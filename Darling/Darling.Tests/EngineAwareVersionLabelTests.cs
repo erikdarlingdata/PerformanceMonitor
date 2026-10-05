@@ -915,6 +915,8 @@ public sealed class EngineAwareVersionLabelTests
                 /* DarlingMcpDataTools.RenderServerList — the MCP list_servers engine_version field and
                    its deprecated sql_version alias (#3245), one call feeding both keys. */
                 "RenderServerList",
+                /* DarlingAdminServersReader.ToAdminServerRow — the web Manage Servers grid's version column (#5239). */
+                "ToAdminServerRow",
                 /* DarlingServer.VersionLabel — the fleet sidebar subtitle, MainWindow.xaml. */
                 "VersionLabel",
             },

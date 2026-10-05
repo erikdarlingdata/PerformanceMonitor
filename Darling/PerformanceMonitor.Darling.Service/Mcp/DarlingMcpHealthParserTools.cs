@@ -720,19 +720,27 @@ public sealed class DarlingMcpHealthParserTools
         var lastOfType = await DarlingSystemHealthReader.GetLastCaptureOfTypeAsync(postgres, c.ServerId, eventType, cancellationToken);
         if (c.RawEventCount > 0)
         {
+            var notice = await NoticeAsync(postgres, c, hoursBack, null, emptyAnswer: true, logger, cancellationToken);
             return WitnessStatus(
                 "empty",
-                $"{c.RawEventCount} {eventType} event(s) were captured for {c.ServerName} in the last {hoursBack} hour(s) and {noneQualifiedBecause}. Events ARE being captured, so this is the healthy answer for this read rather than missing data.",
-                sourceObserved: true, c.LastCapturedAt, lastCapturedOfTypeAt: lastOfType, eventsInWindow: c.RawEventCount, hints: (await NoticeAsync(postgres, c, hoursBack, null, emptyAnswer: true, logger, cancellationToken)).AsHints());
+                McpHelpers.QuietUnlessCut(
+                    notice.WindowTruncated, notice.EffectiveStart,
+                    factual: $"{c.RawEventCount} {eventType} event(s) were captured for {c.ServerName} in the last {hoursBack} hour(s) and {noneQualifiedBecause}",
+                    coveredClaim: ". Events ARE being captured, so this is the healthy answer for this read rather than missing data."),
+                sourceObserved: true, c.LastCapturedAt, lastCapturedOfTypeAt: lastOfType, eventsInWindow: c.RawEventCount, hints: notice.AsHints());
         }
 
         if (lastOfType is DateTime seen)
         {
+            var notice = await NoticeAsync(postgres, c, hoursBack, null, emptyAnswer: true, logger, cancellationToken);
             return WitnessStatus(
                 "empty",
-                $"No {eventType} events were captured for {c.ServerName} in the last {hoursBack} hour(s). This server HAS captured them before (the newest was stored at {Stamp(seen)}), so the window is genuinely quiet rather than blind — widen hours_back to reach the most recent events.",
+                McpHelpers.QuietUnlessCut(
+                    notice.WindowTruncated, notice.EffectiveStart,
+                    factual: $"No {eventType} events were captured for {c.ServerName} in the last {hoursBack} hour(s). This server HAS captured them before (the newest was stored at {Stamp(seen)})",
+                    coveredClaim: ", so the window is genuinely quiet rather than blind — widen hours_back to reach the most recent events."),
                 sourceObserved: true, c.LastCapturedAt, lastCapturedOfTypeAt: seen, eventsInWindow: 0,
-                hints: (await NoticeAsync(postgres, c, hoursBack, null, emptyAnswer: true, logger, cancellationToken)).AsHints());
+                hints: notice.AsHints());
         }
 
         if (c.LastCapturedAt is DateTime alive)

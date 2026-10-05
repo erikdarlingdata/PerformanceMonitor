@@ -642,8 +642,8 @@ running 0.4 executions a second used to report zero and read as idle.
 
 **Desktop things a web imitation would be worse than.** No graphical plan viewer, no interactive query
 heatmap **plot** (the underlying read ships as a bucketed table on the Queries tab — same answer, no canvas),
-no block-chain reconstruction and no interactive deadlock graph — the Blocking tab hands you the captured
-blocked-process-report and deadlock-graph XML verbatim instead of pretending. No period-compare grids. The
+no block-chain reconstruction — the Blocking tab hands you the captured blocked-process-report XML
+(and the deadlock-graph XML, beside a drawn graph you can click) verbatim instead of pretending. No period-compare grids. The
 per-query drill-down above charts the same history the viewer's window does, but it is not that **window**:
 no stored-plan download or cached-plan fetch from it, and none of the desktop grids' own affordances —
 per-column filter popups, CSV export, Copy Repro Script, and right-click drill-down into a ±30-minute

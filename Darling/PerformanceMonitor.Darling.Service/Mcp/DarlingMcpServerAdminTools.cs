@@ -81,7 +81,7 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// the request JSON</b>; on a LAN deployment front the endpoint with the documented TLS reverse proxy.</para>
 /// </summary>
 [McpServerToolType]
-public sealed class DarlingMcpServerAdminTools
+public sealed partial class DarlingMcpServerAdminTools
 {
     /// <summary>The connect-and-probe seam — <see cref="DefaultProbeAsync"/> in production
     /// (<see cref="DarlingServerConnector.ProbeAsync"/> in-process), a stub in the unit tests so the store-write /
@@ -755,32 +755,10 @@ ORDER BY d.host, d.database";
            and ManagedIdentity (#3484). Absent defaults to Windows. The interactive Entra modes (MFA,
            device-code, default-credential) are refused: they need a broker or a signed-in user and cannot run
            unattended. */
-        var authRaw = TryGetString(obj, "auth");
-        var authTrim = authRaw?.Trim();
-        string storeAuth;
-        if (string.IsNullOrWhiteSpace(authTrim) || authTrim.Equals("Windows", StringComparison.OrdinalIgnoreCase))
+        var (storeAuth, authError) = ResolveAuth(TryGetString(obj, "auth"));
+        if (authError != null)
         {
-            storeAuth = ServerStoreAuth.Integrated;
-        }
-        else if (authTrim.Equals("SQL", StringComparison.OrdinalIgnoreCase))
-        {
-            storeAuth = ServerStoreAuth.Sql;
-        }
-        else if (authTrim.Equals("ServicePrincipal", StringComparison.OrdinalIgnoreCase))
-        {
-            storeAuth = ServerStoreAuth.ServicePrincipal;
-        }
-        else if (authTrim.Equals("ManagedIdentity", StringComparison.OrdinalIgnoreCase))
-        {
-            storeAuth = ServerStoreAuth.ManagedIdentity;
-        }
-        else
-        {
-            return (null, Invalid(
-                "auth must be \"Windows\", \"SQL\", \"ServicePrincipal\", or \"ManagedIdentity\". The interactive " +
-                "Microsoft Entra modes (MFA, device-code, default-credential) are not supported for a headless " +
-                "collector — they need a broker or a signed-in user. Use ServicePrincipal (client id + secret) or " +
-                "ManagedIdentity, both non-interactive, for Entra-authenticated Azure SQL targets."));
+            return (null, Invalid(authError));
         }
 
         string? username = null;
@@ -809,18 +787,13 @@ ORDER BY d.host, d.database";
             }
 
             /* #4734: refuse a literal where it cannot be encrypted, HERE, before the probe and the write. Left to
-               ProtectPasswordForStorage it threw after the probe, in the middle of the batch. */
-            var refusal = LiteralSecretRefusal(plaintextPassword, isWindows, isSp);
-            if (refusal != null)
+               ProtectPasswordForStorage it threw after the probe, in the middle of the batch. Then the owner's one
+               rule on references: never at Darling's own configuration or secrets. Add and edit share the helper,
+               so the two cannot disagree. */
+            var secretRefusal = ValidateSecret(plaintextPassword, isWindows, isSp);
+            if (secretRefusal != null)
             {
-                return (null, Invalid(refusal));
-            }
-
-            /* The owner's one rule on references: never at Darling's own configuration or secrets. Read from the
-               same entry object as the checks above, so the route and the core cannot disagree. */
-            if (DarlingOwnedSecrets.ReferenceRefusal(plaintextPassword) is { } ownedRefusal)
-            {
-                return (null, Invalid(ownedRefusal));
+                return (null, Invalid(secretRefusal));
             }
         }
         else if (storeAuth == ServerStoreAuth.ManagedIdentity)
@@ -1159,6 +1132,50 @@ ON CONFLICT (server_id) DO NOTHING";
     }
 
     /* ─────────────────────────────── helpers ─────────────────────────────── */
+
+    /// <summary>
+    /// Maps the <c>auth</c> text of an add entry or an edit to the store's auth value: Windows (integrated), SQL, or
+    /// the two non-interactive Entra modes. Blank is Windows. Anything else, the interactive Entra modes included,
+    /// is the refusal sentence. One mapping for add and edit, so the two accept the same words.
+    /// </summary>
+    internal static (string StoreAuth, string? Error) ResolveAuth(string? authRaw)
+    {
+        var authTrim = authRaw?.Trim();
+        if (string.IsNullOrWhiteSpace(authTrim) || authTrim.Equals("Windows", StringComparison.OrdinalIgnoreCase))
+        {
+            return (ServerStoreAuth.Integrated, null);
+        }
+
+        if (authTrim.Equals("SQL", StringComparison.OrdinalIgnoreCase))
+        {
+            return (ServerStoreAuth.Sql, null);
+        }
+
+        if (authTrim.Equals("ServicePrincipal", StringComparison.OrdinalIgnoreCase))
+        {
+            return (ServerStoreAuth.ServicePrincipal, null);
+        }
+
+        if (authTrim.Equals("ManagedIdentity", StringComparison.OrdinalIgnoreCase))
+        {
+            return (ServerStoreAuth.ManagedIdentity, null);
+        }
+
+        return (ServerStoreAuth.Integrated,
+            "auth must be \"Windows\", \"SQL\", \"ServicePrincipal\", or \"ManagedIdentity\". The interactive " +
+            "Microsoft Entra modes (MFA, device-code, default-credential) are not supported for a headless " +
+            "collector — they need a broker or a signed-in user. Use ServicePrincipal (client id + secret) or " +
+            "ManagedIdentity, both non-interactive, for Entra-authenticated Azure SQL targets.");
+    }
+
+    /// <summary>
+    /// The refusals every SQL password or service-principal client secret meets before it is probed or stored, in
+    /// the order add always asked them: a literal where DPAPI is not available (<see cref="LiteralSecretRefusal"/>),
+    /// then a reference to Darling's own configuration or secrets (<see cref="DarlingOwnedSecrets.ReferenceRefusal(string?)"/>).
+    /// Null when the secret may be used. Add and edit both call it.
+    /// </summary>
+    internal static string? ValidateSecret(string? secret, bool isWindows, bool isServicePrincipal) =>
+        LiteralSecretRefusal(secret, isWindows, isServicePrincipal) ?? DarlingOwnedSecrets.ReferenceRefusal(secret);
 
     /// <summary>
     /// PURE platform check for a SQL password or service-principal client secret (#4734): null when the value can be

@@ -474,6 +474,7 @@ table.data th {
 table.data tbody tr:nth-child(even) { background: var(--row-alt); }
 table.data td.num { text-align: right; font-variant-numeric: tabular-nums; }
 table.data td.wrap { white-space: normal; max-width: 620px; }
+.plan-summary { display: flex; flex-wrap: wrap; gap: 0 1rem; margin: 4px 0; }
 table.data td.pre { white-space: pre-wrap; }
 table.data td.mono { font-family: var(--mono); font-size: 0.78rem; }
 table.data td.sev-Warning { color: var(--warn); }
@@ -497,7 +498,7 @@ table.data tbody tr.band-Offline { background: rgba(168, 174, 186, 0.16); }
 /* The stored-plan panel under a row's Plan button (#4843): the indented XML in a scrollable block. */
 .plan-cell { min-width: 8rem; }
 .plan-panel { margin-top: 6px; max-width: 70vw; }
-.plan-panel pre.plan-xml { max-height: 28rem; overflow: auto; white-space: pre; overflow-wrap: normal; padding: 6px; border: 1px solid var(--border); }
+.plan-panel pre.plan-xml, .plan-panel pre.plan-json { max-height: 28rem; overflow: auto; white-space: pre; overflow-wrap: normal; padding: 6px; border: 1px solid var(--border); }
 /* Column filters (#4843): the header button, the text box and the active-filter strip above a data table. */
 .col-filter-btn { margin-left: 4px; padding: 0 3px; font-size: 11px; line-height: 1.3; background: none; border: 1px solid transparent; color: inherit; opacity: 0.55; cursor: pointer; }
 .col-filter-btn::before { content: "\25BE"; }
@@ -633,6 +634,14 @@ td.cell-picked { outline: 1px solid var(--accent); outline-offset: -1px; }
 .chart-legend .item.drillable { cursor: pointer; border-radius: var(--radius-sm); }
 .chart-legend .item.drillable:hover { color: var(--fg); }
 .chart-legend .item.drillable:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.chart-legend .item.switchable { cursor: pointer; border-radius: var(--radius-sm); user-select: none; }
+.chart-legend .item.switchable:hover { color: var(--fg); }
+.chart-legend .item.switchable:focus-visible, .chart-legend .item [role="button"]:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.chart-legend .item .swatch[role="button"] { cursor: pointer; }
+/* A hidden series stays in the legend, struck through with a hollow swatch, so it reads as hidden and not as absent. */
+.chart-legend .item.legend-off { opacity: 0.55; text-decoration: line-through; }
+.chart-legend .item.legend-off .swatch { background: transparent !important; box-shadow: inset 0 0 0 1px var(--dim); }
+.chart-legend .legend-show-all { margin-left: auto; }
 
 /* The transient drill-down chip above a drilled panel (#1563 D6): the pinned filter(s), a jump to the server page
    (server dimension), and a clear that pops back. View-state only — nothing is persisted. */
@@ -913,6 +922,29 @@ td.cell-picked { outline: 1px solid var(--accent); outline-offset: -1px; }
 .disclosure[open] > .disc-summary::before { content: "▾ "; }
 .disclosure > .disc-summary:hover { color: var(--fg); }
 .disc-body { margin-top: 0.4rem; }
+
+/* #5246: the deadlock graph under Blocking > Deadlock Graphs. */
+.dlg { display: flex; gap: 0.75rem; align-items: flex-start; flex-wrap: wrap; }
+.dlg-scroll { flex: 1 1 28rem; min-width: 0; max-width: 100%; overflow: auto; background: var(--bg-dark); border: 1px solid var(--border); border-radius: var(--radius-sm); }
+.dlg-svg { display: block; max-width: none; }
+.dlg-card { fill: var(--card); stroke: var(--border); stroke-width: 1.5; }
+.dlg-node { cursor: pointer; }
+.dlg-node:hover .dlg-card, .dlg-node:focus .dlg-card { stroke: var(--accent); }
+.dlg-node.victim .dlg-card { stroke: var(--err); stroke-width: 3; }
+.dlg-node.selected .dlg-card { stroke: var(--accent); stroke-width: 3; }
+.dlg-node:focus { outline: none; }
+.dlg-spid { fill: var(--fg); font: 600 14px var(--font); }
+.dlg-badge { fill: var(--err); font: 700 11px var(--font); }
+.dlg-line { fill: var(--dim); font: 12px var(--mono); }
+.dlg-edge { fill: none; stroke: var(--muted); stroke-width: 2; stroke-linejoin: round; }
+.dlg-arrowhead { fill: var(--muted); }
+.dlg-edge-label { fill: var(--fg); font: 11px var(--font); paint-order: stroke; stroke: var(--bg-dark); stroke-width: 3px; }
+.dlg-cycle { fill: none; stroke: var(--border); stroke-width: 1.5; stroke-dasharray: 6 4; }
+.dlg-cycle-label { fill: var(--muted); font: 11px var(--font); }
+.dlg-side { flex: 1 1 18rem; min-width: 0; }
+.dlg-side-head { font-weight: 600; color: var(--fg); margin-bottom: 0.3rem; }
+.dlg-prop { color: var(--dim); overflow-wrap: anywhere; }
+.dlg-prop .fk { color: var(--muted); font-weight: 600; }
 
 .detail-fields { display: grid; grid-template-columns: max-content 1fr; gap: 0.15rem 0.6rem; margin-bottom: 0.3rem; }
 .detail-field { display: contents; }

@@ -90,23 +90,6 @@ WHERE slow_read_id IN
     SELECT slow_read_id FROM collect.slow_reads ORDER BY read_time DESC, slow_read_id DESC OFFSET $1
 );";
 
-    private static readonly string[] s_secretFragments =
-    {
-        "password", "passwd", "pwd", "secret", "token", "apikey", "api_key", "key", "credential", "webhook",
-        "connectionstring", "connection_string", "auth",
-    };
-
-    /* Fragments that mark a VALUE as a secret. Narrower than the key list: a bare "key" or "auth" would drop ordinary text. */
-    private static readonly string[] s_secretValueFragments =
-    {
-        "password", "passwd", "pwd=", "secret", "token=", "apikey", "api_key", "bearer ",
-    };
-
-    private static readonly System.Text.RegularExpressions.Regex s_credentialShape = new(
-        @"://[^/@\s]+:[^/@\s]*@|(password|pwd)\s*=",
-        System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.CultureInvariant,
-        TimeSpan.FromMilliseconds(100));
-
     private readonly Channel<SlowReadRecord> _channel;
     private long _dropped;
     private DateTime _lastPurgeUtc = DateTime.MinValue;
@@ -265,24 +248,7 @@ WHERE slow_read_id IN
     }
 
     /// <summary>True when a key's lower-cased name carries a secret fragment.</summary>
-    internal static bool IsSecretKey(string key)
-    {
-        if (key == "dedup_key")
-        {
-            return false;
-        }
-
-        var lowered = key.ToLowerInvariant();
-        foreach (var fragment in s_secretFragments)
-        {
-            if (lowered.Contains(fragment, StringComparison.Ordinal))
-            {
-                return true;
-            }
-        }
-
-        return false;
-    }
+    internal static bool IsSecretKey(string key) => SecretTextGuard.IsSecretKey(key);
 
     /// <summary>
     /// The one argument policy for the MCP, web and compose surfaces. Numbers, booleans and nulls are kept. A string is
@@ -366,22 +332,7 @@ WHERE slow_read_id IN
             return false;
         }
 
-        foreach (var fragment in s_secretValueFragments)
-        {
-            if (cleaned.Contains(fragment, StringComparison.OrdinalIgnoreCase))
-            {
-                return false;
-            }
-        }
-
-        try
-        {
-            return !s_credentialShape.IsMatch(cleaned);
-        }
-        catch (System.Text.RegularExpressions.RegexMatchTimeoutException)
-        {
-            return false;
-        }
+        return !SecretTextGuard.ValueLooksSecret(cleaned);
     }
 
     private static DateTime? Unspecified(DateTime? value)

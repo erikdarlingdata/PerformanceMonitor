@@ -770,6 +770,35 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
     }
 
     /// <summary>
+    /// #4966: an idle grid (collected, every capture at zero executions) over a window the table does not reach back to says so
+    /// instead of "idle": the first sentence stays, the cut sentence points at <c>effective_start</c>. The same read with a
+    /// <c>database_name</c> filter is exempt and keeps the sentence that names the filter as a cause.
+    /// </summary>
+    [Fact]
+    public async Task AnIdleGrid_OverACutWindow_CarriesTheCutSentence_AndAFilteredOneKeepsItsOwn_AgainstDevPostgres()
+    {
+        await WithServerAsync(async (connection, postgres, baseNow, ct) =>
+        {
+            await SeedAsync(connection, ct, baseNow.AddHours(-3), "0xIDLE1", deltaExec: 0, deltaElapsed: 999_000);
+            await SeedAsync(connection, ct, baseNow.AddMinutes(-30), "0xIDLE2", deltaExec: 0, deltaElapsed: 999_000);
+
+            var cut = Root(await DarlingMcpQueryHeatmapTools.GetQueryHeatmap(postgres, ServerName, 24));
+            Assert.Equal("empty", cut.GetProperty("status").GetString());
+            Assert.True(cut.GetProperty("hints").GetProperty("window_truncated").GetBoolean());
+            Assert.NotEqual(JsonValueKind.Null, cut.GetProperty("hints").GetProperty("effective_start").ValueKind);
+            var cutText = cut.GetProperty("message").GetString()!;
+            Assert.StartsWith($"Query stats WERE collected for {ServerName} in the last 24 hour(s), but no capture recorded an execution", cutText, StringComparison.Ordinal);
+            Assert.EndsWith(". " + McpHelpers.CutWindowNothingMessage + " Delta-based collection also needs a SECOND cycle before the first non-zero row exists.", cutText, StringComparison.Ordinal);
+            Assert.DoesNotContain("up and idle", cutText, StringComparison.Ordinal);
+
+            var filtered = Root(await DarlingMcpQueryHeatmapTools.GetQueryHeatmap(postgres, ServerName, 24, database_name: Db));
+            Assert.True(filtered.GetProperty("hints").GetProperty("window_truncated").GetBoolean());
+            Assert.Contains("a database_name filter matching nothing collected", filtered.GetProperty("message").GetString()!, StringComparison.Ordinal);
+            Assert.DoesNotContain("Nothing in the part of the window", filtered.GetProperty("message").GetString()!, StringComparison.Ordinal);
+        });
+    }
+
+    /// <summary>
     /// #4233 ruling item 4's live pin: the pre-#4233 SQL (fetched via <c>git show origin/dev:...</c> before
     /// this PR's rewrite landed, pinned below as <see cref="PreQ4233HeatmapSql"/> so it cannot silently rot)
     /// and #4233's new <see cref="DarlingQueryHeatmapReader.BuildQueryHeatmapSql"/> must return IDENTICAL
