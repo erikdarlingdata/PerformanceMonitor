@@ -287,6 +287,11 @@ public sealed class McpReadToolBudgetTests : IClassFixture<SharedDuckDbFixture>,
     {
         var now = TruncateToSeconds(DateTime.UtcNow.AddMinutes(-1));
 
+        /* One transaction for the whole seed (#5208): roughly 800 single-row INSERTs were 800 WAL commits. The
+           batch commits at the end of this method, before any tool reads. */
+        var seedConn = await SeedConnectionAsync();
+        using var batch = new SeedBatch(_duckDb, seedConn);
+
         /* query_store_stats: DbCount tenant databases x QueriesPerDb queries, a baseline interval (40h back)
            and a regressed recent interval (30m back, duration/CPU stepped up), carrying ~3.8 KB of
            parameterized query text -- the #4198 field offender and Darling's #1 measured tool.
@@ -395,6 +400,8 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)",
                 _nextId--, Naive(t), _serverId, ServerName, Naive(t), "sql_batch_completed", db,
                 (long)(i + 1) * 500_000, "EXEC dbo.usp_NightlyReconcile_" + i + " " + PadBlock(400));
         }
+
+        batch.Commit();
     }
 
     private Task SeedQueryStoreAsync(DateTime collectionTime, long executions, long avgDurationUs, long avgCpuUs, long intervalId, long queryId, string dbName, string queryText) =>

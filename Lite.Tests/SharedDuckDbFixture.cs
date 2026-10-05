@@ -132,3 +132,52 @@ AND   table_name NOT IN ('schema_version', 'analysis_schema_version', 'store_ide
         return default;
     }
 }
+
+/// <summary>
+/// One explicit transaction around a test's per-row seed loop (#5208). DuckDB commits every auto-commit
+/// statement to the WAL, and on a hosted CI disk a commit costs on the order of 0.2 s, so a few hundred
+/// single-row INSERTs turned into minutes. Inside this batch they share one commit.
+///
+/// <para>The batch changes WHEN the rows commit, nothing else: the seeding code keeps taking the read lock
+/// around each statement exactly as before, and so do BEGIN and COMMIT here. The batch must be committed
+/// (<see cref="Commit"/> or dispose) BEFORE the code under test reads, because the code under test opens its
+/// own connection and sees only committed rows. Commit on dispose is best-effort for the same reason
+/// <c>TestDataSeeder</c>'s own batch is: if the seed threw, the test is already failing, and a commit error
+/// must not mask that exception.</para>
+/// </summary>
+internal sealed class SeedBatch : IDisposable
+{
+    private readonly DuckDbInitializer _duckDb;
+    private readonly DuckDB.NET.Data.DuckDBConnection _connection;
+    private bool _open;
+
+    public SeedBatch(DuckDbInitializer duckDb, DuckDB.NET.Data.DuckDBConnection connection)
+    {
+        _duckDb = duckDb;
+        _connection = connection;
+        Run("BEGIN TRANSACTION");
+        _open = true;
+    }
+
+    /// <summary>Commits now, so the rows are visible to the code under test. Safe to call twice.</summary>
+    public void Commit()
+    {
+        if (!_open) return;
+        _open = false;
+        Run("COMMIT");
+    }
+
+    public void Dispose()
+    {
+        try { Commit(); }
+        catch { /* the test is already failing; don't mask its exception */ }
+    }
+
+    private void Run(string sql)
+    {
+        using var readLock = _duckDb.AcquireReadLock();
+        using var cmd = _connection.CreateCommand();
+        cmd.CommandText = sql;
+        cmd.ExecuteNonQuery();
+    }
+}
