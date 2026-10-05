@@ -36,6 +36,50 @@ public sealed class DarlingManagedRolesTests
     /// UPDATE granted by hand.</summary>
     private const string EditRevoke = "REVOKE UPDATE ON config.config_monitored_servers FROM viewer;";
 
+    /// <summary>
+    /// The census of viewer grants on <c>config.config_monitored_servers</c> (#4843, #5240): every uncommented GRANT that names
+    /// viewer on it, except the column-level SELECT carve, which is a read and not a write. The skip is exactly that shape, a
+    /// SELECT list in parentheses straight onto ON: a bare <c>(?!SELECT )</c> skipped every statement that merely STARTED with
+    /// SELECT, so a table-level UPDATE behind a column SELECT, or a table-level SELECT that undoes the
+    /// <c>encrypted_password</c> carve, passed the census unseen.
+    /// </summary>
+    private static string[] ViewerGrantsOnMonitoredServers(string sql) =>
+        Regex.Matches(
+                Regex.Replace(sql, @"(?m)^\s*--.*$", ""),
+                @"GRANT (?!SELECT \([^)]*\) ON )[^;]*? ON config\.config_monitored_servers TO [^;]*viewer[^;]*;")
+            .Select(m => m.Value).ToArray();
+
+    /// <summary>
+    /// The census must SEE each statement that is not a pure column-level SELECT. Each line is appended to the real batch as one
+    /// more viewer grant, and the census must then list it. Against the old <c>(?!SELECT )</c> skip the first two cases were
+    /// invisible: both start with SELECT.
+    /// </summary>
+    [Theory]
+    [InlineData("GRANT SELECT (name), UPDATE ON config.config_monitored_servers TO viewer;")]
+    [InlineData("GRANT SELECT ON config.config_monitored_servers TO viewer;")]
+    [InlineData("GRANT SELECT, UPDATE (name) ON config.config_monitored_servers TO viewer;")]
+    [InlineData("GRANT UPDATE ON config.config_monitored_servers TO viewer;")]
+    [InlineData("GRANT DELETE ON config.config_monitored_servers TO admin, viewer;")]
+    public void TheMonitoredServersCensus_ListsAnyViewerGrantThatIsNotThePureColumnSelectCarve(string extraGrant)
+    {
+        var sql = DarlingManagedRoles.BuildProvisioningSql(ProvisioningTestSecrets.Admin, ProvisioningTestSecrets.Viewer, ProvisioningTestSecrets.Mcp);
+        var shipped = ViewerGrantsOnMonitoredServers(sql);
+
+        Assert.Equal(shipped.Append(extraGrant).ToArray(), ViewerGrantsOnMonitoredServers(sql + "\n" + extraGrant));
+    }
+
+    /// <summary>The other half: the column-level SELECT carve itself stays out of the census, whatever columns it lists, so
+    /// narrowing the census did not turn the carve (a read) into a counted write.</summary>
+    [Fact]
+    public void TheMonitoredServersCensus_SkipsThePureColumnLevelSelectCarve()
+    {
+        var sql = DarlingManagedRoles.BuildProvisioningSql(ProvisioningTestSecrets.Admin, ProvisioningTestSecrets.Viewer, ProvisioningTestSecrets.Mcp);
+
+        Assert.Equal(
+            ViewerGrantsOnMonitoredServers(sql),
+            ViewerGrantsOnMonitoredServers(sql + "\nGRANT SELECT (server_id, name, host) ON config.config_monitored_servers TO viewer;"));
+    }
+
     [Fact]
     public void BuildProvisioningSql_CreatesRolesIdempotently_LoginNoSuperuser()
     {
@@ -152,7 +196,9 @@ public sealed class DarlingManagedRolesTests
            web edit route runs the edit_server core as viewer: a COLUMN-level UPDATE on exactly the columns that core may
            SET, plus modified_at (the optimistic token). No DELETE (no web route removes a server), no table-level UPDATE.
            The census is the whole set of viewer grants on the table, so a widened or extra grant fails here. The credential
-           column stays SELECT-carved (asserted with the carve below; the column SELECT grant is not a write, so the census skips it). */
+           column stays SELECT-carved (asserted with the carve below). The column-level SELECT carve is not a write, so the census
+           skips exactly that shape (a SELECT list in parentheses straight onto ON); a table-level SELECT, or a write riding
+           behind a column SELECT in one statement, is still counted. */
         Assert.Contains("GRANT INSERT ON config.config_monitored_servers TO viewer;", sql, StringComparison.Ordinal);
         Assert.Contains(EditGrant, sql, StringComparison.Ordinal);
 
@@ -165,10 +211,7 @@ public sealed class DarlingManagedRolesTests
         Assert.Single(Regex.Matches(Regex.Replace(sql, @"(?m)^\s*--.*$", ""), @"REVOKE UPDATE ON config\.config_monitored_servers FROM [^;]*viewer[^;]*;"));
         Assert.Equal(
             new[] { "GRANT INSERT ON config.config_monitored_servers TO viewer;", EditGrant },
-            System.Text.RegularExpressions.Regex.Matches(
-                    System.Text.RegularExpressions.Regex.Replace(sql, @"(?m)^\s*--.*$", ""),
-                    @"GRANT (?!SELECT )[^;]*? ON config\.config_monitored_servers TO [^;]*viewer[^;]*;")
-                .Select(m => m.Value).ToArray());
+            ViewerGrantsOnMonitoredServers(sql));
 
         /* The columns the edit grant must NOT name: a server's enabled state, engine, identity and remediation credentials. */
         var editColumns = EditGrant[(EditGrant.IndexOf('(', StringComparison.Ordinal) + 1)..EditGrant.IndexOf(')', StringComparison.Ordinal)]
