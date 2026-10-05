@@ -15,7 +15,7 @@ namespace PerformanceMonitor.Darling.Service;
 /// <summary>
 /// How <c>procedure_stats</c> treats its plan XML (#5158), the value of the <c>procedureStatsDeferredPlanFetch</c> knob.
 /// </summary>
-internal enum ProcedureStatsPlanFetchMode
+public enum ProcedureStatsPlanFetchMode
 {
     /// <summary>The inline capture, exactly as before the knob existed.</summary>
     Off = 0,

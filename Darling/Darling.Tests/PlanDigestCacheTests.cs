@@ -181,6 +181,13 @@ public sealed class PlanDigestCacheTests
         typeof(DarlingCollectorRunner)
             .GetField("_queryStatsDeferredPlanFetch", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!
             .SetValue(runner, (Func<bool>)(() => knob));
+        /* procedure_stats reads its own knob and the plan switch; both off here, so it never defers. */
+        typeof(DarlingCollectorRunner)
+            .GetField("_capturePlans", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!
+            .SetValue(runner, (Func<bool>)(() => capture));
+        typeof(DarlingCollectorRunner)
+            .GetField("_procedureStatsDeferredPlanFetch", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!
+            .SetValue(runner, (Func<string?>)(() => "off"));
 
         var target = new CollectorTargetInfo { IsAzureSqlDb = azure };
         Assert.Equal(expected, runner.ShouldDeferPlanFetchFor("query_stats", capture, target));
