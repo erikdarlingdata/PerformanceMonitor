@@ -27,6 +27,7 @@ namespace Darling.Tests;
 /// coverage floor and the oldest event shown, whether or not the cap cut the page (the cap is reported by truncated). Every instant is an offset
 /// from one anchor minute, so the probe's purge edge never lands inside a window.
 /// </summary>
+[Collection("live-postgres")]
 public sealed class PgEventToolsWindowFloorLiveTests
 {
     private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
