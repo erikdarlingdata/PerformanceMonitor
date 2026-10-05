@@ -97,7 +97,10 @@ public sealed class WebDataStartNoteTests
     public void TheSparseReads_AreProbedOnTheirCollectorsRuns_AndEveryOtherReadKeepsItsTable()
     {
         Assert.Equal(
-            ["get_pg_blocking", "get_pg_replication_stats", "get_pg_session_states"],
+            [
+                "get_pg_autovacuum_health", "get_pg_blocking", "get_pg_replication_slots", "get_pg_replication_stats",
+                "get_pg_session_states", "get_pg_xmin_horizon",
+            ],
             WebDataStartNote.CollectorRunsByRead.Keys.Order(StringComparer.Ordinal).ToArray());
 
         foreach (var (read, collector) in WebDataStartNote.CollectorRunsByRead)
@@ -119,6 +122,47 @@ public sealed class WebDataStartNoteTests
         }
 
         Assert.False(WebDataStartNote.TryGetReadSource("get_active_queries", out _));
+    }
+
+    /// <summary>The vacuum, horizon, slot and write tiles are listed over the table their tool reads. The freeze headroom and the
+    /// checkpoint and WAL tables get a row every collection, so they keep the table's own start; the horizon holders, the autovacuum
+    /// backlog and the slots store a row only while one exists, so they are probed on the collector's runs (the slot collector is
+    /// named pg_replication_slots and writes pg_replication_slot_stats). The horizon read's nothing-found word is no_holder.</summary>
+    [Fact]
+    public void TheVacuumHorizonSlotAndWriteReads_AreListedOverTheirTables_AndTheSparseOnesAreProbedOnTheirCollectorsRuns()
+    {
+        var expected = new (string Read, string Table, string? Collector)[]
+        {
+            ("get_pg_wraparound_risk", "pg_wraparound_stats", null),
+            ("get_pg_xmin_horizon", "pg_xmin_horizon", "pg_xmin_horizon"),
+            ("get_pg_autovacuum_health", "pg_autovacuum_stats", "pg_autovacuum_stats"),
+            ("get_pg_replication_slots", "pg_replication_slot_stats", "pg_replication_slots"),
+            ("get_pg_write_stats", "pg_write_stats", null),
+        };
+
+        foreach (var (read, table, collector) in expected)
+        {
+            Assert.Equal(table, WebDataStartNote.TableByRead[read]);
+            Assert.True(WebDataStartNote.TryGetReadSource(read, out var source));
+            if (collector is null)
+            {
+                Assert.Equal(table, source.Relation);
+                Assert.Null(source.LogCollectorName);
+                Assert.DoesNotContain(read, WebDataStartNote.CollectorRunsByRead.Keys);
+            }
+            else
+            {
+                Assert.Equal("collection_log", source.Relation);
+                Assert.Equal(collector, WebDataStartNote.CollectorRunsByRead[read]);
+                Assert.Equal(collector, source.LogCollectorName);
+            }
+        }
+
+        Assert.Equal("no_holder", WebDataStartNote.NothingFoundStatusByRead["get_pg_xmin_horizon"]);
+        foreach (var read in new[] { "get_pg_wraparound_risk", "get_pg_autovacuum_health", "get_pg_replication_slots", "get_pg_write_stats" })
+        {
+            Assert.DoesNotContain(read, WebDataStartNote.NothingFoundStatusByRead.Keys);
+        }
     }
 
     [Fact]
@@ -531,11 +575,20 @@ public sealed class WebDataStartNoteTests
     [InlineData("waits", "get_pg_wait_trend", "Wait Trend")]
     [InlineData("io", "get_pg_io_trend", "I/O Trend")]
     [InlineData("activity", "get_pg_plans", "Captured Plans")]
+    [InlineData("overview", "get_pg_autovacuum_health", "Autovacuum Backlog")]
+    [InlineData("vacuum", "get_pg_autovacuum_health", "Autovacuum Backlog|Tables Behind")]
+    [InlineData("overview", "get_pg_replication_slots", "Replication Slots")]
+    [InlineData("replication", "get_pg_replication_slots", "Slot Summary|Slots")]
+    [InlineData("io", "get_pg_write_stats", "Checkpoints and WAL")]
+    [InlineData("vacuum", "get_pg_xmin_horizon", "Horizon Holders")]
+    [InlineData("vacuum", "get_pg_wraparound_risk", "Per-Database Headroom")]
+    [InlineData("overview", "get_pg_xmin_horizon", "")]
+    [InlineData("overview", "get_pg_wraparound_risk", "")]
     public void EveryPanelOfAPostgresWindowRead_DrawsTheNote_TheStatTilesBesideTheirGrids(string tab, string read, string panels)
     {
         if (!WebRangeKeptHistoryBehaviourTests.TryRun("floorPg:" + tab + "|" + read, out var r)) return;
 
-        var expected = panels.Split('|');
+        var expected = panels.Length == 0 ? [] : panels.Split('|');
         var notices = Strings(r, "notices");
         Assert.Equal(expected.Length, notices.Length);
         foreach (var heading in expected)
@@ -545,6 +598,42 @@ public sealed class WebDataStartNoteTests
         }
 
         Assert.Empty(Strings(r, "errors"));
+    }
+
+    /// <summary>The Vacuum tab's freeze headroom tile and the horizon holder tile show the newest reading (the worst database, the
+    /// winning holder), the thresholds are constants the read ships, and the two Overview tiles of those reads are moments too: those
+    /// panels opt out of the note. The panels beside them that show a window figure (the per-database peak, the holders' peak and
+    /// share) and every other tile of the five reads draw it. Read from the source text, so it holds without Node.</summary>
+    [Fact]
+    public void OnlyThePanelsThatShowTheNewestValuesAlone_OptOutOfTheNote_OnTheVacuumHorizonSlotAndWriteTiles()
+    {
+        var tabs = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server-tabs.js").ReplaceLineEndings("\n");
+        var postgres = tabs[tabs.IndexOf("export const POSTGRES_TABS", StringComparison.Ordinal)..];
+
+        string Panel(string title)
+        {
+            var at = postgres.IndexOf("title: \"" + title + "\"", StringComparison.Ordinal);
+            Assert.True(at > 0, title + " is not a PostgreSQL panel");
+            var end = postgres.IndexOf("\n        },", at, StringComparison.Ordinal);
+            return postgres[at..end];
+        }
+
+        Assert.Contains("windowNote: false", Panel("Where the Thresholds Are"), StringComparison.Ordinal);
+        Assert.Contains("windowNote: false", Panel("What Holds the Horizon"), StringComparison.Ordinal);
+        foreach (var title in new[] { "Per-Database Headroom", "Horizon Holders", "Tables Behind", "Slots", "Slot Summary" })
+        {
+            Assert.DoesNotContain("windowNote", Panel(title), StringComparison.Ordinal);
+        }
+
+        foreach (var title in new[] { "Freeze Headroom", "xmin Horizon" })
+        {
+            Assert.Contains("momentStat(\n        \"" + title + "\"", postgres, StringComparison.Ordinal);
+        }
+
+        foreach (var title in new[] { "Autovacuum Backlog", "Replication Slots", "Checkpoints and WAL" })
+        {
+            Assert.DoesNotContain("momentStat(\n        \"" + title + "\"", postgres, StringComparison.Ordinal);
+        }
     }
 
     /// <summary>The same decision in the source text, so it holds without Node: none of the eleven PostgreSQL window reads

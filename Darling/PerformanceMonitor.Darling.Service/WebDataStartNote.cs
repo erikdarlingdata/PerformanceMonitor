@@ -39,7 +39,9 @@ namespace PerformanceMonitor.Darling.Service;
 /// window aggregates (top queries, blocking, database stats, session states, I/O and replication stats) and the trend grids
 /// (database, query duration, wait and I/O trends) read one raw relation over the window, and Captured Plans reads the plan
 /// capture table by capture time. Every panel of their fanouts shows the window's own figures, so none opts out, and a stat
-/// tile draws the note beside its grid. A chart whose time axis spans the asked range already shows the empty span, a read of
+/// tile draws the note beside its grid. The vacuum, horizon, slot and write tiles (freeze headroom, xmin horizon, autovacuum
+/// backlog, replication slots, checkpoints and WAL) draw it on the panels that show a window figure: a peak, a growing count, a
+/// first-to-last difference. A chart whose time axis spans the asked range already shows the empty span, a read of
 /// the newest snapshot has no window to cut, and an event surface (blocked process reports, deadlocks, system health
 /// events, the default trace) filters on the event's own time, which can reach before the first collection, so a
 /// coverage start could name a time later than the history it shows. Those are not in this list.</para>
@@ -129,6 +131,19 @@ internal static class WebDataStartNote
         ["get_pg_wait_trend"] = "pg_wait_sampling",
         ["get_pg_io_trend"] = "pg_io_stats",
         ["get_pg_plans"] = "pg_plan_capture",
+
+        /* The PostgreSQL vacuum, horizon, slot and write tiles (#4966). Each answers figures that need the window to mean
+           anything: the autovacuum backlog's growing count compares a table's newest dead tuples with its earliest in the window,
+           a slot's severity rests on its retained WAL growing across it, the horizon holders' peaks and win shares and the
+           per-database freeze peaks are window figures, and the checkpoint and WAL totals are first-to-last differences. A short
+           history would read as a calm one. The page opts out the panels that show only the newest values (the freeze headroom
+           and horizon-holder tiles and the thresholds): see server-tabs.js. The horizon, autovacuum and slot tables are sparse and are
+           probed on their collectors' runs (CollectorRunsByRead). */
+        ["get_pg_wraparound_risk"] = "pg_wraparound_stats",
+        ["get_pg_xmin_horizon"] = "pg_xmin_horizon",
+        ["get_pg_autovacuum_health"] = "pg_autovacuum_stats",
+        ["get_pg_replication_slots"] = "pg_replication_slot_stats",
+        ["get_pg_write_stats"] = "pg_write_stats",
     };
 
     /// <summary>
@@ -152,6 +167,17 @@ internal static class WebDataStartNote
         ["get_pg_blocking"] = "pg_blocking",
         ["get_pg_session_states"] = "pg_session_states",
         ["get_pg_replication_stats"] = "pg_replication_stats",
+
+        /* The horizon holders, the tables with pending vacuum work and the replication slots (#4966): each collector stores a row only
+           while one exists (PgXminHorizonCollector's holders query ends in WHERE xmin_age IS NOT NULL and the reader says an unheld
+           capture stores nothing; PgAutovacuumStatsCollector's WHERE keeps only tables with dead tuples, modifications, insert activity
+           or autovacuum off; PgReplicationSlotsCollector reads pg_replication_slots, which is empty on a server with no slot). The
+           slot collector is named pg_replication_slots and writes pg_replication_slot_stats. The freeze headroom table
+           (pg_database always lists every database) and the checkpoint and WAL table (single-row views) get a row every collection, so
+           they keep the table's own start. */
+        ["get_pg_xmin_horizon"] = "pg_xmin_horizon",
+        ["get_pg_autovacuum_health"] = "pg_autovacuum_stats",
+        ["get_pg_replication_slots"] = "pg_replication_slots",
     };
 
     /// <summary>
@@ -202,6 +228,7 @@ internal static class WebDataStartNote
         "config_changes",
         "blocking_sampled", "cycles_only", "database_activity", "session_states", "io_activity",
         "database_trend", "query_duration_trend", "wait_trend", "io_trend",
+        "holder_present", "tables_with_pending_maintenance", "slots_present",
     };
 
     /// <summary>
@@ -253,6 +280,12 @@ internal static class WebDataStartNote
         ["get_pg_wait_trend"] = "empty",
         ["get_pg_io_trend"] = "empty",
         ["get_pg_plans"] = "empty",
+
+        /* The horizon read answers no_holder only when the collector captured in the window and recorded none (it answers
+           unavailable when no capture is logged), so it is the one of the vacuum, horizon, slot and write reads that says "looked
+           and found nothing". Wraparound answers unavailable, autovacuum no_pending_maintenance and slots no_slots without asking the log
+           whether the collector ran, and write stats empty for a window too short to difference: none of them is admitted. */
+        ["get_pg_xmin_horizon"] = "no_holder",
     };
 
     /// <summary>
