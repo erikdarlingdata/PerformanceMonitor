@@ -14,6 +14,7 @@ using System.Linq;
 using System.Net;
 using System.Net.Security;
 using System.Net.Sockets;
+using System.Security.Authentication;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using System.Threading.Tasks;
@@ -21,6 +22,7 @@ using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Hosting.Server;
 using Microsoft.AspNetCore.Hosting.Server.Features;
+using Microsoft.AspNetCore.Server.Kestrel.Https;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -652,6 +654,20 @@ public sealed class DarlingListenerTlsTests
                 }
             }
         }
+    }
+
+    [Fact]
+    public void ConfigureHttps_NegotiatesTls12AndTls13Only()
+    {
+        /* #5288: the protocol floor is stated on the options rather than left to the operating system's default,
+           and the one shared body sets it for the web and the MCP listener alike. */
+        using var cert = Make("floor", DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddDays(30));
+        var https = new HttpsConnectionAdapterOptions();
+
+        DarlingListenerTls.ConfigureHttps(https, new DarlingWebTls.LoadedCertificate(cert, new X509Certificate2Collection()));
+
+        Assert.Equal(SslProtocols.Tls12 | SslProtocols.Tls13, https.SslProtocols);
+        Assert.Same(cert, https.ServerCertificate);
     }
 
     /* ---- helpers ---- */
