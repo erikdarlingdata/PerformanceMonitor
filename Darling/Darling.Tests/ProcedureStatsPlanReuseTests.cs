@@ -543,7 +543,13 @@ public sealed class ProcedureStatsPlanReuseTests
         /* the plan columns come first, so their ordinals (27, 28) are those of the inline query */
         Assert.True(
             shadow.IndexOf("query_plan_xml_bytes", StringComparison.Ordinal) < shadow.IndexOf("plan_statement_count", StringComparison.Ordinal));
-        /* removing both identity fragments leaves exactly the inline text: compare against the deferred form's identity text */
+        /* the shadow text is the inline text plus the two identity fragments and nothing else */
+        string Fragment(string name) => (string)typeof(ProcedureStatsCollector)
+            .GetField(name, System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!.GetRawConstantValue()!;
+        Assert.Equal(
+            inline,
+            shadow.Replace(Fragment("PlanIdentitySelectFragment"), "", StringComparison.Ordinal)
+                .Replace(Fragment("PlanIdentityApplyFragment"), "", StringComparison.Ordinal));
         Assert.DoesNotContain("dm_exec_text_query_plan", deferred, StringComparison.Ordinal);
     }
 
