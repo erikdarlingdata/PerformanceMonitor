@@ -269,6 +269,57 @@ public sealed class WebDataStartNoteLiveTests
         }
     }
 
+    /// <summary>The three sparse reads (blocking, session states, replication stats) store a row only when something happened,
+    /// so their first row says nothing about when collection began. Each is probed on its collector's own logged runs.</summary>
+    private static readonly (string Read, string Table, string Collector)[] SparseReads =
+    [
+        ("get_pg_blocking", "pg_blocking_edges", "pg_blocking"),
+        ("get_pg_session_states", "pg_session_states", "pg_session_states"),
+        ("get_pg_replication_stats", "pg_replication_stats", "pg_replication_stats"),
+    ];
+
+    /// <summary>A server registered 30 days ago whose collector ran all week and stored ONE row a day back (the first blocking chain,
+    /// the first long transaction, the first connected replica): the 7-day range was covered, so there is no note. Reading the
+    /// oldest row instead would name yesterday as where the data starts.</summary>
+    [Fact]
+    public async Task ASparseRead_OnAnOldServer_WhoseFirstRowIsADayBack_GetsNoNote_AgainstDevPostgres()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var store = await Store.CreateAsync(ct);
+
+        for (var i = 0; i < SparseReads.Length; i++)
+        {
+            var (read, table, collector) = SparseReads[i];
+            var name = "web-data-start-sparse-old-" + read.Replace('_', '-');
+            var oneDayBack = store.End.AddDays(-1);
+            await store.SeedTableAsync(table, -496640 - i, name, store.End.AddDays(-30), oneDayBack, ct, runsCollector: collector, lastRow: oneDayBack);
+
+            Assert.Same(StandInRows, await WebDataStartNote.AddAsync(store.DataSource, read, name, 168, null, StandInRows, null, ct));
+        }
+    }
+
+    /// <summary>The other side: a server registered two days ago, its collector running since, has a 7-day range it cannot cover.</summary>
+    [Fact]
+    public async Task ASparseRead_OnAServerRegisteredTwoDaysAgo_GetsANote_AgainstDevPostgres()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var store = await Store.CreateAsync(ct);
+
+        for (var i = 0; i < SparseReads.Length; i++)
+        {
+            var (read, table, collector) = SparseReads[i];
+            var name = "web-data-start-sparse-new-" + read.Replace('_', '-');
+            var added = store.End.AddDays(-2);
+            var oneDayBack = store.End.AddDays(-1);
+            await store.SeedTableAsync(table, -496650 - i, name, added, oneDayBack, ct, runsCollector: collector, lastRow: oneDayBack);
+
+            var answer = Assert.IsType<JsonObject>(JsonNode.Parse(await WebDataStartNote.AddAsync(store.DataSource, read, name, 168, null, StandInRows, null, ct)));
+            Assert.True(answer["window_truncated"]?.GetValue<bool>(), read + " gives a note");
+            var start = ParseUtc(answer["effective_start"]);
+            Assert.True(start >= added.AddSeconds(-1) && start <= added.AddHours(1), read + " names the first collection, not its first row, got " + start.ToString("o", CultureInfo.InvariantCulture));
+        }
+    }
+
     private sealed class Store : IAsyncDisposable
     {
         private readonly ScratchPostgres _scratch;
@@ -353,7 +404,9 @@ FROM generate_series($3::timestamp, $4::timestamp, make_interval(mins => $5)) AS
         /// <summary>A server first collected at <paramref name="added"/> with one row an hour in <paramref name="table"/>
         /// from <paramref name="firstRow"/> to the end. Each column the table requires is filled with a stand-in by type:
         /// the note reads only that the server holds a row at a time.</summary>
-        public async Task SeedTableAsync(string table, int serverId, string serverName, DateTime added, DateTime firstRow, CancellationToken ct)
+        public async Task SeedTableAsync(
+            string table, int serverId, string serverName, DateTime added, DateTime firstRow, CancellationToken ct,
+            string? runsCollector = null, DateTime? lastRow = null)
         {
             await using var connection = await DataSource.OpenConnectionAsync(ct);
             await DarlingMcpTestData.RegisterServerAsync(connection, serverId, serverName, ct);
@@ -363,6 +416,21 @@ FROM generate_series($3::timestamp, $4::timestamp, make_interval(mins => $5)) AS
                 update.Parameters.AddWithValue(serverId);
                 update.Parameters.AddWithValue(DateTime.SpecifyKind(added, DateTimeKind.Unspecified));
                 await update.ExecuteNonQueryAsync(ct);
+            }
+
+            if (runsCollector is not null)
+            {
+                /* The collector's runs, logged every 30 minutes from the first collection to the end, whether or not a run stored a row. */
+                await using var log = new NpgsqlCommand(@"
+INSERT INTO collect.collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, rows_collected)
+SELECT $1::bigint * 1000000 + row_number() OVER (), $1, $2, $5, t, 12, 'SUCCESS', 0
+FROM generate_series($3::timestamp, $4::timestamp, interval '30 minutes') AS t", connection);
+                log.Parameters.AddWithValue(serverId);
+                log.Parameters.AddWithValue(serverName);
+                log.Parameters.AddWithValue(DateTime.SpecifyKind(added, DateTimeKind.Unspecified));
+                log.Parameters.AddWithValue(DateTime.SpecifyKind(End, DateTimeKind.Unspecified));
+                log.Parameters.AddWithValue(runsCollector);
+                await log.ExecuteNonQueryAsync(ct);
             }
 
             var time = CollectorCatalog.All.First(c => c.TargetTable == table).PrefixTimeColumnName;
@@ -403,7 +471,7 @@ ORDER BY ordinal_position", connection))
                 "INSERT INTO collect." + table + " (" + string.Join(", ", columns) + ") SELECT " + string.Join(", ", values)
                 + " FROM generate_series($1::timestamp, $2::timestamp, interval '60 minutes') AS t", connection);
             insert.Parameters.AddWithValue(DateTime.SpecifyKind(firstRow, DateTimeKind.Unspecified));
-            insert.Parameters.AddWithValue(DateTime.SpecifyKind(End, DateTimeKind.Unspecified));
+            insert.Parameters.AddWithValue(DateTime.SpecifyKind(lastRow ?? End, DateTimeKind.Unspecified));
             await insert.ExecuteNonQueryAsync(ct);
         }
 
