@@ -895,6 +895,16 @@ function stat(title, read, params, stats, subtitle, span = 1, emptyText) {
 }
 
 /**
+ * stat() for a tile that shows the newest values a windowed read holds and none of its window figures (#4966): the read's
+ * partial-window note belongs to the panels that draw the figures, so this tile draws none. The freeze headroom and xmin
+ * horizon tiles on the PostgreSQL Overview are the cases: the worst database and the winning holder are the latest reading,
+ * and the window peaks and win shares sit in the grids beside the same tiles on the Vacuum tab.
+ */
+function momentStat(title, read, params, stats, subtitle, span = 1, emptyText) {
+  return renderPanel({ title, subtitle, read, params, viz: "stat", stats, span, emptyText, windowNote: false });
+}
+
+/**
  * A line panel over a read's row array. `opts.emptyText` is REQUIRED for the same reason table()'s is: without
  * a sentence, a read whose empty array means the thing simply did not happen inherits renderLineChart's
  * "Not enough data points to chart yet", which describes a condition it never had. get_blocking_trend and
@@ -1918,7 +1928,7 @@ export const POSTGRES_TABS = [
          not "which table". Each read is fetched again by the tab that owns it — the same deliberate duplication
          the SQL Server Overview makes with file I/O and findings. The cost is one read per tab actually opened;
          the alternative is an Overview that cannot answer its own question. */
-      stat(
+      momentStat(
         "Freeze Headroom",
         "get_pg_wraparound_risk",
         { server, hours: ctx.hours },
@@ -1946,7 +1956,7 @@ export const POSTGRES_TABS = [
           emptyText: "No CPU samples in this window. This is an Amazon Aurora feature — on a stock PostgreSQL target this panel is permanently empty.",
         }
       ),
-      stat(
+      momentStat(
         "xmin Horizon",
         "get_pg_xmin_horizon",
         { server, hours: ctx.hours },
@@ -2347,6 +2357,7 @@ export const POSTGRES_TABS = [
           title: "What Holds the Horizon",
           subtitle: ctx.label,
           viz: "stat",
+          windowNote: false,
           stats: PG_XMIN_STATS,
           span: 2,
           emptyText:
@@ -2387,6 +2398,7 @@ export const POSTGRES_TABS = [
           title: "Freeze Headroom",
           subtitle: ctx.label,
           viz: "stat",
+          windowNote: false,
           stats: PG_WRAPAROUND_STATS,
           span: 1,
           emptyText: "No freeze-headroom samples in this window.",
@@ -2397,6 +2409,7 @@ export const POSTGRES_TABS = [
           title: "Where the Thresholds Are",
           subtitle: "PostgreSQL's own, not ours",
           viz: "stat",
+          windowNote: false,
           stats: PG_WRAPAROUND_THRESHOLD_STATS,
           span: 1,
         },
