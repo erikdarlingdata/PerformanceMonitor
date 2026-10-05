@@ -225,6 +225,57 @@ public sealed class DarlingWebEndpointsTests
     public void WrapPlanXml_AnEnvelope_PassesThroughUnchanged(string envelope) =>
         Assert.Equal(envelope, DarlingWebEndpoints.WrapPlanXml(envelope, "H", null));
 
+    /// <summary>#5228: the identity overload echoes the caller's key in the order given, then plan_xml and
+    /// truncated; the original (query_hash, database_name) overload is that same wrap with those two keys.</summary>
+    [Fact]
+    public void WrapPlanXml_TheIdentityOverload_EchoesTheKeyInOrder_AndMatchesTheHashOverload()
+    {
+        const string xml = "<ShowPlanXML><x a=\"1\"/></ShowPlanXML>";
+        var identity = new Dictionary<string, object?>(StringComparer.Ordinal)
+        {
+            ["collection_time"] = "2026-03-04T05:06:07.1234560",
+            ["session_id"] = 51,
+            ["request_id"] = 0,
+            ["live"] = false,
+        };
+        using var doc = System.Text.Json.JsonDocument.Parse(DarlingWebEndpoints.WrapPlanXml(xml, identity));
+        var names = doc.RootElement.EnumerateObject().Select(p => p.Name).ToArray();
+        Assert.Equal(new[] { "collection_time", "session_id", "request_id", "live", "plan_xml", "truncated" }, names);
+        Assert.Equal(51, doc.RootElement.GetProperty("session_id").GetInt32());
+        Assert.Equal(xml, doc.RootElement.GetProperty("plan_xml").GetString());
+
+        var byHash = DarlingWebEndpoints.WrapPlanXml(xml, "0xABC", "db1");
+        var byIdentity = DarlingWebEndpoints.WrapPlanXml(xml, new Dictionary<string, object?>(StringComparer.Ordinal)
+        {
+            ["query_hash"] = "0xABC",
+            ["database_name"] = "db1",
+        });
+        Assert.Equal(byHash, byIdentity);
+    }
+
+    /// <summary>#5228: the three row plan reads refuse a missing or unparseable key BEFORE touching the store
+    /// (the store argument is never used on these paths), with the dispatch's own <c>invalid</c> envelope.</summary>
+    [Theory]
+    [InlineData("get_active_query_plan_xml", "session_id=1", "collection_time")]
+    [InlineData("get_active_query_plan_xml", "collection_time=not-a-time&session_id=1", "collection_time")]
+    [InlineData("get_active_query_plan_xml", "collection_time=2026-03-04T05:06:07.1234560Z", "session_id")]
+    [InlineData("get_active_query_plan_xml", "collection_time=2026-03-04T05:06:07.1234560Z&session_id=abc", "session_id")]
+    [InlineData("get_active_query_plan_xml", "collection_time=2026-03-04T05:06:07.1234560Z&session_id=1&request_id=x", "request_id")]
+    [InlineData("get_query_store_plan_xml", "query_id=1", "database_name")]
+    [InlineData("get_query_store_plan_xml", "database_name=db1", "query_id")]
+    [InlineData("get_query_store_plan_xml", "database_name=db1&query_id=abc", "query_id")]
+    [InlineData("get_query_store_plan_xml", "database_name=db1&query_id=1&plan_id=abc", "plan_id")]
+    [InlineData("get_procedure_plan_xml", "", "sql_handle")]
+    public async Task TheRowPlanReads_RefuseAMissingOrUnparseableKey_BeforeTheStore(string tool, string query, string key)
+    {
+        var context = new Microsoft.AspNetCore.Http.DefaultHttpContext();
+        context.Request.QueryString = new Microsoft.AspNetCore.Http.QueryString("?" + query);
+        var result = await DarlingWebEndpoints.BuildReadDispatch()[tool](context, null!, null!);
+        using var doc = System.Text.Json.JsonDocument.Parse(result);
+        Assert.Equal("invalid", doc.RootElement.GetProperty("status").GetString());
+        Assert.Contains(key, result, StringComparison.Ordinal);
+    }
+
     [Theory]
     [InlineData("{\"cpu_percent\":42}")]
     [InlineData("  {\"cpu_percent\":42}")]                 // leading whitespace still sniffs as JSON
