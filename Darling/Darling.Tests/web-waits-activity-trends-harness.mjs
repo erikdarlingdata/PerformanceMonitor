@@ -1,8 +1,8 @@
-/* Runs the web server page's get_server_trend panels (serverTrendPanel and memoryClerksTrendPanel in
+/* Runs the web server page's get_server_trend panels (namedTrendPanel, drawNamedTrends and sessionStatsTrendPanel in
    wwwroot/js/pages/server-tabs.js, with multi-picker.js, util.js, panels.js and charts.js) against a scripted /api/read
    answer and prints the reads they sent, the picker's state and the charts they drew, as one line of JSON.
-   WebServerTrendsBehaviourTests starts it as
-       node web-server-trends-harness.mjs <path to wwwroot/js> <scenario>
+   WebWaitsActivityTrendsBehaviourTests starts it as
+       node web-waits-activity-trends-harness.mjs <path to wwwroot/js> <scenario>
    charts.js is the shipped renderer behind a wrapper that records each chart's spec, id and scope. `fetch` and the DOM
    are stand-ins; everything else is the shipped code. */
 import fs from "node:fs";
@@ -152,30 +152,29 @@ try {
 const data = (b) => ({ status: 200, body: b });
 const tool = (url) => url.pathname.replace("/api/read/", "");
 const ago = (m) => new Date(Date.now() - m * 60000).toISOString().slice(0, 19);
-const CLERKS = ["MEMORYCLERK_SQLBUFFERPOOL", "CACHESTORE_SQLCP", "CACHESTORE_OBJCP", "OBJECTSTORE_LOCK_MANAGER", "MEMORYCLERK_SQLQERESERVATIONS", "USERSTORE_TOKENPERM", "MEMORYCLERK_XE"];
+const LATCHES = ["LATCH_A", "LATCH_B", "LATCH_C", "LATCH_D", "LATCH_E", "LATCH_F", "LATCH_G"];
+const SPINS = ["SPIN_A", "SPIN_B", "SPIN_C"];
 const pts = (f) => [{ time: ago(10), ...f(1) }, { time: ago(5), ...f(2) }];
 let mode = "data";
 let missing = null;
 answer = (url) => {
   const t = tool(url);
-  if (t === "get_memory_clerks") return mode === "noclerks" ? data({ status: "empty", message: "No snapshot." }) : data({ server: "SRV1", clerks: CLERKS.map((c, i) => ({ clerk_type: c, memory_mb: 100 - i })) });
-  if (t === "get_file_io_trend") {
-    if (mode === "ioempty") return data({ status: "empty", message: "No file I/O recorded." });
-    const f = (name, r, w) => [{ time: ago(10), database_name: name, file_type: "ROWS", file_name: null, avg_read_latency_ms: r, avg_write_latency_ms: w }, { time: ago(5), database_name: name, file_type: "ROWS", file_name: null, avg_read_latency_ms: r + 1, avg_write_latency_ms: w == null ? null : w + 1 }];
-    const trend = mode === "ionowrite" ? [...f("db_a", 5, null)] : [...f("db_a", 5, 20), ...f("db_b", 9, 3)];
-    return data({ server: "SRV1", trend, discontinuities: mode === "iogap" ? [{ at: ago(7), reason: "restart", detail: "uptime reset" }] : [] });
-  }
+  if (t === "get_latch_stats") return mode === "noOptions" ? data({ status: "empty", message: "No latch waits." }) : data({ latches: LATCHES.map((n) => ({ latch_class: n })) });
+  if (t === "get_spinlock_stats") return data({ spinlocks: SPINS.map((n) => ({ spinlock_name: n })) });
   if (t !== "get_server_trend") return data({});
   const metric = url.searchParams.get("metric");
-  if (mode === "allMissing") return data({ status: "empty", message: "None of the named clerk types were recorded. The window does hold other clerk types: heaviest_clerk_types lists the heaviest of them.", hints: { missing_clerk_types: (url.searchParams.get("clerk_types") || "").split(",").filter(Boolean), heaviest_clerk_types: ["CLERK_ALPHA", "CLERK_BETA"] } });
-  if (mode === "empty") return data({ status: "empty", message: "No " + metric + " recorded in the last 24 hour(s)." });
   const discontinuities = [{ at: ago(7), reason: "restart", detail: "uptime reset" }];
-  if (metric === "cpu_scheduler") return data({ server: "SRV1", metric, trend: pts((k) => ({ runnable_tasks: k, blocked_tasks: 0, queued_requests: k })), aggregate_note: "Each point averages.", discontinuities });
-  if (metric === "plan_cache") return data({ server: "SRV1", metric, trend: pts((k) => ({ single_use_mb: 10 * k, multi_use_mb: 20 * k })), discontinuities: [] });
-  const named = (url.searchParams.get("clerk_types") || "").split(",").filter(Boolean);
+  if (mode === "allMissing") return data({ status: "empty", message: "None of the named were recorded.", hints: { missing_names: (url.searchParams.get("names") || "").split(",").filter(Boolean) } });
+  if (mode === "empty") return data({ status: "empty", message: "No " + metric + " recorded in the last 24 hour(s)." });
+  if (metric === "session_stats") {
+    return data({ server: "SRV1", metric, trend: pts((k) => ({ total_sessions: 10 * k, running_sessions: k, sleeping_sessions: 5, background_sessions: 2, dormant_sessions: 1, idle_sessions_over_30min: 0, sessions_waiting_for_memory: 0, databases_with_connections: 3, top_application_name: "AppOne", top_application_connections: 4, top_host_name: "HostOne", top_host_connections: 6 })), aggregate_note: "Session note.", discontinuities });
+  }
+  const named = (url.searchParams.get("names") || "").split(",").filter(Boolean);
   const present = named.filter((c) => c !== missing);
-  const body = { server: "SRV1", metric, series: present.map((c) => ({ clerk_type: c, trend: pts((k) => ({ memory_mb: 50 * k })) })), discontinuities };
-  if (missing && named.includes(missing)) body.missing_clerk_types = [missing];
+  const key = metric === "latch" ? "latch_class" : "spinlock_name";
+  const field = metric === "latch" ? "wait_time_ms_per_second" : "collisions_per_second";
+  const body = { server: "SRV1", metric, series: present.map((c) => ({ [key]: c, trend: pts((k) => ({ [field]: 5 * k })) })), discontinuities };
+  if (missing && named.includes(missing)) body.missing_names = [missing];
   return data(body);
 };
 
@@ -187,7 +186,11 @@ const all = (node, pred, found = []) => {
 };
 const settle = async () => { for (let i = 0; i < 100; i++) await new Promise((r) => setTimeout(r, 0)); };
 const ctx = { hours: 24, label: "last 24 hours", signal: new AbortController().signal };
-const kinds = { fileio: () => modules.tabs.fileIoPanel("SRV1", ctx),  cpu: () => modules.tabs.serverTrendPanel("SRV1", ctx, "cpu_scheduler"), plan: (s) => modules.tabs.serverTrendPanel(s || "SRV1", ctx, "plan_cache"), clerks: (s) => modules.tabs.memoryClerksTrendPanel(s || "SRV1", ctx) };
+const kinds = {
+  latch: (s) => modules.tabs.namedTrendPanel(s || "SRV1", ctx, "latch"),
+  spinlock: (s) => modules.tabs.namedTrendPanel(s || "SRV1", ctx, "spinlock"),
+  session: (s) => modules.tabs.sessionStatsTrendPanel(s || "SRV1", ctx),
+};
 async function build(kind, server) {
   const root = new FakeNode("main");
   modules.util.mount(root, kinds[kind](server));
@@ -205,86 +208,51 @@ const chartInfo = () => {
 };
 const texts = (root, cls) => all(root, (n) => String(n.className).includes(cls)).map((n) => n.textContent);
 
-const allCharts = () => modules.charts.chartCalls.map((c) => ({ id: c.id, labels: c.spec.series.map((x) => x.label), unit: c.spec.unit, scope: c.scope, points: c.spec.points.length }));
 const scenarios = {
-  fileio: async () => {
-    const root = await build("fileio");
-    return { reads: fetches.filter((f) => f.includes("get_file_io_trend")), charts: allCharts(), notices: texts(root, "notice"), empties: texts(root, "strip empty") };
+  latch: async () => {
+    const root = await build("latch");
+    return { reads: trendReads(), checked: checkedNames(root), listed: boxes(root).length, chart: chartInfo(), notices: texts(root, "notice") };
   },
-  fileioGap: async () => {
-    mode = "iogap";
-    const root = await build("fileio");
-    return { charts: allCharts(), notices: texts(root, "notice"), empties: texts(root, "strip empty") };
+  spinlock: async () => {
+    const root = await build("spinlock");
+    return { reads: trendReads(), checked: checkedNames(root), chart: chartInfo(), notices: texts(root, "notice") };
   },
-  fileioNoWrites: async () => {
-    mode = "ionowrite";
-    const root = await build("fileio");
-    return { charts: allCharts(), notices: texts(root, "notice"), empties: texts(root, "strip empty") };
-  },
-  fileioEmpty: async () => {
-    mode = "ioempty";
-    const root = await build("fileio");
-    return { charts: allCharts(), empties: texts(root, "strip empty") };
-  },
-
-  cpu: async () => {
-    const root = await build("cpu");
-    return { reads: trendReads(), chart: chartInfo(), notices: texts(root, "notice"), notes: texts(root, "mp-metric-note"), signals };
-  },
-  plan: async () => {
-    const root = await build("plan");
-    return { reads: trendReads(), chart: chartInfo(), notices: texts(root, "notice") };
-  },
-  clerks: async () => {
-    const root = await build("clerks");
-    return { reads: trendReads(), snapshotReads: fetches.filter((f) => f.includes("get_memory_clerks")), checked: checkedNames(root), listed: boxes(root).length, chart: chartInfo(), notices: texts(root, "notice") };
+  session: async () => {
+    const root = await build("session");
+    return { reads: trendReads(), chart: chartInfo(), notices: texts(root, "notice"), notes: texts(root, "mp-metric-note") };
   },
   survives: async () => {
-    const first = await build("clerks");
-    await toggle(boxes(first).find((b) => b.attrs["aria-label"] === "CACHESTORE_SQLCP"), false);
-    await toggle(boxes(first).find((b) => b.attrs["aria-label"] === "MEMORYCLERK_XE"), true);
-    const rebuilt = await build("clerks");
-    const other = await build("clerks", "SRV2");
-    return { rebuilt: checkedNames(rebuilt), other: checkedNames(other), lastRead: trendReads()[trendReads().length - 2], chart: chartInfo() };
+    const first = await build("latch");
+    await toggle(boxes(first).find((b) => b.attrs["aria-label"] === "LATCH_B"), false);
+    await toggle(boxes(first).find((b) => b.attrs["aria-label"] === "LATCH_G"), true);
+    const rebuilt = await build("latch");
+    const other = await build("latch", "SRV2");
+    const spin = await build("spinlock");
+    return { rebuilt: checkedNames(rebuilt), other: checkedNames(other), spin: checkedNames(spin), lastRead: trendReads()[trendReads().length - 3], chart: chartInfo() };
   },
   missing: async () => {
-    missing = "CACHESTORE_OBJCP";
-    const root = await build("clerks");
+    missing = "LATCH_C";
+    const root = await build("latch");
     return { notices: texts(root, "notice"), chart: chartInfo() };
   },
   allMissing: async () => {
     mode = "allMissing";
-    const root = await build("clerks");
-    return { notices: texts(root, "notice"), empties: texts(root, "strip empty"), notes: texts(root, "mp-metric-note"), chart: chartInfo() };
+    const root = await build("latch");
+    return { notices: texts(root, "notice"), empties: texts(root, "strip empty"), chart: chartInfo() };
   },
-  clerkPicker: async () => {
-    const root = await build("clerks");
-    const buttons = () => all(root, (n) => n.tag === "button").map((b) => b.textContent);
-    const before = checkedNames(root);
-    for (const b of boxes(root).filter((x) => x.checked)) await toggle(b, false);
-    const cleared = checkedNames(root);
-    const top = all(root, (n) => n.tag === "button" && n.textContent === "Top clerks")[0];
-    if (top) { top.listeners.click.forEach((l) => l({})); await settle(); }
-    const afterTop = checkedNames(root);
-    const search = all(root, (n) => n.tag === "input" && n.attrs.type === "search")[0];
-    search.value = "zzz-no-such";
-    search.listeners.input.forEach((l) => l({}));
-    await settle();
-    return { buttons: buttons(), before, cleared, afterTop, noMatch: texts(root, "mp-none") };
-  },
-  emptyCpu: async () => {
+  emptyLatch: async () => {
     mode = "empty";
-    const root = await build("cpu");
+    const root = await build("latch");
     return { chart: chartInfo(), empties: texts(root, "strip empty") };
   },
-  emptyClerks: async () => {
+  emptySession: async () => {
     mode = "empty";
-    const root = await build("clerks");
+    const root = await build("session");
     return { chart: chartInfo(), empties: texts(root, "strip empty") };
   },
-  noClerks: async () => {
-    mode = "noclerks";
-    const root = await build("clerks");
+  noOptions: async () => {
+    mode = "noOptions";
+    const root = await build("latch");
     return { reads: trendReads(), empties: texts(root, "strip empty") };
   },
 };

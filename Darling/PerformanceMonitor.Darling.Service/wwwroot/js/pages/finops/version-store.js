@@ -13,7 +13,8 @@ import { VIZ } from "../../panels.js";
 import { zoomableLineChart, chartZoomScope, SERIES_COLORS } from "../../charts.js";
 import { el, readTool, readErrorStrip, emptyStrip, errorStrip, loadingStrip, mount, fmtNum, localTime, windowFromHours } from "../../util.js";
 
-const TREND_HOURS = 24;
+/* Seven days, the desktop's window, and the read's own ceiling (McpHelpers.MaxHoursBack = 168): a larger value is refused, not clamped. */
+const TREND_HOURS = 168;
 
 const COLUMNS = [
   { key: "database_name", label: "Database" },
