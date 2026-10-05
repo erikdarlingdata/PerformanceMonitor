@@ -186,6 +186,32 @@ VALUES ($1, $2, $3, $4, 5, 500, 'appdb', 'u', 'app', NULL,
         });
     }
 
+    /// <summary>The quiet claim (#4966): over a window the collector began inside, the answer names where the data starts instead of calling the stretch before it quiet; over a covered window it keeps its words.</summary>
+    [Theory]
+    [InlineData("get_pg_replication_stats", "that is the expected answer", false)]
+    [InlineData("get_pg_xmin_horizon", "Vacuum is free to reclaim dead rows", true)]
+    public async Task AnAllClear_ClaimsQuiet_OnlyOverACoveredWindow_AgainstDevPostgres(string read, string coveredClaim, bool inFinding)
+    {
+        var t = Of(read);
+        string Text(JsonElement root) => inFinding ? root.GetProperty("finding").GetString()! : root.GetProperty("message").GetString()!;
+
+        await RunAsync(t, "quietclaim", async (c, ds, end, name) =>
+        {
+            var began = end.AddMinutes(-30);
+            await SeedServerAsync(c, t, name, began, began, end);
+            var cut = WindowFloorLiveHarness.Parse(await t.Call(ds, name, 3, end));
+            Assert.True(cut.GetProperty("hints").GetProperty("window_truncated").GetBoolean(), cut.ToString());
+            Assert.Contains(". " + McpHelpers.CutWindowNothingMessage, Text(cut), StringComparison.Ordinal);
+            Assert.DoesNotContain(coveredClaim, Text(cut), StringComparison.Ordinal);
+
+            await SeedServerAsync(c, t, name, end.AddDays(-30), end.AddDays(-30), end);
+            var covered = WindowFloorLiveHarness.Parse(await t.Call(ds, name, 3, end));
+            Assert.False(covered.GetProperty("hints").GetProperty("window_truncated").GetBoolean(), covered.ToString());
+            Assert.Contains(coveredClaim, Text(covered), StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain(McpHelpers.CutWindowNothingMessage, Text(covered), StringComparison.Ordinal);
+        });
+    }
+
     [Theory]
     [MemberData(nameof(ToolNames))]
     public async Task ANotCollectedAnswer_StaysBare_AndStartsNoProbe_AgainstDevPostgres(string read)

@@ -249,6 +249,33 @@ VALUES ($1, $2, $3, $4, 'work_mem', $5, NULL, 'Resource Usage / Memory', 'user',
         });
 
     /* The notice is always coverage. The row cap is reported by truncated, never by the notice: a capped page beside an early coverage reads covered. */
+    /// <summary>The quiet claim of an empty answer (#4966): a window the store does not cover reads as "nothing was read", a covered one keeps its claim.</summary>
+    [Theory]
+    [InlineData("get_pg_lock_stats", "healthy state on a server without sustained contention")]
+    [InlineData("get_pg_wait_sampling", "this is the healthy state")]
+    [InlineData("get_pg_server_config_changes", "a real finding rather than missing data")]
+    public Task AnEmptyAnswer_ClaimsQuiet_OnlyOverACoveredWindow_AgainstDevPostgres(string tool, string coveredClaim) =>
+        Run(tool, "quietclaim", async (c, ds, end, name) =>
+        {
+            await SeedServerAsync(c, name, end.AddDays(-2));
+
+            /* The window ends nine days ago, before this server was registered: the store holds nothing for it (no start to name). */
+            var cut = WindowFloorLiveHarness.Parse(await Call(tool, ds, name, 1, end.AddDays(-9)));
+            var cutMessage = cut.GetProperty("message").GetString()!;
+            Assert.True(cut.GetProperty("hints").GetProperty("window_truncated").GetBoolean());
+            Assert.Contains(". " + McpHelpers.CutWindowNothingReadMessage, cutMessage, StringComparison.Ordinal);
+            Assert.DoesNotContain(coveredClaim, cutMessage, StringComparison.Ordinal);
+
+            await DarlingMcpTestData.ExecAsync(c, TestContext.Current.CancellationToken,
+                "UPDATE servers SET created_date = $2 WHERE server_id = $1", ServerIdHelper.GetDeterministicHashCode(name), DarlingMcpTestData.Naive(end.AddDays(-30)));
+            await SeedAsync(c, tool, name, end.AddDays(-20));
+            var covered = WindowFloorLiveHarness.Parse(await Call(tool, ds, name, 1, end));
+            var coveredMessage = covered.GetProperty("message").GetString()!;
+            Assert.False(covered.GetProperty("hints").GetProperty("window_truncated").GetBoolean(), covered.ToString());
+            Assert.Contains(coveredClaim, coveredMessage, StringComparison.Ordinal);
+            Assert.DoesNotContain(McpHelpers.CutWindowNothingReadMessage, coveredMessage, StringComparison.Ordinal);
+        });
+
     [Fact]
     public Task ACappedConfigChangesPage_BesideAnEarlyCoverage_ReadsCovered_WhileTruncatedIsTrue_AgainstDevPostgres() =>
         Run("get_pg_server_config_changes", "capped", async (c, ds, end, name) =>

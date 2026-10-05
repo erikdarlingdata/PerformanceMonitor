@@ -218,6 +218,32 @@ public sealed class DarlingMcpPgWindowD8aLiveTests
         });
     }
 
+    /// <summary>Two quiet snapshots inside a window that begins before collection did: the all-clear names where the data starts instead (#4966).</summary>
+    [Fact]
+    public async Task ADatabaseStatsAllClear_OverACutWindow_NamesWhereTheDataStarts_AgainstDevPostgres()
+    {
+        var t = Of("get_pg_database_stats");
+        await RunAsync(t, "emptycut", async (c, ds, end, name) =>
+        {
+            var began = end.AddMinutes(-40);
+            await SeedServerAsync(c, t, name, began, began, end);
+            foreach (var snap in new[] { end.AddMinutes(-30), end.AddMinutes(-20) })
+            {
+                await Exec(c,
+                    "INSERT INTO pg_database_stats (collection_id, collection_time, server_id, server_name, database_name, xact_commit, xact_rollback, blks_read, blks_hit, temp_files, temp_bytes, deadlocks, stats_reset) VALUES ($1, $2, $3, $4, 'quietdb', 1000, 10, 100, 9900, 0, 0, 0, NULL)",
+                    CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(snap), Id(name), name);
+            }
+
+            var root = WindowFloorLiveHarness.Parse(await t.Call(ds, name, 3, end));
+
+            Assert.Equal("empty", root.GetProperty("status").GetString());
+            Assert.True(root.GetProperty("hints").GetProperty("window_truncated").GetBoolean(), root.ToString());
+            var message = root.GetProperty("message").GetString()!;
+            Assert.EndsWith(". " + McpHelpers.CutWindowNothingMessage, message, StringComparison.Ordinal);
+            Assert.DoesNotContain("genuine all-clear", message, StringComparison.Ordinal);
+        });
+    }
+
     [Theory]
     [InlineData("get_pg_io_stats")]
     [InlineData("get_pg_plans")]
