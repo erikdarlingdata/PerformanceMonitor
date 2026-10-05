@@ -385,9 +385,16 @@ OUTER APPLY
     private static bool InlinePlanCapture(CollectorContext context) =>
         context.CapturePlanXml && !context.DeferPlanXmlFetch;
 
-    /// <summary>True when the host captures plans and defers the fetch, so the main query carries the identity columns.</summary>
+    /// <summary>
+    /// True when the main query carries the identity columns: the host defers the fetch
+    /// (they stand in for the plan columns, at ordinals 27-29) or the host asks for them with
+    /// <see cref="CollectorContext.PlanIdentityColumns"/> (at 27-29 with no plan columns, or 29-31 after the inline ones).
+    /// </summary>
     private static bool DeferredPlanIdentity(CollectorContext context) =>
-        context.CapturePlanXml && context.DeferPlanXmlFetch;
+        context.PlanIdentityColumns || (context.CapturePlanXml && context.DeferPlanXmlFetch);
+
+    /// <summary>The ordinal of the first identity column: right after the inline plan columns when they are present.</summary>
+    private static int IdentityOrdinal(CollectorContext context) => InlinePlanCapture(context) ? 29 : 27;
 
     /// <summary>
     /// #5158: the second target query for a host that defers the plan fetch. Takes plan handles, not
@@ -461,12 +468,10 @@ OUTER APPLY
 
     public override CollectorQuery BuildQuery(CollectorContext context)
     {
-        var planSelect = InlinePlanCapture(context)
-            ? PlanSelectFragment
-            : DeferredPlanIdentity(context) ? PlanIdentitySelectFragment : "";
-        var planApply = InlinePlanCapture(context)
-            ? PlanApplyFragment
-            : DeferredPlanIdentity(context) ? PlanIdentityApplyFragment : "";
+        var planSelect = (InlinePlanCapture(context) ? PlanSelectFragment : "")
+            + (DeferredPlanIdentity(context) ? PlanIdentitySelectFragment : "");
+        var planApply = (InlinePlanCapture(context) ? PlanApplyFragment : "")
+            + (DeferredPlanIdentity(context) ? PlanIdentityApplyFragment : "");
 
         if (context.Target.IsAzureSqlDb)
         {
@@ -550,6 +555,7 @@ OUTER APPLY
         var rows = new List<Row>();
         var inlinePlan = InlinePlanCapture(context);
         var deferredIdentity = DeferredPlanIdentity(context);
+        var identityOrdinal = IdentityOrdinal(context);
 
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -592,12 +598,13 @@ OUTER APPLY
                     ? Convert.ToInt64(reader.GetValue(28), CultureInfo.InvariantCulture)
                     : null)
             {
-                /* #5158: a deferred-fetch host reads the identity fingerprint at 27-29 in place of the plan. */
-                PlanStatementCount = deferredIdentity && !reader.IsDBNull(27)
-                    ? Convert.ToInt64(reader.GetValue(27), CultureInfo.InvariantCulture) : null,
-                PlanLastStatementCompile = deferredIdentity && !reader.IsDBNull(28) ? reader.GetDateTime(28) : null,
-                PlanGenerationSum = deferredIdentity && !reader.IsDBNull(29)
-                    ? Convert.ToInt64(reader.GetValue(29), CultureInfo.InvariantCulture) : null,
+                /* #5158: the identity fingerprint is 27-29 in place of the plan (deferred fetch), or 29-31 after the inline plan (shadow). */
+                PlanStatementCount = deferredIdentity && !reader.IsDBNull(identityOrdinal)
+                    ? Convert.ToInt64(reader.GetValue(identityOrdinal), CultureInfo.InvariantCulture) : null,
+                PlanLastStatementCompile = deferredIdentity && !reader.IsDBNull(identityOrdinal + 1)
+                    ? reader.GetDateTime(identityOrdinal + 1) : null,
+                PlanGenerationSum = deferredIdentity && !reader.IsDBNull(identityOrdinal + 2)
+                    ? Convert.ToInt64(reader.GetValue(identityOrdinal + 2), CultureInfo.InvariantCulture) : null,
             });
         }
 
