@@ -9,11 +9,13 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Globalization;
 using System.Runtime.CompilerServices;
 using System.Runtime.ExceptionServices;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using PerformanceMonitor.Analysis.Baselines;
 using NpgsqlTypes;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
@@ -226,7 +228,20 @@ internal static class DarlingDataReader
            per-hash grouping — it is only interesting under host-object rollup, where it IS the finding:
            a proc whose dynamic SQL fragments across 21 hashes reports 21 here, which is the number that
            explains why top-N-by-hash could never surface it. */
-        long DistinctQueryHashes = 1);
+        long DistinctQueryHashes = 1,
+        /* The desktop grid's remaining columns; null on the hourly tier, which does not carry them. */
+        TopQueryDetail? Detail = null);
+
+    /// <summary>The per-group extremes and identity fields the desktop Top Queries grid shows beyond the core
+    /// ranking columns. Every field is null when the store has no value. <c>LastExecutionTime</c> and
+    /// <c>CreationTime</c> are naive UTC, converted from the monitored server's clock at the read.</summary>
+    public sealed record TopQueryDetail(
+        DateTime? LastExecutionTime, DateTime? CreationTime,
+        long? MinPhysicalReads, long? MaxPhysicalReads, long? MinRows, long? MaxRows,
+        long? MinGrantKb, long? MaxGrantKb, long? MinUsedGrantKb, long? MaxUsedGrantKb,
+        long? MinIdealGrantKb, long? MaxIdealGrantKb, long? MinSpills, long? MaxSpills,
+        long? MinReservedThreads, long? MaxReservedThreads, long? MinUsedThreads, long? MaxUsedThreads,
+        long? TotalClrTimeUs, long? PlanGenerationNum, double? WorkerTimePerSecond);
 
     /// <summary>One (database, schema, object) group's summed procedure-stats deltas over the window.</summary>
     public sealed record TopProcedureRow(
@@ -1046,6 +1061,27 @@ internal static class DarlingDataReader
                 MAX(query_plan_hash) AS query_plan_hash,
                 MAX(sql_handle) AS sql_handle,
                 MAX(plan_handle) AS plan_handle,
+                MAX(last_execution_time) AS last_execution_time,
+                MAX(creation_time) AS creation_time,
+                MIN(min_physical_reads) AS min_physical_reads,
+                MAX(max_physical_reads) AS max_physical_reads,
+                MIN(min_rows) AS min_rows,
+                MAX(max_rows) AS max_rows,
+                MIN(min_grant_kb) AS min_grant_kb,
+                MAX(max_grant_kb) AS max_grant_kb,
+                MIN(min_used_grant_kb) AS min_used_grant_kb,
+                MAX(max_used_grant_kb) AS max_used_grant_kb,
+                MIN(min_ideal_grant_kb) AS min_ideal_grant_kb,
+                MAX(max_ideal_grant_kb) AS max_ideal_grant_kb,
+                MIN(min_spills) AS min_spills,
+                MAX(max_spills) AS max_spills,
+                MIN(min_reserved_threads) AS min_reserved_threads,
+                MAX(max_reserved_threads) AS max_reserved_threads,
+                MIN(min_used_threads) AS min_used_threads,
+                MAX(max_used_threads) AS max_used_threads,
+                MAX(total_clr_time) AS total_clr_time,
+                MAX(plan_generation_num) AS plan_generation_num,
+                MAX(CAST(delta_worker_time AS double precision) / NULLIF(sample_interval_seconds, 0) / 1000.0) AS worker_time_per_second,
                 /* #2012: how many DISTINCT statement texts this hash group merged. query_hash is a
                    SHAPE hash — INSERT...EXEC statements naming DIFFERENT callee procs share one
                    (reproduced live), and ad-hoc literal variants collapse too — so a group with
@@ -1105,7 +1141,29 @@ internal static class DarlingDataReader
             r.min_elapsed_time,
             r.max_elapsed_time,
             t.query_text,
-            r.distinct_texts
+            r.distinct_texts,
+            CAST(1 AS bigint) AS distinct_query_hashes,
+            r.last_execution_time,
+            r.creation_time,
+            r.min_physical_reads,
+            r.max_physical_reads,
+            r.min_rows,
+            r.max_rows,
+            r.min_grant_kb,
+            r.max_grant_kb,
+            r.min_used_grant_kb,
+            r.max_used_grant_kb,
+            r.min_ideal_grant_kb,
+            r.max_ideal_grant_kb,
+            r.min_spills,
+            r.max_spills,
+            r.min_reserved_threads,
+            r.max_reserved_threads,
+            r.min_used_threads,
+            r.max_used_threads,
+            r.total_clr_time,
+            r.plan_generation_num,
+            r.worker_time_per_second
         FROM ranked AS r
         LEFT JOIN LATERAL (
             SELECT query_text
@@ -1176,6 +1234,27 @@ internal static class DarlingDataReader
                 MAX(query_plan_hash) AS query_plan_hash,
                 MAX(sql_handle) AS sql_handle,
                 MAX(plan_handle) AS plan_handle,
+                MAX(last_execution_time) AS last_execution_time,
+                MAX(creation_time) AS creation_time,
+                MIN(min_physical_reads) AS min_physical_reads,
+                MAX(max_physical_reads) AS max_physical_reads,
+                MIN(min_rows) AS min_rows,
+                MAX(max_rows) AS max_rows,
+                MIN(min_grant_kb) AS min_grant_kb,
+                MAX(max_grant_kb) AS max_grant_kb,
+                MIN(min_used_grant_kb) AS min_used_grant_kb,
+                MAX(max_used_grant_kb) AS max_used_grant_kb,
+                MIN(min_ideal_grant_kb) AS min_ideal_grant_kb,
+                MAX(max_ideal_grant_kb) AS max_ideal_grant_kb,
+                MIN(min_spills) AS min_spills,
+                MAX(max_spills) AS max_spills,
+                MIN(min_reserved_threads) AS min_reserved_threads,
+                MAX(max_reserved_threads) AS max_reserved_threads,
+                MIN(min_used_threads) AS min_used_threads,
+                MAX(max_used_threads) AS max_used_threads,
+                MAX(total_clr_time) AS total_clr_time,
+                MAX(plan_generation_num) AS plan_generation_num,
+                MAX(CAST(delta_worker_time AS double precision) / NULLIF(sample_interval_seconds, 0) / 1000.0) AS worker_time_per_second,
                 COUNT(DISTINCT query_text_digest) AS distinct_texts,
                 /* #2235: the fragment count IS the finding — 21 here is why a per-hash ranking missed it. */
                 COUNT(DISTINCT query_hash) AS distinct_query_hashes
@@ -1223,7 +1302,28 @@ internal static class DarlingDataReader
             r.max_elapsed_time,
             t.query_text,
             r.distinct_texts,
-            r.distinct_query_hashes
+            r.distinct_query_hashes,
+            r.last_execution_time,
+            r.creation_time,
+            r.min_physical_reads,
+            r.max_physical_reads,
+            r.min_rows,
+            r.max_rows,
+            r.min_grant_kb,
+            r.max_grant_kb,
+            r.min_used_grant_kb,
+            r.max_used_grant_kb,
+            r.min_ideal_grant_kb,
+            r.max_ideal_grant_kb,
+            r.min_spills,
+            r.max_spills,
+            r.min_reserved_threads,
+            r.max_reserved_threads,
+            r.min_used_threads,
+            r.max_used_threads,
+            r.total_clr_time,
+            r.plan_generation_num,
+            r.worker_time_per_second
         FROM ranked AS r
         LEFT JOIN LATERAL (
             SELECT query_text
@@ -1490,6 +1590,9 @@ internal static class DarlingDataReader
         }
 
         var rows = new List<TopQueryRow>();
+        /* The two detail timestamps are stored on the monitored server's own clock; they are converted to naive
+           UTC per row through the server's clock, as every other server-local column on the MCP surface is. */
+        var clock = await DarlingServerClockReader.ReadAsync(postgres, serverId, cancellationToken);
         /* #2235: same parameters, same columns, different GROUP BY — see TopQueriesByHostObjectSql. */
         await using var command = postgres.CreateCommand(rollUpByHostObject ? TopQueriesByHostObjectSql : TopQueriesSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
@@ -1523,10 +1626,27 @@ internal static class DarlingDataReader
                 reader.IsDBNull(19) ? 0 : reader.GetInt64(19),
                 reader.IsDBNull(20) ? "" : reader.GetString(20),
                 reader.IsDBNull(21) ? 0 : reader.GetInt64(21),
-                reader.FieldCount > 22 && !reader.IsDBNull(22) ? reader.GetInt64(22) : 1));
+                reader.IsDBNull(22) ? 1 : reader.GetInt64(22),
+                ReadTopQueryDetail(reader, 23, clock)));
         }
 
         return new TopQueriesReadResult(rows, RetentionTier.Raw, rawForced);
+    }
+
+    /// <summary>The detail columns of <see cref="TopQueriesSql"/> / <see cref="TopQueriesByHostObjectSql"/>, 21
+    /// consecutive fields from <paramref name="first"/>: two timestamps (converted to naive UTC through
+    /// <paramref name="clock"/>), sixteen integer extremes, CLR time, the
+    /// plan generation and the peak CPU rate.</summary>
+    private static TopQueryDetail ReadTopQueryDetail(NpgsqlDataReader reader, int first, ServerClock clock)
+    {
+        DateTime? Time(int i) => DarlingServerClockReader.ToUtc(clock, reader, first + i);
+        long? Long(int i) => reader.IsDBNull(first + i) ? null : Convert.ToInt64(reader.GetValue(first + i), CultureInfo.InvariantCulture);
+        return new TopQueryDetail(
+            Time(0), Time(1),
+            Long(2), Long(3), Long(4), Long(5), Long(6), Long(7), Long(8), Long(9),
+            Long(10), Long(11), Long(12), Long(13), Long(14), Long(15), Long(16), Long(17),
+            Long(18), Long(19),
+            reader.IsDBNull(first + 20) ? null : reader.GetDouble(first + 20));
     }
 
     /// <summary>
