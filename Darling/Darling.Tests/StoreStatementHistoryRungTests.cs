@@ -34,6 +34,8 @@ public sealed class StoreStatementHistoryRungTests
 
     private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
 
+    public static int RungVersion => Rung.Version;
+
     private static PgMigrations.Migration Rung => PgMigrations.Scripts.Single(m => m.Name == RungName);
 
     private static string Statements() =>
