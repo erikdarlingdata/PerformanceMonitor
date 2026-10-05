@@ -16,8 +16,9 @@ namespace Darling.Tests;
 
 /// <summary>
 /// The desktop viewer takes the same server identity lock as the web and MCP writers (#5240, PR 2), and these facts
-/// hold the parts of that a live race cannot: the viewer's COPY of the lock text is the service's text, and each
-/// identity write takes the lock first, in the transaction that writes. The live facts are in
+/// hold the parts of that a live race cannot: the viewer's COPY of the lock text is the service's text, each
+/// identity write takes the lock first, in the transaction that writes, and the Add/Edit dialog shows a refused
+/// (claimed) address as an expected refusal rather than an error. The live facts are in
 /// <see cref="ServerIdentityLockLiveTests"/>; these run without a store.
 ///
 /// <para>The Viewer project cannot reference the service, so <see cref="ViewerDataService.MonitoredServerIdentityLockSql"/>
@@ -39,6 +40,9 @@ public sealed class ServerIdentityLockSourcePinTests
 
     private static string StoreConfigSource() =>
         RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "StoreConfigProvider.cs");
+
+    private static string DialogSource() =>
+        RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "AddServerDialog.xaml.cs");
 
     /// <summary>The text between two markers, which must both be there and in that order.</summary>
     private static string Between(string source, string startMarker, string endMarker)
@@ -111,6 +115,38 @@ public sealed class ServerIdentityLockSourcePinTests
             "new NpgsqlCommand(MonitoredServerUpsertSql, connection, transaction)",
             "CommitAsync(");
         Assert.DoesNotContain("_dataSource.CreateCommand(", body, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A claimed address is an expected refusal of the dialog's save, like a read-only seat or a schema skew: the
+    /// dialog shows the exception's message as it is and logs nothing at error level. Without its own catch the
+    /// save handler's catch-all would prefix the message with "Error saving server:" and log an error for what is
+    /// the identity lock working as designed.
+    /// </summary>
+    [Fact]
+    public void TheDialogsSaveHandler_CatchesAClaimedAddressBeforeTheGeneralCatch_ShowsItAsIs_AndLogsNothing()
+    {
+        var handler = Between(
+            DialogSource(),
+            "private async void SaveButton_Click(",
+            "private async void TestConnectionButton_Click(");
+
+        /* The type has its own catch ahead of the catch-all, and the catch-all is still where the error is logged:
+           the positive control that makes "this catch logs nothing" mean something. */
+        AssertInOrder(
+            handler,
+            "catch (MonitoredServerAddressClaimedException ex)",
+            "catch (Exception ex)",
+            "ViewerLogger.Error(");
+
+        /* The claimed-address catch's own block, as code: comments and literal text blanked, so its explanation
+           cannot satisfy or trip the checks below. */
+        var claimedCatch = Between(handler, "catch (MonitoredServerAddressClaimedException ex)", "catch (Exception ex)");
+        var code = CSharpSourceWalker.StripCommentsAndStrings(claimedCatch);
+
+        AssertInOrder(code, "StatusText.Text = ex.Message;", "SaveButton.IsEnabled = true;");
+        Assert.Empty(CSharpSourceWalker.StringLiteralBodies(claimedCatch));
+        Assert.DoesNotContain("ViewerLogger", code, StringComparison.Ordinal);
     }
 
     [Fact]

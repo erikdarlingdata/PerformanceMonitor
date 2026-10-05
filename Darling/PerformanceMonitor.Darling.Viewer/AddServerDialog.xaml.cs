@@ -772,6 +772,15 @@ public partial class AddServerDialog : Window
             StatusText.Text = ex.Message;
             SaveButton.IsEnabled = true;
         }
+        catch (MonitoredServerAddressClaimedException ex)
+        {
+            /* #5240: another writer claimed this address between the check above and the write, so the write
+               refused and changed nothing. That is an expected refusal, like the two above: the message already
+               says what happened, so it is shown as it is, with no "Error saving server:" prefix and no
+               error-level log line. */
+            StatusText.Text = ex.Message;
+            SaveButton.IsEnabled = true;
+        }
         catch (Exception ex)
         {
             StatusText.Text = $"Error saving server: {ex.Message}";

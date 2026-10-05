@@ -426,8 +426,8 @@ ORDER BY COALESCE(s.display_name, c.name)";
     /// <c>ON CONFLICT (server_id)</c> arm is no help: an edit keeps its row's old id, so a second row with the same
     /// address is not a conflict on the id. The write therefore takes <see cref="MonitoredServerIdentityLockSql"/>
     /// first, reads every other definition's address again under it, and writes only when the address is still
-    /// free. A claimed address throws <see cref="MonitoredServerAddressClaimedException"/>, whose message the dialog's
-    /// save handler already shows for any failed save, and nothing is written.</para>
+    /// free. A claimed address throws <see cref="MonitoredServerAddressClaimedException"/> and nothing is written; the
+    /// dialog's save handler catches that type on its own and shows its message as it is.</para>
     /// </summary>
     public async Task UpsertMonitoredServerAsync(MonitoredServerRow row, CancellationToken cancellationToken = default)
     {
@@ -866,8 +866,9 @@ public sealed record MonitoredServerAddResult(MonitoredServerAddOutcome Outcome,
 /// <summary>
 /// <see cref="ViewerDataService.UpsertMonitoredServerAsync"/> refused an edit (#5240): under the identity lock,
 /// another definition already holds the address the edit moves this server to, so nothing was written. The same
-/// meaning as <see cref="MonitoredServerAddOutcome.Duplicate"/> for an add. The Add/Edit dialog's save handler shows
-/// the message of any exception a save throws, so the operator reads why without new UI.
+/// meaning as <see cref="MonitoredServerAddOutcome.Duplicate"/> for an add. The Add/Edit dialog's save handler catches
+/// this type before its general catch and shows the message as it is (no "Error saving server:" prefix, nothing
+/// logged at error level), so the operator reads why without new UI.
 /// </summary>
 public sealed class MonitoredServerAddressClaimedException : InvalidOperationException
 {
