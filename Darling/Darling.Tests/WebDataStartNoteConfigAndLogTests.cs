@@ -525,6 +525,30 @@ public sealed class ComposedPanelNoticeZoneTests
         Assert.EndsWith(" " + RowCapSentence, shown, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// The harness loads the shipped <c>compose.js</c> beside a stand-in <c>charts.js</c>. When compose.js imports a name the
+    /// stand-in does not export, Node stops at module link time with a SyntaxError, prints nothing and exits 1, so every
+    /// notice test fails with a bare "harness failed" and no hint why (#5247 added four such imports). This pins the cause
+    /// directly: every name compose.js takes from charts.js is exported by the harness's stand-in.
+    /// </summary>
+    [Fact]
+    public void TheHarnessChartsStandIn_ExportsEveryNameComposeJsImportsFromCharts()
+    {
+        var compose = ReadRepoFile(System.IO.Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "compose.js"));
+        var harness = ReadRepoFile(System.IO.Path.Combine("Darling", "Darling.Tests", "web-compose-notice-harness.mjs"));
+
+        var import = System.Text.RegularExpressions.Regex.Match(compose, @"^import\s*\{([^}]*)\}\s*from\s*""\./charts\.js"";", System.Text.RegularExpressions.RegexOptions.Multiline);
+        Assert.True(import.Success, "compose.js no longer has a named import from ./charts.js; update this pin.");
+        var imported = import.Groups[1].Value.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
+        Assert.NotEmpty(imported);
+
+        var stubbed = System.Text.RegularExpressions.Regex.Matches(harness, @"export (?:const|function) (\w+)")
+            .Select(m => m.Groups[1].Value)
+            .ToHashSet(StringComparer.Ordinal);
+        var missing = imported.Where(name => !stubbed.Contains(name)).ToList();
+        Assert.True(missing.Count == 0, "web-compose-notice-harness.mjs's charts.js stand-in does not export: " + string.Join(", ", missing));
+    }
+
     [Fact]
     public void AnAnswerWithoutTheInstants_IsDrawnAsTheServerSentIt()
     {

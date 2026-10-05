@@ -21,7 +21,7 @@
  */
 
 import { el, mount, loadingStrip, errorStrip, emptyStrip, disclosure, fmtInt, fmtNum, apiSendRead, noticeStrip, parseUtc, windowNoteText } from "./util.js";
-import { renderLineChart, zoomChip, renderBarChart, renderPieChart, renderScatterChart, CATEGORICAL_COLORS } from "./charts.js";
+import { renderLineChart, zoomChip, getChartHidden, setChartHidden, nextHiddenKeys, chartZoomScope, renderBarChart, renderPieChart, renderScatterChart, CATEGORICAL_COLORS } from "./charts.js";
 import { navigateServer, gridTable } from "./panels.js";
 import { getCatalog } from "./views-api.js";
 
@@ -419,8 +419,14 @@ export function renderComposedResult(result, panelSpec, opts = {}) {
          string alone would strip that real member's drill and hold it out of the series cap. */
       const hasResidual = isRankedTimeSeries(panelSpec) && panelSpec.includeOther === true;
       const { points, series, hidden } = pivotTimeSeries(rows, groupDims, measureLabel(panelSpec), hasResidual);
-      nodes.push(
-        renderLineChart({
+      /* #5247: the legend hide/isolate state is held under the panel's identity and the page address + range, like the
+         zoom of a built-in chart, so it survives the poll's rebuild. A panel with no slot (the editor preview) has no
+         stable identity, so it gets no switch rather than a key that might collide. */
+      const hiddenId = opts.panelSlot != null ? composedPanelId(panelSpec, opts.scope, opts.panelSlot) : null;
+      const hiddenScope = chartZoomScope(opts.scope ? opts.scope.hours : null);
+      const allKeys = series.map((x) => x.key).concat(overlaySeries ? [overlaySeries.key] : []);
+      const chartHost = hiddenId != null ? el("div", { class: "zoomable-chart" }) : null;
+      const drawChart = () => renderLineChart({
           points,
           xKey: "bucket",
           series,
@@ -441,8 +447,22 @@ export function renderComposedResult(result, panelSpec, opts = {}) {
              absolute window, and resolveChartWindow returns that same window — the zoom keeps winning. */
           windowStart: opts.chartWindow ? opts.chartWindow.windowStart : null,
           windowEnd: opts.chartWindow ? opts.chartWindow.windowEnd : null,
-        })
-      );
+          ...(hiddenId != null
+            ? {
+                hiddenKeys: getChartHidden(hiddenId, hiddenScope),
+                onLegend: (action, key) => {
+                  setChartHidden(hiddenId, hiddenScope, nextHiddenKeys(allKeys, getChartHidden(hiddenId, hiddenScope), action, key));
+                  mount(chartHost, drawChart());
+                },
+              }
+            : {}),
+        });
+      if (chartHost) {
+        mount(chartHost, drawChart());
+        nodes.push(chartHost);
+      } else {
+        nodes.push(drawChart());
+      }
       if (hidden > 0) {
         /* On a rank-then-bucket panel the hidden series are members the author explicitly ASKED to rank, not
            incidental low-priority groups, so the note has to say which promise the chart is not keeping. */
@@ -654,8 +674,16 @@ function renderComposedTable(rows, unit, panelSpec = {}, scope = null, slot = nu
   /* An untitled composed panel has title "" and no id, so the name alone would give every one the same key. `||`
      lets an empty title fall through to the measure, and `slot` (the panel's position on its view, from the caller)
      keeps two panels with the same title or measure apart. */
-  const id = "composed|" + (slot ?? "") + "|" + (panelSpec.id || panelSpec.title || panelSpec.measure || panelSpec.ratio || "") + "|" + (scope && scope.server != null ? scope.server : "");
+  const id = composedPanelId(panelSpec, scope, slot);
   return gridTable(rows, { id, title: panelSpec.title || measureLabel(panelSpec), columns });
+}
+
+/** The stable identity of a composed panel on its view: its position (`slot`), its own id/title/measure and the server
+ *  it ran for. Nothing in it changes when the panel is rebuilt (the poll) — no row count, no timestamp, no array
+ *  index of the result — so state held under it (the grid's sort, a chart's hidden legend entries) survives a repaint
+ *  and cannot reach another panel. */
+function composedPanelId(panelSpec, scope, slot) {
+  return "composed|" + (slot ?? "") + "|" + (panelSpec.id || panelSpec.title || panelSpec.measure || panelSpec.ratio || "") + "|" + (scope && scope.server != null ? scope.server : "");
 }
 
 /** A table header for a result column: "Value" gains its unit, "bucket" -> "Time", a dim name is humanized. */
