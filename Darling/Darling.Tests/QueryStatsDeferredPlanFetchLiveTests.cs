@@ -182,7 +182,8 @@ CREATE PROCEDURE dbo.pm_c AS BEGIN SELECT COUNT_BIG(*) AS c1 FROM sys.types; END
         }
     }
 
-    private static async Task TearDownAsync(Rig rig, bool bodySucceeded)
+    /// <summary>Drops the scratch database on the monitored side. A drop failure surfaces only when the body succeeded.</summary>
+    private static async Task DropScratchDatabaseAsync(Rig rig, bool bodySucceeded)
     {
         try
         {
@@ -195,13 +196,13 @@ CREATE PROCEDURE dbo.pm_c AS BEGIN SELECT COUNT_BIG(*) AS c1 FROM sys.types; END
         catch when (!bodySucceeded)
         {
         }
+    }
 
-        await LiveStoreCleanup.RunAsync(rig.PgConnectionString, bodySucceeded, async (cleanup, cleanupCt) =>
-        {
-            using var command = new NpgsqlCommand("DELETE FROM query_stats WHERE server_id = $1", cleanup);
-            command.Parameters.AddWithValue(rig.Server.ServerId);
-            await command.ExecuteNonQueryAsync(cleanupCt);
-        });
+    private static async Task DeleteStoredRowsAsync(NpgsqlConnection cleanup, int serverId, CancellationToken cleanupCt)
+    {
+        using var command = new NpgsqlCommand("DELETE FROM query_stats WHERE server_id = $1", cleanup);
+        command.Parameters.AddWithValue(serverId);
+        await command.ExecuteNonQueryAsync(cleanupCt);
     }
 
     /// <summary>The run's plans_rendered measurement, or -1 when the run did not defer its fetch (it renders inline).</summary>
@@ -269,7 +270,9 @@ CREATE PROCEDURE dbo.pm_c AS BEGIN SELECT COUNT_BIG(*) AS c1 FROM sys.types; END
         }
         finally
         {
-            await TearDownAsync(rig, ok);
+            await DropScratchDatabaseAsync(rig, ok);
+            await LiveStoreCleanup.RunAsync(rig.PgConnectionString, ok, async (cleanup, cleanupCt) =>
+                await DeleteStoredRowsAsync(cleanup, rig.Server.ServerId, cleanupCt));
         }
     }
 
@@ -294,7 +297,9 @@ CREATE PROCEDURE dbo.pm_c AS BEGIN SELECT COUNT_BIG(*) AS c1 FROM sys.types; END
         }
         finally
         {
-            await TearDownAsync(rig, ok);
+            await DropScratchDatabaseAsync(rig, ok);
+            await LiveStoreCleanup.RunAsync(rig.PgConnectionString, ok, async (cleanup, cleanupCt) =>
+                await DeleteStoredRowsAsync(cleanup, rig.Server.ServerId, cleanupCt));
         }
     }
 
@@ -332,7 +337,9 @@ CREATE PROCEDURE dbo.pm_c AS BEGIN SELECT COUNT_BIG(*) AS c1 FROM sys.types; END
         }
         finally
         {
-            await TearDownAsync(rig, ok);
+            await DropScratchDatabaseAsync(rig, ok);
+            await LiveStoreCleanup.RunAsync(rig.PgConnectionString, ok, async (cleanup, cleanupCt) =>
+                await DeleteStoredRowsAsync(cleanup, rig.Server.ServerId, cleanupCt));
         }
     }
 
@@ -375,7 +382,9 @@ CREATE PROCEDURE dbo.pm_c AS BEGIN SELECT COUNT_BIG(*) AS c1 FROM sys.types; END
         }
         finally
         {
-            await TearDownAsync(rig, ok);
+            await DropScratchDatabaseAsync(rig, ok);
+            await LiveStoreCleanup.RunAsync(rig.PgConnectionString, ok, async (cleanup, cleanupCt) =>
+                await DeleteStoredRowsAsync(cleanup, rig.Server.ServerId, cleanupCt));
         }
     }
 
@@ -408,7 +417,9 @@ CREATE PROCEDURE dbo.pm_c AS BEGIN SELECT COUNT_BIG(*) AS c1 FROM sys.types; END
         }
         finally
         {
-            await TearDownAsync(rig, ok);
+            await DropScratchDatabaseAsync(rig, ok);
+            await LiveStoreCleanup.RunAsync(rig.PgConnectionString, ok, async (cleanup, cleanupCt) =>
+                await DeleteStoredRowsAsync(cleanup, rig.Server.ServerId, cleanupCt));
         }
     }
 }
