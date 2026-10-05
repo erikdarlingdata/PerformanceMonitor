@@ -94,9 +94,10 @@ globalThis.fetch = async (url, init = {}) => {
   if (networkDown) throw new Error("connection refused");
   if (gate) await gate;
   const r = responder(method, url, body);
-  return reply(r.status, r.body);
+  return reply(r.status, r.body, r.raw);
 };
-const reply = (status, body) => ({ status, ok: status >= 200 && status < 300, text: async () => JSON.stringify(body) });
+/* `raw`, when a responder gives it, is the response text as it is (a sign-in page, an empty body) instead of JSON. */
+const reply = (status, body, raw) => ({ status, ok: status >= 200 && status < 300, text: async () => (raw !== undefined ? raw : JSON.stringify(body)) });
 
 const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "manage-tags-"));
 const out = {};
@@ -337,6 +338,24 @@ try {
       await clickText(main, "Save");
       const name = field(main, "name");
       return { text: paint(), formOpen: buttons(main, "Save").length, kept: name ? name.value : null };
+    },
+    /* A write the session gate answers (a 401, a sign-in page with a 200, an empty 200) is not a saved change (#5240 review
+       finding 2): the page hands over to the shell once, with the house message and "/", and shows no success. */
+    expiry: async () => {
+      const answer = {
+        "401": { status: 401, body: { error: "x", login: "/elsewhere" } },
+        html: { status: 200, raw: "<html>" },
+        empty: { status: 200, raw: "" },
+      }[scenarioParam];
+      responder = () => answer;
+      const expired = [];
+      const util = await import(pathToFileURL(path.join(scratch, "util.js")).href);
+      util.onSessionExpired((message, login) => expired.push([message, login]));
+      await mountPage();
+      await clickText(main, "New root tag");
+      await typeInto(main, "name", "Keep me");
+      await clickText(main, "Save");
+      return { expired, text: paint(), writes: calls.length, formOpen: buttons(main, "Save").length };
     },
     editParent: async () => {
       responder = () => ({ status: 404, body: { status: "not_found", refusal: "unknown_parent", message: "Parent tag 2 does not exist." } });
