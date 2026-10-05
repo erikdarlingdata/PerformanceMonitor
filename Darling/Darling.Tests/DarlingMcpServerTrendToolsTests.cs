@@ -40,9 +40,9 @@ public sealed class DarlingMcpServerTrendToolsTests
     }
 
     [Fact]
-    public void TheMetricList_IsTheEightShipped_AndEveryOneIsNamedInTheDescription()
+    public void TheMetricList_IsTheElevenShipped_AndEveryOneIsNamedInTheDescription()
     {
-        Assert.Equal(["total_waits", "cpu_scheduler", "memory_clerks", "plan_cache", "latch", "spinlock", "session_stats", "collector_duration"], DarlingMcpServerTrendTools.Metrics);
+        Assert.Equal(["total_waits", "cpu_scheduler", "memory_clerks", "plan_cache", "latch", "spinlock", "session_stats", "collector_duration", "tempdb_file_io", "tempdb_size", "file_io_throughput"], DarlingMcpServerTrendTools.Metrics);
         var served = McpToolGuideTests.Served("get_server_trend");
         foreach (var metric in DarlingMcpServerTrendTools.Metrics)
         {
@@ -55,9 +55,9 @@ public sealed class DarlingMcpServerTrendToolsTests
     [Fact]
     public async Task AnUnknownMetric_IsRefused_BeforeAnythingIsRead()
     {
-        var answer = await DarlingMcpServerTrendTools.GetServerTrend(null!, "tempdb_size", null, 24, null, null, null, null, TrendBudget.Mcp(DarlingMcpServerTrendTools.MaxPoints));
+        var answer = await DarlingMcpServerTrendTools.GetServerTrend(null!, "tempdb_nope", null, 24, null, null, null, null, TrendBudget.Mcp(DarlingMcpServerTrendTools.MaxPoints));
         Assert.True(McpHelpers.IsRefusalEnvelope(answer));
-        Assert.Contains("total_waits, cpu_scheduler, memory_clerks, plan_cache, latch, spinlock, session_stats, collector_duration", answer, StringComparison.Ordinal);
+        Assert.Contains("total_waits, cpu_scheduler, memory_clerks, plan_cache, latch, spinlock, session_stats, collector_duration, tempdb_file_io, tempdb_size, file_io_throughput", answer, StringComparison.Ordinal);
 
         var missing = await DarlingMcpServerTrendTools.GetServerTrend(null!, null, null, 24, null, null, null, null, TrendBudget.Mcp(DarlingMcpServerTrendTools.MaxPoints));
         Assert.True(McpHelpers.IsRefusalEnvelope(missing));
@@ -78,14 +78,14 @@ public sealed class DarlingMcpServerTrendToolsTests
     public async Task Names_OnAMetricThatTakesNone_OrOverTheCap_AreRefused_AndClerkTypesStayMemoryClerksOnly()
     {
         var budget = TrendBudget.Mcp(DarlingMcpServerTrendTools.MaxPoints);
-        foreach (var metric in new[] { "total_waits", "cpu_scheduler", "memory_clerks", "plan_cache", "session_stats" })
+        foreach (var metric in new[] { "total_waits", "cpu_scheduler", "memory_clerks", "plan_cache", "session_stats", "tempdb_size" })
         {
             var wrong = await DarlingMcpServerTrendTools.GetServerTrend(null!, metric, null, 24, null, null, null, "A", budget);
             Assert.True(McpHelpers.IsRefusalEnvelope(wrong), metric);
         }
 
         var tooMany = string.Join(",", Enumerable.Range(0, DarlingMcpServerTrendTools.MaxClerkCount + 1).Select(i => "N" + i));
-        foreach (var metric in new[] { "latch", "spinlock", "collector_duration" })
+        foreach (var metric in new[] { "latch", "spinlock", "collector_duration", "tempdb_file_io", "file_io_throughput" })
         {
             Assert.True(McpHelpers.IsRefusalEnvelope(await DarlingMcpServerTrendTools.GetServerTrend(null!, metric, null, 24, null, null, null, tooMany, budget)), metric);
             Assert.True(McpHelpers.IsRefusalEnvelope(await DarlingMcpServerTrendTools.GetServerTrend(null!, metric, null, 24, null, null, "CLERK", null, budget)), metric);
@@ -111,6 +111,9 @@ public sealed class DarlingMcpServerTrendToolsTests
         Assert.Contains("collisions_per_second", DarlingMcpServerTrendTools.Note("spinlock", 5, false, 120), StringComparison.Ordinal);
         Assert.Contains("max_duration_ms", DarlingMcpServerTrendTools.Note("collector_duration", 5, false, 120), StringComparison.Ordinal);
         Assert.Contains("top_host_name", DarlingMcpServerTrendTools.Note("session_stats", 5, false, 120), StringComparison.Ordinal);
+        Assert.Contains("avg_read_latency_ms", DarlingMcpServerTrendTools.Note("tempdb_file_io", 5, false, 120), StringComparison.Ordinal);
+        Assert.Contains("allocated_mb", DarlingMcpServerTrendTools.Note("tempdb_size", 5, false, 120), StringComparison.Ordinal);
+        Assert.Contains("write_mb_per_sec", DarlingMcpServerTrendTools.Note("file_io_throughput", 5, false, 120), StringComparison.Ordinal);
     }
 
     [Fact]
@@ -135,6 +138,23 @@ public sealed class DarlingMcpServerTrendToolsTests
         Assert.Contains("NULLIF(sample_interval_seconds, 0)", ServerTrendSql.LatchWaits(1), StringComparison.Ordinal);
         Assert.Contains("PARTITION BY spinlock_name", ServerTrendSql.SpinlockCollisions(1), StringComparison.Ordinal);
         Assert.Contains("status = 'SUCCESS'", ServerTrendSql.CollectorDurations(1), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TheTempDbAndFileIoReads_BindTheNamesThenTheWidth_AndKeepTheViewersRules()
+    {
+        foreach (var sql in new[] { ServerTrendSql.TempDbFileIo(3), ServerTrendSql.FileIoThroughput(3) })
+        {
+            Assert.Contains("IN ($4, $5, $6)", sql, StringComparison.Ordinal);
+            Assert.Contains("CAST($7 AS integer)", sql, StringComparison.Ordinal);
+        }
+
+        Assert.Contains("database_name = 'tempdb'", ServerTrendSql.TempDbFileIo(1), StringComparison.Ordinal);
+        Assert.Contains("NULLIF(sample_interval_seconds, 0)", ServerTrendSql.FileIoThroughput(1), StringComparison.Ordinal);
+        Assert.Contains("PARTITION BY server_id, database_name, file_name", ServerTrendSql.FileIoThroughput(1), StringComparison.Ordinal);
+        Assert.Contains("delta_read_bytes IS NOT NULL", ServerTrendSql.FileIoThroughput(1), StringComparison.Ordinal);
+        Assert.Contains("total_reserved_mb", ServerTrendSql.TempDbSize, StringComparison.Ordinal);
+        Assert.Contains("unallocated_mb", ServerTrendSql.TempDbSize, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -201,7 +221,7 @@ public sealed class DarlingMcpServerTrendToolsLiveTests
     private static readonly int ServerId = ServerIdHelper.GetDeterministicHashCode(ServerName);
     private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
 
-    private static readonly string[] Tables = ["wait_stats", "cpu_scheduler_stats", "memory_clerks", "plan_cache_stats", "latch_stats", "spinlock_stats", "session_summary_stats", "collection_log"];
+    private static readonly string[] Tables = ["wait_stats", "cpu_scheduler_stats", "memory_clerks", "plan_cache_stats", "latch_stats", "spinlock_stats", "session_summary_stats", "collection_log", "file_io_stats", "tempdb_stats"];
 
     [Fact]
     public async Task EveryMetric_ReturnsThePlantedSeries_AndTheEmptyAndUnavailableWordsHold()
@@ -592,6 +612,82 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)",
             var none = JsonDocument.Parse(await DarlingMcpServerTrendTools.GetServerTrend(postgres, "collector_duration", ServerName, 3, asOf, names: "nope_collector")).RootElement;
             Assert.Equal("empty", none.GetProperty("status").GetString());
             Assert.Equal(["slow_collector", "quick_collector"], none.GetProperty("hints").GetProperty("top_names").EnumerateArray().Select(x => x.GetString()).ToArray());
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) => await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
+    [Fact]
+    public async Task TempDbFileIo_TempDbSize_AndFileIoThroughput_ReturnThePlantedSeries_AndDropANullDeltaRow()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live server-trend test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+        await using var postgres = NpgsqlDataSource.Create(cs!);
+
+        var bodySucceeded = false;
+        try
+        {
+            await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+
+            var end = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow);
+            var hour = new DateTime(end.Year, end.Month, end.Day, end.Hour, 0, 0, DateTimeKind.Utc).AddHours(-1);
+            var asOf = hour.AddHours(1).ToString("o", System.Globalization.CultureInfo.InvariantCulture);
+            const string IoInsert = "INSERT INTO file_io_stats (collection_id, collection_time, server_id, server_name, database_name, file_name, file_type, physical_name, size_mb, delta_reads, delta_writes, delta_read_bytes, delta_write_bytes, delta_stall_read_ms, delta_stall_write_ms, sample_interval_seconds) VALUES ($1,$2,$3,$4,$5,$6,'ROWS','x',100,$7,$8,$9,$10,$11,$12,$13)";
+
+            /* tempdev: two rated rows (10 reads at 50 ms stall, 20 reads at 100 ms: 150/30 = 5 ms) plus a restart row (interval 0) and a NULL-delta row that must add nothing. */
+            await DarlingMcpTestData.ExecAsync(connection, ct, IoInsert, CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(hour.AddMinutes(10)), ServerId, ServerName, "tempdb", "tempdev", 10L, 4L, 10485760L, 0L, 50L, 8L, 60);
+            await DarlingMcpTestData.ExecAsync(connection, ct, IoInsert, CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(hour.AddMinutes(11)), ServerId, ServerName, "tempdb", "tempdev", 20L, 4L, 10485760L, 0L, 100L, 12L, 60);
+            await DarlingMcpTestData.ExecAsync(connection, ct, IoInsert, CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(hour.AddMinutes(12)), ServerId, ServerName, "tempdb", "tempdev", 900L, 900L, 999999999L, 999999999L, 99999L, 99999L, 0);
+            await DarlingMcpTestData.ExecAsync(connection, ct, IoInsert, CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(hour.AddMinutes(13)), ServerId, ServerName, "tempdb", "tempdev", DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value, 60);
+            /* A user database file with no stored interval: the gap to its previous collection (30 s) is the interval; the first row has no gap and is dropped. 3 MiB read over 30 s = 0.1 MB/s. */
+            await DarlingMcpTestData.ExecAsync(connection, ct, IoInsert, CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(hour.AddMinutes(20)), ServerId, ServerName, "salesdb", "sales.mdf", 1L, 1L, 99999999L, 99999999L, 1L, 1L, DBNull.Value);
+            await DarlingMcpTestData.ExecAsync(connection, ct, IoInsert, CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(hour.AddMinutes(20).AddSeconds(30)), ServerId, ServerName, "salesdb", "sales.mdf", 1L, 1L, 3145728L, 1048576L, 1L, 1L, DBNull.Value);
+            /* A known interval with a NULL write delta adds no seconds to the write rate: 2 MiB over 60 s is 0.03 MB/s, from the one row that has one. */
+            await DarlingMcpTestData.ExecAsync(connection, ct, IoInsert, CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(hour.AddMinutes(30)), ServerId, ServerName, "salesdb", "log.ldf", 1L, 1L, 0L, 2097152L, 1L, 1L, 60);
+            await DarlingMcpTestData.ExecAsync(connection, ct, IoInsert, CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(hour.AddMinutes(31)), ServerId, ServerName, "salesdb", "log.ldf", 1L, 1L, 0L, DBNull.Value, 1L, 1L, 60);
+
+            foreach (var (minute, reserved, free) in new[] { (10, 100m, 20m), (11, 300m, 40m) })
+            {
+                await DarlingMcpTestData.ExecAsync(connection, ct,
+                    "INSERT INTO tempdb_stats (collection_id, collection_time, server_id, server_name, user_object_reserved_mb, internal_object_reserved_mb, version_store_reserved_mb, total_reserved_mb, unallocated_mb) VALUES ($1,$2,$3,$4,1,1,1,$5,$6)",
+                    CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(hour.AddMinutes(minute)), ServerId, ServerName, reserved, free);
+            }
+
+            var fileIo = JsonDocument.Parse(await DarlingMcpServerTrendTools.GetServerTrend(postgres, "tempdb_file_io", ServerName, 3, asOf, bucket_minutes: 60, names: "tempdev, nope.ndf")).RootElement;
+            var ioSeries = Assert.Single(fileIo.GetProperty("series").EnumerateArray().ToArray());
+            Assert.Equal("tempdev", ioSeries.GetProperty("file_name").GetString());
+            var ioPoint = Assert.Single(ioSeries.GetProperty("trend").EnumerateArray().ToArray());
+            Assert.Equal(5.0, ioPoint.GetProperty("avg_read_latency_ms").GetDouble(), 2);
+            Assert.Equal(2.5, ioPoint.GetProperty("avg_write_latency_ms").GetDouble(), 2);
+            Assert.Equal(["nope.ndf"], fileIo.GetProperty("missing_names").EnumerateArray().Select(x => x.GetString()).ToArray());
+
+            var defaultFileIo = JsonDocument.Parse(await DarlingMcpServerTrendTools.GetServerTrend(postgres, "tempdb_file_io", ServerName, 3, asOf, bucket_minutes: 60)).RootElement;
+            Assert.Equal(["tempdev"], defaultFileIo.GetProperty("series").EnumerateArray().Select(x => x.GetProperty("file_name").GetString()).ToArray());
+
+            var size = JsonDocument.Parse(await DarlingMcpServerTrendTools.GetServerTrend(postgres, "tempdb_size", ServerName, 3, asOf, bucket_minutes: 60)).RootElement;
+            var sizePoint = Assert.Single(size.GetProperty("trend").EnumerateArray().ToArray());
+            Assert.Equal(230.0, sizePoint.GetProperty("allocated_mb").GetDouble(), 2);
+
+            var throughput = JsonDocument.Parse(await DarlingMcpServerTrendTools.GetServerTrend(postgres, "file_io_throughput", ServerName, 3, asOf, bucket_minutes: 60, names: "salesdb.sales.mdf, salesdb.log.ldf, tempdb.tempdev, salesdb.nope")).RootElement;
+            var byLabel = throughput.GetProperty("series").EnumerateArray().ToDictionary(x => x.GetProperty("file_label").GetString()!, x => Assert.Single(x.GetProperty("trend").EnumerateArray().ToArray()));
+            Assert.Equal(0.1, byLabel["salesdb.sales.mdf"].GetProperty("read_mb_per_sec").GetDouble(), 2);
+            Assert.Equal(0.03, byLabel["salesdb.log.ldf"].GetProperty("write_mb_per_sec").GetDouble(), 2);
+            /* tempdev: 20 MiB over 120 s of rated rows (the interval-0 and NULL-delta rows add neither bytes nor seconds). */
+            Assert.Equal(0.17, byLabel["tempdb.tempdev"].GetProperty("read_mb_per_sec").GetDouble(), 2);
+            Assert.Equal(["salesdb.nope"], throughput.GetProperty("missing_names").EnumerateArray().Select(x => x.GetString()).ToArray());
+
+            var none = JsonDocument.Parse(await DarlingMcpServerTrendTools.GetServerTrend(postgres, "file_io_throughput", ServerName, 3, asOf, names: "nope")).RootElement;
+            Assert.Equal("empty", none.GetProperty("status").GetString());
+            Assert.NotEmpty(none.GetProperty("hints").GetProperty("top_names").EnumerateArray());
             bodySucceeded = true;
         }
         finally
