@@ -31,7 +31,8 @@ permissions:
 # already replaced — ~60 reclaimable runner-minutes in one evening). Cancelling a
 # superseded PUSH run is safe because a push run produces nothing any other run consumes:
 # every upload-artifact step in this workflow is gated to the release event (the SignPath
-# signing path) or to failure() (darling-pg diagnostics), nothing in the repo downloads
+# signing path) or to failure() (darling-pg diagnostics), except the per-run Lite timing
+# uploads (#5208), which are ungated and harmless because nothing downloads
 # cross-run artifacts (no download-artifact, gh run download, or workflow_run consumer
 # exists), nightly.yml builds its own tree from its own checkout, and a release compiles
 # fresh on the release event. The accepted trade: push builds are diff-scoped, so a

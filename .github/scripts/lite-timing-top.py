@@ -23,12 +23,18 @@ def files(args):
 
 
 def main(args):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     classes = collections.defaultdict(lambda: [0.0, 0])
     tests = []
     seen = 0
     for path in files(args):
         seen += 1
-        for t in ET.parse(path).getroot().iter("test"):
+        try:
+            root = ET.parse(path).getroot()
+        except (ET.ParseError, OSError) as e:
+            print(f"skipped {path}: {e}")
+            continue
+        for t in root.iter("test"):
             try:
                 secs = float(t.get("time") or 0)
             except ValueError:
