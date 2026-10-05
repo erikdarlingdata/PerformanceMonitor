@@ -260,7 +260,7 @@ internal static class WebDataStartNote
             if (JsonNode.Parse(result) is JsonObject own && ToolWindowFloorKeys.Any(own.ContainsKey))
             {
                 StripToolWindowFloor(own);
-                return own.ToJsonString();
+                return own.ToJsonString(McpHelpers.JsonOptions);
             }
         }
         catch (System.Text.Json.JsonException)
