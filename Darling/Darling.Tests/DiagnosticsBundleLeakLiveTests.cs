@@ -37,7 +37,7 @@ public sealed class DiagnosticsBundleLeakLiveTests
     private const string ServerOne = "zeta-07";
     private const string HostOne = @"zeta-07.example.test\QXINST";
     private const string ServerTwo = "omega";
-    private const string HostTwo = "10.20.30.40,1433";
+    private const string HostTwo = "203.0.113.40,1433";
     private const string DisplayTwo = "Epsilon Display";
     private const string DbOne = "DeltaLedgerDb";
     private const string DbTwo = "gamma_orders";
@@ -48,7 +48,7 @@ public sealed class DiagnosticsBundleLeakLiveTests
     /// <summary>Everything that must not appear, including the pieces a splitter produces.</summary>
     internal static readonly string[] Forbidden =
     {
-        ServerOne, "zeta-07.example.test", "QXINST", ServerTwo, "10.20.30.40", DisplayTwo, "Epsilon", DbOne, DbTwo, Login, Password, Domain,
+        ServerOne, "zeta-07.example.test", "QXINST", ServerTwo, "203.0.113.40", DisplayTwo, "Epsilon", DbOne, DbTwo, Login, Password, Domain,
         "zeta-07x",
     };
 
@@ -95,7 +95,7 @@ VALUES ($1, 701, $2, 'query_store', 'sampled', 60000, 20000, 3, 'PAGEIOLATCH_SH'
 (read_time, surface, route, outcome, total_ms, server_id, arguments, arguments_truncated, source, source_reason, statements, statement_count, statements_truncated, error_class, row_count)
 VALUES ($1, 'mcp', 'get_query_store_top', 'ok', 9000, 701, $2::jsonb, FALSE, 'raw', $3, $4::jsonb, 1, FALSE, NULL, 12)",
             now.AddMinutes(-30),
-            $$"""{"server_name":"zeta-07","database_name":"DeltaLedgerDb","note":"for omega at 10.20.30.40"}""",
+            $$"""{"server_name":"zeta-07","database_name":"DeltaLedgerDb","note":"for omega at 203.0.113.40"}""",
             $"routed raw for zeta-07 (database {DbOne})",
             $$"""[{"ordinal":1,"label":"query_store_stats @ gamma_orders 1a2b3c","ms":8800.5,"rows":12}]""");
 
@@ -130,7 +130,7 @@ VALUES ($1, 'mcp', 'get_query_store_top', 'ok', 9000, 701, $2::jsonb, FALSE, 'ra
             Path.Combine(dir, $"darling-service_{DateTime.Now:yyyyMMdd}.log"),
             $"{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff} [ERROR] [Connector] connect failed Server=zeta-07.example.test;Database={DbOne};User ID={Login};Password={Password}\n"
             + $"    at Connector.Open(zeta-07x, {ServerTwo})\n"
-            + $"{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff} [WARN ] [Probe] slow answer from 10.20.30.40 for {DbTwo}\n");
+            + $"{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff} [WARN ] [Probe] slow answer from 203.0.113.40 for {DbTwo}\n");
     }
 
     /// <summary>The first forbidden string found in the text, in the bytes, case-folded, or in the JSON-unescaped text; null when none.</summary>

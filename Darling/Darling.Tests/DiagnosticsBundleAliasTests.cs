@@ -86,8 +86,8 @@ public sealed class DiagnosticsBundleAliasTests
     public void IpLiterals_BecomeIpAliases_AndAVersionNumberIsKept()
     {
         var a = new BundleAliaser();
-        var text = a.Alias("peer 10.20.30.40 and 2001:db8::1 and again 10.20.30.40");
-        Assert.DoesNotContain("10.20.30.40", text, StringComparison.Ordinal);
+        var text = a.Alias("peer 203.0.113.40 and 2001:db8::1 and again 203.0.113.40");
+        Assert.DoesNotContain("203.0.113.40", text, StringComparison.Ordinal);
         Assert.DoesNotContain("2001:db8", text, StringComparison.Ordinal);
         Assert.Equal(2, text.Split("ip-1").Length - 1);
         var tree = a.AliasTree(JsonNode.Parse("""{"product_version":"1.5.0.0","note":"v 1.5.0.0"}"""));
@@ -122,7 +122,7 @@ public sealed class DiagnosticsBundleAliasTests
         string One()
         {
             var a = Seeded();
-            return a.Alias("zeta-07 gamma_orders DeltaLedgerDb 10.1.2.3");
+            return a.Alias("zeta-07 gamma_orders DeltaLedgerDb 198.51.100.7");
         }
 
         Assert.Equal(One(), One());
