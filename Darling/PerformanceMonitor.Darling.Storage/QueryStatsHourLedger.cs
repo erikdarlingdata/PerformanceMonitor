@@ -134,4 +134,18 @@ written AS (
     RETURNING 1
 )
 SELECT (SELECT count(*) FROM written)::bigint AS rows_written, (SELECT count(*) FROM cleared)::bigint AS rows_deleted;";
+
+    /// <summary>
+    /// The retention prune (#4605): deletes every ledger bucket below <c>$1</c> (naive UTC <c>timestamp</c>, truncated to
+    /// its hour here so a cutoff mid-hour never splits a bucket). The caller passes the successor hourly rollup's
+    /// horizon, <c>now - <see cref="TimescaleSupport.HourlyRetentionSpan"/></c>, and NOT raw's: raw keeps four days and
+    /// the rollup keeps ninety, and the guard compares the ledger with the rollup, so a ledger pruned at raw's horizon
+    /// would be missing the hours the rollup still holds and the guard would fail every window past four days. A plain
+    /// single DELETE is enough: the table holds about one row per server per hour (servers x 24 x retention days), and
+    /// the primary key leads with <c>bucket</c>, so the predicate is an index range scan. Idempotent, and a table with
+    /// nothing below the cutoff deletes nothing.
+    /// </summary>
+    public const string PruneSql = @"
+DELETE FROM collect.query_stats_hour_ledger
+WHERE bucket < date_trunc('hour', $1::timestamp);";
 }
