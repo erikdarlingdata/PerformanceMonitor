@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
@@ -163,10 +164,24 @@ internal static class DarlingMcpWindowNotice
     /// </summary>
     internal static Task<McpWindowNotice> ReadForToolAsync(
         NpgsqlDataSource postgres, string tool, string serverName, DateTime requestedStart, DateTime windowEnd,
-        bool emptyAnswer, ILogger? logger, CancellationToken cancellationToken) =>
-        ReadAsync(
+        bool emptyAnswer, ILogger? logger, CancellationToken cancellationToken)
+    {
+        /* TableFor throws on a tool in neither map; that must cost only the notice, never the answer. */
+        string table;
+        try
+        {
+            table = TableFor(tool);
+        }
+        catch (KeyNotFoundException ex)
+        {
+            logger?.LogWarning(ex, "No window-notice table is listed for {Tool}; the answer goes without its window-floor notice.", tool);
+            return Task.FromResult(McpWindowNotice.Unavailable);
+        }
+
+        return ReadAsync(
             () => Probe(postgres, SourceFor(tool), serverName, requestedStart, windowEnd, cancellationToken),
-            requestedStart, windowEnd, TableFor(tool), emptyAnswer: emptyAnswer, logger: logger, cancellationToken: cancellationToken);
+            requestedStart, windowEnd, table, emptyAnswer: emptyAnswer, logger: logger, cancellationToken: cancellationToken);
+    }
 
     /// <summary>A data answer already serialized: without the three window-floor keys when the probe failed, else as is.</summary>
     internal static string Finish(string json, McpWindowNotice notice) =>

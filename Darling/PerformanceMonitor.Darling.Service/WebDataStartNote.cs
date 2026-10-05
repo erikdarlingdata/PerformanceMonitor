@@ -294,6 +294,16 @@ internal static class WebDataStartNote
     };
 
     /// <summary>
+    /// Reads whose tool writes the window-floor keys and whose page panel is a chart over the asked range: the page strips the
+    /// tool's keys and draws no note, because a chart shows its own empty span. They are not in <see cref="TableByRead"/>,
+    /// so nothing else would remove the tool's UTC sentence.
+    /// </summary>
+    internal static readonly IReadOnlySet<string> StripOnlyReads = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "get_pg_cpu_utilization",
+    };
+
+    /// <summary>
     /// The three window-floor keys a listed read's tool writes itself at the top level of a data answer (#4966).
     /// </summary>
     private static readonly string[] ToolWindowFloorKeys = ["effective_start", "window_truncated", "truncation_note"];
@@ -335,7 +345,7 @@ internal static class WebDataStartNote
         ILogger? logger, CancellationToken cancellationToken)
     {
         var answered = await AddNoteAsync(postgres, tool, server, hoursBack, asOf, result, logger, cancellationToken);
-        if (!ReferenceEquals(answered, result) || !TableByRead.ContainsKey(tool))
+        if (!ReferenceEquals(answered, result) || !(TableByRead.ContainsKey(tool) || StripOnlyReads.Contains(tool)))
         {
             return answered;
         }

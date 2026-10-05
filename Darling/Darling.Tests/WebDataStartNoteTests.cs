@@ -122,6 +122,46 @@ public sealed class WebDataStartNoteTests
     }
 
     [Fact]
+    public async Task AChartRead_HasTheToolsWindowFloorKeysStripped_AndGetsNoNote_WithoutAskingTheStore()
+    {
+        await using var store = NeverConnects();
+        const string withKeys = """{"server":"pg1","hours_back":24,"effective_start":"2026-01-01T00:00:00Z","window_truncated":true,"truncation_note":"UTC sentence","rows":[{"v":1}]}""";
+
+        Assert.Equal(["get_pg_cpu_utilization"], WebDataStartNote.StripOnlyReads.OrderBy(x => x));
+        foreach (var read in WebDataStartNote.StripOnlyReads)
+        {
+            Assert.DoesNotContain(read, WebDataStartNote.TableByRead.Keys);
+            var answered = JsonNode.Parse(await WebDataStartNote.AddAsync(store, read, "pg1", 24, null, withKeys, null, Cancelled))!.AsObject();
+            Assert.False(answered.ContainsKey("effective_start"));
+            Assert.False(answered.ContainsKey("window_truncated"));
+            Assert.False(answered.ContainsKey("truncation_note"));
+            Assert.True(answered.ContainsKey("rows"));
+        }
+    }
+
+    [Fact]
+    public void TheUnlistedMcpReads_AreExactlyTwo_AndShareNoKeyWithTheWebsMaps()
+    {
+        Assert.Equal(
+            ["get_pg_cpu_utilization", "get_pg_xmin_horizon"],
+            DarlingMcpWindowNotice.UnlistedTableByRead.Keys.OrderBy(x => x));
+        foreach (var key in DarlingMcpWindowNotice.UnlistedTableByRead.Keys)
+        {
+            Assert.DoesNotContain(key, WebDataStartNote.TableByRead.Keys);
+            Assert.DoesNotContain(key, WebDataStartNote.CollectorRunsByRead.Keys);
+        }
+    }
+
+    [Fact]
+    public async Task AToolNamedInNeitherMap_CostsOnlyTheNotice()
+    {
+        await using var store = NeverConnects();
+        var notice = await DarlingMcpWindowNotice.ReadForToolAsync(
+            store, "get_not_a_tool", "pg1", DateTime.UtcNow.AddHours(-24), DateTime.UtcNow, false, null, CancellationToken.None);
+        Assert.True(notice.IsUnavailable);
+    }
+
+    [Fact]
     public async Task AnyAnswerThatIsNotAGridReadOverAWindow_ComesBackUntouched_WithoutAskingTheStore()
     {
         await using var store = NeverConnects();
