@@ -181,3 +181,61 @@ internal sealed class SeedBatch : IDisposable
         cmd.ExecuteNonQuery();
     }
 }
+
+/// <summary>
+/// Seeding for tests that call a one-statement helper many times between reads (#5208). Each helper call used to open
+/// its own connection and auto-commit one INSERT, which is one WAL commit (about 0.2 s on a hosted CI disk) per call.
+/// Here every <see cref="ExecuteAsync"/> joins one open <see cref="SeedBatch"/>, and <see cref="Flush"/> commits it.
+///
+/// <para>The owner must call <see cref="Flush"/> BEFORE anything reads: the code under test opens its own connection
+/// and sees only committed rows. The tests do that by building every <c>LocalDataService</c> through a method that
+/// flushes first, so a seed that follows an act (seed, act, seed again) still commits before the next act reads.</para>
+/// </summary>
+internal sealed class PendingSeedSession : IDisposable
+{
+    private readonly DuckDbInitializer _duckDb;
+    private DuckDB.NET.Data.DuckDBConnection? _connection;
+    private SeedBatch? _batch;
+
+    public PendingSeedSession(DuckDbInitializer duckDb) => _duckDb = duckDb;
+
+    public async Task ExecuteAsync(string sql, params object?[] values)
+    {
+        if (_connection == null)
+        {
+            _connection = _duckDb.CreateConnection();
+            await _connection.OpenAsync();
+            _batch = new SeedBatch(_duckDb, _connection);
+        }
+
+        using var readLock = _duckDb.AcquireReadLock();
+        using var cmd = _connection.CreateCommand();
+        cmd.CommandText = sql;
+        foreach (var value in values)
+        {
+            cmd.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = value ?? DBNull.Value });
+        }
+
+        await cmd.ExecuteNonQueryAsync();
+    }
+
+    /// <summary>Commits what has been seeded and closes the connection. Safe to call when nothing is pending.</summary>
+    public void Flush()
+    {
+        if (_connection == null) return;
+        try { _batch?.Commit(); }
+        finally
+        {
+            _batch?.Dispose();
+            _batch = null;
+            _connection.Dispose();
+            _connection = null;
+        }
+    }
+
+    public void Dispose()
+    {
+        try { Flush(); }
+        catch { /* the test is already failing; don't mask its exception */ }
+    }
+}
