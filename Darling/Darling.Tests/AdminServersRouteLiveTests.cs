@@ -80,7 +80,7 @@ public sealed class AdminServersRouteLiveTests
 INSERT INTO config.config_monitored_servers
     (server_id, name, host, auth, username, encrypted_password, monthly_cost_usd, is_enabled, created_at, engine)
 VALUES
-    (11, 'Zulu',  'zulu-01',  'sql',        '{SecretLogin}', '{SecretPassword}', 1234.5, TRUE,  '2026-01-02 03:04:05', 'sqlserver'),
+    (11, 'Zulu',  'zulu-b',  'sql',        '{SecretLogin}', '{SecretPassword}', 1234.5, TRUE,  '2026-01-02 03:04:05', 'sqlserver'),
     (12, 'alpha', 'alpha-02', 'integrated', NULL,            NULL,               0,      FALSE, '2026-01-03 03:04:05', 'sqlserver'),
     (13, 'Alpha', 'alpha-01', 'integrated', NULL,            NULL,               250,    TRUE,  '2026-01-04 03:04:05', 'sqlserver'),
     (14, 'Pg',    'pg-01',    'sql',        '{SecretLogin}', '{SecretPassword}', 0,      FALSE, '2026-01-05 03:04:05', 'postgres');
@@ -112,7 +112,7 @@ VALUES (13, 'alpha-01', 'Alpha', TRUE, 16, now() AT TIME ZONE 'UTC', now() AT TI
             using var doc = JsonDocument.Parse(text);
             Assert.Equal(4, doc.RootElement.GetProperty("server_count").GetInt32());
             var servers = doc.RootElement.GetProperty("servers").EnumerateArray().ToList();
-            Assert.Equal(new[] { "alpha-01", "alpha-02:", "pg-01:pg", "zulu-01" }.Select(n => n.TrimEnd(':')).ToArray(),
+            Assert.Equal(new[] { "alpha-01", "alpha-02", "pg-01:pg", "zulu-b" },
                 servers.Select(s => s.GetProperty("server_name").GetString()!).ToArray());
 
             var disabled = servers.Single(s => s.GetProperty("server_name").GetString() == "alpha-02");
@@ -127,7 +127,7 @@ VALUES (13, 'alpha-01', 'Alpha', TRUE, 16, now() AT TIME ZONE 'UTC', now() AT TI
             Assert.Equal("$250", collected.GetProperty("monthly_cost").GetString());
             Assert.Equal("SQL Server 2022", collected.GetProperty("version").GetString());
 
-            var zulu = servers.Single(s => s.GetProperty("server_name").GetString() == "zulu-01");
+            var zulu = servers.Single(s => s.GetProperty("server_name").GetString() == "zulu-b");
             Assert.Equal("SQL Server", zulu.GetProperty("auth").GetString());
             Assert.Equal("$1,235", zulu.GetProperty("monthly_cost").GetString());
 

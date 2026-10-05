@@ -13,6 +13,7 @@ using System.Text.Json;
 using System.Text.RegularExpressions;
 using PerformanceMonitor.Darling.Service;
 using Xunit;
+using static Darling.Tests.RepoFile;
 
 namespace Darling.Tests;
 
@@ -125,7 +126,7 @@ public sealed class AdminServersRouteTests
         var rows = DarlingAdminServersReader.Build(new[]
         {
             Config(1, "Alpha", "alpha-01", enabled: false),
-            Config(2, "Bravo", "bravo-01", enabled: true),
+            Config(2, "Bravo", "bravo-a", enabled: true),
         }, Now);
         Assert.Equal(new[] { "Disabled", "Enabled" }, rows.Select(r => r.status).ToArray());
     }
@@ -171,10 +172,10 @@ public sealed class AdminServersRouteTests
         {
             Config(1, "bravo", "alpha-02"),
             Config(2, "Bravo", "alpha-01"),
-            Config(3, "Alpha", "zulu-01"),
-            Config(4, "alpha", "zulu-00"),
+            Config(3, "Alpha", "zulu-b"),
+            Config(4, "alpha", "zulu-a"),
         };
-        var expected = new[] { "zulu-00", "zulu-01", "alpha-01", "alpha-02" };
+        var expected = new[] { "zulu-a", "zulu-b", "alpha-01", "alpha-02" };
         Assert.Equal(expected, DarlingAdminServersReader.Build(rows, Now).Select(r => r.server_name).ToArray());
         Assert.Equal(expected, DarlingAdminServersReader.Build(rows.Reverse().ToArray(), Now).Select(r => r.server_name).ToArray());
     }
@@ -194,22 +195,10 @@ public sealed class AdminServersRouteTests
     [Fact]
     public void TheRoute_IsMappedByMapAll_BesideTheTagRoutes_AndOnlyAsAGet()
     {
-        var source = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingWebEndpoints.cs");
+        var source = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingWebEndpoints.cs").ReplaceLineEndings("\n");
         Assert.Contains("MapServerTags(app, postgres, logger);\n        MapAdminServers(app, postgres);", source);
         Assert.Contains("app.MapGet(DarlingAdminServersReader.Route,", source);
         Assert.DoesNotContain("MapPost(DarlingAdminServersReader.Route", source);
         Assert.Equal("/api/admin/servers", DarlingAdminServersReader.Route);
-    }
-
-    private static string ReadRepoFile(params string[] parts)
-    {
-        var dir = new System.IO.DirectoryInfo(AppContext.BaseDirectory);
-        while (dir is not null && !System.IO.File.Exists(System.IO.Path.Combine(dir.FullName, "global.json")))
-        {
-            dir = dir.Parent;
-        }
-
-        Assert.NotNull(dir);
-        return System.IO.File.ReadAllText(System.IO.Path.Combine(new[] { dir!.FullName }.Concat(parts).ToArray())).ReplaceLineEndings("\n");
     }
 }
