@@ -260,6 +260,8 @@ public sealed class AlertNotebookTableCatalogTests
     private static readonly Dictionary<string, string> s_keyConstants = new(StringComparer.Ordinal)
     {
         ["get_database_sizes.size_note"] = "AzureSiblingDatabaseSize.RowNoteKey",
+        // #5249: the gated rows are built by the helper the tool calls (anonymous-object member `message`).
+        ["get_collection_health.message"] = "DarlingGatedCollectorRows.AppendAsync(",
     };
 
     /// <summary>The text from <paramref name="start"/> to the next marker (or the end).</summary>

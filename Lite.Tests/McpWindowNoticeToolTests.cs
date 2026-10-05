@@ -100,6 +100,24 @@ public sealed class McpWindowNoticeToolTests : IDisposable
         Assert.Equal("2026-09-01T01:00:00.0000000Z", insideSlack.EffectiveStart);
     }
 
+    /// <summary>listOnly (get_plan_corrections beside a tuning snapshot): a null floor is NOT covered, a floor keeps the plain notice.</summary>
+    [Fact]
+    public void WindowNotice_ListOnly_NullFloor_SaysNoWindowedRowsWereRead_AFloorKeepsThePlainNote()
+    {
+        var start = new DateTime(2026, 9, 1, 0, 0, 0, DateTimeKind.Utc);
+
+        var none = McpQueryTools.WindowNotice(null, start, "plan_correction", emptyAnswer: false, listOnly: true);
+        var cut = McpQueryTools.WindowNotice(Naive(start.AddDays(2)), start, "plan_correction", emptyAnswer: false, listOnly: true);
+        var covered = McpQueryTools.WindowNotice(null, start, "plan_correction");
+
+        Assert.True(none.WindowTruncated);
+        Assert.Null(none.EffectiveStart);
+        Assert.StartsWith("The store holds no collection of plan_correction for this server in this window, so no windowed rows were read, and a list with no rows is not a report that nothing happened. ", none.TruncationNote);
+        Assert.True(cut.WindowTruncated);
+        Assert.StartsWith("The window reaches further back than this server's raw plan_correction retains", cut.TruncationNote);
+        Assert.False(covered.WindowTruncated);
+    }
+
     /// <summary>The one formatter every window-floor payload writes effective_start through, in both apps (now in the
     /// shared McpHelpers), sets the kind and never shifts the instant.</summary>
     [Fact]
@@ -395,7 +413,10 @@ public sealed class McpWindowNoticeToolTests : IDisposable
 
         Assert.Equal("empty", root.GetProperty("status").GetString());
         Assert.False(EmptyHints(root).GetProperty("window_truncated").GetBoolean());
-        Assert.Contains("WERE collected", root.GetProperty("message").GetString(), StringComparison.Ordinal);
+        var message = root.GetProperty("message").GetString()!;
+        Assert.Contains("WERE collected", message, StringComparison.Ordinal);
+        /* Both branches carry the factual sentence; only the covered one ends in the idle claim. */
+        Assert.EndsWith(". A server that is up and idle looks exactly like this, and so does a database_name filter matching nothing collected. Delta-based collection also needs a SECOND cycle before the first non-zero row exists.", message, StringComparison.Ordinal);
     }
 
     [Fact]

@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.ComponentModel;
 using System.Linq;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
@@ -224,6 +225,12 @@ public sealed class DarlingMcpSessionTools
                 open_transaction_count = r.OpenTransactionCount > 0 ? r.OpenTransactionCount : (int?)null,
                 percent_complete = r.PercentComplete > 0 ? r.PercentComplete : null,
                 query_hash = string.IsNullOrEmpty(r.QueryHash) ? null : r.QueryHash,
+                /* #5228: the plan key and its presence flags. request_id completes the row's natural key
+                   (collection_time, session_id, request_id); the flags are written only when true and a null request_id is omitted
+                   (the omit-false rule, applied per row below), and the XML itself is get_active_query_plan_xml's, on demand. */
+                request_id = r.RequestId,
+                has_query_plan = r.HasQueryPlan ? true : (bool?)null,
+                has_live_query_plan = r.HasLiveQueryPlan ? true : (bool?)null,
                 login_name = r.LoginName,
                 host_name = r.HostName,
                 program_name = r.ProgramName,
@@ -267,6 +274,17 @@ public sealed class DarlingMcpSessionTools
                 node.Remove("effective_start");
                 node.Remove("window_truncated");
                 node.Remove("truncation_note");
+            }
+
+            /* #5228: JsonOptions writes a null as null, so the plan flags and a null request_id are dropped per row here,
+               which is what makes "written only when true" so. */
+            if (node["queries"] is JsonArray queryRows)
+            {
+                foreach (var row in queryRows.OfType<JsonObject>())
+                {
+                    foreach (var key in new[] { "request_id", "has_query_plan", "has_live_query_plan" })
+                        if (row[key] is null) row.Remove(key);
+                }
             }
 
             return node.ToJsonString(McpHelpers.JsonOptions);
