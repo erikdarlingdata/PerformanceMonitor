@@ -1073,6 +1073,14 @@ GRANT INSERT ON {config}.config_monitored_servers TO {viewer};
 --    above (the write fires trg_bump_monitored_servers as viewer). The WPF read-only probe discriminates on
 --    config_alert_log UPDATE, which this grant does not touch. Idempotent, applied on every managed startup: not a
 --    migration rung.
+--    REVOKE first, the same shape as the section-6 read carve: revoking the table privilege also revokes every column
+--    privilege on it, so each run resets viewer to EXACTLY the columns listed below. A bare GRANT only ever adds: a later
+--    release that narrows this list (or a revert of this change) would leave viewer holding the old columns, and a
+--    table-level UPDATE granted by hand would survive every startup and make the column list meaningless. A plain REVOKE
+--    removes only the privileges recorded as granted by the role that issues it (a superuser or the owner counts as the
+--    owner); this batch grants and revokes as that same owner, so it undoes its own grants and any the owner or a
+--    superuser added by hand. A grant made by another role holding GRANT OPTION is not reached.
+REVOKE UPDATE ON {config}.config_monitored_servers FROM {viewer};
 GRANT UPDATE (name, host, port, database, read_only_intent, auth, username, encrypted_password, encrypt_mode, trust_server_certificate, multi_subnet_failover, monthly_cost_usd, modified_at) ON {config}.config_monitored_servers TO {viewer};
 -- #3314: the DELIVERY cooldown -- the sole throttle on a Slack/Teams/PagerDuty/webhook post -- is the one
 -- alert-engine knob stored on config_notification rather than config_alert_settings, so update_alert_settings

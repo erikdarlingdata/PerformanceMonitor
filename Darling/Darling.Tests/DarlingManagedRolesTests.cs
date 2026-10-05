@@ -25,6 +25,17 @@ namespace Darling.Tests;
 /// </summary>
 public sealed class DarlingManagedRolesTests
 {
+    /// <summary>The viewer's column-level UPDATE on <c>config.config_monitored_servers</c> (#5240), as the managed batch and
+    /// <c>Darling/tools/provision-roles.sql</c> both carry it: exactly the columns the edit core may SET, plus
+    /// <c>modified_at</c>.</summary>
+    private const string EditGrant =
+        "GRANT UPDATE (name, host, port, database, read_only_intent, auth, username, encrypted_password, encrypt_mode, trust_server_certificate, multi_subnet_failover, monthly_cost_usd, modified_at) ON config.config_monitored_servers TO viewer;";
+
+    /// <summary>The REVOKE that must come right before <see cref="EditGrant"/> (#5240): revoking the table privilege also
+    /// revokes every column privilege, so each run resets viewer to exactly the granted columns and strips a table-level
+    /// UPDATE granted by hand.</summary>
+    private const string EditRevoke = "REVOKE UPDATE ON config.config_monitored_servers FROM viewer;";
+
     [Fact]
     public void BuildProvisioningSql_CreatesRolesIdempotently_LoginNoSuperuser()
     {
@@ -142,10 +153,16 @@ public sealed class DarlingManagedRolesTests
            SET, plus modified_at (the optimistic token). No DELETE (no web route removes a server), no table-level UPDATE.
            The census is the whole set of viewer grants on the table, so a widened or extra grant fails here. The credential
            column stays SELECT-carved (asserted with the carve below; the column SELECT grant is not a write, so the census skips it). */
-        const string EditGrant =
-            "GRANT UPDATE (name, host, port, database, read_only_intent, auth, username, encrypted_password, encrypt_mode, trust_server_certificate, multi_subnet_failover, monthly_cost_usd, modified_at) ON config.config_monitored_servers TO viewer;";
         Assert.Contains("GRANT INSERT ON config.config_monitored_servers TO viewer;", sql, StringComparison.Ordinal);
         Assert.Contains(EditGrant, sql, StringComparison.Ordinal);
+
+        /* #5240 review: the edit grant is REVOKE-then-GRANT, like the SELECT carve, so it resets viewer to exactly the listed
+           columns on every run instead of only ever adding. The REVOKE is not a GRANT, so the census below never sees it;
+           it is pinned here, and it must sit BEFORE the grant (after it, it would strip the very columns just granted). */
+        var revokeAt = sql.IndexOf(EditRevoke, StringComparison.Ordinal);
+        Assert.True(revokeAt >= 0, "the managed batch no longer REVOKEs viewer's UPDATE on config_monitored_servers before the column grant");
+        Assert.True(revokeAt < sql.IndexOf(EditGrant, StringComparison.Ordinal), "the REVOKE UPDATE must come before the column-level edit grant");
+        Assert.Single(Regex.Matches(Regex.Replace(sql, @"(?m)^\s*--.*$", ""), @"REVOKE UPDATE ON config\.config_monitored_servers FROM [^;]*viewer[^;]*;"));
         Assert.Equal(
             new[] { "GRANT INSERT ON config.config_monitored_servers TO viewer;", EditGrant },
             System.Text.RegularExpressions.Regex.Matches(
