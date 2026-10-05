@@ -33,8 +33,17 @@ namespace Darling.Tests;
 /// <see cref="DarlingManagedRoles.BuildProvisioningSql"/>'s output with the role name swapped, so removing the
 /// grant from the product's SQL makes the add test fail.
 /// </summary>
-public sealed class ServerAddViewerRoleLiveTests
+[Collection("darling-owned-secrets")]
+public sealed class ServerAddViewerRoleLiveTests : IDisposable
 {
+    private readonly DarlingOwnedSet _ownedBefore = DarlingOwnedSecrets.Current;
+
+    /* Configuration loaded, owning nothing: an unpopulated set refuses every env:/file: reference (R3-3), and the
+       entries here use one. */
+    public ServerAddViewerRoleLiveTests() => DarlingOwnedSecrets.Set(DarlingOwnedSet.Empty);
+
+    public void Dispose() => DarlingOwnedSecrets.Set(_ownedBefore);
+
     private static readonly string RolePassword = Convert.ToHexString(RandomNumberGenerator.GetBytes(16));
 
     private const string ServerGrant = "GRANT INSERT ON config.config_monitored_servers TO viewer;";
