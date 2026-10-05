@@ -33,7 +33,7 @@ public sealed class AdminServerEditBehaviourTests
     private const string PasswordNeeded =
         "Changing how this server is reached needs its password again: it is stored encrypted and this surface cannot read it back.";
 
-    private static JsonElement Run(string scenario, string? stdin = null)
+    internal static JsonElement Run(string scenario, string? stdin = null)
     {
         var psi = new ProcessStartInfo("node")
         {
@@ -854,5 +854,338 @@ public sealed class AdminServerEditBehaviourTests
         Assert.Contains("withFileTypes: true", source, StringComparison.Ordinal);
         Assert.DoesNotContain("\"util.js\", \"panels.js\"", source, StringComparison.Ordinal);
         Assert.Contains("process.env.TZ = \"UTC\"", source, StringComparison.Ordinal);
+    }
+
+    // ------------------------------------------------------------------ the save (T5, T7, T8, T9, T11, review findings 4 and 5, the hashchange discard)
+
+    // The token the harness's by-id read hands out, which every PATCH must send back as it came.
+    private const string ReadToken = "2026-10-05T12:34:56.1234567Z";
+
+    private const string Testing = "Testing the connection, then saving. This can take up to a minute.";
+
+    private static string[] Lines(JsonElement view, string name) => view.GetProperty(name).EnumerateArray().Select(StripText).ToArray();
+
+    private static JsonElement[] Patches(JsonElement view) => view.GetProperty("patches").EnumerateArray().ToArray();
+
+    private static bool[] Flags(JsonElement view, string name) => view.GetProperty(name).EnumerateArray().Select(e => e.GetBoolean()).ToArray();
+
+    private static string Notice(JsonElement view) => StripText(view.GetProperty("notice").EnumerateArray().First());
+
+    private static string Cls(JsonElement view, string name) => view.GetProperty(name).EnumerateArray().First().GetProperty("cls").GetString()!;
+
+    private static void AssertPasswordGone(JsonElement page, bool connected)
+    {
+        Assert.Equal("", page.GetProperty("pw").GetProperty("value").GetString());
+        Assert.Equal(connected, page.GetProperty("pw").GetProperty("connected").GetBoolean());
+        Assert.Equal(0, page.GetProperty("secretNodes").GetInt32());
+    }
+
+    [Fact]
+    public void AFailedProbe_ShowsTheServerSentence_KeepsTheForm_AndClearsThePassword()
+    {
+        var page = Run("save:connfail");
+        var after = page.GetProperty("after");
+
+        Assert.Equal("SECRET-PW", page.GetProperty("typed").GetString());
+        Assert.Equal(new[] { "Could not connect to charlie-two: login failed for user 'sa'." }, Lines(after, "banner"));
+        Assert.Equal("strip error", Cls(after, "banner"));
+        Assert.Equal("alert", after.GetProperty("banner").EnumerateArray().First().GetProperty("role").GetString());
+        Assert.Equal(1, after.GetProperty("forms").GetInt32());
+        AssertPasswordGone(page, connected: true);
+        // One PATCH carried the host, the password and the token; the list was not read again.
+        var body = Assert.Single(Patches(after)).GetProperty("body");
+        Assert.Equal("charlie-two", body.GetProperty("host").GetString());
+        Assert.Equal("SECRET-PW", body.GetProperty("password").GetString());
+        Assert.Equal(ReadToken, body.GetProperty("expected_modified_at").GetString());
+        Assert.Equal(1, after.GetProperty("listReads").GetInt32());
+        // The status line said the connection was being tested while it ran, and is gone; Save and Cancel are usable again.
+        Assert.Equal(new[] { Testing }, Lines(page.GetProperty("during"), "status"));
+        Assert.Empty(Lines(after, "status"));
+        Assert.False(after.GetProperty("saveDisabled").GetBoolean());
+        Assert.False(after.GetProperty("cancelDisabled").GetBoolean());
+    }
+
+    [Fact]
+    public void AServer403_IsShown_TheUiDoesNotRelyOnHidingEdit()
+    {
+        var after = Run("save:forbidden").GetProperty("after");
+
+        Assert.Equal("This account has read-only access. Nothing was saved.", Notice(after));
+        Assert.Equal("strip error", Cls(after, "notice"));
+        Assert.Equal(0, after.GetProperty("forms").GetInt32());
+        Assert.Equal(0, after.GetProperty("formBoxChildren").GetInt32());
+        // No retry, and no list read: nothing changed.
+        Assert.Single(Patches(after));
+        Assert.Equal(1, after.GetProperty("listReads").GetInt32());
+    }
+
+    [Fact]
+    public void AServerRemovedWhileTheFormIsOpen_ClosesTheForm_ShowsTheSentence_AndRereadsTheList()
+    {
+        var page = Run("save:gone");
+        var after = page.GetProperty("after");
+
+        Assert.StartsWith("This server's definition no longer exists", Notice(after), StringComparison.Ordinal);
+        Assert.Equal("strip notice", Cls(after, "notice"));
+        Assert.Equal(0, after.GetProperty("forms").GetInt32());
+        Assert.Equal(0, after.GetProperty("formBoxChildren").GetInt32());
+        Assert.Single(Patches(after));
+        Assert.Equal(2, after.GetProperty("listReads").GetInt32());
+        Assert.Equal(new[] { "Bravo", "Charlie" }, Strings(after.GetProperty("rows")));
+        AssertPasswordGone(page, connected: false);
+    }
+
+    [Theory]
+    [InlineData("double")]
+    [InlineData("429")]
+    public void ADoubleSave_SendsOnePatch_AndA429KeepsTheForm(string how)
+    {
+        var page = Run("midsave:" + how);
+        var during = page.GetProperty("during");
+        var mid = page.GetProperty("mid");
+        var late = page.GetProperty("late");
+
+        // Save and Cancel are disabled while the request runs, and the status line says it is saving.
+        Assert.True(during.GetProperty("saveDisabled").GetBoolean());
+        Assert.True(during.GetProperty("cancelDisabled").GetBoolean());
+        Assert.Equal(new[] { "Saving." }, Lines(during, "status"));
+        // A second click on the disabled button, and a click forced past it, send nothing: one PATCH in all.
+        Assert.Single(Patches(during));
+        Assert.Single(Patches(mid));
+        Assert.Single(Patches(late));
+        if (how == "429")
+        {
+            Assert.Equal(new[] { "Another server change is in progress. Try again in a moment." }, Lines(late, "banner"));
+            Assert.Equal(1, late.GetProperty("forms").GetInt32());
+            Assert.False(late.GetProperty("saveDisabled").GetBoolean());
+            Assert.False(late.GetProperty("cancelDisabled").GetBoolean());
+            Assert.Empty(Lines(late, "status"));
+            // And no retry on its own: still one PATCH after the page settled.
+            Assert.Single(Patches(page.GetProperty("settled")));
+        }
+        else
+        {
+            Assert.Equal("Saved \"Alpha Two\". Takes effect at the next collection cycle.", Notice(late));
+        }
+    }
+
+    [Fact]
+    public void ASave_ClosesTheForm_ShowsTheNote_AndRereadsTheList()
+    {
+        var page = Run("save:updated");
+        var after = page.GetProperty("after");
+
+        Assert.Equal("Saved \"Alpha Prime\". Takes effect at the next collection cycle.", Notice(after));
+        Assert.Equal("strip notice", Cls(after, "notice"));
+        Assert.Equal(0, after.GetProperty("forms").GetInt32());
+        Assert.Equal(0, after.GetProperty("formBoxChildren").GetInt32());
+        Assert.Equal(2, after.GetProperty("listReads").GetInt32());
+        Assert.Equal(new[] { "Alpha Prime", "Bravo", "Charlie" }, Strings(after.GetProperty("rows")));
+        Assert.All(Flags(after, "editDisabled"), disabled => Assert.False(disabled));
+        // The one PATCH went to the server's id with the JSON content type, carrying only the changed field and the token.
+        var patch = Assert.Single(Patches(after));
+        Assert.Equal("/api/servers/1", patch.GetProperty("url").GetString());
+        Assert.Equal("application/json", patch.GetProperty("contentType").GetString());
+        Assert.Equal(new[] { "display_name", "expected_modified_at" }, patch.GetProperty("body").EnumerateObject().Select(p => p.Name).ToArray());
+        AssertPasswordGone(page, connected: false);
+    }
+
+    [Fact]
+    public void ASaveThatTestedTheConnection_SaysSo()
+    {
+        var after = Run("save:tested").GetProperty("after");
+
+        Assert.Equal("Saved \"Charlie\". Takes effect at the next collection cycle. The connection was tested before saving.", Notice(after));
+        Assert.Equal(0, after.GetProperty("forms").GetInt32());
+    }
+
+    [Fact]
+    public void AnUnchangedAnswer_ClosesTheForm_WithItsNotice_AndReadsNoList()
+    {
+        var after = Run("save:unchanged").GetProperty("after");
+
+        Assert.Equal("No change was needed; nothing was written.", Notice(after));
+        Assert.Equal(0, after.GetProperty("forms").GetInt32());
+        Assert.Equal(1, after.GetProperty("listReads").GetInt32());
+    }
+
+    [Fact]
+    public void AFormThatDiffersInNothing_ClosesWithNoChange_AndSendsNothing()
+    {
+        var after = Run("save:nochange").GetProperty("after");
+
+        Assert.Equal("No change.", Notice(after));
+        Assert.Equal(0, after.GetProperty("forms").GetInt32());
+        Assert.Empty(Patches(after));
+    }
+
+    [Theory]
+    [InlineData("clientcheck", "Monthly cost must be a number, zero or more.")]
+    [InlineData("nopassword", PasswordNeeded)]
+    public void AClientSideRefusal_SendsNothing_ShowsTheSentence_AndClearsThePassword(string kind, string sentence)
+    {
+        var page = Run("save:" + kind);
+        var after = page.GetProperty("after");
+
+        Assert.Equal(new[] { sentence }, Lines(after, "banner"));
+        Assert.Equal(1, after.GetProperty("forms").GetInt32());
+        Assert.Empty(Patches(after));
+        Assert.Empty(Lines(after, "status"));
+        AssertPasswordGone(page, connected: true);
+    }
+
+    [Theory]
+    [InlineData("invalid", "The host 'charlie two' is not valid: [redacted] is not allowed here.")]
+    [InlineData("limited", "Another server change is in progress. Try again in a moment.")]
+    [InlineData("broken", "admin server edit failed (InvalidOperationException)")]
+    [InlineData("collides", "Another server already uses the address alpha.")]
+    [InlineData("network", "Network error: connection refused")]
+    [InlineData("conflict", "This server was changed since you opened it. Nothing was saved.")]
+    public void AnAnswerThatKeepsTheForm_ShowsItsSentenceInTheBanner_ClearsThePassword_AndEnablesSaveAgain(string kind, string sentence)
+    {
+        var page = Run("save:" + kind);
+        var after = page.GetProperty("after");
+
+        // The sentence has the typed password replaced by "[redacted]" when the service echoed it back.
+        Assert.Equal(new[] { sentence }, Lines(after, "banner"));
+        Assert.Equal(1, after.GetProperty("forms").GetInt32());
+        Assert.Single(Patches(after));
+        Assert.False(after.GetProperty("saveDisabled").GetBoolean());
+        Assert.False(after.GetProperty("cancelDisabled").GetBoolean());
+        AssertPasswordGone(page, connected: true);
+    }
+
+    [Fact]
+    public void A503_KeepsTheForm_RereadsTheList_AndTheNextSaveSendsTheSameToken()
+    {
+        var page = Run("save:timedout");
+        var after = page.GetProperty("after");
+
+        Assert.Equal(new[] { "The edit did not finish in time. It may still complete; reload to see." }, Lines(after, "banner"));
+        Assert.Equal(1, after.GetProperty("forms").GetInt32());
+        Assert.Equal(2, after.GetProperty("listReads").GetInt32());
+        var second = page.GetProperty("second");
+        var patches = Patches(second);
+        Assert.Equal(2, patches.Length);
+        Assert.Equal(ReadToken, patches[0].GetProperty("body").GetProperty("expected_modified_at").GetString());
+        Assert.Equal(ReadToken, patches[1].GetProperty("body").GetProperty("expected_modified_at").GetString());
+        Assert.StartsWith("Saved \"Alpha\".", Notice(second), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AnExpiredSession_HandsOverToTheShell_AndDiscardsTheForm()
+    {
+        var page = Run("save:expired");
+        var after = page.GetProperty("after");
+
+        var told = Assert.Single(page.GetProperty("expired").EnumerateArray());
+        Assert.Equal("Your session has expired. Sign in again.", told.GetProperty("message").GetString());
+        Assert.Equal(0, after.GetProperty("forms").GetInt32());
+        Assert.Empty(Lines(after, "banner"));
+        // No sentence of its own: the page notice is still just the count and note of the list.
+        Assert.StartsWith("3 servers.", Notice(after), StringComparison.Ordinal);
+        Assert.Single(after.GetProperty("notice").EnumerateArray());
+        AssertPasswordGone(page, connected: false);
+    }
+
+    [Theory]
+    [InlineData("probeWindowsHost", true)]
+    [InlineData("probeWindowsTrust", true)]
+    [InlineData("probeWindowsEncrypt", true)]
+    [InlineData("probeSqlHost", true)]
+    [InlineData("probeRotate", true)]
+    [InlineData("probePostgresPort", true)]
+    [InlineData("probeName", false)]
+    [InlineData("probeCost", false)]
+    public void TheStatusLine_SaysTheConnectionIsTested_ExactlyWhenTheServiceWillProbeIt(string kind, bool testing)
+    {
+        // Review finding 5: a Windows or managed-identity server's address, TLS or database change is probed with no password at all.
+        var during = Run("save:" + kind).GetProperty("during");
+
+        Assert.Equal(new[] { testing ? Testing : "Saving." }, Lines(during, "status"));
+        Assert.Equal("strip loading", Cls(during, "status"));
+        Assert.Single(Patches(during));
+    }
+
+    [Fact]
+    public void WhileASaveRuns_NoOtherRowOpens_TheAnswerShowsItsNotice_AndTheNextFormSaves()
+    {
+        // Review finding 4: every Edit button is disabled mid-save; a click on one (or one forced past it) reads no row.
+        var page = Run("midsave:edit");
+        var during = page.GetProperty("during");
+        var mid = page.GetProperty("mid");
+        var late = page.GetProperty("late");
+        var next = page.GetProperty("next");
+
+        Assert.Equal(new[] { true, true, true }, Flags(during, "editDisabled"));
+        Assert.Equal(new[] { "/api/admin/servers/1" }, Strings(mid.GetProperty("byIdGets")));
+        Assert.Equal(1, mid.GetProperty("forms").GetInt32());
+        Assert.Equal(new[] { true, true, true }, Flags(mid, "editDisabled"));
+        Assert.Equal(new[] { false, false, false }, Flags(late, "editDisabled"));
+        Assert.Equal("Saved \"Alpha Two\". Takes effect at the next collection cycle.", Notice(late));
+        // The next row's form opens and its Save works: busy was cleared.
+        Assert.Equal(2, Patches(next).Length);
+        Assert.Equal("Saved \"Charlie Two\". Takes effect at the next collection cycle.", Notice(next));
+    }
+
+    [Theory]
+    [InlineData("tab")]
+    [InlineData("hash")]
+    public void ALateAnswer_TouchesNoForm_ButStillSetsTheNotice_UnlocksTheGrid_AndRereadsTheList(string how)
+    {
+        // The form is discarded while the save runs (the Routes tab; another page). busy still clears, and the outcome is shown
+        // when the Servers tab is on screen again, with the list read after the change.
+        var page = Run("midsave:" + how);
+
+        Assert.Equal(0, page.GetProperty("mid").GetProperty("forms").GetInt32());
+        var shown = how == "tab" ? page.GetProperty("back") : page.GetProperty("late");
+        Assert.Equal("Saved \"Alpha Two\". Takes effect at the next collection cycle.", Notice(shown));
+        Assert.Equal(0, shown.GetProperty("forms").GetInt32());
+        Assert.All(Flags(shown, "editDisabled"), disabled => Assert.False(disabled));
+        Assert.Equal(3, Flags(shown, "editDisabled").Length);
+        Assert.Equal(2, shown.GetProperty("listReads").GetInt32());
+        Assert.Equal("Alpha Two", Strings(shown.GetProperty("rows"))[0]);
+        Assert.Single(Patches(shown));
+    }
+
+    [Theory]
+    [InlineData("#/fleet", false)]
+    [InlineData("#/admin/routes", false)]
+    [InlineData("#/admin/servers", true)]
+    [InlineData("#/admin", true)]
+    [InlineData("#/admin/bogus", true)]
+    public void TheHashLeavingTheServersTab_DiscardsTheForm_ClearingThePasswordFirst(string hash, bool kept)
+    {
+        var page = Run("hash:" + hash);
+
+        // Painted twice before the hash moved, yet one listener: it is registered once.
+        Assert.Equal(1, page.GetProperty("listeners").GetInt32());
+        Assert.Equal(kept, page.GetProperty("kept").GetBoolean());
+        Assert.Equal(kept ? 1 : 0, page.GetProperty("forms").GetInt32());
+        Assert.Equal(kept ? 1 : 0, page.GetProperty("formBoxChildren").GetInt32());
+        if (kept)
+        {
+            Assert.Equal("charlie-two", page.GetProperty("host").GetString());
+            Assert.Equal("SECRET-PW", page.GetProperty("value").GetString());
+        }
+        else
+        {
+            // The very box typed into, read after the form is gone, holds nothing, and nothing on the page does.
+            Assert.Equal("", page.GetProperty("value").GetString());
+            Assert.False(page.GetProperty("connected").GetBoolean());
+            Assert.Equal(0, page.GetProperty("secretNodes").GetInt32());
+        }
+    }
+
+    [Theory]
+    [InlineData("#/fleet", 0)]
+    [InlineData("#/admin/routes", 0)]
+    [InlineData("#/admin/servers", 1)]
+    public void AByIdReadStillRunningWhenTheHashLeaves_OpensNoForm(string hash, int forms)
+    {
+        var page = Run("hashOpen:" + hash);
+
+        Assert.Equal(forms, page.GetProperty("forms").GetInt32());
+        Assert.Equal(forms, page.GetProperty("formBoxChildren").GetInt32());
     }
 }
