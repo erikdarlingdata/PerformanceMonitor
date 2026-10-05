@@ -218,7 +218,7 @@ public sealed class WebDataStartNoteLiveTests
     private static readonly string[] PostgresReads =
         [.. WebDataStartNote.TableByRead.Keys.Where(k => k.StartsWith("get_pg_", StringComparison.Ordinal)).OrderBy(k => k, StringComparer.Ordinal)];
 
-    /// <summary>Each of the seventeen PostgreSQL reads (the configuration changes, the window aggregates, the trend grids and Captured Plans among them, #4966), over its own table, for a server added two days ago whose rows
+    /// <summary>Each of the twenty-two PostgreSQL reads (the configuration changes, the window aggregates, the trend grids, Captured Plans and the vacuum, horizon, slot and write tiles among them, #4966), over its own table, for a server added two days ago whose rows
     /// start a day back: the data starts inside the 7-day range, so the note is there and names a start between the
     /// server's first collection and its first row. Which of the two a table reports depends on whether the schedule
     /// gives it a purge edge (the first collection) or not (the oldest row it holds), so the test holds the bounds the
@@ -228,7 +228,7 @@ public sealed class WebDataStartNoteLiveTests
     {
         var ct = TestContext.Current.CancellationToken;
         await using var store = await Store.CreateAsync(ct);
-        Assert.Equal(17, PostgresReads.Length);
+        Assert.Equal(22, PostgresReads.Length);
 
         for (var i = 0; i < PostgresReads.Length; i++)
         {
@@ -251,7 +251,7 @@ public sealed class WebDataStartNoteLiveTests
         }
     }
 
-    /// <summary>The same seventeen reads for a server collected for a month whose rows reach back past the 7-day window's
+    /// <summary>The same twenty-two reads for a server collected for a month whose rows reach back past the 7-day window's
     /// start (eight days): the store covered the range, so there is no note, over 7 days and over 3. (A quiet start,
     /// rows that begin late in a covered range, is the Waiting Tasks test above: a table the schedule gives no purge
     /// edge reports the oldest row it holds, so for those rows that begin late are a late start.)</summary>
@@ -265,24 +265,30 @@ public sealed class WebDataStartNoteLiveTests
         {
             var read = PostgresReads[i];
             var name = "web-data-start-covered-" + read.Replace('_', '-');
-            await store.SeedTableAsync(WebDataStartNote.TableByRead[read], -496620 - i, name, store.End.AddDays(-30), firstRow: store.End.AddDays(-8), ct);
+            await store.SeedTableAsync(
+                WebDataStartNote.TableByRead[read], -496620 - i, name, store.End.AddDays(-30), firstRow: store.End.AddDays(-8), ct,
+                runsCollector: WebDataStartNote.CollectorRunsByRead.GetValueOrDefault(read));
 
             Assert.Same(StandInRows, await WebDataStartNote.AddAsync(store.DataSource, read, name, 168, null, StandInRows, null, ct));
             Assert.Same(StandInRows, await WebDataStartNote.AddAsync(store.DataSource, read, name, 72, null, StandInRows, null, ct));
         }
     }
 
-    /// <summary>The three sparse reads (blocking, session states, replication stats) store a row only when something happened,
+    /// <summary>The six sparse reads (blocking, session states, replication stats, the xmin horizon holders, the autovacuum backlog and the replication slots) store a row only when something exists,
     /// so their first row says nothing about when collection began. Each is probed on its collector's own logged runs.</summary>
     private static readonly (string Read, string Table, string Collector)[] SparseReads =
     [
         ("get_pg_blocking", "pg_blocking_edges", "pg_blocking"),
         ("get_pg_session_states", "pg_session_states", "pg_session_states"),
         ("get_pg_replication_stats", "pg_replication_stats", "pg_replication_stats"),
+        ("get_pg_xmin_horizon", "pg_xmin_horizon", "pg_xmin_horizon"),
+        ("get_pg_autovacuum_health", "pg_autovacuum_stats", "pg_autovacuum_stats"),
+        ("get_pg_replication_slots", "pg_replication_slot_stats", "pg_replication_slots"),
     ];
 
     /// <summary>A server registered 30 days ago whose collector ran all week and stored ONE row a day back (the first blocking chain,
-    /// the first long transaction, the first connected replica): the 7-day range was covered, so there is no note. Reading the
+    /// the first long transaction, the first connected replica, the first horizon holder, the first table behind on vacuum, the first
+    /// slot): the 7-day range was covered, so there is no note. Reading the
     /// oldest row instead would name yesterday as where the data starts.</summary>
     [Fact]
     public async Task ASparseRead_OnAnOldServer_WhoseFirstRowIsADayBack_GetsNoNote_AgainstDevPostgres()

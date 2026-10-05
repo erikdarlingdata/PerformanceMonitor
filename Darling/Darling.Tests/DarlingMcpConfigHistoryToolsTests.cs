@@ -17,6 +17,7 @@ using ModelContextProtocol.Server;
 using Npgsql;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
@@ -695,6 +696,321 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)",
             await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
                 await DeleteRowsAsync(cleanup, cleanupCt));
         }
+    }
+
+    /* #4966 window-floor cases for the three change tools. The coverage probe measures the purge edge from the store's own clock,
+       so the anchor is the current minute and every seeded instant is an offset from it. */
+    private static DateTime AnchorNow()
+    {
+        var now = DateTime.UtcNow;
+        return new DateTime(now.Year, now.Month, now.Day, now.Hour, now.Minute, 0, DateTimeKind.Utc);
+    }
+
+    private static readonly string[] WindowTools = ["get_server_config_changes", "get_database_config_changes", "get_trace_flag_changes"];
+
+    private static string TableOf(string tool) => tool switch
+    {
+        "get_server_config_changes" => "server_config",
+        "get_database_config_changes" => "database_config",
+        _ => "trace_flags",
+    };
+
+    private static string WindowServerName(string tool, string window) => "darling-mcp-confighist-window-" + window + "-" + TableOf(tool);
+
+    private static Task<string> CallAsync(NpgsqlDataSource postgres, string tool, string server, int hours, DateTime end)
+    {
+        var asOf = WebDataStartNote.FormatWindowEnd(end);
+        return tool switch
+        {
+            "get_server_config_changes" => DarlingMcpConfigHistoryTools.GetServerConfigChanges(postgres, server, hours, asOf),
+            "get_database_config_changes" => DarlingMcpConfigHistoryTools.GetDatabaseConfigChanges(postgres, server, hours, asOf),
+            _ => DarlingMcpConfigHistoryTools.GetTraceFlagChanges(postgres, server, hours, asOf),
+        };
+    }
+
+    /// <summary>A server registered at <paramref name="created"/>, its runs of the tool's collector logged every
+    /// <paramref name="stepMinutes"/> minutes from <paramref name="runsFrom"/> to <paramref name="runsTo"/> (none when null), and one config snapshot
+    /// at each of <paramref name="snapshots"/>, each differing from the one before it (so every snapshot after the first is a change).</summary>
+    private static async Task SeedWindowServerAsync(
+        NpgsqlConnection connection, string tool, string name, DateTime created, DateTime? runsFrom, DateTime runsTo, int stepMinutes, DateTime[] snapshots, System.Threading.CancellationToken ct)
+    {
+        var serverId = ServerIdHelper.GetDeterministicHashCode(name);
+        await DeleteWindowServerAsync(connection, name, ct);
+        await DarlingMcpTestData.RegisterServerAsync(connection, serverId, name, ct);
+        await DarlingMcpTestData.ExecAsync(connection, ct, "UPDATE servers SET created_date = $2 WHERE server_id = $1", serverId, DarlingMcpTestData.Naive(created));
+
+        if (runsFrom is DateTime from)
+        {
+            await DarlingMcpTestData.ExecAsync(connection, ct,
+                @"INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, rows_collected)
+SELECT row_number() OVER (), $1, $2, $3, t, 12, 'SUCCESS', 0
+FROM generate_series($4::timestamp, $5::timestamp, make_interval(mins => $6)) AS t",
+                serverId, name, TableOf(tool), DarlingMcpTestData.Naive(from), DarlingMcpTestData.Naive(runsTo), stepMinutes);
+        }
+
+        for (var i = 0; i < snapshots.Length; i++)
+        {
+            var at = DarlingMcpTestData.Naive(snapshots[i]);
+            switch (tool)
+            {
+                case "get_server_config_changes":
+                    await DarlingMcpTestData.ExecAsync(connection, ct,
+                        @"INSERT INTO server_config (config_id, capture_time, server_id, server_name, configuration_name, value_configured, value_in_use, is_dynamic, is_advanced)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)",
+                        CollectionIdGenerator.Next(), at, serverId, name, "max degree of parallelism", (long)i, (long)i, true, true);
+                    break;
+                case "get_database_config_changes":
+                    await DarlingMcpTestData.ExecAsync(connection, ct,
+                        "INSERT INTO database_config (config_id, capture_time, server_id, server_name, database_name, recovery_model) VALUES ($1,$2,$3,$4,$5,$6)",
+                        CollectionIdGenerator.Next(), at, serverId, name, Db, i % 2 == 0 ? "FULL" : "SIMPLE");
+                    break;
+                default:
+                    await DarlingMcpTestData.ExecAsync(connection, ct,
+                        @"INSERT INTO trace_flags (config_id, capture_time, server_id, server_name, trace_flag, status, is_global, is_session)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
+                        CollectionIdGenerator.Next(), at, serverId, name, 1000 + i, true, true, false);
+                    break;
+            }
+        }
+    }
+
+    private static async Task DeleteWindowServerAsync(NpgsqlConnection connection, string name, System.Threading.CancellationToken ct)
+    {
+        var serverId = ServerIdHelper.GetDeterministicHashCode(name);
+        await DarlingMcpTestData.ExecAsync(connection, ct,
+            "DELETE FROM config_collector_schedules WHERE server_id = $1 AND collector_name IN ('server_config', 'database_config', 'trace_flags')", serverId);
+        foreach (var table in new[] { "server_config", "database_config", "trace_flags", "collection_log", "servers" })
+        {
+            await DarlingMcpTestData.ExecAsync(connection, ct, $"DELETE FROM {table} WHERE server_id = $1", serverId);
+        }
+    }
+
+    private async Task ForEachWindowToolAsync(
+        string window, Func<NpgsqlConnection, NpgsqlDataSource, string, string, DateTime, Task> seedAndAssert)
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live config-tools test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await using var postgres = NpgsqlDataSource.Create(cs!);
+
+        /* A fleet-wide override row for one of the three collectors (another test's leftover on a shared store) moves the purge edge
+           off the default these cases assume, so the fleet rows are set aside and put back in the finally. */
+        var savedFleetRows = new List<(string Name, int? Frequency, int? Retention, bool Enabled, string[]? Databases)>();
+        await using (var save = new NpgsqlCommand(
+            "SELECT collector_name, frequency_minutes, retention_days, enabled, databases FROM config_collector_schedules WHERE server_id IS NULL AND lower(collector_name) IN ('server_config', 'database_config', 'trace_flags')", connection))
+        await using (var saved = await save.ExecuteReaderAsync(ct))
+        {
+            while (await saved.ReadAsync(ct))
+            {
+                savedFleetRows.Add((saved.GetString(0),
+                    saved.IsDBNull(1) ? null : saved.GetInt32(1),
+                    saved.IsDBNull(2) ? null : saved.GetInt32(2),
+                    saved.GetBoolean(3),
+                    saved.IsDBNull(4) ? null : (string[])saved.GetValue(4)));
+            }
+        }
+
+        await DarlingMcpTestData.ExecAsync(connection, ct,
+            "DELETE FROM config_collector_schedules WHERE server_id IS NULL AND lower(collector_name) IN ('server_config', 'database_config', 'trace_flags')");
+
+        var bodySucceeded = false;
+        try
+        {
+            foreach (var tool in WindowTools)
+            {
+                await seedAndAssert(connection, postgres, tool, WindowServerName(tool, window), AnchorNow());
+            }
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            foreach (var row in savedFleetRows)
+            {
+                await DarlingMcpTestData.ExecAsync(connection, System.Threading.CancellationToken.None,
+                    "INSERT INTO config_collector_schedules (server_id, collector_name, frequency_minutes, retention_days, enabled, databases) VALUES (NULL, $1, $2, $3, $4, $5) ON CONFLICT DO NOTHING",
+                    row.Name, (object?)row.Frequency ?? DBNull.Value, (object?)row.Retention ?? DBNull.Value, row.Enabled, (object?)row.Databases ?? DBNull.Value);
+            }
+
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                foreach (var tool in WindowTools)
+                {
+                    await DeleteWindowServerAsync(cleanup, WindowServerName(tool, window), cleanupCt);
+                }
+            });
+        }
+    }
+
+    private static System.Text.Json.JsonElement Parse(string json) => System.Text.Json.JsonDocument.Parse(json).RootElement.Clone();
+
+    /// <summary>Collection starts inside the window: registered two days ago, read over 168 hours. The keys name where it starts and sit right after hours_back.</summary>
+    [Fact]
+    public async Task ADataAnswer_ForAServerAddedTwoDaysAgo_NamesWhereCoverageStarts_AgainstDevPostgres()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await ForEachWindowToolAsync("added", async (connection, postgres, tool, name, end) =>
+        {
+            var added = end.AddDays(-2);
+            await SeedWindowServerAsync(connection, tool, name, added, added, end, 30, [end.AddDays(-1), end.AddHours(-12)], ct);
+
+            var root = Parse(await CallAsync(postgres, tool, name, 168, end));
+
+            Assert.True(root.GetProperty("window_truncated").GetBoolean(), tool);
+            Assert.Equal(McpHelpers.FormatEffectiveStart(added), root.GetProperty("effective_start").GetString());
+            Assert.Equal(
+                DarlingMcpWindowNotice.Build(added, end.AddHours(-168), TableOf(tool)).TruncationNote,
+                root.GetProperty("truncation_note").GetString());
+            Assert.True(root.GetProperty("change_count").GetInt32() > 0, tool);
+            Assert.False(root.TryGetProperty("effective_hours_back", out _), tool);
+
+            var names = root.EnumerateObject().Select(p => p.Name).ToList();
+            var at = names.IndexOf("hours_back");
+            Assert.Equal(["effective_start", "window_truncated", "truncation_note", "change_count"], names.Skip(at + 1).Take(4));
+        });
+    }
+
+    /// <summary>A quiet start: registered a month ago, its first snapshot two days into the window. The store covered the whole window: false, the asked start.</summary>
+    [Fact]
+    public async Task ADataAnswer_WhoseFirstSnapshotComesLate_IsCovered_AgainstDevPostgres()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await ForEachWindowToolAsync("quiet", async (connection, postgres, tool, name, end) =>
+        {
+            await SeedWindowServerAsync(connection, tool, name, end.AddDays(-30), end.AddDays(-8), end, 60, [end.AddDays(-5), end.AddDays(-4)], ct);
+
+            var root = Parse(await CallAsync(postgres, tool, name, 168, end));
+
+            Assert.False(root.GetProperty("window_truncated").GetBoolean(), tool);
+            Assert.Equal(System.Text.Json.JsonValueKind.Null, root.GetProperty("truncation_note").ValueKind);
+            var effectiveStart = DateTime.Parse(root.GetProperty("effective_start").GetString()!, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.RoundtripKind);
+            Assert.InRange((effectiveStart - end.AddHours(-168)).TotalSeconds, 0, 120);
+        });
+    }
+
+    /// <summary>An empty one-hour window with no run and no snapshot: the hints say NOT covered, keep the existing keys, and add the three after them.</summary>
+    [Fact]
+    public async Task AnEmptyHour_WithNoRun_CarriesHintsThatSayTheStoreHoldsNoCollection_AgainstDevPostgres()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await ForEachWindowToolAsync("norun", async (connection, postgres, tool, name, end) =>
+        {
+            await SeedWindowServerAsync(connection, tool, name, end.AddDays(-30), null, end, 30, [], ct);
+
+            var root = Parse(await CallAsync(postgres, tool, name, 1, end));
+
+            Assert.Equal("empty", root.GetProperty("status").GetString());
+            var hints = root.GetProperty("hints");
+            Assert.True(hints.GetProperty("window_truncated").GetBoolean(), tool);
+            Assert.Equal(System.Text.Json.JsonValueKind.Null, hints.GetProperty("effective_start").ValueKind);
+            Assert.Contains("no collection of " + TableOf(tool), hints.GetProperty("truncation_note").GetString(), StringComparison.Ordinal);
+            Assert.Equal(["server", "snapshot_count", "effective_start", "window_truncated", "truncation_note"], hints.EnumerateObject().Select(p => p.Name));
+        });
+    }
+
+    /// <summary>A short window that answers data starts no probe: the answer is covered at the asked start whatever a probe would read.</summary>
+    [Fact]
+    public async Task AShortWindow_ThatAnswersData_StartsNoProbe_AgainstDevPostgres()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await ForEachWindowToolAsync("short", async (connection, postgres, tool, name, end) =>
+        {
+            await SeedWindowServerAsync(connection, tool, name, end.AddDays(-30), end.AddDays(-8), end, 60, [end.AddMinutes(-50), end.AddMinutes(-20)], ct);
+
+            var probes = 0;
+            var bodySucceeded = false;
+            DarlingMcpWindowNotice.TestOnlyProbe = () => { probes++; throw new TimeoutException("a short window must not probe"); };
+            try
+            {
+                var root = Parse(await CallAsync(postgres, tool, name, 1, end));
+
+                Assert.Equal(0, probes);
+                Assert.True(root.GetProperty("change_count").GetInt32() > 0, tool);
+                Assert.False(root.GetProperty("window_truncated").GetBoolean(), tool);
+                Assert.Equal(McpHelpers.FormatEffectiveStart(end.AddHours(-1)), root.GetProperty("effective_start").GetString());
+                bodySucceeded = true;
+            }
+            finally
+            {
+                await LiveStoreCleanup.RunOwnedAsync(bodySucceeded, () =>
+                {
+                    DarlingMcpWindowNotice.TestOnlyProbe = null;
+                    return Task.CompletedTask;
+                });
+            }
+        });
+    }
+
+    /// <summary>
+    /// A snapshot BEFORE the window with no logged run inside it. The viewer and the web Config Changes notes do not count a
+    /// pre-window snapshot as covered (config is captured on connect, so the last snapshot of a long-connected server predates
+    /// every recent window), and the tools match them: the empty answer says the store holds no collection in the window. With a
+    /// run logged in the window the same server is covered.
+    /// </summary>
+    [Fact]
+    public async Task APreWindowSnapshot_IsNotCovered_UnlessARunIsLoggedInTheWindow_AgainstDevPostgres()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await ForEachWindowToolAsync("prewindow", async (connection, postgres, tool, name, end) =>
+        {
+            await SeedWindowServerAsync(connection, tool, name, end.AddDays(-30), null, end, 30, [end.AddDays(-3)], ct);
+
+            var hints = Parse(await CallAsync(postgres, tool, name, 1, end)).GetProperty("hints");
+            Assert.True(hints.GetProperty("window_truncated").GetBoolean(), tool);
+            Assert.Equal(System.Text.Json.JsonValueKind.Null, hints.GetProperty("effective_start").ValueKind);
+
+            /* The same server with one run 35 minutes into the window. */
+            var start = end.AddHours(-1);
+            await SeedWindowServerAsync(connection, tool, name, end.AddDays(-30), start.AddMinutes(35), start.AddMinutes(35), 600, [end.AddDays(-3)], ct);
+
+            var covered = Parse(await CallAsync(postgres, tool, name, 1, end)).GetProperty("hints");
+            Assert.False(covered.GetProperty("window_truncated").GetBoolean(), tool);
+            Assert.Equal(McpHelpers.FormatEffectiveStart(start), covered.GetProperty("effective_start").GetString());
+        });
+    }
+
+    /// <summary>A coverage probe that throws costs the notice, never the answer: data comes back without the three keys, an empty answer without hints.</summary>
+    [Fact]
+    public async Task AFailedProbe_CostsTheNotice_NeverTheAnswer_AgainstDevPostgres()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await ForEachWindowToolAsync("probefail", async (connection, postgres, tool, name, end) =>
+        {
+            await SeedWindowServerAsync(connection, tool, name, end.AddDays(-2), end.AddDays(-2), end, 30, [end.AddDays(-1), end.AddHours(-12)], ct);
+
+            var bodySucceeded = false;
+            DarlingMcpWindowNotice.TestOnlyProbe = () => throw new TimeoutException("the probe's deadline passed");
+            try
+            {
+                var root = Parse(await CallAsync(postgres, tool, name, 168, end));
+
+                Assert.False(root.TryGetProperty("status", out _), tool);
+                Assert.False(root.TryGetProperty("error", out _), tool);
+                Assert.True(root.GetProperty("change_count").GetInt32() > 0, tool);
+                Assert.False(root.TryGetProperty("effective_start", out _), tool);
+                Assert.False(root.TryGetProperty("window_truncated", out _), tool);
+                Assert.False(root.TryGetProperty("truncation_note", out _), tool);
+
+                var empty = Parse(await CallAsync(postgres, tool, name, 1, end.AddDays(-5)));
+                Assert.Equal("empty", empty.GetProperty("status").GetString());
+                Assert.True(empty.TryGetProperty("hints", out var hints), tool);
+                Assert.False(hints.TryGetProperty("effective_start", out _), tool);
+                Assert.False(hints.TryGetProperty("window_truncated", out _), tool);
+                bodySucceeded = true;
+            }
+            finally
+            {
+                await LiveStoreCleanup.RunOwnedAsync(bodySucceeded, () =>
+                {
+                    DarlingMcpWindowNotice.TestOnlyProbe = null;
+                    return Task.CompletedTask;
+                });
+            }
+        });
     }
 
     private static async Task DeleteRowsAsync(NpgsqlConnection connection, System.Threading.CancellationToken ct)

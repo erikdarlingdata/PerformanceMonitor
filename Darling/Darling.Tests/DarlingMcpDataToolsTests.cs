@@ -980,6 +980,34 @@ public sealed class DarlingMcpDataToolsLivePostgresTests
 
     private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
 
+    /* #4966: the window-floor cases of get_wait_stats, shared with the latch and spinlock reads (WindowNoticeAggregateCases). */
+    private static readonly WindowNoticeAggregateCases s_waitWindow = new(
+        "get_wait_stats", "wait_stats",
+        (ds, name, hours, end, limit) => DarlingMcpDataTools.GetWaitStats(ds, name, hours, limit, WebDataStartNote.FormatWindowEnd(end)),
+        (c, name, at, i) => DarlingMcpTestData.ExecAsync(c, TestContext.Current.CancellationToken,
+            @"INSERT INTO wait_stats (collection_id, collection_time, server_id, server_name, wait_type, delta_wait_time_ms, delta_signal_wait_time_ms, delta_waiting_tasks)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
+            CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(at), ServerIdHelper.GetDeterministicHashCode(name), name, "WINDOW_WAIT_" + i, 1000L - i, 100L, 5L),
+        "truncated");
+
+    [Fact]
+    public Task GetWaitStats_CollectionStartingInsideTheWindow_NamesWhereCoverageStarts_AndACappedPageKeepsTheTwoFlagsApart_AgainstDevPostgres() => s_waitWindow.CollectionStartingInsideTheWindow_NamesWhereCoverageStarts_AndACappedPageKeepsTheTwoFlagsApart(ConnectionString);
+
+    [Fact]
+    public Task GetWaitStats_ARankCappedPage_BesideACoveredWindow_IsNotWindowTruncated_AgainstDevPostgres() => s_waitWindow.ARankCappedPage_BesideACoveredWindow_IsNotWindowTruncated(ConnectionString);
+
+    [Fact]
+    public Task GetWaitStats_AQuietStart_IsCovered_AgainstDevPostgres() => s_waitWindow.AQuietStart_IsCovered(ConnectionString);
+
+    [Fact]
+    public Task GetWaitStats_TheNoRowsAnswer_StaysBare_AgainstDevPostgres() => s_waitWindow.TheNoRowsAnswer_StaysBare(ConnectionString);
+
+    [Fact]
+    public Task GetWaitStats_AShortWindow_WithRows_StartsNoProbe_AgainstDevPostgres() => s_waitWindow.AShortWindow_WithRows_StartsNoProbe(ConnectionString);
+
+    [Fact]
+    public Task GetWaitStats_AFailedProbe_CostsTheNotice_NeverTheRows_AgainstDevPostgres() => s_waitWindow.AFailedProbe_CostsTheNotice_NeverTheRows(ConnectionString);
+
     [Fact]
     public async Task DataTools_ReadPlantedRows_AgainstDevPostgres()
     {

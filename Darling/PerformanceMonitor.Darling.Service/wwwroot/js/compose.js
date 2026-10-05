@@ -22,7 +22,7 @@
 
 import { el, mount, loadingStrip, errorStrip, emptyStrip, disclosure, fmtInt, fmtNum, apiSendRead, noticeStrip, parseUtc, windowNoteText } from "./util.js";
 import { renderLineChart, zoomChip, renderBarChart, renderPieChart, renderScatterChart, CATEGORICAL_COLORS } from "./charts.js";
-import { navigateServer } from "./panels.js";
+import { navigateServer, gridTable } from "./panels.js";
 import { getCatalog } from "./views-api.js";
 
 /** The most series a time chart draws before pooling the rest into a "+N more" note (readability + palette size). */
@@ -40,13 +40,13 @@ const OTHER_SERIES_LABEL = "(other)";
  * shape (title + span-2 + a body that shows a loading strip, then the chart / a state). `scope` is the view-level
  * run context {server, hours, variables, values}; flipping it and re-rendering re-scopes every panel at once.
  */
-export function renderComposedPanelCard(panelSpec, scope, onSettled) {
+export function renderComposedPanelCard(panelSpec, scope, onSettled, slot = null) {
   const body = el("div", { class: "panel-body" }, [loadingStrip()]);
   const panel = el("div", { class: "panel card" + (panelSpec.span === 2 ? " span-2" : "") }, [
     el("h3", {}, [panelSpec.title || measureLabel(panelSpec), pinBadge(panelSpec)]),
     body,
   ]);
-  driveComposedPanel(body, panelSpec, scope, onSettled);
+  driveComposedPanel(body, panelSpec, scope, onSettled, slot);
   return panel;
 }
 
@@ -198,7 +198,7 @@ function pinHoursLabel(hours) {
  * never persisted (the stored definition renders verbatim), and a "clear" chip pops back to the base spec. Each new
  * selection REPLACES the drill (a simple "you are viewing X" model), so drilling never stacks into a dead end.
  */
-function driveComposedPanel(body, panelSpec, scope, onSettled) {
+function driveComposedPanel(body, panelSpec, scope, onSettled, slot = null) {
   let drill = null; // { keys: [{dimension, value}] } or null
   let zoom = null; // { startIso, endIso } or null (#1606 brush-zoom — view-state only, like the drill)
   let firstRun = true; // onSettled (#4222) fires once, for the initial load only — a later drill/zoom re-run is
@@ -215,7 +215,7 @@ function driveComposedPanel(body, panelSpec, scope, onSettled) {
     const spec = drill ? withDrillFilters(panelSpec, drill) : panelSpec;
     const done = firstRun ? onSettled : null;
     firstRun = false;
-    renderComposedInto(body, spec, scope, { drill, onDrill, zoom, onZoomChange }).finally(() => {
+    renderComposedInto(body, spec, scope, { drill, onDrill, zoom, onZoomChange, panelSlot: slot }).finally(() => {
       if (done) done();
     });
   }
@@ -277,7 +277,7 @@ export async function renderComposedInto(body, panelSpec, scope, opts = {}) {
        scope), so the drawn axis matches the window the rows were fetched over. renderComposedResult has no
        `scope`, so it is resolved here (where scope + zoom both live) and threaded through opts. */
     const chartWindow = resolveChartWindow(panelSpec, scope, opts.zoom);
-    const nodes = [renderComposedResult(data, panelSpec, { ...opts, annotationMeta, chartWindow })];
+    const nodes = [renderComposedResult(data, panelSpec, { ...opts, annotationMeta, chartWindow, scope })];
     /* The run endpoint's partial-window notice (#1665, #4953): a caveat that the panel did not cover the whole
        requested window. The chosen tier's retention could not cover it, OR the panel's own data starts after
        the window does, OR the row cap truncated the result. Good data, honestly caveated, above the chart.
@@ -483,7 +483,7 @@ export function renderComposedResult(result, panelSpec, opts = {}) {
       break;
     case "table":
     default:
-      nodes.push(renderComposedTable(rows, unit));
+      nodes.push(renderComposedTable(rows, unit, panelSpec, opts.scope, opts.panelSlot));
       break;
   }
 
@@ -639,30 +639,23 @@ function renderScalar(rows, panelSpec, fmt) {
   ]);
 }
 
-/** Any result as a table of its returned columns — bucket localized, value formatted in the unit, dims as text. */
-function renderComposedTable(rows, unit) {
-  const cols = Object.keys(rows[0] || {});
-  if (!cols.length) return emptyStrip("No columns to show.");
-  const head = el(
-    "tr",
-    {},
-    cols.map((c) => el("th", { text: columnLabel(c), class: c === "value" ? "num" : null }))
-  );
-  const bodyRows = rows.map((row) =>
-    el(
-      "tr",
-      {},
-      cols.map((c) => {
-        if (c === "value") return el("td", { class: "num", text: formatComposedValue(row[c], unit) });
-        if (c === "bucket") return el("td", { text: localBucket(row[c]) });
-        const v = row[c];
-        return el("td", { text: v == null || v === "" ? "—" : String(v) });
-      })
-    )
-  );
-  return el("div", { class: "table-wrap" }, [
-    el("table", { class: "data" }, [el("thead", {}, [head]), el("tbody", {}, bodyRows)]),
-  ]);
+/** Any result as a table of its returned columns — bucket localized, value formatted in the unit, dims as text.
+ *  Drawn through the shared grid (panels.js gridTable) so it sorts, filters, copies and exports like every other
+ *  table. Sort, Copy and the CSV read the RAW row (the stored bucket instant, the value as returned); the cells show
+ *  the formatted text. The grid's state is keyed by the panel's identity and the server it ran for. */
+function renderComposedTable(rows, unit, panelSpec = {}, scope = null, slot = null) {
+  const keys = Object.keys(rows[0] || {});
+  if (!keys.length) return emptyStrip("No columns to show.");
+  const columns = keys.map((c) => {
+    if (c === "value") return { key: c, label: columnLabel(c), align: "right", display: (r) => formatComposedValue(r[c], unit) };
+    if (c === "bucket") return { key: c, label: columnLabel(c), format: "time", display: (r) => localBucket(r[c]) };
+    return { key: c, label: columnLabel(c), display: (r) => (r[c] == null || r[c] === "" ? "—" : String(r[c])) };
+  });
+  /* An untitled composed panel has title "" and no id, so the name alone would give every one the same key. `||`
+     lets an empty title fall through to the measure, and `slot` (the panel's position on its view, from the caller)
+     keeps two panels with the same title or measure apart. */
+  const id = "composed|" + (slot ?? "") + "|" + (panelSpec.id || panelSpec.title || panelSpec.measure || panelSpec.ratio || "") + "|" + (scope && scope.server != null ? scope.server : "");
+  return gridTable(rows, { id, title: panelSpec.title || measureLabel(panelSpec), columns });
 }
 
 /** A table header for a result column: "Value" gains its unit, "bucket" -> "Time", a dim name is humanized. */

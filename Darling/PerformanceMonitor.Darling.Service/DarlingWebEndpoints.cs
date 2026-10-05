@@ -295,7 +295,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// and the MCP host's analysis fill — so compare_analysis' banding here reads a series the store was already asked
     /// for this analysis hour from memory. Null keeps the analysis service's baselines private to it.</para>
     /// </summary>
-    public static void MapAll(WebApplication app, NpgsqlDataSource postgres, CollectorRuntimeState collector, ILogger logger, BaselineCache? baselineCache = null, PostgresConfig? postgresConfig = null, ReadLatencyAccumulator? readLatency = null, PerformanceMonitor.PlanAnalysis.AnalyzerConfig? analyzerConfig = null, MonitoredServerRegistryState? registryState = null)
+    public static void MapAll(WebApplication app, NpgsqlDataSource postgres, CollectorRuntimeState collector, ILogger logger, BaselineCache? baselineCache = null, PostgresConfig? postgresConfig = null, ReadLatencyAccumulator? readLatency = null, PerformanceMonitor.PlanAnalysis.AnalyzerConfig? analyzerConfig = null, MonitoredServerRegistryState? registryState = null, SlowReadLog? slowReads = null)
     {
         /* #4442 scope 2, #4782: the read-latency seat THIS call's routes record into -- the accumulator and
            logger this call was given, held in a per-call object that the two record sites close over: the
@@ -305,7 +305,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
            the same process (six test classes call MapAll, and xUnit runs classes in parallel) took the samples
            of a server built before it. Production calls MapAll once, so nothing changes there. A caller with
            no accumulator (a test that maps the routes directly) records nothing. */
-        var readLatencyRecorder = new ReadLatencyRecorder(readLatency, logger);
+        var readLatencyRecorder = new ReadLatencyRecorder(readLatency, logger, slowReads);
 
         /* Liveness AND collection state (#2953). The one health surface that does not read the store, which
            makes it the only one that can answer when the store IS the problem — so it reports the collector's
@@ -377,6 +377,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 var stopwatch = Stopwatch.StartNew();
                 string result;
                 using var readScope = ReadScope.Open(logger);
+                readScope.Scope.CaptureStatements = true;
                 try
                 {
                     /* A newest-first capped read is judged against the window it read: with no anchor sent, the end is
@@ -416,7 +417,9 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                        routing this through FormatError first would make ToHttpResult's classifier re-derive
                        from text what this catch already knows structurally, and log it a second time. */
                     DarlingWebFailureLog.Report(logger, "/api/read/" + name, stopwatch.ElapsedMilliseconds, ex);
-                    RecordWebReadLatency(readLatencyRecorder, name, ReadScope.Resolve(ReadOutcomeClassifier.Classify(ex, context.RequestAborted), readScope.Fallback), stopwatch.ElapsedMilliseconds);
+                    var thrownOutcome = ReadScope.Resolve(ReadOutcomeClassifier.Classify(ex, context.RequestAborted), readScope.Fallback);
+                    RecordWebReadLatency(readLatencyRecorder, name, thrownOutcome, stopwatch.ElapsedMilliseconds);
+                    OfferWebSlowRead(readLatencyRecorder, readScope.Scope, name, thrownOutcome, stopwatch.ElapsedMilliseconds, context, SlowReadLog.ErrorClassOf(ex));
                     return Results.Json(DarlingWebFailureLog.Body(ex), statusCode: DarlingWebFailureLog.StatusCode(ex));
                 }
 
@@ -428,7 +431,10 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 var webOutcome = ClassifyToolResponse(result) == ToolResponseKind.ServerError
                     ? ReadOutcomeClassifier.ClassifySentence(McpHelpers.ErrorMessageOf(result), context.RequestAborted)
                     : ReadOutcome.Ok;
-                RecordWebReadLatency(readLatencyRecorder, name, ReadScope.Resolve(webOutcome, readScope.Fallback), stopwatch.ElapsedMilliseconds);
+                var resolvedOutcome = ReadScope.Resolve(webOutcome, readScope.Fallback);
+                RecordWebReadLatency(readLatencyRecorder, name, resolvedOutcome, stopwatch.ElapsedMilliseconds);
+                OfferWebSlowRead(readLatencyRecorder, readScope.Scope, name, resolvedOutcome, stopwatch.ElapsedMilliseconds, context,
+                    resolvedOutcome == ReadOutcome.Error ? "tool_error" : SlowReadLog.ErrorClassOf(resolvedOutcome));
 
                 return ToHttpResult(result, "/api/read/" + name, logger, stopwatch.ElapsedMilliseconds);
             });
@@ -1806,8 +1812,9 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
            Debug, exactly like the web loop's own recording. */
         var stopwatch = Stopwatch.StartNew();
         using var readScope = ReadScope.Open(readLatency?.Logger);
+        readScope.Scope.CaptureStatements = true;
         var outcome = await RunComposedPanelCoreAsync(postgres, body, clientDeadlineHeadroomSeconds, remapClientTimeout, includeDataStartFields, cancellationToken, readLatency?.Logger, onRunException, nowUtc);
-        RecordComposeLatency(readLatency, body, outcome, stopwatch.ElapsedMilliseconds, cancellationToken, readScope.Fallback);
+        RecordComposeLatency(readLatency, body, outcome, stopwatch.ElapsedMilliseconds, cancellationToken, readScope.Fallback, readScope.Scope);
         return outcome;
     }
 
@@ -1832,14 +1839,68 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         }
     }
 
-    private static void RecordComposeLatency(ReadLatencyRecorder? recorder, JsonObject body, ComposeRunOutcome outcome, long elapsedMs, System.Threading.CancellationToken cancellationToken, ReadFallback? noted = null)
+    /// <summary>The query string as slow-read arguments. A key name is caller text: only plain identifier characters
+    /// ([A-Za-z0-9_.-]) are stored, capped at 64; any other key is dropped and counted under <c>_dropped_keys</c>.</summary>
+    internal static JsonObject WebQueryArguments(IEnumerable<KeyValuePair<string, string?>> query)
+    {
+        var arguments = new JsonObject();
+        var droppedKeys = 0;
+        foreach (var (key, value) in query)
+        {
+            if (!key.All(c => c is (>= 'A' and <= 'Z') or (>= 'a' and <= 'z') or (>= '0' and <= '9') or '_' or '.' or '-'))
+            {
+                droppedKeys++;
+                continue;
+            }
+
+            arguments[key.Length > 64 ? key[..64] : key] = value;
+        }
+
+        if (droppedKeys > 0)
+        {
+            arguments["_dropped_keys"] = droppedKeys;
+        }
+
+        return arguments;
+    }
+
+    /// <summary>The composed-panel route label: <c>compose:</c> plus the panel's source when the catalog knows it,
+    /// else <c>compose:unknown</c>, held to 120 characters.</summary>
+    internal static string ComposeRouteLabel(JsonObject body)
+    {
+        var route = body["panel"] is JsonObject panel && panel["source"] is JsonValue sourceValue
+            && sourceValue.TryGetValue<string>(out var source) && MeasureCatalog.IsKnownSource(source)
+            ? "compose:" + source
+            : ComposeUnknownRouteLabel;
+        return route.Length > 120 ? route[..120] : route;
+    }
+
+    /// <summary>Offers a slow or failed <c>/api/read/*</c> call to the slow-read record (#5097): the query string, as sent,
+    /// becomes the arguments. Never throws into the request.</summary>
+    private static void OfferWebSlowRead(ReadLatencyRecorder recorder, ReadScope scope, string name, ReadOutcome outcome, long elapsedMs, HttpContext context, string? errorClass)
+    {
+        if (recorder.SlowReads is null || !recorder.SlowReads.ShouldRecord(outcome, elapsedMs))
+        {
+            return;
+        }
+
+        try
+        {
+            var arguments = WebQueryArguments(context.Request.Query.Select(q => new KeyValuePair<string, string?>(q.Key, q.Value.Count > 0 ? q.Value[0] : null)));
+
+            recorder.SlowReads.Offer(scope, ReadSurface.Web, name, outcome, elapsedMs, arguments, errorClass, recorder.Logger);
+        }
+        catch (Exception ex)
+        {
+            recorder.Logger?.LogDebug(ex, "Slow-read recording failed for /api/read/{Route}.", name);
+        }
+    }
+
+    private static void RecordComposeLatency(ReadLatencyRecorder? recorder, JsonObject body, ComposeRunOutcome outcome, long elapsedMs, System.Threading.CancellationToken cancellationToken, ReadFallback? noted = null, ReadScope? scope = null)
     {
         try
         {
-            var measureKey = body["panel"] is JsonObject panel && panel["source"] is JsonValue sourceValue
-                && sourceValue.TryGetValue<string>(out var source) && !string.IsNullOrEmpty(source)
-                ? "compose:" + source
-                : ComposeUnknownRouteLabel;
+            var measureKey = ComposeRouteLabel(body);
 
             /* Payload => Ok. outcome.Fault carries the real PostgresException for a store fault the panel
                author could not have caused -- classified the same way the web loop classifies any exception.
@@ -1862,7 +1923,17 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                                 ? ReadOutcome.Cancelled
                                 : ReadOutcome.Error;
 
-            recorder?.Accumulator?.Record(ReadSurface.Compose, measureKey, ReadScope.Resolve(readOutcome, noted), elapsedMs);
+            var resolved = ReadScope.Resolve(readOutcome, noted);
+            recorder?.Accumulator?.Record(ReadSurface.Compose, measureKey, resolved, elapsedMs);
+
+            /* #5097: a slow or failed run also becomes a slow-read row. The panel body is the arguments. */
+            if (scope is not null && recorder?.SlowReads is { } slowReads && slowReads.ShouldRecord(resolved, elapsedMs))
+            {
+                var errorClass = outcome.Fault is not null ? SlowReadLog.ErrorClassOf(outcome.Fault)
+                    : outcome.AuthorSqlState is { Length: > 0 } sqlState ? sqlState
+                    : resolved == ReadOutcome.Error ? "compose_error" : null;
+                slowReads.Offer(scope, ReadSurface.Compose, measureKey, resolved, elapsedMs, body.DeepClone() as JsonObject, errorClass, recorder.Logger);
+            }
         }
         catch (Exception ex)
         {
@@ -1995,7 +2066,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             candidateComposedSeconds = await McpCommandDeadlines.ResolveComposedQuerySecondsAsync(postgres, cancellationToken);
             try
             {
-                hourlyEdgesSnapshot = await BeginHourlyEdgesSnapshotAsync(postgres, hourlyEdgesCandidate, serverScope, candidateComposedSeconds.Value, cancellationToken);
+                hourlyEdgesSnapshot = await BeginHourlyEdgesSnapshotAsync(postgres, hourlyEdgesCandidate, serverScope, candidateComposedSeconds.Value, plan!.UsesModuleJoin, cancellationToken);
             }
             catch (PostgresException ex)
             {
@@ -2014,12 +2085,15 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
 
         await using var snapshot = hourlyEdgesSnapshot;
 
-        var runContext = new ComposeRunContext(serverScope, start, end, values, rollups, now, coverage, queryStoreWideEligible, wideResolution.WideStart, HourlyEdges: snapshot?.Verdict);
+        var runContext = new ComposeRunContext(serverScope, start, end, values, rollups, now, coverage, queryStoreWideEligible, wideResolution.WideStart, HourlyEdges: snapshot?.Verdict, ModuleMapThrough: snapshot?.ModuleMapThrough);
         var (compiled, compileError) = ComposeCompiler.Compile(plan!, runContext);
         if (compileError is not null)
         {
             return ComposeRunOutcome.BadRequest(compileError);
         }
+
+        ReadScope.NoteSource(
+            queryStoreWideEligible ? ReadScope.SourceIntervalTable : snapshot?.Verdict is not null ? ReadScope.SourceHourlyEdges : ReadScope.SourceRaw);
 
         try
         {
@@ -2368,6 +2442,13 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     internal static string HourlyEdgesGuardTimeoutSql(int guardSeconds) =>
         string.Create(CultureInfo.InvariantCulture, $"SET LOCAL statement_timeout = '{guardSeconds}s'");
 
+    /// <summary>#4605: a savepoint around the module map watermark read, so a fault in that read (the map's state table missing, say)
+    /// is undone and the panel statement still runs on the same connection and snapshot.</summary>
+    private const string HourlyEdgesModuleMapSavepointSql = "SAVEPOINT hourly_edges_module_map";
+
+    /// <summary>#4605: undoes the watermark read's savepoint, whether the read succeeded or failed.</summary>
+    private const string HourlyEdgesModuleMapRollbackSql = "ROLLBACK TO SAVEPOINT hourly_edges_module_map";
+
     /// <summary>#4605: puts the role's <c>statement_timeout</c> (the compose deadline) back for the panel statement. <c>DEFAULT</c> is
     /// the value the session started with, which for the compose role is the operator's configured deadline, so the panel
     /// keeps exactly the timeout it has today. Still <c>LOCAL</c>, so nothing outlives the transaction.</summary>
@@ -2381,16 +2462,21 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         private readonly NpgsqlTransaction _transaction;
         private bool _disposed;
 
-        public HourlyEdgesSnapshot(NpgsqlConnection connection, NpgsqlTransaction transaction, ComposeHourlyEdgesVerdict? verdict)
+        public HourlyEdgesSnapshot(NpgsqlConnection connection, NpgsqlTransaction transaction, ComposeHourlyEdgesVerdict? verdict, DateTime? moduleMapThrough = null)
         {
             Connection = connection;
             _transaction = transaction;
             Verdict = verdict;
+            ModuleMapThrough = moduleMapThrough;
         }
 
         public NpgsqlConnection Connection { get; }
 
         public ComposeHourlyEdgesVerdict? Verdict { get; }
+
+        /// <summary>The module map's watermark, read in this snapshot, or null when the panel does not join modules, the
+        /// guard did not pass, or the map has no watermark.</summary>
+        public DateTime? ModuleMapThrough { get; }
 
         public async ValueTask DisposeAsync()
         {
@@ -2425,10 +2511,12 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// <summary>Opens the run's connection, begins the snapshot transaction and runs the count guard in it. A failed OPEN throws
     /// <see cref="ComposeStoreOpenException"/> to the caller. A fault after the open (the begin, the read-only step, a guard
     /// rollback that itself failed) returns null and the panel opens a fresh connection and reads raw; a guard fault that was
-    /// undone cleanly returns a snapshot whose verdict is null and the panel reads raw on it. A cancellation propagates.</summary>
+    /// undone cleanly returns a snapshot whose verdict is null and the panel reads raw on it. A cancellation propagates.
+    /// When the panel joins modules and the guard passed, the module map's watermark is read in the same transaction, so the
+    /// watermark and the panel statement see one snapshot.</summary>
     private static async Task<HourlyEdgesSnapshot?> BeginHourlyEdgesSnapshotAsync(
         NpgsqlDataSource postgres, ComposeHourlyEdgesCandidate candidate, IReadOnlyList<string>? serverScope, int composedSeconds,
-        System.Threading.CancellationToken cancellationToken)
+        bool readModuleMapWatermark, System.Threading.CancellationToken cancellationToken)
     {
         /* The open is outside the try on purpose: a store that cannot be reached throws ComposeStoreOpenException to the caller, who
            answers it the way it answers the panel's own failed open. Opening again here would cost a second open timeout. */
@@ -2439,7 +2527,10 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             transaction = await connection.BeginTransactionAsync(System.Data.IsolationLevel.RepeatableRead, cancellationToken);
             await ExecuteSnapshotStatementAsync(connection, HourlyEdgesReadOnlySql, McpCommandDeadlines.ReadSeconds, cancellationToken);
             var verdict = await ResolveHourlyEdgesVerdictAsync(connection, candidate, serverScope, composedSeconds, cancellationToken);
-            return new HourlyEdgesSnapshot(connection, transaction, verdict);
+            var moduleMapThrough = verdict is not null && readModuleMapWatermark
+                ? await ReadModuleMapWatermarkInSnapshotAsync(connection, cancellationToken)
+                : null;
+            return new HourlyEdgesSnapshot(connection, transaction, verdict, moduleMapThrough);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -2464,6 +2555,18 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
 
             throw;
         }
+    }
+
+    /// <summary>Reads the module map's watermark on the snapshot connection. The read swallows its own faults and returns null, but
+    /// a failed statement aborts the transaction, so the read runs under a savepoint that is always rolled back to: a fault is
+    /// undone and the panel reads without the map, and a clean read loses nothing. A rollback that itself fails is rethrown to
+    /// the snapshot begin, which abandons the snapshot.</summary>
+    private static async Task<DateTime?> ReadModuleMapWatermarkInSnapshotAsync(NpgsqlConnection connection, System.Threading.CancellationToken cancellationToken)
+    {
+        await ExecuteSnapshotStatementAsync(connection, HourlyEdgesModuleMapSavepointSql, McpCommandDeadlines.ReadSeconds, cancellationToken);
+        var watermark = await DarlingModuleMap.ReadWatermarkAsync(connection, cancellationToken);
+        await ExecuteSnapshotStatementAsync(connection, HourlyEdgesModuleMapRollbackSql, McpCommandDeadlines.ReadSeconds, cancellationToken);
+        return watermark;
     }
 
     private static async Task ExecuteSnapshotStatementAsync(
@@ -3542,7 +3645,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             ["get_long_query_completions"] = R(CatData, "Completed long-running queries captured by the XE trace.", PServer(), PHours(24), PLimit(30), PAsOf()),
             ["get_server_properties"] = R(CatData, "Server properties/inventory for a server.", PServer()),
             ["get_tempdb_trend"] = R(CatData, "tempdb space usage over time.", PServer(), PHours(24), PAsOf(), PInt("bucket_minutes")),
-            ["get_top_procedures_by_cpu"] = R(CatData, "Top stored procedures by CPU.", PServer(), PHours(24), PTop(20), PText("database_name"), PAsOf()),
+            ["get_top_procedures_by_cpu"] = R(CatData, "Top stored procedures by CPU.", PServer(), PHours(24), PTop(20), PText("database_name"), PAsOf(), PTextDefault("detail", "summary")),
             ["get_top_queries_by_cpu"] = R(CatData, "Top queries by CPU, optionally parallel-only / min-DOP.", PServer(), PHours(24), PTop(20), PText("database_name"), PBool("parallel_only", false), PInt("min_dop", 0), PAsOf(), PTextDefault("detail", "summary")),
             ["get_pg_top_queries"] = R(CatData, "Top PostgreSQL query shapes by total execution time (Aurora targets).", PServer(), PHours(24), PLimit(20), PAsOf()),
             ["get_pg_plans"] = R(CatData, "Captured PostgreSQL execution plans, grouped by shape. Plans are redacted at collection.", PServer(), PHours(24), PLimit(10), PText("query_id"), PAsOf()),
@@ -3587,7 +3690,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             /* ── trends (DarlingMcpTrendTools) ── */
             ["get_file_io_trend"] = R(CatTrends, "File I/O read and write latency over time per database and file type, heaviest stall first; database_name charts one database per file.", PServer(), PHours(24), PAsOf(), PInt("bucket_minutes"), PText("database_name")),
             ["get_memory_trend"] = R(CatTrends, "Memory usage over time.", PServer(), PHours(24), PAsOf(), PInt("bucket_minutes")),
-            ["get_server_trend"] = R(CatTrends, "One instance trend over time, picked by metric: total_waits, cpu_scheduler, memory_clerks, plan_cache, latch, spinlock, session_stats or collector_duration.", PReqText("metric"), PServer(), PHours(24), PAsOf(), PInt("bucket_minutes"), PText("clerk_types"), PText("names")),
+            ["get_server_trend"] = R(CatTrends, "One instance trend over time, picked by metric: total_waits, cpu_scheduler, memory_clerks, plan_cache, latch, spinlock, session_stats, collector_duration, tempdb_file_io, tempdb_size or file_io_throughput.", PReqText("metric"), PServer(), PHours(24), PAsOf(), PInt("bucket_minutes"), PText("clerk_types"), PText("names")),
             ["get_perfmon_trend"] = R(CatTrends, "One perfmon counter over time (requires counter_name).", PReqText("counter_name"), PServer(), PHours(24), PAsOf(), PInt("bucket_minutes")),
             /* #3653 item 17: the four reads below disclose the WINDOW floor as window_truncated (beside
                effective_start / effective_hours_back) — not the page dialect's truncated, which they never had. */
@@ -3610,6 +3713,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             ["get_collector_cost"] = R(CatOverview, "The monitoring tool's OWN per-collector cost on the monitored servers (self-monitoring) - which of our collectors is the most expensive to run. Pass collector_name for that one collector's daily trend instead of the ranked list.", PInt("days_back", 7), PText("collector_name")),
             ["get_collector_stall_probes"] = R(CatOverview, "The out-of-band server-wide wait samples taken while one of OUR collectors was stalled mid-read - what the monitored instance was doing inside the window the sequential sweep records nothing in. Carries the outcome census beside the samples, deliberately unbanded.", PServer(), PInt("days_back", 7), PLimit(DarlingMcpStallProbeTools.DefaultLimit)),
             ["get_oversized_plan_backlog"] = R(CatOverview, "The cached plans this tool measured as too large to capture inline, and what the out-of-band sweep has done about each one: per server the three verdict buckets (pending/captured/expired, a strict partition), the attempt figures on still-pending rows, the newest capture and expiry instants, and observed_bytes min/median/max, with the per-collector census beside them. Takes no window - a worklist updated in place, not a series. Pass server_name with include_rows for the claim keys.", PServer(), PBool("include_rows", false), PLimit(DarlingMcpOversizedPlanBacklogTools.DefaultLimit)),
+            ["get_slow_reads"] = R(CatOverview, "The monitoring tool's OWN slow or failed reads, newest first - each with the arguments it was asked with, the source that answered and its slowest statements. Recorded when a read took 5 seconds or more or ended in a timeout, error or limit. Optional server, surface (web/compose/mcp) and route filter.", PHours(DarlingMcpSlowReadTools.DefaultHours), PServer(), PText("surface"), PText("route"), PLimit(DarlingMcpSlowReadTools.DefaultLimit)),
             ["get_read_latency"] = R(CatOverview, "The monitoring tool's OWN read-latency history (self-monitoring) - which of the web dashboard's or MCP server's own reads is really slow, and how often it times out. p50/p95/p99 are bucket upper-bound estimates, per (surface, route), sorted p95 desc. Optional surface (web/compose/mcp) and route filter. fallbacks and gate_failures count reads that fell back to raw.", PHours(DarlingMcpReadLatencyTools.DefaultHours), PText("surface"), PText("route"), PLimit(DarlingMcpReadLatencyTools.DefaultLimit)),
 
             /* ── latch / spinlock (DarlingMcpLatchSpinlockTools) ── */
@@ -4366,20 +4470,20 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             ["get_sweep_reports"] = (c, pg, an) => DarlingMcpFleetSweepTools.GetSweepReports(pg, logger, Hours(c, 1), AsOf(c), Str(c, "sweep_id"), Str(c, "watch_state"), c.RequestAborted),
 
             /* ── blocking / deadlocks ── */
-            ["get_blocked_process_xml"] = (c, pg, an) => DarlingMcpBlockingTools.GetBlockedProcessXml(pg, Server(c), Hours(c, 24), Rows(c, "limit", 5), as_of: AsOf(c), cancellationToken: c.RequestAborted),
+            ["get_blocked_process_xml"] = (c, pg, an) => DarlingMcpBlockingTools.GetBlockedProcessXml(pg, Server(c), Hours(c, 24), Rows(c, "limit", 5), as_of: AsOf(c), logger: logger, cancellationToken: c.RequestAborted),
             /* #4198: the internal overload, not the MCP tool wrapper — pins the OLD row limit (30) and the
                OLD 2000-char text cap (WebSqlTextPreviewLength) explicitly, so this page does not change even
                though the tool's own MCP defaults (limit 15, 150-char preview) did. Same shape #3897's trend
                tools use to pass TrendBudget.Chart here instead of their own MCP point budget. */
-            ["get_blocking"] = (c, pg, an) => DarlingMcpBlockingTools.GetBlocking(pg, Server(c), Hours(c, 24), Rows(c, "limit", 30), null, false, AsOf(c), DarlingMcpBlockingTools.WebSqlTextPreviewLength, registryState, c.RequestAborted),
+            ["get_blocking"] = (c, pg, an) => DarlingMcpBlockingTools.GetBlocking(pg, Server(c), Hours(c, 24), Rows(c, "limit", 30), null, false, AsOf(c), DarlingMcpBlockingTools.WebSqlTextPreviewLength, registryState, logger, c.RequestAborted),
             ["get_blocking_trend"] = (c, pg, an) => DarlingMcpBlockingTools.GetBlockingTrend(pg, Server(c), Hours(c, 24), as_of: AsOf(c), cancellationToken: c.RequestAborted),
             /* #4254: full_graph defaults false on the MCP signature (a preview keeps a busy production
                store's tools/list-driven call under the shared response budget), but the web viewer has
                always shown the whole graph. The row pins its OWN default to true so #4198's MCP-side
                budget cut does not silently shrink what the viewer renders. */
-            ["get_deadlock_detail"] = (c, pg, an) => DarlingMcpBlockingTools.GetDeadlockDetail(pg, Server(c), Hours(c, 24), Rows(c, "limit", 5), full_graph: QueryBool(c, "full_graph", true), as_of: AsOf(c), cancellationToken: c.RequestAborted),
+            ["get_deadlock_detail"] = (c, pg, an) => DarlingMcpBlockingTools.GetDeadlockDetail(pg, Server(c), Hours(c, 24), Rows(c, "limit", 5), full_graph: QueryBool(c, "full_graph", true), as_of: AsOf(c), logger: logger, cancellationToken: c.RequestAborted),
             ["get_deadlock_trend"] = (c, pg, an) => DarlingMcpBlockingTools.GetDeadlockTrend(pg, Server(c), Hours(c, 24), as_of: AsOf(c), cancellationToken: c.RequestAborted),
-            ["get_deadlocks"] = (c, pg, an) => DarlingMcpBlockingTools.GetDeadlocks(pg, Server(c), Hours(c, 24), Rows(c, "limit", 20), as_of: AsOf(c), registryState: registryState, cancellationToken: c.RequestAborted),
+            ["get_deadlocks"] = (c, pg, an) => DarlingMcpBlockingTools.GetDeadlocks(pg, Server(c), Hours(c, 24), Rows(c, "limit", 20), as_of: AsOf(c), registryState: registryState, logger: logger, cancellationToken: c.RequestAborted),
             ["get_lock_wait_trend"] = (c, pg, an) => OptionalInt(c, "bucket_minutes", out var bucketMinutes)
                 ? DarlingMcpBlockingTools.GetLockWaitTrend(pg, Server(c), Hours(c, 24), AsOf(c), bucketMinutes, TrendBudget.Chart, c.RequestAborted)
                 : UnparseableParam("bucket_minutes"),
@@ -4438,12 +4542,12 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                still lets an operator ask for the whole statement via ?full_text=true, but the default (no
                query override) reproduces the page exactly as it always rendered. */
             ["get_query_store_top"] = (c, pg, an) => DarlingMcpDataTools.GetQueryStoreTop(pg, Server(c), Hours(c, 24), Rows(c, "top", 20), Str(c, "database_name"), as_of: AsOf(c), execution_type: Str(c, "execution_type"), module_name: Str(c, "module_name"), full_text: QueryBool(c, "full_text", false), previewLength: 2000, cancellationToken: c.RequestAborted),
-            ["get_long_query_completions"] = (c, pg, an) => DarlingMcpLongQueryTools.GetLongQueryCompletions(pg, Server(c), Hours(c, 24), Rows(c, "limit", 30), as_of: AsOf(c), cancellationToken: c.RequestAborted),
+            ["get_long_query_completions"] = (c, pg, an) => DarlingMcpLongQueryTools.GetLongQueryCompletions(pg, Server(c), Hours(c, 24), Rows(c, "limit", 30), as_of: AsOf(c), logger: logger, cancellationToken: c.RequestAborted),
             ["get_server_properties"] = (c, pg, an) => DarlingMcpDataTools.GetServerProperties(pg, Server(c), c.RequestAborted),
             ["get_tempdb_trend"] = (c, pg, an) => OptionalInt(c, "bucket_minutes", out var bucketMinutes)
                 ? DarlingMcpDataTools.GetTempDbTrend(pg, Server(c), Hours(c, 24), AsOf(c), bucketMinutes, TrendBudget.Chart, c.RequestAborted)
                 : UnparseableParam("bucket_minutes"),
-            ["get_top_procedures_by_cpu"] = (c, pg, an) => DarlingMcpDataTools.GetTopProceduresByCpu(pg, Server(c), Hours(c, 24), Rows(c, "top", 20), Str(c, "database_name"), as_of: AsOf(c), cancellationToken: c.RequestAborted),
+            ["get_top_procedures_by_cpu"] = (c, pg, an) => DarlingMcpDataTools.GetTopProceduresByCpu(pg, Server(c), Hours(c, 24), Rows(c, "top", 20), Str(c, "database_name"), as_of: AsOf(c), detail: Str(c, "detail") ?? "summary", cancellationToken: c.RequestAborted),
             ["get_top_queries_by_cpu"] = (c, pg, an) => DarlingMcpDataTools.GetTopQueriesByCpu(pg, Server(c), Hours(c, 24), Rows(c, "top", 20), Str(c, "database_name"), QueryBool(c, "parallel_only", false), QueryInt(c, "min_dop", null, 0), as_of: AsOf(c), detail: Str(c, "detail") ?? "summary", cancellationToken: c.RequestAborted),
             ["get_pg_top_queries"] = (c, pg, an) => DarlingMcpPgStatementTools.GetPgTopQueries(pg, Server(c), Hours(c, 24), Rows(c, "limit", 20), as_of: AsOf(c), cancellationToken: c.RequestAborted),
             /* query_id arrives as TEXT and is passed through as text (#2548): a queryid that made a
@@ -4551,6 +4655,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             ["get_collector_cost"] = (c, pg, an) => DarlingMcpCollectorCostTools.GetCollectorCost(pg, QueryInt(c, "days_back", null, 7), Str(c, "collector_name"), c.RequestAborted),
             ["get_collector_stall_probes"] = (c, pg, an) => DarlingMcpStallProbeTools.GetCollectorStallProbes(pg, Server(c), QueryInt(c, "days_back", null, 7), Rows(c, "limit", DarlingMcpStallProbeTools.DefaultLimit), c.RequestAborted),
             ["get_oversized_plan_backlog"] = (c, pg, an) => DarlingMcpOversizedPlanBacklogTools.GetOversizedPlanBacklog(pg, Server(c), QueryBool(c, "include_rows", false), Rows(c, "limit", DarlingMcpOversizedPlanBacklogTools.DefaultLimit), c.RequestAborted),
+            ["get_slow_reads"] = (c, pg, an) => DarlingMcpSlowReadTools.GetSlowReads(pg, Hours(c, DarlingMcpSlowReadTools.DefaultHours), Server(c), Str(c, "surface"), Str(c, "route"), Rows(c, "limit", DarlingMcpSlowReadTools.DefaultLimit), false, c.RequestAborted),
             ["get_read_latency"] = (c, pg, an) => DarlingMcpReadLatencyTools.GetReadLatency(pg, Hours(c, DarlingMcpReadLatencyTools.DefaultHours), Str(c, "surface"), Str(c, "route"), Rows(c, "limit", DarlingMcpReadLatencyTools.DefaultLimit), c.RequestAborted),
 
             /* ── latch / spinlock ── */

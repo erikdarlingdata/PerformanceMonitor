@@ -9,6 +9,9 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading.Tasks;
+using System.Windows.Controls;
+using PerformanceMonitorLite.Mcp;
 using PerformanceMonitorLite.Services;
 
 namespace PerformanceMonitorLite.Controls;
@@ -37,24 +40,69 @@ public partial class ServerTab
     internal static DateTime? EarliestDeadlockStatsPointDrawn(IEnumerable<PerformanceMonitor.Common.DeadlockSeverityStatsPoint> data) =>
         data.Select(p => (DateTime?)p.Time).Min();
 
+    /// <summary>
+    /// #5098: whether the Blocking Trend / Blocking Stats read drew the XE blocked process reports (it falls back to the DMV snapshots
+    /// only when the window holds none). The note then probes the XE collector alone: a DMV that covers the whole window must not hide
+    /// where the XE data starts. A window that can never get a note starts no check, and a check that throws keeps today's probe.
+    /// </summary>
+    private async System.Threading.Tasks.Task<bool> BlockingReadTookXeAsync(DateTime start, DateTime end, IReadOnlyList<string>? databaseNames)
+    {
+        if (!McpQueryTools.CanWindowBeTruncated(start, end))
+        {
+            return false;
+        }
+
+        try
+        {
+            return await Task.Run(() => _dataService.HasBlockedProcessReportsInWindowAsync(_serverId, start, end, databaseNames));
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Warn("BlockingCharts", $"[{_server.DisplayName}] the blocked-process-report source check failed, so the note probes both sources: {ex.Message}");
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// #5098: the blocking chart's note. The DMV branch is the shared step, unchanged. The XE branch names the combined start
+    /// (<see cref="LocalDataService.GetBlockingXeDataStartAsync"/>: the collector's floor, the earliest report and the blocked process
+    /// threshold's history) through the same guarded probe, so a failed probe costs only the note.
+    /// </summary>
+    private async System.Threading.Tasks.Task RefreshBlockingBannerAsync(
+        bool blockingFromXe, TextBlock banner, DateTime start, DateTime end, DateTime? earliestDrawn, IReadOnlyList<string>? databaseNames)
+    {
+        if (!blockingFromXe)
+        {
+            await RefreshWindowTruncatedBannerAsync(QueryWindowRelation.BlockedProcessReports, banner, start, end, earliestDrawn);
+            return;
+        }
+
+        var floor = await ProbeWindowFloorOrNullAsync(
+            () => Task.Run(() => _dataService.GetBlockingXeDataStartAsync(_serverId, start, end, databaseNames)),
+            $"[{_server.DisplayName}] {QueryWindowRelation.BlockedProcessReports}", start, end);
+        ApplyWindowFloorToBanner(banner, EarlierOfFloorAndRowShown(floor, earliestDrawn), start, GetPickerZone());
+    }
+
     /// <summary>The Trends sub-tab's three notes, over the SAME UTC window the three reads took.</summary>
     private async System.Threading.Tasks.Task RefreshBlockingTrendsBannersAsync(
         List<LockWaitTrendPoint> lockWait, List<TrendPoint> blocking, List<TrendPoint> deadlocks,
-        int hoursBack, DateTime? fromDate, DateTime? toDate)
+        int hoursBack, DateTime? fromDate, DateTime? toDate, IReadOnlyList<string>? databaseNames = null)
     {
         var (start, end) = LocalDataService.GetQueriesTabWindowUtc(hoursBack, fromDate, toDate);
+        var blockingFromXe = await BlockingReadTookXeAsync(start, end, databaseNames);
         await RefreshWindowTruncatedBannerAsync(QueryWindowRelation.WaitStats, LockWaitTrendTruncationBanner, start, end);
-        await RefreshWindowTruncatedBannerAsync(QueryWindowRelation.BlockedProcessReports, BlockingTrendTruncationBanner, start, end, EarliestBlockingTrendPointDrawn(blocking));
+        await RefreshBlockingBannerAsync(blockingFromXe, BlockingTrendTruncationBanner, start, end, EarliestBlockingTrendPointDrawn(blocking), databaseNames);
         await RefreshWindowTruncatedBannerAsync(QueryWindowRelation.Deadlocks, DeadlockTrendTruncationBanner, start, end, EarliestBlockingTrendPointDrawn(deadlocks));
     }
 
     /// <summary>The Blocking Stats sub-tab's two notes (one per chart pair).</summary>
     private async System.Threading.Tasks.Task RefreshBlockingStatsBannersAsync(
         List<BlockingDurationStatsPoint> durationStats, List<PerformanceMonitor.Common.DeadlockSeverityStatsPoint> deadlockSeverity,
-        int hoursBack, DateTime? fromDate, DateTime? toDate)
+        int hoursBack, DateTime? fromDate, DateTime? toDate, IReadOnlyList<string>? databaseNames = null)
     {
         var (start, end) = LocalDataService.GetQueriesTabWindowUtc(hoursBack, fromDate, toDate);
-        await RefreshWindowTruncatedBannerAsync(QueryWindowRelation.BlockedProcessReports, BlockingStatsBlockingTruncationBanner, start, end, EarliestBlockingStatsPointDrawn(durationStats));
+        var blockingFromXe = await BlockingReadTookXeAsync(start, end, databaseNames);
+        await RefreshBlockingBannerAsync(blockingFromXe, BlockingStatsBlockingTruncationBanner, start, end, EarliestBlockingStatsPointDrawn(durationStats), databaseNames);
         await RefreshWindowTruncatedBannerAsync(QueryWindowRelation.Deadlocks, BlockingStatsDeadlockTruncationBanner, start, end, EarliestDeadlockStatsPointDrawn(deadlockSeverity));
     }
 }

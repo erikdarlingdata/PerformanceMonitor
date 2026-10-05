@@ -380,7 +380,15 @@ public partial class CorrelatedTimelineLanesControl : UserControl
         await LiteBlockingLaneDataStart.ShowAsync(
             BlockingLaneDataStartBanner,
             relation => Task.Run(() => _dataService!.GetQueryWindowFloorAsync(relation, _serverId, startUtc, endUtc)),
-            startUtc, endUtc, blockingBars, deadlockBars, _displayZone());
+            startUtc, endUtc, blockingBars, deadlockBars, _displayZone(),
+            blockingReadTookXe: () => Task.Run(() => _dataService!.HasBlockedProcessReportsInWindowAsync(_serverId, startUtc, endUtc)),
+            xeOnlyBlockingFloorOf: () => Task.Run(() => _dataService!.GetQueryWindowFloorAsync(QueryWindowRelation.BlockedProcessReports, _serverId, startUtc, endUtc, includeAlsoCovered: false)),
+            earliestReportOf: () => Task.Run(() => _dataService!.GetEarliestBlockedProcessReportInWindowAsync(_serverId, startUtc, endUtc)),
+            thresholdOf: () => Task.Run(async () =>
+            {
+                var (on, first, zero) = await _dataService!.GetBlockedProcessThresholdOnAsync(_serverId, startUtc, endUtc);
+                return new LiteBlockingLaneDataStart.BlockedProcessThreshold(on, first, zero);
+            }));
     }
 
     private void UpdateBlockingLane(List<(double Time, double Value)> blockingData,

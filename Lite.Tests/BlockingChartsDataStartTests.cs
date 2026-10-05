@@ -183,6 +183,267 @@ FROM generate_series($5::TIMESTAMP, $6::TIMESTAMP, INTERVAL 30 MINUTE) AS g(t)",
         Assert.Equal(SinceText(pointAt), text);
     }
 
+    private static readonly DateTime FixedEnd = new(2026, 9, 20, 12, 0, 0, DateTimeKind.Unspecified);
+
+    private Task SeedDmvRowAsync(DateTime at) => ExecAsync(@"
+INSERT INTO dmv_blocking_snapshots (collection_id, collection_time, event_time, server_id, server_name, database_name, monitor_loop, wait_time_ms)
+VALUES ($1, $2, $2, $3, $4, 'db1', 1, 100)", _nextId++, Naive(at), ServerId, ServerName);
+
+    /// <summary>The tab's note for the blocking charts, as the step runs it: the source check, then the probe with its flag.</summary>
+    private async Task<(bool Visible, string Text)> BlockingNoteAsync(DateTime? earliestDrawn, DateTime startUtc, DateTime endUtc)
+    {
+        var service = new LocalDataService(_duckDb);
+        var fromXe = await service.HasBlockedProcessReportsInWindowAsync(ServerId, startUtc, endUtc);
+        /* #5098: the XE branch names the combined start (collector floor, earliest report, threshold history); the DMV branch is the shared probe. */
+        var floor = fromXe
+            ? await service.GetBlockingXeDataStartAsync(ServerId, startUtc, endUtc)
+            : await service.GetQueryWindowFloorAsync(QueryWindowRelation.BlockedProcessReports, ServerId, startUtc, endUtc, includeAlsoCovered: true);
+        floor = ServerTab.EarlierOfFloorAndRowShown(floor, earliestDrawn);
+        return OnStaThread(() =>
+        {
+            var banner = new System.Windows.Controls.TextBlock();
+            ServerTab.ApplyWindowFloorToBanner(banner, floor, startUtc, TimeZoneInfo.Utc);
+            return (banner.Visibility == System.Windows.Visibility.Visible, banner.Text);
+        });
+    }
+
+    /// <summary>#5098: the DMV covers the whole window and the XE collector began mid-window; the read drew the XE rows, so the note names the XE start.</summary>
+    [Theory]
+    [InlineData("BlockingTrend")]
+    [InlineData("BlockingStats")]
+    public async Task DmvCoversTheWindow_XeStartsMidway_NamesTheXeStart(string surface)
+    {
+        await _duckDb.InitializeAsync();
+        var xeFrom = FixedEnd.AddDays(-3);
+        await SeedRunsAsync(QueryWindowRelation.BlockedProcessReports, FixedEnd.AddDays(-9), FixedEnd);
+        await ExecAsync(@"
+INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, rows_collected)
+SELECT $1 + row_number() OVER (), $2, $3, 'dmv_blocking_snapshot', g.t, 12, 'SUCCESS', 0
+FROM generate_series($4::TIMESTAMP, $5::TIMESTAMP, INTERVAL 30 MINUTE) AS g(t)", _nextId, ServerId, ServerName, FixedEnd.AddDays(-9), FixedEnd);
+        _nextId += 100000;
+        await ExecAsync("DELETE FROM collection_log WHERE collector_name = 'blocked_process_report' AND collection_time < $1", xeFrom);
+        await SeedDmvRowAsync(FixedEnd.AddDays(-6));
+        await SeedRowAsync(QueryWindowRelation.BlockedProcessReports, xeFrom.AddHours(2));
+
+        var (visible, text) = await BlockingNoteAsync(DrawnFor(surface, xeFrom.AddHours(2)), FixedEnd.AddDays(-7), FixedEnd);
+
+        Assert.True(visible);
+        Assert.Equal(SinceText(xeFrom), text);
+    }
+
+    /// <summary>#5098: no XE row in the window, so the read drew the DMV rows and the note is as before (the DMV covers the window: quiet).</summary>
+    [Theory]
+    [InlineData("BlockingTrend")]
+    [InlineData("BlockingStats")]
+    public async Task DmvOnly_NoteIsAsBefore(string surface)
+    {
+        await _duckDb.InitializeAsync();
+        await ExecAsync(@"
+INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, rows_collected)
+SELECT $1 + row_number() OVER (), $2, $3, 'dmv_blocking_snapshot', g.t, 12, 'SUCCESS', 0
+FROM generate_series($4::TIMESTAMP, $5::TIMESTAMP, INTERVAL 30 MINUTE) AS g(t)", _nextId, ServerId, ServerName, FixedEnd.AddDays(-9), FixedEnd);
+        _nextId += 100000;
+        await SeedDmvRowAsync(FixedEnd.AddDays(-6));
+
+        Assert.False(await new LocalDataService(_duckDb).HasBlockedProcessReportsInWindowAsync(ServerId, FixedEnd.AddDays(-7), FixedEnd));
+        var (visible, text) = await BlockingNoteAsync(DrawnFor(surface, FixedEnd.AddDays(-6)), FixedEnd.AddDays(-7), FixedEnd);
+
+        Assert.False(visible);
+        Assert.Equal(string.Empty, text);
+    }
+
+    /// <summary>#5098: the XE collector covers the whole window: no note, with or without the DMV beside it.</summary>
+    [Theory]
+    [InlineData("BlockingTrend")]
+    [InlineData("BlockingStats")]
+    public async Task XeCoversTheWindow_ShowsNoNote(string surface)
+    {
+        await _duckDb.InitializeAsync();
+        await SeedRunsAsync(QueryWindowRelation.BlockedProcessReports, FixedEnd.AddDays(-9), FixedEnd);
+        await SeedRowAsync(QueryWindowRelation.BlockedProcessReports, FixedEnd.AddDays(-7).AddHours(5));
+
+        var (visible, text) = await BlockingNoteAsync(DrawnFor(surface, FixedEnd.AddDays(-7).AddHours(5)), FixedEnd.AddDays(-7), FixedEnd);
+
+        Assert.False(visible);
+        Assert.Equal(string.Empty, text);
+    }
+
+    private async Task SeedThresholdAsync(DateTime at, int valueInUse) =>
+        await ExecAsync(@"
+INSERT INTO server_config (config_id, capture_time, server_id, server_name, configuration_name, value_configured, value_in_use, is_dynamic, is_advanced)
+VALUES ($1, $2, $3, $4, 'blocked process threshold (s)', $5, $5, true, true)", _nextId++, Naive(at), ServerId, ServerName, valueInUse);
+
+    /// <summary>#5098: the threshold went on midway; the collector covers the window and the first report is later. The note names the first nonzero snapshot.</summary>
+    [Theory]
+    [InlineData("BlockingTrend")]
+    [InlineData("BlockingStats")]
+    public async Task ThresholdWentOnMidway_NamesTheFirstNonzeroSnapshot(string surface)
+    {
+        await _duckDb.InitializeAsync();
+        await SeedRunsAsync(QueryWindowRelation.BlockedProcessReports, FixedEnd.AddDays(-9), FixedEnd);
+        await SeedThresholdAsync(FixedEnd.AddDays(-8), 0);
+        await SeedThresholdAsync(FixedEnd.AddDays(-4), 5);
+        await SeedRowAsync(QueryWindowRelation.BlockedProcessReports, FixedEnd.AddDays(-2));
+
+        var (visible, text) = await BlockingNoteAsync(DrawnFor(surface, FixedEnd.AddDays(-2)), FixedEnd.AddDays(-7), FixedEnd);
+
+        Assert.True(visible);
+        Assert.Equal(SinceText(FixedEnd.AddDays(-4)), text);
+    }
+
+    /// <summary>#5098: a report earlier than the first nonzero snapshot is proof the threshold was on: the note names the report.</summary>
+    [Theory]
+    [InlineData("BlockingTrend")]
+    [InlineData("BlockingStats")]
+    public async Task AReportBeforeTheFirstNonzeroSnapshot_NamesTheReport(string surface)
+    {
+        await _duckDb.InitializeAsync();
+        await SeedRunsAsync(QueryWindowRelation.BlockedProcessReports, FixedEnd.AddDays(-9), FixedEnd);
+        await SeedThresholdAsync(FixedEnd.AddDays(-8), 0);
+        await SeedThresholdAsync(FixedEnd.AddDays(-4), 5);
+        await SeedRowAsync(QueryWindowRelation.BlockedProcessReports, FixedEnd.AddDays(-5));
+
+        var (visible, text) = await BlockingNoteAsync(DrawnFor(surface, FixedEnd.AddDays(-5)), FixedEnd.AddDays(-7), FixedEnd);
+
+        Assert.True(visible);
+        Assert.Equal(SinceText(FixedEnd.AddDays(-5)), text);
+    }
+
+    /// <summary>#5098: the threshold was already on before the window: covered, no note.</summary>
+    [Theory]
+    [InlineData("BlockingTrend")]
+    [InlineData("BlockingStats")]
+    public async Task ThresholdOnBeforeTheWindow_IsCovered(string surface)
+    {
+        await _duckDb.InitializeAsync();
+        await SeedRunsAsync(QueryWindowRelation.BlockedProcessReports, FixedEnd.AddDays(-9), FixedEnd);
+        await SeedThresholdAsync(FixedEnd.AddDays(-8), 5);
+        await SeedRowAsync(QueryWindowRelation.BlockedProcessReports, FixedEnd.AddDays(-5));
+
+        var (visible, text) = await BlockingNoteAsync(DrawnFor(surface, FixedEnd.AddDays(-5)), FixedEnd.AddDays(-7), FixedEnd);
+
+        Assert.False(visible);
+        Assert.Equal(string.Empty, text);
+    }
+
+    /// <summary>#5098: nonzero snapshots inside the window, none before it, and no zero ever read: the earlier snapshots may be gone, so the start is unknown, not late. Covered, no note.</summary>
+    [Theory]
+    [InlineData("BlockingTrend")]
+    [InlineData("BlockingStats")]
+    public async Task NonzeroSnapshotsInTheWindowAndNoZeroSeen_IsCovered(string surface)
+    {
+        await _duckDb.InitializeAsync();
+        await SeedRunsAsync(QueryWindowRelation.BlockedProcessReports, FixedEnd.AddDays(-9), FixedEnd);
+        await SeedThresholdAsync(FixedEnd.AddDays(-4), 5);
+        await SeedThresholdAsync(FixedEnd.AddDays(-3), 5);
+        await SeedRowAsync(QueryWindowRelation.BlockedProcessReports, FixedEnd.AddDays(-2));
+
+        var (visible, text) = await BlockingNoteAsync(DrawnFor(surface, FixedEnd.AddDays(-2)), FixedEnd.AddDays(-7), FixedEnd);
+
+        Assert.False(visible);
+        Assert.Equal(string.Empty, text);
+    }
+
+    /// <summary>#5098: the threshold read 5 and then 0 with no earlier snapshot: it was turned off later, which is not a late start. Covered, no note.</summary>
+    [Theory]
+    [InlineData("BlockingTrend")]
+    [InlineData("BlockingStats")]
+    public async Task AZeroSnapshotAfterTheFirstNonzeroOne_IsNotALateStart(string surface)
+    {
+        await _duckDb.InitializeAsync();
+        await SeedRunsAsync(QueryWindowRelation.BlockedProcessReports, FixedEnd.AddDays(-9), FixedEnd);
+        await SeedThresholdAsync(FixedEnd.AddDays(-6), 5);
+        await SeedThresholdAsync(FixedEnd.AddDays(-3), 0);
+        await SeedRowAsync(QueryWindowRelation.BlockedProcessReports, FixedEnd.AddDays(-5));
+
+        var (visible, text) = await BlockingNoteAsync(DrawnFor(surface, FixedEnd.AddDays(-5)), FixedEnd.AddDays(-7), FixedEnd);
+
+        Assert.False(visible);
+        Assert.Equal(string.Empty, text);
+    }
+
+    /// <summary>#5098: no server_config rows at all: the answer is the collector's start, as before the threshold was read.</summary>
+    [Theory]
+    [InlineData("BlockingTrend")]
+    [InlineData("BlockingStats")]
+    public async Task NoServerConfigRows_NamesTheCollectorStart_AsBefore(string surface)
+    {
+        await _duckDb.InitializeAsync();
+        var xeFrom = FixedEnd.AddDays(-3);
+        await SeedRunsAsync(QueryWindowRelation.BlockedProcessReports, xeFrom, FixedEnd);
+        await SeedRowAsync(QueryWindowRelation.BlockedProcessReports, xeFrom.AddHours(2));
+
+        var (visible, text) = await BlockingNoteAsync(DrawnFor(surface, xeFrom.AddHours(2)), FixedEnd.AddDays(-7), FixedEnd);
+
+        Assert.True(visible);
+        Assert.Equal(SinceText(xeFrom), text);
+    }
+
+    /// <summary>#5098: the DMV branch never reads the threshold: a midway-on threshold changes nothing there.</summary>
+    [Theory]
+    [InlineData("BlockingTrend")]
+    [InlineData("BlockingStats")]
+    public async Task DmvBranch_IgnoresTheThreshold(string surface)
+    {
+        await _duckDb.InitializeAsync();
+        await ExecAsync(@"
+INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, rows_collected)
+SELECT $1 + row_number() OVER (), $2, $3, 'dmv_blocking_snapshot', g.t, 12, 'SUCCESS', 0
+FROM generate_series($4::TIMESTAMP, $5::TIMESTAMP, INTERVAL 30 MINUTE) AS g(t)", _nextId, ServerId, ServerName, FixedEnd.AddDays(-9), FixedEnd);
+        _nextId += 100000;
+        await SeedDmvRowAsync(FixedEnd.AddDays(-6));
+        await SeedThresholdAsync(FixedEnd.AddDays(-8), 0);
+        await SeedThresholdAsync(FixedEnd.AddDays(-4), 5);
+
+        var (visible, text) = await BlockingNoteAsync(DrawnFor(surface, FixedEnd.AddDays(-6)), FixedEnd.AddDays(-7), FixedEnd);
+
+        Assert.False(visible);
+        Assert.Equal(string.Empty, text);
+    }
+
+    /// <summary>#5098: the tab's XE branch goes through the guarded probe with the combined start; the DMV branch keeps the shared step.</summary>
+    [Fact]
+    public void TheXeBranch_CombinesThroughTheGuardedProbe_AndTheDmvBranchKeepsTheSharedStep()
+    {
+        var src = File.ReadAllText(ControlsFile("ServerTab.BlockingChartsDataStart.cs")).Replace("\r\n", "\n");
+        var start = src.IndexOf("private async System.Threading.Tasks.Task RefreshBlockingBannerAsync(", StringComparison.Ordinal);
+        Assert.True(start >= 0);
+        var body = src[start..src.IndexOf("\n    }\n", start, StringComparison.Ordinal)];
+        Assert.Contains("if (!blockingFromXe)", body, StringComparison.Ordinal);
+        Assert.Contains("await RefreshWindowTruncatedBannerAsync(QueryWindowRelation.BlockedProcessReports, banner, start, end, earliestDrawn);", body, StringComparison.Ordinal);
+        Assert.Contains("await ProbeWindowFloorOrNullAsync(", body, StringComparison.Ordinal);
+        Assert.Contains("_dataService.GetBlockingXeDataStartAsync(_serverId, start, end, databaseNames)", body, StringComparison.Ordinal);
+    }
+
+    /// <summary>#5098: the ensure that switches the threshold on captures server_config once more, after the change and outside the sp_configure try, so a new server's first snapshot is not the only one.</summary>
+    [Fact]
+    public void TheBlockedProcessEnsure_RecapturesServerConfig_OnlyAfterItChangedTheThreshold()
+    {
+        var src = File.ReadAllText(ServicesFile("RemoteCollectorService.BlockedProcessReport.cs")).Replace("\r\n", "\n");
+        var start = src.IndexOf("private async Task EnsureBlockedProcessXeSessionOnPremAsync(", StringComparison.Ordinal);
+        Assert.True(start >= 0);
+        var body = src[start..];
+        var changed = body.IndexOf("thresholdChanged = true;", StringComparison.Ordinal);
+        var catchAt = body.IndexOf("catch (SqlException ex)", StringComparison.Ordinal);
+        var recapture = body.IndexOf("if (thresholdChanged)", StringComparison.Ordinal);
+        Assert.True(changed > 0 && catchAt > changed && recapture > catchAt, "the flag is set in the try, and read after the catch");
+        Assert.Contains("await RecaptureServerConfigAsync(server, cancellationToken);", body[recapture..], StringComparison.Ordinal);
+        Assert.Contains("await RunCollectorAsync(server, \"server_config\", cancellationToken);", src, StringComparison.Ordinal);
+    }
+
+    /// <summary>#5098: the source check honors the database filter like the reads do.</summary>
+    [Fact]
+    public async Task SourceCheck_HonorsTheDatabaseFilter()
+    {
+        await _duckDb.InitializeAsync();
+        await SeedRowAsync(QueryWindowRelation.BlockedProcessReports, FixedEnd.AddDays(-1));
+        var service = new LocalDataService(_duckDb);
+        var window = (FixedEnd.AddDays(-7), FixedEnd);
+
+        Assert.True(await service.HasBlockedProcessReportsInWindowAsync(ServerId, window.Item1, window.Item2));
+        Assert.False(await service.HasBlockedProcessReportsInWindowAsync(ServerId, window.Item1, window.Item2, ["no_such_db"]));
+    }
+
     /// <summary>A zero bucket is the chart's baseline, not a point drawn: the trend helper ignores it.</summary>
     [Fact]
     public void ZeroBuckets_AreNotPointsDrawn()
@@ -207,6 +468,43 @@ FROM generate_series($5::TIMESTAMP, $6::TIMESTAMP, INTERVAL 30 MINUTE) AS g(t)",
         {
             Assert.Contains($"x:Name=\"{name}\"", xaml, StringComparison.Ordinal);
         }
+    }
+
+    /// <summary>
+    /// Wiring pin: the Trends read and the Stats read take the database filter, so the XE source check the note runs must take the same one.
+    /// All four refresh calls hand the tab's <c>SelectedDatabaseFilter</c> to their step, each step hands its <c>databaseNames</c> to
+    /// <c>BlockingReadTookXeAsync(start, end, databaseNames)</c>, and that check hands it on to the source query.
+    /// </summary>
+    [Fact]
+    public void TheNoteSteps_ReceiveTheDatabaseFilter_AndHandItToTheXeSourceCheck()
+    {
+        var refresh = File.ReadAllText(ControlsFile("ServerTab.Refresh.cs")).ReplaceLineEndings("\n");
+        foreach (var call in new[] { "await RefreshBlockingTrendsBannersAsync(", "await RefreshBlockingStatsBannersAsync(" })
+        {
+            var at = 0;
+            var seen = 0;
+            while ((at = refresh.IndexOf(call, at, StringComparison.Ordinal)) >= 0)
+            {
+                var line = refresh[at..refresh.IndexOf('\n', at)];
+                Assert.EndsWith("hoursBack, fromDate, toDate, SelectedDatabaseFilter);", line, StringComparison.Ordinal);
+                seen++;
+                at += call.Length;
+            }
+
+            Assert.Equal(2, seen);
+        }
+
+        var src = File.ReadAllText(ControlsFile("ServerTab.BlockingChartsDataStart.cs")).Replace("\r\n", "\n");
+        foreach (var step in new[] { "RefreshBlockingTrendsBannersAsync", "RefreshBlockingStatsBannersAsync" })
+        {
+            var start = src.IndexOf($"private async System.Threading.Tasks.Task {step}(", StringComparison.Ordinal);
+            Assert.True(start >= 0, $"{step} is missing");
+            var body = src[start..src.IndexOf("\n    }\n", start, StringComparison.Ordinal)];
+            Assert.Contains("IReadOnlyList<string>? databaseNames = null)", body, StringComparison.Ordinal);
+            Assert.Contains("await BlockingReadTookXeAsync(start, end, databaseNames);", body, StringComparison.Ordinal);
+        }
+
+        Assert.Contains("_dataService.HasBlockedProcessReportsInWindowAsync(_serverId, start, end, databaseNames)", src, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -246,9 +544,9 @@ FROM generate_series($5::TIMESTAMP, $6::TIMESTAMP, INTERVAL 30 MINUTE) AS g(t)",
     /// <summary>The wiring: each step calls each note with its relation, banner and drawn-point argument.</summary>
     [Theory]
     [InlineData("RefreshBlockingTrendsBannersAsync", "WaitStats", "LockWaitTrendTruncationBanner", "")]
-    [InlineData("RefreshBlockingTrendsBannersAsync", "BlockedProcessReports", "BlockingTrendTruncationBanner", ", EarliestBlockingTrendPointDrawn(blocking)")]
+    [InlineData("RefreshBlockingTrendsBannersAsync", "BlockedProcessReports", "BlockingTrendTruncationBanner", ", EarliestBlockingTrendPointDrawn(blocking), databaseNames")]
     [InlineData("RefreshBlockingTrendsBannersAsync", "Deadlocks", "DeadlockTrendTruncationBanner", ", EarliestBlockingTrendPointDrawn(deadlocks)")]
-    [InlineData("RefreshBlockingStatsBannersAsync", "BlockedProcessReports", "BlockingStatsBlockingTruncationBanner", ", EarliestBlockingStatsPointDrawn(durationStats)")]
+    [InlineData("RefreshBlockingStatsBannersAsync", "BlockedProcessReports", "BlockingStatsBlockingTruncationBanner", ", EarliestBlockingStatsPointDrawn(durationStats), databaseNames")]
     [InlineData("RefreshBlockingStatsBannersAsync", "Deadlocks", "BlockingStatsDeadlockTruncationBanner", ", EarliestDeadlockStatsPointDrawn(deadlockSeverity)")]
     public void BlockingBannerSteps_CallEachNote_WithItsRelation(string step, string relation, string banner, string drawn)
     {
@@ -257,9 +555,15 @@ FROM generate_series($5::TIMESTAMP, $6::TIMESTAMP, INTERVAL 30 MINUTE) AS g(t)",
         Assert.True(start >= 0, $"{step} is missing");
         var body = src[start..src.IndexOf("\n    }\n", start, StringComparison.Ordinal)];
 
-        var call = $"await RefreshWindowTruncatedBannerAsync(QueryWindowRelation.{relation}, {banner}, start, end{drawn});";
+        /* #5098: the blocking note goes through RefreshBlockingBannerAsync (the XE branch combines the start, the DMV branch is the shared step). */
+        var call = relation == "BlockedProcessReports"
+            ? $"await RefreshBlockingBannerAsync(blockingFromXe, {banner}, start, end{drawn});"
+            : $"await RefreshWindowTruncatedBannerAsync(QueryWindowRelation.{relation}, {banner}, start, end{drawn});";
         Assert.True(body.Contains(call, StringComparison.Ordinal), $"{step} must contain: {call}");
     }
+
+    private static string ServicesFile(string name, [CallerFilePath] string thisFile = "") =>
+        Path.GetFullPath(Path.Combine(Path.GetDirectoryName(thisFile)!, "..", "Lite", "Services", name));
 
     private static string ControlsFile(string name, [CallerFilePath] string thisFile = "") =>
         Path.GetFullPath(Path.Combine(Path.GetDirectoryName(thisFile)!, "..", "Lite", "Controls", name));

@@ -43,6 +43,19 @@ public sealed class ViewerBlockedProcessReportsCoverageLiveTests : IDisposable
     private const int DmvOnlyServerId = -499802;
     private const int DmvOnlyQuietServerId = -499803;
     private const int DmvCappedServerId = -499804;
+    private const int XeMidwayServerId = -499805;
+    private const int ChartsDmvOnlyServerId = -499806;
+    private const int XeWholeWindowServerId = -499807;
+    private const int XeHistoryServerId = -499808;
+    private const int XeRunsBeforeWindowServerId = -499809;
+    private const int BeforeLogHorizonServerId = -499810;
+    private const int ThresholdMidwayServerId = -499811;
+    private const int ThresholdReportFirstServerId = -499812;
+    private const int ThresholdOnBeforeServerId = -499813;
+    private const int ThresholdNoRowsServerId = -499814;
+    private const int ThresholdDmvServerId = -499815;
+    private const int ThresholdNoZeroSeenServerId = -499816;
+    private const int ThresholdTurnedOffServerId = -499817;
     private const string XeCollector = "blocked_process_report";
     private const string DmvCollector = "dmv_blocking_snapshot";
 
@@ -131,6 +144,259 @@ public sealed class ViewerBlockedProcessReportsCoverageLiveTests : IDisposable
         Assert.Equal(Since(oldestReturned), banner);
     }
 
+    /* The Blocking charts read the XE table when it holds a report in the window. The server was added 40 days before the range's
+       end and its DMV collector has run, and snapshotted, throughout the range; the XE collector began 3 days before the end and
+       its reports begin with it. The grid's probe takes the DMV coverage and reads covered, while the charts' probe names the XE
+       collector's own start, the first day their data can exist (the server's registration date says nothing about it). */
+    [Fact]
+    public async Task TheChartsProbe_NamesTheXeStart_WhereTheGridProbeReadsCoveredByTheDmv_AgainstDevPostgres()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var store = await Store.CreateAsync(rangeEndsDaysAgo: 0, ct);
+
+        await store.AddServerAsync(XeMidwayServerId, store.End.AddDays(-40), ct);
+        await store.LogRunsAsync(XeMidwayServerId, DmvCollector, store.End.AddDays(-40), store.End, ct);
+        await store.InsertDmvSnapshotsAsync(XeMidwayServerId, store.Start, store.End, TimeSpan.FromHours(6), ct);
+        await store.LogRunsAsync(XeMidwayServerId, XeCollector, store.End.AddDays(-3), store.End, ct);
+        await store.InsertXeReportsAsync(XeMidwayServerId, store.End.AddDays(-3).AddHours(6), store.End, store.End.AddDays(-3), ct);
+
+        var gridProbe = await store.Viewer.GetBlockedProcessReportsDataStartAsync(XeMidwayServerId, store.Start, store.End, ct);
+        var chartsProbe = await store.Viewer.GetBlockingChartDataStartAsync(XeMidwayServerId, store.Start, store.End, cancellationToken: ct);
+
+        Assert.False(RawWindowFloor.IsTruncated(gridProbe, store.Start));
+        Assert.Equal(store.End.AddDays(-3), chartsProbe);
+    }
+
+    /* No XE report in the window: the charts' probe is the two-source probe, as before. */
+    [Fact]
+    public async Task TheChartsProbe_WithNoXeReportInTheWindow_IsTheGridProbe_AgainstDevPostgres()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var store = await Store.CreateAsync(rangeEndsDaysAgo: 0, ct);
+
+        await store.AddServerAsync(ChartsDmvOnlyServerId, store.End.AddDays(-2), ct);
+        await store.LogRunsAsync(ChartsDmvOnlyServerId, DmvCollector, store.End.AddDays(-2), store.End, ct);
+        await store.InsertDmvSnapshotsAsync(ChartsDmvOnlyServerId, store.End.AddDays(-2).AddHours(3), store.End, TimeSpan.FromHours(6), ct);
+
+        var chartsProbe = await store.Viewer.GetBlockingChartDataStartAsync(ChartsDmvOnlyServerId, store.Start, store.End, cancellationToken: ct);
+
+        Assert.Equal(store.End.AddDays(-2), chartsProbe);
+        Assert.Equal(await store.Viewer.GetBlockedProcessReportsDataStartAsync(ChartsDmvOnlyServerId, store.Start, store.End, ct), chartsProbe);
+    }
+
+    /* The XE collector covers the whole range: the charts' probe reads covered. */
+    [Fact]
+    public async Task TheChartsProbe_WithXeCoveringTheWholeWindow_ReadsCovered_AgainstDevPostgres()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var store = await Store.CreateAsync(rangeEndsDaysAgo: 0, ct);
+
+        await store.AddServerAsync(XeWholeWindowServerId, store.End.AddDays(-40), ct);
+        await store.LogRunsAsync(XeWholeWindowServerId, XeCollector, store.End.AddDays(-40), store.End, ct);
+        await store.InsertXeReportsAsync(XeWholeWindowServerId, store.Start.AddHours(5), store.End, store.End.AddDays(-40), ct);
+
+        var chartsProbe = await store.Viewer.GetBlockingChartDataStartAsync(XeWholeWindowServerId, store.Start, store.End, cancellationToken: ct);
+
+        Assert.NotNull(chartsProbe);
+        Assert.False(RawWindowFloor.IsTruncated(chartsProbe, store.Start));
+    }
+
+    /* An XE report carries its own event time, which can come before the collector's first run (the first collection stores
+       history): the charts' probe names the earlier of the two, as the grid does. */
+    [Fact]
+    public async Task TheChartsProbe_NamesTheEarliestReport_WhereItComesBeforeTheXeCollectorsFirstRun_AgainstDevPostgres()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var store = await Store.CreateAsync(rangeEndsDaysAgo: 0, ct);
+
+        await store.AddServerAsync(XeHistoryServerId, store.End.AddDays(-40), ct);
+        await store.LogRunsAsync(XeHistoryServerId, XeCollector, store.End.AddDays(-3), store.End, ct);
+        await store.InsertXeReportsAsync(XeHistoryServerId, store.End.AddDays(-5), store.End, store.End.AddDays(-3), ct);
+
+        var chartsProbe = await store.Viewer.GetBlockingChartDataStartAsync(XeHistoryServerId, store.Start, store.End, cancellationToken: ct);
+
+        Assert.Equal(store.End.AddDays(-5), chartsProbe);
+    }
+
+    /* A window that starts before the collection log's horizon (CollectionLogRetentionDays back) cannot be proven by the run log:
+       its oldest run is the purge edge. The store's clock is the real one (the horizon reads UtcNow), so the range is sized from
+       it: it ends 55 days ago and starts 62 days ago, two days before the 60-day horizon, which a test run's few minutes cannot
+       cross. The charts' probe must answer the XE table rule, not a notice naming the purge edge. */
+    [Fact]
+    public async Task TheChartsProbe_ForAWindowBeforeTheLogHorizon_AnswersTheTableRule_NotThePurgeEdge_AgainstDevPostgres()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var store = await Store.CreateAsync(rangeEndsDaysAgo: 55, ct);
+
+        await store.AddServerAsync(BeforeLogHorizonServerId, store.End.AddDays(-100), ct);
+        await store.LogRunsAsync(BeforeLogHorizonServerId, XeCollector, store.End.AddDays(-4), store.End, ct);
+        await store.InsertXeReportsAsync(BeforeLogHorizonServerId, store.Start.AddHours(5), store.End, store.Start.AddHours(5), ct);
+
+        await using var dataSource = NpgsqlDataSource.Create(store.ConnectionString);
+        var tableRule = await DataWindowFloor.GetForServerAsync(
+            dataSource, DataWindowFloor.Source.ForCollectorTable("blocked_process_reports"), BeforeLogHorizonServerId, store.Start, store.End, 30, ct);
+        var chartsProbe = await store.Viewer.GetBlockingChartDataStartAsync(BeforeLogHorizonServerId, store.Start, store.End, cancellationToken: ct);
+
+        Assert.Equal(tableRule, chartsProbe);
+        Assert.NotEqual(store.End.AddDays(-4), chartsProbe);
+    }
+
+    /* #5098: the threshold went on midway. The collector ran the whole range, the daily server_config snapshots read 0 until the
+       fourth day back and 5 from then, and the first report is later still: the zeros before the first nonzero snapshot are not
+       coverage, so the note names that snapshot. */
+    [Fact]
+    public async Task TheChartsProbe_NamesTheFirstNonzeroThresholdSnapshot_WhereTheThresholdWentOnMidway_AgainstDevPostgres()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var store = await Store.CreateAsync(rangeEndsDaysAgo: 0, ct);
+
+        await store.AddServerAsync(ThresholdMidwayServerId, store.End.AddDays(-40), ct);
+        await store.LogRunsAsync(ThresholdMidwayServerId, XeCollector, store.End.AddDays(-10), store.End, ct);
+        await store.InsertThresholdSnapshotsAsync(ThresholdMidwayServerId, store.End.AddDays(-10), store.End.AddDays(-5), 0, ct);
+        await store.InsertThresholdSnapshotsAsync(ThresholdMidwayServerId, store.End.AddDays(-4), store.End, 5, ct);
+        await store.InsertXeReportsAsync(ThresholdMidwayServerId, store.End.AddDays(-3).AddHours(-12), store.End, store.End.AddDays(-3), ct);
+
+        var chartsProbe = await store.Viewer.GetBlockingChartDataStartAsync(ThresholdMidwayServerId, store.Start, store.End, cancellationToken: ct);
+
+        Assert.Equal(store.End.AddDays(-4), chartsProbe);
+    }
+
+    /* A report proves its own time was covered: one before the first nonzero snapshot (the snapshots are a day apart) is the answer. */
+    [Fact]
+    public async Task TheChartsProbe_NamesTheReport_WhereItComesBeforeTheFirstNonzeroThresholdSnapshot_AgainstDevPostgres()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var store = await Store.CreateAsync(rangeEndsDaysAgo: 0, ct);
+
+        await store.AddServerAsync(ThresholdReportFirstServerId, store.End.AddDays(-40), ct);
+        await store.LogRunsAsync(ThresholdReportFirstServerId, XeCollector, store.End.AddDays(-10), store.End, ct);
+        await store.InsertThresholdSnapshotsAsync(ThresholdReportFirstServerId, store.End.AddDays(-10), store.End.AddDays(-5), 0, ct);
+        await store.InsertThresholdSnapshotsAsync(ThresholdReportFirstServerId, store.End.AddDays(-4), store.End, 5, ct);
+        await store.InsertXeReportsAsync(ThresholdReportFirstServerId, store.End.AddDays(-4).AddHours(-12), store.End, store.End.AddDays(-4).AddHours(-12), ct);
+
+        var chartsProbe = await store.Viewer.GetBlockingChartDataStartAsync(ThresholdReportFirstServerId, store.Start, store.End, cancellationToken: ct);
+
+        Assert.Equal(store.End.AddDays(-4).AddHours(-12), chartsProbe);
+    }
+
+    /* The threshold was already on before the window: the answer is the collector's, covered, as before. */
+    [Fact]
+    public async Task TheChartsProbe_WithTheThresholdOnBeforeTheWindow_ReadsCovered_AgainstDevPostgres()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var store = await Store.CreateAsync(rangeEndsDaysAgo: 0, ct);
+
+        await store.AddServerAsync(ThresholdOnBeforeServerId, store.End.AddDays(-40), ct);
+        await store.LogRunsAsync(ThresholdOnBeforeServerId, XeCollector, store.End.AddDays(-10), store.End, ct);
+        await store.InsertThresholdSnapshotsAsync(ThresholdOnBeforeServerId, store.End.AddDays(-10), store.End, 5, ct);
+        await store.InsertXeReportsAsync(ThresholdOnBeforeServerId, store.Start.AddHours(5), store.End, store.End.AddDays(-10), ct);
+
+        var chartsProbe = await store.Viewer.GetBlockingChartDataStartAsync(ThresholdOnBeforeServerId, store.Start, store.End, cancellationToken: ct);
+
+        Assert.NotNull(chartsProbe);
+        Assert.False(RawWindowFloor.IsTruncated(chartsProbe, store.Start));
+    }
+
+    /* Nonzero snapshots inside the window, none before it, and no zero ever read: the earlier snapshots may be purged or were never taken,
+       so the threshold's start is unknown, not late. The answer is the collector's coverage, covered. */
+    [Fact]
+    public async Task TheChartsProbe_WithNonzeroSnapshotsInTheWindowAndNoZeroSeen_ReadsCovered_AgainstDevPostgres()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var store = await Store.CreateAsync(rangeEndsDaysAgo: 0, ct);
+
+        await store.AddServerAsync(ThresholdNoZeroSeenServerId, store.End.AddDays(-40), ct);
+        await store.LogRunsAsync(ThresholdNoZeroSeenServerId, XeCollector, store.End.AddDays(-10), store.End, ct);
+        await store.InsertThresholdSnapshotsAsync(ThresholdNoZeroSeenServerId, store.End.AddDays(-4), store.End, 5, ct);
+        await store.InsertXeReportsAsync(ThresholdNoZeroSeenServerId, store.End.AddDays(-3), store.End, store.End.AddDays(-10), ct);
+
+        var chartsProbe = await store.Viewer.GetBlockingChartDataStartAsync(ThresholdNoZeroSeenServerId, store.Start, store.End, cancellationToken: ct);
+
+        Assert.NotNull(chartsProbe);
+        Assert.False(RawWindowFloor.IsTruncated(chartsProbe, store.Start));
+    }
+
+    /* The threshold read 5 and then 0 with no earlier snapshot: it was on and later turned off, which is not a late start. The zero
+       dated after the first nonzero snapshot does not count, so the answer stays the collector's, covered. */
+    [Fact]
+    public async Task TheChartsProbe_WithAZeroSnapshotAfterTheFirstNonzeroOne_IsNotALateStart_AgainstDevPostgres()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var store = await Store.CreateAsync(rangeEndsDaysAgo: 0, ct);
+
+        await store.AddServerAsync(ThresholdTurnedOffServerId, store.End.AddDays(-40), ct);
+        await store.LogRunsAsync(ThresholdTurnedOffServerId, XeCollector, store.End.AddDays(-10), store.End, ct);
+        await store.InsertThresholdSnapshotsAsync(ThresholdTurnedOffServerId, store.End.AddDays(-6), store.End.AddDays(-4), 5, ct);
+        await store.InsertThresholdSnapshotsAsync(ThresholdTurnedOffServerId, store.End.AddDays(-3), store.End, 0, ct);
+        await store.InsertXeReportsAsync(ThresholdTurnedOffServerId, store.End.AddDays(-5), store.End.AddDays(-4), store.End.AddDays(-10), ct);
+
+        var chartsProbe = await store.Viewer.GetBlockingChartDataStartAsync(ThresholdTurnedOffServerId, store.Start, store.End, cancellationToken: ct);
+
+        Assert.NotNull(chartsProbe);
+        Assert.False(RawWindowFloor.IsTruncated(chartsProbe, store.Start));
+    }
+
+    /* No server_config rows (Azure SQL DB, the collector off, purged history): the answer is #5159's, the collector's coverage. */
+    [Fact]
+    public async Task TheChartsProbe_WithNoThresholdSnapshots_IsTheCollectorsCoverage_AgainstDevPostgres()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var store = await Store.CreateAsync(rangeEndsDaysAgo: 0, ct);
+
+        await store.AddServerAsync(ThresholdNoRowsServerId, store.End.AddDays(-40), ct);
+        await store.LogRunsAsync(ThresholdNoRowsServerId, XeCollector, store.End.AddDays(-3), store.End, ct);
+        await store.InsertXeReportsAsync(ThresholdNoRowsServerId, store.End.AddDays(-2), store.End, store.End.AddDays(-3), ct);
+
+        var chartsProbe = await store.Viewer.GetBlockingChartDataStartAsync(ThresholdNoRowsServerId, store.Start, store.End, cancellationToken: ct);
+
+        Assert.Equal(store.End.AddDays(-3), chartsProbe);
+    }
+
+    /* No report in the window: the charts draw the DMV snapshots, so the threshold history does not apply and the grid probe answers. */
+    [Fact]
+    public async Task TheChartsProbe_WithNoXeReportInTheWindow_IgnoresTheThresholdHistory_AgainstDevPostgres()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var store = await Store.CreateAsync(rangeEndsDaysAgo: 0, ct);
+
+        await store.AddServerAsync(ThresholdDmvServerId, store.End.AddDays(-40), ct);
+        await store.LogRunsAsync(ThresholdDmvServerId, DmvCollector, store.End.AddDays(-40), store.End, ct);
+        await store.InsertThresholdSnapshotsAsync(ThresholdDmvServerId, store.End.AddDays(-10), store.End.AddDays(-5), 0, ct);
+        await store.InsertThresholdSnapshotsAsync(ThresholdDmvServerId, store.End.AddDays(-4), store.End, 5, ct);
+
+        var chartsProbe = await store.Viewer.GetBlockingChartDataStartAsync(ThresholdDmvServerId, store.Start, store.End, cancellationToken: ct);
+        var gridProbe = await store.Viewer.GetBlockedProcessReportsDataStartAsync(ThresholdDmvServerId, store.Start, store.End, ct);
+
+        /* Both answers read the server's registration clock on this branch; a second apart is the same answer. */
+        Assert.NotNull(chartsProbe);
+        Assert.True(Math.Abs((chartsProbe.Value - gridProbe!.Value).TotalSeconds) < 1, $"grid {gridProbe:O} charts {chartsProbe:O}");
+    }
+
+    /* characterization: this pins today's ForCollectorRuns answer; update it when that probe reads first runs. */
+    /* The shared run-log probe (DataWindowFloor.Source.ForCollectorRuns) for an XE collector whose runs reach back before the
+       window answers covered: at or before the window's start. For runs that begin midway it answers the server's registration
+       instead, which is why the charts' probe reads the collector's first run itself. */
+    [Fact]
+    public async Task TheSharedRunLogProbe_ForXeRunsBeforeTheWindow_ReadsCovered_AndForRunsMidway_ReadsTheRegistration_AgainstDevPostgres()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var store = await Store.CreateAsync(rangeEndsDaysAgo: 0, ct);
+
+        await store.AddServerAsync(XeRunsBeforeWindowServerId, store.End.AddDays(-40), ct);
+        await store.LogRunsAsync(XeRunsBeforeWindowServerId, XeCollector, store.End.AddDays(-20), store.End, ct);
+        await store.AddServerAsync(XeMidwayServerId, store.End.AddDays(-40), ct);
+        await store.LogRunsAsync(XeMidwayServerId, XeCollector, store.End.AddDays(-3), store.End, ct);
+
+        await using var dataSource = NpgsqlDataSource.Create(store.ConnectionString);
+        var source = DataWindowFloor.Source.ForCollectorRuns(XeCollector);
+        var before = await DataWindowFloor.GetForServerAsync(dataSource, source, XeRunsBeforeWindowServerId, store.Start, store.End, 30, ct);
+        var midway = await DataWindowFloor.GetForServerAsync(dataSource, source, XeMidwayServerId, store.Start, store.End, 30, ct);
+
+        Assert.NotNull(before);
+        Assert.False(RawWindowFloor.IsTruncated(before, store.Start));
+        Assert.Equal(store.End.AddDays(-40), midway);
+    }
+
     private static string Since(DateTime utc) =>
         "Showing since " + utc.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture);
 
@@ -146,6 +412,8 @@ public sealed class ViewerBlockedProcessReportsCoverageLiveTests : IDisposable
         }
 
         public ViewerDataService Viewer { get; }
+
+        public string ConnectionString => _scratch.ConnectionString;
 
         /// <summary>The end of the 7-day range every test reads, to the minute.</summary>
         public DateTime End { get; }
@@ -265,6 +533,33 @@ FROM generate_series($3::timestamp, $4::timestamp, interval '6 hours') AS t", co
             insert.Parameters.AddWithValue(Naive(firstUtc));
             insert.Parameters.AddWithValue(Naive(lastUtc));
             insert.Parameters.AddWithValue(Naive(collectedAtUtc));
+            insert.Parameters.AddWithValue(-(long)serverId * 1000L);
+            await insert.ExecuteNonQueryAsync(ct);
+        }
+
+        /* One daily server_config snapshot of the blocked process threshold from firstUtc to lastUtc, all reading the given value. */
+        public async Task InsertThresholdSnapshotsAsync(int serverId, DateTime firstUtc, DateTime lastUtc, int value, CancellationToken ct)
+        {
+            await using var connection = await OpenAsync(ct);
+            await using var insert = new NpgsqlCommand(@"
+INSERT INTO collect.server_config
+    (config_id, capture_time, server_id, server_name, configuration_name, value_configured, value_in_use, is_dynamic, is_advanced)
+SELECT
+    row_number() OVER () + $6 + $5 * 100000,
+    t,
+    $1,
+    $2,
+    'blocked process threshold (s)',
+    $5,
+    $5,
+    TRUE,
+    TRUE
+FROM generate_series($3::timestamp, $4::timestamp, interval '1 day') AS t", connection);
+            insert.Parameters.AddWithValue(serverId);
+            insert.Parameters.AddWithValue(ServerName(serverId));
+            insert.Parameters.AddWithValue(Naive(firstUtc));
+            insert.Parameters.AddWithValue(Naive(lastUtc));
+            insert.Parameters.AddWithValue(value);
             insert.Parameters.AddWithValue(-(long)serverId * 1000L);
             await insert.ExecuteNonQueryAsync(ct);
         }

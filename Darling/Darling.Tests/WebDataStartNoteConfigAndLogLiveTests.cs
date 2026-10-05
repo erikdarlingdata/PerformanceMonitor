@@ -297,7 +297,8 @@ public sealed class WebDataStartNoteConfigAndLogLiveTests : IClassFixture<Config
         }
     }
 
-    /// <summary>Every field a note adds is absent: the answer is the tool's own.</summary>
+    /// <summary>Every field a note adds is absent, and so is the tool's own window floor: the web strips a listed read's own
+    /// <c>effective_start</c>, <c>window_truncated</c> and <c>truncation_note</c> on every answer it returns, so the page sees only its own note.</summary>
     private static void AssertNoNote(JsonObject answer)
     {
         Assert.Null(answer["window_truncated"]);
