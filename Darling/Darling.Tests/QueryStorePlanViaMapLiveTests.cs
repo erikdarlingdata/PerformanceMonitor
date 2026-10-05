@@ -15,6 +15,7 @@ using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Darling.Viewer;
@@ -47,16 +48,40 @@ public sealed class QueryStorePlanViaMapLiveTests
     private static readonly string OlderPlan = Plan("map-older");
     private static readonly string InlineOnly = Plan("inline-only");
     private static readonly string InlineBehindMarker = Plan("inline-behind-marker");
+    private static readonly string MapNewer = Plan("map-newer");
+    private static readonly string InlineOlder = Plan("inline-older");
+    private static readonly string MapQ7 = Plan("map-q7");
+    private static readonly string OrphanDigestPlan = Plan("orphan-digest-no-dim-row");
+    private static readonly string InlineBehindOrphan = Plan("inline-behind-orphan");
+    private static readonly string Stale = Plan("map-stale-8d");
 
     private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
 
     [Fact]
-    public void ViewerAndServiceReaders_ShareOneSqlShape()
+    public void ViewerAndServiceReaders_ShareOneSqlShape_AndTheMapReadNeverTouchesTheFactTable()
     {
         static string Norm(string s) => string.Join(' ', s.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
         Assert.Equal(Norm(DarlingStoredPlanReader.QueryStorePlanViaMapSql), Norm(ViewerDataService.QueryStorePlanViaMapSql));
-        Assert.Contains("collect.query_store_plan_map", ViewerDataService.QueryStorePlanViaMapSql, StringComparison.Ordinal);
-        Assert.Contains("JOIN query_plan_dim", ViewerDataService.QueryStorePlanViaMapSql, StringComparison.Ordinal);
+        foreach (var sql in new[] { DarlingStoredPlanReader.QueryStorePlanViaMapSql, ViewerDataService.QueryStorePlanViaMapSql })
+        {
+            Assert.Contains("FROM collect.query_store_plan_map", sql, StringComparison.Ordinal);
+            Assert.Contains("LEFT JOIN query_plan_dim", sql, StringComparison.Ordinal);
+            Assert.Contains("m.plan_id = $3", sql, StringComparison.Ordinal);
+            /* Two index lookups: the fact table is never read once a plan_id is known. */
+            Assert.DoesNotContain("query_store_stats", sql, StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
+    public void TheUnpinnedCandidateRead_IsTimeBounded_NewestFirst_WithAPlanIdTiebreak()
+    {
+        var bounded = DarlingStoredPlanReader.QueryStorePlanCandidatesSql;
+        Assert.Contains("collection_time >= $4", bounded, StringComparison.Ordinal);
+        Assert.Contains("ORDER BY last_collected DESC, plan_id DESC", bounded, StringComparison.Ordinal);
+
+        var unbounded = DarlingStoredPlanReader.QueryStorePlanCandidatesUnboundedSql;
+        Assert.DoesNotContain("collection_time >=", unbounded, StringComparison.Ordinal);
+        Assert.Contains("ORDER BY last_collected DESC, plan_id DESC", unbounded, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -106,8 +131,29 @@ public sealed class QueryStorePlanViaMapLiveTests
             await InsertFactAsync(connection, t0, queryId: 5, planId: 51, inline: InlineBehindMarker, ct);
             await InsertMapAsync(connection, 51, null, ct);
 
+            /* 6: an OLDER plan that lives inline and a NEWER plan that lives in the map, for one query. */
+            await InsertFactAsync(connection, t0, queryId: 6, planId: 61, inline: InlineOlder, ct);
+            await InsertFactAsync(connection, t1, queryId: 6, planId: 62, inline: null, ct);
+            await InsertDimAsync(connection, MapNewer, gz: false, ct);
+            await InsertMapAsync(connection, 62, MapNewer, ct);
+
+            /* 7: a real older map plan, then a newer plan_id whose map row points at a digest with NO dimension
+               row (the dimension GC removed it). The fact row still has inline text: it must not be read. */
+            await InsertFactAsync(connection, t0, queryId: 7, planId: 71, inline: null, ct);
+            await InsertDimAsync(connection, MapQ7, gz: false, ct);
+            await InsertMapAsync(connection, 71, MapQ7, ct);
+            await InsertFactAsync(connection, t1, queryId: 7, planId: 72, inline: InlineBehindOrphan, ct);
+            await InsertMapAsync(connection, 72, OrphanDigestPlan, ct);
+
+            /* 8: the only plan was last seen 8 days before asOf, outside the 7-day bound. */
+            var asOf = new DateTime(2026, 3, 2, 12, 0, 0, DateTimeKind.Unspecified);
+            await InsertFactAsync(connection, asOf.AddDays(-8), queryId: 8, planId: 81, inline: null, ct);
+            await InsertDimAsync(connection, Stale, gz: false, ct);
+            await InsertMapAsync(connection, 81, Stale, ct);
+
             /* ---- Service reader (plan_id optional). */
-            Task<string?> Svc(long q, long? p) => DarlingStoredPlanReader.GetQueryStorePlanTextAsync(postgres, ServerId, Db, q, planId: p, cancellationToken: ct);
+            Task<string?> Svc(long q, long? p) => DarlingStoredPlanReader.GetQueryStorePlanTextAsync(postgres, ServerId, Db, q, planId: p, asOf: asOf, cancellationToken: ct);
+            Task<QueryStorePlanRead?> SvcRead(long q, long? p) => DarlingStoredPlanReader.ResolveQueryStorePlanAsync(postgres, ServerId, Db, q, planId: p, asOf: asOf, cancellationToken: ct);
             Assert.Equal(TextPlan, await Svc(1, null));
             Assert.Equal(TextPlan, await Svc(1, 11));
             Assert.Equal(GzPlan, await Svc(2, null));
@@ -116,9 +162,35 @@ public sealed class QueryStorePlanViaMapLiveTests
             Assert.Equal(OlderPlan, await Svc(3, 31));
             Assert.Null(await Svc(3, 32));
             Assert.Equal(InlineOnly, await Svc(4, null));
-            Assert.Equal(InlineBehindMarker, await Svc(5, 51));
+            /* A map row with no content is ABSENT: the inline text behind a marker is not read. */
+            Assert.Null(await Svc(5, 51));
+            Assert.Null(await Svc(5, null));
             Assert.Null(await Svc(999, null));
             Assert.Null(await Svc(1, 999));
+            /* The plan_id names the plan; the pinned read goes by the map's key alone. */
+            Assert.Equal(TextPlan, await Svc(999, 11));
+
+            /* Older plan inline, newer plan in the map: the map plan wins unpinned; each pinned read answers its own. */
+            Assert.Equal(MapNewer, await Svc(6, null));
+            Assert.Equal(MapNewer, await Svc(6, 62));
+            Assert.Equal(InlineOlder, await Svc(6, 61));
+
+            /* A map row whose digest has no dimension row is absent; the unpinned read moves to the next plan. */
+            Assert.Null(await Svc(7, 72));
+            Assert.Equal(MapQ7, await Svc(7, null));
+
+            /* Last seen 8 days before asOf: the bounded pass finds nothing and the one unbounded pass does. */
+            Assert.Equal(Stale, await Svc(8, null));
+            Assert.Equal(Stale, await Svc(8, 81));
+
+            /* The resolved plan_id comes back with the plan. */
+            Assert.Equal(11, (await SvcRead(1, null))!.PlanId);
+            Assert.Equal(31, (await SvcRead(3, null))!.PlanId);
+            Assert.Equal(62, (await SvcRead(6, null))!.PlanId);
+            Assert.Equal(71, (await SvcRead(7, null))!.PlanId);
+            Assert.Equal(81, (await SvcRead(8, null))!.PlanId);
+            Assert.Equal(61, (await SvcRead(6, 61))!.PlanId);
+            Assert.Null(await SvcRead(5, null));
 
             /* ---- Viewer reader (plan_id required). */
             Task<string?> Vw(long q, long p) => viewer.GetQueryStorePlanTextAsync(ServerId, Db, q, p, cancellationToken: ct);
@@ -127,19 +199,68 @@ public sealed class QueryStorePlanViaMapLiveTests
             Assert.Equal(OlderPlan, await Vw(3, 31));
             Assert.Null(await Vw(3, 32));
             Assert.Equal(InlineOnly, await Vw(4, 41));
-            Assert.Equal(InlineBehindMarker, await Vw(5, 51));
+            Assert.Null(await Vw(5, 51));
+            Assert.Equal(MapNewer, await Vw(6, 62));
+            Assert.Equal(InlineOlder, await Vw(6, 61));
+            Assert.Null(await Vw(7, 72));
+            Assert.Equal(Stale, await Vw(8, 81));
             Assert.Null(await Vw(1, 999));
-            Assert.Null(await Vw(999, 11));
+            /* The map is read by plan_id alone (a plan_id belongs to one query_id), so a query_id that does not
+               own the plan still gets it: the fact table is not consulted. */
+            Assert.Equal(TextPlan, await Vw(999, 11));
             Assert.Null(await viewer.GetQueryStorePlanTextAsync(ServerId + 1, Db, 1, 11, cancellationToken: ct));
 
-            /* ---- analyze_query_store_plan end to end: a map-only plan analyses, it is not "unavailable". */
-            foreach (var (q, p) in new (long, long?)[] { (1, null), (2, null), (3, null) })
+            /* ---- Third reader: the actual-plan resolver. */
+            async Task<(string? Text, string? Plan)> Resolve(long q)
+            {
+                await using var command = new NpgsqlCommand(DarlingWorker.ResolveStoredQueryStoreForActualPlanSql, connection);
+                command.Parameters.AddWithValue(ServerId);
+                command.Parameters.AddWithValue(Db);
+                command.Parameters.AddWithValue(q);
+                await using var reader = await command.ExecuteReaderAsync(ct);
+                if (!await reader.ReadAsync(ct))
+                {
+                    return (null, null);
+                }
+
+                return (
+                    reader.IsDBNull(0) ? null : reader.GetString(0),
+                    PayloadDimensions.ResolveContent(
+                        reader.IsDBNull(1) ? null : reader.GetString(1),
+                        reader.IsDBNull(3) ? null : reader.GetFieldValue<byte[]>(3)));
+            }
+
+            Assert.Equal(("SELECT /*q1*/", TextPlan), await Resolve(1));
+            Assert.Equal(("SELECT /*q2*/", GzPlan), await Resolve(2));
+            Assert.Equal(OlderPlan, (await Resolve(3)).Plan);
+            Assert.Equal(InlineOnly, (await Resolve(4)).Plan);
+            /* A marker: the query text still answers (it is what gets re-executed); the estimated plan is absent. */
+            Assert.Equal(("SELECT /*q5*/", (string?)null), await Resolve(5));
+            Assert.Equal(MapNewer, (await Resolve(6)).Plan);
+            Assert.Equal(MapQ7, (await Resolve(7)).Plan);
+            Assert.Equal(Stale, (await Resolve(8)).Plan);
+            Assert.Equal((null, null), await Resolve(999));
+
+            /* ---- analyze_query_store_plan end to end: the analysed statement and the resolved plan_id. */
+            async Task<(string Identifier, string? Statement)> Analyse(long q, long? p)
             {
                 var json = await DarlingMcpPlanTools.AnalyzeQueryStorePlan(postgres, Db, q, ServerName, p, cancellationToken: ct);
                 using var doc = JsonDocument.Parse(json);
                 Assert.False(doc.RootElement.TryGetProperty("status", out var status) && status.GetString() == "unavailable", json);
                 Assert.Equal("query_store", doc.RootElement.GetProperty("source").GetString());
+                var statements = doc.RootElement.GetProperty("statements");
+                return (
+                    doc.RootElement.GetProperty("identifier").GetString()!,
+                    statements.GetArrayLength() == 0 ? null : statements[0].GetProperty("statement_text").GetString());
             }
+
+            Assert.Equal(($"{Db}:1:11", "SELECT 'map-text'"), await Analyse(1, null));
+            Assert.Equal(($"{Db}:2:21", "SELECT 'map-gz'"), await Analyse(2, null));
+            /* The newest plan is a marker, so the analysed plan is the older one, and the identifier says which. */
+            Assert.Equal(($"{Db}:3:31", "SELECT 'map-older'"), await Analyse(3, null));
+            Assert.Equal(($"{Db}:6:62", "SELECT 'map-newer'"), await Analyse(6, null));
+            Assert.Equal(($"{Db}:6:61", "SELECT 'inline-older'"), await Analyse(6, 61));
+            Assert.Equal(($"{Db}:1:11", "SELECT 'map-text'"), await Analyse(1, 11));
             var missing = await DarlingMcpPlanTools.AnalyzeQueryStorePlan(postgres, Db, 3, ServerName, 32, cancellationToken: ct);
             using (var doc = JsonDocument.Parse(missing))
             {
@@ -154,7 +275,7 @@ public sealed class QueryStorePlanViaMapLiveTests
         }
     }
 
-    private static IEnumerable<string> AllPlans() => new[] { TextPlan, GzPlan, OlderPlan };
+    private static IEnumerable<string> AllPlans() => new[] { TextPlan, GzPlan, OlderPlan, MapNewer, MapQ7, Stale };
 
     private static async Task DeleteAsync(NpgsqlConnection connection, CancellationToken ct)
     {
@@ -191,8 +312,8 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE;", connection);
     {
         using var command = new NpgsqlCommand(@"
 INSERT INTO query_store_stats
-    (collection_id, collection_time, server_id, server_name, database_name, query_id, plan_id, query_plan_text)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8)", connection);
+    (collection_id, collection_time, server_id, server_name, database_name, query_id, plan_id, query_plan_text, query_text)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)", connection);
         command.Parameters.AddWithValue(CollectionIdGenerator.Next());
         command.Parameters.AddWithValue(collectionTime);
         command.Parameters.AddWithValue(ServerId);
@@ -201,6 +322,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8)", connection);
         command.Parameters.AddWithValue(queryId);
         command.Parameters.AddWithValue(planId);
         command.Parameters.AddWithValue((object?)inline ?? DBNull.Value);
+        command.Parameters.AddWithValue($"SELECT /*q{queryId}*/");
         await command.ExecuteNonQueryAsync(ct);
     }
 

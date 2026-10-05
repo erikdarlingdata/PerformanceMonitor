@@ -107,43 +107,39 @@ public sealed partial class ViewerDataService
         """;
 
     /// <summary>
-    /// The latest captured Query Store plan for a query as it is stored since #2210: the fact rows carry no
-    /// plan text (the collector ships a NULL placeholder), and a plan lives ONCE in <c>query_plan_dim</c>,
-    /// reached through <c>collect.query_store_plan_map</c> on (server_id, database_name, plan_id). The inner
-    /// query picks the plans this query_id ran under, newest first (the fact table's own index on
-    /// server, database, query_id, plan_id answers it); the join then resolves the first one whose
-    /// content exists. A map row with a NULL digest is the content-less marker for a plan the engine could
-    /// not persist, so it joins to nothing and the next-newest plan is tried. The dimension row carries
-    /// text, gzip bytes or (for the oldest rows) text only, so both columns come back and the C# side
-    /// resolves text-else-gz. $1 server_id, $2 database_name, $3 query_id, $4 plan_id (the Viewer always passes one; the MCP reader passes NULL for "any plan").
+    /// The Query Store plan for ONE plan_id as it is stored since #2210: the fact rows carry no plan text (the
+    /// collector ships a NULL placeholder), and a plan lives ONCE in <c>query_plan_dim</c>, reached through
+    /// <c>collect.query_store_plan_map</c> on its primary key (server_id, database_name, plan_id). Two index
+    /// lookups, no fact-table scan: a plan_id belongs to exactly one query_id in its database, so the fact
+    /// table adds nothing once the plan_id is known.
+    /// <para>
+    /// The dimension join is a LEFT join on purpose, so the read distinguishes the two ways of coming back
+    /// empty. NO row means the map has never heard of the plan (a pre-cutover plan, or one not yet fetched),
+    /// and the caller falls back to the inline column. A row whose columns are NULL means the map knows the
+    /// plan and has nothing to show: a NULL digest is the content-less marker for a plan the engine could
+    /// not persist, and a digest whose dimension row the dimension GC removed reads the same. That plan is
+    /// absent, and the inline column is not asked, because a post-cutover plan has nothing there.
+    /// </para>
+    /// The dimension row carries text, gzip bytes or (for the oldest rows) text only, so both columns come
+    /// back and the C# side resolves text-else-gz. $1 server_id, $2 database_name, $3 plan_id.
     /// </summary>
     public const string QueryStorePlanViaMapSql = """
         SELECT d.query_plan_xml, d.query_plan_gz
-        FROM (
-            SELECT plan_id, MAX(collection_time) AS last_collected
-            FROM query_store_stats
-            WHERE server_id = $1
-            AND   database_name = $2
-            AND   query_id = $3
-            AND   ($4::bigint IS NULL OR plan_id = $4)
-            GROUP BY plan_id
-        ) AS r
-        JOIN collect.query_store_plan_map AS m
-          ON  m.server_id = $1
-          AND m.database_name = $2
-          AND m.plan_id = r.plan_id
-        JOIN query_plan_dim AS d
+        FROM collect.query_store_plan_map AS m
+        LEFT JOIN query_plan_dim AS d
           ON d.digest = m.digest
-        WHERE (d.query_plan_xml IS NOT NULL OR d.query_plan_gz IS NOT NULL)
-        ORDER BY r.last_collected DESC
-        LIMIT 1
+        WHERE m.server_id = $1
+        AND   m.database_name = $2
+        AND   m.plan_id = $3
         """;
 
     /// <summary>
     /// The stored Query Store execution plan for a grid row, or null when none was captured for that
     /// (database, query_id, plan_id). Since #2210 the plan lives in <c>query_plan_dim</c> behind
-    /// <c>collect.query_store_plan_map</c> (<see cref="QueryStorePlanViaMapSql"/>), asked first; rows written
-    /// before that carry the text inline (<see cref="QueryStorePlanTextSql"/>), asked second.
+    /// <c>collect.query_store_plan_map</c> (<see cref="QueryStorePlanViaMapSql"/>), read by the map's primary
+    /// key. Rows written before that carry the text inline (<see cref="QueryStorePlanTextSql"/>), and that
+    /// column is read ONLY when the map has no row for the plan_id: a map row without content (a NULL-digest
+    /// marker, or a digest whose dimension row is gone) is absent, with no second look.
     /// </summary>
     public async Task<string?> GetQueryStorePlanTextAsync(
         int serverId, string databaseName, long queryId, long planId, CancellationToken cancellationToken = default)
@@ -153,12 +149,14 @@ public sealed partial class ViewerDataService
             viaMap.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
             viaMap.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
             viaMap.Parameters.Add(new NpgsqlParameter<string> { TypedValue = databaseName ?? "" });
-            viaMap.Parameters.Add(new NpgsqlParameter<long> { TypedValue = queryId });
-            viaMap.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Bigint, Value = planId });
-            var resolved = await ReadPlanTextOrGzipAsync(viaMap, cancellationToken);
-            if (resolved is not null)
+            viaMap.Parameters.Add(new NpgsqlParameter<long> { TypedValue = planId });
+            await using var reader = await viaMap.ExecuteReaderAsync(cancellationToken);
+            if (await reader.ReadAsync(cancellationToken))
             {
-                return resolved;
+                /* The map knows this plan_id: whatever it holds is the answer, including nothing. */
+                return PayloadDimensions.ResolveContent(
+                    reader.IsDBNull(0) ? null : reader.GetString(0),
+                    reader.IsDBNull(1) ? null : reader.GetFieldValue<byte[]>(1));
             }
         }
 
