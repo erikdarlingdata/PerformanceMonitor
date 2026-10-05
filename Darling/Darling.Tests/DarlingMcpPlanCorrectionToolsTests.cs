@@ -231,6 +231,24 @@ VALUES ($1,$2,$3,$4,$5,$6,$6,$7,$8,$9,$10)",
         });
 
     [Fact]
+    public async Task ATuningOnlyAnswer_OverAWindowNothingCovered_NeverCallsItselfEmpty_AgainstDevPostgres() =>
+        await RunWindowAsync("tuningcold", async (c, ds, end) =>
+        {
+            /* No logged run anywhere near the window, and the only row is an enablement snapshot: the answer carries data. */
+            await SeedWindowAsync(c, "tuningcold", end.AddDays(-30), null, 30, end);
+            await SeedPlanRowAsync(c, "tuningcold", end.AddDays(-3), null);
+
+            var root = WindowFloorLiveHarness.Parse(await CallWindowAsync(ds, "tuningcold", 1, end));
+
+            Assert.False(root.TryGetProperty("status", out _));
+            Assert.Equal(1, root.GetProperty("automatic_tuning").GetArrayLength());
+            Assert.True(root.GetProperty("window_truncated").GetBoolean());
+            var note = root.GetProperty("truncation_note").GetString()!;
+            Assert.DoesNotContain("empty", note, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("no collection of plan_correction", note, StringComparison.Ordinal);
+        });
+
+    [Fact]
     public async Task AShortWindow_WithRows_StartsNoProbe_AgainstDevPostgres() =>
         await RunWindowAsync("short", async (c, ds, end) =>
         {

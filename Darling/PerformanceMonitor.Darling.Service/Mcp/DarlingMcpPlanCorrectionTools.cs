@@ -81,7 +81,8 @@ public sealed class DarlingMcpPlanCorrectionTools
             var windowStart = now.AddHours(-hours_back);
             var notice = await DarlingMcpWindowNotice.ReadAsync(
                 () => DarlingMcpWindowNotice.Probe(postgres, "plan_correction", resolved.ServerName, windowStart, now, cancellationToken),
-                windowStart, now, "plan_correction", emptyAnswer: rows.Count == 0, logger: logger, cancellationToken: cancellationToken);
+                windowStart, now, "plan_correction", emptyAnswer: false, listOnly: rows.Count == 0,
+                logger: logger, cancellationToken: cancellationToken);
 
             if (tuning.Count == 0 && rows.Count == 0)
             {
