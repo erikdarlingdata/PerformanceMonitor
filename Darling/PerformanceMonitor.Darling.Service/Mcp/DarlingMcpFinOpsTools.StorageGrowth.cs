@@ -27,7 +27,7 @@ public sealed partial class DarlingMcpFinOpsTools
         "storage_growth: database sizes, growth, fastest-growing tables.";
 
     internal const string StorageGrowthViewGuide =
-        "storage_growth answers one level at a time, picked by parameters, beside server, view, level and hours_back; hours_back other than 24 is refused, because the window is a fixed 30 days (the desktop's 7/30/90-day picker is not offered). No database_name: level databases, the section databases (status, message, database_count, truncated, rows) with up to 50 rows, ordered by growth_30d_mb descending (null last), then growth_7d_mb descending (null last), then database_name; database_count is the count before the cap. Rows are database_name, current_size_mb, size_7d_ago_mb, size_30d_ago_mb, growth_7d_mb, growth_30d_mb, daily_growth_rate_mb (2 places), growth_pct_30d (1 place), has_sibling_row, has_log_service_file and note (the desktop's note text, null when none); the past sizes, growth, rate and percent are null when the database has no snapshot at that age, never 0. database_name: level objects, the section database (status, message, row: that database's row, or status empty when it is not in the latest snapshot) and the section objects (status, message, window_days 30, object_count, truncated, days, rows). limit is the object top-N here, 1-20, default 10, and is refused above 20; at the other levels any limit other than the default is refused. Rows are in the desktop's growth order (growth over the 30 days descending with null counted as 0, then schema.table ordinal) and carry object_name ('schema.table'), schema_name, table_name, reserved_mb, used_mb (1 place), total_rows, index_count, growth_mb (1 place; a table created in the window counts its whole size; null when the database has one snapshot only or the table's size is unknown), growth_pct (1 place), daily_growth_rate_mb (2 places) and cells. days lists each UTC day with a sample, ascending, as yyyy-MM-ddTHH:mm:ss.fffffffZ; cells has one [mb, band] per day, aligned to days: mb is the table's reserved MB that day (1 place), band an integer 0-7 from log1p(mb) scaled across all the cells from the smallest positive mb (band 0) to the largest (band 7; every cell is band 0 when all the positive cells are equal, or there is only one); with limit below 20 the bands scale over the rows shown, fewer than the desktop's 20; a day with no sample or 0 MB is [null, null]. database_name plus object_name ('schema.table', exactly as a row of the objects level, from the 20 fastest growers; the key is matched ordinal and case-sensitive with no bracket handling, and when two tables give the same key, such as schema a.b with table c and schema a with table b.c, only the first is reachable): level indexes, the section database and the section indexes (status, index_count, truncated, rows) with up to 30 rows ordered by index_id then index_name; rows are database_name, schema_name, table_name, index_name, index_type_desc, index_id, reserved_mb (1 place), total_rows, user_seeks, user_scans, user_lookups, total_reads, user_updates, last_user_access_server_local, and classification (Unused, Write-only or Active). last_user_access_server_local is the monitored server's own clock, not UTC, printed yyyy-MM-ddTHH:mm:ss with no Z, null when none. object_name without database_name, or an object_name not among those objects, is refused. Each section's status is ok, empty or not_collected; the whole answer is not_collected only when every section is gated for the server's engine, and empty only when every section is empty and none is gated. Times are UTC and end in Z except last_user_access_server_local.";
+        "storage_growth answers one level at a time, picked by parameters, beside server, view, level and hours_back; hours_back sets the objects window: 24 (the default) means 30 days, otherwise a whole number of days from 7 to 90 (168 to 2160 hours) is the window; any other value is refused, and the databases level ignores it (its past sizes are fixed at 7 and 30 days). The window is window_days; the daily rate divides by it and growth is over it. A window over 30 days returns at most 12 objects (truncated says so), so 90 days of cells fit the 32 KB answer. No database_name: level databases, the section databases (status, message, database_count, truncated, rows) with up to 50 rows, ordered by growth_30d_mb descending (null last), then growth_7d_mb descending (null last), then database_name; database_count is the count before the cap. Rows are database_name, current_size_mb, size_7d_ago_mb, size_30d_ago_mb, growth_7d_mb, growth_30d_mb, daily_growth_rate_mb (2 places), growth_pct_30d (1 place), has_sibling_row, has_log_service_file and note (the desktop's note text, null when none); the past sizes, growth, rate and percent are null when the database has no snapshot at that age, never 0. database_name: level objects, the section database (status, message, row: that database's row, or status empty when it is not in the latest snapshot) and the section objects (status, message, window_days, object_count, truncated, days, rows). limit is the object top-N here, 1-20, default 10, and is refused above 20; at the other levels any limit other than the default is refused. Rows are in the desktop's growth order (growth over the window descending with null counted as 0, then schema.table ordinal) and carry object_name ('schema.table'), schema_name, table_name, reserved_mb, used_mb (1 place), total_rows, index_count, growth_mb (1 place; a table created in the window counts its whole size; null when the database has one snapshot only or the table's size is unknown), growth_pct (1 place), daily_growth_rate_mb (2 places) and cells. days lists each UTC day with a sample, ascending, as yyyy-MM-ddTHH:mm:ss.fffffffZ; cells has one [mb, band] per day, aligned to days: mb is the table's reserved MB that day (1 place), band an integer 0-7 from log1p(mb) scaled across all the cells from the smallest positive mb (band 0) to the largest (band 7; every cell is band 0 when all the positive cells are equal, or there is only one); with limit below 20 the bands scale over the rows shown, fewer than the desktop's 20; a day with no sample or 0 MB is [null, null]. database_name plus object_name ('schema.table', exactly as a row of the objects level, from the 20 fastest growers; the key is matched ordinal and case-sensitive with no bracket handling, and when two tables give the same key, such as schema a.b with table c and schema a with table b.c, only the first is reachable): level indexes, the section database and the section indexes (status, index_count, truncated, rows) with up to 30 rows ordered by index_id then index_name; rows are database_name, schema_name, table_name, index_name, index_type_desc, index_id, reserved_mb (1 place), total_rows, user_seeks, user_scans, user_lookups, total_reads, user_updates, last_user_access_server_local, and classification (Unused, Write-only or Active). last_user_access_server_local is the monitored server's own clock, not UTC, printed yyyy-MM-ddTHH:mm:ss with no Z, null when none. object_name without database_name, or an object_name not among those objects, is refused. Each section's status is ok, empty or not_collected; the whole answer is not_collected only when every section is gated for the server's engine, and empty only when every section is empty and none is gated. Times are UTC and end in Z except last_user_access_server_local.";
 
     /// <summary>The fixed ceiling on the database list.</summary>
     internal const int MaxStorageGrowthDatabases = 50;
@@ -40,6 +40,31 @@ public sealed partial class DarlingMcpFinOpsTools
 
     /// <summary>The heatmap's fixed window, the desktop's default.</summary>
     internal const int StorageGrowthWindowDays = 30;
+
+    /// <summary>The longest window the objects level reads: 90 days, as hours.</summary>
+    internal const int MaxStorageGrowthHoursBack = 2160;
+
+    /// <summary>The shortest explicit window: 7 days, as hours. hours_back 24 stays the default 30 days.</summary>
+    internal const int MinStorageGrowthWindowHours = 168;
+
+    /// <summary>Windows over this many days return fewer objects, so the answer stays inside <see cref="McpResponseBudget.DefaultBytes"/>.</summary>
+    internal const int StorageGrowthLongWindowDays = 30;
+
+    /// <summary>The most objects a window over <see cref="StorageGrowthLongWindowDays"/> returns: 12 rows of 90 cells measure under the 32 KB budget at their widest, 20 do not.</summary>
+    internal const int MaxStorageGrowthLongWindowObjects = 12;
+
+    /// <summary>
+    /// The objects window in days for an hours_back, or null when the view does not take it: 24 (the default) is the
+    /// desktop's 30 days; otherwise a whole number of days from 7 to 90.
+    /// </summary>
+    internal static int? StorageGrowthWindowDaysFor(int hoursBack) =>
+        hoursBack == 24 ? StorageGrowthWindowDays
+        : hoursBack >= MinStorageGrowthWindowHours && hoursBack <= MaxStorageGrowthHoursBack && hoursBack % 24 == 0 ? hoursBack / 24
+        : null;
+
+    /// <summary>The most objects the objects level shows for a window of this many days.</summary>
+    internal static int StorageGrowthObjectCap(int windowDays) =>
+        windowDays > StorageGrowthLongWindowDays ? MaxStorageGrowthLongWindowObjects : MaxStorageGrowthObjects;
 
     /// <summary>How many discrete bands the heatmap cells fall into.</summary>
     internal const int StorageGrowthBandCount = 8;
@@ -180,7 +205,7 @@ public sealed partial class DarlingMcpFinOpsTools
 
     internal static string BuildStorageGrowthObjectsPayload(
         string server, int hoursBack, object database, IReadOnlyList<ObjectSizeGrowthDto> ranked, int objectCount,
-        IEnumerable<FinOpsObjectDaySample> samples, string? objectGate)
+        IEnumerable<FinOpsObjectDaySample> samples, string? objectGate, int windowDays = StorageGrowthWindowDays)
     {
         var (days, rows) = StorageGrowthObjectRows(ranked, samples);
         return JsonSerializer.Serialize(new
@@ -194,7 +219,7 @@ public sealed partial class DarlingMcpFinOpsTools
             {
                 status = SectionStatus(objectGate, ranked.Count),
                 message = objectGate == null ? null : NotCollectedMessage(objectGate),
-                window_days = StorageGrowthWindowDays,
+                window_days = windowDays,
                 object_count = objectCount,
                 truncated = objectCount > ranked.Count,
                 days,
@@ -244,9 +269,9 @@ public sealed partial class DarlingMcpFinOpsTools
         NpgsqlDataSource postgres, (int ServerId, string ServerName) resolved, int hoursBack, int limit,
         string? databaseName, string? objectName, CancellationToken ct)
     {
-        if (hoursBack != 24)
+        if (StorageGrowthWindowDaysFor(hoursBack) is not int windowDays)
             return McpHelpers.Refusal("hours_back",
-                $"Invalid hours_back value '{hoursBack}': view {StorageGrowthView} reads a fixed {StorageGrowthWindowDays} days; hours_back does not apply. Omit it or pass 24.");
+                $"Invalid hours_back value '{hoursBack}': view {StorageGrowthView} takes 24 (the default, a {StorageGrowthWindowDays}-day window) or a whole number of days from 7 to 90, as {MinStorageGrowthWindowHours} to {MaxStorageGrowthHoursBack} hours.");
         if (databaseName == null && objectName != null)
             return McpHelpers.Refusal("object_name", $"object_name needs database_name: {objectName} is a table in one database. Pass database_name too, or omit object_name.");
         var objectsLevel = databaseName != null && objectName == null;
@@ -269,14 +294,14 @@ public sealed partial class DarlingMcpFinOpsTools
             return BuildStorageGrowthDatabasesPayload(resolved.ServerName, hoursBack, databases);
         }
 
-        var windowStart = DateTime.SpecifyKind(now.AddDays(-StorageGrowthWindowDays), DateTimeKind.Unspecified);
+        var windowStart = DateTime.SpecifyKind(now.AddDays(-windowDays), DateTimeKind.Unspecified);
         /* Always the desktop's 20: the summary read and RankTopGrowers agree except when growth is null, which happens in two cases:
            the database has a single snapshot (every row is null and the order is by key), or a table's current size is unknown (the SQL sorts that row last,
            the desktop's order counts it as 0); the re-rank keeps the desktop's order in both.
            limit and object_name are applied to that re-ranked set. */
         var topN = MaxStorageGrowthObjects;
         var (objects, samples) = await DarlingFinOpsStorageGrowthReader.GetObjectGrowthHeatmapDataAsync(
-            postgres, resolved.ServerId, databaseName, windowStart, StorageGrowthWindowDays, topN, timeout, ct);
+            postgres, resolved.ServerId, databaseName, windowStart, windowDays, topN, timeout, ct);
         var objectGate = objects.Count == 0 ? await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "index_object_stats", ct) : null;
 
         if (dbGate != null && objectGate != null) return dbGate;
@@ -290,7 +315,7 @@ public sealed partial class DarlingMcpFinOpsTools
 
         if (objectsLevel)
         {
-            return BuildStorageGrowthObjectsPayload(resolved.ServerName, hoursBack, database, ranked.Take(limit).ToList(), ranked.Count, samples, objectGate);
+            return BuildStorageGrowthObjectsPayload(resolved.ServerName, hoursBack, database, ranked.Take(Math.Min(limit, StorageGrowthObjectCap(windowDays))).ToList(), ranked.Count, samples, objectGate, windowDays);
         }
 
         var match = ranked.FirstOrDefault(o => string.Equals(StorageGrowthObjectKey(o), objectName, StringComparison.Ordinal));

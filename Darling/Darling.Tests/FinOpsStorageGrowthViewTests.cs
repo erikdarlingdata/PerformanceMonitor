@@ -56,7 +56,7 @@ public sealed class FinOpsStorageGrowthViewTests
     {
         var tail = McpToolGuideTests.Served("get_finops").Tail;
         Assert.NotNull(tail);
-        foreach (var fact in new[] { "fixed 30 days", "is refused above 20", "up to 50 rows", "up to 30 rows", "[mb, band]", "log1p(mb)", "not UTC", "object_name without database_name" })
+        foreach (var fact in new[] { "24 (the default) means 30 days", "from 7 to 90", "at most 12 objects", "is refused above 20", "up to 50 rows", "up to 30 rows", "[mb, band]", "log1p(mb)", "not UTC", "object_name without database_name" })
             Assert.Contains(fact, tail, StringComparison.Ordinal);
     }
 
@@ -177,6 +177,56 @@ public sealed class FinOpsStorageGrowthViewTests
         Assert.True(databases <= 32768, $"databases {databases}");
         Assert.True(indexesBytes <= 32768, $"indexes {indexesBytes}");
     }
+
+    private static int LongWindowObjectsBytes(int objectCount, int days)
+    {
+        var name = new string('n', 128);
+        var dbs = new List<StorageGrowthDto> { new(name, 99999999.99m, 99999999.99m, 99999999.99m, 99999999.99m, 99999999.99m, 99999999.99m, 9999.9m, true, true) };
+        var objs = Enumerable.Range(0, objectCount).Select(i => new ObjectSizeGrowthDto(name, name + i.ToString("D2"), 99999999.9m, 99999999.9m, 9_999_999_999L, 99, 99999999.9m, 99999.99m, 9999.9m)).ToList();
+        var samples = objs.SelectMany(o => Enumerable.Range(0, days).Select(d => new FinOpsObjectDaySample($"{o.SchemaName}.{o.TableName}", new DateTime(2026, 6, 1).AddDays(d), 12345678.9 + d))).ToList();
+        return Encoding.UTF8.GetByteCount(DarlingMcpFinOpsTools.BuildStorageGrowthObjectsPayload(new string('s', 128), 2160, DarlingMcpFinOpsTools.StorageGrowthDatabaseSection(dbs, name, null), objs, objectCount + 1, samples, null, days));
+    }
+
+    [Fact]
+    public void NinetyDayWindow_AtItsObjectCap_SerialisesUnder32768Bytes_AndTwentyObjectsWouldNot()
+    {
+        var cap = DarlingMcpFinOpsTools.StorageGrowthObjectCap(90);
+        var atCap = LongWindowObjectsBytes(cap, 90);
+        var atTwenty = LongWindowObjectsBytes(DarlingMcpFinOpsTools.MaxStorageGrowthObjects, 90);
+        Console.WriteLine($"storage_growth 90-day objects worst case bytes: {cap} objects {atCap}, 20 objects {atTwenty}");
+        Assert.Equal(12, cap);
+        Assert.True(atCap <= 32768, $"90 days x {cap} objects is {atCap}");
+        Assert.True(atTwenty > 32768, $"90 days x 20 objects is {atTwenty}, so the cap is not needed");
+    }
+
+    [Theory]
+    [InlineData(24, 30)]
+    [InlineData(168, 7)]
+    [InlineData(720, 30)]
+    [InlineData(2160, 90)]
+    [InlineData(1440, 60)]
+    public void WindowDays_AreTheDefault_OrAWholeNumberOfDaysFromSevenToNinety(int hours, int days) =>
+        Assert.Equal(days, DarlingMcpFinOpsTools.StorageGrowthWindowDaysFor(hours));
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-24)]
+    [InlineData(1)]
+    [InlineData(48)]
+    [InlineData(167)]
+    [InlineData(169)]
+    [InlineData(2161)]
+    [InlineData(2184)]
+    public void WindowDays_RefuseWhatIsNotADefaultOrSevenToNinetyWholeDays(int hours) =>
+        Assert.Null(DarlingMcpFinOpsTools.StorageGrowthWindowDaysFor(hours));
+
+    [Theory]
+    [InlineData(7, 20)]
+    [InlineData(30, 20)]
+    [InlineData(31, 12)]
+    [InlineData(90, 12)]
+    public void ObjectCap_FallsOnlyForWindowsOverThirtyDays(int days, int cap) =>
+        Assert.Equal(cap, DarlingMcpFinOpsTools.StorageGrowthObjectCap(days));
 }
 
 internal static class StorageGrowthTestExtensions
@@ -439,7 +489,7 @@ public sealed class FinOpsStorageGrowthViewLiveTests
             McpHelpers.Refusal("object_name", "object_name needs database_name: dbo.Big is a table in one database. Pass database_name too, or omit object_name."),
             await DarlingMcpFinOpsTools.GetFinOps(ds, "storage_growth", ServerName, 24, 10, object_name: "dbo.Big", cancellationToken: ct));
         Assert.Equal(
-            McpHelpers.Refusal("hours_back", "Invalid hours_back value '48': view storage_growth reads a fixed 30 days; hours_back does not apply. Omit it or pass 24."),
+            McpHelpers.Refusal("hours_back", "Invalid hours_back value '48': view storage_growth takes 24 (the default, a 30-day window) or a whole number of days from 7 to 90, as 168 to 2160 hours."),
             await DarlingMcpFinOpsTools.GetFinOps(ds, "storage_growth", ServerName, 48, 10, cancellationToken: ct));
         Assert.Equal(
             McpHelpers.Refusal("limit", "Invalid limit value '21': the objects level of view storage_growth returns at most 20 objects."),
@@ -462,6 +512,48 @@ public sealed class FinOpsStorageGrowthViewLiveTests
         Assert.Equal(
             McpHelpers.Status("empty", "No database size snapshot or object size data was found for this server, so there is no storage growth to show."),
             await DarlingMcpFinOpsTools.GetFinOps(ds, "storage_growth", EmptyServerName, 24, 10, "Alpha", cancellationToken: ct));
+    }
+
+    [Fact]
+    public async Task ObjectsLevel_TakesA7_30_Or90DayWindow_AndCapsTheLongOnesAtTwelve()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await SeedAsync(Cs()!, ct);
+        await using var ds = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        /* The seed has 30 daily snapshots: a 7-day window sees 7 or 8 of them, 30 and 90 days see all 30. */
+        using var week = Parse(await DarlingMcpFinOpsTools.GetFinOps(ds, "storage_growth", ServerName, 168, 10, "Alpha", cancellationToken: ct));
+        Assert.Equal(7, week.RootElement.GetProperty("objects").GetProperty("window_days").GetInt32());
+        Assert.InRange(week.RootElement.GetProperty("objects").GetProperty("days").GetArrayLength(), 7, 8);
+
+        using var month = Parse(await DarlingMcpFinOpsTools.GetFinOps(ds, "storage_growth", ServerName, 720, 10, "Alpha", cancellationToken: ct));
+        Assert.Equal(30, month.RootElement.GetProperty("objects").GetProperty("window_days").GetInt32());
+        Assert.Equal(30, month.RootElement.GetProperty("objects").GetProperty("days").GetArrayLength());
+
+        using var quarter = Parse(await DarlingMcpFinOpsTools.GetFinOps(ds, "storage_growth", ServerName, 2160, 20, "Alpha", cancellationToken: ct));
+        var objects = quarter.RootElement.GetProperty("objects");
+        Assert.Equal("ok", objects.GetProperty("status").GetString());
+        Assert.Equal(90, objects.GetProperty("window_days").GetInt32());
+        Assert.Equal(30, objects.GetProperty("days").GetArrayLength());
+        Assert.Equal(4, objects.GetProperty("rows").GetArrayLength());
+        Assert.Equal(2160, quarter.RootElement.GetProperty("hours_back").GetInt32());
+        /* The indexes level takes the same window. */
+        using var indexes = Parse(await DarlingMcpFinOpsTools.GetFinOps(ds, "storage_growth", ServerName, 2160, 10, "Alpha", object_name: "dbo.Big", cancellationToken: ct));
+        Assert.Equal("indexes", indexes.RootElement.GetProperty("level").GetString());
+    }
+
+    [Fact]
+    public async Task EveryOtherView_StillRefusesHoursBackAboveASevenDayWeek()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await SeedAsync(Cs()!, ct);
+        await using var ds = NpgsqlDataSource.Create(scratch.ConnectionString);
+        foreach (var view in new[] { "utilization", "index_analysis", "high_impact", "database_resources", "application_connections", "optimization" })
+        {
+            var refused = await DarlingMcpFinOpsTools.GetFinOps(ds, view, ServerName, 2160, 10, cancellationToken: ct);
+            Assert.True(McpHelpers.IsRefusalEnvelope(refused), $"{view}: {refused}");
+            Assert.Equal("hours_back", JsonDocument.Parse(refused).RootElement.GetProperty("hints").GetProperty("parameter").GetString());
+        }
     }
 
     [Fact]
