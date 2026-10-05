@@ -51,6 +51,7 @@ fs.writeFileSync(path.join(scratch, "charts.js"),
   'export function zoomableLineChart(spec, id, scope) { globalThis.__charts.push({ spec, id, scope }); const d = document.createElement("div"); d.className = "zoomable-chart"; return d; }\n');
 globalThis.__charts = [];
 const mod = await import(pathToFileURL(scratch + "/pages/query-store-history.js").href);
+const util = await import(pathToFileURL(scratch + "/util.js").href);
 const flush = () => new Promise((r) => setTimeout(r, 5));
 const out = {};
 const row = { database_name: "Orders", query_id: 42 };
@@ -125,6 +126,40 @@ const scenarios = {
     await flush();
     out.text = cell.textContent;
     out.tables = tables(cell).length;
+  },
+  async customRange() {
+    respond(history());
+    util.setActiveRange({ server: "srv-a", hours: 24, startMs: Date.parse("2026-03-04T02:00:00Z"), endMs: Date.parse("2026-03-04T06:00:00Z"), asOf: "2026-03-04T06:00:00.000Z" });
+    const cell = col().render(row);
+    cell.byText("History").click();
+    await flush();
+    Object.assign(out, query(0));
+  },
+  async windowChange() {
+    respond(history());
+    const first = col().render(row);
+    first.byText("History").click();
+    await flush();
+    const before = fetches.length;
+    const sameWindow = mod.queryStoreHistoryColumn("srv-a", 24).render(row);
+    out.sameWindowRefetched = fetches.length - before;
+    const wider = mod.queryStoreHistoryColumn("srv-a", 168).render(row);
+    await flush();
+    out.hoursRefetched = fetches.length - before;
+    out.lastHours = query(fetches.length - 1).query.hours;
+    out.stillOpen = wider.byText("Hide history") !== null && tables(wider).length === 1;
+    util.setActiveRange({ server: "srv-a", hours: 168, startMs: 0, endMs: 1, asOf: "2026-03-04T06:00:00.000Z" });
+    const ranged = mod.queryStoreHistoryColumn("srv-a", 168).render(row);
+    await flush();
+    out.rangeRefetched = fetches.length - before - 1;
+    out.lastAsOf = query(fetches.length - 1).query.as_of;
+  },
+  async cutNotice() {
+    respond(history({ points_truncated: true }));
+    const cell = col().render(row);
+    cell.byText("History").click();
+    await flush();
+    out.notices = cell.all((n) => n.className === "strip notice").map((n) => n.textContent);
   },
   async noKey() {
     out.noDb = col().render({ query_id: 1 }).textContent;

@@ -8,6 +8,7 @@
 
 using System;
 using System.Globalization;
+using System.Linq;
 using System.Text.Json;
 using System.Threading.Tasks;
 using Npgsql;
@@ -22,7 +23,7 @@ namespace Darling.Tests;
 /// <summary>
 /// #5234: get_query_store_query_history folds a query's snapshots plan by plan. An interval collected three times with
 /// a growing execution_count counts once, at its latest snapshot (#1841); two plans come back, the points are ordered by
-/// collection time, and a wrong query_id answers <c>empty</c>. Fixed anchors only.
+/// collection time, and a wrong query_id answers <c>empty</c>. Anchored a few hours back from the run, with as_of fixed against it.
 /// </summary>
 [Collection("live-postgres")]
 public sealed class QueryStoreHistoryLivePostgresTests
@@ -32,8 +33,11 @@ public sealed class QueryStoreHistoryLivePostgresTests
 
     private const string Db = "QsHistoryDb";
 
-    /// <summary>Fixed anchor, naive UTC as the store keeps it.</summary>
-    private static readonly DateTime Anchor = new DateTime(2026, 3, 4, 5, 0, 0, DateTimeKind.Unspecified);
+    /// <summary>
+    /// Naive UTC as the store keeps it, a few hours back from the run so a retention or compression job (which works on
+    /// chunks older than the raw window) cannot touch the seed; as_of is fixed against it, so no clock decides what the window holds.
+    /// </summary>
+    private static readonly DateTime Anchor = DateTime.SpecifyKind(DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow).AddHours(-3), DateTimeKind.Unspecified);
 
     private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
 
@@ -89,9 +93,109 @@ public sealed class QueryStoreHistoryLivePostgresTests
             Assert.Equal(40, points[0].GetProperty("execution_count").GetInt64());
             Assert.True(string.CompareOrdinal(points[0].GetProperty("collection_time").GetString(), points[1].GetProperty("collection_time").GetString()) < 0);
             Assert.False(root.GetProperty("points_truncated").GetBoolean());
+            /* The oldest row is 1 minute past the anchor, hours after the window's start (End - 24 h): the window is cut. */
+            Assert.True(root.GetProperty("window_truncated").GetBoolean());
+            Assert.Equal(Anchor.AddMinutes(1).ToString("yyyy-MM-dd'T'HH:mm", CultureInfo.InvariantCulture), root.GetProperty("effective_start").GetString()![..16]);
 
             Assert.Equal("empty", StatusOf(await DarlingMcpQueryStoreHistoryTools.GetQueryStoreQueryHistory(
                 postgres, Db, 9999, ServerName, hours_back: 24, as_of: End.ToString("o", CultureInfo.InvariantCulture), cancellationToken: ct)));
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
+    /// <summary>#4966: an empty answer over a window the store does not reach back to carries the window notice in its hints.</summary>
+    [Fact]
+    public async Task AnEmptyAnswer_OverACutWindow_CarriesTheWindowNotice()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live history test.");
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+        await using var postgres = NpgsqlDataSource.Create(cs!);
+
+        var bodySucceeded = false;
+        try
+        {
+            await RegisterServerAsync(connection, ct);
+            await InsertAsync(connection, Anchor.AddMinutes(1), 4242, 7, 1, Anchor, 5, 20_000, 10_000, ct);
+
+            using var doc = JsonDocument.Parse(await DarlingMcpQueryStoreHistoryTools.GetQueryStoreQueryHistory(
+                postgres, Db, 9999, ServerName, hours_back: 24, as_of: End.ToString("o", CultureInfo.InvariantCulture), cancellationToken: ct));
+            Assert.Equal("empty", doc.RootElement.GetProperty("status").GetString());
+            var hints = doc.RootElement.GetProperty("hints");
+            Assert.True(hints.GetProperty("window_truncated").GetBoolean());
+            Assert.False(string.IsNullOrEmpty(hints.GetProperty("effective_start").GetString()));
+            Assert.False(string.IsNullOrEmpty(hints.GetProperty("truncation_note").GetString()));
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
+    /// <summary>
+    /// #5234: many plans times many intervals stays under <see cref="McpResponseBudget.DefaultBytes"/>. The newest points are kept
+    /// (so the last interval is present and the first is not), and the plans list is capped by total duration.
+    /// </summary>
+    [Fact]
+    public async Task ManyPlansAndIntervals_StayUnderTheResponseBudget_AndKeepTheNewestPoints()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live history test.");
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+        await using var postgres = NpgsqlDataSource.Create(cs!);
+
+        var bodySucceeded = false;
+        try
+        {
+            await RegisterServerAsync(connection, ct);
+            const int planCount = 30;
+            const int intervalCount = 40;
+            for (var plan = 1; plan <= planCount; plan++)
+            {
+                for (var i = 0; i < intervalCount; i++)
+                {
+                    var intervalStart = Anchor.AddMinutes(-15 * i);
+                    /* Plan N's average is N * 1.234567 ms, so the plans differ and the cut keeps the longest. */
+                    await InsertAsync(connection, intervalStart.AddMinutes(14), 4242, plan, i + 1, intervalStart, 10 + i, plan * 1234.567891, plan * 987.654321, ct);
+                }
+            }
+
+            var json = await DarlingMcpQueryStoreHistoryTools.GetQueryStoreQueryHistory(
+                postgres, Db, 4242, ServerName, hours_back: 24, as_of: End.ToString("o", CultureInfo.InvariantCulture), cancellationToken: ct);
+            var bytes = System.Text.Encoding.UTF8.GetByteCount(json);
+            using var doc = JsonDocument.Parse(json);
+            var root = doc.RootElement;
+            var points = root.GetProperty("points");
+            Assert.True(bytes < McpResponseBudget.DefaultBytes, $"the answer is {bytes} bytes for {points.GetArrayLength()} points; the budget is {McpResponseBudget.DefaultBytes}.");
+            Assert.True(root.GetProperty("points_truncated").GetBoolean());
+            Assert.True(points.GetArrayLength() > 0 && points.GetArrayLength() <= DarlingMcpQueryStoreHistoryTools.MaxPoints);
+            Assert.True(root.GetProperty("plans_truncated").GetBoolean());
+            Assert.Equal(DarlingMcpQueryStoreHistoryTools.MaxPlans, root.GetProperty("plans").GetArrayLength());
+            /* The newest interval is kept, ordered oldest first; the oldest interval is the one that was cut. */
+            var times = Enumerable.Range(0, points.GetArrayLength()).Select(n => points[n].GetProperty("collection_time").GetString()!).ToList();
+            Assert.Equal(times.OrderBy(t => t, StringComparer.Ordinal), times);
+            var newest = Anchor.AddMinutes(14).ToString("yyyy-MM-dd'T'HH:mm", CultureInfo.InvariantCulture);
+            Assert.StartsWith(newest, times[^1]);
+            Assert.DoesNotContain(times, t => t.StartsWith(Anchor.AddMinutes(-15 * (intervalCount - 1) + 14).ToString("yyyy-MM-dd'T'HH:mm", CultureInfo.InvariantCulture), StringComparison.Ordinal));
 
             bodySucceeded = true;
         }

@@ -32,8 +32,38 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 [McpServerToolType]
 public sealed class DarlingMcpQueryStoreHistoryTools
 {
-    /// <summary>The most per-interval points one answer carries; <c>points_truncated</c> marks a cut.</summary>
-    internal const int MaxPoints = 2000;
+    /// <summary>
+    /// The most per-interval points one answer carries; <c>points_truncated</c> marks a cut, and the NEWEST points are kept.
+    /// A point serializes to 130-160 bytes (157 with every field at full width), so 150 points is about 23 KB: with <see cref="MaxPlans"/>
+    /// plans of about 310 bytes each the answer stays under <see cref="McpResponseBudget.DefaultBytes"/>. <see cref="PointByteBudget"/>
+    /// is the guard behind it for unusually wide values.
+    /// </summary>
+    internal const int MaxPoints = 150;
+
+    /// <summary>The most plans one answer lists, by total duration; <c>plans_truncated</c> marks a cut.</summary>
+    internal const int MaxPlans = 20;
+
+    /// <summary>Bytes the points may take: the response budget less room for the envelope and a full plans list.</summary>
+    internal const int PointByteBudget = McpResponseBudget.DefaultBytes - 8 * 1024;
+
+    /// <summary>
+    /// The newest points that fit <see cref="MaxPoints"/> and <paramref name="byteBudget"/>, oldest first. <paramref name="rows"/>
+    /// is ordered oldest first; the cut drops the oldest.
+    /// </summary>
+    internal static List<T> NewestWithinBudget<T>(IReadOnlyList<T> rows, Func<T, int> byteLength, int maxPoints, int byteBudget)
+    {
+        var kept = new List<T>();
+        var used = 0;
+        for (var i = rows.Count - 1; i >= 0 && kept.Count < maxPoints; i--)
+        {
+            var size = byteLength(rows[i]) + 1;
+            if (used + size > byteBudget) break;
+            used += size;
+            kept.Add(rows[i]);
+        }
+        kept.Reverse();
+        return kept;
+    }
 
     /// <summary>
     /// Deduped per interval, as #1841 requires: the collector re-fetches the open interval every cycle, so the same
@@ -82,7 +112,7 @@ public sealed class DarlingMcpQueryStoreHistoryTools
     [McpServerTool(Name = "get_query_store_query_history"), Description(
         "One Query Store query's history, plan by plan: per-plan executions, duration and CPU, plus a per-interval series. window_truncated marks a raw-tier floor. <<GUIDE>> " +
         "Per-plan averages are execution-weighted (total over executions), so they can differ from get_query_store_top, which averages the interval averages. " +
-        "Reads the raw tier only; effective_start is where complete history begins. points is capped at 2000 (points_truncated).")]
+        "Reads the raw tier only; effective_start is where complete history begins. points keeps the newest 150 (points_truncated) and plans the 20 longest by total duration (plans_truncated).")]
     public static async Task<string> GetQueryStoreQueryHistory(
         NpgsqlDataSource postgres,
         [Description("The database_name from get_query_store_top.")] string database_name,
@@ -122,17 +152,31 @@ public sealed class DarlingMcpQueryStoreHistoryTools
                 }
             }
 
+            /* #4966: probe the floor before the empty check, so an empty answer over a cut window says the window was cut. */
+            var floor = await DarlingDataReader.GetQueryStoreWindowFloorAsync(postgres, resolved.ServerId, start, windowEnd, cancellationToken);
+
             if (rows.Count == 0)
                 return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "query_store", cancellationToken)
                     ?? McpHelpers.Status("empty",
-                        $"No Query Store history for query_id {query_id} in database '{database_name}' in the {hours_back}-hour window searched.");
+                        $"No Query Store history for query_id {query_id} in database '{database_name}' in the {hours_back}-hour window searched.",
+                        DarlingMcpWindowNotice.Build(floor, start, "query_store_stats", emptyAnswer: true).AsHints());
 
-            var floor = await DarlingDataReader.GetQueryStoreWindowFloorAsync(postgres, resolved.ServerId, start, windowEnd, cancellationToken);
             var effectiveStart = RawWindowFloor.EffectiveStart(floor, start);
             var truncated = RawWindowFloor.IsTruncated(floor, start);
 
-            var plans = FoldPlans(rows);
-            var pointsTruncated = rows.Count > MaxPoints;
+            var allPlans = FoldPlans(rows);
+            var plansTruncated = allPlans.Count > MaxPlans;
+            var plans = plansTruncated ? allPlans.OrderByDescending(p => p.TotalDurationMs).Take(MaxPlans).OrderBy(p => p.PlanId).ToList() : allPlans;
+            var allPoints = rows.Select(r => new
+            {
+                collection_time = r.CollectionTime.ToString("o", CultureInfo.InvariantCulture),
+                plan_id = r.PlanId,
+                execution_count = r.ExecutionCount,
+                avg_duration_ms = r.AvgDurationMs,
+                avg_cpu_ms = r.AvgCpuMs
+            }).ToList();
+            var points = NewestWithinBudget(allPoints, p => JsonSerializer.SerializeToUtf8Bytes(p, McpHelpers.JsonOptions).Length, MaxPoints, PointByteBudget);
+            var pointsTruncated = points.Count < allPoints.Count;
             return JsonSerializer.Serialize(new
             {
                 database_name,
@@ -151,14 +195,8 @@ public sealed class DarlingMcpQueryStoreHistoryTools
                     last_execution_time = p.LastExecutionTime?.ToString("o", CultureInfo.InvariantCulture),
                     is_forced_plan = p.IsForcedPlan
                 }),
-                points = rows.Take(MaxPoints).Select(r => new
-                {
-                    collection_time = r.CollectionTime.ToString("o", CultureInfo.InvariantCulture),
-                    plan_id = r.PlanId,
-                    execution_count = r.ExecutionCount,
-                    avg_duration_ms = r.AvgDurationMs,
-                    avg_cpu_ms = r.AvgCpuMs
-                }),
+                plans_truncated = plansTruncated,
+                points,
                 points_truncated = pointsTruncated
             }, McpHelpers.JsonOptions);
         }

@@ -68,7 +68,9 @@ public sealed class QueryStoreHistoryBehaviourTests
         Assert.Equal("srv-a", q.GetProperty("server").GetString());
         Assert.Equal("Orders", q.GetProperty("database_name").GetString());
         Assert.Equal("42", q.GetProperty("query_id").GetString());
-        Assert.Equal("24", q.GetProperty("hours_back").GetString());
+        Assert.Equal("24", q.GetProperty("hours").GetString());
+        Assert.False(q.TryGetProperty("hours_back", out _));
+        Assert.False(q.TryGetProperty("as_of", out _));
         Assert.Equal(1, r.GetProperty("fetches").GetInt32());
         Assert.Equal(2, r.GetProperty("dataRows").GetInt32());
         Assert.Equal(2, r.GetProperty("planButtons").GetInt32());
@@ -90,6 +92,36 @@ public sealed class QueryStoreHistoryBehaviourTests
         Assert.True(r.GetProperty("open").GetBoolean());
         Assert.True(r.GetProperty("showsTable").GetBoolean());
         Assert.Equal(0, r.GetProperty("refetched").GetInt32());
+    }
+
+    [Fact]
+    public void WithACustomRange_TheReadIsAnchoredAtTheRangeEnd()
+    {
+        var r = Run("customRange");
+        var q = r.GetProperty("query");
+        Assert.Equal("24", q.GetProperty("hours").GetString());
+        Assert.Equal("2026-03-04T06:00:00.000Z", q.GetProperty("as_of").GetString());
+    }
+
+    [Fact]
+    public void AChangedHoursOrRange_ReadsTheOpenPanelAgain_AndTheSameWindowDoesNot()
+    {
+        var r = Run("windowChange");
+        Assert.Equal(0, r.GetProperty("sameWindowRefetched").GetInt32());
+        Assert.Equal(1, r.GetProperty("hoursRefetched").GetInt32());
+        Assert.Equal("168", r.GetProperty("lastHours").GetString());
+        Assert.True(r.GetProperty("stillOpen").GetBoolean());
+        Assert.Equal(1, r.GetProperty("rangeRefetched").GetInt32());
+        Assert.Equal("2026-03-04T06:00:00.000Z", r.GetProperty("lastAsOf").GetString());
+    }
+
+    [Fact]
+    public void ACutPointList_SaysTheNewestAreShown()
+    {
+        var notices = Run("cutNotice").GetProperty("notices");
+        Assert.Single(notices.EnumerateArray());
+        Assert.Contains("newest 2", notices[0].GetString());
+        Assert.DoesNotContain("first", notices[0].GetString());
     }
 
     [Fact]

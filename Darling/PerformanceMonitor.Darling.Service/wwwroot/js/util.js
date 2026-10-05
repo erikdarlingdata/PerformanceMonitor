@@ -770,6 +770,12 @@ function liveRange() {
   return activeRange && (hash === "" || hash.startsWith("#/server/")) ? activeRange : null;
 }
 
+/** A string that changes when the page's custom range does (its end and span), for a panel that caches a read per window. */
+export function activeRangeStamp() {
+  const range = liveRange();
+  return range ? [range.server, range.hours, range.asOf || ""].join("|") : "";
+}
+
 /* Marks the retry readWithinKeptHistory sends for fewer hours, with the hours the read first asked for. */
 const NARROWED_FROM = Symbol("narrowedFrom");
 
