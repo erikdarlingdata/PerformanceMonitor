@@ -165,6 +165,59 @@ public sealed class WebDataStartNoteTests
         }
     }
 
+    /// <summary>Index usage is listed over the table its tool reads (#4966), so the page draws the web's own note and the tool's UTC
+    /// keys are stripped on every return. Its nothing-found word is <c>empty</c> (collection ran, every index under the size floor);
+    /// <c>unavailable</c>, the word for one snapshot or none, is not admitted.</summary>
+    [Fact]
+    public void IndexUsage_IsListedOverItsTable_AndOnlyItsEmptyWordIsNothingFound()
+    {
+        Assert.Equal("pg_index_usage_stats", WebDataStartNote.TableByRead["get_pg_index_usage"]);
+        Assert.DoesNotContain("get_pg_index_usage", WebDataStartNote.CollectorRunsByRead.Keys);
+        Assert.True(WebDataStartNote.TryGetReadSource("get_pg_index_usage", out var source));
+        Assert.Equal("pg_index_usage_stats", source.Relation);
+        Assert.Equal("empty", WebDataStartNote.NothingFoundStatusByRead["get_pg_index_usage"]);
+    }
+
+    [Fact]
+    public async Task AChartRead_HasTheToolsWindowFloorKeysStripped_AndGetsNoNote_WithoutAskingTheStore()
+    {
+        await using var store = NeverConnects();
+        const string withKeys = """{"server":"pg1","hours_back":24,"effective_start":"2026-01-01T00:00:00Z","window_truncated":true,"truncation_note":"UTC sentence","rows":[{"v":1}]}""";
+
+        Assert.Equal(["get_pg_cpu_utilization"], WebDataStartNote.StripOnlyReads.OrderBy(x => x));
+        foreach (var read in WebDataStartNote.StripOnlyReads)
+        {
+            Assert.DoesNotContain(read, WebDataStartNote.TableByRead.Keys);
+            var answered = JsonNode.Parse(await WebDataStartNote.AddAsync(store, read, "pg1", 24, null, withKeys, null, Cancelled))!.AsObject();
+            Assert.False(answered.ContainsKey("effective_start"));
+            Assert.False(answered.ContainsKey("window_truncated"));
+            Assert.False(answered.ContainsKey("truncation_note"));
+            Assert.True(answered.ContainsKey("rows"));
+        }
+    }
+
+    [Fact]
+    public void TheUnlistedMcpReads_AreExactlyOne_AndShareNoKeyWithTheWebsMaps()
+    {
+        Assert.Equal(
+            ["get_pg_cpu_utilization"],
+            DarlingMcpWindowNotice.UnlistedTableByRead.Keys.OrderBy(x => x));
+        foreach (var key in DarlingMcpWindowNotice.UnlistedTableByRead.Keys)
+        {
+            Assert.DoesNotContain(key, WebDataStartNote.TableByRead.Keys);
+            Assert.DoesNotContain(key, WebDataStartNote.CollectorRunsByRead.Keys);
+        }
+    }
+
+    [Fact]
+    public async Task AToolNamedInNeitherMap_CostsOnlyTheNotice()
+    {
+        await using var store = NeverConnects();
+        var notice = await DarlingMcpWindowNotice.ReadForToolAsync(
+            store, "get_not_a_tool", "pg1", DateTime.UtcNow.AddHours(-24), DateTime.UtcNow, false, null, CancellationToken.None);
+        Assert.True(notice.IsUnavailable);
+    }
+
     [Fact]
     public async Task AnyAnswerThatIsNotAGridReadOverAWindow_ComesBackUntouched_WithoutAskingTheStore()
     {
@@ -582,6 +635,7 @@ public sealed class WebDataStartNoteTests
     [InlineData("io", "get_pg_write_stats", "Checkpoints and WAL")]
     [InlineData("vacuum", "get_pg_xmin_horizon", "Horizon Holders")]
     [InlineData("vacuum", "get_pg_wraparound_risk", "Per-Database Headroom")]
+    [InlineData("storage", "get_pg_index_usage", "Index Usage|By Index")]
     [InlineData("overview", "get_pg_xmin_horizon", "")]
     [InlineData("overview", "get_pg_wraparound_risk", "")]
     public void EveryPanelOfAPostgresWindowRead_DrawsTheNote_TheStatTilesBesideTheirGrids(string tab, string read, string panels)

@@ -13,6 +13,7 @@ using System.Linq;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using ModelContextProtocol.Server;
 using Npgsql;
 using PerformanceMonitor.Common;
@@ -144,6 +145,7 @@ public sealed class DarlingMcpPgDatabaseTools
         [Description("Hours of history to analyze. Default 24.")] int hours_back = 24,
         [Description("Maximum databases to return, most temp bytes first. Default 20. Bounds databases[] only; read truncated to know whether more exist; totals stay of the whole window regardless.")] int limit = 20,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        ILogger? logger = null,
         CancellationToken cancellationToken = default)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
@@ -166,10 +168,13 @@ public sealed class DarlingMcpPgDatabaseTools
 
             if (page.Rows.Count == 0)
             {
-                return await EmptyAsync(postgres, resolved.ServerId, resolved.ServerName, hours_back, start, end, cancellationToken);
+                return await EmptyAsync(postgres, resolved.ServerId, resolved.ServerName, hours_back, start, end, logger, cancellationToken);
             }
 
-            return BuildDatabaseStatsJson(resolved.ServerName, hours_back, page, limit);
+            /* #4966: decided after the empty branch, whose not-collected answer carries no notice. */
+            var notice = await DarlingMcpWindowNotice.ReadForToolAsync(
+                postgres, "get_pg_database_stats", resolved.ServerName, start, end, emptyAnswer: false, logger, cancellationToken);
+            return BuildDatabaseStatsJson(resolved.ServerName, hours_back, page, limit, notice);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -200,8 +205,10 @@ public sealed class DarlingMcpPgDatabaseTools
     /// it.</para>
     /// </summary>
     internal static string BuildDatabaseStatsJson(
-        string serverName, int hoursBack, DarlingPgDatabaseReader.PgDatabasePage page, int limit)
+        string serverName, int hoursBack, DarlingPgDatabaseReader.PgDatabasePage page, int limit,
+        McpWindowNotice? windowNotice = null)
     {
+        var notice = windowNotice ?? McpWindowNotice.Unavailable;
         var truncated = page.Rows.Count > limit;
         var rows = truncated ? page.Rows.Take(limit).ToList() : page.Rows;
 
@@ -270,10 +277,14 @@ public sealed class DarlingMcpPgDatabaseTools
         })
         .ToList();
 
-        return JsonSerializer.Serialize(new
+        return DarlingMcpWindowNotice.Finish(JsonSerializer.Serialize(new
         {
             server = serverName,
             hours_back = hoursBack,
+            /* #4966: the window floor, right after hours_back. */
+            effective_start = notice.EffectiveStart,
+            window_truncated = notice.WindowTruncated,
+            truncation_note = notice.TruncationNote,
             status = "database_activity",
             /* #3541 A3 dialect: the page described as a page. database_count is the WINDOW's - how many
                databases moved or were reset in it, COUNT(*) OVER () on the row statement - which is what
@@ -331,7 +342,7 @@ public sealed class DarlingMcpPgDatabaseTools
                     + "rest of the rows."
                     : string.Empty),
             databases,
-        }, McpHelpers.JsonOptions);
+        }, McpHelpers.JsonOptions), notice);
     }
 
     /// <summary>
@@ -347,7 +358,7 @@ public sealed class DarlingMcpPgDatabaseTools
     /// </summary>
     private static async Task<string> EmptyAsync(
         NpgsqlDataSource postgres, int serverId, string serverName, int hoursBack, DateTime start, DateTime end,
-        CancellationToken cancellationToken = default)
+        ILogger? logger, CancellationToken cancellationToken = default)
     {
         var gated = await DarlingEngineCapability.NotCollectedStatusAsync(
             postgres, serverId, serverName, "pg_database_stats", cancellationToken);
@@ -369,13 +380,25 @@ public sealed class DarlingMcpPgDatabaseTools
 
         if (samplesInWindow >= 2)
         {
+            /* #4966: the empty answer carries the window floor under hints; the unavailable ones below stay as they were. */
+            var notice = await DarlingMcpWindowNotice.ReadForToolAsync(
+                postgres, "get_pg_database_stats", serverName, start, end, emptyAnswer: true, logger, cancellationToken);
             return McpHelpers.Status(
                 "empty",
                 $"No database recorded transactions, block accesses, temp files or deadlocks for {serverName} "
                 + $"in the last {hoursBack} hour(s), and no statistics reset either. Collection DID run over "
                 + "this window - at least two snapshots exist to difference - so this is a genuine all-clear "
                 + "rather than missing data.",
-                hints);
+                notice.IsUnavailable ? hints : new
+                {
+                    hints.server,
+                    hints.hours_back,
+                    hints.samples_in_window,
+                    hints.ever_collected,
+                    effective_start = notice.EffectiveStart,
+                    window_truncated = notice.WindowTruncated,
+                    truncation_note = notice.TruncationNote,
+                });
         }
 
         if (samplesInWindow == 1)
