@@ -79,10 +79,13 @@ const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "collector-run-history-"))
 try {
   fs.mkdirSync(path.join(scratch, "pages"));
   fs.writeFileSync(path.join(scratch, "package.json"), '{ "type": "module" }');
-  for (const f of ["util.js", "panels.js", "read-fields.js"]) fs.copyFileSync(path.join(jsDir, f), path.join(scratch, f));
-  fs.copyFileSync(path.join(jsDir, "pages", "server-tabs.js"), path.join(scratch, "pages", "server-tabs.js"));
-  for (const f of ["grid-tools.js", "multi-picker.js", path.join("pages", "analysis-findings.js"), path.join("pages", "plan-viewer.js"), path.join("pages", "pg-plan-viewer.js")]) {
-    if (fs.existsSync(path.join(jsDir, f))) fs.copyFileSync(path.join(jsDir, f), path.join(scratch, f));
+  /* Copy every module under js/ and js/pages/ rather than a hand-kept list: a new page module that server-tabs.js
+     imports (another PR's pages/*.js) then needs no edit here. Only imported files load, so the rest are inert;
+     charts.js is replaced by the stub below. */
+  for (const dir of ["", "pages"]) {
+    for (const f of fs.readdirSync(path.join(jsDir, dir))) {
+      if (f.endsWith(".js")) fs.copyFileSync(path.join(jsDir, dir, f), path.join(scratch, dir, f));
+    }
   }
   fs.writeFileSync(
     path.join(scratch, "charts.js"),
