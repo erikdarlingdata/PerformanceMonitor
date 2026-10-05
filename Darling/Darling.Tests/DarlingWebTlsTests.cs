@@ -34,14 +34,56 @@ public sealed class DarlingWebTlsTests
         => Assert.Equal(DarlingWebTls.TlsShape.NotConfigured, DarlingWebTls.Describe(null).Shape);
 
     [Fact]
-    public void Describe_EmptyBlock_IsNotConfigured()
+    public void Describe_EmptyBlock_IsInvalid()
     {
-        /* A block present but blank must read as "TLS was never asked for", not as a misconfiguration: an
-           operator who left the keys in place with empty values gets plain HTTP + the exposure warning, which
-           is the same outcome as omitting the block. */
+        /* #5288: a block that is present but blank is refused, not read as "TLS was never asked for". Writing the
+           block is the operator's statement that TLS is on, so plain HTTP is only what OMITTING the block means
+           (Describe_NoBlock_IsNotConfigured). */
         var plan = DarlingWebTls.Describe(new WebTlsConfig { PfxPath = "   ", CertPath = "", KeyPath = null });
-        Assert.Equal(DarlingWebTls.TlsShape.NotConfigured, plan.Shape);
-        Assert.Null(plan.Problem);
+        Assert.Equal(DarlingWebTls.TlsShape.Invalid, plan.Shape);
+        Assert.Equal(
+            "web.network.tls is present but sets none of pfxPath, certPath or keyPath. Check the key names, or remove the block for plain HTTP.",
+            plan.Problem);
+    }
+
+    /// <summary>
+    /// #5288: the tls block's config reader skips a key it does not know, so a block written with other key names
+    /// parses to the same all-blank <see cref="WebTlsConfig"/> as an empty one. These read real JSON, so the
+    /// skipped-key path is the one exercised: the block is present, none of its keys bound, and both listeners'
+    /// sections refuse it.
+    /// </summary>
+    [Theory]
+    [InlineData("web")]
+    [InlineData("mcp")]
+    public void Describe_BlockWithOnlyUnknownKeys_IsInvalid(string section)
+    {
+        foreach (var block in new[]
+        {
+            @"{ ""cert"": ""/run/secrets/tls_cert"", ""key"": ""/run/secrets/tls_key"" }",
+            @"{ ""pfx_path"": ""/certs/a.pfx"" }",
+            "{}",
+        })
+        {
+            var tls = ParseTlsBlock(section, block);
+
+            Assert.NotNull(tls);
+            Assert.False(tls!.IsConfigured);
+
+            var plan = DarlingWebTls.Describe(tls, section);
+            Assert.Equal(DarlingWebTls.TlsShape.Invalid, plan.Shape);
+            Assert.Equal(
+                $"{section}.network.tls is present but sets none of pfxPath, certPath or keyPath. Check the key names, or remove the block for plain HTTP.",
+                plan.Problem);
+        }
+    }
+
+    /// <summary>The <c>tls</c> block <c>section</c> (<c>"web"</c> or <c>"mcp"</c>) parses to, through the config reader.</summary>
+    internal static WebTlsConfig? ParseTlsBlock(string section, string tlsJson)
+    {
+        var config = DarlingConfig.Parse(
+            $$"""{ "{{section}}": { "network": { "listen": "192.168.1.205", "tls": {{tlsJson}} } } }""");
+
+        return section == "web" ? config.Web.Network?.Tls : config.Mcp.Network?.Tls;
     }
 
     [Fact]
@@ -443,6 +485,7 @@ public sealed class DarlingWebTlsTests
         new WebTlsConfig { CertPath = "/certs/a.crt" },
         new WebTlsConfig { KeyPath = "/certs/a.key" },
         new WebTlsConfig { PfxPassword = "hunter2" },
+        new WebTlsConfig(),
     ];
 
     private static readonly string[] s_webInvalidTexts =
@@ -451,6 +494,7 @@ public sealed class DarlingWebTlsTests
         "web.network.tls sets certPath with no keyPath — a PEM certificate cannot serve TLS without its private key.",
         "web.network.tls sets keyPath with no certPath — name the PEM certificate that key belongs to.",
         "web.network.tls sets a PKCS#12 password but no pfxPath — there is no bundle for it to open.",
+        "web.network.tls is present but sets none of pfxPath, certPath or keyPath. Check the key names, or remove the block for plain HTTP.",
     ];
 
     private const string WebStrayPasswordWarning =
@@ -498,7 +542,6 @@ public sealed class DarlingWebTlsTests
         foreach (var block in new WebTlsConfig?[]
         {
             null,
-            new WebTlsConfig(),
             new WebTlsConfig { PfxPath = "/certs/a.pfx" },
             new WebTlsConfig { CertPath = "/certs/a.crt", KeyPath = "/certs/a.key" },
         })

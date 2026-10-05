@@ -50,7 +50,8 @@ internal static class DarlingWebTls
     /// any file is opened.</summary>
     internal enum TlsShape
     {
-        /// <summary>No <c>tls</c> block, or one whose every field is blank — plain HTTP (the caller warns when exposed).</summary>
+        /// <summary>No <c>tls</c> block — plain HTTP (the caller warns when exposed). A block that is present but
+        /// sets none of <c>pfxPath</c>, <c>certPath</c> or <c>keyPath</c> is <see cref="Invalid"/>, not this.</summary>
         NotConfigured,
 
         /// <summary>A PKCS#12 bundle: <c>pfxPath</c>, optionally with a password.</summary>
@@ -96,6 +97,9 @@ internal static class DarlingWebTls
     /// <para>Both forms configured is <see cref="TlsShape.Invalid"/>, not a precedence rule. A precedence rule
     /// would silently serve one certificate while the operator watched the other one expire — and picking the
     /// wrong one is indistinguishable from working until the day it is not.</para>
+    ///
+    /// <para>A block that is present but sets none of the three paths is <see cref="TlsShape.Invalid"/> too (#5288):
+    /// only an ABSENT block (null) means plain HTTP.</para>
     /// </summary>
     /// <param name="tls">The block, or null when the listener has none.</param>
     /// <param name="section">Which listener's block this is, <c>"web"</c> (the default) or <c>"mcp"</c>. It only
@@ -164,7 +168,15 @@ internal static class DarlingWebTls
                 $"{section}.network.tls sets a PKCS#12 password but no pfxPath — there is no bundle for it to open.");
         }
 
-        return new TlsPlan(TlsShape.NotConfigured, null);
+        /* Every flag above is false, which is exactly !tls.IsConfigured: the block is present and sets none of
+           the keys this loader reads. The config reader skips a key it does not know, so a block whose key names
+           are spelled differently arrives here looking just like a block of blank values. Whoever wrote a tls
+           block expects TLS, and reading it as "no TLS" would serve plain HTTP, so it is refused like the lone
+           password above. Only an ABSENT block (null, handled first) means plain HTTP. */
+        return new TlsPlan(
+            TlsShape.Invalid,
+            $"{section}.network.tls is present but sets none of pfxPath, certPath or keyPath. "
+            + "Check the key names, or remove the block for plain HTTP.");
     }
 
     /// <summary>The lifetime gate's three answers. Kept as a kind rather than only the rendered refusal
