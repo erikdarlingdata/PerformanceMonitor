@@ -82,6 +82,7 @@ jobs:
     outputs:
       run: ${{ steps.decide.outputs.run }}
       lite_timing_run: ${{ steps.timing.outputs.run_id }}
+      lite_timing_artifacts: ${{ steps.timing.outputs.artifacts }}
     steps:
       - name: Decide
         id: decide
@@ -118,9 +119,11 @@ jobs:
       # race a dev run finishing in between: two shards would then cut the suite from different timings,
       # and a class could land in two shards or none, which no check inside a single shard can see.
       # Only SUCCESSFUL push runs on dev qualify (a cancelled run is never read, and a push to dev is
-      # code that already merged), and its artifacts must outlive this run by two days, so they cannot
-      # expire while the shards are queued or being re-run. Every failure here means "no source", which
-      # the shards all read the same way: the plain class-name hash cut. The step cannot fail the gate.
+      # code that already merged), and ALL of its timing artifacts must outlive this run by two days, so
+      # they cannot expire while the shards are queued or being re-run. The exact artifact names are
+      # pinned too (the artifacts output), and each shard checks that it downloaded exactly that set.
+      # Every failure here means "no source", which the shards all read the same way: the plain
+      # class-name hash cut. The step cannot fail the gate.
       - name: Pin the Lite timing source
         id: timing
         if: github.event_name != 'release' && steps.decide.outputs.run == 'true'
@@ -135,19 +138,24 @@ jobs:
           export KEEP_UNTIL
           KEEP_UNTIL=$(date -u -d '+2 days' +%Y-%m-%dT%H:%M:%SZ)
           source_run=""
+          source_artifacts=""
           # Filtered on the event here, not in the query: the API's branch+event+status combination
           # returns a stale page of old runs, while branch+status is current. (A pull request FROM dev
           # carries head_branch dev too, hence the event test.)
           runs=$(gh api "repos/${GH_REPO}/actions/workflows/build.yml/runs?branch=dev&status=success&per_page=30" --jq '.workflow_runs[] | select(.event == "push") | .id') || runs=""
           for id in ${runs}; do
-            usable=$(gh api "repos/${GH_REPO}/actions/runs/${id}/artifacts?per_page=100" --jq '[.artifacts[] | select((.name | test("^lite-tests-timing-[0-9]+$")) and (.expired | not) and (.expires_at > env.KEEP_UNTIL))] | length') || usable=0
-            if [ "${usable:-0}" -gt 0 ] 2>/dev/null; then
+            # EVERY timing artifact of the run must outlive this run by two days, not just one, and the exact set is
+            # pinned so each shard can prove it downloaded the same files as the others.
+            names=$(gh api "repos/${GH_REPO}/actions/runs/${id}/artifacts?per_page=100" --jq '[.artifacts[] | select(.name | test("^lite-tests-timing-[0-9]+$"))] | if length > 0 and all(.[]; (.expired | not) and (.expires_at > env.KEEP_UNTIL)) then (map(.name) | unique | join(",")) else "" end') || names=""
+            if [ -n "${names}" ]; then
               source_run="${id}"
+              source_artifacts="${names}"
               break
             fi
           done
 
           echo "run_id=${source_run}" >> "$GITHUB_OUTPUT"
+          echo "artifacts=${source_artifacts}" >> "$GITHUB_OUTPUT"
           if [ -n "${source_run}" ]; then
             echo "::notice title=Lite timing source::The Lite shards balance their cut from the timings of run ${source_run}, the newest successful push run on dev that still has them."
           else
@@ -1819,9 +1827,11 @@ jobs:
   #     matrix (strategy.job-total), so the cut and the matrix cannot disagree.
   # Totality used to hold by arithmetic; the duration cut earns it by proof. The packer's reconcile
   # check fails the leg unless the shard files hold every discovered class exactly once. And a leg
-  # whose pinned timings cannot be downloaded FAILS instead of falling back on its own: all four
-  # legs must cut from the same inputs, or the four cuts would disagree and a class could run twice
-  # or not at all, which no check inside one leg can see. A re-run of a failed leg reuses the pin.
+  # whose pinned timings cannot be downloaded, or whose download is not exactly the artifact set the
+  # gate pinned (one expired or was deleted since), FAILS instead of falling back or cutting on its
+  # own: all four legs must cut from the same inputs, or the four cuts would disagree and a class
+  # could run twice or not at all, which no check inside one leg can see. A re-run of a failed leg
+  # reuses the pin.
   #
   # FOUR and not three, decided on measurement (of the hash cut) rather than taste: the hash balances CLASSES, and
   # Lite's classes carry uneven test counts, so a 3-way cut left one shard holding 42% of the tests
@@ -1993,6 +2003,7 @@ jobs:
           # The timing source the gate pinned for the WHOLE run (empty: none, so the hash cut). Read from
           # the gate's output, never looked up here: see the job header and the gate's timing-source step.
           LITE_TIMING_RUN: ${{ needs.gate.outputs.lite_timing_run }}
+          LITE_TIMING_ARTIFACTS: ${{ needs.gate.outputs.lite_timing_artifacts }}
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           LITE_SCOPE_MODE: ${{ steps.scope.outputs.mode }}
@@ -2046,6 +2057,11 @@ jobs:
                       if ($attempt -lt 3) { Start-Sleep -Seconds (5 * $attempt) }
                   }
                   if (-not $downloaded) { throw "could not download the Lite timings of run $env:LITE_TIMING_RUN that the gate pinned - failing this shard rather than cutting alone, because the other shards may have cut by duration" }
+                  # The gate pinned the exact artifact set. A leg that got fewer (one expired or was deleted since,
+                  # which gh skips without failing) would cut from different inputs than the other legs.
+                  $expected = @(($env:LITE_TIMING_ARTIFACTS -split ',') | Where-Object { $_ } | Sort-Object)
+                  $got = @(Get-ChildItem -Path $timingDir -Directory | ForEach-Object { $_.Name } | Sort-Object)
+                  if ($expected.Count -eq 0 -or ($expected -join ',') -ne ($got -join ',')) { throw "downloaded timing artifacts [$($got -join ', ')] are not the [$($expected -join ', ')] the gate pinned from run $env:LITE_TIMING_RUN - failing this shard rather than cutting from different inputs than the other shards" }
 
                   $packOutput = @(python .github/scripts/lite-shard-pack.py pack --classes $classesFile --shards $shards --out $planDir --timings $timingDir)
                   $packExit = $LASTEXITCODE

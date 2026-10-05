@@ -2826,7 +2826,9 @@ public class CrossAppGuardCiGateTests
     /// would race a dev run finishing in between, and a shard that fell back to the hash on its own while the
     /// others packed by duration would leave classes in two shards or none. These are the lines that prevent
     /// that, pinned as text because the steps only run on a hosted runner: the gate picks ONE source run, from
-    /// successful dev push runs only; every shard reads that pin, and a shard that cannot fetch it fails.
+    /// successful dev push runs only, with EVERY timing artifact of that run unexpired, and pins the exact
+    /// artifact names; every shard reads that pin, and a shard that cannot fetch it, or whose download is not
+    /// exactly the pinned set, fails.
     /// </summary>
     [Fact]
     public void TheLiteShardCut_ComesFromOneTimingSourcePinnedByTheGate_AndNoShardFallsBackAlone()
@@ -2837,6 +2839,7 @@ public class CrossAppGuardCiGateTests
         var gate = JobBlock(yaml, "gate");
         Assert.Contains("    permissions:\n      actions: read\n", gate, StringComparison.Ordinal);
         Assert.Contains("lite_timing_run: ${{ steps.timing.outputs.run_id }}", gate, StringComparison.Ordinal);
+        Assert.Contains("lite_timing_artifacts: ${{ steps.timing.outputs.artifacts }}", gate, StringComparison.Ordinal);
         var pin = StepBlock(gate, "Pin the Lite timing source");
         Assert.Contains("id: timing", pin, StringComparison.Ordinal);
         Assert.Contains("continue-on-error: true", pin, StringComparison.Ordinal);
@@ -2845,6 +2848,9 @@ public class CrossAppGuardCiGateTests
         Assert.Contains("^lite-tests-timing-[0-9]+$", pin, StringComparison.Ordinal);
         Assert.Contains("(.expired | not)", pin, StringComparison.Ordinal);
         Assert.Contains("env.KEEP_UNTIL", pin, StringComparison.Ordinal);
+        /* ALL of the run's timing artifacts must be fresh, not any one of them: a run whose first artifact outlives
+           the others would pass an "at least one" test and then hand a late re-run only some of its files. */
+        Assert.Contains("all(.[]; (.expired | not) and (.expires_at > env.KEEP_UNTIL))", pin, StringComparison.Ordinal);
 
         /* The shard job may read artifacts (actions: read) and runs the packer from the pin, in the full cut only. */
         var job = JobBlock(yaml, "lite-tests");
@@ -2852,6 +2858,7 @@ public class CrossAppGuardCiGateTests
         Assert.Contains("      actions: read\n", job, StringComparison.Ordinal);
         var run = StepBlock(job, "Run Lite tests (shard)");
         Assert.Contains("LITE_TIMING_RUN: ${{ needs.gate.outputs.lite_timing_run }}", run, StringComparison.Ordinal);
+        Assert.Contains("LITE_TIMING_ARTIFACTS: ${{ needs.gate.outputs.lite_timing_artifacts }}", run, StringComparison.Ordinal);
         Assert.Contains("GH_TOKEN: ${{ github.token }}", run, StringComparison.Ordinal);
         Assert.Contains("gh run download $env:LITE_TIMING_RUN --pattern 'lite-tests-timing-*'", run, StringComparison.Ordinal);
         Assert.Contains("lite-shard-pack.py pack --classes", run, StringComparison.Ordinal);
@@ -2872,6 +2879,9 @@ public class CrossAppGuardCiGateTests
            back to the hash alone. The only fallbacks are the pin being empty (every shard reads the same empty
            output) and the packer's own, which every shard reaches from the same files. */
         Assert.Matches(@"if \(-not \$downloaded\) \{ throw ", run);
+        /* ...and so does a shard whose download is a different artifact set than the one the gate pinned (gh skips an
+           expired or deleted artifact without failing, so the exit code alone cannot see it). */
+        Assert.Matches(@"-ne \(\$got -join ','\)\) \{ throw ", run);
         Assert.Matches(@"if \(\$packExit -ne 0\) \{ throw ", run);
         Assert.Matches(@"reconcile --classes \$classesFile --shards \$shards --out \$planDir\s+if \(\$LASTEXITCODE -ne 0\) \{ throw ", run);
         Assert.Contains("if ($env:LITE_TIMING_RUN -match '^\\d+$')", run, StringComparison.Ordinal);
