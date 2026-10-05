@@ -343,6 +343,14 @@ public sealed class CaggGroupIndexDropLiveTests
             await dropEnd.ExecuteNonQueryAsync(ct);
         }
 
+        if (simulatedVersion < QueryStoreTopDailyRungTests.RungVersion)
+        {
+            /* V161 (#5094) - the Query Store top daily summary tables; the first is the probe's sentinel. */
+            await using var dropTopDaily = new NpgsqlCommand(
+                "DROP TABLE IF EXISTS collect.query_store_top_daily, collect.query_store_top_daily_built", connection);
+            await dropTopDaily.ExecuteNonQueryAsync(ct);
+        }
+
         if (simulatedVersion < CollectorRunTimeRungTests.RungVersion)
         {
             /* V160 (#4938) - the collector run time, in a table of its own; the table is the probe's sentinel. */

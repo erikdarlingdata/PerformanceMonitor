@@ -176,8 +176,8 @@ export function renderServer(main, server, tabId, opts) {
   const generation = ++renderGeneration;
   const custom = customRanges.get(server);
   /* A fixed custom range cannot change under the poll, so the poll keeps the panels it already drew (same server, same
-     tab) instead of reading the same hours again. A live range, a preset and a tab or server click rebuild as before. */
-  const keep = isPoll && !!custom && !custom.live && !!gridNode && gridKey === server + "|" + (tabId || "");
+     tab) instead of reading the same hours again. The Refresh button passes `manual: true`: a click asks for a re-read, so it rebuilds even then. A live range, a preset and a tab or server click rebuild as before. */
+  const keep = isPoll && !(opts && opts.manual === true) && !!custom && !custom.live && !!gridNode && gridKey === server + "|" + (tabId || "");
   keepGrid = false;
   current = { server, tab: null };
 

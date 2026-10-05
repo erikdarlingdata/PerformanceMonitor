@@ -8,7 +8,9 @@
 
 using System;
 using System.ComponentModel;
+using System.Collections.Generic;
 using System.Linq;
+using System.Text;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
@@ -51,8 +53,7 @@ public sealed class DarlingMcpReadLatencyTools
         + "(web/compose/mcp) and route filter. Empty means no read recorded in the window, not a failure. "
         + "<<GUIDE>> "
         + "Gets the monitoring tool's OWN read-latency history — how long the web dashboard's `/api/read/*` "
-        + "reads and the composed-panel runner take, and (once the MCP per-tool wrapper ships) the MCP surface "
-        + "too. This is the tool measuring itself, NOT a monitored SQL Server or PostgreSQL target. The service "
+        + "reads, the composed-panel runner and every MCP tool call take. This is the tool measuring itself, NOT a monitored SQL Server or PostgreSQL target. The service "
         + "records every finished read into an in-process histogram keyed by (surface, route, outcome) and "
         + "flushes an hourly aggregate: run count, total and max duration in ms, and a fixed log-scale bucket "
         + "histogram (about 24 bounds, 10 ms to 120 s, plus an overflow bucket for anything past 120 s). This "
@@ -64,11 +65,18 @@ public sealed class DarlingMcpReadLatencyTools
         + "this many ms\", flagged with \"≥ <bound>\" on the rare row whose true value only proven to exceed "
         + "the last finite bucket. timeouts is the run_count of samples whose outcome was a caught statement "
         + "timeout (57014) for that route — a route that answers fast most of the time but times out on a heavy "
-        + "case shows both figures side by side. Sorted by p95 descending, then by count, so the worst tail "
-        + "leads. Pass surface to scope to one of web/compose/mcp, or route to scope to one read/panel name; "
+        + "case shows both figures side by side. Sorted by p95 descending, then by count, then surface and route, so the worst tail "
+        + "leads. fallbacks is the run_count of reads whose interval-table path faulted "
+        + "and were answered from raw (outcome fallback_raw); gate_failures is the run_count of reads whose "
+        + "source decision itself faulted, so they read raw without one (outcome gate_failed). Both are counted "
+        + "inside count and the percentiles, and a fallback that then timed out counts as a timeout, not a "
+        + "fallback. Pass surface to scope to one of web/compose/mcp, or route to scope to one read/panel name; "
         + "both are optional and compose (AND) when both are given. Empty means no read was recorded for the "
         + "window/filter, which on a fresh store, or one below schema V148, is the expected answer — not a "
-        + "sign anything is broken.")]
+        + "sign anything is broken. The page is capped at limit rows or the shared ~32 KB response budget, whichever cuts first: "
+        + "truncated says either cut applied, reads_returned is the rows sent and reads_total the rows the window "
+        + "held, so reads_total minus reads_returned were left out, always from the end of the order above. Raise "
+        + "limit (up to the budget) or narrow with surface or route to see them.")]
     public static async Task<string> GetReadLatency(
         NpgsqlDataSource postgres,
         [Description("Hours of history to summarize. Default 24; max 168 (7 days).")] int hours = DefaultHours,
@@ -122,35 +130,77 @@ public sealed class DarlingMcpReadLatencyTools
                bucket always carries at least one count) sorts last. */
             .OrderByDescending(x => x.P95?.UpperBoundMs ?? -1)
             .ThenByDescending(x => x.Row.RunCount)
-            .Take(limit)
+            .ThenBy(x => x.Row.Surface, StringComparer.Ordinal)
+            .ThenBy(x => x.Row.Route, StringComparer.Ordinal)
             .ToArray();
 
-            return JsonSerializer.Serialize(new
+            var shaped = projected.Select(x => (object)new
             {
-                hours,
-                surface,
-                route,
-                note = BucketEstimateNote,
-                reads = projected.Select(x => new
-                {
-                    surface = x.Row.Surface,
-                    route = x.Row.Route,
-                    count = x.Row.RunCount,
-                    mean_ms = x.Row.MeanMs,
-                    max_ms = x.Row.MaxMs,
-                    p50_ms = x.P50?.UpperBoundMs,
-                    p50_is_at_least = x.P50?.IsAtLeast ?? false,
-                    p95_ms = x.P95?.UpperBoundMs,
-                    p95_is_at_least = x.P95?.IsAtLeast ?? false,
-                    p99_ms = x.P99?.UpperBoundMs,
-                    p99_is_at_least = x.P99?.IsAtLeast ?? false,
-                    timeouts = x.Row.Timeouts,
-                }),
-            });
+                surface = x.Row.Surface,
+                route = x.Row.Route,
+                count = x.Row.RunCount,
+                mean_ms = x.Row.MeanMs,
+                max_ms = x.Row.MaxMs,
+                p50_ms = x.P50?.UpperBoundMs,
+                p50_is_at_least = x.P50?.IsAtLeast ?? false,
+                p95_ms = x.P95?.UpperBoundMs,
+                p95_is_at_least = x.P95?.IsAtLeast ?? false,
+                p99_ms = x.P99?.UpperBoundMs,
+                p99_is_at_least = x.P99?.IsAtLeast ?? false,
+                timeouts = x.Row.Timeouts,
+                fallbacks = x.Row.Fallbacks,
+                gate_failures = x.Row.GateFailures,
+            }).ToArray();
+
+            return BuildResponse(hours, surface, route, shaped, limit, McpResponseBudget.DefaultBytes);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_read_latency", ex);
         }
+    }
+
+    /// <summary>
+    /// Serializes the page: the first <paramref name="limit"/> rows, further cut to fit <paramref name="budgetBytes"/>.
+    /// Rows are taken greedily in order using each row's own bytes plus a comma, then the REAL final response is
+    /// serialized and, while it is over budget with more than one row, the last row is dropped and it is
+    /// serialized again — the envelope's own digits and the true/false spelling depend on the final page.
+    /// </summary>
+    internal static string BuildResponse(int hours, string? surface, string? route, IReadOnlyList<object> shaped, int limit, int budgetBytes)
+    {
+        string Envelope(IReadOnlyList<object> page, bool truncated) => JsonSerializer.Serialize(new
+        {
+            hours,
+            surface,
+            route,
+            note = BucketEstimateNote,
+            truncated,
+            reads_returned = page.Count,
+            reads_total = shaped.Count,
+            reads = page,
+        });
+
+        var page = new List<object>();
+        var running = Encoding.UTF8.GetByteCount(Envelope(Array.Empty<object>(), true));
+        foreach (var row in shaped.Take(limit))
+        {
+            var added = Encoding.UTF8.GetByteCount(JsonSerializer.Serialize(row)) + (page.Count == 0 ? 0 : 1);
+            if (page.Count > 0 && running + added > budgetBytes)
+            {
+                break;
+            }
+
+            running += added;
+            page.Add(row);
+        }
+
+        var result = Envelope(page, page.Count < shaped.Count);
+        while (Encoding.UTF8.GetByteCount(result) > budgetBytes && page.Count > 1)
+        {
+            page.RemoveAt(page.Count - 1);
+            result = Envelope(page, true);
+        }
+
+        return result;
     }
 }
