@@ -1270,10 +1270,19 @@ public sealed class McpNetworkConfig
     public string? Listen { get; set; }
 
     /// <summary>
-    /// The CIDR the in-app <c>RemoteIpAddress</c> check and the firewall rule allow (e.g.
+    /// The CIDR(s) the in-app <c>RemoteIpAddress</c> check and the firewall rule allow (e.g.
     /// <c>192.168.1.0/24</c>); loopback is always allowed regardless. Required when exposed.
+    ///
+    /// <para>#5288: a JSON string holding one CIDR, or several separated by commas
+    /// (<c>"10.8.0.0/16,192.168.1.5/32"</c>), or a JSON array of CIDR strings
+    /// (<c>["10.8.0.0/16", "192.168.1.5/32"]</c>). The property stays a string: the converter joins an array
+    /// with commas, and <see cref="Hosting.CidrAllowList"/> is the one parser. Every entry must be CIDR form
+    /// (<c>/32</c> for one address) and of the SAME address family as <see cref="Listen"/> (a <c>::</c> listen
+    /// takes IPv6 entries only); host bits are masked rather than refused. One bad entry degrades the whole
+    /// listener to loopback-only with a Critical line — an entry is never dropped quietly.</para>
     /// </summary>
     [JsonPropertyName("allowFrom")]
+    [JsonConverter(typeof(Hosting.CidrListJsonConverter))]
     public string? AllowFrom { get; set; }
 
     /// <summary>
@@ -1405,10 +1414,19 @@ public sealed class WebNetworkConfig
     public string? Listen { get; set; }
 
     /// <summary>
-    /// The CIDR the in-app <c>RemoteIpAddress</c> check and the firewall rule allow (e.g.
+    /// The CIDR(s) the in-app <c>RemoteIpAddress</c> check and the firewall rule allow (e.g.
     /// <c>192.168.1.0/24</c>); loopback is always allowed regardless. Required when exposed.
+    ///
+    /// <para>#5288: a JSON string holding one CIDR, or several separated by commas
+    /// (<c>"10.8.0.0/16,192.168.1.5/32"</c>), or a JSON array of CIDR strings
+    /// (<c>["10.8.0.0/16", "192.168.1.5/32"]</c>). The property stays a string: the converter joins an array
+    /// with commas, and <see cref="Hosting.CidrAllowList"/> is the one parser. Every entry must be CIDR form
+    /// (<c>/32</c> for one address) and of the SAME address family as <see cref="Listen"/> (a <c>::</c> listen
+    /// takes IPv6 entries only); host bits are masked rather than refused. One bad entry degrades the whole
+    /// listener to loopback-only with a Critical line — an entry is never dropped quietly.</para>
     /// </summary>
     [JsonPropertyName("allowFrom")]
+    [JsonConverter(typeof(Hosting.CidrListJsonConverter))]
     public string? AllowFrom { get; set; }
 
     /// <summary>

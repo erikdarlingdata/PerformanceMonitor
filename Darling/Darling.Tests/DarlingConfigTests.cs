@@ -337,6 +337,38 @@ public sealed class DarlingConfigTests
         Assert.True(config.Mcp.Network.IsConfigured);
     }
 
+    /// <summary>
+    /// #5288, "no new setting = unchanged", the allowFrom half: a darling.json that spells allowFrom as ONE plain
+    /// string, exactly as every existing config does, loads that string untouched on both listeners (the
+    /// converter reshapes an ARRAY only), parses to the one-entry list <c>IPNetwork</c> gave, and resolves the
+    /// same bind. The tls and hostName halves are added by the lanes that introduce those two settings.
+    /// </summary>
+    [Fact]
+    public void NoNewSettings_McpTlsAndHostNameNull_AllowFromStringAsToday()
+    {
+        var config = DarlingConfig.Parse(@"{
+            ""postgres"": { ""managed"": true },
+            ""mcp"": { ""enabled"": true, ""network"": { ""listen"": ""192.168.1.205"", ""allowFrom"": ""192.168.1.0/24"", ""token"": ""dev-token"" } },
+            ""web"": { ""enabled"": true, ""network"": { ""listen"": ""192.168.1.205"", ""allowFrom"": ""192.168.1.0/24"", ""token"": ""dev-token"" } },
+            ""servers"": [ { ""host"": ""SQL2022"" } ]
+        }");
+
+        Assert.Equal("192.168.1.0/24", config.Mcp.Network!.AllowFrom);
+        Assert.Equal("192.168.1.0/24", config.Web.Network!.AllowFrom);
+
+        var asList = PerformanceMonitor.Darling.Service.Hosting.CidrAllowList.Parse(config.Mcp.Network.AllowFrom!);
+        Assert.Equal(System.Net.IPNetwork.Parse("192.168.1.0/24").ToString(), asList.ToString());
+        Assert.Equal(1, asList.Count);
+
+        var mcpBind = PerformanceMonitor.Darling.Service.Mcp.DarlingMcpHostService.ResolveMcpBind(config.Mcp, managed: true, inContainer: false);
+        Assert.Equal(PerformanceMonitor.Darling.Service.Mcp.DarlingMcpHostService.McpBindMode.NetworkAndLoopback, mcpBind.Mode);
+        Assert.Equal(PerformanceMonitor.Darling.Service.Mcp.DarlingMcpHostService.McpBindReason.NetworkExposed, mcpBind.Reason);
+
+        var webBind = PerformanceMonitor.Darling.Service.Mcp.DarlingWebHostService.ResolveWebBind(config.Web, managed: true, inContainer: false);
+        Assert.Equal(PerformanceMonitor.Darling.Service.Hosting.DarlingHostBinding.BindMode.NetworkAndLoopback, webBind.Mode);
+        Assert.Equal(PerformanceMonitor.Darling.Service.Hosting.DarlingHostBinding.BindReason.NetworkExposed, webBind.Reason);
+    }
+
     [Fact]
     public void McpNetworkConfig_ResolveToken_PrefersEncrypted_FlagsPlaintext()
     {
