@@ -343,6 +343,14 @@ public sealed class CaggGroupIndexDropLiveTests
             await dropEnd.ExecuteNonQueryAsync(ct);
         }
 
+        if (simulatedVersion < SlowReadsRungTests.RungVersion)
+        {
+            /* V162 (#5097) - the slow-read record; the table is the probe's sentinel. */
+            await using var dropSlowReads = new NpgsqlCommand(
+                "DROP TABLE IF EXISTS collect.slow_reads", connection);
+            await dropSlowReads.ExecuteNonQueryAsync(ct);
+        }
+
         if (simulatedVersion < QueryStoreTopDailyRungTests.RungVersion)
         {
             /* V161 (#5094) - the Query Store top daily summary tables; the first is the probe's sentinel. */

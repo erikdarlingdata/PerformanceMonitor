@@ -513,6 +513,39 @@ CREATE TABLE IF NOT EXISTS collect.query_store_top_daily_built
     CONSTRAINT pk_query_store_top_daily_built PRIMARY KEY (server_id, day)
 );";
 
+    /// <summary>
+    /// V162 (#5097) — <c>collect.slow_reads</c>: one row per read that ran long or ended in a timeout, error or
+    /// limit, with its normalised arguments, the source that answered, and each statement's time. Internal
+    /// self-telemetry like <c>collect.read_latency</c> (V148) and <c>collect.collector_stall_probes</c> (V112): not a
+    /// collector, absent from <c>CollectorCatalog.All</c>, covered by the collect schema's blanket GRANT. The writer
+    /// pays for retention and the row cap itself, so no outcome CHECK and no sweep entry.
+    /// </summary>
+    private const string V162Sql = @"
+CREATE TABLE IF NOT EXISTS collect.slow_reads
+(
+    slow_read_id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    read_time timestamp NOT NULL,
+    surface text NOT NULL,
+    route text NOT NULL,
+    outcome text NOT NULL,
+    total_ms integer NOT NULL,
+    server_id integer,
+    window_start timestamp,
+    window_end timestamp,
+    arguments jsonb NOT NULL,
+    arguments_truncated boolean NOT NULL,
+    source text,
+    source_reason text,
+    statements jsonb NOT NULL,
+    statement_count integer NOT NULL,
+    statements_truncated boolean NOT NULL,
+    error_class text
+);
+
+/* Newest-first read and the retention sweep are both by time; the id breaks ties in the read's total order. */
+CREATE INDEX IF NOT EXISTS idx_slow_reads_time
+    ON collect.slow_reads(read_time, slow_read_id);";
+
     public static IReadOnlyList<Migration> Scripts { get; } = new[]
     {
         new Migration(1, "collector-tables", PgSchemaGenerator.GenerateFullSchema()),
@@ -712,6 +745,7 @@ CREATE TABLE IF NOT EXISTS collect.query_store_top_daily_built
         new Migration(159, "install-id-table-oid", V159Sql),
         new Migration(160, "collector-run-time", V160Sql),
         new Migration(161, "query-store-top-daily", V161Sql),
+        new Migration(162, "slow-reads", V162Sql),
     };
 
     /// <summary>
