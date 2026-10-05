@@ -709,7 +709,7 @@ function pickerControl(label, options, onPick) {
  * #3897 the read projected only the database, and nine tempdb files wrote over each other in this pivot.
  */
 export function fileIoPanel(server, ctx) {
-  const { panel, body } = panelShell("File I/O Latency", "avg read latency per database and file type, " + ctx.label);
+  const { panel, body } = panelShell("File I/O Latency", "avg read and write latency per database and file type, " + ctx.label);
   (async () => {
     const res = await readToolWithinKeptHistory("get_file_io_trend", { server, hours: ctx.hours });
     if (res.kind === "error") return mount(body, readErrorStrip(res.message));
@@ -719,20 +719,24 @@ export function fileIoPanel(server, ctx) {
       ...r,
       line: r.database_name === r.file_type ? r.database_name : r.database_name + " " + r.file_type + (r.file_name ? " " + r.file_name : ""),
     }));
-    const { points, series } = pivot(rows, {
-      xKey: "time",
-      seriesKey: "line",
-      valueKey: "avg_read_latency_ms",
-    });
-    if (!series.length) return mount(body, [keptWindowStrip(res), emptyStrip("No file I/O samples in this window.")]);
+    /* The desktop draws read and write latency as two stacked charts over the same lines; so does this panel, one read
+       feeding both. Each chart keeps its own top series by its own peak; a bucket with no reads (or no writes) has a null figure and is left out of that chart rather than drawn as 0. */
+    const read = pivot(rows.filter((r) => r.avg_read_latency_ms != null), { xKey: "time", seriesKey: "line", valueKey: "avg_read_latency_ms" });
+    const write = pivot(rows.filter((r) => r.avg_write_latency_ms != null), { xKey: "time", seriesKey: "line", valueKey: "avg_write_latency_ms" });
+    if (!read.series.length && !write.series.length) return mount(body, [keptWindowStrip(res), emptyStrip("No file I/O samples in this window.")]);
     /* #3653 A5: the payload's baseline discontinuities as a notice above the chart. */
     const notes = discontinuityNotes(res.data);
     /* #2802: axis spans the requested window (ctx.hours ending now), not the pivoted data's own extent. A
        narrowed read spans the hours it answered for. */
+    const draw = (title, data, id, empty) =>
+      data.series.length
+        ? [el("h4", { text: title }), zoomableLineChart({ points: data.points, xKey: "time", series: data.series, formatValue: (v) => Math.round(v) + " ms", unit: "ms", ...windowFromHours(res.keptHours || ctx.hours) }, id, chartZoomScope(ctx.hours))]
+        : [el("h4", { text: title }), emptyStrip(empty)];
     mount(body, [
       keptWindowStrip(res),
       notes.length ? noticeStrip(notes.join(" ")) : null,
-      zoomableLineChart({ points, xKey: "time", series, formatValue: (v) => Math.round(v) + " ms", ...windowFromHours(res.keptHours || ctx.hours) }, "file-io-latency", chartZoomScope(ctx.hours)),
+      ...draw("Read latency (ms)", read, "file-io-latency", "No reads in this window."),
+      ...draw("Write latency (ms)", write, "file-io-write-latency", "No writes in this window."),
     ]);
   })();
   return panel;
