@@ -77,7 +77,7 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 public sealed class DarlingMcpAlertTools
 {
     [McpServerTool(Name = "get_alert_history"), Description("Gets alert history, NEWEST FIRST: each row FIRED; notification_type says whether it was DELIVERED, a separate question from DISMISSED (UI-acknowledged), excluded by default. THE PAGE IS BOUNDED BY limit, NOT hours_back: truncated says the window held more, and oldest/newest_returned_alert_time bound how far the page reached. An EMPTY page can mean no alerts fired, or that every alert here was dismissed: dismissed_excluded_count says which; include_dismissed = true returns them, labelled dismissed = true. A null send_error proves nothing about delivery.<<GUIDE>>Gets recent alert history from the alert log, NEWEST FIRST: what alerts fired, when, for which server, the current vs threshold value, whether email/webhook delivery succeeded, and whether the alert was muted. Omit server_name to see the whole fleet (each row names its server); pass one to scope to a single server. THE PAGE IS BOUNDED BY limit, NOT BY hours_back: alerts_returned is how many rows you got, truncated says the window held more than limit, and oldest_returned_alert_time / newest_returned_alert_time bound the page — under newest-first ordering the oldest stamp IS how far back this read reached, so on a noisy fleet a 24-hour request at the default limit may cover minutes. Raise limit or narrow hours_back when truncated is true; widening hours_back cannot help. BY DEFAULT THIS READ EXCLUDES DISMISSED ALERTS — rows an operator acknowledged in the Viewer's Alert History grid. Dismissal says nothing about whether the alert fired or mattered, so an incident reconstruction that ignores it can miss the very critical someone already looked at: dismissed_excluded says whether the filter applied and dismissed_excluded_count is how many rows in the window it removed, and include_dismissed = true returns them, each labelled dismissed = true. notification_type is the delivery disposition and is the ONLY field that says why a row did not deliver: 'email'/'webhook'/'email+webhook' delivered on that channel; 'throttled' means the delivery cooldown was still inside this alert's window so nothing was attempted (the throttle working, not a fault); 'folded' means a repeat was rolled onto another server's post for the same metric and is named there under 'Other Servers Affected', so it WAS reported; 'failed' means a channel was attempted and came back unsuccessful, with send_error carrying the first failing channel's text; 'unconfigured' means no email or webhook channel is set up; 'muted' means a mute rule suppressed it; 'digest' means the analysis finding was UNCORROBORATED (one fact in its chain, no matched co-fire check) and the corroboration gate routed it to the daily Analysis Singles Digest and the web/MCP surfaces instead of a paging channel — nothing was attempted, nothing was suppressed, and routing_reason on the row says which components decided; 'none' is a resolution row, which no channel applies to. Do NOT split the not-delivered rows on send_error: it is null on 'throttled', 'folded' and 'digest' rows and on every row written before those values existed, so a null error is not evidence of a working cooldown. 'undelivered' is a retained legacy value that means throttled OR folded OR failed with nothing in the row to say which — count those rows separately rather than attributing them. severity is the row's tier — 'critical', 'warning', 'info' or 'resolution' — and severity_source says where it came from: 'fired' when the row persisted the tier the alert actually fired at (graded alerts such as Poison Wait, Volume Free Space and Database State fire Warning OR Critical by measurement), 'metric_name' when the row carries no tier and the metric's name is the only evidence (rows written before the tier was persisted, alerts whose severity is fixed per metric, and every resolution row). Do not infer a graded alert's tier from its name: a 'Poison Wait' row with severity 'warning' fired as a warning. route says WHERE the posts went: the alert's family (self-monitor / reports / agent-jobs / performance), the notification route that matched it (route_id null = the parent channels in Settings > Notifications answered everything) and each delivered channel with the route that supplied its destination — see get_notification_routes for the taxonomy and the routes. route is null on rows written before routing existed and on rows that never reached a delivery decision (throttled, folded, muted, unconfigured, digest, resolutions), so a null route is not evidence of a routing fault. routing is a DIFFERENT question from route: for an 'Analysis: …' finding it is the corroboration gate's decision one step UPSTREAM of the fan-out — 'page' when the finding earned a channel (two or more facts in its chain, or a matched co-fire check, or one of the two by-construction stories) and 'digest' when it was a lone uncorroborated fact — with routing_reason naming the components the gate read, so 'why didn't this page' is answered by the row. Both are null on every engine alert and on analysis rows written before the gate existed. To see what the digest carried, read the rows with notification_type 'digest' in the window: each is a persisted finding with its full detail_text and context, findable in get_analysis_findings by the story hash in its metric_name. Dismissal is an acknowledgement, not a verdict — a dismissed critical still fired — so set this when reconstructing an incident rather than triaging what is still open. Each row then carries dismissed so the two populations stay distinguishable.")]
-    public static async Task<string> GetAlertHistory(
+    public static Task<string> GetAlertHistory(
         NpgsqlDataSource postgres,
         [Description("Server name or display name. Omit to return alerts across all servers (the fleet default).")] string? server_name = null,
         [Description("Hours of history. Default 24.")] int hours_back = 24,
@@ -87,7 +87,27 @@ public sealed class DarlingMcpAlertTools
            /api/read dispatch passes as_of by name, and a trailing optional is the one position no existing
            positional C# caller can be re-bound by. */
         [Description("Include alerts an operator has dismissed in the Viewer. Default false, which is the Alert History grid's own read.")] bool include_dismissed = false,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) =>
+        GetAlertHistoryRead(postgres, server_name, hours_back, limit, as_of, include_dismissed, includeDetails: false, cancellationToken);
+
+    /// <summary>
+    /// The one implementation behind <c>get_alert_history</c>, with a flag the MCP tool cannot reach (#5241).
+    /// <para><paramref name="includeDetails"/> is the web mirror's <c>include_details</c>: each row that has
+    /// advice in its stored context also carries <c>details</c> — the structured items the desktop's Alert
+    /// Detail window renders (heading, labelled fields, the advice prose and the copy-paste fix script). It is
+    /// an <c>internal</c> parameter on an un-attributed method, so the MCP tool's schema, its description and
+    /// its answer are exactly what they were: the tool passes <c>false</c> and builds the same anonymous row it
+    /// always built, and only this path adds a property to it.</para>
+    /// </summary>
+    internal static async Task<string> GetAlertHistoryRead(
+        NpgsqlDataSource postgres,
+        string? server_name,
+        int hours_back,
+        int limit,
+        string? as_of,
+        bool include_dismissed,
+        bool includeDetails,
+        CancellationToken cancellationToken)
     {
         var hoursError = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
         if (hoursError != null) return hoursError;
@@ -138,11 +158,11 @@ public sealed class DarlingMcpAlertTools
                     : McpHelpers.Status("empty", "No alerts found in the specified time range.");
             }
 
-            var alerts = page.Select(r =>
+            var alerts = page.Select((r, index) =>
             {
                 var (severity, severitySource) = AlertHistoryRowSeverity.Describe(r.MetricName, r.ContextJson);
                 var routing = AlertContextSerializer.TryReadRouting(r.ContextJson);
-                return new
+                var row = new
                 {
                     alert_time = r.AlertTime.ToString("o"),
                     server_id = r.ServerId,
@@ -181,7 +201,8 @@ public sealed class DarlingMcpAlertTools
                     routing_reason = routing?.Reason,
                     detail_text = r.DetailText,
                 };
-            });
+                return includeDetails && index < MaxDetailRows ? WithDetails(row, r.ContextJson) : (object)row;
+            }).ToList();
 
             return JsonSerializer.Serialize(new
             {
@@ -205,6 +226,47 @@ public sealed class DarlingMcpAlertTools
         {
             return McpHelpers.FormatError("get_alert_history", ex);
         }
+    }
+
+    /// <summary>How many of a page's newest rows carry <c>details</c> when the web mirror asks for them (#5241).
+    /// An analysis alert's advice and fix script run to a few KB, and the page may ask for 1,000 rows; the
+    /// newest hundred are the ones an operator opens, and a row past the cap keeps its <c>detail_text</c>, which
+    /// the page already falls back to.</summary>
+    internal const int MaxDetailRows = 100;
+
+    /// <summary>
+    /// The row with a trailing <c>details</c> property (#5241), or the row as it was when its stored context
+    /// holds no advice. The items come from <see cref="AlertContextSerializer.TryDeserialize"/>, the read the
+    /// desktop's Alert Detail window uses, so the two surfaces cannot disagree about what a context holds.
+    /// <para>A context with no <see cref="AlertDetailItem.Body"/> anywhere (every engine alert) adds nothing
+    /// the row's <c>detail_text</c> does not already say — <see cref="AlertDetailText.Flatten"/> writes exactly
+    /// its headings and fields — so it gets no <c>details</c>, which keeps the bytes for the rows that
+    /// carry advice.</para>
+    /// <para><b>Never <see cref="AlertDetailItem.Remediation"/>.</b> That is the typed payload the desktop's Apply
+    /// button drives; the web is advise-only (analysis-findings.js), so it is not read into the projection at
+    /// all.</para>
+    /// </summary>
+    internal static object WithDetails(object row, string? contextJson)
+    {
+        if (!AlertContextSerializer.TryDeserialize(contextJson, out var context)
+            || !context.Details.Any(d => !string.IsNullOrEmpty(d.Body)))
+        {
+            return row;
+        }
+
+        var node = JsonSerializer.SerializeToNode(row, McpHelpers.JsonOptions)!.AsObject();
+        node["details"] = new JsonArray(context.Details.Select(d => (JsonNode?)new JsonObject
+        {
+            ["heading"] = d.Heading,
+            ["fields"] = new JsonArray(d.Fields.Select(f => (JsonNode?)new JsonObject
+            {
+                ["label"] = f.Label,
+                ["value"] = f.Value,
+            }).ToArray()),
+            ["body"] = d.Body,
+            ["is_code_block"] = d.IsCodeBlock,
+        }).ToArray());
+        return node;
     }
 
     [McpServerTool(Name = "get_alert_settings"), Description("Gets the alert configuration currently in effect: enabled flags, thresholds, cooldowns, delivery mode, and cadences. cooldown_minutes gates whether an alert FIRES; delivery.cooldown_minutes separately bounds the resulting post, per alert fingerprint and, for a re-notification, per metric across every monitored server. Darling: an unseeded store answers status unavailable and darling.json's defaults still govern until it seeds. Lite always answers its live in-memory settings. An empty knob list (e.g. long_running_query's exclusions) means cleared, not a default in force.<<GUIDE>>Gets the current alert configuration the service is using: which alerts are enabled and their thresholds (CPU, blocking, deadlocks, poison waits, long-running queries/jobs, tempdb, low disk, failed jobs, database state, Availability Group health, connection loss), the cooldown, excluded databases, the deadlock/blocking delivery mode and cooldown, the scheduled-analysis cadence, and the fleet-sweep cadence. TWO different cooldowns are reported and they govern different stages: top-level cooldown_minutes gates whether the alert engine FIRES at all, while delivery.cooldown_minutes bounds the resulting Slack/Teams/PagerDuty/webhook/email post twice over: once per alert FINGERPRINT, and once per METRIC across the whole fleet for a RE-notification. The second bound is why one fault on forty servers does not cost forty posts an hour; the servers it holds back are named on the post that does go out, under an 'Other Servers Affected' section. A first notice is never held back by either bound, and PerEvent delivery mode opts out of the per-metric one. A channel going quiet with alerts still in get_alert_history is delivery.cooldown_minutes, not cooldown_minutes. The self_alerts group holds the thresholds for alerts about the MONITOR STORE itself rather than a monitored server — those arrive with Server: 'Monitor Store' by default, or with the store's own peers.storeName label when the operator set that file-only field (a multi-store estate names each store on its own self-alerts), so an alert naming either spelling is tuned here and nowhere else, including Retention Held's warn/critical ratios. Mute rules match the alert row's server spelling, so on a store with storeName set, scope self-alert mutes to that label, not to 'Monitor Store'. The health_bands group is NOT an alert: its two tiers decide what band a server's card, the worst-first ranking and get_fleet_overview's counts read, in deadlocks per HOUR normalised over whatever window was asked for — so the same pair means the same condition on a 1-hour read and a 24-hour one. Tuning deadlocks.count_threshold does not move the band and tuning health_bands does not move the alert. The file_growth group's rise_mb is megabytes per HOUR, averaged over file_growth.lookback_minutes — a rate, not a total for the window: 10240 means 10 GB/hr whether the lookback is 5 minutes or 24 hours, and the engine scales it to the window (a 5-minute lookback asks for 853 MB inside it, a 24-hour one for 240 GB). The fleet_sweep group is NOT an alert family either, and its cadence is a SECOND cadence, separate from the scheduled-analysis one: fleet_sweep.enabled turns the scheduled whole-fleet sweep report on or off, and fleet_sweep.interval_minutes (15–1440, default 60 — hourly) is how often it runs. The alerts_enabled master switch deliberately does not govern sweep production, only delivery: sweeps keep running under alerts_enabled: false — that is when they carry the would-have-paged ledger — so muting the fleet does not blind the report surface. Separately, deadlocks.pg_count_threshold and blocking.pg_count_threshold are the PostgreSQL versions of those two alerts' count gates, reported inside those same groups, and they are deliberately NOT the same numbers as the count_threshold beside them: the two engines count with different instruments (captured deadlock graphs versus deadlocks parsed from the server log; engine-recorded blocked-process reports versus a periodic SAMPLE of pg_stat_activity), and while both engines' cards now band deadlocks through the same health_bands tiers, a PostgreSQL server still has no blocking band to calibrate against. The enabled switch in each group governs BOTH engines; the two thresholds do not move each other. On a store with no PostgreSQL targets both PostgreSQL keys are inert. poison_wait.threshold_ms is RETIRED: since the Poison Wait alert grades ACCUMULATED wait over a ten-minute window, this value is stored and reported for compatibility but consulted by nothing; poison_wait.threshold_ms_note says so beside it on every read, and update_alert_settings accepts it with a warning rather than refusing a round-tripped payload. poison_wait.enabled is the live switch. analysis.uncorroborated_route is where a notify-worthy but UNCORROBORATED finding goes — one fact in its chain and no matched co-fire check: 'digest' (the default) keeps it off every paging channel and puts it in the daily Analysis Singles Digest and the web/MCP surfaces, 'page' restores the earlier paging of every notify-worthy finding; a corroborated finding pages under either. It is the EFFECTIVE route, never null, resolved from the knob's two homes with the STORE winning: the settings row's analysis_uncorroborated_route column (V137) when it holds a route, else darling.json's analysis.uncorroboratedRoute (read once at service start), else the shipped 'digest'. analysis.uncorroborated_route_source says which home decided — 'store', 'file' or 'default' — and analysis.uncorroborated_route_note restates the precedence beside it; a store column left NULL (every store the morning after the V137 upgrade, and every fresh seed) reads 'file'. Set it with update_alert_settings or the Viewer's Settings window (Notifications > Automated Analysis): live in the running service within one collection sweep, consulted on the next scheduled-analysis delivery, no restart; send null through update_alert_settings to clear the column and hand the decision back to the file. long_running_query.excluded_program_name_prefixes and long_running_query.excluded_logins are the Long-Running Query alert's OPT-OUT knob: a session whose program_name STARTS WITH an entry of the first list, or whose login_name IS an entry of the second (both case-insensitive, no wildcard grammar), is NOT EVALUATED by that alert at all — not read into the decision, not counted, not fingerprinted — which is the opposite of a mute rule (a mute silences a fire already decided; an exclusion means the session never reaches the decision, and excluding a paging program resolves the open incident). The exclusion is applied in the read ahead of long_running_query.max_results, so an excluded session never consumes a result slot, and the fired alert's card carries Excluded Count / Excluded By Program Prefix / Excluded By Login items saying how many SESSIONS each list removed on that evaluation (a session matching both counts once, under the prefix). The lists ship SEEDED from a 7-day read of one large production store, whose long-running population fell into four classes: (1) SQL Agent job steps — program_name prefix 'SQLAgent - TSQL JobStep', ~460 sessions a week across 11 jobs, medians 35–62 min — the default prefix; (2) the NT AUTHORITY\\SYSTEM and NT AUTHORITY\\NETWORK SERVICE logins — the permanent multi-day CDC-shaped background — the default logins; (3) the application's admin login — deliberately NOT a default, because it runs the job wave but also real ad-hoc long-runners, and the job-step prefix already covers its share; (4) named humans — never excluded, they are what the page is for. The seeds are DEFAULTS: an empty list here means the operator cleared it and that arm excludes nothing. SMTP/webhook delivery credentials are managed separately and are not reported here — configure them in the standalone Darling Viewer app's Settings window (Notifications section), which connects to this store (including remotely, not just localhost) rather than requiring desktop access to this specific box.")]    public static async Task<string> GetAlertSettings(        NpgsqlDataSource postgres,
