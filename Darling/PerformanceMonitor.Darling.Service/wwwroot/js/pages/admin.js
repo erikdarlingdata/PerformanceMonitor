@@ -8,7 +8,7 @@
 
 /* Admin: a read-only window onto what the desktop's Manage Servers, Notification Routes and Settings windows show.
    Three tabs, each one existing read, no controls that change anything:
-     Servers             list_servers
+     Servers             GET /api/admin/servers (every configured server, enabled or not)
      Notification Routes get_notification_routes
      Alert Settings      get_alert_settings
    The active tab rides in the hash (#/admin/<tab>) and in module scope, so the 60 s repaint keeps it.
@@ -17,17 +17,26 @@
    it reaches a row. */
 
 import { VIZ } from "../panels.js";
-import { el, mount, loadingStrip, errorStrip, emptyStrip, noticeStrip, readTool } from "../util.js";
+import { el, mount, loadingStrip, errorStrip, emptyStrip, noticeStrip, readTool, apiGet } from "../util.js";
 
 export const SERVER_COLUMNS = [
   { key: "display_name", label: "Display Name" },
   { key: "server_name", label: "Server" },
-  { key: "engine_kind", label: "Engine" },
-  { key: "engine_version", label: "Version" },
-  { key: "status", label: "Freshness", statusSev: true },
+  { key: "auth", label: "Auth" },
+  { key: "engine", label: "Engine" },
+  { key: "version", label: "Version" },
+  { key: "status", label: "Status" },
+  { key: "freshness", label: "Freshness", statusSev: true },
+  { key: "monthly_cost", label: "Monthly Cost ($)", align: "right", sortValue: (r) => r.monthly_cost_usd },
   { key: "read_only", label: "Read only", format: "bool" },
-  { key: "last_collection", label: "Last Collected", format: "time" },
+  { key: "added", label: "Added", format: "time" },
+  { key: "last_collected", label: "Last Collected", format: "time" },
 ];
+
+/* A disabled server's row is drawn with the grey row class the grid already uses for a canceled job run. */
+export function serverRowClass(row) {
+  return row && row.status === "Disabled" ? "band-Offline" : "";
+}
 
 export const ROUTE_COLUMNS = [
   { key: "route_id", label: "#", format: "int" },
@@ -187,19 +196,17 @@ function failure(res, emptyPrefix) {
   return null;
 }
 
-const SERVER_NOT_SHOWN =
-  "Not shown here: whether collection is enabled or disabled, authentication, installed version, monthly cost and Added date. The read does not return them; " +
-  "add, edit and remove stay in the desktop Manage Servers window.";
+const SERVER_NOTE = "Every configured server, enabled or disabled. Add, edit and remove stay in the desktop Manage Servers window.";
 
 async function buildServers(body, generation) {
-  const res = await readTool("list_servers", {});
+  const res = await apiGet("/api/admin/servers");
   if (generation !== renderGeneration) return;
   const bad = failure(res, "No servers are registered");
   if (bad) return mount(body, bad);
   const rows = serverRows(res.data);
   mount(body, [
-    noticeStrip(rows.length + (rows.length === 1 ? " server. " : " servers. ") + SERVER_NOT_SHOWN),
-    VIZ.table({ servers: rows }, { rowsKey: "servers", columns: SERVER_COLUMNS, emptyText: "No servers are registered yet." }),
+    noticeStrip(rows.length + (rows.length === 1 ? " server. " : " servers. ") + SERVER_NOTE),
+    VIZ.table({ servers: rows }, { rowsKey: "servers", columns: SERVER_COLUMNS, rowClass: serverRowClass, emptyText: "No servers are registered yet." }),
   ]);
 }
 

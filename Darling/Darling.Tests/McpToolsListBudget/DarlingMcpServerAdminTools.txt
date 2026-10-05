@@ -2,5 +2,9 @@
 tool add_servers 616
 param add_servers.servers_json 106
 
+tool edit_server 510
+param edit_server.changes_json 134
+param edit_server.server_name 145
+
 tool remove_server 587
 param remove_server.server_name 156

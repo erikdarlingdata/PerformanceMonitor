@@ -45,6 +45,7 @@ public sealed class DataStartBannerSurfaceTests : IDisposable
     private const string ServerName = "SurfaceBannerServer";
     private readonly string _tempDir;
     private readonly DuckDbInitializer _duckDb;
+    private readonly PendingSeedSession _seed;
     private long _nextId = 1;
 
     public DataStartBannerSurfaceTests()
@@ -52,10 +53,20 @@ public sealed class DataStartBannerSurfaceTests : IDisposable
         _tempDir = Path.Combine(Path.GetTempPath(), "SurfaceBanner_" + Guid.NewGuid().ToString("N")[..8]);
         Directory.CreateDirectory(_tempDir);
         _duckDb = new DuckDbInitializer(Path.Combine(_tempDir, "test.duckdb"));
+        _seed = new PendingSeedSession(_duckDb);
+    }
+
+    /* #5208: the seed helpers share one open transaction (PendingSeedSession) instead of committing every statement.
+       Every read goes through Service(), which commits it first, so the code under test sees the rows it always did. */
+    private LocalDataService Service()
+    {
+        _seed.Flush();
+        return new LocalDataService(_duckDb);
     }
 
     public void Dispose()
     {
+        _seed.Dispose();
         try { if (Directory.Exists(_tempDir)) Directory.Delete(_tempDir, recursive: true); }
         catch { /* best-effort cleanup */ }
     }
@@ -115,8 +126,7 @@ public sealed class DataStartBannerSurfaceTests : IDisposable
             ? new Dictionary<string, DateTime> { [LocalDataService.QueryWindowRelationTimeColumn(relation)] = at, ["collection_time"] = collectedAt ?? at }
             : new Dictionary<string, DateTime> { [LocalDataService.QueryWindowRelationTimeColumn(relation)] = at };
 
-        using var connection = _duckDb.CreateConnection();
-        await connection.OpenAsync();
+        var connection = await _seed.ConnectionAsync();
         using var readLock = _duckDb.AcquireReadLock();
 
         var names = new List<string>();
@@ -171,8 +181,7 @@ public sealed class DataStartBannerSurfaceTests : IDisposable
     /// </summary>
     private async Task SeedLogRunsAsync(string collector, DateTime firstUtc, DateTime lastUtc, int everyMinutes)
     {
-        using var connection = _duckDb.CreateConnection();
-        await connection.OpenAsync();
+        var connection = await _seed.ConnectionAsync();
         using var readLock = _duckDb.AcquireReadLock();
         using var cmd = connection.CreateCommand();
         cmd.CommandText = $@"
@@ -191,8 +200,7 @@ FROM generate_series({Literal(firstUtc)}, {Literal(lastUtc)}, INTERVAL {everyMin
     /// </summary>
     private async Task SeedLongQueriesEverySecondsAsync(DateTime firstEventUtc, DateTime lastEventUtc, int everySeconds)
     {
-        using var connection = _duckDb.CreateConnection();
-        await connection.OpenAsync();
+        var connection = await _seed.ConnectionAsync();
         using var readLock = _duckDb.AcquireReadLock();
         using var cmd = connection.CreateCommand();
         cmd.CommandText = $@"
@@ -221,7 +229,7 @@ FROM generate_series({Literal(firstEventUtc)}, {Literal(lastEventUtc)}, INTERVAL
         Func<LocalDataService, Task<List<T>>> read, QueryWindowRelation relation, int rowCap, Func<T, DateTime> rowTimeUtc,
         DateTime startUtc, DateTime endUtc, Func<DateTime?>? cappedSourceOldestUtc = null)
     {
-        var service = new LocalDataService(_duckDb);
+        var service = Service();
         var rows = await read(service);
         var cappedSource = cappedSourceOldestUtc?.Invoke();
         var probedFloor = await service.GetQueryWindowFloorAsync(relation, ServerId, startUtc, endUtc, ServerClock.Utc);
@@ -257,7 +265,7 @@ FROM generate_series({Literal(firstEventUtc)}, {Literal(lastEventUtc)}, INTERVAL
     /// whatever clock the process holds as the active one.</summary>
     private async Task<(bool Visible, string Text)> BannerForAsync(QueryWindowRelation relation, DateTime startUtc, DateTime endUtc, ServerClock? clock = null)
     {
-        var floor = await new LocalDataService(_duckDb).GetQueryWindowFloorAsync(relation, ServerId, startUtc, endUtc, clock ?? ServerClock.Utc);
+        var floor = await Service().GetQueryWindowFloorAsync(relation, ServerId, startUtc, endUtc, clock ?? ServerClock.Utc);
         return OnStaThread(() =>
         {
             var banner = new System.Windows.Controls.TextBlock();
@@ -412,8 +420,7 @@ FROM generate_series({Literal(firstEventUtc)}, {Literal(lastEventUtc)}, INTERVAL
         var table = LocalDataService.QueryWindowRelationView(relation)[2..];
         var timeColumns = new[] { "collection_time", "event_time", "deadlock_time" };
 
-        using var connection = _duckDb.CreateConnection();
-        await connection.OpenAsync();
+        var connection = await _seed.ConnectionAsync();
         using var readLock = _duckDb.AcquireReadLock();
         var names = new List<string>();
         var values = new List<string>();
@@ -602,8 +609,7 @@ FROM generate_series({Literal(firstEventUtc)}, {Literal(lastEventUtc)}, INTERVAL
     /// </summary>
     private async Task SeedDefaultTraceRowAsync(DateTime serverLocal, DateTime collectedAtUtc)
     {
-        using var connection = _duckDb.CreateConnection();
-        await connection.OpenAsync();
+        var connection = await _seed.ConnectionAsync();
         using var readLock = _duckDb.AcquireReadLock();
         using var cmd = connection.CreateCommand();
         cmd.CommandText = $@"
@@ -740,7 +746,7 @@ VALUES ({_nextId++}, {Literal(collectedAtUtc)}, {ServerId}, '{ServerName}', {Lit
         try
         {
             ServerTimeHelper.ActiveServerClock = clock;
-            var service = new LocalDataService(_duckDb);
+            var service = Service();
             var floor = await service.GetQueryWindowFloorAsync(QueryWindowRelation.DefaultTraceEvents, ServerId, start, end);
             var gridRows = await service.GetDefaultTraceEventsAsync(ServerId, fromDate: start, toDate: end);
 
@@ -776,7 +782,7 @@ VALUES ({_nextId++}, {Literal(collectedAtUtc)}, {ServerId}, '{ServerName}', {Lit
         await SeedDefaultTraceRowAsync(oldest, end.AddHours(-1));
         await SeedDefaultTraceRowAsync(oldest.AddHours(30), end.AddHours(-1));
 
-        var service = new LocalDataService(_duckDb);
+        var service = Service();
         var floor = await service.GetQueryWindowFloorAsync(QueryWindowRelation.DefaultTraceEvents, ServerId, start, end, clock);
         var gridRows = await service.GetDefaultTraceEventsAsync(ServerId, fromDate: start, toDate: end, serverClock: clock);
 
@@ -947,7 +953,7 @@ VALUES ({_nextId++}, {Literal(collectedAtUtc)}, {ServerId}, '{ServerName}', {Lit
         await SeedLongQueriesEverySecondsAsync(end.AddMinutes(-LocalDataService.LongQueryGridCap - 40), end.AddMinutes(-2), 60);
         await SeedLogRunsAsync("wait_stats", end.AddMinutes(-LocalDataService.CollectionLogGridCap - 40), end, 1);
 
-        var service = new LocalDataService(_duckDb);
+        var service = Service();
         Assert.Equal(LocalDataService.LongQueryGridCap, (await service.GetRecentLongQueryCompletionsAsync(ServerId, fromDate: end.AddDays(-1), toDate: end)).Count);
         Assert.Equal(LocalDataService.CollectionLogGridCap, (await service.GetRecentCollectionLogAsync(ServerId, fromDate: end.AddDays(-1), toDate: end)).Count);
 
@@ -993,7 +999,7 @@ VALUES ({_nextId++}, {Literal(collectedAtUtc)}, {ServerId}, '{ServerName}', {Lit
         var end = DateTime.UtcNow;
         await SeedLongQueriesEverySecondsAsync(end.AddHours(-30), end.AddMinutes(-2), 5 * 60);
 
-        var rows = await new LocalDataService(_duckDb).GetRecentLongQueryCompletionsAsync(ServerId, fromDate: end.AddDays(-7), toDate: end);
+        var rows = await Service().GetRecentLongQueryCompletionsAsync(ServerId, fromDate: end.AddDays(-7), toDate: end);
         var (visible, text, oldest, _, _) = await CappedLongQueriesBannerAsync(end.AddDays(-7), end);
 
         Assert.True(visible);
@@ -1093,7 +1099,7 @@ VALUES ({_nextId++}, {Literal(collectedAtUtc)}, {ServerId}, '{ServerName}', {Lit
         await _duckDb.InitializeAsync();
         var end = DateTime.UtcNow;
         await SeedLogRunsAsync("long_query_completions", end.AddDays(-2), end, 5);
-        var service = new LocalDataService(_duckDb);
+        var service = Service();
         var start = end.AddMinutes(-rangeMinutes);
         var probeCalls = 0;
 
@@ -1225,7 +1231,7 @@ VALUES ({_nextId++}, {Literal(collectedAtUtc)}, {ServerId}, '{ServerName}', {Lit
             await SeedLogRunsAsync(collector, start, end, 1);
         }
 
-        var service = new LocalDataService(_duckDb);
+        var service = Service();
         var page = await service.GetRecentCollectionLogAsync(ServerId, fromDate: start, toDate: end);
         Assert.Equal(LocalDataService.CollectionLogGridCap, page.Count);
         Assert.True(page.Max(r => r.CollectionTime) - page.Min(r => r.CollectionTime) < TimeSpan.FromHours(4),
@@ -1254,9 +1260,8 @@ VALUES ({_nextId++}, {Literal(collectedAtUtc)}, {ServerId}, '{ServerName}', {Lit
         var end = DateTime.UtcNow;
         var start = end.AddDays(-7);
         await SeedLogRunsAsync("wait_stats", start, end, 1);
-        using (var connection = _duckDb.CreateConnection())
         {
-            await connection.OpenAsync();
+            var connection = await _seed.ConnectionAsync();
             using var readLock = _duckDb.AcquireReadLock();
             using var cmd = connection.CreateCommand();
             cmd.CommandText = $@"
@@ -1265,7 +1270,7 @@ WHERE collector_name = 'wait_stats' AND collection_time = (SELECT MIN(collection
             await cmd.ExecuteNonQueryAsync();
         }
 
-        var buckets = await new LocalDataService(_duckDb).GetCollectorDurationTrendAsync(ServerId, fromDate: start, toDate: end);
+        var buckets = await Service().GetCollectorDurationTrendAsync(ServerId, fromDate: start, toDate: end);
 
         Assert.True(buckets.Count < 2000, $"{buckets.Count} points for 10,081 runs: the read buckets");
         Assert.Equal(10081, buckets.Sum(b => b.RunCount));
@@ -1306,8 +1311,7 @@ WHERE collector_name = 'wait_stats' AND collection_time = (SELECT MIN(collection
 
     private async Task SeedLongQueryAsync(DateTime eventUtc, DateTime collectedUtc)
     {
-        using var connection = _duckDb.CreateConnection();
-        await connection.OpenAsync();
+        var connection = await _seed.ConnectionAsync();
         using var readLock = _duckDb.AcquireReadLock();
         using var cmd = connection.CreateCommand();
         cmd.CommandText = $@"
@@ -1321,7 +1325,7 @@ VALUES ({_nextId++}, {Literal(collectedUtc)}, {ServerId}, '{ServerName}', {Liter
     /// <c>RefreshCappedGridBannerAsync</c> hands the shared step) and its banner step: (visible, text, rows shown).</summary>
     private async Task<(bool Visible, string Text, int Rows)> UnderCapLongQueriesBannerAsync(DateTime startUtc, DateTime endUtc)
     {
-        var service = new LocalDataService(_duckDb);
+        var service = Service();
         var rows = await service.GetRecentLongQueryCompletionsAsync(ServerId, fromDate: startUtc, toDate: endUtc);
         var probed = await service.GetQueryWindowFloorAsync(QueryWindowRelation.LongQueryCompletions, ServerId, startUtc, endUtc, ServerClock.Utc);
         var floor = ServerTab.EarlierOfFloorAndRowShown(probed, ServerTab.EarliestRowShown(rows, ServerTab.LongQueryRowTimeUtc));

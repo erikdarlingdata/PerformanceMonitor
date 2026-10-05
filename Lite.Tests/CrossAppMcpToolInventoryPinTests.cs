@@ -183,6 +183,11 @@ public sealed class CrossAppMcpToolInventoryPinTests
            pg_stat_statements to read. A SKU boundary rather than a porting to-do. */
         "get_store_query_stats",
 
+        /* #5097: the store's own hourly statement history (get_store_query_history), the deltas of the same
+           pg_stat_statements the line above reads. Darling-ONLY for the same reason: Lite's DuckDB store has no
+           server, roles or pg_stat_statements. */
+        "get_store_query_history",
+
         /* #4214 part 2: the store HOST profile read (get_store_host) — platform/RAM/data volume, PostgreSQL
            and TimescaleDB facts, and a per-setting verdict against the managed sizing this store's host was
            derived from. Darling-ONLY by architecture, the get_store_metrics reason: Lite has no managed
@@ -314,6 +319,7 @@ public sealed class CrossAppMcpToolInventoryPinTests
            servers from its own local config + DuckDB, with no central service-honored monitored-server store, so
            there is no Lite twin to port (same reasoning as the Custom Views + alert-tuning tools above). */
         "add_servers",
+        "edit_server",
         "remove_server",
 
         /* #3285: the custom-alert-rule tools — the Darling MCP server's write surface for user-authored alert

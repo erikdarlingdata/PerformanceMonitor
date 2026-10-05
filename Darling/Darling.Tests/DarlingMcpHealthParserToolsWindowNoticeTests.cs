@@ -240,6 +240,65 @@ VALUES ($1,$2,$3,$4,$5,$6,$7)",
             Assert.False(root.TryGetProperty("window_truncated", out _));
         });
 
+    /// <summary>
+    /// #4966, rung 2 of the empty ladder (this type was captured before the window, none in it): a window cut at a start names
+    /// effective_start, a window the store holds nothing in says nothing was read, and a covered window keeps "genuinely quiet".
+    /// The first sentence (which type, which server, when the newest was stored) is kept on all three.
+    /// </summary>
+    [Theory]
+    [InlineData(HealthTool.SystemHealth)]
+    [InlineData(HealthTool.SevereErrors)]
+    [InlineData(HealthTool.MemoryNodeOom)]
+    [InlineData(HealthTool.SignificantWaits)]
+    public async Task AnEmptyAnswer_TheTypeSeenBeforeTheWindow_PicksTheCutVariantByTheNotice_AgainstDevPostgres(HealthTool tool) =>
+        await RunHealthAsync("rung2-" + tool, async (c, ds, end) =>
+        {
+            var (eventType, _, _) = SourceOf(tool);
+            var added = end.AddDays(-1);
+            await SeedHealthServerAsync(c, "rung2-" + tool, added, added, end);
+            await SeedHealthEventAsync(c, "rung2-" + tool, tool, end.AddDays(-20));
+
+            var cut = WindowFloorLiveHarness.Parse(await CallHealthAsync(tool, ds, "rung2-" + tool, 168, end));
+
+            Assert.True(cut.GetProperty("hints").GetProperty("window_truncated").GetBoolean());
+            Assert.Equal(McpHelpers.FormatEffectiveStart(added), cut.GetProperty("hints").GetProperty("effective_start").GetString());
+            var message = cut.GetProperty("message").GetString()!;
+            Assert.StartsWith($"No {eventType} events were captured for {HealthName("rung2-" + tool)} in the last 168 hour(s). This server HAS captured them before", message, StringComparison.Ordinal);
+            Assert.EndsWith(". " + McpHelpers.CutWindowNothingMessage, message, StringComparison.Ordinal);
+            Assert.DoesNotContain("genuinely quiet", message, StringComparison.Ordinal);
+        });
+
+    [Theory]
+    [InlineData(HealthTool.SystemHealth)]
+    [InlineData(HealthTool.SignificantWaits)]
+    public async Task AnEmptyAnswer_TheTypeSeenBeforeTheWindow_NothingHeld_SaysNothingWasRead_AgainstDevPostgres(HealthTool tool) =>
+        await RunHealthAsync("rung2none-" + tool, async (c, ds, end) =>
+        {
+            await SeedHealthServerAsync(c, "rung2none-" + tool, end.AddDays(-30), null, end);
+            await SeedHealthEventAsync(c, "rung2none-" + tool, tool, end.AddDays(-20));
+
+            var cut = WindowFloorLiveHarness.Parse(await CallHealthAsync(tool, ds, "rung2none-" + tool, 168, end));
+
+            Assert.True(cut.GetProperty("hints").GetProperty("window_truncated").GetBoolean());
+            Assert.Equal(JsonValueKind.Null, cut.GetProperty("hints").GetProperty("effective_start").ValueKind);
+            Assert.EndsWith(". " + McpHelpers.CutWindowNothingReadMessage, cut.GetProperty("message").GetString()!, StringComparison.Ordinal);
+        });
+
+    [Theory]
+    [InlineData(HealthTool.SystemHealth)]
+    [InlineData(HealthTool.SignificantWaits)]
+    public async Task AnEmptyAnswer_TheTypeSeenBeforeTheWindow_OverACoveredWindow_KeepsGenuinelyQuiet_AgainstDevPostgres(HealthTool tool) =>
+        await RunHealthAsync("rung2cov-" + tool, async (c, ds, end) =>
+        {
+            await SeedHealthServerAsync(c, "rung2cov-" + tool, end.AddDays(-30), end.AddDays(-8), end);
+            await SeedHealthEventAsync(c, "rung2cov-" + tool, tool, end.AddDays(-20));
+
+            var covered = WindowFloorLiveHarness.Parse(await CallHealthAsync(tool, ds, "rung2cov-" + tool, 168, end));
+
+            Assert.False(covered.GetProperty("hints").GetProperty("window_truncated").GetBoolean());
+            Assert.EndsWith(", so the window is genuinely quiet rather than blind — widen hours_back to reach the most recent events.", covered.GetProperty("message").GetString()!, StringComparison.Ordinal);
+        });
+
     [Theory]
     [InlineData(HealthTool.SystemHealth)]
     [InlineData(HealthTool.SevereErrors)]

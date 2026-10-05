@@ -39,13 +39,15 @@
  * touches innerHTML.
  */
 
-import { el, readTool, readToolWithinKeptHistory, keptWindowStrip, windowFloorStrip, mount, truncate, loadingStrip, errorStrip, readErrorStrip, emptyStrip, disclosure, noticeStrip, getPath, fmtMs, fmtRate, localTime, parseUtc, windowFromHours, daysText } from "../util.js";
-import { renderPanel, VIZ } from "../panels.js";
+import { el, makeActivatable, readTool, readToolWithinKeptHistory, keptWindowStrip, windowFloorStrip, mount, truncate, loadingStrip, errorStrip, readErrorStrip, emptyStrip, disclosure, noticeStrip, getPath, fmtMs, fmtRate, localTime, parseUtc, windowFromHours, daysText } from "../util.js";
+import { renderPanel, setPanelSignal, getPanelSignal, VIZ } from "../panels.js";
 import { zoomableLineChart, chartZoomScope, SERIES_COLORS, CATEGORICAL_COLORS } from "../charts.js";
 import { multiPicker, mergeSeriesRows } from "../multi-picker.js";
+import { pgPlanColumn } from "./pg-plan-viewer.js";
 import { READ_FIELDS } from "../read-fields.js";
 import { analysisFindingsTab } from "./analysis-findings.js";
 import { downloadText } from "../grid-tools.js";
+import { deadlockGraphCell } from "./deadlock-graph.js";
 import { planColumn } from "./plan-viewer.js";
 
 /* ─────────────────────────── shared cell renderers ─────────────────────────── */
@@ -1166,8 +1168,8 @@ export const SERVER_TABS = [
        more than this page's widest Range. The note names that Range from the presets (tabNote), so narrowing them
        cannot leave it wrong. */
     note: (widestHours) =>
-      "Blocked-process reports and deadlock graphs are shown here as their captured XML. The block-chain view " +
-      "and the interactive deadlock graph are desktop-viewer features. This page shows at most " +
+      "Blocked-process reports are shown here as their captured XML. The block-chain view " +
+      "is one of the desktop-viewer features this page does not have. A deadlock graph can be drawn from its row. This page shows at most " +
       daysText(widestHours) +
       ". A Custom View can show more blocking and deadlock history.",
     build: (server, ctx) => [
@@ -1866,6 +1868,17 @@ export const SERVER_TABS = [
           rowsKey: "collectors",
           columns: COLLECTOR_COLUMNS,
           emptyText: "No collection log rows for this server yet.",
+          /* #5227: a row is the way into that collector's run history (the Collection Log below). */
+          onRow: (row, tr) => {
+            if (!row || !row.collector) return;
+            tr.style.cursor = "pointer";
+            tr.setAttribute("title", "Show the runs of " + row.collector + " in the Collection Log below");
+            /* Enter/Space as well as a click; a click that ends a text selection inside the row is the user copying, not picking. */
+            makeActivatable(tr, (e) => {
+              if (e && e.type === "click" && selectionInside(tr)) return;
+              pickCollector(server, row.collector);
+            });
+          },
         },
         {
           title: "Heaviest Collectors",
@@ -1880,15 +1893,7 @@ export const SERVER_TABS = [
          the rollup aggregates seven days into one row per collector, and no projection of it can give
          back the individual runs. This is the tab people reach for when the rollup says HEALTHY and
          collection still looks wrong, and until now the WPF viewer was the only way to it. */
-      table(
-        "Collection Log",
-        "get_collection_log",
-        { server, hours: ctx.hours, limit: 200 },
-        "runs",
-        COLLECTION_LOG_COLUMNS,
-        "individual runs, newest first, over the selected window",
-        "No collector runs in the selected window.",
-      ),
+      collectionLogPanel(server, ctx),
     ],
   },
 
@@ -2145,13 +2150,14 @@ export const POSTGRES_TABS = [
       /* Directly under the query shapes, joined on queryid: a plan only means something beside the
          statement it belongs to. The plan JSON is REDACTED at collection - query text dropped, literals
          replaced - so nothing customer-specific reaches this grid, and the empty text names the usual
-         cause rather than implying the server is quiet. */
+         cause rather than implying the server is quiet. The Plan cell shows the row's own redacted JSON;
+         no second read. */
       table(
         "Captured Plans",
         "get_pg_plans",
         { server, hours: ctx.hours, limit: 10 },
         "plans",
-        PG_PLAN_COLUMNS,
+        [...PG_PLAN_COLUMNS, pgPlanColumn(server)],
         ctx.label + ", grouped by plan shape - plans are redacted at collection",
         "No captured plans. Usually auto_explain is not loaded, or the monitoring login cannot read the server log; on Aurora and RDS there is no log file to read at all."
       ),
@@ -3515,6 +3521,7 @@ function deadlockXmlColumns(server) {
       render: (r) =>
         saveXmlButton(r.deadlock_graph_xml, "deadlock_" + fileStamp(r.deadlock_time) + ".xdl", "application/xml;charset=utf-8", r.deadlock_graph_xml_truncated === true),
     },
+    { key: "graph", label: "Graph", sortable: false, csv: false, filter: false, copy: false, render: (r) => deadlockGraphCell(server, r) },
     { key: "processes", label: "Processes", sortable: false, render: (r) => deadlockProcessesCell(server, r) },
     { key: "deadlock_graph_xml", label: "Deadlock graph", render: (r) => xmlDisclosure(r.deadlock_graph_xml) },
   ];
@@ -4472,6 +4479,65 @@ const COLLECTION_LOG_COLUMNS = [
   { key: "rows_collected", label: "Rows", format: "int" },
   { key: "error_message", label: "Error", wrap: true },
 ];
+
+/* #5227: the collector picked on the Collectors panel, keyed by server at MODULE scope so the 60 s rebuild of the tab
+   keeps the choice. The Collection Log is drawn into a slot that redraws itself, so a pick re-requests only that read. */
+const collectorPick = new Map();
+const collectionLogRedraw = new Map();
+/* The desktop viewer shows a collector's last 7 days. */
+const COLLECTOR_HISTORY_HOURS = 168;
+
+/* One AbortController per server for the Collection Log slot: a new draw aborts the previous 168-hour read. */
+const collectionLogDraws = new Map();
+
+function selectionInside(node) {
+  const sel = typeof window !== "undefined" && window.getSelection ? window.getSelection() : null;
+  return !!sel && !sel.isCollapsed && String(sel).length > 0 && !!sel.anchorNode && node.contains(sel.anchorNode);
+}
+
+function pickCollector(server, collector) {
+  collectorPick.set(server, collector);
+  const redraw = collectionLogRedraw.get(server);
+  if (redraw) redraw();
+}
+
+function collectionLogPanel(server, ctx) {
+  const slot = el("div", {}, []);
+  slot.style.display = "contents";
+  const draw = () => {
+    const previous = collectionLogDraws.get(server);
+    if (previous) previous.abort();
+    const mine = new AbortController();
+    collectionLogDraws.set(server, mine);
+    const outer = getPanelSignal();
+    if (outer) outer.addEventListener("abort", () => mine.abort(), { once: true });
+    const picked = collectorPick.get(server);
+    const params = picked ? { server, hours: COLLECTOR_HISTORY_HOURS, limit: 200, collector_name: picked } : { server, hours: ctx.hours, limit: 200 };
+    const chip = picked
+      ? el(
+          "button",
+          { class: "chip", type: "button", title: "Show every collector again", onClick: () => { collectorPick.delete(server); draw(); } },
+          ["collector " + picked + " \u00d7"]
+        )
+      : null;
+    if (chip) Object.assign(chip.style, { gridColumn: "1 / -1", justifySelf: "start" });
+    setPanelSignal(mine.signal);
+    const logPanel = table(
+        "Collection Log",
+        "get_collection_log",
+        params,
+        "runs",
+        COLLECTION_LOG_COLUMNS,
+        picked ? "runs of " + picked + ", newest first, over the last 7 days" : "individual runs, newest first, over the selected window",
+        picked ? "No runs of " + picked + " in the last 7 days." : "No collector runs in the selected window."
+    );
+    setPanelSignal(outer);
+    mount(slot, [chip, logPanel]);
+  };
+  collectionLogRedraw.set(server, draw);
+  draw();
+  return slot;
+}
 
 const COLLECTOR_COLUMNS = [
   { key: "collector", label: "Collector" },

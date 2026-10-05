@@ -2291,7 +2291,8 @@ function topLevelScalarKeys(sample) {
 
 function rowKeys(sample, rowsKey) {
   const first = firstRow(sample, rowsKey);
-  return first ? Object.keys(first) : [];
+  /* Scalar-valued keys only: a nested value (processes[], graph) would render as [object Object]. */
+  return first ? Object.keys(first).filter((k) => first[k] === null || typeof first[k] !== "object") : [];
 }
 
 function rowNumericKeys(sample, rowsKey) {
