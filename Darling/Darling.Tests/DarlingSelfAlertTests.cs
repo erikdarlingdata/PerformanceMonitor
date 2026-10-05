@@ -2050,6 +2050,90 @@ public sealed class DarlingSelfAlertTests
         Assert.DoesNotContain("NOT YET VALID", fired.ShortMessage);
     }
 
+    /// <summary>
+    /// #5288: the web alert's rendered text is shipped surface (an operator's webhook automation, mute rules and
+    /// muscle memory read it), and the evaluator now renders it from a per-listener descriptor shared with the
+    /// MCP twin. Every arm's words are pinned in full, exactly as they stood before the descriptor existed, so
+    /// the generalization cannot move a character of the web text.
+    /// </summary>
+    [Fact]
+    public async Task WebTlsCert_RenderedText_IsExactlyWhatShippedBeforeTheMcpTwin()
+    {
+        var thresholdDays = $"{(int)DarlingSelfAlertEvaluator.WebTlsCertWarnWindow.TotalDays} days";
+
+        /* In the warning window. */
+        var inWindow = new Harness { Now = CertClock };
+        var inWindowEvaluator = inWindow.Build();
+        await inWindowEvaluator.ApplyWebTlsCertificateAsync(Cert(CertClock.AddDays(10)), Ct);
+        var warned = Assert.Single(inWindow.Deliverer.Outcomes);
+        Assert.Equal("expires 2026-07-11 12:00:00Z (in 10 days)", warned.CurrentValue);
+        Assert.Equal(thresholdDays, warned.ThresholdValue);
+        Assert.Equal("web dashboard TLS certificate expires in 10 days (2026-07-11 12:00:00Z)", warned.ShortMessage);
+        Assert.Equal(
+            "The web dashboard's TLS certificate expires on 2026-07-11 12:00:00Z, in 10 days. When it lapses the LAN "
+            + "dashboard stops serving (it fails closed to loopback-only, never plain HTTP), so renew it and restart the "
+            + "service before then. Certificate: subject CN=Darling Web, thumbprint ABC123DEF456.",
+            warned.DetailText);
+
+        /* Expired. */
+        var expired = new Harness { Now = CertClock };
+        var expiredEvaluator = expired.Build();
+        await expiredEvaluator.ApplyWebTlsCertificateAsync(Cert(CertClock.AddDays(-2)), Ct);
+        var lapsed = Assert.Single(expired.Deliverer.Outcomes);
+        Assert.Equal("expired 2026-06-29 12:00:00Z", lapsed.CurrentValue);
+        Assert.Equal(thresholdDays, lapsed.ThresholdValue);
+        Assert.Equal("web dashboard TLS certificate EXPIRED 2026-06-29 12:00:00Z (2 days ago)", lapsed.ShortMessage);
+        Assert.Equal(
+            "The web dashboard's TLS certificate expired on 2026-06-29 12:00:00Z. An expired certificate fails every TLS "
+            + "handshake, so the LAN dashboard is unreachable now and binds loopback-only on the next service restart. "
+            + "Install a renewed certificate and restart the service. "
+            + "Certificate: subject CN=Darling Web, thumbprint ABC123DEF456.",
+            lapsed.DetailText);
+
+        /* Refused as not yet valid, both tenses of the clock line. */
+        const string refusedCert = "Certificate: subject CN=Darling Web (rotation), thumbprint FUTURE0123.";
+        const string refusedTail =
+            " Correct the system clock or install the currently-valid certificate, then restart the service so the "
+            + "host loads it again. " + refusedCert;
+        var ahead = new Harness { Now = CertClock };
+        await ahead.Build().ApplyWebTlsCertificateAsync(NotYetValidCert(CertClock.AddDays(3)), Ct);
+        var early = Assert.Single(ahead.Deliverer.Outcomes);
+        Assert.Equal("not valid until 2026-07-04 12:00:00Z; not being served", early.CurrentValue);
+        Assert.Equal("valid at service start", early.ThresholdValue);
+        Assert.Equal(
+            "web dashboard TLS certificate NOT YET VALID (valid from 2026-07-04 12:00:00Z) — LAN dashboard is loopback-only",
+            early.ShortMessage);
+        Assert.Equal(
+            "The web dashboard's configured TLS certificate was not yet valid when the service started (not valid until "
+            + "2026-07-04 12:00:00Z), so the host refused to serve it and the LAN dashboard is bound LOOPBACK-ONLY — "
+            + "unreachable from the network, and it will not fall back to plain HTTP. The window opens 2026-07-04 12:00:00Z: "
+            + "if that is in the past by any wall clock you trust, this host's clock is behind; if it is genuinely ahead, "
+            + "the certificate installed is one issued for a future rotation." + refusedTail,
+            early.DetailText);
+
+        var opened = new Harness { Now = CertClock.AddDays(5) };
+        await opened.Build().ApplyWebTlsCertificateAsync(NotYetValidCert(CertClock.AddDays(3)), Ct);
+        var late = Assert.Single(opened.Deliverer.Outcomes);
+        Assert.Equal(
+            "The web dashboard's configured TLS certificate was not yet valid when the service started (not valid until "
+            + "2026-07-04 12:00:00Z), so the host refused to serve it and the LAN dashboard is bound LOOPBACK-ONLY — "
+            + "unreachable from the network, and it will not fall back to plain HTTP. The window opened 2026-07-04 12:00:00Z, "
+            + "after the service started — the host judged the certificate once, at load, and stays loopback-only on "
+            + "that verdict until it is restarted." + refusedTail,
+            late.DetailText);
+
+        /* The two resolution lines. */
+        await inWindowEvaluator.ApplyWebTlsCertificateAsync(Cert(CertClock.AddDays(400)), Ct);
+        var renewed = Assert.Single(inWindow.History.Records);
+        Assert.Equal("Web TLS Certificate Renewed", renewed.MetricName);
+        Assert.Equal(
+            "The web dashboard's TLS certificate is being served and is outside the expiry window", renewed.DetailText);
+
+        await expiredEvaluator.ApplyWebTlsCertificateAsync(NoWebTlsCert, Ct);
+        var gone = Assert.Single(expired.History.Records);
+        Assert.Equal("The web dashboard is no longer serving a TLS certificate to watch", gone.DetailText);
+    }
+
     [Fact]
     public async Task StaleMute_AFreshUnboundedRule_StaysSilent()
     {

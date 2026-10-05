@@ -40,42 +40,12 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// the host publishes — which it does only when it has a loaded certificate; loopback-only installs, an
 /// unconfigured <c>tls</c> block and an unusable one all leave it null, and the worker reads null as "no LAN
 /// TLS certificate to watch" and raises nothing.</para>
+///
+/// <para>The members (<c>Publish</c>, <c>Clear</c>, <c>Read</c> and the <c>Snapshot</c> record) live on
+/// <see cref="ListenerTlsCertificateState"/>, shared with the MCP endpoint's twin
+/// <see cref="McpTlsCertificateState"/> (#5288); this subclass is the web dashboard's own singleton, so a
+/// web restart can never clear or resolve an MCP alert.</para>
 /// </summary>
-public sealed class WebTlsCertificateState
+public sealed class WebTlsCertificateState : ListenerTlsCertificateState
 {
-    /// <summary>A coherent published snapshot of the loaded web-dashboard TLS certificate. <see cref="NotBeforeUtc"/>
-    /// and <see cref="NotAfterUtc"/> are normalized to UTC by the publisher (the X.509 <c>NotBefore</c> /
-    /// <c>NotAfter</c> are LOCAL times). <see cref="RefusedNotYetValid"/> is the host's load-time verdict that
-    /// the certificate's window had not opened yet, so it refused to serve it and the LAN dashboard is
-    /// loopback-only (#3517) — a standing fact about THIS process's start, true until the host publishes
-    /// again or clears, not something to re-check against the clock.</summary>
-    public sealed record Snapshot(
-        DateTimeOffset NotBeforeUtc,
-        DateTimeOffset NotAfterUtc,
-        string Subject,
-        string Thumbprint,
-        bool RefusedNotYetValid);
-
-    private volatile Snapshot? _current;
-
-    /// <summary>Publishes the loaded certificate's facts (web host only, at start; also for a certificate the
-    /// host loaded and then refused for lifetime, so an expired-at-start certificate still surfaces and a
-    /// not-yet-valid one is reported as the refusal it was, #3517).</summary>
-    public void Publish(
-        DateTimeOffset notBeforeUtc, DateTimeOffset notAfterUtc, string subject, string thumbprint, bool refusedNotYetValid) =>
-        _current = new Snapshot(notBeforeUtc, notAfterUtc, subject ?? string.Empty, thumbprint ?? string.Empty, refusedNotYetValid);
-
-    /// <summary>Clears the published snapshot back to "nothing to watch" (web host only) — called when the
-    /// host STOPS serving TLS: a runtime disable of the dashboard, or a failed/degraded start. Without this
-    /// the snapshot is write-once and the worker keeps re-firing the expiry alert about a certificate the
-    /// process is no longer serving, with no resolution short of a full restart (#3514 follow-up). The
-    /// certificate is published again on the next successful start, so a port-change rebind — where Stop and
-    /// Start run back-to-back in one supervisor tick — re-publishes before the worker's next sweep observes
-    /// the null, and does not flicker a resolution.</summary>
-    public void Clear() => _current = null;
-
-    /// <summary>The latest published snapshot, or null when the web host has no loaded TLS certificate
-    /// (loopback-only, no <c>tls</c> block, an unusable one, or after a stop/degrade) — read by the worker as
-    /// "nothing to watch".</summary>
-    public Snapshot? Read() => _current;
 }
