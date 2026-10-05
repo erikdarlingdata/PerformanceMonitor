@@ -18,6 +18,7 @@ using ModelContextProtocol.Server;
 using Npgsql;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
@@ -569,6 +570,303 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
             await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
                 await DeleteRowsAsync(cleanup, cleanupCt));
         }
+    }
+
+    /* #4966: where the data starts, on the five event-list tools. The coverage probe is DataWindowFloor.Source.ForCollectorTable (the later
+       of the retention edge and the server's registration), moved earlier by the oldest event the page shows. Every instant is an offset
+       from one anchor minute, so the probe's purge edge never lands inside a window. */
+    private sealed record EventTool(string Name, string Table, string Label, string ArrayKey);
+
+    private static readonly EventTool[] EventTools =
+    [
+        new("get_blocking", "blocked_process_reports", "blocked_process_reports", "events"),
+        new("get_blocking_dmv", "dmv_blocking_snapshots", "blocked_process_reports and dmv_blocking_snapshots", "events"),
+        new("get_deadlocks", "deadlocks", "deadlocks", "deadlocks"),
+        new("get_deadlock_detail", "deadlocks", "deadlocks", "deadlocks"),
+        new("get_blocked_process_xml", "blocked_process_reports", "blocked_process_reports", "reports"),
+        new("get_long_query_completions", "long_query_completions", "long_query_completions", "completions"),
+    ];
+
+    private static DateTime EventAnchor()
+    {
+        var now = DateTime.UtcNow;
+        return new DateTime(now.Year, now.Month, now.Day, now.Hour, now.Minute, 0, DateTimeKind.Utc);
+    }
+
+    private static string EventServer(EventTool tool, string window) => "darling-mcp-evt-" + window + "-" + tool.Name.Replace('_', '-');
+
+    private static System.Text.Json.JsonElement ParseEvent(string json) => System.Text.Json.JsonDocument.Parse(json).RootElement.Clone();
+
+    private static Task<string> CallEventAsync(NpgsqlDataSource postgres, EventTool tool, string server, int hours, DateTime end, int limit = 15)
+    {
+        var asOf = WebDataStartNote.FormatWindowEnd(end);
+        return tool.Name switch
+        {
+            "get_blocking" or "get_blocking_dmv" => DarlingMcpBlockingTools.GetBlocking(postgres, server, hours, limit, as_of: asOf),
+            "get_deadlocks" => DarlingMcpBlockingTools.GetDeadlocks(postgres, server, hours, limit, as_of: asOf),
+            "get_deadlock_detail" => DarlingMcpBlockingTools.GetDeadlockDetail(postgres, server, hours, limit, as_of: asOf),
+            "get_blocked_process_xml" => DarlingMcpBlockingTools.GetBlockedProcessXml(postgres, server, hours, limit, as_of: asOf),
+            _ => DarlingMcpLongQueryTools.GetLongQueryCompletions(postgres, server, hours, limit, as_of: asOf),
+        };
+    }
+
+    /// <summary>A server registered at <paramref name="created"/> with three events an hour apart from <paramref name="firstEvent"/> (none when null).</summary>
+    private static async Task SeedEventServerAsync(
+        NpgsqlConnection connection, EventTool tool, string name, DateTime created, DateTime? firstEvent, System.Threading.CancellationToken ct)
+    {
+        var serverId = ServerIdHelper.GetDeterministicHashCode(name);
+        await DeleteEventServerAsync(connection, name, ct);
+        await DarlingMcpTestData.RegisterServerAsync(connection, serverId, name, ct);
+        await DarlingMcpTestData.ExecAsync(connection, ct, "UPDATE servers SET created_date = $2 WHERE server_id = $1", serverId, DarlingMcpTestData.Naive(created));
+        if (firstEvent is not DateTime first) return;
+
+        for (var i = 0; i < 3; i++)
+        {
+            var at = DarlingMcpTestData.Naive(first.AddHours(i));
+            switch (tool.Table)
+            {
+                case "blocked_process_reports":
+                    await DarlingMcpTestData.ExecAsync(connection, ct,
+                        @"INSERT INTO blocked_process_reports (blocked_report_id, collection_time, server_id, server_name, event_time, database_name, blocked_spid, blocking_spid, wait_time_ms, lock_mode, blocked_sql_text, blocking_sql_text, blocked_process_report_xml, contentious_object)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)",
+                        CollectionIdGenerator.Next(), at, serverId, name, at, Db, 55 + i, 60, 8000L, "X", "SELECT 1", "UPDATE Posts SET Score = Score + 1", "<blocked-process-report><blocked-process><process spid=\"55\"/></blocked-process></blocked-process-report>", "dbo.Posts");
+                    break;
+                case "dmv_blocking_snapshots":
+                    await DarlingMcpTestData.ExecAsync(connection, ct,
+                        @"INSERT INTO dmv_blocking_snapshots (collection_id, collection_time, server_id, server_name, monitor_loop, event_time, database_name, blocked_spid, blocking_spid, wait_time_ms, lock_mode, blocking_status, contentious_object, blocked_sql_text, blocking_sql_text)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)",
+                        CollectionIdGenerator.Next(), at, serverId, name, -1, at, Db, 70 + i, 80, 3000L, "S", "suspended", "dbo.Users", "SELECT 2", "WAITFOR DELAY '00:01'");
+                    break;
+                case "deadlocks":
+                    await DarlingMcpTestData.ExecAsync(connection, ct,
+                        @"INSERT INTO deadlocks (deadlock_id, collection_time, server_id, server_name, deadlock_time, victim_process_id, victim_sql_text, deadlock_graph_xml)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
+                        CollectionIdGenerator.Next(), at, serverId, name, at, "process123", "DELETE FROM Posts", "<deadlock><victim-list><victimProcess id=\"process123\"/></victim-list><process-list><process id=\"process123\"><inputbuf>DELETE FROM Posts</inputbuf></process></process-list></deadlock>");
+                    break;
+                default:
+                    await DarlingMcpTestData.ExecAsync(connection, ct,
+                        @"INSERT INTO long_query_completions (long_query_completion_id, collection_time, server_id, server_name, event_time, event_type, database_name, duration_microseconds, statement_text)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)",
+                        CollectionIdGenerator.Next(), at, serverId, name, at, "rpc_completed", Db, (long)(i + 1) * 1_000_000, "EXEC p" + i);
+                    break;
+            }
+        }
+    }
+
+    private static async Task DeleteEventServerAsync(NpgsqlConnection connection, string name, System.Threading.CancellationToken ct)
+    {
+        var serverId = ServerIdHelper.GetDeterministicHashCode(name);
+        foreach (var table in new[] { "blocked_process_reports", "dmv_blocking_snapshots", "deadlocks", "long_query_completions", "servers" })
+        {
+            await DarlingMcpTestData.ExecAsync(connection, ct, $"DELETE FROM {table} WHERE server_id = $1", serverId);
+        }
+    }
+
+    /// <summary>Runs <paramref name="body"/> for each event tool against its own seeded server, then removes what it seeded.</summary>
+    private static async Task ForEachEventToolAsync(
+        string window, Func<NpgsqlConnection, NpgsqlDataSource, EventTool, string, DateTime, Task> body)
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live blocking-tools test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await using var postgres = NpgsqlDataSource.Create(cs!);
+
+        var bodySucceeded = false;
+        try
+        {
+            var end = EventAnchor();
+            foreach (var tool in EventTools)
+            {
+                await body(connection, postgres, tool, EventServer(tool, window), end);
+            }
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                foreach (var tool in EventTools)
+                {
+                    await DeleteEventServerAsync(cleanup, EventServer(tool, window), cleanupCt);
+                }
+            });
+        }
+    }
+
+    [Fact]
+    public async Task EventLists_ForAServerAddedTwoDaysAgo_NameWhereCoverageStarts_AgainstDevPostgres()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await ForEachEventToolAsync("added", async (connection, postgres, tool, name, end) =>
+        {
+            var added = end.AddDays(-2);
+            await SeedEventServerAsync(connection, tool, name, added, end.AddDays(-1), ct);
+
+            var root = ParseEvent(await CallEventAsync(postgres, tool, name, 168, end));
+
+            Assert.True(root.GetProperty("window_truncated").GetBoolean(), tool.Name);
+            Assert.Equal(McpHelpers.FormatEffectiveStart(added), root.GetProperty("effective_start").GetString());
+            Assert.Equal(
+                DarlingMcpWindowNotice.Build(added, end.AddHours(-168), tool.Label).TruncationNote,
+                root.GetProperty("truncation_note").GetString());
+            Assert.Contains("raw " + tool.Label + " retains", root.GetProperty("truncation_note").GetString(), StringComparison.Ordinal);
+            Assert.False(root.TryGetProperty("effective_hours_back", out _), tool.Name);
+            Assert.Equal(3, root.GetProperty(tool.ArrayKey).GetArrayLength());
+
+            /* Written right after hours_back, in the contract's order. */
+            var names = root.EnumerateObject().Select(p => p.Name).ToList();
+            var at = names.IndexOf("hours_back");
+            Assert.Equal(["effective_start", "window_truncated", "truncation_note"], names.Skip(at + 1).Take(3));
+        });
+    }
+
+    [Fact]
+    public async Task EventLists_WhoseFirstEventComesLate_AreCovered_AgainstDevPostgres()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await ForEachEventToolAsync("quiet", async (connection, postgres, tool, name, end) =>
+        {
+            await SeedEventServerAsync(connection, tool, name, end.AddDays(-30), end.AddDays(-5), ct);
+
+            var root = ParseEvent(await CallEventAsync(postgres, tool, name, 168, end));
+
+            Assert.False(root.GetProperty("window_truncated").GetBoolean(), tool.Name);
+            Assert.Equal(System.Text.Json.JsonValueKind.Null, root.GetProperty("truncation_note").ValueKind);
+            var effectiveStart = DateTime.Parse(root.GetProperty("effective_start").GetString()!, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.RoundtripKind);
+            Assert.InRange((effectiveStart - end.AddHours(-168)).TotalSeconds, 0, 120);
+        });
+    }
+
+    /// <summary>An event stamped before the server's first collection (a backfill) is shown, so the notice cannot name a start later than it.</summary>
+    [Fact]
+    public async Task AnEvent_OlderThanTheFirstCollection_GivesNoNotice_AgainstDevPostgres()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await ForEachEventToolAsync("backfill", async (connection, postgres, tool, name, end) =>
+        {
+            /* Registered an hour ago; the oldest event is 30 minutes into a 24-hour window, 23 hours before the registration. */
+            await SeedEventServerAsync(connection, tool, name, end.AddHours(-1), end.AddHours(-23.5), ct);
+
+            var root = ParseEvent(await CallEventAsync(postgres, tool, name, 24, end));
+
+            Assert.Equal(3, root.GetProperty(tool.ArrayKey).GetArrayLength());
+            Assert.False(root.GetProperty("window_truncated").GetBoolean(), tool.Name);
+            Assert.Equal(System.Text.Json.JsonValueKind.Null, root.GetProperty("truncation_note").ValueKind);
+            Assert.Equal(McpHelpers.FormatEffectiveStart(end.AddHours(-23.5)), root.GetProperty("effective_start").GetString());
+        });
+    }
+
+    [Fact]
+    public async Task AnEmptyAnswer_PastCoverage_CarriesTheNoticeUnderHints_AgainstDevPostgres()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await ForEachEventToolAsync("empty", async (connection, postgres, tool, name, end) =>
+        {
+            var added = end.AddDays(-2);
+            await SeedEventServerAsync(connection, tool, name, added, null, ct);
+
+            var root = ParseEvent(await CallEventAsync(postgres, tool, name, 1, end.AddDays(-5)));
+
+            Assert.Equal("empty", root.GetProperty("status").GetString());
+            var hints = root.GetProperty("hints");
+            Assert.True(hints.GetProperty("window_truncated").GetBoolean(), tool.Name);
+            Assert.Equal(McpHelpers.FormatEffectiveStart(added), hints.GetProperty("effective_start").GetString());
+            Assert.False(root.TryGetProperty("window_truncated", out _), tool.Name);
+        });
+    }
+
+    /// <summary>A window of 90 minutes or less that answered rows starts no probe: the stand-in would throw if it ran.</summary>
+    [Fact]
+    public async Task AShortWindow_WithRows_StartsNoProbe_AgainstDevPostgres()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await ForEachEventToolAsync("short", async (connection, postgres, tool, name, end) =>
+        {
+            await SeedEventServerAsync(connection, tool, name, end.AddDays(-30), end.AddMinutes(-40), ct);
+
+            var probes = 0;
+            DarlingMcpWindowNotice.TestOnlyProbe = () => { probes++; throw new TimeoutException("the probe must not run"); };
+            var bodySucceeded = false;
+            try
+            {
+                var root = ParseEvent(await CallEventAsync(postgres, tool, name, 1, end.AddHours(1)));
+
+                Assert.Equal(0, probes);
+                Assert.True(root.GetProperty(tool.ArrayKey).GetArrayLength() > 0, tool.Name);
+                Assert.False(root.GetProperty("window_truncated").GetBoolean(), tool.Name);
+                bodySucceeded = true;
+            }
+            finally
+            {
+                await LiveStoreCleanup.RunOwnedAsync(bodySucceeded, () =>
+                {
+                    DarlingMcpWindowNotice.TestOnlyProbe = null;
+                    return Task.CompletedTask;
+                });
+            }
+        });
+    }
+
+    /// <summary>A page cut by the limit still carries the notice, computed over the events it shows.</summary>
+    [Fact]
+    public async Task ACappedPage_StillCarriesTheNotice_AgainstDevPostgres()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await ForEachEventToolAsync("capped", async (connection, postgres, tool, name, end) =>
+        {
+            var added = end.AddDays(-2);
+            await SeedEventServerAsync(connection, tool, name, added, end.AddDays(-1), ct);
+
+            var root = ParseEvent(await CallEventAsync(postgres, tool, name, 168, end, limit: 2));
+
+            Assert.True(root.GetProperty("truncated").GetBoolean(), tool.Name);
+            Assert.Equal(2, root.GetProperty(tool.ArrayKey).GetArrayLength());
+            Assert.True(root.GetProperty("window_truncated").GetBoolean(), tool.Name);
+            Assert.Equal(McpHelpers.FormatEffectiveStart(added), root.GetProperty("effective_start").GetString());
+        });
+    }
+
+    /// <summary>A coverage probe that throws costs the notice, never the rows: the rows come back without the three keys, and an empty answer without hints.</summary>
+    [Fact]
+    public async Task AFailedProbe_CostsTheNotice_NeverTheRows_AgainstDevPostgres()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await ForEachEventToolAsync("probefail", async (connection, postgres, tool, name, end) =>
+        {
+            await SeedEventServerAsync(connection, tool, name, end.AddDays(-2), end.AddDays(-1), ct);
+
+            var bodySucceeded = false;
+            DarlingMcpWindowNotice.TestOnlyProbe = () => throw new TimeoutException("the probe's deadline passed");
+            try
+            {
+                var root = ParseEvent(await CallEventAsync(postgres, tool, name, 168, end));
+
+                Assert.False(root.TryGetProperty("status", out _), tool.Name);
+                Assert.False(root.TryGetProperty("error", out _), tool.Name);
+                Assert.Equal(3, root.GetProperty(tool.ArrayKey).GetArrayLength());
+                Assert.False(root.TryGetProperty("effective_start", out _), tool.Name);
+                Assert.False(root.TryGetProperty("window_truncated", out _), tool.Name);
+                Assert.False(root.TryGetProperty("truncation_note", out _), tool.Name);
+
+                var empty = ParseEvent(await CallEventAsync(postgres, tool, name, 1, end.AddDays(-5)));
+                Assert.Equal("empty", empty.GetProperty("status").GetString());
+                Assert.False(empty.TryGetProperty("hints", out _), tool.Name);
+                bodySucceeded = true;
+            }
+            finally
+            {
+                await LiveStoreCleanup.RunOwnedAsync(bodySucceeded, () =>
+                {
+                    DarlingMcpWindowNotice.TestOnlyProbe = null;
+                    return Task.CompletedTask;
+                });
+            }
+        });
     }
 
     private static async Task DeleteRowsAsync(NpgsqlConnection connection, System.Threading.CancellationToken ct, bool keepServer = false)
