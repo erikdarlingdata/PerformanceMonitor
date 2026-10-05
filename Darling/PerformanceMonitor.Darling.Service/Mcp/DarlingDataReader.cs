@@ -9,11 +9,13 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Globalization;
 using System.Runtime.CompilerServices;
 using System.Runtime.ExceptionServices;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using PerformanceMonitor.Analysis.Baselines;
 using NpgsqlTypes;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
@@ -226,7 +228,20 @@ internal static class DarlingDataReader
            per-hash grouping — it is only interesting under host-object rollup, where it IS the finding:
            a proc whose dynamic SQL fragments across 21 hashes reports 21 here, which is the number that
            explains why top-N-by-hash could never surface it. */
-        long DistinctQueryHashes = 1);
+        long DistinctQueryHashes = 1,
+        /* The desktop grid's remaining columns; null on the hourly tier, which does not carry them. */
+        TopQueryDetail? Detail = null);
+
+    /// <summary>The per-group extremes and identity fields the desktop Top Queries grid shows beyond the core
+    /// ranking columns. Every field is null when the store has no value. <c>LastExecutionTime</c> and
+    /// <c>CreationTime</c> are naive UTC, converted from the monitored server's clock at the read.</summary>
+    public sealed record TopQueryDetail(
+        DateTime? LastExecutionTime, DateTime? CreationTime,
+        long? MinPhysicalReads, long? MaxPhysicalReads, long? MinRows, long? MaxRows,
+        long? MinGrantKb, long? MaxGrantKb, long? MinUsedGrantKb, long? MaxUsedGrantKb,
+        long? MinIdealGrantKb, long? MaxIdealGrantKb, long? MinSpills, long? MaxSpills,
+        long? MinReservedThreads, long? MaxReservedThreads, long? MinUsedThreads, long? MaxUsedThreads,
+        long? TotalClrTimeUs, long? PlanGenerationNum, double? WorkerTimePerSecond);
 
     /// <summary>One (database, schema, object) group's summed procedure-stats deltas over the window.</summary>
     public sealed record TopProcedureRow(
@@ -1046,6 +1061,27 @@ internal static class DarlingDataReader
                 MAX(query_plan_hash) AS query_plan_hash,
                 MAX(sql_handle) AS sql_handle,
                 MAX(plan_handle) AS plan_handle,
+                MAX(last_execution_time) AS last_execution_time,
+                MAX(creation_time) AS creation_time,
+                MIN(min_physical_reads) AS min_physical_reads,
+                MAX(max_physical_reads) AS max_physical_reads,
+                MIN(min_rows) AS min_rows,
+                MAX(max_rows) AS max_rows,
+                MIN(min_grant_kb) AS min_grant_kb,
+                MAX(max_grant_kb) AS max_grant_kb,
+                MIN(min_used_grant_kb) AS min_used_grant_kb,
+                MAX(max_used_grant_kb) AS max_used_grant_kb,
+                MIN(min_ideal_grant_kb) AS min_ideal_grant_kb,
+                MAX(max_ideal_grant_kb) AS max_ideal_grant_kb,
+                MIN(min_spills) AS min_spills,
+                MAX(max_spills) AS max_spills,
+                MIN(min_reserved_threads) AS min_reserved_threads,
+                MAX(max_reserved_threads) AS max_reserved_threads,
+                MIN(min_used_threads) AS min_used_threads,
+                MAX(max_used_threads) AS max_used_threads,
+                MAX(total_clr_time) AS total_clr_time,
+                MAX(plan_generation_num) AS plan_generation_num,
+                MAX(CAST(delta_worker_time AS double precision) / NULLIF(sample_interval_seconds, 0) / 1000.0) AS worker_time_per_second,
                 /* #2012: how many DISTINCT statement texts this hash group merged. query_hash is a
                    SHAPE hash — INSERT...EXEC statements naming DIFFERENT callee procs share one
                    (reproduced live), and ad-hoc literal variants collapse too — so a group with
@@ -1105,7 +1141,29 @@ internal static class DarlingDataReader
             r.min_elapsed_time,
             r.max_elapsed_time,
             t.query_text,
-            r.distinct_texts
+            r.distinct_texts,
+            CAST(1 AS bigint) AS distinct_query_hashes,
+            r.last_execution_time,
+            r.creation_time,
+            r.min_physical_reads,
+            r.max_physical_reads,
+            r.min_rows,
+            r.max_rows,
+            r.min_grant_kb,
+            r.max_grant_kb,
+            r.min_used_grant_kb,
+            r.max_used_grant_kb,
+            r.min_ideal_grant_kb,
+            r.max_ideal_grant_kb,
+            r.min_spills,
+            r.max_spills,
+            r.min_reserved_threads,
+            r.max_reserved_threads,
+            r.min_used_threads,
+            r.max_used_threads,
+            r.total_clr_time,
+            r.plan_generation_num,
+            r.worker_time_per_second
         FROM ranked AS r
         LEFT JOIN LATERAL (
             SELECT query_text
@@ -1176,6 +1234,27 @@ internal static class DarlingDataReader
                 MAX(query_plan_hash) AS query_plan_hash,
                 MAX(sql_handle) AS sql_handle,
                 MAX(plan_handle) AS plan_handle,
+                MAX(last_execution_time) AS last_execution_time,
+                MAX(creation_time) AS creation_time,
+                MIN(min_physical_reads) AS min_physical_reads,
+                MAX(max_physical_reads) AS max_physical_reads,
+                MIN(min_rows) AS min_rows,
+                MAX(max_rows) AS max_rows,
+                MIN(min_grant_kb) AS min_grant_kb,
+                MAX(max_grant_kb) AS max_grant_kb,
+                MIN(min_used_grant_kb) AS min_used_grant_kb,
+                MAX(max_used_grant_kb) AS max_used_grant_kb,
+                MIN(min_ideal_grant_kb) AS min_ideal_grant_kb,
+                MAX(max_ideal_grant_kb) AS max_ideal_grant_kb,
+                MIN(min_spills) AS min_spills,
+                MAX(max_spills) AS max_spills,
+                MIN(min_reserved_threads) AS min_reserved_threads,
+                MAX(max_reserved_threads) AS max_reserved_threads,
+                MIN(min_used_threads) AS min_used_threads,
+                MAX(max_used_threads) AS max_used_threads,
+                MAX(total_clr_time) AS total_clr_time,
+                MAX(plan_generation_num) AS plan_generation_num,
+                MAX(CAST(delta_worker_time AS double precision) / NULLIF(sample_interval_seconds, 0) / 1000.0) AS worker_time_per_second,
                 COUNT(DISTINCT query_text_digest) AS distinct_texts,
                 /* #2235: the fragment count IS the finding — 21 here is why a per-hash ranking missed it. */
                 COUNT(DISTINCT query_hash) AS distinct_query_hashes
@@ -1223,7 +1302,28 @@ internal static class DarlingDataReader
             r.max_elapsed_time,
             t.query_text,
             r.distinct_texts,
-            r.distinct_query_hashes
+            r.distinct_query_hashes,
+            r.last_execution_time,
+            r.creation_time,
+            r.min_physical_reads,
+            r.max_physical_reads,
+            r.min_rows,
+            r.max_rows,
+            r.min_grant_kb,
+            r.max_grant_kb,
+            r.min_used_grant_kb,
+            r.max_used_grant_kb,
+            r.min_ideal_grant_kb,
+            r.max_ideal_grant_kb,
+            r.min_spills,
+            r.max_spills,
+            r.min_reserved_threads,
+            r.max_reserved_threads,
+            r.min_used_threads,
+            r.max_used_threads,
+            r.total_clr_time,
+            r.plan_generation_num,
+            r.worker_time_per_second
         FROM ranked AS r
         LEFT JOIN LATERAL (
             SELECT query_text
@@ -1490,6 +1590,9 @@ internal static class DarlingDataReader
         }
 
         var rows = new List<TopQueryRow>();
+        /* The two detail timestamps are stored on the monitored server's own clock; they are converted to naive
+           UTC per row through the server's clock, as every other server-local column on the MCP surface is. */
+        var clock = await DarlingServerClockReader.ReadAsync(postgres, serverId, cancellationToken);
         /* #2235: same parameters, same columns, different GROUP BY — see TopQueriesByHostObjectSql. */
         await using var command = postgres.CreateCommand(rollUpByHostObject ? TopQueriesByHostObjectSql : TopQueriesSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
@@ -1523,10 +1626,27 @@ internal static class DarlingDataReader
                 reader.IsDBNull(19) ? 0 : reader.GetInt64(19),
                 reader.IsDBNull(20) ? "" : reader.GetString(20),
                 reader.IsDBNull(21) ? 0 : reader.GetInt64(21),
-                reader.FieldCount > 22 && !reader.IsDBNull(22) ? reader.GetInt64(22) : 1));
+                reader.IsDBNull(22) ? 1 : reader.GetInt64(22),
+                ReadTopQueryDetail(reader, 23, clock)));
         }
 
         return new TopQueriesReadResult(rows, RetentionTier.Raw, rawForced);
+    }
+
+    /// <summary>The detail columns of <see cref="TopQueriesSql"/> / <see cref="TopQueriesByHostObjectSql"/>, 21
+    /// consecutive fields from <paramref name="first"/>: two timestamps (converted to naive UTC through
+    /// <paramref name="clock"/>), sixteen integer extremes, CLR time, the
+    /// plan generation and the peak CPU rate.</summary>
+    private static TopQueryDetail ReadTopQueryDetail(NpgsqlDataReader reader, int first, ServerClock clock)
+    {
+        DateTime? Time(int i) => DarlingServerClockReader.ToUtc(clock, reader, first + i);
+        long? Long(int i) => reader.IsDBNull(first + i) ? null : Convert.ToInt64(reader.GetValue(first + i), CultureInfo.InvariantCulture);
+        return new TopQueryDetail(
+            Time(0), Time(1),
+            Long(2), Long(3), Long(4), Long(5), Long(6), Long(7), Long(8), Long(9),
+            Long(10), Long(11), Long(12), Long(13), Long(14), Long(15), Long(16), Long(17),
+            Long(18), Long(19),
+            reader.IsDBNull(first + 20) ? null : reader.GetDouble(first + 20));
     }
 
     /// <summary>
@@ -1980,7 +2100,7 @@ internal static class DarlingDataReader
     /// before <c>LIMIT $4 + 5</c>) — module_name is not a GROUP BY key here (<c>MAX(module_name)</c> is the
     /// aggregate), so it has to filter the deduplicated rows before the GROUP BY rather than after it, and
     /// living in the shared suffix means both the raw and the table CTE inherit that same placement.</summary>
-    private const string QueryStoreTopSuffix = """
+    private const string QueryStoreTopRankedHead = """
         ranked AS (
             SELECT
                 database_name,
@@ -2013,6 +2133,14 @@ internal static class DarlingDataReader
             ORDER BY SUM(execution_count) * AVG(CAST(avg_duration_us AS double precision)) DESC
             LIMIT $4 + 5
         )
+
+        """;
+
+    /// <summary>The outer read from <c>SELECT r.database_name</c> down: the text lateral, the WAITFOR self-exclusion,
+    /// the final <c>ORDER BY</c> and <c>LIMIT $4</c>. It reads only <c>ranked</c>'s column list, so
+    /// <see cref="QueryStoreTopSuffix"/> (the raw and the interval-table reads) and <see cref="QueryStoreTopDailyTableSql"/>
+    /// (the daily-summary read) share this one text and cannot drift apart below <c>ranked</c>.</summary>
+    private const string QueryStoreTopTail = """
         SELECT
             r.database_name,
             r.query_id,
@@ -2063,6 +2191,171 @@ internal static class DarlingDataReader
         LIMIT $4
         """;
 
+    /// <summary><see cref="QueryStoreTopRankedHead"/> + <see cref="QueryStoreTopTail"/>: byte-identical to the single
+    /// string it was before the tail was split off for <see cref="QueryStoreTopDailyTableSql"/> (a test pins its hash).</summary>
+    private const string QueryStoreTopSuffix = QueryStoreTopRankedHead + QueryStoreTopTail;
+
+    /// <summary>
+    /// The long-window read (#5094): <see cref="QueryStoreTopTableSql"/>'s answer, with a run of whole UTC days taken
+    /// from <c>collect.query_store_top_daily</c> instead of the wide table. $1 server_id, $2 the gate's
+    /// <c>ReadStart</c>, $3 the window end (inclusive, as in the table read), $4 top, $5 database, $6 execution
+    /// outcome, $7 module, $8 <c>S</c> and $9 <c>E</c> (dates): the days <c>[S, E)</c> come from the summary, and the
+    /// edges <c>[$2, S)</c> and <c>[E, $3]</c> from the wide table with exactly the table read's predicates (the
+    /// inclusive $3, the <c>first_execution_time</c> floor of <see cref="QueryStoreTopTablePrefix"/> per range, no upper
+    /// bound), so a partial first or last day, and any day without a built row, is exact.
+    /// <para><b>Every arm is projected as recombinable parts</b>: the execution count, and for each averaged column its
+    /// value as <c>numeric</c> and a 0/1 for "not NULL" (the summary stores the same two things as
+    /// <c>&lt;col&gt;_sum</c> and <c>&lt;col&gt;_n</c>). <c>ranked</c> then groups the unioned rows by the table read's own
+    /// keys and computes <c>SUM(sum) / NULLIF(SUM(n), 0)</c>, which is the table read's unweighted mean of interval
+    /// averages. In the clean case it equals the table read bit for bit: <c>AVG(double precision)</c> of the
+    /// bigint-valued columns is <c>Sx / N</c> with <c>Sx</c> a sum of integers, exact in a double while it stays below
+    /// 2^53; here <c>Sx</c> is an exact <c>numeric</c> sum that is converted to a double once and divided by the same
+    /// <c>N</c>, so both are one correctly rounded division of the same two numbers. $7 filters the unioned rows before
+    /// the GROUP BY, where the table read puts it (<c>module_name</c> is part of the summary's key). The text lateral,
+    /// the WAITFOR exclusion and the ordering are <see cref="QueryStoreTopTail"/>, shared with the table read.</para>
+    /// <para><b>Approximate only through the summary's documented staleness</b>: a row written into a day after that day
+    /// was built is missed, and a row whose <c>collection_time</c> moves into the next day is counted twice until the
+    /// second pass. Those residuals, and why the summary has them, are in the V161 comment in <c>PgMigrations</c> and
+    /// the <see cref="QueryStoreTopDaily"/> header. A static readonly for the same reason as
+    /// <see cref="QueryStoreTopTableSql"/>.</para>
+    /// </summary>
+    public static readonly string QueryStoreTopDailyTableSql = $$"""
+        WITH parts AS (
+            SELECT
+                database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role, module_name,
+                CAST(execution_count AS numeric) AS ec,
+                CAST(avg_duration_us AS numeric) AS duration_sum, CAST(CAST(avg_duration_us IS NOT NULL AS integer) AS bigint) AS duration_n,
+                CAST(avg_cpu_time_us AS numeric) AS cpu_sum, CAST(CAST(avg_cpu_time_us IS NOT NULL AS integer) AS bigint) AS cpu_n,
+                CAST(avg_logical_io_reads AS numeric) AS reads_sum, CAST(CAST(avg_logical_io_reads IS NOT NULL AS integer) AS bigint) AS reads_n,
+                CAST(avg_logical_io_writes AS numeric) AS writes_sum, CAST(CAST(avg_logical_io_writes IS NOT NULL AS integer) AS bigint) AS writes_n,
+                CAST(avg_physical_io_reads AS numeric) AS physical_sum, CAST(CAST(avg_physical_io_reads IS NOT NULL AS integer) AS bigint) AS physical_n,
+                CAST(avg_rowcount AS numeric) AS rowcount_sum, CAST(CAST(avg_rowcount IS NOT NULL AS integer) AS bigint) AS rowcount_n,
+                last_execution_time, query_plan_hash
+            FROM query_store_interval_wide
+            WHERE server_id = $1
+            AND   collection_time >= $2
+            AND   collection_time < $8::date
+            AND   first_execution_time >= $2 - {{QueryStoreIntervalWide.PurgeEdgeMarginSql}}
+            AND   ($5::text IS NULL OR database_name = $5)
+            AND   ($6::text IS NULL OR execution_type_desc = $6)
+            UNION ALL
+            SELECT
+                database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role, module_name,
+                CAST(execution_count AS numeric) AS ec,
+                CAST(avg_duration_us AS numeric), CAST(CAST(avg_duration_us IS NOT NULL AS integer) AS bigint),
+                CAST(avg_cpu_time_us AS numeric), CAST(CAST(avg_cpu_time_us IS NOT NULL AS integer) AS bigint),
+                CAST(avg_logical_io_reads AS numeric), CAST(CAST(avg_logical_io_reads IS NOT NULL AS integer) AS bigint),
+                CAST(avg_logical_io_writes AS numeric), CAST(CAST(avg_logical_io_writes IS NOT NULL AS integer) AS bigint),
+                CAST(avg_physical_io_reads AS numeric), CAST(CAST(avg_physical_io_reads IS NOT NULL AS integer) AS bigint),
+                CAST(avg_rowcount AS numeric), CAST(CAST(avg_rowcount IS NOT NULL AS integer) AS bigint),
+                last_execution_time, query_plan_hash
+            FROM query_store_interval_wide
+            WHERE server_id = $1
+            AND   collection_time >= $9::date
+            AND   collection_time <= $3
+            AND   first_execution_time >= $9::date - {{QueryStoreIntervalWide.PurgeEdgeMarginSql}}
+            AND   ($5::text IS NULL OR database_name = $5)
+            AND   ($6::text IS NULL OR execution_type_desc = $6)
+            UNION ALL
+            SELECT
+                database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role, module_name,
+                execution_count_sum,
+                avg_duration_us_sum, avg_duration_us_n,
+                avg_cpu_time_us_sum, avg_cpu_time_us_n,
+                avg_logical_io_reads_sum, avg_logical_io_reads_n,
+                avg_logical_io_writes_sum, avg_logical_io_writes_n,
+                avg_physical_io_reads_sum, avg_physical_io_reads_n,
+                avg_rowcount_sum, avg_rowcount_n,
+                last_execution_time_max, query_plan_hash_max
+            FROM query_store_top_daily
+            WHERE server_id = $1
+            AND   day >= $8::date
+            AND   day < $9::date
+            AND   ($5::text IS NULL OR database_name = $5)
+            AND   ($6::text IS NULL OR execution_type_desc = $6)
+        ),
+        ranked AS (
+            SELECT
+                database_name,
+                query_id,
+                plan_id,
+                query_hash,
+                execution_type_desc,
+                MAX(module_name) AS module_name,
+                replica_role,
+                CAST(SUM(ec) AS bigint) AS total_executions,
+                CAST(SUM(duration_sum) AS double precision) / NULLIF(SUM(duration_n), 0) / 1000.0 AS avg_duration_ms,
+                CAST(SUM(cpu_sum) AS double precision) / NULLIF(SUM(cpu_n), 0) / 1000.0 AS avg_cpu_time_ms,
+                CAST(SUM(reads_sum) AS double precision) / NULLIF(SUM(reads_n), 0) AS avg_logical_reads,
+                CAST(SUM(writes_sum) AS double precision) / NULLIF(SUM(writes_n), 0) AS avg_logical_writes,
+                CAST(SUM(physical_sum) AS double precision) / NULLIF(SUM(physical_n), 0) AS avg_physical_reads,
+                CAST(SUM(rowcount_sum) AS double precision) / NULLIF(SUM(rowcount_n), 0) AS avg_rowcount,
+                MAX(last_execution_time) AS last_execution_time,
+                MAX(query_plan_hash) AS query_plan_hash
+            FROM parts
+            WHERE ($7::text IS NULL OR module_name = $7)
+            GROUP BY database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role
+            ORDER BY SUM(ec) * (CAST(SUM(duration_sum) AS double precision) / NULLIF(SUM(duration_n), 0)) DESC
+            LIMIT $4 + 5
+        )
+
+        """ + QueryStoreTopTail;
+
+    /// <summary>The days of <c>[$2, $3)</c> that have a built summary row for server $1. $2 and $3 are dates.</summary>
+    private const string QueryStoreTopBuiltDaysSql = """
+        SELECT day
+        FROM query_store_top_daily_built
+        WHERE server_id = $1
+        AND   day >= $2::date
+        AND   day < $3::date
+        ORDER BY day
+        """;
+
+    /// <summary>
+    /// The longest contiguous run of <paramref name="builtDays"/> (ascending, distinct) as <c>[Start, EndExclusive)</c>;
+    /// a tie goes to the latest run, the newer days being the more expensive to read from the wide table. Null when
+    /// there is no built day.
+    /// </summary>
+    internal static (DateOnly Start, DateOnly EndExclusive)? LongestBuiltRun(IReadOnlyList<DateOnly> builtDays)
+    {
+        (DateOnly Start, DateOnly EndExclusive)? best = null;
+        var bestLength = 0;
+        var i = 0;
+        while (i < builtDays.Count)
+        {
+            var j = i;
+            while (j + 1 < builtDays.Count && builtDays[j + 1] == builtDays[j].AddDays(1))
+            {
+                j++;
+            }
+
+            var length = j - i + 1;
+            if (length >= bestLength)
+            {
+                best = (builtDays[i], builtDays[j].AddDays(1));
+                bestLength = length;
+            }
+
+            i = j + 1;
+        }
+
+        return best;
+    }
+
+    /// <summary>The whole UTC days <c>[First, EndExclusive)</c> inside <c>[readStart, endUtc)</c>: the first midnight at
+    /// or after <paramref name="readStart"/> up to the midnight at or before <paramref name="endUtc"/>. Empty (First
+    /// &gt;= EndExclusive) for a window that holds no whole day.</summary>
+    internal static (DateOnly First, DateOnly EndExclusive) WholeDays(DateTime readStart, DateTime endUtc)
+    {
+        var first = DateOnly.FromDateTime(readStart.Date);
+        if (readStart.TimeOfDay != TimeSpan.Zero)
+        {
+            first = first.AddDays(1);
+        }
+
+        return (first, DateOnly.FromDateTime(endUtc.Date));
+    }
+
     /// <summary>
     /// #3953's own threshold for this read (ruling issuecomment-5836972848 item 5): below this window the
     /// table's extra round trips (the gate's own reads plus a second transaction) cost more than they save, so
@@ -2093,7 +2386,15 @@ internal static class DarlingDataReader
     /// <param name="Rows">The top rows.</param>
     /// <param name="Table">The read's <see cref="QueryStoreIntervalWide.WideReadPlan"/> when the interval table
     /// served; null when the raw tier did.</param>
-    public readonly record struct QueryStoreTopRead(List<QueryStoreRow> Rows, QueryStoreIntervalWide.WideReadPlan? Table);
+    /// <param name="DailyDaysUsed">How many whole UTC days came from the daily summary
+    /// (<c>collect.query_store_top_daily</c>); 0 when the whole window was read from the wide table or raw.</param>
+    /// <param name="DailySpan">The days <c>[Start, EndExclusive)</c> read from the summary; null when
+    /// <see cref="DailyDaysUsed"/> is 0.</param>
+    public readonly record struct QueryStoreTopRead(
+        List<QueryStoreRow> Rows,
+        QueryStoreIntervalWide.WideReadPlan? Table,
+        int DailyDaysUsed = 0,
+        (DateOnly Start, DateOnly EndExclusive)? DailySpan = null);
 
     /// <summary>
     /// #3953: reads <c>query_store_interval_wide</c> when <see cref="QueryStoreIntervalWide.ReadsTableAsync"/>
@@ -2126,11 +2427,11 @@ internal static class DarlingDataReader
         {
             var table = await TryGetQueryStoreTopFromTableAsync(
                 postgres, serverId, startUtc, endUtc, top, databaseName, executionType, moduleName, cancellationToken);
-            if (table is var (tableRows, tablePlan))
+            if (table is var (tableRows, tablePlan, dailyDays, dailySpan))
             {
                 ReadScope.NoteSource(ReadScope.SourceIntervalTable);
                 ReadScope.NoteRows(tableRows.Count);
-                return new QueryStoreTopRead(tableRows, tablePlan);
+                return new QueryStoreTopRead(tableRows, tablePlan, dailyDays, dailySpan);
             }
         }
 
@@ -2175,7 +2476,7 @@ internal static class DarlingDataReader
     /// returns null (except cancellation, which propagates): the gate already does this for its own statements,
     /// and the table read must fail the same way rather than surface to the caller as an error.
     /// </summary>
-    private static async Task<(List<QueryStoreRow> Rows, QueryStoreIntervalWide.WideReadPlan Plan)?> TryGetQueryStoreTopFromTableAsync(
+    private static async Task<(List<QueryStoreRow> Rows, QueryStoreIntervalWide.WideReadPlan Plan, int DailyDays, (DateOnly Start, DateOnly EndExclusive)? DailySpan)?> TryGetQueryStoreTopFromTableAsync(
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int top, string? databaseName,
         string? executionType, string? moduleName, CancellationToken cancellationToken)
     {
@@ -2209,8 +2510,31 @@ internal static class DarlingDataReader
                 throw injectFault();
             }
 
+            /* The longest run of built whole days inside [ReadStart, end), read in this same snapshot. No built day
+               keeps the interval-table read exactly as it was (same text, same parameters). */
+            var (firstDay, endDay) = WholeDays(plan.ReadStart, endUtc);
+            (DateOnly Start, DateOnly EndExclusive)? dailySpan = null;
+            if (firstDay < endDay)
+            {
+                var builtDays = new List<DateOnly>();
+                await using (var built = new NpgsqlCommand(QueryStoreTopBuiltDaysSql, connection) { Transaction = transaction, CommandTimeout = McpCommandDeadlines.ReadSeconds })
+                {
+                    AddInt(built, serverId);
+                    built.Parameters.Add(new NpgsqlParameter<DateOnly> { TypedValue = firstDay, NpgsqlDbType = NpgsqlDbType.Date });
+                    built.Parameters.Add(new NpgsqlParameter<DateOnly> { TypedValue = endDay, NpgsqlDbType = NpgsqlDbType.Date });
+                    await using var builtReader = await built.ExecuteReaderAsync(cancellationToken);
+                    while (await builtReader.ReadAsync(cancellationToken))
+                    {
+                        builtDays.Add(DateOnly.FromDateTime(builtReader.GetDateTime(0)));
+                    }
+                }
+
+                dailySpan = LongestBuiltRun(builtDays);
+            }
+
             var rows = new List<QueryStoreRow>();
-            await using var command = new NpgsqlCommand(QueryStoreTopTableSql, connection) { Transaction = transaction, CommandTimeout = McpCommandDeadlines.ReadSeconds };
+            var topSql = dailySpan is null ? QueryStoreTopTableSql : QueryStoreTopDailyTableSql;
+            await using var command = new NpgsqlCommand(topSql, connection) { Transaction = transaction, CommandTimeout = McpCommandDeadlines.ReadSeconds };
             AddInt(command, serverId);
             AddTimestamp(command, plan.ReadStart);
             AddTimestamp(command, endUtc);
@@ -2218,13 +2542,19 @@ internal static class DarlingDataReader
             AddNullableText(command, databaseName);
             AddNullableText(command, executionType);
             AddNullableText(command, moduleName);
+            if (dailySpan is var (spanStart, spanEnd))
+            {
+                command.Parameters.Add(new NpgsqlParameter<DateOnly> { TypedValue = spanStart, NpgsqlDbType = NpgsqlDbType.Date });
+                command.Parameters.Add(new NpgsqlParameter<DateOnly> { TypedValue = spanEnd, NpgsqlDbType = NpgsqlDbType.Date });
+            }
+
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             while (await reader.ReadAsync(cancellationToken))
             {
                 rows.Add(ReadQueryStoreTopRow(reader));
             }
 
-            return (rows, plan);
+            return (rows, plan, dailySpan is var (ds, de) ? de.DayNumber - ds.DayNumber : 0, dailySpan);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
