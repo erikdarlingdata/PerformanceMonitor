@@ -50,12 +50,27 @@ public sealed class EffectiveStartUtcTests
     [InlineData("DarlingMcpSessionTools.cs", 2)]
     [InlineData("DarlingMcpMemoryGrantTools.cs", 1)]
     [InlineData("DarlingMcpPlanCorrectionTools.cs", 1)]
+    [InlineData("DarlingMcpPgStatementTools.cs", 1)]
+    [InlineData("DarlingMcpPgDatabaseTools.cs", 2)]
+    [InlineData("DarlingMcpPgIoTools.cs", 1)]
+    [InlineData("DarlingMcpPgPlanTools.cs", 1)]
+    [InlineData("DarlingMcpPgCpuUtilizationTools.cs", 1)]
+    [InlineData("DarlingMcpPgBlockingTools.cs", 2)]
+    [InlineData("DarlingMcpPgSessionStatesTools.cs", 2)]
+    [InlineData("DarlingMcpPgReplicationStatsTools.cs", 1)]
+    [InlineData("DarlingMcpPgXminTools.cs", 1)]
     [InlineData("DarlingMcpPgDeadlockTools.cs", 1)]
     [InlineData("DarlingMcpPgLogEventTools.cs", 1)]
     [InlineData("DarlingMcpQueryHeatmapTools.cs", 1)]
     [InlineData("DarlingMcpQueryStoreRegressionTools.cs", 1)]
+    [InlineData("DarlingMcpPgWaitTools.cs", 1)]
+    [InlineData("DarlingMcpPgWaitSamplingTools.cs", 1)]
+    [InlineData("DarlingMcpPgKernelStatsTools.cs", 1)]
+    [InlineData("DarlingMcpPgPredicateTools.cs", 1)]
+    [InlineData("DarlingMcpPgServerStateTools.cs", 3)]
     [InlineData("DarlingMcpHealthParserTools.cs", 9)]
     [InlineData("DarlingMcpDefaultTraceTools.cs", 1)]
+    [InlineData("DarlingMcpPgIndexUsageTools.cs", 1)]
     public void EveryWindowFloorWrite_RoutesThroughTheSharedFormatter(string file, int minimumRouted)
     {
         var source = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", file);
@@ -69,7 +84,8 @@ public sealed class EffectiveStartUtcTests
            helper's own formatting is pinned below. */
         bool IsRouted(string line) =>
             line.StartsWith("effective_start = McpHelpers.FormatEffectiveStart(", StringComparison.Ordinal)
-            || line == "effective_start = notice.EffectiveStart,";
+            || line == "effective_start = notice.EffectiveStart,"
+            || line == "effective_start = notice?.EffectiveStart,";
         var routed = writes.Count(IsRouted);
         var others = writes.Where(line => !IsRouted(line)).ToList();
 

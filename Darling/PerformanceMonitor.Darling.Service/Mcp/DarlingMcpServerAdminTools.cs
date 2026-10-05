@@ -815,6 +815,13 @@ ORDER BY d.host, d.database";
             {
                 return (null, Invalid(refusal));
             }
+
+            /* The owner's one rule on references: never at Darling's own configuration or secrets. Read from the
+               same entry object as the checks above, so the route and the core cannot disagree. */
+            if (DarlingOwnedSecrets.ReferenceRefusal(plaintextPassword) is { } ownedRefusal)
+            {
+                return (null, Invalid(ownedRefusal));
+            }
         }
         else if (storeAuth == ServerStoreAuth.ManagedIdentity)
         {

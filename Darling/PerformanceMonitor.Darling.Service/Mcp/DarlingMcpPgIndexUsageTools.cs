@@ -14,6 +14,7 @@ using System.Linq;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using ModelContextProtocol.Server;
 using Npgsql;
 using PerformanceMonitor.Common;
@@ -30,6 +31,9 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 [McpServerToolType]
 public sealed class DarlingMcpPgIndexUsageTools
 {
+    /// <summary>The collector table the tool reads, named in its window notice (#4966).</summary>
+    private const string UsageTable = "pg_index_usage_stats";
+
     /// <summary>
     /// Below this many samples the read has not watched the index long enough to say anything about
     /// disuse. Two is the floor rather than a comfortable number: it is the minimum at which
@@ -230,6 +234,7 @@ public sealed class DarlingMcpPgIndexUsageTools
         [Description("Hours of history to analyze. Default 168 (seven days). Widen this to the longest interval any scheduled job runs on before calling an index unused.")] int hours_back = 168,
         [Description("Maximum indexes to return, biggest unscanned first. Default 25. See the tool's reading guide.")] int limit = 25,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        ILogger? logger = null,
         CancellationToken cancellationToken = default)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
@@ -254,8 +259,17 @@ public sealed class DarlingMcpPgIndexUsageTools
 
             if (rows.Count == 0)
             {
-                return await EmptyAsync(postgres, resolved.ServerId, resolved.ServerName, hours_back, start, end, cancellationToken);
+                return await EmptyAsync(postgres, resolved.ServerId, resolved.ServerName, hours_back, start, end, logger, cancellationToken);
             }
+
+            /* #4966: scans_in_window is a DIFFERENCE between the first and last sample, and this collector runs daily, so a short
+               history gives a small difference that can make an index look unused. The keys come from coverage (the collector's
+               table), and a failed probe costs the keys, never the rows. */
+            var notice = await DarlingMcpWindowNotice.ReadAsync(
+                () => DarlingMcpWindowNotice.Probe(postgres, UsageTable, resolved.ServerName, start, end, cancellationToken),
+                start, end, UsageTable,
+                "scans_in_window is a difference between samples and covers only effective_start onward, so a short history undercounts: an index can look unused only because it has been watched briefly.",
+                logger: logger, cancellationToken: cancellationToken);
 
             var unscanned = rows.Where(r => r.ScansInWindow == 0 && r.IsValid && !r.IsPrimaryKey
                                             && !r.SupportsConstraint && !r.IsUnique && !r.IsReplicaIdentity
@@ -325,10 +339,13 @@ public sealed class DarlingMcpPgIndexUsageTools
             })
             .ToList();
 
-            return JsonSerializer.Serialize(new
+            var json = JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
                 hours_back,
+                effective_start = notice.EffectiveStart,
+                window_truncated = notice.WindowTruncated,
+                truncation_note = notice.TruncationNote,
                 status = "index_usage",
                 /* The page's count under the page's name (#3594). */
                 indexes_returned = indexes.Count,
@@ -367,6 +384,9 @@ public sealed class DarlingMcpPgIndexUsageTools
                          : string.Empty),
                 indexes,
             }, McpHelpers.JsonOptions);
+
+            /* A failed probe costs the notice, never the rows (see DarlingMcpWindowNotice.ReadAsync). */
+            return notice.IsUnavailable ? DarlingMcpWindowNotice.WithoutKeys(json) : json;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -385,7 +405,7 @@ public sealed class DarlingMcpPgIndexUsageTools
     /// </summary>
     private static async Task<string> EmptyAsync(
         NpgsqlDataSource postgres, int serverId, string serverName, int hoursBack, DateTime start, DateTime end,
-        CancellationToken cancellationToken = default)
+        ILogger? logger = null, CancellationToken cancellationToken = default)
     {
         var gated = await DarlingEngineCapability.NotCollectedStatusAsync(
             postgres, serverId, serverName, "pg_index_usage_stats", cancellationToken);
@@ -396,15 +416,30 @@ public sealed class DarlingMcpPgIndexUsageTools
 
         var probe = await DarlingPgIndexUsageReader.ProbePgIndexUsageAsync(postgres, serverId, start, end, cancellationToken);
 
-        var hints = new
-        {
-            server = serverName,
-            hours_back = hoursBack,
-            rows_in_window = probe.RowsInWindow,
-            snapshots_in_window = probe.SnapshotsInWindow,
-            ever_collected = probe.RowsEver > 0,
-        };
+        /* #4966: the window keys ride under hints on the empty and the unavailable answers (nothing was read, so a short store reads as
+           "nothing happened" otherwise); not_collected, decided above, stays bare. */
+        var notice = await DarlingMcpWindowNotice.ReadAsync(
+            () => DarlingMcpWindowNotice.Probe(postgres, UsageTable, serverName, start, end, cancellationToken),
+            start, end, UsageTable, emptyAnswer: true, logger: logger, cancellationToken: cancellationToken);
 
+        var hints = new Dictionary<string, object?>
+        {
+            ["server"] = serverName,
+            ["hours_back"] = hoursBack,
+            ["rows_in_window"] = probe.RowsInWindow,
+            ["snapshots_in_window"] = probe.SnapshotsInWindow,
+            ["ever_collected"] = probe.RowsEver > 0,
+        };
+        if (!notice.IsUnavailable)
+        {
+            /* A failed probe has no verdict, so no key rather than a false one. */
+            hints["effective_start"] = notice.EffectiveStart;
+            hints["window_truncated"] = notice.WindowTruncated;
+            hints["truncation_note"] = notice.TruncationNote;
+        }
+
+        /* This "empty" branch cannot be reached today: snapshots are counted from the same rows the read walks, so two or more
+           snapshots in the window mean rows were returned. It stays, with its NothingFoundStatusByRead entry, in case the two ever diverge. */
         if (probe.SnapshotsInWindow >= MinimumSamplesForADisuseClaim)
         {
             return McpHelpers.Status(

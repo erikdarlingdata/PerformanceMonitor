@@ -265,6 +265,20 @@ public sealed class WebDataStartNoteConfigAndLogTests : IClassFixture<ConfigAndL
             "get_long_query_completions" => [("DarlingMcpLongQueryTools.cs", "GetLongQueryCompletions")],
             "get_memory_pressure_events" => [("DarlingMcpMemoryGrantTools.cs", "GetMemoryPressureEvents")],
             "get_default_trace_events" => [("DarlingMcpDefaultTraceTools.cs", "GetDefaultTraceEvents")],
+            "get_health_parser_system_health" => [("DarlingMcpHealthParserTools.cs", "GetSystemHealth")],
+            "get_health_parser_severe_errors" => [("DarlingMcpHealthParserTools.cs", "GetSevereErrors")],
+            "get_health_parser_io_issues" => [("DarlingMcpHealthParserTools.cs", "GetIOIssues")],
+            "get_health_parser_scheduler_issues" => [("DarlingMcpHealthParserTools.cs", "GetSchedulerIssues")],
+            "get_health_parser_memory_conditions" => [("DarlingMcpHealthParserTools.cs", "GetMemoryConditions")],
+            "get_health_parser_cpu_tasks" => [("DarlingMcpHealthParserTools.cs", "GetCPUTasks")],
+            "get_health_parser_memory_broker" => [("DarlingMcpHealthParserTools.cs", "GetMemoryBroker")],
+            "get_health_parser_memory_node_oom" => [("DarlingMcpHealthParserTools.cs", "GetMemoryNodeOOM")],
+            "get_health_parser_significant_waits" => [("DarlingMcpHealthParserTools.cs", "GetSignificantWaits")],
+            "get_pg_deadlocks" => [("DarlingMcpPgDeadlockTools.cs", "GetPgDeadlocks")],
+            "get_pg_log_events" => [("DarlingMcpPgLogEventTools.cs", "GetPgLogEvents")],
+            "get_blocking" => [("DarlingMcpBlockingTools.cs", "GetBlocking")],
+            "get_deadlocks" => [("DarlingMcpBlockingTools.cs", "GetDeadlocks")],
+            "get_deadlock_detail" => [("DarlingMcpBlockingTools.cs", "GetDeadlockDetail")],
             _ => throw new ArgumentOutOfRangeException(nameof(read), read, "a listed read this test does not know"),
         };
 
@@ -273,6 +287,12 @@ public sealed class WebDataStartNoteConfigAndLogTests : IClassFixture<ConfigAndL
             var (file, method) = Where(read).Single();
             var source = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", file);
             var start = source.IndexOf("public static async Task<string> " + method + "(", StringComparison.Ordinal);
+            if (start < 0)
+            {
+                /* get_blocking's tool method hands off to an overload and is not async. */
+                start = source.IndexOf("public static Task<string> " + method + "(", StringComparison.Ordinal);
+            }
+
             Assert.True(start > 0, read + ": " + method + " not found");
             var end = source.IndexOf("[McpServerTool(", start, StringComparison.Ordinal);
             return end < 0 ? source[start..] : source[start..end];
@@ -283,9 +303,10 @@ public sealed class WebDataStartNoteConfigAndLogTests : IClassFixture<ConfigAndL
             var body = Body(read);
             if (WebDataStartNote.NothingFoundStatusByRead.TryGetValue(read, out var word))
             {
-                /* The three SQL Server histories answer through the one NoChanges helper, whose word is empty. */
+                /* The three SQL Server histories answer through the one NoChanges helper, whose word is empty; the nine system_health
+                   reads through EmptyAsync, whose rungs all answer empty or unavailable. */
                 var answersIt = body.Contains("\"" + word + "\"", StringComparison.Ordinal)
-                    || (word == "empty" && body.Contains("NoChanges(", StringComparison.Ordinal));
+                    || (word == "empty" && (body.Contains("NoChanges(", StringComparison.Ordinal) || body.Contains("EmptyAsync(", StringComparison.Ordinal)));
                 Assert.True(answersIt, read + " is admitted for " + word + " but its tool never answers it");
             }
             else
@@ -322,6 +343,7 @@ public sealed class WebDataStartNoteConfigAndLogTests : IClassFixture<ConfigAndL
         ("get_pg_autovacuum_health", "pg_autovacuum_stats", null, ["tables_with_pending_maintenance"], ["no_pending_maintenance"], "DarlingMcpPgAutovacuumTools.cs"),
         ("get_pg_replication_slots", "pg_replication_slot_stats", null, ["slots_present"], ["no_slots"], "DarlingMcpPgSlotTools.cs"),
         ("get_pg_write_stats", "pg_write_stats", null, [], ["empty"], "DarlingMcpPgServerStateTools.cs"),
+        ("get_pg_index_usage", "pg_index_usage_stats", "empty", ["index_usage"], ["unavailable"], "DarlingMcpPgIndexUsageTools.cs"),
     ];
 
     /* Each read is listed over its raw relation, served by the web mirror, drawn by the page, and admitted for exactly the word

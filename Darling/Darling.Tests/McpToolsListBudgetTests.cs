@@ -213,10 +213,11 @@ public sealed class McpToolsListBudgetTests
     // get_server_trend (#5117), get_finops view database_sizes (#5121) and get_deadlock_detail processes (deadlock rows) re-measured together on dev 0032cfa6d: 184,872 -> 186,010.
     // get_server_trend gains latch, spinlock, session_stats and collector_duration (#4843): 186,010 -> 186,158.
     // get_slow_reads (#5097, the slow-read record's read tool) adds one tool, re-measured on the tree merged with dev 85a522f0b: 186,158 -> 186,917, 171 -> 172 tools (unchanged by dev's later commits).
-    /* #5228: +1,885 bytes for the three raw-plan reads behind the web grids' plan buttons (get_query_store_plan_xml,
-       get_procedure_plan_xml, get_active_query_plan_xml): 187,122 -> 189,007, 172 -> 175 tools, measured. Each head is under 160
-       characters. */
-    private const int TotalCeilingBytes = 189_007;
+    // get_store_query_history (#5097, the store statement history read) adds one tool, measured on this tree: 187,122 -> 188,119, 172 -> 173 tools.
+    /* #5228: the three raw-plan reads behind the web grids' plan buttons (get_query_store_plan_xml, get_procedure_plan_xml,
+       get_active_query_plan_xml), measured on the tree merged with dev 94aa5e755: 188,119 -> 190,004 (+1,885), 173 -> 176 tools. Each head
+       is under 160 characters. */
+    private const int TotalCeilingBytes = 190_004;
 
 
 
