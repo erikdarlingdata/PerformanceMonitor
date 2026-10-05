@@ -227,13 +227,22 @@ public sealed class DarlingMcpMemoryGrantTools
                server's coverage and its first event in the window, and no event shown can sit before the start named. An answer with rows
                over a window of 90 minutes or less needs no probe; an empty one is always probed. */
             var windowStart = now.AddHours(-hours_back);
+            if (rows.Count == 0)
+            {
+                /* not_collected first: it carries no notice, so a probe before it would be thrown away. */
+                var notCollected = await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "memory_pressure_events", cancellationToken);
+                if (notCollected is not null)
+                {
+                    return notCollected;
+                }
+            }
+
             var notice = await DarlingMcpWindowNotice.ReadAsync(
                 () => DarlingMcpWindowNotice.Probe(postgres, DataWindowFloor.Source.ForMemoryPressureEvents(), resolved.ServerName, windowStart, now, cancellationToken),
                 windowStart, now, "memory_pressure_events", emptyAnswer: rows.Count == 0, logger: logger, cancellationToken: cancellationToken);
 
             if (rows.Count == 0)
-                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "memory_pressure_events", cancellationToken)
-                    ?? McpHelpers.Status("empty", "No memory pressure events found in the requested time range.", notice.AsHints());
+                return McpHelpers.Status("empty", "No memory pressure events found in the requested time range.", notice.AsHints());
 
             var payload = new
             {
