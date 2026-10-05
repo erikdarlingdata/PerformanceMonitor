@@ -14,6 +14,7 @@ class FakeNode {
     this.tag = tag; this.children = []; this.attrs = {}; this.listeners = {}; this.parent = null; this._text = "";
     this.className = ""; this.dataset = {}; this.value = ""; this.checked = false; this.open = false; this.isRoot = false;
   }
+  get parentNode() { return this.parent; }
   get firstChild() { return this.children[0] || null; }
   get nextSibling() { const i = this.parent ? this.parent.children.indexOf(this) : -1; return i >= 0 ? this.parent.children[i + 1] || null : null; }
   get isConnected() { let n = this; while (n.parent) n = n.parent; return n.isRoot; }
@@ -51,16 +52,21 @@ const servers = { servers: [{ server_name: "srv-a", display_name: "Server A" }, 
 const posts = [];
 let canEdit = true;
 let postReply = (req) => ({ status: 200, body: { requested: req.alerts.length, dismissed: req.alerts.length, already_dismissed: 0, unknown: 0 } });
-globalThis.confirm = () => true;
+const confirms = [];
+globalThis.confirm = (m) => { confirms.push(m); return true; };
+let readFails = false;
+let postGate = null;
 globalThis.fetch = async (url, init) => {
   const u = String(url);
   if (init && init.method === "POST") {
+    if (postGate) await postGate;
     const req = JSON.parse(init.body);
     posts.push({ url: u, contentType: init.headers["Content-Type"], req });
     const r = postReply(req);
     return { status: r.status, ok: r.status < 300, text: async () => JSON.stringify(r.body) };
   }
   urls.push(u);
+  if (readFails && u.includes("/get_alert_history")) return { status: 500, ok: false, text: async () => JSON.stringify({ error: "read failed" }) };
   let body = {};
   if (u.startsWith("/api/session")) body = { can_edit: canEdit };
   else if (u.includes("/list_servers")) body = servers;
@@ -188,6 +194,59 @@ try {
       postReply = () => ({ status: 401, body: { error: "Session expired" } });
       button(main, "Dismiss Selected").fire("click"); await tick();
       out.status401 = statusOf(main).textContent;
+    },
+    async truncatedPrompt() {
+      alertsReply = { alerts: [row(1), row(2)], truncated: true };
+      const main = newMain(); await renderAlerts(main);
+      alertsReply = { alerts: [], truncated: false };
+      button(main, "Dismiss All").fire("click"); await tick();
+      out.truncatedAsk = confirms[0];
+      confirms.length = 0;
+      alertsReply = { alerts: [row(1), row(2)], truncated: false };
+      const again = newMain(); await renderAlerts(again);
+      alertsReply = { alerts: [], truncated: false };
+      button(again, "Dismiss All").fire("click"); await tick();
+      out.fullAsk = confirms[0];
+    },
+    async copy() {
+      const texts = [];
+      Object.defineProperty(globalThis, "navigator", { value: { clipboard: { writeText: async (t) => { texts.push(t); } } }, configurable: true, writable: true });
+      alertsReply = { alerts: [row(1), row(2)], truncated: false };
+      const main = newMain(); await renderAlerts(main);
+      const tr = bodyRows(main)[0];
+      const tbody = main.all("table")[0].children[1];
+      tbody.fire("click", { target: { closest: () => tr.children[2] } });
+      button(main, "Copy all").fire("click"); await tick();
+      button(main, "Copy row").fire("click"); await tick();
+      out.copyAll = texts[0];
+      out.copyRow = texts[1];
+      out.cells = tr.children.length;
+    },
+    async failedPoll() {
+      alertsReply = { alerts: [row(1), row(2)], truncated: false };
+      const main = newMain(); await renderAlerts(main);
+      check(boxes(main)[1]);
+      readFails = true;
+      await renderAlerts(main);
+      out.labelAfterFailedRead = button(main, "Dismiss Selected").textContent;
+      readFails = false;
+      await renderAlerts(main);
+      out.afterGoodRead = boxes(main).map((b) => b.checked);
+      out.labelAfterGoodRead = button(main, "Dismiss Selected").textContent;
+    },
+    async tickedInFlight() {
+      alertsReply = { alerts: [row(1), row(2), row(3)], truncated: false };
+      const main = newMain(); await renderAlerts(main);
+      check(boxes(main)[0]);
+      let release; postGate = new Promise((res) => { release = res; });
+      alertsReply = { alerts: [row(2), row(3)], truncated: false };
+      button(main, "Dismiss Selected").fire("click");
+      await tick();
+      check(boxes(main)[2]); // ticked while the request is in flight
+      release(); postGate = null; await tick();
+      out.sent = posts.map((p) => p.req.alerts.map((a) => a.metric_name));
+      out.label = button(main, "Dismiss Selected").textContent;
+      out.checked = boxes(main).map((b) => b.checked);
     },
     async counts() {
       alertsReply = { alerts: [row(1), row(2), row(3), row(4)], truncated: false };

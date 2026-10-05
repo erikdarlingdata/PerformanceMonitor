@@ -67,7 +67,7 @@ function alertColumns() {
  * list goes in several requests and the counts are added up. */
 const DISMISS_CHUNK = 1000;
 const selected = new Map();
-const SELECT_COLUMN = { key: "select", label: "Select", csv: false, render: (a) => selectCell(a) };
+const SELECT_COLUMN = { key: "select", label: "Select", csv: false, copy: false, render: (a) => selectCell(a) };
 
 /* A row can be dismissed when it is live and names its server by id (the dismiss key needs server_id). */
 function dismissable(a) {
@@ -81,8 +81,15 @@ function dismissKeyOf(a) {
 /* Empties the checked set and unticks the boxes of the rows the table keeps (reconcileRows reuses their nodes). */
 function clearSelection(state) {
   selected.clear();
-  if (state && state.tbody) {
-    for (const tr of state.tbody.children) for (const box of tr.querySelectorAll("input")) box.checked = false;
+  uncheckBoxes(state);
+}
+
+/* Syncs every listed checkbox to the checked set (reconcileRows reuses the nodes of rows the table keeps). */
+function uncheckBoxes(state) {
+  if (!state || !state.tbody) return;
+  for (const tr of state.tbody.children) {
+    const row = gridRowOf(tr);
+    for (const box of tr.querySelectorAll("input")) box.checked = !!row && selected.has(alertKey(row));
   }
 }
 
@@ -429,8 +436,10 @@ function buildDismissBar(state) {
   allBtn.addEventListener("click", () => {
     const rows = visibleRows(state).filter(dismissable);
     if (!rows.length) return;
-    /* Same prompt the desktop asks before Dismiss All. */
-    const ask = "Dismiss " + rows.length + " alert(s)?\n\nDismissed alerts are hidden from this view but remain in the database.";
+    /* The prompt the Viewer asks before Dismiss All. Unlike the Viewer, which dismisses every live alert in the
+       window, this page dismisses only the rows it lists, so a truncated page says the rest stay live. */
+    let ask = "Dismiss " + rows.length + " alert(s)?\n\nDismissed alerts are hidden from this view but remain in the store.";
+    if (state.truncated) ask += "\n\nMore alerts exist than the " + state.alerts.length + " listed; only the listed ones are dismissed and the rest stay live.";
     if (typeof globalThis.confirm === "function" && !globalThis.confirm(ask)) return;
     dismissRows(state, rows);
   });
@@ -488,7 +497,9 @@ async function dismissRows(state, rows) {
     if (totals.requested) await refreshAlerts(state);
     return;
   }
-  clearSelection(state);
+  /* Unselect only what was sent; a box ticked while the request was in flight stays checked. */
+  for (const a of rows) selected.delete(alertKey(a));
+  uncheckBoxes(state);
   d.status.setAttribute("class", "dismiss-status");
   d.status.textContent = dismissOutcomeText(totals);
   await refreshAlerts(state);
@@ -565,12 +576,14 @@ async function refreshAlerts(state) {
     state.alerts = [];
     state.tbody = null;
     state.rowMap = null;
-    selected.clear();
+    state.truncated = false;
+    /* The checked set survives a failed read; it is pruned only against a successful one. */
     updateDismissBar(state);
     mount(state.tableBox, res.kind === "error" ? errorStrip(res.message) : emptyStrip(res.message));
     return;
   }
   state.alerts = res.data.alerts || [];
+  state.truncated = res.data.truncated === true;
   /* A checked row that is no longer listed (dismissed elsewhere, aged out) is no longer selected. */
   const listed = new Set(state.alerts.filter(dismissable).map(alertKey));
   for (const key of [...selected.keys()]) if (!listed.has(key)) selected.delete(key);

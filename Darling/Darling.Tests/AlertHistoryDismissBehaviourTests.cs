@@ -138,6 +138,53 @@ public sealed class AlertHistoryDismissBehaviourTests
     }
 
     [Fact]
+    public void DismissAllPrompt_SaysStore_AndWhenThePageIsTruncatedSaysTheRestStayLive()
+    {
+        var r = Run("truncatedPrompt");
+        var full = r.GetProperty("fullAsk").GetString()!;
+        Assert.Contains("remain in the store", full);
+        Assert.DoesNotContain("database", full);
+        Assert.DoesNotContain("More alerts exist", full);
+        var truncated = r.GetProperty("truncatedAsk").GetString()!;
+        Assert.Contains("remain in the store", truncated);
+        Assert.Contains("More alerts exist than the 2 listed", truncated);
+        Assert.Contains("the rest stay live", truncated);
+    }
+
+    [Fact]
+    public void CopyRowAndCopyTable_LeaveOutTheSelectColumn_ButKeepMute()
+    {
+        var r = Run("copy");
+        var all = r.GetProperty("copyAll").GetString()!.Split('\n');
+        var header = all[0].Split('\t');
+        Assert.DoesNotContain("Select", header);
+        Assert.Contains("Mute", header);
+        var row = r.GetProperty("copyRow").GetString()!.Split('\t');
+        Assert.Equal(header.Length, row.Length);
+        Assert.Equal(header.Length, all[1].Split('\t').Length);
+        Assert.Equal(header.Length + 1, r.GetProperty("cells").GetInt32());
+    }
+
+    [Fact]
+    public void AFailedPollRead_KeepsTheCheckedSet()
+    {
+        var r = Run("failedPoll");
+        Assert.Equal("Dismiss Selected (1)", r.GetProperty("labelAfterFailedRead").GetString());
+        Assert.Equal(new[] { false, true }, r.GetProperty("afterGoodRead").EnumerateArray().Select(e => e.GetBoolean()).ToArray());
+        Assert.Equal("Dismiss Selected (1)", r.GetProperty("labelAfterGoodRead").GetString());
+    }
+
+    [Fact]
+    public void ABoxTickedWhileADismissIsInFlight_IsNotClearedAndNotSent()
+    {
+        var r = Run("tickedInFlight");
+        var sent = Assert.Single(r.GetProperty("sent").EnumerateArray());
+        Assert.Equal(new[] { "High CPU 1" }, sent.EnumerateArray().Select(e => e.GetString()!).ToArray());
+        Assert.Equal("Dismiss Selected (1)", r.GetProperty("label").GetString());
+        Assert.Equal(new[] { false, true }, r.GetProperty("checked").EnumerateArray().Select(e => e.GetBoolean()).ToArray());
+    }
+
+    [Fact]
     public void TheStatusLine_SaysHowManyWereDismissedAndHowManyWereAlreadyGone()
     {
         var r = Run("counts");
