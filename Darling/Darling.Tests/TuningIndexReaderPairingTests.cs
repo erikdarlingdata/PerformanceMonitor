@@ -35,7 +35,7 @@ public sealed class TuningIndexReaderPairingTests
         new Dictionary<string, (string, string)>
         {
             ["idx_query_stats_server_hash_time"] = ("server_id", DarlingStoredPlanReader.QueryStatsPlanXmlByHashSql),
-            ["idx_query_store_stats_server_db_query_plan_time"] = ("server_id", DarlingStoredPlanReader.QueryStorePlanTextSql),
+            ["idx_query_store_stats_server_db_query_plan_time"] = ("server_id", DarlingStoredPlanReader.QueryStorePlanCandidatesSql),
             ["idx_query_store_stats_server_time_forcing"] = ("server_id", DarlingAlertReadAdapter.ForcePlanFailuresSql),
             [PgTableTuning.LegacyRowIndexName] = ("server_id", QueryStoreIntervalWide.HasLegacyRowSql),
             [PgTableTuning.QueryStatsRestartRowIndexName] = ("collection_time", IntervalRollupRestartRows.QueryStatsRestartRowsSql),
