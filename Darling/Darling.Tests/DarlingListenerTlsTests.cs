@@ -128,26 +128,64 @@ public sealed class DarlingListenerTlsTests
     public void Resolve_NotConfigured_WarnsCleartext_ExposesWithoutCertificate(string section)
     {
         var labels = section == "web" ? ListenerTlsLabels.Web : ListenerTlsLabels.Mcp;
-        foreach (var block in new WebTlsConfig?[] { null, new WebTlsConfig() })
-        {
-            var log = new RecordingLogger();
-            var state = new WebTlsCertificateState();
 
-            var outcome = DarlingListenerTls.Resolve(log, state, labels, block, Listen, Port, null);
+        /* Only an ABSENT block is plain HTTP. A block that is present but sets none of its keys is refused
+           (Resolve_TypoedTlsBlock_RefusesToExpose). */
+        var log = new RecordingLogger();
+        var state = new WebTlsCertificateState();
 
-            Assert.True(outcome.Expose);
-            Assert.Null(outcome.Certificate);
-            Assert.Equal(DarlingWebTls.TlsShape.NotConfigured, outcome.Shape);
-            Assert.False(outcome.ExposesWithoutItsCertificate);
-            Assert.Null(state.Read());
-            Assert.Equal(DarlingListenerTls.CleartextWarning(labels), Assert.Single(log.At(LogLevel.Warning)));
-        }
+        var outcome = DarlingListenerTls.Resolve(log, state, labels, null, Listen, Port, null);
+
+        Assert.True(outcome.Expose);
+        Assert.Null(outcome.Certificate);
+        Assert.Equal(DarlingWebTls.TlsShape.NotConfigured, outcome.Shape);
+        Assert.False(outcome.ExposesWithoutItsCertificate);
+        Assert.Null(state.Read());
+        Assert.Equal(DarlingListenerTls.CleartextWarning(labels), Assert.Single(log.At(LogLevel.Warning)));
 
         Assert.Equal(
             section == "web"
                 ? "Web dashboard is LAN-exposed WITHOUT TLS — the access token and its session cookie cross the segment in the clear, and web.network.allowFrom bounds only who can route to the port. Configure web.network.tls (a PKCS#12 bundle or a PEM pair), or front the port with a TLS-terminating reverse proxy."
                 : "MCP server is LAN-exposed WITHOUT TLS: the bearer token and every tool result cross the segment in the clear, and mcp.network.allowFrom bounds only who can route to the port. Configure mcp.network.tls (a PKCS#12 bundle or a PEM pair), or front the port with a TLS-terminating reverse proxy.",
             DarlingListenerTls.CleartextWarning(labels));
+    }
+
+    /// <summary>
+    /// #5288: a <c>tls</c> block whose keys the config reader does not know parses to an all-blank block, and an
+    /// all-blank block is not plain HTTP: the listener is refused (loopback-only, Critical line) rather than
+    /// exposed with no certificate and a cleartext warning. Real JSON, so the skipped-key path is the one under test.
+    /// </summary>
+    [Theory]
+    [InlineData("web")]
+    [InlineData("mcp")]
+    public void Resolve_TypoedTlsBlock_RefusesToExpose(string section)
+    {
+        var labels = section == "web" ? ListenerTlsLabels.Web : ListenerTlsLabels.Mcp;
+        foreach (var json in new[]
+        {
+            @"{ ""cert"": ""/run/secrets/tls_cert"", ""key"": ""/run/secrets/tls_key"" }",
+            @"{ ""pfx_path"": ""/certs/a.pfx"" }",
+            "{}",
+        })
+        {
+            var block = DarlingWebTlsTests.ParseTlsBlock(section, json);
+            Assert.NotNull(block);
+            var log = new RecordingLogger();
+            var state = new WebTlsCertificateState();
+
+            var outcome = DarlingListenerTls.Resolve(log, state, labels, block, Listen, Port, null);
+
+            Assert.False(outcome.Expose);
+            Assert.Null(outcome.Certificate);
+            Assert.Equal(DarlingWebTls.TlsShape.Invalid, outcome.Shape);
+            Assert.False(outcome.ExposesWithoutItsCertificate);
+            Assert.Null(state.Read());
+            Assert.Empty(log.At(LogLevel.Warning));
+            Assert.Equal(
+                $"{labels.Surface} TLS is misconfigured ({section}.network.tls is present but sets none of pfxPath, certPath or keyPath. "
+                + "Check the key names, or remove the block for plain HTTP.) — refusing to expose; binding loopback-only.",
+                Assert.Single(log.At(LogLevel.Critical)));
+        }
     }
 
     /* ---- the web's texts, whole, exactly as the web host logged them before the block moved ---- */
@@ -273,6 +311,7 @@ public sealed class DarlingListenerTlsTests
     [InlineData("pem-cert-without-key")]
     [InlineData("pem-key-without-cert")]
     [InlineData("password-without-bundle")]
+    [InlineData("block-with-no-known-keys")]
     [InlineData("unreadable-file")]
     [InlineData("wrong-password")]
     [InlineData("expired")]
@@ -291,6 +330,7 @@ public sealed class DarlingListenerTlsTests
             "pem-cert-without-key" => new WebTlsConfig { CertPath = "/certs/a.crt" },
             "pem-key-without-cert" => new WebTlsConfig { KeyPath = "/certs/a.key" },
             "password-without-bundle" => new WebTlsConfig { PfxPassword = "hunter2" },
+            "block-with-no-known-keys" => new WebTlsConfig(),
             "unreadable-file" => new WebTlsConfig { PfxPath = Path.Combine(temp.Path, "absent.pfx") },
             "wrong-password" => WritePfx(temp, good, "right", "wrong"),
             "expired" => WritePfx(temp, old),
