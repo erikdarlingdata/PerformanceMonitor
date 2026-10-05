@@ -51,6 +51,11 @@ public sealed class EffectiveStartUtcTests
     [InlineData("DarlingMcpPlanCorrectionTools.cs", 1)]
     [InlineData("DarlingMcpQueryHeatmapTools.cs", 1)]
     [InlineData("DarlingMcpQueryStoreRegressionTools.cs", 1)]
+    [InlineData("DarlingMcpPgWaitTools.cs", 1)]
+    [InlineData("DarlingMcpPgWaitSamplingTools.cs", 1)]
+    [InlineData("DarlingMcpPgKernelStatsTools.cs", 1)]
+    [InlineData("DarlingMcpPgPredicateTools.cs", 1)]
+    [InlineData("DarlingMcpPgServerStateTools.cs", 2)]
     public void EveryWindowFloorWrite_RoutesThroughTheSharedFormatter(string file, int minimumRouted)
     {
         var source = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", file);
@@ -64,7 +69,8 @@ public sealed class EffectiveStartUtcTests
            helper's own formatting is pinned below. */
         bool IsRouted(string line) =>
             line.StartsWith("effective_start = McpHelpers.FormatEffectiveStart(", StringComparison.Ordinal)
-            || line == "effective_start = notice.EffectiveStart,";
+            || line == "effective_start = notice.EffectiveStart,"
+            || line == "effective_start = notice?.EffectiveStart,";
         var routed = writes.Count(IsRouted);
         var others = writes.Where(line => !IsRouted(line)).ToList();
 
