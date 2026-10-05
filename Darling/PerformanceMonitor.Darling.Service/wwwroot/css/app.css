@@ -105,6 +105,28 @@ a:hover { text-decoration: underline; }
 }
 .server-item .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
+/* #5243: the sidebar's search box + group-by-tag toggle, and its collapsible tag-group headers. */
+.server-search { padding: 0.25rem 1.25rem 0.4rem; display: flex; flex-direction: column; gap: 0.35rem; }
+.sidebar-search-input { width: 100%; box-sizing: border-box; }
+.sidebar-group-control { font-size: 0.78rem; }
+.sidebar-group-header {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.35rem 1.25rem 0.35rem 0.75rem;
+  cursor: pointer;
+  user-select: none;
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 600;
+}
+.sidebar-group-header:hover { background: var(--lighter); }
+.sidebar-group-header:focus-visible { outline: 2px solid var(--muted); outline-offset: -2px; }
+.sidebar-group-chevron { width: 0.9rem; flex: 0 0 auto; font-size: 0.7rem; }
+.sidebar-group-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sidebar-group-count { font-weight: 400; }
+.sidebar-no-match { padding: 0.5rem 1.25rem; }
+
 /* Per-browser viewer conveniences (#4843): the favourite star, the acknowledgeable alert-count badge, the
    collapsible sidebar and the severity-colour settings. --sev-* are set from localStorage as #rrggbb only. */
 .fav-star { background: none; border: 0; padding: 0 2px; color: var(--muted); cursor: pointer; font-size: 1rem; line-height: 1; }

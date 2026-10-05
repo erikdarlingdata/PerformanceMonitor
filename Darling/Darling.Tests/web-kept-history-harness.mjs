@@ -147,6 +147,7 @@ try {
   }
   if (serverPageScenario) {
     fs.copyFileSync(path.join(jsDir, "pages", "fleet.js"), path.join(scratch, "pages", "fleet.js"));
+    fs.copyFileSync(path.join(jsDir, "fleet-groups.js"), path.join(scratch, "fleet-groups.js"));
     fs.writeFileSync(
       path.join(scratch, "pages", "server.js"),
       fs.readFileSync(path.join(jsDir, "pages", "server.js"), "utf8") + "\nexport { RANGE_OPTIONS, WIDEST_RANGE_HOURS };\n"
