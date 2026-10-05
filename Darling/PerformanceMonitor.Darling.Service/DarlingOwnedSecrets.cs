@@ -71,7 +71,11 @@ public static class DarlingOwnedSecrets
         OperatingSystem.IsWindows() || OperatingSystem.IsMacOS() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
 
     /// <summary>Null when <paramref name="password"/> is not an <c>env:</c>/<c>file:</c> reference or the reference
-    /// points at nothing Darling owns; otherwise <see cref="ReferenceRefusalText"/>.</summary>
+    /// points at nothing Darling owns; otherwise <see cref="ReferenceRefusalText"/>.
+    /// Identity comparison (volume + file ID of each owned path, a small known set) catches a symlink, a case variant and a
+    /// Windows short name. A hard link placed outside every owned directory is out of scope: making one needs local read
+    /// access to the target, which already defeats this control, and finding one would mean statting every file under the
+    /// owned directories (thousands, in the database data directory) on an interactive path.</summary>
     internal static string? ReferenceRefusal(string? password) => ReferenceRefusal(password, s_current);
 
     internal static string? ReferenceRefusal(string? password, DarlingOwnedSet owned)
@@ -149,64 +153,6 @@ public static class DarlingOwnedSecrets
         if (ownedIds.Count > 0 && ReachesOwned(path, real, ownedIds, identityOf))
         {
             return true;
-        }
-
-        /* A hard link is a second name for an owned FILE, and an ancestor walk cannot see it: the candidate sits outside
-           every owned directory. So when the candidate exists, look for its identity among the files under each owned
-           directory. Bounded: a store directory can hold many files, and the scan stops at the cap rather than run long. */
-        var candidate = Safe(identityOf, real) ?? Safe(identityOf, path);
-        if (candidate is null)
-        {
-            return false;
-        }
-
-        var budget = MaxFilesScanned;
-        foreach (var ownedPath in owned.Paths)
-        {
-            if (!string.IsNullOrWhiteSpace(ownedPath) && !ownedPath.Contains('\0')
-                && ContainsFileWithIdentity(ownedPath, candidate.Value, identityOf, ref budget))
-            {
-                return true;
-            }
-        }
-
-        return false;
-    }
-
-    private const int MaxFilesScanned = 20000;
-
-    private static bool ContainsFileWithIdentity(string root, FileId wanted, Func<string, FileId?> identityOf, ref int budget)
-    {
-        try
-        {
-            if (!Directory.Exists(root))
-            {
-                return false;
-            }
-
-            var options = new EnumerationOptions
-            {
-                RecurseSubdirectories = true,
-                IgnoreInaccessible = true,
-                AttributesToSkip = FileAttributes.ReparsePoint,
-                ReturnSpecialDirectories = false,
-            };
-            foreach (var file in Directory.EnumerateFiles(root, "*", options))
-            {
-                if (--budget < 0)
-                {
-                    return false;
-                }
-
-                if (Safe(identityOf, file) is { } id && id == wanted)
-                {
-                    return true;
-                }
-            }
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
-        {
-            return false;
         }
 
         return false;

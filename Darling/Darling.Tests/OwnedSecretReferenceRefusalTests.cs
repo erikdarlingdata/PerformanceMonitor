@@ -242,12 +242,15 @@ public sealed class OwnedSecretReferenceRefusalTests : IDisposable
     }
 
     [Fact]
-    public void AHardLinkToAnOwnedFile_IsRefused()
+    public void AHardLinkToAnOwnedFile_PlacedOutsideTheOwnedDirectory_IsAccepted()
     {
+        /* Deliberate scope decision: the check compares identity of the owned files themselves, not of every file under
+           the owned directories (thousands in the database data directory, on an interactive click). Making a hard link
+           needs local read access to the target, which already defeats this control, so the scan bought nothing. */
         var link = Path.Combine(_root, "other", "linked.txt");
         Assert.True(TryHardLink(link, Path.Combine(_owned, "secret.txt")), "could not create a hard link on this machine");
 
-        Assert.Equal(DarlingOwnedSecrets.ReferenceRefusalText, Check("file:" + link));
+        Assert.Null(Check("file:" + link));
     }
 
     [Fact]
