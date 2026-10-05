@@ -47,6 +47,8 @@ public sealed class WebPlanViewerPageTests
     [InlineData("active_snapshot", "get_active_query_plan_xml", new[] { "collection_time", "session_id" })]
     [InlineData("query_store", "get_query_store_plan_xml", new[] { "database_name", "query_id" })]
     [InlineData("procedure", "get_procedure_plan_xml", new[] { "sql_handle" })]
+    [InlineData("blocking", "get_blocking_plan_xml", new[] { "event_time", "blocked_spid", "blocking_spid" })]
+    [InlineData("deadlock_victim", "get_deadlock_plan_xml", new[] { "collection_time", "deadlock_time" })]
     public void EachPlanSourceKind_ReadsACatalogTool_AndSendsItsRequiredParams(string kind, string tool, string[] required)
     {
         var viewer = Js("pages", "plan-viewer.js");
@@ -78,13 +80,18 @@ public sealed class WebPlanViewerPageTests
         Assert.DoesNotContain("new Date", viewer, StringComparison.Ordinal);
         Assert.DoesNotContain("Date.parse", viewer, StringComparison.Ordinal);
         Assert.Contains("collection_time: s.collection_time,", viewer, StringComparison.Ordinal);
+        // The blocked-process-report and deadlock reads (#5236) match their stamps for equality as well.
+        Assert.Contains("event_time: s.event_time,", viewer, StringComparison.Ordinal);
+        Assert.Contains("deadlock_time: s.deadlock_time,", viewer, StringComparison.Ordinal);
     }
 
     [Theory]
     [InlineData("ACTIVE_COLUMNS", "[...ACTIVE_COLUMNS, ...activePlanColumns(server)]")]
     [InlineData("QUERY_STORE_COLUMNS", "[...QUERY_STORE_COLUMNS, queryStorePlanColumn(server)]")]
     [InlineData("TOP_PROC_COLUMNS", "[...TOP_PROC_COLUMNS, procedurePlanColumn(server)]")]
-    public void TheThreeRowGrids_AddTheirPlanColumns_WhereTheyAreBuilt(string list, string composed)
+    [InlineData("BLOCKING_COLUMNS", "[...BLOCKING_COLUMNS, ...blockingPlanColumns(server)]")]
+    [InlineData("DEADLOCK_COLUMNS", "[...DEADLOCK_COLUMNS, deadlockPlanColumn(server)]")]
+    public void TheRowGrids_AddTheirPlanColumns_WhereTheyAreBuilt(string list, string composed)
     {
         var tabs = Js("pages", "server-tabs.js");
         Assert.Contains(composed, tabs, StringComparison.Ordinal);
@@ -94,11 +101,11 @@ public sealed class WebPlanViewerPageTests
     }
 
     [Fact]
-    public void TheServerTabsImport_NamesTheThreeFactories()
+    public void TheServerTabsImport_NamesTheFactories()
     {
         var tabs = Js("pages", "server-tabs.js");
         var line = tabs.Split('\n').Single(l => l.EndsWith("from \"./plan-viewer.js\";", StringComparison.Ordinal));
-        foreach (var name in new[] { "activePlanColumns", "planColumn", "procedurePlanColumn", "queryStorePlanColumn" })
+        foreach (var name in new[] { "activePlanColumns", "blockingPlanColumns", "deadlockPlanColumn", "planColumn", "procedurePlanColumn", "queryStorePlanColumn" })
             Assert.Contains(name, line, StringComparison.Ordinal);
     }
 
@@ -109,8 +116,35 @@ public sealed class WebPlanViewerPageTests
         Assert.Contains("key: \"has_query_plan\"", viewer, StringComparison.Ordinal);
         Assert.Contains("key: \"has_live_query_plan\"", viewer, StringComparison.Ordinal);
         Assert.Contains("key: \"sql_handle\"", viewer, StringComparison.Ordinal);
+        // The blocking and deadlock columns (#5236) each key on their own presence flag, one flag per button.
+        Assert.Contains("key: \"has_blocked_plan\"", viewer, StringComparison.Ordinal);
+        Assert.Contains("key: \"has_blocking_plan\"", viewer, StringComparison.Ordinal);
+        Assert.Contains("key: \"has_victim_plan\"", viewer, StringComparison.Ordinal);
         // The original stored-plan column keeps query_hash; no new column reuses it.
         Assert.Equal(1, viewer.Split("key: \"query_hash\",\n    label: \"Plan\"").Length - 1);
+    }
+
+    /// <summary>The blocking and deadlock buttons (#5236) draw only where their presence flag is exactly true. The server
+    /// sends the flag as true or leaves it off, so a looser test (truthy, not false) would draw a button for a value the
+    /// server never sends, and that button could only answer "unavailable".</summary>
+    [Theory]
+    [InlineData("has_blocked_plan", "Blocked plan")]
+    [InlineData("has_blocking_plan", "Blocking plan")]
+    [InlineData("has_victim_plan", "Victim plan")]
+    public void TheBlockingAndDeadlockButtons_DrawOnlyWhereTheirFlagIsExactlyTrue(string flag, string label)
+    {
+        var viewer = Js("pages", "plan-viewer.js");
+        var start = viewer.IndexOf("key: \"" + flag + "\"", StringComparison.Ordinal);
+        Assert.True(start >= 0, flag + " is not a column key");
+        var column = viewer.Substring(start, viewer.IndexOf("copy: false", start, StringComparison.Ordinal) - start);
+        Assert.Contains("label: \"" + label + "\"", column, StringComparison.Ordinal);
+        Assert.Contains("row." + flag + " === true", column, StringComparison.Ordinal);
+        // The flag is read once, by that strict comparison, and nowhere else in the column.
+        Assert.Equal(1, column.Split("row." + flag).Length - 1);
+        Assert.Contains("hideWhenEmpty: true", column, StringComparison.Ordinal);
+        Assert.Contains("sortable: false", column, StringComparison.Ordinal);
+        Assert.Contains("filter: false", column, StringComparison.Ordinal);
+        Assert.Contains("csv: false", column, StringComparison.Ordinal);
     }
 
     [Fact]

@@ -48,7 +48,7 @@ import { READ_FIELDS } from "../read-fields.js";
 import { analysisFindingsTab } from "./analysis-findings.js";
 import { downloadText } from "../grid-tools.js";
 import { deadlockGraphCell } from "./deadlock-graph.js";
-import { activePlanColumns, planColumn, procedurePlanColumn, queryStorePlanColumn } from "./plan-viewer.js";
+import { activePlanColumns, blockingPlanColumns, deadlockPlanColumn, planColumn, procedurePlanColumn, queryStorePlanColumn } from "./plan-viewer.js";
 
 /* ─────────────────────────── shared cell renderers ─────────────────────────── */
 
@@ -1188,7 +1188,7 @@ export const SERVER_TABS = [
         "get_blocking",
         { server, hours: ctx.hours, limit: 30 },
         "events",
-        BLOCKING_COLUMNS,
+        [...BLOCKING_COLUMNS, ...blockingPlanColumns(server)],
         ctx.label,
         "No blocking events in this window.",
         2,
@@ -1201,7 +1201,7 @@ export const SERVER_TABS = [
         "get_deadlocks",
         { server, hours: ctx.hours, limit: 20 },
         "deadlocks",
-        DEADLOCK_COLUMNS,
+        [...DEADLOCK_COLUMNS, deadlockPlanColumn(server)],
         ctx.label,
         "No deadlocks in this window.",
         2,
