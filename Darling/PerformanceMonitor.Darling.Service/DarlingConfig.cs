@@ -208,6 +208,22 @@ public sealed class DarlingConfig
     public int ProcedureStatsPlanCycleInterval { get; set; } = 4;
 
     /// <summary>
+    /// #5158: whether <c>query_stats</c> fetches plan XML only for statement plans this host has not already
+    /// committed. On (the default), the main query carries no plan and a second target query renders just the
+    /// plans the host has not stored; rows for plans it has stored carry the existing digest, so every reader
+    /// sees what it saw before. Off restores the inline capture, which renders and ships every row's plan every run.
+    ///
+    /// <para><b>Why.</b> On one large store the inline capture rendered 54 GB of plan XML an hour on the monitored
+    /// servers and shipped 29 GB of it, against 1.1 GB an hour of distinct plans: about 47 times the plans there
+    /// are, and the reason the slowest <c>query_stats</c> runs are almost entirely time spent draining plan text.</para>
+    ///
+    /// <para>A file-only knob like <see cref="ProcedureStatsPlanCycleInterval"/>: an edit takes effect on the next
+    /// restart, and it needs no schema rung. Only meaningful while <see cref="CapturePlans"/> is on.</para>
+    /// </summary>
+    [JsonPropertyName("queryStatsDeferredPlanFetch")]
+    public bool QueryStatsDeferredPlanFetch { get; set; } = true;
+
+    /// <summary>
     /// The shared alert engine's enabled flags and thresholds (Phase-5 slice D). Every default
     /// mirrors Lite's <c>App.*</c> alert defaults exactly, so an empty section alerts like a
     /// fresh Lite install. Optional — omit it entirely for the defaults.

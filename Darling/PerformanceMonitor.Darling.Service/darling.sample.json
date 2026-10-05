@@ -188,6 +188,14 @@
   // rendering on the same cycle. A file-only knob (not stored in the control plane): edit + restart.
   "procedureStatsPlanCycleInterval": 4,
 
+  // query_stats plan fetching. true (the default) leaves plan XML out of query_stats' main query and renders it in
+  // a second query for only the statement plans this service has not already stored; rows for plans it has stored
+  // carry the existing digest, so every reader sees the same data. On one large store the inline capture rendered
+  // 54 GB of plans an hour on the monitored servers against 1.1 GB an hour of distinct plans. false restores the
+  // inline capture (every row's plan, every run). A file-only knob: edit + restart. Only matters while
+  // capturePlans is on.
+  "queryStatsDeferredPlanFetch": true,
+
   // The alert engine (optional section). Every default mirrors Performance Monitor Lite's:
   // cpu 80% (total mode), blocking 1, deadlock 1, poison wait 500 ms, long-running query
   // 30 min, tempdb 80%, low disk 10% / 5 GB, job multiplier 3x, failed-job lookback 60 min,

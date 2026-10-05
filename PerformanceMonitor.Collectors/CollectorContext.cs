@@ -715,6 +715,16 @@ public sealed class CollectorContext
     public long PerItemPlanFetchMs { get; set; }
 
     /// <summary>
+    /// #5158: how many statement plans the host actually rendered on the monitored server this pass, with
+    /// <see cref="DeferPlanXmlFetch"/> on. A row whose plan the host already held is not counted. Zero when
+    /// the fetch is not deferred, which is also when every row carries its inline plan.
+    /// </summary>
+    public int PerItemPlanRenderedRows { get; set; }
+
+    /// <summary>#5158: the measured plan size, in bytes, of the plans counted by <see cref="PerItemPlanRenderedRows"/>, over-cap plans included.</summary>
+    public long PerItemPlanRenderedBytes { get; set; }
+
+    /// <summary>
     /// Milliseconds the item's separate statement-text fetch took (#2150's fetch, split out for the #2312
     /// investigation) — same contract as <see cref="PerItemPlanFetchMs"/>: inside <c>sql:</c>, not drain,
     /// zero when the host runs no separate fetch.
