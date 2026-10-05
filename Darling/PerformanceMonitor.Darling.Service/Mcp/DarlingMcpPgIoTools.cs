@@ -12,6 +12,7 @@ using System.Linq;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using ModelContextProtocol.Server;
 using Npgsql;
 using PerformanceMonitor.Common;
@@ -41,6 +42,7 @@ public sealed class DarlingMcpPgIoTools
         [Description("Hours of history to analyze. Default 24.")] int hours_back = 24,
         [Description("Maximum (backend_type, object, context) combinations to return, busiest first. Default 20. Bounds the page - read truncated for more; the shares stay of the whole window whatever this is set to.")] int limit = 20,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        ILogger? logger = null,
         CancellationToken cancellationToken = default)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
@@ -72,16 +74,20 @@ public sealed class DarlingMcpPgIoTools
                     return gated;
                 }
 
-                return JsonSerializer.Serialize(new
+                /* #4966: the nothing-found word is an empty answer, so it carries the window floor under hints. */
+                var emptyNotice = await DarlingMcpWindowNotice.ReadForToolAsync(
+                    postgres, "get_pg_io_stats", resolved.ServerName, now.AddHours(-hours_back), now, emptyAnswer: true, logger, cancellationToken);
+                return DarlingMcpWindowNotice.FinishEmpty(JsonSerializer.Serialize(new
                 {
                     server = resolved.ServerName,
                     hours_back,
                     status = "no_io_activity",
+                    hints = emptyNotice.AsHints(),
                     finding = "No (backend_type, object, context) combination recorded read, write, extend or "
                             + "hit activity in this window. On a busy server that more likely means the "
                             + "collector has not run yet than that the server is idle — pg_stat_io needs "
                             + "PostgreSQL 16 or later, so check the target's major version.",
-                }, McpHelpers.JsonOptions);
+                }, McpHelpers.JsonOptions), emptyNotice);
             }
 
             /* Asked of the server's OWN configuration rather than inferred from the zeros, exactly as the
@@ -91,7 +97,9 @@ public sealed class DarlingMcpPgIoTools
             var timingSetting = await DarlingPgTrendReader.GetIoTimingTrackedAsync(
                 postgres, resolved.ServerId, windowEnd, cancellationToken);
 
-            return BuildIoJson(resolved.ServerName, hours_back, page, limit, timingSetting);
+            var notice = await DarlingMcpWindowNotice.ReadForToolAsync(
+                postgres, "get_pg_io_stats", resolved.ServerName, now.AddHours(-hours_back), now, emptyAnswer: false, logger, cancellationToken);
+            return BuildIoJson(resolved.ServerName, hours_back, page, limit, timingSetting, notice);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -123,8 +131,10 @@ public sealed class DarlingMcpPgIoTools
         int hoursBack,
         DarlingPgIoReader.PgIoPage page,
         int limit,
-        bool? timingSetting)
+        bool? timingSetting,
+        McpWindowNotice? windowNotice = null)
     {
+        var notice = windowNotice ?? McpWindowNotice.Unavailable;
         var truncated = page.Rows.Count > limit;
         var rows = truncated ? page.Rows.Take(limit).ToList() : page.Rows;
 
@@ -201,10 +211,14 @@ public sealed class DarlingMcpPgIoTools
         var bytesMeasured = rows.Any(r => r.ByteCountersTracked);
         var bytesEstimated = !bytesMeasured && rows.Any(r => r.OpBytes > 0);
 
-        return JsonSerializer.Serialize(new
+        return DarlingMcpWindowNotice.Finish(JsonSerializer.Serialize(new
         {
             server = serverName,
             hours_back = hoursBack,
+            /* #4966: the window floor, right after hours_back. */
+            effective_start = notice.EffectiveStart,
+            window_truncated = notice.WindowTruncated,
+            truncation_note = notice.TruncationNote,
             status = "io_activity",
             /* #3541 A3 dialect: the page described as a page. combinations_returned is the page's count, in
                the `<noun>s_returned` spelling every other paged tool uses (queries_returned,
@@ -283,6 +297,6 @@ public sealed class DarlingMcpPgIoTools
                       + "columns PostgreSQL 18 replaced it with are not being collected. The counts and "
                       + "times above are unaffected."),
             combinations,
-        }, McpHelpers.JsonOptions);
+        }, McpHelpers.JsonOptions), notice);
     }
 }

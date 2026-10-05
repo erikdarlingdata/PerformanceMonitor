@@ -13,6 +13,7 @@ using System.Linq;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using ModelContextProtocol.Server;
 using Npgsql;
 using PerformanceMonitor.Common;
@@ -220,6 +221,7 @@ public sealed class DarlingMcpPgSessionStatesTools
         [Description("Hours of history to analyze. Default 24.")] int hours_back = 24,
         [Description("Maximum sessions to return, horizon holders first then longest transaction. Default 25. See the tool's reading guide.")] int limit = 25,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        ILogger? logger = null,
         CancellationToken cancellationToken = default)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
@@ -248,8 +250,12 @@ public sealed class DarlingMcpPgSessionStatesTools
 
             if (rows.Count == 0)
             {
-                return await EmptyAsync(postgres, resolved.ServerId, resolved.ServerName, hours_back, captures, cancellationToken);
+                return await EmptyAsync(postgres, resolved.ServerId, resolved.ServerName, hours_back, captures, start, end, logger, cancellationToken);
             }
+
+            /* #4966: decided after the empty branch, whose not-collected answer carries no notice. */
+            var notice = await DarlingMcpWindowNotice.ReadForToolAsync(
+                postgres, "get_pg_session_states", resolved.ServerName, start, end, emptyAnswer: false, logger, cancellationToken);
 
             var holders = rows.Count(r => r.HorizonHolderSamples > 0 && !r.StateWasRedacted);
             var idleHolders = rows.Count(r => r.HorizonHolderSamples > 0 && r.IdleInTransactionSamples > 0
@@ -322,10 +328,14 @@ public sealed class DarlingMcpPgSessionStatesTools
             })
             .ToList();
 
-            return JsonSerializer.Serialize(new
+            return DarlingMcpWindowNotice.Finish(JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
                 hours_back,
+                /* #4966: the window floor, right after hours_back. */
+                effective_start = notice.EffectiveStart,
+                window_truncated = notice.WindowTruncated,
+                truncation_note = notice.TruncationNote,
                 status = "session_states",
                 /* The page's count under the page's name (#3594). */
                 sessions_returned = sessions.Count,
@@ -369,7 +379,7 @@ public sealed class DarlingMcpPgSessionStatesTools
                          + "above cover only the sessions returned. Raise limit for the full picture."
                          : string.Empty),
                 sessions,
-            }, McpHelpers.JsonOptions);
+            }, McpHelpers.JsonOptions), notice);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -388,7 +398,7 @@ public sealed class DarlingMcpPgSessionStatesTools
     private static async Task<string> EmptyAsync(
         NpgsqlDataSource postgres, int serverId, string serverName, int hoursBack,
         DarlingPgSessionStatesReader.PgSessionStatesCaptureCounts captures,
-        CancellationToken cancellationToken = default)
+        DateTime start, DateTime end, ILogger? logger, CancellationToken cancellationToken = default)
     {
         var gated = await DarlingEngineCapability.NotCollectedStatusAsync(
             postgres, serverId, serverName, "pg_session_states", cancellationToken);
@@ -409,6 +419,9 @@ public sealed class DarlingMcpPgSessionStatesTools
 
         if (captures.CapturesTotal > 0)
         {
+            /* #4966: the all-clear carries the window floor beside its own hints; the unavailable answer below stays bare. */
+            var notice = await DarlingMcpWindowNotice.ReadForToolAsync(
+                postgres, "get_pg_session_states", serverName, start, end, emptyAnswer: true, logger, cancellationToken);
             return McpHelpers.Status(
                 "empty",
                 $"No session held a transaction open past the collector's floor on {serverName} in the last "
@@ -417,7 +430,18 @@ public sealed class DarlingMcpPgSessionStatesTools
                 + "every transaction is short. One caveat that is not a hedge: this samples at the "
                 + "collection interval, so a transaction that opened and closed between two samples is "
                 + "genuinely invisible here.",
-                hints);
+                notice.IsUnavailable ? hints : new
+                {
+                    hints.server,
+                    hints.hours_back,
+                    hints.captures_in_window,
+                    hints.captures_with_sessions,
+                    hints.first_capture_at,
+                    hints.last_capture_at,
+                    effective_start = notice.EffectiveStart,
+                    window_truncated = notice.WindowTruncated,
+                    truncation_note = notice.TruncationNote,
+                });
         }
 
         return McpHelpers.Status(

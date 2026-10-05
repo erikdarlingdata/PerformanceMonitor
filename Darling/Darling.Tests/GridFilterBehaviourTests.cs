@@ -151,4 +151,88 @@ public sealed class GridFilterBehaviourTests
         Assert.False(Bool(r, "controlColumn"));
         Assert.Equal(3, Arr(r, "heads").Length);
     }
+
+    // The operators scenario: Name (text), CPU (int), Pct (pct), Seen (time) over five rows:
+    //   alpha/1000/12.5/instant, beta/950/0/null, gamma/0/null/instant, ""/null/99/"", "-"/90/100/instant.
+    // A null or "" cell draws the em dash; the literal "-" is a real value.
+    private static readonly string[] Dash = { "\u2014" };
+
+    [Fact]
+    public void Typing_WithoutPickingAnOperator_IsStillTheSubstringMatch_AndTheBoxIsThere()
+    {
+        var r = Run("operators");
+        Assert.True(Bool(r, "noPick"));
+        Assert.Equal(new[] { "alpha" }, Arr(r, "defaultContains"));
+    }
+
+    [Fact]
+    public void TheOperatorList_FollowsTheColumnKind()
+    {
+        var r = Run("operators");
+        Assert.Equal(new[] { "Contains", "Equals", "Not equals", ">", ">=", "<", "<=", "Is empty", "Is not empty" }, Arr(r, "cpuOps"));
+        Assert.Equal(new[] { "Contains", "Equals", "Not equals", "Starts with", "Ends with", "Is empty", "Is not empty" }, Arr(r, "nameOps"));
+        Assert.Equal(new[] { "Contains", "Is empty", "Is not empty" }, Arr(r, "timeOps"));
+    }
+
+    [Fact]
+    public void NumericOperators_CompareTheRawNumber_NotTheText()
+    {
+        var r = Run("operators");
+        // "> 900" matches 1000 (rendered "1,000") and 950; as a string, "1,000" sorts before "900".
+        Assert.Equal(new[] { "alpha", "beta" }, Arr(r, "gt900"));
+        Assert.Empty(Arr(r, "gt1000"));
+        Assert.Equal(new[] { "alpha" }, Arr(r, "gte1000"));
+        Assert.Equal(new[] { "gamma", "-" }, Arr(r, "lt950"));
+        Assert.Equal(new[] { "beta", "gamma", "-" }, Arr(r, "lte950"));
+        // A typed "50%" is the number 50; a cell with no number never satisfies an ordering.
+        Assert.Equal(new[] { "\u2014", "-" }, Arr(r, "pctGt50"));
+        Assert.Empty(Arr(r, "textGtNotNumber"));
+    }
+
+    [Fact]
+    public void EqualsAndNotEquals_OnANumberColumn_CompareNumbers()
+    {
+        var r = Run("operators");
+        Assert.Equal(new[] { "alpha" }, Arr(r, "eq1000"));
+        Assert.Equal(new[] { "beta", "gamma", "\u2014", "-" }, Arr(r, "ne1000"));
+    }
+
+    [Fact]
+    public void TextOperators_EqualsNotEqualsStartsWithEndsWith_IgnoreCase_AndTakeCommaAlternatives()
+    {
+        var r = Run("operators");
+        Assert.Equal(new[] { "alpha" }, Arr(r, "eqAlpha"));
+        Assert.Equal(new[] { "alpha", "beta" }, Arr(r, "eqList"));
+        Assert.Equal(new[] { "gamma", "\u2014", "-" }, Arr(r, "neList"));
+        Assert.Equal(new[] { "alpha" }, Arr(r, "starts"));
+        Assert.Equal(new[] { "beta" }, Arr(r, "ends"));
+    }
+
+    [Fact]
+    public void IsEmpty_IsTheMissingValue_NeverAZero_AndNeverTheLiteralDash()
+    {
+        var r = Run("operators");
+        // Name "" is empty; the literal "-" is a value.
+        Assert.Equal(Dash, Arr(r, "nameEmpty"));
+        Assert.Equal(new[] { "alpha", "beta", "gamma", "-" }, Arr(r, "nameNotEmpty"));
+        // CPU 0 (gamma) is a value; only the null is empty.
+        Assert.Equal(Dash, Arr(r, "cpuEmpty"));
+        Assert.Equal(new[] { "alpha", "beta", "gamma", "-" }, Arr(r, "cpuNotEmpty"));
+        // Pct 0 (beta) is a value; only gamma's null is empty.
+        Assert.Equal(new[] { "gamma" }, Arr(r, "pctEmpty"));
+        // Seen: null and "" are empty on a time column too.
+        Assert.Equal(new[] { "beta", "\u2014" }, Arr(r, "seenEmpty"));
+        Assert.Equal(new[] { "alpha", "gamma", "-" }, Arr(r, "seenNotEmpty"));
+    }
+
+    [Fact]
+    public void AnOperatorFilter_ShowsInTheChip_SurvivesARebuild_AndTheValuelessOnesHideTheTextBox()
+    {
+        var r = Run("operators");
+        Assert.Equal(new[] { "CPU: > 900×" }, Arr(r, "chip"));
+        Assert.Equal(new[] { "alpha", "beta" }, Arr(r, "rebuilt"));
+        Assert.Equal("gt", Str(r, "rebuiltOp"));
+        Assert.Equal(new[] { "CPU: Is empty×" }, Arr(r, "emptyChip"));
+        Assert.Equal("none", Str(r, "emptyBoxHidden"));
+    }
 }
