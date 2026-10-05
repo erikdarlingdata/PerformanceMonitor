@@ -1040,13 +1040,15 @@ export const SERVER_TABS = [
       table(
         "Top Procedures by CPU",
         "get_top_procedures_by_cpu",
-        { server, hours: ctx.hours, top: 20 },
+        { server, hours: ctx.hours, top: 20, detail: "full" },
         "procedures",
         TOP_PROC_COLUMNS,
         ctx.label,
         "No procedure stats in this window. Delta-based collection needs at least two cycles (~30 minutes).",
         2,
-        "truncation_note"
+        "truncation_note",
+        null,
+        TOP_PROC_GROUPS
       ),
     ],
   },
@@ -1421,13 +1423,15 @@ export const SERVER_TABS = [
       table(
         "Top Procedures by CPU",
         "get_top_procedures_by_cpu",
-        { server, hours: ctx.hours, top: 20 },
+        { server, hours: ctx.hours, top: 20, detail: "full" },
         "procedures",
         TOP_PROC_COLUMNS,
         ctx.label,
         "No procedure stats in this window. Delta-based collection needs at least two cycles (~30 minutes).",
         2,
-        "truncation_note"
+        "truncation_note",
+        null,
+        TOP_PROC_GROUPS
       ),
       table(
         "Query Store",
@@ -3115,18 +3119,47 @@ const QUERY_TREND_COLUMNS = [
   { key: "query_plan_hash", label: "Plan Hash", mono: true },
 ];
 
+/* The desktop Top Procedures grid's columns in its order (its Query Plan download column is the separate plan work).
+   The ungrouped columns are the core set and always show; the rest follow the toggles in TOP_PROC_GROUPS, all off at
+   first. Last Execution and Cached Time arrive as UTC instants (the read converts them from the monitored server's
+   clock) and print in the browser's local time. The hourly tier carries none of the grouped fields, nor Type, the
+   write and read totals or Avg Reads, and prints a dash for each. */
 const TOP_PROC_COLUMNS = [
-  { key: "full_name", label: "Procedure" },
   { key: "database_name", label: "Database" },
+  { key: "full_name", label: "Procedure" },
   { key: "object_type", label: "Type" },
+  { key: "last_execution_time", label: "Last Execution", format: "time", group: "Times" },
+  { key: "cached_time", label: "Cached Time", format: "time", group: "Times" },
   { key: "execution_count", label: "Execs", format: "int" },
   { key: "total_cpu_ms", label: "Total CPU", format: "ms" },
   { key: "avg_cpu_ms", label: "Avg CPU", format: "ms" },
-  { key: "total_elapsed_ms", label: "Total Elapsed", format: "ms" },
-  { key: "avg_elapsed_ms", label: "Avg Elapsed", format: "ms" },
-  { key: "max_cpu_ms", label: "Max CPU", format: "ms" },
-  { key: "total_spills", label: "Spills", format: "int" },
+  { key: "total_elapsed_ms", label: "Total Duration", format: "ms" },
+  { key: "avg_elapsed_ms", label: "Avg Duration", format: "ms" },
+  { key: "total_logical_reads", label: "Total Reads", format: "int" },
+  { key: "avg_reads", label: "Avg Reads", format: "int" },
+  { key: "total_logical_writes", label: "Total Writes", format: "int", group: "I/O and spills" },
+  { key: "total_physical_reads", label: "Physical Reads", format: "int", group: "I/O and spills" },
+  { key: "total_spills", label: "Total Spills", format: "int" },
+  { key: "avg_spills", label: "Avg Spills", format: "num2", group: "I/O and spills" },
+  { key: "min_cpu_ms", label: "Min CPU", format: "ms", group: "Extremes" },
+  { key: "max_cpu_ms", label: "Max CPU", format: "ms", group: "Extremes" },
+  { key: "min_elapsed_ms", label: "Min Duration", format: "ms", group: "Extremes" },
+  { key: "max_elapsed_ms", label: "Max Duration", format: "ms", group: "Extremes" },
+  { key: "min_logical_reads", label: "Min Reads", format: "int", group: "Extremes" },
+  { key: "max_logical_reads", label: "Max Reads", format: "int", group: "Extremes" },
+  { key: "min_physical_reads", label: "Min Phys Reads", format: "int", group: "Extremes" },
+  { key: "max_physical_reads", label: "Max Phys Reads", format: "int", group: "Extremes" },
+  { key: "min_logical_writes", label: "Min Writes", format: "int", group: "Extremes" },
+  { key: "max_logical_writes", label: "Max Writes", format: "int", group: "Extremes" },
+  { key: "min_spills", label: "Min Spills", format: "int", group: "Extremes" },
+  { key: "max_spills", label: "Max Spills", format: "int", group: "Extremes" },
 ];
+
+const TOP_PROC_GROUPS = {
+  groups: ["Times", "I/O and spills", "Extremes"],
+  defaultGroups: [],
+};
+
 
 /* #2484: the regression grid. Baseline and recent sit BESIDE each other for each metric rather than being
    collapsed into the percent alone -- a 300% regression on a query that went from 1 ms to 4 ms is not the

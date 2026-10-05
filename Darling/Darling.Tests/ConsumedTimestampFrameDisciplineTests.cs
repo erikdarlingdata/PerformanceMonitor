@@ -952,6 +952,9 @@ public sealed class ConsumedTimestampFrameDisciplineTests
         (SiteLabel.DeSkewedAtRead, "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpDataTools.cs",
             "creation_time", "query_stats", 1,
             "get_top_queries_by_cpu detail=full; converted per row through the server's clock at the read (DarlingDataReader.ReadTopQueryDetail)"),
+        (SiteLabel.DeSkewedAtRead, "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpDataTools.cs",
+            "cached_time", "procedure_stats", 1,
+            "get_top_procedures_by_cpu detail=full; converted per row through the server's clock at the read (DarlingDataReader.ReadTopProcedureDetail)"),
         (SiteLabel.DeSkewedAtRead, "Lite/Mcp/McpBlockingTools.cs",
             "blocked_last_tran_started", "blocked_process_reports+dmv_blocking_snapshots", 1, "Lite get_blocking; de-skewed at the read by #3206"),
         (SiteLabel.DeSkewedAtRead, "Lite/Mcp/McpBlockingTools.cs",
@@ -1028,7 +1031,7 @@ public sealed class ConsumedTimestampFrameDisciplineTests
        TrendPayloads.CpuUtilization builder. */
     private const int McpPayloadUnmarkedSites = 1;
     private const int DesktopRenderMismatchSites = 0;
-    private const int DeSkewedAtReadSites = 26;
+    private const int DeSkewedAtReadSites = 27;
 
     /* ═══════════════════════ 5. resolving which table a site's column came from ═══════════════════════ */
 
@@ -1321,7 +1324,7 @@ public sealed class ConsumedTimestampFrameDisciplineTests
     /// </summary>
     private static readonly (string File, string Column, int Sites)[] DeclinedAmbiguousMcpSites =
     [
-        ("Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpDataTools.cs", "last_execution_time", 2),
+        ("Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpDataTools.cs", "last_execution_time", 3),
         ("Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpPgCpuUtilizationTools.cs", "sample_time", 1),
         ("Lite/Mcp/McpBlockingTools.cs", "event_time", 2),
         ("Lite/Mcp/McpDefaultTraceTools.cs", "event_time", 1),
@@ -1869,6 +1872,8 @@ public sealed class ConsumedTimestampFrameDisciplineTests
                 "DarlingServerClockReader.ToUtc(clock, reader, 11),"),
             ("creation_time", "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingDataReader.cs",
                 "DateTime? Time(int i) => DarlingServerClockReader.ToUtc(clock, reader, first + i);"),
+            ("cached_time", "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingDataReader.cs",
+                "DateTime? Time(int i) => DarlingServerClockReader.ToUtc(clock, reader, first + i);"),
             ("blocked_last_tran_started", "Lite/Mcp/McpBlockingTools.cs",
                 "UtcOrNull(r.BlockedLastTranStarted)"),
             ("blocking_last_tran_started", "Lite/Mcp/McpBlockingTools.cs",
@@ -1905,6 +1910,13 @@ public sealed class ConsumedTimestampFrameDisciplineTests
            that converts through the server's clock, and both are written with the "o" format. */
         var topQueriesReader = File.ReadAllText(RepoPath("Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingDataReader.cs"));
         Assert.Contains("Time(0), Time(1),", topQueriesReader, StringComparison.Ordinal);
+        Assert.Contains("last_execution_time = d.LastExecutionTime?.ToString(\"o\")",
+            File.ReadAllText(RepoPath("Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpDataTools.cs")), StringComparison.Ordinal);
+
+        /* get_top_procedures_by_cpu detail=full emits last_execution_time beside cached_time, declined for the same reason
+           and pinned the same way: one reader converts both through the server's clock. */
+        var topProceduresReader = File.ReadAllText(RepoPath("Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingDataReader.cs"));
+        Assert.Contains("ReadTopProcedureDetail(reader, 17, clock)", topProceduresReader, StringComparison.Ordinal);
         Assert.Contains("last_execution_time = d.LastExecutionTime?.ToString(\"o\")",
             File.ReadAllText(RepoPath("Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpDataTools.cs")), StringComparison.Ordinal);
 
