@@ -352,7 +352,27 @@ public sealed class McpWindowNoticeToolTests : IDisposable
 
         Assert.Equal("empty", root.GetProperty("status").GetString());
         Assert.True(EmptyHints(root).GetProperty("window_truncated").GetBoolean());
-        Assert.Equal(McpHelpers.CutWindowNothingMessage, root.GetProperty("message").GetString());
+        Assert.NotEqual(JsonValueKind.Null, EmptyHints(root).GetProperty("effective_start").ValueKind);
+        var message = root.GetProperty("message").GetString()!;
+        Assert.StartsWith("Query stats WERE collected for ", message, StringComparison.Ordinal);
+        Assert.EndsWith(". " + McpHelpers.CutWindowNothingMessage + " Delta-based collection also needs a SECOND cycle before the first non-zero row exists.", message, StringComparison.Ordinal);
+        Assert.DoesNotContain("up and idle", message, StringComparison.Ordinal);
+    }
+
+    /// <summary>#4966: a database_name filter is exempt: over the same cut window its empty grid keeps the sentence that names the filter as a cause.</summary>
+    [Fact]
+    public async Task GetQueryHeatmap_AFilteredIdleGrid_OverACutWindow_KeepsItsOwnSentence()
+    {
+        await _duckDb.InitializeAsync();
+        var now = DateTime.UtcNow;
+        await SeedIdleQueryStatsAsync(now.AddDays(-2), "0xI1");
+        await SeedIdleQueryStatsAsync(now.AddDays(-1), "0xI2");
+
+        var root = Root(await McpQueryTools.GetQueryHeatmap(Service(), _serverManager, ServerName, hours_back: 168, database_name: "Db"));
+
+        Assert.True(EmptyHints(root).GetProperty("window_truncated").GetBoolean());
+        Assert.Contains("a database_name filter matching nothing collected", root.GetProperty("message").GetString(), StringComparison.Ordinal);
+        Assert.DoesNotContain("Nothing in the part of the window", root.GetProperty("message").GetString(), StringComparison.Ordinal);
     }
 
     /// <summary>#4966: the same idle grid over a covered window keeps its "idle" sentence.</summary>
@@ -706,8 +726,11 @@ public sealed class McpWindowNoticeToolTests : IDisposable
 
         var root = Root(await McpQueryTools.GetQueryStoreRegressions(Service(), _serverManager, ServerName, hours_back: 24));
 
-        /* #4966: the window is cut, so the all-clear claim gives way to the shared cut sentence. */
-        Assert.Equal(McpHelpers.CutWindowNothingMessage, root.GetProperty("message").GetString());
+        /* #4966: the window is cut, so the all-clear claim gives way to the shared cut sentence; the 25% threshold stays. */
+        var message = root.GetProperty("message").GetString()!;
+        Assert.Contains("more than 25% worse than its baseline", message, StringComparison.Ordinal);
+        Assert.EndsWith(". " + McpHelpers.CutWindowNothingMessage, message, StringComparison.Ordinal);
+        Assert.DoesNotContain("this IS the all-clear", message, StringComparison.Ordinal);
         AssertTruncatedAt(EmptyHints(root), floor, "query_store_stats");
         Assert.Contains("baseline_start", EmptyHints(root).GetProperty("truncation_note").GetString(), StringComparison.Ordinal);
     }

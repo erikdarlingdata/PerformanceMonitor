@@ -313,7 +313,7 @@ public sealed class DarlingQueryStoreRegressionsLiveTests
             Assert.Equal("empty", clear.GetProperty("status").GetString());
             var clearText = clear.GetProperty("message").GetString()!;
             /* #4966: the baseline reaches 40 hours back, past the 24-hour window's start but not seven days, so the window is cut and the all-clear gives way. */
-            Assert.Equal(McpHelpers.CutWindowNothingMessage, clearText);
+            AssertCutAllClear(clear, clearText);
             Assert.DoesNotContain("EVER", clearText, StringComparison.Ordinal);
             Assert.DoesNotContain("Widen", clearText, StringComparison.Ordinal);
 
@@ -550,7 +550,7 @@ public sealed class DarlingQueryStoreRegressionsLiveTests
 
             var clear = Root(await DarlingMcpQueryStoreRegressionTools.GetQueryStoreRegressions(postgres, ServerName, 24));
             Assert.Equal("empty", clear.GetProperty("status").GetString());
-            Assert.Equal(McpHelpers.CutWindowNothingMessage, clear.GetProperty("message").GetString());
+            AssertCutAllClear(clear, clear.GetProperty("message").GetString()!);
             var clearHints = clear.GetProperty("hints");
             Assert.True(clearHints.GetProperty("window_truncated").GetBoolean());
             Assert.Equal(McpHelpers.FormatEffectiveStart(baseNow.AddHours(-40)), clearHints.GetProperty("effective_start").GetString());
@@ -599,7 +599,7 @@ public sealed class DarlingQueryStoreRegressionsLiveTests
 
             var match = Root(await DarlingMcpQueryStoreRegressionTools.GetQueryStoreRegressions(postgres, ServerName, 24, Db));
             /* #4966: this fixture's baseline is cut (40 hours of the seven days), so the matching filter's nothing is the cut sentence. */
-            Assert.Equal(McpHelpers.CutWindowNothingMessage, match.GetProperty("message").GetString());
+            AssertCutAllClear(match, match.GetProperty("message").GetString()!);
 
             bodySucceeded = true;
         }
@@ -741,6 +741,19 @@ public sealed class DarlingQueryStoreRegressionsLiveTests
             await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
                 await DeleteRowsAsync(cleanup, cleanupCt));
         }
+    }
+
+    /// <summary>
+    /// #4966: the all-clear over a cut baseline keeps its factual first sentence (the 25% threshold included) and swaps only the
+    /// claim for the cut sentence its hints select: the one that points at <c>effective_start</c> when the notice names one.
+    /// </summary>
+    private static void AssertCutAllClear(JsonElement answer, string message)
+    {
+        Assert.True(answer.GetProperty("hints").GetProperty("window_truncated").GetBoolean());
+        Assert.StartsWith("No query on ", message, StringComparison.Ordinal);
+        Assert.Contains("more than 25% worse than its baseline", message, StringComparison.Ordinal);
+        Assert.EndsWith(". " + McpHelpers.CutWindowClaim(answer.GetProperty("hints").GetProperty("effective_start").GetString()), message, StringComparison.Ordinal);
+        Assert.DoesNotContain("this IS the all-clear", message, StringComparison.Ordinal);
     }
 
     private static JsonElement Root(string json) => JsonDocument.Parse(json).RootElement;

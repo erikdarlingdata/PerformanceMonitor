@@ -141,7 +141,8 @@ public sealed class McpToolsListBudgetTests
     // (+95). Constant set to the value McpToolsListBudgetTests itself measured on this tree.
     // get_perfmon_stats' head names the new per_second field in its rate clause (521 -> 579), byte-identical
     // with Darling's twin. Constant set to the value McpToolsListBudgetTests itself measured on this tree.
-    private const int TotalCeilingBytes = 92_358;
+    // #4966: get_tool_guide's description gains the window-keys sentence (123 bytes, byte-identical with Darling's twin): 92,358 -> 92,481; tool get_tool_guide 487 -> 610.
+    private const int TotalCeilingBytes = 92_481;
 
     private const int ConvertedHeadCap = 1_000;
     private const int ConvertedParameterCap = 200;

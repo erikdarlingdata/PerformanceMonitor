@@ -1,4 +1,4 @@
 # McpToolGuideTools: tools/list budget for #3898. Ceilings only go down; see McpToolsListBudgetTests. One block per tool, blank line between blocks.
-tool get_tool_guide 487
+tool get_tool_guide 610
 param get_tool_guide.tools 98
 param get_tool_guide.topics 98

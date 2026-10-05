@@ -386,9 +386,12 @@ public sealed class McpWindowNoticeConfigAndLogToolTests : IDisposable
         Assert.Contains("matched", message, StringComparison.Ordinal);
     }
 
-    /// <summary>#4966: an empty collection log over a cut window carries the shared cut sentence; over a covered one it keeps "genuinely quiet".</summary>
+    /// <summary>
+    /// #4966: an empty collection log over a window the store holds none of says so (no start to name), keeping its
+    /// first sentence; the filtered empty is exempt and keeps its own words whether the window is cut or not.
+    /// </summary>
     [Fact]
-    public async Task CollectionLog_AnEmptyWindow_CarriesTheCutSentence_WhenCut_AndTheQuietOneWhenCovered()
+    public async Task CollectionLog_AnEmptyWindow_NothingHeld_SaysNothingWasRead_AndTheFilteredEmptyKeepsItsWords()
     {
         await _duckDb.InitializeAsync();
         /* Runs exist, all older than the window: the server HAS collected, and the window holds none. */
@@ -397,9 +400,19 @@ public sealed class McpWindowNoticeConfigAndLogToolTests : IDisposable
         var cut = Root(await McpHealthTools.GetCollectionLog(Service(), _serverManager, ServerName, 24, as_of: AsOf));
 
         Assert.Equal("empty", cut.GetProperty("status").GetString());
-        Assert.Equal(McpHelpers.CutWindowNothingMessage, cut.GetProperty("message").GetString());
+        Assert.Equal(JsonValueKind.Null, cut.GetProperty("hints").GetProperty("effective_start").ValueKind);
+        Assert.Equal($"No collector runs recorded for {ServerName} in the last 24 hour(s). {McpHelpers.CutWindowNothingReadMessage}", cut.GetProperty("message").GetString());
 
-        /* The filtered empty over a window the log covers (runs reach back past its start) keeps its own sentence. */
+        /* The same cut window, filtered: not the cut sentence, the filtered one with its echo and advice. */
+        var cutFiltered = Root(await McpHealthTools.GetCollectionLog(
+            Service(), _serverManager, ServerName, 24, as_of: AsOf, collector_name: "no_such_collector"));
+        var cutFilteredMessage = cutFiltered.GetProperty("message").GetString()!;
+        Assert.True(cutFiltered.GetProperty("hints").GetProperty("window_truncated").GetBoolean());
+        Assert.Contains("no_such_collector", cutFilteredMessage, StringComparison.Ordinal);
+        Assert.Contains("says nothing about the window as a whole", cutFilteredMessage, StringComparison.Ordinal);
+        Assert.DoesNotContain("Nothing was read", cutFilteredMessage, StringComparison.Ordinal);
+
+        /* A window the log covers (runs reach back past its start): the filtered empty keeps its sentence there too. */
         await SeedLogRunsAsync("wait_stats", Anchor.AddDays(-3), Anchor, everyMinutes: 30);
         var covered = Root(await McpHealthTools.GetCollectionLog(
             Service(), _serverManager, ServerName, 24, as_of: AsOf, collector_name: "no_such_collector"));

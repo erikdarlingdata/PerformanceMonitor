@@ -120,7 +120,7 @@ public sealed class DarlingMcpQueryHeatmapTools
                 start, end, "query_stats", emptyAnswer: rows.Count == 0, logger: logger, cancellationToken: cancellationToken);
 
             if (rows.Count == 0)
-                return await EmptyAsync(postgres, resolved.ServerName, resolved.ServerId, start, end, hours_back, notice, cancellationToken);
+                return await EmptyAsync(postgres, resolved.ServerName, resolved.ServerId, start, end, hours_back, notice, filtered: !string.IsNullOrWhiteSpace(database_name), cancellationToken: cancellationToken);
 
             var truncated = rows.Count > limit;
             var cells = rows.Take(limit).ToList();
@@ -223,7 +223,7 @@ public sealed class DarlingMcpQueryHeatmapTools
     /// </summary>
     private static async Task<string> EmptyAsync(
         NpgsqlDataSource postgres, string serverName, int serverId, DateTime start, DateTime end, int hours_back,
-        McpWindowNotice notice, CancellationToken cancellationToken)
+        McpWindowNotice notice, bool filtered, CancellationToken cancellationToken)
     {
         var (hasAny, hasInWindow) = await DarlingQueryHeatmapReader.GetCoverageAsync(postgres, serverId, start, end, cancellationToken);
 
@@ -246,8 +246,12 @@ public sealed class DarlingMcpQueryHeatmapTools
         return McpHelpers.Status(
             "empty",
             McpHelpers.QuietUnlessCut(
-                notice.WindowTruncated,
-                $"Query stats WERE collected for {serverName} in the last {hours_back} hour(s), but no capture recorded an execution: every row carried a zero execution delta, so nothing lands on the grid. A server that is up and idle looks exactly like this, and so does a database_name filter matching nothing collected. Delta-based collection also needs a SECOND cycle before the first non-zero row exists."),
+                /* A database_name filter is exempt: the coverage probe is unfiltered, so a filtered empty grid may be the filter and
+                   not the window, and the covered sentence is the one that says so. */
+                notice.WindowTruncated && !filtered, notice.EffectiveStart,
+                factual: $"Query stats WERE collected for {serverName} in the last {hours_back} hour(s), but no capture recorded an execution: every row carried a zero execution delta, so nothing lands on the grid",
+                coveredClaim: ". A server that is up and idle looks exactly like this, and so does a database_name filter matching nothing collected.",
+                tail: " Delta-based collection also needs a SECOND cycle before the first non-zero row exists."),
             notice.AsHints());
     }
 }

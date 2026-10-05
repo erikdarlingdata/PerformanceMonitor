@@ -278,8 +278,9 @@ public sealed class DarlingMcpQueryStoreRegressionTools
         return McpHelpers.Status(
             "empty",
             McpHelpers.QuietUnlessCut(
-                notice.WindowTruncated,
-                $"No query on {serverName} regressed in the last {hours_back} hour(s). Both a baseline and this window were collected and no query's average CPU is more than 25% worse than its baseline — this IS the all-clear for this read."),
+                notice.WindowTruncated, notice.EffectiveStart,
+                factual: $"No query on {serverName} regressed in the last {hours_back} hour(s). Both a baseline and this window were collected and no query's average CPU is more than 25% worse than its baseline",
+                coveredClaim: " — this IS the all-clear for this read."),
             notice.AsHints());
     }
 }

@@ -883,16 +883,35 @@ internal static class McpHelpers
     }
 
     /// <summary>
-    /// #4966: the one sentence an empty answer carries INSTEAD of a "quiet" or "all-clear" claim when its window notice
-    /// says the window is cut (<c>hints.window_truncated</c> true). Both apps use this one constant, so a client reads the
-    /// same words from either; <c>McpMissMessageParityPinTests</c> holds the literal.
+    /// #4966: the claim an empty answer carries INSTEAD of its "quiet" or "all-clear" clause when its window notice says the
+    /// window is cut (<c>hints.window_truncated</c> true) and names where the store's data starts
+    /// (<c>hints.effective_start</c> set). Both apps use this one constant, so a client reads the same words from either;
+    /// <c>McpMissMessageParityPinTests</c> holds the literal.
     /// </summary>
     public const string CutWindowNothingMessage = "Nothing in the part of the window the store covers; the store's data for this read starts at effective_start (see hints), so the stretch before it is not a report that nothing happened.";
 
     /// <summary>
-    /// #4966: chooses the message of an empty answer at run time. A cut window (<paramref name="windowTruncated"/>)
-    /// gets <see cref="CutWindowNothingMessage"/>; a covered window keeps <paramref name="coveredMessage"/> exactly.
+    /// #4966: the cut-window claim for an empty answer whose notice has NO <c>effective_start</c>: the store holds no data for
+    /// the read in the window at all, so there is no start to point at and the sentence points at the note instead.
     /// </summary>
-    public static string QuietUnlessCut(bool windowTruncated, string coveredMessage) =>
-        windowTruncated ? CutWindowNothingMessage : coveredMessage;
+    public const string CutWindowNothingReadMessage = "Nothing was read: the store holds no data for this read in the window (see hints.truncation_note), so this empty answer is not a report that nothing happened.";
+
+    /// <summary>The cut-window claim for a notice: <see cref="CutWindowNothingMessage"/> when it names a start, else <see cref="CutWindowNothingReadMessage"/>.</summary>
+    public static string CutWindowClaim(string? effectiveStart) =>
+        string.IsNullOrEmpty(effectiveStart) ? CutWindowNothingReadMessage : CutWindowNothingMessage;
+
+    /// <summary>
+    /// #4966: builds the message of an empty answer at run time, replacing only the CLAIM clause. The
+    /// <paramref name="factual"/> first sentence (counts, thresholds, filter echoes), written without its closing period,
+    /// is kept either way. A covered window then reads <paramref name="factual"/> + <paramref name="coveredClaim"/> exactly
+    /// (the claim carries its own leading separator, so the covered text is what it was before #4966); a cut window
+    /// (<paramref name="windowTruncated"/>) reads <paramref name="factual"/> + ". " + <see cref="CutWindowClaim"/> for
+    /// <paramref name="effectiveStart"/>. <paramref name="tail"/> is more text, after the claim, that is not a claim and
+    /// is kept on both branches. A failed probe leaves the notice uncut, so the covered text is kept.
+    /// </summary>
+    public static string QuietUnlessCut(
+        bool windowTruncated, string? effectiveStart, string factual, string coveredClaim, string tail = "") =>
+        windowTruncated
+            ? factual + ". " + CutWindowClaim(effectiveStart) + tail
+            : factual + coveredClaim + tail;
 }

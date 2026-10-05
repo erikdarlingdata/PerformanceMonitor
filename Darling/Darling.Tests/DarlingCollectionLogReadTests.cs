@@ -120,7 +120,8 @@ public sealed class DarlingCollectionLogReadTests
             /* #4966: the only run is 48 hours old, so the one-hour window holds none of the log: it is NOT covered, and the
                answer says so instead of "genuinely quiet". */
             Assert.True(quietDoc.RootElement.GetProperty("hints").GetProperty("window_truncated").GetBoolean());
-            Assert.Equal(McpHelpers.CutWindowNothingMessage, quietText);
+            Assert.Equal(JsonValueKind.Null, quietDoc.RootElement.GetProperty("hints").GetProperty("effective_start").ValueKind);
+            Assert.Equal($"No collector runs recorded for {ServerName} in the last 1 hour(s). {McpHelpers.CutWindowNothingReadMessage}", quietText);
 
             /* ── 3. rows in the window: the data path, and the split that makes the log worth reading ── */
             await SeedAsync(connection, ct, "query_store", MinutesAgo(10));
@@ -592,20 +593,18 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
     }
 
     /// <summary>
-    /// #4966: a filtered nothing names its filter, unless its window is cut, when it carries the one shared sentence and no
-    /// claim about the filter or the window. This fixture's rows are minutes old against a 24-hour window, so it is cut.
+    /// #4966: a filtered nothing says nothing about the window as a whole, so it keeps its filter echo and its advice whether
+    /// or not the window is cut. This fixture's rows are minutes old against a 24-hour window, so the window IS cut: asserting
+    /// both makes the one branch it produces the branch under test, and the cut sentence must not replace the filtered one.
     /// </summary>
     private static void AssertFilterNamedOrWindowCut(JsonElement root, string filterText)
     {
         var message = root.GetProperty("message").GetString()!;
-        if (root.GetProperty("hints").GetProperty("window_truncated").GetBoolean())
-        {
-            Assert.Equal(McpHelpers.CutWindowNothingMessage, message);
-        }
-        else
-        {
-            Assert.Contains(filterText, message, StringComparison.Ordinal);
-        }
+        Assert.True(root.GetProperty("hints").GetProperty("window_truncated").GetBoolean());
+        Assert.Contains(filterText, message, StringComparison.Ordinal);
+        Assert.Contains("says nothing about the window as a whole", message, StringComparison.Ordinal);
+        Assert.DoesNotContain("Nothing in the part of the window", message, StringComparison.Ordinal);
+        Assert.DoesNotContain("Nothing was read", message, StringComparison.Ordinal);
     }
 
     private static async Task DeleteFilterRowsAsync(NpgsqlConnection connection, CancellationToken ct)

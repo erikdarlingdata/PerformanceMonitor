@@ -87,7 +87,8 @@ public sealed class DarlingBlockingStatsReadTests
             var healthyText = healthyDoc.RootElement.GetProperty("message").GetString()!;
             /* #4966: the store's only run is 20 minutes old, so a 24-hour window is CUT, and a cut window may not say clear. */
             Assert.True(healthyDoc.RootElement.GetProperty("hints").GetProperty("window_truncated").GetBoolean());
-            Assert.Equal(McpHelpers.CutWindowNothingMessage, healthyText);
+            Assert.Equal($"No blocking or deadlocks recorded for {ServerName} in the last 24 hour(s). {McpHelpers.CutWindowNothingMessage}", healthyText);
+            Assert.NotEqual(JsonValueKind.Null, healthyDoc.RootElement.GetProperty("hints").GetProperty("effective_start").ValueKind);
             Assert.DoesNotContain("NEVER", healthyText, StringComparison.Ordinal);
 
             /*

@@ -22,7 +22,7 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 [McpServerToolType]
 public sealed class DarlingMcpToolGuideTools
 {
-    [McpServerTool(Name = "get_tool_guide"), Description("Returns the reading guides tools/list leaves out. A tool whose description ends \"Reading guide: get_tool_guide.\" has one: pass its name in tools for what its fields mean and its edge cases. Pass topic names in topics for guides that span tools. Call with neither to list the tools with guides and the topics. Unknown names are reported in the answer, not as errors; an answer over its size budget lists the rest under deferred. Read-only: reads no collected data and no monitored server.")]
+    [McpServerTool(Name = "get_tool_guide"), Description("Returns the reading guides tools/list leaves out. A tool whose description ends \"Reading guide: get_tool_guide.\" has one: pass its name in tools for what its fields mean and its edge cases. Pass topic names in topics for guides that span tools. Call with neither to list the tools with guides and the topics. Unknown names are reported in the answer, not as errors; an answer over its size budget lists the rest under deferred. Read-only: reads no collected data and no monitored server. `window_truncated` true: the window starts before the store's data, not a cut page (`effective_start`, `truncation_note`).")]
     public static string GetToolGuide(
         McpToolGuideCatalog catalog,
         [Description(McpToolGuideToolText.ToolsParameter)] string[]? tools = null,

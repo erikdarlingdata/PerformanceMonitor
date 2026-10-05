@@ -101,15 +101,16 @@ public sealed class McpMissMessageParityPinTests
            OWN sentences ahead of these three, so what is compared here stays the monitored-server text. */
         "This server HAS collected before, so this window is genuinely quiet rather than broken — widen hours_back to find the most recent runs.",
 
-        /* #4966: the covered-window variants of the quiet and all-clear sentences, byte-identical on both SKUs.
-           The cut-window variant is one constant in Common (McpHelpers.CutWindowNothingMessage), pinned below. */
+        /* #4966: the covered-window variants of the quiet and all-clear CLAIMS, byte-identical on both SKUs. Each sits after
+           the message's own factual first sentence, which is kept on a cut window too. The cut-window claims are two
+           constants in Common (McpHelpers.CutWindowNothingMessage and CutWindowNothingReadMessage), pinned below. */
         "The blocking collectors HAVE run successfully for this server, so the window is genuinely clear rather than blind.",
         "this IS the all-clear for this read.",
         "A server that is up and idle looks exactly like this, and so does a database_name filter matching nothing collected.",
         "This says nothing about the window as a whole — the filters were applied, so unfiltered runs may well exist.",
 
-        /* #4966: the server-instructions sentence naming the three window keys. */
-        "effective_start, window_truncated and truncation_note say where the store's data for a read starts; window_truncated true means the window reaches further back than the data, not that the page was cut.",
+        /* #4966: the server-instructions sentence naming the three window keys, with the same sentence in get_tool_guide's description. */
+        "`window_truncated` true: the window starts before the store's data, not a cut page (`effective_start`, `truncation_note`).",
 
         /* get_memory_clerks */
         "This read returns the LATEST snapshot rather than a window, so an empty result is never a quiet period — a live SQL Server always has memory clerks.",
@@ -158,7 +159,8 @@ public sealed class McpMissMessageParityPinTests
            window) no other read has. */
         "so this is NOT a report of a quiet server — there is nothing to draw. query_stats is a PERIODIC table rather than an edge table: the collector writes rows every cycle for whatever is in the plan cache, so an empty history means nobody looked. Check get_collection_health for this server.",
         " hour(s), so the grid has no columns rather than no hot cells. Widen hours_back, or check get_collection_health — a collector that stopped looks exactly like this.",
-        " hour(s), but no capture recorded an execution: every row carried a zero execution delta, so nothing lands on the grid. A server that is up and idle looks exactly like this, and so does a database_name filter matching nothing collected. Delta-based collection also needs a SECOND cycle before the first non-zero row exists.",
+        " hour(s), but no capture recorded an execution: every row carried a zero execution delta, so nothing lands on the grid",
+        " Delta-based collection also needs a SECOND cycle before the first non-zero row exists.",
 
         /* get_lock_wait_trend (#2484). The all-clear sentence is get_wait_types' own, reused deliberately:
            both reads are looking at the same PERIODIC table and the advice is identical, so two spellings
@@ -234,7 +236,7 @@ public sealed class McpMissMessageParityPinTests
            stamp), so what is compared is the literal text a caller receives. The dead rung keeps the
            "system_health session is started" sentence EngineCapabilityMissTests pins on both SKUs. */
         ". Events ARE being captured, so this is the healthy answer for this read rather than missing data.",
-        "), so the window is genuinely quiet rather than blind — widen hours_back to reach the most recent events.",
+        ", so the window is genuinely quiet rather than blind — widen hours_back to reach the most recent events.",
         " — so for this category the absence is a measurement: the engine has not recorded one. Not a blind spot, and a wider window would not change it.",
         "No system_health events of ANY type have EVER been captured for ",
         ", so this is NOT an all-clear — there is nothing here to be clear about. This read is served from the collected system_health ring buffer: check that collection is running for this server and that its system_health session is started before concluding nothing happened.",
@@ -292,13 +294,27 @@ public sealed class McpMissMessageParityPinTests
     /// app's empty answers pick between it and their covered text at run time through <c>QuietUnlessCut</c>.
     /// </summary>
     [Fact]
-    public void TheCutWindowSentence_IsTheAgreedWords_AndReplacesTheQuietClaimOnlyWhenCut()
+    public void TheCutWindowSentences_AreTheAgreedWords_AndReplaceTheQuietClaimOnlyWhenCut()
     {
-        const string agreed = "Nothing in the part of the window the store covers; the store's data for this read starts at effective_start (see hints), so the stretch before it is not a report that nothing happened.";
-        Assert.Equal(agreed, McpHelpers.CutWindowNothingMessage);
-        Assert.Equal(agreed, McpHelpers.QuietUnlessCut(true, "this window is genuinely quiet"));
-        Assert.Equal("this window is genuinely quiet", McpHelpers.QuietUnlessCut(false, "this window is genuinely quiet"));
-        Assert.True(AppearsIn("PerformanceMonitor.Common/Mcp", agreed), "the shared cut-window sentence left Common");
+        const string withStart = "Nothing in the part of the window the store covers; the store's data for this read starts at effective_start (see hints), so the stretch before it is not a report that nothing happened.";
+        const string withoutStart = "Nothing was read: the store holds no data for this read in the window (see hints.truncation_note), so this empty answer is not a report that nothing happened.";
+        Assert.Equal(withStart, McpHelpers.CutWindowNothingMessage);
+        Assert.Equal(withoutStart, McpHelpers.CutWindowNothingReadMessage);
+        Assert.True(AppearsIn("PerformanceMonitor.Common/Mcp", withStart), "the shared cut-window sentence left Common");
+        Assert.True(AppearsIn("PerformanceMonitor.Common/Mcp", withoutStart), "the shared nothing-read sentence left Common");
+
+        /* The notice picks the variant: a start to point at, or none. */
+        Assert.Equal(withStart, McpHelpers.CutWindowClaim("2026-09-10T12:00:00Z"));
+        Assert.Equal(withoutStart, McpHelpers.CutWindowClaim(null));
+
+        /* Only the claim clause is replaced: the factual first sentence survives on both branches. */
+        const string factual = "No query on S regressed in the last 24 hour(s). No query is more than 25% worse than its baseline";
+        const string claim = " — this IS the all-clear for this read.";
+        Assert.Equal(factual + claim, McpHelpers.QuietUnlessCut(false, "2026-09-10T12:00:00Z", factual, claim));
+        Assert.Equal(factual + ". " + withStart, McpHelpers.QuietUnlessCut(true, "2026-09-10T12:00:00Z", factual, claim));
+        Assert.Equal(factual + ". " + withoutStart, McpHelpers.QuietUnlessCut(true, null, factual, claim));
+        Assert.Equal(factual + ". " + withStart + " tail", McpHelpers.QuietUnlessCut(true, "x", factual, claim, " tail"));
+        Assert.Equal(factual + claim + " tail", McpHelpers.QuietUnlessCut(false, "x", factual, claim, " tail"));
     }
 
     /// <summary>
