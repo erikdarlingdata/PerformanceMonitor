@@ -15,7 +15,10 @@ namespace PerformanceMonitor.Darling.Storage;
 /// (server, hour), the hour ledger (<see cref="QueryStatsHourLedger"/>, a row count the collector adds in the same
 /// transaction as its COPY) with the rollup's <c>sum(sample_count)</c>, and returns the number of pairs that disagree.
 /// The guard it replaces counted every raw row of the window; on a large store that ran past its 15 s cap and the route
-/// was never taken. The ledger makes its cost depend on the number of (server, hour) pairs, not on the number of raw rows.
+/// was never taken. The ledger half of this guard reads one row per (server, hour). The rollup half still sums every rollup
+/// row of the window (one per server, database, query_hash, sql_handle and hour): the same rows the panel's middle-hours
+/// read scans next, so the guard costs about one pass over the rollup's window and reads no raw rows. Whether that pass fits
+/// the 15 s cap on a large store is not claimed here: the acceptance read of #4605 measures it after deployment.
 /// <para>A result of 0 means the guard passed. <see cref="UncoveredResult"/> (-1) means the ledger does not cover the
 /// window: the state row's <c>counted_since</c> is after the window start, or the state row is missing, so the hours
 /// before it were never counted and no comparison says anything. Any other result, or a fault, means the read stays on
