@@ -451,6 +451,10 @@ table.data tbody tr.band-Offline { background: rgba(168, 174, 186, 0.16); }
 .col-picker .col-picker-label { font-size: 12px; opacity: 0.8; margin-right: 2px; }
 .col-picker .col-toggle { font-size: 12px; padding: 2px 8px; }
 .col-picker .col-toggle.on { border-color: var(--accent, currentColor); font-weight: 600; }
+/* The stored-plan panel under a row's Plan button (#4843): the indented XML in a scrollable block. */
+.plan-cell { min-width: 8rem; }
+.plan-panel { margin-top: 6px; max-width: 70vw; }
+.plan-panel pre.plan-xml { max-height: 28rem; overflow: auto; white-space: pre; overflow-wrap: normal; padding: 6px; border: 1px solid var(--border); }
 td.cell-picked { outline: 1px solid var(--accent); outline-offset: -1px; }
 
 /* ─────────────────────────── band list ─────────────────────────── */

@@ -51,15 +51,15 @@ public sealed class FinOpsTabOptimizationPageTests
         return source.Substring(start, end - start);
     }
 
-    private static void AssertKeysMatchRow(string constName, string method, string close, int count)
+    private static void AssertKeysMatchRow(string constName, string method, string close, int count, int extraEmitted = 0)
     {
         var keys = Keys(constName);
         var row = RowSlice(method, close);
         foreach (var key in keys)
             Assert.Matches("(?m)^\\s+" + Regex.Escape(key) + " = ", row);
         var emitted = Regex.Matches(row, "(?m)^\\s+[a-z_0-9]+ = ").Count;
-        Assert.Equal(count, emitted);
-        Assert.Equal(emitted, keys.Count);
+        Assert.Equal(count + extraEmitted, emitted);
+        Assert.Equal(count, keys.Count);
     }
 
     [Fact]
@@ -102,7 +102,11 @@ public sealed class FinOpsTabOptimizationPageTests
 
     [Fact]
     public void EveryQueryColumnKeyIsEmittedByTheExpensiveQueryRows() =>
-        AssertKeysMatchRow("QUERY_COLUMNS", "ExpensiveQueryRows", "\n        }).ToList();", 9);
+        AssertKeysMatchRow("QUERY_COLUMNS", "ExpensiveQueryRows", "\n        }).ToList();", 9, extraEmitted: 1);
+
+    [Fact]
+    public void ExpensiveQueryRowsCarryTheQueryHashThePlanColumnReads() =>
+        Assert.Contains("query_hash = r.QueryHash,", RowSlice("ExpensiveQueryRows", "\n        }).ToList();"));
 
     [Fact]
     public void EveryMemoryGrantColumnKeyIsEmittedByTheMemoryGrantRows() =>
@@ -184,7 +188,7 @@ public sealed class FinOpsTabOptimizationPageTests
     {
         var imports = Regex.Matches(Tab(), "from \"([^\"]+)\";").Select(m => m.Groups[1].Value).ToList();
         Assert.NotEmpty(imports);
-        Assert.All(imports, i => Assert.Contains(i, new[] { "../../panels.js", "../../charts.js", "../../util.js" }));
+        Assert.All(imports, i => Assert.Contains(i, new[] { "../../panels.js", "../../charts.js", "../../util.js", "../plan-viewer.js" }));
     }
 
     [Fact]
