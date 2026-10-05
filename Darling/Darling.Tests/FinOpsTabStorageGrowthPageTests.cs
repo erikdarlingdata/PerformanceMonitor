@@ -74,14 +74,14 @@ public sealed class FinOpsTabStorageGrowthPageTests
     public void TheTabReadsGetFinOpsWithTheStorageGrowthViewAtEachLevel()
     {
         var tab = Tab();
-        // Pins the databases-level read: view and the 24-hour value the view requires (any other hours is refused).
+        // Pins the databases-level read: view and the 24 hours it keeps (the databases level ignores the window).
         Assert.Contains("const params = { server, view: \"storage_growth\", hours: HOURS };", tab);
         Assert.Matches("(?m)^const HOURS = 24;$", tab);
         // Pins the objects-level read: the database plus the desktop's top 20, the most the view allows.
-        Assert.Contains("if (state.level === \"objects\") Object.assign(params, { database_name: state.database, limit: OBJECT_LIMIT });", tab);
+        Assert.Contains("if (state.level === \"objects\") Object.assign(params, { database_name: state.database, limit: OBJECT_LIMIT, hours: state.days * 24 });", tab);
         Assert.Matches("(?m)^const OBJECT_LIMIT = 20;$", tab);
         // Pins the indexes-level read: no limit, because the view refuses any limit at this level.
-        Assert.Contains("if (state.level === \"indexes\") Object.assign(params, { database_name: state.database, object_name: state.object });", tab);
+        Assert.Contains("if (state.level === \"indexes\") Object.assign(params, { database_name: state.database, object_name: state.object, hours: state.days * 24 });", tab);
         // Pins the one call site that sends them.
         Assert.Contains("readTool(\"get_finops\", params, ctx && ctx.signal)", tab);
         Assert.Single(Regex.Matches(tab, "readTool\\("));
