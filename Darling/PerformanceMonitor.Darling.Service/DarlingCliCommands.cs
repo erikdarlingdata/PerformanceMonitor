@@ -79,6 +79,14 @@ public static class DarlingCliCommands
     public static bool IsCheckSettingsVerb(string arg) =>
         string.Equals(arg, "--check-settings", StringComparison.OrdinalIgnoreCase);
 
+    /// <summary>The spelling the bug-report template shows for the diagnostics-bundle verb.</summary>
+    public const string DiagnosticsBundleVerbName = "--diagnostics-bundle";
+
+    /// <summary>The verb <see cref="DiagnosticsBundleAsync"/> handles (#5097): <c>--diagnostics-bundle</c> or its short form <c>--diag-bundle</c>.</summary>
+    public static bool IsDiagnosticsBundleVerb(string arg) =>
+        string.Equals(arg, DiagnosticsBundleVerbName, StringComparison.OrdinalIgnoreCase)
+        || string.Equals(arg, "--diag-bundle", StringComparison.OrdinalIgnoreCase);
+
     /// <summary>The verb <see cref="PrintViewerConnectionAsync"/> handles (darling-network-endpoints D8).</summary>
     public static bool IsPrintViewerConnectionVerb(string arg) =>
         string.Equals(arg, "--print-viewer-connection", StringComparison.OrdinalIgnoreCase);
@@ -202,6 +210,7 @@ public static class DarlingCliCommands
         IsEncryptPasswordVerb(arg)
         || IsValidateConfigVerb(arg)
         || IsCheckSettingsVerb(arg)
+        || IsDiagnosticsBundleVerb(arg)
         || IsPrintViewerConnectionVerb(arg)
         || IsPrintMcpTokenVerb(arg)
         || IsPrintWebTokenVerb(arg)
@@ -282,6 +291,7 @@ public static class DarlingCliCommands
         "  PerformanceMonitor.Darling.Service.exe --help, -h          Print this help and exit." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --test-connection   Validate darling.json and probe every configured server (the store's registry when it is reachable, otherwise the file's list)." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --check-settings [--json]   Print the store host profile and a verdict per sizing-relevant setting; exits non-zero if any is stale-after-hardware-change." + Environment.NewLine +
+        "  PerformanceMonitor.Darling.Service.exe --diagnostics-bundle <path> [--hours N] [--server <name>] [--log-dir <dir>] [--config <path>] [--alias-map <path>] [--force]   Write one aliased diagnostics file to attach to a bug report (run elevated on the store host; --diag-bundle is the short form)." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --encrypt-password  Encrypt a SQL-auth password for darling.json (reads stdin)." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --print-viewer-connection   Print a remote-viewer connection string (managed store)." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --print-mcp-token   Reprint the MCP bearer token from darling.json (run elevated; writes a LIVE token to stdout)." + Environment.NewLine +
@@ -550,6 +560,170 @@ public static class DarlingCliCommands
         ex is CryptographicException
             ? DarlingSecrets.DescribeStoreCredentialDecryptFailure(DarlingManagedPostgres.CredentialFileName)
             : ex.Message;
+
+    /// <summary>Exit codes <see cref="DiagnosticsBundleAsync"/> returns.</summary>
+    public static class DiagnosticsBundleExitCode
+    {
+        /// <summary>The bundle was written and every section was read.</summary>
+        public const int Ok = 0;
+
+        /// <summary>Bad arguments, a config that does not parse or validate, an unusable connection string, or an unknown --server. No file.</summary>
+        public const int ConfigError = 1;
+
+        /// <summary>The store could not be opened. A reduced bundle IS written.</summary>
+        public const int StoreUnreachable = 2;
+
+        /// <summary>The bundle was written, but one or more sections failed; the manifest lists which.</summary>
+        public const int PartialBundle = 3;
+
+        /// <summary>The path is not writable, the file exists without --force, or the size cap could not be met. No file.</summary>
+        public const int OutputError = 4;
+
+        /// <summary>The verifier still found a known name or secret after aliasing. No file.</summary>
+        public const int LeakGuard = 5;
+    }
+
+    /// <summary>
+    /// <c>--diagnostics-bundle</c> (#5097): writes one aliased JSON file a user can attach to a bug report. Reads only.
+    /// An unreachable store still writes a reduced bundle (the config shape and the service log) and exits 2; a
+    /// verifier hit exits 5 and writes nothing. See <see cref="DiagnosticsBundle"/>.
+    /// </summary>
+    public static async Task<int> DiagnosticsBundleAsync(
+        string[] args, TextWriter output, TextWriter error, CancellationToken cancellationToken)
+    {
+        var (options, parseError) = DiagnosticsBundle.ParseArgs(args);
+        if (options is null)
+        {
+            error.WriteLine(parseError);
+            error.WriteLine("Usage: --diagnostics-bundle <path> [--hours N] [--server <name>] [--log-dir <dir>] [--config <path>] [--alias-map <path>] [--force]");
+            return DiagnosticsBundleExitCode.ConfigError;
+        }
+
+        DarlingConfig config;
+        try
+        {
+            config = DarlingConfig.Load(options.ConfigPath);
+        }
+        catch (Exception ex)
+        {
+            error.WriteLine($"Could not load configuration: {ex.Message}");
+            return DiagnosticsBundleExitCode.ConfigError;
+        }
+
+        var postgres = config.Postgres;
+        if (postgres is null)
+        {
+            error.WriteLine("postgres section is required.");
+            return DiagnosticsBundleExitCode.ConfigError;
+        }
+
+        var problems = config.Validate();
+        if (problems.Count > 0)
+        {
+            error.WriteLine("Configuration is invalid:");
+            foreach (var problem in problems)
+            {
+                error.WriteLine("  - " + problem);
+            }
+
+            return DiagnosticsBundleExitCode.ConfigError;
+        }
+
+        if (!TryBuildStoreConnectionString(postgres, out var connectionString, out var unusable, ensureStoreSearchPath: true))
+        {
+            error.WriteLine(unusable);
+            return DiagnosticsBundleExitCode.ConfigError;
+        }
+
+        var outputProblem = DiagnosticsBundle.CheckOutput(options);
+        if (outputProblem is not null)
+        {
+            error.WriteLine(outputProblem);
+            return DiagnosticsBundleExitCode.OutputError;
+        }
+
+        NpgsqlDataSource? dataSource = null;
+        Exception? storeError = null;
+        string? storeSentence = null;
+        if (string.IsNullOrWhiteSpace(connectionString))
+        {
+            storeSentence = postgres.Managed && OperatingSystem.IsWindows()
+                ? DarlingStoreBootstrapEvidence.MissingStoreCredentialMessage(postgres)
+                : "postgres.connectionString is empty, so there is no store to read.";
+        }
+        else
+        {
+            try
+            {
+                dataSource = NpgsqlDataSource.Create(
+                    DarlingStoreConnection.PinSessionTimeZoneUtc(
+                        DarlingStoreConnection.WithApplicationName(connectionString, DarlingManagedPostgres.CliApplicationName)));
+                using var probeBudget = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                probeBudget.CancelAfter(TimeSpan.FromSeconds(ServiceCommandDeadlines.CliStoreReadSeconds * 2));
+                await using var probe = await dataSource.OpenConnectionAsync(probeBudget.Token);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
+            {
+                storeError = ex;
+                if (dataSource is not null)
+                {
+                    await dataSource.DisposeAsync();
+                    dataSource = null;
+                }
+            }
+        }
+
+        DiagnosticsBundleRunner.Outcome outcome;
+        try
+        {
+            outcome = await DiagnosticsBundleRunner.BuildAsync(
+                options, config, connectionString, dataSource, storeError, storeSentence, cancellationToken);
+        }
+        finally
+        {
+            if (dataSource is not null)
+            {
+                await dataSource.DisposeAsync();
+            }
+        }
+
+        if (outcome.Text is null)
+        {
+            error.WriteLine(outcome.Message);
+            foreach (var leak in outcome.Leaks.Distinct())
+            {
+                error.WriteLine($"  blocked: {leak.Class} found in section '{leak.Section}', field '{leak.Field}'.");
+            }
+
+            error.WriteLine("Nothing was written.");
+            return outcome.ExitCode;
+        }
+
+        var writeProblem = DiagnosticsBundle.WriteAtomically(options.OutputPath, outcome.Text, options.Force);
+        if (writeProblem is not null)
+        {
+            error.WriteLine(writeProblem);
+            return DiagnosticsBundleExitCode.OutputError;
+        }
+
+        if (options.AliasMapPath is not null)
+        {
+            try
+            {
+                var lines = new List<string> { DiagnosticsBundle.AliasMapWarning };
+                lines.AddRange(outcome.Aliaser.AliasMapLines());
+                File.WriteAllLines(options.AliasMapPath, lines);
+                output.WriteLine("Alias map written (DO NOT ATTACH it): " + options.AliasMapPath);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                error.WriteLine("Could not write the alias map (" + ex.GetType().Name + "); the bundle itself was written.");
+            }
+        }
+
+        output.WriteLine($"Wrote {outcome.Text.Length:N0} characters to {options.OutputPath}. Open it and check it before you attach it.");
+        return outcome.ExitCode;
+    }
 
     /// <summary>Exit codes <see cref="CheckSettingsAsync"/> returns — separate codes for a config problem, an
     /// unreachable store, and a settings result that needs attention, so a caller can tell them apart (#4214's
