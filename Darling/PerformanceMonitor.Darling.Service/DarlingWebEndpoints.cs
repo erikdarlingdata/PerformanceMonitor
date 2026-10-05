@@ -983,10 +983,6 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     internal static readonly TimeSpan ServerAddSlotTimeout = TimeSpan.FromSeconds(120);
 
     internal const string ServerAddTimedOutText = "Adding servers took too long; check the server list before retrying.";
-    internal const string ServerAddConnectText = "Could not connect to the server.";
-    internal const string ServerAddLoginText = "The server refused the login.";
-    internal const string ServerAddSecretText = "The password reference could not be resolved.";
-    internal const string ServerAddGenericText = "The server could not be added.";
 
     /// <summary>The most servers one <c>POST /api/servers</c> request may carry.</summary>
     internal const int MaxServersPerAddRequest = 20;
@@ -1078,51 +1074,55 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             }
 
             var stopwatch = Stopwatch.StartNew();
+            /* The core takes no request token, like the tool: a client that disconnects mid-batch must not
+               leave the entries after it unattempted while the ones before it are already saved and unaudited. */
+            Task<string> running;
             try
             {
-                /* The core takes no request token, like the tool: a client that disconnects mid-batch must not
-                   leave the entries after it unattempted while the ones before it are already saved and unaudited. */
-                string result;
-                try
-                {
-                    var running = addServers(body);
-                    try
-                    {
-                        result = await running.WaitAsync(slotTimeout);
-                    }
-                    catch (TimeoutException)
-                    {
-                        /* The slot is released below; the abandoned add is observed so a late fault is not unobserved. */
-                        _ = running.ContinueWith(t => _ = t.Exception, TaskContinuationOptions.OnlyOnFaulted);
-                        logger.LogWarning("POST /api/servers: the add did not finish within {Seconds} s; the slot was released", (int)slotTimeout.TotalSeconds);
-                        return ErrorResult(ServerAddTimedOutText, StatusCodes.Status503ServiceUnavailable);
-                    }
-                }
-                catch (Exception ex) when (ex is not OperationCanceledException)
-                {
-                    /* The core catches its own faults, so this is a backstop. Only the exception TYPE is logged: its
-                       message could quote a connection string or a value the request carried. */
-                    return ServerErrorResult(
-                        $"add_servers failed ({ex.GetType().Name})", "/api/servers", logger, stopwatch.ElapsedMilliseconds);
-                }
-
-                var secrets = SubmittedSecrets(entries);
-
-                if (ClassifyToolResponse(result) is ToolResponseKind.ServerError)
-                {
-                    return ServerErrorResult(RedactSecrets(McpHelpers.ErrorMessageOf(result), secrets), "/api/servers", logger, stopwatch.ElapsedMilliseconds);
-                }
-
-                var answer = RedactAddAnswer(result, secrets);
-                LogServerAddFailures(logger, DarlingWebSeat.FromContext(context).EditorPrincipal, answer);
-                answer = MapAddFailureDetails(answer);
-                LogServerAdds(logger, DarlingWebSeat.FromContext(context).EditorPrincipal, entries, answer);
-                return Results.Text(answer, "application/json", statusCode: MuteRuleEnvelopeStatus(answer));
+                running = addServers(body);
             }
-            finally
+            catch (Exception ex) when (ex is not OperationCanceledException)
             {
+                /* addServers threw before returning a task: nothing is running, so free the slot here. Only the
+                   exception TYPE is logged: its message could quote a value the request carried. */
                 addInFlight.Release();
+                return ServerErrorResult(
+                    $"add_servers failed ({ex.GetType().Name})", "/api/servers", logger, stopwatch.ElapsedMilliseconds);
             }
+
+            /* The slot is freed by the add itself, once, when it finishes (completed or faulted) - never by
+               the wait, so an add that outlives the timeout still holds the slot. */
+            _ = running.ContinueWith(_ => addInFlight.Release(), TaskScheduler.Default);
+
+            string result;
+            try
+            {
+                result = await running.WaitAsync(slotTimeout);
+            }
+            catch (TimeoutException)
+            {
+                _ = running.ContinueWith(t => _ = t.Exception, TaskContinuationOptions.OnlyOnFaulted);
+                logger.LogWarning("POST /api/servers: the add did not finish within {Seconds} s; the slot stays held until it does", (int)slotTimeout.TotalSeconds);
+                return ErrorResult(ServerAddTimedOutText, StatusCodes.Status503ServiceUnavailable);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                /* The core catches its own faults, so this is a backstop; only the TYPE is logged. */
+                return ServerErrorResult(
+                    $"add_servers failed ({ex.GetType().Name})", "/api/servers", logger, stopwatch.ElapsedMilliseconds);
+            }
+
+            var secrets = SubmittedSecrets(entries);
+
+            if (ClassifyToolResponse(result) is ToolResponseKind.ServerError)
+            {
+                return ServerErrorResult(RedactSecrets(McpHelpers.ErrorMessageOf(result), secrets), "/api/servers", logger, stopwatch.ElapsedMilliseconds);
+            }
+
+            var answer = RedactAddAnswer(result, secrets);
+            LogServerAddFailures(logger, DarlingWebSeat.FromContext(context).EditorPrincipal, answer);
+            LogServerAdds(logger, DarlingWebSeat.FromContext(context).EditorPrincipal, entries, answer);
+            return Results.Text(answer, "application/json", statusCode: MuteRuleEnvelopeStatus(answer));
         });
     }
 
@@ -1270,69 +1270,6 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         _ => "other",
     };
 
-    /// <summary>PURE: the fixed sentence a probe or save failure detail is shown as on the web route. Only the
-    /// probe (<c>connection_failed</c>) and save (<c>not_saved</c>) statuses carry free-form exception text; the
-    /// rest of the core's details are its own validation sentences and pass through unchanged. Refused, timed-out
-    /// and TLS failures share one sentence, as do the two unresolved-reference causes, so the answer does not
-    /// tell a caller what is listening, or which file or variable exists.</summary>
-    internal static string? FixedFailureDetail(string? status, string? detail)
-    {
-        if (status == DarlingMcpServerAdminTools.AddStatus.NotSaved)
-        {
-            return ServerAddGenericText;
-        }
-
-        if (status != DarlingMcpServerAdminTools.AddStatus.ConnectionFailed)
-        {
-            return null;
-        }
-
-        var text = detail ?? "";
-        if (text.Contains("secret", StringComparison.OrdinalIgnoreCase)
-            || text.Contains("environment variable", StringComparison.OrdinalIgnoreCase)
-            || text.Contains("reference", StringComparison.OrdinalIgnoreCase))
-        {
-            return ServerAddSecretText;
-        }
-
-        if (text.Contains("login failed", StringComparison.OrdinalIgnoreCase)
-            || text.Contains("authentication failed", StringComparison.OrdinalIgnoreCase)
-            || text.Contains("password", StringComparison.OrdinalIgnoreCase)
-            || text.Contains("28P01", StringComparison.Ordinal))
-        {
-            return ServerAddLoginText;
-        }
-
-        return ServerAddConnectText;
-    }
-
-    /// <summary>The answer with every probe or save failure detail replaced by its fixed sentence.</summary>
-    internal static string MapAddFailureDetails(string answer)
-    {
-        try
-        {
-            if (JsonNode.Parse(answer) is JsonObject envelope && envelope["results"] is JsonArray results)
-            {
-                foreach (var row in results.OfType<JsonObject>())
-                {
-                    var fixedText = FixedFailureDetail(TryGetString(row, "status"), TryGetString(row, "detail"));
-                    if (fixedText is not null)
-                    {
-                        row["detail"] = fixedText;
-                    }
-                }
-
-                return envelope.ToJsonString();
-            }
-        }
-        catch (JsonException)
-        {
-            return "{\"status\":\"error\",\"message\":\"The answer could not be read.\"}";
-        }
-
-        return answer;
-    }
-
     /// <summary>One Information line per failed row with the core's full detail (secrets already redacted), so the
     /// operator keeps what the web answer no longer shows.</summary>
     private static void LogServerAddFailures(ILogger logger, string principal, string answer)
@@ -1344,7 +1281,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 foreach (var row in results.OfType<JsonObject>())
                 {
                     var status = TryGetString(row, "status");
-                    if (FixedFailureDetail(status, TryGetString(row, "detail")) is null)
+                    if (status != DarlingMcpServerAdminTools.AddStatus.ConnectionFailed && status != DarlingMcpServerAdminTools.AddStatus.NotSaved)
                     {
                         continue;
                     }

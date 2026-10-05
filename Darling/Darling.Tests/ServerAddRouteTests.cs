@@ -275,7 +275,7 @@ public sealed class ServerAddRouteTests
         var (status, body) = await PostAsync(rig, Entries(1));
         Assert.Equal(HttpStatusCode.OK, status);
         AssertNoSecret(rig, body);
-        Assert.Equal(DarlingWebEndpoints.ServerAddLoginText, DetailOf(body));
+        Assert.Equal("login failed for password [redacted]", DetailOf(body));
         Assert.Contains("login failed for password [redacted]", rig.Log.Joined, StringComparison.Ordinal);
     }
 
@@ -339,7 +339,7 @@ public sealed class ServerAddRouteTests
         Assert.Empty(rig.Log.Lines);
     }
 
-    /* ═══════════════════════ fixed failure sentences ═══════════════════════ */
+    /* ═══════════════════════ failure text ═══════════════════════ */
 
     private static string Failed(string status, string detail) =>
         "{\"requested\":1,\"added\":0,\"skipped\":0,\"collided\":0,\"failed\":1,\"results\":[{\"server\":\"sql00\",\"status\":\"" + status
@@ -349,31 +349,18 @@ public sealed class ServerAddRouteTests
         JsonNode.Parse(body)!["results"]![0]!["detail"]!.GetValue<string>();
 
     [Theory]
-    [InlineData("Could not connect: Connection refused by the target host", DarlingWebEndpoints.ServerAddConnectText)]
-    [InlineData("Could not connect: Connection timed out", DarlingWebEndpoints.ServerAddConnectText)]
-    [InlineData("Could not connect: The SSL connection could not be established", DarlingWebEndpoints.ServerAddConnectText)]
-    [InlineData("Could not connect to the server.", DarlingWebEndpoints.ServerAddConnectText)]
-    [InlineData("Could not connect: Login failed for user 'monitor'.", DarlingWebEndpoints.ServerAddLoginText)]
-    [InlineData("Could not connect: password authentication failed for user \"monitor\"", DarlingWebEndpoints.ServerAddLoginText)]
-    [InlineData("Could not connect: password: environment variable 'DB_PW' is not set (or empty or blank) - the referenced secret cannot resolve.", DarlingWebEndpoints.ServerAddSecretText)]
-    [InlineData("Could not connect: password: secret file '/run/secrets/x' could not be read: Access denied", DarlingWebEndpoints.ServerAddSecretText)]
-    public async Task AProbeFailure_IsShownAsOneFixedSentence_AndTheFullDetailIsLogged(string detail, string expected)
+    [InlineData("connection_failed", "Could not connect: Connection refused by the target host")]
+    [InlineData("connection_failed", "Could not connect: Login failed for user 'monitor'.")]
+    [InlineData("not_saved", "Not saved: the write was refused")]
+    public async Task AFailureRow_CarriesTheCoresOwnText_ToTheCaller_AndTheLog(string rowStatus, string detail)
     {
-        await using var rig = await StartAsync(_ => Task.FromResult(Failed("connection_failed", detail)));
+        await using var rig = await StartAsync(_ => Task.FromResult(Failed(rowStatus, detail)));
         var (status, body) = await PostAsync(rig, Entries(1));
         Assert.Equal(HttpStatusCode.OK, status);
-        Assert.Equal(expected, DetailOf(body));
+        Assert.Equal(detail, DetailOf(body));
         Assert.Contains(rig.Log.Lines, l => l.StartsWith("Information: Server add failed", StringComparison.Ordinal)
-            && l.Contains(detail.Replace("\"", "\""), StringComparison.Ordinal));
+            && l.Contains(detail, StringComparison.Ordinal));
         AssertNoSecret(rig, body);
-    }
-
-    [Fact]
-    public async Task ASaveFailure_IsShownAsTheGenericSentence()
-    {
-        await using var rig = await StartAsync(_ => Task.FromResult(Failed("not_saved", "Not saved: relation x denied for " + "table")));
-        var (_, body) = await PostAsync(rig, Entries(1));
-        Assert.Equal(DarlingWebEndpoints.ServerAddGenericText, DetailOf(body));
     }
 
     [Theory]
@@ -390,7 +377,7 @@ public sealed class ServerAddRouteTests
     /* ═══════════════════════ slot timeout ═══════════════════════ */
 
     [Fact]
-    public async Task ACoreThatNeverFinishes_Answers503_AndFreesTheSlot()
+    public async Task ACoreThatNeverFinishes_Answers503_AndKeepsTheSlot_UntilTheAddFinishes()
     {
         var hang = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
         var calls = 0;
@@ -402,8 +389,22 @@ public sealed class ServerAddRouteTests
         Assert.Contains(DarlingWebEndpoints.ServerAddTimedOutText, body, StringComparison.Ordinal);
         AssertNoSecret(rig, body);
 
-        Assert.Equal(HttpStatusCode.OK, (await PostAsync(rig, Entries(1))).Status);
+        /* The first core call is still outstanding: the slot is still held. */
+        Assert.Equal(HttpStatusCode.TooManyRequests, (await PostAsync(rig, Entries(1))).Status);
+        Assert.Equal(1, calls);
+
         hang.SetResult(AddedAnswer);
+        var accepted = HttpStatusCode.TooManyRequests;
+        for (var i = 0; i < 50 && accepted == HttpStatusCode.TooManyRequests; i++)
+        {
+            accepted = (await PostAsync(rig, Entries(1))).Status;
+            if (accepted == HttpStatusCode.TooManyRequests)
+            {
+                await Task.Delay(50, TestContext.Current.CancellationToken);
+            }
+        }
+
+        Assert.Equal(HttpStatusCode.OK, accepted);
     }
 
     /* ═══════════════════════ principal on one line ═══════════════════════ */
