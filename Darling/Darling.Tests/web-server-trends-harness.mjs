@@ -159,6 +159,12 @@ let missing = null;
 answer = (url) => {
   const t = tool(url);
   if (t === "get_memory_clerks") return mode === "noclerks" ? data({ status: "empty", message: "No snapshot." }) : data({ server: "SRV1", clerks: CLERKS.map((c, i) => ({ clerk_type: c, memory_mb: 100 - i })) });
+  if (t === "get_file_io_trend") {
+    if (mode === "ioempty") return data({ status: "empty", message: "No file I/O recorded." });
+    const f = (name, r, w) => [{ time: ago(10), database_name: name, file_type: "ROWS", file_name: null, avg_read_latency_ms: r, avg_write_latency_ms: w }, { time: ago(5), database_name: name, file_type: "ROWS", file_name: null, avg_read_latency_ms: r + 1, avg_write_latency_ms: w == null ? null : w + 1 }];
+    const trend = mode === "ionowrite" ? [...f("db_a", 5, null)] : [...f("db_a", 5, 20), ...f("db_b", 9, 3)];
+    return data({ server: "SRV1", trend, discontinuities: mode === "iogap" ? [{ at: ago(7), reason: "restart", detail: "uptime reset" }] : [] });
+  }
   if (t !== "get_server_trend") return data({});
   const metric = url.searchParams.get("metric");
   if (mode === "allMissing") return data({ status: "empty", message: "None of the named clerk types were recorded. The window does hold other clerk types: heaviest_clerk_types lists the heaviest of them.", hints: { missing_clerk_types: (url.searchParams.get("clerk_types") || "").split(",").filter(Boolean), heaviest_clerk_types: ["CLERK_ALPHA", "CLERK_BETA"] } });
@@ -181,7 +187,7 @@ const all = (node, pred, found = []) => {
 };
 const settle = async () => { for (let i = 0; i < 100; i++) await new Promise((r) => setTimeout(r, 0)); };
 const ctx = { hours: 24, label: "last 24 hours", signal: new AbortController().signal };
-const kinds = { cpu: () => modules.tabs.serverTrendPanel("SRV1", ctx, "cpu_scheduler"), plan: (s) => modules.tabs.serverTrendPanel(s || "SRV1", ctx, "plan_cache"), clerks: (s) => modules.tabs.memoryClerksTrendPanel(s || "SRV1", ctx) };
+const kinds = { fileio: () => modules.tabs.fileIoPanel("SRV1", ctx),  cpu: () => modules.tabs.serverTrendPanel("SRV1", ctx, "cpu_scheduler"), plan: (s) => modules.tabs.serverTrendPanel(s || "SRV1", ctx, "plan_cache"), clerks: (s) => modules.tabs.memoryClerksTrendPanel(s || "SRV1", ctx) };
 async function build(kind, server) {
   const root = new FakeNode("main");
   modules.util.mount(root, kinds[kind](server));
@@ -199,7 +205,28 @@ const chartInfo = () => {
 };
 const texts = (root, cls) => all(root, (n) => String(n.className).includes(cls)).map((n) => n.textContent);
 
+const allCharts = () => modules.charts.chartCalls.map((c) => ({ id: c.id, labels: c.spec.series.map((x) => x.label), unit: c.spec.unit, scope: c.scope, points: c.spec.points.length }));
 const scenarios = {
+  fileio: async () => {
+    const root = await build("fileio");
+    return { reads: fetches.filter((f) => f.includes("get_file_io_trend")), charts: allCharts(), notices: texts(root, "notice"), empties: texts(root, "strip empty") };
+  },
+  fileioGap: async () => {
+    mode = "iogap";
+    const root = await build("fileio");
+    return { charts: allCharts(), notices: texts(root, "notice"), empties: texts(root, "strip empty") };
+  },
+  fileioNoWrites: async () => {
+    mode = "ionowrite";
+    const root = await build("fileio");
+    return { charts: allCharts(), notices: texts(root, "notice"), empties: texts(root, "strip empty") };
+  },
+  fileioEmpty: async () => {
+    mode = "ioempty";
+    const root = await build("fileio");
+    return { charts: allCharts(), empties: texts(root, "strip empty") };
+  },
+
   cpu: async () => {
     const root = await build("cpu");
     return { reads: trendReads(), chart: chartInfo(), notices: texts(root, "notice"), notes: texts(root, "mp-metric-note"), signals };
