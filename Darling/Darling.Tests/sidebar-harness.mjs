@@ -64,11 +64,11 @@ const tag = (id, name, parent_id, sort_order) => ({ id, name, parent_id, sort_or
 const forest = [tag(1, "East", null, 0), tag(2, "Prod", 1, 0), tag(3, "West", null, 1), tag(4, "Spare", null, 2)];
 const card = (server_id, display_name, server_name, tags, band = "Healthy") => ({ server_id, display_name, server_name, tags, band });
 const cards = [
-  card(1, "Alpha", "alpha-01.example.test", [{ id: 2, name: "Prod" }]),
-  card(2, "Bravo", "bravo-01.example.test", [{ id: 2, name: "Prod" }, { id: 3, name: "West" }]),
-  card(3, "Charlie", "charlie-01.example.test", [{ id: 1, name: "East" }]),
-  card(4, "Delta", "delta-01.example.test", []),
-  card(5, "Echo", "echo-01.example.test", [{ id: 3, name: "West" }]),
+  card(1, "Alpha", "alpha-host.example.test", [{ id: 2, name: "Prod" }]),
+  card(2, "Bravo", "bravo-host.example.test", [{ id: 2, name: "Prod" }, { id: 3, name: "West" }]),
+  card(3, "Charlie", "charlie-host.example.test", [{ id: 1, name: "East" }]),
+  card(4, "Delta", "delta-host.example.test", []),
+  card(5, "Echo", "echo-host.example.test", [{ id: 3, name: "West" }]),
 ];
 const fleet = { cards, tags: forest };
 
@@ -92,7 +92,7 @@ try {
     const match = (term) => names2(rowsFor(term, false));
     const names2 = (m) => m.rows.map((r) => r.card.display_name);
     out.byDisplay = match("ALPH");
-    out.byServerName = match("charlie-01");
+    out.byServerName = match("charlie-host");
     out.byTag = match("west");
     out.byTagCase = match("PROD");
     out.padded = match("  delta ");
@@ -119,7 +119,7 @@ try {
     fire(input, "input");
     out.typed = names(list);
     // the 60 s poll: a fresh payload painted into the same list, then a route change repaint with an active server
-    side.paintServerList(list, { cards: cards.slice().reverse(), tags: forest }, "bravo-01.example.test");
+    side.paintServerList(list, { cards: cards.slice().reverse(), tags: forest }, "bravo-host.example.test");
     out.afterPoll = names(list);
     out.termAfterPoll = side.sidebarSearchTerm();
     out.activeAfterPoll = all(list, (n) => /\bactive\b/.test(n.className)).map((n) => n.dataset.display);
