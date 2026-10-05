@@ -210,6 +210,9 @@ public static class PayloadDimensions
     private static readonly IReadOnlyDictionary<int, PayloadDimension> EmptyPlan =
         new Dictionary<int, PayloadDimension>();
 
+    /// <summary>The byte length of a <see cref="Digest"/> (SHA-256).</summary>
+    public const int DigestLengthBytes = 32;
+
     /// <summary>
     /// The content digest: SHA-256 over the UTF-8 bytes of the payload EXACTLY as it would have been
     /// stored inline — i.e. after <c>PgCollectorRowWriter.StripEmbeddedNuls</c>, so the digest keys
@@ -418,4 +421,52 @@ public static class PayloadDimensions
             $"WHERE {dimTable}.{LastSeenColumn} < EXCLUDED.{LastSeenColumn} - {LastSeenRefreshGuardInterval}";
     }
 
+    /// <summary>
+    /// The keep-alive for digests a batch referenced without content: ONE statement, one array of digests plus
+    /// the collection timestamp. It refreshes <see cref="LastSeenColumn"/> on the dim rows whose stored value
+    /// is more than <see cref="LastSeenRefreshGuardHours"/> stale, and returns the digests of the array that
+    /// have NO dim row at all (the fact row written from them resolves to nothing, and the caller must stop
+    /// presenting them).
+    ///
+    /// <para>The GC liveness invariant of <see cref="LastSeenColumn"/> holds exactly as on the insert path
+    /// (<see cref="UpsertSql"/>): a digest a batch references is stamped, never left older than
+    /// <see cref="LastSeenRefreshGuardHours"/> behind the newest fact row pointing at it, so the sweep
+    /// (which trails by more than that guard) cannot delete content a live row still references. The guard
+    /// is the same constant, so it also keeps the same cost cap: a continuously referenced digest takes at
+    /// most <c>24 / LastSeenRefreshGuardHours</c> updates a day, not one per cycle.</para>
+    ///
+    /// <para>The rows to refresh are chosen and locked in a subquery (<c>FOR UPDATE SKIP LOCKED</c>), so the
+    /// touch never waits on a row lock. There is no single total order across the upsert (<see cref="UpsertSql"/>,
+    /// whose conflict arm locks the row even when its guard is false) and this touch: one batch can hold digest A
+    /// from its upsert and want B in its touch while another holds B and wants A, and a waiting touch would turn
+    /// that into a deadlock that rolls back a whole batch. Skipping a locked row is safe because whoever holds a
+    /// stale-but-live dim row is refreshing it: the upsert's conflict arm, another touch, or the Query Store
+    /// plan map's <c>dim_touch</c>. A holder that rolls back leaves the row stale, and the next cycle touches it
+    /// again, far inside the dimension GC's margin. GC can never be the holder: <see cref="RowCappedDeleteSql"/>
+    /// only reaches rows older than <see cref="ComputeDimensionCutoff"/>, at least the guard plus one day behind,
+    /// and a digest referenced every cycle is never more than about <see cref="LastSeenRefreshGuardHours"/> hours
+    /// stale. A skipped row correctly counts as present.</para>
+    ///
+    /// <para>The absent-digest read is a plain read of the table as the statement began: the refresh never
+    /// deletes, and GC cannot reach a live digest, so a digest present at that point is present. The converse
+    /// can be false: a digest another, uncommitted batch is still inserting is not visible to this statement and
+    /// is reported absent. That costs one extra render on the next cycle and nothing else.</para>
+    /// </summary>
+    public static string TouchSql(string dimTable)
+    {
+        PayloadColumnOf(dimTable);
+        return
+            $"WITH refreshed AS (\n" +
+            $"    UPDATE {dimTable} SET {LastSeenColumn} = $2\n" +
+            $"    WHERE {DigestColumn} IN (\n" +
+            $"        SELECT s.{DigestColumn} FROM {dimTable} s\n" +
+            $"        WHERE s.{DigestColumn} = ANY($1::bytea[])\n" +
+            $"        AND   s.{LastSeenColumn} < $2 - {LastSeenRefreshGuardInterval}\n" +
+            $"        ORDER BY s.{DigestColumn}\n" +
+            $"        FOR UPDATE SKIP LOCKED)\n" +
+            $"    RETURNING 1)\n" +
+            $"SELECT w.digest FROM unnest($1::bytea[]) AS w(digest)\n" +
+            $"WHERE NOT EXISTS (SELECT 1 FROM {dimTable} d WHERE d.{DigestColumn} = w.digest)\n" +
+            $"ORDER BY w.digest";
+    }
 }
