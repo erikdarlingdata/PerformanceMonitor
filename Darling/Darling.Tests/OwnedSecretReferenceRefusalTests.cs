@@ -272,12 +272,16 @@ public sealed class OwnedSecretReferenceRefusalTests : IDisposable
     {
         /* PROGRA~3 and "Program Files" name the same directory on Windows but share no text; that cannot be created on
            this machine, so the comparison is exercised with a stand-in identity source. */
-        var owned = new DarlingOwnedSet(new[] { "/data/Program Files/darling" }, Array.Empty<string>());
-        FileId? Identity(string p) => p.Replace('\\', '/').TrimEnd('/') switch
-        {
-            "/data/Program Files/darling" or "/data/PROGRA~3/darling" => new FileId(7, 42),
-            _ => null,
-        };
+        /* Every path is put through Path.GetFullPath, as DarlingOwnedSecrets.RealPath does, so the stand-in identity map is
+           keyed on what the code looks up on this platform: on Windows "/data/x" is rooted to the current drive. */
+        static string Key(string p) => Path.GetFullPath(p).Replace('\\', '/').TrimEnd('/');
+        var comparer = OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal;
+        var ownedDir = Path.GetFullPath("/data/Program Files/darling");
+        var shortDir = Key("/data/PROGRA~3/darling");
+        var longDir = Key("/data/Program Files/darling");
+        var owned = new DarlingOwnedSet(new[] { ownedDir }, Array.Empty<string>());
+        FileId? Identity(string p) =>
+            comparer.Equals(Key(p), longDir) || comparer.Equals(Key(p), shortDir) ? new FileId(7, 42) : null;
 
         Assert.Equal(
             DarlingOwnedSecrets.ReferenceRefusalText,
