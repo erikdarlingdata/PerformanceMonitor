@@ -248,7 +248,6 @@ VALUES ($1, $2, $3, $4, 'work_mem', $5, NULL, 'Resource Usage / Memory', 'user',
             }
         });
 
-    /* The notice is always coverage. The row cap is reported by truncated, never by the notice: a capped page beside an early coverage reads covered. */
     /// <summary>The quiet claim of an empty answer (#4966): a window the store does not cover reads as "nothing was read", a covered one keeps its claim.</summary>
     [Theory]
     [InlineData("get_pg_lock_stats", "healthy state on a server without sustained contention")]
@@ -275,6 +274,7 @@ VALUES ($1, $2, $3, $4, 'work_mem', $5, NULL, 'Resource Usage / Memory', 'user',
             Assert.DoesNotContain(McpHelpers.CutWindowNothingReadMessage, coveredMessage, StringComparison.Ordinal);
         });
 
+    /* The notice is always coverage. The row cap is reported by truncated, never by the notice: a capped page beside an early coverage reads covered. */
     [Fact]
     public Task ACappedConfigChangesPage_BesideAnEarlyCoverage_ReadsCovered_WhileTruncatedIsTrue_AgainstDevPostgres() =>
         Run("get_pg_server_config_changes", "capped", async (c, ds, end, name) =>

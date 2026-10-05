@@ -124,8 +124,10 @@ public sealed class DarlingMcpPgXminTools
                     captures_in_window = capturesInWindow,
                     finding = McpHelpers.QuietUnlessCut(
                         emptyNotice.WindowTruncated, emptyNotice.EffectiveStart,
-                        factual: $"Nothing is holding back the xmin horizon in this window: the collector captured "
-                            + $"{capturesInWindow} time(s) and recorded no holder",
+                        factual: (emptyNotice.WindowTruncated
+                                ? "Nothing is holding back the xmin horizon in the captures the store holds"
+                                : "Nothing is holding back the xmin horizon in this window")
+                            + $": the collector captured {capturesInWindow} time(s) and recorded no holder",
                         coveredClaim: ". Vacuum is free to "
                             + "reclaim dead rows, so bloat growth has a different cause — look at whether "
                             + "autovacuum is being triggered at all (per-table thresholds and dead-tuple "

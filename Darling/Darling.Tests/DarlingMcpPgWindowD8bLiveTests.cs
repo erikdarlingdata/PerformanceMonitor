@@ -190,6 +190,7 @@ VALUES ($1, $2, $3, $4, 5, 500, 'appdb', 'u', 'app', NULL,
     [Theory]
     [InlineData("get_pg_replication_stats", "that is the expected answer", false)]
     [InlineData("get_pg_xmin_horizon", "Vacuum is free to reclaim dead rows", true)]
+    [InlineData("get_pg_session_states", "a real all-clear rather than missing data", false)]
     public async Task AnAllClear_ClaimsQuiet_OnlyOverACoveredWindow_AgainstDevPostgres(string read, string coveredClaim, bool inFinding)
     {
         var t = Of(read);
@@ -203,6 +204,13 @@ VALUES ($1, $2, $3, $4, 5, 500, 'appdb', 'u', 'app', NULL,
             Assert.True(cut.GetProperty("hints").GetProperty("window_truncated").GetBoolean(), cut.ToString());
             Assert.Contains(". " + McpHelpers.CutWindowNothingMessage, Text(cut), StringComparison.Ordinal);
             Assert.DoesNotContain(coveredClaim, Text(cut), StringComparison.Ordinal);
+            if (read == "get_pg_xmin_horizon")
+            {
+                /* The cut factual part claims only the captures the store holds, never the whole window. */
+                Assert.Contains("in the captures the store holds", Text(cut), StringComparison.Ordinal);
+                Assert.DoesNotContain("in this window", Text(cut), StringComparison.Ordinal);
+                Assert.EndsWith(". " + McpHelpers.CutWindowNothingMessage, Text(cut), StringComparison.Ordinal);
+            }
 
             await SeedServerAsync(c, t, name, end.AddDays(-30), end.AddDays(-30), end);
             var covered = WindowFloorLiveHarness.Parse(await t.Call(ds, name, 3, end));
