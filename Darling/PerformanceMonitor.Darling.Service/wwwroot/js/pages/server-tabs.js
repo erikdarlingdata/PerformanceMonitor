@@ -42,7 +42,7 @@
 import { el, readTool, readToolWithinKeptHistory, keptWindowStrip, windowFloorStrip, mount, truncate, loadingStrip, errorStrip, readErrorStrip, emptyStrip, disclosure, noticeStrip, getPath, fmtMs, fmtRate, localTime, parseUtc, windowFromHours, daysText } from "../util.js";
 import { renderPanel, VIZ } from "../panels.js";
 import { zoomableLineChart, chartZoomScope, SERIES_COLORS, CATEGORICAL_COLORS } from "../charts.js";
-import { multiPicker, mergeSeriesRows, pickerState } from "../multi-picker.js";
+import { multiPicker, mergeSeriesRows } from "../multi-picker.js";
 import { READ_FIELDS } from "../read-fields.js";
 import { analysisFindingsTab } from "./analysis-findings.js";
 
@@ -335,20 +335,41 @@ export async function drawWaitTrends(slot, server, ctx, checked, metric) {
   ]);
 }
 
+/** The most counters the Perfmon chart draws at once: one read each, and the palette has ten colors. */
+const MAX_COUNTERS_CHARTED = 10;
+
+/** The desktop's General Throughput pack: the counters checked when the reader has not chosen any. */
+const PERFMON_DEFAULT_COUNTERS = [
+  "Batch Requests/sec",
+  "SQL Compilations/sec",
+  "SQL Re-Compilations/sec",
+  "Query optimizations/sec",
+  "Network IO waits",
+];
+
+/** The default counter set, bounded by `max` and drawn only from the counters this server holds (case-insensitive,
+    as the desktop matches them); when none of the pack is collected, the first counter in the list. */
+function perfmonDefaults(available, max) {
+  const picked = [];
+  for (const want of PERFMON_DEFAULT_COUNTERS) {
+    const hit = available.find((n) => n.toLowerCase() === want.toLowerCase());
+    if (hit && picked.length < max && !picked.includes(hit)) picked.push(hit);
+  }
+  return picked.length || !available.length ? picked : [available[0]];
+}
+
 /**
- * Perfmon counters: a picker over the counters this server actually collects, charting the chosen one.
+ * Perfmon counters: the latest snapshot's table, and a multi-series trend over the counters the reader checks.
  *
- * The desktop viewer's Perfmon tab is a searchable counter list over a multi-series chart. get_perfmon_trend
- * REQUIRES a counter_name, so without a picker the read is unreachable from the browser — which is why the
- * options come from get_perfmon_stats (the latest snapshot's counter list) rather than being hardcoded: a
- * hardcoded name is exactly how you end up charting a counter this server does not collect.
- *
- * When the trend read still comes back empty it can carry hints.collected_counters. Its message tells the
- * reader to "see hints.collected_counters", which is a JSON path no browser reader can open, so the hint list
- * is rendered here instead of being dropped.
+ * The desktop viewer's Perfmon tab is a searchable counter list over a multi-series chart, opening on the General
+ * Throughput pack. get_perfmon_trend REQUIRES a counter_name, so the options come from get_perfmon_stats (the latest
+ * snapshot's counter list) rather than being hardcoded: a hardcoded name is exactly how you end up charting a counter
+ * this server does not collect. The trend read takes a counter name and no instance, so the list is by counter name.
+ * Each checked counter is one get_perfmon_trend read; the checked set and the search text live in multi-picker.js's
+ * module state keyed by server, so the 60 s rebuild keeps them.
  */
 export function perfmonPanel(server, ctx) {
-  const { panel, body } = panelShell("Perfmon Counters", "latest snapshot, with a trend for the counter you pick");
+  const { panel, body } = panelShell("Perfmon Counters", "latest snapshot, with a trend for the counters you check");
   (async () => {
     const res = await readTool("get_perfmon_stats", { server });
     if (res.kind === "error") return mount(body, readErrorStrip(res.message));
@@ -361,49 +382,115 @@ export function perfmonPanel(server, ctx) {
        exact payload it would render, and a second panel would have paid for get_perfmon_stats twice to show the
        list the picker above it is built from. */
     const chartSlot = el("div", {}, [loadingStrip()]);
-    const picker = pickerControl("Counter", names, (name) => drawPerfmonTrend(chartSlot, server, ctx, name));
+    const picker = multiPicker({
+      key: "perfmon|" + server,
+      label: "Counters",
+      options: names,
+      max: MAX_COUNTERS_CHARTED,
+      noun: "counter",
+      defaultsLabel: "Default counters",
+      defaults: perfmonDefaults,
+      onChange: (checked) => drawPerfmonTrends(chartSlot, server, ctx, checked),
+    });
     mount(body, [
       VIZ.table({ ...res.data, counters: perfmonRows(res.data.counters) }, {
         rowsKey: "counters",
         columns: PERFMON_COLUMNS,
         emptyText: "No perfmon counters in the latest snapshot.",
       }),
-      el("div", { class: "picker-row" }, [picker]),
+      picker.node,
       chartSlot,
     ]);
-    drawPerfmonTrend(chartSlot, server, ctx, names[0]);
+    picker.restoreFocus();
+    drawPerfmonTrends(chartSlot, server, ctx, picker.checked());
   })();
   return panel;
 }
 
-async function drawPerfmonTrend(slot, server, ctx, counterName) {
-  mount(slot, loadingStrip());
-  const trend = await readToolWithinKeptHistory("get_perfmon_trend", { server, counter_name: counterName, hours: ctx.hours });
-  if (trend.kind === "error") return mount(slot, readErrorStrip(trend.message));
-  if (trend.kind === "empty") {
-    const hinted = trend.hints && Array.isArray(trend.hints.collected_counters) ? trend.hints.collected_counters : null;
-    mount(slot, [
-      keptWindowStrip(trend),
-      emptyStrip(trend.message),
-      hinted && hinted.length
-        ? el("div", { class: "muted", style: "margin-top:0.4rem", text: "Collected here: " + hinted.join(", ") })
-        : null,
-    ]);
+/* The newest Perfmon draw's AbortController per server: a new draw aborts the previous one's reads, and a read that
+   finishes after that is dropped. */
+const perfmonDraws = new Map();
+
+export async function drawPerfmonTrends(slot, server, ctx, checked) {
+  const counters = checked.slice(0, MAX_COUNTERS_CHARTED);
+  const previous = perfmonDraws.get(server);
+  if (previous) previous.abort();
+  const mine = new AbortController();
+  perfmonDraws.set(server, mine);
+  if (!counters.length) {
+    mount(slot, emptyStrip("Check at least one counter to chart its trend."));
     return;
   }
-  /* #3653 A5: the payload's baseline discontinuities as a notice above the chart. */
-  const notes = discontinuityNotes(trend.data);
+  mount(slot, loadingStrip());
+  const results = await Promise.all(
+    counters.map((counter) => readToolWithinKeptHistory("get_perfmon_trend", { server, counter_name: counter, hours: ctx.hours }, mine.signal))
+  );
+  if (perfmonDraws.get(server) !== mine || mine.signal.aborted) return;
+
+  const drawn = [];
+  const notes = [];
+  const kept = [];
+  let keptHours = 0;
+  const seenNotes = new Set();
+  let failed = 0;
+  let allRates = true;
+  results.forEach((trend, i) => {
+    const counter = counters[i];
+    if (trend.kind !== "data") {
+      if (trend.kind !== "empty") failed++;
+      /* The server's no-trend sentence points at hints.collected_counters, a JSON path a reader cannot open, so
+         the counters it holds are listed here as text instead. */
+      const collected = trend.hints && Array.isArray(trend.hints.collected_counters) ? trend.hints.collected_counters : null;
+      const said = collected && trend.message ? trend.message.replace(/\s*[—-]\s*see hints\.collected_counters.*$/, ".") : trend.message;
+      notes.push(counter + ": " + (said || (trend.kind === "empty" ? "no trend data." : "the read failed.")) + (collected && collected.length ? " Collected here: " + collected.join(", ") + "." : ""));
+      return;
+    }
+    if (trend.keptHours) {
+      keptHours = Math.max(keptHours, trend.keptHours);
+      kept.push(trend);
+    }
+    /* #3653 A5: the payload's baseline discontinuities render as a notice above the chart. They are about the
+       server, so the same sentence from two counters shows once. */
+    for (const n of discontinuityNotes(trend.data)) seenNotes.add(n);
+    const points = trend.data.trend || [];
+    /* A rate counter plots its per_second (its stored value only climbs); any other counter plots its value. */
+    const rate = points.some((p) => p && "per_second" in p);
+    if (!rate) allRates = false;
+    drawn.push({
+      key: "c" + i,
+      label: counter,
+      rows: points.map((p) => ({ time: p.time, v: rate ? p.per_second : p.value })),
+      color: CATEGORICAL_COLORS[i % CATEGORICAL_COLORS.length],
+    });
+  });
+
+  const failures = notes.map((n) => noticeStrip(n));
+  if (!drawn.length && !failed) {
+    mount(slot, emptyStrip("None of the " + counters.length + " checked counters has trend data in this window."));
+    return;
+  }
+  if (!drawn.length) {
+    mount(slot, [failures.length ? failures : null, errorStrip("None of the " + counters.length + " checked counters returned a trend.")]);
+    return;
+  }
   mount(slot, [
-    keptWindowStrip(trend),
-    notes.length ? noticeStrip(notes.join(" ")) : null,
+    kept.length ? keptWindowStrip(kept[0]) : null,
+    seenNotes.size ? noticeStrip([...seenNotes].join(" ")) : null,
+    ...failures,
     zoomableLineChart({
-      points: trend.data.trend || [],
+      points: mergeSeriesRows(drawn, "time", "v"),
       xKey: "time",
-      ...perfmonTrendLines(trend.data.trend || []),
+      series: drawn.map((d) => ({ key: d.key, label: d.label, color: d.color })),
+      /* Rates print through fmtRate so a small real rate never reads as 0; a chart that mixes in a gauge or an
+         average prints plain numbers, since one axis serves every line. */
+      ...(allRates
+        ? { unit: "/s", formatValue: fmtRate }
+        : { formatValue: (v) => Number(v).toLocaleString(undefined, { maximumFractionDigits: 2 }) }),
       /* #2802: axis spans the requested window (ctx.hours ending now), not the data's own extent. A narrowed
          read spans the hours it answered for. */
-      ...windowFromHours(trend.keptHours || ctx.hours),
-    }, "perfmon-trend|" + counterName, chartZoomScope(ctx.hours)),
+      ...windowFromHours(keptHours || ctx.hours),
+    }, "perfmon-trend|" + server, chartZoomScope(ctx.hours)),
+    el("div", { class: "mp-metric-note", text: "Rate counters plot per second; other counters plot their value." }),
   ]);
 }
 
@@ -423,23 +510,6 @@ function perfmonRows(counters) {
       ? { ...c, running_total: c.value, value: null, delta_value: c.per_second == null ? null : c.delta_value }
       : c
   );
-}
-
-/* The trend chart's lines for the picked counter. A rate counter's points carry per_second, the figure the desktop
-   charts plot for it, and that is the one line: its value only climbs. Its axis and tooltip print through fmtRate,
-   so a small real rate never reads as 0. Every other counter keeps its value and delta lines and its own number
-   format, so a gauge still plots its reading. */
-function perfmonTrendLines(points) {
-  if (points.some((p) => p && "per_second" in p)) {
-    return { series: [{ key: "per_second", label: "Per second", color: SERIES_COLORS[0] }], unit: "/s", formatValue: fmtRate };
-  }
-  return {
-    series: [
-      { key: "value", label: "Value", color: SERIES_COLORS[0] },
-      { key: "delta_value", label: "Delta", color: SERIES_COLORS[1] },
-    ],
-    formatValue: (v) => Number(v).toLocaleString(undefined, { maximumFractionDigits: 2 }),
-  };
 }
 
 /**
@@ -3475,7 +3545,7 @@ const DEFAULT_CLERKS_CHECKED = 5;
 /**
  * Memory Clerks trend with a clerk-type selector, the web twin of the desktop's clerk picker. The options are the clerks
  * of the latest snapshot (get_memory_clerks, heaviest first); the first time a server is shown the heaviest five are
- * checked, as the desktop does. The checked set and search text live in multi-picker.js's module state keyed by server,
+ * checked, as the desktop does. The checked set and search text live in multi-picker.js's module state keyed by server (the first show and the Top clerks button both check the heaviest five),
  * so the 60 s rebuild keeps them.
  */
 export function memoryClerksTrendPanel(server, ctx) {
@@ -3488,14 +3558,15 @@ export function memoryClerksTrendPanel(server, ctx) {
     if (!options.length) return mount(body, emptyStrip("No memory clerks in the latest snapshot — the clerk collector may not have run yet."));
 
     const key = "clerks|" + server;
-    const held = pickerState(key);
-    if (!held.checked) held.checked = new Set(options.slice(0, DEFAULT_CLERKS_CHECKED));
     const chartSlot = el("div", {}, [loadingStrip()]);
     const picker = multiPicker({
       key,
       label: "Clerks",
       options,
       max: MAX_CLERKS_CHARTED,
+      noun: "clerk",
+      defaultsLabel: "Top clerks",
+      defaults: (o) => o.slice(0, DEFAULT_CLERKS_CHECKED),
       onChange: (checked) => drawClerkTrends(chartSlot, server, ctx, checked),
     });
     mount(body, [picker.node, chartSlot]);
@@ -3530,7 +3601,18 @@ export async function drawClerkTrends(slot, server, ctx, checked) {
   if (trend.kind === "error") return mount(slot, readErrorStrip(trend.message));
   const missingOf = (data) => (data && Array.isArray(data.missing_clerk_types) ? data.missing_clerk_types : []);
   const missingStrip = (data) => (missingOf(data).length ? noticeStrip("No samples in this window for: " + missingOf(data).join(", ") + ".") : null);
-  if (trend.kind === "empty") return mount(slot, [keptWindowStrip(trend), missingStrip(trend.data), emptyStrip(trend.message || "No clerk samples in this window.")]);
+  if (trend.kind === "empty") {
+    /* The empty envelope carries its lists under hints; the server's sentence points at them as JSON paths a
+       reader cannot open, so they are shown as text. */
+    const hints = trend.hints || {};
+    const heaviest = Array.isArray(hints.heaviest_clerk_types) ? hints.heaviest_clerk_types : [];
+    return mount(slot, [
+      keptWindowStrip(trend),
+      missingStrip(hints),
+      emptyStrip(trend.message || "No clerk samples in this window."),
+      heaviest.length ? el("div", { class: "mp-metric-note", text: "Heaviest clerks in this window: " + heaviest.join(", ") + "." }) : null,
+    ]);
+  }
 
   const drawn = (trend.data.series || []).map((s, i) => ({
     key: "c" + i,

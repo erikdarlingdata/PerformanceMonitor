@@ -120,7 +120,7 @@ try {
   fs.mkdirSync(path.join(scratch, "pages"));
   fs.writeFileSync(path.join(scratch, "package.json"), '{ "type": "module" }');
   for (const f of ["util.js", "panels.js", "read-fields.js"]) fs.copyFileSync(path.join(jsDir, f), path.join(scratch, f));
-  for (const rel of ["grid-tools.js", "multi-picker.js", path.join("pages", "analysis-findings.js")]) {
+  for (const rel of ["grid-tools.js", "multi-picker.js", path.join("pages", "analysis-findings.js"), path.join("pages", "plan-viewer.js")]) {
     const from = path.join(jsDir, rel);
     if (!fs.existsSync(from)) continue;
     fs.mkdirSync(path.dirname(path.join(scratch, rel)), { recursive: true });
@@ -161,6 +161,7 @@ answer = (url) => {
   if (t === "get_memory_clerks") return mode === "noclerks" ? data({ status: "empty", message: "No snapshot." }) : data({ server: "SRV1", clerks: CLERKS.map((c, i) => ({ clerk_type: c, memory_mb: 100 - i })) });
   if (t !== "get_server_trend") return data({});
   const metric = url.searchParams.get("metric");
+  if (mode === "allMissing") return data({ status: "empty", message: "None of the named clerk types were recorded. The window does hold other clerk types: heaviest_clerk_types lists the heaviest of them.", hints: { missing_clerk_types: (url.searchParams.get("clerk_types") || "").split(",").filter(Boolean), heaviest_clerk_types: ["CLERK_ALPHA", "CLERK_BETA"] } });
   if (mode === "empty") return data({ status: "empty", message: "No " + metric + " recorded in the last 24 hour(s)." });
   const discontinuities = [{ at: ago(7), reason: "restart", detail: "uptime reset" }];
   if (metric === "cpu_scheduler") return data({ server: "SRV1", metric, trend: pts((k) => ({ runnable_tasks: k, blocked_tasks: 0, queued_requests: k })), aggregate_note: "Each point averages.", discontinuities });
@@ -223,6 +224,26 @@ const scenarios = {
     missing = "CACHESTORE_OBJCP";
     const root = await build("clerks");
     return { notices: texts(root, "notice"), chart: chartInfo() };
+  },
+  allMissing: async () => {
+    mode = "allMissing";
+    const root = await build("clerks");
+    return { notices: texts(root, "notice"), empties: texts(root, "strip empty"), notes: texts(root, "mp-metric-note"), chart: chartInfo() };
+  },
+  clerkPicker: async () => {
+    const root = await build("clerks");
+    const buttons = () => all(root, (n) => n.tag === "button").map((b) => b.textContent);
+    const before = checkedNames(root);
+    for (const b of boxes(root).filter((x) => x.checked)) await toggle(b, false);
+    const cleared = checkedNames(root);
+    const top = all(root, (n) => n.tag === "button" && n.textContent === "Top clerks")[0];
+    if (top) { top.listeners.click.forEach((l) => l({})); await settle(); }
+    const afterTop = checkedNames(root);
+    const search = all(root, (n) => n.tag === "input" && n.attrs.type === "search")[0];
+    search.value = "zzz-no-such";
+    search.listeners.input.forEach((l) => l({}));
+    await settle();
+    return { buttons: buttons(), before, cleared, afterTop, noMatch: texts(root, "mp-none") };
   },
   emptyCpu: async () => {
     mode = "empty";

@@ -200,7 +200,7 @@ public sealed class BaselineDiscontinuityRenderCensusTests
         /* One definition and one use per trend-drawing function: the wait, perfmon, per-query and file-I/O panels, plus the instance-trend and memory-clerk panels. */
         var uses = Regex.Matches(js, @"discontinuityNotes\((trend\.data|res\.data)\)").Count;
         Assert.Equal(6, uses);
-        foreach (var fn in new[] { "export async function drawWaitTrends(", "async function drawPerfmonTrend(", "async function drawQueryTrend(", "export function fileIoPanel(", "export function serverTrendPanel(", "export async function drawClerkTrends(" })
+        foreach (var fn in new[] { "export async function drawWaitTrends(", "export async function drawPerfmonTrends(", "async function drawQueryTrend(", "export function fileIoPanel(", "export function serverTrendPanel(", "export async function drawClerkTrends(" })
         {
             var start = js.IndexOf(fn, StringComparison.Ordinal);
             Assert.True(start >= 0, fn);

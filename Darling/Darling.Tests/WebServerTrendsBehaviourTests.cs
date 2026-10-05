@@ -123,6 +123,27 @@ public sealed class WebServerTrendsBehaviourTests
     }
 
     [Fact]
+    public void WhenNoNamedClerkHasSamples_TheHintsListsAreShownAsText()
+    {
+        var r = Run("allMissing");
+        Assert.Contains(Strings(r.GetProperty("notices")), n => n.StartsWith("No samples in this window for: MEMORYCLERK_SQLBUFFERPOOL"));
+        Assert.Contains("Heaviest clerks in this window: CLERK_ALPHA, CLERK_BETA.", Strings(r.GetProperty("notes")));
+        Assert.Equal(JsonValueKind.Null, r.GetProperty("chart").ValueKind);
+    }
+
+    [Fact]
+    public void TheClerkPicker_SaysClerk_AndItsDefaultsButtonChecksTheHeaviestFive()
+    {
+        var r = Run("clerkPicker");
+        Assert.Contains("Top clerks", Strings(r.GetProperty("buttons")));
+        Assert.DoesNotContain("Top waits", Strings(r.GetProperty("buttons")));
+        Assert.Equal(FirstFive, Strings(r.GetProperty("before")));
+        Assert.Empty(r.GetProperty("cleared").EnumerateArray());
+        Assert.Equal(FirstFive, Strings(r.GetProperty("afterTop")));
+        Assert.Equal("No clerk matches the search.", Strings(r.GetProperty("noMatch")).Single());
+    }
+
+    [Fact]
     public void AnEmptyAnswer_ShowsTheReadsMessage_NotAChart()
     {
         foreach (var scenario in new[] { "emptyCpu", "emptyClerks" })
