@@ -210,6 +210,29 @@ VALUES ($1, $2, $3, $4, $5, $6, $7)",
         AssertCovered(root, WindowStart);
     }
 
+    [Theory]
+    [InlineData(Tool.SystemHealth)]
+    [InlineData(Tool.SevereErrors)]
+    [InlineData(Tool.IoIssues)]
+    [InlineData(Tool.SchedulerIssues)]
+    [InlineData(Tool.MemoryConditions)]
+    [InlineData(Tool.CpuTasks)]
+    [InlineData(Tool.MemoryBroker)]
+    [InlineData(Tool.MemoryNodeOom)]
+    [InlineData(Tool.SignificantWaits)]
+    public async Task ALateFirstEventOfThisType_OlderEventsOfAnotherType_NoRunsBeforeTheWindow_IsCovered(Tool tool)
+    {
+        await _duckDb.InitializeAsync();
+        /* No collector run before the window; an event of another type sits before the window start, which proves the window is
+           not the data's start even though the tool's own first event came a day before the anchor. */
+        await SeedEventAsync(OtherTypeOf(tool), WindowStart.AddDays(-1));
+        await SeedEventAsync(tool, Anchor.AddDays(-1));
+
+        var root = Root(await CallAsync(tool));
+
+        AssertCovered(root, WindowStart);
+    }
+
     /// <summary>The three keys sit right after <c>hours_back</c>, in this order, on every tool.</summary>
     [Theory]
     [InlineData(Tool.SystemHealth)]
@@ -349,18 +372,27 @@ VALUES ($1, $2, $3, $4, $5, $6, $7)",
     }
 
     /// <summary>Events of the tool's own type were captured and gated out (the first rung): still an empty answer, still the keys.</summary>
-    [Fact]
-    public async Task AnEmptyWindow_EventsCapturedButGatedOut_CarriesTheKeysUnderHints()
+    [Theory]
+    [InlineData(Tool.MemoryBroker)]
+    [InlineData(Tool.SignificantWaits)]
+    public async Task AnEmptyWindow_EventsCapturedButGatedOut_CarriesTheKeysUnderHints(Tool tool)
     {
         await _duckDb.InitializeAsync();
         await SeedLogRunsAsync(Anchor.AddDays(-2), Anchor, everyMinutes: 30);
-        /* A memory-broker event with the HIGH notification, which the gate drops. */
+        /* An event of the tool's own type that its gate drops: the broker fixture's HIGH notification, or a wait under the duration floor. */
+        var (eventType, fixture, _) = SourceOf(tool);
+        var xml = LoadFixture(fixture);
+        if (tool == Tool.SignificantWaits)
+        {
+            xml = xml.Replace("<data name=\"duration\"><value>1500</value>", "<data name=\"duration\"><value>10</value>", StringComparison.Ordinal);
+        }
+
         await ExecuteAsync(@"
 INSERT INTO system_health_events (system_health_event_id, collection_time, server_id, server_name, event_time, event_type, event_xml)
 VALUES ($1, $2, $3, $4, $2, $5, $6)",
-            _nextId++, Naive(Anchor.AddDays(-1)), _serverId, ServerName, SystemHealthParser.MemoryBrokerEvent, LoadFixture("memory_broker.xml"));
+            _nextId++, Naive(Anchor.AddDays(-1)), _serverId, ServerName, eventType, xml);
 
-        var root = Root(await CallAsync(Tool.MemoryBroker));
+        var root = Root(await CallAsync(tool));
 
         Assert.Equal("empty", root.GetProperty("status").GetString());
         Assert.Equal(1, root.GetProperty("events_in_window").GetInt32());
