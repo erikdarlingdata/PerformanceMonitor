@@ -62,6 +62,10 @@ function svg(tag, attrs) {
  *   onZoom     — optional brush-zoom callback (#1606): a pointer drag across ≥8px of plot selects a time
  *                range and calls onZoom(fromMs, toMs) so the caller can RE-RUN the panel on that window
  *                (server-side re-run keeps bucket resolution + tier routing + the partial-window notice honest).
+ *   title      — optional chart name; it names the saved image and the exported CSV.
+ *   source     — optional { read, params }: the read name and parameters behind the chart. The chart menu's
+ *                Show Data Source item appears only when this is given.
+ *   zoomed / onResetZoom — optional: when zoomed is true and onResetZoom is a function, the chart menu offers Reset zoom.
  *   windowStart— optional x-axis DOMAIN start, windowEnd its end, both UTC-epoch ms (#2802). When both are given
  *   windowEnd    and windowEnd > windowStart, the axis spans [windowStart, windowEnd] — the REQUESTED time window
  *                — instead of the data's own first/last-point extent, so a sparse discrete-event series (blocking,
@@ -73,6 +77,7 @@ function svg(tag, attrs) {
  */
 export function renderLineChart(spec) {
   const { points, xKey, series, formatValue = (v) => String(v), clampMax = null, unit = null, mode = "line", thresholds = null, annotations = null, onSelect = null, series2 = null, onZoom = null, integerTicks = false, windowStart = null, windowEnd = null } = spec;
+  const { title = null, source = null, zoomed = false, onResetZoom = null } = spec;
   const stacked = mode === "stacked";
   const stackedBar = mode === "stacked-bar";
   /* Both stacked modes share the cumulative pre-pass, the sum-based y-domain, and the hover-at-stack-top dots. */
@@ -545,6 +550,7 @@ export function renderLineChart(spec) {
     tooltip.style.display = "none";
   });
 
+  attachChartMenu(chart, root, { title, source, zoomed, onResetZoom, xKey, series, series2 }, rows);
   return chart;
 }
 
@@ -923,6 +929,224 @@ function niceScale(min, max, maxTicks, clampMax, integer = false) {
 }
 
 
+/* ─────────────────────────── chart menu (#4843) ─────────────────────────── */
+
+/* The Viewer's chart context menu, in the browser: Copy Image, Save Image As, Reset zoom, Export Data to CSV and
+   Show Data Source, in that order. It opens from a small visible button (keyboard reachable) and from right-click.
+   Items are plain text. grid-tools.js is loaded on first use, so a page that never opens the menu never pulls it. */
+export const CHART_MENU_LABELS = {
+  copy: "Copy Image",
+  save: "Save Image As...",
+  reset: "Reset zoom",
+  csv: "Export Data to CSV...",
+  source: "Show Data Source",
+};
+
+const SVG_STYLE_PROPS = ["fill", "stroke", "stroke-width", "stroke-dasharray", "stroke-linecap", "stroke-linejoin", "opacity", "fill-opacity", "stroke-opacity", "font-family", "font-size", "font-weight", "font-variant-numeric", "text-anchor", "display"];
+const IMAGE_SCALE = 2;
+
+/** The chart's series as CSV rows: a header, then one row per (time, series) with a value. Times are UTC. */
+export function chartCsvRows(rows, xKey, series, series2) {
+  const all = series2 ? series.concat([series2]) : series;
+  const out = [["DateTime (UTC)", "Series", "Value"]];
+  for (const { t, r } of rows) {
+    const stamp = t.toISOString().slice(0, 19).replace("T", " ");
+    for (const s of all) {
+      const v = r[s.key];
+      if (v == null || v === "" || isNaN(v)) continue;
+      out.push([stamp, s.label || s.key, Number(v)]);
+    }
+  }
+  return out;
+}
+
+/** The text Show Data Source displays: the read name, then each parameter on its own line. */
+export function chartSourceLines(source) {
+  const lines = ["Read: " + String(source.read)];
+  const params = source.params && typeof source.params === "object" ? Object.entries(source.params) : [];
+  if (params.length === 0) lines.push("Parameters: none");
+  else for (const [k, v] of params) lines.push(k + " = " + (v != null && typeof v === "object" ? JSON.stringify(v) : String(v)));
+  return lines;
+}
+
+/* A copy of the live SVG with the computed style of every element written onto it, so the PNG matches the screen
+   (the page's CSS and theme variables do not travel with a serialized SVG). */
+function inlineStyledSvgClone(root) {
+  const clone = root.cloneNode(true);
+  const live = [root].concat(Array.from(root.querySelectorAll("*")));
+  const copy = [clone].concat(Array.from(clone.querySelectorAll("*")));
+  live.forEach((node, i) => {
+    const cs = getComputedStyle(node);
+    const decl = SVG_STYLE_PROPS.map((p) => p + ":" + cs.getPropertyValue(p)).join(";");
+    copy[i].setAttribute("style", decl);
+  });
+  const box = root.getBoundingClientRect();
+  clone.setAttribute("width", String(Math.round(box.width) || W));
+  clone.setAttribute("height", String(Math.round(box.height) || H));
+  clone.setAttribute("xmlns", SVG_NS);
+  return clone;
+}
+
+/* Rasterizes the chart to a PNG blob on a canvas: no network, the SVG goes in as a data URL. */
+async function chartPngBlob(root) {
+  const clone = inlineStyledSvgClone(root);
+  const width = Number(clone.getAttribute("width"));
+  const height = Number(clone.getAttribute("height"));
+  const url = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(new XMLSerializer().serializeToString(clone));
+  const img = new Image();
+  await new Promise((resolve, reject) => {
+    img.onload = resolve;
+    img.onerror = () => reject(new Error("the browser could not draw the chart"));
+    img.src = url;
+  });
+  const canvas = document.createElement("canvas");
+  canvas.width = width * IMAGE_SCALE;
+  canvas.height = height * IMAGE_SCALE;
+  const ctx = canvas.getContext("2d");
+  ctx.fillStyle = getComputedStyle(document.body).backgroundColor || "#fff";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+  return new Promise((resolve, reject) => canvas.toBlob((b) => (b ? resolve(b) : reject(new Error("the browser could not encode the image"))), "image/png"));
+}
+
+function menuFileStem(title) {
+  return String(title || "chart").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 60) || "chart";
+}
+
+function attachChartMenu(chart, root, opts, rows) {
+  const { title, source, zoomed, onResetZoom, xKey, series, series2 } = opts;
+  const hasSource = !!(source && source.read);
+  const canReset = zoomed === true && typeof onResetZoom === "function";
+  const button = el("button", { class: "chart-menu-btn", type: "button", title: "Chart menu", "aria-label": "Chart menu", "aria-haspopup": "menu", "aria-expanded": "false", text: "⋯" });
+  const status = el("div", { class: "chart-menu-status", role: "status" });
+  const sourceBox = el("div", { class: "chart-source" });
+  sourceBox.style.display = "none";
+  let popup = null;
+  let outside = null;
+
+  const say = (msg) => {
+    status.textContent = msg;
+  };
+  const close = () => {
+    if (popup) {
+      chart.removeChild(popup);
+      popup = null;
+    }
+    button.setAttribute("aria-expanded", "false");
+    if (outside && typeof document.removeEventListener === "function") document.removeEventListener("click", outside);
+    outside = null;
+  };
+  const actions = [];
+  actions.push({
+    label: CHART_MENU_LABELS.copy,
+    run: async () => {
+      try {
+        const blob = await chartPngBlob(root);
+        const nav = typeof navigator !== "undefined" ? navigator : null;
+        if (!nav || !nav.clipboard || typeof nav.clipboard.write !== "function" || typeof ClipboardItem === "undefined" || window.isSecureContext === false) {
+          say("Copy isn't available here: the browser only allows it on a secure (HTTPS or localhost) page.");
+          return;
+        }
+        await nav.clipboard.write([new ClipboardItem({ "image/png": blob })]);
+        say("Image copied.");
+      } catch (e) {
+        say("Copy failed: " + (e && e.message ? e.message : "the browser refused."));
+      }
+    },
+  });
+  actions.push({
+    label: CHART_MENU_LABELS.save,
+    run: async () => {
+      try {
+        const blob = await chartPngBlob(root);
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = menuFileStem(title) + ".png";
+        a.style.display = "none";
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        setTimeout(() => URL.revokeObjectURL(url), 10000);
+        say("Image saved.");
+      } catch (e) {
+        say("Save failed: " + (e && e.message ? e.message : "the browser refused."));
+      }
+    },
+  });
+  if (canReset) actions.push({ label: CHART_MENU_LABELS.reset, run: () => onResetZoom() });
+  actions.push({
+    label: CHART_MENU_LABELS.csv,
+    run: async () => {
+      const tools = await import("./grid-tools.js");
+      tools.downloadCsv(tools.csvFileName(menuFileStem(title)), tools.toCsv(chartCsvRows(rows, xKey, series, series2)));
+      say("CSV exported.");
+    },
+  });
+  if (hasSource) {
+    actions.push({
+      label: CHART_MENU_LABELS.source,
+      run: () => {
+        sourceBox.textContent = "";
+        for (const line of chartSourceLines(source)) sourceBox.appendChild(el("div", { text: line }));
+        sourceBox.style.display = sourceBox.style.display === "none" ? "" : "none";
+      },
+    });
+  }
+
+  const open = (x, y) => {
+    if (popup) close();
+    const items = actions.map((a) => {
+      const b = el("button", { class: "chart-menu-item", type: "button", role: "menuitem", text: a.label });
+      b.addEventListener("click", () => {
+        close();
+        button.focus && button.focus();
+        a.run();
+      });
+      return b;
+    });
+    popup = el("div", { class: "chart-menu", role: "menu" }, items);
+    if (typeof x === "number" && typeof y === "number") {
+      popup.style.left = x + "px";
+      popup.style.top = y + "px";
+    }
+    popup.addEventListener("keydown", (e) => {
+      const at = items.indexOf(typeof document !== "undefined" ? document.activeElement : null);
+      if (e.key === "Escape") {
+        close();
+        button.focus && button.focus();
+      } else if (e.key === "ArrowDown") {
+        e.preventDefault();
+        items[(at + 1) % items.length].focus();
+      } else if (e.key === "ArrowUp") {
+        e.preventDefault();
+        items[(at - 1 + items.length) % items.length].focus();
+      }
+    });
+    chart.appendChild(popup);
+    button.setAttribute("aria-expanded", "true");
+    if (items[0] && items[0].focus) items[0].focus();
+    if (typeof document.addEventListener === "function") {
+      outside = (e) => {
+        if (e && e.target === button) return;
+        close();
+      };
+      /* After this click finishes, so the click that opened the menu does not close it. */
+      setTimeout(() => outside && document.addEventListener("click", outside), 0);
+    }
+  };
+
+  button.addEventListener("click", () => (popup ? close() : open()));
+  chart.addEventListener("contextmenu", (e) => {
+    e.preventDefault();
+    const box = chart.getBoundingClientRect();
+    open(Math.max(0, e.clientX - box.left), Math.max(0, e.clientY - box.top));
+  });
+  chart.appendChild(button);
+  chart.appendChild(status);
+  chart.appendChild(sourceBox);
+}
+
 /* ─────────────────────────── client-side brush zoom ─────────────────────────── */
 
 /* The zoom each zoomable chart holds, at MODULE scope so the 60 s poll's rebuild of the panel grid re-applies it.
@@ -1013,6 +1237,11 @@ export function zoomableLineChart(spec, id, scope) {
     if (!zoomed && getChartZoom(id, scope)) setChartZoom(id, scope, null, null);
     const chart = renderLineChart({
       ...shown,
+      zoomed,
+      onResetZoom: () => {
+        setChartZoom(id, scope, null, null);
+        draw();
+      },
       onZoom: (fromMs, toMs) => {
         /* Only a span that holds a loaded point is kept; an empty brush stores nothing, so a later poll cannot zoom unasked. */
         if (applyChartZoom(spec, { from: fromMs, to: toMs }).zoomed) {

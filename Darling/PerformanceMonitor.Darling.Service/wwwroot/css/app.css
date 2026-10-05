@@ -506,6 +506,13 @@ td.cell-picked { outline: 1px solid var(--accent); outline-offset: -1px; }
   display: none;
   box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4);
 }
+.chart-menu-btn { position: absolute; top: 2px; right: 4px; background: transparent; border: 1px solid transparent; color: var(--muted); border-radius: var(--radius-sm); cursor: pointer; line-height: 1; padding: 0.1rem 0.4rem; }
+.chart-menu-btn:hover, .chart-menu-btn:focus-visible { border-color: var(--border); color: var(--fg); }
+.chart-menu { position: absolute; top: 24px; right: 4px; z-index: 5; display: flex; flex-direction: column; min-width: 11rem; background: var(--bg-dark); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 0.2rem 0; }
+.chart-menu-item { background: transparent; border: 0; color: var(--fg); text-align: left; padding: 0.3rem 0.7rem; font-size: 0.78rem; cursor: pointer; }
+.chart-menu-item:hover, .chart-menu-item:focus-visible { background: var(--border); }
+.chart-menu-status { font-size: 0.72rem; color: var(--muted); }
+.chart-source { margin-top: 0.3rem; font-size: 0.72rem; color: var(--muted); font-family: var(--mono, monospace); }
 .chart-tooltip .t-time { color: var(--muted); margin-bottom: 0.2rem; }
 .chart-tooltip .t-row { display: flex; align-items: center; gap: 0.35rem; }
 .chart-tooltip .t-row .swatch { width: 10px; height: 3px; border-radius: 2px; }
