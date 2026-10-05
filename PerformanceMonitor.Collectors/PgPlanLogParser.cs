@@ -42,7 +42,7 @@ namespace PerformanceMonitor.Collectors;
 ///
 /// <para><b>The hash covers the plan's SHAPE, not its estimates (#5114).</b> The stored JSON keeps everything
 /// <c>auto_explain</c> wrote, but the hash is taken over a projection of it: costs, row and width estimates,
-/// every <c>log_analyze</c> counter, buffer and I/O figures, <c>Settings</c>, <c>JIT</c>, timings and the number of
+/// every <c>log_analyze</c> counter (WAL, index searches), any <c>Estimated *</c> key, buffer and I/O figures, <c>Settings</c>, <c>JIT</c>, timings and the number of
 /// workers planned are dropped, because they drift between captures of one plan (statistics refresh, cache state,
 /// a setting) and would read as a plan change. What stays is the tree: node types, join order and method, relations,
 /// indexes, scan direction, parallel awareness and every condition and key field. The projection is a DENYLIST, so a
@@ -350,8 +350,8 @@ public static class PgPlanLogParser
     };
 
     /* Keys on a plan node that are an estimate, a runtime counter, a buffer figure or a degree the planner derives
-       from estimates. The pattern families in IsVolatileNodeKey cover the rest (Actual *, Rows Removed by *, * Blocks,
-       * I/O *). Anything NOT listed or matched stays in the hash: unknown means shape. */
+       from estimates. The pattern families in IsVolatileNodeKey cover the rest (Actual *, Estimated *, Rows Removed by *,
+       * Blocks, * I/O *, WAL *). Anything NOT listed or matched stays in the hash: unknown means shape. */
     private static readonly HashSet<string> s_nodeVolatile = new(StringComparer.Ordinal)
     {
         "Startup Cost", "Total Cost", "Plan Rows", "Plan Width", "Planned Partitions",
@@ -363,7 +363,7 @@ public static class PgPlanLogParser
         "Full-sort Groups", "Pre-sorted Groups",
         "Storage", "Maximum Storage",
         "Tuples Inserted", "Conflicting Tuples",
-        "WAL Records", "WAL FPI", "WAL Bytes",
+        "Index Searches",
         "Subplans Removed",
     };
 
@@ -371,6 +371,8 @@ public static class PgPlanLogParser
     internal static bool IsVolatileNodeKey(string key) =>
         s_nodeVolatile.Contains(key)
         || key.StartsWith("Actual ", StringComparison.Ordinal)
+        || key.StartsWith("Estimated ", StringComparison.Ordinal)
+        || key.StartsWith("WAL ", StringComparison.Ordinal)
         || key.StartsWith("Rows Removed by ", StringComparison.Ordinal)
         || key.EndsWith(" Blocks", StringComparison.Ordinal)
         || key.Contains("I/O ", StringComparison.Ordinal);
