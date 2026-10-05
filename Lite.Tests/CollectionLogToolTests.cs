@@ -11,6 +11,7 @@ using System.IO;
 using System.Text.Json;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
+using PerformanceMonitor.Common;
 using PerformanceMonitorLite.Database;
 using PerformanceMonitorLite.Mcp;
 using PerformanceMonitorLite.Models;
@@ -114,7 +115,8 @@ public sealed class CollectionLogToolTests : IClassFixture<SharedDuckDbFixture>,
             Assert.DoesNotContain("widen", text, StringComparison.OrdinalIgnoreCase);
         }
 
-        /* Collected, but outside the asked-for window: a true negative, and widening IS the move. */
+        /* Collected, but outside the asked-for window: nothing was read from the window, so the answer is the
+           cut-window one (#4966) rather than "genuinely quiet". It is not the never-collected fault either. */
         await SeedLogAsync("query_store", DateTime.UtcNow.AddHours(-48));
 
         var quiet = await McpHealthTools.GetCollectionLog(service, _serverManager, ServerName, 1, 200);
@@ -122,7 +124,7 @@ public sealed class CollectionLogToolTests : IClassFixture<SharedDuckDbFixture>,
         Assert.Equal("empty", quietRoot.GetProperty("status").GetString());
         var quietText = quietRoot.GetProperty("message").GetString()!;
         Assert.DoesNotContain("EVER", quietText, StringComparison.Ordinal);
-        Assert.Contains("widen", quietText, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal($"No collector runs recorded for {ServerName} in the last 1 hour(s). {McpHelpers.CutWindowNothingReadMessage}", quietText);
     }
 
     [Fact]
