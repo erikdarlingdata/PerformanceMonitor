@@ -781,12 +781,14 @@ public sealed class DarlingExportViewerConfigTests
             catch (Exception ex)
             {
                 Assert.Skip($"cannot create a symlink on this machine ({ex.Message}) - needs Developer Mode or elevation");
-                return;
             }
 
             Assert.True(
                 File.GetAttributes(linkPath).HasFlag(FileAttributes.ReparsePoint),
                 "precondition: the planted path is a reparse point");
+            Assert.Equal(
+                Path.GetFullPath(redirected),
+                Path.GetFullPath(File.ResolveLinkTarget(linkPath, returnFinalTarget: true)!.FullName));
 
             var output = new StringWriter();
             var error = new StringWriter();
@@ -804,6 +806,104 @@ public sealed class DarlingExportViewerConfigTests
         {
             root.Delete(recursive: true);
         }
+    }
+
+    /// <summary>
+    /// A directory JUNCTION needs no privilege to create on Windows, so unlike the symlink case this one
+    /// cannot skip for want of a right: it is the redirection an ordinary local user can always plant. Two
+    /// shapes, both refused with nothing written through them: the junction IS the destination folder, and
+    /// the junction sits where server.crt would be written.
+    /// </summary>
+    [Fact]
+    public async Task ExportViewerConfigAsync_JunctionAtTheDestinationOrTheCertificatePath_RefusesWithoutWritingThrough()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "DPAPI requires Windows.");
+
+        var root = Directory.CreateTempSubdirectory("darling-export-junction-");
+        try
+        {
+            var dataDirectory = Path.Combine(root.FullName, "pg");
+            var configPath = Path.Combine(root.FullName, "darling.json");
+            await File.WriteAllTextAsync(configPath, ManagedConfigJson(dataDirectory));
+
+            /* Shape 1: the destination folder is a junction to a real folder elsewhere. */
+            var realFolder = Path.Combine(root.FullName, "elsewhere");
+            Directory.CreateDirectory(realFolder);
+            var junctionDestination = Path.Combine(root.FullName, "handoff-junction");
+            CreateJunction(junctionDestination, realFolder);
+
+            var output = new StringWriter();
+            var error = new StringWriter();
+            var exit = await DarlingCliCommands.ExportViewerConfigAsync(
+                configPath, junctionDestination, output, error, CancellationToken.None);
+
+            Assert.Equal(1, exit);
+            Assert.Contains("junction", error.ToString(), StringComparison.Ordinal);
+            Assert.Equal("", output.ToString());
+            Assert.Empty(Directory.GetFileSystemEntries(realFolder));
+
+            /* Shape 2: a real destination whose server.crt is a junction to a real folder. */
+            var destination = Path.Combine(root.FullName, "handoff");
+            Directory.CreateDirectory(destination);
+            var certJunction = Path.Combine(destination, "server.crt");
+            var certTarget = Path.Combine(root.FullName, "elsewhere-cert");
+            Directory.CreateDirectory(certTarget);
+            CreateJunction(certJunction, certTarget);
+
+            output = new StringWriter();
+            error = new StringWriter();
+            exit = await DarlingCliCommands.ExportViewerConfigAsync(
+                configPath, destination, output, error, CancellationToken.None);
+
+            Assert.Equal(1, exit);
+            Assert.Contains("symbolic link", error.ToString(), StringComparison.Ordinal);
+            Assert.Equal("", output.ToString());
+            Assert.Empty(Directory.GetFileSystemEntries(certTarget));
+        }
+        finally
+        {
+            /* A junction is removed as a link (non-recursive); a recursive delete would not follow it either,
+               but removing them first leaves no doubt the real folders are not walked. */
+            foreach (var junction in new[] { "handoff-junction", Path.Combine("handoff", "server.crt") })
+            {
+                var path = Path.Combine(root.FullName, junction);
+                if (Directory.Exists(path))
+                {
+                    Directory.Delete(path, recursive: false);
+                }
+            }
+
+            root.Delete(recursive: true);
+        }
+    }
+
+    /// <summary>Creates a directory junction with <c>mklink /J</c>, which needs no special privilege, and proves
+    /// it exists and resolves to the target before the caller asserts anything about the product.</summary>
+    private static void CreateJunction(string junctionPath, string targetPath)
+    {
+        var psi = new System.Diagnostics.ProcessStartInfo("cmd.exe")
+        {
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+        };
+        psi.ArgumentList.Add("/c");
+        psi.ArgumentList.Add("mklink");
+        psi.ArgumentList.Add("/J");
+        psi.ArgumentList.Add(junctionPath);
+        psi.ArgumentList.Add(targetPath);
+        using var proc = System.Diagnostics.Process.Start(psi)!;
+        var stderr = proc.StandardError.ReadToEnd();
+        proc.WaitForExit();
+        Assert.True(proc.ExitCode == 0, $"precondition: mklink /J failed ({stderr})");
+
+        Assert.True(
+            new DirectoryInfo(junctionPath).Attributes.HasFlag(FileAttributes.ReparsePoint),
+            "precondition: the junction is a reparse point");
+        Assert.Equal(
+            Path.GetFullPath(targetPath).TrimEnd(Path.DirectorySeparatorChar),
+            Path.GetFullPath(Directory.ResolveLinkTarget(junctionPath, returnFinalTarget: true)!.FullName)
+                .TrimEnd(Path.DirectorySeparatorChar));
     }
 
     /// <summary>
