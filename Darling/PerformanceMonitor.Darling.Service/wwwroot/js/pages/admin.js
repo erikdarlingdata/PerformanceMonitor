@@ -6,11 +6,13 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
-/* Admin: a read-only window onto what the desktop's Manage Servers, Notification Routes and Settings windows show.
-   Three tabs, each one existing read, no controls that change anything:
+/* Admin: a window onto what the desktop's Manage Servers, Notification Routes and Settings windows show.
+   Three tabs, each one existing read:
      Servers             GET /api/admin/servers (every configured server, enabled or not)
      Notification Routes get_notification_routes
      Alert Settings      get_alert_settings
+   Routes and Settings change nothing. The Servers tab also lets a sign-in that can make changes edit one server in place
+   (#5240): an Edit button on each row opens a form above the grid, filled from GET /api/admin/servers/{id}.
    The active tab rides in the hash (#/admin/<tab>) and in module scope, so the 60 s repaint keeps it.
    Every cell is an allow-listed column or a key the settings read emits; a route row's destinations are never
    read (the tool reports channel names only), and a settings key that looks like a credential is dropped before
@@ -18,6 +20,7 @@
 
 import { VIZ } from "../panels.js";
 import { el, mount, loadingStrip, errorStrip, emptyStrip, noticeStrip, readTool, apiGet } from "../util.js";
+import { getSession } from "../views-api.js";
 
 export const SERVER_COLUMNS = [
   { key: "display_name", label: "Display Name" },
@@ -36,6 +39,30 @@ export const SERVER_COLUMNS = [
 /* A disabled server's row is drawn with the grey row class the grid already uses for a canceled job run. */
 export function serverRowClass(row) {
   return row && row.status === "Disabled" ? "band-Offline" : "";
+}
+
+/* The Edit button of one row (#5240): a row the list reports without a numeric server_id gets none, because the by-id
+   read and the edit are keyed on it. The label names the server for a screen reader. */
+function editCell(row) {
+  if (!row || !Number.isInteger(row.server_id)) return null;
+  const name = row.display_name || row.server_name || "server " + row.server_id;
+  return el("button", {
+    class: "btn",
+    type: "button",
+    text: "Edit",
+    "aria-label": "Edit " + name,
+    "data-server-id": String(row.server_id),
+    onClick: () => openEdit(row.server_id),
+  });
+}
+
+/* The trailing Edit column. Like the Mute column on Alert History it is the web's per-row write affordance: a link-only
+   cell, so the CSV and the copied text leave it out. */
+export const EDIT_COLUMN = { key: "edit", label: "Edit", csv: false, copy: false, render: editCell };
+
+/** The Servers grid's columns: SERVER_COLUMNS, plus the Edit column for a seat whose session reports can_edit. */
+export function serverColumns(canEdit) {
+  return canEdit ? SERVER_COLUMNS.concat([EDIT_COLUMN]) : SERVER_COLUMNS;
 }
 
 export const ROUTE_COLUMNS = [
@@ -432,19 +459,287 @@ function failure(res, emptyPrefix) {
   return null;
 }
 
-const SERVER_NOTE = "Every configured server, enabled or disabled. Add, edit and remove stay in the desktop Manage Servers window.";
+/* The Servers tab's note, by what the session probe said (#5240). A probe that failed is not the same as a read-only
+   seat: reloading fixes the first and never the second, so each gets its own words. */
+const NOTE_READ_ONLY = "Every configured server, enabled or disabled. This sign-in is read-only. Add, edit and remove stay in the desktop Manage Servers window.";
+const NOTE_EDITING = "Every configured server, enabled or disabled. Edit changes a server in place. Add, remove, enable or disable, and excluded databases stay in the desktop Manage Servers window.";
+const NOTE_PROBE_FAILED = "Every configured server, enabled or disabled. Could not check whether this sign-in can make changes. Reload the page to try again.";
+
+function serversNote(session) {
+  if (session.probe_failed === true) return NOTE_PROBE_FAILED;
+  return session.can_edit === true ? NOTE_EDITING : NOTE_READ_ONLY;
+}
+
+/* The Servers tab's page state, in module scope so the 60 s repaint keeps it (#5240).
+   `layout` is the three boxes the tab draws into, { body, noticeBox, formBox, tableBox }. They are mounted into the body
+   ONCE, on the first draw into it, and every later draw (the poll, the re-read after a change, a read that failed, the
+   render catch) refreshes only noticeBox and tableBox. A node taken out of the document loses the focus and the keystrokes
+   that follow it, and the same node put back does not get the focus back, so while a form is open no code passes formBox
+   or anything that holds it to mount() or clear() (review finding 1; manage-tags.js keeps its form the same way).
+   `editForm` is the open edit form, or null. `opening` counts every open and every close, so a by-id read that lands after
+   its form was discarded is dropped. `notice` is the page-level sentence, { message, isError } or null: a refused or
+   failed open now, a save's answer later. `summary` is the count-and-note text of the last good list read. */
+let layout = null;
+let editForm = null;
+let opening = 0;
+let notice = null;
+let summary = null;
+
+function serverBoxes(body) {
+  if (layout && layout.body === body) return layout;
+  layout = {
+    body,
+    noticeBox: el("div", { class: "admin-notice", "data-box": "notice" }),
+    formBox: el("div", { class: "admin-form-box", "data-box": "form" }),
+    tableBox: el("div", { class: "admin-table-box", "data-box": "table" }),
+  };
+  mount(body, [layout.noticeBox, layout.formBox, layout.tableBox]);
+  return layout;
+}
+
+/* The page-level sentence (when there is one) above the count and note of the last good read. */
+function drawNotice() {
+  if (!layout) return;
+  const nodes = [];
+  if (notice) {
+    nodes.push(el("div", { class: "strip " + (notice.isError ? "error" : "notice"), role: notice.isError ? "alert" : "status", text: notice.message }));
+  }
+  if (summary) nodes.push(noticeStrip(summary));
+  mount(layout.noticeBox, nodes);
+}
+
+/** Show `message` above the grid, as an error when `isError`; null or "" takes it away. */
+function setNotice(message, isError) {
+  notice = message ? { message, isError: isError === true } : null;
+  drawNotice();
+}
+
+/* The Edit buttons now in the grid, for the code that locks them while a request runs. */
+function editButtons() {
+  return layout ? layout.tableBox.querySelectorAll("button[data-server-id]") : [];
+}
+
+/* Read the list again under a new render generation (a poll read still in flight is dropped), into the boxes already on
+   the page, so an open form is not touched. Resolves when the read has been drawn. */
+function reloadServers() {
+  if (shownTab !== "servers" || !layout || layout.body !== shownBody) return Promise.resolve();
+  return startBuilder("servers", shownBody, ++renderGeneration);
+}
 
 async function buildServers(body, generation) {
-  const res = await apiGet("/api/admin/servers");
+  const [session, res] = await Promise.all([getSession(), apiGet("/api/admin/servers")]);
   if (generation !== renderGeneration) return;
+  const boxes = serverBoxes(body);
   const bad = failure(res, "No servers are registered");
-  if (bad) return mount(body, bad);
+  if (bad) {
+    summary = null;
+    drawNotice();
+    return mount(boxes.tableBox, bad);
+  }
   const rows = serverRows(res.data);
-  mount(body, [
-    noticeStrip(rows.length + (rows.length === 1 ? " server. " : " servers. ") + SERVER_NOTE),
-    VIZ.table({ servers: rows }, { rowsKey: "servers", columns: SERVER_COLUMNS, rowClass: serverRowClass, emptyText: "No servers are registered yet." }),
+  summary = rows.length + (rows.length === 1 ? " server. " : " servers. ") + serversNote(session);
+  drawNotice();
+  mount(boxes.tableBox, VIZ.table({ servers: rows }, {
+    rowsKey: "servers",
+    columns: serverColumns(session.can_edit === true),
+    rowClass: serverRowClass,
+    emptyText: "No servers are registered yet.",
+  }));
+}
+
+/* ─────────────────────────── the edit form (#5240) ─────────────────────────── */
+
+/* The desktop dialog's sentences (Darling.Viewer AddServerDialog.xaml and .xaml.cs), with the dashes and arrows of
+   the originals written out as plain punctuation. */
+const ENGINE_TEXT = { sqlserver: "SQL Server", postgres: "PostgreSQL" };
+const ENGINE_LOCKED = "The engine is part of what this server is: its collected history is keyed to it, so an edit cannot change it. To move a host between engines, add it as a new server and remove this one.";
+const POSTGRES_NOTE = "PostgreSQL targets connect with username and password authentication. The Database box below is optional: blank connects to the maintenance database ('postgres'), which the cluster-wide collectors read from. Encryption maps to sslmode: Optional is prefer, and Mandatory or Strict is verify-full, or require when 'Trust server certificate' is checked (typically needed for Aurora).";
+const MANAGED_IDENTITY_NOTE = "Managed Identity only works when the Darling service runs on an Azure VM / resource that has a managed identity assigned.";
+const AUTH_LABELS = {
+  Windows: "Windows Authentication",
+  SQL: "SQL Server Authentication",
+  ServicePrincipal: "Azure Service Principal",
+  ManagedIdentity: "Azure Managed Identity",
+};
+const USERNAME_LABELS = { SQL: "Username", ServicePrincipal: "Client (Application) ID", ManagedIdentity: "User-Assigned Identity Client ID (optional)" };
+const PASSWORD_LABELS = { SQL: "Password", ServicePrincipal: "Client Secret" };
+const PASSWORD_REQUIRED = "(required for this change)";
+const PASSWORD_KEPT = "(leave blank to keep the stored one)";
+
+/* One labelled text box. The label wraps its control, so it names it without an id or a name attribute. */
+function textRow(f, key, label, props) {
+  const caption = el("span", { class: "mute-label", text: label });
+  const input = el("input", { type: "text", class: "tag-input", "data-field": key, ...props });
+  input.value = f.values[key];
+  input.addEventListener("input", () => {
+    f.values[key] = input.value;
+    f.refresh();
+  });
+  return { input, caption, row: el("label", { class: "tag-field", "data-row": key }, [caption, input]) };
+}
+
+function checkRow(f, key, label) {
+  const input = el("input", { type: "checkbox", "data-field": key });
+  input.checked = f.values[key] === true;
+  input.addEventListener("change", () => {
+    f.values[key] = input.checked;
+    f.refresh();
+  });
+  return el("label", { class: "tag-field", "data-row": key }, [input, " " + label]);
+}
+
+/* The encryption choice. The stored word is matched to an option ignoring case by editFormValues; a word the page does not
+   know is added as one more option and stays selected, so a form nobody touched sends no change (D15). */
+function encryptRow(f) {
+  const stored = f.values.encrypt_mode;
+  const words = EDIT_ENCRYPT_MODES.includes(stored) ? EDIT_ENCRYPT_MODES : EDIT_ENCRYPT_MODES.concat([stored]);
+  const select = el("select", { class: "tag-input", "data-field": "encrypt_mode" }, words.map((w) => el("option", { value: w, text: w || "(blank)" })));
+  select.value = stored;
+  select.addEventListener("change", () => {
+    f.values.encrypt_mode = select.value;
+    f.refresh();
+  });
+  return el("label", { class: "tag-field", "data-row": "encrypt_mode" }, [el("span", { class: "mute-label", text: "Encryption:" }), select]);
+}
+
+/* The four authentication choices of a SQL Server form. A PostgreSQL form has none: its auth is always SQL. */
+function authRows(f) {
+  const choices = EDIT_AUTHS.map((word) => {
+    const input = el("input", { type: "radio", name: "admin-edit-auth", value: word, "data-field": "auth" });
+    input.addEventListener("change", () => {
+      if (!input.checked) return;
+      f.values.auth = word;
+      f.refresh();
+    });
+    return { input, label: el("label", { class: "tag-field" }, [input, " " + AUTH_LABELS[word]]) };
+  });
+  f.radios = choices.map((c) => c.input);
+  return el("fieldset", { class: "tag-field", "data-row": "auth" }, [
+    el("legend", { class: "mute-label", text: "Authentication" }),
+    choices.map((c) => c.label),
   ]);
 }
+
+/* Show or hide a row. The author rule `.tag-field { display: block }` outranks the browser's own [hidden] rule (as app.css
+   notes for the nav), so the attribute alone would leave the row on screen; the inline display is what hides it. */
+function setShown(node, shown) {
+  node.hidden = !shown;
+  node.style.display = shown ? "" : "none";
+}
+
+/* The form for the open server. It is built once per open and kept up to date in place by f.refresh(), so typing never
+   replaces a node. Values live in f.values (text and booleans, the shape editFormValues returns); the password is never
+   copied into it: the Save step reads the password box once, when it is pressed. The username is kept per authentication
+   mode in f.usernames, as the desktop has one box per mode, so a SQL login never turns into a client id by a click. */
+function formNode(f) {
+  const postgres = f.original.engine === "postgres";
+  const heading = el("h3", { text: "Edit " + (postgres ? "PostgreSQL Server" : "SQL Server") + " Connection", tabindex: "-1", "data-role": "heading" });
+  const host = textRow(f, "host", "Server Name / Address");
+  const name = textRow(f, "display_name", "Display Name (optional)");
+  const port = postgres ? textRow(f, "port", "Port:", { inputmode: "numeric" }) : null;
+  const username = textRow(f, "username", USERNAME_LABELS.SQL);
+  const managedNote = el("div", { class: "muted", "data-row": "managed-identity-note", text: MANAGED_IDENTITY_NOTE });
+  const secret = el("input", { type: "password", class: "tag-input", "data-field": "password" });
+  const secretCaption = el("span", { class: "mute-label", text: PASSWORD_LABELS.SQL });
+  const secretRow = el("label", { class: "tag-field", "data-row": "password" }, [secretCaption, secret]);
+  f.heading = heading;
+  f.passwordInput = secret;
+  f.bannerBox = el("div", { "data-box": "banner" });
+  f.saveButton = el("button", { class: "btn primary", type: "button", text: "Save", "data-action": "save", onClick: () => submitEdit() });
+  f.cancelButton = el("button", { class: "btn", type: "button", text: "Cancel", "data-action": "cancel", onClick: () => closeEdit() });
+  f.refresh = () => {
+    const auth = f.values.auth;
+    for (const input of f.radios || []) input.checked = input.value === auth;
+    if (f.shownAuth !== auth) {
+      f.shownAuth = auth;
+      username.input.value = f.usernames[auth] || "";
+    }
+    f.usernames[auth] = username.input.value;
+    f.values.username = auth === "Windows" ? "" : username.input.value;
+    username.caption.textContent = USERNAME_LABELS[auth] || USERNAME_LABELS.SQL;
+    setShown(username.row, auth !== "Windows");
+    setShown(managedNote, auth === "ManagedIdentity");
+    setShown(secretRow, auth === "SQL" || auth === "ServicePrincipal");
+    secretCaption.textContent = (PASSWORD_LABELS[auth] || PASSWORD_LABELS.SQL) + " " + (passwordRequired(f.original, f.values) ? PASSWORD_REQUIRED : PASSWORD_KEPT);
+  };
+  const rows = [
+    el("div", { class: "tag-field", "data-row": "engine" }, [
+      el("span", { class: "mute-label", text: "Database Engine" }),
+      el("div", { "data-field": "engine", text: ENGINE_TEXT[f.original.engine] }),
+      el("div", { class: "muted", text: ENGINE_LOCKED }),
+    ]),
+    host.row,
+    name.row,
+  ];
+  if (postgres) rows.push(port.row, el("div", { class: "muted", text: "blank = 5432, the default" }), el("div", { class: "muted", text: POSTGRES_NOTE }));
+  else rows.push(authRows(f));
+  rows.push(
+    username.row,
+    managedNote,
+    secretRow,
+    el("h4", { class: "section-title", text: "Connection Options" }),
+    encryptRow(f),
+    checkRow(f, "trust_server_certificate", "Trust server certificate (skip certificate validation)"),
+    textRow(f, "database", "Database:").row,
+  );
+  if (!postgres) {
+    rows.push(
+      checkRow(f, "read_only_intent", "Read-only intent (for AG listeners and readable replicas)"),
+      checkRow(f, "multi_subnet_failover", "Multi-subnet failover (for AG listeners and FCIs)"),
+    );
+  }
+  rows.push(
+    textRow(f, "monthly_cost_usd", "Monthly Cost ($):", { inputmode: "decimal" }).row,
+    f.bannerBox,
+    el("div", { class: "form-actions" }, [f.saveButton, f.cancelButton]),
+  );
+  f.refresh();
+  return el("div", { class: "card tag-form admin-edit-form", role: "group", "aria-label": heading.textContent, "data-edit-form": String(f.id) }, [heading, ...rows]);
+}
+
+/* Open the edit form for server `id` (#5240). One form at a time: opening another row discards the open one. The by-id
+   read answers every way it can, and each way is handled (review finding 9): data fills the form; a 404 means the
+   server was removed meanwhile, so its sentence is shown and the list is read again; a 401 hands over to the shell; any
+   other answer (403, 500, a network failure, a body that is not a server's settings) shows its sentence and opens no
+   form. The password box is created only after a good read. */
+async function openEdit(id) {
+  closeEdit();
+  const mine = opening;
+  setNotice(null);
+  mount(layout.formBox, loadingStrip("Loading server settings"));
+  const res = await apiGet("/api/admin/servers/" + id);
+  if (mine !== opening) return;
+  const data = res.kind === "data" && res.data && typeof res.data === "object" && !Array.isArray(res.data) && typeof res.data.modified_at === "string" ? res.data : null;
+  if (!data) {
+    closeEdit();
+    if (res.kind === "auth") return;
+    const sentence = typeof res.message === "string" && res.message !== "" ? res.message : "Could not read this server's settings.";
+    setNotice(sentence, res.status !== 404);
+    if (res.status === 404) await reloadServers();
+    return;
+  }
+  const original = editFormValues(data);
+  const usernames = { SQL: "", ServicePrincipal: "", ManagedIdentity: "" };
+  if (original.auth in usernames) usernames[original.auth] = original.username;
+  const f = { id, original, values: { ...original }, usernames, token: data.modified_at };
+  editForm = f;
+  mount(layout.formBox, formNode(f));
+  f.heading.focus();
+}
+
+/* The one way the form goes away: Cancel, a save that finished, an answer that closes it, another row's Edit and a tab
+   switch all come here (review finding 3). The typed password is cleared FIRST, while its box is still in the page, so no
+   detached node, closure or state object keeps it; then the state is dropped and the box emptied. Counting a close also
+   drops a by-id read that is still in flight. */
+function closeEdit() {
+  opening++;
+  if (editForm && editForm.passwordInput) editForm.passwordInput.value = "";
+  editForm = null;
+  if (layout) mount(layout.formBox, []);
+}
+
+/* Save (the next step builds on this: the checks, the request and the answer table). The form's Save button calls it. */
+async function submitEdit() {}
 
 const ROUTES_NOTE =
   "Read only. Destinations (webhook URLs, keys) are never reported by the service; only the names of the channels a " +
@@ -487,17 +782,39 @@ async function buildSettings(body, generation) {
 
 const BUILDERS = { servers: buildServers, routes: buildRoutes, settings: buildSettings };
 
+/* Run a tab's builder. A builder that throws leaves an error strip: in the Servers tab's table area when its boxes are on the
+   page (the form above it is never replaced), else in the body. */
+function startBuilder(tabId, body, generation) {
+  return BUILDERS[tabId](body, generation).catch((e) => {
+    if (generation !== renderGeneration) return;
+    const strip = errorStrip("Could not render this tab: " + (e && e.message ? e.message : String(e)));
+    mount(tabId === "servers" && layout && layout.body === body ? layout.tableBox : body, strip);
+  });
+}
+
 export function renderAdmin(main, tabId) {
   const tab = findTab(tabId);
   activeTab = tab.id;
   const generation = ++renderGeneration;
   /* A repaint of the tab already on screen keeps the body it drew, so the page does not collapse and lose its scroll
      position while the read is in flight; the loading strip is only for the first draw of a tab. */
-  const body = shownBody && shownTab === tab.id ? shownBody : el("div", { class: "admin-body" }, [loadingStrip("Loading " + tab.label.toLowerCase())]);
+  const sameTab = !!shownBody && shownTab === tab.id;
+  if (!sameTab) {
+    /* Arriving at a tab other than the one on screen discards an open edit form (its password is cleared first) and the
+       Servers tab's page state. */
+    closeEdit();
+    layout = null;
+    notice = null;
+    summary = null;
+  }
+  const body = sameTab ? shownBody : el("div", { class: "admin-body" }, [loadingStrip("Loading " + tab.label.toLowerCase())]);
   shownBody = body;
   shownTab = tab.id;
-  mount(main, [el("div", { class: "page-head" }, [el("h2", { text: "Admin" })]), tabBar(tab), body]);
-  BUILDERS[tab.id](body, generation).catch((e) => {
-    if (generation === renderGeneration) mount(body, errorStrip("Could not render this tab: " + (e && e.message ? e.message : String(e))));
-  });
+  /* Stable layout (review finding 1): when the tab is unchanged and its body is still attached to `main`, nothing above or
+     around the body changes, so main is NOT mounted again. Mounting main takes the body, and the open form inside it, out of
+     the document, and a focused box inside a node taken out loses its focus. Only the builder runs. */
+  if (!(sameTab && body.parentNode === main)) {
+    mount(main, [el("div", { class: "page-head" }, [el("h2", { text: "Admin" })]), tabBar(tab), body]);
+  }
+  startBuilder(tab.id, body, generation);
 }

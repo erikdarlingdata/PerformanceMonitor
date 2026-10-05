@@ -537,6 +537,276 @@ public sealed class AdminServerEditBehaviourTests
         Assert.Equal(expected, redacted.GetString());
     }
 
+    // ------------------------------------------------------------------ the page: Edit column, notes, opening and closing the form
+
+    private const string NoteStart = "Every configured server, enabled or disabled. ";
+
+    private static string[] Strings(JsonElement array) => array.EnumerateArray().Select(e => e.GetString()!).ToArray();
+
+    private static string StripText(JsonElement strip) => strip.GetProperty("text").GetString()!;
+
+    [Fact]
+    public void AReadOnlySeat_SeesNoEditAction_AndNeverReadsTheEditRow()
+    {
+        var page = Run("seat:readonly");
+
+        Assert.Equal(0, page.GetProperty("editHeaders").GetInt32());
+        Assert.Equal(0, page.GetProperty("editButtons").GetInt32());
+        // The session probe and the list are the only requests: no by-id read and no PATCH.
+        Assert.Equal(new[] { "GET /api/session", "GET /api/admin/servers" }, Strings(page.GetProperty("requests")));
+        Assert.Equal("3 servers. " + NoteStart + "This sign-in is read-only. Add, edit and remove stay in the desktop Manage Servers window.", Assert.Single(Strings(page.GetProperty("notice"))));
+        Assert.False(page.GetProperty("form").GetBoolean());
+    }
+
+    [Theory]
+    [InlineData("probefailed")]
+    [InlineData("probedropped")]
+    public void ASeatWhoseSessionProbeFailed_SeesNoEditAction_AndANoteToReloadThePage(string kind)
+    {
+        var page = Run("seat:" + kind);
+
+        Assert.Equal(0, page.GetProperty("editHeaders").GetInt32());
+        Assert.Equal(0, page.GetProperty("editButtons").GetInt32());
+        Assert.Equal(
+            "3 servers. " + NoteStart + "Could not check whether this sign-in can make changes. Reload the page to try again.",
+            Assert.Single(Strings(page.GetProperty("notice"))));
+        Assert.DoesNotContain("read-only", Assert.Single(Strings(page.GetProperty("notice"))), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AnEditingSeat_SeesAnEditButtonOnEachRowWithAnId_AndTheEditingNote()
+    {
+        var page = Run("seat:editor");
+
+        Assert.Equal(1, page.GetProperty("editHeaders").GetInt32());
+        Assert.Equal(new[] { "Edit Alpha", "Edit Bravo" }, Strings(page.GetProperty("labels")));
+        Assert.Equal(new[] { "1", "2" }, Strings(page.GetProperty("ids")));
+        // Echo is listed without a server_id, so it has no button.
+        Assert.Equal(new[] { "Alpha", "Bravo", "Echo" }, Strings(page.GetProperty("rows")));
+        Assert.Equal(
+            "3 servers. " + NoteStart + "Edit changes a server in place. Add, remove, enable or disable, and excluded databases stay in the desktop Manage Servers window.",
+            Assert.Single(Strings(page.GetProperty("notice"))));
+    }
+
+    [Fact]
+    public void TheEditButton_ReadsTheServerById_FillsTheForm_AndFocusesItsHeading()
+    {
+        var page = Run("open:charlie");
+        var form = page.GetProperty("form");
+
+        Assert.Equal(new[] { "/api/admin/servers/3" }, Strings(page.GetProperty("byIdGets")));
+        Assert.Equal("Edit SQL Server Connection", form.GetProperty("heading").GetString());
+        Assert.True(form.GetProperty("headingFocused").GetBoolean());
+        Assert.Equal("-1", form.GetProperty("headingTabindex").GetString());
+        Assert.Equal("SQL Server", form.GetProperty("engine").GetString());
+        Assert.Equal(
+            new[] { "engine", "host", "display_name", "auth", "username", "password", "encrypt_mode", "trust_server_certificate", "database", "read_only_intent", "multi_subnet_failover", "monthly_cost_usd" },
+            Strings(form.GetProperty("keys")));
+        var values = form.GetProperty("values");
+        Assert.Equal("charlie", values.GetProperty("host").GetString());
+        Assert.Equal("Charlie", values.GetProperty("display_name").GetString());
+        Assert.Equal("sa", values.GetProperty("username").GetString());
+        Assert.Equal("Mandatory", values.GetProperty("encrypt_mode").GetString());
+        Assert.Equal("Sales", values.GetProperty("database").GetString());
+        Assert.Equal("1234", values.GetProperty("monthly_cost_usd").GetString());
+        Assert.Equal("", values.GetProperty("password").GetString());
+        Assert.Equal("password", form.GetProperty("passwordType").GetString());
+        var checks = form.GetProperty("checks");
+        Assert.True(checks.GetProperty("trust_server_certificate").GetBoolean());
+        Assert.True(checks.GetProperty("read_only_intent").GetBoolean());
+        Assert.False(checks.GetProperty("multi_subnet_failover").GetBoolean());
+        Assert.Equal(new[] { "SQL" }, form.GetProperty("auth").EnumerateArray().Where(r => r.GetProperty("checked").GetBoolean()).Select(r => r.GetProperty("value").GetString()!).ToArray());
+        Assert.Equal(new[] { "Save", "Cancel" }, Strings(form.GetProperty("buttons")));
+        Assert.Equal(1, page.GetProperty("formBoxChildren").GetInt32());
+    }
+
+    [Fact]
+    public void WhileTheByIdReadRuns_TheBoxSaysItIsLoading_ThenTheFormReplacesIt()
+    {
+        var page = Run("loading");
+
+        Assert.Equal("Loading server settings", page.GetProperty("during").GetProperty("box").GetString());
+        Assert.False(page.GetProperty("during").GetProperty("form").GetBoolean());
+        Assert.Equal(new[] { "strip loading" }, Strings(page.GetProperty("during").GetProperty("strips")));
+        Assert.Equal("Edit SQL Server Connection", page.GetProperty("form").GetProperty("heading").GetString());
+    }
+
+    [Theory]
+    [InlineData("bravo", "5433")]
+    [InlineData("bravo0", "")]
+    public void APostgresForm_ShowsPortAndNoAuthChoice_AndNoSqlServerOnlyOptions(string which, string port)
+    {
+        var form = Run("open:" + which).GetProperty("form");
+
+        Assert.Equal("Edit PostgreSQL Server Connection", form.GetProperty("heading").GetString());
+        Assert.Equal("PostgreSQL", form.GetProperty("engine").GetString());
+        // No auth radios, no read-only intent and no multi-subnet failover; the port is there, blank when stored as 0.
+        Assert.Equal(
+            new[] { "engine", "host", "display_name", "port", "username", "password", "encrypt_mode", "trust_server_certificate", "database", "monthly_cost_usd" },
+            Strings(form.GetProperty("keys")));
+        Assert.Empty(form.GetProperty("auth").EnumerateArray());
+        Assert.Equal(port, form.GetProperty("values").GetProperty("port").GetString());
+        Assert.Equal("pgmon", form.GetProperty("values").GetProperty("username").GetString());
+        var notes = Strings(form.GetProperty("muted"));
+        Assert.Contains("blank = 5432, the default", notes);
+        Assert.Contains(notes, n => n.StartsWith("PostgreSQL targets connect with username and password authentication.", StringComparison.Ordinal));
+        Assert.DoesNotContain(notes, n => n.Contains('—') || n.Contains('→'));
+    }
+
+    [Fact]
+    public void AServerRemovedBeforeItsFormOpens_ShowsTheNotice_OpensNoForm_AndRereadsTheList()
+    {
+        var page = Run("byIdFails:404");
+        var strips = page.GetProperty("notice").EnumerateArray().ToArray();
+
+        Assert.Equal("This server's definition no longer exists.", StripText(strips[0]));
+        Assert.Equal("strip notice", strips[0].GetProperty("cls").GetString());
+        Assert.False(page.GetProperty("form").GetBoolean());
+        Assert.Equal(0, page.GetProperty("formBoxChildren").GetInt32());
+        // The list was read again, and the re-read no longer carries the removed server.
+        Assert.Equal(1, page.GetProperty("listReads").GetInt32());
+        Assert.Equal(new[] { "Bravo", "Charlie" }, Strings(page.GetProperty("rows")));
+    }
+
+    [Theory]
+    [InlineData("403", "This account has read-only access.")]
+    [InlineData("500", "admin server read failed (InvalidOperationException)")]
+    [InlineData("network", "Network error: connection refused")]
+    public void AFailedEditRead_ShowsTheSentence_OpensNoForm_AndKeepsTheList(string kind, string sentence)
+    {
+        var page = Run("byIdFails:" + kind);
+        var strip = page.GetProperty("notice").EnumerateArray().First();
+
+        Assert.Equal(sentence, StripText(strip));
+        Assert.Equal("strip error", strip.GetProperty("cls").GetString());
+        Assert.Equal("alert", strip.GetProperty("role").GetString());
+        Assert.False(page.GetProperty("form").GetBoolean());
+        Assert.Equal(0, page.GetProperty("formBoxChildren").GetInt32());
+        Assert.Equal(0, page.GetProperty("listReads").GetInt32());
+        Assert.Equal(new[] { "Alpha", "Bravo", "Charlie" }, Strings(page.GetProperty("rows")));
+    }
+
+    [Theory]
+    [InlineData("ok")]
+    [InlineData("listFails")]
+    public void ThePollRepaint_KeepsAnOpenFormFocusedAndItsTypedValues(string kind)
+    {
+        var page = Run("poll:" + kind);
+
+        // The repaint is under way (its list read held back): the form is untouched.
+        Assert.True(page.GetProperty("during").GetProperty("active").GetBoolean());
+        Assert.Equal("sql-prod-01", page.GetProperty("during").GetProperty("value").GetString());
+        // And after the list read landed: the same host box, still focused, still holding what was typed.
+        Assert.True(page.GetProperty("activeIsHost").GetBoolean());
+        Assert.True(page.GetProperty("sameHost").GetBoolean());
+        Assert.True(page.GetProperty("hostConnected").GetBoolean());
+        Assert.Equal("sql-prod-01", page.GetProperty("hostValue").GetString());
+        Assert.True(page.GetProperty("sameFormBox").GetBoolean());
+        Assert.Equal(0, page.GetProperty("ancestorsRemoved").GetInt32());
+        Assert.True(page.GetProperty("formOpen").GetBoolean());
+        Assert.Equal(2, page.GetProperty("listReads").GetInt32());
+        if (kind == "ok")
+        {
+            Assert.Equal(new[] { "Alpha", "Charlie" }, Strings(page.GetProperty("rows")));
+        }
+        else
+        {
+            // A failed list read shows in the table area, not over the form.
+            Assert.Empty(Strings(page.GetProperty("rows")));
+            Assert.Equal("the list could not be read", page.GetProperty("tableArea").GetString());
+            Assert.Equal(new[] { "strip error" }, Strings(page.GetProperty("tableAreaStrips")));
+        }
+    }
+
+    [Theory]
+    [InlineData("cancel", 0)]
+    [InlineData("another", 1)]
+    [InlineData("tab", 0)]
+    public void EveryWayOfClosingTheForm_ClearsThePasswordItHeld_BeforeItIsDetached(string path, int formsLeft)
+    {
+        var page = Run("closes:" + path);
+
+        Assert.Equal("SECRET-PW", page.GetProperty("typed").GetString());
+        // The very node typed into, read after the form is gone: nothing detached keeps the secret.
+        Assert.Equal("", page.GetProperty("value").GetString());
+        Assert.False(page.GetProperty("connected").GetBoolean());
+        Assert.Equal(formsLeft, page.GetProperty("forms").GetInt32());
+        Assert.Equal(0, page.GetProperty("secretNodes").GetInt32());
+        if (path == "another")
+        {
+            Assert.Equal("Edit SQL Server Connection", page.GetProperty("heading").GetString());
+        }
+    }
+
+    [Theory]
+    [InlineData("another", 1, "Edit PostgreSQL Server Connection")]
+    [InlineData("tab", 0, null)]
+    public void AByIdReadThatLandsAfterItsFormWasDiscarded_OpensNothing(string path, int forms, string? heading)
+    {
+        var page = Run("staleOpen:" + path);
+
+        Assert.Equal(forms, page.GetProperty("forms").GetInt32());
+        Assert.Equal(heading, page.GetProperty("heading").GetString());
+    }
+
+    [Fact]
+    public void TheAuthChoice_ShowsOnlyTheBoxesItNeeds_KeepsAUsernamePerMode_AndTellsWhenThePasswordIsNeeded()
+    {
+        var page = Run("authModes");
+        JsonElement Step(string name) => page.GetProperty("steps").EnumerateArray().Single(s => s.GetProperty("step").GetString() == name);
+        string Auths(JsonElement s) => string.Join(",", s.GetProperty("checked").EnumerateArray().Select(c => c.GetString()));
+        bool Hidden(JsonElement row) => row.GetProperty("hidden").GetBoolean() && row.GetProperty("display").GetString() == "none";
+
+        var opened = Step("opened");
+        Assert.Equal("Windows", Auths(opened));
+        Assert.True(Hidden(opened.GetProperty("username")));
+        Assert.True(Hidden(opened.GetProperty("password")));
+
+        var sql = Step("sql");
+        Assert.Equal("SQL", Auths(sql));
+        Assert.False(Hidden(sql.GetProperty("username")));
+        Assert.Equal("Username", sql.GetProperty("username").GetProperty("label").GetString());
+        Assert.Equal("sa-new", sql.GetProperty("usernameValue").GetString());
+        Assert.False(Hidden(sql.GetProperty("password")));
+        Assert.Equal("Password (required for this change)", sql.GetProperty("password").GetProperty("label").GetString());
+
+        // The username typed under SQL does not become a client id: each mode has its own box contents.
+        var principal = Step("serviceprincipal");
+        Assert.Equal("Client (Application) ID", principal.GetProperty("username").GetProperty("label").GetString());
+        Assert.Equal("", principal.GetProperty("usernameValue").GetString());
+        Assert.Equal("Client Secret (required for this change)", principal.GetProperty("password").GetProperty("label").GetString());
+        Assert.Equal("sa-new", Step("sql again").GetProperty("usernameValue").GetString());
+
+        var managed = Step("managed identity");
+        Assert.Equal("User-Assigned Identity Client ID (optional)", managed.GetProperty("username").GetProperty("label").GetString());
+        Assert.False(Hidden(managed.GetProperty("username")));
+        Assert.True(Hidden(managed.GetProperty("password")));
+        Assert.False(Hidden(managed.GetProperty("note")));
+
+        var windows = Step("windows");
+        Assert.True(Hidden(windows.GetProperty("username")));
+        Assert.True(Hidden(windows.GetProperty("password")));
+        Assert.True(Hidden(windows.GetProperty("note")));
+
+        // A SQL login's password is asked for again only once its host changes, and not once the host is put back.
+        Assert.Equal(
+            new[] { "Password (leave blank to keep the stored one)", "Password (required for this change)", "Password (leave blank to keep the stored one)" },
+            Strings(page.GetProperty("suffixes")));
+    }
+
+    [Theory]
+    [InlineData("mandatory", "Mandatory", "Optional,Mandatory,Strict")]
+    [InlineData("STRICT", "Strict", "Optional,Mandatory,Strict")]
+    [InlineData("Weird", "Weird", "Optional,Mandatory,Strict,Weird")]
+    [InlineData("none", "", "Optional,Mandatory,Strict,")]
+    public void TheStoredEncryptionWord_IsMatchedIgnoringCase_AndAnUnknownOneStaysSelectedAsAnExtraOption(string stored, string selected, string options)
+    {
+        var page = Run("encrypt:" + stored);
+
+        Assert.Equal(selected, page.GetProperty("value").GetString());
+        Assert.Equal(options, string.Join(",", Strings(page.GetProperty("options"))));
+    }
+
     // ------------------------------------------------------------------ the harness frame
 
     [Fact]
@@ -558,7 +828,8 @@ public sealed class AdminServerEditBehaviourTests
         Assert.StartsWith("2 servers.", Assert.Single(page.GetProperty("notice").EnumerateArray()).GetString());
         Assert.Equal(0, page.GetProperty("editHeaders").GetInt32());
         Assert.Equal(0, page.GetProperty("editButtons").GetInt32());
-        Assert.Equal(new[] { "GET /api/admin/servers" }, page.GetProperty("requests").EnumerateArray().Select(r => r.GetString()).ToArray());
+        // The session probe (which decides whether the Edit column is drawn) comes first, then the list.
+        Assert.Equal(new[] { "GET /api/session", "GET /api/admin/servers" }, page.GetProperty("requests").EnumerateArray().Select(r => r.GetString()).ToArray());
     }
 
     [Fact]
