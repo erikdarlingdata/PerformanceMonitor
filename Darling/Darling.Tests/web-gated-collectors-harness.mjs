@@ -70,15 +70,11 @@ process.on("unhandledRejection", () => {});
 
 const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "gated-collectors-"));
 try {
-  fs.mkdirSync(path.join(scratch, "pages"));
+  /* Copy the whole js tree (js/, js/pages/ and every subdirectory) rather than a hand-kept list (#5279): a page module
+     that server-tabs.js imports and another PR adds (pages/deadlock-graph.js broke the old fixed list, #5249) then needs no
+     edit here. Only imported files load, so the rest are inert; charts.js is replaced by the stub below. */
+  fs.cpSync(jsDir, scratch, { recursive: true });
   fs.writeFileSync(path.join(scratch, "package.json"), '{ "type": "module" }');
-  for (const f of ["util.js", "panels.js", "read-fields.js"]) fs.copyFileSync(path.join(jsDir, f), path.join(scratch, f));
-  fs.copyFileSync(path.join(jsDir, "pages", "server-tabs.js"), path.join(scratch, "pages", "server-tabs.js"));
-  /* Modules that other open PRs add to what server-tabs.js and panels.js import: copied when present, so this harness
-     keeps working whichever lands first. */
-  for (const f of ["grid-tools.js", "multi-picker.js", path.join("pages", "analysis-findings.js"), path.join("pages", "plan-viewer.js"), path.join("pages", "pg-plan-viewer.js")]) {
-    if (fs.existsSync(path.join(jsDir, f))) fs.copyFileSync(path.join(jsDir, f), path.join(scratch, f));
-  }
   fs.writeFileSync(
     path.join(scratch, "charts.js"),
     'import { el } from "./util.js";\nexport const SERIES_COLORS = [];\nexport const CATEGORICAL_COLORS = [];\nexport function normalizeColor(c) { return c; }\n' +
