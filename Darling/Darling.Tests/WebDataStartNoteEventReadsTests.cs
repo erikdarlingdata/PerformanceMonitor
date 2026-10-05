@@ -89,12 +89,16 @@ public sealed class WebDataStartNoteEventReadsTests
         Assert.Contains("? dataStart", source, StringComparison.Ordinal);
     }
 
-    /// <summary>The capped set is exactly the six reads: the four that read <c>collection_time</c> and the two event reads.</summary>
+    /// <summary>The capped set is exactly the eleven reads (#4966): the four that read <c>collection_time</c>, the two SQL Server event reads
+    /// and the five Blocking, Deadlocks and PostgreSQL event log reads.</summary>
     [Fact]
-    public void CappedByRead_IsExactlyTheSixCappedReads()
+    public void CappedByRead_IsExactlyTheElevenCappedReads()
     {
         Assert.Equal(
-            ["get_blocked_process_xml", "get_collection_log", "get_default_trace_events", "get_pg_server_config_changes", "get_plan_corrections", "get_waiting_tasks"],
+            [
+                "get_blocked_process_xml", "get_blocking", "get_collection_log", "get_deadlock_detail", "get_deadlocks", "get_default_trace_events",
+                "get_pg_deadlocks", "get_pg_log_events", "get_pg_server_config_changes", "get_plan_corrections", "get_waiting_tasks",
+            ],
             WebDataStartNote.CappedByRead.Keys.Order(StringComparer.Ordinal).ToArray());
         foreach (var read in WebDataStartNote.NewestFirstCappedReads)
         {

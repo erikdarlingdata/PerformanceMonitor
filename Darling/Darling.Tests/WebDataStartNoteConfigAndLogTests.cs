@@ -265,6 +265,11 @@ public sealed class WebDataStartNoteConfigAndLogTests : IClassFixture<ConfigAndL
             "get_long_query_completions" => [("DarlingMcpLongQueryTools.cs", "GetLongQueryCompletions")],
             "get_memory_pressure_events" => [("DarlingMcpMemoryGrantTools.cs", "GetMemoryPressureEvents")],
             "get_default_trace_events" => [("DarlingMcpDefaultTraceTools.cs", "GetDefaultTraceEvents")],
+            "get_pg_deadlocks" => [("DarlingMcpPgDeadlockTools.cs", "GetPgDeadlocks")],
+            "get_pg_log_events" => [("DarlingMcpPgLogEventTools.cs", "GetPgLogEvents")],
+            "get_blocking" => [("DarlingMcpBlockingTools.cs", "GetBlocking")],
+            "get_deadlocks" => [("DarlingMcpBlockingTools.cs", "GetDeadlocks")],
+            "get_deadlock_detail" => [("DarlingMcpBlockingTools.cs", "GetDeadlockDetail")],
             _ => throw new ArgumentOutOfRangeException(nameof(read), read, "a listed read this test does not know"),
         };
 
@@ -273,6 +278,12 @@ public sealed class WebDataStartNoteConfigAndLogTests : IClassFixture<ConfigAndL
             var (file, method) = Where(read).Single();
             var source = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", file);
             var start = source.IndexOf("public static async Task<string> " + method + "(", StringComparison.Ordinal);
+            if (start < 0)
+            {
+                /* get_blocking's tool method hands off to an overload and is not async. */
+                start = source.IndexOf("public static Task<string> " + method + "(", StringComparison.Ordinal);
+            }
+
             Assert.True(start > 0, read + ": " + method + " not found");
             var end = source.IndexOf("[McpServerTool(", start, StringComparison.Ordinal);
             return end < 0 ? source[start..] : source[start..end];

@@ -142,6 +142,15 @@ internal static class WebDataStartNote
         ["get_memory_pressure_events"] = MemoryPressureEventsTable,
         ["get_default_trace_events"] = "default_trace_events",
 
+        /* The PostgreSQL event logs, SQL Server Blocking and Deadlocks (#4966). All are event lists on the event's own time, so
+           the event-time rule applies (EventTimeByRead) and a capped page names its oldest row (CappedByRead). get_blocking is fed
+           by two tables (CompositeSourcesByRead); this entry names the first. */
+        ["get_pg_deadlocks"] = "pg_deadlocks",
+        ["get_pg_log_events"] = "pg_log_events",
+        ["get_blocking"] = "blocked_process_reports",
+        ["get_deadlocks"] = "deadlocks",
+        ["get_deadlock_detail"] = "deadlocks",
+
         /* The PostgreSQL vacuum, horizon, slot and write tiles (#4966). Each answers figures that need the window to mean
            anything: the autovacuum backlog's growing count compares a table's newest dead tuples with its earliest in the window,
            a slot's severity rests on its retained WAL growing across it, the horizon holders' peaks and win shares and the
@@ -196,6 +205,51 @@ internal static class WebDataStartNote
         ["get_pg_autovacuum_health"] = "pg_autovacuum_stats",
         ["get_pg_replication_slots"] = "pg_replication_slots",
     };
+
+    /// <summary>
+    /// The reads fed by MORE than one table (#4966), each with the tables its tool probes, in the tool's order. get_blocking lists the
+    /// XE blocked process reports and the always-on DMV blocking snapshots that stand in for them (<c>BlockingPageSources</c> in
+    /// DarlingMcpBlockingTools). The probe passes both to <see cref="DataWindowFloor.GetAsync"/>, which answers the EARLIER start, as the
+    /// tool and the desktop viewer do. <see cref="TableByRead"/> names the first table, so a caller that wants one source still gets one.
+    /// </summary>
+    internal static readonly IReadOnlyDictionary<string, string[]> CompositeSourcesByRead = new Dictionary<string, string[]>(StringComparer.Ordinal)
+    {
+        ["get_blocking"] = ["blocked_process_reports", "dmv_blocking_snapshots"],
+    };
+
+    /// <summary>
+    /// Every probe source for a listed read: the composite's sources when <see cref="CompositeSourcesByRead"/> names the read, else the
+    /// one <see cref="TryGetReadSource"/> gives. False when any source cannot be resolved.
+    /// </summary>
+    internal static bool TryGetReadSources(string read, out IReadOnlyList<DataWindowFloor.Source> sources)
+    {
+        if (CompositeSourcesByRead.TryGetValue(read, out var tables))
+        {
+            var list = new List<DataWindowFloor.Source>(tables.Length);
+            foreach (var table in tables)
+            {
+                if (!TryGetSource(table, out var one))
+                {
+                    sources = [];
+                    return false;
+                }
+
+                list.Add(one);
+            }
+
+            sources = list;
+            return true;
+        }
+
+        if (TryGetReadSource(read, out var single))
+        {
+            sources = [single];
+            return true;
+        }
+
+        sources = [];
+        return false;
+    }
 
     /// <summary>
     /// The probe source for a listed read: its collector's runs when <see cref="CollectorRunsByRead"/> names one, else the source
@@ -255,6 +309,16 @@ internal static class WebDataStartNote
     };
 
     /// <summary>
+    /// The <c>status</c> word a listed read answers its ROWS with when the word is that read's alone (#4966). <c>events</c> and
+    /// <c>deadlocks</c> are not in <see cref="RowStatuses"/>: another read may use the word for an envelope.
+    /// </summary>
+    internal static readonly IReadOnlyDictionary<string, string> RowStatusByRead = new Dictionary<string, string>(StringComparer.Ordinal)
+    {
+        ["get_pg_deadlocks"] = "deadlocks",
+        ["get_pg_log_events"] = "events",
+    };
+
+    /// <summary>
     /// The one <c>status</c> word each listed read answers with when it LOOKED and found nothing in the window (#4966): the
     /// word a reader takes for "nothing happened". Over a short history an empty span reads as quiet when it is only short, and
     /// empty is these grids' usual state, so an answer carrying the word goes through the coverage probe and gets the same
@@ -310,6 +374,13 @@ internal static class WebDataStartNote
         ["get_long_query_completions"] = "empty",
         ["get_memory_pressure_events"] = "empty",
         ["get_default_trace_events"] = "empty",
+
+        /* The PostgreSQL event logs, Blocking and Deadlocks (#4966): the window held no event. */
+        ["get_pg_deadlocks"] = "no_deadlocks",
+        ["get_pg_log_events"] = "no_events",
+        ["get_blocking"] = "empty",
+        ["get_deadlocks"] = "empty",
+        ["get_deadlock_detail"] = "empty",
 
         /* The horizon read answers no_holder only when the collector captured in the window and recorded none (it answers
            unavailable when no capture is logged), so it is the one of the vacuum, horizon, slot and write reads that says "looked
@@ -377,6 +448,14 @@ internal static class WebDataStartNote
         ["get_long_query_completions"] = new("oldest_returned_event_time", null, null, PageIsRanked: true),
         ["get_memory_pressure_events"] = new(null, "events", "sample_time"),
         ["get_default_trace_events"] = new(null, "events", "event_time"),
+
+        /* PostgreSQL event logs, Blocking and Deadlocks (#4966). The PG deadlock rows carry occurred_at; the log page names its
+           oldest row; get_blocking and the two deadlock tools name theirs in oldest_returned_event_time / _deadlock_time. */
+        ["get_pg_deadlocks"] = new(null, "deadlocks", "occurred_at"),
+        ["get_pg_log_events"] = new("oldest_returned_at", null, null),
+        ["get_blocking"] = new("oldest_returned_event_time", null, null),
+        ["get_deadlocks"] = new("oldest_returned_deadlock_time", null, null),
+        ["get_deadlock_detail"] = new("oldest_returned_deadlock_time", null, null),
     };
 
     /// <summary>
@@ -407,6 +486,15 @@ internal static class WebDataStartNote
            minimum event_time. */
         ["get_blocked_process_xml"] = new(null, null, "oldest_returned_event_time", null, null, null),
         ["get_default_trace_events"] = new("total_events", "shown", null, "events", "event_time", null),
+
+        /* PostgreSQL event logs, Blocking and Deadlocks (#4966). The PG deadlock page has truncated and the rows' occurred_at but
+           no oldest field and no order word; the log page says "newest first"; the three SQL Server tools carry their oldest
+           field and an order word. */
+        ["get_pg_deadlocks"] = new(null, null, null, "deadlocks", "occurred_at", null),
+        ["get_pg_log_events"] = new(null, null, "oldest_returned_at", null, null, "newest first"),
+        ["get_blocking"] = new(null, null, "oldest_returned_event_time", null, null, "event_time_desc"),
+        ["get_deadlocks"] = new(null, null, "oldest_returned_deadlock_time", null, null, "deadlock_time_desc"),
+        ["get_deadlock_detail"] = new(null, null, "oldest_returned_deadlock_time", null, null, "deadlock_time_desc"),
     };
 
     /// <summary>
@@ -480,7 +568,7 @@ internal static class WebDataStartNote
         if (string.IsNullOrWhiteSpace(server)
             || hoursBack is not int hours
             || hours < 1
-            || !TryGetReadSource(tool, out var source))
+            || !TryGetReadSources(tool, out var sources))
         {
             return result;
         }
@@ -505,7 +593,7 @@ internal static class WebDataStartNote
            left without one, as before. Any other envelope (unavailable, not_collected, invalid), an error, or a tool that
            already reports its own window floor is left as it is. */
         if (payload is null
-            || (payload.ContainsKey("status") && !IsRowStatus(payload) && !IsNothingFoundStatus(tool, payload))
+            || (payload.ContainsKey("status") && !IsRowStatus(tool, payload) && !IsNothingFoundStatus(tool, payload))
             || payload.ContainsKey("error")
             || payload.ContainsKey("window_truncated"))
         {
@@ -559,7 +647,7 @@ internal static class WebDataStartNote
 
             var windowStart = windowEnd.AddHours(-hours);
             var dataStart = await DataWindowFloor.GetAsync(
-                postgres, [source], [resolved.ServerName], windowStart, windowEnd, StorageCommandDeadlines.McpReadSeconds, cancellationToken);
+                postgres, sources, [resolved.ServerName], windowStart, windowEnd, StorageCommandDeadlines.McpReadSeconds, cancellationToken);
 
             /* An event read follows the event-time rule (ViewerEventDataStart.Of): the earlier of the coverage start and the
                earliest event the page shows, or that event alone when the probe found no coverage but rows exist. Any other
@@ -737,8 +825,9 @@ internal static class WebDataStartNote
     internal const string PgConfigChangesRead = "get_pg_server_config_changes";
 
     /* Whether the answer's status word is one a listed read puts on its ROWS (RowStatuses) rather than an envelope. */
-    private static bool IsRowStatus(JsonObject payload) =>
-        payload["status"] is JsonValue word && word.TryGetValue<string>(out var status) && RowStatuses.Contains(status);
+    private static bool IsRowStatus(string tool, JsonObject payload) =>
+        payload["status"] is JsonValue word && word.TryGetValue<string>(out var status)
+        && (RowStatuses.Contains(status) || (RowStatusByRead.TryGetValue(tool, out var own) && string.Equals(own, status, StringComparison.Ordinal)));
 
     /* Whether the answer's status word is this read's own "looked and found nothing" one (NothingFoundStatusByRead). */
     private static bool IsNothingFoundStatus(string tool, JsonObject payload) =>
