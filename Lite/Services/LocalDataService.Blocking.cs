@@ -1049,6 +1049,28 @@ ORDER BY bucket";
     }
 
     /// <summary>
+    /// #5098: whether the XE blocked process reports have a row in the window, with the SAME predicate (and database filter) as the
+    /// <c>bpr</c> arm of <see cref="GetBlockingTrendAsync"/> and <see cref="GetBlockingDurationStatsAsync"/>. When true those reads drew
+    /// the XE rows alone (the DMV arm is skipped), so the note must name the XE start, not a DMV-covered one.
+    /// </summary>
+    public async Task<bool> HasBlockedProcessReportsInWindowAsync(int serverId, DateTime startUtc, DateTime endUtc, IReadOnlyList<string>? databaseNames = null)
+    {
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+
+        var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
+        command.CommandText = "SELECT 1 FROM " + StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time >= $2 AND event_time <= $3" + dbClause) + " AS ev LIMIT 1";
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        command.Parameters.Add(new DuckDBParameter { Value = startUtc });
+        command.Parameters.Add(new DuckDBParameter { Value = endUtc });
+        foreach (var db in dbValues)
+            command.Parameters.Add(new DuckDBParameter { Value = db });
+
+        using var reader = await command.ExecuteReaderAsync();
+        return await reader.ReadAsync();
+    }
+
+    /// <summary>
     /// Gets blocking incident trend (count of distinct blocking events per time bucket).
     /// Uses blocked_process_reports from Extended Events for more reliable detection.
     /// Falls back to blocking_snapshots if no XE data available.
