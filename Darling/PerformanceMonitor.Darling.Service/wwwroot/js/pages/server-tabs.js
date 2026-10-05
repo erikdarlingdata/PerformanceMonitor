@@ -4587,6 +4587,11 @@ const COLLECTOR_COLUMNS = [
      showed the floor, but no column showed the sentence behind it, so a regressed row read WARNING with
      every other cell blank. Composed server-side from the shared formatter, like the two columns above. */
   { key: "regression_finding", label: "Regression", wrap: true },
+  /* #5249: a PostgreSQL collector this server's engine does not collect (a collector this engine kind can never run: an Aurora-only reader on stock PostgreSQL, the sampler on Aurora) has no log row,
+     so the server lists it with status not_collected and the sentence saying why. The status paints with the
+     neutral Unknown band, not an error one: a gate is not a fault. Left out unless a row has a message, so a
+     server with no such collector (and every SQL Server tab) shows no column of dashes. */
+  { key: "message", label: "Why not collected", wrap: true, hideWhenEmpty: true },
 ];
 
 const HEAVIEST_COLUMNS = [

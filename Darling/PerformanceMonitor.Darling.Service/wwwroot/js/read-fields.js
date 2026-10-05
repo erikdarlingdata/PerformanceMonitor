@@ -90,6 +90,7 @@ export const READ_FIELDS = {
         { key: "avg_duration_ms", label: "Avg Dur", format: "ms" },
         { key: "last_success", label: "Last Success", format: "time" },
         { key: "note_summary", label: "Note", wrap: true },
+        { key: "message", label: "Why not collected", wrap: true },
       ],
     },
   },
