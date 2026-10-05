@@ -2075,10 +2075,13 @@ jobs:
                   if ($LASTEXITCODE -ne 0) { throw 'the shard files are not exactly the discovered classes - failing this shard' }
 
                   $mine = @(Get-Content -Path (Join-Path $planDir "shard-${{ matrix.shard }}.txt") | Where-Object { $_.Trim() })
-                  # A fingerprint of the whole plan, identical on every leg when they cut from the same inputs.
-                  $planText = (0..($shards - 1) | ForEach-Object { Get-Content -Raw -Path (Join-Path $planDir "shard-$_.txt") }) -join ''
+                  # A fingerprint of the whole plan, identical on every leg when they cut from the same inputs. Each
+                  # shard file is labelled, so the same classes split differently across shards give a different id
+                  # (joined bare, [A, B] + [C] and [A] + [B, C] hashed the same). Nothing compares the legs' ids: it
+                  # is a diagnostic to read side by side, and the pinned artifact set above is what keeps them equal.
+                  $planText = (0..($shards - 1) | ForEach-Object { "shard-$_`n" + (Get-Content -Raw -Path (Join-Path $planDir "shard-$_.txt")) }) -join ''
                   $planId = [System.Convert]::ToHexString([System.Security.Cryptography.SHA256]::HashData([System.Text.Encoding]::UTF8.GetBytes($planText))).Substring(0, 12).ToLower()
-                  Write-Host "::notice title=Lite shard plan::cut by $method (timings of run $env:LITE_TIMING_RUN); plan $planId, the same on every shard"
+                  Write-Host "::notice title=Lite shard plan::cut by $method (timings of run $env:LITE_TIMING_RUN); plan $planId. Every shard of this run must print this same id."
               }
               else {
                   $sha = [System.Security.Cryptography.SHA256]::Create()

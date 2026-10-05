@@ -2885,6 +2885,13 @@ public class CrossAppGuardCiGateTests
         Assert.Matches(@"if \(\$packExit -ne 0\) \{ throw ", run);
         Assert.Matches(@"reconcile --classes \$classesFile --shards \$shards --out \$planDir\s+if \(\$LASTEXITCODE -ne 0\) \{ throw ", run);
         Assert.Contains("if ($env:LITE_TIMING_RUN -match '^\\d+$')", run, StringComparison.Ordinal);
+
+        /* The logged plan id hashes each shard's file under its own label, so two different partitions of the same
+           classes cannot share an id, and the notice says every shard must print the same id instead of claiming
+           that they do (nothing compares them). */
+        Assert.Contains("\"shard-$_`n\" + (Get-Content -Raw -Path (Join-Path $planDir \"shard-$_.txt\"))", run, StringComparison.Ordinal);
+        Assert.Contains("Every shard of this run must print this same id.", run, StringComparison.Ordinal);
+        Assert.DoesNotContain("the same on every shard", run, StringComparison.Ordinal);
     }
 
     /// <summary>
