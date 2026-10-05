@@ -438,6 +438,11 @@ table.data td.sev-Healthy { color: var(--ok); }
 .grid-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; margin-bottom: 4px; }
 .grid-tools .grid-tool { font-size: 12px; padding: 2px 8px; }
 .grid-tools-status { font-size: 12px; opacity: 0.8; margin-left: 6px; }
+
+/* The stored-plan panel under a row's Plan button (#4843): the indented XML in a scrollable block. */
+.plan-cell { min-width: 8rem; }
+.plan-panel { margin-top: 6px; max-width: 70vw; }
+.plan-panel pre.plan-xml { max-height: 28rem; overflow: auto; white-space: pre; overflow-wrap: normal; padding: 6px; border: 1px solid var(--border); }
 td.cell-picked { outline: 1px solid var(--accent); outline-offset: -1px; }
 
 /* ─────────────────────────── band list ─────────────────────────── */
