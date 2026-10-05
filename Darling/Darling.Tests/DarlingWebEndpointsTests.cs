@@ -265,6 +265,12 @@ public sealed class DarlingWebEndpointsTests
     [InlineData("get_query_store_plan_xml", "database_name=db1", "query_id")]
     [InlineData("get_query_store_plan_xml", "database_name=db1&query_id=abc", "query_id")]
     [InlineData("get_query_store_plan_xml", "database_name=db1&query_id=1&plan_id=abc", "plan_id")]
+    [InlineData("get_active_query_plan_xml", "collection_time=2026-03-04&session_id=1", "collection_time")]
+    [InlineData("get_active_query_plan_xml", "collection_time=3/4/2026&session_id=1", "collection_time")]
+    [InlineData("get_active_query_plan_xml", "collection_time=2026-03-04T05:06:07.1234560Z&session_id=1&live=yes", "live")]
+    [InlineData("get_procedure_plan_xml", "sql_handle=abc", "sql_handle")]
+    [InlineData("get_procedure_plan_xml", "sql_handle=0x", "sql_handle")]
+    [InlineData("get_procedure_plan_xml", "sql_handle=0x03%27%3BDROP", "sql_handle")]
     [InlineData("get_procedure_plan_xml", "", "sql_handle")]
     public async Task TheRowPlanReads_RefuseAMissingOrUnparseableKey_BeforeTheStore(string tool, string query, string key)
     {

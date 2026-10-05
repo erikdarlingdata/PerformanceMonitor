@@ -1406,9 +1406,6 @@ public sealed class McpPayloadContractCensusTests
         /* #4734: create_mute_rule's body moved into CreateMuteRuleOver (the tool hands it the Postgres-backed
            store), so the expires_at parse, unchanged, is found under the new method name. */
         "DarlingMcpAlertTools.cs CreateMuteRuleOver",
-        /* #5228: get_active_query_plan_xml reads the row's collection_time back as an instant in UTC (UTC styles
-           and the invariant culture) so every fractional digit survives into the equality the store compares. */
-        "DarlingMcpPlanTools.cs GetActiveQueryPlanXml",
     ];
 
     private static readonly Regex GeneralTimestampParse = new(

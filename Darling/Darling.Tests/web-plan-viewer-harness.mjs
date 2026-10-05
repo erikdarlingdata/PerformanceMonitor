@@ -160,6 +160,7 @@ const scenarios = {
     const cols = viewer.activePlanColumns("srv-a");
     out.activeKeys = cols.map((c) => c.key);
     out.activeLabels = cols.map((c) => c.label);
+    out.planColsNoFilter = [...cols, viewer.queryStorePlanColumn("srv-a"), viewer.procedurePlanColumn("srv-a")].every((c) => c.filter === false);
     out.activeHide = cols.every((c) => c.hideWhenEmpty === true && c.sortable === false && c.csv === false);
     const est = cols[0].render(snap);
     est.byText("Plan").click();

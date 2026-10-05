@@ -4711,15 +4711,18 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 : !OptionalLong(c, "plan_id", out var qsPlanId) ? UnparseableParam("plan_id")
                 : WrapPlanXmlAsync(DarlingMcpPlanTools.GetQueryStorePlanXml(pg, qsDatabase, qsQueryId.Value, Server(c), qsPlanId, c.RequestAborted),
                     PlanIdentity(("database_name", qsDatabase), ("query_id", qsQueryId), ("plan_id", qsPlanId))),
-            ["get_procedure_plan_xml"] = (c, pg, an) => RequireText(c, "sql_handle", out var procSqlHandle)
-                ? WrapPlanXmlAsync(DarlingMcpPlanTools.GetProcedurePlanXml(pg, procSqlHandle, Server(c), c.RequestAborted),
-                    PlanIdentity(("sql_handle", procSqlHandle)))
-                : MissingParam("sql_handle"),
+            ["get_procedure_plan_xml"] = (c, pg, an) => !RequireText(c, "sql_handle", out var procSqlHandle)
+                ? MissingParam("sql_handle")
+                : !DarlingMcpPlanTools.IsSqlHandle(procSqlHandle) ? UnparseableParam("sql_handle", "Expected a hex sql_handle such as 0x0300...")
+                : WrapPlanXmlAsync(DarlingMcpPlanTools.GetProcedurePlanXml(pg, procSqlHandle, Server(c), c.RequestAborted),
+                    PlanIdentity(("sql_handle", procSqlHandle))),
             ["get_active_query_plan_xml"] = (c, pg, an) => !RequireText(c, "collection_time", out var snapTime)
                 ? MissingParam("collection_time")
                 : !OptionalInt(c, "session_id", out var snapSession) ? UnparseableParam("session_id")
                 : snapSession is null ? MissingParam("session_id")
                 : !OptionalInt(c, "request_id", out var snapRequest) ? UnparseableParam("request_id")
+                : !DarlingMcpPlanTools.TryParseCollectionTime(snapTime, out _) ? UnparseableParam("collection_time", "Expected the collection_time exactly as get_active_queries returned it (ISO 8601).")
+                : First(c, "live") is { } liveText && !bool.TryParse(liveText, out _) ? UnparseableParam("live", "Expected true or false.")
                 : WrapPlanXmlAsync(DarlingMcpPlanTools.GetActiveQueryPlanXml(pg, snapTime, snapSession.Value, Server(c), snapRequest ?? 0, QueryBool(c, "live", false), c.RequestAborted),
                     PlanIdentity(("collection_time", snapTime), ("session_id", snapSession), ("request_id", snapRequest ?? 0), ("live", QueryBool(c, "live", false)))),
 
@@ -5024,8 +5027,9 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
 
     /// <summary>The dispatch layer's refusal for a filter value it cannot read as a number — the <c>invalid</c>
     /// envelope, for the reason <see cref="MissingParam"/> is.</summary>
-    private static Task<string> UnparseableParam(string key) =>
-        Task.FromResult(McpHelpers.Refusal(key, $"Invalid value for parameter '{key}'. Expected a number."));
+    private static Task<string> UnparseableParam(string key, string? expected = null) =>
+        Task.FromResult(McpHelpers.Refusal(key, $"Invalid value for parameter '{key}'. {expected ?? "Expected a number."}"));
+
 
     private static int QueryInt(HttpContext context, string key, string? aliasKey, int def) =>
         ParseInt(First(context, key) ?? (aliasKey is null ? null : First(context, aliasKey)), def);

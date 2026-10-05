@@ -151,6 +151,7 @@ public sealed class PlanViewerBehaviourTests
         Assert.Equal(new[] { "has_query_plan", "has_live_query_plan" }, Strs(r, "activeKeys"));
         Assert.Equal(new[] { "Plan", "Live plan" }, Strs(r, "activeLabels"));
         Assert.True(r.GetProperty("activeHide").GetBoolean());
+        Assert.True(r.GetProperty("planColsNoFilter").GetBoolean());
 
         Assert.Equal("/api/read/get_active_query_plan_xml", Str(r, "activePath"));
         var est = r.GetProperty("activeQuery");

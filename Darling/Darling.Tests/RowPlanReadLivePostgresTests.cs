@@ -34,7 +34,7 @@ public sealed class RowPlanReadLivePostgresTests
     private static readonly int ServerId = ServerIdHelper.GetDeterministicHashCode(ServerName);
 
     private const string Db = "RowPlanDb";
-    private const string SqlHandle = "0xROWPLANHANDLE01";
+    private const string SqlHandle = "0xA0B1C2D3E4F50617";
 
     /// <summary>Fixed anchor with a non-zero microsecond part (123456 us), naive UTC as the store keeps it.</summary>
     private static readonly DateTime Anchor = new DateTime(2026, 3, 4, 5, 6, 7, DateTimeKind.Unspecified).AddTicks(1_234_560);
@@ -106,7 +106,7 @@ public sealed class RowPlanReadLivePostgresTests
 
             /* ---- get_procedure_plan_xml. */
             Assert.Equal(procedure, await DarlingMcpPlanTools.GetProcedurePlanXml(postgres, SqlHandle, ServerName, cancellationToken: ct));
-            Assert.Equal("unavailable", StatusOf(await DarlingMcpPlanTools.GetProcedurePlanXml(postgres, "0xNOSUCHHANDLE", ServerName, cancellationToken: ct)));
+            Assert.Equal("unavailable", StatusOf(await DarlingMcpPlanTools.GetProcedurePlanXml(postgres, "0xDEADBEEF", ServerName, cancellationToken: ct)));
 
             bodySucceeded = true;
         }

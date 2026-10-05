@@ -307,6 +307,7 @@ export function activePlanColumns(server) {
         planSourceCell(server, row && row.has_query_plan === true ? source(row, false) : null, "Plan", "Show the estimated plan captured with this request"),
       hideWhenEmpty: true,
       sortable: false,
+      filter: false,
       csv: false,
     },
     {
@@ -316,6 +317,7 @@ export function activePlanColumns(server) {
         planSourceCell(server, row && row.has_live_query_plan === true ? source(row, true) : null, "Live plan", "Show the live plan captured with this request"),
       hideWhenEmpty: true,
       sortable: false,
+      filter: false,
       csv: false,
     },
   ];
@@ -337,6 +339,7 @@ export function queryStorePlanColumn(server) {
         "Show the stored Query Store plan for this query"
       ),
     sortable: false,
+    filter: false,
     csv: false,
   };
 }
@@ -350,6 +353,7 @@ export function procedurePlanColumn(server) {
       planSourceCell(server, row && row.sql_handle ? { kind: "procedure", sql_handle: row.sql_handle } : null, "Plan", "Show the stored plan for this procedure"),
     hideWhenEmpty: true,
     sortable: false,
+    filter: false,
     csv: false,
   };
 }
