@@ -1221,7 +1221,7 @@ public sealed class ServerPageTabsTests
     /// </summary>
     private static IEnumerable<(string Read, string[] Arrays)> DescriptorArraysBoundIn(string js)
     {
-        foreach (Match open in Regex.Matches(js, @"(?<![A-Za-z0-9_])(?:stat|table|fanout)\("))
+        foreach (Match open in Regex.Matches(js, @"(?<![A-Za-z0-9_])(?:stat|momentStat|table|fanout)\("))
         {
             var depth = 1;
             var i = open.Index + open.Length;

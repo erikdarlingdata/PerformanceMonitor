@@ -620,6 +620,7 @@ public sealed class WebDataStartNoteTests
 
         Assert.Contains("windowNote: false", Panel("Where the Thresholds Are"), StringComparison.Ordinal);
         Assert.Contains("windowNote: false", Panel("What Holds the Horizon"), StringComparison.Ordinal);
+        Assert.Contains("windowNote: false", Panel("Freeze Headroom"), StringComparison.Ordinal);
         foreach (var title in new[] { "Per-Database Headroom", "Horizon Holders", "Tables Behind", "Slots", "Slot Summary" })
         {
             Assert.DoesNotContain("windowNote", Panel(title), StringComparison.Ordinal);
