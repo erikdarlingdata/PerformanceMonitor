@@ -435,10 +435,22 @@ public static class PayloadDimensions
     /// is the same constant, so it also keeps the same cost cap: a continuously referenced digest takes at
     /// most <c>24 / LastSeenRefreshGuardHours</c> updates a day, not one per cycle.</para>
     ///
-    /// <para>The rows to refresh are chosen and locked in a subquery ordered by digest (<c>FOR UPDATE</c>),
-    /// so concurrent batches that share digests take the row locks in one total order, as
-    /// <see cref="UpsertSql"/> does (#1801). The absent-digest read is a plain read of the table as the
-    /// statement began: the refresh never deletes, so a digest present at that point is present.</para>
+    /// <para>The rows to refresh are chosen and locked in a subquery (<c>FOR UPDATE SKIP LOCKED</c>), so the
+    /// touch never waits on a row lock. There is no single total order across the upsert (<see cref="UpsertSql"/>,
+    /// whose conflict arm locks the row even when its guard is false) and this touch: one batch can hold digest A
+    /// from its upsert and want B in its touch while another holds B and wants A, and a waiting touch would turn
+    /// that into a deadlock that rolls back a whole batch. Skipping a locked row is safe because whoever holds a
+    /// stale-but-live dim row is refreshing it: the upsert's conflict arm, another touch, or the Query Store
+    /// plan map's <c>dim_touch</c>. A holder that rolls back leaves the row stale, and the next cycle touches it
+    /// again, far inside the dimension GC's margin. GC can never be the holder: <see cref="RowCappedDeleteSql"/>
+    /// only reaches rows older than <see cref="ComputeDimensionCutoff"/>, at least the guard plus one day behind,
+    /// and a digest referenced every cycle is never more than about <see cref="LastSeenRefreshGuardHours"/> hours
+    /// stale. A skipped row correctly counts as present.</para>
+    ///
+    /// <para>The absent-digest read is a plain read of the table as the statement began: the refresh never
+    /// deletes, and GC cannot reach a live digest, so a digest present at that point is present. The converse
+    /// can be false: a digest another, uncommitted batch is still inserting is not visible to this statement and
+    /// is reported absent. That costs one extra render on the next cycle and nothing else.</para>
     /// </summary>
     public static string TouchSql(string dimTable)
     {
@@ -451,7 +463,7 @@ public static class PayloadDimensions
             $"        WHERE s.{DigestColumn} = ANY($1::bytea[])\n" +
             $"        AND   s.{LastSeenColumn} < $2 - {LastSeenRefreshGuardInterval}\n" +
             $"        ORDER BY s.{DigestColumn}\n" +
-            $"        FOR UPDATE)\n" +
+            $"        FOR UPDATE SKIP LOCKED)\n" +
             $"    RETURNING 1)\n" +
             $"SELECT w.digest FROM unnest($1::bytea[]) AS w(digest)\n" +
             $"WHERE NOT EXISTS (SELECT 1 FROM {dimTable} d WHERE d.{DigestColumn} = w.digest)\n" +

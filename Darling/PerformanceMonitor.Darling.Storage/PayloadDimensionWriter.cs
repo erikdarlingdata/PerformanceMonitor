@@ -48,8 +48,9 @@ public static class PayloadDimensionWriter
     /// get one more statement per dimension table in this same transaction, <see cref="PayloadDimensions.TouchSql"/>,
     /// which keeps their <c>last_seen</c> alive under the same <see cref="PayloadDimensions.LastSeenRefreshGuardHours"/>
     /// guard as the insert path, so the dimension GC's liveness invariant is unchanged. The result is the
-    /// touched digests that have NO dim row, as upper-case hex (the form <c>Convert.ToHexString</c> gives);
-    /// empty when there are none, which is every batch that touches nothing.</para>
+    /// touched digests that have NO dim row, as upper-case hex (the form <c>Convert.ToHexString</c> gives)
+    /// whatever case the known digest was offered in, so a caller must compare case-insensitively or upper-case
+    /// its own digests first; empty when there are none, which is every batch that touches nothing.</para>
     /// </summary>
     public static async Task<IReadOnlyList<string>> FlushAsync(
         NpgsqlConnection connection,

@@ -58,7 +58,11 @@ public sealed class PayloadDigestPassThroughLiveTests
             QueryPlanXml = planXml,
         };
 
-    /// <summary>Forwards every write, except that the plan column's null goes to PayloadOrDigest with a digest.</summary>
+    /// <summary>
+    /// Forwards every write, except that the plan column's null goes to PayloadOrDigest with a digest. A
+    /// PayloadOrDigest call the collector makes itself at the plan column forwards its own digest when it has one
+    /// and this writer's digest otherwise, so the stand-in stays correct once the collector routes its own.
+    /// </summary>
     private sealed class DigestRoutingWriter : ICollectorRowWriter
     {
         private readonly PgCollectorRowWriter _inner;
@@ -87,8 +91,8 @@ public sealed class PayloadDigestPassThroughLiveTests
 
         public ICollectorRowWriter PayloadOrDigest(string? content, string? knownDigest)
         {
-            _index++;
-            _inner.PayloadOrDigest(content, knownDigest);
+            var at = _index++;
+            _inner.PayloadOrDigest(content, knownDigest ?? (at == _planOrdinal ? _knownDigest : null));
             return this;
         }
 
@@ -379,6 +383,161 @@ public sealed class PayloadDigestPassThroughLiveTests
             await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
                 await CleanupAsync(cleanup, serverId, new[] { digest }, cleanupCt));
         }
+    }
+
+    [Fact]
+    public void AKnownDigest_AtAPositionWithNoDivertedPayload_Throws_InsteadOfWritingANullPlan()
+    {
+        var hex = Convert.ToHexString(PayloadDimensions.Digest("<plan/>"));
+
+        var noPlan = new PgCollectorRowWriter();
+        Assert.Throws<InvalidOperationException>(() => noPlan.PayloadOrDigest(null, hex));
+
+        /* A diversion plan and a batch, but this position is not a diverted one (index 0 is not the plan column). */
+        var wrongPosition = new PgCollectorRowWriter();
+        wrongPosition.UseDimensions(
+            PayloadDimensions.DiversionPlanFor(QueryStatsCollector.Instance), new PayloadDimensionBatch());
+        wrongPosition.BeginPayload();
+        Assert.Throws<InvalidOperationException>(() => wrongPosition.PayloadOrDigest(null, hex));
+    }
+
+    [Fact]
+    public async Task ALowerCaseKnownDigest_RoundTrips_AndTheAbsentListReportsItUpperCased()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString), SkipReason);
+
+        var ct = TestContext.Current.CancellationToken;
+        var (serverId, serverName) = NewServer();
+        var presentPlan = $"<ShowPlanXML server=\"{serverName}\" present=\"1\"><StmtSimple/></ShowPlanXML>";
+        var present = PayloadDimensions.Digest(presentPlan);
+        var missing = PayloadDimensions.Digest($"<ShowPlanXML server=\"{serverName}\" missing=\"1\"/>");
+
+        await using var connection = await OpenMigratedStoreAsync(connectionString!, ct);
+        var bodySucceeded = false;
+        try
+        {
+            await WriteBatchAsync(connection, serverId, serverName, Anchor,
+                new[] { (NewRow("0xA", presentPlan), (string?)null) }, ct);
+
+            var absent = await WriteBatchAsync(connection, serverId, serverName, Anchor.AddMinutes(1),
+                new[]
+                {
+                    (NewRow("0xB", null), (string?)Convert.ToHexString(present).ToLowerInvariant()),
+                    (NewRow("0xC", null), (string?)Convert.ToHexString(missing).ToLowerInvariant()),
+                }, ct);
+
+            Assert.Equal(presentPlan, await ResolvedPlanAsync(connection, serverId, "0xB", ct));
+            Assert.Equal(new[] { Convert.ToHexString(missing) }, absent);
+            Assert.NotEqual(Convert.ToHexString(missing).ToLowerInvariant(), absent[0]);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await CleanupAsync(cleanup, serverId, new[] { present, missing }, cleanupCt));
+        }
+    }
+
+    /// <summary>
+    /// Two batches whose dim upserts and touches cross: each holds one stale digest from its upsert's conflict
+    /// arm (the row lock is taken even when the guard is false) and then touches the other's. Run with the real
+    /// SQL on two connections, in an interleaved order that needs no timing: the touches skip the rows the other
+    /// batch holds, so neither waits (a 2 s lock timeout is armed to make a wait fail fast as 55P03) and both
+    /// commit.
+    /// </summary>
+    [Fact]
+    public async Task TwoBatches_ThatUpsertOneStaleDigestEachAndTouchTheOthers_NeitherWaitsNorDeadlocks()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString), SkipReason);
+
+        var ct = TestContext.Current.CancellationToken;
+        var (serverId, serverName) = NewServer();
+        var planA = $"<ShowPlanXML server=\"{serverName}\" which=\"a\"/>";
+        var planB = $"<ShowPlanXML server=\"{serverName}\" which=\"b\"/>";
+        var digestA = PayloadDimensions.Digest(planA);
+        var digestB = PayloadDimensions.Digest(planB);
+        var stale = Anchor;
+        var now = Anchor.AddHours(10);
+
+        await using var first = await OpenMigratedStoreAsync(connectionString!, ct);
+        await using var second = new NpgsqlConnection(connectionString);
+        await second.OpenAsync(ct);
+        var bodySucceeded = false;
+        try
+        {
+            /* Both dim rows exist, committed, stored well past the guard behind the batches below. */
+            var seed = new PayloadDimensionBatch();
+            seed.Add(PayloadDimensions.QueryPlanDimTable, digestA, planA);
+            seed.Add(PayloadDimensions.QueryPlanDimTable, digestB, planB);
+            await using (var seedTransaction = await first.BeginTransactionAsync(ct))
+            {
+                await PayloadDimensionWriter.FlushAsync(first, seedTransaction, seed, stale, ct, compressPlanContent: false);
+                await seedTransaction.CommitAsync(ct);
+            }
+
+            await using var firstTransaction = await first.BeginTransactionAsync(ct);
+            await using var secondTransaction = await second.BeginTransactionAsync(ct);
+
+            await UpsertAsync(first, firstTransaction, digestA, planA, now, ct);
+            await UpsertAsync(second, secondTransaction, digestB, planB, now, ct);
+
+            await using (var timeout = new NpgsqlCommand("SET LOCAL lock_timeout = '2s'", first, firstTransaction))
+            {
+                await timeout.ExecuteNonQueryAsync(ct);
+            }
+
+            var firstAbsent = await TouchAsync(first, firstTransaction, new[] { digestB }, now, ct);
+            var secondAbsent = await TouchAsync(second, secondTransaction, new[] { digestA }, now, ct);
+
+            Assert.Empty(firstAbsent);
+            Assert.Empty(secondAbsent);
+
+            await firstTransaction.CommitAsync(ct);
+            await secondTransaction.CommitAsync(ct);
+
+            Assert.Equal(now, await LastSeenAsync(first, digestA, ct));
+            Assert.Equal(now, await LastSeenAsync(first, digestB, ct));
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await CleanupAsync(cleanup, serverId, new[] { digestA, digestB }, cleanupCt));
+        }
+    }
+
+    /// <summary>The dim upsert exactly as the flush sends it (text payload, naive-UTC stamp).</summary>
+    private static async Task UpsertAsync(
+        NpgsqlConnection connection, NpgsqlTransaction transaction, byte[] digest, string payload, DateTime stamp, CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand(
+            PayloadDimensions.UpsertSql(PayloadDimensions.QueryPlanDimTable, compressContent: false), connection, transaction);
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Bytea, Value = new[] { digest } });
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text, Value = new[] { payload } });
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = stamp });
+        await command.ExecuteNonQueryAsync(ct);
+    }
+
+    /// <summary>The keep-alive touch exactly as the flush sends it; returns the digests it reports absent.</summary>
+    private static async Task<List<string>> TouchAsync(
+        NpgsqlConnection connection, NpgsqlTransaction transaction, byte[][] digests, DateTime stamp, CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand(
+            PayloadDimensions.TouchSql(PayloadDimensions.QueryPlanDimTable), connection, transaction);
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Bytea, Value = digests });
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = stamp });
+        var absent = new List<string>();
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            absent.Add(Convert.ToHexString(reader.GetFieldValue<byte[]>(0)));
+        }
+
+        return absent;
     }
 
     [Fact]

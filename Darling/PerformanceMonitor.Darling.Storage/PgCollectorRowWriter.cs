@@ -203,7 +203,8 @@ public sealed class PgCollectorRowWriter : ICollectorRowWriter
     /// text and no dim insert, and the digest joins the batch's touch set so the flush keeps the dim row
     /// alive. Anything else is exactly <see cref="Value(string?)"/>. <paramref name="knownDigest"/> is the
     /// 64-character hex of the SHA-256 <see cref="PayloadDimensions.Digest"/> produced; a malformed one
-    /// throws rather than writing a digest that resolves to nothing.
+    /// throws rather than writing a digest that resolves to nothing, and so does a known digest at a position
+    /// with no diverted payload (a writer set up without the diversion plan).
     /// </summary>
     public ICollectorRowWriter PayloadOrDigest(string? content, string? knownDigest)
     {
@@ -215,7 +216,8 @@ public sealed class PgCollectorRowWriter : ICollectorRowWriter
         var digest = ParseKnownDigest(knownDigest);
         if (!_diversionPlan.TryGetValue(_payloadIndex, out var dimension))
         {
-            return Value(content);
+            throw new InvalidOperationException(
+                "A known payload digest needs a diverted payload position — this position has none, so the row would be written with no plan.");
         }
 
         var dimensions = _dimensions ?? throw new InvalidOperationException(
