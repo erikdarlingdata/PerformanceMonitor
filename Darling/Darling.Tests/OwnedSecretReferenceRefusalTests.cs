@@ -50,7 +50,10 @@ public sealed class OwnedSecretReferenceRefusalTests : IDisposable
         {
             try
             {
-                File.SetUnixFileMode(dir, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+                if (!OperatingSystem.IsWindows())
+                {
+                    File.SetUnixFileMode(dir, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+                }
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or PlatformNotSupportedException)
             {
@@ -296,7 +299,10 @@ public sealed class OwnedSecretReferenceRefusalTests : IDisposable
         Directory.CreateDirectory(locked);
         File.WriteAllText(Path.Combine(locked, "pw"), "x");
         _lockedDirectories.Add(locked);
-        File.SetUnixFileMode(locked, UnixFileMode.None);
+        if (!OperatingSystem.IsWindows())
+        {
+            File.SetUnixFileMode(locked, UnixFileMode.None);
+        }
         Assert.SkipWhen(CanStatInside(locked), "this process can search a mode-000 directory (running as root), so no denial can be produced.");
 
         Assert.Equal(DarlingOwnedSecrets.ReferenceRefusalText, Check("file:" + Path.Combine(locked, "pw")));
