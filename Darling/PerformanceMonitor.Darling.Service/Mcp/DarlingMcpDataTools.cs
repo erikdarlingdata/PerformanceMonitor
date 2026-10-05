@@ -1484,6 +1484,7 @@ public sealed class DarlingMcpDataTools
                         ? (object)CompactCollectionHealthRow(r, runTime)
                         : (object)PartialCollectionHealthRow(r, runTime);
             });
+            result = result.Concat(await DarlingGatedCollectorRows.AppendAsync(postgres, resolved.ServerId, resolved.ServerName, rows, cancellationToken));
 
             static object FullCollectionHealthRow(CollectorHealth r, CollectorRunTimeReading? runTime) => new
             {
