@@ -20,6 +20,7 @@ using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.Logging;
 using Npgsql;
+using NpgsqlTypes;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Hosting;
 using PerformanceMonitor.Darling.Service.Mcp;
@@ -221,6 +222,65 @@ public sealed class ServerEditViewerRoleLiveTests : IDisposable
             Assert.True((int)status >= 500, "answered " + (int)status);
             Assert.DoesNotContain("42501", body, StringComparison.Ordinal);
             Assert.Equal("delta", await ScalarAsync(owner, "SELECT name FROM config_monitored_servers WHERE server_id = 5203", ct));
+            ok = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunOwnedAsync(ok, () => ExecAsync(owner, $"DROP OWNED BY {roleName}; DROP ROLE IF EXISTS {roleName};", CancellationToken.None));
+        }
+    }
+
+    /// <summary>
+    /// The edit core's REAL write with the credential in the SET list, as the viewer role (#5240): <c>UPDATE
+    /// config_monitored_servers SET encrypted_password = $3, modified_at = ... WHERE server_id = $1 AND modified_at = $2
+    /// RETURNING modified_at</c>. The web edits above change the name and cost only, and the column fact in
+    /// <see cref="ServerAddViewerRoleLiveTests"/> runs hand-written statements, so nothing else ran this exact statement under
+    /// the viewer's grants: a write to a column viewer can set and cannot read, a predicate and a RETURNING that read only
+    /// <c>modified_at</c> (which viewer may read), and the statement-level beacon trigger firing as viewer.
+    /// </summary>
+    [Fact]
+    public async Task AsTheViewerRole_TheEditStoresRealUpdate_WithThePasswordInTheSetList_WritesUnderTheTokenPredicate_AndReturnsTheNewToken()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var roleName = "srv_pwd_" + Guid.NewGuid().ToString("N")[..8];
+        var (scratch, owner, ownerString) = await ServerAddViewerRoleLiveTests.OpenAsync(ct);
+        await using var _ = scratch;
+        await using var __ = owner;
+        await using var viewer = await ServerAddViewerRoleLiveTests.ProvisionAsync(owner, ownerString, roleName, null, ct);
+        var ok = false;
+        try
+        {
+            await ExecAsync(owner, "INSERT INTO config_service (id) VALUES (1) ON CONFLICT DO NOTHING", ct);
+            await ExecAsync(owner, $"INSERT INTO config_monitored_servers (server_id, name, host, auth, username, encrypted_password) VALUES (5204, 'echo', 'echo.example.test', 'sql', 'monitor', '{StoredBlob}')", ct);
+
+            var store = new DarlingMcpServerAdminTools.PostgresServerEditStore(viewer);
+            var row = await store.ReadRowAsync(5204, ct);
+            Assert.NotNull(row);
+            var versionBefore = long.Parse(await ScalarAsync(owner, "SELECT config_version FROM config_service", ct), System.Globalization.CultureInfo.InvariantCulture);
+
+            /* The write: the credential column in the SET list, under the modified_at the edit read. */
+            var write = await store.WriteAsync(
+                5204, row!.ModifiedAt, [new DarlingMcpServerAdminTools.EditColumnValue("password", "encrypted_password", NpgsqlDbType.Text, "blob-2")], null, ct);
+            Assert.Equal(DarlingMcpServerAdminTools.ServerEditWriteKind.Written, write.Kind);
+            Assert.True(write.ModifiedAt > row.ModifiedAt, "RETURNING modified_at did not move past the token the edit read");
+
+            /* The new blob is stored, the new token is what the row now carries (read as owner and through the by-id read as
+               viewer), and the beacon moved exactly once. */
+            Assert.Equal("blob-2", await ScalarAsync(owner, "SELECT encrypted_password FROM config_monitored_servers WHERE server_id = 5204", ct));
+            await using (var stamp = owner.CreateCommand("SELECT modified_at FROM config_monitored_servers WHERE server_id = 5204"))
+            {
+                Assert.Equal(write.ModifiedAt, (DateTime)(await stamp.ExecuteScalarAsync(ct))!);
+            }
+
+            Assert.Equal(write.ModifiedAt, (await store.ReadRowAsync(5204, ct))!.ModifiedAt);
+            Assert.Equal(versionBefore + 1, long.Parse(await ScalarAsync(owner, "SELECT config_version FROM config_service", ct), System.Globalization.CultureInfo.InvariantCulture));
+
+            /* The token just spent is stale: the same write is a conflict and changes nothing (the blob, the token, the beacon). */
+            var stale = await store.WriteAsync(
+                5204, row.ModifiedAt, [new DarlingMcpServerAdminTools.EditColumnValue("password", "encrypted_password", NpgsqlDbType.Text, "blob-3")], null, ct);
+            Assert.Equal(DarlingMcpServerAdminTools.ServerEditWriteKind.Conflict, stale.Kind);
+            Assert.Equal("blob-2", await ScalarAsync(owner, "SELECT encrypted_password FROM config_monitored_servers WHERE server_id = 5204", ct));
+            Assert.Equal(versionBefore + 1, long.Parse(await ScalarAsync(owner, "SELECT config_version FROM config_service", ct), System.Globalization.CultureInfo.InvariantCulture));
             ok = true;
         }
         finally
