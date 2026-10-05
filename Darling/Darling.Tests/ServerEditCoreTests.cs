@@ -120,6 +120,7 @@ public sealed class ServerEditCoreTests : IDisposable
 
         Assert.Equal("invalid", Status(answer));
         Assert.Contains(key, answer, StringComparison.Ordinal);
+        Assert.Contains("cannot be changed here", answer, StringComparison.Ordinal);
         Assert.Equal(0, store.Reads);
         Assert.Equal(0, store.Writes);
     }
