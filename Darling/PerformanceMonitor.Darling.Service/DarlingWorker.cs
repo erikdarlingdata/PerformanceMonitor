@@ -2876,6 +2876,10 @@ LIMIT 1";
                read through a provider each cycle, but darling.json is loaded once, so an edit needs a restart.
                false restores the inline capture. */
             queryStatsDeferredPlanFetch: () => config.QueryStatsDeferredPlanFetch,
+            /* #5158: procedure_stats' deferred plan fetch: off, shadow or on. A file-only knob: read through a provider each
+               cycle, but darling.json is loaded once, so an edit needs a restart. The runner treats an unrecognized value
+               as off. */
+            procedureStatsDeferredPlanFetch: () => config.ProcedureStatsDeferredPlanFetch,
             /* #3477: the per-collector database scope, resolved live against the SAME _scheduleOverrides
                the cadence gate reads — one source, so the scope a run collects under and the schedule it
                was dispatched under can never come from two different reloads. */

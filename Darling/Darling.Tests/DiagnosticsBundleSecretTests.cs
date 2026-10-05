@@ -96,6 +96,19 @@ public sealed class DiagnosticsBundleSecretTests
         Assert.True(unclassified.Count == 0, "Classify these in DiagnosticsBundle.ConfigShapeProjected (a scalar that identifies nothing, such as a flag or a number) or ConfigShapeExcluded (anything that holds a name, host, path, URL or secret, with a reason): " + string.Join(", ", unclassified));
     }
 
+    [Theory]
+    [InlineData(null, "off")]
+    [InlineData("off", "off")]
+    [InlineData("shadow", "shadow")]
+    [InlineData(" ON ", "on")]
+    [InlineData("secret-host.example.test", "off")]
+    public void ConfigShape_ProjectsTheProcedureStatsPlanFetchAsItsParsedMode(string? raw, string expected)
+    {
+        var shape = DiagnosticsBundle.BuildConfigShape(new DarlingConfig { ProcedureStatsDeferredPlanFetch = raw! });
+        Assert.Equal(expected, shape["procedure_stats_deferred_plan_fetch"]!.GetValue<string>());
+        Assert.DoesNotContain("secret-host", shape.ToJsonString());
+    }
+
     [Fact]
     public void ConfigShape_ProjectsTheDeferredPlanFetchFlag()
     {
