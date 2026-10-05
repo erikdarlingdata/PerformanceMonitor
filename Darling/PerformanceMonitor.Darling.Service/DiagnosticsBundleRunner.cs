@@ -51,8 +51,7 @@ SELECT datname FROM pg_database";
     /// <summary>
     /// The monitored database inventory: the distinct database names the periodic per-database state snapshot saw in
     /// the last 24 hours. The table is chunked by collection_time and indexed on (server_id, collection_time), so a
-    /// bound of one day reads the newest chunk only; the read adds no index, and a store without the table answers
-    /// from the other inventory below.
+    /// bound of one day reads the newest chunk only; the read adds no index. A table that cannot be read is a failed name source.
     /// </summary>
     internal const string DatabaseInventorySql = @"
 SELECT DISTINCT database_name
@@ -240,7 +239,8 @@ WHERE queryid = ANY($1)";
         NpgsqlDataSource? postgres,
         Exception? storeError,
         string? storeReason,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        NameSourceSql? nameSources = null)
     {
         var aliaser = new BundleAliaser();
         var warnings = new List<string>(DiagnosticsBundle.SeedFromConfig(aliaser, config, connectionString));
@@ -249,14 +249,14 @@ WHERE queryid = ANY($1)";
 
         if (postgres is not null)
         {
-            var seeded = await SeedFromStoreAsync(aliaser, postgres, cancellationToken);
-            warnings.AddRange(seeded.Notes);
+            var seeded = await SeedFromStoreAsync(aliaser, postgres, cancellationToken, nameSources);
             if (seeded.FailedNameSource is not null)
             {
-                /* The registry and the collected-data server list are where every monitored server's name is learned.
-                   With the store up and one unreadable, the bundle cannot prove it removed every server name. */
+                /* The registry, the collected-data server list, the store's roles and databases and the monitored database
+                   inventories are where names are learned. With the store up and one unreadable, the bundle cannot prove
+                   it removed every name. */
                 return new Outcome(DiagnosticsBundleExitCode.LeakGuard, null, Array.Empty<BundleLeak>(), aliaser,
-                    seeded.FailedNameSource + ": a server name source could not be read, so the bundle cannot prove it removed every server name.");
+                    seeded.FailedNameSource + ": a name source could not be read, so the bundle cannot prove it removed every name.");
             }
         }
 
@@ -365,16 +365,32 @@ WHERE queryid = ANY($1)";
         return new Outcome(exit, text, leaks, aliaser, string.Empty, warnings);
     }
 
-    /// <summary>What reading the store's name sources gave: manifest notes, and the server-name source that failed (null when none did).</summary>
-    internal sealed record SeedResult(IReadOnlyList<string> Notes, string? FailedNameSource);
+    /// <summary>
+    /// The SQL of each store name source. The defaults are the product's reads; a test substitutes one to make exactly
+    /// that source fail.
+    /// </summary>
+    internal sealed record NameSourceSql(
+        string Registry = RegistryNamesSql,
+        string Servers = CollectServersSql,
+        string Roles = StoreRolesSql,
+        string Databases = StoreDatabasesSql,
+        string Inventory = DatabaseInventorySql,
+        string PgInventory = PgDatabaseInventorySql);
 
+    /// <summary>What reading the store's name sources gave: the first source that failed (null when none did).</summary>
+    internal sealed record SeedResult(string? FailedNameSource);
+
+    /// <summary>
+    /// Reads every store name source. While the store is up, a source that cannot be read leaves names known only to it
+    /// unaliased and unknown to the verifier, so the first failure is returned by name and the caller refuses.
+    /// </summary>
     internal static async Task<SeedResult> SeedFromStoreAsync(
-        BundleAliaser aliaser, NpgsqlDataSource postgres, CancellationToken ct, string storeRolesSql = StoreRolesSql)
+        BundleAliaser aliaser, NpgsqlDataSource postgres, CancellationToken ct, NameSourceSql? sql = null)
     {
-        var notes = new List<string>();
+        sql ??= new NameSourceSql();
         string? failedNameSource = null;
 
-        if (!await TryReadAsync(postgres, RegistryNamesSql, reader =>
+        if (!await TryReadAsync(postgres, sql.Registry, reader =>
         {
             aliaser.AddName(AliasKind.Server, reader.IsDBNull(0) ? null : reader.GetString(0));
             aliaser.AddName(AliasKind.Host, reader.IsDBNull(1) ? null : reader.GetString(1));
@@ -393,7 +409,7 @@ WHERE queryid = ANY($1)";
         }
 
         /* Servers by id first so the alias order follows server_id; display names share their server's alias. */
-        if (!await TryReadAsync(postgres, CollectServersSql, reader =>
+        if (!await TryReadAsync(postgres, sql.Servers, reader =>
         {
             var id = reader.GetInt32(0);
             var name = reader.IsDBNull(1) ? null : reader.GetString(1);
@@ -407,7 +423,7 @@ WHERE queryid = ANY($1)";
             failedNameSource ??= "servers";
         }
 
-        if (!await TryReadAsync(postgres, storeRolesSql, reader =>
+        if (!await TryReadAsync(postgres, sql.Roles, reader =>
         {
             var role = reader.GetString(0);
             if (!BundleAliaser.ProductRoles.Contains(role, StringComparer.OrdinalIgnoreCase))
@@ -416,28 +432,28 @@ WHERE queryid = ANY($1)";
             }
         }, ct))
         {
-            notes.Add("The store's role list could not be read, so a role named only in free text may not be aliased.");
+            failedNameSource ??= "pg_roles";
         }
 
-        if (!await TryReadAsync(postgres, StoreDatabasesSql, reader => aliaser.AddName(AliasKind.Database, reader.GetString(0)), ct))
+        if (!await TryReadAsync(postgres, sql.Databases, reader => aliaser.AddName(AliasKind.Database, reader.GetString(0)), ct))
         {
-            notes.Add("The store's database list could not be read, so a database named only in free text may not be aliased.");
+            failedNameSource ??= "pg_database";
         }
 
-        if (!await TryReadAsync(postgres, DatabaseInventorySql, reader => aliaser.AddName(AliasKind.Database, reader.GetString(0)), ct))
+        if (!await TryReadAsync(postgres, sql.Inventory, reader => aliaser.AddName(AliasKind.Database, reader.GetString(0)), ct))
         {
-            notes.Add("The SQL Server database inventory could not be read, so a monitored database named only in free text may not be aliased.");
+            failedNameSource ??= "collect.database_states";
         }
 
-        if (!await TryReadAsync(postgres, PgDatabaseInventorySql, reader => aliaser.AddName(AliasKind.Database, reader.GetString(0)), ct))
+        if (!await TryReadAsync(postgres, sql.PgInventory, reader => aliaser.AddName(AliasKind.Database, reader.GetString(0)), ct))
         {
-            notes.Add("The PostgreSQL database inventory could not be read, so a monitored database named only in free text may not be aliased.");
+            failedNameSource ??= "collect.pg_database_stats";
         }
 
-        return new SeedResult(notes, failedNameSource);
+        return new SeedResult(failedNameSource);
     }
 
-    /// <summary>One bounded read for the name set. Returns false when the read failed; the caller decides whether that is a note or a refusal.</summary>
+    /// <summary>One bounded read for the name set. Returns false when the read failed; the caller refuses, since a name source that cannot be read leaves its names unaliased.</summary>
     private static async Task<bool> TryReadAsync(NpgsqlDataSource postgres, string sql, Action<NpgsqlDataReader> each, CancellationToken ct)
     {
         try

@@ -56,7 +56,7 @@ public sealed class DiagnosticsBundleSeedFailureLiveTests
             Assert.Equal(DarlingCliCommands.DiagnosticsBundleExitCode.LeakGuard, exit);
             Assert.False(File.Exists(bundle));
             var text = error.ToString();
-            Assert.Contains("a server name source could not be read, so the bundle cannot prove it removed every server name", text, StringComparison.Ordinal);
+            Assert.Contains("a name source could not be read, so the bundle cannot prove it removed every name", text, StringComparison.Ordinal);
             Assert.Contains("config_monitored_servers", text, StringComparison.Ordinal);
             Assert.DoesNotContain("alpha-sql-01", text, StringComparison.Ordinal);
             ok = true;
@@ -69,8 +69,66 @@ public sealed class DiagnosticsBundleSeedFailureLiveTests
         }
     }
 
+    public static TheoryData<string, string> EachNameSource() => new()
+    {
+        { "config_monitored_servers", "registry" },
+        { "servers", "servers" },
+        { "pg_roles", "roles" },
+        { "pg_database", "databases" },
+        { "collect.database_states", "inventory" },
+        { "collect.pg_database_stats", "pgInventory" },
+    };
+
+    [Theory]
+    [MemberData(nameof(EachNameSource))]
+    public async Task AnyNameSourceFailing_WhileTheStoreIsUp_ExitsFive_WithNoFile_AndNamesTheSource(string source, string which)
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), "Set DARLING_TEST_PG to run the live seed-failure test.");
+        var ct = TestContext.Current.CancellationToken;
+        var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct);
+        var root = Directory.CreateTempSubdirectory("darling-bundle-seedsrc-");
+        var ok = false;
+        try
+        {
+            await using (var connection = new NpgsqlConnection(scratch.ConnectionString))
+            {
+                await connection.OpenAsync(ct);
+                await PgMigrations.MigrateAsync(connection, ct);
+            }
+
+            /* The store is migrated and up; exactly one source's read is broken. */
+            const string broken = "SELECT nonexistent_column FROM pg_roles";
+            var sql = which switch
+            {
+                "registry" => new DiagnosticsBundleRunner.NameSourceSql(Registry: broken),
+                "servers" => new DiagnosticsBundleRunner.NameSourceSql(Servers: broken),
+                "roles" => new DiagnosticsBundleRunner.NameSourceSql(Roles: broken),
+                "databases" => new DiagnosticsBundleRunner.NameSourceSql(Databases: broken),
+                "inventory" => new DiagnosticsBundleRunner.NameSourceSql(Inventory: broken),
+                _ => new DiagnosticsBundleRunner.NameSourceSql(PgInventory: broken),
+            };
+
+            var options = DiagnosticsBundle.ParseArgs(new[] { Path.Combine(root.FullName, "b.json"), "--log-dir", root.FullName }).Options!;
+            var config = new DarlingConfig { Servers = { new MonitoredServer { Name = "alpha-sql-01" } } };
+            await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+            var outcome = await DiagnosticsBundleRunner.BuildAsync(options, config, scratch.ConnectionString, postgres, null, null, ct, sql);
+
+            Assert.Equal(DarlingCliCommands.DiagnosticsBundleExitCode.LeakGuard, outcome.ExitCode);
+            Assert.Null(outcome.Text);
+            Assert.StartsWith(source + ": a name source could not be read", outcome.Message, StringComparison.Ordinal);
+            Assert.DoesNotContain("alpha-sql-01", outcome.Message, StringComparison.Ordinal);
+            ok = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, ok, async (_, _) => await Task.CompletedTask);
+            await scratch.DisposeAsync();
+            root.Delete(recursive: true);
+        }
+    }
+
     [Fact]
-    public async Task RoleAndInventoryReadsFailing_AreNotesOnly_AndNameSourcesStillRead()
+    public async Task EveryNameSourceReadable_OnAMigratedStore_ReturnsNoFailure()
     {
         Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), "Set DARLING_TEST_PG to run the live seed-failure test.");
         var ct = TestContext.Current.CancellationToken;
@@ -85,11 +143,8 @@ public sealed class DiagnosticsBundleSeedFailureLiveTests
             }
 
             await using var source = NpgsqlDataSource.Create(scratch.ConnectionString);
-            var aliaser = new BundleAliaser();
-            var result = await DiagnosticsBundleRunner.SeedFromStoreAsync(aliaser, source, ct, storeRolesSql: "SELECT nonexistent_column FROM pg_roles");
-
+            var result = await DiagnosticsBundleRunner.SeedFromStoreAsync(new BundleAliaser(), source, ct);
             Assert.Null(result.FailedNameSource);
-            Assert.Contains(result.Notes, n => n.Contains("role list could not be read", StringComparison.Ordinal));
             ok = true;
         }
         finally

@@ -271,6 +271,10 @@ internal static class DiagnosticsBundle
             map = ResolveLinks(options.AliasMapPath);
             bundle = ResolveLinks(options.OutputPath);
         }
+        catch (UninspectableComponentException)
+        {
+            return "--alias-map could not be resolved (a path component could not be inspected), so the bundle cannot prove the map is a different file.";
+        }
         catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
         {
             return "--alias-map is not a usable path (" + ex.GetType().Name + ").";
@@ -292,7 +296,8 @@ internal static class DiagnosticsBundle
     /// <summary>
     /// The full path of <paramref name="path"/> with every symbolic link on it followed: each existing component is
     /// resolved in turn, so a link to a file that does not exist yet still compares equal to that file's own path, and
-    /// a path inside a linked directory compares by the directory's real location plus the file name.
+    /// a path inside a linked directory compares by the directory's real location plus the file name. A component that
+    /// does not exist is kept as written; one that cannot be inspected throws, since what it links to is unknown.
     /// </summary>
     internal static string ResolveLinks(string path, int depth = 0)
     {
@@ -319,13 +324,26 @@ internal static class DiagnosticsBundle
                     current = ResolveLinks(target.FullName, depth + 1);
                 }
             }
+            catch (Exception ex) when (ex is FileNotFoundException or DirectoryNotFoundException)
+            {
+                /* A component that does not exist yet is compared as written. */
+            }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
             {
-                /* A component that cannot be inspected is compared as written. */
+                /* The component exists (or may) but cannot be inspected, so what it links to is unknown. */
+                throw new UninspectableComponentException(ex);
             }
         }
 
         return current;
+    }
+
+    /// <summary>A path component that cannot be inspected, so the path cannot be resolved.</summary>
+    private sealed class UninspectableComponentException : Exception
+    {
+        public UninspectableComponentException(Exception inner) : base("A path component could not be inspected.", inner)
+        {
+        }
     }
 
     /// <summary>Checks the output location before any work: an existing file without --force, or a missing or unwritable directory, is exit 4.</summary>

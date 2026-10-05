@@ -397,9 +397,52 @@ public sealed class DiagnosticsBundleRound2Tests
         }
         finally
         {
+            /* Delete the link itself first so the recursive delete never walks into its target. */
+            var linkPath = Path.Combine(root.FullName, "dirlink");
+            if (new DirectoryInfo(linkPath).LinkTarget is not null)
+            {
+                Directory.Delete(linkPath, recursive: false);
+            }
+
             root.Delete(recursive: true);
         }
     }
+
+    [Fact]
+    [System.Runtime.Versioning.UnsupportedOSPlatform("windows")]
+    public void AliasMap_APathComponent_ThatExistsButCannotBeInspected_IsRefused()
+    {
+        Assert.SkipWhen(OperatingSystem.IsWindows(), "Denying a directory by mode needs POSIX permissions.");
+        Assert.SkipWhen(geteuid() == 0, "Root can inspect a directory whose mode is 000.");
+        var root = Directory.CreateTempSubdirectory("darling-bundle-denied-");
+        var denied = Path.Combine(root.FullName, "A");
+        try
+        {
+            Directory.CreateDirectory(Path.Combine(denied, "sub"));
+            File.SetUnixFileMode(denied, UnixFileMode.None);
+
+            /* Precondition: inspecting a child of the denied directory really throws. */
+            Assert.Throws<UnauthorizedAccessException>(() => File.GetAttributes(Path.Combine(denied, "sub")));
+
+            var options = DiagnosticsBundle.ParseArgs(new[] { Path.Combine(root.FullName, "b.json"), "--alias-map", Path.Combine(denied, "sub", "x.json") }).Options!;
+            var problem = DiagnosticsBundle.CheckAliasMap(options);
+            Assert.NotNull(problem);
+            Assert.Contains("could not be resolved (a path component could not be inspected)", problem, StringComparison.Ordinal);
+            Assert.Contains("cannot prove the map is a different file", problem, StringComparison.Ordinal);
+
+            /* A component that does not exist yet is still compared as written. */
+            var fresh = DiagnosticsBundle.ParseArgs(new[] { Path.Combine(root.FullName, "b.json"), "--alias-map", Path.Combine(root.FullName, "missing", "x.json") }).Options!;
+            Assert.Null(DiagnosticsBundle.CheckAliasMap(fresh));
+        }
+        finally
+        {
+            File.SetUnixFileMode(denied, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+            root.Delete(recursive: true);
+        }
+    }
+
+    [System.Runtime.InteropServices.DllImport("libc")]
+    private static extern uint geteuid();
 
     [Fact]
     public void AliasMap_AJunction_ThatHoldsTheBundle_IsRefused()
