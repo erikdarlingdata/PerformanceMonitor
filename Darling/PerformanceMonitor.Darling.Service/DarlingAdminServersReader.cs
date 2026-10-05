@@ -148,7 +148,7 @@ internal static class DarlingAdminServersReader
     /// </summary>
     internal static List<AdminServerRow> Build(IReadOnlyList<Row> rows, DateTime nowUtc)
     {
-        var built = rows.Select(r => (Id: r.ServerId, Row: ToRow(r, nowUtc))).ToList();
+        var built = rows.Select(r => (Id: r.ServerId, Row: ToAdminServerRow(r, nowUtc))).ToList();
         built.Sort((a, b) =>
         {
             var byDisplay = StringComparer.OrdinalIgnoreCase.Compare(a.Row.display_name, b.Row.display_name);
@@ -159,7 +159,7 @@ internal static class DarlingAdminServersReader
         return built.Select(x => x.Row).ToList();
     }
 
-    private static AdminServerRow ToRow(Row r, DateTime nowUtc)
+    internal static AdminServerRow ToAdminServerRow(Row r, DateTime nowUtc)
     {
         /* The storage name the collectors stamp when the server has connected; the same name derived from the
            config fields when it has not, so a not-yet-collected server is still named the way it will be. */
