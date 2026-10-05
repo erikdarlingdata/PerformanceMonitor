@@ -80,6 +80,7 @@ public sealed class QueryStatsHourLedgerTests
         var versions = PgMigrations.Scripts.Select(s => s.Version).ToList();
 
         Assert.Equal(164, Rung.Version);
+        Assert.Equal(QueryStatsHourLedger.RungVersion, Rung.Version); // the runner's below-the-rung check reads this constant
         Assert.Single(PgMigrations.Scripts, m => m.Name == RungName);
         Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
         Assert.Equal(versions.Distinct().OrderBy(v => v), versions);
@@ -146,11 +147,16 @@ public sealed class QueryStatsHourLedgerTests
     [Fact]
     public void TheSeams_CountTheRollupsPopulation_ByTheHour_AndNeedNoTimescale()
     {
-        /* The rollup counts rows under this exact predicate; the recount, and the guard's raw side it replaces, say the same. */
+        /* The rollup counts rows under this exact predicate; the recount says the same. The guard has no raw side any more: it
+           reads the ledger, so it names this table and has no scan of collect.query_stats (the lookahead keeps
+           query_stats_hour_ledger and query_stats_interval_hourly from counting as one). */
         const string predicate = "sample_interval_seconds IS DISTINCT FROM 0";
         Assert.Contains(predicate, TimescaleSupport.CreateQueryStatsIntervalHourlySql, StringComparison.Ordinal);
         Assert.Contains(predicate, QueryStatsHourLedger.RecountSql, StringComparison.Ordinal);
-        Assert.Contains(predicate, IntervalRollupCountGuard.QueryStatsSql, StringComparison.Ordinal);
+        Assert.Contains($"FROM {QueryStatsHourLedger.LedgerTable}", IntervalRollupCountGuard.QueryStatsSql, StringComparison.Ordinal);
+        Assert.Contains($"FROM {QueryStatsHourLedger.StateTable}", IntervalRollupCountGuard.QueryStatsSql, StringComparison.Ordinal);
+        Assert.DoesNotMatch(@"\bcollect\.query_stats(?![\w$])", IntervalRollupCountGuard.QueryStatsSql);
+        Assert.DoesNotContain(predicate, IntervalRollupCountGuard.QueryStatsSql, StringComparison.Ordinal);
 
         foreach (var sql in new[] { QueryStatsHourLedger.UpsertSql, QueryStatsHourLedger.RecountSql })
         {
