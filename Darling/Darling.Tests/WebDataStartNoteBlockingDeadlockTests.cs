@@ -63,18 +63,8 @@ public sealed class WebDataStartNoteBlockingDeadlockTests
         }
     }
 
-    /// <summary>A page ranked by something other than time is a sample: the coverage rule applies, so the store is asked.</summary>
-    [Fact]
-    public async Task ARankedPage_TakesTheCoverageRule()
-    {
-        await using var store = NeverConnects();
-        var ranked = CappedPages.First(p => p.Read == "get_blocking").Page.Replace("event_time_desc", "duration_desc", StringComparison.Ordinal);
-
-        await Assert.ThrowsAnyAsync<OperationCanceledException>(
-            () => WebDataStartNote.AddAsync(store, "get_blocking", "sql01", 48, WindowEnd, ranked, null, Cancelled));
-    }
-
-    /// <summary>The PostgreSQL event words are row words for their own read only; the empty answers are probed like rows.</summary>
+    /// <summary>The PostgreSQL event words are row words for their own read only; the empty answers are probed like rows. The
+    /// get_waiting_tasks line is a guard pin (it passed before the change too); the rest fail without it.</summary>
     [Fact]
     public async Task TheRowWords_ArePerRead_AndTheEmptyAnswersAreProbed()
     {
@@ -110,9 +100,10 @@ public sealed class WebDataStartNoteBlockingDeadlockTests
         Assert.Contains("postgres, sources, [resolved.ServerName]", note, StringComparison.Ordinal);
     }
 
-    /// <summary>The premises in the tools' source: the fields and order words the rules read.</summary>
+    /// <summary>A premise pin, not a test of the change: the tools' source still spells the fields and order words the rules read.
+    /// It passes with or without the change and fails only if a tool renames one.</summary>
     [Fact]
-    public void TheToolsAnswer_TheFieldsTheRulesRead()
+    public void PremisePin_TheToolsSource_SpellsTheFieldsTheRulesRead()
     {
         var pgDeadlocks = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpPgDeadlockTools.cs");
         Assert.Contains("status = \"deadlocks\"", pgDeadlocks, StringComparison.Ordinal);

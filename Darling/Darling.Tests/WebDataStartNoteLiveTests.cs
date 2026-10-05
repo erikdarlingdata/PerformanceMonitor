@@ -431,10 +431,30 @@ public sealed class WebDataStartNoteLiveTests
         }
     }
 
-    /// <summary>get_blocking is fed by two tables; a server whose rows sit ONLY in the DMV snapshots (no blocked process reports) still
-    /// gets the note, from that table's coverage, and one whose rows sit only in the XE table gets it from the XE table.</summary>
+    /// <summary>The composite probe, proved: the XE table starts late inside the window (the page shows only XE rows), while the DMV
+    /// snapshots reach back from before the window. The earlier start covers the window, so there is NO note; a probe of the XE table
+    /// alone would name the late start and add one.</summary>
     [Fact]
-    public async Task GetBlocking_OnRowsFromOnlyTheDmvPath_OrOnlyTheXePath_NamesThatPathsStart_AgainstDevPostgres()
+    public async Task GetBlocking_WhenTheDmvSnapshotsCoverTheWindowButTheXeRowsStartLate_GivesNoNote_AgainstDevPostgres()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var store = await Store.CreateAsync(ct);
+        const string server = "web-data-start-blocking-composite";
+
+        /* DMV: hourly snapshots from 10 days back to the window end, so they cover the 7-day window from before its start. */
+        await store.SeedTableAsync("dmv_blocking_snapshots", -496732, server, store.End.AddDays(-10), store.End.AddDays(-10), ct);
+        /* XE: starts one day back, late inside the window; these are the rows the page shows. */
+        await store.SeedTableAsync("blocked_process_reports", -496732, server, store.End.AddDays(-1), store.End.AddDays(-1), ct, eventColumn: "event_time", extraSet: ExtraSet("blocked_process_reports"));
+
+        var answer = await store.AskEventReadAsync("get_blocking", server, 168, ct);
+        Assert.True(answer["events_returned"]?.GetValue<int>() > 0, "the page shows the XE rows");
+        Assert.True(answer["window_truncated"] is null, "the DMV snapshots cover the window, so no note: " + answer["truncation_note"]);
+        Assert.Null(answer["truncation_note"]);
+    }
+
+    /// <summary>Each single-table server still gets the note from its own table's start (does not by itself prove the composite).</summary>
+    [Fact]
+    public async Task GetBlocking_OnRowsFromOneTableOnly_NamesThatTablesStart_AgainstDevPostgres()
     {
         var ct = TestContext.Current.CancellationToken;
         await using var store = await Store.CreateAsync(ct);
@@ -632,15 +652,15 @@ ORDER BY ordinal_position", connection))
         {
             var payload = read switch
             {
-                "get_blocked_process_xml" => await DarlingMcpBlockingTools.GetBlockedProcessXml(DataSource, server, hours, 100, null, cancellationToken: ct),
-                "get_long_query_completions" => await DarlingMcpLongQueryTools.GetLongQueryCompletions(DataSource, server, hours, 100, null, cancellationToken: ct),
-                "get_memory_pressure_events" => await DarlingMcpMemoryGrantTools.GetMemoryPressureEvents(DataSource, server, hours, null, null, cancellationToken: ct),
-                "get_default_trace_events" => await DarlingMcpDefaultTraceTools.GetDefaultTraceEvents(DataSource, server, hours, 100, null, cancellationToken: ct),
-                "get_pg_deadlocks" => await DarlingMcpPgDeadlockTools.GetPgDeadlocks(DataSource, server, hours, 100, null, cancellationToken: ct),
-                "get_pg_log_events" => await DarlingMcpPgLogEventTools.GetPgLogEvents(DataSource, server, hours, null, null, 100, null, cancellationToken: ct),
-                "get_blocking" => await DarlingMcpBlockingTools.GetBlocking(DataSource, server, hours, 100, null, false, null, cancellationToken: ct),
-                "get_deadlocks" => await DarlingMcpBlockingTools.GetDeadlocks(DataSource, server, hours, 100, null, null, cancellationToken: ct),
-                "get_deadlock_detail" => await DarlingMcpBlockingTools.GetDeadlockDetail(DataSource, server, hours, 100, cancellationToken: ct),
+                "get_blocked_process_xml" => await DarlingMcpBlockingTools.GetBlockedProcessXml(DataSource, server_name: server, hours_back: hours, limit: 100, cancellationToken: ct),
+                "get_long_query_completions" => await DarlingMcpLongQueryTools.GetLongQueryCompletions(DataSource, server_name: server, hours_back: hours, limit: 100, cancellationToken: ct),
+                "get_memory_pressure_events" => await DarlingMcpMemoryGrantTools.GetMemoryPressureEvents(DataSource, server_name: server, hours_back: hours, cancellationToken: ct),
+                "get_default_trace_events" => await DarlingMcpDefaultTraceTools.GetDefaultTraceEvents(DataSource, server_name: server, hours_back: hours, limit: 100, cancellationToken: ct),
+                "get_pg_deadlocks" => await DarlingMcpPgDeadlockTools.GetPgDeadlocks(DataSource, server_name: server, hours_back: hours, limit: 100, cancellationToken: ct),
+                "get_pg_log_events" => await DarlingMcpPgLogEventTools.GetPgLogEvents(DataSource, server_name: server, hours_back: hours, limit: 100, cancellationToken: ct),
+                "get_blocking" => await DarlingMcpBlockingTools.GetBlocking(DataSource, server_name: server, hours_back: hours, limit: 100, cancellationToken: ct),
+                "get_deadlocks" => await DarlingMcpBlockingTools.GetDeadlocks(DataSource, server_name: server, hours_back: hours, limit: 100, cancellationToken: ct),
+                "get_deadlock_detail" => await DarlingMcpBlockingTools.GetDeadlockDetail(DataSource, server_name: server, hours_back: hours, limit: 100, cancellationToken: ct),
                 _ => throw new ArgumentOutOfRangeException(nameof(read), read, "not an event read"),
             };
             var answered = await WebDataStartNote.AddAsync(DataSource, read, server, hours, null, payload, null, ct);
@@ -669,8 +689,8 @@ WHERE server_id = $1", connection);
         {
             var payload = read switch
             {
-                "get_health_parser_severe_errors" => await DarlingMcpHealthParserTools.GetSevereErrors(DataSource, server, hours, 100, null, cancellationToken: ct),
-                "get_health_parser_system_health" => await DarlingMcpHealthParserTools.GetSystemHealth(DataSource, server, hours, 100, null, cancellationToken: ct),
+                "get_health_parser_severe_errors" => await DarlingMcpHealthParserTools.GetSevereErrors(DataSource, server_name: server, hours_back: hours, limit: 100, cancellationToken: ct),
+                "get_health_parser_system_health" => await DarlingMcpHealthParserTools.GetSystemHealth(DataSource, server_name: server, hours_back: hours, limit: 100, cancellationToken: ct),
                 _ => throw new ArgumentOutOfRangeException(nameof(read), read, "not a seeded system_health read"),
             };
             var answered = await WebDataStartNote.AddAsync(DataSource, read, server, hours, null, payload, null, ct);
