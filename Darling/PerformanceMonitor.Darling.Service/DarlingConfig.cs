@@ -224,6 +224,28 @@ public sealed class DarlingConfig
     public bool QueryStatsDeferredPlanFetch { get; set; } = true;
 
     /// <summary>
+    /// #5158: whether <c>procedure_stats</c> fetches plan XML only for module plans this host has not already
+    /// committed. <c>off</c> (the default) keeps the inline capture. <c>shadow</c> keeps the inline capture and every
+    /// stored row exactly as <c>off</c> writes it, and in addition recognizes each module plan by its identity (the
+    /// plan handle, its cached time and a fingerprint of its statements) and checks that identity against the plans
+    /// this host has committed, recording in the run's collection-log note how many it would have skipped and how
+    /// many of those the identity got wrong (<c>deferred_would_hit</c>, <c>deferred_false_hit</c>). <c>on</c> skips
+    /// the render for a recognized plan, sends its stored digest instead, and renders only the rest, at most 150 a run.
+    /// An unrecognized value logs a warning and means <c>off</c>.
+    ///
+    /// <para><b>Why a shadow mode.</b> A module plan changes in place when one statement recompiles, with the same
+    /// plan handle and cached time, so an identity that missed that would send a stale plan's digest. Shadow measures
+    /// the identity against the plans it just rendered before <c>on</c> trusts it. The cadence of
+    /// <see cref="ProcedureStatsPlanCycleInterval"/> still decides which runs may render: an <c>on</c> run between
+    /// captures sends digests for recognized plans and renders nothing.</para>
+    ///
+    /// <para>A file-only knob like <see cref="QueryStatsDeferredPlanFetch"/>, read live, with no schema rung. Only
+    /// meaningful while <see cref="CapturePlans"/> is on; Azure SQL Database keeps <c>off</c>.</para>
+    /// </summary>
+    [JsonPropertyName("procedureStatsDeferredPlanFetch")]
+    public string ProcedureStatsDeferredPlanFetch { get; set; } = "off";
+
+    /// <summary>
     /// The shared alert engine's enabled flags and thresholds (Phase-5 slice D). Every default
     /// mirrors Lite's <c>App.*</c> alert defaults exactly, so an empty section alerts like a
     /// fresh Lite install. Optional — omit it entirely for the defaults.

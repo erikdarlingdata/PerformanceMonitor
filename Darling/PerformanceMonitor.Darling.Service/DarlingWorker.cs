@@ -2873,6 +2873,9 @@ LIMIT 1";
             /* #5158: query_stats fetches plan XML only for plans this host has not committed. Live like its siblings;
                false restores the inline capture. */
             queryStatsDeferredPlanFetch: () => config.QueryStatsDeferredPlanFetch,
+            /* #5158: procedure_stats' deferred plan fetch: off, shadow or on. Live like its siblings; the runner reads it
+               each cycle and treats an unrecognized value as off. */
+            procedureStatsDeferredPlanFetch: () => config.ProcedureStatsDeferredPlanFetch,
             /* #3477: the per-collector database scope, resolved live against the SAME _scheduleOverrides
                the cadence gate reads — one source, so the scope a run collects under and the schedule it
                was dispatched under can never come from two different reloads. */
