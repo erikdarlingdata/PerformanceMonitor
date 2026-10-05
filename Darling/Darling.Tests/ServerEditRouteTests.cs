@@ -110,7 +110,7 @@ public sealed class ServerEditRouteTests
     }
 
     private static async Task<(HttpStatusCode Status, string Body)> SendAsync(
-        Rig rig, HttpMethod method, string path, string? body = null, string mediaType = "application/json", string? seat = null)
+        Rig rig, HttpMethod method, string path, string? body = null, string mediaType = "application/json", string? seat = null, string? principal = null)
     {
         var ct = TestContext.Current.CancellationToken;
         using var request = new HttpRequestMessage(method, path);
@@ -124,12 +124,31 @@ public sealed class ServerEditRouteTests
             request.Headers.Add("X-Seat", seat);
         }
 
+        if (principal is not null)
+        {
+            request.Headers.Add("X-Principal", Uri.EscapeDataString(principal));
+        }
+
         using var response = await rig.Client.SendAsync(request, ct);
         return (response.StatusCode, await response.Content.ReadAsStringAsync(ct));
     }
 
-    private static Task<(HttpStatusCode Status, string Body)> PatchAsync(Rig rig, string body, int id = 41, string mediaType = "application/json", string? seat = null) =>
-        SendAsync(rig, HttpMethod.Patch, "/api/servers/" + id, body, mediaType, seat);
+    private static Task<(HttpStatusCode Status, string Body)> PatchAsync(
+        Rig rig, string body, int id = 41, string mediaType = "application/json", string? seat = null, string? principal = null) =>
+        SendAsync(rig, HttpMethod.Patch, "/api/servers/" + id, body, mediaType, seat, principal);
+
+    /// <summary>Waits for a captured log line that contains <paramref name="fragment"/>. A late audit line is written by
+    /// a thread-pool continuation after the 503 was answered, so a test waits for it and never asserts the instant it
+    /// releases the core.</summary>
+    private static async Task WaitForLogLineAsync(Rig rig, string fragment)
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(10);
+        while (!rig.Log.Lines.Any(l => l.Contains(fragment, StringComparison.Ordinal)))
+        {
+            Assert.True(DateTime.UtcNow < deadline, $"no log line contained \"{fragment}\"; the log held: {rig.Log.Joined}");
+            await Task.Delay(20, TestContext.Current.CancellationToken);
+        }
+    }
 
     private static Task<(HttpStatusCode Status, string Body)> PostAddAsync(Rig rig) =>
         SendAsync(rig, HttpMethod.Post, "/api/servers", "[{\"host\":\"sql01\"}]");
@@ -331,16 +350,19 @@ public sealed class ServerEditRouteTests
     }
 
     [Fact]
-    public void RedactEditAnswer_RemovesTheSecretInItsRawAndJsonEscapedSpelling_FromTheMessage()
+    public void RedactEditAnswer_RemovesTheSecretInItsRawAndJsonEscapedSpelling()
     {
         const string secret = "p\"w\\d";
-        /* Serialized the way the core writes it: on the wire the secret's quote and backslash are escaped. */
+        /* Serialized the way the core writes it: on the wire the secret's quote and backslash are escaped, so the text
+           holds only the escaped spelling and the redaction has to work on the parsed value. */
+        var escaped = System.Text.Json.JsonSerializer.Serialize(secret)[1..^1];
         var answer = new JsonObject { ["status"] = "connection_failed", ["message"] = "bad " + secret + " and again " + secret }.ToJsonString();
-        Assert.Contains("p\\\"w\\\\d", answer, StringComparison.Ordinal);
+        Assert.Contains(escaped, answer, StringComparison.Ordinal);
+        Assert.DoesNotContain(secret, answer, StringComparison.Ordinal);
 
         var redacted = DarlingWebEndpoints.RedactEditAnswer(answer, new[] { secret });
         Assert.DoesNotContain(secret, redacted, StringComparison.Ordinal);
-        Assert.DoesNotContain("p\\\"w\\\\d", redacted, StringComparison.Ordinal);
+        Assert.DoesNotContain(escaped, redacted, StringComparison.Ordinal);
         var envelope = JsonNode.Parse(redacted)!.AsObject();
         Assert.Equal("bad [redacted] and again [redacted]", envelope["message"]!.GetValue<string>());
         Assert.Equal("connection_failed", envelope["status"]!.GetValue<string>());
@@ -625,7 +647,7 @@ public sealed class ServerEditRouteTests
             edit: (_, _) => Interlocked.Increment(ref calls) == 1 ? hang.Task : Task.FromResult(UpdatedAnswer),
             editTimeout: TimeSpan.FromMilliseconds(200));
 
-        var (status, body) = await PatchAsync(rig, Changes("\"password\":\"" + FakeSecret + "\""));
+        var (status, body) = await PatchAsync(rig, Changes("\"password\":\"" + FakeSecret + "\""), principal: "dana");
         Assert.Equal(HttpStatusCode.ServiceUnavailable, status);
         Assert.Equal(DarlingWebEndpoints.ServerEditTimedOutText, JsonNode.Parse(body)!["error"]!.GetValue<string>());
         AssertNoSecret(rig, body);
@@ -633,8 +655,16 @@ public sealed class ServerEditRouteTests
         Assert.Equal(HttpStatusCode.TooManyRequests, (await PatchAsync(rig, Changes())).Status);
         Assert.Equal(HttpStatusCode.TooManyRequests, (await PostAddAsync(rig)).Status);
         Assert.Equal(1, Volatile.Read(ref calls));
+        Assert.DoesNotContain(rig.Log.Lines, l => l.Contains("Server edited by", StringComparison.Ordinal));
 
+        /* The client was told 503, but the core commits when it finishes: its audit line is written then, once, for the
+           principal who sent the edit (not whoever sends the next one). */
         hang.SetResult(UpdatedAnswer);
+        await WaitForLogLineAsync(rig, "Server edited by");
+        var late = Assert.Single(rig.Log.Lines, l => l.Contains("Server edited by", StringComparison.Ordinal));
+        Assert.Contains("Server edited by dana: id 41, fields display_name,monthly_cost_usd", late, StringComparison.Ordinal);
+        AssertNoSecret(rig, body);
+
         var accepted = HttpStatusCode.TooManyRequests;
         for (var i = 0; i < 100 && accepted == HttpStatusCode.TooManyRequests; i++)
         {
@@ -646,6 +676,8 @@ public sealed class ServerEditRouteTests
         }
 
         Assert.Equal(HttpStatusCode.OK, accepted);
+        Assert.Single(rig.Log.Lines, l => l.Contains("Server edited by dana", StringComparison.Ordinal));
+        Assert.Single(rig.Log.Lines, l => l.Contains("Server edited by alice", StringComparison.Ordinal));
     }
 
     [Fact]

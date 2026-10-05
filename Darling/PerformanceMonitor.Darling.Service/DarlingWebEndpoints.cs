@@ -1088,7 +1088,19 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 return ErrorResult(refusal!, StatusCodes.Status400BadRequest);
             }
 
-            var ran = await RunInServerWriteSlotAsync(serverWriteInFlight, () => addServers(body), slotTimeout, AddSlotLabels, logger);
+            /* Both are read BEFORE the slot call: an add that outlives the wait commits after the request is over, and
+               its audit line is written then, from these two, never from the HttpContext. */
+            var principal = DarlingWebSeat.FromContext(context).EditorPrincipal;
+            var secrets = SubmittedSecrets(entries);
+
+            var ran = await RunInServerWriteSlotAsync(
+                serverWriteInFlight, () => addServers(body), slotTimeout, AddSlotLabels, logger,
+                auditLateAnswer: late =>
+                {
+                    var lateAnswer = RedactAddAnswer(late, secrets);
+                    LogServerAddFailures(logger, principal, lateAnswer);
+                    LogServerAdds(logger, principal, entries, lateAnswer);
+                });
             if (ran.Early is not null)
             {
                 return ran.Early;
@@ -1097,16 +1109,14 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             var result = ran.Answer!;
             var stopwatch = ran.Stopwatch!;
 
-            var secrets = SubmittedSecrets(entries);
-
             if (ClassifyToolResponse(result) is ToolResponseKind.ServerError)
             {
                 return ServerErrorResult(RedactSecrets(McpHelpers.ErrorMessageOf(result), secrets), "/api/servers", logger, stopwatch.ElapsedMilliseconds);
             }
 
             var answer = RedactAddAnswer(result, secrets);
-            LogServerAddFailures(logger, DarlingWebSeat.FromContext(context).EditorPrincipal, answer);
-            LogServerAdds(logger, DarlingWebSeat.FromContext(context).EditorPrincipal, entries, answer);
+            LogServerAddFailures(logger, principal, answer);
+            LogServerAdds(logger, principal, entries, answer);
             return Results.Text(answer, "application/json", statusCode: MuteRuleEnvelopeStatus(answer));
         });
 
@@ -1141,16 +1151,21 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 return ErrorResult(refusal!, StatusCodes.Status400BadRequest);
             }
 
-            var ran = await RunInServerWriteSlotAsync(serverWriteInFlight, () => editServer(id, body), editSlotTimeout, EditSlotLabels, logger);
-            if (ran.Early is not null)
-            {
-                return ran.Early;
-            }
-
+            /* Both are read BEFORE the slot call: an edit that outlives the wait commits after the request is over, and
+               its audit line is written then, from these two, never from the HttpContext. */
+            var principal = DarlingWebSeat.FromContext(context).EditorPrincipal;
             var secrets = new List<string>();
             if (TryGetString(changes, "password") is { Length: > 0 } secret)
             {
                 secrets.Add(secret);
+            }
+
+            var ran = await RunInServerWriteSlotAsync(
+                serverWriteInFlight, () => editServer(id, body), editSlotTimeout, EditSlotLabels, logger,
+                auditLateAnswer: late => LogServerEdit(logger, principal, id, RedactEditAnswer(late, secrets)));
+            if (ran.Early is not null)
+            {
+                return ran.Early;
             }
 
             var result = ran.Answer!;
@@ -1160,7 +1175,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             }
 
             var answer = RedactEditAnswer(result, secrets);
-            LogServerEdit(logger, DarlingWebSeat.FromContext(context).EditorPrincipal, id, answer);
+            LogServerEdit(logger, principal, id, answer);
             return Results.Text(answer, "application/json", statusCode: ServerEditEnvelopeStatus(answer));
         });
 
@@ -1357,11 +1372,14 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// wait, and both go through one <see cref="SingleReleaseSlot"/> so it is freed at most once; the handler frees it
     /// in <c>finally</c> BEFORE the caller writes any answer, so a client that sends again the moment it reads the
     /// answer finds the slot free. A core that outlives <paramref name="timeout"/> answers 503 and keeps the slot
-    /// until it finishes. Only the exception TYPE is ever logged or answered: its message could quote a value the
-    /// request carried.
+    /// until it finishes, and a core that outlives it can still commit: <paramref name="auditLateAnswer"/> receives
+    /// its answer when it finishes, so the route's audit line is written for a write the client was told nothing
+    /// about. It runs after the request is over, so it must not touch the HttpContext. Only the exception TYPE is
+    /// ever logged or answered: its message could quote a value the request carried.
     /// </summary>
     private static async Task<ServerWriteRun> RunInServerWriteSlotAsync(
-        SemaphoreSlim gate, Func<Task<string>> start, TimeSpan timeout, ServerWriteSlotLabels labels, ILogger logger)
+        SemaphoreSlim gate, Func<Task<string>> start, TimeSpan timeout, ServerWriteSlotLabels labels, ILogger logger,
+        Action<string>? auditLateAnswer = null)
     {
         if (!gate.Wait(0))
         {
@@ -1400,6 +1418,13 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         catch (TimeoutException)
         {
             _ = running.ContinueWith(t => _ = t.Exception, TaskContinuationOptions.OnlyOnFaulted);
+            if (auditLateAnswer is not null)
+            {
+                /* The core still commits after the 503: write its audit line when it finishes. Never touch HttpContext here. */
+                _ = running.ContinueWith(
+                    t => auditLateAnswer(t.Result), CancellationToken.None, TaskContinuationOptions.OnlyOnRanToCompletion, TaskScheduler.Default);
+            }
+
             logger.LogWarning("{Verb} did not finish within {Seconds} s; the slot stays held until it does", labels.LogVerb, (int)timeout.TotalSeconds);
             return new ServerWriteRun(ErrorResult(labels.TimedOutText, StatusCodes.Status503ServiceUnavailable), null, null);
         }
