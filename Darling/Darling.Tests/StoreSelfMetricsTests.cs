@@ -380,6 +380,8 @@ public sealed class StoreSelfMetricsTests
             ["collect.store_log_captures"] = "self-telemetry about the store's own logging, not collected monitoring data",
             ["collect.read_latency"] = "internal self-telemetry (the read-path histogram), not collected monitoring data (V148 doc)",
             ["collect.pg_statement_text"] = "dimension-shaped content keyed to facts rather than collected as facts, pruned on last_seen (V73 doc)",
+            ["collect.store_statement_captures"] = "internal self-telemetry (the store's statement history captures), not collected monitoring data (V163 doc)",
+            ["collect.store_statement_history"] = "internal self-telemetry (the store's statement history), pruned to 90 days by its own writer, not collected monitoring data (V163 doc)",
             ["collect.slow_reads"] = "internal self-telemetry (the slow-read record), not collected monitoring data (V162 doc)",
             ["collect.query_store_top_daily"] = "the daily summary the Query Store top read uses, approximate by design and rebuilt from the interval table (V161 doc)",
             ["collect.query_store_top_daily_built"] = "per-day build bookkeeping for the daily summary, bytes too small to matter (V161 doc)",

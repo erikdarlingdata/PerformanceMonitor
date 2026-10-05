@@ -112,6 +112,8 @@ const sandbox = {
   favoriteStar: () => null,
   alertBadge: () => null,
   initSidebarCollapse() {},
+  initSidebarSearch() {},
+  paintServerList() {},
   initSeverityColorSettings() {},
   readTool: async () => ({ kind: "empty" }),
   getSession: async () => null,

@@ -194,7 +194,7 @@ public sealed class WebDataStartNoteLiveTests
         var firstRow = store.End.AddDays(-1);
         await store.SeedTableAsync("memory_grant_stats", -496630, "web-data-start-memory-grants", added, firstRow, ct);
 
-        var payload = await DarlingMcpMemoryGrantTools.GetMemoryGrants(store.DataSource, "web-data-start-memory-grants", 168, null, ct);
+        var payload = await DarlingMcpMemoryGrantTools.GetMemoryGrants(store.DataSource, "web-data-start-memory-grants", 168, null, cancellationToken: ct);
         var answered = await WebDataStartNote.AddAsync(store.DataSource, "get_memory_grants", "web-data-start-memory-grants", 168, null, payload, null, ct);
 
         var answer = Assert.IsType<JsonObject>(JsonNode.Parse(answered));
@@ -207,7 +207,7 @@ public sealed class WebDataStartNoteLiveTests
         Assert.Equal(TimeSpan.FromHours(168), ParseUtc(answer["window_end_utc"]) - ParseUtc(answer["window_start_utc"]));
 
         await store.SeedTableAsync("memory_grant_stats", -496631, "web-data-start-memory-grants-covered", store.End.AddDays(-30), firstRow: store.End.AddDays(-8), ct);
-        var covered = await DarlingMcpMemoryGrantTools.GetMemoryGrants(store.DataSource, "web-data-start-memory-grants-covered", 168, null, ct);
+        var covered = await DarlingMcpMemoryGrantTools.GetMemoryGrants(store.DataSource, "web-data-start-memory-grants-covered", 168, null, cancellationToken: ct);
         Assert.Same(covered, await WebDataStartNote.AddAsync(store.DataSource, "get_memory_grants", "web-data-start-memory-grants-covered", 168, null, covered, null, ct));
     }
 
@@ -218,7 +218,7 @@ public sealed class WebDataStartNoteLiveTests
     private static readonly string[] PostgresReads =
         [.. WebDataStartNote.TableByRead.Keys.Where(k => k.StartsWith("get_pg_", StringComparison.Ordinal)).OrderBy(k => k, StringComparer.Ordinal)];
 
-    /// <summary>Each of the seventeen PostgreSQL reads (the configuration changes, the window aggregates, the trend grids and Captured Plans among them, #4966), over its own table, for a server added two days ago whose rows
+    /// <summary>Each of the twenty-three PostgreSQL reads (the configuration changes, the window aggregates, the trend grids, Captured Plans and the vacuum, horizon, slot and write tiles among them, #4966), over its own table, for a server added two days ago whose rows
     /// start a day back: the data starts inside the 7-day range, so the note is there and names a start between the
     /// server's first collection and its first row. Which of the two a table reports depends on whether the schedule
     /// gives it a purge edge (the first collection) or not (the oldest row it holds), so the test holds the bounds the
@@ -228,7 +228,7 @@ public sealed class WebDataStartNoteLiveTests
     {
         var ct = TestContext.Current.CancellationToken;
         await using var store = await Store.CreateAsync(ct);
-        Assert.Equal(17, PostgresReads.Length);
+        Assert.Equal(23, PostgresReads.Length);
 
         for (var i = 0; i < PostgresReads.Length; i++)
         {
@@ -251,7 +251,7 @@ public sealed class WebDataStartNoteLiveTests
         }
     }
 
-    /// <summary>The same seventeen reads for a server collected for a month whose rows reach back past the 7-day window's
+    /// <summary>The same twenty-three reads for a server collected for a month whose rows reach back past the 7-day window's
     /// start (eight days): the store covered the range, so there is no note, over 7 days and over 3. (A quiet start,
     /// rows that begin late in a covered range, is the Waiting Tasks test above: a table the schedule gives no purge
     /// edge reports the oldest row it holds, so for those rows that begin late are a late start.)</summary>
@@ -265,24 +265,30 @@ public sealed class WebDataStartNoteLiveTests
         {
             var read = PostgresReads[i];
             var name = "web-data-start-covered-" + read.Replace('_', '-');
-            await store.SeedTableAsync(WebDataStartNote.TableByRead[read], -496620 - i, name, store.End.AddDays(-30), firstRow: store.End.AddDays(-8), ct);
+            await store.SeedTableAsync(
+                WebDataStartNote.TableByRead[read], -496620 - i, name, store.End.AddDays(-30), firstRow: store.End.AddDays(-8), ct,
+                runsCollector: WebDataStartNote.CollectorRunsByRead.GetValueOrDefault(read));
 
             Assert.Same(StandInRows, await WebDataStartNote.AddAsync(store.DataSource, read, name, 168, null, StandInRows, null, ct));
             Assert.Same(StandInRows, await WebDataStartNote.AddAsync(store.DataSource, read, name, 72, null, StandInRows, null, ct));
         }
     }
 
-    /// <summary>The three sparse reads (blocking, session states, replication stats) store a row only when something happened,
+    /// <summary>The six sparse reads (blocking, session states, replication stats, the xmin horizon holders, the autovacuum backlog and the replication slots) store a row only when something exists,
     /// so their first row says nothing about when collection began. Each is probed on its collector's own logged runs.</summary>
     private static readonly (string Read, string Table, string Collector)[] SparseReads =
     [
         ("get_pg_blocking", "pg_blocking_edges", "pg_blocking"),
         ("get_pg_session_states", "pg_session_states", "pg_session_states"),
         ("get_pg_replication_stats", "pg_replication_stats", "pg_replication_stats"),
+        ("get_pg_xmin_horizon", "pg_xmin_horizon", "pg_xmin_horizon"),
+        ("get_pg_autovacuum_health", "pg_autovacuum_stats", "pg_autovacuum_stats"),
+        ("get_pg_replication_slots", "pg_replication_slot_stats", "pg_replication_slots"),
     ];
 
     /// <summary>A server registered 30 days ago whose collector ran all week and stored ONE row a day back (the first blocking chain,
-    /// the first long transaction, the first connected replica): the 7-day range was covered, so there is no note. Reading the
+    /// the first long transaction, the first connected replica, the first horizon holder, the first table behind on vacuum, the first
+    /// slot): the 7-day range was covered, so there is no note. Reading the
     /// oldest row instead would name yesterday as where the data starts.</summary>
     [Fact]
     public async Task ASparseRead_OnAnOldServer_WhoseFirstRowIsADayBack_GetsNoNote_AgainstDevPostgres()
@@ -322,6 +328,68 @@ public sealed class WebDataStartNoteLiveTests
             Assert.True(start >= added.AddSeconds(-1) && start <= added.AddHours(1), read + " names the first collection, not its first row, got " + start.ToString("o", CultureInfo.InvariantCulture));
         }
     }
+
+    /// <summary>Each event read: table, the column that holds the event's own time, and the tool's rows key.</summary>
+    private static readonly (string Read, string Table, string EventColumn)[] EventReads =
+    [
+        ("get_blocked_process_xml", "blocked_process_reports", "event_time"),
+        ("get_long_query_completions", "long_query_completions", "event_time"),
+        ("get_memory_pressure_events", "memory_pressure_events", "sample_time"),
+        ("get_default_trace_events", "default_trace_events", "event_time"),
+    ];
+
+    /// <summary>A server added two days ago whose stored events carry times from before it (a first collection stores the
+    /// server's event history): over 7 days the note names the earliest event shown, which is earlier than the coverage start
+    /// and still after the window's start.</summary>
+    [Fact]
+    public async Task AnEventRead_WhoseHistoryReachesBeforeCoverage_NamesTheEarliestEvent_AgainstDevPostgres()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var store = await Store.CreateAsync(ct);
+        var added = store.End.AddDays(-2);
+
+        for (var i = 0; i < EventReads.Length; i++)
+        {
+            var (read, table, column) = EventReads[i];
+            var name = "web-data-start-event-history-" + read.Replace('_', '-');
+            await store.SeedTableAsync(table, -496700 - i, name, added, added, ct, eventColumn: column, eventShift: TimeSpan.FromDays(2), extraSet: ExtraSet(table));
+
+            var answer = await store.AskEventReadAsync(read, name, 168, ct);
+
+            Assert.True(answer["window_truncated"]?.GetValue<bool>(), read + " gives a note");
+            var start = ParseUtc(answer["effective_start"]);
+            var earliestEvent = added.AddDays(-2);
+            Assert.True(Math.Abs((start - earliestEvent).TotalSeconds) < 1, read + " names the earliest event, got " + start.ToString("o", CultureInfo.InvariantCulture) + " vs " + earliestEvent.ToString("o", CultureInfo.InvariantCulture) + " " + answer.ToJsonString()[..Math.Min(500, answer.ToJsonString().Length)]);
+            Assert.Equal(start.Ticks, ParseUtc(answer["data_start_utc"]).Ticks);
+            Assert.StartsWith("partial window:", answer["truncation_note"]!.GetValue<string>(), StringComparison.Ordinal);
+        }
+    }
+
+    /// <summary>The same server whose events reach the window's start: the page shows the whole range, so there is no note.</summary>
+    [Fact]
+    public async Task AnEventRead_WhoseHistoryReachesTheWindowsStart_GetsNoNote_AgainstDevPostgres()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var store = await Store.CreateAsync(ct);
+        var added = store.End.AddDays(-2);
+
+        for (var i = 0; i < EventReads.Length; i++)
+        {
+            var (read, table, column) = EventReads[i];
+            var name = "web-data-start-event-reaches-" + read.Replace('_', '-');
+            await store.SeedTableAsync(table, -496710 - i, name, added, added, ct, eventColumn: column, eventShift: TimeSpan.FromDays(5.5), extraSet: ExtraSet(table));
+
+            var answer = await store.AskEventReadAsync(read, name, 168, ct);
+
+            Assert.NotEqual(true, answer["window_truncated"]?.GetValue<bool>());
+            Assert.Null(answer["data_start_utc"]);
+            Assert.Null(answer["effective_start"]);
+            Assert.Null(answer["truncation_note"]);
+        }
+    }
+
+    /* The Blocked Process Reports read counts only rows that carry a report; the stand-in seed leaves that column null. */
+    private static string? ExtraSet(string table) => table == "blocked_process_reports" ? "blocked_process_report_xml = '<blocked-process-report/>'" : null;
 
     private sealed class Store : IAsyncDisposable
     {
@@ -409,7 +477,7 @@ FROM generate_series($3::timestamp, $4::timestamp, make_interval(mins => $5)) AS
         /// the note reads only that the server holds a row at a time.</summary>
         public async Task SeedTableAsync(
             string table, int serverId, string serverName, DateTime added, DateTime firstRow, CancellationToken ct,
-            string? runsCollector = null, DateTime? lastRow = null)
+            string? runsCollector = null, DateTime? lastRow = null, string? eventColumn = null, TimeSpan? eventShift = null, string? extraSet = null)
         {
             await using var connection = await DataSource.OpenConnectionAsync(ct);
             await DarlingMcpTestData.RegisterServerAsync(connection, serverId, serverName, ct);
@@ -476,6 +544,32 @@ ORDER BY ordinal_position", connection))
             insert.Parameters.AddWithValue(DateTime.SpecifyKind(firstRow, DateTimeKind.Unspecified));
             insert.Parameters.AddWithValue(DateTime.SpecifyKind(lastRow ?? End, DateTimeKind.Unspecified));
             await insert.ExecuteNonQueryAsync(ct);
+
+            /* An event carries its own time, apart from the collection that stored it: stamp each row's event column that far
+               before its collection_time, as a first collection stores the server's event history. */
+            if (eventColumn is not null)
+            {
+                await using var stamp = new NpgsqlCommand(
+                    "UPDATE collect." + table + " SET " + eventColumn + " = " + time + " - make_interval(secs => $2)" + (extraSet is null ? "" : ", " + extraSet) + " WHERE server_id = $1", connection);
+                stamp.Parameters.AddWithValue(serverId);
+                stamp.Parameters.AddWithValue((eventShift ?? TimeSpan.Zero).TotalSeconds);
+                await stamp.ExecuteNonQueryAsync(ct);
+            }
+        }
+
+        /// <summary>The tool's own payload for an event read over a window, then the data-start note: what the web mirror answers.</summary>
+        public async Task<JsonObject> AskEventReadAsync(string read, string server, int hours, CancellationToken ct)
+        {
+            var payload = read switch
+            {
+                "get_blocked_process_xml" => await DarlingMcpBlockingTools.GetBlockedProcessXml(DataSource, server, hours, 100, null, cancellationToken: ct),
+                "get_long_query_completions" => await DarlingMcpLongQueryTools.GetLongQueryCompletions(DataSource, server, hours, 100, null, cancellationToken: ct),
+                "get_memory_pressure_events" => await DarlingMcpMemoryGrantTools.GetMemoryPressureEvents(DataSource, server, hours, null, null, cancellationToken: ct),
+                "get_default_trace_events" => await DarlingMcpDefaultTraceTools.GetDefaultTraceEvents(DataSource, server, hours, 100, null, cancellationToken: ct),
+                _ => throw new ArgumentOutOfRangeException(nameof(read), read, "not an event read"),
+            };
+            var answered = await WebDataStartNote.AddAsync(DataSource, read, server, hours, null, payload, null, ct);
+            return Assert.IsType<JsonObject>(JsonNode.Parse(answered));
         }
 
         /// <summary>What the web mirror answers for the grid: the tool's own payload, then the data-start note.</summary>

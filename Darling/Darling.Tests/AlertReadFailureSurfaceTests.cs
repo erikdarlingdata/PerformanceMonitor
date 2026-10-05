@@ -967,7 +967,7 @@ public sealed class AlertReadFailureSurfaceTests
     /* 11th since #4215: ReadRejectedManagedConfSettingNamesAsync's catch — COUNTED,
        not exempt, because a RejectedValue row is judgeable evidence for the alert, not context for its text. */
     private const int WorkerCountedSites = 11;
-    private const int WorkerExemptSites = 11;
+    private const int WorkerExemptSites = 12;
 
     /// <summary>
     /// Counted sites tree-wide. ONE numeral with several readers rather than the same number written out at
@@ -1056,6 +1056,7 @@ public sealed class AlertReadFailureSurfaceTests
         ["CONVERTS the fault into the unreadable count"] = "a parse arm, not a read: the fleet-sweep rollup's store read is counted above it, and a document that does not parse becomes the rollup's own reportable unreadable count - the fault is evidence, not a swallow",
         ["Could not resolve Agent job names"] = "reads the monitored server's msdb through the host resolver, not the store - the Recently-failed-job precedent one seam over; the card degrades to the unresolved form whose raw marker keeps the gap visible, and the page still delivers",
         ["delivery stamp could not be written"] = "a write (#3580): the daily document was already delivered and process memory already gates it; the dropped stamp costs one re-announcement at the next restart and never a delivery - the stamp READ beside it is the read, and it is counted",
+        ["Store statement history is still failing"] = "the Debug repeat of a telemetry write sweep (#5097); the first failure warns, no alert is judged on its result",
         ["Read-latency flush failed"] = "the read-latency histogram flush writes instrumentation; losing an hour's rows can't hide an alert condition",
     };
 
@@ -1241,8 +1242,10 @@ public sealed class AlertReadFailureSurfaceTests
            flush's catch, a telemetry write whose loss costs an hour's histogram rows and never an alert.
            33rd since #4750: the Notification Channel Failing self-alert's catch, whose counts come from the
            webhook service's memory rather than the store. 34th since #4732: the Collection Falling Behind
-           self-alert's wrapper catch, whose counts come from the worker's in-memory gate statistics. */
-        Assert.Equal(34, totalExempt);
+           self-alert's wrapper catch, whose counts come from the worker's in-memory gate statistics. 35th since
+           #5097: the store statement history snapshot's catch, a telemetry write sweep whose loss costs an hour's
+           capture and never an alert. */
+        Assert.Equal(35, totalExempt);
 
         /* Every exemption in the table is actually used. An exemption for a message that no longer exists
            is a hole this pin would otherwise keep open indefinitely — the shape that lets a real new catch

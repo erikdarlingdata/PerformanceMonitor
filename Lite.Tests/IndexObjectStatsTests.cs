@@ -58,6 +58,10 @@ public class IndexObjectStatsTests : IClassFixture<SharedDuckDbFixture>, IDispos
 
     private async Task SeedScenarioAsync()
     {
+        // Six rows, one commit (#5208).
+        var seedConn = await SeedConnectionAsync();
+        using var batch = new SeedBatch(_duckDb, seedConn);
+
         // BigTable (object 100): 200 MB -> 600 MB  => +400 MB / 200% growth
         await InsertObjectStat(_prior, "AppDb", 100, 1, "dbo", "BigTable", "PK_BigTable", 200m, 1_000_000, 0, 0, 0, 0, 0, 0);
         await InsertObjectStat(_latest, "AppDb", 100, 1, "dbo", "BigTable", "PK_BigTable", 600m, 3_000_000, 5000, 100, 10, 50, 0, 0);
@@ -69,6 +73,8 @@ public class IndexObjectStatsTests : IClassFixture<SharedDuckDbFixture>, IDispos
         // HotTable (object 300 index 1): 10000ms -> 100000ms lock wait => +90000ms contention
         await InsertObjectStat(_prior, "AppDb", 300, 1, "dbo", "HotTable", "PK_HotTable", 80m, 250_000, 100, 5, 0, 200, 10_000, 0);
         await InsertObjectStat(_latest, "AppDb", 300, 1, "dbo", "HotTable", "PK_HotTable", 80m, 250_000, 200, 8, 0, 400, 100_000, 3);
+
+        batch.Commit();
     }
 
     private async Task InsertObjectStat(

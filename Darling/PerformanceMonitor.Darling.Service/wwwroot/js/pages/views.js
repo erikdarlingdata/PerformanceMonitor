@@ -528,7 +528,7 @@ export async function renderView(main, id) {
 
   const gridBox = el("div", { class: "panel-grid" });
   function renderGrid() {
-    mount(gridBox, panels.map((p) => panelOrError(p, readSet, sourceSet, currentScope())));
+    mount(gridBox, panels.map((p, i) => panelOrError(p, readSet, sourceSet, currentScope(), undefined, i)));
   }
 
   /* The chrome is only meaningful when a composed panel can re-scope; a pure v1 read view skips it. */
@@ -1059,7 +1059,7 @@ function checkRow(label, checked, onToggle) {
    `onSettled` (optional; the alert notebook's in-flight limiter release, #4222) is called exactly once per call: by
    the renderer when its load ends, or right here when the panel cannot start a load and becomes an error card —
    so a bad cell cannot hold a limiter slot. Every other caller omits it. */
-function panelOrError(p, readSet, sourceSet, scope, onSettled) {
+function panelOrError(p, readSet, sourceSet, scope, onSettled, slot = null) {
   const fail = (title, message) => {
     if (onSettled) onSettled();
     return panelErrorCard(title, message);
@@ -1077,7 +1077,7 @@ function panelOrError(p, readSet, sourceSet, scope, onSettled) {
     if (!p.viz) {
       return fail(p.title, "This composed panel has no chart type.");
     }
-    return renderComposedPanelCard(p, scope, onSettled);
+    return renderComposedPanelCard(p, scope, onSettled, slot);
   }
   if (!p.read || !readSet.has(p.read)) {
     return fail(p.title, "Unknown read '" + (p.read || "") + "'. It may have been renamed or removed.");

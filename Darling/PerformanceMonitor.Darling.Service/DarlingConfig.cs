@@ -360,6 +360,11 @@ public sealed class DarlingConfig
         return Path.Combine(AppContext.BaseDirectory, "darling.json");
     }
 
+    /// <summary>Every env:/file: reference found in the deserialized config, exactly as written, captured
+    /// in <see cref="Parse"/> before any resolution. Feeds <see cref="DarlingOwnedSecrets"/>.</summary>
+    [JsonIgnore]
+    internal List<string> SecretReferencesAsWritten { get; set; } = new();
+
     public static DarlingConfig Load(string? explicitPath = null)
     {
         var path = ResolveConfigPath(explicitPath);
@@ -369,7 +374,9 @@ public sealed class DarlingConfig
                 $"Configuration file not found: {path}. Copy darling.sample.json to darling.json and edit it.", path);
         }
 
-        return Parse(File.ReadAllText(path));
+        var loaded = Parse(File.ReadAllText(path));
+        DarlingOwnedSecrets.Set(DarlingOwnedSecrets.Compute(loaded, path));
+        return loaded;
     }
 
     public static DarlingConfig Parse(string json)
@@ -379,6 +386,10 @@ public sealed class DarlingConfig
         {
             throw new InvalidDataException("Configuration file parsed to null.");
         }
+
+        /* Capture every env:/file: reference AS WRITTEN, before the resolution below overwrites any slot
+           with the secret it points at. */
+        config.SecretReferencesAsWritten = DarlingOwnedSecrets.CollectReferences(config);
 
         /* #1804: postgres.connectionString also takes an env:/file: reference — for the WHOLE string,
            since the password lives inside it and per-field indirection can't reach it. Resolved ONCE

@@ -261,6 +261,10 @@ public sealed class WebDataStartNoteConfigAndLogTests : IClassFixture<ConfigAndL
             "get_resource_semaphore" => [("DarlingMcpMemoryGrantTools.cs", "GetResourceSemaphore")],
             "get_plan_corrections" => [("DarlingMcpPlanCorrectionTools.cs", "GetPlanCorrections")],
             "get_pg_wait_stats" => [("DarlingMcpPgWaitTools.cs", "GetPgWaitStats")],
+            "get_blocked_process_xml" => [("DarlingMcpBlockingTools.cs", "GetBlockedProcessXml")],
+            "get_long_query_completions" => [("DarlingMcpLongQueryTools.cs", "GetLongQueryCompletions")],
+            "get_memory_pressure_events" => [("DarlingMcpMemoryGrantTools.cs", "GetMemoryPressureEvents")],
+            "get_default_trace_events" => [("DarlingMcpDefaultTraceTools.cs", "GetDefaultTraceEvents")],
             _ => throw new ArgumentOutOfRangeException(nameof(read), read, "a listed read this test does not know"),
         };
 
@@ -308,6 +312,17 @@ public sealed class WebDataStartNoteConfigAndLogTests : IClassFixture<ConfigAndL
         ("get_pg_wait_trend", "pg_wait_sampling", "empty", ["wait_trend"], [], "DarlingMcpPgTrendTools.cs"),
         ("get_pg_io_trend", "pg_io_stats", "empty", ["io_trend"], [], "DarlingMcpPgTrendTools.cs"),
         ("get_pg_plans", "pg_plan_capture", "empty", [], ["precondition"], "DarlingMcpPgPlanTools.cs"),
+
+        /* The vacuum, horizon, slot and write tiles. Only the horizon read admits a word: no_holder is answered after the log shows the
+           collector captured in the window, and unavailable (no capture logged) is kept. The other four answer their healthy-or-empty
+           word without asking the log whether the collector ran (no_pending_maintenance, no_slots), or say the collector has not
+           collected (unavailable), or say a window too short to difference holds nothing (empty), so none of those is admitted. */
+        ("get_pg_wraparound_risk", "pg_wraparound_stats", null, [], ["unavailable"], "DarlingMcpPgWraparoundTools.cs"),
+        ("get_pg_xmin_horizon", "pg_xmin_horizon", "no_holder", ["holder_present"], ["unavailable"], "DarlingMcpPgXminTools.cs"),
+        ("get_pg_autovacuum_health", "pg_autovacuum_stats", null, ["tables_with_pending_maintenance"], ["no_pending_maintenance"], "DarlingMcpPgAutovacuumTools.cs"),
+        ("get_pg_replication_slots", "pg_replication_slot_stats", null, ["slots_present"], ["no_slots"], "DarlingMcpPgSlotTools.cs"),
+        ("get_pg_write_stats", "pg_write_stats", null, [], ["empty"], "DarlingMcpPgServerStateTools.cs"),
+        ("get_pg_index_usage", "pg_index_usage_stats", "empty", ["index_usage"], ["unavailable"], "DarlingMcpPgIndexUsageTools.cs"),
     ];
 
     /* Each read is listed over its raw relation, served by the web mirror, drawn by the page, and admitted for exactly the word

@@ -139,6 +139,15 @@ const scenarios = {
     answer = () => data({ server: "SRV1", hours_back: 6, events: [ev(at(1, 5), 1, 0), ev(at(2, 5), 0, 1)] });
     return modules.tabs.memoryPressurePanels("SRV1", { hours: 6, label: "last 6 hours" });
   },
+  // A data answer the server stamped with a partial-window note (#4966): the grid draws it once, the chart draws none.
+  floor: () => {
+    answer = () => data({
+      server: "SRV1", hours_back: 6, window_truncated: true, effective_start: "2026-01-02T12:30:00Z",
+      truncation_note: "partial window: this panel's data starts at 2026-01-02 12:30 UTC, after the window's start at 2026-01-02 06:00 UTC.",
+      events: [ev(at(1, 5), 2, 0)],
+    });
+    return modules.tabs.memoryPressurePanels("SRV1", { hours: 6, label: "last 6 hours" });
+  },
   empty: () => {
     answer = () => data({ status: "empty", message: "No memory pressure events found in the requested time range." });
     return modules.tabs.memoryPressurePanels("SRV1", { hours: 6, label: "last 6 hours" });

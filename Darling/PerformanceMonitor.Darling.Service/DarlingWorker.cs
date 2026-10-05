@@ -1054,6 +1054,7 @@ public sealed class DarlingWorker : BackgroundService
        none), and 42501, a login without the log read. get_store_log already reports the gap on the read
        surface, so the hourly Warning only repeated what nobody was going to change. */
     private bool _storeLogCaptureUnavailableWarned;
+    private bool _storeStatementHistoryWarned;
 
     /* Stage 4 service self-alerts (collection-stopped, connection lost/restored, capture-down). Built
        once in RunCollectionLoopAsync over the SAME deliverer/history the shared engine uses, so the
@@ -9934,7 +9935,8 @@ AND   j.hypertable_name = '{relation}'", connection))
     ///
     /// <para>Two more self-telemetry passes ride the same tick, connection and budget: the #3021
     /// <see cref="StoreLogSweep"/> read of the store's own server log, and the #2674 collector-cost flush.
-    /// The shared budget is what bounds the whole tick — three passes on one
+    /// A fourth pass, the #5097 <see cref="StoreStatementHistory"/> snapshot, rides the same budget.
+    /// The shared budget is what bounds the whole tick — every pass on one
     /// <see cref="StoreSelfMetrics.SweepTimeoutSeconds"/> linked CTS, not one each.</para>
     /// </summary>
     /// <param name="checkpointLongestSync">(#4834) The longest single checkpoint sync the minute sampler saw since the
@@ -10103,6 +10105,44 @@ AND   j.hypertable_name = '{relation}'", connection))
                     _logger.LogWarning(
                         "PostgreSQL deadlocks: re-masking alerts, reports and findings stored before this build failed, and is retried next hour: {Message}",
                         ex.Message);
+                }
+            }
+
+            /* #5097: the store's own statement history, on this same hourly tick so it lands on the census' grid.
+               ITS OWN catch, and a Warning once: a store whose owner cannot run the reader function (a bring-your-own
+               store without the extension) repeats the same failure hourly, and none of it may cost the
+               collector-cost or read-latency flush below. A snapshot that fails rolls back whole, so the baseline
+               and the history never disagree. */
+            if (connection.State != ConnectionState.Open)
+            {
+                await connection.CloseAsync();
+                await connection.OpenAsync(budget.Token);
+            }
+
+            /* Its own slice of the budget, like the re-mask above: seven commands at 60 s each could otherwise use the
+               whole sweep budget and a cancellation here would skip the flushes below. A slice that expired while the
+               budget did not is a failed pass like any other; only the budget itself ends the sweep. */
+            using var historyBudget = CancellationTokenSource.CreateLinkedTokenSource(budget.Token);
+            historyBudget.CancelAfter(StoreStatementHistory.SliceBudget);
+            try
+            {
+                await StoreStatementHistory.SnapshotAsync(connection, DateTime.UtcNow, _logger, historyBudget.Token);
+                _storeStatementHistoryWarned = false;
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException
+                || (historyBudget.IsCancellationRequested && !budget.IsCancellationRequested))
+            {
+                var sqlState = (ex as PostgresException)?.SqlState ?? "n/a";
+                if (_storeStatementHistoryWarned)
+                {
+                    _logger.LogDebug("Store statement history is still failing (SqlState {SqlState}): {Message}", sqlState, ex.Message);
+                }
+                else
+                {
+                    _logger.LogWarning(
+                        "Store statement history failed (SqlState {SqlState}), so this hour's per-statement deltas are missing: {Message}",
+                        sqlState, ex.Message);
+                    _storeStatementHistoryWarned = true;
                 }
             }
 

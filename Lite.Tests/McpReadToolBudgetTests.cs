@@ -181,6 +181,10 @@ public sealed class McpReadToolBudgetTests : IClassFixture<SharedDuckDbFixture>,
         /* 89 tools total, minus mute_analysis_finding, five analyze_*, compare_analysis and audit_config = 81
            read tools attempted; a tool with no usable default throws and lands in gaps, not measured, so the
            floor is set under 81 rather than at it. */
+        /* An empty store answers every tool in a few hundred bytes and would pass the budget vacuously. The
+           seed is ~DbCount x QueriesPerDb x 2 query-store rows, so the largest answer must be well over a
+           small floor if the seeded rows are visible to the tools. */
+        Assert.True(measured.Max(m => m.Bytes) > 2_000, "the largest tool answer is tiny -- the seed is not visible to the tools, so the budget check is vacuous");
         Assert.True(measured.Count > 60, $"only {measured.Count} read tools were measured -- reflection likely under-enumerated the service assembly");
         Assert.True(overBudget.Length == 0,
             "over the #4198 default budget and not in ExemptOffenders:" + Environment.NewLine + string.Join(Environment.NewLine, overBudget) +
@@ -286,6 +290,11 @@ public sealed class McpReadToolBudgetTests : IClassFixture<SharedDuckDbFixture>,
     private async Task SeedAsync()
     {
         var now = TruncateToSeconds(DateTime.UtcNow.AddMinutes(-1));
+
+        /* One transaction for the whole seed (#5208): roughly 800 single-row INSERTs were 800 WAL commits. The
+           batch commits at the end of this method, before any tool reads. */
+        var seedConn = await SeedConnectionAsync();
+        using var batch = new SeedBatch(_duckDb, seedConn);
 
         /* query_store_stats: DbCount tenant databases x QueriesPerDb queries, a baseline interval (40h back)
            and a regressed recent interval (30m back, duration/CPU stepped up), carrying ~3.8 KB of
@@ -395,6 +404,8 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)",
                 _nextId--, Naive(t), _serverId, ServerName, Naive(t), "sql_batch_completed", db,
                 (long)(i + 1) * 500_000, "EXEC dbo.usp_NightlyReconcile_" + i + " " + PadBlock(400));
         }
+
+        batch.Commit();
     }
 
     private Task SeedQueryStoreAsync(DateTime collectionTime, long executions, long avgDurationUs, long avgCpuUs, long intervalId, long queryId, string dbName, string queryText) =>

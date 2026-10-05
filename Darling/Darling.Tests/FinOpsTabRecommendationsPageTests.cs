@@ -153,7 +153,7 @@ public sealed class FinOpsTabRecommendationsPageTests
             catch (Win32Exception)
             {
                 Assert.Skip("Node is not installed, so the tab script cannot be parsed.");
-                return;
+                throw;
             }
 
             using (proc)

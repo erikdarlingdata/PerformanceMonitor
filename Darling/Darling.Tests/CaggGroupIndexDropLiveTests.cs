@@ -343,6 +343,14 @@ public sealed class CaggGroupIndexDropLiveTests
             await dropEnd.ExecuteNonQueryAsync(ct);
         }
 
+        if (simulatedVersion < StoreStatementHistoryRungTests.RungVersion)
+        {
+            /* V163 (#5097) - the store's statement history; the history table is the probe's sentinel. */
+            await using var dropStatementHistory = new NpgsqlCommand(
+                "DROP TABLE IF EXISTS collect.store_statement_history, collect.store_statement_captures, config.store_statement_baseline", connection);
+            await dropStatementHistory.ExecuteNonQueryAsync(ct);
+        }
+
         if (simulatedVersion < SlowReadsRungTests.RungVersion)
         {
             /* V162 (#5097) - the slow-read record; the table is the probe's sentinel. */
