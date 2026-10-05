@@ -15,6 +15,8 @@
 
 import { el, mount, apiGetFleet, loadingStrip, errorStrip, emptyStrip, localTime, localClock, relTime, fmtInt, fmtNum, fmtPct, fmtMb, fmtMs, bandClass, rollupTextId } from "../util.js";
 import { VIZ, navigateServer } from "../panels.js";
+import { favoritesFirst, onChange as onLocalChange } from "../viewer-local.js";
+import { favoriteStar, alertBadge } from "../viewer-local-ui.js";
 
 const BAND_RANK = { Offline: 0, Critical: 1, Warning: 2, Healthy: 3 };
 
@@ -49,6 +51,8 @@ let attentionToggle = null;
    nests its children correctly, exactly as FleetView does. */
 let fleetGrouped = readStored("darling.fleet.grouped") === "1";
 let lastTags = [];
+/* A favourite or acknowledgement made anywhere repaints the grid in place (no refetch). */
+onLocalChange(() => redrawCards());
 const collapsedGroups = new Set(readStoredJson("darling.fleet.collapsed", []));
 const GROUP_INDENT = 16; // px per tree depth
 
@@ -240,7 +244,7 @@ function redrawCards() {
   const searched = lastCards.filter((c) => cardMatches(c, fleetFilter));
   const matched = (attentionOnly ? searched.filter(cardNeedsAttention) : searched)
     .slice()
-    .sort(SORTS[fleetSort] || SORTS.severity);
+    .sort(favoritesFirst(SORTS[fleetSort] || SORTS.severity));
 
   /* The active state rides with the CARDS, not only with the toggle that set it. The desktop viewer can put
      its count beside the toggle and stop there because its roll-up header is docked and never scrolls; this
@@ -318,7 +322,7 @@ function setAttentionOnly(on) {
    header hides its cards AND every descendant group via the hideBelow depth-gate, mirroring FleetView's
    collapse-reveal (a collapsed tag hides its whole subtree). */
 function renderGrouped(matched) {
-  const groups = buildTagGroups(lastTags, matched, SORTS[fleetSort] || SORTS.severity);
+  const groups = buildTagGroups(lastTags, matched, favoritesFirst(SORTS[fleetSort] || SORTS.severity));
   if (!groups.length) {
     return [el("div", { class: "muted", style: "padding:0.5rem", text: fleetFilter.trim() ? "No servers match “" + fleetFilter.trim() + "”." : "No tagged servers yet." })];
   }
@@ -579,6 +583,8 @@ function serverCard(c) {
            (the web seat has no silence action), so a silenced server stops looking healthy-quiet. */
         c.is_silenced ? el("span", { class: "silenced-bell", title: "Alerts silenced for this server", role: "img", "aria-label": "Alerts silenced" }) : null,
         el("span", { class: "title", text: c.display_name }),
+        alertBadge(c.server_id),
+        favoriteStar(c.server_id),
       ]),
       statusLine,
       tagPills(c),

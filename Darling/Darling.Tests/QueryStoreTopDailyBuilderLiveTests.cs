@@ -543,7 +543,7 @@ FROM collect.query_store_top_daily WHERE server_id = 1 AND day = DATE '2026-01-1
     }
 
     [Fact]
-    public void TheTenant_IsTheLastAwaitInTheStoreMaintenanceTick_WithItsOwnCatchAll()
+    public void TheTenant_IsTheLastAwaitInsideTheTimescaleGate_WithItsOwnCatchAll()
     {
         var worker = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs");
         var code = CSharpSourceWalker.StripCommentsAndStrings(worker);
@@ -557,7 +557,7 @@ FROM collect.query_store_top_daily WHERE server_id = 1 AND day = DATE '2026-01-1
         Assert.True(convergeAt >= 0 && buildAt > convergeAt, "the summary builder is awaited after the store-object convergence");
         Assert.Equal(1, tick.Split(Build).Length - 1);
         Assert.True(string.IsNullOrWhiteSpace(tick[(convergeAt + Converge.Length)..buildAt]), "nothing sits between the convergence and the builder");
-        Assert.StartsWith("}", tick[(buildAt + Build.Length)..].TrimStart(), StringComparison.Ordinal);
+        Assert.True(tick[(buildAt + Build.Length)..].TrimStart().StartsWith('}'), "the summary builder is the last await inside the TimescaleDB gate (only the closing brace of the gated block follows it)");
         Assert.Equal(';', tick[..buildAt].TrimEnd()[^1]);
 
         var builder = Body(code, "private async Task BuildQueryStoreTopDailyAsync(CancellationToken stoppingToken)");
