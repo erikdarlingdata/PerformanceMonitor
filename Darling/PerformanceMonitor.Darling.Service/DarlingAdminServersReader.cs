@@ -143,18 +143,20 @@ internal static class DarlingAdminServersReader
         JsonSerializer.Serialize(new { server_count = rows.Count, servers = Build(rows, nowUtc) }, McpHelpers.JsonOptions);
 
     /// <summary>
-    /// The display-ready rows, ordered by display name (ordinal, ignoring case) then server name (ordinal) -
-    /// two servers that share a display name keep one order on every read.
+    /// The display-ready rows, ordered by display name (ordinal, ignoring case) then server name (ordinal), then server id -
+    /// the order is total, so two servers that share a display name keep one order on every read.
     /// </summary>
     internal static List<AdminServerRow> Build(IReadOnlyList<Row> rows, DateTime nowUtc)
     {
-        var built = rows.Select(r => ToRow(r, nowUtc)).ToList();
+        var built = rows.Select(r => (Id: r.ServerId, Row: ToRow(r, nowUtc))).ToList();
         built.Sort((a, b) =>
         {
-            var byDisplay = StringComparer.OrdinalIgnoreCase.Compare(a.display_name, b.display_name);
-            return byDisplay != 0 ? byDisplay : string.CompareOrdinal(a.server_name, b.server_name);
+            var byDisplay = StringComparer.OrdinalIgnoreCase.Compare(a.Row.display_name, b.Row.display_name);
+            if (byDisplay != 0) return byDisplay;
+            var byName = string.CompareOrdinal(a.Row.server_name, b.Row.server_name);
+            return byName != 0 ? byName : a.Id.CompareTo(b.Id);
         });
-        return built;
+        return built.Select(x => x.Row).ToList();
     }
 
     private static AdminServerRow ToRow(Row r, DateTime nowUtc)
@@ -165,8 +167,10 @@ internal static class DarlingAdminServersReader
             ? ServerIdHelper.BuildStorageName(r.Host, r.Database, r.ReadOnlyIntent, r.Engine, r.Port)
             : r.CollectedServerName;
 
-        var displayName = !string.IsNullOrEmpty(r.CollectedDisplayName) ? r.CollectedDisplayName
-            : !string.IsNullOrWhiteSpace(r.Name) ? r.Name
+        /* The CONFIG name first, as the desktop Manage Servers window shows it, so a rename shows at once and not
+           only after the server reconnects; the collected name only fills in a blank config name. */
+        var displayName = !string.IsNullOrWhiteSpace(r.Name) ? r.Name
+            : !string.IsNullOrEmpty(r.CollectedDisplayName) ? r.CollectedDisplayName
             : serverName;
 
         var engineKind = r.EngineKind
@@ -199,13 +203,10 @@ internal static class DarlingAdminServersReader
         _ => auth,
     };
 
-    /// <summary>"$1,234" (invariant culture, halves away from zero), or null when no cost is set - a cost that
-    /// rounds to $0 reads as none, not as "$0".</summary>
-    internal static string? CostLabel(decimal monthlyCostUsd)
-    {
-        var rounded = Math.Round(monthlyCostUsd, 0, MidpointRounding.AwayFromZero);
-        return rounded <= 0m ? null : rounded.ToString("$#,##0", CultureInfo.InvariantCulture);
-    }
+    /// <summary>"$1,234" (invariant culture, halves away from zero), always formatted like the desktop: 0 is
+    /// "$0", 0.4 is "$0", -5 is "-$5". The stored column is NOT NULL, so there is no null case.</summary>
+    internal static string CostLabel(decimal monthlyCostUsd) =>
+        Math.Round(monthlyCostUsd, 0, MidpointRounding.AwayFromZero).ToString("$#,##0", CultureInfo.InvariantCulture);
 
     /// <summary>One grid row. Field names are the grid's column keys.</summary>
     internal sealed class AdminServerRow

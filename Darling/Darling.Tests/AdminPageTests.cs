@@ -38,7 +38,7 @@ public sealed class AdminPageTests
     {
         var page = Page();
         Assert.Contains("apiGet(\"/api/admin/servers\")", page);
-        Assert.DoesNotContain("list_servers", page.Replace("GET /api/admin/servers (every configured server, enabled or not)", ""));
+        Assert.DoesNotContain("list_servers", page);
         Assert.Contains("rowClass: serverRowClass", page);
         Assert.Contains("row.status === \"Disabled\"", page);
     }

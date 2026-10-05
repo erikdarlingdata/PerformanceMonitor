@@ -110,14 +110,15 @@ public sealed class AdminServersRouteTests
         Assert.Equal(expected, DarlingAdminServersReader.AuthLabel(stored));
 
     [Theory]
-    [InlineData("0", null)]
-    [InlineData("0.4", null)]
+    [InlineData("0", "$0")]
+    [InlineData("0.4", "$0")]
+    [InlineData("-5", "-$5")]
     [InlineData("0.5", "$1")]
     [InlineData("1", "$1")]
     [InlineData("1234.5", "$1,235")]
     [InlineData("2.5", "$3")]
     [InlineData("1234567", "$1,234,567")]
-    public void TheMonthlyCost_IsDollarsWithGroupsAndHalvesRoundedAway_OrNullWhenNone(string cost, string? expected) =>
+    public void TheMonthlyCost_IsAlwaysFormatted_DollarsWithGroupsAndHalvesRoundedAway(string cost, string expected) =>
         Assert.Equal(expected, DarlingAdminServersReader.CostLabel(decimal.Parse(cost, System.Globalization.CultureInfo.InvariantCulture)));
 
     [Fact]
@@ -166,7 +167,7 @@ public sealed class AdminServersRouteTests
         PerformanceMonitor.Darling.Service.Mcp.DarlingMcpDataTools.FreshnessStatus(last, registered, Now);
 
     [Fact]
-    public void TheRows_AreInTotalOrder_DisplayNameIgnoringCase_ThenServerNameOrdinal_WhateverTheReadOrder()
+    public void TheRows_AreInTotalOrder_DisplayNameIgnoringCase_ThenServerNameOrdinal_ThenServerId_WhateverTheReadOrder()
     {
         var rows = new[]
         {
@@ -180,6 +181,26 @@ public sealed class AdminServersRouteTests
         Assert.Equal(expected, DarlingAdminServersReader.Build(rows.Reverse().ToArray(), Now).Select(r => r.server_name).ToArray());
     }
 
+    [Fact]
+    public void ARenamedConfigRow_ShowsItsNewName_BeforeTheServerReconnects()
+    {
+        var renamed = Config(1, "Renamed", "alpha-01", collectedName: "alpha-01", collectedDisplay: "OldName",
+            last: Now.AddMinutes(-1), registered: Now.AddDays(-30), sqlMajor: 16, engineKind: "sqlserver");
+        var row = Assert.Single(DarlingAdminServersReader.Build(new[] { renamed }, Now));
+        Assert.Equal("Renamed", row.display_name);
+        Assert.Equal("alpha-01", row.server_name);
+    }
+
+    [Fact]
+    public void TwoRowsTiedOnDisplayNameAndServerName_FallToServerId_WhateverTheReadOrder()
+    {
+        /* The cost carries the id so the rows can be told apart in the output. */
+        var rows = new[] { Config(9, "Same", "alpha-01", cost: 9m), Config(3, "Same", "alpha-01", cost: 3m), Config(5, "Same", "alpha-01", cost: 5m) };
+        var expected = new[] { 3m, 5m, 9m };
+        Assert.Equal(expected, DarlingAdminServersReader.Build(rows, Now).Select(r => r.monthly_cost_usd).ToArray());
+        Assert.Equal(expected, DarlingAdminServersReader.Build(rows.Reverse().ToArray(), Now).Select(r => r.monthly_cost_usd).ToArray());
+    }
+
     [Theory]
     [InlineData(false, "GET", "/api/admin/servers", true)]
     [InlineData(false, "HEAD", "/api/admin/servers", true)]
@@ -188,7 +209,7 @@ public sealed class AdminServersRouteTests
     [InlineData(false, "PATCH", "/api/admin/servers", false)]
     [InlineData(false, "DELETE", "/api/admin/servers", false)]
     [InlineData(true, "GET", "/api/admin/servers", true)]
-    public void TheRoute_SitsBehindTheSeatMethodGate_LikeEveryOtherWebRoute(bool canEdit, string method, string path, bool expected) =>
+    public void TheMethodGate_AllowsOnlyGet_OnTheAdminServersPath_ForReadOnlyAndEditingSignIns(bool canEdit, string method, string path, bool expected) =>
         Assert.Equal(expected, PerformanceMonitor.Darling.Service.Hosting.DarlingWebSeat.IsRequestAllowed(
             new PerformanceMonitor.Darling.Service.Hosting.DarlingWebSeat("who", canEdit), method, path));
 

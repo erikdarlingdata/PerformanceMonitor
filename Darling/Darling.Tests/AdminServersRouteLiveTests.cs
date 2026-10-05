@@ -30,9 +30,11 @@ namespace Darling.Tests;
 
 /// <summary>
 /// <c>GET /api/admin/servers</c> through a real host over a scratch store, as a non-superuser holding exactly the
-/// <c>viewer</c> role's column grant on <c>config_monitored_servers</c> (#5239): a statement that named a
-/// credential column would fail here with a 42501, the way it would in a deployment, instead of passing as the
-/// owner.
+/// <c>viewer</c> role's provisioned grants (#5239), replayed from the product's provisioning SQL. A statement
+/// that named <c>encrypted_password</c> or <c>remediation_encrypted_password</c> would fail here with a 42501,
+/// the way it would in a deployment, instead of passing as the owner. <c>username</c> and
+/// <c>remediation_username</c> ARE in the viewer grant, so they would not fail here: the unit pin
+/// (<c>AdminServersRouteTests</c>) is what guards them, and the body assertions below catch their emission.
 /// </summary>
 public sealed class AdminServersRouteLiveTests
 {
@@ -68,11 +70,14 @@ public sealed class AdminServersRouteLiveTests
         await ExecAsync(owner, $"CREATE ROLE {RoleName} LOGIN NOSUPERUSER PASSWORD '{RolePassword}'");
         try
         {
-            await ExecAsync(owner,
-                $"GRANT USAGE ON SCHEMA collect, config TO {RoleName}; "
-                + $"GRANT SELECT ON ALL TABLES IN SCHEMA collect TO {RoleName}; "
-                + $"GRANT SELECT ON ALL TABLES IN SCHEMA config TO {RoleName}; "
-                + DarlingManagedRoles.BuildViewerColumnAclSql("config", RoleName));
+            /* Every viewer GRANT / REVOKE the product provisions, retargeted at the scratch role, so a future
+               narrowing of the viewer's grants shows up here. */
+            var viewerStatements = ViewerGrantReplay.StatementsFor(RoleName);
+            Assert.Contains(viewerStatements, x => x.StartsWith("GRANT SELECT (", StringComparison.Ordinal) && x.Contains("config_monitored_servers", StringComparison.Ordinal));
+            foreach (var statement in viewerStatements)
+            {
+                await ExecAsync(owner, statement);
+            }
 
             /* Four configured servers. Display names are chosen so the order is neither insertion order nor id
                order: "alpha" and "Alpha" tie ignoring case and fall to the ordinal server name. */
@@ -118,7 +123,7 @@ VALUES (13, 'alpha-01', 'Alpha', TRUE, 16, now() AT TIME ZONE 'UTC', now() AT TI
             var disabled = servers.Single(s => s.GetProperty("server_name").GetString() == "alpha-02");
             Assert.Equal("Disabled", disabled.GetProperty("status").GetString());
             Assert.Equal("Windows", disabled.GetProperty("auth").GetString());
-            Assert.Equal(JsonValueKind.Null, disabled.GetProperty("monthly_cost").ValueKind);
+            Assert.Equal("$0", disabled.GetProperty("monthly_cost").GetString());
             Assert.Equal("AwaitingFirstCollection", disabled.GetProperty("freshness").GetString());
             Assert.Equal("2026-01-03T03:04:05.0000000", disabled.GetProperty("added").GetString());
 
