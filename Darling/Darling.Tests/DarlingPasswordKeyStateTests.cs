@@ -186,7 +186,7 @@ public sealed class DarlingPasswordKeyStateTests
     {
         // A fresh ring built the way the process-wide one starts, so no other test's setting can change the answer.
         var ring = DarlingPasswordKey.Refusing(DarlingPasswordKey.NotReadyReason);
-        var binding = PasswordBinding.ForSmtp("example-mail-01", 587, true, "example_mail_user");
+        var binding = PasswordBinding.ForSmtp("omega-01", 587, true, "example_mail_user");
 
         Assert.False(ring.Status.CanSeal);
         Assert.Equal(DarlingPasswordKey.NotReadyReason, ring.Status.Reason);
@@ -199,7 +199,7 @@ public sealed class DarlingPasswordKeyStateTests
     public void A_refusing_ring_seals_nothing_and_opens_nothing()
     {
         var ring = DarlingPasswordKey.Refusing("The password key file cannot be used.");
-        var binding = PasswordBinding.ForSmtp("example-mail-01", 587, true, "example_mail_user");
+        var binding = PasswordBinding.ForSmtp("omega-01", 587, true, "example_mail_user");
 
         Assert.False(ring.Status.CanSeal);
         Assert.Equal("The password key file cannot be used.", ring.Status.Reason);
@@ -215,7 +215,7 @@ public sealed class DarlingPasswordKeyStateTests
     {
         using var key = PasswordPrivateKey.Generate();
         var ring = DarlingPasswordKey.FromPrivateKey(key);
-        var binding = PasswordBinding.ForSmtp("example-mail-01", 587, true, "example_mail_user");
+        var binding = PasswordBinding.ForSmtp("omega-01", 587, true, "example_mail_user");
 
         var text = ring.Seal("p@ss-not-real", binding);
 
@@ -226,6 +226,6 @@ public sealed class DarlingPasswordKeyStateTests
         Assert.Equal("p@ss-not-real", ring.Open(text, binding));
         Assert.Equal(
             PasswordSealFailure.BindingOrTamper,
-            Assert.Throws<PasswordSealException>(() => ring.Open(text, PasswordBinding.ForSmtp("example-mail-02", 587, true, "example_mail_user"))).Kind);
+            Assert.Throws<PasswordSealException>(() => ring.Open(text, PasswordBinding.ForSmtp("omega-02", 587, true, "example_mail_user"))).Kind);
     }
 }

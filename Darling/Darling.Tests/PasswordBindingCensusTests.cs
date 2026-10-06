@@ -216,9 +216,9 @@ public sealed class PasswordBindingCensusTests
     [Fact]
     public void The_associated_data_is_the_label_key_id_purpose_and_fields_each_with_a_four_byte_length()
     {
-        var binding = PasswordBinding.ForSmtp("example-mail-01", 587, true, null);
+        var binding = PasswordBinding.ForSmtp("omega-01", 587, true, null);
         var expected = new List<byte>();
-        foreach (var part in new[] { "PerformanceMonitor.Darling.sealed.v1", "0123456789abcdef", "smtp", "example-mail-01", "587", "1", "" })
+        foreach (var part in new[] { "PerformanceMonitor.Darling.sealed.v1", "0123456789abcdef", "smtp", "omega-01", "587", "1", "" })
         {
             var bytes = Encoding.UTF8.GetBytes(part);
             expected.AddRange(new byte[] { 0, 0, 0, (byte)bytes.Length });
@@ -227,7 +227,7 @@ public sealed class PasswordBindingCensusTests
 
         Assert.Equal(expected.ToArray(), binding.EncodeAad("0123456789abcdef"));
         Assert.Equal(
-            PasswordBinding.ForSmtp("example-mail-01", 587, true, "").EncodeAad("0123456789abcdef"),
+            PasswordBinding.ForSmtp("omega-01", 587, true, "").EncodeAad("0123456789abcdef"),
             binding.EncodeAad("0123456789abcdef"));
         Assert.Equal(SHA256.HashData(binding.EncodeAad("")), binding.LegacyPinHash());
         Assert.NotEqual(binding.EncodeAad("0123456789abcdef"), binding.EncodeAad("fedcba9876543210"));
@@ -238,7 +238,7 @@ public sealed class PasswordBindingCensusTests
     {
         var server = PasswordBinding.ForServer(Base with { Auth = "SQL", EncryptMode = "Mandatory", Engine = "SqlServer", ReadOnlyIntent = true });
         var remediation = PasswordBinding.ForRemediation(Base with { Engine = "SqlServer" }, "example_fix");
-        var smtp = PasswordBinding.ForSmtp("example-mail-01", 587, false, "example_mail_user");
+        var smtp = PasswordBinding.ForSmtp("omega-01", 587, false, "example_mail_user");
 
         Assert.Equal("server", server.Purpose);
         Assert.Equal(
@@ -249,6 +249,6 @@ public sealed class PasswordBindingCensusTests
             new string?[] { "example-sql-01", "example_db", "mandatory", "0", "0", "example_fix", "sqlserver" },
             remediation.Fields.ToArray());
         Assert.Equal("smtp", smtp.Purpose);
-        Assert.Equal(new string?[] { "example-mail-01", "587", "0", "example_mail_user" }, smtp.Fields.ToArray());
+        Assert.Equal(new string?[] { "omega-01", "587", "0", "example_mail_user" }, smtp.Fields.ToArray());
     }
 }

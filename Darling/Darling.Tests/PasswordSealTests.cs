@@ -148,10 +148,10 @@ public sealed class PasswordSealTests
 
     public static IEnumerable<object[]> SmtpFieldChanges()
     {
-        yield return new object[] { "host", "example-mail-02", 587, true, "example_mail_user" };
-        yield return new object[] { "port", "example-mail-01", 25, true, "example_mail_user" };
-        yield return new object[] { "ssl", "example-mail-01", 587, false, "example_mail_user" };
-        yield return new object[] { "username", "example-mail-01", 587, true, "other_mail_user" };
+        yield return new object[] { "host", "omega-02", 587, true, "example_mail_user" };
+        yield return new object[] { "port", "omega-01", 25, true, "example_mail_user" };
+        yield return new object[] { "ssl", "omega-01", 587, false, "example_mail_user" };
+        yield return new object[] { "username", "omega-01", 587, true, "other_mail_user" };
     }
 
     [Theory]
@@ -161,11 +161,11 @@ public sealed class PasswordSealTests
     {
         _ = field;
         var text = PasswordSeal.Seal(
-            FakePassword, KeyA.PublicKey, PasswordBinding.ForSmtp("example-mail-01", 587, true, "example_mail_user"));
+            FakePassword, KeyA.PublicKey, PasswordBinding.ForSmtp("omega-01", 587, true, "example_mail_user"));
 
         Assert.Equal(
             FakePassword,
-            PasswordSeal.Open(text, KeyA, PasswordBinding.ForSmtp("example-mail-01", 587, true, "example_mail_user")));
+            PasswordSeal.Open(text, KeyA, PasswordBinding.ForSmtp("omega-01", 587, true, "example_mail_user")));
         var ex = Fails(() => PasswordSeal.Open(text, KeyA, PasswordBinding.ForSmtp(host, port, ssl, username)));
 
         Assert.Equal(PasswordSealFailure.BindingOrTamper, ex.Kind);
