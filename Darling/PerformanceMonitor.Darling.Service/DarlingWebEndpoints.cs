@@ -2296,6 +2296,11 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// </summary>
     internal static IResult MuteRuleToolResult(string result, string route, ILogger logger, long elapsedMs, int successStatus = StatusCodes.Status200OK)
     {
+        /* #4348: swept first, like ToHttpResult. A mute rule echoes the pattern it was given, which can be a statement. */
+        var swept = DarlingWebStatementSweep.Apply(result);
+        if (swept.Refused) return DarlingWebStatementSweep.Refusal(route, logger, elapsedMs);
+        result = swept.Text;
+
         var kind = ClassifyToolResponse(result);
         if (kind is ToolResponseKind.ServerError)
         {
@@ -5743,13 +5748,22 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// The bare <c>"Error during "</c> arm <see cref="ClassifyToolResponse"/> keeps for an un-migrated producer
     /// maps here too, for the same reason.</para>
     /// </summary>
-    internal static IResult ToHttpResult(string result, string route, ILogger logger, long elapsedMs) => ClassifyToolResponse(result) switch
+    internal static IResult ToHttpResult(string result, string route, ILogger logger, long elapsedMs)
     {
-        ToolResponseKind.JsonPassthrough => Results.Text(result, "application/json"),
-        ToolResponseKind.Refusal => Results.Text(result, "application/json", statusCode: StatusCodes.Status400BadRequest),
-        ToolResponseKind.ServerError => ServerErrorResult(McpHelpers.ErrorMessageOf(result), route, logger, elapsedMs),
-        _ => Results.Json(new { error = result }, statusCode: StatusCodes.Status400BadRequest),
-    };
+        /* #4348: the statement filter's web sweep. It runs BEFORE ClassifyToolResponse, so the error sentence
+           ServerErrorResult echoes is swept too, and a body it cannot read is never written. */
+        var swept = DarlingWebStatementSweep.Apply(result);
+        if (swept.Refused) return DarlingWebStatementSweep.Refusal(route, logger, elapsedMs);
+        result = swept.Text;
+
+        return ClassifyToolResponse(result) switch
+        {
+            ToolResponseKind.JsonPassthrough => Results.Text(result, "application/json"),
+            ToolResponseKind.Refusal => Results.Text(result, "application/json", statusCode: StatusCodes.Status400BadRequest),
+            ToolResponseKind.ServerError => ServerErrorResult(McpHelpers.ErrorMessageOf(result), route, logger, elapsedMs),
+            _ => Results.Json(new { error = result }, statusCode: StatusCodes.Status400BadRequest),
+        };
+    }
 
     /// <summary>The ServerError arm's body, factored out so both <see cref="ToHttpResult"/> and the
     /// <c>/api/read/*</c> loop's binding-layer catch (which holds the real <see cref="Exception"/>, not just
