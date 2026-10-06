@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Threading;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using PerformanceMonitor.Alerting;
@@ -97,18 +98,38 @@ AND   n.forced = 1
 AND   n.failures > p.failures
 ORDER BY n.database_name, n.query_id, n.plan_id";
 
-    /// <summary>Runs <see cref="ForcePlanFailuresSql"/> for one server.</summary>
-    public async Task<List<ForcePlanFailureInfo>> GetForcePlanFailuresAsync(int serverId)
+    private ArchiveReadLimiter _archiveReadLimiter = ArchiveReadLimiter.Shared;
+
+    /// <summary>Test seam (#5377): replaces the process-wide archive-read limiter for this service.</summary>
+    internal ArchiveReadLimiter ArchiveReadLimiterForTests { set => _archiveReadLimiter = value; }
+
+    /// <summary>
+    /// Test seam (#5377): called with <c>"limiter"</c> once the forced-plan read holds its slot and
+    /// <c>"readlock"</c> once it also holds the database read lock. Production leaves it null.
+    /// </summary>
+    internal Action<string>? ArchiveReadStepForTests { get; set; }
+
+    /// <summary>
+    /// Runs <see cref="ForcePlanFailuresSql"/> for one server. The query reads <c>v_query_store_stats</c>, so it
+    /// scans Parquet like the watermark reads' cache misses do, and it shares their limit (#5377): it takes a
+    /// slot of the process-wide <see cref="ArchiveReadLimiter"/> FIRST and the database read lock after it
+    /// (<see cref="OpenConnectionAsync"/>), and gives the lock back first, so a pass that waits for a slot holds
+    /// no lock. A cancelled wait takes nothing and releases nothing.
+    /// </summary>
+    public async Task<List<ForcePlanFailureInfo>> GetForcePlanFailuresAsync(int serverId, CancellationToken cancellationToken = default)
     {
+        using var slot = await _archiveReadLimiter.EnterAsync(cancellationToken);
+        ArchiveReadStepForTests?.Invoke("limiter");
         using var connection = await OpenConnectionAsync();
+        ArchiveReadStepForTests?.Invoke("readlock");
         using var command = connection.CreateCommand();
         command.CommandText = ForcePlanFailuresSql;
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = DateTime.UtcNow - ForcePlanFailureWindow });
 
         var items = new List<ForcePlanFailureInfo>();
-        using var reader = await command.ExecuteReaderAsync();
-        while (await reader.ReadAsync())
+        using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
         {
             items.Add(new ForcePlanFailureInfo
             {
