@@ -28,6 +28,27 @@ namespace Darling.Tests;
 public sealed class PgSensitiveStatementFilterTests
 {
     /// <summary>
+    /// The stored-text scrub's frozen pattern is the exact text of the shipped version 1 pattern (the dev
+    /// definition before the filter was widened), and it is not the live shared pattern: no stored row is
+    /// rewritten by the wider filter, so the scrub must keep naming exactly what it named.
+    /// </summary>
+    [Fact]
+    public void TheStoredTextScrubKeepsItsFrozenVersionOnePattern()
+    {
+        const string gap = "([[:space:]]|/[*]([^*]|[*]+[^*/])*[*]+/|--[^[:cntrl:]]*)";
+        const string shippedVersionOne =
+            "[[:<:]](create|alter)" + gap + "+(role|user|group|subscription|server)[[:>:]]" +
+            "|[[:<:]]password[[:>:]]" + gap + "*(=|to)?" + gap + "*(e?'|u&'|[$][^0-9])" +
+            "|[[:<:]](pg)?password[[:space:]]*=[[:space:]]*[^$[:space:]]" +
+            "|[a-z][a-z0-9+.-]*://[^[:space:]/@:]+:[^[:space:]/@]+@";
+
+        Assert.Equal(shippedVersionOne, PerformanceMonitor.Darling.Service.PgStatementTextScrub.Version1Pattern);
+        Assert.NotEqual(PerformanceMonitor.Common.SensitiveStatements.Pattern,
+            PerformanceMonitor.Darling.Service.PgStatementTextScrub.Version1Pattern);
+        Assert.Equal(1, PerformanceMonitor.Darling.Service.PgStatementTextScrub.ScrubVersion);
+    }
+
+    /// <summary>
     /// One definition in the whole repo. Every occurrence of the pattern's opening token
     /// (<c>[[:&lt;:]](create|alter)</c>) must be the ONE declaration in <see cref="PgSensitiveStatementFilter"/>
     /// — a second literal copy anywhere else is exactly the drift #4348 exists to prevent. The needle itself
@@ -59,6 +80,15 @@ public sealed class PgSensitiveStatementFilterTests
                 continue;
             }
 
+            // The stored-text scrub carries one deliberate, frozen copy: the version 1 pattern of the shipped
+            // scrub (PgStatementTextScrub.Version1Pattern), kept apart from the live definition because no
+            // stored row is rewritten by the wider filter. It is pinned to the literal by
+            // TheStoredTextScrubKeepsItsFrozenVersionOnePattern below, so it cannot drift either.
+            if (Path.GetFileName(file) == "PgStatementTextScrub.cs")
+            {
+                continue;
+            }
+
             var text = File.ReadAllText(file);
             if (text.Contains(needle, StringComparison.Ordinal))
             {
@@ -69,7 +99,7 @@ public sealed class PgSensitiveStatementFilterTests
 
         Assert.Equal(1, hits);
         Assert.NotNull(onlyFile);
-        Assert.EndsWith("PgSensitiveStatementFilter.cs", onlyFile, StringComparison.Ordinal);
+        Assert.EndsWith("SensitiveStatements.cs", onlyFile, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -128,11 +158,28 @@ public sealed class PgSensitiveStatementFilterTests
     [Fact]
     public void SqlPredicate_MatchesTheLiteralExpectedSql()
     {
+        // The pattern is typed out by hand here (never built from the shared constants) so a change to the
+        // shared pattern fails this test until the expected text is updated on purpose. A1-A4 are the original
+        // alternatives, byte-identical; T1-T9 are the appended T-SQL alternatives (#4348).
+        const string gap = "([[:space:]]|/[*]([^*]|[*]+[^*/])*[*]+/|--[^[:cntrl:]]*)";
         const string expected =
-            "CASE WHEN c ~* '[[:<:]](create|alter)([[:space:]]|/[*]([^*]|[*]+[^*/])*[*]+/|--[^[:cntrl:]]*)+" +
-            "(role|user|group|subscription|server)[[:>:]]|[[:<:]]password[[:>:]]([[:space:]]|/[*]([^*]|[*]+[^*/])*[*]+/|" +
-            "--[^[:cntrl:]]*)*(=|to)?([[:space:]]|/[*]([^*]|[*]+[^*/])*[*]+/|--[^[:cntrl:]]*)*(e?''|u&''|[$][^0-9])|" +
-            "[[:<:]](pg)?password[[:space:]]*=[[:space:]]*[^$[:space:]]|[a-z][a-z0-9+.-]*://[^[:space:]/@:]+:[^[:space:]/@]+@' " +
+            "CASE WHEN c ~* '[[:<:]](create|alter)" + gap + "+(role|user|group|subscription|server)[[:>:]]" +
+            "|[[:<:]]password[[:>:]]" + gap + "*(=|to)?" + gap + "*(e?''|u&''|[$][^0-9])" +
+            "|[[:<:]](pg)?password[[:space:]]*=[[:space:]]*[^$[:space:]]" +
+            "|[a-z][a-z0-9+.-]*://[^[:space:]/@:]+:[^[:space:]/@]+@" +
+            "|[[:<:]](create|alter)" + gap + "+(login|credential)[[:>:]]" +
+            "|[[:<:]]scoped" + gap + "+credential[[:>:]]" +
+            "|[[:<:]]([a-z0-9_]*(password|passwd|pwd|secret)|key_source)[[:>:]]" + gap + "*(=|to)?" +
+            gap + "*(n?''|e''|u&''|0x|[$][^0-9])" +
+            "|[[:<:]]pwd[[:space:]]*=[[:space:]]*[^$@[:space:]]" +
+            "|[[:<:]](sp_addlogin|sp_password|sp_addlinkedsrvlogin|sp_addapprole|sp_approlepassword|sp_setapprole" +
+            "|sp_change_users_login|sp_adddistributor|sp_changedistributor_password|sp_adddistpublisher" +
+            "|sp_addsubscriber|sp_link_publication|sp_control_dbmasterkey_password|sp_xp_cmdshell_proxy_account)[[:>:]]" +
+            "|[[:<:]](encryptbypassphrase|decryptbypassphrase|decryptbykeyautocert|decryptbykeyautoasymkey" +
+            "|decryptbyasymkey|decryptbycert|signbycert|signbyasymkey|pwdencrypt|pwdcompare)[[:>:]]" +
+            "|[[:<:]]opendatasource[[:>:]]" +
+            "|[[:<:]]openrowset" + gap + "*[(]" + gap + "*n?''" +
+            "|[[:<:]][a-z0-9_]*(password|passwd|pwd|secret)(]|\")" + gap + "*=" + gap + "*(n?''|e''|u&''|0x)' " +
             "THEN '-- statement text withheld (#4348)' ELSE c END";
 
         Assert.Equal(expected, PgSensitiveStatementFilter.SqlPredicate("c"));
