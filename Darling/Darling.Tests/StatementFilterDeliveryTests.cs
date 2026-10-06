@@ -160,24 +160,53 @@ public sealed class StatementFilterDeliveryTests
            through, and the same text in an unmarked outcome does not. That is what "judged once" means here. */
         var (deliverer, history) = Build();
         var planted = PgFamilyOutcome(StatementScrubCanary.CanaryStatement);
+        var unmarked = PgFamilyOutcome(StatementScrubCanary.CanaryStatement);
 
         await deliverer.DeliverAndReportAsync(AlertStatementFilter.MarkJudged(planted), TestContext.Current.CancellationToken);
-        await deliverer.DeliverAndReportAsync(planted, TestContext.Current.CancellationToken);
+        await deliverer.DeliverAndReportAsync(unmarked, TestContext.Current.CancellationToken);
 
         Assert.Contains("S3cret-canary-ssf", RowText(history.Records[0]), StringComparison.Ordinal);
         AssertNoSecret(RowText(history.Records[1]));
     }
 
     [Fact]
+    public async Task AWithCopyThatAddsNewText_OfAJudgedOutcome_IsJudgedAgain()
+    {
+        /* M2 (#5360): the mark lives in the filter's own table, keyed by instance, so a `with` copy of a judged
+           outcome is a new instance and its new text is judged. At the base the mark was a record parameter that a
+           `with` copy kept, so this text reached the deliverer unjudged. */
+        var judged = AlertStatementFilter.Apply(PgFamilyOutcome(StatementScrubCanary.PlainStatement));
+        var edited = judged with { DetailText = "Query: " + StatementScrubCanary.CanaryStatement, ShortMessage = StatementScrubCanary.CanaryStatement };
+
+        Assert.NotSame(edited, AlertStatementFilter.Apply(edited));
+        Assert.DoesNotContain("S3cret-canary-ssf", StatementFilterAlertTests.Everything(AlertStatementFilter.Apply(edited)), StringComparison.Ordinal);
+
+        var (deliverer, history) = Build();
+        await deliverer.DeliverAndReportAsync(edited, TestContext.Current.CancellationToken);
+        AssertNoSecret(RowText(Assert.Single(history.Records)));
+    }
+
+    [Fact]
+    public void AnOutcomeACallerBuilt_IsJudged_AndTheFilterHasNoPublicWayToMarkOne()
+    {
+        var built = PgFamilyOutcome(StatementScrubCanary.CanaryStatement);
+
+        Assert.NotSame(built, AlertStatementFilter.Apply(built));
+        Assert.DoesNotContain("S3cret-canary-ssf", StatementFilterAlertTests.Everything(AlertStatementFilter.Apply(built)), StringComparison.Ordinal);
+
+        /* No public parameter, property or method can say "already filtered" (M2, #5360). */
+        Assert.Null(typeof(AlertOutcome).GetProperty("StatementFiltered"));
+        Assert.Null(typeof(AlertStatementFilter).GetMethod("MarkJudged", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static));
+    }
+
+    [Fact]
     public void Apply_SetsTheMarkerOnTheCopyItReturns_AndNeverJudgesAMarkedOutcomeAgain()
     {
         var named = PgFamilyOutcome(StatementScrubCanary.CanaryStatement);
-        Assert.False(named.StatementFiltered);
 
         var filtered = AlertStatementFilter.Apply(named);
 
         Assert.NotSame(named, filtered);
-        Assert.True(filtered.StatementFiltered);
         Assert.Same(filtered, AlertStatementFilter.Apply(filtered));
         Assert.Same(filtered, AlertStatementFilter.MarkJudged(filtered));
     }
@@ -189,7 +218,6 @@ public sealed class StatementFilterDeliveryTests
 
         Assert.Same(plain, AlertStatementFilter.Apply(plain));
         var marked = AlertStatementFilter.MarkJudged(plain);
-        Assert.True(marked.StatementFiltered);
         Assert.Same(marked, AlertStatementFilter.Apply(marked));
         Assert.Same(marked, AlertStatementFilter.MarkJudged(marked));
         Assert.Same(plain.Context, marked.Context);
@@ -205,7 +233,7 @@ public sealed class StatementFilterDeliveryTests
         await h.Build().EvaluateServerAsync(AlertEngineTests.Harness.Snapshot());
 
         var outcome = Assert.Single(h.Deliverer.Outcomes);
-        Assert.True(outcome.StatementFiltered);
+        Assert.Same(outcome, AlertStatementFilter.Apply(outcome));
         Assert.Contains("canary_plain_ssf", StatementFilterAlertTests.Everything(outcome), StringComparison.Ordinal);
     }
 
@@ -219,7 +247,7 @@ public sealed class StatementFilterDeliveryTests
         await h.Build().EvaluateServerAsync(AlertEngineTests.Harness.Snapshot());
 
         var outcome = Assert.Single(h.Deliverer.Outcomes);
-        Assert.True(outcome.StatementFiltered);
+        Assert.Same(outcome, AlertStatementFilter.Apply(outcome));
         var (deliverer, history) = Build();
         await deliverer.DeliverAndReportAsync(outcome, TestContext.Current.CancellationToken);
         AssertNoSecret(RowText(Assert.Single(history.Records)));

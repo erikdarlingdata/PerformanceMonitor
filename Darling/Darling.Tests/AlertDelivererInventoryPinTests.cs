@@ -20,7 +20,7 @@ namespace Darling.Tests;
 /// #5320 (part of #4348): the statement filter sits at the delivery choke point. Both deliverers run
 /// <c>AlertStatementFilter.Apply</c> at their entry, so every caller that hands an outcome to one (the engine's
 /// <c>FireAsync</c>, the PostgreSQL families, the self alerts, the custom alert rules, and any caller added later) is
-/// filtered with no list to keep; <c>AlertOutcome.StatementFiltered</c> stops an engine alert being judged twice. The
+/// filtered with no list to keep; the filter's own table of judged instances stops an engine alert being judged twice. The
 /// finding senders filter their own entry points. This pin lists every type that implements a deliverer or a finding
 /// sender, requires the filter at each entry, and lists every file that reaches a notifier or writes an alert history
 /// row, so a new path that skips the deliverer fails here until someone has put the filter on it.
@@ -55,7 +55,19 @@ public sealed class AlertDelivererInventoryPinTests
         "Lite/MainWindow.AlertEngine.cs",
         "Lite/Services/EmailAlertService.cs",
         "Lite/Services/LiteAlertDeliverer.cs",
+        "PerformanceMonitor.Notifications/EmailSendCore.cs",
     ];
+
+    /// <summary>
+    /// The calls that reach a channel or the history row: the email core's <c>TrySendAsync</c> and
+    /// <c>TrySendAlertEmailAsync</c>, the webhook fan-out's <c>TrySendWebhookAlertsAsync</c> (public, so a new direct
+    /// caller would skip the deliverer, L3 of #5360) and its <c>PostWebhookAsync</c> (internal, reachable from every
+    /// app through InternalsVisibleTo), and <c>RecordAlertAsync</c>. The test sends (<c>SendTest*Async</c>) carry fixed
+    /// text only and are not entry points.
+    /// </summary>
+    internal static readonly Regex ChannelCall = new(
+        @"[.]\s*(?:TrySendAlertEmailAsync|TrySendAsync|TrySendWebhookAlertsAsync|PostWebhookAsync|RecordAlertAsync)\s*\(\s*(?!(?:DarlingSelfAlertEvaluator[.])?BuildResolutionRecord)",
+        RegexOptions.CultureInvariant, TimeSpan.FromSeconds(5));
 
     private static IEnumerable<(string Relative, string Text)> Sources()
     {
@@ -123,14 +135,26 @@ public sealed class AlertDelivererInventoryPinTests
         Assert.True(filter < body.IndexOf("outcome.", StringComparison.Ordinal), "the filter must run before any field of the outcome is read");
     }
 
+    [Theory]
+    [InlineData("await _webhookAlertService.TrySendWebhookAlertsAsync(alert, ct);")]
+    [InlineData("webhook.TrySendWebhookAlertsAsync (")]
+    [InlineData("await WebhookAlertService.PostWebhookAsync(url, payload, null);")]
+    [InlineData("await _core.TrySendAsync(request);")]
+    [InlineData("await _emailAlertService.TrySendAlertEmailAsync(a, b);")]
+    [InlineData("await _history.RecordAlertAsync(record);")]
+    public void TheChannelPatternCatchesEveryDirectEntryPoint(string plantedCaller)
+    {
+        /* L3 (#5360): the pattern at the base missed TrySendWebhookAlertsAsync, so a planted direct webhook caller
+           passed the inventory. */
+        Assert.Matches(ChannelCall, plantedCaller);
+        Assert.DoesNotMatch(ChannelCall, "await _history.RecordAlertAsync(DarlingSelfAlertEvaluator.BuildResolutionRecord(x));");
+    }
+
     [Fact]
     public void NoPathToANotifierOrTheAlertHistorySkipsTheDeliverer()
     {
-        var channel = new Regex(
-            @"[.]\s*(?:TrySendAlertEmailAsync|TrySendAsync|RecordAlertAsync)\s*\(\s*(?!(?:DarlingSelfAlertEvaluator[.])?BuildResolutionRecord)",
-            RegexOptions.CultureInvariant, TimeSpan.FromSeconds(5));
         var files = Sources()
-            .Where(s => channel.IsMatch(s.Text))
+            .Where(s => ChannelCall.IsMatch(s.Text))
             .Select(s => s.Relative)
             .OrderBy(n => n, StringComparer.Ordinal)
             .ToList();
