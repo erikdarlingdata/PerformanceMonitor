@@ -706,6 +706,12 @@ public sealed class DarlingWorker : BackgroundService
     internal static bool ShouldLaunchMaterializationHoleRepair(bool repairRunningInThisProcess, bool epochCurrentInStore)
         => !repairRunningInThisProcess && !epochCurrentInStore;
 
+    /// <summary>#5307: one warning per unknown key under the network sections, naming its full path and never its value.</summary>
+    internal static IReadOnlyList<string> GetUnknownNetworkKeyWarnings(DarlingConfig config) =>
+        config.UnknownNetworkKeys
+            .Select(path => $"darling.json: '{path}' is not a recognized setting and is ignored; check its spelling against darling.sample.json.")
+            .ToList();
+
     /// <summary>
     /// The network-endpoint startup warnings the worker emits AFTER <see cref="DarlingConfig.Validate"/>
     /// passes (darling-network-endpoints) — NEVER inside Validate(), which is all-fatal, so an optional,
@@ -1840,6 +1846,13 @@ LIMIT 1";
            Validate() passes and NEVER inside it (Validate is all-fatal; an optional-endpoint note must not
            abort startup). Covers BYO-mode network.* being ignored and the network.role=admin pivot risk. */
         foreach (var warning in GetNetworkStartupWarnings(config))
+        {
+            _logger.LogWarning("{Warning}", warning);
+        }
+
+        /* #5307: a key under web.network / mcp.network (or their tls blocks, or web.network.oidc) that no config
+           class declares is dropped at load; name each one so a mistyped key is visible. Paths only. */
+        foreach (var warning in GetUnknownNetworkKeyWarnings(config))
         {
             _logger.LogWarning("{Warning}", warning);
         }

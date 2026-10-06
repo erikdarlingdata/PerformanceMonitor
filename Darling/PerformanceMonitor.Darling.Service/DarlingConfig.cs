@@ -365,6 +365,13 @@ public sealed class DarlingConfig
     [JsonIgnore]
     internal List<string> SecretReferencesAsWritten { get; set; } = new();
 
+    /// <summary>#5307: the paths (never the values) of keys under <c>web.network</c> and <c>mcp.network</c>, their
+    /// <c>tls</c> blocks and <c>web.network.oidc</c> that no config class declares, e.g. <c>mcp.network.ssl</c>,
+    /// found by <see cref="DarlingUnknownKeys"/> in <see cref="Parse"/>. Internal and <c>[JsonIgnore]</c>, so a
+    /// serialized config (the diagnostics bundle) never carries it.</summary>
+    [JsonIgnore]
+    internal List<string> UnknownNetworkKeys { get; set; } = new();
+
     public static DarlingConfig Load(string? explicitPath = null)
     {
         var path = ResolveConfigPath(explicitPath);
@@ -390,6 +397,7 @@ public sealed class DarlingConfig
         /* Capture every env:/file: reference AS WRITTEN, before the resolution below overwrites any slot
            with the secret it points at. */
         config.SecretReferencesAsWritten = DarlingOwnedSecrets.CollectReferences(config);
+        config.UnknownNetworkKeys = DarlingUnknownKeys.Find(json);
 
         /* #1804: postgres.connectionString also takes an env:/file: reference — for the WHOLE string,
            since the password lives inside it and per-field indirection can't reach it. Resolved ONCE
