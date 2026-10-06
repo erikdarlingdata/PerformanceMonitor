@@ -17,7 +17,7 @@
  * was read for (hours and the custom range), and a rebuild under a different window reads it again. Every string is
  * drawn through el() as text.
  */
-import { el, readTool, fmtMs, localTime, windowFromHours, activeRangeStamp } from "../util.js";
+import { el, readTool, fmtMs, localTime, windowFromHours, activeRangeStamp, windowNoteText } from "../util.js";
 import { zoomableLineChart, chartZoomScope, SERIES_COLORS } from "../charts.js";
 import { planSourceCell } from "./plan-viewer.js";
 
@@ -63,13 +63,17 @@ export function queryStoreHistoryViewCounts() {
   return Object.fromEntries([...views].map(([key, set]) => [key, set.size]));
 }
 
+/* The note an empty answer carries under `hints` when the window reaches past what the store holds (#5300), in the page's own
+   clock, or null: an empty answer over a cut window is not a report that the query never ran. */
+const emptyWindowNote = (hints) => (hints && typeof hints === "object" && hints.window_truncated === true ? windowNoteText(hints) : null);
+
 /** Turns a read result into { kind: "data" | "none" | "error", ... }, or null when the read was abandoned. */
 export function classifyHistoryRead(res) {
   if (!res || res.kind === "aborted" || res.kind === "auth") return null;
   const text = typeof res.message === "string" ? res.message : "";
   if (res.kind === "data" && res.data && Array.isArray(res.data.plans)) return { kind: "data", data: res.data };
   if (res.kind === "error") return { kind: "error", message: text || "The history could not be read." };
-  return { kind: "none", message: text || "No history was found for this query in the window." };
+  return { kind: "none", message: text || "No history was found for this query in the window.", note: emptyWindowNote(res.hints) };
 }
 
 async function load(key, server, row, hours, stamp) {
@@ -155,7 +159,8 @@ function panelFor(key, server, hours) {
   if (state.phase === "loading") return el("div", { class: "plan-panel qs-history" }, [el("div", { class: "strip loading", text: "Loading the query's history..." })]);
   const r = state.result;
   if (r.kind !== "data") {
-    return el("div", { class: "plan-panel qs-history" }, [el("div", { class: r.kind === "error" ? "strip error" : "strip empty", text: r.message })]);
+    const note = r.note ? el("div", { class: "strip notice", text: r.note }) : null;
+    return el("div", { class: "plan-panel qs-history" }, [note, el("div", { class: r.kind === "error" ? "strip error" : "strip empty", text: r.message })]);
   }
   const d = r.data;
   const notice = d.window_truncated

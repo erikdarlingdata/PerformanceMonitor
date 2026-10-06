@@ -131,6 +131,27 @@ const scenarios = {
     out.text = cell.textContent;
     out.tables = tables(cell).length;
   },
+  /* An empty answer over a window the store does not reach back to carries its note under hints (#5300): the panel shows it
+     above the message. Hints that say the window was not cut show no note. */
+  async emptyWithHints() {
+    const hints = { effective_start: "2026-03-04T00:00:00.0000000Z", window_truncated: true, truncation_note: "The window reaches further back than the store holds, so the older part of it was not read." };
+    reply = { status: 200, body: JSON.stringify({ status: "empty", message: "No Query Store history for query_id 42.", hints }) };
+    const cell = col().render(row);
+    cell.byText("History").click();
+    await flush();
+    out.notices = cell.all((n) => n.className === "strip notice").map((n) => n.textContent);
+    out.empties = cell.all((n) => n.className === "strip empty").map((n) => n.textContent);
+    out.tables = tables(cell).length;
+  },
+  async emptyWithUncutHints() {
+    const hints = { effective_start: "2026-03-04T00:00:00.0000000Z", window_truncated: false, truncation_note: null };
+    reply = { status: 200, body: JSON.stringify({ status: "empty", message: "No Query Store history for query_id 42.", hints }) };
+    const cell = col().render(row);
+    cell.byText("History").click();
+    await flush();
+    out.notices = cell.all((n) => n.className === "strip notice").length;
+    out.text = cell.textContent;
+  },
   async customRange() {
     respond(history());
     util.setActiveRange({ server: "srv-a", hours: 24, startMs: Date.parse("2026-03-04T02:00:00Z"), endMs: Date.parse("2026-03-04T06:00:00Z"), asOf: "2026-03-04T06:00:00.000Z" });

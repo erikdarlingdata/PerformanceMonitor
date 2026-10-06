@@ -206,6 +206,61 @@ public sealed class QueryStoreHistoryLivePostgresTests
         }
     }
 
+    /// <summary>
+    /// #5300: Query Store keeps a plan's Regular and Aborted runs, and an availability group's replicas, in separate rows
+    /// that share a collection time. The series draws ONE value per plan and instant, execution-weighted, and the plan table
+    /// folds the same rows the same way. A window under 24 hours never consults the interval table, so this reads raw.
+    /// </summary>
+    [Fact]
+    public async Task OutcomesAndReplicas_AtOneInstant_GiveOnePointPerPlan_ExecutionWeighted()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live history test.");
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+        await using var postgres = NpgsqlDataSource.Create(cs!);
+
+        var bodySucceeded = false;
+        try
+        {
+            await RegisterServerAsync(connection, ct);
+            var at = Anchor.AddMinutes(10);
+            /* Plan 7: 1000 Regular runs at 5 ms and 2 Aborted (timeout) runs at 30 s, one interval, one instant. */
+            await InsertAsync(connection, at, 4242, 7, 1, Anchor, 1000, 5_000, 2_000, ct, outcome: "Regular");
+            await InsertAsync(connection, at, 4242, 7, 1, Anchor, 2, 30_000_000, 30_000_000, ct, outcome: "Aborted");
+            /* Plan 9: two replicas, one instant. */
+            await InsertAsync(connection, at, 4242, 9, 2, Anchor, 10, 100_000, 10_000, ct, replicaRole: "primary");
+            await InsertAsync(connection, at, 4242, 9, 2, Anchor, 30, 200_000, 30_000, ct, replicaRole: "secondary");
+            /* A later instant of plan 7, a lone row. */
+            await InsertAsync(connection, Anchor.AddMinutes(25), 4242, 7, 3, Anchor.AddMinutes(15), 40, 6_000, 2_000, ct);
+
+            using var doc = JsonDocument.Parse(await DarlingMcpQueryStoreHistoryTools.GetQueryStoreQueryHistory(
+                postgres, Db, 4242, ServerName, hours_back: 12, as_of: End.ToString("o", CultureInfo.InvariantCulture), cancellationToken: ct));
+            var points = doc.RootElement.GetProperty("points");
+            Assert.Equal(3, points.GetArrayLength());
+            Assert.Equal(new long[] { 7, 9, 7 }, Enumerable.Range(0, 3).Select(n => points[n].GetProperty("plan_id").GetInt64()));
+            Assert.Equal(1002, points[0].GetProperty("execution_count").GetInt64());
+            Assert.Equal((1000 * 5.0 + 2 * 30_000.0) / 1002, points[0].GetProperty("avg_duration_ms").GetDouble(), 6);
+            Assert.Equal(40, points[1].GetProperty("execution_count").GetInt64());
+            Assert.Equal((10 * 100.0 + 30 * 200.0) / 40, points[1].GetProperty("avg_duration_ms").GetDouble(), 6);
+            Assert.Equal(6.0, points[2].GetProperty("avg_duration_ms").GetDouble(), 6);
+            /* The plan table folds the same rows, so a point and its plan's row agree about what was combined. */
+            var plan7 = doc.RootElement.GetProperty("plans")[0];
+            Assert.Equal(1042, plan7.GetProperty("execution_count").GetInt64());
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
     private static async Task RegisterServerAsync(NpgsqlConnection connection, System.Threading.CancellationToken ct)
     {
         await using var command = new NpgsqlCommand(@"
@@ -222,13 +277,15 @@ ON CONFLICT (server_id) DO UPDATE SET server_name = EXCLUDED.server_name, displa
 
     private static async Task InsertAsync(
         NpgsqlConnection connection, DateTime collectionTime, long queryId, long planId, long intervalId, DateTime firstExecution,
-        long executions, double avgDurationUs, double avgCpuUs, System.Threading.CancellationToken ct)
+        long executions, double avgDurationUs, double avgCpuUs, System.Threading.CancellationToken ct,
+        string outcome = "Regular", string? replicaRole = null)
     {
         await using var command = new NpgsqlCommand(@"
 INSERT INTO query_store_stats
     (collection_id, collection_time, server_id, server_name, database_name, query_id, plan_id, runtime_stats_interval_id,
-     first_execution_time, last_execution_time, execution_count, avg_duration_us, avg_cpu_time_us, is_forced_plan)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9, $10, $11, $12, FALSE)", connection);
+     first_execution_time, last_execution_time, execution_count, avg_duration_us, avg_cpu_time_us, is_forced_plan,
+     execution_type_desc, replica_role)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9, $10, $11, $12, FALSE, $13, $14)", connection);
         command.Parameters.AddWithValue(CollectionIdGenerator.Next());
         command.Parameters.AddWithValue(DateTime.SpecifyKind(collectionTime, DateTimeKind.Unspecified));
         command.Parameters.AddWithValue(ServerId);
@@ -241,6 +298,8 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9, $10, $11, $12, FALSE)", connecti
         command.Parameters.AddWithValue(executions);
         command.Parameters.AddWithValue(avgDurationUs);
         command.Parameters.AddWithValue(avgCpuUs);
+        command.Parameters.AddWithValue(outcome);
+        command.Parameters.AddWithValue((object?)replicaRole ?? DBNull.Value);
         await command.ExecuteNonQueryAsync(ct);
     }
 
