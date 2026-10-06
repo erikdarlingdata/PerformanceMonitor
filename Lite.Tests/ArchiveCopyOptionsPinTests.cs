@@ -58,13 +58,36 @@ public sealed class ArchiveCopyOptionsSourceScanTests
         }
     }
 
-    /* A COPY's destination in an interpolated SQL string: TO '{path}' ( ... ). The path expression may hold
-       parentheses but never a closing brace, so [^}]* spans it. */
-    private static readonly Regex CopyDestination = new(@"\bTO\s+'\{[^}]*\}'\s*\(", RegexOptions.CultureInvariant);
+    /* A COPY's destination in an interpolated SQL string: TO '{path}', with or without an option list after it.
+       The path expression may hold parentheses but never a closing brace, so [^}]* spans it. A bare
+       COPY ... TO '{path}' has no option list at all (DuckDB infers parquet from the extension) and would write
+       122,880-row groups, so the destination alone counts, not only one followed by a parenthesis (#5381). */
+    private static readonly Regex CopyDestination = new(@"\bTO\s+'\{[^}]*\}'", RegexOptions.CultureInvariant);
 
     private static readonly Regex CopyWithSharedOptions = new(
         @"\bTO\s+'\{[^}]*\}'\s*\(\{(?:ParquetCompaction\.)?(?:ArchiveCopyOptions|BuildArchiveCopyOptions\([^}]*\))\}\)",
         RegexOptions.CultureInvariant);
+
+    private static (int All, int Shared) CountCopies(string text) =>
+        (CopyDestination.Matches(text).Count, CopyWithSharedOptions.Matches(text).Count);
+
+    [Fact]
+    public void ABareCopyWithNoOptionList_IsCountedAsAnOffender()
+    {
+        /* A planted COPY with no option list: it must count as a COPY that is not on the shared options. */
+        var (bareAll, bareShared) = CountCopies("cmd.CommandText = $\"COPY (SELECT * FROM {table}) TO '{path}'\";");
+        Assert.Equal(1, bareAll);
+        Assert.Equal(0, bareShared);
+
+        var (listAll, listShared) = CountCopies("cmd.CommandText = $\"COPY (SELECT 1) TO '{path}' (FORMAT PARQUET)\";");
+        Assert.Equal(1, listAll);
+        Assert.Equal(0, listShared);
+
+        var (okAll, okShared) = CountCopies(
+            "cmd.CommandText = $\"COPY (SELECT 1) TO '{path}' ({ParquetCompaction.ArchiveCopyOptions})\";");
+        Assert.Equal(1, okAll);
+        Assert.Equal(1, okShared);
+    }
 
     [Fact]
     public void EveryLiteArchiveCopy_TakesItsOptionsFromTheSharedConstant()
@@ -74,8 +97,7 @@ public sealed class ArchiveCopyOptionsSourceScanTests
 
         foreach (var (path, text) in LiteSources())
         {
-            var all = CopyDestination.Matches(text).Count;
-            var shared = CopyWithSharedOptions.Matches(text).Count;
+            var (all, shared) = CountCopies(text);
             compliant += shared;
             if (all != shared)
             {
@@ -207,6 +229,16 @@ SELECT i, 1, 'S1', 'wait_stats', TIMESTAMP '2026-01-01 00:00:00' + INTERVAL (i) 
            inside a group stay in order), and nothing in Lite reads by file position. What the views depend on is
            that each group covers its own narrow span of collection_time, so the footer min/max can prune: no two
            groups may overlap in time. */
+        /* A group with no footer min or max gives the join below no pair, so "no overlap" would pass without
+           checking anything. Every group must carry both stats before the overlap is read (#5381). */
+        var withoutStats = await ScalarAsync($@"
+SELECT count(*) FROM parquet_metadata('{file}')
+WHERE path_in_schema = 'collection_time' AND (stats_min IS NULL OR stats_max IS NULL)");
+        var statGroups = await ScalarAsync($@"
+SELECT count(*) FROM parquet_metadata('{file}') WHERE path_in_schema = 'collection_time'");
+        Assert.True(statGroups == groups, $"{statGroups} collection_time column chunk(s) for {groups} row group(s)");
+        Assert.True(withoutStats == 0, $"{withoutStats} row group(s) have no footer min/max for collection_time, so the overlap check below would pass vacuously");
+
         var overlapping = await ScalarAsync($@"
 WITH g AS (SELECT row_group_id, min(stats_min::TIMESTAMP) AS mn, max(stats_max::TIMESTAMP) AS mx
            FROM parquet_metadata('{file}') WHERE path_in_schema = 'collection_time' GROUP BY row_group_id)

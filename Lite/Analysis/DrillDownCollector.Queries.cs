@@ -339,7 +339,7 @@ latest AS
         ROW_NUMBER() OVER
         (
             PARTITION BY database_name, query_hash, query_plan_hash
-            ORDER BY collection_time DESC
+            ORDER BY collection_time DESC, collection_id DESC
         ) AS rn
     FROM v_query_stats, svr
     WHERE server_id = $1
@@ -479,7 +479,7 @@ psp_signature AS
             ROW_NUMBER() OVER
             (
                 PARTITION BY database_name, query_hash, query_plan_hash
-                ORDER BY collection_time DESC
+                ORDER BY collection_time DESC, collection_id DESC
             ) AS rn
         FROM v_query_stats, svr
         WHERE server_id = $1
@@ -522,7 +522,7 @@ deduped AS
         ROW_NUMBER() OVER
         (
             PARTITION BY database_name, query_id, plan_id, replica_role, runtime_stats_interval_id, first_execution_time
-            ORDER BY collection_time DESC, execution_count DESC
+            ORDER BY collection_time DESC, execution_count DESC, collection_id DESC
         ) AS rn
     FROM v_query_store_stats
     WHERE server_id = $1
