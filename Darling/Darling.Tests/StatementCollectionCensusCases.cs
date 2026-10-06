@@ -25,5 +25,16 @@ internal static class StatementCollectionCensusCases
         {
             // Filled by the lanes that hook a column, one line each, for example:
             // ["query_stats.query_text"] = "StatementCollectionCensusTests.QueryStats_QueryText_IsWithheld",
+            // R4 (blocking and deadlocks), StatementScrubBlockingTests.cs:
+            ["blocked_process_report.blocked_sql_text"] = "StatementCollectionCensusTests.BlockedProcessReport_blocked_sql_text_blocking_sql_text_blocked_process_report_xml_and_both_plans_AreWithheld",
+            ["blocked_process_report.blocking_sql_text"] = "StatementCollectionCensusTests.BlockedProcessReport_blocked_sql_text_blocking_sql_text_blocked_process_report_xml_and_both_plans_AreWithheld",
+            ["blocked_process_report.blocked_process_report_xml"] = "StatementCollectionCensusTests.BlockedProcessReport_blocked_sql_text_blocking_sql_text_blocked_process_report_xml_and_both_plans_AreWithheld",
+            ["blocked_process_report.blocked_query_plan_xml"] = "StatementCollectionCensusTests.BlockedProcessReport_blocked_sql_text_blocking_sql_text_blocked_process_report_xml_and_both_plans_AreWithheld",
+            ["blocked_process_report.blocking_query_plan_xml"] = "StatementCollectionCensusTests.BlockedProcessReport_blocked_sql_text_blocking_sql_text_blocked_process_report_xml_and_both_plans_AreWithheld",
+            ["deadlocks.victim_sql_text"] = "StatementCollectionCensusTests.Deadlocks_victim_sql_text_deadlock_graph_xml_and_victim_query_plan_xml_AreWithheld",
+            ["deadlocks.deadlock_graph_xml"] = "StatementCollectionCensusTests.Deadlocks_victim_sql_text_deadlock_graph_xml_and_victim_query_plan_xml_AreWithheld",
+            ["deadlocks.victim_query_plan_xml"] = "StatementCollectionCensusTests.Deadlocks_victim_sql_text_deadlock_graph_xml_and_victim_query_plan_xml_AreWithheld",
+            ["dmv_blocking_snapshot.blocked_sql_text"] = "StatementCollectionCensusTests.DmvBlockingSnapshot_blocked_sql_text_and_blocking_sql_text_AreWithheld",
+            ["dmv_blocking_snapshot.blocking_sql_text"] = "StatementCollectionCensusTests.DmvBlockingSnapshot_blocked_sql_text_and_blocking_sql_text_AreWithheld",
         };
 }

@@ -10,6 +10,7 @@ using System;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using Microsoft.Extensions.Logging;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitorLite.Database;
 
@@ -30,6 +31,9 @@ namespace PerformanceMonitorLite.Database;
 /// </summary>
 internal static class DeadlockDuplicateCleanup
 {
+    /* #4348: a graph the statement filter withheld WHOLE is the marker text, the same for every such graph, so two
+       different deadlocks at the same time would look like copies. A marker graph is never touched, like a NULL or
+       empty one. */
     private const string DeleteSql = @"
 DELETE FROM deadlocks
 WHERE deadlock_id IN (
@@ -40,6 +44,7 @@ WHERE deadlock_id IN (
         FROM deadlocks
         WHERE deadlock_time IS NOT NULL
         AND   deadlock_graph_xml IS NOT NULL AND deadlock_graph_xml <> ''
+        AND   deadlock_graph_xml <> '" + SensitiveStatements.PlaceholderText + @"'
     )
     WHERE rn > 1
 )";

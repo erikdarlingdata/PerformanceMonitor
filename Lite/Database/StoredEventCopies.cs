@@ -9,6 +9,7 @@
 using System.Globalization;
 using System.Linq;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitorLite.Database;
 
@@ -81,7 +82,7 @@ internal static class StoredEventCopies
     /* A deadlock's identity is its server, time and exact graph. */
     private static readonly string[] DeadlockIdentity =
         ["server_id", "deadlock_time", XmlKey("deadlock_graph_xml"),
-         .. NeverCollapsed("deadlock_graph_xml", "deadlock_id", "deadlock_time")];
+         .. NeverCollapsed("deadlock_graph_xml", "deadlock_id", "deadlock_time", neverCollapseWithheld: true)];
 
     /// <summary>The identity tuple a deadlock count distinguishes by: server, time and exact graph, plus the two
     /// never-collapse parts, so a row with no graph or no time counts on its own. The grouped side of
@@ -98,9 +99,17 @@ internal static class StoredEventCopies
     /* A row with no usable identity (no text, or no event time) is never collapsed: these parts add the row's own
        id and collection_time to the key for it alone, and are NULL (one shared group) for every other row. They
        test the raw text, never its key, because hash(NULL) is not NULL. */
-    private static string[] NeverCollapsed(string textColumn, string idColumn, string timeColumn)
+    private static string[] NeverCollapsed(string textColumn, string idColumn, string timeColumn, bool neverCollapseWithheld = false)
     {
         var unusable = $"{textColumn} IS NULL OR {textColumn} = '' OR {timeColumn} IS NULL";
+        /* #4348: an event's XML that the statement filter withheld WHOLE is the marker text, the same for every such
+           event, so two different events at the same time would share one identity and read as one. Such a row is
+           kept on its own, like a row with no text (deadlock graphs). */
+        if (neverCollapseWithheld)
+        {
+            unusable += $" OR {textColumn} = '{SensitiveStatements.PlaceholderText}'";
+        }
+
         return [$"CASE WHEN {unusable} THEN {idColumn} END", $"CASE WHEN {unusable} THEN collection_time END"];
     }
 

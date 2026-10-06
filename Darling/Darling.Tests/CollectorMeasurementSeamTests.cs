@@ -379,9 +379,11 @@ public class CollectorMeasurementSeamTests
             MakeReader(new[] { null, "<not-a-blocked-process-report/>", ReportXml }), mixed, CancellationToken.None);
 
         Assert.Single(mixedRows);
-        Assert.Equal(
-            "events_read=3 report_xml_empty=1 report_xml_unparsed=1 events_stored=1",
-            CollectorMeasurementNote.Render(mixed.Measurements));
+        /* #4348: the good report's statements went through the statement filter, so a cycle that judged a value
+           also carries the four statement_scrub_* measurements, after the collector's own. */
+        var mixedNote = CollectorMeasurementNote.Render(mixed.Measurements);
+        Assert.StartsWith("events_read=3 report_xml_empty=1 report_xml_unparsed=1 events_stored=1 ", mixedNote, StringComparison.Ordinal);
+        Assert.Contains("statement_scrub_named=0 statement_scrub_timeouts=0 statement_scrub_unjudged=0 statement_scrub_ms=", mixedNote, StringComparison.Ordinal);
 
         /* The one that matters: the ring buffer delivered events and NOT ONE became a row. Indistinguishable
            from the quiet server above until this seam existed. */
