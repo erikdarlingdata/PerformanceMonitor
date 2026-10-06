@@ -159,6 +159,24 @@ public sealed class QueryStoreHistoryBehaviourTests
     }
 
     [Fact]
+    public void AnEmptyAnswer_ShowsTheWindowNoteItCarries_AboveItsMessage()
+    {
+        var r = Run("emptyWithHints");
+        Assert.Single(r.GetProperty("notices").EnumerateArray());
+        Assert.Contains("further back than the store holds", r.GetProperty("notices")[0].GetString());
+        Assert.Contains("No Query Store history", r.GetProperty("empties")[0].GetString());
+        Assert.Equal(0, r.GetProperty("tables").GetInt32());
+    }
+
+    [Fact]
+    public void AnEmptyAnswer_WhoseWindowWasNotCut_ShowsNoNote()
+    {
+        var r = Run("emptyWithUncutHints");
+        Assert.Equal(0, r.GetProperty("notices").GetInt32());
+        Assert.Contains("No Query Store history", Str(r, "text"));
+    }
+
+    [Fact]
     public void ARowWithoutAKey_GetsADash()
     {
         var r = Run("noKey");
