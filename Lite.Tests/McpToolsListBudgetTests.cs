@@ -144,7 +144,10 @@ public sealed class McpToolsListBudgetTests
     // get_active_queries gains its wait_type parameter (#5235, a 190-character description, byte-identical with Darling's twin; the served head
     // is unchanged). Constant set to the value McpToolsListBudgetTests itself measured on this tree: 92,203 (the previous ceiling, 92,358, had
     // headroom even with the parameter in).
-    private const int TotalCeilingBytes = 92_203;
+    // get_database_config_changes, get_default_trace_events and get_health_parser_severe_errors gain database_name (#5244 PR6, appended last, the
+    // 46-character "Limit to one database. Omit for all databases." sentence the other Lite database_name parameters use; the served heads are
+    // unchanged), +97 bytes each. Constant set to the value McpToolsListBudgetTests itself measured on this tree: 92,494.
+    private const int TotalCeilingBytes = 92_494;
 
     private const int ConvertedHeadCap = 1_000;
     private const int ConvertedParameterCap = 200;

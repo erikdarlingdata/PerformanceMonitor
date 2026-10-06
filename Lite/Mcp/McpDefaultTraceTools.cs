@@ -43,7 +43,8 @@ public sealed class McpDefaultTraceTools
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history to retrieve. Default 24.")] int hours_back = 24,
         [Description("Maximum number of events to return. Default 100.")] int limit = 100,
-        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        [Description("Limit to one database. Omit for all databases.")] string? database_name = null)
     {
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
         if (error != null) return error;
@@ -58,11 +59,15 @@ public sealed class McpDefaultTraceTools
                tab's. See McpServerLocalWindow. */
             var serverClock = await McpServerLocalWindow.ClockForAsync(dataService, resolved.ServerId);
 
+            /* #5244: database_name appended LAST (H1). The reader filters in SQL, before the limit below, so total_events and the page
+               are the chosen database's; a blank is "no filter". Events with no database (server-level ones) are in no chosen database. */
+            var database = string.IsNullOrWhiteSpace(database_name) ? null : database_name;
             var rows = await dataService.GetDefaultTraceEventsAsync(
-                resolved.ServerId, hours_back, asOfUtc: windowEnd, serverClock: serverClock);
+                resolved.ServerId, hours_back, databaseNames: database is null ? null : new[] { database }, asOfUtc: windowEnd, serverClock: serverClock);
             if (rows.Count == 0)
                 return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "default_trace_events")
-                    ?? McpHelpers.Status("empty", "No significant default trace events found in the requested time range.",
+                    ?? McpHelpers.Status("empty",
+                        "No significant default trace events found in the requested time range" + (database is null ? "." : " for database " + database + "."),
                         (await WindowNoticeAsync(dataService, resolved.ServerId, hours_back, windowEnd, serverClock, emptyAnswer: true)).AsHints());
 
             var notice = await WindowNoticeAsync(dataService, resolved.ServerId, hours_back, windowEnd, serverClock);

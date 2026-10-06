@@ -376,7 +376,9 @@ ORDER BY event_time DESC";
         var map = await GetDatabaseNameMapAsync(serverId);
         var xmls = await ReadSystemHealthEventXmlAsync(serverId, startTime, endTime, SystemHealthParser.ErrorReportedEvent);
 
-        var filter = databaseNames is { Count: > 0 } ? new HashSet<string>(databaseNames, StringComparer.OrdinalIgnoreCase) : null;
+        /* #5244: ordinal, and an id the map lacks is in no chosen database (its "database_id N" label is not a name), the reading
+           Darling's severe-errors reader takes, so the same filter returns the same rows on both products. */
+        var filter = databaseNames is { Count: > 0 } ? new HashSet<string>(databaseNames, StringComparer.Ordinal) : null;
 
         var rows = new List<SevereErrorRow>();
         foreach (var xml in xmls)
@@ -385,7 +387,7 @@ ORDER BY event_time DESC";
             if (record != null && SystemHealthSignificance.IsSignificant(record))
             {
                 var databaseName = ResolveDatabaseName(record.DatabaseId, map);
-                if (filter == null || filter.Contains(databaseName))
+                if (filter == null || (record.DatabaseId is { } id && map.ContainsKey(id) && filter.Contains(databaseName)))
                     rows.Add(new SevereErrorRow(record, databaseName));
             }
         }

@@ -136,7 +136,8 @@ public sealed class McpHealthParserTools
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history to retrieve. Default 24.")] int hours_back = 24,
         [Description("Maximum number of entries. Default 50.")] int limit = 50,
-        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        [Description("Limit to one database. Omit for all databases.")] string? database_name = null)
     {
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
         if (error != null) return error;
@@ -146,11 +147,18 @@ public sealed class McpHealthParserTools
             var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd) ?? McpHelpers.ValidateTop(limit);
             if (validation != null) return validation;
 
-            var rows = await dataService.GetSevereErrorsAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd);
+            /* #5244: database_name appended LAST (H1). The store keeps no database name for these events, so the reader resolves each
+               database_id through the server's latest id-to-name map and filters in C# on that name, after the severity gate and before
+               the counts and the cap; a blank is "no filter". Known limit (#5373): SQL Server reuses a dropped database's id, so an old
+               error can resolve to a newer database's name. */
+            var database = string.IsNullOrWhiteSpace(database_name) ? null : database_name;
+            var rows = await dataService.GetSevereErrorsAsync(
+                resolved.ServerId, hours_back, databaseNames: database is null ? null : new[] { database }, asOfUtc: windowEnd);
             var lastCapturedAt = await dataService.GetLastSystemHealthCaptureAsync(resolved.ServerId);
             if (rows.Count == 0)
                 return await EmptyAsync(dataService, resolved.ServerId, resolved.ServerName, hours_back, windowEnd, SystemHealthParser.ErrorReportedEvent,
-                    $"none was a significant severe error (severity {SystemHealthSignificance.SevereErrorMinSeverity}+ and off the benign connection-reset list)", capturedInWindow: null, lastCapturedAt);
+                    $"none was a significant severe error (severity {SystemHealthSignificance.SevereErrorMinSeverity}+ and off the benign connection-reset list)"
+                        + (database is null ? "" : " in database " + database), capturedInWindow: null, lastCapturedAt);
 
             var notice = await WindowNoticeAsync(dataService, resolved.ServerId, hours_back, windowEnd);
 
