@@ -111,6 +111,28 @@ public sealed class StatementScrubViewerPlanWithheldTests
         Assert.Empty(problems);
     }
 
+    /// <summary>
+    /// #5320: a deadlock graph or blocked process report the filter withheld whole is the marker, not XML. The viewer's
+    /// two XML downloads go through the shared <c>FileSaveHelper.SaveXmlToFile</c>, which asks the guard before it
+    /// opens the save dialog, so the marker is never written to an <c>.xml</c> file and the user is told why.
+    /// </summary>
+    [Fact]
+    public void SaveXmlToFile_RefusesAWithheldReportBeforeTheSaveDialog_AndTheViewersDownloadsUseIt()
+    {
+        var helper = File.ReadAllText(RepoFile.PathTo("PerformanceMonitor.Ui/FileSaveHelper.cs"));
+        var start = helper.IndexOf("public static void SaveXmlToFile(", StringComparison.Ordinal);
+        Assert.True(start >= 0, "SaveXmlToFile not found");
+        var dialog = helper.IndexOf("new SaveFileDialog", start, StringComparison.Ordinal);
+        var guard = helper.IndexOf("WithheldPlanGuard.RefuseSave(xml)", start, StringComparison.Ordinal);
+        Assert.True(guard >= 0 && dialog >= 0 && guard < dialog, "SaveXmlToFile must call WithheldPlanGuard.RefuseSave(xml) before it opens the dialog");
+
+        var export = File.ReadAllText(RepoFile.PathTo("Darling/PerformanceMonitor.Darling.Viewer/ViewerServerTab.CopyExport.cs"));
+        Assert.Contains("using static PerformanceMonitor.Ui.FileSaveHelper;", export, StringComparison.Ordinal);
+        Assert.Contains("SaveXmlToFile(row.DeadlockGraphXml", export, StringComparison.Ordinal);
+        Assert.Contains("SaveXmlToFile(row.BlockedProcessReportXml", export, StringComparison.Ordinal);
+        Assert.DoesNotContain("File.WriteAllText", export, StringComparison.Ordinal);
+    }
+
     private static void OnStaThread(Action body)
     {
         Exception? error = null;

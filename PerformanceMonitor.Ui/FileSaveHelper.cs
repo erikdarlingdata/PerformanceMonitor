@@ -56,6 +56,10 @@ public static class FileSaveHelper
     /// </summary>
     public static void SaveXmlToFile(string xml, string suggestedFileName, string whatLabel)
     {
+        /* #5320: a deadlock graph or blocked process report the statement filter withheld whole is the marker, not XML.
+           Say so and write no file, the same as the plan save sites do (shared by Lite and the Darling viewer). */
+        if (WithheldPlanGuard.RefuseSave(xml)) return;
+
         var dialog = new SaveFileDialog
         {
             Filter = "XML files (*.xml)|*.xml|All files (*.*)|*.*",
