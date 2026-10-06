@@ -88,7 +88,7 @@ public partial class FinOpsTab : UserControl
             string? optimizedLockingNote = null;
             try
             {
-                optimizedLockingNote = await Task.Run(() => _dataService.GetOptimizedLockingNoteAsync(serverId));
+                optimizedLockingNote = await Task.Run(() => _dataService.GetOptimizedLockingNoteAsync(serverId, db));
             }
             catch (Exception noteEx)
             {
