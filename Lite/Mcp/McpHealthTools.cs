@@ -1331,7 +1331,8 @@ public sealed class McpHealthTools
         ServerManager serverManager,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history. Default 24. No upper bound (this read exists to look further back than the 168-hour reads allow); a negative or zero value is refused rather than read as its absolute value.")] int hours_back = 24,
-        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        [Description("Limit the blocking series to one database. Omit for all databases.")] string? database_name = null)
     {
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
         if (error != null) return error;
@@ -1348,7 +1349,12 @@ public sealed class McpHealthTools
         try
         {
             var hours = hours_back;
-            var blocking = await dataService.GetBlockingDurationStatsAsync(resolved.ServerId, hours, asOfUtc: windowEnd);
+            /* #5244: database_name appended LAST (H1). Only the BLOCKING series is limited: deadlock graphs carry no
+               database column here, so the deadlock series stays whole (Darling's twin does the same) and every text
+               that speaks of "blocking or deadlocks" says so. A blank is "no filter". */
+            var database = string.IsNullOrWhiteSpace(database_name) ? null : database_name;
+            var blocking = await dataService.GetBlockingDurationStatsAsync(
+                resolved.ServerId, hours, databaseNames: database == null ? null : new[] { database }, asOfUtc: windowEnd);
             var deadlocks = await dataService.GetDeadlockSeverityStatsAsync(resolved.ServerId, hours, asOfUtc: windowEnd);
 
             if (blocking.Count == 0 && deadlocks.Count == 0)
@@ -1373,7 +1379,9 @@ public sealed class McpHealthTools
                         "empty",
                         McpHelpers.QuietUnlessCut(
                             emptyNotice.WindowTruncated, emptyNotice.EffectiveStart,
-                            factual: $"No blocking or deadlocks recorded for {resolved.ServerName} in the last {hours} hour(s)",
+                            factual: database == null
+                                ? $"No blocking or deadlocks recorded for {resolved.ServerName} in the last {hours} hour(s)"
+                                : $"No blocking for database '{database}' (and no deadlocks, which are not limited by database) recorded for {resolved.ServerName} in the last {hours} hour(s)",
                             coveredClaim: ". The blocking collectors HAVE run successfully for this server, so the window is genuinely clear rather than blind."),
                         emptyNotice.AsHints())
                     : McpHelpers.Status(
@@ -1393,6 +1401,9 @@ public sealed class McpHealthTools
                 effective_start = notice.EffectiveStart,
                 window_truncated = notice.WindowTruncated,
                 truncation_note = notice.TruncationNote,
+                /* #5244: the database the blocking series is limited to (the deadlock series never is); null for all.
+                   After the three notice keys, as on Darling's twin. */
+                database_name = database,
                 blocking_duration = blocking.Select(b => new
                 {
                     time = b.Time.ToString("o"),
