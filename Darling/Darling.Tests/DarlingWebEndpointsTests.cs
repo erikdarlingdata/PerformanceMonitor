@@ -15,6 +15,7 @@ using System.Runtime.CompilerServices;
 using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.DependencyInjection;
 using ModelContextProtocol.Server;
 using PerformanceMonitor.Common;
@@ -731,5 +732,52 @@ public sealed class DarlingWebEndpointsTests
 
         Assert.NotNull(dir);
         return dir!;
+    }
+
+    /* ---- #5245: a single-value query key sent more than once is refused, never read as the joined "a,b" ---- */
+
+    private static DefaultHttpContext Ask(string query)
+    {
+        var context = new DefaultHttpContext();
+        context.Request.QueryString = new QueryString(query);
+        return context;
+    }
+
+    [Theory]
+    [InlineData("", "", true)]
+    [InlineData("?confirm=true", "true", true)]
+    [InlineData("?confirm=", "", true)]
+    [InlineData("?confirm=true&confirm=true", "", false)]
+    [InlineData("?confirm=&confirm=true", "", false)]
+    public void TrySingleQueryValue_ReturnsTheOneValue_AndRefusesARepeatedKey(string query, string expected, bool accepted)
+    {
+        var context = Ask(query);
+
+        Assert.Equal(accepted, DarlingWebEndpoints.TrySingleQueryValue(context.Request.Query, "confirm", out var value));
+        Assert.Equal(expected, value);
+    }
+
+    [Theory]
+    [InlineData("", false)]
+    [InlineData("?confirm=true", true)]
+    public void ParseConfirm_SingleValue_BehavesAsBefore(string query, bool expectedConfirm)
+    {
+        var (confirm, refusal) = DarlingWebEndpoints.ParseConfirm(Ask(query).Request.Query);
+
+        Assert.Equal(expectedConfirm, confirm);
+        Assert.Null(refusal);
+    }
+
+    [Theory]
+    [InlineData("?confirm=1", "confirm must be true, or omitted.")]
+    [InlineData("?confirm=TRUE", "confirm must be true, or omitted.")]
+    [InlineData("?confirm=true&confirm=true", "confirm must be given once, as true, or omitted.")]
+    [InlineData("?confirm=true&confirm=1", "confirm must be given once, as true, or omitted.")]
+    public void ParseConfirm_RefusesAWrongValue_AndARepeatedKey(string query, string expectedRefusal)
+    {
+        var (confirm, refusal) = DarlingWebEndpoints.ParseConfirm(Ask(query).Request.Query);
+
+        Assert.False(confirm);
+        Assert.Equal(expectedRefusal, refusal);
     }
 }
