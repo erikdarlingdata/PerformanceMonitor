@@ -2413,6 +2413,14 @@ internal static class DarlingDataReader
     /// the connected store's version for this surface; no extra round trip earns its keep here.</summary>
     private const int QueryStoreTopTableMinSchemaVersion = 145;
 
+    /// <summary>
+    /// The first half of the grid's tier choice (#3953), shared so the Query Store History read (#5234) follows the grid
+    /// and cannot drift from it: the store must be at schema version 145 or later, and the window at least
+    /// <see cref="QueryStoreTopMinWindow"/>. The second half is the gate, <see cref="QueryStoreIntervalWide.ResolveReadAsync"/>.
+    /// </summary>
+    internal static bool QueryStoreTopMayReadTable(DateTime startUtc, DateTime endUtc) =>
+        StorageVersion.SchemaVersion >= QueryStoreTopTableMinSchemaVersion && endUtc - startUtc >= QueryStoreTopMinWindow;
+
     public static Task<List<QueryStoreRow>> GetQueryStoreTopAsync(
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int top, string? databaseName,
         CancellationToken cancellationToken = default) =>
@@ -2459,7 +2467,7 @@ internal static class DarlingDataReader
            call under QueryStoreTopMinWindow otherwise still opens a second connection, a transaction, and
            pays ReadSourceInputsSql plus the unindexed PlainTableFloorSql scan for a read that can only ever
            land on raw (UseTable's clause 5). */
-        if (StorageVersion.SchemaVersion >= QueryStoreTopTableMinSchemaVersion && endUtc - startUtc >= QueryStoreTopMinWindow)
+        if (QueryStoreTopMayReadTable(startUtc, endUtc))
         {
             var table = await TryGetQueryStoreTopFromTableAsync(
                 postgres, serverId, startUtc, endUtc, top, databaseName, executionType, moduleName, cancellationToken);
