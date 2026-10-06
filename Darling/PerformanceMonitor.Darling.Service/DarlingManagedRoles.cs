@@ -1127,7 +1127,7 @@ GRANT INSERT, UPDATE, DELETE ON {config}.config_monitored_servers TO {mcp};
 --     rather than a natural clear's 'tray' (a teardown surfaces no operator notification) -- so a caller can
 --     page nothing and fabricate no fire; only server_id/name and the already-sanitized title/detail vary.
 --     Definer-safe: owned by the store owner (the creating provisioning role, {owner}), an explicit pinned
---     search_path so no injected path can redirect the unqualified config_alert_log or now(), and a fully
+--     search_path with pg_temp last and the table named by its schema, so no temporary object can redirect the config_alert_log write or now(), and a fully
 --     parameterized INSERT with NO dynamic SQL. Created + REVOKEd-from-PUBLIC by the shared builder below;
 --     EXECUTE is the only privilege the least-privilege roles get, and admin/owner keep their direct INSERT and
 --     never call it. NOT a versioned migration: CREATE OR REPLACE is idempotent and owner-run every start and
@@ -1208,7 +1208,7 @@ LANGUAGE sql
 SECURITY DEFINER
 SET search_path = {config}, pg_catalog, pg_temp
 AS $fn$
-   INSERT INTO config_alert_log
+   INSERT INTO {config}.config_alert_log
       (alert_time, server_id, server_name, metric_name, current_value, threshold_value,
        alert_sent, notification_type, send_error, muted, detail_text, context_json)
    VALUES
@@ -1288,7 +1288,7 @@ BEGIN
    INTO v_old_modified_at, v_old_host, v_old_port, v_old_auth, v_old_database, v_old_read_only_intent,
         v_old_username, v_old_encrypt_mode, v_old_trust_server_certificate, v_old_multi_subnet_failover,
         v_remediation_held
-   FROM config_monitored_servers AS s
+   FROM {config}.config_monitored_servers AS s
    WHERE s.server_id = p_server_id
    FOR UPDATE OF s;
 
@@ -1360,7 +1360,7 @@ BEGIN
       v_secret := NULL;
    END IF;
 
-   UPDATE config_monitored_servers AS s
+   UPDATE {config}.config_monitored_servers AS s
    SET name = CASE WHEN 'name' = ANY (p_columns) THEN p_name ELSE s.name END,
        host = v_host,
        port = v_port,

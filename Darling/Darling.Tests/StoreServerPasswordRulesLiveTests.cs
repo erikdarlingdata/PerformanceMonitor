@@ -310,6 +310,63 @@ public sealed class StoreServerPasswordRulesLiveTests
         });
     }
 
+    /// <summary>
+    /// A role that may create temporary objects puts a table named like each table the two definer functions use
+    /// (<c>config.edit_monitored_server</c> and <c>config.record_custom_alert_resolution</c>) in its own session, with a
+    /// trigger on it that would record who runs it. Called as that role, each function writes the store's table, the trigger
+    /// never fires, and nothing runs in the function owner's name through it.
+    /// </summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ATemporaryTableAndTriggerNamedLikeAStoreTable_IsNeverUsedByTheDefinerFunctions(bool selfManagedText)
+    {
+        await RunScenarioAsync(selfManagedText, async (ownerString, owner, ct) =>
+        {
+            var next = 7950;
+            foreach (var (roleName, password) in new[] { ("viewer", ProvisioningTestSecrets.ViewerPassword), ("mcp", ProvisioningTestSecrets.McpPassword) })
+            {
+                var serverId = next++;
+                var metric = "shadow-metric-" + roleName;
+                await InsertServerAsync(owner, serverId, "keep-host", ProtectedBlob, null, ct);
+                await using var role = await ConnectAsync(ownerString, roleName, password, ct);
+
+                await ExecAsync(role, "CREATE TEMP TABLE trigger_log (who text)", ct);
+                await ExecAsync(role,
+                    "CREATE FUNCTION pg_temp.shadow_trigger() RETURNS trigger LANGUAGE plpgsql AS $fn$ " +
+                    "BEGIN INSERT INTO pg_temp.trigger_log VALUES (current_user); RETURN NEW; END $fn$", ct);
+
+                await ExecAsync(role,
+                    "CREATE TEMP TABLE config_monitored_servers (server_id integer, name text, host text, port integer, database text, " +
+                    "read_only_intent boolean, auth text, username text, encrypted_password text, remediation_encrypted_password text, " +
+                    "encrypt_mode text, trust_server_certificate boolean, multi_subnet_failover boolean, monthly_cost_usd numeric, modified_at timestamp)", ct);
+                var token = await TextAsync(owner, $"SELECT to_char(modified_at, 'YYYY-MM-DD HH24:MI:SS.US') FROM config_monitored_servers WHERE server_id = {serverId}", ct);
+                await ExecAsync(role,
+                    $"INSERT INTO config_monitored_servers (server_id, host, auth, modified_at) VALUES ({serverId}, 'keep-host', 'sql', '{token}'::timestamp)", ct);
+                await ExecAsync(role,
+                    "CREATE TRIGGER shadow BEFORE UPDATE ON config_monitored_servers FOR EACH ROW EXECUTE FUNCTION pg_temp.shadow_trigger()", ct);
+
+                await ExecAsync(role,
+                    "CREATE TEMP TABLE config_alert_log (alert_time timestamp, server_id integer, server_name text, metric_name text, " +
+                    "current_value double precision, threshold_value double precision, alert_sent boolean, notification_type text, " +
+                    "send_error text, muted boolean, detail_text text, context_json text)", ct);
+                await ExecAsync(role,
+                    "CREATE TRIGGER shadow BEFORE INSERT ON config_alert_log FOR EACH ROW EXECUTE FUNCTION pg_temp.shadow_trigger()", ct);
+
+                Assert.Equal("saved", await TextAsync(role,
+                    $"SELECT outcome FROM config.edit_monitored_server({serverId}, '{token}'::timestamp, ARRAY['host','encrypted_password']::text[], " +
+                    "NULL, 'moved-host', NULL, NULL, NULL, NULL, NULL, 'a-new-protected-blob', NULL, NULL, NULL, NULL)", ct));
+                await ExecAsync(role, $"SELECT config.record_custom_alert_resolution({serverId}, 'srv', '{metric}', 'detail')", ct);
+
+                Assert.Equal("0", await TextAsync(role, "SELECT count(*) FROM pg_temp.trigger_log", ct));
+                Assert.Equal("moved-host", await TextAsync(owner, $"SELECT host FROM config_monitored_servers WHERE server_id = {serverId}", ct));
+                Assert.Equal("1", await TextAsync(owner, $"SELECT count(*) FROM config_alert_log WHERE server_id = {serverId} AND metric_name = '{metric}'", ct));
+                Assert.Equal("keep-host", await TextAsync(role, $"SELECT host FROM pg_temp.config_monitored_servers WHERE server_id = {serverId}", ct));
+                Assert.Equal("0", await TextAsync(role, "SELECT count(*) FROM pg_temp.config_alert_log", ct));
+            }
+        });
+    }
+
     private const string RemediationBlob = "AQAAANCMnd8-a-remediation-blob";
 
     /// <summary>

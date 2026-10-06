@@ -484,17 +484,13 @@ ORDER BY COALESCE(s.display_name, c.name)";
     /// remediation secret, made by a role that does not own the table.</summary>
     internal const string StoreRemediationKeptSqlState = "PW003";
 
-    /// <summary>The sentence a refused change on a row with a remediation login gives: the same text the web and MCP edit
-    /// answer with (<c>DarlingMcpServerAdminTools.RemediationKeptText</c>). <c>ServerEditPasswordRuleViewerTests</c> fails when
-    /// the two texts differ.</summary>
-    public const string RemediationKeptText =
-        "This server has a remediation login stored. Change how it is reached on the service host, in the configuration file or with --add-server.";
+    /// <summary>The sentence a refused change on a row with a remediation login gives: the one in
+    /// <see cref="ServerConnectionRule.RemediationKeptText"/>, which the web and MCP edit answer with too.</summary>
+    public const string RemediationKeptText = ServerConnectionRule.RemediationKeptText;
 
-    /// <summary>The sentence a refused move gives: the same text the web and MCP edit answer with
-    /// (<c>DarlingMcpServerAdminTools.EditPasswordNeededText</c>), because this project cannot reference the service.
-    /// <c>ServerEditPasswordRulePinTests</c> fails when the two texts differ.</summary>
-    public const string EditPasswordNeededText =
-        "Changing how this server is reached needs its password again: it is stored encrypted and this surface cannot read it back.";
+    /// <summary>The sentence a refused move gives: the one in <see cref="ServerConnectionRule.PasswordNeededOnMoveText"/>,
+    /// which the web and MCP edit answer with too.</summary>
+    public const string EditPasswordNeededText = ServerConnectionRule.PasswordNeededOnMoveText;
 
     /// <summary>The stored connection settings (host, port, engine, database, read-only intent, auth, username, encrypt mode,
     /// trust certificate, multi-subnet failover), whether the stored blob is the one a row carries, and whether the row holds a
@@ -514,16 +510,6 @@ WHERE server_id = $1";
     /// <summary>The service-principal twin of <see cref="EditSwitchToSqlNeedsPasswordText"/>.</summary>
     public const string EditSwitchToServicePrincipalNeedsSecretText =
         "Switching to ServicePrincipal authentication needs the client secret as password.";
-
-    /// <summary>
-    /// True when the host or port moved off the stored one the way the web and MCP edit count an address move: the host
-    /// (the incoming host trimmed of spaces, the stored host compared exactly as stored, the instance being part of it)
-    /// or the port differs. Mirrors <see cref="ServerConnectionRule.SameAddress"/> and the store's edit function
-    /// (<c>btrim(host)</c> on the incoming value, then <c>IS DISTINCT FROM</c>). The write's own check compares every connection
-    /// setting (<see cref="ServerConnectionRule.ConnectionSettingsDiffer"/>).
-    /// </summary>
-    internal static bool ReachMoved(string storedHost, int storedPort, string newHost, int newPort) =>
-        !string.Equals(newHost.Trim(' '), storedHost, StringComparison.Ordinal) || newPort != storedPort;
 
     /// <summary>
     /// Refuses (throws <see cref="MonitoredServerPasswordNeededException"/>) a write that changes how a stored server is

@@ -398,7 +398,7 @@ BEGIN
    INTO v_old_modified_at, v_old_host, v_old_port, v_old_auth, v_old_database, v_old_read_only_intent,
         v_old_username, v_old_encrypt_mode, v_old_trust_server_certificate, v_old_multi_subnet_failover,
         v_remediation_held
-   FROM config_monitored_servers AS s
+   FROM config.config_monitored_servers AS s
    WHERE s.server_id = p_server_id
    FOR UPDATE OF s;
 
@@ -470,7 +470,7 @@ BEGIN
       v_secret := NULL;
    END IF;
 
-   UPDATE config_monitored_servers AS s
+   UPDATE config.config_monitored_servers AS s
    SET name = CASE WHEN 'name' = ANY (p_columns) THEN p_name ELSE s.name END,
        host = v_host,
        port = v_port,

@@ -139,6 +139,32 @@ public sealed class DarlingManagedRolesTests
         Assert.Contains("This server has a remediation login stored. Change how it is reached on the service host, in the configuration file or with --add-server.", rules, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// The rules' three refusal sentences are literal in the managed batch and in the script, and each is the one in
+    /// <see cref="ServerConnectionRule"/> that the web, MCP and viewer answers use: every message the rules raise is one of
+    /// the three, and each of the three is raised.
+    /// </summary>
+    [Fact]
+    public void TheRulesRefusalSentences_AreTheSharedConstants_InTheManagedBatchAndTheScript()
+    {
+        var expected = new[]
+        {
+            ServerConnectionRule.PasswordNeededOnMoveText,
+            ServerConnectionRule.ReferenceRefusedText,
+            ServerConnectionRule.RemediationKeptText,
+        };
+        var byo = Regex.Replace(RepoFile.ReadRepoFile("Darling", "tools", "provision-roles.sql"), @"(?m)^\s*--.*$", "");
+        var rules = DarlingManagedRoles.BuildServerPasswordRulesSql("config");
+        var pattern = new Regex(@"RAISE EXCEPTION '%', '([^']*)'");
+
+        foreach (var text in new[] { rules, byo })
+        {
+            var raised = pattern.Matches(text).Select(match => match.Groups[1].Value).ToList();
+            Assert.All(raised, sentence => Assert.Contains(sentence, expected));
+            Assert.Equal(expected.OrderBy(s => s, StringComparer.Ordinal), raised.Distinct().OrderBy(s => s, StringComparer.Ordinal));
+        }
+    }
+
     [Fact]
     public void BuildProvisioningSql_CreatesRolesIdempotently_LoginNoSuperuser()
     {
@@ -663,9 +689,9 @@ public sealed class DarlingManagedRolesTests
         Assert.Contains("CREATE OR REPLACE FUNCTION config.record_custom_alert_resolution(", sql, StringComparison.Ordinal);
         Assert.Contains("SECURITY DEFINER", sql, StringComparison.Ordinal);
 
-        /* The pinned search_path (config first, then pg_catalog) is what makes injection impossible — no caller
-           path can redirect the unqualified config_alert_log or now(). */
-        Assert.Contains("SET search_path = config, pg_catalog", sql, StringComparison.Ordinal);
+        /* The pinned search_path (config first, then pg_catalog, the temporary schema last) and the table named by its
+           schema keep a caller's temporary objects and search path from redirecting the config_alert_log write or now(). */
+        Assert.Contains("SET search_path = config, pg_catalog, pg_temp", sql, StringComparison.Ordinal);
 
         /* A fresh function is EXECUTE-able by PUBLIC by default, so the REVOKE is mandatory and must precede the
            narrow grant; EXECUTE is the ONLY privilege the least-privilege roles get. */
@@ -677,7 +703,7 @@ public sealed class DarlingManagedRolesTests
 
         /* The body writes ONE config_alert_log row, shape-LOCKED to a no-channel resolution (alert_sent false,
            notification_type 'none', zeroed values, unmuted) — so a grantee can page nothing and forge no fire. */
-        Assert.Contains("INSERT INTO config_alert_log", sql, StringComparison.Ordinal);
+        Assert.Contains("INSERT INTO config.config_alert_log", sql, StringComparison.Ordinal);
         Assert.Contains("false, 'none', NULL, false,", sql, StringComparison.Ordinal);
 
         /* NOT the rejected blanket grant: viewer/mcp never get a table-level write on the history table. The one

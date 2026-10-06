@@ -46,6 +46,13 @@ public sealed class ServerEditPasswordRuleViewerTests
         Assert.Equal(Edit.EditPasswordNeededText, new MonitoredServerPasswordNeededException().Message);
     }
 
+    /// <summary>The rule the viewer's edit applies (<see cref="ServerConnectionRule.ConnectionSettingsDiffer"/>, with the
+    /// form's host trimmed of spaces as the dialog trims it) to a form that changes only the host and port.</summary>
+    private static bool ViewerMoves(string storedHost, int storedPort, string newHost, int newPort) =>
+        ServerConnectionRule.ConnectionSettingsDiffer(
+            ServerConnectionSettings.WithDefaults(newHost.Trim(' '), newPort, null, null, null, null, null, null, null, null),
+            ServerConnectionSettings.WithDefaults(storedHost, storedPort, null, null, null, null, null, null, null, null));
+
     [Theory]
     [InlineData("edit-rule.example.test", 0, "edit-rule.example.test", 0, false)]
     [InlineData("edit-rule.example.test", 0, "  edit-rule.example.test ", 0, false)]
@@ -59,7 +66,7 @@ public sealed class ServerEditPasswordRuleViewerTests
     [InlineData("edit-rule.example.test ", 0, "edit-rule.example.test ", 0, true)]
     public void TheViewersMoveRule_IsTheCoresHostAndPortRule(string storedHost, int storedPort, string newHost, int newPort, bool moved)
     {
-        Assert.Equal(moved, ViewerDataService.ReachMoved(storedHost, storedPort, newHost, newPort));
+        Assert.Equal(moved, ViewerMoves(storedHost, storedPort, newHost, newPort));
     }
 
     [Theory]
@@ -74,7 +81,7 @@ public sealed class ServerEditPasswordRuleViewerTests
         /* The core trims a request's host when it reads it, then calls SameAddress with the stored text as it is. */
         Assert.Equal(
             !Edit.SameAddress(newHost.Trim(' '), newPort, storedHost, storedPort),
-            ViewerDataService.ReachMoved(storedHost, storedPort, newHost, newPort));
+            ViewerMoves(storedHost, storedPort, newHost, newPort));
     }
 
     [Theory]

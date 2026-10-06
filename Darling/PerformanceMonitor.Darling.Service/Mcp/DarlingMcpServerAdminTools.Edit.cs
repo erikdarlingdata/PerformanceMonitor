@@ -99,18 +99,15 @@ public sealed partial class DarlingMcpServerAdminTools
     private const string EditNoteAddress =
         "This server keeps its id and history. The old address cannot be added as a new server under the same spelling.";
 
-    internal const string EditPasswordNeededText =
-        "Changing how this server is reached needs its password again: it is stored encrypted and this surface cannot read it back.";
+    internal const string EditPasswordNeededText = ServerConnectionRule.PasswordNeededOnMoveText;
 
     /// <summary>The answer when the store refuses a password that is a reference (env: or file:): the store takes the
     /// password itself from the viewer, admin and MCP roles. The same words in the store's own trigger and edit function.</summary>
-    internal const string EditReferenceRefusedText =
-        "Enter the password itself. References (env: or file:) can only be set in the configuration file.";
+    internal const string EditReferenceRefusedText = ServerConnectionRule.ReferenceRefusedText;
 
     /// <summary>The answer when the store refuses a change to how a server is reached because the row holds a remediation
     /// login: that secret is set and changed on the service host. The same words in the store's own trigger.</summary>
-    internal const string EditRemediationKeptText =
-        "This server has a remediation login stored. Change how it is reached on the service host, in the configuration file or with --add-server.";
+    internal const string EditRemediationKeptText = ServerConnectionRule.RemediationKeptText;
 
     /// <summary>The fixed answer when the store has no edit function the calling role may run (#5240): a self-managed store
     /// whose roles were provisioned before the function existed. Never PostgreSQL's own text.</summary>
