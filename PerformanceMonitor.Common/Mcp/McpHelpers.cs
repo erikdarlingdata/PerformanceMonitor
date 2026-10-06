@@ -75,6 +75,27 @@ internal static class McpHelpers
     }
 
     /// <summary>
+    /// <see cref="Truncate"/> for statement text (#5320): the WHOLE text is judged first
+    /// (<see cref="SensitiveStatements.Text"/>), then cut. A value can sit early in a batch with the text that
+    /// names it past the cut (a URI's <c>user:secret@</c> trigger is its closing at-sign), so a prefix can be
+    /// judged clean while it holds part of a secret. A statement judged named is the placeholder, so no cut text
+    /// can hold half of one.
+    /// </summary>
+    public static string? TruncateStatement(string? value, int maxLength) =>
+        Truncate(SensitiveStatements.Text(value), maxLength);
+
+    /// <summary>
+    /// The same filter-then-cut as <see cref="TruncateStatement"/> for a preview that carries no "... (truncated)"
+    /// marker because its row has its own truncated flag (the Query Heatmap cell, the FinOps query preview).
+    /// </summary>
+    public static string? StatementPreview(string? value, int maxLength)
+    {
+        var filtered = SensitiveStatements.Text(value);
+        if (filtered == null || filtered.Length <= maxLength) return filtered;
+        return filtered[..TextElementCutLength(filtered, maxLength)];
+    }
+
+    /// <summary>
     /// How many UTF-16 units of <paramref name="text"/> to keep so the cut lands on a text-element boundary (an
     /// extended grapheme cluster: an emoji with its modifiers, a letter with its combining accent, a CR LF pair) at
     /// or before <paramref name="limit"/>. The rule and the walk are the #3625 cut in

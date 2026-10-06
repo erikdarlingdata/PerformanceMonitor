@@ -743,7 +743,8 @@ internal static class DarlingTriageEndpoint
                 ["sections"] = sections,
             };
 
-            return Results.Text(body.ToJsonString(), "application/json");
+            /* #4348: the page's own body holds the alert row and every section's read, so it is swept whole. */
+            return DarlingWebStatementSweep.JsonText(body, "/api/triage", logger, 0);
         });
     }
 
