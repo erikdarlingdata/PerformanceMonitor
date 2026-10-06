@@ -390,6 +390,16 @@ public sealed class WebChartAtTimeBehaviourTests
     }
 
     [Fact]
+    public void TheWaitItem_NeverNamesAQdsWait_AndFallsBackToTheGenericItemThatClearsTheFilter()
+    {
+        // Query Store's QDS_* waits are never linked from a row, so the chart's item cannot offer one either, even
+        // when that series is the one drawn nearest the click.
+        var r = Run();
+        Assert.Equal(UsualItems.Append("Show Active Queries at This Time").ToArray(), Strings(r.GetProperty("qdsItems")));
+        Assert.Equal("", r.GetProperty("filterAfterQdsItem").GetString());
+    }
+
+    [Fact]
     public void TheGenericActiveQueriesItem_ClearsTheWaitFilter_AndBlockingLeavesIt()
     {
         var r = Run();

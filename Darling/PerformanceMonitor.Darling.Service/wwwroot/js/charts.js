@@ -16,7 +16,7 @@
  * this string. pages/deadlock-graph.js keeps its own copy for the same reason (it does not import this file).
  */
 
-import { el, mount, parseUtc, axisTime, emptyStrip, setQueryWaitFilter } from "./util.js";
+import { el, mount, parseUtc, axisTime, emptyStrip, setQueryWaitFilter, waitIsLinked } from "./util.js";
 
 const SVG_NS = "http://www.w3.org/2000/svg";
 
@@ -1310,10 +1310,10 @@ function attachChartMenu(chart, root, opts, rows) {
     if (popup) close();
     const hasTime = !!atTime && Number.isFinite(t);
     const g = hasTime ? AT_TIME_TARGETS[atTime.item] || AT_TIME_TARGETS.queries : null;
-    /* The wait item names the wait it was picked on (as text, in the button's label); with none it is the generic Active
-       Queries item. The wait item sets the wait filter and the generic queries item clears it; Blocking and Deadlocks
-       leave it alone. */
-    const named = !!g && atTime.item === "wait" && typeof wait === "string" && wait !== "";
+    /* The wait item names the wait it was picked on (as text, in the button's label); with none, or a QDS_* wait (never
+       linked, like a row's), it is the generic Active Queries item. The wait item sets the wait filter and the generic
+       queries item clears it; Blocking and Deadlocks leave it alone. */
+    const named = !!g && atTime.item === "wait" && waitIsLinked(wait);
     const timed = g
       ? [
           {

@@ -770,6 +770,14 @@ export function setQueryWaitFilter(server, w) {
   else queryWaitFilters.set(server, v);
 }
 
+/** Whether wait `w` gets a link to Active Queries (#5235): any named wait except Query Store's QDS_* waits, which are the
+ *  background tasks' own and never a request's wait at a capture. The wait rows and the wait trend chart's menu item both
+ *  ask this, so the two cannot disagree. */
+export function waitIsLinked(w) {
+  const v = typeof w === "string" ? w.trim() : "";
+  return v !== "" && !/^QDS_/i.test(v);
+}
+
 /* The windowed reads that take no `as_of` (the catalog's `hours` without an `as_of`): they keep answering "the last N
    hours ending now", and say so. Every other windowed read takes `as_of`. WebServerPageRangeTests pins this list
    against the read catalog. */

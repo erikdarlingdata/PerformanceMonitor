@@ -351,6 +351,16 @@ out.filterAfterBlockingItem = util.queryWaitFilter("A");
 take();
 util.setQueryWaitFilter("A", "");
 
+/* A QDS_* wait is never linked: when it is the nearest series the item is the generic one, and clicking it clears the filter. */
+const qds = charts.zoomableLineChart(waitSpec({ series: [{ key: "a", label: "QDS_PRE_EMPTIVE", color: "#fff" }, waitSeries[1]] }), "t26", scope);
+rightClick(qds, 521, plotNode(qds), 30);
+out.qdsItems = labels(qds);
+util.setQueryWaitFilter("A", "WAIT_A");
+await click(qds, "Show Active Queries at This Time");
+out.filterAfterQdsItem = util.queryWaitFilter("A");
+take();
+util.setQueryWaitFilter("A", "");
+
 /* A rebuild of the chart (the 60 s poll) keeps the open menu and the wait it named. */
 const r1 = charts.zoomableLineChart(waitSpec(), "t24", scope);
 rightClick(r1, 521, plotNode(r1), 270);
