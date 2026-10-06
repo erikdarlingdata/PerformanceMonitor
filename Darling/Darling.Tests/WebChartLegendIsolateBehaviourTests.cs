@@ -246,7 +246,8 @@ public sealed class WebChartLegendIsolateBehaviourTests
     [Fact]
     public void ADrillingEntrysSwatch_HasATransparentPad_ThatMakesA20By25Target_AndStopsShortOfTheLabel()
     {
-        var css = ReadRepoFileLf("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "css", "app.css");
+        // Read as it sits on disk: no anchor below spans a line break, and [^}] and \s match either newline.
+        var css = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "css", "app.css");
 
         var size = Regex.Match(css, @"\.chart-legend \.swatch\s*\{[^}]*width:\s*(\d+)px[^}]*height:\s*(\d+)px");
         Assert.True(size.Success, "the legend swatch lost its width and height in px");
@@ -282,7 +283,7 @@ public sealed class WebChartLegendIsolateBehaviourTests
         var gap = Regex.Match(css, @"\.chart-legend \.item\s*\{[^}]*gap:\s*(\d+(?:\.\d+)?)rem");
         Assert.True(root.Success && gap.Success, "the root font size or the legend item gap changed shape, so the pad cannot be checked against the label");
         var gapPx = double.Parse(root.Groups[1].Value, CultureInfo.InvariantCulture) * double.Parse(gap.Groups[1].Value, CultureInfo.InvariantCulture);
-        Assert.True(right < gapPx, $"the pad reaches {right} px to the right, and the label is only {gapPx} px away");
+        Assert.True(right < gapPx, $"the pad reaches {right} px to the right, and the label is only {gapPx.ToString("0.##", CultureInfo.InvariantCulture)} px away");
     }
 
     [Fact]
