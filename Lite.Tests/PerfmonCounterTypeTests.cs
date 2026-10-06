@@ -88,8 +88,9 @@ public sealed class PerfmonCounterTypeTests
         Assert.Equal("other", PerfmonCounterTypes.Word(424242));
     }
 
-    /// <summary>The write half and the read half of one rule, held equal across the assembly boundary that
-    /// forbids one declaration: a type added to either side without the other fails here, not in a chart.</summary>
+    /// <summary>The write half and the read half of one rule, declared once: the gauge set lives in the
+    /// vocabulary (<c>PerfmonCounterTypes.GaugeTypes</c>) and the collector's <c>GaugeCounterTypes</c> and
+    /// <c>IsGauge</c> read it, so a type added there reaches the collector in the same edit.</summary>
     [Fact]
     public void TheCollectorsGaugeSet_IsTheVocabularysGaugeSet()
     {
@@ -105,11 +106,13 @@ public sealed class PerfmonCounterTypeTests
             Assert.False(PerfmonStatsCollector.IsGauge(type));
         }
 
-        /* The two assemblies really are unrelated — the reason the set is spelled twice. */
+        /* The collectors assembly reads the vocabulary from Common, and Common does not reference the collectors
+           back: one direction only, so the set is declared once and there is no cycle. */
         var collectors = typeof(PerfmonStatsCollector).Assembly;
         var common = typeof(PerfmonCounterTypes).Assembly;
-        Assert.DoesNotContain(collectors.GetReferencedAssemblies(), a => a.Name == common.GetName().Name);
+        Assert.Contains(collectors.GetReferencedAssemblies(), a => a.Name == common.GetName().Name);
         Assert.DoesNotContain(common.GetReferencedAssemblies(), a => a.Name == collectors.GetName().Name);
+        Assert.Same(PerfmonCounterTypes.GaugeTypes, PerfmonStatsCollector.GaugeCounterTypes);
     }
 
     /* ---- the Lite rung ------------------------------------------------------------------------------- */
