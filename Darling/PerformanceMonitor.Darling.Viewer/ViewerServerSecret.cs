@@ -10,6 +10,7 @@ using System;
 using System.Runtime.Versioning;
 using System.Security.Cryptography;
 using System.Text;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Viewer;
 
@@ -57,7 +58,8 @@ public static class ViewerServerSecret
     /// </summary>
     public static string? TryUnprotect(string? base64Blob)
     {
-        if (string.IsNullOrWhiteSpace(base64Blob))
+        /* A sealed value (#5366) opens only in the service, for its own connection settings: there is nothing to pre-fill. */
+        if (string.IsNullOrWhiteSpace(base64Blob) || PasswordSeal.IsSealed(base64Blob))
         {
             return null;
         }

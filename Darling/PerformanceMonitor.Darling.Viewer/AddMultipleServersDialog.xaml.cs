@@ -24,8 +24,8 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// block, optionally probe every server through the service, and write all non-duplicate rows to
 /// <c>config.config_monitored_servers</c> via <see cref="ViewerDataService.AddMonitoredServerAsync"/>, which never
 /// overwrites a different server that hashes to the same <c>server_id</c> (#4789).
-/// The shared credential is resolved ONCE (one <see cref="ViewerServerSecret.Protect"/> call) and the same DPAPI
-/// blob is stamped onto every row — the Darling service has no store-side profile concept, so a picked profile
+/// The shared credential is resolved ONCE and each row seals the password for its own connection settings (#5366);
+/// the Darling service has no store-side profile concept, so a picked profile
 /// is resolved to concrete creds here (the asymmetry vs Lite, which mints one shared profile). The four auth
 /// modes the service honors are offered (Windows / SQL / Service Principal / Managed Identity, or a profile of
 /// one of them); Test All runs SEQUENTIALLY through the
@@ -235,6 +235,13 @@ public partial class AddMultipleServersDialog : Window
             return;
         }
 
+        var (sealer, sealError) = await ResolveSealerAsync(shared);
+        if (sealError is not null)
+        {
+            StatusText.Text = sealError;
+            return;
+        }
+
         _testRunning = true;
         _cancelTest = false;
         PasteBox.IsEnabled = false;
@@ -259,7 +266,7 @@ public partial class AddMultipleServersDialog : Window
                 }
                 if (row.ParsedLine is null) continue;
 
-                var (testServer, buildError) = BuildTestConnectServer(row.ParsedLine, shared);
+                var (testServer, buildError) = BuildTestConnectServer(row.ParsedLine, shared, sealer);
                 if (testServer is null)
                 {
                     row.Status = "Failed: " + buildError;
@@ -313,10 +320,17 @@ public partial class AddMultipleServersDialog : Window
             return;
         }
 
-        // Resolve the shared credential ONCE (one Protect call) — the same DPAPI blob is stamped on every row.
+        // Resolve the shared credential ONCE; each row seals the password for its own connection settings.
         if (!TryResolveSharedCredential(out var shared, out var credError))
         {
             StatusText.Text = credError;
+            return;
+        }
+
+        var (sealer, sealError) = await ResolveSealerAsync(shared);
+        if (sealError is not null)
+        {
+            StatusText.Text = sealError;
             return;
         }
 
@@ -343,7 +357,7 @@ public partial class AddMultipleServersDialog : Window
 
             foreach (var line in result.Servers)
             {
-                var (row, buildError) = BuildMonitoredServerRow(line, shared);
+                var (row, buildError) = BuildMonitoredServerRow(line, shared, sealer);
                 if (row is null)
                 {
                     failed++;
@@ -467,8 +481,8 @@ public partial class AddMultipleServersDialog : Window
         _ => "Optional"
     };
 
-    /// <summary>Resolves the chosen credential source ONCE into the store's (auth type, username, DPAPI blob) —
-    /// <see cref="ViewerServerSecret.Protect"/> is called exactly once and the blob is reused for every row.
+    /// <summary>Resolves the chosen credential source ONCE into the shared (auth type, username, password) — each row
+    /// then seals that password for its own connection settings (<see cref="BuildMonitoredServerRow"/>).
     /// A picked profile is resolved to its concrete secret (the Darling store keeps no profile table); an
     /// Azure/Entra profile the service can't honor is blocked here.</summary>
     private bool TryResolveSharedCredential(out BulkSharedSettings shared, out string? error)
@@ -522,7 +536,7 @@ public partial class AddMultipleServersDialog : Window
             {
                 AuthType = profile.AuthType,
                 Username = string.IsNullOrWhiteSpace(secret.Value.Username) ? profile.Username : secret.Value.Username,
-                EncryptedPassword = ViewerServerSecret.Protect(secret.Value.Password),
+                Secret = secret.Value.Password,
                 EncryptMode = encryptMode,
                 TrustServerCertificate = trustCert,
             };
@@ -538,7 +552,7 @@ public partial class AddMultipleServersDialog : Window
         if (ServicePrincipalAuthRadio.IsChecked == true)
         {
             /* #3484: one Entra service principal (client id + secret) stamped on every pasted row — the tenant is
-               resolved per target by the driver. The secret is stored in the same DPAPI blob shape as SQL. */
+               resolved per target by the driver. The secret is sealed the same way as a SQL password. */
             var clientId = AzureClientIdBox.Text.Trim();
             if (string.IsNullOrEmpty(clientId)) { error = "The Application (client) ID is required for service-principal authentication."; return false; }
             var secret = AzureClientSecretBox.Password;
@@ -547,7 +561,7 @@ public partial class AddMultipleServersDialog : Window
             {
                 AuthType = AuthenticationTypes.ServicePrincipal,
                 Username = clientId,
-                EncryptedPassword = ViewerServerSecret.Protect(secret),
+                Secret = secret,
                 EncryptMode = encryptMode,
                 TrustServerCertificate = trustCert,
             };
@@ -579,7 +593,7 @@ public partial class AddMultipleServersDialog : Window
         {
             AuthType = AuthenticationTypes.SqlServer,
             Username = username,
-            EncryptedPassword = ViewerServerSecret.Protect(typed),
+            Secret = typed,
             EncryptMode = encryptMode,
             TrustServerCertificate = trustCert,
         };
@@ -590,7 +604,8 @@ public partial class AddMultipleServersDialog : Window
     /// upsert shape). REJECTS an auth the Darling service can't honor via <see cref="ServerStoreCredential.MapAuth"/>
     /// (the belt — the trimmed radios never offer Azure, but a profile could resolve to one). A blank/whitespace
     /// database maps to NULL, NEVER "master" (coercing would mint a mismatched server_id and split collected data).</summary>
-    internal static (MonitoredServerRow? Row, string? Error) BuildMonitoredServerRow(BulkServerParseLine line, BulkSharedSettings shared)
+    internal static (MonitoredServerRow? Row, string? Error) BuildMonitoredServerRow(
+        BulkServerParseLine line, BulkSharedSettings shared, ViewerPasswordSealer? sealer = null)
     {
         var mapped = ServerStoreCredential.MapAuth(shared.AuthType);
         if (mapped is null)
@@ -610,7 +625,6 @@ public partial class AddMultipleServersDialog : Window
             Database = database,
             Auth = mapped,
             Username = shared.Username,
-            EncryptedPassword = shared.EncryptedPassword,
             EncryptMode = shared.EncryptMode,
             TrustServerCertificate = shared.TrustServerCertificate,
             ReadOnlyIntent = false,
@@ -618,14 +632,46 @@ public partial class AddMultipleServersDialog : Window
             MonthlyCostUsd = 0m,
             IsEnabled = true,
         };
+
+        if (!string.IsNullOrEmpty(shared.Secret))
+        {
+            if (sealer is null)
+            {
+                return (null, ViewerPasswordKey.NoKeyText);
+            }
+
+            try
+            {
+                row.EncryptedPassword = sealer.Seal(shared.Secret, row);
+            }
+            catch (ViewerPasswordRefusedException ex)
+            {
+                return (null, ex.Message);
+            }
+        }
+
         return (row, null);
+    }
+
+    /// <summary>Reads the key the shared password is sealed with, once for the whole batch. No key is read when the
+    /// shared credential carries no password.</summary>
+    private async Task<(ViewerPasswordSealer? Sealer, string? Error)> ResolveSealerAsync(BulkSharedSettings shared)
+    {
+        if (string.IsNullOrEmpty(shared.Secret) || _dataService is null)
+        {
+            return (null, null);
+        }
+
+        var key = await ViewerPasswordKey.GetSealKeyAsync(_dataService, this);
+        return key.Sealer is null ? (null, key.Refusal) : (key.Sealer, null);
     }
 
     /// <summary>Maps one parsed row + the shared settings into a <see cref="TestConnectServer"/> for the probe —
     /// the same fields as the store row (single source of truth via <see cref="BuildMonitoredServerRow"/>).</summary>
-    internal static (TestConnectServer? Server, string? Error) BuildTestConnectServer(BulkServerParseLine line, BulkSharedSettings shared)
+    internal static (TestConnectServer? Server, string? Error) BuildTestConnectServer(
+        BulkServerParseLine line, BulkSharedSettings shared, ViewerPasswordSealer? sealer = null)
     {
-        var (row, error) = BuildMonitoredServerRow(line, shared);
+        var (row, error) = BuildMonitoredServerRow(line, shared, sealer);
         if (row is null)
         {
             return (null, error);
@@ -772,13 +818,12 @@ public partial class AddMultipleServersDialog : Window
 
 /// <summary>The one shared auth/encryption block applied to every bulk row. <see cref="AuthType"/> is the
 /// viewer <see cref="AuthenticationTypes"/> value (mapped to the store's <c>auth</c> by the mapping helper);
-/// <see cref="EncryptedPassword"/> is the single DPAPI blob (<see cref="ViewerServerSecret.Protect"/> called
-/// once) stamped onto every row.</summary>
+/// <see cref="Secret"/> is the one password every row seals for its own connection settings.</summary>
 internal sealed class BulkSharedSettings
 {
     public string AuthType { get; init; } = AuthenticationTypes.Windows;
     public string? Username { get; init; }
-    public string? EncryptedPassword { get; init; }
+    public string? Secret { get; init; }
     public string EncryptMode { get; init; } = "Mandatory";
     public bool TrustServerCertificate { get; init; }
 }
