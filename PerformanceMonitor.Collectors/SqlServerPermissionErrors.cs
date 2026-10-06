@@ -50,6 +50,14 @@ public static class SqlServerPermissionErrors
     /// <item>229 — EXECUTE/SELECT permission denied on an object.</item>
     /// <item>262 — permission denied IN a database (the #2150/#2512 tempdb DMV case).</item>
     /// <item>297 — the user does not have permission to perform this action.</item>
+    /// <item>15247 — "User does not have permission to perform this action." (#5378): what CREATE or ALTER EVENT
+    /// SESSION raises for a login without ALTER ANY EVENT SESSION. It was the one number a monitoring login meets on
+    /// the Extended Events ensure path that the set missed, so a denied long-query session recorded ERROR (and, in
+    /// Lite, was retried every cycle). MS Learn lists it as a permission denial:
+    /// https://learn.microsoft.com/sql/relational-databases/errors-events/database-engine-events-and-errors-15000-to-15999
+    /// Checked and left out: 1088 (cannot find the object; an object-missing error, not a denial), 15151 (cannot
+    /// find the object OR no permission: ambiguous by its own text, which is why the Darling XE read classifies it
+    /// by message), 8189 and 300 are already here, and 297 is already here.</item>
     /// <item>300 — VIEW SERVER STATE denied; on Azure SQL Database a service-objective limit rather
     /// than a missing grant, which is what <c>AzureDmvPermissionHint</c> exists to say.</item>
     /// <item>916 — the principal cannot access the database under the current security context.</item>
@@ -58,5 +66,5 @@ public static class SqlServerPermissionErrors
     /// </list>
     /// </summary>
     public static bool IsPermissionDenied(int sqlErrorNumber)
-        => sqlErrorNumber is 229 or 262 or 297 or 300 or 916 or 8189;
+        => sqlErrorNumber is 229 or 262 or 297 or 300 or 916 or 8189 or 15247;
 }

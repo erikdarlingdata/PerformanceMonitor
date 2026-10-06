@@ -144,10 +144,17 @@ public sealed class McpToolsListBudgetTests
     // get_active_queries gains its wait_type parameter (#5235, a 190-character description, byte-identical with Darling's twin; the served head
     // is unchanged). Constant set to the value McpToolsListBudgetTests itself measured on this tree: 92,203 (the previous ceiling, 92,358, had
     // headroom even with the parameter in).
+    // get_object_locking gains database_name (#5231, appended last, the 46-character "Limit to one database. Omit for all databases."
+    // sentence get_query_heatmap and get_query_store_regressions already use; the served head is unchanged), +97 bytes: 92,300.
+    // #5244 PR3 lane L1: get_blocking_trend and get_blocked_process_xml gain database_name (46 characters each, the shared sentence) and
+    // get_blocking_stats gains its partial-scope form (66 characters); lane L2 adds database_name to get_blocked_process_reports and
+    // get_waiting_tasks (46 each); no served head changes. Constant set to the value McpToolsListBudgetTests itself measured on this tree.
+    // #5244 PR3 (r1 M1): get_blocking_trend and get_blocking_stats each gain the one sentence that says which collector answered (the source key
+    // and when the DMV snapshot is used), identical to Darling's twins: 92,805 -> 93,265 bytes (+460).
     // #5244 PR4 lane L1: get_query_duration_trend, get_procedure_duration_trend and get_query_store_duration_trend gain database_name
     // (46 characters each, the shared sentence); no served head changes. Set to the measured total: 92,494 (+291 over 92,203, the three
     // parameters with their JSON framing). PR4's lane L2 runs after this one on the same total.
-    private const int TotalCeilingBytes = 92_688;
+    private const int TotalCeilingBytes = 93_750;
 
     private const int ConvertedHeadCap = 1_000;
     private const int ConvertedParameterCap = 200;

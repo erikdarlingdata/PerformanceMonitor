@@ -973,7 +973,7 @@ public sealed class DarlingMcpServerAdminToolsSurfaceTests
     }
 
     [Fact]
-    public void ParseRequest_OffWindows_RefusesOnlyTheLiteralEntries_AndKeepsTheReferencesAndTheRest()
+    public void ParseRequest_FromTheHostCommandLine_OffWindows_RefusesOnlyTheLiteralEntries_AndKeepsTheReferencesAndTheRest()
     {
         using var owned = new OwnedSetScope(DarlingOwnedSet.Empty);
         var (entries, invalid, _) = DarlingMcpServerAdminTools.ParseRequest(
@@ -982,7 +982,7 @@ public sealed class DarlingMcpServerAdminToolsSurfaceTests
             "{\"host\":\"sql2\",\"auth\":\"SQL\",\"username\":\"u\",\"password\":\"file:/run/secrets/sql_password\"}," +
             "{\"host\":\"az1\",\"auth\":\"ServicePrincipal\",\"username\":\"app\",\"password\":\"literal-secret\"}," +
             "{\"host\":\"az2\",\"auth\":\"ServicePrincipal\",\"username\":\"app\",\"password\":\"env:CLIENT_SECRET\"}]",
-            isWindows: false);
+            isWindows: false, allowSecretReferences: true);
 
         Assert.Equal(new[] { 0, 2, 4 }, entries.Select(e => e.Order).ToArray());
         Assert.Equal(new[] { 1, 3 }, invalid.Select(r => r.Order).ToArray());
@@ -993,14 +993,14 @@ public sealed class DarlingMcpServerAdminToolsSurfaceTests
     }
 
     [Fact]
-    public void ParseRequest_WithNoConfigurationLoaded_RefusesEveryReferenceEntry_AndKeepsTheRest()
+    public void ParseRequest_FromTheHostCommandLine_WithNoConfigurationLoaded_RefusesEveryReferenceEntry_AndKeepsTheRest()
     {
         using var owned = new OwnedSetScope(null!);
         var (entries, invalid, _) = DarlingMcpServerAdminTools.ParseRequest(
             "[{\"host\":\"win1\"}," +
             "{\"host\":\"sql2\",\"auth\":\"SQL\",\"username\":\"u\",\"password\":\"file:/run/secrets/sql_password\"}," +
             "{\"host\":\"sql3\",\"auth\":\"SQL\",\"username\":\"u\",\"password\":\"env:SQL_PASSWORD\"}]",
-            isWindows: false);
+            isWindows: false, allowSecretReferences: true);
 
         Assert.Equal(new[] { 0 }, entries.Select(e => e.Order).ToArray());
         Assert.Equal(new[] { 1, 2 }, invalid.Select(r => r.Order).ToArray());
