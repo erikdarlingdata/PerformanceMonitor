@@ -33,7 +33,7 @@ public sealed class CustomAlertResolutionNameFilterTests
     {
         /* Both resolution sites (the natural clear and the teardown) build the title from the judged name. A title
            built from the raw name (the shape before this pin) fails here. */
-        var source = ReadRepoFileLf("Darling", "PerformanceMonitor.Darling.Service", "CustomAlertEvaluator.cs");
+        var source = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "CustomAlertEvaluator.cs");
 
         var titles = Regex.Matches(source, @"var title = (?<expr>[^;]+);", RegexOptions.CultureInvariant, TimeSpan.FromSeconds(5));
         Assert.Equal(2, titles.Count);
