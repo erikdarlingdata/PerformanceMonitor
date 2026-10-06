@@ -1,0 +1,402 @@
+/*
+ * Copyright (c) 2026 Erik Darling, Darling Data LLC
+ *
+ * This file is part of the SQL Server Performance Monitor.
+ *
+ * Licensed under the MIT License. See LICENSE file in the project root for full license information.
+ */
+
+using System;
+using System.IO;
+using System.Linq;
+using System.Text.Json;
+using System.Threading.Tasks;
+using DuckDB.NET.Data;
+using PerformanceMonitor.Common;
+using PerformanceMonitorLite.Database;
+using PerformanceMonitorLite.Mcp;
+using PerformanceMonitorLite.Models;
+using PerformanceMonitorLite.Services;
+using Xunit;
+
+namespace PerformanceMonitorLite.Tests;
+
+/// <summary>
+/// #5244 (PR4, lane L2): <c>database_name</c> on Lite's get_long_query_completions and get_plan_corrections, the twins
+/// of Darling's list-taking readers. Each gets a DuckDB fixture with three databases where the filter returns only the
+/// chosen database's rows, a blank name returns all of them, the row cap counts only the chosen database's rows (the
+/// predicate sits on the raw rows, before the ranking and the limit), and a filtered empty answer keeps the
+/// <c>empty</c> status word and says "for the database X" (the chosen databases for two or more) the way Darling's tools do.
+/// </summary>
+public sealed class EventListDatabaseFilterToolTests : IClassFixture<SharedDuckDbFixture>, IDisposable
+{
+    private const string ServerName = "EventListDbFilterSrv";
+
+    private readonly DuckDbInitializer _duckDb;
+    private readonly string _configDir;
+    private readonly ServerManager _serverManager;
+    private readonly int _serverId;
+    private readonly LocalDataService _service;
+    private DuckDBConnection? _seedConn;
+    private long _nextId = 950000;
+    private readonly DateTime _planBase = new(DateTime.UtcNow.Year, DateTime.UtcNow.Month, DateTime.UtcNow.Day, DateTime.UtcNow.Hour, DateTime.UtcNow.Minute, 0, DateTimeKind.Utc);
+
+    public EventListDatabaseFilterToolTests(SharedDuckDbFixture fixture)
+    {
+        fixture.ResetData();
+        _duckDb = fixture.DuckDb;
+        _service = new LocalDataService(_duckDb);
+
+        _configDir = Path.Combine(Path.GetTempPath(), "pmlite-eventlistdbfilter-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(_configDir);
+        _serverManager = new ServerManager(_configDir);
+
+        var server = new ServerConnection
+        {
+            Id = Guid.NewGuid().ToString(),
+            ServerName = ServerName,
+            IsEnabled = true,
+        };
+        _serverManager.AddServer(server);
+
+        _serverId = RemoteCollectorService.GetDeterministicHashCode(
+            RemoteCollectorService.GetServerNameForStorage(server));
+    }
+
+    public void Dispose()
+    {
+        _seedConn?.Dispose();
+        try { Directory.Delete(_configDir, recursive: true); } catch (IOException) { /* temp dir */ }
+    }
+
+    private static DateTime Naive(DateTime utc) => DateTime.SpecifyKind(utc, DateTimeKind.Unspecified);
+
+    private static JsonElement Parse(string json) => JsonDocument.Parse(json).RootElement;
+
+    private async Task ExecuteAsync(string sql, params object?[] values)
+    {
+        using var readLock = _duckDb.AcquireReadLock();
+        if (_seedConn is null)
+        {
+            _seedConn = _duckDb.CreateConnection();
+            await _seedConn.OpenAsync();
+        }
+        using var cmd = _seedConn.CreateCommand();
+        cmd.CommandText = sql;
+        foreach (var value in values)
+            cmd.Parameters.Add(new DuckDBParameter { Value = value ?? DBNull.Value });
+        await cmd.ExecuteNonQueryAsync();
+    }
+
+    private static string[] Databases(JsonElement root, string array) =>
+        root.GetProperty(array).EnumerateArray().Select(r => r.GetProperty("database_name").GetString()!).ToArray();
+
+    /* ───────────────────────── get_long_query_completions ───────────────────────── */
+
+    private Task SeedLongQueryAsync(string database, int seconds, int minutesAgo)
+    {
+        var when = Naive(DateTime.UtcNow.AddMinutes(-minutesAgo));
+        return ExecuteAsync(@"
+INSERT INTO long_query_completions (long_query_completion_id, collection_time, server_id, server_name, event_time, event_type, database_name, statement_text, duration_microseconds)
+VALUES ($1, $2, $3, $4, $5, 'rpc_completed', $6, 'SELECT 1', $7)",
+            _nextId++, when, _serverId, ServerName, when, database, seconds * 1_000_000L);
+    }
+
+    /// <summary>DbA holds the three slowest runs (9, 8 and 7 s), DbB one 1 s run and DbC one 2 s run.</summary>
+    private async Task SeedThreeDatabaseLongQueriesAsync()
+    {
+        await SeedLongQueryAsync("DbA", 9, 5);
+        await SeedLongQueryAsync("DbA", 8, 6);
+        await SeedLongQueryAsync("DbA", 7, 7);
+        await SeedLongQueryAsync("DbB", 1, 8);
+        await SeedLongQueryAsync("DbC", 2, 9);
+    }
+
+    [Fact]
+    public async Task LongQueries_OneName_ReturnsOnlyThatDatabasesRows()
+    {
+        await SeedThreeDatabaseLongQueriesAsync();
+
+        var root = Parse(await McpLongQueryTools.GetLongQueryCompletions(
+            _service, _serverManager, ServerName, 24, 30, database_name: "DbB"));
+
+        Assert.Equal(new[] { "DbB" }, Databases(root, "completions"));
+        Assert.Equal("DbB", root.GetProperty("database_name").GetString());
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("   ")]
+    public async Task LongQueries_BlankName_ReturnsEveryDatabase(string? blank)
+    {
+        await SeedThreeDatabaseLongQueriesAsync();
+
+        var root = Parse(await McpLongQueryTools.GetLongQueryCompletions(
+            _service, _serverManager, ServerName, 24, 30, database_name: blank));
+
+        Assert.Equal(5, root.GetProperty("completions_returned").GetInt32());
+        Assert.Equal(new[] { "DbA", "DbA", "DbA", "DbC", "DbB" }, Databases(root, "completions"));
+        Assert.Equal(JsonValueKind.Null, root.GetProperty("database_name").ValueKind);
+    }
+
+    [Fact]
+    public async Task LongQueries_TheLimitCountsOnlyTheChosenDatabasesRows()
+    {
+        await SeedThreeDatabaseLongQueriesAsync();
+
+        // Unfiltered, limit 1 would be DbA's 9 s run. Filtered to DbB it is DbB's only run, and nothing was cut.
+        var one = Parse(await McpLongQueryTools.GetLongQueryCompletions(
+            _service, _serverManager, ServerName, 24, 1, database_name: "DbB"));
+        Assert.Equal(new[] { "DbB" }, Databases(one, "completions"));
+        Assert.False(one.GetProperty("truncated").GetBoolean());
+
+        // DbA holds three runs: limit 2 is its two slowest and says the window held more.
+        var two = Parse(await McpLongQueryTools.GetLongQueryCompletions(
+            _service, _serverManager, ServerName, 24, 2, database_name: "DbA"));
+        Assert.Equal(2, two.GetProperty("completions_returned").GetInt32());
+        Assert.True(two.GetProperty("truncated").GetBoolean());
+        Assert.Equal(new[] { 9000.0, 8000.0 }, two.GetProperty("completions").EnumerateArray().Select(r => r.GetProperty("duration_ms").GetDouble()).ToArray());
+    }
+
+    [Fact]
+    public async Task LongQueries_FilteredEmpty_SaysTheChosenDatabases_AndStaysEmpty()
+    {
+        await SeedThreeDatabaseLongQueriesAsync();
+
+        var root = Parse(await McpLongQueryTools.GetLongQueryCompletions(
+            _service, _serverManager, ServerName, 24, 30, database_name: "NoSuchDb"));
+
+        Assert.Equal("empty", root.GetProperty("status").GetString());
+        Assert.Contains(" for the database ", root.GetProperty("message").GetString());
+        Assert.DoesNotContain("chosen databases", root.GetProperty("message").GetString());
+    }
+
+    [Fact]
+    public async Task LongQueries_UnfilteredEmpty_KeepsTheOriginalWording()
+    {
+        await SeedLongQueryAsync("DbA", 9, 5);
+
+        var root = Parse(await McpLongQueryTools.GetLongQueryCompletions(
+            _service, _serverManager, ServerName, 1, 30, as_of: DateTime.UtcNow.AddDays(-3).ToString("o")));
+
+        Assert.Equal("empty", root.GetProperty("status").GetString());
+        Assert.DoesNotContain("chosen databases", root.GetProperty("message").GetString());
+    }
+
+    /* ───────────────────────── get_plan_corrections ───────────────────────── */
+
+    private Task SeedPlanCorrectionAsync(string database, int index, int minutesAgo)
+    {
+        // Whole minutes off one base, so the rows of one capture share a collection_time exactly (the tuning snapshot is
+        // the rows stamped with the server's newest collection_time).
+        var when = Naive(_planBase.AddMinutes(-minutesAgo));
+        return ExecuteAsync(@"
+INSERT INTO plan_correction
+    (collection_id, collection_time, server_id, server_name, database_name,
+     force_last_good_plan_desired_state, force_last_good_plan_actual_state, force_last_good_plan_reason,
+     recommendation_name, recommendation_state, score, query_id, query_text)
+VALUES ($1, $2, $3, $4, $5, 'Enabled', 'Enabled', 'ok', $6, 'Active', $7, $8, 'SELECT 1')",
+            _nextId++, when, _serverId, ServerName, database, $"PlanRegression_{database}_{index}", 50 + index, 1000L + index);
+    }
+
+    /// <summary>DbA holds three recommendations, DbB one and DbC one; the newest capture of each database is the same
+    /// minute, so the automatic-tuning snapshot names all three.</summary>
+    private async Task SeedThreeDatabasePlanCorrectionsAsync()
+    {
+        await SeedPlanCorrectionAsync("DbA", 1, 30);
+        await SeedPlanCorrectionAsync("DbA", 2, 20);
+        await SeedPlanCorrectionAsync("DbA", 3, 2);
+        await SeedPlanCorrectionAsync("DbB", 4, 2);
+        await SeedPlanCorrectionAsync("DbC", 5, 2);
+    }
+
+    [Fact]
+    public async Task PlanCorrections_OneName_NarrowsBothLayers()
+    {
+        await SeedThreeDatabasePlanCorrectionsAsync();
+
+        var root = Parse(await McpPlanCorrectionTools.GetPlanCorrections(
+            _service, _serverManager, ServerName, 24, 25, database_name: "DbB"));
+
+        Assert.Equal(new[] { "DbB" }, Databases(root, "recommendations"));
+        Assert.Equal(new[] { "DbB" }, Databases(root, "automatic_tuning"));
+        Assert.Equal("DbB", root.GetProperty("database_name").GetString());
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("   ")]
+    public async Task PlanCorrections_BlankName_ReturnsEveryDatabase(string? blank)
+    {
+        await SeedThreeDatabasePlanCorrectionsAsync();
+
+        var root = Parse(await McpPlanCorrectionTools.GetPlanCorrections(
+            _service, _serverManager, ServerName, 24, 25, database_name: blank));
+
+        Assert.Equal(5, root.GetProperty("recommendations_returned").GetInt32());
+        Assert.Equal(new[] { "DbA", "DbB", "DbC" }, Databases(root, "automatic_tuning").OrderBy(d => d).ToArray());
+        Assert.Equal(JsonValueKind.Null, root.GetProperty("database_name").ValueKind);
+    }
+
+    [Fact]
+    public async Task PlanCorrections_TheLimitCountsOnlyTheChosenDatabasesRows()
+    {
+        await SeedThreeDatabasePlanCorrectionsAsync();
+
+        // Newest first with limit 2 over every database would be two of the three 2-minutes-ago rows. Filtered to DbA
+        // the page is DbA's newest two, and the third DbA row makes it a truncated page.
+        var root = Parse(await McpPlanCorrectionTools.GetPlanCorrections(
+            _service, _serverManager, ServerName, 24, 2, database_name: "DbA"));
+
+        Assert.Equal(new[] { "DbA", "DbA" }, Databases(root, "recommendations"));
+        Assert.True(root.GetProperty("truncated").GetBoolean());
+
+        var one = Parse(await McpPlanCorrectionTools.GetPlanCorrections(
+            _service, _serverManager, ServerName, 24, 1, database_name: "DbC"));
+        Assert.Equal(new[] { "DbC" }, Databases(one, "recommendations"));
+        Assert.False(one.GetProperty("truncated").GetBoolean());
+    }
+
+    [Fact]
+    public async Task PlanCorrections_FilteredEmpty_SaysTheChosenDatabases_AndStaysEmpty()
+    {
+        await SeedThreeDatabasePlanCorrectionsAsync();
+
+        var root = Parse(await McpPlanCorrectionTools.GetPlanCorrections(
+            _service, _serverManager, ServerName, 24, 25, database_name: "NoSuchDb"));
+
+        Assert.Equal("empty", root.GetProperty("status").GetString());
+        Assert.Equal("No plan correction data found for the database NoSuchDb.", root.GetProperty("message").GetString());
+    }
+
+    /* ───────────── #5244 review L2 and L3: the empty answers ───────────── */
+
+    /// <summary>
+    /// L3: a filter that empties the answer on a server whose collector HAS rows for other databases ends the message after
+    /// the database clause. It must not send the reader to the opt-in switch, which is already on. With no filter the opt-in
+    /// sentence stays. L2: both answers echo <c>database_name</c> (the name, null for all), blank included.
+    /// </summary>
+    [Fact]
+    public async Task LongQueries_EmptyAnswers_EchoTheDatabase_AndOnlyAnUnfilteredOneBlamesTheOptInSwitch()
+    {
+        await SeedThreeDatabaseLongQueriesAsync();
+
+        var filtered = Parse(await McpLongQueryTools.GetLongQueryCompletions(
+            _service, _serverManager, ServerName, 24, 30, database_name: "NoSuchDb"));
+        Assert.Equal("empty", filtered.GetProperty("status").GetString());
+        Assert.Equal("No long-running query completions found in the specified time range for the database NoSuchDb.",
+            filtered.GetProperty("message").GetString());
+        Assert.Equal("NoSuchDb", filtered.GetProperty("database_name").GetString());
+
+        /* An unfiltered read of a server with no completions at all: the opt-in sentence is true there. */
+        await ExecuteAsync("DELETE FROM long_query_completions");
+        foreach (var blank in new string?[] { null, "", "   " })
+        {
+            var unfiltered = Parse(await McpLongQueryTools.GetLongQueryCompletions(
+                _service, _serverManager, ServerName, 24, 30, database_name: blank));
+            Assert.Equal("empty", unfiltered.GetProperty("status").GetString());
+            Assert.Contains("opt-in (default OFF)", unfiltered.GetProperty("message").GetString(), StringComparison.Ordinal);
+            Assert.Equal(JsonValueKind.Null, unfiltered.GetProperty("database_name").ValueKind);
+        }
+    }
+
+    [Fact]
+    public async Task PlanCorrections_EmptyAnswers_EchoTheDatabase_BlankIsNull()
+    {
+        await SeedThreeDatabasePlanCorrectionsAsync();
+
+        var filtered = Parse(await McpPlanCorrectionTools.GetPlanCorrections(
+            _service, _serverManager, ServerName, 24, 25, database_name: "NoSuchDb"));
+        Assert.Equal("empty", filtered.GetProperty("status").GetString());
+        Assert.Equal("NoSuchDb", filtered.GetProperty("database_name").GetString());
+
+        await ExecuteAsync("DELETE FROM plan_correction");
+        var blank = Parse(await McpPlanCorrectionTools.GetPlanCorrections(
+            _service, _serverManager, ServerName, 24, 25, database_name: "  "));
+        Assert.Equal("empty", blank.GetProperty("status").GetString());
+        Assert.Equal(JsonValueKind.Null, blank.GetProperty("database_name").ValueKind);
+    }
+
+    /// <summary>
+    /// [#5414 round 2, L3, the other half] A filtered empty answer sends the reader to the opt-in switch only when the window
+    /// notice has no <c>effective_start</c>, which means the store holds no long-query row for this server in the window at all
+    /// (the probe is not database-filtered). With rows for other databases the collector is on, so the sentence stops after the
+    /// database clause (pinned in the test above); on an empty store the opt-in sentence stays, with the database clause
+    /// before it and the database echoed.
+    /// </summary>
+    [Fact]
+    public async Task LongQueries_FilteredEmpty_OnAServerWithNoLongQueryRows_KeepsTheOptInSentence()
+    {
+        var filtered = Parse(await McpLongQueryTools.GetLongQueryCompletions(
+            _service, _serverManager, ServerName, 24, 30, database_name: "DbA"));
+
+        Assert.Equal("empty", filtered.GetProperty("status").GetString());
+        Assert.Equal("No long-running query completions found in the specified time range for the database DbA"
+            + ". The long_query_completions collector is opt-in (default OFF) — enable it in the collector schedule to capture data.",
+            filtered.GetProperty("message").GetString());
+        Assert.Equal("DbA", filtered.GetProperty("database_name").GetString());
+        Assert.False(filtered.GetProperty("hints").TryGetProperty("effective_start", out var start) && start.ValueKind != JsonValueKind.Null,
+            "the notice must carry no effective_start on an empty store; that is what keeps the opt-in sentence");
+    }
+
+    /// <summary>
+    /// [#5414 round 2, L2] The <c>precondition</c> answer (the collector's last run recorded a permission denial, Lite's one
+    /// reachable rung before the empty one) echoes <c>database_name</c>: the name for a chosen database, null for blank.
+    /// </summary>
+    [Fact]
+    public async Task LongQueries_PreconditionAnswer_EchoesTheDatabase_BlankIsNull()
+    {
+        await ExecuteAsync(@"
+INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, status, error_message)
+VALUES ($1, $2, $3, 'long_query_completions', $4, 'PERMISSIONS', 'The server principal is not able to access the database.')",
+            _nextId++, _serverId, ServerName, Naive(DateTime.UtcNow.AddMinutes(-1)));
+
+        var filtered = Parse(await McpLongQueryTools.GetLongQueryCompletions(
+            _service, _serverManager, ServerName, 24, 30, database_name: "DbA"));
+        Assert.Equal("precondition", filtered.GetProperty("status").GetString());
+        Assert.Equal("DbA", filtered.GetProperty("database_name").GetString());
+
+        foreach (var blank in new string?[] { null, "", "   " })
+        {
+            var unfiltered = Parse(await McpLongQueryTools.GetLongQueryCompletions(
+                _service, _serverManager, ServerName, 24, 30, database_name: blank));
+            Assert.Equal("precondition", unfiltered.GetProperty("status").GetString());
+            Assert.True(unfiltered.TryGetProperty("database_name", out var echo));
+            Assert.Equal(JsonValueKind.Null, echo.ValueKind);
+        }
+    }
+
+    /// <summary>
+    /// [#5414 round 2, L2] Every Lite tool wraps its <c>not_collected</c> rung in <c>McpHelpers.WithDatabase</c>. No Lite
+    /// collector these five tools read is gated off on any SQL Server engine edition (<c>CollectorEngineCapability.NotCollectedMessage</c>
+    /// answers null for all of them on editions 0 to 39, and Lite passes no engine kind), so the rung cannot be driven through the
+    /// tools and the envelope shape is pinned at the helper they all call: one name gives the name, two or more give "the chosen
+    /// databases" (<c>McpDatabaseSelection.Describe</c>), blank or all gives null with the key still written, null in gives null
+    /// out, and an envelope that already carries the key is left alone.
+    /// </summary>
+    [Fact]
+    public void WithDatabase_OnANotCollectedEnvelope_EchoesOneNameManyOrNull()
+    {
+        var notCollected = McpHelpers.Status("not_collected", "This server does not collect that.");
+
+        var one = Parse(McpHelpers.WithDatabase(notCollected, McpDatabaseSelection.Describe(new[] { "DbA" }))!);
+        Assert.Equal("not_collected", one.GetProperty("status").GetString());
+        Assert.Equal("DbA", one.GetProperty("database_name").GetString());
+
+        var many = Parse(McpHelpers.WithDatabase(notCollected, McpDatabaseSelection.Describe(new[] { "DbA", "DbB" }))!);
+        Assert.Equal("the chosen databases", many.GetProperty("database_name").GetString());
+
+        foreach (var all in new[] { McpDatabaseSelection.Describe(null), McpDatabaseSelection.Describe(Array.Empty<string>()) })
+        {
+            var none = Parse(McpHelpers.WithDatabase(notCollected, all)!);
+            Assert.True(none.TryGetProperty("database_name", out var echo));
+            Assert.Equal(JsonValueKind.Null, echo.ValueKind);
+        }
+
+        Assert.Null(McpHelpers.WithDatabase(null, "DbA"));
+        var carrying = McpHelpers.StatusForDatabase("not_collected", "m", "DbX");
+        Assert.Equal(carrying, McpHelpers.WithDatabase(carrying, "DbA"));
+    }
+}
