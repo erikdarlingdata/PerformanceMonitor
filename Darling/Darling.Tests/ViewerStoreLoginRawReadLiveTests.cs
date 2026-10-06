@@ -17,11 +17,9 @@ using Xunit;
 namespace Darling.Tests;
 
 /// <summary>
-/// #4348, L8: the Darling desktop viewer reads <c>collect.*</c> directly with its store login, not through an MCP tool or a
-/// web route, so the statement filter at those reads does not reach it. This live test records what that login can read: the
-/// viewer's grants are lifted from the shipped provisioning SQL (<see cref="DarlingManagedRoles.BuildProvisioningSql"/>), put on a
-/// disposable role in a scratch store, and the role then SELECTs the three tables that hold statement text and plans. If any
-/// is refused the viewer is a boundary of its own and the filter's scope has to be revisited, so the test fails loudly.
+/// #4348: checks the store login grants of the Darling desktop viewer. The viewer's grants are lifted from the shipped
+/// provisioning SQL (<see cref="DarlingManagedRoles.BuildProvisioningSql"/>), put on a disposable role in a scratch store, and
+/// the role then SELECTs the three tables that hold statement text and plans. The test fails if any of those reads is refused.
 ///
 /// <para>#1776 own-store: mints its own scratch database (<see cref="ScratchPostgres"/>), never the shared
 /// <c>live-postgres</c> collection. The role is cluster-wide, so it carries a per-run suffix and is dropped in cleanup.</para>
@@ -39,7 +37,7 @@ public sealed class ViewerStoreLoginRawReadLiveTests
     {
         var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
         Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
-            "Set DARLING_TEST_PG to a Postgres connection string to run the viewer raw-read live test.");
+            "Set DARLING_TEST_PG to a Postgres connection string to run the viewer store-login grants live test.");
         var ct = TestContext.Current.CancellationToken;
 
         var managed = DarlingManagedRoles.BuildProvisioningSql(

@@ -217,6 +217,88 @@ public sealed class StatementFilterPlanReadsLiveTests
     }
 
     /// <summary>
+    /// The answer a client receives for a stored plan over the tools' 500 KB limit, at the two wire seams: the host's registered
+    /// filters (MCP) and the web read's <c>ToHttpResult</c>. A plan with no auto-parameter token comes back as a cut, filtered plan
+    /// ending in the truncation marker, with the named statement's placeholder inside. The same plan padded with auto-parameter
+    /// tokens (<c>@1</c>) comes back as the whole-output placeholder: the cut plan does not parse, so the second check cannot
+    /// probe it and withholds it whole (fails closed, accepted behaviour).
+    /// </summary>
+    [Fact]
+    public async Task APlanOverTheTransportLimit_OnTheWire_IsACutFilteredPlanWithoutAutoParameterTokens_AndThePlaceholderWithThem()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live plan-read filter test.");
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+        await using var postgres = NpgsqlDataSource.Create(cs!);
+        using var host = await StatementFilterCensus.BuildHostAsync();
+
+        var bodySucceeded = false;
+        try
+        {
+            await RegisterServerAsync(connection, ct);
+            await InsertStatsAsync(connection, "query_stats", Anchor, "0xWIRENOTOKEN", null, BigPlan(600_000, canaryFirst: true), null, ct);
+            await InsertStatsAsync(connection, "query_stats", Anchor, "0xWIRETOKENS", null, BigPlan(600_000, canaryFirst: true, autoParameterTokens: true), null, ct);
+
+            /* No tokens: the cut, filtered plan, on both wires. */
+            string noTokens = await DarlingMcpPlanTools.GetPlanXml(postgres, "0xWIRENOTOKEN", ServerName, cancellationToken: ct);
+            string mcpCut = (await StatementFilterCensus.FilterThroughHostAsync(host, noTokens)).Text;
+            AssertCutFilteredPlan("host filter, no tokens", mcpCut, markerSuffix: true);
+            /* The web wrap moves the "... (truncated)" suffix into a truncated flag, so the plan_xml text is the cut plan without it. */
+            using var webCutDoc = JsonDocument.Parse(await WebAnswerAsync(noTokens, "0xWIRENOTOKEN"));
+            Assert.True(webCutDoc.RootElement.GetProperty("truncated").GetBoolean());
+            AssertCutFilteredPlan("web read, no tokens", webCutDoc.RootElement.GetProperty("plan_xml").GetString()!, markerSuffix: false);
+
+            /* Tokens: the tool's own answer is the cut plan; the second check withholds it whole on both wires. */
+            string withTokens = await DarlingMcpPlanTools.GetPlanXml(postgres, "0xWIRETOKENS", ServerName, cancellationToken: ct);
+            Assert.EndsWith("... (truncated)", withTokens, StringComparison.Ordinal);
+            string mcpHeld = (await StatementFilterCensus.FilterThroughHostAsync(host, withTokens)).Text;
+            Assert.Equal(SensitiveStatements.PlaceholderText, mcpHeld);
+            string webHeld = JsonDocument.Parse(await WebAnswerAsync(withTokens, "0xWIRETOKENS")).RootElement.GetProperty("plan_xml").GetString()!;
+            Assert.Equal(SensitiveStatements.PlaceholderText, webHeld);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
+    private static void AssertCutFilteredPlan(string label, string answer, bool markerSuffix)
+    {
+        Assert.True(answer.StartsWith("<ShowPlanXML", StringComparison.Ordinal), label + ": not a plan: " + answer[..Math.Min(80, answer.Length)]);
+        Assert.Equal(markerSuffix, answer.EndsWith("... (truncated)", StringComparison.Ordinal));
+        Assert.True(answer.Length >= 500_000, label + ": not a cut plan (" + answer.Length + " chars)");
+        Assert.False(answer.EndsWith("</ShowPlanXML>", StringComparison.Ordinal), label + ": the whole plan came back");
+        Assert.Contains(StatementFilterCensus.Marker, answer, StringComparison.Ordinal);
+        foreach (string needle in StatementScrubCanary.SecretNeedles)
+            Assert.DoesNotContain(needle, answer, StringComparison.Ordinal);
+    }
+
+    /// <summary>What the web plan read sends for a tool answer: the wrapped answer through <c>ToHttpResult</c>.</summary>
+    private static async Task<string> WebAnswerAsync(string toolAnswer, string queryHash)
+    {
+        var result = DarlingWebEndpoints.ToHttpResult(
+            DarlingWebEndpoints.WrapPlanXml(toolAnswer, queryHash, null), "/api/read/get_plan_xml",
+            Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance, 1);
+        var services = new Microsoft.Extensions.DependencyInjection.ServiceCollection();
+        Microsoft.Extensions.DependencyInjection.LoggingServiceCollectionExtensions.AddLogging(services);
+        var context = new Microsoft.AspNetCore.Http.DefaultHttpContext
+        {
+            RequestServices = Microsoft.Extensions.DependencyInjection.ServiceCollectionContainerBuilderExtensions.BuildServiceProvider(services),
+        };
+        context.Response.Body = new System.IO.MemoryStream();
+        await result.ExecuteAsync(context);
+        return Encoding.UTF8.GetString(((System.IO.MemoryStream)context.Response.Body).ToArray());
+    }
+
+    /// <summary>
     /// A 20 MB stored plan read through <c>get_plan_xml</c>, with the sensitive statement at the start and with none: the filter
     /// is told where the tool will cut, so neither shape walks the whole document. The ceiling is loose on purpose (a slow
     /// runner is not a failure); it catches a read that goes back to filtering all 20 MB.
@@ -283,7 +365,7 @@ public sealed class StatementFilterPlanReadsLiveTests
 
     /// <summary>A plan of at least <paramref name="minLength"/> characters: the canary plan's statements first (when
     /// <paramref name="canaryFirst"/>; the plain statement otherwise), then plain padding statements.</summary>
-    private static string BigPlan(int minLength, bool canaryFirst)
+    private static string BigPlan(int minLength, bool canaryFirst, bool autoParameterTokens = false)
     {
         string canary = StatementScrubCanary.CanaryPlan();
         int open = canary.IndexOf("<StmtSimple", StringComparison.Ordinal);
@@ -296,8 +378,11 @@ public sealed class StatementFilterPlanReadsLiveTests
 
         var sb = new StringBuilder(minLength + 1024);
         sb.Append(head).Append(first).Append(plain);
+        /* The pad's parameter is the auto-parameter shape (@1) when asked, so the cut text holds a token as well as the
+           plain statement's ParameterCompiledValue. */
+        string pad = autoParameterTokens ? "@1" : "@c";
         for (int i = 10; sb.Length < minLength; i++)
-            sb.Append("<StmtSimple StatementText=\"SELECT canary_pad_ssf FROM dbo.pad WHERE id = @c\" StatementId=\"").Append(i).Append("\" StatementType=\"SELECT\" />");
+            sb.Append("<StmtSimple StatementText=\"SELECT canary_pad_ssf FROM dbo.pad WHERE id = ").Append(pad).Append("\" StatementId=\"").Append(i).Append("\" StatementType=\"SELECT\" />");
         return sb.Append(Tail).ToString();
     }
 
