@@ -13,6 +13,7 @@ using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Runtime.Versioning;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
@@ -1189,8 +1190,8 @@ END $do$;
     /// freshly created function is EXECUTE-able by PUBLIC by default, so revoking is mandatory); the caller adds
     /// the narrow <c>GRANT EXECUTE</c>. Shared so the gated live proof test creates the IDENTICAL function rather
     /// than a drifting hand-copy. Definer-safe by construction: owned by whoever runs it (the provisioning owner,
-    /// which holds the config_alert_log INSERT the body needs), an explicit <c>SET search_path = {config},
-    /// pg_catalog</c> so neither the unqualified table nor <c>now()</c> can be redirected by a caller's
+    /// which holds the config_alert_log INSERT the body needs), an explicit <c>SET search_path = pg_catalog,
+    /// pg_temp</c> so neither the schema-qualified table nor <c>now()</c> can be redirected by a caller's
     /// search_path, and a fully parameterized INSERT that hardcodes the resolution shape (never a fire) with no
     /// dynamic SQL. The 12-column list matches <c>PgAlertHistoryStore.RecordAlertAsync</c>'s write for a
     /// <c>BuildResolutionRecord</c> and so do the fixed values, EXCEPT this is pinned to a no-channel row
@@ -1206,7 +1207,7 @@ CREATE OR REPLACE FUNCTION {config}.record_custom_alert_resolution(
 RETURNS void
 LANGUAGE sql
 SECURITY DEFINER
-SET search_path = {config}, pg_catalog, pg_temp
+SET search_path = pg_catalog, pg_temp
 AS $fn$
    INSERT INTO {config}.config_alert_log
       (alert_time, server_id, server_name, metric_name, current_value, threshold_value,
@@ -1252,7 +1253,7 @@ CREATE OR REPLACE FUNCTION {config}.edit_monitored_server(
 RETURNS TABLE (outcome text, new_modified_at timestamp)
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = {config}, pg_catalog, pg_temp
+SET search_path = pg_catalog, pg_temp
 AS $fn$
 DECLARE
    v_old_modified_at timestamp;
@@ -1461,9 +1462,11 @@ BEGIN
       OR NEW.trust_server_certificate IS DISTINCT FROM OLD.trust_server_certificate
       OR NEW.multi_subnet_failover IS DISTINCT FROM OLD.multi_subnet_failover;
 
-   IF v_moved
-      AND COALESCE(OLD.remediation_encrypted_password, '') <> ''
-      AND NEW.remediation_encrypted_password IS NOT DISTINCT FROM OLD.remediation_encrypted_password THEN
+   -- A remediation secret that is kept goes with the login name it was stored for: that name is as much a part of how
+   -- the row is reached as the host is, so it is not changed here either. Not part of v_moved, so it never raises PW002.
+   IF COALESCE(OLD.remediation_encrypted_password, '') <> ''
+      AND NEW.remediation_encrypted_password IS NOT DISTINCT FROM OLD.remediation_encrypted_password
+      AND (v_moved OR NEW.remediation_username IS DISTINCT FROM OLD.remediation_username) THEN
       RAISE EXCEPTION '%', 'This server has a remediation login stored. Change how it is reached on the service host, in the configuration file or with --add-server.' USING ERRCODE = 'PW003';
    END IF;
 
@@ -1486,7 +1489,10 @@ CREATE OR REPLACE TRIGGER trg_monitored_server_password_rules
     /// from <c>tools/provision-roles.sql</c> alone, so a store upgraded without re-running the script has none. This runs
     /// <see cref="BuildServerPasswordRulesSql"/> on the service's own connection, which owns the tables, on every start. It
     /// never throws and never fails the start: when the connection may not create the function or the trigger, one warning
-    /// names <c>provision-roles.sql</c>. Returns whether the rules are in place.
+    /// names <c>provision-roles.sql</c>. Rules that are already in place are left alone: when the trigger exists, is
+    /// enabled and its function has the built text and search path (a function another role created from the script
+    /// included, which this connection could not replace), nothing is run and nothing is warned, and no lock is taken on
+    /// the table. Returns whether the rules are in place.
     /// </summary>
     public static async Task<bool> EnsureServerPasswordRulesAsync(
         NpgsqlDataSource dataSource, ILogger logger, CancellationToken cancellationToken = default)
@@ -1497,6 +1503,12 @@ CREATE OR REPLACE TRIGGER trg_monitored_server_password_rules
         try
         {
             await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
+            if (await ServerPasswordRulesAreInPlaceAsync(connection, cancellationToken))
+            {
+                logger.LogInformation("The store's password rules are already in place on config.config_monitored_servers");
+                return true;
+            }
+
             await using var command = new NpgsqlCommand(BuildServerPasswordRulesSql("config"), connection)
             {
                 CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds,
@@ -1513,6 +1525,66 @@ CREATE OR REPLACE TRIGGER trg_monitored_server_password_rules
             return false;
         }
     }
+
+    /// <summary>
+    /// Whether the trigger is on <c>config_monitored_servers</c>, enabled, a row-level BEFORE INSERT OR UPDATE one, and its
+    /// function has the text <see cref="BuildServerPasswordRulesSql"/> builds (full-line comments and spacing set aside) and
+    /// the pinned search path. A read that fails answers false, so the caller falls back to creating them.
+    /// </summary>
+    private static async Task<bool> ServerPasswordRulesAreInPlaceAsync(NpgsqlConnection connection, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await using var read = new NpgsqlCommand(@"
+SELECT p.prosrc, p.proconfig
+FROM pg_catalog.pg_trigger AS t
+JOIN pg_catalog.pg_proc AS p ON p.oid = t.tgfoid
+WHERE t.tgrelid = 'config.config_monitored_servers'::regclass
+  AND t.tgname = 'trg_monitored_server_password_rules'
+  AND t.tgenabled = 'O'
+  AND t.tgtype = 23
+  AND p.proname = 'monitored_server_password_rules'
+  AND p.pronamespace = 'config'::regnamespace", connection)
+            {
+                CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds,
+            };
+            await using var reader = await read.ExecuteReaderAsync(cancellationToken);
+            if (!await reader.ReadAsync(cancellationToken))
+            {
+                return false;
+            }
+
+            var stored = reader.GetString(0);
+            var settings = reader.IsDBNull(1) ? Array.Empty<string>() : reader.GetFieldValue<string[]>(1);
+            if (settings.Length != 1 || !string.Equals(settings[0], "search_path=pg_catalog, pg_temp", StringComparison.Ordinal))
+            {
+                return false;
+            }
+
+            var built = BuildServerPasswordRulesSql("config");
+            const string quote = "$rules$";
+            var open = built.IndexOf(quote, StringComparison.Ordinal);
+            var close = built.IndexOf(quote, open + quote.Length, StringComparison.Ordinal);
+            if (open < 0 || close < 0)
+            {
+                return false;
+            }
+
+            return string.Equals(
+                NormalizeRulesText(stored),
+                NormalizeRulesText(built.Substring(open + quote.Length, close - open - quote.Length)),
+                StringComparison.Ordinal);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>The function text with full-line comments and runs of white space set aside, the comparison the script's
+    /// copy of the rules is held to as well.</summary>
+    private static string NormalizeRulesText(string sql) =>
+        Regex.Replace(Regex.Replace(sql, @"(?m)^\s*--.*$", ""), @"\s+", " ").Trim();
 
     /// <summary>
     /// Fails closed unless <paramref name="secret"/> is a SCRAM-SHA-256 verifier (#3910). This refuses a plain

@@ -16,7 +16,7 @@ namespace Darling.Tests;
 /// <summary>
 /// The service's start creates the store's password rules on a store it does not provision itself. The start is one large
 /// method on a live worker, so no unit seam reaches it; this reads the worker's source, comments removed, and fails when
-/// either call is gone from the provisioning chain or moves out of its branch.
+/// any of the three calls is gone from the provisioning chain or moves out of its branch.
 /// </summary>
 public sealed class SelfManagedStoreRulesStartPinTests
 {
@@ -36,7 +36,7 @@ public sealed class SelfManagedStoreRulesStartPinTests
     }
 
     [Fact]
-    public void ASelfManagedStoreStart_CreatesThePasswordRules_InBothBranchesThatDoNotProvisionTheStore()
+    public void ASelfManagedStoreStart_CreatesThePasswordRules_InEveryBranchThatDoesNotProvisionTheRulesItself()
     {
         var chain = ProvisioningChain();
 
@@ -54,6 +54,13 @@ public sealed class SelfManagedStoreRulesStartPinTests
                 RegexOptions.Singleline),
             chain);
 
-        Assert.Equal(2, Regex.Matches(chain, @"EnsureServerPasswordRulesAsync\(").Count);
+        /* The managed branch, when its provisioning throws before its own rules section. */
+        Assert.Matches(
+            new Regex(
+                @"EnsureProvisionedAsync\(.*?ex\.Message\);\s*await DarlingManagedRoles\.EnsureServerPasswordRulesAsync\(postgres, _logger, stoppingToken\);\s*\}\s*\}\s*else if \(!config\.Postgres\.Managed && ",
+                RegexOptions.Singleline),
+            chain);
+
+        Assert.Equal(3, Regex.Matches(chain, @"EnsureServerPasswordRulesAsync\(").Count);
     }
 }

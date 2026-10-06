@@ -16,7 +16,7 @@ namespace Darling.Tests;
 
 /// <summary>
 /// A darling.json entry and a store row are the same connection only when they agree on all ten connection settings plus
-/// engine (<c>ConnectionSettingsDiffer</c>, authentication compared exactly). The file entry's secret is copied into a
+/// engine (<c>ConnectionSettingsDiffer</c>, authentication compared ignoring case). The file entry's secret is copied into a
 /// row that has none, and a reference the file declares is marked on a row, only for such a row.
 /// </summary>
 public sealed class StoreConfigProviderConnectionMatchTests

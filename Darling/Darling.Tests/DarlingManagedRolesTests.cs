@@ -125,13 +125,17 @@ public sealed class DarlingManagedRolesTests
         Assert.Contains("left(p_secret, 4) = 'env:' OR left(p_secret, 5) = 'file:'", function, StringComparison.Ordinal);
         Assert.Contains("'reference_refused'", function, StringComparison.Ordinal);
 
-        /* The rules read the catalog by its schema and keep the temporary schema last; the two definer functions keep it
-           last too. Each string is in the batch's text and, by the comparison above, in the script's. */
+        /* The rules read the catalog by its schema and keep the temporary schema last; the two definer functions pin it the
+           same way. Each string is in the batch's text and, by the comparison above, in the script's. */
         Assert.Contains("FROM pg_catalog.pg_class AS c", rules, StringComparison.Ordinal);
         Assert.Contains("SET search_path = pg_catalog, pg_temp", rules, StringComparison.Ordinal);
-        Assert.Contains("SET search_path = config, pg_catalog, pg_temp", function, StringComparison.Ordinal);
-        Assert.Contains("SET search_path = config, pg_catalog, pg_temp", DarlingManagedRoles.BuildCustomAlertResolveFunctionSql("config"), StringComparison.Ordinal);
+        Assert.Contains("SET search_path = pg_catalog, pg_temp", function, StringComparison.Ordinal);
+        Assert.Contains("SET search_path = pg_catalog, pg_temp", DarlingManagedRoles.BuildCustomAlertResolveFunctionSql("config"), StringComparison.Ordinal);
         Assert.DoesNotContain("FROM pg_class", rules, StringComparison.Ordinal);
+
+        /* The edit function names its table by schema in both statements, so the pinned path needs nothing from config. */
+        Assert.Contains("FROM config.config_monitored_servers AS s", function, StringComparison.Ordinal);
+        Assert.Contains("UPDATE config.config_monitored_servers AS s", function, StringComparison.Ordinal);
 
         /* A change to how a row is reached while it holds a remediation login has its own outcome and its own state. */
         Assert.Contains("'remediation_kept'", function, StringComparison.Ordinal);
@@ -689,9 +693,9 @@ public sealed class DarlingManagedRolesTests
         Assert.Contains("CREATE OR REPLACE FUNCTION config.record_custom_alert_resolution(", sql, StringComparison.Ordinal);
         Assert.Contains("SECURITY DEFINER", sql, StringComparison.Ordinal);
 
-        /* The pinned search_path (config first, then pg_catalog, the temporary schema last) and the table named by its
+        /* The pinned search_path (pg_catalog, the temporary schema last) and the table named by its
            schema keep a caller's temporary objects and search path from redirecting the config_alert_log write or now(). */
-        Assert.Contains("SET search_path = config, pg_catalog, pg_temp", sql, StringComparison.Ordinal);
+        Assert.Contains("SET search_path = pg_catalog, pg_temp", sql, StringComparison.Ordinal);
 
         /* A fresh function is EXECUTE-able by PUBLIC by default, so the REVOKE is mandatory and must precede the
            narrow grant; EXECUTE is the ONLY privilege the least-privilege roles get. */

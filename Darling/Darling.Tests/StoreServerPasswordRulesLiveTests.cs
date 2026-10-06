@@ -313,8 +313,8 @@ public sealed class StoreServerPasswordRulesLiveTests
     /// <summary>
     /// A role that may create temporary objects puts a table named like each table the two definer functions use
     /// (<c>config.edit_monitored_server</c> and <c>config.record_custom_alert_resolution</c>) in its own session, with a
-    /// trigger on it that would record who runs it. Called as that role, each function writes the store's table, the trigger
-    /// never fires, and nothing runs in the function owner's name through it.
+    /// trigger on it that would record who runs it. Called as that role, each function writes the store's table and the trigger
+    /// never fires.
     /// </summary>
     [Theory]
     [InlineData(false)]
@@ -406,13 +406,22 @@ public sealed class StoreServerPasswordRulesLiveTests
             await RefusedAsync(() => ExecAsync(mcp, "UPDATE config_monitored_servers SET host = 'evil-host' WHERE server_id = 8003", ct), RemediationState, RemediationSentence);
             await RefusedAsync(() => ExecAsync(mcp, "UPDATE config_monitored_servers SET host = 'evil-host', encrypted_password = 'typed-anything' WHERE server_id = 8003", ct), RemediationState, RemediationSentence);
             Assert.Equal("rem-mcp", await TextAsync(owner, "SELECT host FROM config_monitored_servers WHERE server_id = 8003", ct));
+
+            /* The login name the remediation secret was stored for is part of how the row is reached: it does not change
+               while the secret stays, and does on a row that holds none. */
+            var before = await TextAsync(owner, "SELECT COALESCE(remediation_username, '(none)') FROM config_monitored_servers WHERE server_id = 8003", ct);
+            await RefusedAsync(() => ExecAsync(mcp, "UPDATE config_monitored_servers SET remediation_username = 'another-login' WHERE server_id = 8003", ct), RemediationState, RemediationSentence);
+            Assert.Equal(before, await TextAsync(owner, "SELECT COALESCE(remediation_username, '(none)') FROM config_monitored_servers WHERE server_id = 8003", ct));
+            await ExecAsync(mcp, "UPDATE config_monitored_servers SET remediation_username = 'another-login' WHERE server_id = 8004", ct);
+            Assert.Equal("another-login", await TextAsync(owner, "SELECT remediation_username FROM config_monitored_servers WHERE server_id = 8004", ct));
         });
     }
 
     /// <summary>
     /// A self-managed store's rules are created on the service's start, as the role that owns its tables, when the script was
     /// not re-run after an upgrade; running it again changes nothing, and a login that may not create them gets one warning
-    /// that names the script and fails nothing.
+    /// that names the script and fails nothing. Rules already in place from another role raise no warning; a function that
+    /// differs raises one.
     /// </summary>
     [Fact]
     public async Task ASelfManagedStoreWithNoRules_GetsThemFromTheServicesStart_AndALoginThatMayNotCreateThemGetsOneWarning()
@@ -455,6 +464,36 @@ public sealed class StoreServerPasswordRulesLiveTests
             Assert.Equal(1, warned.CountAtLevel(Microsoft.Extensions.Logging.LogLevel.Warning));
             Assert.Contains("provision-roles.sql", warned.Joined, StringComparison.Ordinal);
             Assert.Equal("0", await TextAsync(owner, triggerCount, ct));
+
+            /* Rules that are already in place, made by a role this login is not, are left alone and warn nothing: the login
+               could not replace the function, and nothing needs replacing. A function that differs in its setting or in its
+               body gets one warning each. */
+            await ExecAsync(owner, $"GRANT USAGE ON SCHEMA config TO {login}", ct);
+            await using (var ownerSource = NpgsqlDataSource.Create(scratch.ConnectionString))
+            await using (var restrictedSource = NpgsqlDataSource.Create(restricted))
+            {
+                Assert.True(await DarlingManagedRoles.EnsureServerPasswordRulesAsync(ownerSource, new CapturingTestLogger(), ct));
+                Assert.Equal("1", await TextAsync(owner, triggerCount, ct));
+
+                var inPlace = new CapturingTestLogger();
+                Assert.True(await DarlingManagedRoles.EnsureServerPasswordRulesAsync(restrictedSource, inPlace, ct), inPlace.Joined);
+                Assert.Equal(0, inPlace.CountAtLevel(Microsoft.Extensions.Logging.LogLevel.Warning));
+
+                await ExecAsync(owner, "ALTER FUNCTION config.monitored_server_password_rules() SET search_path = public", ct);
+                var otherSetting = new CapturingTestLogger();
+                Assert.False(await DarlingManagedRoles.EnsureServerPasswordRulesAsync(restrictedSource, otherSetting, ct), otherSetting.Joined);
+                Assert.Equal(1, otherSetting.CountAtLevel(Microsoft.Extensions.Logging.LogLevel.Warning));
+
+                Assert.True(await DarlingManagedRoles.EnsureServerPasswordRulesAsync(ownerSource, new CapturingTestLogger(), ct));
+                await ExecAsync(owner, "CREATE OR REPLACE FUNCTION config.monitored_server_password_rules() RETURNS trigger LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp AS $x$ BEGIN RETURN NEW; END; $x$", ct);
+                var otherBody = new CapturingTestLogger();
+                Assert.False(await DarlingManagedRoles.EnsureServerPasswordRulesAsync(restrictedSource, otherBody, ct), otherBody.Joined);
+                Assert.Equal(1, otherBody.CountAtLevel(Microsoft.Extensions.Logging.LogLevel.Warning));
+                Assert.Contains("provision-roles.sql", otherBody.Joined, StringComparison.Ordinal);
+
+                Assert.True(await DarlingManagedRoles.EnsureServerPasswordRulesAsync(ownerSource, new CapturingTestLogger(), ct));
+            }
+
             bodySucceeded = true;
         }
         finally

@@ -2594,6 +2594,10 @@ LIMIT 1";
                 _logger.LogError(
                     "Least-privilege role provisioning failed — the Viewer's admin/viewer roles may be stale " +
                     "until the next successful start: {Message}", ex.Message);
+                /* Provisioning stopped before its own rules section: a store that has never had the password rules
+                   would keep none while the viewer and mcp roles keep their earlier credentials. Best effort; the
+                   call warns for itself and never throws. */
+                await DarlingManagedRoles.EnsureServerPasswordRulesAsync(postgres, _logger, stoppingToken);
             }
         }
         else if (!config.Postgres.Managed && Hosting.DarlingHostBinding.IsRunningInContainer)

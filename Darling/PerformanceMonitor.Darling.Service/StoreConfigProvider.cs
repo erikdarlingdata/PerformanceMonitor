@@ -331,16 +331,18 @@ public sealed class StoreConfigProvider
                 ? " Note --test-connection reads darling.json, so it probes the FILE's settings and can report "
                   + "PASS for a connection the service will never make."
                 : "";
+            var passwordNote = DescribePasswordNotUsed(live, MaxDriftedServersLogged);
 
             _logger?.LogWarning(
                 "darling.json disagrees with the registry about {Count} monitored server(s), and the registry is "
                 + "what the service uses: {Details}. The store is authoritative after the first seed, so editing a "
                 + "registered server's settings in the file changes nothing and a restart cannot change that — "
                 + "edit them in the Viewer's Manage Servers window (the MCP add_servers tool cannot: an "
-                + "already-registered server is skipped as a duplicate).{ConnectionCaveat}",
+                + "already-registered server is skipped as a duplicate).{ConnectionCaveat}{PasswordNote}",
                 live.Count,
                 FormatSettingDrift(live, MaxDriftedServersLogged),
-                connectionCaveat);
+                connectionCaveat,
+                passwordNote);
         }
 
         if (paused.Count > 0)
@@ -353,6 +355,29 @@ public sealed class StoreConfigProvider
                 paused.Count,
                 FormatSettingDrift(paused, MaxDriftedServersLogged));
         }
+    }
+
+    /// <summary>
+    /// The clause for the drift warning about a password: a server whose darling.json entry carries a password or a
+    /// reference gets the file's password only while the entry and the registry row agree on every connection setting
+    /// (<see cref="BackfillSecretFromFile"/>), so for a drifted connection setting the file's password is not used until
+    /// the two agree. Empty when no such server is listed. Pure, so the text is pinned by a test.
+    /// </summary>
+    internal static string DescribePasswordNotUsed(IReadOnlyList<ServerSettingDrift> drifted, int maxServers)
+    {
+        var names = drifted
+            .Where(d => d.FileEntryCarriesPassword && d.Fields.Any(f => f.AffectsConnection))
+            .Select(d => d.Server)
+            .ToList();
+        if (names.Count == 0)
+        {
+            return "";
+        }
+
+        var shown = maxServers > 0 && names.Count > maxServers ? maxServers : names.Count;
+        var listed = string.Join(", ", names.Take(shown)) + (shown < names.Count ? $" and {names.Count - shown} more" : "");
+        return $" For a drifted connection setting on an entry that carries a password or a reference ({listed}), "
+            + "its password from darling.json is not used until the two agree.";
     }
 
     /// <summary>
@@ -491,8 +516,11 @@ FROM config_monitored_servers", connection) { CommandTimeout = ServiceCommandDea
     /// </summary>
     internal sealed record RegisteredServer(MonitoredServer Config, bool IsEnabled);
 
-    /// <summary>One registered server and every field its darling.json entry disagrees with (#2552).</summary>
-    internal sealed record ServerSettingDrift(string Server, bool IsEnabled, IReadOnlyList<SettingDrift> Fields);
+    /// <summary>One registered server and every field its darling.json entry disagrees with (#2552).
+    /// <paramref name="FileEntryCarriesPassword"/> is whether the entry holds a password or a reference, which decides
+    /// whether the warning says that password is not used while a connection setting differs.</summary>
+    internal sealed record ServerSettingDrift(
+        string Server, bool IsEnabled, IReadOnlyList<SettingDrift> Fields, bool FileEntryCarriesPassword = false);
 
     /// <summary>
     /// Pairs each darling.json entry with its registry row and reports the fields they disagree on (#2552).
@@ -556,7 +584,9 @@ FROM config_monitored_servers", connection) { CommandTimeout = ServiceCommandDea
             var fields = CompareServerSettings(entry, match.Config);
             if (fields.Count > 0)
             {
-                drifted.Add(new ServerSettingDrift(match.Config.DisplayName, match.IsEnabled, fields));
+                drifted.Add(new ServerSettingDrift(
+                    match.Config.DisplayName, match.IsEnabled, fields,
+                    !string.IsNullOrWhiteSpace(entry.EncryptedPassword) || !string.IsNullOrWhiteSpace(entry.Password)));
             }
         }
 
@@ -1770,7 +1800,7 @@ ORDER BY name", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoo
     /// <summary>
     /// Copies the darling.json secret into a server built from a store row that carries none, when exactly one file entry
     /// holds the same connection: the storage name and username, and all ten connection settings plus engine
-    /// (<see cref="ServerConnectionRule.ConnectionSettingsDiffer"/>, authentication compared exactly). A row that differs in any
+    /// (<see cref="ServerConnectionRule.ConnectionSettingsDiffer"/>, authentication compared ignoring case). A row that differs in any
     /// of them is left without the file's secret.
     /// </summary>
     internal static void BackfillSecretFromFile(MonitoredServer server, DarlingConfig bootstrap)
@@ -1803,7 +1833,7 @@ ORDER BY name", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoo
     /// (<see cref="DarlingSecrets.ResolvePassword"/>). Nothing in the row can set a mark: it takes a file entry (itself
     /// marked when the file was read) with this server's id and exactly this text. A store row for another server id, or a
     /// row whose slot was changed to another reference, finds no such entry and is left unmarked. The row must also agree with
-    /// the entry on all ten connection settings plus engine (the edit core's own rule, authentication compared exactly), so a
+    /// the entry on all ten connection settings plus engine (the edit core's own rule, authentication compared ignoring case), so a
     /// reference the file declares for one connection is never sent to another: an operator who moves a file server updates its darling.json entry too (the file
     /// then declares the reference for the new address), or uses a reference that is not owned.
     /// </summary>

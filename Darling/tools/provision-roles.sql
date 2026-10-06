@@ -362,7 +362,7 @@ CREATE OR REPLACE FUNCTION config.edit_monitored_server(
 RETURNS TABLE (outcome text, new_modified_at timestamp)
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = config, pg_catalog, pg_temp
+SET search_path = pg_catalog, pg_temp
 AS $fn$
 DECLARE
    v_old_modified_at timestamp;
@@ -571,9 +571,11 @@ BEGIN
       OR NEW.trust_server_certificate IS DISTINCT FROM OLD.trust_server_certificate
       OR NEW.multi_subnet_failover IS DISTINCT FROM OLD.multi_subnet_failover;
 
-   IF v_moved
-      AND COALESCE(OLD.remediation_encrypted_password, '') <> ''
-      AND NEW.remediation_encrypted_password IS NOT DISTINCT FROM OLD.remediation_encrypted_password THEN
+   -- A remediation secret that is kept goes with the login name it was stored for: that name is as much a part of how
+   -- the row is reached as the host is, so it is not changed here either. Not part of v_moved, so it never raises PW002.
+   IF COALESCE(OLD.remediation_encrypted_password, '') <> ''
+      AND NEW.remediation_encrypted_password IS NOT DISTINCT FROM OLD.remediation_encrypted_password
+      AND (v_moved OR NEW.remediation_username IS DISTINCT FROM OLD.remediation_username) THEN
       RAISE EXCEPTION '%', 'This server has a remediation login stored. Change how it is reached on the service host, in the configuration file or with --add-server.' USING ERRCODE = 'PW003';
    END IF;
 
