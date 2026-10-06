@@ -81,20 +81,20 @@ public sealed class StatementColumnCensusTests
         ["query_snapshots.live_query_plan"] = Hooked("8", "R6", pending: false),
 
         /* Rows 9-11: blocked process reports (R4). */
-        ["blocked_process_report.blocked_sql_text"] = Hooked("9", "R4"),
-        ["blocked_process_report.blocking_sql_text"] = Hooked("9", "R4"),
-        ["blocked_process_report.blocked_process_report_xml"] = Hooked("10", "R4"),
-        ["blocked_process_report.blocked_query_plan_xml"] = Hooked("11", "R4"),
-        ["blocked_process_report.blocking_query_plan_xml"] = Hooked("11", "R4"),
+        ["blocked_process_report.blocked_sql_text"] = Hooked("9", "R4", pending: false),
+        ["blocked_process_report.blocking_sql_text"] = Hooked("9", "R4", pending: false),
+        ["blocked_process_report.blocked_process_report_xml"] = Hooked("10", "R4", pending: false),
+        ["blocked_process_report.blocked_query_plan_xml"] = Hooked("11", "R4", pending: false),
+        ["blocked_process_report.blocking_query_plan_xml"] = Hooked("11", "R4", pending: false),
 
         /* Rows 12-14: deadlocks (R4). */
-        ["deadlocks.victim_sql_text"] = Hooked("12", "R4"),
-        ["deadlocks.deadlock_graph_xml"] = Hooked("13", "R4"),
-        ["deadlocks.victim_query_plan_xml"] = Hooked("14", "R4"),
+        ["deadlocks.victim_sql_text"] = Hooked("12", "R4", pending: false),
+        ["deadlocks.deadlock_graph_xml"] = Hooked("13", "R4", pending: false),
+        ["deadlocks.victim_query_plan_xml"] = Hooked("14", "R4", pending: false),
 
         /* Row 15: the DMV blocking snapshot (R4). */
-        ["dmv_blocking_snapshot.blocked_sql_text"] = Hooked("15", "R4"),
-        ["dmv_blocking_snapshot.blocking_sql_text"] = Hooked("15", "R4"),
+        ["dmv_blocking_snapshot.blocked_sql_text"] = Hooked("15", "R4", pending: false),
+        ["dmv_blocking_snapshot.blocking_sql_text"] = Hooked("15", "R4", pending: false),
 
         /* Rows 16-18 and 21: the event and history collectors (R5). */
         ["long_query_completions.statement_text"] = Hooked("16", "R5", pending: false),

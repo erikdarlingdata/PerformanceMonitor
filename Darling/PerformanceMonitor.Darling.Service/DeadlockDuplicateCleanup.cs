@@ -12,6 +12,7 @@ using System.Globalization;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
+using PerformanceMonitor.Common;
 using Npgsql;
 using NpgsqlTypes;
 using PerformanceMonitor.Darling.Storage;
@@ -164,7 +165,9 @@ WHERE server_id = $1";
     /* READ-ONLY. $1 server, $2 day start, $3 day end, $4 the cap. The window reads from $2 - 1 day so a keeper
        stored just before midnight is seen; the candidates are confined to [$2, $3). key_count = 1 leaves alone any
        row whose (collection_time, deadlock_id) is shared, so a keyed delete can never match a keeper. The graph
-       is compared with COLLATE "C" so the identity is ordinal whatever the database collation. */
+       is compared with COLLATE "C" so the identity is ordinal whatever the database collation. #4348: a graph the
+       statement filter withheld WHOLE is the marker text, the same for every such graph, so two different deadlocks
+       at the same time would look like copies; a marker graph is never a candidate. */
     private const string CandidateSql = @"
 SELECT collection_time, deadlock_id, deadlock_time, deadlock_graph_xml
 FROM (
@@ -177,6 +180,7 @@ FROM (
     AND   collection_time >= $2 - INTERVAL '1 day' AND collection_time < $3
     AND   deadlock_time IS NOT NULL
     AND   deadlock_graph_xml IS NOT NULL AND deadlock_graph_xml <> ''
+    AND   deadlock_graph_xml COLLATE ""C"" <> '" + SensitiveStatements.PlaceholderText + @"'
 ) x
 WHERE x.rn > 1
 AND   x.key_count = 1

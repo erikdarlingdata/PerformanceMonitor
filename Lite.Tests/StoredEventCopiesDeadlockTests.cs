@@ -3,6 +3,7 @@ using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
+using PerformanceMonitor.Common;
 using PerformanceMonitorLite.Database;
 using Xunit;
 
@@ -214,7 +215,9 @@ public class StoredEventCopiesDeadlockTests : IDisposable
 
         /* Every mention of the graph column outside hash(…) and the NULL/'' tests of the never-collapse parts. */
         var bare = count.Replace("hash(deadlock_graph_xml)", "", StringComparison.Ordinal)
-            .Replace("deadlock_graph_xml IS NULL OR deadlock_graph_xml = ''", "", StringComparison.Ordinal);
+            .Replace("deadlock_graph_xml IS NULL OR deadlock_graph_xml = ''", "", StringComparison.Ordinal)
+            /* #4348: a graph withheld whole is the marker text; the never-collapse test names it. */
+            .Replace(" OR deadlock_graph_xml = '" + SensitiveStatements.PlaceholderText + "'", "", StringComparison.Ordinal);
         Assert.DoesNotContain("deadlock_graph_xml", bare, StringComparison.Ordinal);
 
         /* The helper's grouped side keys by the same parts. */
