@@ -690,29 +690,9 @@ public sealed class DarlingConfigTests
         Assert.True(usedPlaintext);
     }
 
-    /// <summary>
-    /// #2087: add_servers stores env:/file: secret REFERENCES verbatim in the encrypted-password slot on
-    /// Linux (a pointer is not a secret, and DPAPI does not exist there). The resolver must therefore
-    /// recognize a reference in that slot and resolve it instead of feeding it to DPAPI Unprotect — which
-    /// would throw on every platform, since a reference is not a base64 blob.
-    /// </summary>
-    [Fact]
-    public void ResolvePassword_ReferenceInEncryptedSlot_ResolvesInsteadOfUnprotecting()
-    {
-        Environment.SetEnvironmentVariable("DARLING_TEST_2087_PW", "ref-resolved!");
-        try
-        {
-            var server = Server(s => { s.Auth = "sql"; s.Username = "u"; s.EncryptedPassword = "env:DARLING_TEST_2087_PW"; });
-            Assert.Equal("ref-resolved!", DarlingSecrets.ResolvePassword(server, out var usedPlaintext));
-
-            /* A reference is not plaintext-in-config — callers must not warn on it (the #1804 rule). */
-            Assert.False(usedPlaintext);
-        }
-        finally
-        {
-            Environment.SetEnvironmentVariable("DARLING_TEST_2087_PW", null);
-        }
-    }
+    /* #2087's resolve half (a reference in the encrypted-password slot resolves instead of being unprotected) moved to
+       DarlingSecretsOwnedReferenceTests (#5240): the resolve now reads the process-wide owned set, so its test sets that
+       set, in the collection every class that sets it belongs to. */
 
     /// <summary>
     /// #2087's storage half: a reference passes through UNTOUCHED on every platform (the Linux onboarding
