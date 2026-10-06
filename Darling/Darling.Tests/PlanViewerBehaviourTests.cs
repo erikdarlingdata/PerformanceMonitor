@@ -268,6 +268,41 @@ public sealed class PlanViewerBehaviourTests
         Assert.Equal(0, r.GetProperty("refetchedRows").GetInt32());
     }
 
+    /// <summary>A source's scope (#5234) is part of its panel key, so one plan opened from two places is two panels, and the
+    /// scope never goes to the read.</summary>
+    [Fact]
+    public void ASourceScope_KeepsTheSamePlanInTwoPlacesAsTwoPanels_AndIsNotSentToTheRead()
+    {
+        var r = Run("scopedSource");
+        Assert.True(r.GetProperty("scopedOpen").GetBoolean());
+        Assert.False(r.GetProperty("plainOpen").GetBoolean());
+        Assert.False(r.GetProperty("otherOpen").GetBoolean());
+        Assert.Equal(new[] { "srv-a|@query_store|Orders|42|7|@scope|panel-a" }, Strs(r, "keys"));
+        var query = r.GetProperty("query");
+        Assert.False(query.TryGetProperty("scope", out _));
+        Assert.Equal("7", query.GetProperty("plan_id").GetString());
+        Assert.True(r.GetProperty("againOpen").GetBoolean());
+        Assert.Equal(0, r.GetProperty("refetched").GetInt32());
+    }
+
+    /// <summary>Three rows a build, rebuilt twelve times without a click: first the same rows each time, then new rows each
+    /// time. The set holds the grid on the page and the one being built, so six cells at most.</summary>
+    [Fact]
+    public void RebuildingAPlanGridWithoutAClick_KeepsTheRedrawSetBounded()
+    {
+        var r = Run("rebuildsBounded");
+        foreach (var phase in new[] { "sameRows", "newRows" })
+        {
+            var p = r.GetProperty(phase);
+            var after = p.GetProperty("after").EnumerateArray().Select(e => e.GetInt32()).ToArray();
+            Assert.All(after, n => Assert.InRange(n, 3, 6));
+            Assert.Equal(6, after[^1]);
+            // The cells of the build in progress are not on the page yet, and a later cell of that build must not drop them.
+            Assert.Equal(6, p.GetProperty("during").EnumerateArray().Last().GetInt32());
+        }
+        Assert.Equal(6, r.GetProperty("keys").GetInt32());
+    }
+
     [Fact]
     public void AQueryStoreRowWithNoStoredPlan_SaysSo()
     {

@@ -317,7 +317,7 @@ Configuration is a single JSON file with no schedule knobs. See the **[Darling o
 | Alerts (tray + email + webhooks) | Yes | Email + webhooks (headless) | Yes |
 | Themes | Dark and light | Dark and light | Dark and light |
 | Portability | Single executable | Portable service + viewer zip (Windows), service tarball (Linux) | Server-bound |
-| MCP server (LLM integration) | Built-in (89 tools) | On request (179 tools) | Built into Dashboard (66 tools) |
+| MCP server (LLM integration) | Built-in (89 tools) | On request (180 tools) | Built into Dashboard (66 tools) |
 
 ---
 
@@ -455,7 +455,7 @@ claude mcp add --transport http --scope user sql-monitor http://localhost:5151/
 
 ### Available Tools
 
-**Lite** exposes 89 tools; **Darling** exposes 179 (the analysis + data-read surface plus its write tools) on request; the deprecated **Dashboard** exposes 66 (see [deprecated/Dashboard/README.md](deprecated/Dashboard/README.md)). Core tools are shared.
+**Lite** exposes 89 tools; **Darling** exposes 180 (the analysis + data-read surface plus its write tools) on request; the deprecated **Dashboard** exposes 66 (see [deprecated/Dashboard/README.md](deprecated/Dashboard/README.md)). Core tools are shared.
 
 | Category | Tools |
 |---|---|
@@ -464,7 +464,7 @@ claude mcp add --transport http --scope user sql-monitor http://localhost:5151/
 | Health | `get_server_summary`, `get_collection_health`, `get_daily_summary` |
 | Alerts | `get_alert_history`, `get_alert_settings`, `get_mute_rules` |
 | Waits | `get_wait_stats`, `get_wait_types`, `get_wait_trend`, `get_waiting_tasks` |
-| Queries | `get_top_queries_by_cpu`, `get_top_procedures_by_cpu`, `get_query_store_top`, `get_query_duration_trend`, `get_query_trend` |
+| Queries | `get_top_queries_by_cpu`, `get_top_procedures_by_cpu`, `get_query_store_top`, `get_query_store_query_history`, `get_query_duration_trend`, `get_query_trend` |
 | Active Queries | `get_active_queries` |
 | CPU | `get_cpu_utilization` |
 | Memory | `get_memory_stats`, `get_memory_trend`, `get_memory_clerks`, `get_memory_grants`, `get_resource_semaphore` |

@@ -492,6 +492,7 @@ AND   hypertable_name = 'query_store_stats';";
             command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = DBNull.Value });
         }
 
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = PerformanceMonitor.Darling.Storage.TopFill.FirstCandidates(TestTop) });  /* #5313: the round's candidate limit, bound last */
         await command.ExecuteNonQueryAsync(ct);
     }
 

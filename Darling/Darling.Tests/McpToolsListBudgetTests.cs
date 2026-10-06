@@ -220,11 +220,17 @@ public sealed class McpToolsListBudgetTests
        is under 160 characters. */
     // Both additions above together (edit_server #5240 plus the three raw-plan reads #5228), as McpToolsListBudgetTests measured the tree
     // merged with dev c1679bcdd: 188,119 -> 191,056 (= 188,119 + 1,052 + 1,885), 173 -> 177 tools. The ceiling now covers all 177 served tools.
+    /* #5234: get_query_store_query_history, the per-plan history behind the web Query Store grid's History button,
+       measured on the tree merged with dev c1679bcdd and the raw-plan reads: 191,056 -> 191,824 (+768), 177 -> 178 tools. The ceiling
+       now covers all 178 served tools. Re-measured after merging dev 9a089ff8e (#5260 landed there squashed): 191,814 bytes, 178 tools,
+       so the ceiling is 191,814. */
     /* #5236: get_blocking_plan_xml and get_deadlock_plan_xml (the Blocking and Deadlocks grids' plan reads), measured on this tree:
        191,056 -> 192,755 (+1,699), 177 -> 179 tools. Each head is under 160 characters. */
     /* #5236 (the plan reads' optional database_name, so two databases under one server_id each read their own plan): both reads gain one
        parameter with a 52-byte description (108 bytes each with its schema entry), measured on this tree: 192,755 -> 192,971 (+216), 179 tools. */
-    private const int TotalCeilingBytes = 192_971;
+    /* #5236 merged with dev d27eb46f7 (#5299 order_by, #5300 get_query_store_query_history growth): re-measured on the merged tree: 193,738 bytes,
+       180 tools (dev's own 178 plus the two plan reads). Constant set to the measured value, not the deltas added by hand. */
+    private const int TotalCeilingBytes = 193_738;
 
 
 

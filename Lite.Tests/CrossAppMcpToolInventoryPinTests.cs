@@ -254,6 +254,10 @@ public sealed class CrossAppMcpToolInventoryPinTests
         "get_blocking_plan_xml",
         "get_deadlock_plan_xml",
 
+        /* #5234: get_query_store_query_history, the per-plan history behind the web Query Store grid's History
+           button. Darling-ONLY: Lite's history window reads DuckDB directly and has no MCP twin. */
+        "get_query_store_query_history",
+
         /* #3797: the Query Store clutter view (get_query_store_clutter) - per database the query_store
            collector's read cost off collection_log's fan-out rollup, plan churn off the raw query_store_stats
            plan identities, and the query_store_health options row; per server the non-sleep QDS_* wait deltas

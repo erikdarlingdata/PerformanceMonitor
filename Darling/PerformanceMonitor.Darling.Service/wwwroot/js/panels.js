@@ -74,6 +74,9 @@ export function renderPanel(desc, onSettled) {
   const body = el("div", { class: "panel-body" }, [loadingStrip()]);
   const panel = el("div", { class: "panel card" + (desc.span === 2 ? " span-2" : "") }, [
     el("h3", {}, [desc.title, desc.subtitle ? el("span", { class: "panel-sub", text: " " + desc.subtitle }) : null]),
+    /* #5226: an optional control node under the title (the Top Queries / Top Procedures ranking selector), drawn before the body so a
+       load that replaces the body never replaces it. Absent on every other panel. */
+    desc.control || null,
     body,
   ]);
   loadPanel(desc, body, signal, onSettled);

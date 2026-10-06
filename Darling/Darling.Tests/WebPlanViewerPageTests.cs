@@ -87,7 +87,7 @@ public sealed class WebPlanViewerPageTests
 
     [Theory]
     [InlineData("ACTIVE_COLUMNS", "[...ACTIVE_COLUMNS, ...activePlanColumns(server)]")]
-    [InlineData("QUERY_STORE_COLUMNS", "[...QUERY_STORE_COLUMNS, queryStorePlanColumn(server)]")]
+    [InlineData("QUERY_STORE_COLUMNS", "[...QUERY_STORE_COLUMNS, queryStorePlanColumn(server), queryStoreHistoryColumn(server, ctx.hours)]")]
     [InlineData("TOP_PROC_COLUMNS", "[...TOP_PROC_COLUMNS, procedurePlanColumn(server)]")]
     [InlineData("BLOCKING_COLUMNS", "[...BLOCKING_COLUMNS, ...blockingPlanColumns(server)]")]
     [InlineData("DEADLOCK_COLUMNS", "[...DEADLOCK_COLUMNS, deadlockPlanColumn(server)]")]

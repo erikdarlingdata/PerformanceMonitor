@@ -36,7 +36,9 @@ public sealed class TopQueriesHourlyRoutingTests
 
         Assert.Contains("GROUP BY database_name, query_hash", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("host_object_name", sql, StringComparison.Ordinal);
-        Assert.Contains("ORDER BY SUM(worker_time_sum) DESC", sql, StringComparison.Ordinal);
+        /* The ranking is the const's anchor; the CPU read is the const expanded to the worker-time sum (#5226). */
+        Assert.Contains("ORDER BY rank_metric DESC NULLS LAST", sql, StringComparison.Ordinal);
+        Assert.Contains("SUM(worker_time_sum) AS rank_metric", TopRankings.Apply(sql, TopRanking.Cpu, hourly: true), StringComparison.Ordinal);
         Assert.Contains(DarlingDataReader.TopQueriesHourlyFromPlaceholder, sql, StringComparison.Ordinal);
     }
 
@@ -80,12 +82,17 @@ public sealed class TopQueriesHourlyRoutingTests
     public void TopQueriesHourlySql_LooksUpTextInStatement_AndSelectsNoDeltaExtremes()
     {
         var sql = DarlingDataReader.TopQueriesHourlySql;
-        Assert.Contains("LEFT JOIN LATERAL", sql, StringComparison.Ordinal);
+        /* #5309: one text lookup, probed once per key by index, not one per row and not a read of the window's raw rows. It has two
+           stages, each one lateral: latest_in_window for the ranked keys, then (#5299 round 2, N1) latest_any for the keys the
+           window had no text for. */
+        Assert.Equal(2, System.Text.RegularExpressions.Regex.Matches(sql, "LATERAL").Count);
+        Assert.Contains("latest_in_window AS (", sql, StringComparison.Ordinal);
         Assert.Contains("MAX(sql_handle)", sql, StringComparison.Ordinal);
         Assert.Contains("NOT LIKE 'WAITFOR%'", sql, StringComparison.Ordinal);
-        Assert.Contains("LIMIT $4 + 5", sql, StringComparison.Ordinal);
+        Assert.Contains("LIMIT $6", sql, StringComparison.Ordinal);   /* #5313: the candidate limit; the ceiling moved to $7 */
+        Assert.DoesNotContain("+ 5", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("worker_time_min", sql, StringComparison.Ordinal);
-        Assert.DoesNotContain("$6", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("$7", sql, StringComparison.Ordinal);   /* the ceiling is a $CEIL$ placeholder, bound only when known */
         Assert.Null(typeof(DarlingDataReader).GetField("TopQueriesHourlyTextLookupSql",
             System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static));
 

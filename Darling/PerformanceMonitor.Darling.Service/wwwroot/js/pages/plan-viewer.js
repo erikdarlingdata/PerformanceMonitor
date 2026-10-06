@@ -31,6 +31,11 @@ const TRUNCATED_NOTE =
 const openPlans = new Map();
 /* key -> Set of redraw functions, one per cell currently showing the key. */
 const views = new Map();
+/* The grid build a cell belongs to. Each plan column factory below runs once per grid build, so each call starts a new
+   generation, and a cell stamps its draw with the generation it registers under. `sweptGeneration` is the last one swept
+   (see dropOlderDetached). */
+let generation = 0;
+let sweptGeneration = 0;
 
 /* The plan sources. `read` is the tool; `params(source)` is its query (empty values are dropped by the read call);
    `stem(source)` names a download. `query_hash` keeps its original panel key (server|database|hash) so a panel open
@@ -111,11 +116,15 @@ const SOURCES = {
   },
 };
 
-/* A panel's key: server, then the kind (left out for query_hash, whose key never had one), then the kind's own parts.
-   The kind in the key is what keeps two sources with equal-looking parts from sharing a panel. */
+/* A panel's key: server, then the kind (left out for query_hash, whose key never had one), then the kind's own parts, then
+   the source's `scope` when it has one. The kind in the key is what keeps two sources with equal-looking parts from sharing
+   a panel. The scope does the same for one plan opened from two places: the Query Store History table names its own panel
+   as the scope, so its Plan button opens its own cell and not the grid's Plan cell for that plan (#5234). The scope is
+   never sent to the read. */
 const keyOf = (server, source) => {
   const parts = SOURCES[source.kind].key(source);
-  return [server, ...(source.kind === "query_hash" ? [] : ["@" + source.kind]), ...parts].join("|");
+  const scope = source.scope == null ? [] : ["@scope", source.scope];
+  return [server, ...(source.kind === "query_hash" ? [] : ["@" + source.kind]), ...parts, ...scope].join("|");
 };
 
 /** The state of every open panel, for tests: a copy, so the caller cannot change the module's. */
@@ -127,6 +136,11 @@ export function openPlanKeys() {
 export function resetPlanViewer() {
   openPlans.clear();
   views.clear();
+}
+
+/** How many cells are registered to redraw for each key, as { key: count }, for tests. */
+export function planViewerViewCounts() {
+  return Object.fromEntries([...views].map(([key, set]) => [key, set.size]));
 }
 
 /* Splits XML text into tags (quote-aware, so a ">" inside an attribute value such as StatementText does not end the
@@ -200,7 +214,22 @@ function redraw(key) {
     if (draw.host && draw.host.isConnected === false) set.delete(draw);
     else draw();
   }
+  if (set.size === 0) views.delete(key);
 }
+
+/* Runs when the first cell of a generation registers: every draw of an OLDER generation whose cell has left the page goes,
+   under whatever key. redraw() prunes only the key it is called for, and a row nobody clicks (or one that has left the grid)
+   never reaches it, so without this each rebuild would leave a cell per row in the set for the life of the page (#5234).
+   The generation is what makes this safe: the cells of the build in progress are not on the page yet (the grid is attached
+   after its rows are drawn) and are never dropped here, and a cell of an older build that is still on the page stays too. */
+const dropOlderDetached = () => {
+  for (const [key, set] of views) {
+    for (const draw of [...set]) {
+      if (draw.generation < generation && draw.host && draw.host.isConnected === false) set.delete(draw);
+    }
+    if (set.size === 0) views.delete(key);
+  }
+};
 
 /* What every plan read answers (the web route's wrapper around the DarlingMcpPlanTools reads): JSON { <the key it was
    read by>, plan_xml, truncated } for a stored plan (`truncated` is decided on the server), or a status envelope
@@ -312,6 +341,11 @@ export function planSourceCell(server, source, label, title) {
     if (isOpen) host.appendChild(panelFor(key, stem));
   };
   draw.host = host;
+  draw.generation = generation;
+  if (sweptGeneration !== generation) {
+    sweptGeneration = generation;
+    dropOlderDetached();
+  }
   if (!views.has(key)) views.set(key, new Set());
   views.get(key).add(draw);
   draw();
@@ -336,6 +370,7 @@ export function storedPlanCell(server, row) {
 /** Active Queries: an "Estimated plan" and a "Live plan" column, each gated on the row's own presence flag (the flags
  *  arrive only when true, so a row without one gets a dash). */
 export function activePlanColumns(server) {
+  generation += 1;
   const source = (row, live) => ({
     kind: "active_snapshot",
     collection_time: row.collection_time,
@@ -372,6 +407,7 @@ export function activePlanColumns(server) {
 /** Query Store: a plan button keyed by database, query and plan. Keyed on query_id, which every row has, so the
  *  column always shows; a query with no stored plan answers "No stored plan" in the panel. */
 export function queryStorePlanColumn(server) {
+  generation += 1;
   return {
     key: "query_id",
     label: "Plan",
@@ -393,6 +429,7 @@ export function queryStorePlanColumn(server) {
 
 /** Top Procedures: a plan button keyed by sql_handle. Hidden when no row has one (the hourly tier carries none). */
 export function procedurePlanColumn(server) {
+  generation += 1;
   return {
     key: "sql_handle",
     label: "Plan",
@@ -481,6 +518,7 @@ export function deadlockPlanColumn(server) {
 
 /** The grid column every plan-capable grid adds: hidden when no row carries a query_hash. */
 export function planColumn(server) {
+  generation += 1;
   return {
     key: "query_hash",
     label: "Plan",
