@@ -77,6 +77,16 @@ public static partial class SensitiveStatements
     /// than this literal.</summary>
     public const string PlaceholderText = "-- statement text withheld (#4348)";
 
+    /// <summary>What a plan window says, in place of a plan, for a plan the filter withheld whole (the document's own
+    /// value is <see cref="PlaceholderText"/>). The viewers show it as the empty state and refuse to save the plan with
+    /// it, so "withheld" is never read as "could not be read". One sentence, so the apps and the tests share it.</summary>
+    public const string WithheldPlanSentence = "This plan was withheld by the statement filter (#4348).";
+
+    /// <summary>Whether a plan document is the whole-plan marker (what <see cref="Xml(string?, int)"/> returns for a
+    /// plan it withholds whole) rather than a plan. A real plan is never equal to it.</summary>
+    public static bool IsWithheldPlan(string? planXml) =>
+        planXml is not null && string.Equals(planXml.Trim(), PlaceholderText, StringComparison.Ordinal);
+
     /// <summary>What <see cref="Json"/> returns when it cannot read a result. Fixed, so a caller can tell a refusal
     /// from withheld text, and never the input.</summary>
     public const string JsonRefusal = "Output withheld: the sensitive-statement filter could not read this result.";

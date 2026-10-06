@@ -12,9 +12,13 @@ using System.IO;
 using System.Linq;
 using System.Runtime.CompilerServices;
 using System.Text.RegularExpressions;
+using System.Threading;
+using System.Windows;
+using System.Windows.Controls;
 using Darling.Tests;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.PlanAnalysis;
+using PerformanceMonitor.Ui;
 using PerformanceMonitorLite.Services;
 using Xunit;
 
@@ -65,20 +69,101 @@ public sealed class StatementScrubLivePlanDisplayTests
     }
 
     /// <summary>
-    /// The state of the plan viewer for a plan withheld whole (a plan the judging budget could not cover): the
-    /// marker is not a plan, so the shared parser refuses it and <c>PlanViewerControl.LoadPlan</c> shows the parse
-    /// error in its empty-state title (<c>PlanDisplayText.ParseErrorMessage</c>) instead of a plan.
+    /// The shared parser still refuses the marker (it is not a plan), which is why the viewer must not hand it to the
+    /// parser: <c>PlanViewerControl.LoadPlan</c> answers a whole-plan marker with the withheld sentence instead of the
+    /// parse error ("The plan XML could not be read"), and the next test holds that.
     /// </summary>
     [Fact]
-    public void APlanWithheldWhole_LeavesTheViewerOnItsParseErrorEmptyState()
+    public void TheParserRefusesTheMarker_SoTheViewerMustNotParseIt()
     {
         var parsed = ShowPlanParser.Parse(Marker);
 
-        var message = PlanDisplayText.ParseErrorMessage(parsed);
-
-        Assert.False(string.IsNullOrEmpty(message));
-        Assert.DoesNotContain("S3cret", message!, StringComparison.Ordinal);
+        Assert.False(string.IsNullOrEmpty(PlanDisplayText.ParseErrorMessage(parsed)));
         Assert.DoesNotContain(PlanStatements.EnumerateAll(parsed), s => s.RootNode != null);
+    }
+
+    [Fact]
+    public void APlanWithheldWhole_ShowsTheWithheldSentenceInTheViewer_NotAParseError()
+    {
+        OnStaThread(() =>
+        {
+            var control = new PlanViewerControl();
+            try
+            {
+                control.LoadPlan(Marker, "Stored Plan").GetAwaiter().GetResult();
+
+                var title = (TextBlock)control.FindName("EmptyStateTitle");
+                Assert.Equal(SensitiveStatements.WithheldPlanSentence, title.Text);
+                Assert.Equal("This plan was withheld by the statement filter (#4348).", title.Text);
+                Assert.DoesNotContain("could not be read", title.Text, StringComparison.Ordinal);
+                Assert.Equal(Visibility.Visible, ((UIElement)control.FindName("EmptyState")).Visibility);
+                Assert.Equal(Visibility.Collapsed, ((UIElement)control.FindName("EmptyStateDetail")).Visibility);
+                Assert.Equal(Visibility.Collapsed, ((UIElement)control.FindName("PlanScrollViewer")).Visibility);
+            }
+            finally
+            {
+                control.Cleanup();
+            }
+        });
+    }
+
+    [Fact]
+    public void TheWithheldGuard_RefusesOnlyTheMarker_AndARealPlanIsUnchanged()
+    {
+        Assert.Equal(SensitiveStatements.WithheldPlanSentence, WithheldPlanGuard.WithheldSentence(Marker));
+        Assert.Equal(SensitiveStatements.WithheldPlanSentence, WithheldPlanGuard.WithheldSentence("  " + Marker + "\r\n"));
+
+        var plain = "<ShowPlanXML xmlns=\"http://schemas.microsoft.com/sqlserver/2004/07/showplan\"><BatchSequence><Batch><Statements>"
+            + "<StmtSimple StatementText=\"" + StatementScrubCanary.PlainStatement + "\" /></Statements></Batch></BatchSequence></ShowPlanXML>";
+
+        Assert.Null(WithheldPlanGuard.WithheldSentence(plain));
+        Assert.Null(WithheldPlanGuard.WithheldSentence(StatementScrubCanary.CanaryPlan()));
+        Assert.Null(WithheldPlanGuard.WithheldSentence(null));
+        Assert.Null(WithheldPlanGuard.WithheldSentence(string.Empty));
+
+        /* A real plan is not refused, and nothing is shown for it (a refusal would put up a message box). */
+        Assert.False(WithheldPlanGuard.RefuseSave(plain));
+        Assert.False(WithheldPlanGuard.RefuseSave(null));
+        Assert.Null(ShowPlanParser.Parse(plain).ParseError);
+    }
+
+    /// <summary>
+    /// Every place in the app that writes a plan to a <c>.sqlplan</c> file asks <c>WithheldPlanGuard.RefuseSave</c>
+    /// first, so the marker is never saved as a plan. A new save site fails here until it does.
+    /// </summary>
+    [Fact]
+    public void EveryPlanSaveSite_RefusesTheWithheldMarkerFirst()
+    {
+        var problems = new List<string>();
+        var sites = 0;
+
+        foreach (var root in new[] { "Lite", "PerformanceMonitor.Ui" })
+        {
+            foreach (var file in Directory.EnumerateFiles(Path.Combine(RepoRoot(), root), "*.cs", SearchOption.AllDirectories))
+            {
+                var relative = Path.GetRelativePath(RepoRoot(), file).Replace('\\', '/');
+                if (relative.Contains("/obj/", StringComparison.Ordinal) || relative.Contains("/bin/", StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                var text = File.ReadAllText(file);
+                if (!text.Contains("new SaveFileDialog", StringComparison.Ordinal) || !text.Contains(".sqlplan\"", StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                sites++;
+                if (!text.Contains("WithheldPlanGuard.RefuseSave(", StringComparison.Ordinal))
+                {
+                    problems.Add(relative + " writes a .sqlplan without WithheldPlanGuard.RefuseSave");
+                }
+            }
+        }
+
+        /* The three history windows, the shared SavePlanFile helper and the viewer's own Save button. */
+        Assert.True(sites >= 5, "expected at least 5 plan save sites, found " + sites);
+        Assert.Empty(problems);
     }
 
     private static readonly Regex LiveFetchCall = new(
@@ -135,6 +220,24 @@ public sealed class StatementScrubLivePlanDisplayTests
         Assert.True(sites >= 16, "expected at least 16 live plan fetch call sites, found " + sites);
         Assert.Equal(6, files.Count);
         Assert.Empty(problems);
+    }
+
+    private static void OnStaThread(Action body)
+    {
+        Exception? error = null;
+        var thread = new Thread(() =>
+        {
+            try { body(); }
+            catch (Exception ex) { error = ex; }
+        });
+        thread.SetApartmentState(ApartmentState.STA);
+        thread.Start();
+        thread.Join();
+
+        if (error is not null)
+        {
+            throw error;
+        }
     }
 
     private static string RepoRoot([CallerFilePath] string thisFile = "")

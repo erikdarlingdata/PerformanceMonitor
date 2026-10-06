@@ -185,7 +185,8 @@ SELECT
     statement_start_offset,
     statement_end_offset,
     database_name,
-    observed_bytes
+    observed_bytes,
+    attempt_count
 FROM collect.oversized_plan_backlog
 WHERE server_id = $1
 AND   captured_at IS NULL
@@ -302,7 +303,10 @@ LIMIT 1;";
     /// along because the outcome statements address the full key.</param>
     /// <param name="Observation">The cache coordinates and the measured size, in the same shape the
     /// collector described it.</param>
-    public sealed record PendingPlan(string CollectorName, OversizedPlanObservation Observation);
+    /// <param name="AttemptCount">The row's <c>attempt_count</c> at claim time: how many fetches already ended
+    /// without a capture or an expiry (and the captures and expiries that did, which retire the row anyway).
+    /// The sweep retires a plan the judging budget keeps failing to cover once this reaches its limit (#5320).</param>
+    public sealed record PendingPlan(string CollectorName, OversizedPlanObservation Observation, int AttemptCount = 0);
 
     /// <summary>
     /// Records this cycle's over-cap sightings for one server. Opens NO connection when there are none,

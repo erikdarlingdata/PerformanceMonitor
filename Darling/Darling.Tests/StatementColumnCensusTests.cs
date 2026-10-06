@@ -529,9 +529,14 @@ public sealed class StatementColumnCensusTests
     /// <summary>The bodies of every declaration of <paramref name="method"/> in <paramref name="source"/> (empty
     /// when the type or the method is not there). A declaration is a line that starts with modifiers or a return
     /// type and then the name and "(", followed by a block body.</summary>
-    internal static List<string> BodiesOf(string source, string type, string method)
+    internal static List<string> BodiesOf(string source, string type, string method) =>
+        DeclarationsOf(source, type, method).Select(d => d.Body).ToList();
+
+    /// <summary>As <see cref="BodiesOf"/>, with each declaration's parameter list beside its body, so a writer that
+    /// is HANDED a <c>SensitiveStatements.Session</c> (the batch's, rather than one it makes) can be recognised.</summary>
+    internal static List<(string Parameters, string Body)> DeclarationsOf(string source, string type, string method)
     {
-        var bodies = new List<string>();
+        var bodies = new List<(string Parameters, string Body)>();
         var code = CodeOnly(source);
         if (!Regex.IsMatch(code, @"\b(class|struct|record|interface)\s+" + Regex.Escape(type) + @"\b"))
         {
@@ -584,13 +589,42 @@ public sealed class StatementColumnCensusTests
                 }
             }
 
-            bodies.Add(code[open..Math.Min(close + 1, code.Length)]);
+            var parametersStart = m.Index + m.Length - 1;
+            bodies.Add((
+                code[parametersStart..Math.Max(parametersStart, Math.Min(open, code.Length))],
+                code[open..Math.Min(close + 1, code.Length)]));
         }
 
         return bodies;
     }
 
     private static bool HasSessionCall(string body) => SessionCall.IsMatch(body);
+
+    private static readonly Regex SessionParameter = new(
+        @"\bSensitiveStatements\s*\.\s*Session\??\s+(?<name>\w+)",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
+    /// <summary>
+    /// A writer that is passed the batch's session rather than making one: it names a
+    /// <c>SensitiveStatements.Session</c> parameter and its body calls a judging method (<c>Text</c>, <c>TryText</c>,
+    /// <c>Xml</c>, <c>TryXml</c>) on that parameter. Merely receiving a session, or judging through some other
+    /// object, is not hooking.
+    /// </summary>
+    private static bool JudgesThroughAReceivedSession((string Parameters, string Body) declaration)
+    {
+        foreach (Match p in SessionParameter.Matches(declaration.Parameters))
+        {
+            var call = new Regex(
+                @"(?<![\w.])" + Regex.Escape(p.Groups["name"].Value) + @"\s*\.\s*(Try)?(Text|Xml)\s*\(",
+                RegexOptions.CultureInvariant);
+            if (call.IsMatch(declaration.Body))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
 
     /// <summary>The problems with a watched list, reading each site's file through <paramref name="read"/>.</summary>
     private static string[] WatchedProblems(IEnumerable<Watched> writers, Func<string, string?> read)
@@ -607,14 +641,14 @@ public sealed class StatementColumnCensusTests
             foreach (var (file, type, method) in w.Sites)
             {
                 var source = read(file);
-                var bodies = source is null ? new List<string>() : BodiesOf(source, type, method);
+                var bodies = source is null ? new List<(string Parameters, string Body)>() : DeclarationsOf(source, type, method);
                 if (bodies.Count == 0)
                 {
                     problems.Add(w.Name + ": " + type + "." + method + " in " + file + " no longer exists; update WatchedWriters");
                     continue;
                 }
 
-                hooked |= bodies.Any(HasSessionCall);
+                hooked |= bodies.Any(d => HasSessionCall(d.Body) || JudgesThroughAReceivedSession(d));
             }
 
             if (!w.Pending && !hooked)
@@ -673,6 +707,67 @@ namespace N
         Assert.Empty(WatchedProblems(new[] { one with { Sites = new[] { ("f.cs", "W", "Hooked") } } }, _ => Source));
         Assert.Single(WatchedProblems(new[] { one with { Pending = true, Sites = new[] { ("f.cs", "W", "Gone") } } }, _ => Source));
         Assert.Single(WatchedProblems(new[] { one with { Pending = true } }, _ => null));
+    }
+
+    [Fact]
+    public void TheWatchedScan_RecognisesTheSessionAWriterReceives_AndAWriterThatNeverJudgesStillFails()
+    {
+        const string Source = @"
+namespace N
+{
+    internal static class R
+    {
+        internal static (int, string) Judges(SensitiveStatements.Session scrub, string xml, int attempts)
+        {
+            if (!scrub.TryXml(xml, out var judged))
+            {
+                return (0, null);
+            }
+
+            return (1, judged);
+        }
+
+        internal static void ReceivesButNeverJudges(SensitiveStatements.Session scrub, string xml)
+        {
+            Use(xml);
+        }
+
+        internal static void JudgesThroughSomethingElse(SensitiveStatements.Session scrub, Other other, string xml)
+        {
+            other.Xml(xml);
+        }
+
+        internal static void JudgesThroughAParameterThatIsNotASession(Other scrub, string xml)
+        {
+            scrub.Xml(xml);
+        }
+
+        internal static void ACommentIsNotAJudgement(SensitiveStatements.Session scrub, string xml)
+        {
+            // scrub.Xml(xml)
+            var s = ""scrub.Xml(x)"";
+        }
+    }
+}";
+        Watched Site(string method) => new("planted", "6.7 row 0", "R0", false, ("f.cs", "R", method));
+
+        Assert.Empty(WatchedProblems(new[] { Site("Judges") }, _ => Source));
+        Assert.Single(WatchedProblems(new[] { Site("ReceivesButNeverJudges") }, _ => Source));
+        Assert.Single(WatchedProblems(new[] { Site("JudgesThroughSomethingElse") }, _ => Source));
+        Assert.Single(WatchedProblems(new[] { Site("JudgesThroughAParameterThatIsNotASession") }, _ => Source));
+        Assert.Single(WatchedProblems(new[] { Site("ACommentIsNotAJudgement") }, _ => Source));
+    }
+
+    [Fact]
+    public void TheOversizedSweepWatchedWriter_IsHookedThroughTheSessionItReceives()
+    {
+        var source = ReadSiteFile("Darling/PerformanceMonitor.Darling.Service/OversizedPlanBacklogSweep.cs");
+        Assert.NotNull(source);
+
+        var judge = DeclarationsOf(source!, "OversizedPlanBacklogSweep", "JudgeFetchedPlan");
+        Assert.Single(judge);
+        Assert.False(HasSessionCall(judge[0].Body), "the judging step makes no session of its own");
+        Assert.True(JudgesThroughAReceivedSession(judge[0]));
     }
 
     // ── the release gate ──

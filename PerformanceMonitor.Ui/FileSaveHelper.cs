@@ -23,10 +23,14 @@ public static class FileSaveHelper
 {
     /// <summary>
     /// Prompts for a <c>.sqlplan</c> path and writes <paramref name="planXml"/> there; the pre-filled name is
-    /// <paramref name="defaultName"/> plus a <c>yyyyMMdd_HHmmss</c> timestamp.
+    /// <paramref name="defaultName"/> plus a <c>yyyyMMdd_HHmmss</c> timestamp. A plan the statement filter withheld whole
+    /// is refused with <see cref="PerformanceMonitor.Common.SensitiveStatements.WithheldPlanSentence"/> and nothing is written.
     /// </summary>
     public static void SavePlanFile(string planXml, string defaultName)
     {
+        /* #5320: the whole-plan marker is not a plan; say it is withheld instead of writing it into a .sqlplan. */
+        if (WithheldPlanGuard.RefuseSave(planXml)) return;
+
         var dialog = new SaveFileDialog
         {
             Filter = "SQL Plan files (*.sqlplan)|*.sqlplan|All files (*.*)|*.*",
