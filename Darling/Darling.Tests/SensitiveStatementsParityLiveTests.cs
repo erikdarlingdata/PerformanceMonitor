@@ -95,13 +95,13 @@ public sealed class SensitiveStatementsParityLiveTests
         }
     }
 
-    /// <summary>A U+212A (Kelvin sign) next to a named keyword is not a word character in a C-locale cluster,
-    /// and the .NET word class is case-sensitive so it is not one there either (#5320 L1). The two verdicts
-    /// are compared only on a cluster whose character type is C or POSIX; a libc locale reads the sign as a
-    /// letter, so there the answer is recorded and not compared. Not part of the corpus: lower-casing the
+    /// <summary>A U+212A (Kelvin sign) next to a named keyword is not a word character under the C collation,
+    /// and the .NET word class is case-sensitive so it is not one there either (#5320 L1). PostgreSQL's
+    /// answer depends on the cluster's locale, so the match runs with <c>COLLATE "C"</c> and the fact runs
+    /// on every cluster, whatever its character type (#5320 N2). Not part of the corpus: lower-casing the
     /// sign gives an ASCII k.</summary>
     [Fact]
-    public async Task AKelvinSignNextToANamedKeywordGetsTheSameVerdictInBothEngines_OnACLocaleCluster()
+    public async Task AKelvinSignNextToANamedKeywordGetsTheSameVerdictInBothEngines_UnderTheCCollation()
     {
         var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
         Assert.SkipWhen(string.IsNullOrWhiteSpace(connectionString),
@@ -112,22 +112,19 @@ public sealed class SensitiveStatementsParityLiveTests
         await using var connection = new NpgsqlConnection(scratch.ConnectionString);
         await connection.OpenAsync(ct);
 
-        await using var show = new NpgsqlCommand("SELECT datctype FROM pg_database WHERE datname = current_database()", connection);
-        var ctype = (string)(await show.ExecuteScalarAsync(ct))!;
         const string text = "x \u212Asp_addlogin 'a'";
-        var pg = await IsNamedAsync(connection, text, ct);
+        var pg = await IsNamedAsync(connection, text, ct, cCollation: true);
         var dotnet = SensitiveStatements.Names(text);
         TestContext.Current.SendDiagnosticMessage(string.Create(CultureInfo.InvariantCulture,
-            $"kelvin sign: ctype={ctype} pg={pg} dotnet={dotnet}"));
+            $"kelvin sign: pg={pg} dotnet={dotnet}"));
 
         Assert.True(dotnet);
-        Assert.SkipUnless(ctype is "C" or "POSIX", "The cluster's character type is " + ctype + ", not C: PostgreSQL reads U+212A as a letter there.");
         Assert.Equal(dotnet, pg);
     }
 
-    private static async Task<bool> IsNamedAsync(NpgsqlConnection connection, string text, CancellationToken ct)
+    private static async Task<bool> IsNamedAsync(NpgsqlConnection connection, string text, CancellationToken ct, bool cCollation = false)
     {
-        await using var command = new NpgsqlCommand("SELECT $1 ~* $2", connection);
+        await using var command = new NpgsqlCommand(cCollation ? "SELECT $1 COLLATE \"C\" ~* $2" : "SELECT $1 ~* $2", connection);
         command.Parameters.AddWithValue(text);
         command.Parameters.AddWithValue(SensitiveStatements.Pattern);
         return (bool)(await command.ExecuteScalarAsync(ct))!;
