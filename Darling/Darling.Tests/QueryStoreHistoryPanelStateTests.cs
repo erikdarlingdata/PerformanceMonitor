@@ -6,6 +6,7 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+using System;
 using System.Linq;
 using System.Text.Json;
 using Xunit;
@@ -75,5 +76,28 @@ public sealed class QueryStoreHistoryPanelStateTests
             Assert.Equal(6, Ints(p, "during")[^1]);
         }
         Assert.Equal(6, r.GetProperty("keys").GetInt32());
+    }
+
+    [Fact]
+    public void UnderAPreset_ARedrawKeepsTheWindowTheDataWasLoadedFor_AndANewReadTakesItsOwn()
+    {
+        const long hour = 3600000L;
+        var r = Run("presetWindow");
+        var end = DateTimeOffset.Parse("2026-03-04T06:00:00Z").ToUnixTimeMilliseconds();
+        var loaded = r.GetProperty("loaded");
+        Assert.Equal(end, loaded.GetProperty("end").GetInt64());
+        Assert.Equal(end - hour, loaded.GetProperty("start").GetInt64());
+
+        // Half an hour on, the page's rebuild draws the open panel from the same read, so the axis stays where it was.
+        Assert.Equal(0, r.GetProperty("rebuiltRefetched").GetInt32());
+        var rebuilt = r.GetProperty("rebuilt");
+        Assert.Equal(end, rebuilt.GetProperty("end").GetInt64());
+        Assert.Equal(end - hour, rebuilt.GetProperty("start").GetInt64());
+
+        // A read for a wider window takes the axis of that window, anchored at the time of that read.
+        Assert.Equal(1, r.GetProperty("widenedRefetched").GetInt32());
+        var widened = r.GetProperty("widened");
+        Assert.Equal(end + hour / 2, widened.GetProperty("end").GetInt64());
+        Assert.Equal(end + hour / 2 - 6 * hour, widened.GetProperty("start").GetInt64());
     }
 }

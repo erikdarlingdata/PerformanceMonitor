@@ -21,7 +21,8 @@ import { el, readTool, fmtMs, localTime, windowFromHours, activeRangeStamp, wind
 import { zoomableLineChart, chartZoomScope, SERIES_COLORS } from "../charts.js";
 import { planSourceCell } from "./plan-viewer.js";
 
-/* key -> { phase: "loading" | "done", stamp, result: { kind: "data" | "none" | "error", ... } }. */
+/* key -> { phase: "loading" | "done", stamp, window, result: { kind: "data" | "none" | "error", ... } }. `window` is the chart's
+   axis ({ windowStart, windowEnd } or null), taken when the read was made so a redraw later keeps the axis the data was read for. */
 const openHistories = new Map();
 /* key -> Set of redraw functions, one per cell currently showing the key. Each draw carries `draw.host`, the cell it draws
    into, so redraw() can tell a cell the page threw away (a grid rebuild, a tab switch) from one still on it. */
@@ -111,7 +112,7 @@ async function load(key, server, row, hours, stamp) {
   if (!current || current.stamp !== stamp) return; // closed, or read again for another window, while the read was out
   const outcome = classifyHistoryRead(res);
   if (outcome === null) openHistories.delete(key);
-  else openHistories.set(key, { phase: "done", stamp, result: outcome });
+  else openHistories.set(key, { phase: "done", stamp, window: current.window, result: outcome });
   redraw(key);
 }
 
@@ -123,7 +124,7 @@ function toggle(server, row, hours) {
     return;
   }
   const stamp = stampOf(hours);
-  openHistories.set(key, { phase: "loading", stamp });
+  openHistories.set(key, { phase: "loading", stamp, window: windowFromHours(hours) });
   redraw(key);
   return load(key, server, row, hours, stamp);
 }
@@ -163,11 +164,13 @@ function planTable(server, data, scope) {
   ]);
 }
 
-function chartFor(data, hours) {
+/* `axis` is the chart's window ({ windowStart, windowEnd }, or null for the data's own extent) as it was when the read was made.
+   Under a preset, windowFromHours() reads the clock, so asking again at each redraw would slide the axis away from the data. */
+function chartFor(data, hours, axis) {
   const points = (data.points || []).map((p) => ({ collection_time: p.collection_time, ["p" + p.plan_id]: p.avg_duration_ms }));
   const series = data.plans.map((p, i) => ({ key: "p" + p.plan_id, label: "Plan " + p.plan_id, color: SERIES_COLORS[i % SERIES_COLORS.length] }));
   return zoomableLineChart(
-    { points, xKey: "collection_time", series, formatValue: (v) => fmtMs(v), unit: "ms", ...(windowFromHours(hours) || {}) },
+    { points, xKey: "collection_time", series, formatValue: (v) => fmtMs(v), unit: "ms", ...(axis || {}) },
     "qs-history|" + data.database_name + "|" + data.query_id,
     chartZoomScope(hours)
   );
@@ -190,7 +193,7 @@ function panelFor(key, server, hours) {
     : null;
   const plansCut = d.plans_truncated ? el("div", { class: "strip notice", text: "Only the " + d.plans.length + " plans with the most total duration are listed." }) : null;
   const cut = d.points_truncated ? el("div", { class: "strip notice", text: "The chart shows the newest " + d.points.length.toLocaleString("en-US") + " snapshots of the window; older ones are not drawn." }) : null;
-  return el("div", { class: "plan-panel qs-history" }, [notice, plansCut, cut, chartFor(d, hours), planTable(server, d, key)]);
+  return el("div", { class: "plan-panel qs-history" }, [notice, plansCut, cut, chartFor(d, hours, state.window), planTable(server, d, key)]);
 }
 
 /**
@@ -212,7 +215,7 @@ export function queryStoreHistoryColumn(server, hours) {
       const open = openHistories.get(key);
       if (open && open.stamp !== stampOf(hours)) {
         const stamp = stampOf(hours);
-        openHistories.set(key, { phase: "loading", stamp });
+        openHistories.set(key, { phase: "loading", stamp, window: windowFromHours(hours) });
         load(key, server, row, hours, stamp);
       }
       const draw = () => {

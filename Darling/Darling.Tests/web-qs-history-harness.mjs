@@ -277,6 +277,31 @@ const scenarios = {
     }
     out.keys = Object.keys(mod.queryStoreHistoryViewCounts()).length;
   },
+  /* Under a preset the chart's axis is the window the data was read for, not the clock at each redraw: a rebuild half an hour
+     later draws the same axis from the same read, and a read for another window takes that window's axis. */
+  async presetWindow() {
+    const realNow = Date.now;
+    let now = Date.parse("2026-03-04T06:00:00Z");
+    Date.now = () => now;
+    try {
+      respond(history());
+      const axis = () => { const spec = globalThis.__charts[globalThis.__charts.length - 1].spec; return { start: spec.windowStart, end: spec.windowEnd }; };
+      body.appendChild(mod.queryStoreHistoryColumn("srv-a", 1).render(row)).byText("History").click();
+      await flush();
+      out.loaded = axis();
+      now += 30 * 60000;
+      const before = fetches.length;
+      body.appendChild(mod.queryStoreHistoryColumn("srv-a", 1).render(row));
+      out.rebuilt = axis();
+      out.rebuiltRefetched = fetches.length - before;
+      body.appendChild(mod.queryStoreHistoryColumn("srv-a", 6).render(row));
+      await flush();
+      out.widened = axis();
+      out.widenedRefetched = fetches.length - before;
+    } finally {
+      Date.now = realNow;
+    }
+  },
   async cutNotice() {
     respond(history({ points_truncated: true }));
     const cell = col().render(row);
