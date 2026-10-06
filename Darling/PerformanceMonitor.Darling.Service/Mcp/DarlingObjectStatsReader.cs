@@ -14,6 +14,7 @@ using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
 
@@ -246,7 +247,7 @@ internal static class DarlingObjectStatsReader
     /// Per-index usage at the latest snapshot — Lite's <c>GetIndexUsageAsync</c> ported to Postgres:
     /// seeks/scans/lookups/updates with the Unused / Write-only / Active classification, unused-first then
     /// largest reserved. Counters are cumulative since the last restart.
-    /// <para>$1 server_id, $2 database filter (NULL = every database), $3 cap.</para>
+    /// <para>$1 server_id, $2 database filter (a text[], NULL = every database; #5245, the shape of <see cref="DatabaseFilter.Clause"/>), $3 cap.</para>
     /// <para>#2636: the ordering and the cap interact badly and a field report found the sharp edge. Unused
     /// sorts ahead of everything SERVER-WIDE, so on an instance with 200+ unused indexes concentrated in one
     /// legacy database, the entire capped result is consumed by that database and every Active index in every
@@ -306,7 +307,7 @@ internal static class DarlingObjectStatsReader
         FROM v_index_object_stats
         WHERE server_id = $1
         AND   collection_time = (SELECT MAX(collection_time) FROM v_index_object_stats WHERE server_id = $1)
-        AND   ($2::text IS NULL OR database_name = $2::text)
+        AND   ($2::text[] IS NULL OR database_name = ANY($2))
         ORDER BY
             CASE WHEN COALESCE(user_seeks, 0) + COALESCE(user_scans, 0) + COALESCE(user_lookups, 0) = 0 THEN 0 ELSE 1 END,
             reserved_mb DESC NULLS LAST,
@@ -330,22 +331,35 @@ internal static class DarlingObjectStatsReader
         FROM v_index_object_stats
         WHERE server_id = $1
         AND   collection_time = (SELECT MAX(collection_time) FROM v_index_object_stats WHERE server_id = $1)
-        AND   ($2::text IS NULL OR database_name = $2::text)
+        AND   ($2::text[] IS NULL OR database_name = ANY($2))
         """;
 
     /// <summary>
     /// The rows the cap allowed. <paramref name="databaseName"/> null means every database — the shape the
-    /// tool had before #2636, kept so callers that genuinely want a server-wide sweep still get one.
+    /// tool had before #2636, kept so callers that genuinely want a server-wide sweep still get one. One name:
+    /// <see cref="GetIndexUsageAsync(NpgsqlDataSource,int,int,DatabaseFilter,CancellationToken)"/> with
+    /// <see cref="DatabaseFilter.One"/>.
+    /// </summary>
+    public static Task<List<IndexUsageRow>> GetIndexUsageAsync(
+        NpgsqlDataSource postgres, int serverId, int top, string? databaseName = null, CancellationToken cancellationToken = default) =>
+        GetIndexUsageAsync(postgres, serverId, top, DatabaseFilter.One(databaseName), cancellationToken);
+
+    /// <summary>
+    /// #5245: <see cref="GetIndexUsageAsync(NpgsqlDataSource,int,int,string,CancellationToken)"/> over a SET of databases.
+    /// <paramref name="databases"/> is <see cref="DatabaseFilter.All"/> for every database; otherwise the rows are
+    /// the unused-first, largest-first top <paramref name="top"/> of the CHOSEN databases only (the cap applies after
+    /// the filter, in SQL). The snapshot anchor stays the server's newest capture, so a filtered and an unfiltered
+    /// call read the same capture.
     /// </summary>
     public static async Task<List<IndexUsageRow>> GetIndexUsageAsync(
-        NpgsqlDataSource postgres, int serverId, int top, string? databaseName = null, CancellationToken cancellationToken = default)
+        NpgsqlDataSource postgres, int serverId, int top, DatabaseFilter databases, CancellationToken cancellationToken = default)
     {
         var rows = new List<IndexUsageRow>();
         var clock = await DarlingServerClockReader.ReadAsync(postgres, serverId, cancellationToken);
         await using var command = postgres.CreateCommand(IndexUsageSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddInt(command, serverId);
-        command.Parameters.AddWithValue((object?)databaseName ?? DBNull.Value);
+        command.Parameters.Add(databases.Parameter());
         DarlingMcpReadParameters.AddInt(command, top);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
@@ -376,15 +390,25 @@ internal static class DarlingObjectStatsReader
 
     /// <summary>
     /// How many index rows the same server and database filter match at the latest snapshot, ignoring the
-    /// cap (#2636).
+    /// cap (#2636). One name, or null for every database.
+    /// </summary>
+    public static Task<long> GetIndexUsageMatchCountAsync(
+        NpgsqlDataSource postgres, int serverId, string? databaseName = null, CancellationToken cancellationToken = default) =>
+        GetIndexUsageMatchCountAsync(postgres, serverId, DatabaseFilter.One(databaseName), cancellationToken);
+
+    /// <summary>
+    /// #5245: <see cref="GetIndexUsageMatchCountAsync(NpgsqlDataSource,int,string,CancellationToken)"/> over a SET of
+    /// databases: the count of the CHOSEN databases' rows, the population
+    /// <see cref="GetIndexUsageAsync(NpgsqlDataSource,int,int,DatabaseFilter,CancellationToken)"/> pages over.
+    /// <see cref="DatabaseFilter.All"/> is the server-wide count.
     /// </summary>
     public static async Task<long> GetIndexUsageMatchCountAsync(
-        NpgsqlDataSource postgres, int serverId, string? databaseName = null, CancellationToken cancellationToken = default)
+        NpgsqlDataSource postgres, int serverId, DatabaseFilter databases, CancellationToken cancellationToken = default)
     {
         await using var command = postgres.CreateCommand(IndexUsageMatchCountSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddInt(command, serverId);
-        command.Parameters.AddWithValue((object?)databaseName ?? DBNull.Value);
+        command.Parameters.Add(databases.Parameter());
 
         return await command.ExecuteScalarAsync(cancellationToken) is long count ? count : 0;
     }
@@ -395,7 +419,7 @@ internal static class DarlingObjectStatsReader
     /// Per-index locking / latch contention at the SERVER's latest capture — the viewer's
     /// <c>IndexLockingAllSql</c> projected to the columns get_object_locking surfaces: only rows with a
     /// nonzero lock/latch wait or promotion, most contended first. Counters are cumulative since the last
-    /// restart. $1 server_id, $2 cap.
+    /// restart. $1 server_id, $2 database filter (a text[], NULL = every database; #5245), $3 cap.
     ///
     /// <para><b>#3878: this read used to resolve "latest" PER <c>database_name</c></b> —
     /// <c>MAX(collection_time)</c> GROUPed BY the name string, joined back to the rows — which made every
@@ -453,10 +477,11 @@ internal static class DarlingObjectStatsReader
             OR COALESCE(ios.page_io_latch_wait_in_ms, 0) > 0
             OR COALESCE(ios.index_lock_promotion_count, 0) > 0
         )
+        AND   ($2::text[] IS NULL OR ios.database_name = ANY($2))
         ORDER BY
             COALESCE(ios.row_lock_wait_in_ms, 0) + COALESCE(ios.page_lock_wait_in_ms, 0)
             + COALESCE(ios.page_latch_wait_in_ms, 0) + COALESCE(ios.page_io_latch_wait_in_ms, 0) DESC
-        LIMIT $2
+        LIMIT $3
         """;
 
     /// <summary>
@@ -464,36 +489,62 @@ internal static class DarlingObjectStatsReader
     /// <c>capture_time</c> of the whole server, as <see cref="DarlingCurrentConfigReader.DatabaseConfigSql"/> reads
     /// it: one collection run writes every database with one capture time, so that capture is the server's whole
     /// snapshot, and a dropped database's old true flag does not outlive it. <c>capture_time</c> is projected so the
-    /// latest-anchor census sees the anchor. A NULL flag means unknown. $1 server_id.
+    /// latest-anchor census sees the anchor. A NULL flag means unknown. $1 server_id, $2 database filter (a text[], NULL = every database; #5245: the
+    /// anchor stays the server's capture, only WHICH databases' flags count changes).
     /// </summary>
     public const string OptimizedLockingFlagsSql = """
         SELECT is_optimized_locking_on, capture_time
         FROM database_config
         WHERE server_id = $1
         AND   capture_time = (SELECT MAX(capture_time) FROM database_config WHERE server_id = $1)
+        AND   ($2::text[] IS NULL OR database_name = ANY($2))
         """;
 
-    /// <summary>The shared optimized-locking note when any database's newest flag is true; null otherwise.</summary>
+    /// <summary>The shared optimized-locking note when any database's newest flag is true; null otherwise. #5245: with a
+    /// <paramref name="databases"/> selection only the CHOSEN databases' flags count, so the note never warns about a
+    /// database the page does not show.</summary>
+    public static Task<string?> GetOptimizedLockingNoteAsync(
+        NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken = default) =>
+        GetOptimizedLockingNoteAsync(postgres, serverId, DatabaseFilter.All, cancellationToken);
+
+    /// <summary>The note over a selection: see <see cref="GetOptimizedLockingNoteAsync(NpgsqlDataSource,int,CancellationToken)"/>;
+    /// only the <paramref name="databases"/> chosen count (#5245).</summary>
     public static async Task<string?> GetOptimizedLockingNoteAsync(
-        NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken = default)
+        NpgsqlDataSource postgres, int serverId, DatabaseFilter databases, CancellationToken cancellationToken = default)
     {
         var flags = new List<bool?>();
         await using var command = postgres.CreateCommand(OptimizedLockingFlagsSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddInt(command, serverId);
+        command.Parameters.Add(databases.Parameter());
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
             flags.Add(reader.IsDBNull(0) ? null : reader.GetBoolean(0));
         return OptimizedLockingNote.For(flags);
     }
 
+    /// <summary>The server's latest-capture locking rows over every database, most contended first, at most
+    /// <paramref name="top"/>: <see cref="GetIndexLockingAsync(NpgsqlDataSource,int,int,DatabaseFilter,CancellationToken)"/>
+    /// with <see cref="DatabaseFilter.All"/>.</summary>
+    public static Task<List<IndexLockingRow>> GetIndexLockingAsync(
+        NpgsqlDataSource postgres, int serverId, int top, CancellationToken cancellationToken = default) =>
+        GetIndexLockingAsync(postgres, serverId, top, DatabaseFilter.All, cancellationToken);
+
+    /// <summary>
+    /// #5245: the server's latest-capture locking rows, most contended first, at most <paramref name="top"/>.
+    /// <paramref name="databases"/> is <see cref="DatabaseFilter.All"/> for every database; otherwise only the CHOSEN
+    /// databases' rows are ranked and capped, so the page is the top N of those databases. The snapshot anchor stays
+    /// the server's newest capture (a filter picks rows, it never picks a different capture), so a filtered and an
+    /// unfiltered call read the same instant. The names bind as one text[] and are never spliced into the statement.
+    /// </summary>
     public static async Task<List<IndexLockingRow>> GetIndexLockingAsync(
-        NpgsqlDataSource postgres, int serverId, int top, CancellationToken cancellationToken = default)
+        NpgsqlDataSource postgres, int serverId, int top, DatabaseFilter databases, CancellationToken cancellationToken = default)
     {
         var rows = new List<IndexLockingRow>();
         await using var command = postgres.CreateCommand(IndexLockingSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddInt(command, serverId);
+        command.Parameters.Add(databases.Parameter());
         DarlingMcpReadParameters.AddInt(command, top);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))

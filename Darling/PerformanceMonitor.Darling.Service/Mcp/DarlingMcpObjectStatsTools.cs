@@ -17,6 +17,7 @@ using ModelContextProtocol.Server;
 using Npgsql;
 using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Storage;
 
 #pragma warning disable CA1707 // MCP tools use snake_case naming convention
 
@@ -162,11 +163,29 @@ public sealed class DarlingMcpObjectStatsTools
     }
 
     [McpServerTool(Name = "get_index_usage"), Description("Per-index usage (seeks, scans, lookups, updates) from the latest daily snapshot, classed Unused, Write-only, or Active. Unused/write-only sort first as drop candidates: on a server with many, results can be one database's unused indexes, hiding Active ones elsewhere. Counters reset at the last restart or index rebuild, so Write-only means no reads since then. last_user_access is UTC (de-skewed): compare directly with get_collection_log and list_servers. <<GUIDE>> Gets per-index usage (seeks, scans, lookups, updates) from the latest daily snapshot, classifying each index as Unused, Write-only, or Active. Unused and write-only indexes are listed FIRST because they are drop candidates - which means that on a server with many unused indexes the row limit can be filled entirely by one database's unused indexes, hiding every Active index elsewhere. Pass database_name to ask about one database, which is almost always what you want; the response carries matching_index_count and truncated so a short answer is never mistaken for an absent one. Counters are cumulative since the last instance restart. last_user_access is UTC - the underlying sys.dm_db_index_usage_stats columns are in the monitored server's local clock and this read de-skews them - so it compares directly against get_collection_log and list_servers. Classification: Unused is zero seeks, scans and lookups AND zero updates; Write-only is zero of the first three but at least one update; everything else is Active. sys.dm_db_index_usage_stats also clears on an index rebuild and on a database detach/reattach, not only on an instance restart, so a heavily-used index that was just rebuilt can read as Unused until it accrues new activity - check the index's maintenance history before treating an Unused row as a drop candidate. Empty results are two different things here. If database_name is given and matches no rows there, but the server has index data in other databases, status is empty, not unavailable, with a note to check the name against get_database_sizes. If nothing matches anywhere on the server, whether or not database_name was given, the result is not_collected (if the engine's collection state says so) or unavailable instead - this tool never reports a truly empty server as empty. The note field says whether the answer is complete or truncated. Truncated means more indexes matched than the cap returned; every Active index that did not fit is among the omitted rows, since Active is never returned ahead of an Unused or write-only one, and if unused/write-only indexes alone outnumber the cap, none of them appear either - a truncated, all-Unused answer says nothing about how many Active indexes exist.")]
-    public static async Task<string> GetIndexUsage(
+    public static Task<string> GetIndexUsage(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Limit to one database. Strongly recommended: without it, unused-first ordering can fill the whole result from one database.")] string? database_name = null,
         [Description("Maximum rows to return. Default 75.")] int limit = IndexUsageTop,
+        CancellationToken cancellationToken = default) =>
+        GetIndexUsage(postgres, server_name, DatabaseFilter.One(database_name), limit, cancellationToken);
+
+    /// <summary>
+    /// #5245: get_index_usage over a SET of databases. <paramref name="databases"/> is <see cref="DatabaseFilter.All"/> for
+    /// every database. Otherwise the page is the unused-first top <paramref name="limit"/> of the CHOSEN databases only
+    /// (the cap applies after the filter), <c>matching_index_count</c> counts the chosen databases' rows, and every
+    /// sentence that used to name one database says so for a list too: "for database 'X'" for one name and "for the
+    /// chosen databases" for two or more, with no verdict about a database the read never looked at.
+    /// <para>One-name consumers made list-aware (#5245 M4): the empty-result sentence and its "the server has N across
+    /// its other databases" probe (the probe stays server-wide, so it can say there is data elsewhere); the truncation
+    /// note (it told the caller to "pass database_name", which a filtered call already did); the echoed
+    /// <c>database_name</c> (the name for one, <see cref="DatabaseFilter.Describe"/> for a list, null for all). The
+    /// status word is unchanged: <c>empty</c> is "looked at the chosen databases, found nothing", <c>unavailable</c>
+    /// is "this server has no index stats at all".</para>
+    /// </summary>
+    internal static async Task<string> GetIndexUsage(
+        NpgsqlDataSource postgres, string? server_name, DatabaseFilter databases, int limit = IndexUsageTop,
         CancellationToken cancellationToken = default)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
@@ -177,26 +196,26 @@ public sealed class DarlingMcpObjectStatsTools
 
         try
         {
-            var database = string.IsNullOrWhiteSpace(database_name) ? null : database_name;
+            var scope = DescribeScope(databases);
 
-            var rows = await DarlingObjectStatsReader.GetIndexUsageAsync(postgres, resolved.ServerId, limit, database, cancellationToken);
+            var rows = await DarlingObjectStatsReader.GetIndexUsageAsync(postgres, resolved.ServerId, limit, databases, cancellationToken);
             if (rows.Count == 0)
             {
                 /* #2636: a database filter that matches nothing is a DIFFERENT answer from a server that
                    collects no index stats, and the reporter hit the first while being told the second. The
                    capability check still runs first — a wrong-engine target has no index_object_stats at all
                    — and only then does the filter get blamed for its own empty result. */
-                if (database is not null)
+                if (scope is not null)
                 {
-                    var anyOnServer = await DarlingObjectStatsReader.GetIndexUsageMatchCountAsync(postgres, resolved.ServerId, cancellationToken: cancellationToken);
+                    var anyOnServer = await DarlingObjectStatsReader.GetIndexUsageMatchCountAsync(postgres, resolved.ServerId, DatabaseFilter.All, cancellationToken);
 
                     if (anyOnServer > 0)
                     {
                         return McpHelpers.Status(
                             "empty",
-                            $"No index usage rows for database '{database}' on {resolved.ServerName} at the "
+                            $"No index usage rows for {scope} on {resolved.ServerName} at the "
                             + $"latest snapshot, though the server has {anyOnServer:N0} across its other "
-                            + "databases. Check the database name against get_database_sizes — the filter "
+                            + $"databases. Check the database {(databases.Names.Count == 1 ? "name" : "names")} against get_database_sizes — the filter "
                             + "matches exactly, and an excluded or renamed database looks identical to one "
                             + "with no indexes.");
                     }
@@ -208,7 +227,7 @@ public sealed class DarlingMcpObjectStatsTools
 
             /* Counted BEFORE the cap, by a second query. A count taken over the returned rows is a count of
                the page, which is the whole defect this answers. */
-            var matching = await DarlingObjectStatsReader.GetIndexUsageMatchCountAsync(postgres, resolved.ServerId, database, cancellationToken);
+            var matching = await DarlingObjectStatsReader.GetIndexUsageMatchCountAsync(postgres, resolved.ServerId, databases, cancellationToken);
             var truncated = matching > rows.Count;
 
             var result = rows.Select(r => new
@@ -232,16 +251,20 @@ public sealed class DarlingMcpObjectStatsTools
             return JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
-                database_name = database,
+                database_name = databases.Describe(),
                 returned_index_count = rows.Count,
                 matching_index_count = matching,
                 truncated,
                 note = truncated
-                    ? $"TRUNCATED: {matching:N0} indexes match and {rows.Count:N0} were returned. Rows are "
-                      + "ordered UNUSED FIRST across the whole server, so the ones omitted are the ACTIVE "
-                      + "indexes and they may be concentrated in databases with no rows here at all. This is "
-                      + "not evidence that a database was not collected — pass database_name to ask about "
-                      + "one, or raise limit."
+                    ? (scope is null
+                        ? $"TRUNCATED: {matching:N0} indexes match and {rows.Count:N0} were returned. Rows are "
+                          + "ordered UNUSED FIRST across the whole server, so the ones omitted are the ACTIVE "
+                          + "indexes and they may be concentrated in databases with no rows here at all. This is "
+                          + "not evidence that a database was not collected — pass database_name to ask about "
+                          + "one, or raise limit."
+                        : $"TRUNCATED: {matching:N0} indexes match {scope} and {rows.Count:N0} were returned. Rows are "
+                          + $"ordered UNUSED FIRST across {scope}, so the ones omitted are the ACTIVE "
+                          + "indexes there. This says nothing about databases outside the filter — raise limit to see more.")
                     : "Complete: every index matching this filter at the latest snapshot is included.",
                 indexes = result
             }, McpHelpers.JsonOptions);
@@ -251,6 +274,26 @@ public sealed class DarlingMcpObjectStatsTools
             return McpHelpers.FormatError("get_index_usage", ex);
         }
     }
+
+    /// <summary>
+    /// #5245 M4: how a sentence names the databases a locking or usage read was asked about. Null for every database;
+    /// <c>database 'X'</c> for one name (the wording the one-name reads already used); "the chosen databases" for a
+    /// list. Never a verdict about a database the read did not look at.
+    /// </summary>
+    internal static string? DescribeScope(DatabaseFilter databases) =>
+        databases.IsAll ? null
+        : databases.Names.Count == 1 ? $"database '{databases.Names[0]}'"
+        : databases.Describe();
+
+    /// <summary>
+    /// #5245 M4: whether the Azure master "monitored as their own servers" note still describes the page. It says
+    /// events from those databases are among the rows, which stops being true when the chosen databases hold none of
+    /// them, so a filtered call keeps the note only when a chosen name is one of the separately monitored databases.
+    /// An unfiltered call keeps it whenever the resolver found any, as before.
+    /// </summary>
+    internal static bool SeparatelyMonitoredInScope(IReadOnlyList<string>? separate, DatabaseFilter databases) =>
+        separate is not null
+        && (databases.IsAll || separate.Any(sep => databases.Names.Contains(sep, StringComparer.OrdinalIgnoreCase)));
 
     [McpServerTool(Name = "get_object_locking"), Description("Gets per-index locking and latch contention (row/page lock waits in ms, lock escalations, page-latch and page-IO-latch waits) from the latest daily snapshot, top contended objects first. Use to find tables/indexes driving blocking and contention. Counters are cumulative since the last instance restart. LATEST IS A TIME: this reads the newest index/object snapshot for the server, not a window, and captured_at is the instant it was collected - these are the databases and indexes that existed AT that stamp, and because object stats are collected DAILY the stamp can be most of a day old on a healthy server and older still on one whose collector has stalled.")]
     public static async Task<string> GetObjectLocking(
@@ -263,12 +306,24 @@ public sealed class DarlingMcpObjectStatsTools
         var validation = McpHelpers.ValidateTop(limit);
         if (validation != null) return validation;
 
-        return await GetObjectLockingCoreAsync(postgres, server_name, limit, registryState, null, cancellationToken);
+        return await GetObjectLockingCoreAsync(postgres, server_name, limit, registryState, null, cancellationToken, databases: DatabaseFilter.All);
     }
 
+    /// <summary>
+    /// get_object_locking's body. #5245: <paramref name="databases"/> (last, so positional callers keep compiling) is
+    /// <see cref="DatabaseFilter.All"/> for every database; otherwise only the CHOSEN databases' rows are ranked and
+    /// capped, the page is the top <paramref name="limit"/> of them, and <c>captured_at</c> is still the SERVER's
+    /// newest capture (a filter picks rows, never a different snapshot).
+    /// <para>One-name consumers made list-aware (#5245 M4): the optimized-locking note (only the chosen databases'
+    /// flags count); the Azure master "separately monitored" note (kept only when a chosen database is one of them);
+    /// the truncation and complete notes and the unavailable envelope (each names the filter). A filtered call that
+    /// finds nothing probes the whole server once: contention elsewhere makes it <c>empty</c> ("the chosen databases
+    /// have none"), no contention anywhere keeps the <c>unavailable</c> / not-collected answer an unfiltered call gives.</para>
+    /// </summary>
     internal static async Task<string> GetObjectLockingCoreAsync(
         NpgsqlDataSource postgres, string? server_name, int limit, MonitoredServerRegistryState? registryState,
-        Func<int, CancellationToken, Task<IReadOnlyList<string>?>>? resolver, CancellationToken cancellationToken)
+        Func<int, CancellationToken, Task<IReadOnlyList<string>?>>? resolver, CancellationToken cancellationToken,
+        DatabaseFilter databases = default)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
@@ -278,22 +333,42 @@ public sealed class DarlingMcpObjectStatsTools
             /* #4198: limit + 1 as the fetch, the extra row as the OBSERVED truncation signal (#3653's
                dialect) -- McpHelpers.BoundPage trims the page back to `limit`, so objects_returned below is
                always a count of the page and never of the over-fetch. */
-            var fetched = await DarlingObjectStatsReader.GetIndexLockingAsync(postgres, resolved.ServerId, limit + 1, cancellationToken);
+            var fetched = await DarlingObjectStatsReader.GetIndexLockingAsync(postgres, resolved.ServerId, limit + 1, databases, cancellationToken);
             var (rows, truncated) = McpHelpers.BoundPage(fetched, limit);
 
-            var optimizedLockingNote = await DarlingObjectStatsReader.GetOptimizedLockingNoteAsync(postgres, resolved.ServerId, cancellationToken);
-            /* #4925: a master's rows stay; this line says why its separately monitored databases' rows are among them. */
+            var optimizedLockingNote = await DarlingObjectStatsReader.GetOptimizedLockingNoteAsync(postgres, resolved.ServerId, databases, cancellationToken);
+            /* #4925: a master's rows stay; this line says why its separately monitored databases' rows are among them.
+               #5245: a filtered call keeps it only when a chosen database is one of them. */
             var separate = await DarlingMcpBlockingTools.SeparatelyMonitoredForAsync(postgres, registryState, resolved.ServerId, cancellationToken, resolver);
-            var separatelyMonitoredNote = separate is null ? null : AzureMasterScope.SeparatelyMonitoredListNote;
+            var separatelyMonitoredNote = SeparatelyMonitoredInScope(separate, databases) ? AzureMasterScope.SeparatelyMonitoredListNote : null;
+            var scope = DescribeScope(databases);
+            var inScope = scope is null ? "" : " in " + scope;
 
             if (rows.Count == 0)
-                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "index_object_stats", cancellationToken)
-                    ?? McpHelpers.Status("unavailable",
-                        "No locking/contention data recorded. Index/object stats are collected daily."
+            {
+                /* #5245: the chosen databases having no contention is a different answer from the server having
+                   none, so a filtered empty read looks at the whole server once (limit 1, the anchor is the same). */
+                if (scope is not null
+                    && (await DarlingObjectStatsReader.GetIndexLockingAsync(postgres, resolved.ServerId, 1, cancellationToken)).Count > 0)
+                {
+                    return McpHelpers.Status("empty",
+                        $"No lock/latch contention{inScope} on {resolved.ServerName} at the latest snapshot, though other databases on "
+                        + $"the server have some. Check the database {(databases.Names.Count == 1 ? "name" : "names")} against get_database_sizes "
+                        + "— the filter matches exactly, and an excluded or renamed database looks identical to one with no contention."
                         + (optimizedLockingNote is null ? "" : " " + optimizedLockingNote),
                         optimizedLockingNote is null && separatelyMonitoredNote is null
                             ? null
                             : new { optimized_locking_note = optimizedLockingNote, separately_monitored_note = separatelyMonitoredNote });
+                }
+
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "index_object_stats", cancellationToken)
+                    ?? McpHelpers.Status("unavailable",
+                        "No locking/contention data recorded" + (scope is null ? "" : $" for {scope}, or for any other database on this server") + ". Index/object stats are collected daily."
+                        + (optimizedLockingNote is null ? "" : " " + optimizedLockingNote),
+                        optimizedLockingNote is null && separatelyMonitoredNote is null
+                            ? null
+                            : new { optimized_locking_note = optimizedLockingNote, separately_monitored_note = separatelyMonitoredNote });
+            }
 
             var result = rows.Select(r => new
             {
@@ -330,11 +405,11 @@ public sealed class DarlingMcpObjectStatsTools
                 /* #4198: no separate match-count query (unlike get_index_usage) -- BoundPage's over-fetch
                    only OBSERVES "more than limit", not how many more, so the note says that and no more. */
                 note = truncated
-                    ? $"TRUNCATED: more than {rows.Count:N0} indexes have lock/latch contention at the latest "
+                    ? $"TRUNCATED: more than {rows.Count:N0} indexes have lock/latch contention{inScope} at the latest "
                       + "snapshot. Rows are ordered by total wait time (row lock + page lock + page latch + "
                       + "page I/O latch) descending, so the highest-contention indexes are returned first; "
                       + "raise limit to see more."
-                    : "Complete: every index with lock/latch contention at the latest snapshot is included.",
+                    : $"Complete: every index with lock/latch contention{inScope} at the latest snapshot is included.",
                 optimized_locking_note = optimizedLockingNote,
                 separately_monitored_note = separatelyMonitoredNote,
                 objects = result
