@@ -47,6 +47,19 @@ public sealed class DarlingWebHostGateLiveTests
     private static readonly IPAddress InCidrRemote = IPAddress.Parse("192.168.1.50");
     private static readonly IPAddress OutOfCidrRemote = IPAddress.Parse("10.0.0.9");
 
+    /// <summary>Adapts <see cref="CapturingTestLogger"/> (a plain <see cref="ILogger"/>) to the generic
+    /// <see cref="ILogger{TCategoryName}"/> <see cref="DarlingWebHostService"/>'s constructor requires.</summary>
+    private sealed class CapturingHostLogger(CapturingTestLogger inner) : ILogger<DarlingWebHostService>
+    {
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => inner.BeginScope(state);
+
+        public bool IsEnabled(LogLevel logLevel) => inner.IsEnabled(logLevel);
+
+        public void Log<TState>(
+            LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
+            => inner.Log(logLevel, eventId, state, exception, formatter);
+    }
+
     /// <summary>
     /// Builds a <see cref="TestServer"/> running the REAL <c>DarlingWebHostService.ConfigurePipeline</c> —
     /// the exact method the production <c>TryStartServerAsync</c> calls right after <c>builder.Build()</c>,
@@ -56,7 +69,7 @@ public sealed class DarlingWebHostGateLiveTests
     /// </summary>
     private static async Task<TestServer> BuildServer(
         bool networkMode, string? publicBaseUrlHost = null, DarlingWebOidcClient? oidcClient = null,
-        bool requireTokenWhenLoopbackOnly = false)
+        bool requireTokenWhenLoopbackOnly = false, CapturingTestLogger? hostLogger = null)
     {
         var builder = WebApplication.CreateBuilder();
         builder.WebHost.UseTestServer();
@@ -73,8 +86,9 @@ public sealed class DarlingWebHostGateLiveTests
 
         var app = builder.Build();
 
+        // hostLogger is the host's own logger, the one the gates write their refusal lines to; the Host-refusal line test reads it.
         var host = new DarlingWebHostService(
-            NullLogger<DarlingWebHostService>.Instance,
+            hostLogger is null ? NullLogger<DarlingWebHostService>.Instance : new CapturingHostLogger(hostLogger),
             new WebRuntimeState(),
             new CollectorRuntimeState(),
             new WebTlsCertificateState(),
@@ -219,6 +233,26 @@ public sealed class DarlingWebHostGateLiveTests
         var ctx = await Send(server, "/", "evil.com", InCidrRemote, token: Token);
 
         Assert.Equal(StatusCodes.Status400BadRequest, ctx.Response.StatusCode);
+    }
+
+    /// <summary>#5288: the line the Host guard logs for a refused name tells the operator which settings decide the
+    /// names it admits: the loopback names, the listen address (<c>web.network.listen</c>) and <c>web.publicBaseUrl</c>'s
+    /// host. The MCP listener's line names its own settings in the same shape
+    /// (<see cref="DarlingMcpHostGateLiveTests"/>). Read from the host's own logger through the real pipeline.</summary>
+    [Fact]
+    public async Task NetworkMode_ForeignHost_TheRefusalLogLine_NamesTheSettingsThatDecideTheAdmittedNames()
+    {
+        var hostLogger = new CapturingTestLogger();
+        using var server = await BuildServer(networkMode: true, publicBaseUrlHost: "monitor.example.com", hostLogger: hostLogger);
+        var ctx = await Send(server, "/", "evil.com", InCidrRemote, token: Token);
+        Assert.Equal(StatusCodes.Status400BadRequest, ctx.Response.StatusCode);
+
+        var line = Assert.Single(hostLogger.Lines);
+        Assert.StartsWith("Warning: Web dashboard ", line, StringComparison.Ordinal);
+        Assert.Contains("the Host header 'evil.com' is not an address this endpoint binds", line, StringComparison.Ordinal);
+        Assert.Contains("web.network.listen when LAN-exposed", line, StringComparison.Ordinal);
+        Assert.Contains("web.publicBaseUrl's host", line, StringComparison.Ordinal);
+        Assert.DoesNotContain("monitor.example.com", line, StringComparison.Ordinal);
     }
 
     /// <summary>#4220: web.publicBaseUrl's host is admitted as one extra allowed Host value — a DNS name

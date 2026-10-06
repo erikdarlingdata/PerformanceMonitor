@@ -49,6 +49,19 @@ public sealed class DarlingMcpHostGateLiveTests
     private const string Token = "correct-mcp-token-value";
     private static readonly IPAddress InCidrRemote = IPAddress.Parse("192.168.1.50");
 
+    /// <summary>Adapts <see cref="CapturingTestLogger"/> (a plain <see cref="ILogger"/>) to the generic
+    /// <see cref="ILogger{TCategoryName}"/> <see cref="DarlingMcpHostService"/>'s constructor requires.</summary>
+    private sealed class CapturingHostLogger(CapturingTestLogger inner) : ILogger<DarlingMcpHostService>
+    {
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => inner.BeginScope(state);
+
+        public bool IsEnabled(LogLevel logLevel) => inner.IsEnabled(logLevel);
+
+        public void Log<TState>(
+            LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
+            => inner.Log(logLevel, eventId, state, exception, formatter);
+    }
+
     /// <summary>
     /// Builds a <see cref="TestServer"/> running the REAL <see cref="DarlingMcpHostService.ConfigureMcpServices"/>
     /// and <see cref="DarlingMcpHostService.ConfigurePipeline"/> — the exact methods the production
@@ -58,7 +71,7 @@ public sealed class DarlingMcpHostGateLiveTests
     /// </summary>
     private static async Task<TestServer> BuildServer(
         bool networkMode, string? hostName = null, ILogger? logger = null, string? rawAllowedHostName = null,
-        bool requireTokenWhenLoopbackOnly = false)
+        bool requireTokenWhenLoopbackOnly = false, CapturingTestLogger? hostLogger = null)
     {
         var builder = WebApplication.CreateBuilder();
         builder.WebHost.UseTestServer();
@@ -76,8 +89,11 @@ public sealed class DarlingMcpHostGateLiveTests
 
         var app = builder.Build();
 
+        // hostLogger is the host's own logger, the one the gates write their refusal lines to; the Host-refusal line test reads it.
         var host = new DarlingMcpHostService(
-            Microsoft.Extensions.Logging.Abstractions.NullLogger<DarlingMcpHostService>.Instance,
+            hostLogger is null
+                ? Microsoft.Extensions.Logging.Abstractions.NullLogger<DarlingMcpHostService>.Instance
+                : new CapturingHostLogger(hostLogger),
             new McpRuntimeState(),
             new MonitoredServerRegistryState());
 
@@ -283,6 +299,34 @@ public sealed class DarlingMcpHostGateLiveTests
         var ctx = await SendRaw(server, path, "evil.com", networkMode ? InCidrRemote : IPAddress.Loopback, bearer: networkMode ? Token : null);
 
         Assert.Equal(StatusCodes.Status400BadRequest, ctx.Response.StatusCode);
+    }
+
+    /// <summary>
+    /// #5288: the line the Host guard logs for a refused name tells the operator which settings decide the names it
+    /// admits, the way the web dashboard's line names <c>web.publicBaseUrl</c>'s host: the loopback names, the listen
+    /// address (<c>mcp.network.listen</c>) and the configured name (<c>mcp.network.hostName</c>), the last two in
+    /// network mode only. Read from the host's own logger through the real pipeline, so it is the line the service
+    /// writes, not a copy of it.
+    /// </summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task ForeignHost_TheRefusalLogLine_NamesTheSettingsThatDecideTheAdmittedNames(bool networkMode)
+    {
+        var hostLogger = new CapturingTestLogger();
+        using var server = await BuildServer(networkMode, hostName: "mcp.corp.example", hostLogger: hostLogger);
+
+        var ctx = await SendRaw(server, "/", "evil.com", networkMode ? InCidrRemote : IPAddress.Loopback, bearer: networkMode ? Token : null);
+        Assert.Equal(StatusCodes.Status400BadRequest, ctx.Response.StatusCode);
+
+        var line = Assert.Single(hostLogger.Lines);
+        Assert.StartsWith("Warning: MCP ", line, StringComparison.Ordinal);
+        Assert.Contains("the Host header 'evil.com' is not an address this endpoint binds", line, StringComparison.Ordinal);
+        Assert.Contains("mcp.network.listen when LAN-exposed", line, StringComparison.Ordinal);
+        Assert.Contains("mcp.network.hostName when LAN-exposed", line, StringComparison.Ordinal);
+        Assert.Contains(DarlingMcpHostService.HostRefusalAdmits, line, StringComparison.Ordinal);
+        /* The line names the setting, never its value: the configured name is not written to the log. */
+        Assert.DoesNotContain("mcp.corp.example", line, StringComparison.Ordinal);
     }
 
     /// <summary>
