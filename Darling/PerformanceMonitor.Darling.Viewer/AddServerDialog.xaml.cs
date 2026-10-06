@@ -258,37 +258,7 @@ public partial class AddServerDialog : Window
         {
             StatusText.Text = "";
         }
-        /* #2279: a stored secret — a SQL password OR a service-principal client secret (#3484) — is a DPAPI
-           LocalMachine blob ONLY the machine writing it can decrypt. The service is what has to decrypt it, so
-           a credential saved from a viewer on another PC than the service can never be used and the server
-           fails to connect on every sweep afterwards (the #2255 report). Said as soon as either secret-bearing
-           mode is picked, so it lands before the secret is typed rather than after the save.
-
-           WARNED, not refused: a non-loopback store does not prove this viewer is remote (a BYO store on
-           another host with the service local reads the same), and refusing would block a legitimate first-run
-           Add. Silent for a loopback store, which is the managed single-box deploy and the overwhelmingly
-           common case — a hint that fires for everyone is a hint nobody reads. */
-        else if ((SqlAuthRadio.IsChecked == true || ServicePrincipalAuthRadio.IsChecked == true)
-            && _dataService is { StoreIsOnThisMachine: false })
-        {
-            StatusText.Text = SqlCredentialMachineBoundHint;
-        }
-        else if (StatusText.Text == SqlCredentialMachineBoundHint)
-        {
-            StatusText.Text = "";
-        }
     }
-
-    /// <summary>
-    /// The #2279 hint. A const so <see cref="AuthMode_Changed"/> can clear exactly its own message when the mode
-    /// changes away — the same self-clearing discipline the Azure arm uses, which is what stops a stale hint
-    /// sitting under an unrelated mode.
-    /// </summary>
-    private const string SqlCredentialMachineBoundHint =
-        "This viewer's store is not on this machine. A SQL-auth password is encrypted for THIS machine only, " +
-        "so if the Darling service runs elsewhere it will not be able to decrypt it and the server will fail " +
-        "to connect. Add it from a viewer on the service's host, run --add-server there, or use an env:/file: " +
-        "reference instead.";
 
     /// <summary>
     /// #3499: swaps the engine-specific parts of the form. The SQL Server arm is the XAML's default state —
