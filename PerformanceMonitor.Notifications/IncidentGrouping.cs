@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using System.Text.RegularExpressions;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Notifications;
 
@@ -247,6 +248,7 @@ public static class BlockingIncidentGrouper
         var order = new List<string>();
         var buckets = new Dictionary<string, List<BlockedEvent>>(StringComparer.Ordinal);
 
+        var ordinal = 0;
         foreach (var raw in events ?? Enumerable.Empty<BlockedEvent>())
         {
             /* #1876: normalize the label HERE, at the one point every blocking fingerprint passes
@@ -265,7 +267,7 @@ public static class BlockingIncidentGrouper
                 ContentiousObject = ContentiousObjectLabel.Normalize(raw.ContentiousObject, raw.Database),
             };
 
-            var identity = IdentityKey(e);
+            var identity = IdentityKey(e, ordinal++);
             if (!buckets.TryGetValue(identity, out var list))
             {
                 list = new List<BlockedEvent>();
@@ -291,7 +293,7 @@ public static class BlockingIncidentGrouper
                     new[] { representative.ContentiousObject! }, rows.Count, waitRange)
                 : AlertFingerprint.ForKey(
                     serverName, AlertFingerprint.Blocking,
-                    QueryPairKey(representative),
+                    FingerprintKey(identity, representative),
                     DatabaseDisplay(representative.Database), rows.Count, waitRange);
 
             // ForObjects/ForKey only return null on empty identity, which IdentityKey already excludes,
@@ -327,10 +329,26 @@ public static class BlockingIncidentGrouper
         return groups;
     }
 
-    private static string IdentityKey(BlockedEvent e) =>
+    private static string IdentityKey(BlockedEvent e, int ordinal) =>
         !string.IsNullOrWhiteSpace(e.ContentiousObject)
             ? "obj|" + Norm(e.Database) + "|" + Norm(e.ContentiousObject)
-            : "qp|" + QueryPairKey(e);
+            : HasWithheldQuery(e)
+                /* #4348: a withheld statement has no text to group on, and every one reads as the same marker,
+                   so two different statements would fold into one incident. Each sample stands alone. */
+                ? "withheld|" + ordinal.ToString(CultureInfo.InvariantCulture) + "|" + Norm(e.Database)
+                : "qp|" + QueryPairKey(e);
+
+    /// <summary>The text the incident fingerprint is keyed on: the query pair for a text-keyed incident, the
+    /// per-sample key for one whose text was withheld (so two different withheld statements never share a
+    /// dedup key).</summary>
+    private static string FingerprintKey(string identity, BlockedEvent representative) =>
+        identity.StartsWith("withheld|", StringComparison.Ordinal) ? identity : QueryPairKey(representative);
+
+    private static bool HasWithheldQuery(BlockedEvent e) =>
+        IsWithheld(e.BlockedQuery) || IsWithheld(e.BlockingQuery);
+
+    private static bool IsWithheld(string? query) =>
+        query is not null && query.Trim() == SensitiveStatements.PlaceholderText;
 
     private static string QueryPairKey(BlockedEvent e) =>
         Norm(e.Database) + "|" + NormalizeQuery(e.BlockedQuery) + "|" + NormalizeQuery(e.BlockingQuery);
