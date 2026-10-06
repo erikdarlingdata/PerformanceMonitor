@@ -258,8 +258,10 @@ public sealed class WebChartAtTimeBehaviourTests
         var tabs = File.ReadAllText(PathTo("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server-tabs.js"));
         var calls = Regex.Matches(tabs, @"zoomableLineChart\(\{");
         Assert.Equal(9, calls.Count);
-        var handed = Regex.Matches(tabs, @"zoomableLineChart\(\{\s*atTime: \{ server \},");
+        var handed = Regex.Matches(tabs, @"zoomableLineChart\(\{\s*atTime: \{ server(, item: ""wait"")? \},");
         Assert.Equal(calls.Count, handed.Count);
+        // Only the wait trend chart names the wait item (#5235); every other direct chart keeps the default.
+        Assert.Single(Regex.Matches(tabs, @"atTime: \{ server, item: ""wait"" \}"));
 
         var panels = File.ReadAllText(PathTo("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "panels.js"));
         Assert.Contains("atTime: desc.atTime || null,", panels);
@@ -356,5 +358,77 @@ public sealed class WebChartAtTimeBehaviourTests
         // No other chart names one: 4 blocking charts and 3 deadlock charts, all counted above.
         Assert.Equal(4, Regex.Matches(tabs, @"atTimeItem: ""blocking""").Count);
         Assert.Equal(3, Regex.Matches(tabs, @"atTimeItem: ""deadlocks""").Count);
+    }
+
+    [Fact]
+    public void TheWaitTrendChart_OffersShowQueriesWithTheNearestWait()
+    {
+        // The item names the series drawn nearest the click at the nearest point (the desktop's GetNearestSeries), and applies the
+        // hour around that point, sets the server's wait filter and moves to the Queries tab.
+        var r = Run();
+        Assert.Equal(UsualItems.Append("Show Queries With WAIT_A at This Time").ToArray(), Strings(r.GetProperty("waitHighItems")));
+        Assert.Equal(UsualItems.Append("Show Queries With WAIT_B at This Time").ToArray(), Strings(r.GetProperty("waitLowItems")));
+        var call = OneCall(r, "waitCall");
+        Assert.Equal(ClickedMs - HalfMs, call.GetProperty("startMs").GetInt64());
+        Assert.Equal(ClickedMs + HalfMs, call.GetProperty("endMs").GetInt64());
+        Assert.Equal("WAIT_B", r.GetProperty("filterAfterWaitItem").GetString());
+        Assert.Equal("", r.GetProperty("filterOtherServer").GetString());
+        Assert.Equal("#/server/A/queries", r.GetProperty("waitHashAfter").GetString());
+        // The wait is text: a wait name that looks like markup stays one label with no child element.
+        Assert.Equal("Show Queries With <img src=x onerror=alert(1)> at This Time", r.GetProperty("markupItemText").GetString());
+        Assert.Equal(0, r.GetProperty("markupItemChildren").GetInt32());
+    }
+
+    [Fact]
+    public void TheWaitItem_FallsBackToActiveQueries_WhenNoSeriesHasAValueThere()
+    {
+        var r = Run();
+        Assert.Equal(UsualItems.Append("Show Active Queries at This Time").ToArray(), Strings(r.GetProperty("waitFallbackItems")));
+        // A series with no value at the nearest point is not the nearest one, however close it is drawn to the click.
+        Assert.Equal(UsualItems.Append("Show Queries With WAIT_B at This Time").ToArray(), Strings(r.GetProperty("waitOnlyBItems")));
+        Assert.Equal("", r.GetProperty("filterAfterFallbackItem").GetString());
+    }
+
+    [Fact]
+    public void TheGenericActiveQueriesItem_ClearsTheWaitFilter_AndBlockingLeavesIt()
+    {
+        var r = Run();
+        Assert.Equal("", r.GetProperty("filterAfterGenericItem").GetString());
+        Assert.Equal("WAIT_A", r.GetProperty("filterAfterBlockingItem").GetString());
+    }
+
+    [Fact]
+    public void ARestoredMenu_KeepsTheNamedWait()
+    {
+        var r = Run();
+        Assert.Equal(UsualItems.Append("Show Queries With WAIT_B at This Time").ToArray(), Strings(r.GetProperty("restoredWaitItems")));
+        Assert.Equal(ClickedMs - HalfMs, OneCall(r, "restoredWaitCall").GetProperty("startMs").GetInt64());
+        Assert.Equal("WAIT_B", r.GetProperty("restoredFilter").GetString());
+    }
+
+    [Fact]
+    public void OpenServerTabAt_KeepsTheRangeForANullTime_AndARefusedRangeSetsNothingAndRoutesNowhere()
+    {
+        var r = Run();
+        Assert.Equal(JsonValueKind.Null, r.GetProperty("keepRangeReturn").ValueKind);
+        Assert.Equal(0, r.GetProperty("keepRangeCalls").GetInt32());
+        Assert.Equal(1, r.GetProperty("keepRangeBeforeRoute").GetInt32());
+        Assert.Equal("#/server/A/queries", r.GetProperty("keepRangeHash").GetString());
+
+        Assert.Equal("The end cannot be in the future.", r.GetProperty("refusedReturn").GetString());
+        Assert.Equal(0, r.GetProperty("refusedBeforeRoute").GetInt32());
+        Assert.Equal(new[] { "The end cannot be in the future." }, Strings(r.GetProperty("refusedSaid")));
+        Assert.Equal("#/server/A/cpu", r.GetProperty("refusedDirectHash").GetString());
+    }
+
+    [Fact]
+    public void TheQueryWaitFilter_IsPerServer_AndABlankWaitClearsIt()
+    {
+        var r = Run();
+        Assert.Equal("CXPACKET", r.GetProperty("filterS1").GetString());
+        Assert.Equal("LCK_M_X", r.GetProperty("filterS2").GetString());
+        Assert.Equal("", r.GetProperty("filterUnset").GetString());
+        Assert.Equal("", r.GetProperty("filterS1Blank").GetString());
+        Assert.Equal("", r.GetProperty("filterS2Null").GetString());
     }
 }

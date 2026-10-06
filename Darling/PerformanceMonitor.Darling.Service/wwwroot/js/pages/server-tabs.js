@@ -358,7 +358,7 @@ export async function drawWaitTrends(slot, server, ctx, checked, metric) {
     seenNotes.size ? noticeStrip([...seenNotes].join(" ")) : null,
     ...failures,
     zoomableLineChart({
-      atTime: { server },
+      atTime: { server, item: "wait" },
       points: mergeSeriesRows(drawn, "time", metric),
       xKey: "time",
       series: drawn.map((d) => ({ key: d.key, label: d.label, color: d.color })),

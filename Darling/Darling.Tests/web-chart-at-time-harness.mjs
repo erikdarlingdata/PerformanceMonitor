@@ -165,8 +165,8 @@ const labels = (host) => items(host).map((n) => n.textContent);
 const chartDiv = (host) => find(host, (n) => String(n.className) === "chart")[0];
 const plotNode = (host) => find(host, (n) => n.tag === "svg")[0];
 /* A right-click lands on a node: the plot's svg unless a case names another (the legend, the status line, the button, the menu). */
-const rightClick = (host, x, target = plotNode(host)) =>
-  chartDiv(host).listeners.contextmenu[0]({ preventDefault() {}, clientX: x, clientY: 20, target });
+const rightClick = (host, x, target = plotNode(host), y = 20) =>
+  chartDiv(host).listeners.contextmenu[0]({ preventDefault() {}, clientX: x, clientY: y, target });
 const closeMenu = (host) => {
   const m = find(host, (n) => n.attrs.role === "menu")[0];
   if (m) m.listeners.keydown[0]({ key: "Escape", preventDefault() {} });
@@ -303,6 +303,99 @@ out.rebuiltItems = labels(k2);
 await click(k2, "Show Active Queries at This Time");
 const kc = take()[0];
 out.rebuiltMiddle = kc ? (kc.startMs + kc.endMs) / 2 : null;
+
+/* The wait trend chart (atTime.item "wait", #5235): two series, WAIT_A drawn high and WAIT_B low (the plot spans y 26 to 290
+   in a 320-high box), and the item names the series drawn nearest the click. */
+const util = await import(pathToFileURL(path.join(scratch, "util.js")).href);
+const waitPoints = points.map((p, i) => ({ ...p, a: 100, b: 10, c: i === 5 ? null : 1 }));
+const waitSeries = [
+  { key: "a", label: "WAIT_A", color: "#fff" },
+  { key: "b", label: "WAIT_B", color: "#0f0" },
+];
+const waitSpec = (extra) => spec({ title: "Waits", atTime: { server: "A", item: "wait" }, points: waitPoints, series: waitSeries, ...extra });
+const wHigh = charts.zoomableLineChart(waitSpec(), "t20", scope);
+rightClick(wHigh, 521, plotNode(wHigh), 30);
+out.waitHighItems = labels(wHigh);
+const wLow = charts.zoomableLineChart(waitSpec(), "t21", scope);
+rightClick(wLow, 521, plotNode(wLow), 270);
+out.waitLowItems = labels(wLow);
+util.setQueryWaitFilter("A", "");
+await click(wLow, "Show Queries With WAIT_B at This Time");
+out.waitCall = take();
+out.filterAfterWaitItem = util.queryWaitFilter("A");
+out.filterOtherServer = util.queryWaitFilter("B");
+out.waitHashAfter = globalThis.location.hash;
+
+/* A series with no value at the nearest point is not picked: only WAIT_B has one at T0 + 5 min here. */
+const onlyB = charts.zoomableLineChart(waitSpec({ points: waitPoints.map((p, i) => (i === 5 ? { ...p, a: null } : p)) }), "t22", scope);
+rightClick(onlyB, 521, plotNode(onlyB), 30);
+out.waitOnlyBItems = labels(onlyB);
+
+/* No series has a value there: the generic item, which also clears the wait filter, as a plain Active Queries item does. */
+const none = charts.zoomableLineChart(waitSpec({ points: waitPoints.map((p, i) => (i === 5 ? { ...p, a: null, b: null } : p)) }), "t23", scope);
+rightClick(none, 521, plotNode(none), 30);
+out.waitFallbackItems = labels(none);
+util.setQueryWaitFilter("A", "WAIT_A");
+await click(none, "Show Active Queries at This Time");
+out.filterAfterFallbackItem = util.queryWaitFilter("A");
+take();
+util.setQueryWaitFilter("A", "WAIT_A");
+rightClick(a, 521);
+await click(a, "Show Active Queries at This Time");
+out.filterAfterGenericItem = util.queryWaitFilter("A");
+take();
+util.setQueryWaitFilter("A", "WAIT_A");
+rightClick(blk, 521);
+await click(blk, "Show Blocking at This Time");
+out.filterAfterBlockingItem = util.queryWaitFilter("A");
+take();
+util.setQueryWaitFilter("A", "");
+
+/* A rebuild of the chart (the 60 s poll) keeps the open menu and the wait it named. */
+const r1 = charts.zoomableLineChart(waitSpec(), "t24", scope);
+rightClick(r1, 521, plotNode(r1), 270);
+const r2 = charts.zoomableLineChart(waitSpec(), "t24", scope);
+out.restoredWaitItems = labels(r2);
+await click(r2, "Show Queries With WAIT_B at This Time");
+out.restoredWaitCall = take();
+out.restoredFilter = util.queryWaitFilter("A");
+util.setQueryWaitFilter("A", "");
+
+/* A wait name is text, never markup. */
+const markup = charts.zoomableLineChart(waitSpec({ series: [{ key: "a", label: "<img src=x onerror=alert(1)>", color: "#fff" }] }), "t25", scope);
+rightClick(markup, 521, plotNode(markup), 30);
+const markupItem = items(markup).find((n) => n.textContent.startsWith("Show Queries With"));
+out.markupItemText = markupItem ? markupItem.textContent : null;
+out.markupItemChildren = markupItem ? markupItem.children.length : -1;
+
+/* openServerTabAt, called directly: a null time keeps the range, a refused range runs nothing and routes nowhere. */
+jump("#/server/A/cpu");
+let ran = 0;
+out.keepRangeReturn = await charts.openServerTabAt("A", null, "queries", { beforeRoute: () => ran++, say() {} });
+out.keepRangeCalls = take().length;
+out.keepRangeBeforeRoute = ran;
+out.keepRangeHash = globalThis.location.hash;
+jump("#/server/A/cpu");
+ran = 0;
+globalThis.__rangeError = "The end cannot be in the future.";
+const said = [];
+out.refusedReturn = await charts.openServerTabAt("A", T0 + 5 * MIN, "queries", { beforeRoute: () => ran++, say: (m) => said.push(m) });
+out.refusedBeforeRoute = ran;
+out.refusedSaid = said;
+out.refusedDirectHash = globalThis.location.hash;
+globalThis.__rangeError = null;
+take();
+
+/* The wait filter helpers: per server, a blank (or non-text) wait deletes. */
+util.setQueryWaitFilter("S1", "CXPACKET");
+util.setQueryWaitFilter("S2", "LCK_M_X");
+out.filterS1 = util.queryWaitFilter("S1");
+out.filterS2 = util.queryWaitFilter("S2");
+out.filterUnset = util.queryWaitFilter("S3");
+util.setQueryWaitFilter("S1", "   ");
+out.filterS1Blank = util.queryWaitFilter("S1");
+util.setQueryWaitFilter("S2", null);
+out.filterS2Null = util.queryWaitFilter("S2");
 
 fs.rmSync(scratch, { recursive: true, force: true });
 console.log(JSON.stringify(out));
