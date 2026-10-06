@@ -7,7 +7,10 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.IO;
+using System.Linq;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using PerformanceMonitor.Darling.Service;
@@ -22,6 +25,11 @@ namespace Darling.Tests;
 /// still resolves. A refused reference fails that one server's connect attempt the way an unresolvable reference does,
 /// and never reaches the worker as a throw.
 ///
+/// <para>One reference that is owned is not refused: the one darling.json itself declares, in the same slot, for the
+/// same server id. A server read from the file, or built from the store row the file seeded, keeps resolving its own
+/// reference; a store row that names another server's reference, or whose slot now holds a different owned reference,
+/// is still refused.</para>
+///
 /// <para>The owned set is process-wide state, so the class is in the <c>darling-owned-secrets</c> collection with the
 /// other classes that set it, and it puts back what it found.</para>
 /// </summary>
@@ -33,6 +41,8 @@ public sealed class DarlingSecretsOwnedReferenceTests : IDisposable
     private const string OtherVariable = "DARLING_TEST_OTHER_VARIABLE_5240";
     private const string OtherVariableValue = "other-variable-value-Q7";
     private const string UnsetVariable = "DARLING_TEST_UNSET_VARIABLE_5240";
+    private const string SecondOwnedVariable = "DARLING_TEST_SECOND_OWNED_VARIABLE_5240";
+    private const string SecondOwnedVariableValue = "second-owned-variable-value-Q7";
     private const string OwnedFileValue = "owned-file-value-Q7";
     private const string OtherFileValue = "other-file-value-Q7";
 
@@ -53,6 +63,7 @@ public sealed class DarlingSecretsOwnedReferenceTests : IDisposable
         File.WriteAllText(_otherFile, OtherFileValue);
         Environment.SetEnvironmentVariable(OwnedVariable, OwnedVariableValue);
         Environment.SetEnvironmentVariable(OtherVariable, OtherVariableValue);
+        Environment.SetEnvironmentVariable(SecondOwnedVariable, SecondOwnedVariableValue);
         Environment.SetEnvironmentVariable(UnsetVariable, null);
         DarlingOwnedSecrets.Set(new DarlingOwnedSet(new[] { ownedDirectory }, new[] { OwnedVariable }));
     }
@@ -62,6 +73,7 @@ public sealed class DarlingSecretsOwnedReferenceTests : IDisposable
         DarlingOwnedSecrets.Set(_before);
         Environment.SetEnvironmentVariable(OwnedVariable, null);
         Environment.SetEnvironmentVariable(OtherVariable, null);
+        Environment.SetEnvironmentVariable(SecondOwnedVariable, null);
         try
         {
             Directory.Delete(_root, true);
@@ -198,5 +210,128 @@ public sealed class DarlingSecretsOwnedReferenceTests : IDisposable
 
         /* The gate was released both times: a third attempt is not blocked behind the first two. */
         Assert.Equal(1, gate.CurrentCount);
+    }
+
+    /* ═══════════ a reference darling.json declares for the same server keeps resolving (#5240) ═══════════ */
+
+    /// <summary>A darling.json text holding the given server entries; the serializer escapes any path in them.</summary>
+    private static string DarlingJson(params object[] servers) => JsonSerializer.Serialize(new { servers });
+
+    /// <summary>What the service does once darling.json has loaded: every reference the file writes becomes owned, and so
+    /// does the file's own directory. The file sits in the fixture's owned directory, so <c>_otherFile</c> stays unowned.</summary>
+    private void OwnWhatTheFileWrites(DarlingConfig config) =>
+        DarlingOwnedSecrets.Set(DarlingOwnedSecrets.Compute(config, Path.Combine(_root, "own", "darling.json")));
+
+    /// <summary>
+    /// A server darling.json declares keeps resolving its own reference when the file's own entry is what gets resolved (the
+    /// file's list stands in when the store cannot be read). The file declares that same reference, in that same slot, for
+    /// that same server, so it is not refused for being one the file wrote. Both slots, and both shapes of reference. A
+    /// server built by hand with the same text is a different thing: nothing declares it, so it is still refused.
+    /// </summary>
+    [Fact]
+    public void AReferenceTheFileDeclaresForAServer_ResolvesOnTheFilesOwnEntry_InBothSlots()
+    {
+        var config = DarlingConfig.Parse(DarlingJson(new
+        {
+            name = "alpha",
+            host = "alpha.example.test",
+            auth = "sql",
+            username = "monitor",
+            encryptedPassword = "env:" + OwnedVariable,
+            remediationUsername = "remediator",
+            remediationEncryptedPassword = "file:" + _ownedFile,
+        }));
+        OwnWhatTheFileWrites(config);
+        var alpha = Assert.Single(config.Servers);
+
+        Assert.Equal(OwnedVariableValue, DarlingSecrets.ResolvePassword(alpha, out var usedPlaintext));
+        Assert.False(usedPlaintext);
+        Assert.Equal(OwnedFileValue, DarlingSecrets.ResolveRemediationPassword(alpha));
+
+        Assert.Throws<InvalidOperationException>(() => DarlingSecrets.ResolvePassword(Server("env:" + OwnedVariable), out _));
+        Assert.Throws<InvalidOperationException>(() => DarlingSecrets.ResolveRemediationPassword(Server(remediationPassword: "file:" + _ownedFile)));
+    }
+
+    /// <summary>
+    /// The encrypted-password slot, through a real store: a darling.json server whose slot holds a reference is seeded into
+    /// the store and keeps resolving it when it is read back. A store row for a DIFFERENT server id that names the same
+    /// reference is refused, and so is the file server's own row once its slot holds another owned reference (one the file
+    /// declares for a different server). The second file server, untouched, still resolves in the same read.
+    /// </summary>
+    [Fact]
+    public Task TheEncryptedSlot_KeepsTheReferenceTheFileDeclaresForThatServerId_AndRefusesEveryOtherOwnedReference() =>
+        RunStoreRowScenarioAsync(remediationSlot: false);
+
+    /// <summary>The same three outcomes for the remediation password slot.</summary>
+    [Fact]
+    public Task TheRemediationSlot_KeepsTheReferenceTheFileDeclaresForThatServerId_AndRefusesEveryOtherOwnedReference() =>
+        RunStoreRowScenarioAsync(remediationSlot: true);
+
+    private async Task RunStoreRowScenarioAsync(bool remediationSlot)
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var column = remediationSlot ? "remediation_encrypted_password" : "encrypted_password";
+        var setting = remediationSlot ? "remediationEncryptedPassword" : "encryptedPassword";
+
+        /* darling.json: two servers, each declaring its own reference in the slot under test. Both references are owned,
+           because the file writes them. */
+        static object Entry(bool remediation, string name, string reference) => remediation
+            ? new { name, host = name + ".example.test", remediationUsername = "remediator", remediationEncryptedPassword = reference }
+            : new { name, host = name + ".example.test", auth = "sql", username = "monitor", encryptedPassword = reference };
+        var config = DarlingConfig.Parse(DarlingJson(
+            Entry(remediationSlot, "alpha", "env:" + OwnedVariable),
+            Entry(remediationSlot, "beta", "env:" + SecondOwnedVariable)));
+        OwnWhatTheFileWrites(config);
+
+        var (scratchStore, owner, _) = await ServerAddViewerRoleLiveTests.OpenAsync(ct);
+        await using var scratchHolder = scratchStore;
+        await using var ownerHolder = owner;
+        await new StoreConfigProvider(owner).SeedIfEmptyAsync(config, ct);
+
+        string? Resolve(MonitoredServer server) =>
+            remediationSlot ? DarlingSecrets.ResolveRemediationPassword(server) : DarlingSecrets.ResolvePassword(server, out _);
+
+        async Task<IReadOnlyList<MonitoredServer>> ReadStoreAsync()
+        {
+            await using var connection = await owner.OpenConnectionAsync(ct);
+            return await StoreConfigProvider.ReadMonitoredServersAsync(connection, config, ct);
+        }
+
+        /* 1. Seeded from the file, read back from the store row: each server resolves the reference the file declared for it. */
+        var seeded = await ReadStoreAsync();
+        Assert.Equal(OwnedVariableValue, Resolve(seeded.Single(s => s.Name == "alpha")));
+        Assert.Equal(SecondOwnedVariableValue, Resolve(seeded.Single(s => s.Name == "beta")));
+
+        /* 2. A store row for another server id that names alpha's reference: the file declares that text, but not for
+           this id. */
+        await using (var insert = owner.CreateCommand(remediationSlot
+            ? $"INSERT INTO config_monitored_servers (server_id, name, host, remediation_username, remediation_encrypted_password) VALUES (5301001, 'store-only', 'store-only.example.test', 'remediator', 'env:{OwnedVariable}')"
+            : $"INSERT INTO config_monitored_servers (server_id, name, host, auth, username, encrypted_password) VALUES (5301001, 'store-only', 'store-only.example.test', 'sql', 'monitor', 'env:{OwnedVariable}')"))
+        {
+            await insert.ExecuteNonQueryAsync(ct);
+        }
+
+        var withStoreOnly = await ReadStoreAsync();
+        var storeOnly = withStoreOnly.Single(s => s.Name == "store-only");
+        var refusedStoreOnly = Assert.Throws<InvalidOperationException>(() => Resolve(storeOnly));
+        Assert.Contains($"servers['store-only'].{setting}", refusedStoreOnly.Message, StringComparison.Ordinal);
+        Assert.Contains(DarlingOwnedSecrets.ReferenceRefusalText, refusedStoreOnly.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain(OwnedVariableValue, refusedStoreOnly.Message, StringComparison.Ordinal);
+        Assert.Equal(OwnedVariableValue, Resolve(withStoreOnly.Single(s => s.Name == "alpha")));
+
+        /* 3. The file server's own row, once its slot holds another owned reference (beta's, which the file declares for
+           beta's id): the same id, a different reference. */
+        await using (var update = owner.CreateCommand(
+            $"UPDATE config_monitored_servers SET {column} = 'env:{SecondOwnedVariable}' WHERE name = 'alpha'"))
+        {
+            Assert.Equal(1, await update.ExecuteNonQueryAsync(ct));
+        }
+
+        var afterChange = await ReadStoreAsync();
+        var refusedAlpha = Assert.Throws<InvalidOperationException>(() => Resolve(afterChange.Single(s => s.Name == "alpha")));
+        Assert.Contains($"servers['alpha'].{setting}", refusedAlpha.Message, StringComparison.Ordinal);
+        Assert.Contains(DarlingOwnedSecrets.ReferenceRefusalText, refusedAlpha.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain(SecondOwnedVariableValue, refusedAlpha.Message, StringComparison.Ordinal);
+        Assert.Equal(SecondOwnedVariableValue, Resolve(afterChange.Single(s => s.Name == "beta")));
     }
 }
