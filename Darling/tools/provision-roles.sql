@@ -362,7 +362,7 @@ CREATE OR REPLACE FUNCTION config.edit_monitored_server(
 RETURNS TABLE (outcome text, new_modified_at timestamp)
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = config, pg_catalog
+SET search_path = config, pg_catalog, pg_temp
 AS $fn$
 DECLARE
    v_old_modified_at timestamp;
@@ -388,13 +388,16 @@ DECLARE
    v_new_secret boolean;
    v_secret_set boolean;
    v_secret text;
+   v_remediation_held boolean;
+   v_connection_changed boolean;
 BEGIN
    p_columns := COALESCE(p_columns, ARRAY[]::text[]);
 
    SELECT s.modified_at, s.host, s.port, s.auth, s.database, s.read_only_intent, s.username, s.encrypt_mode,
-          s.trust_server_certificate, s.multi_subnet_failover
+          s.trust_server_certificate, s.multi_subnet_failover, COALESCE(s.remediation_encrypted_password, '') <> ''
    INTO v_old_modified_at, v_old_host, v_old_port, v_old_auth, v_old_database, v_old_read_only_intent,
-        v_old_username, v_old_encrypt_mode, v_old_trust_server_certificate, v_old_multi_subnet_failover
+        v_old_username, v_old_encrypt_mode, v_old_trust_server_certificate, v_old_multi_subnet_failover,
+        v_remediation_held
    FROM config_monitored_servers AS s
    WHERE s.server_id = p_server_id
    FOR UPDATE OF s;
@@ -433,16 +436,24 @@ BEGIN
    -- Any change to how the row connects (host, port, database, read-only intent, authentication mode, username,
    -- encryption, certificate trust, multi-subnet failover) never keeps the stored secret on a row that has one:
    -- the same set the route refuses (#5240). The caller's word is not taken: the change is worked out from the row.
-   IF v_secret_auth AND NOT v_new_secret
-      AND (v_host IS DISTINCT FROM v_old_host
-           OR v_port IS DISTINCT FROM v_old_port
-           OR v_database IS DISTINCT FROM v_old_database
-           OR v_read_only_intent IS DISTINCT FROM v_old_read_only_intent
-           OR lower(v_auth) IS DISTINCT FROM lower(v_old_auth)
-           OR v_username IS DISTINCT FROM v_old_username
-           OR lower(v_encrypt_mode) IS DISTINCT FROM lower(v_old_encrypt_mode)
-           OR v_trust_server_certificate IS DISTINCT FROM v_old_trust_server_certificate
-           OR v_multi_subnet_failover IS DISTINCT FROM v_old_multi_subnet_failover) THEN
+   v_connection_changed := v_host IS DISTINCT FROM v_old_host
+      OR v_port IS DISTINCT FROM v_old_port
+      OR v_database IS DISTINCT FROM v_old_database
+      OR v_read_only_intent IS DISTINCT FROM v_old_read_only_intent
+      OR lower(v_auth) IS DISTINCT FROM lower(v_old_auth)
+      OR v_username IS DISTINCT FROM v_old_username
+      OR lower(v_encrypt_mode) IS DISTINCT FROM lower(v_old_encrypt_mode)
+      OR v_trust_server_certificate IS DISTINCT FROM v_old_trust_server_certificate
+      OR v_multi_subnet_failover IS DISTINCT FROM v_old_multi_subnet_failover;
+
+   -- A row that holds a remediation secret is not moved from here, whatever else the call sends: that secret is
+   -- set and changed on the service host, and a new main password does not replace it.
+   IF v_connection_changed AND v_remediation_held THEN
+      RETURN QUERY SELECT 'remediation_kept'::text, NULL::timestamp;
+      RETURN;
+   END IF;
+
+   IF v_secret_auth AND NOT v_new_secret AND v_connection_changed THEN
       RETURN QUERY SELECT 'password_needed'::text, NULL::timestamp;
       RETURN;
    END IF;
@@ -488,24 +499,26 @@ GRANT EXECUTE ON FUNCTION config.edit_monitored_server(integer, timestamp, text[
 --     references are set in the configuration file, or by --add-server on the service host, as the owner. An update
 --     that changes how a server is reached (host, port, engine, database, read-only intent, authentication mode,
 --     username, encryption, certificate trust, multi-subnet failover) while keeping the stored password is refused:
---     the password is typed again with the change. The owner (the role that owns the table, or a superuser) is not
+--     the password is typed again with the change, and a row that holds a remediation login is not moved by these roles
+--     at all (PW003). The owner (the role that owns the table, or a superuser) is not
 --     held to either rule, and neither is a row already in the table: only INSERT and UPDATE are checked. The
 --     trigger and its function are created here, not in a migration, so re-running this script after an upgrade
 --     keeps them current.
 CREATE OR REPLACE FUNCTION config.monitored_server_password_rules()
 RETURNS trigger
 LANGUAGE plpgsql
-SET search_path = pg_catalog
+SET search_path = pg_catalog, pg_temp
 AS $rules$
 DECLARE
    v_reference_main boolean;
    v_reference_remediation boolean;
    v_held boolean;
+   v_moved boolean;
 BEGIN
    -- The store owner (the role that owns the table, and a superuser) writes what it writes: the service, the
    -- --add-server verb, the configuration-file seed, and the body of edit_monitored_server, which runs as the
    -- function's owner. Every other role is held to the two rules below.
-   IF pg_has_role(current_user, (SELECT c.relowner FROM pg_class AS c WHERE c.oid = TG_RELID), 'USAGE') THEN
+   IF pg_has_role(current_user, (SELECT c.relowner FROM pg_catalog.pg_class AS c WHERE c.oid = TG_RELID), 'USAGE') THEN
       RETURN NEW;
    END IF;
 
@@ -545,19 +558,28 @@ BEGIN
    END IF;
 
    -- An update that changes how the row connects (the set edit_monitored_server counts, plus the engine) never keeps
-   -- a stored secret that is still there: the password is typed again with the change.
-   IF (NEW.host IS DISTINCT FROM OLD.host
-       OR NEW.port IS DISTINCT FROM OLD.port
-       OR NEW.engine IS DISTINCT FROM OLD.engine
-       OR NEW.database IS DISTINCT FROM OLD.database
-       OR NEW.read_only_intent IS DISTINCT FROM OLD.read_only_intent
-       OR lower(NEW.auth) IS DISTINCT FROM lower(OLD.auth)
-       OR NEW.username IS DISTINCT FROM OLD.username
-       OR lower(NEW.encrypt_mode) IS DISTINCT FROM lower(OLD.encrypt_mode)
-       OR NEW.trust_server_certificate IS DISTINCT FROM OLD.trust_server_certificate
-       OR NEW.multi_subnet_failover IS DISTINCT FROM OLD.multi_subnet_failover)
-      AND ((COALESCE(OLD.encrypted_password, '') <> '' AND NEW.encrypted_password IS NOT DISTINCT FROM OLD.encrypted_password)
-           OR (COALESCE(OLD.remediation_encrypted_password, '') <> '' AND NEW.remediation_encrypted_password IS NOT DISTINCT FROM OLD.remediation_encrypted_password)) THEN
+   -- a stored secret that is still there: the main password is typed again with the change, and a remediation
+   -- password is changed on the service host.
+   v_moved := NEW.host IS DISTINCT FROM OLD.host
+      OR NEW.port IS DISTINCT FROM OLD.port
+      OR NEW.engine IS DISTINCT FROM OLD.engine
+      OR NEW.database IS DISTINCT FROM OLD.database
+      OR NEW.read_only_intent IS DISTINCT FROM OLD.read_only_intent
+      OR lower(NEW.auth) IS DISTINCT FROM lower(OLD.auth)
+      OR NEW.username IS DISTINCT FROM OLD.username
+      OR lower(NEW.encrypt_mode) IS DISTINCT FROM lower(OLD.encrypt_mode)
+      OR NEW.trust_server_certificate IS DISTINCT FROM OLD.trust_server_certificate
+      OR NEW.multi_subnet_failover IS DISTINCT FROM OLD.multi_subnet_failover;
+
+   IF v_moved
+      AND COALESCE(OLD.remediation_encrypted_password, '') <> ''
+      AND NEW.remediation_encrypted_password IS NOT DISTINCT FROM OLD.remediation_encrypted_password THEN
+      RAISE EXCEPTION '%', 'This server has a remediation login stored. Change how it is reached on the service host, in the configuration file or with --add-server.' USING ERRCODE = 'PW003';
+   END IF;
+
+   IF v_moved
+      AND COALESCE(OLD.encrypted_password, '') <> ''
+      AND NEW.encrypted_password IS NOT DISTINCT FROM OLD.encrypted_password THEN
       RAISE EXCEPTION '%', 'Changing how this server is reached needs its password again: it is stored encrypted and this surface cannot read it back.' USING ERRCODE = 'PW002';
    END IF;
 

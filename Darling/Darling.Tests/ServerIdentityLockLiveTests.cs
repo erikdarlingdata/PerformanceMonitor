@@ -124,7 +124,7 @@ public sealed class ServerIdentityLockLiveTests
             (server_id, name, host, auth, username, encrypted_password, excluded_databases, capture_plans, is_enabled,
              alert_delivery_mode_override, plan_force_bot_enabled, remediation_username, remediation_encrypted_password, monthly_cost_usd)
             VALUES ({id}, '{name}', '{host}', 'integrated', NULL, NULL,
-                    ARRAY['tempdb','model'], TRUE, FALSE, 'PerEvent', TRUE, 'rem-user', 'rem-blob', 7)", ct);
+                    ARRAY['tempdb','model'], TRUE, FALSE, 'PerEvent', TRUE, 'rem-user', NULL, 7)", ct);
 
     /// <summary>The storage key of every definition, mapped from the same five columns the product reads (a NULL
     /// engine or port is the default one), in <c>server_id</c> order.</summary>

@@ -124,6 +124,19 @@ public sealed class DarlingManagedRolesTests
         var function = DarlingManagedRoles.BuildEditMonitoredServerFunctionSql("config");
         Assert.Contains("left(p_secret, 4) = 'env:' OR left(p_secret, 5) = 'file:'", function, StringComparison.Ordinal);
         Assert.Contains("'reference_refused'", function, StringComparison.Ordinal);
+
+        /* The rules read the catalog by its schema and keep the temporary schema last; the two definer functions keep it
+           last too. Each string is in the batch's text and, by the comparison above, in the script's. */
+        Assert.Contains("FROM pg_catalog.pg_class AS c", rules, StringComparison.Ordinal);
+        Assert.Contains("SET search_path = pg_catalog, pg_temp", rules, StringComparison.Ordinal);
+        Assert.Contains("SET search_path = config, pg_catalog, pg_temp", function, StringComparison.Ordinal);
+        Assert.Contains("SET search_path = config, pg_catalog, pg_temp", DarlingManagedRoles.BuildCustomAlertResolveFunctionSql("config"), StringComparison.Ordinal);
+        Assert.DoesNotContain("FROM pg_class", rules, StringComparison.Ordinal);
+
+        /* A change to how a row is reached while it holds a remediation login has its own outcome and its own state. */
+        Assert.Contains("'remediation_kept'", function, StringComparison.Ordinal);
+        Assert.Contains("USING ERRCODE = 'PW003'", rules, StringComparison.Ordinal);
+        Assert.Contains("This server has a remediation login stored. Change how it is reached on the service host, in the configuration file or with --add-server.", rules, StringComparison.Ordinal);
     }
 
     [Fact]

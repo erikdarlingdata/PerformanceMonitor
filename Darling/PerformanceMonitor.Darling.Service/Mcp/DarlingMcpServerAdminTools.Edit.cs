@@ -107,6 +107,11 @@ public sealed partial class DarlingMcpServerAdminTools
     internal const string EditReferenceRefusedText =
         "Enter the password itself. References (env: or file:) can only be set in the configuration file.";
 
+    /// <summary>The answer when the store refuses a change to how a server is reached because the row holds a remediation
+    /// login: that secret is set and changed on the service host. The same words in the store's own trigger.</summary>
+    internal const string EditRemediationKeptText =
+        "This server has a remediation login stored. Change how it is reached on the service host, in the configuration file or with --add-server.";
+
     /// <summary>The fixed answer when the store has no edit function the calling role may run (#5240): a self-managed store
     /// whose roles were provisioned before the function existed. Never PostgreSQL's own text.</summary>
     internal const string EditStoreNeedsRolesText =
@@ -352,6 +357,9 @@ public sealed partial class DarlingMcpServerAdminTools
             case ServerEditWriteKind.ReferenceRefused:
                 /* The store's own check of a new password: it never takes a reference from this role. */
                 return Outcome(EditStatus.Invalid, EditReferenceRefusedText);
+            case ServerEditWriteKind.RemediationKept:
+                /* The store's own check of a change to how the row connects while it holds a remediation login: nothing is written. */
+                return Outcome(EditStatus.Invalid, EditRemediationKeptText);
             case ServerEditWriteKind.Conflict:
                 /* Same shape as the pre-probe conflict: the current non-secret values, so the caller can retry. */
                 if (await store.ReadRowAsync(serverId, cancellationToken) is { } currentRow)
@@ -913,7 +921,7 @@ public sealed partial class DarlingMcpServerAdminTools
     /// <summary><c>Occupied</c>: another definition holds the address the edit moves to. <c>ActualOccupied</c>: another
     /// definition holds the storage key the probe's connected database gives (#5240), the refusal
     /// <see cref="ActualIdentityCollision"/> gives before the write. Neither commits.</summary>
-    internal enum ServerEditWriteKind { Written, NotFound, Conflict, Occupied, PasswordNeeded, ActualOccupied, ReferenceRefused }
+    internal enum ServerEditWriteKind { Written, NotFound, Conflict, Occupied, PasswordNeeded, ActualOccupied, ReferenceRefused, RemediationKept }
 
     internal sealed record ServerEditWrite(ServerEditWriteKind Kind, DateTime ModifiedAt);
 
@@ -1105,6 +1113,8 @@ FROM config_monitored_servers WHERE server_id = $1";
                     return new ServerEditWrite(ServerEditWriteKind.PasswordNeeded, expectedModifiedAt);
                 case "reference_refused":
                     return new ServerEditWrite(ServerEditWriteKind.ReferenceRefused, expectedModifiedAt);
+                case "remediation_kept":
+                    return new ServerEditWrite(ServerEditWriteKind.RemediationKept, expectedModifiedAt);
                 case "saved":
                     break;
                 default:
