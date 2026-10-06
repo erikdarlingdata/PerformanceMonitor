@@ -39,4 +39,11 @@ public static class CollectedDatabases
         AND   database_name NOT IN ('master', 'model', 'msdb', 'tempdb')
         ORDER BY database_name
         """;
+
+    /// <summary>
+    /// <see cref="NamesSql"/> with a row limit, $2 (the web route passes its cap plus one, so one extra row says the list
+    /// was cut). Built from <see cref="NamesSql"/> so the two cannot drift. The desktop Excluded Databases picker keeps
+    /// running <see cref="NamesSql"/> itself and so reads every name, as before. #5245.
+    /// </summary>
+    public const string NamesLimitedSql = NamesSql + "\nLIMIT $2";
 }

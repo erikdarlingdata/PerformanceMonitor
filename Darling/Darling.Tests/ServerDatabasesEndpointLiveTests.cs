@@ -90,6 +90,7 @@ public sealed class ServerDatabasesEndpointLiveTests
 
             using var doc = JsonDocument.Parse(text);
             Assert.Equal(ServerName, doc.RootElement.GetProperty("server").GetString());
+            Assert.False(doc.RootElement.GetProperty("truncated").GetBoolean());
             var names = doc.RootElement.GetProperty("databases").EnumerateArray().Select(e => e.GetString()!).ToArray();
 
             /* Both views, de-duplicated, system databases gone, the other server's database absent. The ORDER BY is
@@ -115,6 +116,90 @@ public sealed class ServerDatabasesEndpointLiveTests
             await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
                 await CleanupAsync(cleanup, cleanupCt));
         }
+    }
+
+    [Fact]
+    public async Task TheRoute_StopsAtItsCap_AndSaysTruncated_OnlyWhenOneMoreDatabaseExists()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live #5245 server-databases cap test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await CleanupAsync(connection, ct);
+
+        var bodySucceeded = false;
+        try
+        {
+            await InsertServerAsync(connection, ServerId, ServerName, ct);
+            var cap = DarlingServerDatabasesEndpoint.MaxDatabases;
+            Assert.Equal(5000, cap);
+
+            /* Exactly cap databases: every name comes back and nothing is cut. */
+            await InsertManyAsync(connection, ServerId, ServerName, 1, cap, ct);
+
+            await using var postgres = NpgsqlDataSource.Create(connectionString!);
+            var builder = WebApplication.CreateBuilder();
+            builder.WebHost.UseTestServer();
+            builder.Logging.ClearProviders();
+            await using var app = builder.Build();
+            DarlingServerDatabasesEndpoint.Map(app, postgres, app.Logger);
+            await app.StartAsync(ct);
+            using var client = app.GetTestClient();
+            var url = "/api/server-databases?server=" + Uri.EscapeDataString(ServerName);
+
+            using (var exact = await client.GetAsync(url, ct))
+            {
+                Assert.Equal(HttpStatusCode.OK, exact.StatusCode);
+                using var doc = JsonDocument.Parse(await exact.Content.ReadAsStringAsync(ct));
+                Assert.Equal(cap, doc.RootElement.GetProperty("databases").GetArrayLength());
+                Assert.False(doc.RootElement.GetProperty("truncated").GetBoolean());
+            }
+
+            /* One more (cap + 1): the cap's worth of names, in name order, and truncated. The extra name is the last in
+               name order, so it is the one left out. */
+            await InsertManyAsync(connection, ServerId, ServerName, cap + 1, cap + 1, ct);
+            using (var cut = await client.GetAsync(url, ct))
+            {
+                Assert.Equal(HttpStatusCode.OK, cut.StatusCode);
+                using var doc = JsonDocument.Parse(await cut.Content.ReadAsStringAsync(ct));
+                var names = doc.RootElement.GetProperty("databases").EnumerateArray().Select(e => e.GetString()!).ToArray();
+                Assert.Equal(cap, names.Length);
+                Assert.True(doc.RootElement.GetProperty("truncated").GetBoolean());
+                Assert.DoesNotContain(CapName(cap + 1), names);
+                Assert.Contains(CapName(1), names);
+            }
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await CleanupAsync(cleanup, cleanupCt));
+        }
+    }
+
+    /// <summary>The seeded name for number <paramref name="n"/>; the zero padding keeps name order equal to number order
+    /// under any collation.</summary>
+    private static string CapName(int n) => "cap5245_" + n.ToString("D5", System.Globalization.CultureInfo.InvariantCulture);
+
+    private static async Task InsertManyAsync(
+        NpgsqlConnection connection, int serverId, string serverName, int first, int last, CancellationToken ct)
+    {
+        using var command = new NpgsqlCommand(
+            "INSERT INTO database_config (config_id, capture_time, server_id, server_name, database_name) " +
+            "SELECT $1 + g, $2, $3, $4, 'cap5245_' || lpad(g::text, 5, '0') FROM generate_series($5::int, $6::int) AS g",
+            connection);
+        command.Parameters.AddWithValue(5_245_000_000_000L);
+        command.Parameters.AddWithValue(DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified));
+        command.Parameters.AddWithValue(serverId);
+        command.Parameters.AddWithValue(serverName);
+        command.Parameters.AddWithValue(first);
+        command.Parameters.AddWithValue(last);
+        await command.ExecuteNonQueryAsync(ct);
     }
 
     private static async Task InsertServerAsync(NpgsqlConnection connection, int serverId, string serverName, CancellationToken ct)
@@ -167,5 +252,22 @@ public sealed class CollectedDatabasesSqlTests
 
         Assert.Contains("SELECT DISTINCT database_name FROM v_database_config WHERE server_id = $1", sql, StringComparison.Ordinal);
         Assert.Contains("SELECT DISTINCT database_name FROM v_database_size_stats WHERE server_id = $1", sql, StringComparison.Ordinal);
+    }
+
+    /// <summary>The web route reads <see cref="CollectedDatabases.NamesLimitedSql"/>: the shared list plus one trailing LIMIT.
+    /// The desktop Excluded Databases picker keeps the unlimited <see cref="CollectedDatabases.NamesSql"/>, so its list
+    /// is every collected name as before.</summary>
+    [Fact]
+    public void NamesLimitedSql_IsTheSharedListPlusALimit_AndTheDesktopPickerStaysUnlimited()
+    {
+        Assert.Equal(CollectedDatabases.NamesSql + "\nLIMIT $2", CollectedDatabases.NamesLimitedSql);
+        Assert.DoesNotContain("LIMIT", CollectedDatabases.NamesSql, StringComparison.Ordinal);
+
+        var desktop = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.ExcludedDatabases.cs");
+        Assert.Contains("CollectedDatabases.NamesSql", desktop, StringComparison.Ordinal);
+        Assert.DoesNotContain("NamesLimitedSql", desktop, StringComparison.Ordinal);
+
+        var route = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingServerDatabasesEndpoint.cs");
+        Assert.Contains("CollectedDatabases.NamesLimitedSql", route, StringComparison.Ordinal);
     }
 }

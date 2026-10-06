@@ -176,6 +176,38 @@ public sealed class WebDatabaseFilterPickerBehaviourTests
     }
 
     [Fact]
+    public void WhenTheRouteCutTheList_ThePopoverSaysSo_AndTheLabelCountsAPlus()
+    {
+        var r = Run("cutList");
+
+        Assert.Equal(40, r.GetProperty("offered").GetInt32());
+        Assert.Equal(
+            new[] { "The list stops at 40 databases, so more are not shown. The search box narrows the names listed." },
+            Strings(r.GetProperty("note")));
+        Assert.Equal("Databases: 1 of 40+", r.GetProperty("label").GetString());
+    }
+
+    [Fact]
+    public void WhenTheRouteCutNothing_NoNoteShows_AndTheLabelKeepsThePlainCount()
+    {
+        var r = Run("uncutList");
+
+        Assert.Empty(Strings(r.GetProperty("note")));
+        Assert.Equal("Databases: 1 of 40", r.GetProperty("label").GetString());
+    }
+
+    [Fact]
+    public void ABlankByTheServicesRuleName_IsRefusedWithTheNameSentence_AndAByteOrderMarkNameIsKept()
+    {
+        var r = Run("blankName");
+
+        Assert.Contains("a name the filter cannot keep", r.GetProperty("message").GetString());
+        Assert.DoesNotContain("too large", r.GetProperty("message").GetString());
+        Assert.Equal(JsonValueKind.Null, r.GetProperty("stored").ValueKind);
+        Assert.Equal(new[] { "1:feff" }, Strings(r.GetProperty("storedBom")));
+    }
+
+    [Fact]
     public void WhenTheInventoryCannotBeLoaded_TheSentenceShows_AndTheStoredNamesStayListed()
     {
         var r = Run("loadFails");

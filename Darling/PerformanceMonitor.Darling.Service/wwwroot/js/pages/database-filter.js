@@ -28,9 +28,10 @@
 
 import { el, mount, apiGet } from "../util.js";
 import { multiPicker, pickerState } from "../multi-picker.js";
-import { getDatabaseFilter, setDatabaseFilter, MAX_DB_NAMES, MAX_DB_QUERY_BYTES, databaseQueryBytes } from "../viewer-local.js";
+import { getDatabaseFilter, setDatabaseFilter, isDatabaseName, MAX_DB_NAMES, MAX_DB_QUERY_BYTES, databaseQueryBytes } from "../viewer-local.js";
 
 const inventories = new Map(); // server_id -> the database names the store offers
+const cutInventories = new Set(); // server_ids whose offered list the route cut at its cap (more databases exist)
 let openFor = null; // the server_id whose popover is open
 let loadFailed = ""; // the sentence for the last failed inventory load of the open popover
 
@@ -69,7 +70,9 @@ export function databaseFilterControl({ serverId, server, onApply }) {
 
   const paintLabel = () => {
     const inv = inventories.get(serverId);
-    button.textContent = databaseFilterLabel(getDatabaseFilter(serverId).length, inv ? inv.length : null);
+    /* A cut list reads "of 5000+": the count is the cap, not the number of databases the server has. */
+    const offered = inv ? (cutInventories.has(serverId) ? inv.length + "+" : inv.length) : null;
+    button.textContent = databaseFilterLabel(getDatabaseFilter(serverId).length, offered);
   };
 
   let picker = null;
@@ -100,7 +103,11 @@ export function databaseFilterControl({ serverId, server, onApply }) {
     });
     const finish = (names) => {
       if (!setDatabaseFilter(serverId, names)) {
-        message.textContent = "That set of databases is too large to keep. Uncheck some and apply again.";
+        /* Two reasons a set is refused: it is over a size bound, or it holds a name the filter cannot keep (blank by the
+           service's rule, or over 128 characters). Each gets its own sentence. */
+        message.textContent = names.some((n) => !isDatabaseName(n))
+          ? "That selection holds a name the filter cannot keep (blank, or over 128 characters). Uncheck it and apply again."
+          : "That set of databases is too large to keep. Uncheck some and apply again.";
         return;
       }
       openFor = null;
@@ -110,7 +117,15 @@ export function databaseFilterControl({ serverId, server, onApply }) {
     };
     const all = el("button", { type: "button", class: "btn db-filter-all", text: "All databases", onClick: () => finish([]) });
     const apply = el("button", { type: "button", class: "btn db-filter-apply", text: "Apply", onClick: () => finish(picker.checked()) });
-    mount(popover, [picker.node, message, el("div", { class: "db-filter-actions" }, [all, apply])]);
+    /* The route stops at its cap and says so (truncated). The names past it are not offered, so the picker says the list is cut;
+       the search box narrows the names listed, it does not reach past the cut. */
+    const cutNote = cutInventories.has(serverId) && inv
+      ? el("div", {
+        class: "db-filter-cut",
+        text: "The list stops at " + inv.length + " databases, so more are not shown. The search box narrows the names listed.",
+      })
+      : null;
+    mount(popover, [picker.node, cutNote, message, el("div", { class: "db-filter-actions" }, [all, apply])]);
     picker.restoreFocus();
   };
 
@@ -119,6 +134,8 @@ export function databaseFilterControl({ serverId, server, onApply }) {
     const res = await apiGet("/api/server-databases?server=" + encodeURIComponent(server));
     if (res.kind === "data" && res.data && Array.isArray(res.data.databases)) {
       inventories.set(serverId, res.data.databases.filter((d) => typeof d === "string"));
+      if (res.data.truncated === true) cutInventories.add(serverId);
+      else cutInventories.delete(serverId);
     } else if (res.kind !== "aborted") {
       loadFailed = "The list of databases could not be loaded" + (res.message ? ": " + res.message : ".");
     }
@@ -151,6 +168,7 @@ export function databaseFilterControl({ serverId, server, onApply }) {
 /** Forgets the held inventories and the open flag. For tests. */
 export function resetDatabaseFilterState() {
   inventories.clear();
+  cutInventories.clear();
   openFor = null;
   loadFailed = "";
 }
