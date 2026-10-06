@@ -74,28 +74,46 @@ public static class ParquetCompaction
        tables this runs on, so on-disk bytes are a fine proxy for merge memory. */
     public const long DefaultBatchInputBytes = 200L * 1024 * 1024; /* 200 MB */
 
-    /* Tables compaction skips entirely — best-effort (#933).
+    /* Tables compaction consolidates per DAY instead of per month (#5393, after #933).
 
-       query_snapshots stores query-plan XML that expands ~30x on read,
-       concentrated in a handful of multi-MB values (reporter data: query_plan p50
-       47 KB, p99 1.1 MB, max 27 MB). Merging it materializes gigabytes of strings
-       and OOMs the compaction memory cap, and the parquet COPY pre-reserves memory
-       in a way that batching can't get under (DuckDB upstream #16482) on memory-
-       constrained hosts. It also barely compacts — its per-cycle files are already
-       near the largest size that merges safely.
+       query_snapshots stores query-plan XML that expands ~30x on read, concentrated in a handful of
+       multi-MB values (reporter data: query_plan p50 47 KB, p99 1.1 MB, max 27 MB). Merging it materializes
+       gigabytes of strings, so the 200 MB per-batch budget the other tables use OOMs the compaction memory cap,
+       and #933 skipped the table. That left one file per archive pass (up to about 24 a day, roughly 2,200 in
+       the 3-month window), and every v_query_snapshots read opens each of them at bind.
 
-       Rather than retry a doomed multi-minute merge every archival cycle (and log
-       an error each time), we skip it. Its per-cycle files are left in place and
-       pruned by the normal retention sweep, so every plan is retained for the full
-       retention window; only the monthly file-count consolidation is forgone for
-       this one table. */
-    private static readonly HashSet<string> SkipCompactionTables = new(StringComparer.OrdinalIgnoreCase)
+       It is now merged into YYYYMMDD_query_snapshots.parquet (and _ptNNN parts), one day per group, with its own
+       much smaller per-batch input budget (DailyBatchInputBytes) on one thread. Only the day shapes are merged:
+       a monthly, legacy or imported_ file of this table is still left alone, as before. */
+    private static readonly HashSet<string> DailyCompactionTables = new(StringComparer.OrdinalIgnoreCase)
     {
         "query_snapshots"
     };
 
-    /* Whether compaction skips <paramref name="table"/> entirely (best-effort). */
-    public static bool ShouldSkipCompaction(string table) => SkipCompactionTables.Contains(table);
+    /* Whether compaction merges <paramref name="table"/> one day per group rather than one month per group. */
+    public static bool IsDailyTable(string table) => DailyCompactionTables.Contains(table);
+
+    /* Whether compaction leaves the group (<paramref name="period"/>, <paramref name="table"/>) alone: a table
+       that is merged per day has no monthly merge, so its 6-digit (YYYYMM) groups are skipped. A day group has
+       an 8-digit period. */
+    public static bool ShouldSkipCompaction(string table, string period) =>
+        IsDailyTable(table) && period.Length != 8;
+
+    /* On-disk parquet bytes per merge batch for a daily table, measured on a copy of a real store's
+       query_snapshots files (DuckDB.NET in Lite.Tests, 4 GB memory_limit, one thread, peak process working set;
+       directional, a small store):
+         - real plans (p50 5.8 KB, max 1.1 MB): 8 MB of input peaked at 281 MB;
+         - plan text repeated 8x (p50 46 KB, max 9 MB, about the reporter's p50): 200 MB peaked at 1.3 GB;
+         - plan text repeated 24x (p99 about 1 MB, max 27 MB, the reporter's p99 and max but 3x its p50):
+           8 MB peaked at 1.23 GB, 13 MB at 2.4 GB, 100 MB at 3.7 GB, so no budget in the hundreds of MB is safe.
+       8 MiB keeps the worst measured batch under half the 4 GB cap. Peak memory follows the plan text a row
+       group decodes, not the file bytes, so a file whose own size is over the budget is not merged by itself:
+       CompactParquetFiles leaves it where it is. */
+    public const long DailyBatchInputBytes = 8L * 1024 * 1024; /* 8 MiB */
+
+    /* Threads for a daily table's merge: one thread roughly halves the row-group buffers in flight (24x
+       plans, 6.5 MB: 2.0 GB on two threads, 1.3 GB on one) at about twice the time. */
+    public static int ThreadsFor(string table) => IsDailyTable(table) ? 1 : DefaultThreads;
 
     /* Columns to exclude during compaction — dead weight from legacy archives */
     private static readonly Dictionary<string, string[]> CompactionExcludeColumns = new()
@@ -148,9 +166,9 @@ public static class ParquetCompaction
        backlog the pairwise path was ~5x slower (it re-read an ever-larger
        accumulator file every step) and OOM-prone. A single COPY at the default
        row-group size is both faster and stays within the memory cap for the
-       numeric tables this runs on. (Wide query-plan-XML tables can't be merged
-       within the cap at all on constrained hosts and are skipped — see
-       SkipCompactionTables.)
+       numeric tables this runs on. (query_snapshots, with its query-plan XML,
+       is merged one day at a time on a much smaller batch budget — see
+       DailyCompactionTables.)
 
        Pragma tuning:
          - memory_limit = 4GB: parquet COPY makes allocations that bypass the

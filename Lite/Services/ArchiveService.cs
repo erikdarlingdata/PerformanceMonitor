@@ -78,6 +78,9 @@ public class ArchiveService
     internal static Func<Task>? BetweenPreserveCopyAndResetForTests { get; set; }
     internal long CompactionBatchInputBytes { get; set; } = ParquetCompaction.DefaultBatchInputBytes;
 
+    /* The per-batch input budget for the tables merged one day at a time (query_snapshots, #5393). */
+    internal long DailyCompactionBatchInputBytes { get; set; } = ParquetCompaction.DailyBatchInputBytes;
+
     /// <summary>
     /// The most disk space (bytes) the last compaction pass found a single month/table group would need for its
     /// merged output: the on-disk size of the files it would read, which its temps match until the swap removes
@@ -764,7 +767,8 @@ COPY (
                for the month would write over the journal and forget the files it still has to delete. */
             if (File.Exists(journalPath))
             {
-                var m = Regex.Match(journalName, @"^(\d{6})_(.+)" + Regex.Escape(SwapJournalSuffix) + "$");
+                /* The group's period is a month (6 digits) or, for a table merged per day, a day (8 digits). */
+                var m = Regex.Match(journalName, @"^(\d{8}|\d{6})_(.+)" + Regex.Escape(SwapJournalSuffix) + "$");
                 if (m.Success)
                 {
                     unresolvedGroups.Add((m.Groups[1].Value, m.Groups[2].Value));
@@ -790,7 +794,9 @@ COPY (
     }
 
     /// <summary>
-    /// Compacts all per-cycle parquet files into monthly files (YYYYMM_tablename.parquet).
+    /// Compacts all per-cycle parquet files into monthly files (YYYYMM_tablename.parquet), or, for the tables
+    /// <see cref="ParquetCompaction.IsDailyTable"/> names (query_snapshots), into daily files
+    /// (YYYYMMDD_tablename.parquet, and _ptNNN parts past the table's smaller batch budget).
     /// This keeps the archive directory small (~75 files for 3 months of 25 tables)
     /// and dramatically improves DuckDB read_parquet glob performance.
     /// </summary>
@@ -829,6 +835,25 @@ COPY (
             {
                 month = m.Groups[1].Value[..6]; /* YYYYMM */
                 table = m.Groups[2].Value;
+
+                /* A table merged per day keeps the whole day as its group key (#5393). */
+                if (ParquetCompaction.IsDailyTable(table))
+                {
+                    month = m.Groups[1].Value;
+                }
+            }
+
+            /* YYYYMMDD_tablename or YYYYMMDD_tablename_ptNNN of a table merged per day: the day file, and the
+               part files it splits into past its batch budget (#5393). Matched before the generic daily form
+               below, which would read the part suffix as part of the table name. */
+            if (month == null)
+            {
+                m = Regex.Match(name, @"^(\d{8})_([a-z].+?)(_pt\d{3})?$");
+                if (m.Success && ParquetCompaction.IsDailyTable(m.Groups[2].Value))
+                {
+                    month = m.Groups[1].Value;
+                    table = m.Groups[2].Value;
+                }
             }
 
             /* YYYYMMDD_tablename (no HHMM) */
@@ -958,10 +983,9 @@ COPY (
 
         foreach (var ((month, table), files) in groups)
         {
-            /* Best-effort: some tables can't be merged within the memory cap and
-               are skipped — their per-cycle files are left in place and pruned by
-               retention (see ParquetCompaction.SkipCompactionTables and #933). */
-            if (ParquetCompaction.ShouldSkipCompaction(table))
+            /* A table merged per day (query_snapshots, #5393) has no monthly merge: its monthly, legacy and
+               imported_ files stay as they are and are pruned by retention. Only its day groups go on. */
+            if (ParquetCompaction.ShouldSkipCompaction(table, month))
             {
                 continue;
             }
@@ -993,11 +1017,12 @@ COPY (
                     .ToList();
 
                 /* Bucket files into size-budgeted batches so a single COPY never
-                   merges an unbounded amount of data. Wide query-plan-XML tables
-                   that can't merge within the cap are skipped above; the tables
-                   that reach here compress mildly, so the on-disk budget is a fine
-                   proxy and they fit one batch with many files (#933). */
-                var batches = ParquetCompaction.BuildSizeBudgetedBatches(sorted, CompactionBatchInputBytes);
+                   merges an unbounded amount of data. Most tables compress mildly, so
+                   the on-disk budget is a fine proxy and they fit one batch with many
+                   files (#933). query_snapshots, whose query-plan XML expands about 30x
+                   on read, gets a much smaller budget (#5393). */
+                var isDaily = ParquetCompaction.IsDailyTable(table);
+                var batches = ParquetCompaction.BuildSizeBudgetedBatches(sorted, isDaily ? DailyCompactionBatchInputBytes : CompactionBatchInputBytes);
 
                 /* Merge only what changes, and only what fits (#5377).
 
@@ -1012,8 +1037,11 @@ COPY (
                    would not fit in the free space, with the headroom a merge needs, is held back for a later
                    pass; its files stay as they are, readable, and the pass says so once, below. Batches are
                    disjoint, so any subset of them is a complete merge of its own files. */
+                /* A table merged per day also leaves a batch of one alone, whatever the file's name (#5393): a
+                   per-cycle file over the small budget is merged by nothing else, and rewriting it alone would
+                   only rename it while risking the memory the budget exists to bound. */
                 var wantedBatches = batches
-                    .Where(b => !(b.Count == 1 && IsMergedFileName(Path.GetFileName(b[0]))))
+                    .Where(b => !(b.Count == 1 && (isDaily || IsMergedFileName(Path.GetFileName(b[0])))))
                     .ToList();
                 var wantedBytes = wantedBatches.Sum(BatchInputBytes);
                 largestNeedBytes = Math.Max(largestNeedBytes, wantedBytes);
@@ -1082,7 +1110,8 @@ COPY (
                    place for next cycle's retry. */
                 for (var i = 0; i < batches.Count; i++)
                 {
-                    ParquetCompaction.MergeBatchToFile(table, batches[i], batchOutputs[i].TempPath, spillDirSql);
+                    ParquetCompaction.MergeBatchToFile(table, batches[i], batchOutputs[i].TempPath, spillDirSql,
+                        threads: ParquetCompaction.ThreadsFor(table));
                 }
 
                 OnCompactionTempsReadyForTests?.Invoke(batchOutputs.Select(o => o.TempPath).ToList());
@@ -1183,8 +1212,21 @@ COPY (
        a batch of one of them has nothing to merge. */
     private static readonly Regex s_mergedFileNamePattern = new(@"^(imported_)?\d{6}_.+?(_pt\d{3})?$", RegexOptions.Compiled);
 
-    private static bool IsMergedFileName(string fileName) =>
-        s_mergedFileNamePattern.IsMatch(Path.GetFileNameWithoutExtension(fileName));
+    /* The same for a table merged per day: YYYYMMDD_table or YYYYMMDD_table_ptNNN (#5393). A per-cycle name
+       (YYYYMMDD_HHMM_table) puts the time in front of the table name, so it never reads as one of these. */
+    private static readonly Regex s_dailyMergedFileNamePattern = new(@"^\d{8}_(?<table>.+?)(_pt\d{3})?$", RegexOptions.Compiled);
+
+    private static bool IsMergedFileName(string fileName)
+    {
+        var name = Path.GetFileNameWithoutExtension(fileName);
+        if (s_mergedFileNamePattern.IsMatch(name))
+        {
+            return true;
+        }
+
+        var daily = s_dailyMergedFileNamePattern.Match(name);
+        return daily.Success && ParquetCompaction.IsDailyTable(daily.Groups["table"].Value);
+    }
 
     private static long BatchInputBytes(List<string> batch) =>
         batch.Sum(p => new FileInfo(p.Replace("/", "\\")).Length);
