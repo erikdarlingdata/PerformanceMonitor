@@ -217,6 +217,14 @@ public class ArchiveService
 
         _logger?.LogInformation("Archiving data older than {CutoffDate} to Parquet (prefix: {Timestamp})", cutoffDate, timestamp);
 
+        /* #5377: what the archive holds before this pass touches it (the recoveries above rebuild the views
+           themselves when they change anything). The views are rebuilt at the end only when this differs, or when
+           a table's file was promoted: every rebuild bumps the archive generation and throws away every cached
+           watermark, so rebuilding after a pass that moved nothing made the next read of each table pay for the
+           watermark again. */
+        var archiveBefore = SnapshotArchiveFiles();
+        var promotedAnyFile = false;
+
         /* Archive each table independently. Export-to-Parquet (COPY ... TO)
            only READS the database, so it runs under a read lock — concurrently
            with the UI. Only the DELETE modifies the file, and the promote of
@@ -303,6 +311,7 @@ public class ArchiveService
                         WritePendingArchive(table, cutoffDate, Path.GetFileName(parquetPath));
                         BeforePromoteForTests?.Invoke(table);
                         MoveWithRetry(tempParquetPath, parquetPath);
+                        promotedAnyFile = true;
                     }
                     catch (Exception ex) when (ex is not SimulatedKillException)
                     {
@@ -353,8 +362,13 @@ public class ArchiveService
         }
         finally
         {
-            /* Refresh archive views outside write lock — view creation is fast and safe */
-            await _duckDb.CreateArchiveViewsAsync();
+            /* Refresh archive views outside write lock — view creation is fast and safe. Skipped when the pass
+               left the archive's files as it found them (#5377); a file promoted or swapped by a pass that then
+               failed counts as a change, so the partial-failure paths still rebuild. */
+            if (promotedAnyFile || !SnapshotArchiveFiles().SequenceEqual(archiveBefore, StringComparer.Ordinal))
+            {
+                await _duckDb.CreateArchiveViewsAsync();
+            }
         }
         }
         finally
@@ -362,6 +376,35 @@ public class ArchiveService
             IsArchiving = false;
             s_archiveLock.Release();
         }
+    }
+
+    /* The archive's membership as the views see it (#5377): every file their *_table.parquet globs match, with its
+       size and write time so a file swapped under the same name differs too. Sorted, so two snapshots compare
+       element by element. */
+    private List<string> SnapshotArchiveFiles()
+    {
+        var snapshot = new List<string>();
+        if (!Directory.Exists(_archivePath))
+        {
+            return snapshot;
+        }
+
+        foreach (var path in Directory.GetFiles(_archivePath, "*.parquet"))
+        {
+            try
+            {
+                var info = new FileInfo(path);
+                snapshot.Add($"{info.Name}|{info.Length}|{info.LastWriteTimeUtc.Ticks}");
+            }
+            catch (IOException)
+            {
+                /* Gone between the listing and the stat: a change in itself, and the next snapshot will not list it. */
+                snapshot.Add($"{Path.GetFileName(path)}|gone");
+            }
+        }
+
+        snapshot.Sort(StringComparer.Ordinal);
+        return snapshot;
     }
 
     /* The DELETE of a periodic export, under the write lock: it modifies table data and the next CHECKPOINT

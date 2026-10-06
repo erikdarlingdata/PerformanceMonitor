@@ -353,13 +353,15 @@ public class CollectionLogDrainForensicsStoreTests
            route can read. The pin is what turned that into a merge conflict to resolve rather than a
            wrong number nobody noticed. #4053's no-csvlog-file arm is the twelfth, the csvlog route's twin of
            the eleventh: the collector is on and csvlog is configured, but no .csv file exists yet. #4053's
-           no-jsonlog-file arm is the thirteenth, the jsonlog route's twin of the twelfth. */
-        Assert.Equal(13, Regex.Matches(worker, @"drain: null").Count);
+           no-jsonlog-file arm is the thirteenth, the jsonlog route's twin of the twelfth. #5378's
+           long-query PERMISSIONS arm is the fourteenth: the session's create was denied (the login lacks
+           ALTER ANY EVENT SESSION), so the run is an early return that read and drained nothing. */
+        Assert.Equal(14, Regex.Matches(worker, @"drain: null").Count);
 
-        /* And V110's fetch sums stay null on those same thirteen arms and for the same reason: no item
+        /* And V110's fetch sums stay null on those same fourteen arms and for the same reason: no item
            completed, so no fetch was performed. Counted rather than merely present, so an arm that starts
            passing a real value - which would mean attributing another run's fetch to a failure row - is a red. */
-        Assert.Equal(13, Regex.Matches(worker, @"fetchPhases: null").Count);
+        Assert.Equal(14, Regex.Matches(worker, @"fetchPhases: null").Count);
     }
 
     /// <summary>
