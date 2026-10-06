@@ -237,6 +237,31 @@ public sealed class HostHeaderGuardTests
         Assert.EndsWith(", requireTokenWhenLoopbackOnly)", callText, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// #5288: a start that network mode degraded out of listens on loopback only, so its Host guard admits loopback
+    /// names only. The behavior is proven through <c>ConfigurePipeline</c> in <c>DarlingMcpHostGateLiveTests</c> and
+    /// <c>DarlingWebHostGateLiveTests</c> (<c>TlsRefusal_DegradedLoopbackServer_AdmitsLoopbackNamesOnly_NotTheListenAddress</c>),
+    /// which build the pipeline through <c>ResolveHostGuardListenIp</c> with the final mode; this pins the host's own
+    /// glue, which a network-mode start cannot drive from a test: the pipeline call hands over the resolver's answer,
+    /// decided after the TLS decision, and never the parsed address itself.
+    /// </summary>
+    [Theory]
+    [InlineData("DarlingMcpHostService.cs", "ResolveHostGuardListenIp(networkMode, networkListenIp)")]
+    [InlineData("DarlingWebHostService.cs", "DarlingMcpHostService.ResolveHostGuardListenIp(networkMode, networkListenIp)")]
+    public void TlsRefusal_TheHostHandsThePipelineTheGuardAddress_DecidedFromTheFinalMode(string fileName, string resolverCall)
+    {
+        var source = ReadHostSource(fileName);
+
+        var tlsDecision = source.IndexOf("networkMode = tlsOutcome.Expose;", StringComparison.Ordinal);
+        var call = source.IndexOf("ConfigurePipeline(_app,", StringComparison.Ordinal);
+        Assert.True(tlsDecision > 0 && call > tlsDecision, $"{fileName}: the pipeline call must come after the TLS decision");
+
+        var callText = source[call..source.IndexOf(';', call)];
+        Assert.Contains(resolverCall, callText, StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "networkListenIp", callText.Replace(resolverCall, string.Empty, StringComparison.Ordinal), StringComparison.Ordinal);
+    }
+
     /// <summary>And it must precede the endpoint mapping, or a request reaches a handler before being judged.</summary>
     [Fact]
     public void McpHost_RunsTheGuardBeforeMapMcp()

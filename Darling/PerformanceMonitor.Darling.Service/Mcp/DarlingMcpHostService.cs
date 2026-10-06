@@ -697,7 +697,11 @@ public sealed class DarlingMcpHostService : BackgroundService
                and a start whose token could not be resolved both leave it empty, and stay tokenless as before. */
             var requireTokenWhenLoopbackOnly = !networkMode && bearerToken.Length > 0;
 
-            ConfigurePipeline(_app, networkMode, networkListenIp, allowedCidr, bearerToken, allowedHostName, requireTokenWhenLoopbackOnly);
+            /* #5288: the Host guard admits the listen address only while the server is exposed on it. networkListenIp
+               was parsed before any degrade and still holds it afterwards, so it goes through
+               ResolveHostGuardListenIp with the final mode: a start that fell back to loopback-only admits loopback
+               names only, whatever it parsed. */
+            ConfigurePipeline(_app, networkMode, ResolveHostGuardListenIp(networkMode, networkListenIp), allowedCidr, bearerToken, allowedHostName, requireTokenWhenLoopbackOnly);
 
             /* #2389: name the authority for each half of what is being started. enabled/port come from
                whichever plane the supervisor resolved; listen/allowFrom/token are always darling.json. */
@@ -1360,6 +1364,19 @@ public sealed class DarlingMcpHostService : BackgroundService
 
         return networkMode ? hostName : null;
     }
+
+    /// <summary>
+    /// The listen address the Host guard admits beside the loopback names (#5288): the parsed
+    /// <c>mcp.network.listen</c> while the server is network-exposed, and null on a loopback-only server, which then
+    /// admits loopback names only. That includes a start that network mode degraded out of (a refused certificate, an
+    /// unreadable token): the address was parsed before the degrade and is still in hand, but nothing listens on it
+    /// any more, so a request that names it is not one this server was meant to answer. PURE;
+    /// <paramref name="networkMode"/> must be the FINAL mode, after every degrade, because that is the whole rule.
+    /// Both hosts hand <c>ConfigurePipeline</c> this answer, and the gate tests build their pipelines through it for
+    /// the reason they build through <see cref="ResolveAllowedHostName"/>.
+    /// </summary>
+    internal static IPAddress? ResolveHostGuardListenIp(bool networkMode, IPAddress? networkListenIp)
+        => networkMode ? networkListenIp : null;
 
     /// <summary>
     /// Everything AFTER <c>builder.Build()</c>: the Host-allowlist/DNS-rebinding guard (both modes), the

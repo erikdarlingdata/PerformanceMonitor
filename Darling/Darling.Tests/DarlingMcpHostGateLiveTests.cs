@@ -84,7 +84,12 @@ public sealed class DarlingMcpHostGateLiveTests
         host.ConfigurePipeline(
             app,
             networkMode: networkMode,
-            networkListenIp: networkMode ? IPAddress.Parse(ListenIp) : null,
+            // #5288: the Host guard's listen address is decided exactly as TryStartServerAsync decides it, through
+            // ResolveHostGuardListenIp from the FINAL mode. The host parses the configured address before any degrade,
+            // so a start that degraded out of network mode (requireTokenWhenLoopbackOnly) still has it in hand and the
+            // resolver is what drops it; a start that never had a network block has none to hand over.
+            networkListenIp: DarlingMcpHostService.ResolveHostGuardListenIp(
+                networkMode, networkMode || requireTokenWhenLoopbackOnly ? IPAddress.Parse(ListenIp) : null),
             allowedCidr: IPNetwork.Parse(AllowedCidr),
             bearerToken: Token,
             // #5288: the configured name is decided exactly as TryStartServerAsync decides it, through
@@ -216,6 +221,26 @@ public sealed class DarlingMcpHostGateLiveTests
         var ctx = await SendRaw(server, "/", "evil.com", IPAddress.Loopback, bearer: Token);
 
         Assert.Equal(StatusCodes.Status400BadRequest, ctx.Response.StatusCode);
+    }
+
+    /// <summary>
+    /// #5288: the degraded loopback-only server listens on loopback only, so its Host guard admits loopback names
+    /// only. A request that names the configured listen address is answered 400 even with the right token, because
+    /// nothing is listening there any more, while a loopback name with the same token still reaches <c>tools/list</c>.
+    /// The server is built through <c>ResolveHostGuardListenIp</c> with the final mode, the way the host builds it.
+    /// </summary>
+    [Theory]
+    [InlineData("/")]
+    [InlineData("/core")]
+    public async Task TlsRefusal_DegradedLoopbackServer_AdmitsLoopbackNamesOnly_NotTheListenAddress(string path)
+    {
+        using var server = await BuildServer(networkMode: false, requireTokenWhenLoopbackOnly: true);
+
+        var named = await SendRaw(server, path, ListenIp, IPAddress.Loopback, bearer: Token);
+        Assert.Equal(StatusCodes.Status400BadRequest, named.Response.StatusCode);
+
+        var (loopbackName, body) = await ToolsListAsync(server, path, "localhost", IPAddress.Loopback, Token);
+        Assert.True(loopbackName == StatusCodes.Status200OK, $"a loopback name with the token must reach tools/list, got {loopbackName}: {body}");
     }
 
     /// <summary>
