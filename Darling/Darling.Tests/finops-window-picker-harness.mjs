@@ -71,14 +71,11 @@ const hoursOf = (url) => new URL(url, "http://viewer.test").searchParams.get("ho
 
 const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "finops-window-"));
 try {
-  fs.mkdirSync(path.join(scratch, "pages", "finops"), { recursive: true });
+  /* Copy the whole js tree (js/, js/pages/ and every subdirectory) rather than a hand-kept list (#5279): a page module that
+     another PR adds then needs no edit here. Only imported files load, so the rest are inert; every stand-in below is
+     written AFTER the copy, so it still replaces the real file. */
+  fs.cpSync(jsDir, scratch, { recursive: true });
   fs.writeFileSync(path.join(scratch, "package.json"), '{ "type": "module" }');
-  for (const f of ["util.js", "panels.js", "grid-tools.js", "read-fields.js"]) fs.copyFileSync(path.join(jsDir, f), path.join(scratch, f));
-  /* The plan button the Expensive Queries and High Impact grids add: copied when present. */
-  if (fs.existsSync(path.join(jsDir, "pages", "plan-viewer.js"))) fs.copyFileSync(path.join(jsDir, "pages", "plan-viewer.js"), path.join(scratch, "pages", "plan-viewer.js"));
-  for (const f of ["optimization.js", "high-impact.js", "index-analysis.js"]) {
-    fs.copyFileSync(path.join(jsDir, "pages", "finops", f), path.join(scratch, "pages", "finops", f));
-  }
   fs.writeFileSync(
     path.join(scratch, "charts.js"),
     'import { el } from "./util.js";\nexport const SERIES_COLORS = [];\nexport function normalizeColor(c) { return c; }\nexport function renderLineChart() { return el("div", {}); }\n' +

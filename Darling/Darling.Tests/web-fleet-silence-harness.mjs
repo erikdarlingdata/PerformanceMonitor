@@ -84,14 +84,10 @@ globalThis.fetch = async (url, init = {}) => {
 const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "fleet-silence-"));
 const out = {};
 try {
-  fs.mkdirSync(path.join(scratch, "pages"), { recursive: true });
+  /* Copy the whole js tree (js/, js/pages/ and every subdirectory) rather than a hand-kept list (#5279): a page module that
+     another PR adds then needs no edit here. Only imported files load, so the rest are inert. */
+  fs.cpSync(jsDir, scratch, { recursive: true });
   fs.writeFileSync(path.join(scratch, "package.json"), '{ "type": "module" }');
-  for (const f of fs.readdirSync(jsDir)) if (f.endsWith(".js")) fs.copyFileSync(path.join(jsDir, f), path.join(scratch, f));
-  for (const f of fs.readdirSync(path.join(jsDir, "pages"))) {
-    const src = path.join(jsDir, "pages", f);
-    if (f.endsWith(".js")) fs.copyFileSync(src, path.join(scratch, "pages", f));
-    else if (fs.statSync(src).isDirectory()) fs.cpSync(src, path.join(scratch, "pages", f), { recursive: true });
-  }
   const page = await import(pathToFileURL(path.join(scratch, "pages", "fleet.js")).href);
   const main = new FakeNode("main");
   const draw = async () => { await page.renderFleet(main); await settle(); };

@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Data;
+using System.Linq;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using Microsoft.Data.SqlClient;
@@ -710,7 +711,14 @@ ORDER BY point_time";
     /// first_execution_time is already projected so a reader can tell those rows apart. Tier 2 stored the
     /// real interval identity, which would now make collapsing them trivial — and the exclusion STANDS
     /// anyway, because whether this drilldown should show every snapshot or one row per interval is a
-    /// product call, not an arithmetic one, and the arithmetic was never wrong here.</para>
+    /// product call, not an arithmetic one, and the arithmetic of THIS read was never wrong.</para>
+    ///
+    /// <para>The window that shows it did add these rows up, though: its summary's Total Executions summed
+    /// execution_count over the list, which counts an interval collected N times about N times (#5306). A
+    /// total over this list takes <see cref="QueryStoreHistoryRow.TotalExecutions"/>, which keeps the latest
+    /// snapshot of each interval first. That is why the projection carries runtime_stats_interval_id and
+    /// replica_role: they are the rest of the identity the aggregate reads above dedup on, and are not shown in
+    /// the grid. The grid itself still lists every snapshot.</para>
     /// </summary>
     public async Task<List<QueryStoreHistoryRow>> GetQueryStoreHistoryAsync(int serverId, string databaseName, long queryId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null)
     {
@@ -768,7 +776,9 @@ SELECT
     plan_forcing_type,
     compatibility_level,
     query_hash,
-    query_plan_hash
+    query_plan_hash,
+    runtime_stats_interval_id,
+    replica_role
 FROM v_query_store_stats
 WHERE server_id = $1
 AND   database_name = $2
@@ -838,7 +848,9 @@ ORDER BY collection_time";
                 PlanForcingType = reader.IsDBNull(46) ? "" : reader.GetString(46),
                 CompatibilityLevel = reader.IsDBNull(47) ? 0 : reader.GetInt32(47),
                 QueryHash = reader.IsDBNull(48) ? "" : reader.GetString(48),
-                QueryPlanHash = reader.IsDBNull(49) ? "" : reader.GetString(49)
+                QueryPlanHash = reader.IsDBNull(49) ? "" : reader.GetString(49),
+                RuntimeStatsIntervalId = reader.IsDBNull(50) ? (long?)null : Convert.ToInt64(reader.GetValue(50)),
+                ReplicaRole = reader.IsDBNull(51) ? null : reader.GetString(51)
             });
         }
 
@@ -1184,8 +1196,47 @@ public class QueryStoreHistoryRow
     public string QueryHash { get; set; } = "";
     public string QueryPlanHash { get; set; } = "";
 
+    // The rest of the interval identity, beside plan_id / first_execution_time / execution_type_desc above (#5306).
+    // Not shown in the grid: LatestPerInterval keys on them. NULL on rows collected before the columns existed
+    // (runtime_stats_interval_id, #1841 tier 2) and, for replica_role, off an availability group.
+    public long? RuntimeStatsIntervalId { get; set; }
+    public string? ReplicaRole { get; set; }
+
     public double TotalDurationMs => ExecutionCount * AvgDurationMs;
     public double TotalCpuMs => ExecutionCount * AvgCpuTimeMs;
+
+    /// <summary>
+    /// #5306: the newest snapshot of each Query Store interval among <paramref name="rows"/>.
+    ///
+    /// <para>The history grid lists EVERY stored snapshot on purpose (see <c>GetQueryStoreHistoryAsync</c>), and
+    /// query_store_stats rows are cumulative per interval: an interval the collector fetched N times is N rows with a
+    /// growing execution_count. Anything that ADDS those rows up counts the interval about N times, so a total takes
+    /// this first. The input is not changed: the window binds the same list to its grid.</para>
+    ///
+    /// <para>The interval identity and the "latest" order are the aggregate reads' in this file (#1841, #1907). The key
+    /// is plan_id, runtime_stats_interval_id, first_execution_time, execution_type_desc and replica_role; the survivor
+    /// is the greatest collection_time, then the greatest execution_count (the #1907 tie-break, which picks the flushed
+    /// slice of an interval stored twice at one collection time). database_name and query_id are in those reads' key
+    /// too and are constant here, because the history read is scoped to one of each. A NULL part of the key matches
+    /// another NULL, as in the aggregate reads' partitioning, which is also how the rows collected before the id was
+    /// stored keep the first_execution_time proxy.</para>
+    /// </summary>
+    public static IReadOnlyList<QueryStoreHistoryRow> LatestPerInterval(IEnumerable<QueryStoreHistoryRow> rows) =>
+        rows
+            .GroupBy(r => (r.PlanId, r.RuntimeStatsIntervalId, r.FirstExecutionTime, r.ExecutionTypeDesc, r.ReplicaRole))
+            .Select(interval => interval
+                .OrderByDescending(r => r.CollectionTime)
+                .ThenByDescending(r => r.ExecutionCount)
+                .First())
+            .ToList();
+
+    /// <summary>
+    /// #5306: the executions of the queries <paramref name="rows"/> hold, counting each interval once at its latest
+    /// snapshot (<see cref="LatestPerInterval"/>). The history window's summary line shows this as Total Executions;
+    /// adding <see cref="ExecutionCount"/> up over the grid's rows counted an interval collected N times about N times.
+    /// </summary>
+    public static long TotalExecutions(IEnumerable<QueryStoreHistoryRow> rows) =>
+        LatestPerInterval(rows).Sum(r => r.ExecutionCount);
 
     /// <summary>
     /// The zone the window that shows this row draws its chart in (#4766): its opening tab's picker zone. The window

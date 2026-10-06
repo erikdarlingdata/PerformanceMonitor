@@ -77,10 +77,11 @@ const findText = (node, tag, text) => findAll(node, tag).find((n) => n.textConte
 
 const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "storage-growth-window-"));
 try {
-  fs.mkdirSync(path.join(scratch, "pages", "finops"), { recursive: true });
+  /* Copy the whole js tree (js/, js/pages/ and every subdirectory) rather than a hand-kept list (#5279): a page module that
+     another PR adds then needs no edit here. Only imported files load, so the rest are inert; every stand-in below is
+     written AFTER the copy, so it still replaces the real file. */
+  fs.cpSync(jsDir, scratch, { recursive: true });
   fs.writeFileSync(path.join(scratch, "package.json"), '{ "type": "module" }');
-  for (const f of ["util.js", "panels.js", "grid-tools.js", "read-fields.js"]) fs.copyFileSync(path.join(jsDir, f), path.join(scratch, f));
-  fs.copyFileSync(path.join(jsDir, "pages", "finops", "storage-growth.js"), path.join(scratch, "pages", "finops", "storage-growth.js"));
   fs.writeFileSync(
     path.join(scratch, "charts.js"),
     'import { el } from "./util.js";\nexport const SERIES_COLORS = [];\nexport function normalizeColor(c) { return c; }\nexport function renderLineChart() { return el("div", {}); }\n' +

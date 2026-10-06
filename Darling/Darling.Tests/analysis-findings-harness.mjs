@@ -48,10 +48,10 @@ globalThis.fetch = async (url, opts) => { fetches.push(String(url)); signals.pus
 
 const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "analysis-findings-"));
 try {
-  fs.mkdirSync(path.join(scratch, "pages"), { recursive: true });
+  /* Copy the whole js tree (js/, js/pages/ and every subdirectory) rather than a hand-kept list (#5279): a page module that
+     another PR adds then needs no edit here. Only imported files load, so the rest are inert. */
+  fs.cpSync(jsDir, scratch, { recursive: true });
   fs.writeFileSync(path.join(scratch, "package.json"), '{ "type": "module" }');
-  fs.copyFileSync(path.join(jsDir, "util.js"), path.join(scratch, "util.js"));
-  fs.copyFileSync(path.join(jsDir, "pages", "analysis-findings.js"), path.join(scratch, "pages", "analysis-findings.js"));
   const mod = await import(pathToFileURL(path.join(scratch, "pages", "analysis-findings.js")).href);
 
   const finding = (over) => ({
