@@ -19,7 +19,7 @@ namespace Darling.Tests;
 /// <summary>
 /// How many recommendations the FinOps Index Analysis tab asks for and what it says when the read cut the list (#5238), run from
 /// the shipped page script under Node (<c>finops-index-analysis-limit-harness.mjs</c>): the first read asks for 500, a cut list
-/// says it stops at the limit and how many are not shown, a cut list of one database does not send the reader back to the
+/// says it stops at the limit and how many are not shown (one left over reads "is", not "are"), a cut list of one database does not send the reader back to the
 /// Database box, and a list that fits, or has exactly as many as the limit lists, says nothing about a cut. Node is skipped when
 /// it is not installed.
 /// </summary>
@@ -87,6 +87,16 @@ public sealed class FinOpsIndexAnalysisLimitBehaviourTests
         var notices = Notices(Run().GetProperty("filtered"));
         Assert.Equal(
             new[] { "Showing the largest 500 of 503 recommendations. The list stops at 500, so 3 more are not shown. Database Alpha." + Tail },
+            notices);
+    }
+
+    /* The count of what is left reads "1 more is not shown" for one and "N more are not shown" for any other number. */
+    [Fact]
+    public void ACutListLeavingExactlyOneSaysOneMoreIsNotShown_NotOneMoreAreNotShown()
+    {
+        var notices = Notices(Run().GetProperty("oneOver"));
+        Assert.Equal(
+            new[] { "Showing the largest 500 of 501 recommendations. The list stops at 500, so 1 more is not shown. Choose a database above to see its own list." + Tail },
             notices);
     }
 

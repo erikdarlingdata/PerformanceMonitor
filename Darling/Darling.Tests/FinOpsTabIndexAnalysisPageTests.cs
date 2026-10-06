@@ -322,7 +322,9 @@ public sealed class FinOpsTabIndexAnalysisPageTests
     {
         var tab = Tab();
         Assert.Contains("const rowsCut = n > 0 && data.truncated;", tab);
-        Assert.Contains("\"Showing the largest \" + n + \" of \" + data.recommendation_count + \" recommendations. The list stops at \" + n + \", so \" + (data.recommendation_count - n) + \" more are not shown.\"", tab);
+        /* #5238: the count left over is one name, with a singular branch ("1 more is not shown"); the harness test runs the text itself. */
+        Assert.Contains("const left = data.recommendation_count - n;", tab);
+        Assert.Contains("\"Showing the largest \" + n + \" of \" + data.recommendation_count + \" recommendations. The list stops at \" + n + \", so \" + (left === 1 ? \"1 more is\" : left + \" more are\") + \" not shown.\"", tab);
         Assert.DoesNotContain("The largest \" + n", tab);
     }
 

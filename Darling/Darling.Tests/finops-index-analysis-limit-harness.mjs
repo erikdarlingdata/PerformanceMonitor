@@ -1,6 +1,7 @@
 /* Runs the shipped Index Analysis tab (wwwroot/js/pages/finops/index-analysis.js) against a recording fetch and a node-tree DOM,
    and prints as one line of JSON what it asked for and which notices it drew (#5238): the first read's limit, the notice for a
-   list the read cut, for a cut list of one database, for a list that fits and for a list of exactly the limit that cuts nothing.
+   list the read cut, for a cut list of one database, for a list that fits, for a list of exactly the limit that cuts nothing and for a list
+   cut one row short of whole.
        node finops-index-analysis-limit-harness.mjs <path to wwwroot/js> */
 import fs from "node:fs";
 import os from "node:os";
@@ -140,6 +141,13 @@ try {
   root = tab.build("srv-c", {});
   await settle();
   out.exact = { reads: seen(), notices: noticeTexts(root) };
+
+  // One finding more than the limit lists: the notice counts the one left over in the singular.
+  body = JSON.stringify(payload(500, 501, 500));
+  fetches.length = 0;
+  root = tab.build("srv-d", {});
+  await settle();
+  out.oneOver = { reads: seen(), notices: noticeTexts(root) };
   console.log(JSON.stringify(out));
 } finally {
   fs.rmSync(scratch, { recursive: true, force: true });

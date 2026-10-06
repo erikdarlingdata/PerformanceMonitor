@@ -105,10 +105,12 @@ function noticeText(data, n, db) {
   // The read says when rows were cut (truncated, with the count of every finding), so the notice never guesses: a list of exactly
   // the limit that cut nothing says nothing. A cut list of the whole server points at the Database box, whose list is cut on its own.
   const rowsCut = n > 0 && data.truncated;
+  // The count left over reads "1 more is not shown" for one and "N more are not shown" for any other number.
+  const left = data.recommendation_count - n;
   const count = n === 0
     ? "No cleanup recommendations: indexes look clean."
     : (rowsCut
-      ? "Showing the largest " + n + " of " + data.recommendation_count + " recommendations. The list stops at " + n + ", so " + (data.recommendation_count - n) + " more are not shown."
+      ? "Showing the largest " + n + " of " + data.recommendation_count + " recommendations. The list stops at " + n + ", so " + (left === 1 ? "1 more is" : left + " more are") + " not shown."
       : n + (n === 1 ? " recommendation." : " recommendations."));
   const narrow = rowsCut && !db ? " Choose a database above to see its own list." : "";
   const cut = data.databases_truncated ? " Showing the largest databases of " + data.database_count + "." : "";

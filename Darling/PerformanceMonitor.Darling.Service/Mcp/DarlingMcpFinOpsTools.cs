@@ -80,8 +80,10 @@ public sealed partial class DarlingMcpFinOpsTools
     /// default call. storage_growth's objects level refuses what is over 20 itself, and its indexes level any non-default <c>limit</c>.</summary>
     internal static int MaxLimitFor(string normalizedView) => normalizedView switch
     {
-        DatabaseSizesView => MaxDatabaseSizeRows,
+        // Set A (#4843): append set A's arms below this line only.
         IndexAnalysisView => MaxIndexAnalysisRecommendations,
+        // Set B (#4843): append set B's arms below this line only.
+        DatabaseSizesView => MaxDatabaseSizeRows,
         StorageGrowthView => MaxStorageGrowthDatabaseRows,
         _ => MaxLimit,
     };
@@ -93,7 +95,7 @@ public sealed partial class DarlingMcpFinOpsTools
         [Description("Which view to read. Valid: " + SetAValid + SetBValid + ".")] string view,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours back, default 24 (storage_growth: max 2160).")] int hours_back = 24,
-        [Description("Most rows per top-N list the view keeps (1-50, default 10).")] int limit = DefaultLimit,
+        [Description("Most rows per list (default 10); each view has its own max.")] int limit = DefaultLimit,
         [Description("Database to limit the view to (index_analysis, storage_growth).")] string? database_name = null,
         [Description("Return full script and definition text (index_analysis only; default false).")] bool full_text = false,
         [Description("schema.table of one object (storage_growth only, with database_name).")] string? object_name = null,
