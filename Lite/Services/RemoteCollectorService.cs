@@ -626,21 +626,40 @@ public partial class RemoteCollectorService
             return;
         }
 
-        /* Run CHECKPOINT here after all collector connections are closed.
-           Write lock ensures no UI readers have stale file offsets when
-           CHECKPOINT reorganizes/truncates the database file. */
+        await RunPostCollectionCheckpointAsync(LocalDataService.WriteLockBudget, cancellationToken);
+    }
+
+    /// <summary>
+    /// Runs CHECKPOINT after a collection round, once all collector connections are closed. The write lock ensures no
+    /// UI readers have stale file offsets when CHECKPOINT reorganizes/truncates the database file.
+    ///
+    /// <para>#5371: the wait for that lock is bounded by <paramref name="writeLockBudget"/> (the same budget every
+    /// other store write uses). The process-wide lock is a <see cref="System.Threading.ReaderWriterLockSlim"/>, and a
+    /// waiting writer makes every NEW reader wait, so an unbounded wait behind one slow read parked every UI read and
+    /// the next collector behind it. On a timeout this round's CHECKPOINT is skipped and the next round retries.</para>
+    /// </summary>
+    /// <returns>True when CHECKPOINT ran; false when it was skipped (lock budget spent) or failed.</returns>
+    internal async Task<bool> RunPostCollectionCheckpointAsync(TimeSpan writeLockBudget, CancellationToken cancellationToken)
+    {
         try
         {
-            using var writeLock = _duckDb.AcquireWriteLock();
+            using var writeLock = _duckDb.AcquireWriteLock(timeout: writeLockBudget);
             using var conn = _duckDb.CreateConnection();
             await conn.OpenAsync(cancellationToken);
             using var cmd = conn.CreateCommand();
             cmd.CommandText = "CHECKPOINT";
             await cmd.ExecuteNonQueryAsync(cancellationToken);
+            return true;
+        }
+        catch (TimeoutException)
+        {
+            AppLogger.Debug("Collector", $"Post-collection checkpoint skipped: the database lock was not free within {writeLockBudget.TotalSeconds:0.###}s (a read is in flight); the next round retries");
+            return false;
         }
         catch (Exception ex)
         {
             AppLogger.Debug("Collector", $"Post-collection checkpoint failed (non-critical): {ex.Message}");
+            return false;
         }
     }
 
