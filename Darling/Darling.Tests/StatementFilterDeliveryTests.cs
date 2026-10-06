@@ -175,7 +175,7 @@ public sealed class StatementFilterDeliveryTests
         /* M2 (#5360): the mark lives in the filter's own table, keyed by instance, so a `with` copy of a judged
            outcome is a new instance and its new text is judged. At the base the mark was a record parameter that a
            `with` copy kept, so this text reached the deliverer unjudged. */
-        var judged = AlertStatementFilter.Apply(PgFamilyOutcome(StatementScrubCanary.PlainStatement));
+        var judged = AlertStatementFilter.MarkJudged(AlertStatementFilter.Apply(PgFamilyOutcome(StatementScrubCanary.PlainStatement)));
         var edited = judged with { DetailText = "Query: " + StatementScrubCanary.CanaryStatement, ShortMessage = StatementScrubCanary.CanaryStatement };
 
         Assert.NotSame(edited, AlertStatementFilter.Apply(edited));
