@@ -41,9 +41,17 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 ///
 /// <para>Thread-safety: one writer (the host's start path), one reader (the worker's sweep). State is a
 /// single immutable record reference swapped atomically, so the reader never sees a torn snapshot. Null until
-/// the host publishes, which it does only when it has a loaded certificate; loopback-only installs, an
-/// unconfigured <c>tls</c> block and an unusable one all leave it null, and the worker reads null as "no LAN
-/// TLS certificate to watch" and raises nothing.</para>
+/// the host publishes, which it does when it has a loaded certificate or when it could not load the one it was
+/// told to (<see cref="Snapshot.LoadRefusal"/>); loopback-only installs, an unconfigured <c>tls</c> block and a
+/// misconfigured one all leave it null, and the worker reads null as "no LAN TLS certificate to watch" and
+/// raises nothing.</para>
+///
+/// <para><b>Why a load failure publishes a verdict instead of clearing.</b> Null reads as healthy: it is what a
+/// stopped listener and an install with no TLS look like, and the worker resolves a standing expiry alert on it.
+/// A certificate that cannot be loaded at start (a changed password, a key that does not match) leaves the
+/// listener loopback-only, which is the opposite of healthy, so the host says so
+/// (<see cref="PublishLoadRefusal"/>) and the worker repeats it until the host says otherwise, the same shape as
+/// <see cref="Snapshot.RefusedNotYetValid"/>.</para>
 /// </summary>
 public abstract class ListenerTlsCertificateState
 {
@@ -52,13 +60,18 @@ public abstract class ListenerTlsCertificateState
     /// <c>NotAfter</c> are LOCAL times). <see cref="RefusedNotYetValid"/> is the host's load-time verdict that
     /// the certificate's window had not opened yet, so it refused to serve it and the listener is
     /// loopback-only (#3517) - a standing fact about THIS process's start, true until the host publishes
-    /// again or clears, not something to re-check against the clock.</summary>
+    /// again or clears, not something to re-check against the clock. <see cref="LoadRefusal"/> is the host's
+    /// load-time verdict that the configured certificate could not be loaded at all (a wrong password, a key that
+    /// does not match, an unreadable file), carrying the reason: null when the certificate loaded. The listener is
+    /// then loopback-only, there are no certificate facts to give, so the date and identity fields of such a
+    /// snapshot are blank and mean nothing.</summary>
     public sealed record Snapshot(
         DateTimeOffset NotBeforeUtc,
         DateTimeOffset NotAfterUtc,
         string Subject,
         string Thumbprint,
-        bool RefusedNotYetValid);
+        bool RefusedNotYetValid,
+        string? LoadRefusal = null);
 
     private volatile Snapshot? _current;
 
@@ -69,17 +82,26 @@ public abstract class ListenerTlsCertificateState
         DateTimeOffset notBeforeUtc, DateTimeOffset notAfterUtc, string subject, string thumbprint, bool refusedNotYetValid) =>
         _current = new Snapshot(notBeforeUtc, notAfterUtc, subject ?? string.Empty, thumbprint ?? string.Empty, refusedNotYetValid);
 
+    /// <summary>Publishes the host's verdict that the configured certificate could not be loaded (the owning host
+    /// only, at start), in place of any earlier snapshot: the listener is loopback-only, and the worker raises
+    /// the Critical self-alert for it instead of reading the absence of a certificate as a healthy listener.
+    /// <paramref name="reason"/> is the loader's own message; the worker sanitizes and caps it for the alert
+    /// text.</summary>
+    public void PublishLoadRefusal(string reason) =>
+        _current = new Snapshot(default, default, string.Empty, string.Empty, RefusedNotYetValid: false, reason ?? string.Empty);
+
     /// <summary>Clears the published snapshot back to "nothing to watch" (the owning host only) - called when the
-    /// host STOPS serving TLS: a runtime disable of the listener, or a failed/degraded start. Without this
-    /// the snapshot is write-once and the worker keeps re-firing the expiry alert about a certificate the
+    /// host STOPS serving TLS: a runtime disable of the listener, or a failed start after the certificate was
+    /// adopted. A certificate that cannot be loaded is not a clear: see <see cref="PublishLoadRefusal"/>. Without
+    /// this the snapshot is write-once and the worker keeps re-firing the expiry alert about a certificate the
     /// process is no longer serving, with no resolution short of a full restart (#3514 follow-up). The
     /// certificate is published again on the next successful start, so a port-change rebind - where Stop and
     /// Start run back-to-back in one supervisor tick - re-publishes before the worker's next sweep observes
     /// the null, and does not flicker a resolution.</summary>
     public void Clear() => _current = null;
 
-    /// <summary>The latest published snapshot, or null when the host has no loaded TLS certificate
-    /// (loopback-only, no <c>tls</c> block, an unusable one, or after a stop/degrade) - read by the worker as
+    /// <summary>The latest published snapshot, or null when the host has no TLS certificate to report
+    /// (loopback-only, no <c>tls</c> block, a misconfigured one, or after a stop) - read by the worker as
     /// "nothing to watch".</summary>
     public Snapshot? Read() => _current;
 }

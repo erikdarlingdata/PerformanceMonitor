@@ -68,7 +68,7 @@ public sealed class DarlingListenerTlsTests
     }
 
     [Fact]
-    public void Resolve_LoadFailure_RefusesClearsState()
+    public void Resolve_LoadFailure_RefusesAndPublishesTheLoadRefusal()
     {
         using var temp = new TempDir();
         var absent = Path.Combine(temp.Path, "absent.pfx");
@@ -81,7 +81,14 @@ public sealed class DarlingListenerTlsTests
 
         Assert.False(outcome.Expose);
         Assert.Null(outcome.Certificate);
-        Assert.Null(state.Read());
+
+        /* #5288: the earlier snapshot is replaced by the host's load-refusal verdict, not cleared: a cleared state
+           reads as "no certificate to watch", which is healthy. */
+        var published = state.Read();
+        Assert.NotNull(published);
+        Assert.Equal(
+            $"mcp.network.tls.pfxPath '{absent}' does not exist or is not readable", published!.LoadRefusal);
+        Assert.Equal(string.Empty, published.Thumbprint);
         Assert.Equal(
             $"MCP server TLS certificate could not be loaded (mcp.network.tls.pfxPath '{absent}' does not exist or is not readable)"
             + " — refusing to expose; binding loopback-only.",
@@ -531,6 +538,42 @@ public sealed class DarlingListenerTlsTests
         Assert.Null(outcome.Certificate);
         Assert.False(outcome.ExposesWithoutItsCertificate);
         Assert.NotEmpty(log.At(LogLevel.Critical));
+    }
+
+    [Fact]
+    public void Resolve_WrongPfxPassword_PublishesTheLoadRefusal_InsteadOfClearingTheState()
+    {
+        using var temp = new TempDir();
+        using var good = Make("refusal", DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddDays(365));
+        var state = new McpTlsCertificateState();
+        state.Publish(DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddDays(10), "CN=earlier", "EARLIER", refusedNotYetValid: false);
+
+        var outcome = DarlingListenerTls.Resolve(
+            new RecordingLogger(), state, ListenerTlsLabels.Mcp, WritePfx(temp, good, "right", "wrong"), Listen, Port, null);
+
+        Assert.False(outcome.Expose);
+        var published = state.Read();
+        Assert.NotNull(published);   // not cleared: a cleared state reads as healthy
+        Assert.False(string.IsNullOrWhiteSpace(published!.LoadRefusal));
+        Assert.Contains("could not be loaded", published.LoadRefusal);
+        Assert.False(published.RefusedNotYetValid);
+        Assert.Equal(string.Empty, published.Thumbprint);   // the earlier facts are replaced, not left standing
+    }
+
+    [Fact]
+    public void Resolve_ThrowAfterTheCertificateWasPublished_ReplacesItsFactsWithTheLoadRefusal()
+    {
+        using var temp = new TempDir();
+        using var good = Make("late", DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddDays(365));
+        var state = new WebTlsCertificateState();
+
+        var outcome = DarlingListenerTls.Resolve(
+            new RecordingLogger { ThrowOn = LogLevel.Information }, state, ListenerTlsLabels.Mcp,
+            WritePfx(temp, good), Listen, Port, null);
+
+        Assert.False(outcome.Expose);
+        Assert.NotNull(state.Read()!.LoadRefusal);
+        Assert.Equal(string.Empty, state.Read()!.Thumbprint);
     }
 
     [Fact]
