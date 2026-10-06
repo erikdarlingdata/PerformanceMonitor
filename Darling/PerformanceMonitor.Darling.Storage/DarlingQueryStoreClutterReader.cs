@@ -164,7 +164,10 @@ public static class DarlingQueryStoreClutterReader
     /// this arm can say anything about and are excluded from the denominator on purpose; a zero-duration
     /// run is excluded so the share has a denominator. The <c>others</c> CTE pools the OTHER databases'
     /// slowest costs on the same server so the tool can publish this database's median against theirs.
-    /// $1 server_id array, $2/$3 window (naive UTC), $4 collector name.
+    /// $1 server_id array, $2/$3 window (naive UTC), $4 collector name, $5 the chosen databases (#5244: one text[], NULL
+    /// for every database). The databases narrow the FINAL per-database rows only: <c>per_server</c> (the run denominator)
+    /// and <c>others</c> (the pool the median is compared against) read every run, so a database's numbers do not move
+    /// with the selection.
     /// </summary>
     public const string ReadCostSql = """
         WITH runs AS
@@ -231,11 +234,15 @@ public static class DarlingQueryStoreClutterReader
         LEFT JOIN others AS o
           ON  o.server_id = d.server_id
           AND o.database_name = d.database_name
+        WHERE ($5::text[] IS NULL OR d.database_name = ANY($5))
         ORDER BY d.server_id, d.runs_slowest DESC, d.slowest_item_ms_p50 DESC, d.database_name
         """;
 
+    /// <param name="databases">#5244: the chosen databases (the optional last parameter keeps the Viewer's calls compiling
+    /// unchanged); <see cref="DatabaseFilter.All"/>, the default, is every database.</param>
     public static async Task<List<ReadCostRow>> GetReadCostAsync(
-        NpgsqlDataSource postgres, int[] serverIds, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default)
+        NpgsqlDataSource postgres, int[] serverIds, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default,
+        DatabaseFilter databases = default)
     {
         var rows = new List<ReadCostRow>();
         await using var command = postgres.CreateCommand(ReadCostSql);
@@ -244,6 +251,7 @@ public static class DarlingQueryStoreClutterReader
         AddTimestamp(command, startUtc);
         AddTimestamp(command, endUtc);
         command.Parameters.AddWithValue(CollectorName);
+        command.Parameters.Add(databases.Parameter());
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -281,7 +289,8 @@ public static class DarlingQueryStoreClutterReader
     /// collection in the window. The store keeps no first-seen stamp (<c>query_store_plan_map</c> holds
     /// <c>last_seen</c> only), so a plan idle before the window and executed again inside it counts as an
     /// arrival here; the tool says so.</para>
-    /// $1 server_id array, $2/$3 window (naive UTC).
+    /// $1 server_id array, $2/$3 window (naive UTC), $4 the chosen databases (#5244: one text[], NULL for every database;
+    /// every figure here is per database, so the predicate narrows the source rows).
     /// </summary>
     public const string PlanChurnSql = """
         WITH rows_in_window AS
@@ -291,6 +300,7 @@ public static class DarlingQueryStoreClutterReader
             WHERE server_id = ANY($1::int[])
             AND   collection_time >= $2
             AND   collection_time <= $3
+            AND   ($4::text[] IS NULL OR database_name = ANY($4))
         ),
         per_plan AS
         (
@@ -368,8 +378,10 @@ public static class DarlingQueryStoreClutterReader
         ORDER BY d.server_id, d.database_name
         """;
 
+    /// <param name="databases">#5244: the chosen databases (optional and last, so the Viewer's calls compile unchanged).</param>
     public static async Task<List<PlanChurnRow>> GetPlanChurnAsync(
-        NpgsqlDataSource postgres, int[] serverIds, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default)
+        NpgsqlDataSource postgres, int[] serverIds, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default,
+        DatabaseFilter databases = default)
     {
         var rows = new List<PlanChurnRow>();
         await using var command = postgres.CreateCommand(PlanChurnSql);
@@ -377,6 +389,7 @@ public static class DarlingQueryStoreClutterReader
         AddServers(command, serverIds);
         AddTimestamp(command, startUtc);
         AddTimestamp(command, endUtc);
+        command.Parameters.Add(databases.Parameter());
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -413,7 +426,7 @@ public static class DarlingQueryStoreClutterReader
     /// reader maps it at ordinal 12, so anything inserted before it shifts every ordinal above. A NULL there
     /// is a row the collector wrote before the column existed — never asked, and never the engine's
     /// <c>NONE</c>.</para>
-    /// $1 server_id array, $2/$3 window (naive UTC).
+    /// $1 server_id array, $2/$3 window (naive UTC), $4 the chosen databases (#5244: one text[], NULL for every database).
     /// </summary>
     public const string ConfigSql = """
         SELECT DISTINCT ON (server_id, database_name)
@@ -434,11 +447,14 @@ public static class DarlingQueryStoreClutterReader
         WHERE server_id = ANY($1::int[])
         AND   capture_time >= $2
         AND   capture_time <= $3
+        AND   ($4::text[] IS NULL OR database_name = ANY($4))
         ORDER BY server_id, database_name, capture_time DESC
         """;
 
+    /// <param name="databases">#5244: the chosen databases (optional and last, so the Viewer's calls compile unchanged).</param>
     public static async Task<List<ConfigRow>> GetConfigAsync(
-        NpgsqlDataSource postgres, int[] serverIds, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default)
+        NpgsqlDataSource postgres, int[] serverIds, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default,
+        DatabaseFilter databases = default)
     {
         var rows = new List<ConfigRow>();
         await using var command = postgres.CreateCommand(ConfigSql);
@@ -446,6 +462,7 @@ public static class DarlingQueryStoreClutterReader
         AddServers(command, serverIds);
         AddTimestamp(command, startUtc);
         AddTimestamp(command, endUtc);
+        command.Parameters.Add(databases.Parameter());
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {

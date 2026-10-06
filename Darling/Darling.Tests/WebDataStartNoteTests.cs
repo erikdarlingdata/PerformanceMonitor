@@ -459,7 +459,7 @@ public sealed class WebDataStartNoteTests
 
         Assert.Contains("ORDER BY collection_time DESC", PerformanceMonitor.Darling.Service.Mcp.DarlingPlanCorrectionReader.PlanCorrectionsSql, StringComparison.Ordinal);
         var corrections = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpPlanCorrectionTools.cs");
-        var correctionsTool = corrections.IndexOf("public static async Task<string> GetPlanCorrections(", StringComparison.Ordinal);
+        var correctionsTool = corrections.IndexOf("internal static async Task<string> GetPlanCorrections(", StringComparison.Ordinal);
         Assert.True(correctionsTool > 0);
         var correctionsBody = corrections[correctionsTool..];
         Assert.Contains("var truncated = rows.Count > limit;", correctionsBody, StringComparison.Ordinal);

@@ -91,7 +91,7 @@ public sealed class DarlingMcpQueryStoreClutterTools
 
     [McpServerTool(Name = "get_query_store_clutter"), Description(
         "The Query Store CLUTTER view for one server, composed from already-collected rows: no new query runs. Clutter (read_cost/plan_churn/config) is per DATABASE; qs_overhead (waits/memory clerk) is per SERVER, never attributed to a database. No rows answers unavailable, never a clean bill. Verdict Unknown means unmeasured, never quietly Healthy. REPLICAS: excluded, verdict Unknown, never a defect. query_capture_mode null means never asked, never NONE. window_truncated is a retention floor, not a page cut: no limit fixes it. fleet_median is null unless include_fleet_median=true. <<GUIDE>> The Query Store CLUTTER view for one server, composed from rows already collected — no new query runs against the monitored server. Clutter is per DATABASE and overhead is per SERVER, and the payload keeps the two apart. Each database row carries three decomposed arms with raw numbers, never a bare composite. (a) read_cost, from the query_store collector's fan-out rollup on collection_log: runs_observed (fan-out runs on the server in the window), runs_slowest (runs on which THIS database was the slowest item) and runs_slowest_pct, slowest_item_ms_p50/p95 when it was, run_duration_ms_p50 for scale, slowest_share_pct (median of slowest_item_ms / duration_ms over those runs — the slowest item's share of the whole pass, get_collection_health's verdict figure), and dominance_ratio (this database's median slowest cost over the pooled median of every OTHER database's slowest cost on the same server, null when no other database was ever slowest). dominance_ratio is NOT get_collection_health's dominance (slowest x items / run) — it names a different quantity. The store keeps only the slowest item of each run, so this arm ranks databases by how often and by how much they were the slowest, not by a per-database series. (b) plan_churn, from raw query_store_stats: distinct_queries, distinct_plans (plan_id — the identity MAX_PLANS_PER_QUERY caps and the plan map keys on), plans_per_query_p95 and _max, new_plans_per_day (plans first seen after the database's first collection in the window, per day of the span its collections cover; a plan idle before the window and run again inside it counts as new — the store keeps no first-seen stamp), never_seen_twice_fraction (plans seen under exactly one collection over all plans observed; null under two collections) and collections_observed. (c) config, the newest query_store_health capture per database INSIDE the window, with its own captured_at: actual_state, desired_state, readonly_reason (decoded), storage used vs cap and pct_of_cap, size_based_cleanup_mode, stale_query_threshold_days, max_plans_per_query, interval_length_minutes, and query_capture_mode (the DMV's query_capture_mode_desc spelling verbatim: ALL / AUTO / CUSTOM / NONE) with capture_mode_known beside it — null means the newest capture predates the V137 rung that added the column, which is NEVER ASKED and never NONE. The mode is the one option on that row that names a plan-churn factory, so the churn recommendations name it: ALL beside high churn is the 'switch to AUTO' case, AUTO beside it points at the workload. Per database, verdict is the band canon (Healthy / Warning / Critical / Unknown) with verdict_reasons naming the arm and bar that raised it; the bars are published under thresholds so you can disagree with them on the evidence, and Unknown means unmeasured, never quietly Healthy. recommendations is prose per reason and next_tools names the reads that carry the detail. Rows are ordered worst-first (band, then the read-cost share, then plans per query) and cut at limit, observed off a fetch one past it: truncated is the page cut, databases_returned the page, database_count the whole. REPLICAS: a database whose readonly_reason carries bit 8 (the engine's readable-secondary flag) reads excluded: true, excluded_reason: qs_read_only_replica, verdict Unknown — Query Store on a readable secondary is READ_ONLY by design, its clutter and configuration are its primary's, and it is never a defect here. qs_overhead is the ONE per-server block: wait_stats lists every non-sleep QDS_* wait type in the window with wait_ms_total, waiting_tasks_total and wait_ms_per_hour (rated milliseconds over the measured seconds they accrued over, never over a cadence; null when no interval was knowable), and excluded_wait_types NAMES the four QDS_* sleep waits IgnoredWaitDefaults drops at collection (QDS_ASYNC_QUEUE, QDS_CLEANUP_STALE_QUERIES_TASK_MAIN_LOOP_SLEEP, QDS_PERSIST_TASK_MAIN_LOOP_SLEEP, QDS_SHUTDOWN_QUEUE) so the proxy is not mistaken for the whole; memory_clerk is MEMORYCLERK_QUERYDISKSTORE latest and window max, with clerk_in_latest_capture saying whether it is in the collector's current top 25 (its absence is a rank, not a zero); the block ends with the window's baseline discontinuities, the same markers the trend tools publish. The window block carries the requested start and end beside the raw tier's reach. fleet_median is opt-in (include_fleet_median): discrete medians of slowest_share_pct and plans_per_query_p95 over every database on every enabled SQL Server target that is not a replica, and of the QDS wait rate over those servers, each with the population it was drawn from — off by default because it walks two raw hypertables fleet-wide over the window. include_fleet_median's own original wording, unabbreviated: If true, also compute fleet_median: the discrete median of each headline arm over every enabled SQL Server target that is not a replica, so a per-server figure has a reference. Default false — it walks query_store_stats and wait_stats fleet-wide over the window, which on a large store is the read deadline's whole budget. The plan-churn and wait arms read the raw tier only, which on a store with the rollups armed is dropped at 4 days." + McpHelpers.WindowTruncatedDescription)]
-    public static async Task<string> GetQueryStoreClutter(
+    public static Task<string> GetQueryStoreClutter(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history. Default 24, maximum 168; the plan-churn and wait arms read the raw tier, which a store with the rollups armed drops at 4 days — window_truncated says when the window reached past it.")] int hours_back = 24,
@@ -99,6 +99,25 @@ public sealed class DarlingMcpQueryStoreClutterTools
         [Description("If true, also computes fleet_median: the discrete median of each headline arm over every enabled non-replica SQL Server target. Default false; see the reading guide for the read-cost detail.")] bool include_fleet_median = false,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
         CancellationToken cancellationToken = default)
+        => GetQueryStoreClutter(postgres, server_name, hours_back, limit, include_fleet_median, as_of, DatabaseFilter.All, cancellationToken);
+
+    /// <summary>
+    /// #5244: the get_query_store_clutter read over a LIST of databases. The MCP tool passes <see cref="DatabaseFilter.All"/>
+    /// until a later lane wires its <c>database_name</c>. Only the per-database rows narrow (read cost, plan churn, config);
+    /// the per-server overhead (waits, memory clerk), the window floor, the baseline discontinuities and the fleet reference
+    /// stay whole. The one-name consumers are list-aware: the Query Store precondition on the empty path takes the filter,
+    /// an empty answer for chosen databases is <c>empty</c> and says "for the chosen databases" (never a verdict on the
+    /// server), and <c>server_is_replica</c> is read off the server's WHOLE config, not the chosen databases' rows.
+    /// </summary>
+    internal static async Task<string> GetQueryStoreClutter(
+        NpgsqlDataSource postgres,
+        string? server_name,
+        int hours_back,
+        int limit,
+        bool include_fleet_median,
+        string? as_of,
+        DatabaseFilter databaseFilter,
+        CancellationToken cancellationToken)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
@@ -112,9 +131,9 @@ public sealed class DarlingMcpQueryStoreClutterTools
             var requestedStart = now.AddHours(-hours_back);
             var serverIds = new[] { resolved.ServerId };
 
-            var readCost = await DarlingQueryStoreClutterReader.GetReadCostAsync(postgres, serverIds, requestedStart, now, cancellationToken);
-            var planChurn = await DarlingQueryStoreClutterReader.GetPlanChurnAsync(postgres, serverIds, requestedStart, now, cancellationToken);
-            var config = await DarlingQueryStoreClutterReader.GetConfigAsync(postgres, serverIds, requestedStart, now, cancellationToken);
+            var readCost = await DarlingQueryStoreClutterReader.GetReadCostAsync(postgres, serverIds, requestedStart, now, cancellationToken, databaseFilter);
+            var planChurn = await DarlingQueryStoreClutterReader.GetPlanChurnAsync(postgres, serverIds, requestedStart, now, cancellationToken, databaseFilter);
+            var config = await DarlingQueryStoreClutterReader.GetConfigAsync(postgres, serverIds, requestedStart, now, cancellationToken, databaseFilter);
             var waits = await DarlingQueryStoreClutterReader.GetQdsWaitsAsync(postgres, serverIds, requestedStart, now, cancellationToken);
             var clerk = await DarlingQueryStoreClutterReader.GetQueryStoreClerkAsync(postgres, resolved.ServerId, requestedStart, now, cancellationToken);
 
@@ -126,8 +145,14 @@ public sealed class DarlingMcpQueryStoreClutterTools
                    the clerk are not consulted here — a server with QDS waits and no Query Store rows is a
                    server whose Query Store this tool cannot see, which is what the miss says. */
                 return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, DarlingQueryStoreClutterReader.CollectorName, cancellationToken)
-                    ?? await DarlingRuntimePrecondition.QueryStoreStatusAsync(postgres, resolved.ServerId, resolved.ServerName, null, cancellationToken)
+                    ?? await DarlingRuntimePrecondition.QueryStoreStatusAsync(postgres, resolved.ServerId, resolved.ServerName, databaseFilter, cancellationToken)
                     ?? await DarlingRuntimePrecondition.StatusAsync(postgres, resolved.ServerId, resolved.ServerName, DarlingQueryStoreClutterReader.CollectorName, cancellationToken)
+                    ?? (!databaseFilter.IsAll
+                        ? McpHelpers.Status(
+                            "empty",
+                            $"No Query Store rows, no query_store fan-out run and no query_store_health capture for the chosen databases in the {hours_back}-hour window. "
+                            + "A chosen database either has Query Store OFF, is not on this server, or has not completed a cycle yet. Widen the selection to read the whole server.")
+                        : null)
                     ?? McpHelpers.Status(
                         "unavailable",
                         $"No Query Store rows, no query_store fan-out run and no query_store_health capture for this server in the {hours_back}-hour window. "
@@ -185,7 +210,12 @@ public sealed class DarlingMcpQueryStoreClutterTools
 
             var includedWaits = waits.Where(w => !QueryStoreClutter.IsExcludedWaitType(w.WaitType)).ToList();
             var excludedPresent = waits.Where(w => QueryStoreClutter.IsExcludedWaitType(w.WaitType)).Select(w => w.WaitType).OrderBy(w => w, StringComparer.Ordinal).ToList();
-            var serverIsReplica = QueryStoreClutter.IsReplicaServer(config);
+            /* A SERVER-level claim ("every database here is a readable secondary"), so it is read off the server's whole latest
+               config, never the chosen databases' rows: one replica database picked from a mixed server must not say the server is one. */
+            var serverIsReplica = QueryStoreClutter.IsReplicaServer(
+                databaseFilter.IsAll
+                    ? config
+                    : await DarlingQueryStoreClutterReader.GetConfigAsync(postgres, serverIds, requestedStart, now, cancellationToken));
 
             var databases = page.Select(r => new
             {
