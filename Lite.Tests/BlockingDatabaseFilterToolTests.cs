@@ -181,6 +181,8 @@ public sealed class BlockingDatabaseFilterToolTests : IClassFixture<SharedDuckDb
             _service, _serverManager, ServerName, database_name: blank));
 
         Assert.Equal(3, root.GetProperty("trend").GetArrayLength());
+        /* N2: a blank is "no filter", and the answer echoes it as null rather than the blank that was sent. */
+        Assert.Equal(JsonValueKind.Null, root.GetProperty("database_name").ValueKind);
     }
 
     /// <summary>The DMV-snapshot arm still fills in only where the FILTERED report arm has no rows, so a database that has

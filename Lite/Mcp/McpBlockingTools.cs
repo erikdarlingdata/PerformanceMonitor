@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using ModelContextProtocol.Server;
 using PerformanceMonitorLite.Analysis;
 using PerformanceMonitorLite.Services;
@@ -476,10 +477,10 @@ public sealed class McpBlockingTools
 
                 var captures = await dataService.GetBlockingCaptureCountsAsync(
                     resolved.ServerId, hours_back, asOfUtc: anchorEnd);
-                return await EmptyTrend(
+                return WithNullSource(await EmptyTrend(
                     "blocking", resolved.ServerName, hours_back, captures,
                     () => dataService.HasAnyBlockingCollectorRunAsync(resolved.ServerId),
-                    database);
+                    database));
             }
 
             var result = points.Select(p => new { time = p.Time.ToString("o"), count = p.Count });
@@ -621,6 +622,18 @@ public sealed class McpBlockingTools
         {
             return McpHelpers.FormatError("get_lock_wait_trend", ex);
         }
+    }
+
+    /// <summary>
+    /// #5244: the empty answers of get_blocking_trend carry <c>source: null</c> -- the same key a non-empty answer names its collector in,
+    /// and the value get_blocking_stats gives when its blocking series has no rows -- so a caller reads one shape for "which collector
+    /// answered" whether or not any collector did. Appended to the status envelope; the deadlock trend shares EmptyTrend and does not call this.
+    /// </summary>
+    private static string WithNullSource(string statusAnswer)
+    {
+        var node = JsonNode.Parse(statusAnswer)!.AsObject();
+        node["source"] = null;
+        return node.ToJsonString(McpHelpers.JsonOptions);
     }
 
     /// <summary>

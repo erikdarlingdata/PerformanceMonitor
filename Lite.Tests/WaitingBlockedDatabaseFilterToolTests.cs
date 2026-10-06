@@ -192,6 +192,8 @@ public sealed class WaitingBlockedDatabaseFilterToolTests : IClassFixture<Shared
             _service, _serverManager, ServerName, database_name: blank));
 
         Assert.Equal(3, root.GetProperty("reports").GetArrayLength());
+        /* N2: a blank is "no filter", and the answer echoes it as null rather than the blank that was sent. */
+        Assert.Equal(JsonValueKind.Null, root.GetProperty("database_name").ValueKind);
     }
 
     /// <summary>Both arms, the XE reports and the DMV fallback, keep only the chosen database: a snapshot of another

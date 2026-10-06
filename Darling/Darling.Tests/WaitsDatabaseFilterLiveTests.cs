@@ -409,6 +409,15 @@ public sealed class WaitsDatabaseFilterLiveTests
             /* The two tools' JSON carries the same word under a top-level source key. */
             var statsJson = JsonDocument.Parse(await DarlingMcpDataTools.GetBlockingStats(postgres, MixedServerName, 1, DatabaseFilter.Of([DbA]), seed.End.ToString("o"), null, ct)).RootElement;
             Assert.Equal("DMV snapshot", statsJson.GetProperty("source").GetString());
+            var statsJsonAb = JsonDocument.Parse(await DarlingMcpDataTools.GetBlockingStats(postgres, MixedServerName, 1, DatabaseFilter.Of([DbA, DbB]), seed.End.ToString("o"), null, ct)).RootElement;
+            Assert.Equal("blocked-process-report", statsJsonAb.GetProperty("source").GetString());
+
+            /* N1: get_blocking_trend's own JSON, by exact tag for both filters, so a trend tool that hard-codes one source fails here
+               even though the readers above are right. */
+            var trendJsonA = JsonDocument.Parse(await DarlingMcpBlockingTools.GetBlockingTrend(postgres, MixedServerName, 1, seed.End.ToString("o"), DatabaseFilter.Of([DbA]), ct)).RootElement;
+            Assert.Equal("DMV snapshot", trendJsonA.GetProperty("source").GetString());
+            var trendJsonAb = JsonDocument.Parse(await DarlingMcpBlockingTools.GetBlockingTrend(postgres, MixedServerName, 1, seed.End.ToString("o"), DatabaseFilter.Of([DbA, DbB]), ct)).RootElement;
+            Assert.Equal("blocked-process-report", trendJsonAb.GetProperty("source").GetString());
 
             var b = await AskAsync(DatabaseFilter.One(DbB));
             Assert.Equal(ab.Stats, b.Stats);
