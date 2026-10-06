@@ -140,8 +140,12 @@ def class_weight(raw, is_serial):
 
 
 def predicted_walls(assignment, weights, serial):
-    """Modelled wall seconds per shard: parallel seconds / PARALLEL_CONCURRENCY + serial seconds."""
-    return [sum(class_weight(weights.get(c, 0.0), c in serial) for c in shard) for shard in assignment]
+    """Modelled wall seconds per shard: parallel seconds / PARALLEL_CONCURRENCY + serial seconds. A class with no
+    timing counts at the mean of the timed classes, as `pack` places it (#5208)."""
+    assigned = {c for shard in assignment for c in shard}
+    known = [weights[c] for c in assigned if c in weights]
+    default = sum(known) / len(known) if known else 0.0
+    return [sum(class_weight(weights.get(c, default), c in serial) for c in shard) for shard in assignment]
 
 
 def pack(classes, shards, weights, serial=frozenset()):
@@ -241,6 +245,8 @@ def main(argv):
     if not serial_names:
         print(f"::warning title=Lite shard packer::no DisableParallelization collection found under {tests_dir}; every class is weighed as parallel")
     serial = {c for c, col in load_collections(timings).items() if col in serial_names}
+    if serial_names and not serial:
+        print("::warning title=Lite shard packer::serial collections are declared in the sources but no timed class sits in one of them; every class is weighed as parallel")
     assignment, method = pack(classes, shards, weights, serial)
     write_shards(out, assignment)
     load = [sum(weights.get(c, 0.0) for c in s) for s in assignment]
@@ -350,16 +356,20 @@ def self_test():
                     '[CollectionDefinition("Off", DisableParallelization = false)]\npublic class D {}\n'
                     'public static class Holder\n{\n    public const string Name = "from-const";\n}\n'
                     '[CollectionDefinition(Missing.Name, DisableParallelization = true)]\npublic class E {}\n')
-        names, unresolved = serial_collection_names(d)
-        ok(names == {"Lit", "from-const"} and unresolved == ["Missing.Name"], "serial collections: literal and constant resolved, parallel skipped, unknown reported")
+        cnames, unresolved = serial_collection_names(d)
+        ok(cnames == {"Lit", "from-const"} and unresolved == ["Missing.Name"], "serial collections: literal and constant resolved, parallel skipped, unknown reported")
     # The real test sources: every DisableParallelization definition must resolve to a name, or the packer would
     # silently weigh that collection as parallel.
     if os.path.isdir(DEFAULT_TESTS_DIR):
-        names, unresolved = serial_collection_names(DEFAULT_TESTS_DIR)
+        cnames, unresolved = serial_collection_names(DEFAULT_TESTS_DIR)
         ok(unresolved == [], "every serial collection in Lite.Tests resolves to a name: " + ", ".join(unresolved))
-        ok("CollectionResetGate" in names, "Lite.Tests declares the CollectionResetGate serial collection")
+        # The scan must find at least one serial collection; no collection name is hard-coded here, so renaming a
+        # collection does not fail the shard-0 job (#5208).
+        ok(len(cnames) > 0, "Lite.Tests declares at least one serial collection")
 
-    # The guard must FAIL when a class is withheld, duplicated or invented.
+    # The guard must FAIL when a class is withheld, duplicated or invented. `names` is the 60-class list from the top
+    # of the self-test; the checks below must run on it, not on collection names (#5208 review F1).
+    ok(len(names) == 60, "self-test class list intact")
     a, _ = pack(names, 4, skew)
     withheld = [list(s) for s in a]
     gone = withheld[2].pop()
