@@ -102,7 +102,17 @@ public sealed class PlanRegressionReadShapeTests
         Assert.Contains("unnest($4::text[], $5::text[], $6::text[])", sql, StringComparison.Ordinal);
         Assert.Equal(3, Regex.Matches(sql, @"IS NOT DISTINCT FROM").Count);
         Assert.DoesNotContain("$7", sql, StringComparison.Ordinal);
-        Assert.DoesNotContain("query_text_dim", sql, StringComparison.Ordinal);
+
+        /* The text is the view's own COALESCE (#1767, D10): the row's inline text, else the text dimension's for the row's
+           digest, through exactly ONE left join on the digest. The dimension is named in that join and nowhere else, the
+           join is never an inner join (a row whose text lives only in the dimension, or in neither, keeps its row), and
+           the read still carries no LIMIT and no second text source. */
+        Assert.Contains("COALESCE(q.query_text, d.query_text) AS query_text", sql, StringComparison.Ordinal);
+        Assert.Matches(new Regex(@"FROM query_stats AS q\s+LEFT JOIN query_text_dim AS d ON d\.digest = q\.query_text_digest\s+JOIN unnest\("), sql);
+        Assert.Single(Regex.Matches(sql, @"query_text_dim"));
+        Assert.Equal(2, Regex.Matches(sql, @"\bJOIN\b").Count); /* the one left join on the dimension and the unnest join, no third */
+        Assert.Single(Regex.Matches(sql, @"\bLEFT JOIN\b"));
+        Assert.DoesNotContain("LIMIT", sql, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
