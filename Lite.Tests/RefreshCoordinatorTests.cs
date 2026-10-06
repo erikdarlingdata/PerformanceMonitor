@@ -36,6 +36,7 @@ public sealed class RefreshCoordinatorTests
         internal required RefreshScope Scope { get; init; }
         internal required string Tab { get; init; }
         internal required string Window { get; init; }
+        internal required string Compare { get; init; }
         internal required CancellationToken Token { get; init; }
         internal TaskCompletionSource Gate { get; } = new();
         internal bool Painted { get; set; }
@@ -50,6 +51,7 @@ public sealed class RefreshCoordinatorTests
     {
         internal string SelectedTab = "A";
         internal string Window = "4h";
+        internal string Compare = "None";
         internal readonly List<Pass> Passes = new();
         internal readonly List<Exception> Faults = new();
         internal readonly List<string> Paints = new();
@@ -80,7 +82,7 @@ public sealed class RefreshCoordinatorTests
 
         private async Task RunPassAsync(RefreshScope scope, CancellationToken ct)
         {
-            var pass = new Pass { Scope = scope, Tab = SelectedTab, Window = Window, Token = ct };
+            var pass = new Pass { Scope = scope, Tab = SelectedTab, Window = Window, Compare = Compare, Token = ct };
             Passes.Add(pass);
             StartSignal(Passes.Count - 1).TrySetResult(pass);
             Concurrent++;
@@ -364,6 +366,67 @@ public sealed class RefreshCoordinatorTests
         await Completes(first);
     }
 
+    [Fact]
+    public async Task CompareToChangeDuringARunningPass_ReplaysOnceAfterIt_WithTheNewSelection()
+    {
+        var h = new Harness { SelectedTab = "Overview" };
+
+        var tick = h.Coordinator.PollAsync();
+
+        /* The user picks Yesterday while the tick's pass is repainting. Dev's handler returned on _isRefreshing and
+           dropped it: the combo said Yesterday and the grids kept no baseline. */
+        h.Compare = "Yesterday";
+        var change = h.Coordinator.RequestAsync(RefreshScope.VisibleTab);
+        Assert.Single(h.Passes);
+        Assert.True(h.Coordinator.HasPending);
+
+        h.Release(0);
+        await h.Started(1);
+
+        /* Once, after the running pass, reading the combo at its own start; the tick's wider scope rides along. */
+        Assert.Equal(2, h.Passes.Count);
+        Assert.Equal("None", h.Passes[0].Compare);
+        Assert.False(h.Passes[0].Painted);
+        Assert.Equal("Yesterday", h.Passes[1].Compare);
+        Assert.Equal(RefreshScope.Full, h.Passes[1].Scope);
+
+        h.Release(1);
+        await Completes(change);
+        await Completes(tick);
+
+        Assert.Equal(2, h.Passes.Count);
+        Assert.Equal(new[] { "Full:Overview:4h" }, h.Paints);
+        Assert.Equal(1, h.MaxConcurrent);
+    }
+
+    [Fact]
+    public async Task TwoCompareToChangesDuringOnePass_ReplayOnce_WithTheLastSelection()
+    {
+        var h = new Harness { SelectedTab = "TopQueries" };
+
+        var first = h.Coordinator.RequestAsync(RefreshScope.VisibleTab);
+
+        h.Compare = "Yesterday";
+        _ = h.Coordinator.RequestAsync(RefreshScope.VisibleTab);
+        h.Compare = "Last week";
+        _ = h.Coordinator.RequestAsync(RefreshScope.VisibleTab);
+
+        Assert.Single(h.Passes);
+        Assert.True(h.Coordinator.HasPending);
+
+        h.Release(0);
+        await h.Started(1);
+        Assert.Equal(2, h.Passes.Count);
+        Assert.Equal("Last week", h.Passes[1].Compare);
+
+        h.Release(1);
+        await Completes(first);
+
+        Assert.Equal(2, h.Passes.Count);
+        Assert.Equal(1, h.MaxConcurrent);
+        Assert.False(h.Coordinator.IsRunning);
+    }
+
     // ---- ServerTab wiring pins: each of these fails on the source dev had before #5371. ----
 
     private static string ControlsDir([CallerFilePath] string thisFile = "") =>
@@ -412,6 +475,21 @@ public sealed class RefreshCoordinatorTests
 
         Assert.DoesNotContain("_isRefreshing", body);
         Assert.Contains("_suppressRangeRefresh", body);
+    }
+
+    [Fact]
+    public void TheCompareToHandler_DoesNotDropAChangeBecauseARefreshIsRunning_AndSkipsOnlyTheProgramsOwnWrite()
+    {
+        var body = Body("ServerTab.Comparison.cs", "CompareToCombo_SelectionChanged");
+
+        Assert.DoesNotContain("_isRefreshing", body);
+        Assert.Contains("_suppressRangeRefresh", body);
+        Assert.Contains("RefreshVisibleTabOnlyAsync()", body);
+        Assert.DoesNotContain("RefreshOverviewAsync(", body);
+
+        /* The program's own reset of the combo (a tab with no comparison) is what the flag is for. */
+        var reset = Body("ServerTab.Comparison.cs", "UpdateCompareDropdownState");
+        Assert.Matches(@"_suppressRangeRefresh\s*=\s*true;\s*try\s*\{\s*CompareToCombo\.SelectedIndex\s*=\s*0;", reset);
     }
 
     [Fact]

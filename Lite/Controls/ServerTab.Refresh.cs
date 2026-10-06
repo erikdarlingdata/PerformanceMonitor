@@ -153,7 +153,7 @@ public partial class ServerTab : UserControl
     private async Task RefreshEverythingAsync(CancellationToken ct)
     {
         /* _isRefreshing now only means "this pass is repainting": the grids' selection handlers read it so a refresh
-           does not clear a slicer overlay, and the compare combo ignores a change that lands mid-repaint. It no longer
+           does not clear a slicer overlay. It no longer
            doubles as the in-flight guard (the coordinator is that), and everything that can throw sits inside the try,
            so the flag cannot be left set by a failed clock read or picker render. */
         _isRefreshing = true;
