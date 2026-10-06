@@ -173,7 +173,7 @@ internal static class DarlingServiceKeyFile
                 return new ServiceKeyFileResult<TKey>(ServiceKeyFileState.Absent, null, path, null, Exists: false, Untrusted: false, discarded);
             }
 
-            return Write(path, generate, discarded, spec.UniqueTemporary, logger);
+            return Write(path, generate, discarded, spec.UniqueTemporary, spec.CheckOwner, logger);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -226,7 +226,7 @@ internal static class DarlingServiceKeyFile
                 return Refuse<TKey>(path, "a file is already there, and a key is never written over one", untrusted: false, discarded);
             }
 
-            return Write(path, generate, discarded, spec.UniqueTemporary, logger);
+            return Write(path, generate, discarded, spec.UniqueTemporary, spec.CheckOwner, logger);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -236,7 +236,7 @@ internal static class DarlingServiceKeyFile
 
     /// <summary>The reason the Unix file at <paramref name="path"/> is not the service's own (#5366): another user owns
     /// it, or it has more than one name. Null when it is the service's, or when this platform cannot say.</summary>
-    private static string? UnexpectedOwnerReason(string path)
+    internal static string? UnexpectedOwnerReason(string path)
     {
         if (ComposeCredentialDirectoryGuard.Current.UnixModes is not { } modes || modes.OwnerOf(path) is not { } owner)
         {
@@ -356,11 +356,16 @@ internal static class DarlingServiceKeyFile
     /// appeared meanwhile is never replaced.
     /// </summary>
     private static ServiceKeyFileResult<TKey> Write<TKey>(
-        string path, Func<ServiceKeyGeneration<TKey>> generate, string? discarded, bool uniqueTemporary, ILogger logger)
+        string path, Func<ServiceKeyGeneration<TKey>> generate, string? discarded, bool uniqueTemporary, bool checkOwner, ILogger logger)
         where TKey : class
     {
         /* A unique temporary (#5366) is created with CreateNew and never deleted first, so a second writer cannot remove
            the first's file and put its own in its place. The fixed name is the log-hash key's, as it was. */
+        if (uniqueTemporary)
+        {
+            RemoveLeftTemporaries(path, logger);
+        }
+
         var temporary = uniqueTemporary
             ? path + UniqueTemporaryInfix + Convert.ToHexString(RandomNumberGenerator.GetBytes(8))
             : path + ".tmp";
@@ -414,6 +419,14 @@ internal static class DarlingServiceKeyFile
                 DarlingManagedRoles.FlushToDisk(writer, stream);
             }
 
+            /* The file a start would load is checked the way that start checks it, before it is moved into place (#5366): a
+               directory that hands every new file to another user would otherwise take a key, have passwords sealed to it,
+               and refuse it on every later start. Nothing is published when it fails. */
+            if (checkOwner && UnexpectedOwnerReason(temporary) is { } owner)
+            {
+                throw new InvalidOperationException($"the new file was not kept, because {owner}");
+            }
+
             File.Move(temporary, path, overwrite: false);
             return new ServiceKeyFileResult<TKey>(ServiceKeyFileState.Generated, generation.Key, path, null, Exists: true, Untrusted: false, discarded);
         }
@@ -455,6 +468,37 @@ internal static class DarlingServiceKeyFile
         }
     }
 
+    /// <summary>
+    /// Removes the unique temporary files an earlier write left behind (#5366), when it stopped between creating one and
+    /// moving it: each holds a whole key, and no other step looks for them. Regular files only: a directory, or a link,
+    /// with such a name is not ours and is left. A writer running at the same moment loses its file, so its move fails and
+    /// it publishes nothing. Best effort: the next write tries again.
+    /// </summary>
+    private static void RemoveLeftTemporaries(string path, ILogger logger)
+    {
+        try
+        {
+            var directory = Path.GetDirectoryName(path);
+            if (string.IsNullOrEmpty(directory) || !Directory.Exists(directory))
+            {
+                return;
+            }
+
+            foreach (var left in Directory.EnumerateFiles(directory, Path.GetFileName(path) + UniqueTemporaryInfix + "*"))
+            {
+                var info = new FileInfo(left);
+                if (info.LinkTarget is null && !info.Attributes.HasFlag(FileAttributes.Directory))
+                {
+                    TryDelete(left, logger);
+                }
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException)
+        {
+            logger.LogDebug("Could not look for leftover temporary files of {File}: {Message}", path, ex.Message);
+        }
+    }
+
     private static void TryDelete(string path, ILogger logger)
     {
         try
@@ -463,7 +507,7 @@ internal static class DarlingServiceKeyFile
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
-            /* best effort: the next write clears a leftover temporary itself */
+            /* best effort: the next write of a unique-named key file removes leftovers, and a fixed-name one clears its own */
             logger.LogDebug("Could not remove {File}: {Message}", path, ex.Message);
         }
     }

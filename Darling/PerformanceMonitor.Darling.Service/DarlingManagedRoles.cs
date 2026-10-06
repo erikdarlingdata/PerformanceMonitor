@@ -1823,10 +1823,11 @@ WHERE u.rolname = current_user";
                     var verdict = JudgeComposeCredentialDirectory(before, modes.Get(directory));
                     if (verdict.Distrust is not { } wasOpen || !verdict.MayWrite)
                     {
-                        /* #4004 review, round 3: a directory this process found open and could not empty stays refused
-                           to every later caller this start, though it now reads owner-only, so "nothing in it is used this
-                           start" holds for all of them. The next start trusts it: only a directory can be left, and no
-                           reader takes one for a credential. */
+                        /* A directory this process found open and could not empty stays refused to every later caller
+                           this start, though it now reads owner-only, so "nothing in it is used this start" holds for
+                           all of them. The next start trusts it, so what was left must not pass for a credential then:
+                           a password key that could not be moved aside leaves an empty file at its quarantine name (so
+                           its load refuses on every start), and a directory at a credential's name is read by nothing. */
                         return verdict.Distrust is null && guard.LeftBehind(directory) is { } leftBehind
                             ? new ComposeCredentialDirectoryTrust(leftBehind, MayWrite: false)
                             : verdict;
@@ -2054,21 +2055,23 @@ WHERE u.rolname = current_user";
     private static void SetPasswordKeyAside(string directory, string name, ComposeCredentialDirectoryGuard guard, List<string> left, ILogger logger)
     {
         var path = Path.Combine(directory, name);
-        if (!DarlingServiceKeyFile.AnythingAt(path))
-        {
-            return;
-        }
-
         var quarantine = path + DarlingPasswordKeyFile.QuarantineSuffix;
         var target = quarantine;
-        for (var attempt = 1; DarlingServiceKeyFile.AnythingAt(target) && attempt < 1000; attempt++)
-        {
-            target = path + ".discarded-" + attempt.ToString(CultureInfo.InvariantCulture);
-        }
-
+        var moveStarted = false;
         try
         {
+            if (!DarlingServiceKeyFile.AnythingAt(path))
+            {
+                return;
+            }
+
+            for (var attempt = 1; DarlingServiceKeyFile.AnythingAt(target) && attempt < 1000; attempt++)
+            {
+                target = path + ".discarded-" + attempt.ToString(CultureInfo.InvariantCulture);
+            }
+
             var regularFile = new FileInfo(path).LinkTarget is null && File.Exists(path);
+            moveStarted = true;
             if (!regularFile && Directory.Exists(path) && new FileInfo(path).LinkTarget is null)
             {
                 Directory.Move(path, target);
@@ -2078,25 +2081,65 @@ WHERE u.rolname = current_user";
                 File.Move(path, target, overwrite: false);
             }
 
+            moveStarted = false;
             if (regularFile && guard.UnixModes is { } modes)
             {
-                try
-                {
-                    modes.Set(target, OwnerOnlyFile);
-                }
-                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-                {
-                    logger.LogDebug("Could not set {File} to owner-only: {Message}", target, ex.Message);
-                }
+                SetKeptKeyOwnerOnly(modes, target, logger);
             }
 
             logger.LogWarning(
                 "The password key at {Path} was found while the credentials directory {Directory} was open to other users, and is kept as {Kept} (#5366). It is not deleted, and the key's load checks it against the store before it is used.",
                 path, directory, target);
         }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException)
         {
             left.Add($"{path} (it could not be set aside as {Path.GetFileName(target)}: {ex.Message})");
+
+            /* A move that failed leaves the key at its live name in a directory that is owner-only from now on, which the
+               next start would trust and load with nothing to say it was found open (#5366). An empty file at the
+               quarantine name makes every later load refuse (two names, or an empty key), however many starts follow. When
+               the quarantine name was taken already, that file is the record and nothing is added. */
+            if (moveStarted && target == quarantine)
+            {
+                try
+                {
+                    var options = new FileStreamOptions { Mode = FileMode.CreateNew, Access = FileAccess.Write };
+                    if (!OperatingSystem.IsWindows())
+                    {
+                        options.UnixCreateMode = OwnerOnlyFile;
+                    }
+
+                    using var marker = new FileStream(quarantine, options);
+                }
+                catch (Exception markerEx) when (markerEx is IOException or UnauthorizedAccessException)
+                {
+                    logger.LogError("Could not leave a marker at {Path} for the password key that could not be set aside: {Message}", quarantine, markerEx.Message);
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// Sets a kept password key to 0600 (#5366; a mount's group setting can add group bits back), but only a file that is
+    /// the service's own with one name: as root, a chmod would otherwise change the mode of whatever file someone
+    /// linked in while the directory was open. A file whose owner cannot be told is left as it is; the load then
+    /// reports it untrusted by its mode.
+    /// </summary>
+    private static void SetKeptKeyOwnerOnly(IUnixDirectoryModes modes, string target, ILogger logger)
+    {
+        try
+        {
+            if (DarlingServiceKeyFile.UnexpectedOwnerReason(target) is { } notOurs)
+            {
+                logger.LogDebug("Left {File} as it is: {Reason}", target, notOurs);
+                return;
+            }
+
+            modes.Set(target, OwnerOnlyFile);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            logger.LogDebug("Could not set {File} to owner-only: {Message}", target, ex.Message);
         }
     }
 

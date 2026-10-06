@@ -35,6 +35,9 @@ namespace PerformanceMonitor.Darling.Service;
 /// it. Every other credential file in such a directory is removed.</para>
 ///
 /// <para>A refusal names the file and its directory, never the key.</para>
+///
+/// <para>The key's text form (base64) passes through managed strings while it is read and written, as the log-hash key's
+/// does, and the key itself stays in memory for as long as the service runs.</para>
 /// </summary>
 public static class DarlingPasswordKeyFile
 {
@@ -86,9 +89,10 @@ public static class DarlingPasswordKeyFile
         ArgumentNullException.ThrowIfNull(logger);
 
         var path = Path.Combine(directory, FileName);
+        ServiceKeyFileResult<byte[]>? live = null;
         try
         {
-            var live = DarlingServiceKeyFile.Load(directory, Spec, generate: null, createDirectory: false, logger);
+            live = DarlingServiceKeyFile.Load(directory, Spec, generate: null, createDirectory: false, logger);
             if (live.State == ServiceKeyFileState.DirectoryRefused || !DarlingServiceKeyFile.AnythingAt(path + QuarantineSuffix))
             {
                 return Describe(live, foundAfterOpenDirectory: false, logger);
@@ -96,6 +100,12 @@ public static class DarlingPasswordKeyFile
 
             if (live.Exists)
             {
+                /* Not used past here: the key is zeroed before the refusal returns (#5366). */
+                if (live.Key is not null)
+                {
+                    CryptographicOperations.ZeroMemory(live.Key);
+                }
+
                 return new PasswordKeyFileLoad(
                     Present: true, Untrusted: true,
                     $"Two password key files are in {directory}: {FileName} and {QuarantineFileName}. Keep the right one and remove the other, then restart.",
@@ -108,6 +118,11 @@ public static class DarlingPasswordKeyFile
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
+            if (live?.Key is not null)
+            {
+                CryptographicOperations.ZeroMemory(live.Key);
+            }
+
             return new PasswordKeyFileLoad(
                 Present: ExistsOrFalse(path), Untrusted: false, Refusal: $"The password key {FileName} in {directory} could not be checked ({ex.Message}).",
                 Pkcs8: null, FoundAfterOpenDirectory: false, path);
@@ -163,7 +178,19 @@ public static class DarlingPasswordKeyFile
         var generated = false;
         try
         {
-            if (ExistsOrFalse(path + QuarantineSuffix))
+            /* A check that cannot be made refuses (#5366): a kept key may be waiting, and a new one is never written
+               beside it. */
+            bool kept;
+            try
+            {
+                kept = DarlingServiceKeyFile.AnythingAt(path + QuarantineSuffix);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException)
+            {
+                return new PasswordKeyFileLoad(Present: false, Untrusted: false, Refusal: $"a new password key was not written to {path}: whether {QuarantineFileName} holds a key kept from an earlier start could not be checked ({ex.Message})", Pkcs8: null, FoundAfterOpenDirectory: false, path);
+            }
+
+            if (kept)
             {
                 return new PasswordKeyFileLoad(Present: true, Untrusted: false, Refusal: $"a new password key was not written to {path}: {QuarantineFileName} holds a key kept from an earlier start; accept it or retire it first", Pkcs8: null, FoundAfterOpenDirectory: true, path);
             }
