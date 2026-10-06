@@ -38,29 +38,29 @@ public sealed class DarlingPasswordKeyStoreLiveTests
     [Fact]
     public async Task AFreshStore_GeneratesAKey_PublishesIt_AndRecordsTheHostAsOk()
     {
-        await using var rig = await Rig.CreateAsync();
+        await using var store = await StoreFixture.CreateAsync();
         var bodySucceeded = false;
         try
         {
             var logger = new ListLogger();
-            var runtime = await rig.StartAsync(logger: logger);
+            var runtime = await store.StartAsync(logger: logger);
 
             Assert.Equal("ok", runtime.State);
             Assert.True(runtime.Ring.Status.CanSeal);
-            Assert.Same(runtime.Ring, rig.LastRing);
-            Assert.True(File.Exists(Path.Combine(rig.Directory, DarlingPasswordKeyFile.FileName)));
+            Assert.Same(runtime.Ring, store.LastRing);
+            Assert.True(File.Exists(Path.Combine(store.Directory, DarlingPasswordKeyFile.FileName)));
 
-            var published = await rig.ReadCurrentAsync();
+            var published = await store.ReadCurrentAsync();
             Assert.NotNull(published);
             Assert.Equal(runtime.Ring.Status.KeyId, published.KeyId);
             Assert.Equal("RSA3072-OAEP-SHA256/A256GCM", published.Algorithm);
 
-            var state = await rig.ReadStateAsync("example-host");
+            var state = await store.ReadStateAsync("example-host");
             Assert.Equal(("ok", published.KeyId), (state.State, state.KeyId));
             Assert.Contains(logger.Lines, l => l.StartsWith($"Password key {PasswordSeal.DisplayKeyId(published.KeyId)} generated in ", StringComparison.Ordinal));
 
             // A second start finds the file and the published key agree and says "loaded".
-            var again = await rig.StartAsync(logger: logger);
+            var again = await store.StartAsync(logger: logger);
             Assert.Equal("ok", again.State);
             Assert.Equal(runtime.Ring.Status.KeyId, again.Ring.Status.KeyId);
             Assert.Contains(logger.Lines, l => l.StartsWith($"Password key {PasswordSeal.DisplayKeyId(published.KeyId)} loaded from ", StringComparison.Ordinal));
@@ -74,33 +74,33 @@ public sealed class DarlingPasswordKeyStoreLiveTests
         }
         finally
         {
-            await rig.CleanupAsync(bodySucceeded);
+            await store.CleanupAsync(bodySucceeded);
         }
     }
 
     [Fact]
     public async Task AResetThenAStart_RetiresTheOldFile_MakesANewKey_AndMarksTheOldRowReplaced()
     {
-        await using var rig = await Rig.CreateAsync();
+        await using var store = await StoreFixture.CreateAsync();
         var bodySucceeded = false;
         try
         {
-            var first = await rig.StartAsync();
+            var first = await store.StartAsync();
             var oldId = first.Ring.Status.KeyId!;
 
-            await using (var c = await rig.Source.OpenConnectionAsync(TestContext.Current.CancellationToken))
+            await using (var c = await store.Source.OpenConnectionAsync(TestContext.Current.CancellationToken))
             {
                 Assert.Equal(oldId, await DarlingPasswordKeyStore.MarkCurrentResetAsync(c, TestContext.Current.CancellationToken));
             }
 
-            var second = await rig.StartAsync();
+            var second = await store.StartAsync();
 
             Assert.Equal("ok", second.State);
             Assert.NotEqual(oldId, second.Ring.Status.KeyId);
-            Assert.True(File.Exists(Path.Combine(rig.Directory, DarlingPasswordKeyFile.FileName + ".retired")));
-            Assert.True(File.Exists(Path.Combine(rig.Directory, DarlingPasswordKeyFile.FileName)));
+            Assert.True(File.Exists(Path.Combine(store.Directory, DarlingPasswordKeyFile.FileName + ".retired")));
+            Assert.True(File.Exists(Path.Combine(store.Directory, DarlingPasswordKeyFile.FileName)));
 
-            var rows = await rig.ReadRowsAsync();
+            var rows = await store.ReadRowsAsync();
             Assert.Equal(["current", "replaced"], [rows[second.Ring.Status.KeyId!].State, rows[oldId].State]);
             Assert.Equal("reset", rows[oldId].Reason);
             Assert.True(rows[oldId].ReplacedAtSet);
@@ -108,217 +108,217 @@ public sealed class DarlingPasswordKeyStoreLiveTests
         }
         finally
         {
-            await rig.CleanupAsync(bodySucceeded);
+            await store.CleanupAsync(bodySucceeded);
         }
     }
 
     [Fact]
     public async Task AKeyFileWithNoPublishedKey_IsPublished_AndAMissingFileRefusesWithTheStateMissing()
     {
-        await using var rig = await Rig.CreateAsync();
+        await using var store = await StoreFixture.CreateAsync();
         var bodySucceeded = false;
         try
         {
             using var made = PasswordPrivateKey.Generate();
-            var written = DarlingPasswordKeyFile.Generate(rig.Directory, made.ExportPkcs8, new ListLogger());
+            var written = DarlingPasswordKeyFile.Generate(store.Directory, made.ExportPkcs8, new ListLogger());
             Assert.True(written.Present);
 
-            var published = await rig.StartAsync();
+            var published = await store.StartAsync();
             Assert.Equal("ok", published.State);
-            Assert.Equal(made.PublicKey.KeyId, (await rig.ReadCurrentAsync())!.KeyId);
+            Assert.Equal(made.PublicKey.KeyId, (await store.ReadCurrentAsync())!.KeyId);
 
             // The store publishes a key and the directory no longer has it.
-            File.Move(Path.Combine(rig.Directory, DarlingPasswordKeyFile.FileName), Path.Combine(rig.Directory, "moved-away"));
-            var missing = await rig.StartAsync();
+            File.Move(Path.Combine(store.Directory, DarlingPasswordKeyFile.FileName), Path.Combine(store.Directory, "moved-away"));
+            var missing = await store.StartAsync();
 
             Assert.Equal("missing", missing.State);
             Assert.False(missing.Ring.Status.CanSeal);
             Assert.Contains("is missing from the credentials directory", missing.Ring.Status.Reason, StringComparison.Ordinal);
-            Assert.Equal("missing", (await rig.ReadStateAsync("example-host")).State);
-            Assert.False(File.Exists(Path.Combine(rig.Directory, DarlingPasswordKeyFile.FileName)));
+            Assert.Equal("missing", (await store.ReadStateAsync("example-host")).State);
+            Assert.False(File.Exists(Path.Combine(store.Directory, DarlingPasswordKeyFile.FileName)));
             bodySucceeded = true;
         }
         finally
         {
-            await rig.CleanupAsync(bodySucceeded);
+            await store.CleanupAsync(bodySucceeded);
         }
     }
 
     [Fact]
     public async Task AKeptKeyThatPassesTheSelfTest_IsAccepted_AndIsBackAtTheLiveNameAfterTheStart()
     {
-        await using var rig = await Rig.CreateAsync();
+        await using var store = await StoreFixture.CreateAsync();
         var bodySucceeded = false;
         try
         {
-            var first = await rig.StartAsync();
-            var keptPath = Path.Combine(rig.Directory, DarlingPasswordKeyFile.QuarantineFileName);
-            File.Move(Path.Combine(rig.Directory, DarlingPasswordKeyFile.FileName), keptPath);
+            var first = await store.StartAsync();
+            var keptPath = Path.Combine(store.Directory, DarlingPasswordKeyFile.QuarantineFileName);
+            File.Move(Path.Combine(store.Directory, DarlingPasswordKeyFile.FileName), keptPath);
 
             var logger = new ListLogger();
-            var second = await rig.StartAsync(logger: logger);
+            var second = await store.StartAsync(logger: logger);
 
             Assert.Equal("ok", second.State);
             Assert.Equal(first.Ring.Status.KeyId, second.Ring.Status.KeyId);
-            Assert.True(File.Exists(Path.Combine(rig.Directory, DarlingPasswordKeyFile.FileName)));
+            Assert.True(File.Exists(Path.Combine(store.Directory, DarlingPasswordKeyFile.FileName)));
             Assert.False(File.Exists(keptPath));
             Assert.Contains(logger.Lines, l => l.Contains("another user may have read it", StringComparison.Ordinal));
-            Assert.Contains("another user may have read it", (await rig.ReadStateAsync("example-host")).Note, StringComparison.Ordinal);
+            Assert.Contains("another user may have read it", (await store.ReadStateAsync("example-host")).Note, StringComparison.Ordinal);
             bodySucceeded = true;
         }
         finally
         {
-            await rig.CleanupAsync(bodySucceeded);
+            await store.CleanupAsync(bodySucceeded);
         }
     }
 
     [Fact]
     public async Task AKeptKeyWhosePrivateHalfDoesNotOpenTheSelfTest_IsNotUsed_AndStaysWhereItWas()
     {
-        await using var rig = await Rig.CreateAsync();
+        await using var store = await StoreFixture.CreateAsync();
         var bodySucceeded = false;
         try
         {
-            await rig.StartAsync();
-            var keptPath = Path.Combine(rig.Directory, DarlingPasswordKeyFile.QuarantineFileName);
-            File.Move(Path.Combine(rig.Directory, DarlingPasswordKeyFile.FileName), keptPath);
+            await store.StartAsync();
+            var keptPath = Path.Combine(store.Directory, DarlingPasswordKeyFile.QuarantineFileName);
+            File.Move(Path.Combine(store.Directory, DarlingPasswordKeyFile.FileName), keptPath);
 
-            var refused = await rig.StartAsync(selfTest: static (_, _) => false);
+            var refused = await store.StartAsync(selfTest: static (_, _) => false);
 
             Assert.Equal("mismatch", refused.State);
             Assert.False(refused.Ring.Status.CanSeal);
             Assert.True(File.Exists(keptPath));
-            Assert.False(File.Exists(Path.Combine(rig.Directory, DarlingPasswordKeyFile.FileName)));
-            Assert.Equal("mismatch", (await rig.ReadStateAsync("example-host")).State);
+            Assert.False(File.Exists(Path.Combine(store.Directory, DarlingPasswordKeyFile.FileName)));
+            Assert.Equal("mismatch", (await store.ReadStateAsync("example-host")).State);
             bodySucceeded = true;
         }
         finally
         {
-            await rig.CleanupAsync(bodySucceeded);
+            await store.CleanupAsync(bodySucceeded);
         }
     }
 
     [Fact]
     public async Task ADisabledOrExtraTrigger_MakesTheStartRefuse_AndNoKeyIsPublished()
     {
-        await using var rig = await Rig.CreateAsync();
+        await using var store = await StoreFixture.CreateAsync();
         var bodySucceeded = false;
         try
         {
-            await rig.ExecAsync("ALTER TABLE config.password_key DISABLE TRIGGER trg_password_key_owner_only_row;");
-            var disabled = await rig.StartAsync();
+            await store.ExecAsync("ALTER TABLE config.password_key DISABLE TRIGGER trg_password_key_owner_only_row;");
+            var disabled = await store.StartAsync();
             Assert.Equal("refused", disabled.State);
             Assert.False(disabled.Ring.Status.CanSeal);
             Assert.Contains("trg_password_key_owner_only_row", disabled.Ring.Status.Reason, StringComparison.Ordinal);
-            Assert.Null(await rig.ReadCurrentAsync());
-            Assert.Equal("refused", (await rig.ReadStateAsync("example-host")).State);
+            Assert.Null(await store.ReadCurrentAsync());
+            Assert.Equal("refused", (await store.ReadStateAsync("example-host")).State);
 
-            await rig.ExecAsync("ALTER TABLE config.password_key ENABLE ALWAYS TRIGGER trg_password_key_owner_only_row;");
-            await rig.ExecAsync(
+            await store.ExecAsync("ALTER TABLE config.password_key ENABLE ALWAYS TRIGGER trg_password_key_owner_only_row;");
+            await store.ExecAsync(
                 "CREATE TRIGGER trg_extra BEFORE INSERT ON config.legacy_secret_pin FOR EACH ROW EXECUTE FUNCTION config.password_key_owner_only();");
-            var extra = await rig.StartAsync();
+            var extra = await store.StartAsync();
             Assert.Equal("refused", extra.State);
             Assert.Contains("trg_extra", extra.Ring.Status.Reason, StringComparison.Ordinal);
 
-            await rig.ExecAsync("DROP TRIGGER trg_extra ON config.legacy_secret_pin;");
-            Assert.Equal("ok", (await rig.StartAsync()).State);
+            await store.ExecAsync("DROP TRIGGER trg_extra ON config.legacy_secret_pin;");
+            Assert.Equal("ok", (await store.StartAsync()).State);
             bodySucceeded = true;
         }
         finally
         {
-            await rig.CleanupAsync(bodySucceeded);
+            await store.CleanupAsync(bodySucceeded);
         }
     }
 
     [Fact]
     public async Task TheSweepCheck_RefusesOnAResetAMismatchOrADisabledTrigger_AndRecoversWhenTheStoreIsRight()
     {
-        await using var rig = await Rig.CreateAsync();
+        await using var store = await StoreFixture.CreateAsync();
         var bodySucceeded = false;
         try
         {
-            var runtime = await rig.StartAsync();
+            var runtime = await store.StartAsync();
             var ct = TestContext.Current.CancellationToken;
             var heldId = runtime.Ring.Status.KeyId!;
 
             await runtime.SweepCheckAsync(ct);
-            Assert.Same(runtime.Ring, rig.LastRing);
+            Assert.Same(runtime.Ring, store.LastRing);
 
             // A trigger that stops protecting the tables.
-            await rig.ExecAsync("ALTER TABLE config.password_key_service DISABLE TRIGGER trg_password_key_service_owner_only_row;");
+            await store.ExecAsync("ALTER TABLE config.password_key_service DISABLE TRIGGER trg_password_key_service_owner_only_row;");
             await runtime.SweepCheckAsync(ct);
-            Assert.False(rig.LastRing!.Status.CanSeal);
-            Assert.Equal("refused", (await rig.ReadStateAsync("example-host")).State);
-            await rig.ExecAsync("ALTER TABLE config.password_key_service ENABLE ALWAYS TRIGGER trg_password_key_service_owner_only_row;");
+            Assert.False(store.LastRing!.Status.CanSeal);
+            Assert.Equal("refused", (await store.ReadStateAsync("example-host")).State);
+            await store.ExecAsync("ALTER TABLE config.password_key_service ENABLE ALWAYS TRIGGER trg_password_key_service_owner_only_row;");
             await runtime.SweepCheckAsync(ct);
-            Assert.Same(runtime.Ring, rig.LastRing);
-            Assert.Equal("ok", (await rig.ReadStateAsync("example-host")).State);
+            Assert.Same(runtime.Ring, store.LastRing);
+            Assert.Equal("ok", (await store.ReadStateAsync("example-host")).State);
 
             // A reset made while the service runs: no current row.
-            await using (var c = await rig.Source.OpenConnectionAsync(ct))
+            await using (var c = await store.Source.OpenConnectionAsync(ct))
             {
                 await DarlingPasswordKeyStore.MarkCurrentResetAsync(c, ct);
             }
 
             await runtime.SweepCheckAsync(ct);
-            Assert.False(rig.LastRing!.Status.CanSeal);
-            Assert.Equal("reset_pending", (await rig.ReadStateAsync("example-host")).State);
+            Assert.False(store.LastRing!.Status.CanSeal);
+            Assert.Equal("reset_pending", (await store.ReadStateAsync("example-host")).State);
 
             // A different key published in its place.
             using var other = PasswordPrivateKey.Generate();
-            await rig.ExecAsync(
+            await store.ExecAsync(
                 "INSERT INTO config.password_key (key_id, public_key, algorithm, state) VALUES (@id, @key, 'RSA3072-OAEP-SHA256/A256GCM', 'current');",
                 ("id", other.PublicKey.KeyId), ("key", other.PublicKey.Spki));
             await runtime.SweepCheckAsync(ct);
-            Assert.False(rig.LastRing!.Status.CanSeal);
-            Assert.Equal("mismatch", (await rig.ReadStateAsync("example-host")).State);
+            Assert.False(store.LastRing!.Status.CanSeal);
+            Assert.Equal("mismatch", (await store.ReadStateAsync("example-host")).State);
             Assert.NotEqual(heldId, other.PublicKey.KeyId);
             bodySucceeded = true;
         }
         finally
         {
-            await rig.CleanupAsync(bodySucceeded);
+            await store.CleanupAsync(bodySucceeded);
         }
     }
 
     [Fact]
     public async Task StateRowsNotUpdatedForThirtyDays_AreDeletedAtStart_AndRecentOnesStay()
     {
-        await using var rig = await Rig.CreateAsync();
+        await using var store = await StoreFixture.CreateAsync();
         var bodySucceeded = false;
         try
         {
-            await rig.ExecAsync(
+            await store.ExecAsync(
                 "INSERT INTO config.password_key_service (service_host, key_id, state, updated_at) VALUES ('old-host-example', NULL, 'ok', (now() AT TIME ZONE 'UTC') - interval '31 days'), " +
                 "('recent-host-example', NULL, 'ok', (now() AT TIME ZONE 'UTC') - interval '29 days');");
 
-            await rig.StartAsync();
+            await store.StartAsync();
 
-            var hosts = await rig.ReadHostsAsync();
+            var hosts = await store.ReadHostsAsync();
             Assert.Equal(["example-host", "recent-host-example"], hosts);
             bodySucceeded = true;
         }
         finally
         {
-            await rig.CleanupAsync(bodySucceeded);
+            await store.CleanupAsync(bodySucceeded);
         }
     }
 
     [Fact]
     public async Task OnWindows_ThePinSnapshotPinsEachOpenableLegacyValue_ToItsRowAndConnection_ThenIsDone()
     {
-        await using var rig = await Rig.CreateAsync();
+        await using var store = await StoreFixture.CreateAsync();
         var bodySucceeded = false;
         try
         {
-            await rig.SeedServersAsync();
+            await store.SeedServersAsync();
             string? Open(string stored) => stored.StartsWith("legacy-", StringComparison.Ordinal) ? "p@ss-not-real" : throw new CryptographicException("not a blob");
 
             var logger = new ListLogger();
-            await rig.StartAsync(isWindows: true, unprotect: Open, logger: logger);
+            await store.StartAsync(isWindows: true, unprotect: Open, logger: logger);
 
-            Assert.Equal("done", await rig.MarkerAsync());
-            var pins = await rig.ReadPinsAsync();
+            Assert.Equal("done", await store.MarkerAsync());
+            var pins = await store.ReadPinsAsync();
             Assert.Equal(["0/smtp", "1/remediation", "1/server"], pins.Keys.Order(StringComparer.Ordinal).ToArray());
 
             // value_sha256 is the hash of the STORED text, never of the password.
@@ -333,70 +333,70 @@ public sealed class DarlingPasswordKeyStoreLiveTests
             Assert.Equal(PasswordBinding.ForSmtp("smtp.example.com", 587, true, "mail_login").LegacyPinHash(), pins["0/smtp"].Binding);
 
             // The sealed, reference and empty values were not pinned (server 2, 3 and 4 hold them), and a second start adds nothing.
-            await rig.StartAsync(isWindows: true, unprotect: Open);
-            Assert.Equal(3, (await rig.ReadPinsAsync()).Count);
+            await store.StartAsync(isWindows: true, unprotect: Open);
+            Assert.Equal(3, (await store.ReadPinsAsync()).Count);
             bodySucceeded = true;
         }
         finally
         {
-            await rig.CleanupAsync(bodySucceeded);
+            await store.CleanupAsync(bodySucceeded);
         }
     }
 
     [Fact]
     public async Task OnLinux_ThePendingMarkerBecomesSkipped_AndNothingIsPinned()
     {
-        await using var rig = await Rig.CreateAsync();
+        await using var store = await StoreFixture.CreateAsync();
         var bodySucceeded = false;
         try
         {
-            await rig.SeedServersAsync();
-            await rig.StartAsync(isWindows: false, unprotect: static _ => throw new InvalidOperationException("must not be called"));
+            await store.SeedServersAsync();
+            await store.StartAsync(isWindows: false, unprotect: static _ => throw new InvalidOperationException("must not be called"));
 
-            Assert.Equal("skipped", await rig.MarkerAsync());
-            Assert.Empty(await rig.ReadPinsAsync());
+            Assert.Equal("skipped", await store.MarkerAsync());
+            Assert.Empty(await store.ReadPinsAsync());
             bodySucceeded = true;
         }
         finally
         {
-            await rig.CleanupAsync(bodySucceeded);
+            await store.CleanupAsync(bodySucceeded);
         }
     }
 
     [Fact]
     public async Task AMissingMarkerRow_PinsNothing_AndCreatesNoMarker()
     {
-        await using var rig = await Rig.CreateAsync();
+        await using var store = await StoreFixture.CreateAsync();
         var bodySucceeded = false;
         try
         {
-            await rig.SeedServersAsync();
-            await rig.ExecAsync("DELETE FROM config.legacy_secret_pin_marker;");
+            await store.SeedServersAsync();
+            await store.ExecAsync("DELETE FROM config.legacy_secret_pin_marker;");
 
-            var runtime = await rig.StartAsync(isWindows: true, unprotect: static _ => "p@ss-not-real");
+            var runtime = await store.StartAsync(isWindows: true, unprotect: static _ => "p@ss-not-real");
 
             Assert.Equal("ok", runtime.State);
-            Assert.Null(await rig.MarkerAsync());
-            Assert.Empty(await rig.ReadPinsAsync());
+            Assert.Null(await store.MarkerAsync());
+            Assert.Empty(await store.ReadPinsAsync());
             bodySucceeded = true;
         }
         finally
         {
-            await rig.CleanupAsync(bodySucceeded);
+            await store.CleanupAsync(bodySucceeded);
         }
     }
 
     [Fact]
     public async Task ANonOwnerWhoUpdatesThePublishedKey_GetsPW010()
     {
-        await using var rig = await Rig.CreateAsync();
+        await using var store = await StoreFixture.CreateAsync();
         var bodySucceeded = false;
         var role = "pk_probe_" + Guid.NewGuid().ToString("N")[..10];
         try
         {
-            await rig.StartAsync();
-            await rig.ExecAsync($"CREATE ROLE {role} LOGIN PASSWORD 'p@ss-not-real'; GRANT USAGE ON SCHEMA config TO {role}; GRANT SELECT, UPDATE ON config.password_key TO {role};");
-            var builder = new NpgsqlConnectionStringBuilder(rig.Scratch.ConnectionString) { Username = role, Password = "p@ss-not-real", Pooling = false };
+            await store.StartAsync();
+            await store.ExecAsync($"CREATE ROLE {role} LOGIN PASSWORD 'p@ss-not-real'; GRANT USAGE ON SCHEMA config TO {role}; GRANT SELECT, UPDATE ON config.password_key TO {role};");
+            var builder = new NpgsqlConnectionStringBuilder(store.Scratch.ConnectionString) { Username = role, Password = "p@ss-not-real", Pooling = false };
             await using var connection = new NpgsqlConnection(builder.ConnectionString);
             await connection.OpenAsync(TestContext.Current.CancellationToken);
             await using var update = new NpgsqlCommand("UPDATE config.password_key SET public_key = decode(repeat('01', 400), 'hex');", connection);
@@ -407,7 +407,7 @@ public sealed class DarlingPasswordKeyStoreLiveTests
         }
         finally
         {
-            await rig.CleanupAsync(bodySucceeded, $"DROP OWNED BY {role}; DROP ROLE IF EXISTS {role};");
+            await store.CleanupAsync(bodySucceeded, $"DROP OWNED BY {role}; DROP ROLE IF EXISTS {role};");
         }
     }
 
@@ -425,9 +425,9 @@ public sealed class DarlingPasswordKeyStoreLiveTests
     }
 
     /// <summary>One scratch store, migrated, with its own key directory and the owner's data source.</summary>
-    private sealed class Rig : IAsyncDisposable
+    private sealed class StoreFixture : IAsyncDisposable
     {
-        private Rig(ScratchPostgres scratch, NpgsqlDataSource source, string directory)
+        private StoreFixture(ScratchPostgres scratch, NpgsqlDataSource source, string directory)
         {
             Scratch = scratch;
             Source = source;
@@ -442,7 +442,7 @@ public sealed class DarlingPasswordKeyStoreLiveTests
 
         public IPasswordKeyRing? LastRing { get; private set; }
 
-        public static async Task<Rig> CreateAsync()
+        public static async Task<StoreFixture> CreateAsync()
         {
             Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), "Set DARLING_TEST_PG to run the password key runtime live pins (each mints its own scratch database).");
             var ct = TestContext.Current.CancellationToken;
@@ -455,7 +455,7 @@ public sealed class DarlingPasswordKeyStoreLiveTests
 
             var directory = Path.Combine(Path.GetTempPath(), "pmkey-" + Guid.NewGuid().ToString("N")[..12]);
             System.IO.Directory.CreateDirectory(directory);
-            return new Rig(scratch, NpgsqlDataSource.Create(scratch.ConnectionString), directory);
+            return new StoreFixture(scratch, NpgsqlDataSource.Create(scratch.ConnectionString), directory);
         }
 
         public Task<DarlingPasswordKeyRuntime> StartAsync(
