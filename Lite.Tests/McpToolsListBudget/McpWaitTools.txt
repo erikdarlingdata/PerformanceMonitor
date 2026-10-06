@@ -19,6 +19,7 @@ param get_wait_types.server_name 28
 
 tool get_waiting_tasks 364
 param get_waiting_tasks.as_of 167
+param get_waiting_tasks.database_name 46
 param get_waiting_tasks.hours_back 28
 param get_waiting_tasks.limit 141
 param get_waiting_tasks.server_name 28

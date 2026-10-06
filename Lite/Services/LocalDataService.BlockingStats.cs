@@ -26,7 +26,7 @@ namespace PerformanceMonitorLite.Services;
 /// Reports grid and the blocking-incident count trend read.
 /// </summary>
 public sealed record BlockingDurationStatsPoint(
-    DateTime Time, int EventCount, long TotalDurationMs, long MaxDurationMs, double AvgDurationMs);
+    DateTime Time, int EventCount, long TotalDurationMs, long MaxDurationMs, double AvgDurationMs, string? Source = null);
 
 /* The DeadlockSeverityStatsPoint record moved to PerformanceMonitor.Common (#2484), because the headless
    service needed the same shape and a third identical copy is how three surfaces end up disagreeing about
@@ -94,7 +94,8 @@ WITH bpr AS (
         COUNT(*) AS event_count,
         CAST(COALESCE(SUM(wait_time_ms), 0) AS BIGINT) AS total_duration_ms,
         CAST(COALESCE(MAX(wait_time_ms), 0) AS BIGINT) AS max_duration_ms,
-        CAST(COALESCE(AVG(wait_time_ms), 0) AS DOUBLE) AS avg_duration_ms
+        CAST(COALESCE(AVG(wait_time_ms), 0) AS DOUBLE) AS avg_duration_ms,
+        'blocked-process-report' AS source
     FROM " + StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time >= $2 AND event_time <= $3" + dbClause) + @" AS ev
     GROUP BY DATE_TRUNC('minute', event_time)
 ),
@@ -104,14 +105,15 @@ dmv AS (
         COUNT(*) AS event_count,
         CAST(COALESCE(SUM(wait_time_ms), 0) AS BIGINT) AS total_duration_ms,
         CAST(COALESCE(MAX(wait_time_ms), 0) AS BIGINT) AS max_duration_ms,
-        CAST(COALESCE(AVG(wait_time_ms), 0) AS DOUBLE) AS avg_duration_ms
+        CAST(COALESCE(AVG(wait_time_ms), 0) AS DOUBLE) AS avg_duration_ms,
+        'DMV snapshot' AS source
     FROM v_dmv_blocking_snapshots
     WHERE server_id = $1 AND event_time >= $2 AND event_time <= $3" + dbClause + @"
     GROUP BY DATE_TRUNC('minute', event_time)
 )
-SELECT bucket, event_count, total_duration_ms, max_duration_ms, avg_duration_ms FROM bpr
+SELECT bucket, event_count, total_duration_ms, max_duration_ms, avg_duration_ms, source FROM bpr
 UNION ALL
-SELECT bucket, event_count, total_duration_ms, max_duration_ms, avg_duration_ms FROM dmv WHERE NOT EXISTS (SELECT 1 FROM bpr)
+SELECT bucket, event_count, total_duration_ms, max_duration_ms, avg_duration_ms, source FROM dmv WHERE NOT EXISTS (SELECT 1 FROM bpr)
 ORDER BY bucket";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
@@ -129,7 +131,8 @@ ORDER BY bucket";
                 reader.IsDBNull(1) ? 0 : Convert.ToInt32(reader.GetValue(1)),
                 reader.IsDBNull(2) ? 0 : Convert.ToInt64(reader.GetValue(2)),
                 reader.IsDBNull(3) ? 0 : Convert.ToInt64(reader.GetValue(3)),
-                reader.IsDBNull(4) ? 0 : ToDouble(reader.GetValue(4))));
+                reader.IsDBNull(4) ? 0 : ToDouble(reader.GetValue(4)),
+                reader.IsDBNull(5) ? null : reader.GetString(5)));
         }
 
         return items;

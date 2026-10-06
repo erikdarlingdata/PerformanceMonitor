@@ -88,7 +88,7 @@ public sealed class SensitiveStatementsTests
     }
 
     private const string PinnedTranslation = """
-        (?:(?<!(?-i:[0-9A-Za-z_]))(?=(?-i:[0-9A-Za-z_]))(?:(create|alter)([\s]|/[*]([^*]|[*]+[^*/])*[*]+/|--[^\p{Cc}]*)+(role|user|group|subscription|server)(?<=(?-i:[0-9A-Za-z_]))(?!(?-i:[0-9A-Za-z_]))|password(?<=(?-i:[0-9A-Za-z_]))(?!(?-i:[0-9A-Za-z_]))([\s]|/[*]([^*]|[*]+[^*/])*[*]+/|--[^\p{Cc}]*)*(=|to)?([\s]|/[*]([^*]|[*]+[^*/])*[*]+/|--[^\p{Cc}]*)*(e?'|u&'|[$][^0-9])|(pg)?password[\s]*=[\s]*[^$\s]|(create|alter)([\s]|/[*]([^*]|[*]+[^*/])*[*]+/|--[^\p{Cc}]*)+(login|credential)(?<=(?-i:[0-9A-Za-z_]))(?!(?-i:[0-9A-Za-z_]))|scoped([\s]|/[*]([^*]|[*]+[^*/])*[*]+/|--[^\p{Cc}]*)+credential(?<=(?-i:[0-9A-Za-z_]))(?!(?-i:[0-9A-Za-z_]))|([a-z0-9_]*(password|passwd|pwd|secret)|key_source)(?<=(?-i:[0-9A-Za-z_]))(?!(?-i:[0-9A-Za-z_]))([\s]|/[*]([^*]|[*]+[^*/])*[*]+/|--[^\p{Cc}]*)*(=|to)?([\s]|/[*]([^*]|[*]+[^*/])*[*]+/|--[^\p{Cc}]*)*(n?'|e'|u&'|0x|[$][^0-9])|pwd[\s]*=[\s]*[^$@\s]|(sp_addlogin|sp_password|sp_addlinkedsrvlogin|sp_addapprole|sp_approlepassword|sp_setapprole|sp_change_users_login|sp_adddistributor|sp_changedistributor_password|sp_adddistpublisher|sp_addsubscriber|sp_link_publication|sp_control_dbmasterkey_password|sp_xp_cmdshell_proxy_account)(?<=(?-i:[0-9A-Za-z_]))(?!(?-i:[0-9A-Za-z_]))|(encryptbypassphrase|decryptbypassphrase|decryptbykeyautocert|decryptbykeyautoasymkey|decryptbyasymkey|decryptbycert|signbycert|signbyasymkey|pwdencrypt|pwdcompare)(?<=(?-i:[0-9A-Za-z_]))(?!(?-i:[0-9A-Za-z_]))|opendatasource(?<=(?-i:[0-9A-Za-z_]))(?!(?-i:[0-9A-Za-z_]))|openrowset([\s]|/[*]([^*]|[*]+[^*/])*[*]+/|--[^\p{Cc}]*)*[(]([\s]|/[*]([^*]|[*]+[^*/])*[*]+/|--[^\p{Cc}]*)*n?'|[a-z0-9_]*(password|passwd|pwd|secret)(]|")([\s]|/[*]([^*]|[*]+[^*/])*[*]+/|--[^\p{Cc}]*)*=([\s]|/[*]([^*]|[*]+[^*/])*[*]+/|--[^\p{Cc}]*)*(n?'|e'|u&'|0x)))|[a-z][a-z0-9+.-]*://[^\s/@:]+:[^\s/@]+@
+        (?:(?<!(?-i:[0-9A-Za-z_]))(?=(?-i:[0-9A-Za-z_]))(?:(create|alter)([\s]|/[*]([^*]|[*]+[^*/])*[*]+/|--[^\p{Cc}]*)+(role|user|group|subscription|server)(?<=(?-i:[0-9A-Za-z_]))(?!(?-i:[0-9A-Za-z_]))|password(?<=(?-i:[0-9A-Za-z_]))(?!(?-i:[0-9A-Za-z_]))([\s]|/[*]([^*]|[*]+[^*/])*[*]+/|--[^\p{Cc}]*)*(=|to)?([\s]|/[*]([^*]|[*]+[^*/])*[*]+/|--[^\p{Cc}]*)*(e?'|u&'|[$][^0-9])|(pg)?password[\s]*=[\s]*[^$\s]|(create|alter)([\s]|/[*]([^*]|[*]+[^*/])*[*]+/|--[^\p{Cc}]*)+(login|credential)(?<=(?-i:[0-9A-Za-z_]))(?!(?-i:[0-9A-Za-z_]))|scoped([\s]|/[*]([^*]|[*]+[^*/])*[*]+/|--[^\p{Cc}]*)+credential(?<=(?-i:[0-9A-Za-z_]))(?!(?-i:[0-9A-Za-z_]))|([a-z0-9_]*(password|passwd|pwd|secret)|key_source)(?<=(?-i:[0-9A-Za-z_]))(?!(?-i:[0-9A-Za-z_]))([\s]|/[*]([^*]|[*]+[^*/])*[*]+/|--[^\p{Cc}]*)*(=|to)?([\s]|/[*]([^*]|[*]+[^*/])*[*]+/|--[^\p{Cc}]*)*(n?'|e'|u&'|0x|[$][^0-9])|pwd[\s]*=[\s]*[^$@\s]|(sp_addlogin|sp_password|sp_addlinkedsrvlogin|sp_addapprole|sp_approlepassword|sp_setapprole|sp_change_users_login|sp_adddistributor|sp_changedistributor_password|sp_adddistpublisher|sp_addsubscriber|sp_link_publication|sp_control_dbmasterkey_password|sp_xp_cmdshell_proxy_account)(?<=(?-i:[0-9A-Za-z_]))(?!(?-i:[0-9A-Za-z_]))|(encryptbypassphrase|decryptbypassphrase|decryptbykeyautocert|decryptbykeyautoasymkey|decryptbyasymkey|decryptbycert|signbycert|signbyasymkey|pwdencrypt|pwdcompare)(?<=(?-i:[0-9A-Za-z_]))(?!(?-i:[0-9A-Za-z_]))|opendatasource(?<=(?-i:[0-9A-Za-z_]))(?!(?-i:[0-9A-Za-z_]))|openrowset([\s]|/[*]([^*]|[*]+[^*/])*[*]+/|--[^\p{Cc}]*)*[(]([\s]|/[*]([^*]|[*]+[^*/])*[*]+/|--[^\p{Cc}]*)*n?'|[a-z0-9_]*(password|passwd|pwd|secret)(]|")([\s]|/[*]([^*]|[*]+[^*/])*[*]+/|--[^\p{Cc}]*)*=([\s]|/[*]([^*]|[*]+[^*/])*[*]+/|--[^\p{Cc}]*)*(n?'|e'|u&'|0x)|([a-z0-9_]*(password|passwd|pwd|secret)|key_source)([\s]|/[*]([^*]|[*]+[^*/])*[*]+/|--[^\p{Cc}]*)+((as|constant)([\s]|/[*]([^*]|[*]+[^*/])*[*]+/|--[^\p{Cc}]*)+)?[[]?[a-z_][a-z0-9_.]*]?([\s]*[(][\s0-9a-z,]{0,20}[)])?([\s]|/[*]([^*]|[*]+[^*/])*[*]+/|--[^\p{Cc}]*)*(:?=|default(?<=(?-i:[0-9A-Za-z_]))(?!(?-i:[0-9A-Za-z_])))([\s]|/[*]([^*]|[*]+[^*/])*[*]+/|--[^\p{Cc}]*)*(n?'|e'|u&'|0x|[$][^0-9])))|[a-z][a-z0-9+.-]*://[^\s/@:]+:[^\s/@]+@
         """;
 
     [Fact]
@@ -152,6 +152,273 @@ public sealed class SensitiveStatementsTests
         Assert.True(SensitiveStatements.TryTranslate(SensitiveStatements.Pattern, out _));
     }
 
+    /// <summary>The .NET judge compiles the pattern as two regexes (#5320 M1), both cut out of the one shared
+    /// constant. Put back together with <c>|</c> they are exactly <see cref="SensitiveStatements.Pattern"/>. The
+    /// first is the thirteen alternatives before T10, and its translation is the literal the whole judge was before
+    /// T10 existed; the second is T10 alone. PostgreSQL still reads the whole constant.</summary>
+    [Fact]
+    public void TheTwoJudgePartsPutBackTogetherAreExactlyThePattern()
+    {
+        var count = SensitiveStatements.JudgeHeadAlternatives;
+        Assert.True(SensitiveStatements.TrySplitAlternatives(SensitiveStatements.Pattern, count, out var head, out var tail));
+
+        Assert.Equal(SensitiveStatements.Pattern, head + "|" + tail);
+        Assert.False(SensitiveStatements.TrySplitAlternatives(tail, 1, out _, out _), "the second part is one alternative");
+        Assert.True(SensitiveStatements.TrySplitAlternatives(head, count - 1, out _, out _));
+        Assert.False(SensitiveStatements.TrySplitAlternatives(head, count, out _, out _), "the first part is exactly " + count + " alternatives");
+        Assert.StartsWith("[[:<:]]([a-z0-9_]*(password|passwd|pwd|secret)|key_source)", tail, StringComparison.Ordinal);
+        Assert.True(SensitiveStatements.TryTranslate(head, out var headTranslated));
+        Assert.True(SensitiveStatements.TryTranslate(tail, out var tailTranslated));
+        Assert.Equal(PinnedHeadTranslation, headTranslated);
+        Assert.Equal(PinnedTailTranslation, tailTranslated);
+    }
+
+    /// <summary>The first judge part, A1-T9, translated: byte for byte the literal
+    /// <see cref="TheTranslatedPatternIsPinnedAndHasNoPosixClassLeft"/> pinned before T10 was appended.</summary>
+    private const string PinnedHeadTranslation = """
+        (?:(?<!(?-i:[0-9A-Za-z_]))(?=(?-i:[0-9A-Za-z_]))(?:(create|alter)([\s]|/[*]([^*]|[*]+[^*/])*[*]+/|--[^\p{Cc}]*)+(role|user|group|subscription|server)(?<=(?-i:[0-9A-Za-z_]))(?!(?-i:[0-9A-Za-z_]))|password(?<=(?-i:[0-9A-Za-z_]))(?!(?-i:[0-9A-Za-z_]))([\s]|/[*]([^*]|[*]+[^*/])*[*]+/|--[^\p{Cc}]*)*(=|to)?([\s]|/[*]([^*]|[*]+[^*/])*[*]+/|--[^\p{Cc}]*)*(e?'|u&'|[$][^0-9])|(pg)?password[\s]*=[\s]*[^$\s]|(create|alter)([\s]|/[*]([^*]|[*]+[^*/])*[*]+/|--[^\p{Cc}]*)+(login|credential)(?<=(?-i:[0-9A-Za-z_]))(?!(?-i:[0-9A-Za-z_]))|scoped([\s]|/[*]([^*]|[*]+[^*/])*[*]+/|--[^\p{Cc}]*)+credential(?<=(?-i:[0-9A-Za-z_]))(?!(?-i:[0-9A-Za-z_]))|([a-z0-9_]*(password|passwd|pwd|secret)|key_source)(?<=(?-i:[0-9A-Za-z_]))(?!(?-i:[0-9A-Za-z_]))([\s]|/[*]([^*]|[*]+[^*/])*[*]+/|--[^\p{Cc}]*)*(=|to)?([\s]|/[*]([^*]|[*]+[^*/])*[*]+/|--[^\p{Cc}]*)*(n?'|e'|u&'|0x|[$][^0-9])|pwd[\s]*=[\s]*[^$@\s]|(sp_addlogin|sp_password|sp_addlinkedsrvlogin|sp_addapprole|sp_approlepassword|sp_setapprole|sp_change_users_login|sp_adddistributor|sp_changedistributor_password|sp_adddistpublisher|sp_addsubscriber|sp_link_publication|sp_control_dbmasterkey_password|sp_xp_cmdshell_proxy_account)(?<=(?-i:[0-9A-Za-z_]))(?!(?-i:[0-9A-Za-z_]))|(encryptbypassphrase|decryptbypassphrase|decryptbykeyautocert|decryptbykeyautoasymkey|decryptbyasymkey|decryptbycert|signbycert|signbyasymkey|pwdencrypt|pwdcompare)(?<=(?-i:[0-9A-Za-z_]))(?!(?-i:[0-9A-Za-z_]))|opendatasource(?<=(?-i:[0-9A-Za-z_]))(?!(?-i:[0-9A-Za-z_]))|openrowset([\s]|/[*]([^*]|[*]+[^*/])*[*]+/|--[^\p{Cc}]*)*[(]([\s]|/[*]([^*]|[*]+[^*/])*[*]+/|--[^\p{Cc}]*)*n?'|[a-z0-9_]*(password|passwd|pwd|secret)(]|")([\s]|/[*]([^*]|[*]+[^*/])*[*]+/|--[^\p{Cc}]*)*=([\s]|/[*]([^*]|[*]+[^*/])*[*]+/|--[^\p{Cc}]*)*(n?'|e'|u&'|0x)))|[a-z][a-z0-9+.-]*://[^\s/@:]+:[^\s/@]+@
+        """;
+
+    /// <summary>The second judge part, T10 alone, translated.</summary>
+    private const string PinnedTailTranslation = """
+        (?<!(?-i:[0-9A-Za-z_]))(?=(?-i:[0-9A-Za-z_]))([a-z0-9_]*(password|passwd|pwd|secret)|key_source)([\s]|/[*]([^*]|[*]+[^*/])*[*]+/|--[^\p{Cc}]*)+((as|constant)([\s]|/[*]([^*]|[*]+[^*/])*[*]+/|--[^\p{Cc}]*)+)?[[]?[a-z_][a-z0-9_.]*]?([\s]*[(][\s0-9a-z,]{0,20}[)])?([\s]|/[*]([^*]|[*]+[^*/])*[*]+/|--[^\p{Cc}]*)*(:?=|default(?<=(?-i:[0-9A-Za-z_]))(?!(?-i:[0-9A-Za-z_])))([\s]|/[*]([^*]|[*]+[^*/])*[*]+/|--[^\p{Cc}]*)*(n?'|e'|u&'|0x|[$][^0-9])
+        """;
+
+    [Theory]
+    [InlineData("a(b|c)|[|]d|e", 1, "a(b|c)", "[|]d|e")]
+    [InlineData("a(b|c)|[|]d|e", 2, "a(b|c)|[|]d", "e")]
+    [InlineData("[[:<:]]x|[^|]y|[]|]z|w", 1, "[[:<:]]x", "[^|]y|[]|]z|w")]
+    [InlineData("[[:<:]]x|[^|]y|[]|]z|w", 3, "[[:<:]]x|[^|]y|[]|]z", "w")]
+    [InlineData("(a|(b|c))|d", 1, "(a|(b|c))", "d")]
+    public void AlternativesAreCutOnlyAtATopLevelBar(string source, int count, string expectedHead, string expectedTail)
+    {
+        Assert.True(SensitiveStatements.TrySplitAlternatives(source, count, out var head, out var tail));
+
+        Assert.Equal(expectedHead, head);
+        Assert.Equal(expectedTail, tail);
+    }
+
+    [Theory]
+    [InlineData("a|b", 0)]
+    [InlineData("a|b", 2)]
+    [InlineData("a(b|c)", 1)]
+    [InlineData("[a|b", 1)]
+    [InlineData("a|", 1)]
+    public void ASourceWithNoAlternativeAfterTheFirstCountIsNotSplit(string source, int count)
+    {
+        Assert.False(SensitiveStatements.TrySplitAlternatives(source, count, out var head, out var tail));
+
+        Assert.Equal(source, head);
+        Assert.Equal(string.Empty, tail);
+    }
+
+    /// <summary>Two regexes are a speed change only (#5320 M1): over the corpus and the seeded fuzz set the split
+    /// judge and the one-regex judge give the same verdict, so "named when either matches" is exact OR. The
+    /// first part alone is built too, so the test also shows the fuzz set reaches strings only the second part names.</summary>
+    [Fact]
+    public void TheSplitJudgeGivesTheSameVerdictAsTheOneRegexJudge_OverTheCorpusAndAFuzzSet()
+    {
+        var timeout = TimeSpan.FromSeconds(5);
+        Assert.True(SensitiveStatements.TrySplitAlternatives(
+            SensitiveStatements.Pattern, SensitiveStatements.JudgeHeadAlternatives, out var headSource, out _));
+        var one = SensitiveStatements.CreateJudge(SensitiveStatements.Pattern, timeout, prefilter: false);
+        var two = SensitiveStatements.CreateJudge(
+            SensitiveStatements.Pattern, timeout, prefilter: false, headAlternatives: SensitiveStatements.JudgeHeadAlternatives);
+        var headOnly = SensitiveStatements.CreateJudge(headSource, timeout, prefilter: false);
+
+        var named = 0;
+        var tailOnly = 0;
+        var failures = new List<string>();
+        foreach (var text in CorpusAndFuzz())
+        {
+            var verdict = one(text);
+            named += verdict == SensitiveStatements.Verdict.Named ? 1 : 0;
+            tailOnly += verdict == SensitiveStatements.Verdict.Named && headOnly(text) == SensitiveStatements.Verdict.Clean ? 1 : 0;
+            if (two(text) != verdict)
+            {
+                failures.Add("split and single differ: " + text);
+            }
+        }
+
+        Assert.True(named > 1_000, $"the fuzz set names only {named} strings, too few to pin anything");
+        Assert.True(tailOnly > 50, $"only {tailOnly} strings are named by the second part alone, too few to pin anything");
+        Assert.True(failures.Count == 0, string.Join(Environment.NewLine, failures.Take(20)));
+    }
+
+    /// <summary>A <see cref="SensitiveStatements.BudgetedRegex"/> runs at the largest limit that fits the time
+    /// left (#5320 M1), so the second judge part never runs past what the first left of the one budget. With
+    /// 250 ms the limits are 187, 93, 46 and 23 ms. The text backtracks without end, so each call ends at the
+    /// limit it ran with: every reading is at least 60% of the limit, and the best of three is within a generous
+    /// overshoot of it.</summary>
+    [Theory]
+    [InlineData(200, 187)]
+    [InlineData(150, 93)]
+    [InlineData(90, 46)]
+    [InlineData(45, 23)]
+    public void ABudgetedRegexRunsAtTheLargestLimitThatFitsWhatIsLeft(int remainingMs, int expectedLimitMs)
+    {
+        var regex = new SensitiveStatements.BudgetedRegex("(a|aa)+b", TimeSpan.FromMilliseconds(250));
+        var text = new string('a', 60) + "c";
+
+        var best = long.MaxValue;
+        for (var attempt = 0; attempt < 3; attempt++)
+        {
+            var watch = Stopwatch.StartNew();
+            Assert.Throws<System.Text.RegularExpressions.RegexMatchTimeoutException>(
+                () => regex.IsMatch(text, TimeSpan.FromMilliseconds(remainingMs)));
+            watch.Stop();
+            Assert.True(watch.ElapsedMilliseconds >= expectedLimitMs * 0.6, $"stopped after {watch.ElapsedMilliseconds} ms, below the {expectedLimitMs} ms limit");
+            best = Math.Min(best, watch.ElapsedMilliseconds);
+        }
+
+        TimingClaim.AtMost(best, expectedLimitMs + 100, $"best of 3 for a {expectedLimitMs} ms limit");
+    }
+
+    [Fact]
+    public void ABudgetedRegexWithLessTimeLeftThanItsSmallestLimitTimesOutWithoutRunning()
+    {
+        var regex = new SensitiveStatements.BudgetedRegex("b", TimeSpan.FromMilliseconds(250));
+
+        Assert.True(regex.IsMatch("xb", TimeSpan.FromMilliseconds(250)));
+        Assert.False(regex.IsMatch("xa", TimeSpan.FromMilliseconds(30)));
+        Assert.Throws<System.Text.RegularExpressions.RegexMatchTimeoutException>(() => regex.IsMatch("xb", TimeSpan.FromMilliseconds(20)));
+        Assert.Throws<System.Text.RegularExpressions.RegexMatchTimeoutException>(() => regex.IsMatch("xb", TimeSpan.Zero));
+        Assert.Throws<System.Text.RegularExpressions.RegexMatchTimeoutException>(() => regex.IsMatch("xb", TimeSpan.FromMilliseconds(-5)));
+    }
+
+    /// <summary>The two parts share the one per-value timeout (#5320 M1). A fake clock says the first part took a
+    /// given time; the second part then gets only what is left. The first part is a plain <c>x</c>; the second
+    /// backtracks without end on the text, so its real time shows the limit it was given: nothing used runs it at
+    /// 187 ms, 100 ms used at 93 ms, 200 ms used at 46 ms, and 240 ms used (under the smallest 23 ms limit left) is
+    /// TimedOut at once.</summary>
+    [Theory]
+    [InlineData(0, 187)]
+    [InlineData(100, 93)]
+    [InlineData(200, 46)]
+    [InlineData(240, 0)]
+    public void TheSecondJudgePartRunsOnlyInsideWhatTheFirstLeftOfTheBudget(int firstPartMs, int limitMs)
+    {
+        var text = new string('a', 60) + "d";
+        var best = long.MaxValue;
+        for (var attempt = 0; attempt < 3; attempt++)
+        {
+            var calls = 0;
+            var judge = SensitiveStatements.CreateJudge(
+                "x|(a|aa)+c",
+                TimeSpan.FromMilliseconds(250),
+                prefilter: false,
+                headAlternatives: 1,
+                clock: () => TimeSpan.FromMilliseconds(calls++ == 0 ? 0 : firstPartMs));
+            var watch = Stopwatch.StartNew();
+            var verdict = judge(text);
+            watch.Stop();
+
+            Assert.Equal(SensitiveStatements.Verdict.TimedOut, verdict);
+            Assert.True(watch.ElapsedMilliseconds >= limitMs * 0.6, $"stopped after {watch.ElapsedMilliseconds} ms");
+            best = Math.Min(best, watch.ElapsedMilliseconds);
+        }
+
+        TimingClaim.AtMost(best, limitMs + 100, $"best of 3; the second part had {limitMs} ms");
+    }
+
+    /// <summary>A part that matches names the value whichever part it is, and a text neither matches is clean.</summary>
+    [Fact]
+    public void ATwoPartJudgeNamesAValueEitherPartMatches()
+    {
+        var judge = SensitiveStatements.CreateJudge("x|y|z", SensitiveStatements.MatchTimeout, headAlternatives: 2);
+
+        Assert.Equal(SensitiveStatements.Verdict.Named, judge("--x--"));
+        Assert.Equal(SensitiveStatements.Verdict.Named, judge("--y--"));
+        Assert.Equal(SensitiveStatements.Verdict.Named, judge("--z--"));
+        Assert.Equal(SensitiveStatements.Verdict.Clean, judge("--w--"));
+    }
+
+    /// <summary>The production judge is the split judge (#5320 N2), pinned without a stopwatch. A fake clock says the
+    /// first part used 240 ms of the 250 ms budget, so the second part has too little time left and the value is
+    /// TimedOut. <c>x_pwd = HASHBYTES(1)</c> reaches the full judge (the pre-check's superset matches it) and no
+    /// part names it, so a judge that has gone back to one regex answers Clean here and fails this test.</summary>
+    [Fact]
+    public void TheProductionJudgeRunsItsSecondPartInsideWhatTheFirstLeft()
+    {
+        var calls = 0;
+        var judge = SensitiveStatements.CreateProductionJudge(
+            clock: () => TimeSpan.FromMilliseconds(calls++ == 0 ? 0 : 240));
+
+        Assert.Equal(SensitiveStatements.Verdict.TimedOut, judge("x_pwd = HASHBYTES(1)"));
+    }
+
+    /// <summary>The warm-up builds the shared judge, can run again, and does not throw (#5320 N1).</summary>
+    [Fact]
+    public void WarmUpBuildsTheSharedJudgeAndCanRunAgain()
+    {
+        SensitiveStatements.WarmUp();
+        SensitiveStatements.WarmUp();
+
+        Assert.True(SensitiveStatements.JudgeIsBuilt);
+        Assert.Equal(SensitiveStatements.Verdict.Clean, SensitiveStatements.Judge("SELECT 1"));
+    }
+
+    /// <summary>1 MB of ordinary SQL with a trailing near miss that only the pre-check's superset hits (#5320 M1).
+    /// <c>x_pwd = HASHBYTES(1)</c> has no word start, so the pre-check matches it (T4 without its assertion) and the
+    /// full judge must run and answer Clean. With the whole pattern as one compiled regex that took about 226 ms
+    /// a megabyte and the value timed out and was withheld; as two regexes it is Clean inside the 250 ms timeout.</summary>
+    [Fact]
+    public void AMegabyteOfOrdinarySqlWithATrailingNearMissIsCleanInsideTheTimeout()
+    {
+        SensitiveStatements.Judge("warm the regex up");
+        var unit = "SELECT col_a, col_b FROM dbo.t WHERE c = 1 AND d <> 2 ";
+        var text = string.Concat(Enumerable.Repeat(unit, 1_000_000 / unit.Length + 1)).Substring(0, 1_000_000)
+            + " x_pwd = HASHBYTES(1)";
+
+        // The gate (#5369): fail-closed holds whatever the load (a slow machine may time out, never name nothing
+        // wrongly), and with no clock to run out the same split judge answers Clean.
+        Assert.NotEqual(SensitiveStatements.Verdict.Named, SensitiveStatements.Judge(text));
+        Assert.Equal(SensitiveStatements.Verdict.Clean, UnboundedJudge.Value(text));
+
+        // The wall-clock claim, a measurement unless DARLING_TIMING_TESTS=1.
+        var best = long.MaxValue;
+        for (var attempt = 0; attempt < 5 && best >= 250; attempt++)
+        {
+            var watch = Stopwatch.StartNew();
+            var verdict = SensitiveStatements.Judge(text);
+            watch.Stop();
+
+            if (verdict == SensitiveStatements.Verdict.Clean)
+            {
+                best = Math.Min(best, watch.ElapsedMilliseconds);
+            }
+        }
+
+        TimingClaim.AtMost(best == long.MaxValue ? double.PositiveInfinity : best, 249, "1 MB near miss came back Clean");
+    }
+
+    /// <summary>A typed secret-named variable followed by a long dash banner, in a value where something else
+    /// passes the pre-check (#5320 L2). The typed-declaration alternative's gaps after the type backtrack on a run of
+    /// dashes (the known comment-run case); the second judge part runs out of its time and the value is named by the
+    /// timeout. PostgreSQL answers Clean. That errs toward withholding, and an atomic rewrite of the gap is ruled
+    /// out, so the row pins the .NET answer: TimedOut, never Clean, back inside about the match timeout.</summary>
+    [Fact]
+    public void ATypedSecretVariableBehindADashBannerIsNamedByTimeout_WhenAnotherPartPassesThePreCheck()
+    {
+        SensitiveStatements.Judge("warm the regex up");
+        foreach (var text in SensitiveStatementCorpus.NamedByTimeoutInDotNetOnly)
+        {
+            var best = long.MaxValue;
+            for (var attempt = 0; attempt < 3; attempt++)
+            {
+                var watch = Stopwatch.StartNew();
+                var verdict = SensitiveStatements.Judge(text);
+                watch.Stop();
+
+                Assert.Equal(SensitiveStatements.Verdict.TimedOut, verdict);
+                best = Math.Min(best, watch.ElapsedMilliseconds);
+            }
+
+            TimingClaim.AtMost(best, 400, "best of 3 for a banner named by timeout");
+            Assert.True(SensitiveStatements.Names(text));
+        }
+    }
+
     [Fact]
     public void AMatchThatRunsPastItsTimeoutGivesTimedOut()
     {
@@ -180,7 +447,22 @@ public sealed class SensitiveStatementsTests
         {
             var best = BestOfJudging(text, SensitiveStatements.Verdict.Clean, 5);
 
-            Assert.True(best < 50, $"best of 5 took {best} ms: {text}");
+            TimingClaim.AtMost(best, 49, $"best of 5: {text}");
+            Assert.False(SensitiveStatements.Names(text));
+        }
+    }
+
+    /// <summary>The same for the strings aimed at the typed-declaration alternative (#5320): a password word, many
+    /// comment tokens or a long length part, and no literal. The pre-check finds no literal, so they are Clean.</summary>
+    [Fact]
+    public void EachTypedDeclarationAdversarialStringIsCleanWithin50Ms()
+    {
+        SensitiveStatements.Judge("warm the regex up");
+        foreach (var text in SensitiveStatementCorpus.TypedDeclarationAdversarial)
+        {
+            var best = BestOfJudging(text, SensitiveStatements.Verdict.Clean, 5);
+
+            TimingClaim.AtMost(best, 49, $"best of 5: {text.Substring(0, 24)}");
             Assert.False(SensitiveStatements.Names(text));
         }
     }
@@ -206,7 +488,7 @@ public sealed class SensitiveStatementsTests
         {
             var best = BestOfJudging(text, SensitiveStatements.Verdict.Clean, 5);
 
-            Assert.True(best < 50, $"best of 5 took {best} ms: {text.Substring(0, Math.Min(40, text.Length))}");
+            TimingClaim.AtMost(best, 49, $"best of 5: {text.Substring(0, Math.Min(40, text.Length))}");
         }
     }
 
@@ -221,8 +503,31 @@ public sealed class SensitiveStatementsTests
 
         var best = BestOfJudging(text, SensitiveStatements.Verdict.TimedOut, 3);
 
-        Assert.True(best <= 300, $"best of 3 took {best} ms");
+        TimingClaim.AtMost(best, 300, "best of 3 for a near hit that times out");
         Assert.True(SensitiveStatements.Names(text));
+    }
+
+    /// <summary>A typed declaration of a password variable behind many comment tokens (#5320). The full judge may
+    /// backtrack on the second string, so the answer is Named or TimedOut (named either way), never Clean, and the
+    /// call returns inside the match timeout.</summary>
+    [Fact]
+    public void ATypedDeclarationBehindManyCommentTokensIsNeverClean_AndReturnsInsideTheTimeout()
+    {
+        var comments = string.Concat(Enumerable.Repeat(" --", 40));
+        SensitiveStatements.Judge("warm the regex up");
+        foreach (var text in new[]
+        {
+            "declare @pwd" + comments + "\n nvarchar(20) = N'x'",
+            "declare @pwd" + comments + " nvarchar(20) = N'x'",
+        })
+        {
+            var watch = Stopwatch.StartNew();
+            var verdict = SensitiveStatements.Judge(text);
+            watch.Stop();
+
+            Assert.NotEqual(SensitiveStatements.Verdict.Clean, verdict);
+            TimingClaim.AtMost(watch.ElapsedMilliseconds, 999, $"typed declaration behind comment tokens: {text.Substring(0, 24)}");
+        }
     }
 
     /// <summary>A 100 KB binary literal (200,000 hex characters) in an INSERT, and the other long single-run
@@ -239,19 +544,30 @@ public sealed class SensitiveStatementsTests
         SensitiveStatements.Judge("warm the regex up");
         foreach (var text in texts)
         {
-            var best = BestOfJudging(text, SensitiveStatements.Verdict.Clean, 5);
+            var best = BestOfJudging(text, SensitiveStatements.Verdict.Clean, 5, UnboundedJudge.Value);
 
-            Assert.True(best < 100, $"best of 5 took {best} ms for {text.Length} characters");
+            TimingClaim.AtMost(best, 99, $"best of 5 for {text.Length} characters");
         }
     }
 
-    private static long BestOfJudging(string text, SensitiveStatements.Verdict expected, int attempts)
+    /// <summary>The production pattern and split, with a one-minute timeout and a clock that never advances: no
+    /// load can time it out, so a verdict asserted through it cannot flake (#5369).</summary>
+    private static readonly Lazy<Func<string, SensitiveStatements.Verdict>> UnboundedJudge = new(() =>
+        SensitiveStatements.CreateJudge(
+            SensitiveStatements.Pattern,
+            TimeSpan.FromMinutes(1),
+            headAlternatives: SensitiveStatements.JudgeHeadAlternatives,
+            clock: static () => TimeSpan.Zero));
+
+    private static long BestOfJudging(
+        string text, SensitiveStatements.Verdict expected, int attempts, Func<string, SensitiveStatements.Verdict>? judge = null)
     {
+        judge ??= SensitiveStatements.Judge;
         var best = long.MaxValue;
         for (var attempt = 0; attempt < attempts; attempt++)
         {
             var watch = Stopwatch.StartNew();
-            var verdict = SensitiveStatements.Judge(text);
+            var verdict = judge(text);
             watch.Stop();
 
             Assert.Equal(expected, verdict);
@@ -276,6 +592,7 @@ public sealed class SensitiveStatementsTests
         "update", "set", "dbo.t", "col", "bulk", "(", ")", "'", "n'", "e'", "u&'", "0x", "0xff", "$1", "$a", "=",
         "to", ":", "@", "/", "://", "user:pw@", "http://", "]", "[", "\"", "[pwd]", "\"secret\"", ";", ",", "_",
         "9", "a", " ", " ", " ", "\n", "\t", "--", "-- c", "/* c */", "/*", "*/", "*",
+        "nvarchar", "varchar(20)", "(max)", "text", "int", "as", "constant", "default", ":=", "[nvarchar]", "sys.sysname",
     };
 
     /// <summary>A seeded set of short strings built from the tokens the pattern is made of, so a large share of
@@ -400,20 +717,23 @@ public sealed class SensitiveStatementsTests
         var unit = "SELECT col_a, col_b FROM dbo.t WHERE c = 1 AND d <> 2 ";
         var text = string.Concat(Enumerable.Repeat(unit, 1_000_000 / unit.Length + 1)).Substring(0, 1_000_000);
 
+        // The gate (#5369): Clean with no time to run out. The speed is a measurement unless DARLING_TIMING_TESTS=1.
+        Assert.Equal(SensitiveStatements.Verdict.Clean, UnboundedJudge.Value(text));
+
         var best = long.MaxValue;
-        var clean = false;
-        for (var attempt = 0; attempt < 5 && !clean; attempt++)
+        for (var attempt = 0; attempt < 5 && best >= 250; attempt++)
         {
             var watch = Stopwatch.StartNew();
             var verdict = SensitiveStatements.Judge(text);
             watch.Stop();
 
-            clean = verdict == SensitiveStatements.Verdict.Clean;
-            best = Math.Min(best, watch.ElapsedMilliseconds);
+            if (verdict == SensitiveStatements.Verdict.Clean)
+            {
+                best = Math.Min(best, watch.ElapsedMilliseconds);
+            }
         }
 
-        Assert.True(clean, $"never came back Clean; best attempt {best} ms");
-        Assert.True(best < 250, $"took {best} ms");
+        TimingClaim.AtMost(best == long.MaxValue ? double.PositiveInfinity : best, 249, "1,000,000 ordinary characters came back Clean");
     }
 
     [Fact]
@@ -625,6 +945,33 @@ public sealed class SensitiveStatementsTests
         var bigVerdict = SensitiveStatements.Judge(big);
         watch.Stop();
         Record($"Judge on 1,000,000 chars: {bigVerdict}, {watch.Elapsed.TotalMilliseconds:F1} ms");
+
+        // The two judge parts and the whole pattern as one regex, on the same 1,000,000 characters (#5320 M1), without
+        // the pre-check and with a timeout that cannot fire, so the numbers are the cost of the matching alone.
+        Assert.True(SensitiveStatements.TrySplitAlternatives(
+            SensitiveStatements.Pattern, SensitiveStatements.JudgeHeadAlternatives, out var headSource, out var tailSource));
+        var longTimeout = TimeSpan.FromSeconds(30);
+        foreach (var (label, source, parts) in new[]
+        {
+            ("part 1 (A1-T9)", headSource, 0),
+            ("part 2 (T10)", tailSource, 0),
+            ("both parts", SensitiveStatements.Pattern, SensitiveStatements.JudgeHeadAlternatives),
+            ("whole pattern as one regex", SensitiveStatements.Pattern, 0),
+        })
+        {
+            var judge = SensitiveStatements.CreateJudge(source, longTimeout, prefilter: false, headAlternatives: parts);
+            judge(big);
+            var bestMs = double.MaxValue;
+            for (var attempt = 0; attempt < 3; attempt++)
+            {
+                watch.Restart();
+                judge(big);
+                watch.Stop();
+                bestMs = Math.Min(bestMs, watch.Elapsed.TotalMilliseconds);
+            }
+
+            Record($"Judge on 1,000,000 chars, {label}, no pre-check: best of 3 {bestMs:F1} ms");
+        }
 
         // Each adversarial string.
         foreach (var text in SensitiveStatementCorpus.Adversarial)
