@@ -327,6 +327,44 @@ public sealed class WebDatabaseFilterTests
         Assert.Contains("every value was empty or only spaces", message, StringComparison.Ordinal);
     }
 
+    /// <summary>A name holding NUL is one no stored database can have, and PostgreSQL refuses a text value that holds it,
+    /// so the binder answers the same <c>invalid</c> envelope for <c>database_name</c> as for an over-long name, naming
+    /// no value, before any read reaches the store (#5245).</summary>
+    [Theory]
+    [InlineData("\0")]
+    [InlineData("A", "B\0")]
+    [InlineData("A\0", "B")]
+    public async Task DatabaseNames_ANameHoldingNul_IsRefused_WithoutEchoingTheName(params string[] names)
+    {
+        var message = await RefusalOf(QueryOf(names));
+
+        Assert.Contains("holds a character a database name cannot hold", message, StringComparison.Ordinal);
+        Assert.DoesNotContain("\0", message, StringComparison.Ordinal);
+        Assert.False(DarlingWebEndpoints.TryBindDatabaseNames(names, out _, out var refusal) || refusal is null);
+    }
+
+    /// <summary>On the web dispatch: every database-filtered read answers the refusal and never reaches the store (the
+    /// store and analysis arguments are null here, so a read that got past the binder would throw).</summary>
+    [Theory]
+    [InlineData("get_active_queries")]
+    [InlineData("get_query_heatmap")]
+    [InlineData("get_query_store_regressions")]
+    [InlineData("get_query_store_top")]
+    [InlineData("get_top_procedures_by_cpu")]
+    [InlineData("get_top_queries_by_cpu")]
+    public async Task TheDatabaseFilteredReads_RefuseANulName_BeforeTheStore(string read)
+    {
+        foreach (var query in new[] { "?server=S&database_name=%00", "?server=S&database_name=A&database_name=B%00" })
+        {
+            var result = await DarlingWebEndpoints.BuildReadDispatch()[read](Ask(query), null!, null!);
+
+            Assert.True(McpHelpers.IsRefusalEnvelope(result), result);
+            using var doc = JsonDocument.Parse(result);
+            Assert.Equal("invalid", doc.RootElement.GetProperty("status").GetString());
+            Assert.Equal("database_name", doc.RootElement.GetProperty("hints").GetProperty("parameter").GetString());
+        }
+    }
+
     [Fact]
     public async Task DatabaseNamesRefusal_ForAnAcceptableRequest_IsABug_SoItThrows()
     {

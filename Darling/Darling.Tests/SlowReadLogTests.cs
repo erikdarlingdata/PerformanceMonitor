@@ -455,6 +455,29 @@ public sealed class SlowReadLogTests
         Assert.False(DarlingWebEndpoints.WebQueryArguments(new[] { new KeyValuePair<string, string?>("top", "5") }).ContainsKey("_dropped_keys"));
     }
 
+    /// <summary>A repeated key is recorded as a JSON array of its values, in the order sent; a key sent once stays a
+    /// plain string, and the 64-character key rule still applies to a repeated key (#5245).</summary>
+    [Fact]
+    public void ARepeatedWebQueryKey_KeepsEveryValueAsAnArray_AndASingleKeyIsUnchanged()
+    {
+        var args = DarlingWebEndpoints.WebQueryArguments(new[]
+        {
+            new KeyValuePair<string, string?>("database_name", "A"),
+            new KeyValuePair<string, string?>("top", "5"),
+            new KeyValuePair<string, string?>("database_name", "B"),
+            new KeyValuePair<string, string?>("server", ""),
+            new KeyValuePair<string, string?>("server", "S2"),
+            new KeyValuePair<string, string?>(new string('k', 100), "x"),
+            new KeyValuePair<string, string?>(new string('k', 100), "y"),
+        });
+
+        var databases = Assert.IsType<JsonArray>(args["database_name"]);
+        Assert.Equal(new[] { "A", "B" }, databases.Select(v => (string?)v).ToArray());
+        Assert.Equal(new[] { "", "S2" }, Assert.IsType<JsonArray>(args["server"]).Select(v => (string?)v).ToArray());
+        Assert.Equal(new[] { "x", "y" }, Assert.IsType<JsonArray>(args[new string('k', 64)]).Select(v => (string?)v).ToArray());
+        Assert.Equal("5", Assert.IsAssignableFrom<JsonValue>(args["top"]).GetValue<string>());
+    }
+
     [Fact]
     public void AnUnknownComposeSource_RecordsComposeUnknown_AndAKnownOneKeepsItsName()
     {

@@ -2268,7 +2268,8 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     }
 
     /// <summary>The query string as slow-read arguments. A key name is caller text: only plain identifier characters
-    /// ([A-Za-z0-9_.-]) are stored, capped at 64; any other key is dropped and counted under <c>_dropped_keys</c>.</summary>
+    /// ([A-Za-z0-9_.-]) are stored, capped at 64; any other key is dropped and counted under <c>_dropped_keys</c>. A key that
+    /// repeats is stored as a JSON array of its values in the order sent; a key sent once is a plain value.</summary>
     internal static JsonObject WebQueryArguments(IEnumerable<KeyValuePair<string, string?>> query)
     {
         var arguments = new JsonObject();
@@ -2281,7 +2282,21 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 continue;
             }
 
-            arguments[key.Length > 64 ? key[..64] : key] = value;
+            var stored = key.Length > 64 ? key[..64] : key;
+            if (!arguments.TryGetPropertyValue(stored, out var existing))
+            {
+                arguments[stored] = value;
+            }
+            else if (existing is JsonArray repeated)
+            {
+                repeated.Add(value);
+            }
+            else
+            {
+                /* A key sent more than once records every value, in the order sent, so the record shows the request as it
+                   was made (#5245); a key sent once stays a plain value. */
+                arguments[stored] = new JsonArray(existing?.DeepClone(), JsonValue.Create(value));
+            }
         }
 
         if (droppedKeys > 0)
@@ -2314,7 +2329,11 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
 
         try
         {
-            var arguments = WebQueryArguments(context.Request.Query.Select(q => new KeyValuePair<string, string?>(q.Key, q.Value.Count > 0 ? q.Value[0] : null)));
+            /* One pair per value, so a key sent more than once keeps every value (WebQueryArguments folds them into an array);
+               a key with no value at all (a bare ?key) is one null pair, as before. */
+            var arguments = WebQueryArguments(context.Request.Query.SelectMany(q => q.Value.Count > 0
+                ? q.Value.Select(v => new KeyValuePair<string, string?>(q.Key, v))
+                : [new KeyValuePair<string, string?>(q.Key, null)]));
 
             recorder.SlowReads.Offer(scope, ReadSurface.Web, name, outcome, elapsedMs, arguments, errorClass, recorder.Logger);
         }
@@ -5493,6 +5512,15 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
 
         foreach (var name in names)
         {
+            /* PostgreSQL refuses a text value holding 0x00 (SQLSTATE 22021) and no stored database name can hold one, so the
+               name is refused here with the same envelope, rather than costing the read a 500. The sentence echoes no name. */
+            if (name.Contains('\0'))
+            {
+                refusal = McpHelpers.Refusal(DatabaseNameKey,
+                    "A database_name value holds a character a database name cannot hold.");
+                return false;
+            }
+
             if (name.Length > MaxDatabaseNameLength)
             {
                 refusal = McpHelpers.Refusal(DatabaseNameKey,
