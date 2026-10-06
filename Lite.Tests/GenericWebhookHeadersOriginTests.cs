@@ -73,10 +73,21 @@ public sealed class GenericWebhookHeadersOriginTests
     {
         using var configured = new Capture();
 
-        await SendAsync(configured.Url, routedUrl: configured.Url + "/routed");
+        await SendAsync(configured.Url + "/alerts", routedUrl: configured.Url + "/alerts/routed");
 
         Assert.Equal(1, configured.Requests);
         Assert.Contains("X-Fake-Key: not-real-value", configured.LastRequestHead, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task ARouteToAnotherPath_WhenTheConfiguredUrlIsTheSiteRoot_ReceivesTheBodyAndNoHeaders()
+    {
+        using var configured = new Capture();
+
+        await SendAsync(configured.Url + "/", routedUrl: configured.Url + "/routed");
+
+        Assert.Equal(1, configured.Requests);
+        Assert.DoesNotContain("X-Fake-Key", configured.LastRequestHead, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
