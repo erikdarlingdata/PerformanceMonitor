@@ -86,7 +86,13 @@ public sealed class DarlingMcpLongQueryTools
                        that is already switched on. */
                     ?? await DarlingRuntimePrecondition.StatusAsync(postgres, resolved.ServerId, resolved.ServerName, "long_query_completions", cancellationToken)
                     /* #4966: the window keys ride on an empty answer under hints; not_collected and the precondition stay bare. */
-                    ?? McpHelpers.Status("empty", "No long-running query completions found in the specified time range" + DarlingMcpBlockingTools.ForChosenDatabases(databaseFilter) + ". The long_query_completions collector is opt-in (default OFF) — enable it in the collector schedule to capture data.",
+                    ?? McpHelpers.StatusForDatabase("empty",
+                        /* #5244 review L3: the precondition answer above already named a collector that is on but broken, so
+                           under a filter the likelier cause is the filter itself: the answer ends after the database clause,
+                           as get_plan_corrections does, rather than sending the reader to a switch that may already be on. */
+                        "No long-running query completions found in the specified time range" + DarlingMcpBlockingTools.ForChosenDatabases(databaseFilter)
+                            + (databaseFilter.IsAll ? ". The long_query_completions collector is opt-in (default OFF) — enable it in the collector schedule to capture data." : "."),
+                        databaseFilter.Describe(), /* #5244 review L2: the echo rides on an empty answer too */
                         (await DarlingMcpWindowNotice.ReadEventAsync(
                             () => DarlingMcpWindowNotice.Probe(postgres, "long_query_completions", resolved.ServerName, windowStart, now, cancellationToken),
                             null, windowStart, now, "long_query_completions", emptyAnswer: true, logger: logger, cancellationToken: cancellationToken)).AsHints());

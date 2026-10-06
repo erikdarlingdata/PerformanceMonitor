@@ -721,7 +721,7 @@ public sealed class DarlingMcpTrendTools
                     return EmptyStatus(
                         "empty",
                         $"The requested window ends before {floor:o}, the oldest hour the corrected Query Store rollup has materialized. This read serves history from query_store_stats_corrected_hourly rather than ranking the raw Query Store slab (#2736), so windows before that floor come back empty even when rows were collected — run --backfill-rollups to materialize deeper history.",
-                        disclosure);
+                        disclosure, databases);
                 }
 
                 var everSampled = await DarlingTrendReader.HasAnyQueryStoreStatAsync(postgres, resolved.ServerId, cancellationToken);
@@ -731,7 +731,7 @@ public sealed class DarlingMcpTrendTools
                         "unavailable",
                         NeverSampledMessage(resolved.ServerName, "Query Store",
                             "Query Store may be OFF on this server's databases — that, not an absence of slow queries, is the usual cause. Check QUERY_STORE = ON per database, then that collection is running for this server."),
-                        disclosure);
+                        disclosure, databases);
                 }
 
                 /*
@@ -745,10 +745,10 @@ public sealed class DarlingMcpTrendTools
                     return EmptyStatus(
                         "empty",
                         $"No Query Store samples were recorded for {ScopedServer(resolved.ServerName, databases)} between {head:o} — the oldest hour the corrected rollup has materialized — and the end of the window. This server HAS been sampled before, so that stretch is genuinely quiet; the part of the window before {head:o} is unserved rather than quiet (the rollup has not materialized it and this read no longer ranks the raw slab for it, #2736) — run --backfill-rollups to materialize it. Widening hours_back finds newer samples only; it cannot reach the unserved head.",
-                        disclosure);
+                        disclosure, databases);
                 }
 
-                return EmptyStatus("empty", QuietWindowMessage(ScopedServer(resolved.ServerName, databases), hours_back, "Query Store"), disclosure);
+                return EmptyStatus("empty", QuietWindowMessage(ScopedServer(resolved.ServerName, databases), hours_back, "Query Store"), disclosure, databases);
             }
 
             return SerializeTrend(resolved.ServerName, hours_back, points, disclosure,
@@ -957,12 +957,15 @@ public sealed class DarlingMcpTrendTools
     /// <c>message</c>: an empty answer still says which tier it read and how far that tier reached, because
     /// "nothing here" means different things from a four-day raw tier and a ninety-day rollup.
     /// </summary>
-    private static string EmptyStatus(string status, string message, TrendDisclosure disclosure)
+    private static string EmptyStatus(string status, string message, TrendDisclosure disclosure, DatabaseFilter databases)
     {
         var envelope = new Dictionary<string, object?>
         {
             ["status"] = status,
             ["message"] = message,
+            /* #5244 review L2: the same echo SerializeTrend writes, so a caller reads which databases the answer was
+               limited to whether it got data or none: the name for one, "the chosen databases" for two or more, null for all. */
+            ["database_name"] = databases.Describe(),
         };
         disclosure.WriteTo(envelope);
         return JsonSerializer.Serialize(envelope, McpHelpers.JsonOptions);
@@ -1065,7 +1068,7 @@ public sealed class DarlingMcpTrendTools
 
         if (!await DarlingTrendReader.HasAnySampleOnRouteAsync(postgres, rawProbe, route, serverId, cancellationToken))
         {
-            return EmptyStatus("unavailable", NeverSampledMessage(serverName, what, checkThis), disclosure);
+            return EmptyStatus("unavailable", NeverSampledMessage(serverName, what, checkThis), disclosure, databases);
         }
 
         if (route.Tier == RetentionTier.Hourly)
@@ -1080,7 +1083,7 @@ public sealed class DarlingMcpTrendTools
             return EmptyStatus(
                 "empty",
                 $"No {what} samples in the hourly rollup ({route.HourlyView}) for {scoped} over the last {hours_back} hour(s), from {startUtc:o}. The window reaches past the raw tier's {TimescaleSupport.RawRetentionSpan.TotalDays:0}-day retention, so this read served the rollup, not raw. {reach} Widening hours_back cannot help here.",
-                disclosure);
+                disclosure, databases);
         }
 
         /*
@@ -1099,7 +1102,7 @@ public sealed class DarlingMcpTrendTools
         var rawReaches = route.RawReaches(startUtc) ?? !pastRawHorizon;
         if (rawReaches)
         {
-            return EmptyStatus("empty", QuietWindowMessage(scoped, hours_back, what), disclosure);
+            return EmptyStatus("empty", QuietWindowMessage(scoped, hours_back, what), disclosure, databases);
         }
 
         if (!pastRawHorizon && route.Coverage.RawOldestUtc is DateTime storeOldest)
@@ -1107,7 +1110,7 @@ public sealed class DarlingMcpTrendTools
             return EmptyStatus(
                 "empty",
                 $"No {what} samples were recorded for {scoped} between {storeOldest:o} — the oldest {route.RawTable} row this store holds for any server — and the end of the window. This server HAS been sampled before, so that stretch is genuinely quiet; the part of the window before {storeOldest:o} predates the store's history rather than being quiet, and widening hours_back cannot reach it.",
-                disclosure);
+                disclosure, databases);
         }
 
         /* Past the horizon on the raw route with the rollup present: coverage put the read here because the
@@ -1120,7 +1123,7 @@ public sealed class DarlingMcpTrendTools
         return EmptyStatus(
             "empty",
             $"No {what} samples were recorded for {scoped} in the part of the last {hours_back} hour(s) that the raw tier still holds. {oldest}, and the window as requested starts at {startUtc:o} — the part before raw's reach is UNSERVED rather than quiet, because the hourly rollup ({route.HourlyView}) that would serve deeper history has materialized less than raw holds. This server HAS been sampled before. Widening hours_back reaches further into what raw no longer holds and cannot help; run --backfill-rollups to materialize the rollup, which is what serves deeper history.",
-            disclosure);
+            disclosure, databases);
     }
 
     /// <summary>

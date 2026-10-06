@@ -917,11 +917,11 @@ public sealed class McpQueryTools
                     ? EmptyStatus(
                         "empty",
                         $"No query samples recorded for {ScopedServer(resolved.ServerName, database)} in the last {hours_back} hour(s). This server HAS collected query stats before, so this window is genuinely quiet rather than broken — widen hours_back to find the most recent samples.",
-                        startUtc, windowEnd, grain)
+                        startUtc, windowEnd, grain, database)
                     : EmptyStatus(
                         "unavailable",
                         $"No query stats have EVER been recorded for {resolved.ServerName}. This is not an empty window — the query_stats collector has stored nothing at all for this server. Check that collection is running and that the server is enabled; get_top_queries_by_cpu will be equally empty until it does.",
-                        startUtc, windowEnd, grain);
+                        startUtc, windowEnd, grain, database);
             }
 
             /* The two siblings below serialize through the SAME helper, so the three Performance-Trends
@@ -1301,12 +1301,15 @@ public sealed class McpQueryTools
     /// an empty Performance-Trends answer carries the same six keys the data envelope does (#3541 A2) — a
     /// caller reads <c>source</c> without first checking whether it got data.
     /// </summary>
-    private static string EmptyStatus(string status, string message, DateTime startUtc, DateTime windowEndUtc, TrendGrain grain)
+    private static string EmptyStatus(string status, string message, DateTime startUtc, DateTime windowEndUtc, TrendGrain grain, string? database)
     {
         var envelope = new Dictionary<string, object?>
         {
             ["status"] = status,
             ["message"] = message,
+            /* #5244 review L2: the echo the data envelope writes (the name for one database, null for all), so an empty
+               answer says which database it was limited to; Darling's twin writes Describe() here. */
+            ["database_name"] = McpDatabaseSelection.Describe(database == null ? null : new[] { database }),
         };
         WriteDisclosure(envelope, null, startUtc, windowEndUtc, grain);
         return JsonSerializer.Serialize(envelope, McpHelpers.JsonOptions);
@@ -1339,11 +1342,11 @@ public sealed class McpQueryTools
             ? EmptyStatus(
                 "empty",
                 $"No {what} samples were recorded for {ScopedServer(serverName, database)} in the last {hours_back} hour(s). This server HAS been sampled before, so this window is genuinely quiet rather than broken — widen hours_back to find the most recent samples.",
-                startUtc, windowEndUtc, grain)
+                startUtc, windowEndUtc, grain, database)
             : EmptyStatus(
                 "unavailable",
                 $"No {what} samples have EVER been recorded for {serverName}. This is not an empty window — nothing at all has been stored for this server, so it is NOT a quiet server. {checkThis}",
-                startUtc, windowEndUtc, grain);
+                startUtc, windowEndUtc, grain, database);
     }
 
     [McpServerTool(Name = "get_query_trend"), Description("Gets a time-series of performance metrics for a specific query identified by its query_hash. Use this after identifying a problematic query from get_top_queries_by_cpu or get_query_store_top to see how it has changed over time." + McpHelpers.WindowTruncatedDescription + BaselineDiscontinuities.DescriptionSentence)]

@@ -70,13 +70,14 @@ public sealed class McpPlanCorrectionTools
             if (tuning.Count == 0 && rows.Count == 0)
             {
                 return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "plan_correction")
-                    ?? McpHelpers.Status("empty",
+                    ?? McpHelpers.StatusForDatabase("empty",
                         /* #5244: a filtered empty is a verdict about the chosen database only, the same words as Darling's twin. */
                         database != null
                             ? $"No plan correction data found{McpBlockingTools.ForChosenDatabase(database)}."
                             : "No plan correction data collected for this server. The collector runs against SQL Server 2017+ " +
                         "(sys.dm_db_tuning_recommendations); a server that has never produced a row here either predates " +
                         "that or has no databases with Query Store on.",
+                        database, /* #5244 review L2: the echo rides on an empty answer too */
                         (await McpQueryTools.WindowNoticeAsync(
                             () => dataService.GetQueryWindowFloorAsync(QueryWindowRelation.PlanCorrection, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd),
                             windowEnd.AddHours(-hours_back), windowEnd, "plan_correction", emptyAnswer: true)).AsHints());

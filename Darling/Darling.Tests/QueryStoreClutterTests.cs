@@ -655,8 +655,8 @@ public sealed class QueryStoreClutterTests
         Assert.DoesNotContain("DateTime.UtcNow", body, StringComparison.Ordinal);
         /* #4203: cancellationToken threads to every store call, so the anchor pin matches the call text
            including the token rather than the pre-#4203 shape. */
-        Assert.Contains("GetReadCostAsync(postgres, fleetIds, requestedStart, now, cancellationToken)", body, StringComparison.Ordinal);
-        Assert.Contains("GetPlanChurnAsync(postgres, fleetIds, requestedStart, now, cancellationToken)", body, StringComparison.Ordinal);
+        Assert.Contains("GetReadCostAsync(postgres, fleetIds, requestedStart, now, cancellationToken: cancellationToken)", body, StringComparison.Ordinal);
+        Assert.Contains("GetPlanChurnAsync(postgres, fleetIds, requestedStart, now, cancellationToken: cancellationToken)", body, StringComparison.Ordinal);
         Assert.Contains("GetQdsWaitsAsync(postgres, fleetIds, requestedStart, now, cancellationToken)", body, StringComparison.Ordinal);
         /* the page is observed, never inferred */
         Assert.Contains("McpHelpers.BoundPage(composed, limit)", body, StringComparison.Ordinal);

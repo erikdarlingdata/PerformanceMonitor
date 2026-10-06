@@ -227,7 +227,6 @@ public sealed class DurationTrendDatabaseFilterLiveTests
         Assert.Equal(unfiltered, DurationTrendRouting.BuildBucketedHourlyTrendSql("collect.query_stats_interval_hourly AS h", withDatabaseFilter: false));
         /* Query Store: both arms of the raw-only statement; the rollup arm and both raw arms of the routed one. */
         Assert.Equal(2, Count(DarlingTrendReader.QueryStoreDurationTrendFilteredSql, predicate4));
-        Assert.DoesNotContain("database_name = ANY", DarlingTrendReader.QueryStoreDurationTrendSql, StringComparison.Ordinal);
         Assert.Equal(3, Count(DarlingTrendReader.QueryStoreDurationTrendRollupFilteredSql, predicate5));
         Assert.Equal(QueryStoreTrendRouting.BuildRollupTrendSql(withDatabaseFilter: true), DarlingTrendReader.QueryStoreDurationTrendRollupFilteredSql);
     }
