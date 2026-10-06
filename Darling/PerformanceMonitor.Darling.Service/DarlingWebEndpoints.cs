@@ -4527,8 +4527,8 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             /* ── object / index stats (DarlingMcpObjectStatsTools) ── */
             ["get_database_sizes"] = R(CatObjects, "Per-database size breakdown.", PServer()),
             ["get_pvs_stats"] = R(CatObjects, "ADR persistent version store state per database, with an optional top-5 size trend.", PServer(), PInt("trend_hours_back", 0)),
-            ["get_index_usage"] = R(CatObjects, "Index usage (seeks/scans/updates) per index. Unused-first, so pass database_name unless you want a server-wide sweep; the answer carries matching_index_count and truncated.", PServer(), PText("database_name"), PLimit(200)),
-            ["get_object_locking"] = R(CatObjects, "Per-object locking/contention stats.", PServer(), PLimit(200)),
+            ["get_index_usage"] = R(CatObjects, "Index usage (seeks/scans/updates) per index. Unused-first, so pass database_name unless you want a server-wide sweep; the answer carries matching_index_count and truncated.", PServer(), PDatabases(), PLimit(200)),
+            ["get_object_locking"] = R(CatObjects, "Per-object locking/contention stats.", PServer(), PLimit(200), PDatabases(), PText("detail_database"), PText("detail_schema"), PText("detail_table"), PText("detail_index")),
             ["get_table_index_sizes"] = R(CatObjects, "Per-table/index size breakdown.", PServer()),
 
             /* ── plan cache / scheduler (DarlingMcpPlanCacheSchedulerTools) ── */
@@ -5505,7 +5505,9 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             /* ── object / index stats ── */
             ["get_database_sizes"] = (c, pg, an) => DarlingMcpObjectStatsTools.GetDatabaseSizes(pg, Server(c), cancellationToken: c.RequestAborted),
             ["get_pvs_stats"] = (c, pg, an) => DarlingMcpPvsTools.GetPvsStats(pg, Server(c), QueryInt(c, "trend_hours_back", null, 0), c.RequestAborted),
-            ["get_index_usage"] = (c, pg, an) => DarlingMcpObjectStatsTools.GetIndexUsage(pg, Server(c), Str(c, "database_name"), Rows(c, "limit", 200), cancellationToken: c.RequestAborted),
+            ["get_index_usage"] = (c, pg, an) => DatabaseNames(c) is { } databases
+                ? DarlingMcpObjectStatsTools.GetIndexUsage(pg, Server(c), databases, Rows(c, "limit", 200), c.RequestAborted)
+                : DatabaseNamesRefusal(c),
             /* #4258: limit defaults to 75 on the MCP signature now (was an uncapped-looking 200-row hard
                fetch with no parameter at all), sized under the shared response budget. The web viewer has
                always effectively received that old 200-row fetch (there was no smaller cap anywhere in the
@@ -5513,7 +5515,10 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                for the identical reason - rather than silently dropping to the new MCP default. 200 is well
                under both McpHelpers.MaxTop and MaxRowLimit (1000 each), so the value is never refused or
                reclamped by either validation layer. */
-            ["get_object_locking"] = (c, pg, an) => DarlingMcpObjectStatsTools.GetObjectLocking(pg, Server(c), Rows(c, "limit", 200), registryState, c.RequestAborted),
+            ["get_object_locking"] = (c, pg, an) => HasObjectLockingSelector(c) ? ObjectLockingDetail(c, pg)
+                : DatabaseNames(c) is { } databases
+                    ? DarlingMcpObjectStatsTools.GetObjectLockingWithHeatAsync(pg, Server(c), Rows(c, "limit", 200), registryState, databases, c.RequestAborted)
+                    : DatabaseNamesRefusal(c),
             ["get_table_index_sizes"] = (c, pg, an) => DarlingMcpObjectStatsTools.GetTableIndexSizes(pg, Server(c), cancellationToken: c.RequestAborted),
 
             /* ── plan cache / scheduler ── */
@@ -5748,6 +5753,45 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// <summary>The server name from <c>?server=</c> (or the tool's own <c>?server_name=</c>); null when absent,
     /// which lets a tool auto-select a sole configured server exactly as the MCP surface does.</summary>
     private static string? Server(HttpContext context) => First(context, "server") ?? First(context, "server_name");
+
+    /* ── the Locking page's index detail selector (#5311): web-only, never an MCP parameter ── */
+
+    private static readonly string[] ObjectLockingSelectorKeys = ["detail_database", "detail_schema", "detail_table", "detail_index"];
+
+    /// <summary>True when the request carries any <c>detail_*</c> selector key: the read then answers ONE index's four
+    /// counters (<see cref="ObjectLockingDetail"/>) instead of the list. Without one the list read is untouched.</summary>
+    private static bool HasObjectLockingSelector(HttpContext context) =>
+        ObjectLockingSelectorKeys.Any(key => context.Request.Query.ContainsKey(key));
+
+    /// <summary>
+    /// #5311: the detail read of <c>get_object_locking</c>. The index is named exactly by <c>detail_database</c>,
+    /// <c>detail_schema</c> and <c>detail_table</c> (each required) and <c>detail_index</c> (absent names a heap); each
+    /// goes to the store as a bound parameter. A missing or blank name, a name over a <c>sysname</c>'s 128 characters or
+    /// one holding NUL is refused with the usual <c>invalid</c> envelope before the store is touched; a blank database
+    /// would otherwise be the "every database" filter, and a selector never widens.
+    /// </summary>
+    private static Task<string> ObjectLockingDetail(HttpContext context, NpgsqlDataSource postgres)
+    {
+        foreach (var key in new[] { "detail_database", "detail_schema", "detail_table" })
+        {
+            var v = First(context, key);
+            if (v is null || string.IsNullOrWhiteSpace(v)) return MissingParam(key);
+        }
+
+        foreach (var key in ObjectLockingSelectorKeys)
+        {
+            var v = First(context, key);
+            if (v is null) continue;
+            if (v.Contains('\0'))
+                return Task.FromResult(McpHelpers.Refusal(key, $"A {key} value holds a character an object name cannot hold."));
+            if (v.Length > MaxDatabaseNameLength)
+                return Task.FromResult(McpHelpers.Refusal(key, $"A {key} value is {v.Length} characters long; an object name is at most {MaxDatabaseNameLength} characters."));
+        }
+
+        return DarlingMcpObjectStatsTools.GetObjectLockingDetailAsync(
+            postgres, Server(context), First(context, "detail_database")!, First(context, "detail_schema")!,
+            First(context, "detail_table")!, First(context, "detail_index"), context.RequestAborted);
+    }
 
     /// <summary>The hours-back window from <c>?hours=</c> (or the tool's own <c>?hours_back=</c>), else the tool's default.</summary>
     private static int Hours(HttpContext context, int def) => QueryInt(context, "hours", "hours_back", def);
