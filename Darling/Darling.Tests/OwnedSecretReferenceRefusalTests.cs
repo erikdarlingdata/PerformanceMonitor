@@ -99,11 +99,11 @@ public sealed class OwnedSecretReferenceRefusalTests : IDisposable
         JsonSerializer.Serialize(new[] { new { host = "sql01", auth = "SQL", username = "monitor", password } });
 
     [Fact]
-    public void TheMcpCore_RefusesAnOwnedFileAndAnOwnedEnvReference()
+    public void TheHostCommandLineAdd_RefusesAnOwnedFileAndAnOwnedEnvReference()
     {
         foreach (var pw in new[] { "file:" + Path.Combine(_owned, "secret.txt"), "env:DARLING_CONFIG" })
         {
-            var (entries, invalid, whole) = DarlingMcpServerAdminTools.ParseRequest(Body(pw), isWindows: false);
+            var (entries, invalid, whole) = DarlingMcpServerAdminTools.ParseRequest(Body(pw), isWindows: false, allowSecretReferences: true);
             Assert.Null(whole);
             Assert.Empty(entries);
             var r = Assert.Single(invalid);
@@ -112,11 +112,11 @@ public sealed class OwnedSecretReferenceRefusalTests : IDisposable
     }
 
     [Fact]
-    public void TheMcpCore_AcceptsAnUnrelatedReference_AndLeavesLiteralsAlone()
+    public void TheHostCommandLineAdd_AcceptsAnUnrelatedReference_AndLeavesLiteralsAlone()
     {
         foreach (var pw in new[] { "file:" + Path.Combine(_root, "other", "pw"), "env:SOME_OTHER_VAR" })
         {
-            var (entries, invalid, _) = DarlingMcpServerAdminTools.ParseRequest(Body(pw), isWindows: false);
+            var (entries, invalid, _) = DarlingMcpServerAdminTools.ParseRequest(Body(pw), isWindows: false, allowSecretReferences: true);
             Assert.Empty(invalid);
             Assert.Single(entries);
         }

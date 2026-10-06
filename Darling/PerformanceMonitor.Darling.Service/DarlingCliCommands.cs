@@ -5562,7 +5562,7 @@ public static class DarlingCliCommands
 
     /// <summary>
     /// <c>--add-server</c> (#2256): registers monitored server(s) in the store from a JSON array on stdin, through
-    /// the SAME <see cref="DarlingMcpServerAdminTools.AddServers"/> path the MCP tool uses — so validation, dedupe,
+    /// the SAME core the MCP <c>add_servers</c> tool uses (<see cref="DarlingMcpServerAdminTools.AddServersFromHostCommandLineAsync"/>) — so validation, dedupe,
     /// the in-process connection probe, password encryption and the identity computation are shared rather than
     /// reimplemented. <c>server_id</c> in particular is a hash of the storage name, which is exactly the part an
     /// operator cannot safely produce by hand.
@@ -5637,7 +5637,9 @@ public static class DarlingCliCommands
             await using var dataSource = NpgsqlDataSource.Create(
                 DarlingStoreConnection.PinSessionTimeZoneUtc(
                     DarlingStoreConnection.WithApplicationName(connectionString, DarlingManagedPostgres.CliApplicationName)));
-            resultJson = await DarlingMcpServerAdminTools.AddServers(dataSource, json);
+            /* Typed at the host's own command line, not a request: a password here may be an env:/file: reference, the
+               way the configuration file's is (DarlingMcpServerAdminTools.AddServersFromHostCommandLineAsync). */
+            resultJson = await DarlingMcpServerAdminTools.AddServersFromHostCommandLineAsync(dataSource, json);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

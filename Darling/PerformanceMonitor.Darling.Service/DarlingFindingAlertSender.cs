@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
+using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Notifications;
 
 namespace PerformanceMonitor.Darling.Service;
@@ -74,6 +75,10 @@ public sealed class DarlingFindingAlertSender : IFindingAlertSender
             return null;
         try
         {
+        /* #5320 (part of #4348): the statement filter, before anything is composed, sent or written. The
+           context, its attachment and the prose are judged once here, so the digest row, the channels and
+           the history row all carry the filtered values. */
+            named = AlertStatementFilter.Apply(named);
             var (serverName, currentValue, context) = FindingSummary.Compose(named);
             var result = await _core.TrySendAsync(
                 FindingSummary.MetricName, serverName, currentValue, named.Count.ToString(CultureInfo.InvariantCulture),
@@ -115,6 +120,10 @@ public sealed class DarlingFindingAlertSender : IFindingAlertSender
 
         try
         {
+        /* #5320 (part of #4348): the statement filter, before anything is composed, sent or written. The
+           context, its attachment and the prose are judged once here, so the digest row, the channels and
+           the history row all carry the filtered values. */
+            alert = AlertStatementFilter.Apply(alert);
             var context = alert.Context;
             AlertDelivery delivery;
 
