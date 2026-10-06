@@ -443,6 +443,10 @@ public sealed partial class ViewerDataService : IAsyncDisposable
 
     private readonly NpgsqlDataSource _dataSource;
 
+    /// <summary>The store connection a saved password key belongs to (host, port and database), see
+    /// <see cref="ViewerPasswordKey.StoreIdentityOf"/>.</summary>
+    public string StoreConnectionIdentity { get; }
+
     /// <summary>Review D4R M3: <see cref="GetStoreSchemaVersionAsync"/>'s result, cached per instance (this
     /// instance is per store connection) once the Queries grid's #3953 table-read gate has probed it, so a
     /// long-window grid refresh pays the 121-column catalog probe once per session rather than on every load.
@@ -483,6 +487,7 @@ public sealed partial class ViewerDataService : IAsyncDisposable
             DarlingStoreConnection.PinSessionTimeZoneUtc(
                 DarlingStoreConnection.WithApplicationName(effectiveConnectionString, ViewerSettings.ApplicationName)));
         StoreIsOnThisMachine = StoreHostIsLoopback(connectionString);
+        StoreConnectionIdentity = ViewerPasswordKey.StoreIdentityOf(connectionString);
         _alertClocks = new ServerClockCache(ct => GetServerClocksAsync(serverId: null, ct), AlertClockLifetime);
     }
 

@@ -412,7 +412,7 @@ public partial class AddServerDialog : Window
         $"Leave the {what} blank to keep the stored one. If you change how the server is reached (address, database, login or encryption settings), enter it again.";
 
     /// <summary>True on an edit when the form's connection settings differ from the stored row's by the rule the web and MCP
-    /// edit use (<see cref="ServerConnectionRule.ConnectionSettingsDiffer"/>: host, port, engine, database, read-only intent,
+    /// edit use (<see cref="ServerConnectionIdentity.Differ"/>: host, port, engine, database, read-only intent,
     /// authentication, username, encrypt mode, trust certificate and multi-subnet failover). A port the box cannot parse
     /// counts as unchanged here: the form's own port check reports it. The authentication and username are the ones the
     /// credential being resolved carries.</summary>
@@ -430,13 +430,11 @@ public partial class AddServerDialog : Window
         }
 
         var database = string.IsNullOrWhiteSpace(DatabaseNameBox.Text) ? null : DatabaseNameBox.Text.Trim();
-        var form = new ServerConnectionSettings(
+        var form = ServerConnectionIdentity.FromStoredColumns(
             ServerNameBox.Text.Trim(), port, _existing.Engine, database, ReadOnlyIntentCheckBox.IsChecked == true, auth, username,
             GetSelectedEncryptMode(), TrustCertCheckBox.IsChecked == true, MultiSubnetFailoverCheckBox.IsChecked == true);
-        var stored = ServerConnectionSettings.WithDefaults(
-            _existing.Host, _existing.Port, _existing.Engine, _existing.Database, _existing.ReadOnlyIntent, _existing.Auth,
-            _existing.Username, _existing.EncryptMode, _existing.TrustServerCertificate, _existing.MultiSubnetFailover);
-        return ServerConnectionRule.ConnectionSettingsDiffer(form, stored);
+        var stored = ViewerPasswordSealer.IdentityOf(_existing);
+        return ServerConnectionIdentity.Differ(form, stored);
     }
 
     /// <summary>
@@ -445,11 +443,12 @@ public partial class AddServerDialog : Window
     /// blocking the Azure/Entra modes the service can't honor and keeping an existing blob when the password
     /// box is left blank on edit.
     /// </summary>
-    private bool TryResolveCredential(out string auth, out string? username, out string? encryptedPassword, out string? error)
+    private bool TryResolveCredential(out string auth, out string? username, out string? encryptedPassword, out string? secret, out string? error)
     {
         auth = ServerStoreCredential.Integrated;
         username = null;
         encryptedPassword = null;
+        secret = null;
         error = null;
 
         if (UseProfileRadio.IsChecked == true)
@@ -484,15 +483,15 @@ public partial class AddServerDialog : Window
             /* Secret-bearing profiles (SQL, service principal): resolve the concrete secret and write it onto
                the row — the store keeps concrete creds; profiles are a viewer authoring convenience the store
                needs no table for. */
-            var secret = _profileStore.GetSecret(profile.Id);
-            if (secret is null || string.IsNullOrEmpty(secret.Value.Password))
+            var profileSecret = _profileStore.GetSecret(profile.Id);
+            if (profileSecret is null || string.IsNullOrEmpty(profileSecret.Value.Password))
             {
                 error = $"The credential profile '{profile.Name}' has no stored secret on this machine. Re-enter it under Credential Profiles.";
                 return false;
             }
 
-            username = string.IsNullOrWhiteSpace(secret.Value.Username) ? profile.Username : secret.Value.Username;
-            encryptedPassword = ViewerServerSecret.Protect(secret.Value.Password);
+            username = string.IsNullOrWhiteSpace(profileSecret.Value.Username) ? profile.Username : profileSecret.Value.Username;
+            secret = profileSecret.Value.Password;
             return true;
         }
 
@@ -515,7 +514,7 @@ public partial class AddServerDialog : Window
             var typed = PasswordBox.Password;
             if (!string.IsNullOrEmpty(typed))
             {
-                encryptedPassword = ViewerServerSecret.Protect(typed);
+                secret = typed;
                 return true;
             }
 
@@ -558,7 +557,7 @@ public partial class AddServerDialog : Window
             var typedSecret = AzureClientSecretBox.Password;
             if (!string.IsNullOrEmpty(typedSecret))
             {
-                encryptedPassword = ViewerServerSecret.Protect(typedSecret);
+                secret = typedSecret;
                 return true;
             }
 
@@ -601,9 +600,10 @@ public partial class AddServerDialog : Window
     }
 
     /// <summary>Reads the form into a fresh store row (server_id derived from identity), or a user-facing error.</summary>
-    private MonitoredServerRow? BuildRowFromForm(out string? error)
+    private MonitoredServerRow? BuildRowFromForm(out string? error, out string? secret)
     {
         error = null;
+        secret = null;
 
         var host = ServerNameBox.Text.Trim();
         if (string.IsNullOrEmpty(host))
@@ -637,7 +637,7 @@ public partial class AddServerDialog : Window
             port = parsedPort;
         }
 
-        if (!TryResolveCredential(out var auth, out var username, out var encryptedPassword, out var credError))
+        if (!TryResolveCredential(out var auth, out var username, out var encryptedPassword, out secret, out var credError))
         {
             error = credError;
             return null;
@@ -700,6 +700,45 @@ public partial class AddServerDialog : Window
         };
     }
 
+    /// <summary>The password is sealed once for the form's settings: the test and the save that follows it store the same text.</summary>
+    private readonly ViewerSealCache _sealCache = new();
+
+    /// <summary>
+    /// Reads the form into a store row and seals a newly entered password (#5366) to the service's published key, for that
+    /// row's connection settings. A password that is kept (a blank box on edit) stays as stored. The error is a sentence for
+    /// the status line; it never carries a password.
+    /// </summary>
+    private async Task<(MonitoredServerRow? Row, string? Error)> BuildSealedRowFromFormAsync()
+    {
+        var row = BuildRowFromForm(out var error, out var secret);
+        if (row is null || secret is null)
+        {
+            return (row, error);
+        }
+
+        if (_dataService is null)
+        {
+            return (null, ViewerPasswordKey.NoKeyText);
+        }
+
+        var key = await ViewerPasswordKey.GetSealKeyAsync(_dataService, this);
+        if (key.Sealer is null)
+        {
+            return (null, key.Refusal);
+        }
+
+        try
+        {
+            row.EncryptedPassword = _sealCache.GetOrSeal(key.Sealer, secret, row);
+        }
+        catch (ViewerPasswordRefusedException ex)
+        {
+            return (null, ex.Message);
+        }
+
+        return (row, null);
+    }
+
     /// <summary>The per-server delivery override the combo encodes: index 0 = inherit the global (null),
     /// 1 = force Summary, 2 = force Per-event (#1236).</summary>
     private AlertNotificationMode? GetSelectedDeliveryOverride() => AlertDeliveryOverrideBox.SelectedIndex switch
@@ -738,8 +777,8 @@ public partial class AddServerDialog : Window
         {
             SaveButton.IsEnabled = false;
 
-            /* Build (incl. DPAPI Protect, which can throw) inside the try so nothing escapes this async void. */
-            var row = BuildRowFromForm(out var error);
+            /* Build (incl. sealing the password) inside the try so nothing escapes this async void. */
+            var (row, error) = await BuildSealedRowFromFormAsync();
             if (row is null)
             {
                 StatusText.Text = error;
@@ -848,8 +887,8 @@ public partial class AddServerDialog : Window
             TestConnectionButton.IsEnabled = false;
             SaveButton.IsEnabled = false;
 
-            /* Build (incl. DPAPI Protect) inside the try — a crypto failure must not escape this async void. */
-            var row = BuildRowFromForm(out var error);
+            /* Build (incl. sealing the password) inside the try — a crypto failure must not escape this async void. */
+            var (row, error) = await BuildSealedRowFromFormAsync();
             if (row is null)
             {
                 StatusText.Text = error;

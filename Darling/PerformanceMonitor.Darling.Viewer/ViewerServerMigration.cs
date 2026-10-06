@@ -82,11 +82,14 @@ public sealed class ViewerServerMigration
         }
 
         var total = new ViewerServerImportResult(0, 0);
+        var key = new SealKeyHolder();
+        var deferred = false;
         try
         {
             foreach (var entry in _serverStore.GetAllServers())
             {
-                var (row, _) = TryProjectEntry(entry);
+                var (row, needsKey) = await ProjectAsync(entry, dataService, key, cancellationToken);
+                deferred |= needsKey;
                 if (row is null)
                 {
                     continue;
@@ -103,6 +106,14 @@ public sealed class ViewerServerMigration
             /* Lost the write race (grants tightened under us) — leave the marker unwritten so a later,
                writable run finishes the import. */
             ViewerLogger.Warn("ViewerServerMigration", "Store went read-only mid-migrate; will retry next run.");
+            return total.Imported;
+        }
+
+        /* An entry with a password waits for the service's password key (#5366): leave the marker unwritten so a later
+           run, with the key published, imports it. The entries already in the store are skipped as duplicates then. */
+        if (deferred)
+        {
+            ViewerLogger.Warn("ViewerServerMigration", "A server with a password was not imported yet: " + (key.Refusal ?? ViewerPasswordKey.NoKeyText));
             return total.Imported;
         }
 
@@ -132,9 +143,10 @@ public sealed class ViewerServerMigration
 
         var projector = new ViewerServerMigration(sourceStore, sourceProfiles);
         var total = new ViewerServerImportResult(0, 0);
+        var key = new SealKeyHolder();
         foreach (var entry in sourceStore.GetAllServers())
         {
-            var (row, _) = projector.TryProjectEntry(entry);
+            var (row, _) = await projector.ProjectAsync(entry, dataService, key, cancellationToken);
             if (row is null)
             {
                 continue;
@@ -145,6 +157,49 @@ public sealed class ViewerServerMigration
         }
 
         return total;
+    }
+
+    /// <summary>The key a pass seals with, read the first time an entry needs it and not again.</summary>
+    private sealed class SealKeyHolder
+    {
+        public bool Tried;
+        public ViewerPasswordSealer? Sealer;
+        public string? Refusal;
+    }
+
+    /// <summary>The skip reason of an entry with a password when no sealer was given.</summary>
+    internal const string NoPasswordKeyReason = "no password key is available to seal its password";
+
+    /// <summary>
+    /// Projects one entry, reading the store's password key the first time an entry with a password needs it.
+    /// <c>NeedsKey</c> is true when the entry was left out only because that key could not be had.
+    /// </summary>
+    private async Task<(MonitoredServerRow? Row, bool NeedsKey)> ProjectAsync(
+        ViewerServerEntry entry, ViewerDataService dataService, SealKeyHolder key, CancellationToken cancellationToken)
+    {
+        var (row, reason) = TryProjectEntry(entry, key.Sealer);
+        if (row is not null || reason != NoPasswordKeyReason)
+        {
+            return (row, false);
+        }
+
+        if (!key.Tried)
+        {
+            key.Tried = true;
+            var result = await ViewerPasswordKey.GetSealKeyAsync(dataService, null, cancellationToken);
+            key.Sealer = result.Sealer;
+            key.Refusal = result.Refusal;
+            if (key.Sealer is not null)
+            {
+                (row, reason) = TryProjectEntry(entry, key.Sealer);
+                if (row is not null || reason != NoPasswordKeyReason)
+                {
+                    return (row, false);
+                }
+            }
+        }
+
+        return (null, true);
     }
 
     /// <summary>
@@ -184,10 +239,12 @@ public sealed class ViewerServerMigration
     /// <summary>
     /// Projects a viewer registry entry to the store row the migrate writes, or returns a skip reason. Public
     /// so Darling.Tests can pin the auth mapping + secret resolution without a live store. Reads Windows
-    /// Credential Manager (through the injected stores) and DPAPI-seals a SQL secret, so the SQL path is
-    /// Windows-only; the integrated + unsupported-auth + missing-secret branches are platform-independent.
+    /// Credential Manager (through the injected stores) and seals a SQL secret to <paramref name="sealer"/> for the row's
+    /// connection settings (#5366), so the SQL path is Windows-only; the integrated + unsupported-auth + missing-secret
+    /// branches are platform-independent. An entry with a secret and no sealer is skipped with
+    /// <see cref="NoPasswordKeyReason"/>.
     /// </summary>
-    public (MonitoredServerRow? Row, string? SkipReason) TryProjectEntry(ViewerServerEntry entry)
+    public (MonitoredServerRow? Row, string? SkipReason) TryProjectEntry(ViewerServerEntry entry, ViewerPasswordSealer? sealer = null)
     {
         ArgumentNullException.ThrowIfNull(entry);
 
@@ -238,7 +295,7 @@ public sealed class ViewerServerMigration
         }
 
         /* SQL and service principal both resolve a secret — a SQL password or a client secret — from the
-           profile or the server store, and store it in the same DPAPI blob. */
+           profile or the server store, and store it sealed to the service's key. */
         var credential = profile is not null
             ? _profileStore.GetSecret(profile.Id)
             : _serverStore.GetCredential(entry.Id);
@@ -249,7 +306,20 @@ public sealed class ViewerServerMigration
         }
 
         row.Username = string.IsNullOrWhiteSpace(credential.Value.Username) ? row.Username : credential.Value.Username;
-        row.EncryptedPassword = ViewerServerSecret.Protect(credential.Value.Password);
+        if (sealer is null)
+        {
+            return (null, NoPasswordKeyReason);
+        }
+
+        try
+        {
+            row.EncryptedPassword = sealer.Seal(credential.Value.Password, row);
+        }
+        catch (ViewerPasswordRefusedException ex)
+        {
+            return (null, ex.Message);
+        }
+
         return (row, null);
     }
 
