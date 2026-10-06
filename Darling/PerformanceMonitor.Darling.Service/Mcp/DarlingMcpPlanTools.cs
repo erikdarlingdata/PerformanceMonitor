@@ -406,7 +406,7 @@ public sealed class DarlingMcpPlanTools
                     db = database_name;
                     text = await DarlingReproScript.ReadQueryStoreTextAsync(postgres, resolved.ServerId, database_name!, query_id!.Value, cancellationToken);
                     planXml = text == null ? null : await DarlingStoredPlanReader.GetQueryStorePlanTextAsync(
-                        postgres, resolved.ServerId, database_name!, query_id.Value, plan_id, cancellationToken);
+                        postgres, resolved.ServerId, database_name!, query_id.Value, plan_id, cancellationToken: cancellationToken);
                     break;
                 default:
                     collector = "query_snapshots";
