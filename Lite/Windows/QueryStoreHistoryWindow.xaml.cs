@@ -95,7 +95,11 @@ public partial class QueryStoreHistoryWindow : Window
 
             if (_historyData.Count > 0)
             {
-                var totalExec = _historyData.Sum(r => r.ExecutionCount);
+                /* #5306: each Query Store interval counts once, at its latest snapshot. The grid lists every snapshot
+                   (an interval collected N times is N rows with a growing count), so adding the column up counted it
+                   about N times. The samples count, the first and last times and the plan count below are not totals
+                   of the counts: they read the rows as they are. */
+                var totalExec = QueryStoreHistoryRow.TotalExecutions(_historyData);
                 var planCount = _historyData.Select(r => r.PlanId).Distinct().Count();
                 var zone = _displayZone();
                 var first = ServerTimeHelper.FormatInstant(_historyData.First().CollectionTime, zone, "MM/dd HH:mm");
