@@ -181,7 +181,8 @@ public sealed class SameStatementPileupSourceCensusTests
             ElapsedMs: 29_124,
             CpuTimeMs: 1_351,
             LogicalReads: 287_049,
-            PhysicalReads: 29_505);
+            PhysicalReads: 29_505,
+            PreviewText: "select 1");
 
         Assert.Equal("0xabcdef0123456789", SameStatementPileupDetector.StatementIdentity(row));
 
