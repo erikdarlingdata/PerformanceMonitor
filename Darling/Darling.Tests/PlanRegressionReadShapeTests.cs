@@ -76,7 +76,8 @@ public sealed class PlanRegressionReadShapeTests
            the reader's second read, which resolves the plans the reader keeps. */
         Assert.DoesNotContain("LIMIT 5", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("query_text_dim", sql, StringComparison.Ordinal);
-        Assert.Contains("LEFT(o.query_text, 500) AS query_text", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("LEFT(o.query_text", sql, StringComparison.Ordinal); /* #5320: whole text, judged then cut in C# */
+        Assert.Contains("    o.query_text,", sql, StringComparison.Ordinal);
         Assert.Matches(
             new Regex(@"o\.time_zone_id,\s+o\.query_text_digest\s+FROM offenders AS o\s+ORDER BY", RegexOptions.Singleline),
             sql);
@@ -90,7 +91,7 @@ public sealed class PlanRegressionReadShapeTests
         /* One dimension row per digest by primary key: the read touches the digests it was given and nothing else. The
            cut to 500 characters stays in SQL, so it is still PostgreSQL's character count. */
         Assert.Matches(
-            new Regex(@"^\s*SELECT digest, LEFT\(query_text, 500\)\s+FROM query_text_dim\s+WHERE digest = ANY\(\$1\)\s*$"),
+            new Regex(@"^\s*SELECT digest, query_text\s+FROM query_text_dim\s+WHERE digest = ANY\(\$1\)\s*$"),
             sql);
 
         /* One array parameter however many plans print, never a parameter or a list literal per digest. */

@@ -300,10 +300,11 @@ public sealed class DarlingAnalysisPipelineTests
         Assert.Contains("monitor_loop", sql, StringComparison.Ordinal);
         Assert.Contains("contentious_object", sql, StringComparison.Ordinal);
 
-        /* Unlike the fact collector's full-text pair rows, the drill-down payload truncates
-           both SQL texts (Lite's shape). */
-        Assert.Contains("LEFT(blocked_sql_text, 500)", sql, StringComparison.Ordinal);
-        Assert.Contains("LEFT(blocking_sql_text, 500)", sql, StringComparison.Ordinal);
+        /* #5320: the read returns both SQL texts whole; the drill-down payload judges them with the statement filter and
+           cuts them to 500 in C# (a cut made in SQL first would hand the filter a prefix). */
+        Assert.DoesNotContain("LEFT(", sql, StringComparison.Ordinal);
+        Assert.Contains("blocked_sql_text AS blocked_sql", sql, StringComparison.Ordinal);
+        Assert.Contains("blocking_sql_text AS blocking_sql", sql, StringComparison.Ordinal);
     }
 
     /* ---------------- ungated: worker cadence + notification adapter pins ---------------- */
