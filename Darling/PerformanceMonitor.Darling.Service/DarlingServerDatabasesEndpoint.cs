@@ -16,6 +16,7 @@ using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Logging;
 using Npgsql;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service.Hosting;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
@@ -49,11 +50,24 @@ internal static class DarlingServerDatabasesEndpoint
     internal const string Route = "/api/server-databases";
 
     /// <summary>Maps <see cref="Route"/>. Called once from <see cref="DarlingWebEndpoints.MapAll"/>.</summary>
-    internal static void Map(WebApplication app, NpgsqlDataSource postgres, ILogger logger)
+    internal static void Map(WebApplication app, NpgsqlDataSource postgres, ILogger logger) =>
+        Map(app, postgres, logger, MaxDatabases);
+
+    /// <summary>
+    /// <see cref="Map(WebApplication, NpgsqlDataSource, ILogger)"/> with the row cap as an argument. The production call
+    /// passes <see cref="MaxDatabases"/>; a test passes a small cap, so the route's row counts and its truncated flag are
+    /// asserted over a handful of rows and fail on their own, not only through the constant's value. #5314.
+    /// </summary>
+    internal static void Map(WebApplication app, NpgsqlDataSource postgres, ILogger logger, int cap)
     {
         app.MapGet(Route, async (HttpContext context) =>
         {
             var stopwatch = Stopwatch.StartNew();
+            if (!TryBindSearch(context.Request.Query, out var search, out var refusal))
+            {
+                return DarlingWebEndpoints.ToHttpResult(refusal!, Route, logger, stopwatch.ElapsedMilliseconds);
+            }
+
             var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(
                 postgres, DarlingWebEndpoints.First(context, "server"), context.RequestAborted);
             if (error is not null)
@@ -63,7 +77,7 @@ internal static class DarlingServerDatabasesEndpoint
 
             try
             {
-                var (names, truncated) = await ReadAsync(postgres, resolved.ServerId, MaxDatabases, context.RequestAborted);
+                var (names, truncated) = await ReadAsync(postgres, resolved.ServerId, cap, context.RequestAborted, search);
                 return Results.Text(Render(resolved.ServerName, names, truncated), "application/json");
             }
             catch (OperationCanceledException) when (context.RequestAborted.IsCancellationRequested)
@@ -91,13 +105,20 @@ internal static class DarlingServerDatabasesEndpoint
     /// returned.
     /// </summary>
     internal static async Task<(List<string> Names, bool Truncated)> ReadAsync(
-        NpgsqlDataSource postgres, int serverId, int cap, CancellationToken cancellationToken)
+        NpgsqlDataSource postgres, int serverId, int cap, CancellationToken cancellationToken, string? search = null)
     {
         var names = new List<string>();
-        await using var command = postgres.CreateCommand(CollectedDatabases.NamesLimitedSql);
+        await using var command = postgres.CreateCommand(
+            search is null ? CollectedDatabases.NamesLimitedSql : CollectedDatabases.NamesSearchLimitedSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = cap + 1 });
+        if (search is not null)
+        {
+            /* ONE text parameter: the pattern is built from the search text with its wildcards escaped. */
+            command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = CollectedDatabases.SearchPattern(search) });
+        }
+
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -111,6 +132,51 @@ internal static class DarlingServerDatabasesEndpoint
         }
 
         return (names, truncated);
+    }
+
+    /// <summary>The most characters a <c>search</c> value may hold: a database name's own cap
+    /// (<see cref="DarlingWebEndpoints.MaxDatabaseNameLength"/>), since no name is longer to contain it.</summary>
+    internal const int MaxSearchLength = DarlingWebEndpoints.MaxDatabaseNameLength;
+
+    private const string SearchKey = "search";
+
+    /// <summary>
+    /// PURE: the optional <c>search</c> value of a request. True with <paramref name="search"/> null when the key is
+    /// absent or blank (empty or whitespace-only reads as no search), and true with the text, untrimmed, when it is
+    /// usable. False with the <c>invalid</c> refusal envelope for a key sent more than once (the one-value rule,
+    /// <see cref="DarlingWebEndpoints.TrySingleQueryValue"/>), a value holding a NUL character, or a value over
+    /// <see cref="MaxSearchLength"/> characters. The sentence names the rule, never the value, so nothing a caller sent is
+    /// echoed. #5314.
+    /// </summary>
+    internal static bool TryBindSearch(IQueryCollection query, out string? search, out string? refusal)
+    {
+        search = null;
+        refusal = null;
+        if (!DarlingWebEndpoints.TrySingleQueryValue(query, SearchKey, out var value))
+        {
+            refusal = McpHelpers.Refusal(SearchKey, "search must be given once, or left out.");
+            return false;
+        }
+
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return true;
+        }
+
+        if (value.Contains('\0', StringComparison.Ordinal))
+        {
+            refusal = McpHelpers.Refusal(SearchKey, "search must not contain a NUL character.");
+            return false;
+        }
+
+        if (value.Length > MaxSearchLength)
+        {
+            refusal = McpHelpers.Refusal(SearchKey, $"search is longer than {MaxSearchLength} characters; give a shorter text.");
+            return false;
+        }
+
+        search = value;
+        return true;
     }
 
     /// <summary>The route's JSON body: <c>{"server": "...", "databases": [...], "truncated": false}</c>.</summary>

@@ -182,7 +182,7 @@ public sealed class WebDatabaseFilterPickerBehaviourTests
 
         Assert.Equal(40, r.GetProperty("offered").GetInt32());
         Assert.Equal(
-            new[] { "The list stops at 40 databases, so more are not shown. The search box narrows the names listed." },
+            new[] { "The list stops at 40 databases, so more are not shown. Type part of a name in the search box to find it." },
             Strings(r.GetProperty("note")));
         Assert.Equal("Databases: 1 of 40+", r.GetProperty("label").GetString());
     }
@@ -194,6 +194,67 @@ public sealed class WebDatabaseFilterPickerBehaviourTests
 
         Assert.Empty(Strings(r.GetProperty("note")));
         Assert.Equal("Databases: 1 of 40", r.GetProperty("label").GetString());
+    }
+
+    [Fact]
+    public void ACutLists_SearchBox_AsksTheRouteOnce_AfterAPause_AndShowsTheDatabasePastTheCap()
+    {
+        var r = Run("cutSearch");
+
+        // The first page says it is cut and tells the reader to type a name; typing asks nothing until the pause is over.
+        Assert.Equal(
+            new[] { "The list stops at 40 databases, so more are not shown. Type part of a name in the search box to find it." },
+            Strings(r.GetProperty("noteBefore")));
+        Assert.Equal(0, r.GetProperty("searchUrlsBefore").GetInt32());
+        Assert.Equal(0, r.GetProperty("searchUrlsDuringPause").GetInt32());
+
+        // Three keystrokes are one ask, for the last text, and the list is that answer: a name that was never in the first page.
+        Assert.Equal(new[] { "/api/server-databases?server=SRV1&search=zz-past" }, Strings(r.GetProperty("searchUrls")));
+        Assert.Equal(new[] { "zz-past-the-cap" }, Strings(r.GetProperty("listedAfter")));
+        Assert.Empty(Strings(r.GetProperty("noteAfter")));
+        Assert.Equal("Databases: All", r.GetProperty("label").GetString());
+
+        // The found name can be checked and applied. Clearing the box shows the first page again (and the checked name after it),
+        // and asks the route for nothing more.
+        Assert.Equal(41, r.GetProperty("listedCleared").GetInt32());
+        Assert.Equal(1, r.GetProperty("searchUrlsAfterClear").GetInt32());
+        Assert.Equal(new[] { "zz-past-the-cap" }, Strings(r.GetProperty("checkedAfterClear")));
+        Assert.Equal(new[] { "zz-past-the-cap" }, Strings(r.GetProperty("stored")));
+    }
+
+    [Fact]
+    public void ACutLists_Search_ShowsOnlyTheNewestAnswer_WhenAnOlderOneLandsLater()
+    {
+        var r = Run("cutSearchNewestWins");
+
+        Assert.Equal(
+            new[] { "/api/server-databases?server=SRV1&search=a1", "/api/server-databases?server=SRV1&search=a2" },
+            Strings(r.GetProperty("searchUrls")));
+        Assert.Equal(new[] { "a2-new-answer" }, Strings(r.GetProperty("listedMid")));
+        Assert.Equal(new[] { "a2-new-answer" }, Strings(r.GetProperty("listedEnd")));
+    }
+
+    [Fact]
+    public void ASearchThatIsItselfCut_SaysSo()
+    {
+        var r = Run("cutSearchCutAndFails");
+
+        Assert.Equal(40, r.GetProperty("offered").GetInt32());
+        Assert.Equal(
+            new[] { "The search stops at 40 databases, so more matches are not shown. Type more of the name to narrow it." },
+            Strings(r.GetProperty("noteCut")));
+    }
+
+    [Fact]
+    public void AListThatWasNotCut_FiltersLocally_AndAsksTheRouteForNothing()
+    {
+        var r = Run("uncutSearch");
+
+        Assert.Empty(Strings(r.GetProperty("searchUrls")));
+        Assert.Equal(
+            new[] { "db10", "db11", "db12", "db13", "db14", "db15", "db16", "db17", "db18", "db19" },
+            Strings(r.GetProperty("listed")));
+        Assert.Empty(Strings(r.GetProperty("note")));
     }
 
     [Fact]
@@ -227,6 +288,9 @@ public sealed class WebDatabaseFilterPickerBehaviourTests
         Assert.DoesNotContain("innerHTML", picker);
         Assert.DoesNotContain("insertAdjacentHTML", picker);
         Assert.Contains("selectAll: withSelectAll = true", multi);
+        // The search callback is optional: a picker that passes none (the wait pickers) behaves as it did.
+        Assert.Contains("onSearch = null", multi);
+        Assert.Contains("if (onSearch) onSearch(state.search);", multi);
         Assert.Contains("setActiveDatabaseFilter({ server: current.server, databases })", server);
         Assert.Contains("onApply: redrawPanels", server);
         Assert.Contains("isPostgresTarget(card)", server);

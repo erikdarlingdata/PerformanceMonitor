@@ -86,11 +86,12 @@ export function mergeSeriesRows(series, xKey, valueKey) {
  * defaults(options, max) (default topWaitDefaults). `selectAll: false` leaves out the Select All button (default true, so the
  * wait pickers do not change), a null `defaultsLabel` leaves out the defaults button, and `refuse(value, checkedSet)` may
  * return a sentence that refuses checking `value` (a bound other than the count, such as the database filter's byte budget):
- * the box is disabled and the sentence shows as the hint.
+ * the box is disabled and the sentence shows as the hint. `onSearch(text)` (default none) runs after each keystroke in the search
+ * box, once the list is filtered, for a caller whose options are only part of a longer list and so asks its source for the match (#5314).
  * Returns { node, checked(), metric(), restoreFocus() }: call restoreFocus() once node is in the page.
  */
 export function multiPicker(opts) {
-  const { key, label, options, max, metrics = null, onChange, noun = "wait", defaultsLabel = "Top waits", defaults: defaultSet = topWaitDefaults, selectAll: withSelectAll = true, refuse = null } = opts;
+  const { key, label, options, max, metrics = null, onChange, noun = "wait", defaultsLabel = "Top waits", defaults: defaultSet = topWaitDefaults, selectAll: withSelectAll = true, refuse = null, onSearch = null } = opts;
   const state = pickerState(key);
   const defaults = () => defaultSet(options, max);
   state.checked = state.checked ? new Set(state.checked) : new Set(defaults());
@@ -151,6 +152,7 @@ export function multiPicker(opts) {
   search.addEventListener("input", () => {
     state.search = search.value;
     render();
+    if (onSearch) onSearch(state.search);
   });
   /* The rebuild replaces the input. When the one still in the page had focus, remember its caret now, while it is
      still there, and put both back on the new input once it is mounted. */

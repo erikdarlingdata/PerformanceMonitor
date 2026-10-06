@@ -63,6 +63,7 @@ let fleetOk = true;
 let inventory = [];
 let inventoryStatus = 200;
 let inventoryCut = false; // the route answered truncated: true
+let searchHandler = null; // (text) => { names, cut, delay }: the route's answer to a request that carries search=
 globalThis.fetch = async (url) => {
   const u = String(url);
   urls.push(u);
@@ -72,6 +73,12 @@ globalThis.fetch = async (url) => {
   }
   if (u.startsWith("/api/server-databases")) {
     if (inventoryStatus !== 200) return { status: inventoryStatus, ok: false, text: async () => JSON.stringify({ error: "no list" }) };
+    const q = new URL(u, "http://x").searchParams.get("search");
+    if (q !== null && searchHandler) {
+      const a = searchHandler(q);
+      if (a.delay) await new Promise((r) => setTimeout(r, a.delay));
+      return { status: 200, ok: true, text: async () => JSON.stringify({ server: "SRV1", databases: a.names, truncated: a.cut === true }) };
+    }
     return { status: 200, ok: true, text: async () => JSON.stringify({ server: "SRV1", databases: inventory, truncated: inventoryCut }) };
   }
   return { status: 200, ok: true, text: async () => "{}" };
@@ -277,6 +284,82 @@ try {
       out.note = popover.byClass("db-filter-cut").map((n) => n.textContent);
       out.label = page.byClass("db-filter-button")[0].textContent;
     },
+    /* #5314: a cut list's search box asks the route for the typed text, after a pause, and shows the newest answer. A database past
+       the cap (named "zz-past-the-cap", not among the 40 loaded) is found; the cut note then says to type a name. A burst of
+       keystrokes sends ONE ask, for the last text. Clearing the box shows the first page again. */
+    async cutSearch() {
+      inventory = names(40);
+      inventoryCut = true;
+      searchHandler = (q) => ({ names: q.startsWith("zz") ? ["zz-past-the-cap"] : [], cut: false });
+      const { page } = await open();
+      const popover = page.byClass("db-filter-popover")[0];
+      page.byClass("db-filter-button")[0].fire("click");
+      await settle();
+      out.noteBefore = popover.byClass("db-filter-cut").map((n) => n.textContent);
+      out.searchUrlsBefore = searchUrls().length;
+      type(popover, "z"); type(popover, "zz"); type(popover, "zz-past");
+      out.searchUrlsDuringPause = searchUrls().length;
+      await sleep(450);
+      out.searchUrls = searchUrls();
+      out.listedAfter = boxes(popover).map((b) => b.attrs["aria-label"]);
+      out.noteAfter = popover.byClass("db-filter-cut").map((n) => n.textContent);
+      out.label = page.byClass("db-filter-button")[0].textContent;
+      // The found name can be checked and applied, though it was never in the first page.
+      boxes(popover)[0].checked = true; boxes(popover)[0].fire("change");
+      type(popover, "");
+      await sleep(100);
+      out.listedCleared = boxes(popover).length;
+      out.searchUrlsAfterClear = searchUrls().length;
+      out.checkedAfterClear = checked(popover).map((b) => b.attrs["aria-label"]);
+      press(popover, "Apply"); await settle();
+      out.stored = stored()["7"];
+    },
+    /* Only the newest answer shows: the answer for the first text is slow and lands after the second text's answer. */
+    async cutSearchNewestWins() {
+      inventory = names(40);
+      inventoryCut = true;
+      searchHandler = (q) => (q === "a1" ? { names: ["a1-old-answer"], cut: false, delay: 400 } : { names: ["a2-new-answer"], cut: false });
+      const { page } = await open();
+      const popover = page.byClass("db-filter-popover")[0];
+      page.byClass("db-filter-button")[0].fire("click");
+      await settle();
+      type(popover, "a1");
+      await sleep(300); // the ask for "a1" is in flight (250 ms pause), its answer is 400 ms away
+      type(popover, "a2");
+      await sleep(350); // the ask for "a2" has been answered
+      out.listedMid = boxes(popover).map((b) => b.attrs["aria-label"]);
+      await sleep(400); // the slow "a1" answer has landed by now
+      out.listedEnd = boxes(popover).map((b) => b.attrs["aria-label"]);
+      out.searchUrls = searchUrls();
+    },
+    /* A search that is itself cut says so, and says to type more of the name. */
+    async cutSearchCutAndFails() {
+      inventory = names(40);
+      inventoryCut = true;
+      searchHandler = (q) => (q === "m" ? { names: names(40, "m"), cut: true } : { names: [], cut: false });
+      const { page } = await open();
+      const popover = page.byClass("db-filter-popover")[0];
+      page.byClass("db-filter-button")[0].fire("click");
+      await settle();
+      type(popover, "m");
+      await sleep(450);
+      out.noteCut = popover.byClass("db-filter-cut").map((n) => n.textContent);
+      out.offered = boxes(popover).length;
+    },
+    /* A list that was NOT cut already holds every name: typing filters those locally and asks the route for nothing. */
+    async uncutSearch() {
+      inventory = names(40);
+      searchHandler = () => ({ names: ["should-not-be-asked"], cut: false });
+      const { page } = await open();
+      const popover = page.byClass("db-filter-popover")[0];
+      page.byClass("db-filter-button")[0].fire("click");
+      await settle();
+      type(popover, "db1");
+      await sleep(450);
+      out.searchUrls = searchUrls();
+      out.listed = boxes(popover).map((b) => b.attrs["aria-label"]);
+      out.note = popover.byClass("db-filter-cut").map((n) => n.textContent);
+    },
     /* The inventory read failed: the sentence shows and the stored names stay listed, so the choice can still be undone. */
     async loadFails() {
       inventoryStatus = 500;
@@ -293,6 +376,14 @@ try {
 
   const boxes = (popover) => popover.all("input").filter((i) => i.attrs.type === "checkbox");
   const checked = (popover) => boxes(popover).filter((b) => b.checked);
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const searchUrls = () => urls.filter((u) => u.startsWith("/api/server-databases") && u.includes("search="));
+  /* Types `text` into the picker's search box (the input the page holds now) the way a keystroke does. */
+  const type = (popover, text) => {
+    const box = popover.every((n) => n.tag === "input" && n.attrs.type === "search")[0];
+    box.value = text;
+    box.fire("input");
+  };
   const press = (popover, text) => popover.all("button").find((b) => b.textContent === text).fire("click");
   const builds = () => globalThis.__builds || [];
 
