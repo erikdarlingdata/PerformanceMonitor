@@ -37,6 +37,21 @@ public static class DarlingSecretSource
            && (value.StartsWith(EnvPrefix, StringComparison.Ordinal)
                || value.StartsWith(FilePrefix, StringComparison.Ordinal));
 
+    /// <summary>The sentence every request path answers with when a password field holds a reference. It names no
+    /// value: the text the caller typed is never repeated.</summary>
+    internal const string RequestReferenceRefusalText =
+        "Enter the password itself. References (env: or file:) can only be set in the configuration file.";
+
+    /// <summary>
+    /// The one question a request path asks of a password it was handed (web add, web edit, MCP add_servers, MCP
+    /// edit_server, the test_connect command): null when the text is a password to use as typed, otherwise
+    /// <see cref="RequestReferenceRefusalText"/>. It is <see cref="IsReference"/> and nothing else, so what is refused is
+    /// exactly what <see cref="Resolve"/> would have dereferenced: same prefixes, same case rule, same start-of-text
+    /// rule, no more and no less. A password that only contains <c>env:</c> after its first character is a password.
+    /// </summary>
+    internal static string? RequestReferenceRefusal(string? value)
+        => IsReference(value) ? RequestReferenceRefusalText : null;
+
     /// <summary>
     /// Resolves a secret slot's value: a reference is dereferenced (a missing/empty target is a
     /// configuration error naming BOTH the setting and the target, never a silent empty secret); a

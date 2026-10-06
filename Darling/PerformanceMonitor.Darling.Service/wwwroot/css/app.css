@@ -1270,6 +1270,15 @@ pre.code {
 .finops-body { display: block; }
 .finops-panel { min-width: 0; }
 
+/* Locking & Contention index detail pane (#5311): opens above the table on a row click. */
+.locking-detail:empty { display: none; }
+.locking-detail { background: var(--bg-dark); border: 1px solid var(--border); border-radius: 6px; padding: 10px 14px; margin: 8px 0; }
+.locking-detail-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.locking-detail-status { color: var(--muted); margin: 8px 0 0; }
+.locking-detail-counters { display: grid; grid-template-columns: max-content max-content; gap: 4px 24px; margin: 8px 0 0; }
+.locking-detail-counters dt { color: var(--muted); }
+.locking-detail-counters dd { margin: 0; font-variant-numeric: tabular-nums; }
+
 /* Storage Growth heatmap (#4843): one accent shade per service band, 0 (smallest) to 7 (largest). */
 .heat-band-0 { background: rgba(46, 174, 241, 0.10); }
 .heat-band-1 { background: rgba(46, 174, 241, 0.21); }

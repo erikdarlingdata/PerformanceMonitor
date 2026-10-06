@@ -156,7 +156,7 @@ public static partial class SensitiveStatements
         || (value.Contains('&', StringComparison.Ordinal) && budget.Judge(WebUtility.HtmlDecode(value)) != Verdict.Clean);
 
     /// <summary><see cref="Text(string?)"/> under a budget: a spent budget or a failed match gives the marker.</summary>
-    private static string? TextUnder(JudgeBudget budget, string? value)
+    internal static string? TextUnder(JudgeBudget budget, string? value)
     {
         if (string.IsNullOrEmpty(value)) return value;
         try
