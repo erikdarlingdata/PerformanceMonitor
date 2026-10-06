@@ -7,6 +7,8 @@
  */
 
 using System;
+using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
@@ -44,6 +46,13 @@ public sealed class ServerEditPasswordRuleViewerTests
         Assert.Equal(Edit.EditPasswordNeededText, new MonitoredServerPasswordNeededException().Message);
     }
 
+    /// <summary>The rule the viewer's edit applies (<see cref="ServerConnectionRule.ConnectionSettingsDiffer"/>, with the
+    /// form's host trimmed of spaces as the dialog trims it) to a form that changes only the host and port.</summary>
+    private static bool ViewerMoves(string storedHost, int storedPort, string newHost, int newPort) =>
+        ServerConnectionRule.ConnectionSettingsDiffer(
+            ServerConnectionSettings.WithDefaults(newHost.Trim(' '), newPort, null, null, null, null, null, null, null, null),
+            ServerConnectionSettings.WithDefaults(storedHost, storedPort, null, null, null, null, null, null, null, null));
+
     [Theory]
     [InlineData("edit-rule.example.test", 0, "edit-rule.example.test", 0, false)]
     [InlineData("edit-rule.example.test", 0, "  edit-rule.example.test ", 0, false)]
@@ -57,7 +66,7 @@ public sealed class ServerEditPasswordRuleViewerTests
     [InlineData("edit-rule.example.test ", 0, "edit-rule.example.test ", 0, true)]
     public void TheViewersMoveRule_IsTheCoresHostAndPortRule(string storedHost, int storedPort, string newHost, int newPort, bool moved)
     {
-        Assert.Equal(moved, ViewerDataService.ReachMoved(storedHost, storedPort, newHost, newPort));
+        Assert.Equal(moved, ViewerMoves(storedHost, storedPort, newHost, newPort));
     }
 
     [Theory]
@@ -72,7 +81,7 @@ public sealed class ServerEditPasswordRuleViewerTests
         /* The core trims a request's host when it reads it, then calls SameAddress with the stored text as it is. */
         Assert.Equal(
             !Edit.SameAddress(newHost.Trim(' '), newPort, storedHost, storedPort),
-            ViewerDataService.ReachMoved(storedHost, storedPort, newHost, newPort));
+            ViewerMoves(storedHost, storedPort, newHost, newPort));
     }
 
     [Theory]
@@ -105,7 +114,7 @@ public sealed class ServerEditPasswordRuleViewerTests
         Assert.DoesNotContain("AzureClientSecretBox.Password = decrypted", source, StringComparison.Ordinal);
 
         /* Both keep-the-stored-blob branches (SQL and service principal) ask first. */
-        var guard = "if (ReachMovedFromForm())";
+        var guard = "if (ReachMovedFromForm(";
         var first = source.IndexOf(guard, StringComparison.Ordinal);
         Assert.True(first >= 0, "missing: " + guard);
         Assert.True(source.IndexOf(guard, first + 1, StringComparison.Ordinal) > first, "the second keep-blob branch has no guard");
@@ -123,7 +132,7 @@ public sealed class ServerEditPasswordRuleViewerTests
         }
     }
 
-    private static async Task<Rig> OpenAsync(string auth, string? blob, CancellationToken ct)
+    private static async Task<Rig> OpenAsync(string auth, string? blob, CancellationToken ct, string? remediationBlob = null)
     {
         var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
         Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
@@ -147,6 +156,15 @@ public sealed class ServerEditPasswordRuleViewerTests
             command.Parameters.AddWithValue(auth);
             command.Parameters.AddWithValue(blob is null ? DBNull.Value : blob);
             await command.ExecuteNonQueryAsync(ct);
+        }
+
+        if (remediationBlob is not null)
+        {
+            await using var remediation = owner.CreateCommand(
+                "UPDATE config_monitored_servers SET remediation_username = 'fix-login', remediation_encrypted_password = $2 WHERE server_id = $1");
+            remediation.Parameters.AddWithValue(ServerId);
+            remediation.Parameters.AddWithValue(remediationBlob);
+            await remediation.ExecuteNonQueryAsync(ct);
         }
 
         return new Rig(scratch, owner);
@@ -224,9 +242,15 @@ public sealed class ServerEditPasswordRuleViewerTests
         await using var rig = await OpenAsync("sql", StoredBlob, ct);
         await using var viewer = new ViewerDataService(rig.Scratch.ConnectionString);
 
-        await viewer.UpsertMonitoredServerAsync(Row("sql", StoredHost, StoredBlob, encryptMode: "Strict"), ct);
+        var renamed = Row("sql", StoredHost, StoredBlob);
+        renamed.Name = "edit-rule-renamed";
+        renamed.MonthlyCostUsd = 5m;
+        await viewer.UpsertMonitoredServerAsync(renamed, ct);
 
-        Assert.Equal((StoredHost, StoredBlob, "Strict"), await StoredAsync(rig, ct));
+        Assert.Equal((StoredHost, StoredBlob, "Mandatory"), await StoredAsync(rig, ct));
+        await using var read = rig.Owner.CreateCommand("SELECT name FROM config_monitored_servers WHERE server_id = $1");
+        read.Parameters.AddWithValue(ServerId);
+        Assert.Equal("edit-rule-renamed", (string?)await read.ExecuteScalarAsync(ct));
     }
 
     [Fact]
@@ -292,5 +316,107 @@ public sealed class ServerEditPasswordRuleViewerTests
         await viewer.UpsertMonitoredServerAsync(Row("integrated", StoredHost, null), ct);
 
         Assert.Equal((StoredHost, null, "Mandatory"), await StoredAsync(rig, ct));
+    }
+
+    public static IEnumerable<object[]> ConnectionFields() =>
+        new[] { "encrypt mode", "trust certificate", "multi-subnet", "username", "database", "read-only", "engine", "port", "host" }
+            .Select(f => new object[] { f });
+
+    private static MonitoredServerRow Changed(string field, string auth, string? blob)
+    {
+        var row = Row(auth, StoredHost, blob);
+        switch (field)
+        {
+            case "encrypt mode": row.EncryptMode = "Optional"; break;
+            case "trust certificate": row.TrustServerCertificate = true; break;
+            case "multi-subnet": row.MultiSubnetFailover = true; break;
+            case "username": row.Username = "other-user"; break;
+            case "database": row.Database = "tempdb"; break;
+            case "read-only": row.ReadOnlyIntent = true; break;
+            case "engine": row.Engine = "postgres"; break;
+            case "port": row.Port = 5433; break;
+            case "host": row.Host = MovedHost; break;
+            default: throw new ArgumentException(field);
+        }
+
+        return row;
+    }
+
+    /// <summary>The sentence the web and MCP edit give for a row with a remediation login. Held here as text because the
+    /// two apps carry it as separate constants.</summary>
+    private const string RemediationSentence =
+        "This server has a remediation login stored. Change how it is reached on the service host, in the configuration file or with --add-server.";
+
+    [Fact]
+    public void TheViewersRemediationSentence_IsTheSharedSentence()
+    {
+        Assert.Equal(RemediationSentence, ViewerDataService.RemediationKeptText);
+        Assert.Equal("PW003", ViewerDataService.StoreRemediationKeptSqlState);
+    }
+
+    [Theory]
+    [MemberData(nameof(ConnectionFields))]
+    public async Task AnyConnectionChange_ThatKeepsTheStoredBlob_IsRefusedBeforeTheWrite(string field)
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var rig = await OpenAsync("sql", StoredBlob, ct);
+        await using var viewer = new ViewerDataService(rig.Scratch.ConnectionString);
+
+        var refused = await Assert.ThrowsAsync<MonitoredServerPasswordNeededException>(
+            () => viewer.UpsertMonitoredServerAsync(Changed(field, "sql", StoredBlob), ct));
+        Assert.Equal(Edit.EditPasswordNeededText, refused.Message);
+        var blank = await Assert.ThrowsAsync<MonitoredServerPasswordNeededException>(
+            () => viewer.UpsertMonitoredServerAsync(Changed(field, "sql", null), ct));
+        Assert.Equal(Edit.EditPasswordNeededText, blank.Message);
+
+        Assert.Equal((StoredHost, StoredBlob, "Mandatory"), await StoredAsync(rig, ct));
+    }
+
+    [Theory]
+    [MemberData(nameof(ConnectionFields))]
+    public async Task AnyConnectionChange_WithANewlyEnteredPassword_Saves(string field)
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var rig = await OpenAsync("sql", StoredBlob, ct);
+        await using var viewer = new ViewerDataService(rig.Scratch.ConnectionString);
+
+        await viewer.UpsertMonitoredServerAsync(Changed(field, "sql", NewBlob), ct);
+
+        var stored = await StoredAsync(rig, ct);
+        Assert.Equal(NewBlob, stored.Blob);
+    }
+
+    [Theory]
+    [InlineData("sql", "stored-blob")]
+    [InlineData("integrated", null)]
+    public async Task AConnectionChange_OnARowWithARemediationSecret_IsRefusedBeforeTheWrite_WithTheSharedSentence(string auth, string? blob)
+    {
+        var ct = TestContext.Current.CancellationToken;
+        foreach (var field in ConnectionFields().Select(f => (string)f[0]))
+        {
+            await using var rig = await OpenAsync(auth, blob, ct, remediationBlob: "remediation-blob");
+            await using var viewer = new ViewerDataService(rig.Scratch.ConnectionString);
+
+            /* A password typed with the change does not help: the refusal does not depend on it. */
+            var typed = await Assert.ThrowsAsync<MonitoredServerPasswordNeededException>(
+                () => viewer.UpsertMonitoredServerAsync(Changed(field, auth, auth == "sql" ? NewBlob : null), ct));
+            Assert.Equal(RemediationSentence, typed.Message);
+
+            Assert.Equal((StoredHost, blob, "Mandatory"), await StoredAsync(rig, ct));
+        }
+    }
+
+    [Fact]
+    public async Task ANonConnectionChange_OnARowWithARemediationSecret_Saves()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var rig = await OpenAsync("sql", StoredBlob, ct, remediationBlob: "remediation-blob");
+        await using var viewer = new ViewerDataService(rig.Scratch.ConnectionString);
+
+        var renamed = Row("sql", StoredHost, StoredBlob);
+        renamed.MonthlyCostUsd = 7m;
+        await viewer.UpsertMonitoredServerAsync(renamed, ct);
+
+        Assert.Equal((StoredHost, StoredBlob, "Mandatory"), await StoredAsync(rig, ct));
     }
 }

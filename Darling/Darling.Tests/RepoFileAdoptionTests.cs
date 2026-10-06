@@ -217,6 +217,9 @@ public sealed class RepoFileAdoptionTests
            stores' sources and asserts them equal up to one token, and its wiring pin slices each pass method by
            call sites that sit on their own lines — anchors spanning line breaks on every arm. */
         "RecurrenceLabelStoreReadTests.cs",
+        /* #5374: its start pin slices the provisioning chain of DarlingWorker.cs, comments removed, and matches the rules call
+           inside each branch of it, across line breaks. */
+        "SelfManagedStoreRulesStartPinTests.cs",
         /* Its heading pin slices fillServerHead's body out of server.js, from its declaration to the closing brace
            on its own line, and asserts the display-name assignment sits inside it and ahead of the dot update. */
         "ServerPageTitlePinTests.cs",

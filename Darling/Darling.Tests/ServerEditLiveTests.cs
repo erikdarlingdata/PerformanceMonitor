@@ -137,12 +137,13 @@ public sealed class ServerEditLiveTests : IDisposable
     }
 
     private static Task SeedServerAsync(
-        NpgsqlDataSource owner, int id, string name, string host, string auth, string? username, string? blob, CancellationToken ct) =>
+        NpgsqlDataSource owner, int id, string name, string host, string auth, string? username, string? blob, CancellationToken ct,
+        string? remediationBlob = null) =>
         ExecAsync(owner, $@"INSERT INTO config_monitored_servers
             (server_id, name, host, auth, username, encrypted_password, excluded_databases, capture_plans, is_enabled,
              alert_delivery_mode_override, plan_force_bot_enabled, remediation_username, remediation_encrypted_password, monthly_cost_usd)
             VALUES ({id}, '{name}', '{host}', '{auth}', {(username is null ? "NULL" : "'" + username + "'")}, {(blob is null ? "NULL" : "'" + blob + "'")},
-                    ARRAY['tempdb','model'], TRUE, FALSE, 'PerEvent', TRUE, 'rem-user', 'rem-blob', 7)", ct);
+                    ARRAY['tempdb','model'], TRUE, FALSE, 'PerEvent', TRUE, 'rem-user', {(remediationBlob is null ? "NULL" : "'" + remediationBlob + "'")}, 7)", ct);
 
     private static async Task<string> RowSignatureAsync(NpgsqlDataSource owner, int id, CancellationToken ct) =>
         await ScalarAsync<string>(owner, $@"SELECT concat_ws('|', is_enabled, array_to_string(excluded_databases, ','), capture_plans,
@@ -194,6 +195,36 @@ public sealed class ServerEditLiveTests : IDisposable
             var same = Parse(await Edit.EditServerByNameAsync(rig.Mcp, "Orders", "{\"display_name\":\"Orders\"}", Reachable, true, null, ct));
             Assert.Equal("unchanged", same["status"]!.GetValue<string>());
             Assert.Equal(versionMid, await ScalarAsync<long>(rig.Owner, "SELECT config_version FROM config_service", ct));
+            ok = true;
+        }
+        finally
+        {
+            await DropRoleAsync(rig, ok);
+        }
+    }
+
+    [Fact]
+    public async Task AsTheMcpRole_AnAddressEditOnARowWithARemediationLogin_IsRefused_AndWritesNothing_WhileANameEditSaves()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var rig = await OpenAsync(ct);
+        var ok = false;
+        try
+        {
+            await SeedServerAsync(rig.Owner, 5191, "alpha-91", "alpha-91.example.test", "integrated", null, null, ct, remediationBlob: "rem-blob");
+            var before = await RowSignatureAsync(rig.Owner, 5191, ct);
+            var versionBefore = await ScalarAsync<long>(rig.Owner, "SELECT config_version FROM config_service", ct);
+
+            var moved = Parse(await Edit.EditServerByNameAsync(rig.Mcp, "alpha-91.example.test", "{\"host\":\"alpha-99.example.test\"}", Reachable, true, null, ct));
+            Assert.Equal("invalid", moved["status"]!.GetValue<string>());
+            Assert.Equal(Edit.EditRemediationKeptText, moved["message"]!.GetValue<string>());
+            Assert.Equal("alpha-91.example.test", await ScalarAsync<string>(rig.Owner, "SELECT host FROM config_monitored_servers WHERE server_id = 5191", ct));
+            Assert.Equal(before, await RowSignatureAsync(rig.Owner, 5191, ct));
+            Assert.Equal(versionBefore, await ScalarAsync<long>(rig.Owner, "SELECT config_version FROM config_service", ct));
+
+            var renamed = Parse(await Edit.EditServerByNameAsync(rig.Mcp, "alpha-91.example.test", "{\"display_name\":\"Renamed\"}", Reachable, true, null, ct));
+            Assert.Equal("updated", renamed["status"]!.GetValue<string>());
+            Assert.Equal(before, await RowSignatureAsync(rig.Owner, 5191, ct));
             ok = true;
         }
         finally
