@@ -68,7 +68,10 @@ public class DeadlockDuplicateCleanupTests : IDisposable
     [Fact]
     public async Task TheNextStartLeavesOneRowPerExactDuplicate_KeepsTheEarliest_AndTheStartAfterRemovesNothing()
     {
-        await new DuckDbInitializer(_dbPath).InitializeAsync();
+        using (var initializer = new DuckDbInitializer(_dbPath))
+        {
+            await initializer.InitializeAsync();
+        }
 
         using (var seed = new DuckDBConnection($"Data Source={_dbPath}"))
         {
@@ -99,7 +102,10 @@ public class DeadlockDuplicateCleanupTests : IDisposable
             Assert.Equal(KeptIds.Length + RemovedIds.Length, await CountAsync(seed));
         }
 
-        await new DuckDbInitializer(_dbPath).InitializeAsync();
+        using (var initializer = new DuckDbInitializer(_dbPath))
+        {
+            await initializer.InitializeAsync();
+        }
 
         using var verify = new DuckDBConnection($"Data Source={_dbPath}");
         await verify.OpenAsync();
@@ -117,7 +123,10 @@ public class DeadlockDuplicateCleanupTests : IDisposable
         Assert.Equal(0, await DeadlockDuplicateCleanup.RemoveAsync(verify, logger: null));
         verify.Close();
 
-        await new DuckDbInitializer(_dbPath).InitializeAsync();
+        using (var initializer = new DuckDbInitializer(_dbPath))
+        {
+            await initializer.InitializeAsync();
+        }
         using var again = new DuckDBConnection($"Data Source={_dbPath}");
         await again.OpenAsync();
         Assert.Equal(KeptIds.OrderBy(i => i).ToList(), await ReadIdsAsync(again));
@@ -126,7 +135,10 @@ public class DeadlockDuplicateCleanupTests : IDisposable
     [Fact]
     public async Task TheCleanupCalledDirectlyReportsTheRowsItRemoved()
     {
-        await new DuckDbInitializer(_dbPath).InitializeAsync();
+        using (var initializer = new DuckDbInitializer(_dbPath))
+        {
+            await initializer.InitializeAsync();
+        }
 
         using var connection = new DuckDBConnection($"Data Source={_dbPath}");
         await connection.OpenAsync();

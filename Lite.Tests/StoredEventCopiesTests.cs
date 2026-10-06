@@ -110,7 +110,7 @@ public class StoredEventCopiesTests : IDisposable
     private async Task<DuckDBConnection> StageAsync(string table, IEnumerable<string> archived, IEnumerable<string> recollected)
     {
         var shape = Shapes[table];
-        var initializer = new DuckDbInitializer(_dbPath);
+        using var initializer = new DuckDbInitializer(_dbPath);
         await initializer.InitializeAsync();
         using (var connection = await OpenAsync())
         {

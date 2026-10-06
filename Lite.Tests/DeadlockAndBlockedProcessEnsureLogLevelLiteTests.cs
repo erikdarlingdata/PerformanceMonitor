@@ -42,6 +42,8 @@ namespace Lite.Tests;
 [Collection("app-logger-statics")]
 public sealed class DeadlockAndBlockedProcessEnsureLogLevelLiteTests : IDisposable
 {
+    private readonly List<DuckDbInitializer> _initializers = [];
+
     private const string Host = "alwayson.database.windows.net";
     private const string Deadlock = "deadlock";
     private const string BlockedProcess = "blocked process";
@@ -60,6 +62,11 @@ public sealed class DeadlockAndBlockedProcessEnsureLogLevelLiteTests : IDisposab
 
     public void Dispose()
     {
+        foreach (var initializer in _initializers)
+        {
+            initializer.Dispose();
+        }
+
         try
         {
             if (Directory.Exists(_tempDir))
@@ -111,6 +118,7 @@ public sealed class DeadlockAndBlockedProcessEnsureLogLevelLiteTests : IDisposab
     private async Task<Rig> BuildRigAsync()
     {
         var duckDb = new DuckDbInitializer(_dbPath);
+        _initializers.Add(duckDb);
         await duckDb.InitializeAsync();
 
         var server = NewServer();

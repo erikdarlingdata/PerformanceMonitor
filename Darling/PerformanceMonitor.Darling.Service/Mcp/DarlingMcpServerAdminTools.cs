@@ -78,7 +78,8 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// <c>config_monitored_servers</c> write fires the existing <c>trg_bump_monitored_servers → config_bump_version</c>
 /// trigger (SECURITY INVOKER), which the #1608 <c>config_service</c> beacon column-grant already covers, so the
 /// running service hot-reloads the monitored set within one sweep. <b>The SQL password transits the MCP endpoint in
-/// the request JSON</b>; on a LAN deployment front the endpoint with the documented TLS reverse proxy.</para>
+/// the request JSON</b>; on a LAN deployment serve the endpoint over HTTPS with <c>mcp.network.tls</c> (#5288), or
+/// front it with a TLS reverse proxy.</para>
 /// </summary>
 [McpServerToolType]
 public sealed partial class DarlingMcpServerAdminTools
@@ -135,7 +136,8 @@ public sealed partial class DarlingMcpServerAdminTools
         "\"not_saved\" and \"invalid\" → failed. Only added servers are monitored; read the other three counters before treating " +
         "the batch as done. An added server's detail reports what the probe found — for a PostgreSQL target that " +
         "includes writer-vs-reader, Aurora-vs-not, and how many of the PostgreSQL collectors apply to it. NOTE: the " +
-        "password travels to this endpoint in the request; on a LAN use the documented TLS reverse proxy. " +
+        "password travels to this endpoint in the request. MCP serves HTTPS on its network listener when mcp.network.tls " +
+        "is set, so on a LAN set it; a TLS reverse proxy in front of the endpoint also works. " +
         "servers_json is a JSON ARRAY of server objects to add (see above for the per-object fields), e.g. " +
         "[{\"host\":\"sql01\",\"auth\":\"SQL\",\"username\":\"monitor\",\"password\":\"...\",\"encrypt_mode\":\"Mandatory\"," +
         "\"trust_server_certificate\":true},{\"host\":\"aurora.cluster-abc.us-east-1.rds.amazonaws.com\",\"engine\":" +

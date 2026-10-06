@@ -706,6 +706,12 @@ public sealed class DarlingWorker : BackgroundService
     internal static bool ShouldLaunchMaterializationHoleRepair(bool repairRunningInThisProcess, bool epochCurrentInStore)
         => !repairRunningInThisProcess && !epochCurrentInStore;
 
+    /// <summary>#5307: one warning per unknown key under the network sections, naming its full path and never its value.</summary>
+    internal static IReadOnlyList<string> GetUnknownNetworkKeyWarnings(DarlingConfig config) =>
+        config.UnknownNetworkKeys
+            .Select(path => $"darling.json: '{path}' is not a recognized setting and is ignored; check its spelling against darling.sample.json.")
+            .ToList();
+
     /// <summary>
     /// The network-endpoint startup warnings the worker emits AFTER <see cref="DarlingConfig.Validate"/>
     /// passes (darling-network-endpoints) — NEVER inside Validate(), which is all-fatal, so an optional,
@@ -1196,6 +1202,12 @@ public sealed class DarlingWorker : BackgroundService
     /// each sweep so the certificate-expiry self-alert fires without a restart.</summary>
     private readonly WebTlsCertificateState _webTlsCertState;
 
+    /// <summary>#5288: the MCP endpoint's served TLS certificate, published by the MCP host and read in the same
+    /// sweep as <see cref="_webTlsCertState"/>, so the "MCP TLS Certificate Expiring" self-alert fires without a
+    /// restart. Null when the worker is built without it (a test harness, never the service): the MCP half of the
+    /// sweep is then skipped, exactly as if the MCP host never published a certificate.</summary>
+    private readonly McpTlsCertificateState? _mcpTlsCertState;
+
     /* #2298: the live monitored-server registry seam — published beside the two above, read by the MCP
        host's plan-fetch resolver so it never re-reads config_monitored_servers as the mcp role (whose
        encrypted_password SELECT-carve fails that whole read). */
@@ -1312,9 +1324,10 @@ LIMIT 1";
     /* #5097: the slow-read record's queue; its one writer runs from the startup path once the store is migrated. */
     private readonly SlowReadLog? _slowReads;
 
-    public DarlingWorker(ILogger<DarlingWorker> logger, ILoggerFactory loggerFactory, McpRuntimeState mcpState, WebRuntimeState webState, MonitoredServerRegistryState registryState, CollectorRuntimeState collectorState, WebTlsCertificateState webTlsCertState, BaselineCache baselineCache, ReadLatencyAccumulator readLatency, SlowReadLog? slowReads = null)
+    public DarlingWorker(ILogger<DarlingWorker> logger, ILoggerFactory loggerFactory, McpRuntimeState mcpState, WebRuntimeState webState, MonitoredServerRegistryState registryState, CollectorRuntimeState collectorState, WebTlsCertificateState webTlsCertState, BaselineCache baselineCache, ReadLatencyAccumulator readLatency, SlowReadLog? slowReads = null, McpTlsCertificateState? mcpTlsCertState = null)
     {
         _slowReads = slowReads;
+        _mcpTlsCertState = mcpTlsCertState;
         _logger = logger;
         _loggerFactory = loggerFactory;
         _mcpState = mcpState;
@@ -1837,6 +1850,13 @@ LIMIT 1";
             _logger.LogWarning("{Warning}", warning);
         }
 
+        /* #5307: a key under web.network / mcp.network (or their tls blocks, or web.network.oidc) that no config
+           class declares is dropped at load; name each one so a mistyped key is visible. Paths only. */
+        foreach (var warning in GetUnknownNetworkKeyWarnings(config))
+        {
+            _logger.LogWarning("{Warning}", warning);
+        }
+
         /* #4220: web.publicBaseUrl shaped like it carries a credential (a query string, fragment, or
            userinfo — e.g. the dashboard's own sign-in link pasted in by mistake). Ruled: sending the link is
            the operator's call, not refused here; one warning at startup is the whole mitigation. */
@@ -2197,23 +2217,25 @@ LIMIT 1";
         };
 
     /// <summary>
-    /// Maps the web host's published TLS-certificate snapshot to the report the evaluator consumes (#3514):
+    /// Maps a listener host's published TLS-certificate snapshot (the web host's, #3514, or the MCP host's,
+    /// #5288, which share one snapshot type) to the report the evaluator consumes (#3514):
     /// a null snapshot — nothing served, or <c>Clear()</c>ed when the dashboard stopped — becomes
     /// <c>Configured=false</c> (the evaluator's resolve arm), and a live snapshot carries its validity window,
-    /// identity and the host's not-yet-valid verdict (#3517) through unchanged — the verdict is the host's to
-    /// make and this mapping must not re-derive or drop it. Pure + static so the null-to-unconfigured seam
+    /// identity and the host's not-yet-valid verdict (#3517) and load-refusal verdict (#5288) through unchanged —
+    /// the verdict is the host's to make and this mapping must not re-derive or drop it. Pure + static so the null-to-unconfigured seam
     /// pins in a unit test rather than only through the sweep loop — the <see cref="BuildStoreUpgradeReport"/>
     /// precedent, and the seam the #3514 review flagged as previously tested only from the sides.
     /// </summary>
     internal static DarlingSelfAlertEvaluator.WebTlsCertReport BuildWebTlsCertReport(
-        WebTlsCertificateState.Snapshot? snapshot)
+        ListenerTlsCertificateState.Snapshot? snapshot)
         => new(
             Configured: snapshot is not null,
             NotBeforeUtc: snapshot?.NotBeforeUtc ?? default,
             NotAfterUtc: snapshot?.NotAfterUtc ?? default,
             Subject: snapshot?.Subject ?? string.Empty,
             Thumbprint: snapshot?.Thumbprint ?? string.Empty,
-            RefusedNotYetValid: snapshot?.RefusedNotYetValid ?? false);
+            RefusedNotYetValid: snapshot?.RefusedNotYetValid ?? false,
+            LoadRefusal: snapshot?.LoadRefusal);
 
     /// <summary>
     /// Maps the fleet gate's last-hour counts to the report the "Collection Falling Behind" arm consumes (#4732).
@@ -3588,12 +3610,22 @@ LIMIT 1";
                loopback-only from the start, and the host does not re-decide when the date passes). A null
                snapshot means no LAN TLS certificate to watch. Fleet-level, and the Evaluate* wrapper is
                failure-isolated so a throw never stops the fleet loop. */
+            /* #5288: the MCP endpoint's certificate rides the same hourly gate (one stamp, no new field): the
+               MCP host publishes its served expiry to McpTlsCertificateState exactly as the web host does, and
+               the evaluator keeps the two alerts apart by key and metric, so the call sits right beside the web
+               one. Each Evaluate* wrapper is failure-isolated on its own, so a throw in the web half cannot
+               skip the MCP half. */
             /* #4732: the stamp below is written as now + s_webTlsCheckInterval, so that is the span. */
             if (_selfAlerts is not null && StampIsDue(_nextWebTlsCheckUtc, s_webTlsCheckInterval, DateTime.UtcNow))
             {
                 _nextWebTlsCheckUtc = DateTime.UtcNow.Add(s_webTlsCheckInterval);
                 await _selfAlerts.EvaluateWebTlsCertificateAsync(
                     BuildWebTlsCertReport(_webTlsCertState.Read()), stoppingToken);
+                if (_mcpTlsCertState is not null)
+                {
+                    await _selfAlerts.EvaluateMcpTlsCertificateAsync(
+                        BuildWebTlsCertReport(_mcpTlsCertState.Read()), stoppingToken);
+                }
             }
 
             /* #4732: the fleet gate's last-hour counts, once a minute: the "Collection Falling Behind" self-alert

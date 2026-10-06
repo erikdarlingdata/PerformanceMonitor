@@ -664,14 +664,54 @@ internal sealed class DarlingSelfAlertEvaluator
     /// <see cref="MaxListedUnhealthyRules"/>' reasoning — one bounded alert, not a wall of text.</summary>
     private const int MaxListedStaleMuteRules = 20;
 
-    /* -------- web dashboard TLS certificate expiry (#3514) -------- */
+    /* -------- web dashboard and MCP TLS certificate expiry (#3514, #5288) -------- */
 
     /// <summary>The fixed fleet-level key for the web-dashboard TLS certificate expiry edge (not a real
     /// server); non-numeric so the deliverer's #1236 int.TryParse no-ops on it, like <see cref="StaleMuteKey"/>.</summary>
     private const string WebTlsCertKey = "webtlscert";
 
-    private readonly ConcurrentDictionary<string, bool> _activeWebTlsCert = new();
-    private readonly ConcurrentDictionary<string, DateTime> _lastWebTlsCertAlert = new();
+    /// <summary>The fixed fleet-level key for the MCP endpoint's TLS certificate expiry edge (#5288). Its OWN key,
+    /// not <see cref="WebTlsCertKey"/>: one shared key would let a web renewal resolve an MCP alert, and a
+    /// certificate both listeners serve would raise one alert instead of the two the operator needs (each
+    /// listener drops to loopback-only on its own). Non-numeric for the same #1236 reason.</summary>
+    private const string McpTlsCertKey = "mcptlscert";
+
+    /// <summary>Which listener's served certificate a TLS self-alert is about (#5288). The two listeners share
+    /// one body (<see cref="ApplyListenerTlsCertificateAsync"/>) and differ only in <see cref="TlsListenerDescriptor"/>.</summary>
+    internal enum TlsListener
+    {
+        /// <summary>The web dashboard's <c>web.network.tls</c> certificate (#3514).</summary>
+        Web,
+
+        /// <summary>The MCP endpoint's <c>mcp.network.tls</c> certificate (#5288).</summary>
+        Mcp,
+    }
+
+    /// <summary>What differs between the two listeners' TLS alerts: the fleet key, the metric pair, and the two
+    /// nouns the rendered text uses. <paramref name="Surface"/> is the listener's name as a sentence noun
+    /// ("web dashboard", "MCP server"); <paramref name="Endpoint"/> is the network-facing endpoint that falls to
+    /// loopback-only ("LAN dashboard", "LAN MCP endpoint"). Everything else (the window, the daily re-state, the
+    /// severities, the edge rules) is shared, so a change to one listener's alert is a change to both.</summary>
+    private sealed record TlsListenerDescriptor(
+        string Key, string ExpiryMetric, string RenewedMetric, string Surface, string Endpoint);
+
+    private static readonly TlsListenerDescriptor s_webTls = new(
+        WebTlsCertKey, WebTlsCertExpiryMetric, WebTlsCertRenewedMetric, "web dashboard", "LAN dashboard");
+
+    private static readonly TlsListenerDescriptor s_mcpTls = new(
+        McpTlsCertKey, McpTlsCertExpiryMetric, McpTlsCertRenewedMetric, "MCP server", "LAN MCP endpoint");
+
+    private static TlsListenerDescriptor DescribeTlsListener(TlsListener listener) => listener switch
+    {
+        TlsListener.Web => s_webTls,
+        TlsListener.Mcp => s_mcpTls,
+        _ => throw new ArgumentOutOfRangeException(nameof(listener), listener, "Unknown TLS listener."),
+    };
+
+    /* One pair of maps for both listeners, keyed by each listener's own fleet key: the keys differ, so the two
+       alerts' active flags and re-state stamps never touch. */
+    private readonly ConcurrentDictionary<string, bool> _activeListenerTlsCert = new();
+    private readonly ConcurrentDictionary<string, DateTime> _lastListenerTlsCertAlert = new();
 
     /// <summary>The metric the web-dashboard TLS certificate expiry self-alert fires under (#3514). A WEBHOOK
     /// AUTOMATION KEY like its siblings — a const, stable across releases. State-only in the numeric columns:
@@ -684,17 +724,41 @@ internal sealed class DarlingSelfAlertEvaluator
     /// <c>AlertMetricClassifier.IsResolution</c> styles it green.</summary>
     internal const string WebTlsCertRenewedMetric = "Web TLS Certificate Renewed";
 
+    /// <summary>The metric the MCP endpoint's TLS certificate expiry self-alert fires under (#5288): the web
+    /// metric's twin, with the same shape. A WEBHOOK AUTOMATION KEY, a const, stable across releases, and its
+    /// OWN string so an operator's mute rule or webhook route for the web alert never silently covers (or
+    /// misses) the MCP one. State-only in the numeric columns, for the <see cref="WebTlsCertExpiryMetric"/>
+    /// reason: an expiry is a date, not a quantity.</summary>
+    internal const string McpTlsCertExpiryMetric = "MCP TLS Certificate Expiring";
+
+    /// <summary>The resolution title for <see cref="McpTlsCertExpiryMetric"/>, recorded when the MCP endpoint is
+    /// serving a healthy certificate again or no longer serves one to watch. Carries the recognized "Renewed"
+    /// resolution suffix, like <see cref="WebTlsCertRenewedMetric"/>.</summary>
+    internal const string McpTlsCertRenewedMetric = "MCP TLS Certificate Renewed";
+
     /// <summary>How long before expiry this begins to warn — the SAME window the web host's startup log uses
     /// (<see cref="Hosting.DarlingWebTls.ExpiryWarningDays"/>), so the two surfaces agree to the day and a
-    /// reader who saw the startup line sees the same threshold here.</summary>
+    /// reader who saw the startup line sees the same threshold here. Shared by the MCP listener's alert
+    /// (#5288): the MCP certificate is loaded and judged by the same <c>DarlingWebTls</c> code, so one window
+    /// is the truth for both.</summary>
     internal static readonly TimeSpan WebTlsCertWarnWindow = TimeSpan.FromDays(Hosting.DarlingWebTls.ExpiryWarningDays);
 
     /// <summary>How long this condition waits before re-stating itself while the certificate is still inside
     /// the warning window — its OWN daily interval, for the <see cref="StaleMuteRefire"/> reason: the fact is a
     /// fixed expiry date measured against the clock, identical every sweep, so the shared 5-to-120-minute
     /// cooldown would flood the channel about a date that changes only when the operator renews. Daily
-    /// dominates the cooldown's two-hour ceiling under every setting.</summary>
+    /// dominates the cooldown's two-hour ceiling under every setting. Shared by both listeners' alerts (#5288),
+    /// each re-stating on its own stamp.</summary>
     internal static readonly TimeSpan WebTlsCertRefire = TimeSpan.FromDays(1);
+
+    /// <summary>Appended to a listener's fleet key to name the re-state stamp of its load-refusal alert (#5288),
+    /// so a refusal and an in-window warning on the same listener each wait on their own daily interval. Not a
+    /// fleet key itself: it never reaches a store, only the in-memory stamp map.</summary>
+    private const string LoadRefusalStampSuffix = ":load";
+
+    /// <summary>Length cap for the loader's message in a load-refusal alert's detail (#5288). A real message
+    /// names the setting, the path and the cause; the cap bounds a runaway one.</summary>
+    private const int MaxTlsLoadRefusalLength = 300;
 
     /// <summary>Length cap for one stale rule's operator-authored reason in the alert detail. Generous
     /// enough to carry a real sentence, bounded so <see cref="MaxListedStaleMuteRules"/> lines cannot grow
@@ -5534,17 +5598,23 @@ internal sealed class DarlingSelfAlertEvaluator
         return (shortMessage, detail, string.Create(inv, $"{percent}% skipped"));
     }
 
-    /* ---------------- web dashboard TLS certificate expiry (#3514) ---------------- */
+    /* ---------------- web dashboard and MCP TLS certificate expiry (#3514, #5288) ---------------- */
 
     /// <summary>
-    /// What the web host knows about its served TLS certificate, carried out to the worker's alert sweep — a
-    /// platform-neutral copy of the loaded certificate's facts so the alert path never touches an X.509 type.
+    /// What a listener's host knows about its served TLS certificate (the web host's, #3514, or the MCP host's,
+    /// #5288), carried out to the worker's alert sweep — a platform-neutral copy of the loaded certificate's
+    /// facts so the alert path never touches an X.509 type. The one record serves both listeners; it keeps its
+    /// original name because every web caller and test already speaks it.
     /// <paramref name="Configured"/> is false when there is no LAN TLS certificate to watch (loopback-only, no
     /// <c>tls</c> block, or an unusable one); the other fields are meaningful only when it is true.
     /// <paramref name="RefusedNotYetValid"/> is the host's own load-time verdict (#3517): it judged
     /// <paramref name="NotBeforeUtc"/> still ahead of the clock, refused the certificate, and bound loopback-only
     /// — a decision it does not revisit until its next start, which is why it travels as a flag and is never
     /// re-derived here from the date.
+    /// <paramref name="LoadRefusal"/> is the host's other load-time verdict (#5288): the configured certificate
+    /// could not be loaded at all, so the listener is loopback-only, and the text is why. Null when the
+    /// certificate loaded. A report that carries it has no certificate facts: its date and identity fields are
+    /// blank and are never read.
     /// </summary>
     internal sealed record WebTlsCertReport(
         bool Configured,
@@ -5552,7 +5622,8 @@ internal sealed class DarlingSelfAlertEvaluator
         DateTimeOffset NotAfterUtc,
         string Subject,
         string Thumbprint,
-        bool RefusedNotYetValid);
+        bool RefusedNotYetValid,
+        string? LoadRefusal = null);
 
     /// <summary>
     /// The isolating entry point the worker's sweep calls for the web-dashboard TLS certificate expiry
@@ -5561,11 +5632,25 @@ internal sealed class DarlingSelfAlertEvaluator
     /// a throwing pre-deliver mute check can never propagate out of the collection sweep. Cancellation still
     /// propagates.
     /// </summary>
-    public async Task EvaluateWebTlsCertificateAsync(WebTlsCertReport report, CancellationToken cancellationToken)
+    public Task EvaluateWebTlsCertificateAsync(WebTlsCertReport report, CancellationToken cancellationToken) =>
+        EvaluateListenerTlsCertificateAsync(TlsListener.Web, report, cancellationToken);
+
+    /// <summary>
+    /// The isolating entry point the worker's sweep calls for the MCP endpoint's TLS certificate expiry
+    /// self-alert (#5288): the web entry point's twin, with the same failure isolation, over the MCP listener's
+    /// own key and metric pair. Cancellation still propagates.
+    /// </summary>
+    public Task EvaluateMcpTlsCertificateAsync(WebTlsCertReport report, CancellationToken cancellationToken) =>
+        EvaluateListenerTlsCertificateAsync(TlsListener.Mcp, report, cancellationToken);
+
+    /// <summary>The one failure-isolating wrapper behind both listeners' entry points (#5288), so the catch
+    /// exists once and the two listeners cannot drift in what they swallow.</summary>
+    private async Task EvaluateListenerTlsCertificateAsync(
+        TlsListener listener, WebTlsCertReport report, CancellationToken cancellationToken)
     {
         try
         {
-            await ApplyWebTlsCertificateAsync(report, cancellationToken);
+            await ApplyListenerTlsCertificateAsync(listener, report, cancellationToken);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -5573,14 +5658,44 @@ internal sealed class DarlingSelfAlertEvaluator
         }
         catch (Exception ex)
         {
-            /* NOT counted by #3013's swallowed-read counter: the report is a parameter from the web host's
-               in-memory WebTlsCertificateState publish, and this method performs no store read. */
-            _logger?.LogError("Web TLS certificate self-alert failed: {Message}", ex.Message);
+            /* NOT counted by #3013's swallowed-read counter: the report is a parameter from the listener
+               host's in-memory TLS certificate state publish (WebTlsCertificateState for the web host,
+               McpTlsCertificateState for the MCP host), and this method performs no store read. Two literal
+               messages in ONE catch rather than a templated one: the failed-read census reads this catch's
+               text, and the web line stays byte-identical to what it has always logged. */
+            if (listener == TlsListener.Mcp)
+            {
+                _logger?.LogError("MCP TLS certificate self-alert failed: {Message}", ex.Message);
+            }
+            else
+            {
+                _logger?.LogError("Web TLS certificate self-alert failed: {Message}", ex.Message);
+            }
         }
     }
 
+    /// <summary>The web dashboard's TLS certificate expiry edge (#3514): <see cref="ApplyListenerTlsCertificateAsync"/>
+    /// for <see cref="TlsListener.Web"/>. Kept under its original name because every web pin calls it.</summary>
+    internal Task ApplyWebTlsCertificateAsync(WebTlsCertReport report, CancellationToken cancellationToken) =>
+        ApplyListenerTlsCertificateAsync(TlsListener.Web, report, cancellationToken);
+
+    /// <summary>The MCP endpoint's TLS certificate expiry edge (#5288): <see cref="ApplyListenerTlsCertificateAsync"/>
+    /// for <see cref="TlsListener.Mcp"/>. Internal so it pins directly with a recording deliverer and a
+    /// controllable clock, like the web twin.</summary>
+    internal Task ApplyMcpTlsCertificateAsync(WebTlsCertReport report, CancellationToken cancellationToken) =>
+        ApplyListenerTlsCertificateAsync(TlsListener.Mcp, report, cancellationToken);
+
     /// <summary>
-    /// Edge-applies the "the web dashboard's served TLS certificate is expiring" condition (#3514).
+    /// Edge-applies the "a listener's served TLS certificate is expiring" condition: the web dashboard's
+    /// (#3514, key <c>webtlscert</c>) or the MCP endpoint's (#5288, key <c>mcptlscert</c>).
+    ///
+    /// <para><b>One body, two listeners (#5288).</b> The edge rules, the window, the daily re-state and the
+    /// severities are identical for both listeners, so there is one implementation and a
+    /// <see cref="TlsListenerDescriptor"/> (the local <c>tls</c>) that supplies the only things that differ: the
+    /// fleet key, the metric pair and the two nouns in the rendered text. The prose below is written for the web
+    /// dashboard, which is where the behaviour was first designed; read "the dashboard" as "the listener" for the
+    /// MCP endpoint. A certificate that both listeners serve fires twice and resolves twice, because the two
+    /// alerts have their own keys, their own active flags and their own re-state stamps.</para>
     ///
     /// <para><b>Why this exists.</b> When the dashboard is LAN-exposed with a certificate, its expiry was
     /// surfaced only two ways — a startup-log warning inside <see cref="WebTlsCertWarnWindow"/> and the
@@ -5607,6 +5722,14 @@ internal sealed class DarlingSelfAlertEvaluator
     /// the host does not re-decide when the date passes: it stays loopback-only until it is restarted, and a
     /// date-derived arm would have resolved the alert about a dashboard that was still down.</para>
     ///
+    /// <para><b>The load-refusal arm (#5288).</b> A certificate that could not be loaded at all (a changed
+    /// password, a key that does not match) leaves the listener loopback-only with nothing to read a date from.
+    /// The host says so (<see cref="WebTlsCertReport.LoadRefusal"/>) rather than clearing its state, because a
+    /// cleared state is the healthy "no certificate to watch" reading and would resolve a standing expiry alert
+    /// under "Renewed" while the endpoint is down. This arm fires the same family at CRITICAL, under the same key
+    /// and metric, and on its own re-state stamp so it is raised at once even when an in-window warning was sent
+    /// minutes ago. It ignores the date fields entirely, so a blank date can never read as expired.</para>
+    ///
     /// <para>A STANDING condition like its siblings: fire on entry, re-state per <see cref="WebTlsCertRefire"/>
     /// while it holds, and ONE resolution when the served certificate is healthy again (renewed past the
     /// window) or TLS is no longer configured — the not-yet-valid arm shares that resolution: the host
@@ -5615,89 +5738,127 @@ internal sealed class DarlingSelfAlertEvaluator
     /// (the <c>Configured=false</c> arm, which does resolve). Gated on the master alerts switch. Internal so it
     /// pins directly with a recording deliverer and a controllable clock.</para>
     /// </summary>
-    internal async Task ApplyWebTlsCertificateAsync(WebTlsCertReport report, CancellationToken cancellationToken)
+    internal async Task ApplyListenerTlsCertificateAsync(
+        TlsListener listener, WebTlsCertReport report, CancellationToken cancellationToken)
     {
         if (report is null || !_settings.AlertsEnabled)
         {
             return;
         }
 
+        var tls = DescribeTlsListener(listener);
         var now = _utcNow();
 
         /* The host's verdict, not the clock's: see the method summary. Meaningful only when configured. */
         var refusedNotYetValid = report.Configured && report.RefusedNotYetValid;
 
+        /* The host's other verdict (#5288): the certificate could not be loaded, so there is no date to read. */
+        var loadRefusal = report.Configured ? report.LoadRefusal : null;
+        var loadRefused = loadRefusal is not null;
+
         /* Healthy is either "no certificate to watch" or "being served, with more than the warning window
            still to run". The subtraction is DateTime-on-DateTime so it is a pure TimeSpan and never trips the
-           DateTimeOffset(...) Kind guard on a test-injected clock. */
+           DateTimeOffset(...) Kind guard on a test-injected clock. A load refusal is neither. */
         var healthy =
             !report.Configured
-            || (!refusedNotYetValid && report.NotAfterUtc.UtcDateTime - now > WebTlsCertWarnWindow);
+            || (!loadRefused && !refusedNotYetValid && report.NotAfterUtc.UtcDateTime - now > WebTlsCertWarnWindow);
 
         if (healthy)
         {
-            if (_activeWebTlsCert.TryRemove(WebTlsCertKey, out var was) && was)
+            if (_activeListenerTlsCert.TryRemove(tls.Key, out var was) && was)
             {
-                _lastWebTlsCertAlert.TryRemove(WebTlsCertKey, out _);
+                _lastListenerTlsCertAlert.TryRemove(tls.Key, out _);
+                _lastListenerTlsCertAlert.TryRemove(tls.Key + LoadRefusalStampSuffix, out _);
                 /* The configured-and-healthy line names BOTH facts the family alerts on — served, and outside
                    the window — because the active alert it clears may have been either arm (#3517): a
                    dashboard toggled off and on within one supervisor tick re-publishes a now-usable
                    certificate before the sweep ever sees the null, so this is the line a cured
                    not-yet-valid refusal resolves with too. */
                 await RecordResolutionAsync(new AlertResolution(
-                    StoreKey(WebTlsCertKey), _storeLabel, WebTlsCertExpiryMetric, WebTlsCertRenewedMetric,
+                    StoreKey(tls.Key), _storeLabel, tls.ExpiryMetric, tls.RenewedMetric,
                     report.Configured
-                        ? "The web dashboard's TLS certificate is being served and is outside the expiry window"
-                        : "The web dashboard is no longer serving a TLS certificate to watch"), cancellationToken);
+                        ? $"The {tls.Surface}'s TLS certificate is being served and is outside the expiry window"
+                        : $"The {tls.Surface} is no longer serving a TLS certificate to watch"), cancellationToken);
             }
 
             return;
         }
 
-        _activeWebTlsCert[WebTlsCertKey] = true;
+        _activeListenerTlsCert[tls.Key] = true;
+
+        /* A load refusal keeps its own stamp beside the family's: a standing in-window warning (or a refusal the
+           host made earlier) must not hold back the first Critical about a certificate that has just failed to
+           load, and the refusal then re-states on its own daily interval like every other arm. */
+        var stampKey = loadRefused ? tls.Key + LoadRefusalStampSuffix : tls.Key;
 
         /* Standing condition: fire on entry, re-state only per WebTlsCertRefire while it holds — its OWN
            interval rather than the shared cooldown, for the StaleMuteRefire reason (a fixed date measured
            against the clock, identical every sweep). */
-        if (LastFiredStamp.TryGet(_lastWebTlsCertAlert, WebTlsCertKey, now, out var lastFired)
+        if (LastFiredStamp.TryGet(_lastListenerTlsCertAlert, stampKey, now, out var lastFired)
             && now - lastFired < WebTlsCertRefire)
         {
             return;
         }
 
-        _lastWebTlsCertAlert[WebTlsCertKey] = now;
+        _lastListenerTlsCertAlert[stampKey] = now;
 
-        var expired = report.NotAfterUtc.UtcDateTime <= now;
-        var (shortMessage, detail, currentValue) = RenderWebTlsCert(report, now, expired, refusedNotYetValid);
+        /* No dates exist for a load refusal, and a blank NotAfter would read as expired: never derive it there. */
+        var expired = !loadRefused && report.NotAfterUtc.UtcDateTime <= now;
+        var (shortMessage, detail, currentValue) =
+            RenderListenerTlsCert(tls, report, now, expired, refusedNotYetValid, loadRefusal);
 
         var delivery = await FireAsync(
-            StoreKey(WebTlsCertKey), _storeLabel, WebTlsCertExpiryMetric,
+            StoreKey(tls.Key), _storeLabel, tls.ExpiryMetric,
             currentValue: currentValue,
-            /* The not-yet-valid arm has no window to name — the bar it failed is "valid now". */
-            thresholdValue: refusedNotYetValid && !expired
-                ? "valid at service start"
-                : $"{Hosting.DarlingWebTls.ExpiryWarningDays} days",
+            /* The refusal arms have no window to name — the bar they failed is "loads" and "valid now". */
+            thresholdValue: loadRefused
+                ? "loads at service start"
+                : refusedNotYetValid && !expired
+                    ? "valid at service start"
+                    : $"{Hosting.DarlingWebTls.ExpiryWarningDays} days",
             detail: detail,
-            /* Critical for BOTH refusals: expired and not-yet-valid leave the LAN dashboard equally unreachable. */
-            severity: expired || refusedNotYetValid ? AlertSeverityLevel.Critical : AlertSeverityLevel.Warning,
+            /* Critical for EVERY refusal: expired, not-yet-valid and cannot-load leave the LAN listener equally
+               unreachable. */
+            severity: expired || refusedNotYetValid || loadRefused ? AlertSeverityLevel.Critical : AlertSeverityLevel.Warning,
             shortMessage: shortMessage,
             /* State-only: an expiry is a date, not a quantity — see WebTlsCertExpiryMetric. */
             numericCurrentValue: StateOnlyValue, numericThresholdValue: StateOnlyValue,
             cancellationToken);
-        AfterSelfFire(WebTlsCertExpiryMetric, _lastWebTlsCertAlert, WebTlsCertKey, now, WebTlsCertRefire, delivery);
+        AfterSelfFire(tls.ExpiryMetric, _lastListenerTlsCertAlert, stampKey, now, WebTlsCertRefire, delivery);
     }
 
-    /// <summary>Renders the (shortMessage, detail, currentValue) for the web TLS certificate alert. The
-    /// subject and thumbprint match the web host's own startup log line, so an operator can tie the alert to
-    /// the certificate it named. Pure but for the caller's clock; pinned by tests.
+    /// <summary>Renders the (shortMessage, detail, currentValue) for a listener's TLS certificate alert. The
+    /// subject and thumbprint match the listener host's own startup log line, so an operator can tie the alert to
+    /// the certificate it named. The two nouns come from the descriptor (<c>tls</c>): the web text is the same
+    /// characters it always was, and the MCP text names the "MCP server" and the "LAN MCP endpoint". Pure but for
+    /// the caller's clock; pinned by tests.
     ///
     /// <para>Expired outranks not-yet-valid when both hold (a refused-at-start certificate the process then
     /// outlived): fixing the clock cannot bring an expired certificate back, so that is the fact to lead
     /// with; the not-yet-valid text below is for the case a clock fix or the right certificate plus a restart
-    /// actually cures.</para></summary>
-    private static (string ShortMessage, string Detail, string CurrentValue) RenderWebTlsCert(
-        WebTlsCertReport report, DateTime now, bool expired, bool refusedNotYetValid)
+    /// actually cures. A load refusal outranks both: it has no dates, so it is rendered from its reason
+    /// alone.</para></summary>
+    private static (string ShortMessage, string Detail, string CurrentValue) RenderListenerTlsCert(
+        TlsListenerDescriptor tls, WebTlsCertReport report, DateTime now, bool expired, bool refusedNotYetValid,
+        string? loadRefusal)
     {
+        if (loadRefusal is not null)
+        {
+            /* The reason is the loader's own message: one line, capped, because it lands in the detail text the
+               mute pre-fill parses line by line. */
+            var reason = CustomAlertEvaluator.SanitizeDisplayText(loadRefusal, MaxTlsLoadRefusalLength);
+            var because = reason.Length == 0 ? string.Empty : $" ({reason})";
+            var refusedValue = "not loaded; not being served";
+            var refusedShort =
+                $"{tls.Surface} TLS certificate COULD NOT BE LOADED — {tls.Endpoint} is loopback-only";
+            var refusedDetail =
+                $"The {tls.Surface}'s configured TLS certificate could not be loaded when the service started{because}, "
+                + $"so the host refused to expose the {tls.Endpoint}: it is bound LOOPBACK-ONLY — unreachable from the "
+                + "network, and it will not fall back to plain HTTP. Check the certificate file or files, the password, "
+                + "and that the private key matches the certificate, then restart the service so the host loads it again.";
+            return (refusedShort, refusedDetail, refusedValue);
+        }
+
         var notAfter = report.NotAfterUtc.UtcDateTime;
         var certRef = $"Certificate: subject {report.Subject}, thumbprint {report.Thumbprint}.";
 
@@ -5706,7 +5867,7 @@ internal sealed class DarlingSelfAlertEvaluator
             var notBefore = report.NotBeforeUtc.UtcDateTime;
             var currentValue = $"not valid until {notBefore:u}; not being served";
             var shortMessage =
-                $"web dashboard TLS certificate NOT YET VALID (valid from {notBefore:u}) — LAN dashboard is loopback-only";
+                $"{tls.Surface} TLS certificate NOT YET VALID (valid from {notBefore:u}) — {tls.Endpoint} is loopback-only";
 
             /* Two tenses, because the operator reads this on the alert channel at some later hour: while the
                window is still ahead, the clock is the likely culprit and the date is what to check it
@@ -5719,9 +5880,9 @@ internal sealed class DarlingSelfAlertEvaluator
                 : $"The window opened {notBefore:u}, after the service started — the host judged the certificate once, at load, "
                   + "and stays loopback-only on that verdict until it is restarted.";
             var detail =
-                $"The web dashboard's configured TLS certificate was not yet valid when the service started (not valid "
-                + $"until {notBefore:u}), so the host refused to serve it and the LAN dashboard is bound LOOPBACK-ONLY — "
-                + $"unreachable from the network, and it will not fall back to plain HTTP. {clockLine} Correct the system "
+                $"The {tls.Surface}'s configured TLS certificate was not yet valid when the service started (not valid "
+                + $"until {notBefore:u}), so the host refused to serve it and the {tls.Endpoint} is bound LOOPBACK-ONLY — "
+                + $"unreachable from the network, and it will not fall back to plain HTTP. The token is still required on the loopback listener. {clockLine} Correct the system "
                 + "clock or install the currently-valid certificate, then restart the service so the host loads it "
                 + $"again. {certRef}";
             return (shortMessage, detail, currentValue);
@@ -5732,10 +5893,10 @@ internal sealed class DarlingSelfAlertEvaluator
             var agoDays = Math.Max(0, (int)Math.Floor((now - notAfter).TotalDays));
             var currentValue = $"expired {notAfter:u}";
             var shortMessage =
-                $"web dashboard TLS certificate EXPIRED {notAfter:u} ({agoDays} day{(agoDays == 1 ? string.Empty : "s")} ago)";
+                $"{tls.Surface} TLS certificate EXPIRED {notAfter:u} ({agoDays} day{(agoDays == 1 ? string.Empty : "s")} ago)";
             var detail =
-                $"The web dashboard's TLS certificate expired on {notAfter:u}. An expired certificate fails every TLS "
-                + "handshake, so the LAN dashboard is unreachable now and binds loopback-only on the next service restart. "
+                $"The {tls.Surface}'s TLS certificate expired on {notAfter:u}. An expired certificate fails every TLS "
+                + $"handshake, so the {tls.Endpoint} is unreachable now and binds loopback-only on the next service restart, with the token still required. "
                 + $"Install a renewed certificate and restart the service. {certRef}";
             return (shortMessage, detail, currentValue);
         }
@@ -5743,10 +5904,10 @@ internal sealed class DarlingSelfAlertEvaluator
         var days = Math.Max(0, (int)Math.Ceiling((notAfter - now).TotalDays));
         var plural = days == 1 ? string.Empty : "s";
         var current = $"expires {notAfter:u} (in {days} day{plural})";
-        var shortMsg = $"web dashboard TLS certificate expires in {days} day{plural} ({notAfter:u})";
+        var shortMsg = $"{tls.Surface} TLS certificate expires in {days} day{plural} ({notAfter:u})";
         var det =
-            $"The web dashboard's TLS certificate expires on {notAfter:u}, in {days} day{plural}. When it lapses the LAN "
-            + "dashboard stops serving (it fails closed to loopback-only, never plain HTTP), so renew it and restart the "
+            $"The {tls.Surface}'s TLS certificate expires on {notAfter:u}, in {days} day{plural}. When it lapses the {tls.Endpoint} "
+            + "stops serving (it fails closed to loopback-only with the token still required, never plain HTTP), so renew it and restart the "
             + $"service before then. {certRef}";
         return (shortMsg, det, current);
     }

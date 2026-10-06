@@ -220,9 +220,14 @@ public sealed class McpToolsListBudgetTests
        is under 160 characters. */
     // Both additions above together (edit_server #5240 plus the three raw-plan reads #5228), as McpToolsListBudgetTests measured the tree
     // merged with dev c1679bcdd: 188,119 -> 191,056 (= 188,119 + 1,052 + 1,885), 173 -> 177 tools. The ceiling now covers all 177 served tools.
+    /* #5234: get_query_store_query_history, the per-plan history behind the web Query Store grid's History button,
+       measured on the tree merged with dev c1679bcdd and the raw-plan reads: 191,056 -> 191,824 (+768), 177 -> 178 tools. The ceiling
+       now covers all 178 served tools. Re-measured after merging dev 9a089ff8e (#5260 landed there squashed): 191,814 bytes, 178 tools,
+       so the ceiling is 191,814. */
     // get_active_queries gains its wait_type parameter (#5235, a 190-character description; the served head is unchanged). Constant set to the
-    // value McpToolsListBudgetTests itself measured on this tree: 191,283, against the previous ceiling of 191,056.
-    private const int TotalCeilingBytes = 191_283;
+    // value McpToolsListBudgetTests itself measured on this tree: +227 bytes. Merged with dev's #5234 (the per-plan Query Store history tool), as
+    // the test measured the merged tree: 192,050, against dev's previous ceiling of 191,814.
+    private const int TotalCeilingBytes = 192_050;
 
 
 

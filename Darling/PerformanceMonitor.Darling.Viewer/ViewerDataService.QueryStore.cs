@@ -296,9 +296,10 @@ public sealed partial class ViewerDataService
             FROM deduped
             WHERE rn = 1
             GROUP BY database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role
-            ORDER BY SUM(execution_count) * AVG(CAST(avg_duration_us AS double precision)) DESC
-            LIMIT $4 + 5
-        )
+            ORDER BY SUM(execution_count) * AVG(CAST(avg_duration_us AS double precision)) DESC, database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role
+            LIMIT $6
+        ),
+        page AS (
         SELECT
             r.database_name,
             r.query_id,
@@ -352,7 +353,8 @@ public sealed partial class ViewerDataService
             r.avg_num_physical_io_reads,
             r.min_num_physical_io_reads,
             r.max_num_physical_io_reads,
-            r.replica_role
+            r.replica_role,
+            ROW_NUMBER() OVER (ORDER BY r.total_executions * r.avg_duration_ms DESC, r.database_name, r.query_id, r.plan_id, r.query_hash, r.execution_type_desc, r.replica_role) AS page_ord
         FROM ranked AS r
         /* #2150: resolve the text ONCE, inside the lateral, so everything downstream still reads a single
            t.query_text — the projection above and the WAITFOR self-exclusion below both get the resolved
@@ -377,14 +379,22 @@ public sealed partial class ViewerDataService
                            AND   s.query_id = r.query_id
                            AND   s.database_name = r.database_name
                            AND   s.query_text IS NOT NULL
-                           ORDER BY s.collection_time DESC
+                           ORDER BY s.collection_time DESC, s.collection_id DESC
                            LIMIT 1
                        )
                    ) AS query_text
         ) AS t ON TRUE
         WHERE t.query_text IS NULL OR t.query_text NOT LIKE 'WAITFOR%'
-        ORDER BY r.total_executions * r.avg_duration_ms DESC
+        ORDER BY page_ord
         LIMIT $4
+        )
+        /* #5313: the candidate count rides on its own row, joined to the page, so a round whose candidates were
+           ALL trimmed (every one a WAITFOR statement) still reports it; an empty page used to read as
+           exhausted. page_ord is NULL on that row, which is how the caller tells it from a page row. */
+        SELECT p.*, c.candidate_count
+        FROM (SELECT COUNT(*) AS candidate_count FROM ranked) AS c
+        LEFT JOIN page AS p ON TRUE
+        ORDER BY p.page_ord
         """;
 
     /// <summary>
@@ -443,18 +453,19 @@ public sealed partial class ViewerDataService
             }
         }
 
-        var rows = new List<ViewerQueryStoreRow>();
-
-        await using var command = _dataSource.CreateCommand(QueryStoreTopSql);
-        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
-        AddServerWindowParameters(command, serverId, startUtc, endUtc);
-        command.Parameters.Add(new Npgsql.NpgsqlParameter<int> { TypedValue = top });
-        command.Parameters.Add(DatabaseFilterParameter(databaseNames));
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        while (await reader.ReadAsync(cancellationToken))
+        /* #5313: the WAITFOR trim can leave the page short; TopFill asks again with a larger candidate limit ($6)
+           while more candidates exist, under its bound. */
+        var rows = await TopFill.RunAsync(top, async candidates =>
         {
-            rows.Add(ReadQueryStoreTopRow(reader));
-        }
+            await using var command = _dataSource.CreateCommand(QueryStoreTopSql);
+            command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
+            AddServerWindowParameters(command, serverId, startUtc, endUtc);
+            command.Parameters.Add(new Npgsql.NpgsqlParameter<int> { TypedValue = top });
+            command.Parameters.Add(DatabaseFilterParameter(databaseNames));
+            command.Parameters.Add(new Npgsql.NpgsqlParameter<int> { TypedValue = candidates });
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            return await TopFill.ReadPageAsync(reader, QueryStorePageOrdinal, ReadQueryStoreTopRow, cancellationToken);
+        });
 
         return (rows, null);
     }
@@ -492,22 +503,23 @@ public sealed partial class ViewerDataService
                 return null;
             }
 
-            var rows = new List<ViewerQueryStoreRow>();
-            await using var command = new Npgsql.NpgsqlCommand(QueryStoreTopTableSql, connection, transaction) { CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds };
-            command.Parameters.Add(new Npgsql.NpgsqlParameter<int> { TypedValue = serverId });
-            command.Parameters.Add(new Npgsql.NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(plan.ReadStart, DateTimeKind.Unspecified) });
-            command.Parameters.Add(new Npgsql.NpgsqlParameter
+            /* #5313: the same fill rounds as the raw read, on this transaction's snapshot ($6 is the candidate limit). */
+            var rows = await TopFill.RunAsync(top, async candidates =>
             {
-                NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Timestamp,
-                Value = literalEndUtc.HasValue ? DateTime.SpecifyKind(literalEndUtc.Value, DateTimeKind.Unspecified) : DBNull.Value,
+                await using var command = new Npgsql.NpgsqlCommand(QueryStoreTopTableSql, connection, transaction) { CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds };
+                command.Parameters.Add(new Npgsql.NpgsqlParameter<int> { TypedValue = serverId });
+                command.Parameters.Add(new Npgsql.NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(plan.ReadStart, DateTimeKind.Unspecified) });
+                command.Parameters.Add(new Npgsql.NpgsqlParameter
+                {
+                    NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Timestamp,
+                    Value = literalEndUtc.HasValue ? DateTime.SpecifyKind(literalEndUtc.Value, DateTimeKind.Unspecified) : DBNull.Value,
+                });
+                command.Parameters.Add(new Npgsql.NpgsqlParameter<int> { TypedValue = top });
+                command.Parameters.Add(DatabaseFilterParameter(databaseNames));
+                command.Parameters.Add(new Npgsql.NpgsqlParameter<int> { TypedValue = candidates });
+                await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+                return await TopFill.ReadPageAsync(reader, QueryStorePageOrdinal, ReadQueryStoreTopRow, cancellationToken);
             });
-            command.Parameters.Add(new Npgsql.NpgsqlParameter<int> { TypedValue = top });
-            command.Parameters.Add(DatabaseFilterParameter(databaseNames));
-            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-            while (await reader.ReadAsync(cancellationToken))
-            {
-                rows.Add(ReadQueryStoreTopRow(reader));
-            }
 
             return (rows, plan);
         }
@@ -519,6 +531,10 @@ public sealed partial class ViewerDataService
             return null;
         }
     }
+
+    /// <summary>The ordinal of <c>page_ord</c>, the column after <c>replica_role</c> (#5313): <c>candidate_count</c>
+    /// follows it. <see cref="TopFill.ReadPageAsync{T}"/> reads both.</summary>
+    private const int QueryStorePageOrdinal = 53;
 
     /// <summary>Shared by <see cref="GetQueryStoreTopQueriesAsync"/>'s raw and table paths: both
     /// <see cref="QueryStoreTopSql"/> and <see cref="QueryStoreTopTableSql"/> project the same

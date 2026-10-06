@@ -509,6 +509,9 @@ public sealed class NotificationRoutingTests
             DarlingSelfAlertEvaluator.AnalysisSinglesDigestMetric,
             DarlingSelfAlertEvaluator.DiskPressureMetric, DarlingSelfAlertEvaluator.CustomRuleHealthMetric,
             DarlingSelfAlertEvaluator.StaleMuteMetric, DarlingSelfAlertEvaluator.WebTlsCertExpiryMetric,
+            /* #5288: the MCP endpoint's twin of the web certificate alert, fired through the descriptor's
+               ExpiryMetric (tls.ExpiryMetric), which the FireAsync literal scan below cannot see. */
+            DarlingSelfAlertEvaluator.McpTlsCertExpiryMetric,
             DarlingSelfAlertEvaluator.StoreSettingsMetric,
             DarlingSelfAlertEvaluator.CompressionJobMetric, DarlingSelfAlertEvaluator.JobCadenceMetric,
             DarlingSelfAlertEvaluator.RetentionHoldMetric, DarlingSelfAlertEvaluator.StoreUpgradeMetric,

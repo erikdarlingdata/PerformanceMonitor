@@ -369,7 +369,17 @@ public class DarlingNetworkBlockLifetimeTests
            that the nearest enclosing brace context is the start-up block, not the if/else — asserted here
            the cheap way: the call is after BOTH branches' log statements. */
         var loopbackLine = source.IndexOf("(loopback only)", StringComparison.Ordinal);
-        var exposedLine = source.IndexOf("loopback also bound", StringComparison.Ordinal);
+
+        /* Where the LAN start line is LOGGED. The web host writes its text inline ("loopback also bound ..."). The MCP
+           host builds it in DescribeNetworkStart (#5288: the line names the scheme it serves), so its log statement is
+           the call to that helper, which sits ahead of the lifetime call, while the helper's own text sits after the
+           whole start-up method and is not where the line is written. The pin still requires the lifetime to come
+           after the LAN start line's log statement. */
+        var exposedLine = source.IndexOf("DescribeNetworkStart(", StringComparison.Ordinal);
+        if (exposedLine < 0)
+        {
+            exposedLine = source.IndexOf("loopback also bound", StringComparison.Ordinal);
+        }
 
         Assert.True(loopbackLine >= 0, $"{fileName}'s loopback start line is gone — this pin needs rewriting");
         Assert.True(exposedLine >= 0, $"{fileName}'s LAN start line is gone — this pin needs rewriting");
