@@ -37,6 +37,8 @@ namespace Lite.Tests;
 [Collection("app-logger-statics")]
 public sealed class LongQueryTraceLifecycleLiteTests : IDisposable
 {
+    private readonly List<DuckDbInitializer> _initializers = [];
+
     private const string Host = "lqtrace.database.windows.net";
 
     private readonly string _tempDir;
@@ -53,6 +55,11 @@ public sealed class LongQueryTraceLifecycleLiteTests : IDisposable
 
     public void Dispose()
     {
+        foreach (var initializer in _initializers)
+        {
+            initializer.Dispose();
+        }
+
         try
         {
             if (Directory.Exists(_tempDir))
@@ -144,6 +151,7 @@ public sealed class LongQueryTraceLifecycleLiteTests : IDisposable
     private async Task<Rig> BuildRigAsync(ServerConnection server, bool traceOn, int engineEdition = 5, bool withInstallId = true, InstallIdStore? idStore = null)
     {
         var duckDb = new DuckDbInitializer(_dbPath);
+        _initializers.Add(duckDb);
         await duckDb.InitializeAsync();
 
         var servers = new ServerManager(_configDir);
@@ -163,6 +171,7 @@ public sealed class LongQueryTraceLifecycleLiteTests : IDisposable
     private async Task<Rig> RestartAsync(Rig before)
     {
         var duckDb = new DuckDbInitializer(_dbPath);
+        _initializers.Add(duckDb);
         await duckDb.InitializeAsync();
 
         var after = WireRig(duckDb, before.Servers, before.Schedules, before.Server, withInstallId: true);

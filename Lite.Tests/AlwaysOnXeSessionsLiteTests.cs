@@ -30,6 +30,8 @@ namespace Lite.Tests;
 [Collection("app-logger-statics")]
 public sealed class AlwaysOnXeSessionsLiteTests : IDisposable
 {
+    private readonly List<DuckDbInitializer> _initializers = [];
+
     private const string InstallIdValue = "0a1b2c3d";
 
     private readonly string _tempDir;
@@ -46,6 +48,11 @@ public sealed class AlwaysOnXeSessionsLiteTests : IDisposable
 
     public void Dispose()
     {
+        foreach (var initializer in _initializers)
+        {
+            initializer.Dispose();
+        }
+
         try
         {
             if (Directory.Exists(_tempDir))
@@ -352,6 +359,7 @@ public sealed class AlwaysOnXeSessionsLiteTests : IDisposable
     private async Task<Rig> BuildRigAsync()
     {
         var duckDb = new DuckDbInitializer(_dbPath);
+        _initializers.Add(duckDb);
         await duckDb.InitializeAsync();
 
         var server = new ServerConnection { ServerName = "alwayson.database.windows.net", DisplayName = "alwayson-" + Guid.NewGuid().ToString("N")[..8] };

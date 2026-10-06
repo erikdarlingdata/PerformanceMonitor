@@ -52,7 +52,10 @@ public class StoredEventCopiesDeadlockTests : IDisposable
        after that, the way a cycle after the 512 MB reset stores them. */
     private async Task<DuckDBConnection> StageAsync(string[] archived, string[] hot)
     {
-        await new DuckDbInitializer(_dbPath).InitializeAsync();
+        using (var initializer = new DuckDbInitializer(_dbPath))
+        {
+            await initializer.InitializeAsync();
+        }
         var connection = new DuckDBConnection($"Data Source={_dbPath}");
         await connection.OpenAsync(TestContext.Current.CancellationToken);
         if (archived.Length > 0)
@@ -65,7 +68,10 @@ public class StoredEventCopiesDeadlockTests : IDisposable
 
         if (hot.Length > 0)
             await ExecuteAsync(connection, $"INSERT INTO deadlocks {Columns} VALUES {string.Join(", ", hot)}");
-        await new DuckDbInitializer(_dbPath).CreateArchiveViewsAsync();
+        using (var initializer = new DuckDbInitializer(_dbPath))
+        {
+            await initializer.CreateArchiveViewsAsync();
+        }
         return connection;
     }
 

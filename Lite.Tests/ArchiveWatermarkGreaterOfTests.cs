@@ -49,6 +49,7 @@ public sealed class ArchiveWatermarkGreaterOfTests : IDisposable
 
     public void Dispose()
     {
+        _duckDb.Dispose();
         CollectionResetGate.ResetForTests();
         try
         {

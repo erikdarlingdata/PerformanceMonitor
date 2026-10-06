@@ -1247,7 +1247,7 @@ public partial class LiteAlertForwardingTests : IDisposable
         Directory.CreateDirectory(tempDir);
         try
         {
-            var duckDb = new DuckDbInitializer(Path.Combine(tempDir, "test.duckdb"));
+            using var duckDb = new DuckDbInitializer(Path.Combine(tempDir, "test.duckdb"));
             await duckDb.InitializeAsync();
             IAlertStateStore store = new LiteAlertStateStore(new DuckDbAlertHistoryStore(duckDb));
 

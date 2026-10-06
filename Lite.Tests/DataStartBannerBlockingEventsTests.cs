@@ -48,6 +48,7 @@ public sealed class DataStartBannerBlockingEventsTests : IDisposable
 
     public void Dispose()
     {
+        _duckDb.Dispose();
         try { if (Directory.Exists(_tempDir)) Directory.Delete(_tempDir, recursive: true); }
         catch { /* best-effort cleanup */ }
     }

@@ -78,6 +78,7 @@ public sealed class CollectionLogDrillDataStartTests : IDisposable
 
     public void Dispose()
     {
+        _duckDb.Dispose();
         ServerTimeHelper.ActiveServerClock = _savedClock;
         ServerTimeHelper.CurrentDisplayMode = _savedMode;
         CultureInfo.CurrentCulture = _savedCulture;

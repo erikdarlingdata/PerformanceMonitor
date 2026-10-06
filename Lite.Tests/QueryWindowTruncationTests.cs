@@ -71,6 +71,7 @@ public sealed class QueryWindowTruncationTests : IDisposable
 
     public void Dispose()
     {
+        _duckDb.Dispose();
         ServerTimeHelper.ActiveServerClock = _savedClock;
         ServerTimeHelper.CurrentDisplayMode = _savedMode;
         try { if (Directory.Exists(_tempDir)) Directory.Delete(_tempDir, recursive: true); }

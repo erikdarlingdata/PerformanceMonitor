@@ -813,7 +813,7 @@ public sealed class TimeHonestyRungReadTests : IClassFixture<SharedDuckDbFixture
         Directory.CreateDirectory(dbDir);
         var dbPath = Path.Combine(dbDir, "lite-v62.duckdb");
 
-        var initializer = new DuckDbInitializer(dbPath);
+        using var initializer = new DuckDbInitializer(dbPath);
         await initializer.InitializeAsync();
 
         using (var conn = new DuckDBConnection($"Data Source={dbPath}"))
@@ -860,7 +860,7 @@ public sealed class TimeHonestyRungReadTests : IClassFixture<SharedDuckDbFixture
             await ExecAsync(conn, "INSERT INTO schema_version (version) VALUES (62)");
         }
 
-        var upgraded = new DuckDbInitializer(dbPath);
+        using var upgraded = new DuckDbInitializer(dbPath);
         await upgraded.InitializeAsync();
         await upgraded.CreateArchiveViewsAsync();
 

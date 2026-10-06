@@ -49,7 +49,7 @@ public class MuteRulesSurviveResetTests : IDisposable
     [Fact]
     public async Task PermanentMuteRule_SurvivesArchiveAllAndReset()
     {
-        var initializer = new DuckDbInitializer(_dbPath);
+        using var initializer = new DuckDbInitializer(_dbPath);
         await initializer.InitializeAsync();
 
         var ruleId = Guid.NewGuid().ToString();
@@ -71,7 +71,7 @@ public class MuteRulesSurviveResetTests : IDisposable
     [Fact]
     public async Task ExpiringMuteRule_SurvivesArchiveAllAndReset()
     {
-        var initializer = new DuckDbInitializer(_dbPath);
+        using var initializer = new DuckDbInitializer(_dbPath);
         await initializer.InitializeAsync();
 
         var ruleId = Guid.NewGuid().ToString();
@@ -94,7 +94,7 @@ public class MuteRulesSurviveResetTests : IDisposable
     [Fact]
     public async Task EmptyMuteRulesTable_DoesNotBreakReset()
     {
-        var initializer = new DuckDbInitializer(_dbPath);
+        using var initializer = new DuckDbInitializer(_dbPath);
         await initializer.InitializeAsync();
 
         var archiveService = new ArchiveService(initializer, _archiveDir);
