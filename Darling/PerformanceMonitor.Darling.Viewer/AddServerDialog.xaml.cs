@@ -28,7 +28,7 @@ namespace PerformanceMonitor.Darling.Viewer;
 ///
 /// <para><b>Auth + secrets.</b> The service connects with Windows, SQL, and the two non-interactive Entra
 /// modes — service principal and managed identity (#3484) — so those are the modes written (Windows →
-/// <c>integrated</c>; SQL → <c>sql</c> + a DPAPI-LocalMachine password blob via <see cref="ViewerServerSecret"/>;
+/// <c>integrated</c>; SQL → <c>sql</c> + a password sealed to the service's published key (<see cref="ViewerPasswordKey"/>);
 /// service principal → <c>serviceprincipal</c> + the client secret in the same blob shape; managed identity →
 /// <c>managedidentity</c>, secret-less), never plaintext. A SQL credential PROFILE is resolved to its concrete
 /// username + secret at write time. The INTERACTIVE Entra modes (MFA / device-code / default-credential) have

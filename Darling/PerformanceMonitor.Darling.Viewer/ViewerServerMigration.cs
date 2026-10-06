@@ -34,8 +34,8 @@ namespace PerformanceMonitor.Darling.Viewer;
 ///
 /// <para><b>Secrets.</b> An integrated-auth and a managed-identity entry migrate with no secret. A SQL-auth or
 /// service-principal entry (inline or via a SQL credential profile) has its secret — a password or a client
-/// secret — read from Windows Credential Manager and re-sealed as the service-decryptable DPAPI-LocalMachine
-/// blob (<see cref="ViewerServerSecret"/>); such an entry whose secret cannot be resolved is skipped rather
+/// secret — read from Windows Credential Manager and re-sealed to the service's published key
+/// (<see cref="ViewerPasswordKey"/>); such an entry whose secret cannot be resolved is skipped rather
 /// than imported broken. Only the INTERACTIVE Entra modes the service can't honor
 /// (<see cref="ServerStoreCredential"/>) are skipped outright. Favorites are NOT migrated — they stay
 /// viewer-local in <see cref="ViewerServerStore"/>.</para>

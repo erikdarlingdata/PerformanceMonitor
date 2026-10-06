@@ -222,6 +222,11 @@ public static class ViewerPasswordKey
 
     public const string ReadOnlyText = "Passwords cannot be saved from a read-only connection.";
 
+    /// <summary>#5366: the login connected but is not allowed to read the key tables (SQLSTATE 42501), which is not the
+    /// same as a read-only connection and has a different fix.</summary>
+    public const string NoKeyAccessText =
+        "This login cannot read the service's password key. Connect with the admin role, or run provision-roles.sql again on this store.";
+
     public const string NoTablesText =
         "Passwords cannot be saved: this store has no password key tables yet. Update or restart the Darling service.";
 
@@ -367,7 +372,7 @@ public static class ViewerPasswordKey
         }
         catch (PostgresException ex) when (ex.SqlState == "42501")
         {
-            return new ViewerSealKeyResult { Refusal = ReadOnlyText };
+            return new ViewerSealKeyResult { Refusal = NoKeyAccessText };
         }
         catch (PostgresException ex) when (ex.SqlState == "42P01")
         {

@@ -199,7 +199,7 @@ public sealed class ViewerSmtpSealTests : IDisposable
         foreach (var file in new[] { "SettingsWindow.xaml.cs", "ViewerControlPlaneMigration.cs" })
         {
             var text = File.ReadAllText(Path.Combine(viewer, file));
-            Assert.DoesNotContain("ViewerServerSecret.Protect(", text, StringComparison.Ordinal);
+            Assert.DoesNotContain("ViewerServerSecret.", text, StringComparison.Ordinal);
         }
     }
 

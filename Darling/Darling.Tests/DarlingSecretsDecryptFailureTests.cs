@@ -23,9 +23,8 @@ namespace Darling.Tests;
 /// name what failed to decrypt, does not mention that a machine boundary is involved, and reads exactly like SQL
 /// Server rejecting a login — which is where the operator looked.</para>
 ///
-/// <para><b>What is actually true, and why the message can be specific about it.</b> Both
-/// <see cref="DarlingSecrets"/> and the Viewer's <c>ViewerServerSecret</c> protect with
-/// <c>DataProtectionScope.LocalMachine</c> and share the entropy string byte-for-byte. LocalMachine means ANY
+/// <para><b>What is actually true, and why the message can be specific about it.</b> The
+/// service's <see cref="DarlingSecrets"/> protects with <c>DataProtectionScope.LocalMachine</c>, as did the blobs older Viewers wrote with the same entropy string. LocalMachine means ANY
 /// user on the writing machine can decrypt, and NO other machine ever can. So this is never a service-account
 /// permissions problem and never a user-boundary problem: it is a machine boundary, and the overwhelmingly likely
 /// cause is a credential encrypted by a Viewer running somewhere else. Every remedy is therefore "produce the

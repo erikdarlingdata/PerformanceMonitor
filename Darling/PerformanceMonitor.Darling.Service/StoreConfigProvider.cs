@@ -1973,7 +1973,9 @@ ORDER BY name", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoo
                 server.EncryptedPasswordDeclaredByFile = true;
             }
 
+            /* #5366: a remediation reference is declared for one remediation login, so the row must name that same login (null as empty). */
             if (declared.RemediationEncryptedPasswordDeclaredByFile
+                && string.Equals(declared.RemediationUsername ?? string.Empty, server.RemediationUsername ?? string.Empty, StringComparison.Ordinal)
                 && DarlingSecrets.DeclaresSecretText(server.RemediationEncryptedPassword)
                 && string.Equals(declared.RemediationEncryptedPassword, server.RemediationEncryptedPassword, StringComparison.Ordinal))
             {

@@ -233,12 +233,6 @@ public sealed class ViewerPasswordKeyTests : IDisposable
         Assert.NotEqual(first, second);
     }
 
-    [Fact]
-    public void ASealedValueHasNothingToPrefill()
-    {
-        Assert.Null(ViewerServerSecret.TryUnprotect(new ViewerPasswordSealer(_key.PublicKey).Seal("p@ss-not-real", Row("alpha-sql"))));
-    }
-
     [Theory]
     [InlineData("AddServerDialog.xaml.cs")]
     [InlineData("AddMultipleServersDialog.xaml.cs")]
@@ -249,7 +243,8 @@ public sealed class ViewerPasswordKeyTests : IDisposable
     {
         var source = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", file);
 
-        Assert.DoesNotContain("ViewerServerSecret.Protect(", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("ViewerServerSecret.", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("ProtectedData.Protect(", source, StringComparison.Ordinal);
         Assert.DoesNotContain("ConnectionSettingsDiffer", source, StringComparison.Ordinal);
         Assert.DoesNotContain("ServerConnectionSettings", source, StringComparison.Ordinal);
     }
@@ -262,6 +257,38 @@ public sealed class ViewerPasswordKeyTests : IDisposable
         {
             Assert.DoesNotContain("ConnectionSettingsDiffer", File.ReadAllText(path), StringComparison.Ordinal);
         }
+    }
+
+    [Fact]
+    public void TheViewer_HasNoDpapiWritePath()
+    {
+        /* #5366: a password the Viewer saves is sealed to the service's published key. The old DPAPI write helper is gone,
+           and no Viewer file protects data with DPAPI (reading a saved managed-store credential stays). */
+        var directory = Path.GetDirectoryName(RepoFile.PathTo("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerPasswordKey.cs"))!;
+        Assert.False(File.Exists(Path.Combine(directory, "ViewerServerSecret.cs")));
+        foreach (var path in Directory.EnumerateFiles(directory, "*.cs", SearchOption.AllDirectories))
+        {
+            var text = File.ReadAllText(path);
+            Assert.DoesNotContain("ViewerServerSecret.", text, StringComparison.Ordinal);
+            Assert.DoesNotContain("ProtectedData.Protect(", text, StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
+    public void ALoginThatCannotReadTheKeyTables_GetsItsOwnSentence()
+    {
+        /* #5366: SQLSTATE 42501 on the key tables is a missing grant, not a read-only connection. */
+        Assert.Equal(
+            "This login cannot read the service's password key. Connect with the admin role, or run provision-roles.sql again on this store.",
+            ViewerPasswordKey.NoKeyAccessText);
+        Assert.NotEqual(ViewerPasswordKey.ReadOnlyText, ViewerPasswordKey.NoKeyAccessText);
+
+        var source = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerPasswordKey.cs");
+        var arm = source.IndexOf("ex.SqlState == \"42501\"", StringComparison.Ordinal);
+        Assert.True(arm > 0);
+        var armEnd = source.IndexOf('}', arm);
+        Assert.Contains("NoKeyAccessText", source.Substring(arm, armEnd - arm), StringComparison.Ordinal);
+        Assert.DoesNotContain("ReadOnlyText", source.Substring(arm, armEnd - arm), StringComparison.Ordinal);
     }
 
     private string UnwritablePinsPath()

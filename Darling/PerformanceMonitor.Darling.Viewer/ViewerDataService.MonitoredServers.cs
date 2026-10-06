@@ -38,8 +38,8 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// <para><b>Identity.</b> <c>server_id</c> is <c>ServerIdHelper.GetDeterministicHashCode(BuildStorageName(
 /// host, database, readOnlyIntent))</c> — the SAME identity the collectors stamp and the service's seed uses
 /// (<see cref="ComputeServerId"/>), so a viewer-written row JOINs the collected data and the service's
-/// reconcile matches it. <b>Secrets.</b> <c>encrypted_password</c> is a DPAPI-LocalMachine blob produced by
-/// <see cref="ViewerServerSecret"/> (never plaintext); integrated auth stores none. Azure/Entra auth modes
+/// reconcile matches it. <b>Secrets.</b> <c>encrypted_password</c> is a password sealed to the service's published key by
+/// <see cref="ViewerPasswordKey"/> (never plaintext); integrated auth stores none. Azure/Entra auth modes
 /// are not written — the service can't honor them (see <see cref="ServerStoreCredential"/>).</para>
 /// </summary>
 public sealed partial class ViewerDataService
