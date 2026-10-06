@@ -39,6 +39,8 @@ public sealed class StatementCutSourceScanTests
         "Lite/Mcp",
         "Lite/Services",
         "Lite/Analysis",
+        "PerformanceMonitor.Alerting",
+        "PerformanceMonitor.Notifications",
         "Darling/PerformanceMonitor.Darling.Service",
         "Darling/PerformanceMonitor.Darling.Analysis",
     };
@@ -46,10 +48,12 @@ public sealed class StatementCutSourceScanTests
     /// <summary>A name that says the value is statement text. Lower-cased identifier or column, substring match.</summary>
     private static readonly Regex StatementName = new(
         @"sql|query_?text|statement|inputbuf|graph|stmt|normalized|preview_?text|raw_?text|fetched_?text|text_?data"
-        + @"|blocked_?process|current_?query|root_?query|query_?sample|sample_?text|query|_query",
+        + @"|blocked_?process|current_?query|root_?query|query_?sample|sample_?text|(?:blocked|blocking|victim)_?query|\bquery\b|_query\b",
         RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
-    private static readonly Regex TruncateCall = new(@"\bTruncate\s*\(", RegexOptions.Compiled);
+    /// <summary><c>Truncate(x, n)</c> and the alert builders' <c>TruncateText(x, n)</c> (#5320: it cuts the alert
+    /// context's statement text). <c>TruncateStatement</c> is the judge-then-cut helper and is not matched.</summary>
+    private static readonly Regex TruncateCall = new(@"\bTruncate(?:Text)?\s*\(", RegexOptions.Compiled);
     private static readonly Regex SubstringCall = new(@"([\w][\w\.\?!]*)\s*\.\s*Substring\s*\(", RegexOptions.Compiled);
     private static readonly Regex RangeCut = new(@"([\w][\w\.\?!]*)\s*\[[^\]\[]*\.\.[^\]\[]*\]", RegexOptions.Compiled);
     private static readonly Regex SqlCut = new(@"\b(left|substring|substr)\s*\(", RegexOptions.Compiled | RegexOptions.IgnoreCase);
@@ -97,6 +101,14 @@ public sealed class StatementCutSourceScanTests
         new("Darling/PerformanceMonitor.Darling.Service/DarlingWebDeadlockGraph.cs", "p.sqltext", 1,
             "PR C judges it whole; drop at C's dev merge. Until then the web viewer's side panel cuts one process's text out of deadlock_graph_xml for display, and web responses carry no statement judge",
             Ceiling: true),
+        new("Darling/PerformanceMonitor.Darling.Service/DarlingWorker.cs", "row.victimstatement!", 1,
+            "BuildPgDeadlockIncident cuts a PostgreSQL victim statement the collector already judged whole: PgDeadlockLogParser redacts the whole report (PgLogTextRedactor.RedactDetail) before it takes the victim's statement out of it, and PgDeadlockLogParser.NormalizeStatement re-reads a stored one. Nothing here sees raw text"),
+        new("Darling/PerformanceMonitor.Darling.Service/DarlingWorker.cs", "row.rootquery!", 1,
+            "BuildPgBlockingIncident cuts a PostgreSQL root query the target already judged whole: PgBlockingCollector wraps blocker.query in PgSensitiveStatementFilter.SqlPredicate on the target before the row leaves it (PgSensitiveStatementFilterTests), and PgStatementTextScrub covers rows stored before that. Nothing here sees raw text"),
+        new("PerformanceMonitor.Notifications/AnalysisNotificationService.cs", "element.getrawtext()", 1,
+            "ScalarText shortens a nested drill-down object or array for the finding notification's field. The drill-down JSON is what DrillDownCollector stores: its statement values are judge-then-cut there (AnalysisStatementText.Preview), so this cuts judged values and never sees raw statement text"),
+        new("PerformanceMonitor.Notifications/WebhookAlertService.cs", "paragraph", 2,
+            "SplitProseLabel splits a synthesized advice paragraph on its first ': ' into label and value; both halves are kept, nothing is cut off (the name matches 'graph')"),
         new("Lite/Analysis/BaselineProvider.cs", "eventbaselinesql", 3,
             "slices the event-baseline SQL script (our own query text) around its events CTE to swap one column; it is a script, not a statement read from a monitored server"),
         new("Lite/Analysis/PileupSnapshotReader.cs", "rawcut(rawtext)", 1,
@@ -391,6 +403,11 @@ public sealed class StatementCutSourceScanTests
     [Theory]
     [InlineData("var p = McpHelpers.Truncate(row.QueryText, 400);", "C# Truncate")]
     [InlineData("var p = McpHelpers.Truncate(sqlText, 400);", "C# Truncate")]
+    [InlineData("var p = AlertContextBuilders.TruncateText(row.QueryText);", "C# Truncate")]
+    [InlineData("var p = TruncateText(g.BlockedQuery, 300);", "C# Truncate")]
+    [InlineData("var p = TruncateText(g.QueryText, 300);", "C# Truncate")]
+    [InlineData("var p = TruncateText(blockedQuery, 300);", "C# Truncate")]
+    [InlineData("var p = AlertContextBuilders.TruncateText(statement, 80);", "C# Truncate")]
     [InlineData("var p = McpHelpers.Truncate(r.victim_sql_text ?? \"\", 400);", "C# Truncate")]
     [InlineData("var p = McpHelpers.Truncate(inputbuf, 400);", "C# Truncate")]
     [InlineData("var p = McpHelpers.Truncate(deadlockGraph, 400);", "C# Truncate")]
@@ -428,6 +445,8 @@ public sealed class StatementCutSourceScanTests
     [InlineData("var p = tableName.Substring(0, 10);")]
     [InlineData("var p = schema_name[..8];")]
     [InlineData("var p = McpHelpers.TruncateStatement(sqlText, 400);")]
+    [InlineData("var p = AlertContextBuilders.TruncateStatement(row.QueryText);")]
+    [InlineData("var p = AlertContextBuilders.TruncateText(j.Message, 300);")]
     [InlineData("var p = McpHelpers.StatementPreview(row.QueryText, 400);")]
     [InlineData("// McpHelpers.Truncate(sqlText, 400) is what this used to be")]
     [InlineData("var note = \"McpHelpers.Truncate(sqlText, 400)\";")]
