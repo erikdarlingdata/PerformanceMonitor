@@ -36,6 +36,7 @@ namespace Lite.Tests;
 /// under a low <c>memory_limit</c>. The old SQL runs out of memory there (asserted, so the limit cannot drift loose
 /// without failing), and the shipped read does not.</para>
 /// </summary>
+[Collection(QueryStoreMemoryPinCollection.Name)]
 public sealed class QueryStoreTextAfterRankingTests : IDisposable
 {
     private const int ServerId = 5381;
@@ -146,15 +147,6 @@ WHERE {presence}";
         using var command = connection.CreateCommand();
         command.CommandText = sql;
         await command.ExecuteNonQueryAsync();
-    }
-
-    /// <summary>What <c>ArchiveService</c> does: lower the instance's memory_limit for everything that runs next.</summary>
-    private async Task SetMemoryLimitAsync(string limit)
-    {
-        using var readLock = _duckDb!.AcquireReadLock();
-        using var connection = _duckDb.CreateConnection();
-        await connection.OpenAsync();
-        await ExecAsync(connection, $"SET memory_limit = '{limit}'");
     }
 
     private async Task<List<Dictionary<string, object?>>> OracleAsync(string sql, params object[] parameters)
@@ -316,23 +308,50 @@ WHERE {presence}";
     // ---- memory ----
 
     /// <summary>
-    /// The archive under test: five files' worth of days (4 parquet + the hot table), 60 recurring queries x 3
-    /// snapshots, ~100 KB of text each. The memory_limit is low enough that the old SQL, which carries query_text
-    /// through a window over every row of the window, cannot run, and high enough for one day's row group of text.
+    /// The archive under test: five days (4 parquet files, one row group each, like the archive writer's, plus day 0),
+    /// 300 recurring queries x 3 snapshots, ~100 KB of text each (~86 MB of text per day).
+    ///
+    /// <para>Why each pin is built the way it is. A DuckDB read's peak memory depends on the thread count, on what else
+    /// runs in the same instance, and on how many files the scan opens at once, so a pin that leaves those free passes
+    /// or fails with the test runner's load (the first version of these pins did: the old statement ran out of memory
+    /// when the test ran alone and fitted when other classes ran beside it). Here every pin builds its OWN database file
+    /// (BuildStoreAsync: a fresh folder per test), sets <c>threads = 1</c> and a fixed <c>memory_limit</c>, and the class
+    /// is in a collection that does not run in parallel with other collections. With one thread the old statement's peak
+    /// is the same on every run: the margins below were measured by sweeping the limit (comparison: new fits from 150MB,
+    /// old fails up to 500MB; regressions: new fits from 150MB, old fails up to 225MB), and each pin sits well inside
+    /// both edges.</para>
     /// </summary>
     private const int WideTextRepeat = 3000;
-    private const int WideQueries = 300;  // ~86 MB of text per day
-    private const string LowMemoryLimit = "300MB";
+    private const int WideQueries = 300;
+    private const string TightMemoryLimit = "200MB";
+    private const string TopQueriesMemoryLimit = "400MB";
 
-    [Fact(Skip = "#5381 handoff: the by-key text read of the rewritten top-queries still runs out of memory at 300MB on this 5-day store, and the old statement fits here (the repro saw it fail only on a 14 and a 30 day window). Needs a tuned store and limit.")]
-    public async Task TopQueries_FitALowMemoryLimit()
+    /// <summary>What <c>ArchiveService</c> does (lower the instance's memory_limit), plus one thread so the peak is repeatable.</summary>
+    private async Task PinMemoryAsync(string limit)
+    {
+        using var readLock = _duckDb!.AcquireReadLock();
+        using var connection = _duckDb.CreateConnection();
+        await connection.OpenAsync();
+        await ExecAsync(connection, "SET threads = 1");
+        await ExecAsync(connection, $"SET memory_limit = '{limit}'");
+    }
+
+    [Fact]
+    public async Task TopQueries_FitWhereTheOldReadFits_AndReturnTheWideText()
     {
         var duckDb = await BuildStoreAsync(WideTextRepeat, WideQueries, hotToday: false);
-        await SetMemoryLimitAsync(LowMemoryLimit);
+        await PinMemoryAsync(TopQueriesMemoryLimit);
 
-        /* No old-SQL OOM assertion here, on purpose: over these five days the old top-queries statement still fits 300MB
-           (the repro saw it fail only on a 14 and a 30 day window of a 30 file archive), so the RED half of this pin is
-           not demonstrated for this read. This is a guard that the by-key text read fits the limit. */
+        /* No RED half for this read, on purpose: at one thread the old statement's peak is its text lateral reading one
+           row group at a time, the same row group the new read's by-key lookup needs, so the two need the same ~300MB
+           over these five days (both fail at 250MB, both pass at 300MB). The old read only runs out of memory on a window
+           of many days AND many threads (the repro: 14 and 30 day windows of a 30 file archive at 1GB, default threads),
+           which this fixture cannot build repeatably. So the pin is the one that matters for a rewrite: wherever the old
+           statement fits, the new read fits and returns the same rows (the parity test above holds the rows). */
+        var old = await Record.ExceptionAsync(() => OracleAsync(
+            QueryStoreOldReadSql.TopQueries.Replace("@@CANDIDATES@@", "10"), ServerId, _anchor.AddHours(-120), _anchor, 5));
+        Assert.True(old is null, "the old SQL is expected to fit at this limit, so the new read is held to it: " + old);
+
         var rows = await new LocalDataService(duckDb).GetQueryStoreTopQueriesAsync(ServerId, 120, 5, asOfUtc: _anchor);
         Assert.Equal(5, rows.Count);
         Assert.All(rows, r => Assert.True(r.QueryId == 13 || r.QueryText.Length > 90_000));
@@ -342,7 +361,7 @@ WHERE {presence}";
     public async Task Comparison_FitsALowMemoryLimit_WhereTheOldReadDoesNot()
     {
         var duckDb = await BuildStoreAsync(WideTextRepeat, WideQueries, hotToday: false);
-        await SetMemoryLimitAsync(LowMemoryLimit);
+        await PinMemoryAsync(TightMemoryLimit);
         var (cs, ce, bs, be) = (_anchor.AddHours(-24), _anchor, _anchor.AddHours(-96), _anchor.AddHours(-24));
 
         var old = await Record.ExceptionAsync(() => OracleAsync(QueryStoreOldReadSql.Comparison, ServerId, cs, ce, bs, be));
@@ -353,11 +372,11 @@ WHERE {presence}";
         Assert.Contains(rows, r => r.QueryText.Length > 90_000);
     }
 
-    [Fact(Skip = "#5381 handoff: the old statement runs out of memory at 300MB when this test runs alone and fits when other classes run beside it, so the RED half is not deterministic yet. Needs a pinned thread count or a tighter limit.")]
+    [Fact]
     public async Task Regressions_FitALowMemoryLimit_WhereTheOldReadDoesNot()
     {
         var duckDb = await BuildStoreAsync(WideTextRepeat, WideQueries, hotToday: false);
-        await SetMemoryLimitAsync(LowMemoryLimit);
+        await PinMemoryAsync(TightMemoryLimit);
 
         var old = await Record.ExceptionAsync(() => OracleAsync(
             QueryStoreOldReadSql.Regressions, ServerId, _anchor.AddHours(-24), _anchor, _anchor.AddHours(-24).AddDays(-LocalDataService.BaselineLookbackDays), 50));
@@ -366,6 +385,29 @@ WHERE {presence}";
         var rows = await new LocalDataService(duckDb).GetQueryStoreRegressionsAsync(ServerId, 24, 50, asOfUtc: _anchor);
         Assert.True(rows.Count >= 5);
         Assert.Contains(rows, r => r.QueryTextSample.Length > 90_000);
+    }
+
+    /// <summary>
+    /// The by-key text lookups carry the time filter, so the parquet scan can skip every row group whose collection_time
+    /// range cannot hold the rows asked for. Without it a lookup for one row decodes the text column of every day.
+    /// </summary>
+    [Fact]
+    public async Task TheTextLookups_CarryTheTimeFilterIntoTheScan()
+    {
+        var duckDb = await BuildStoreAsync(textRepeat: 3);
+        var from = _anchor.AddDays(-2);
+        var to = _anchor.AddDays(-1);
+
+        var byRow = await OracleAsync("EXPLAIN " + LocalDataService.TextByRowSql([1_000_000L + 10, 1_000_000L + 11]), ServerId, from, to);
+        var window = await OracleAsync("EXPLAIN " + LocalDataService.WindowTextSql, ServerId, "db_odd", 7L, from, to);
+        foreach (var (name, plan) in new[] { ("by-row", byRow), ("window", window) })
+        {
+            var text = string.Join("\n", plan.SelectMany(r => r.Values).Select(v => v?.ToString()));
+            Assert.True(text.Contains("collection_time", StringComparison.Ordinal),
+                $"the {name} text lookup's plan does not mention collection_time:\n{text}");
+            /* The bound must be on the scan itself (a Filters line of the parquet scan), not only in a later FILTER. */
+            Assert.Matches(@"(?s)(READ_PARQUET|PARQUET_SCAN|TABLE_SCAN).*Filters:.*collection_time", text);
+        }
     }
 
     // ---- shape ----
@@ -401,4 +443,14 @@ WHERE {presence}";
 
         return dir?.FullName ?? throw new InvalidOperationException("repo root not found");
     }
+}
+
+/// <summary>
+/// The memory pins read a DuckDB database under a fixed memory_limit and one thread, so no other test class may run
+/// beside them: the collection is not parallelised with the rest of the assembly.
+/// </summary>
+[CollectionDefinition(QueryStoreMemoryPinCollection.Name, DisableParallelization = true)]
+public sealed class QueryStoreMemoryPinCollection
+{
+    public const string Name = "QueryStoreMemoryPins";
 }

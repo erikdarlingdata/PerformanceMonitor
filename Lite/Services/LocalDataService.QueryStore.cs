@@ -184,16 +184,15 @@ ORDER BY bucket";
         {
         using var command = connection.CreateCommand();
         command.CommandText = @"
-WITH deduped AS (
+WITH latest AS (
     /* LOAD-BEARING (correctness, not just perf) — #1841. query_store_stats rows are CUMULATIVE
        per-Query-Store-interval snapshots, and the collector re-fetches the OPEN interval every cycle
        as its last_execution_time advances, so the SAME interval is stored repeatedly with a growing
        execution_count. SUM(execution_count) over the raw rows reports 10 + 25 + 40 for an interval that
        reached 40, and AVG(avg_*) becomes an avg-of-avgs weighted by how many times each interval happened
        to be re-collected. Keep the LATEST snapshot per interval. The aggregate below projects nearly every
-       payload column, so they are listed here; #5381: query_text and query_plan_text are NOT among them. SELECT *
-       carried both wide columns through the ROW_NUMBER sort for every row in the window, which is what ran Lite out
-       of its memory_limit on a wide window. The text is read after the ranking, for the page's rows only (below).
+       payload column, so they are listed in `deduped`; #5381: query_text and query_plan_text are NOT among them.
+       The text is read after the ranking, for the page's rows only (below).
 
        runtime_stats_interval_id is the REAL interval identity (tier 2), with first_execution_time kept
        beside it as the tier-1 proxy for rows collected before it existed — see the slicer above for why
@@ -201,7 +200,31 @@ WITH deduped AS (
 
        replica_role and execution_type_desc are in the partition because the aggregate below is grouped
        (or MAXed) on them: the dedup key must be at least as fine as the read's own row identity, or
-       dedup would silently drop a row the grid is supposed to show rather than de-duplicate one. */
+       dedup would silently drop a row the grid is supposed to show rather than de-duplicate one.
+
+       #5381: the window runs over the NARROW columns only (the row's id and time), and the payload comes back by a
+       join on those two for the winning rows. Running the window over the payload sorted every column of every row
+       in the window, which is the part of this read that grows with the window, and DuckDB keeps a copy of it per
+       thread. The join's build side is one narrow row per interval. */
+    SELECT collection_id AS latest_id, collection_time AS latest_time
+    FROM
+    (
+        SELECT
+            collection_id,
+            collection_time,
+            ROW_NUMBER() OVER
+            (
+                PARTITION BY database_name, query_id, plan_id, runtime_stats_interval_id, first_execution_time, execution_type_desc, replica_role
+                ORDER BY collection_time DESC, execution_count DESC
+            ) AS rn
+        FROM v_query_store_stats
+        WHERE server_id = $1
+        AND   collection_time >= $2
+        AND   collection_time <= $3" + dbClause + executionTypeClause + @"
+    ) w
+    WHERE rn = 1
+),
+deduped AS (
     SELECT
         database_name, query_id, plan_id, query_hash, replica_role, module_name, execution_type_desc,
         runtime_stats_interval_id, first_execution_time, last_execution_time, collection_time,
@@ -214,13 +237,9 @@ WITH deduped AS (
         min_clr_time_us, max_clr_time_us, min_rowcount, max_rowcount, min_log_bytes_used,
         max_log_bytes_used, min_tempdb_space_used, max_tempdb_space_used, avg_query_max_used_memory,
         min_query_max_used_memory, max_query_max_used_memory, avg_num_physical_io_reads,
-        min_num_physical_io_reads, max_num_physical_io_reads,
-        ROW_NUMBER() OVER
-        (
-            PARTITION BY database_name, query_id, plan_id, runtime_stats_interval_id, first_execution_time, execution_type_desc, replica_role
-            ORDER BY collection_time DESC, execution_count DESC
-        ) AS rn
+        min_num_physical_io_reads, max_num_physical_io_reads
     FROM v_query_store_stats
+    INNER JOIN latest ON latest.latest_id = collection_id AND latest.latest_time = collection_time
     WHERE server_id = $1
     AND   collection_time >= $2
     AND   collection_time <= $3" + dbClause + executionTypeClause + @"
@@ -291,35 +310,17 @@ ranked AS (
         MIN(CAST(min_num_physical_io_reads AS DOUBLE PRECISION)) AS min_num_physical_io_reads,
         MAX(CAST(max_num_physical_io_reads AS DOUBLE PRECISION)) AS max_num_physical_io_reads
     FROM deduped
-    WHERE rn = 1" + moduleClause + @"
+    WHERE 1 = 1" + moduleClause + @"
     GROUP BY database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role
     /* #5299 round 3 (O16): the ranking ends on the whole group key - see GetTopQueriesByCpuAsync. */
     ORDER BY SUM(execution_count) * AVG(CAST(avg_duration_us AS DOUBLE PRECISION)) DESC, database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role
     LIMIT " + candidates + @"
 ),
-/* #5381: which row holds each candidate's text, found on NARROW columns only. This is the row the old lateral
-   picked (latest by collection_time, then collection_id) except that it does not look at query_text: the text itself
-   is read for these rows by key afterwards, so no wide column is carried through a window or a join. The all-history
-   reach of the old lateral is unchanged; only its width is. A candidate whose latest row has a NULL text is
-   re-resolved to its latest NON-NULL text by the caller, which is what the old IS NOT NULL guard did. */
-latest_row AS (
-    SELECT database_name, query_id, collection_id, collection_time
-    FROM
-    (
-        SELECT
-            v.database_name,
-            v.query_id,
-            v.collection_id,
-            v.collection_time,
-            ROW_NUMBER() OVER (PARTITION BY v.database_name, v.query_id ORDER BY v.collection_time DESC, v.collection_id DESC) AS lr
-        FROM v_query_store_stats v
-        INNER JOIN (SELECT DISTINCT database_name, query_id FROM ranked) k
-          ON  k.database_name = v.database_name
-          AND k.query_id = v.query_id
-        WHERE v.server_id = $1
-    ) x
-    WHERE lr = 1
-),
+/* #5381: `ranked` is read ONCE, here. Referencing it a second time (for a candidate count, or to find each candidate's
+   text row) makes DuckDB materialise it and hold a second copy of its window and aggregate state, which doubled this
+   read's peak memory (753 MB against the old read's 726 MB over a 7 day window at 1 GB). The count is the number of
+   rows this statement returns, and each candidate's latest text row is found by a second statement over the
+   candidates' keys (ReadQueryStoreLatestRowsAsync), so nothing here looks at the whole archive. */
 page AS (
 SELECT
     r.database_name,
@@ -376,20 +377,15 @@ SELECT
     r.min_num_physical_io_reads,
     r.max_num_physical_io_reads,
     r.replica_role,
-    ROW_NUMBER() OVER (ORDER BY r.total_executions * r.avg_duration_ms DESC, r.database_name, r.query_id, r.plan_id, r.query_hash, r.execution_type_desc, r.replica_role) AS page_ord,
-    lr.collection_id AS text_collection_id,
-    lr.collection_time AS text_collection_time
+    ROW_NUMBER() OVER (ORDER BY r.total_executions * r.avg_duration_ms DESC, r.database_name, r.query_id, r.plan_id, r.query_hash, r.execution_type_desc, r.replica_role) AS page_ord
 FROM ranked r
-LEFT JOIN latest_row lr
-  ON  lr.database_name = r.database_name
-  AND lr.query_id = r.query_id
 )
-/* #5313: the count row rides beside the page so a round trimmed to nothing still reports whether more candidates exist.
-   #5381: the WAITFOR filter and the page limit need the text, so they run in code after the by-key text read, over
-   the candidates in page_ord order - the same rows in the same order the old statement's WHERE and LIMIT $4 kept. */
-SELECT p.*, c.candidate_count
-FROM (SELECT COUNT(*) AS candidate_count FROM ranked) c
-LEFT JOIN page p ON TRUE
+/* #5313: a round reports how many candidates its ranking produced, so TopFill knows whether more exist.
+   #5381: that count is the number of rows returned here (the page is not trimmed in SQL any more), and the WAITFOR
+   filter and the page limit need the text, so they run in code after the text read, over the candidates in page_ord
+   order - the same rows in the same order the old statement's WHERE and LIMIT $4 kept. */
+SELECT p.*
+FROM page p
 ORDER BY p.page_ord";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
@@ -402,18 +398,11 @@ ORDER BY p.page_ord";
         if (!string.IsNullOrWhiteSpace(moduleName))
             command.Parameters.Add(new DuckDBParameter { Value = moduleName });
 
-        var candidatesWithKeys = new List<(QueryStoreRow Row, long? TextCollectionId, DateTime? TextCollectionTime)>();
-        var candidateCount = 0;
+        var candidateRows = new List<QueryStoreRow>();
         using (var reader = await command.ExecuteReaderAsync())
         {
         while (await reader.ReadAsync())
         {
-            candidateCount = reader.IsDBNull(57) ? 0 : Convert.ToInt32(reader.GetValue(57));
-            if (reader.IsDBNull(54))
-            {
-                continue;
-            }
-
             var candidate = new QueryStoreRow
             {
                 DatabaseName = reader.IsDBNull(0) ? "" : reader.GetString(0),
@@ -471,24 +460,21 @@ ORDER BY p.page_ord";
                 MaxNumPhysicalIoReads = reader.IsDBNull(52) ? 0 : ToDouble(reader.GetValue(52)),
                 ReplicaRole = reader.IsDBNull(53) ? null : reader.GetString(53)
             };
-            candidatesWithKeys.Add((candidate,
-                reader.IsDBNull(55) ? (long?)null : reader.GetInt64(55),
-                reader.IsDBNull(56) ? (DateTime?)null : reader.GetDateTime(56)));
+            candidateRows.Add(candidate);
         }
         }
 
-        /* #5381: the text, for the candidates only and by key. */
-        var texts = await ReadQueryStoreTextByRowAsync(
-            connection, serverId,
-            candidatesWithKeys.Where(c => c.TextCollectionId.HasValue && c.TextCollectionTime.HasValue)
-                .Select(c => (c.TextCollectionId!.Value, c.TextCollectionTime!.Value)));
+        /* #5381: the row that holds each candidate's text (the latest row of its database and query_id over ALL history,
+           as the old lateral picked), then the text of those rows, both by key and for the candidates only. */
+        var latestRows = await ReadQueryStoreLatestRowsAsync(connection, serverId, candidateRows.Select(r => (r.DatabaseName, r.QueryId)));
+        var texts = await ReadQueryStoreTextByRowAsync(connection, serverId, latestRows.Values);
         var items = new List<QueryStoreRow>();
-        foreach (var (row, textId, textTime) in candidatesWithKeys)
+        foreach (var row in candidateRows)
         {
             string? text = null;
-            if (textId.HasValue && textTime.HasValue)
+            if (latestRows.TryGetValue((row.DatabaseName, row.QueryId), out var textRow))
             {
-                texts.TryGetValue((textId.Value, textTime.Value), out text);
+                texts.TryGetValue(textRow, out text);
                 /* The old lateral skipped NULL texts: a latest row with no text resolves to the latest row WITH one. */
                 text ??= await ReadQueryStoreLatestNonNullTextAsync(connection, serverId, row.DatabaseName, row.QueryId);
             }
@@ -508,7 +494,7 @@ ORDER BY p.page_ord";
             items.Add(row);
         }
 
-        return (items, candidateCount);
+        return (items, candidateRows.Count);
         }
 
         return await TopFill.RunAsync(top, RunRoundAsync);

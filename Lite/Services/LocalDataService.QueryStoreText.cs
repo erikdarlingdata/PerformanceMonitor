@@ -47,15 +47,7 @@ public partial class LocalDataService
             {
                 var slice = ordered.Skip(i).Take(QueryStoreTextKeyChunk).ToList();
                 using var command = connection.CreateCommand();
-                /* Ids are BIGINTs read back from the store and formatted by hand: no user text reaches this IN list.
-                   The time bounds sit beside the ids so a row group is skipped on either. */
-                command.CommandText = @"
-SELECT collection_id, collection_time, query_text
-FROM v_query_store_stats
-WHERE server_id = $1
-AND   collection_time >= $2
-AND   collection_time <= $3
-AND   collection_id IN (" + string.Join(",", slice.Select(r => r.CollectionId.ToString(CultureInfo.InvariantCulture))) + ")";
+                command.CommandText = TextByRowSql(slice.Select(r => r.CollectionId));
                 command.Parameters.Add(new DuckDBParameter { Value = serverId });
                 command.Parameters.Add(new DuckDBParameter { Value = slice.Min(r => r.CollectionTime) });
                 command.Parameters.Add(new DuckDBParameter { Value = slice.Max(r => r.CollectionTime) });
@@ -64,6 +56,81 @@ AND   collection_id IN (" + string.Join(",", slice.Select(r => r.CollectionId.To
                 {
                     result[(reader.GetInt64(0), reader.GetDateTime(1))] = reader.IsDBNull(2) ? null : reader.GetString(2);
                 }
+            }
+        }
+
+        return result;
+    }
+
+    /// <summary>
+    /// The by-key text statement for the given ids: $1 server, $2 and $3 the time bounds. The bounds sit beside the ids so
+    /// a parquet row group is skipped on either. Ids are BIGINTs read back from the store and formatted by hand: no
+    /// user text reaches this IN list.
+    /// </summary>
+    internal static string TextByRowSql(IEnumerable<long> collectionIds) => @"
+SELECT collection_id, collection_time, query_text
+FROM v_query_store_stats
+WHERE server_id = $1
+AND   collection_time >= $2
+AND   collection_time <= $3
+AND   collection_id IN (" + string.Join(",", collectionIds.Select(id => id.ToString(CultureInfo.InvariantCulture))) + ")";
+
+    /// <summary>The window text statement: $1 server, $2 database, $3 query_id, $4 and $5 the window.</summary>
+    internal const string WindowTextSql = @"
+SELECT MAX(query_text)
+FROM v_query_store_stats
+WHERE server_id = $1
+AND   database_name = $2
+AND   query_id = $3
+AND   collection_time >= $4
+AND   collection_time <= $5";
+
+    /// <summary>Most (database, query_id) keys one latest-row statement carries; each key is two parameters.</summary>
+    internal const int QueryStoreLatestRowKeyChunk = 100;
+
+    /// <summary>
+    /// For each (database_name, query_id), the key (collection_id, collection_time) of its LATEST <c>v_query_store_stats</c>
+    /// row over ALL history, whatever that row's text is: the row the old top-queries lateral picked, found on narrow
+    /// columns only and for the named keys only. A key with no row is absent from the result.
+    /// </summary>
+    internal static async Task<Dictionary<(string DatabaseName, long QueryId), (long CollectionId, DateTime CollectionTime)>> ReadQueryStoreLatestRowsAsync(
+        LockedConnection connection, int serverId, IEnumerable<(string DatabaseName, long QueryId)> keys)
+    {
+        var result = new Dictionary<(string, long), (long, DateTime)>();
+        var distinct = keys.Distinct().ToList();
+        for (var i = 0; i < distinct.Count; i += QueryStoreLatestRowKeyChunk)
+        {
+            var slice = distinct.Skip(i).Take(QueryStoreLatestRowKeyChunk).ToList();
+            using var command = connection.CreateCommand();
+            /* The key list is parameters, never text: a database name is user data. $1 is the server; key n is ($2n, $2n+1). */
+            command.CommandText = @"
+SELECT x.database_name, x.query_id, x.collection_id, x.collection_time
+FROM
+(
+    SELECT
+        v.database_name,
+        v.query_id,
+        v.collection_id,
+        v.collection_time,
+        ROW_NUMBER() OVER (PARTITION BY v.database_name, v.query_id ORDER BY v.collection_time DESC, v.collection_id DESC) AS lr
+    FROM v_query_store_stats v
+    INNER JOIN (VALUES " + string.Join(", ", slice.Select((_, n) => $"(CAST(${2 + 2 * n} AS VARCHAR), CAST(${3 + 2 * n} AS BIGINT))")) + @") k(database_name, query_id)
+      ON  k.database_name = v.database_name
+      AND k.query_id = v.query_id
+    WHERE v.server_id = $1
+) x
+WHERE x.lr = 1";
+            command.Parameters.Add(new DuckDBParameter { Value = serverId });
+            foreach (var (databaseName, queryId) in slice)
+            {
+                command.Parameters.Add(new DuckDBParameter { Value = databaseName });
+                command.Parameters.Add(new DuckDBParameter { Value = queryId });
+            }
+
+            using var reader = await command.ExecuteReaderAsync();
+            while (await reader.ReadAsync())
+            {
+                result[(reader.GetString(0), reader.GetInt64(1))] = (reader.GetInt64(2), reader.GetDateTime(3));
             }
         }
 
@@ -103,14 +170,7 @@ LIMIT 1";
         LockedConnection connection, int serverId, string databaseName, long queryId, DateTime windowStart, DateTime windowEnd)
     {
         using var command = connection.CreateCommand();
-        command.CommandText = @"
-SELECT MAX(query_text)
-FROM v_query_store_stats
-WHERE server_id = $1
-AND   database_name = $2
-AND   query_id = $3
-AND   collection_time >= $4
-AND   collection_time <= $5";
+        command.CommandText = WindowTextSql;
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = databaseName });
         command.Parameters.Add(new DuckDBParameter { Value = queryId });
