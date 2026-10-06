@@ -2935,12 +2935,24 @@ public sealed class DarlingMcpDataTools
     }
 
     [McpServerTool(Name = "get_current_waits_trend"), Description("Gets the two Current Waits series over time for a server: waiting-task total wait duration per wait type per collection, and blocked-session counts per database per collection. get_waiting_tasks answers 'what is waiting right now' and can never say whether it is worse than an hour ago — this is that question. Use it to tell a server that is always mildly blocked from one that just started, and to see which database owns the blocking over the window rather than in one snapshot.")]
-    public static async Task<string> GetCurrentWaitsTrend(
+    public static Task<string> GetCurrentWaitsTrend(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history. Default 4. No upper bound (this read exists to look further back than the 168-hour reads allow); a negative or zero value is refused rather than read as its absolute value.")] int hours_back = 4,
         [Description("Limit the blocked-session series to one database. Omit for all databases.")] string? database_name = null,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        CancellationToken cancellationToken = default) =>
+        GetCurrentWaitsTrend(postgres, server_name, hours_back, DatabaseFilter.One(database_name), as_of, cancellationToken);
+
+    /// <summary>
+    /// #5244: <see cref="GetCurrentWaitsTrend(NpgsqlDataSource,string,int,string,string,CancellationToken)"/> over a SET of
+    /// databases. The list limits the BLOCKED-SESSION series only (the waiting-task series is per wait type, whole, as the tool's head
+    /// says). The echoed <c>database_name</c> is the name for one database and "the chosen databases" for two or more. The
+    /// both-series-empty answers below name no database: "nothing was waiting" is true of the whole server, because the
+    /// waiting-task series the filter never touches is empty too, so neither text is a verdict about a database the read skipped.
+    /// </summary>
+    internal static async Task<string> GetCurrentWaitsTrend(
+        NpgsqlDataSource postgres, string? server_name, int hours_back, DatabaseFilter databases, string? as_of,
         CancellationToken cancellationToken = default)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
@@ -2962,7 +2974,7 @@ public sealed class DarlingMcpDataTools
 
             var waits = await DarlingDataReader.GetWaitingTaskTrendAsync(postgres, resolved.ServerId, start, end, cancellationToken);
             var blocked = await DarlingDataReader.GetBlockedSessionTrendAsync(
-                postgres, resolved.ServerId, start, end, database_name, cancellationToken);
+                postgres, resolved.ServerId, start, end, databases, cancellationToken);
 
             if (waits.Count == 0 && blocked.Count == 0)
             {
@@ -2991,7 +3003,8 @@ public sealed class DarlingMcpDataTools
             {
                 server = resolved.ServerName,
                 hours_back = hours_back,
-                database_name,
+                /* #5244: the name for one database, "the chosen databases" for two or more, null for all. */
+                database_name = databases.Describe(),
                 /*
                     Two series in one payload because they are read together: a wait-type spike with no
                     blocked sessions is a resource wait, and the same spike WITH them is contention. Split
@@ -3018,13 +3031,27 @@ public sealed class DarlingMcpDataTools
     }
 
     [McpServerTool(Name = "get_blocking_stats"), Description("Gets blocking SEVERITY over time for a server: per-minute blocking duration (event count, total, max and average wait) and per-minute deadlock severity (victim count plus total, max and average wait across every process in the graphs). get_blocking_trend and get_deadlock_trend count incidents; this is how BAD they were. Ten one-second blocks and one ten-minute block are the same count and are not the same problem, which is the distinction this read exists to make.")]
-    public static async Task<string> GetBlockingStats(
+    public static Task<string> GetBlockingStats(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history. Default 24. No upper bound (this read exists to look further back than the 168-hour reads allow); a negative or zero value is refused rather than read as its absolute value.")] int hours_back = 24,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
         ILogger? logger = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) =>
+        GetBlockingStats(postgres, server_name, hours_back, DatabaseFilter.All, as_of, logger, cancellationToken);
+
+    /// <summary>
+    /// #5244: <see cref="GetBlockingStats(NpgsqlDataSource,string,int,string,ILogger,CancellationToken)"/> with the BLOCKING series
+    /// limited to a SET of databases. Deadlocks carry no database column here, so the deadlock series stays whole, and every
+    /// text that speaks of "blocking or deadlocks" says so. Every one-name consumer on the empty path is list-aware: the empty
+    /// answer reads "No blocking for {the chosen databases} and no deadlocks" rather than a verdict that the window was
+    /// genuinely clear for databases the read filtered, and the echoed <c>database_name</c> is the name for one database and
+    /// "the chosen databases" for two or more. The unavailable arm ("never run successfully") is about collection and is
+    /// unchanged: no filtered series can make a collector that never ran look quiet.
+    /// </summary>
+    internal static async Task<string> GetBlockingStats(
+        NpgsqlDataSource postgres, string? server_name, int hours_back, DatabaseFilter databases, string? as_of,
+        ILogger? logger = null, CancellationToken cancellationToken = default)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
@@ -3043,7 +3070,7 @@ public sealed class DarlingMcpDataTools
             var end = windowEnd;
             var start = end.AddHours(-hours_back);
 
-            var blocking = await DarlingDataReader.GetBlockingDurationStatsAsync(postgres, resolved.ServerId, start, end, cancellationToken);
+            var blocking = await DarlingDataReader.GetBlockingDurationStatsAsync(postgres, resolved.ServerId, start, end, databases, cancellationToken);
 
             /* Parsed and bucketed by the shared aggregator rather than re-derived here: a second copy of
                "what counts as a victim" is how two surfaces end up disagreeing about one deadlock. */
@@ -3080,7 +3107,12 @@ public sealed class DarlingMcpDataTools
                         "empty",
                         McpHelpers.QuietUnlessCut(
                             emptyNotice.WindowTruncated, emptyNotice.EffectiveStart,
-                            factual: $"No blocking or deadlocks recorded for {resolved.ServerName} in the last {hours_back} hour(s)",
+                            /* #5244: with a database filter only the blocking half was limited to it (deadlocks are not
+                               split by database here), so the sentence says exactly that instead of "no blocking". */
+                            factual: databases.IsAll
+                                ? $"No blocking or deadlocks recorded for {resolved.ServerName} in the last {hours_back} hour(s)"
+                                : $"No blocking for {(databases.Names.Count == 1 ? $"database '{databases.Names[0]}'" : DatabaseFilter.ManyDatabasesDescription)} "
+                                  + $"(and no deadlocks, which are not limited by database) recorded for {resolved.ServerName} in the last {hours_back} hour(s)",
                             coveredClaim: ". The blocking collectors HAVE run successfully for this server, so the window is genuinely clear rather than blind."),
                         emptyNotice.AsHints())
                     : McpHelpers.Status(
@@ -3101,6 +3133,10 @@ public sealed class DarlingMcpDataTools
                 effective_start = notice.EffectiveStart,
                 window_truncated = notice.WindowTruncated,
                 truncation_note = notice.TruncationNote,
+                /* #5244: which databases the blocking series is limited to (the deadlock series never is): the name for one,
+                   "the chosen databases" for two or more, null for all. After the three notice keys, which stay right behind
+                   hours_back. */
+                database_name = databases.Describe(),
                 /*
                     Severity, not counts. get_blocking_trend already answers how OFTEN; ten one-second
                     blocks and one ten-minute block share a count and are different problems.

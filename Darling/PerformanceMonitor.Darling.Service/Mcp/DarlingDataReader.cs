@@ -4604,9 +4604,11 @@ FROM config.config_collector_schedules";
     /// session rather than every waiting task. The optional database filter is kept from the viewer's read
     /// rather than dropped for a simpler signature: on a busy instance one database usually owns the
     /// blocking, and a series that cannot be narrowed to it answers a different question from the one the
-    /// viewer answers. $1 server_id, $2 start, $3 end (naive UTC), $4 database name or NULL.</para>
+    /// viewer answers. $1 server_id, $2 start, $3 end (naive UTC), $4 the databases as one <c>text[]</c> (#5244): SQL NULL
+    /// is every database, otherwise the series is limited to the named ones (<see cref="DatabaseFilter.Clause"/>, so one name
+    /// and several are the same statement text).</para>
     /// </summary>
-    public const string BlockedSessionTrendSql = """
+    public static readonly string BlockedSessionTrendSql = $$"""
         SELECT
             collection_time,
             database_name,
@@ -4617,7 +4619,7 @@ FROM config.config_collector_schedules";
         AND   collection_time >= $2
         AND   collection_time <= $3
         AND   database_name IS NOT NULL
-        AND   ($4::text IS NULL OR database_name = $4)
+        {{DatabaseFilter.All.Clause("database_name", 4)}}
         GROUP BY
             collection_time,
             database_name
@@ -4626,10 +4628,19 @@ FROM config.config_collector_schedules";
             database_name
         """;
 
-    /// <summary>Runs <see cref="BlockedSessionTrendSql"/>.</summary>
+    /// <summary>Runs <see cref="BlockedSessionTrendSql"/> for one database (a blank name is every database).</summary>
+    public static Task<List<BlockedSessionTrendRow>> GetBlockedSessionTrendAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc,
+        string? databaseName = null, CancellationToken cancellationToken = default) =>
+        GetBlockedSessionTrendAsync(postgres, serverId, startUtc, endUtc, DatabaseFilter.One(databaseName), cancellationToken);
+
+    /// <summary>
+    /// <see cref="BlockedSessionTrendSql"/> over a SET of databases (#5244): <paramref name="databases"/> empty
+    /// (<see cref="DatabaseFilter.All"/>) is every database, otherwise only the named databases' blocked sessions are counted.
+    /// </summary>
     public static async Task<List<BlockedSessionTrendRow>> GetBlockedSessionTrendAsync(
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc,
-        string? databaseName = null, CancellationToken cancellationToken = default)
+        DatabaseFilter databases, CancellationToken cancellationToken = default)
     {
         var rows = new List<BlockedSessionTrendRow>();
         await using var command = postgres.CreateCommand(BlockedSessionTrendSql);
@@ -4637,11 +4648,7 @@ FROM config.config_collector_schedules";
         AddInt(command, serverId);
         AddTimestamp(command, startUtc);
         AddTimestamp(command, endUtc);
-        command.Parameters.Add(new NpgsqlParameter
-        {
-            Value = string.IsNullOrWhiteSpace(databaseName) ? DBNull.Value : databaseName,
-            NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Text,
-        });
+        AddDatabases(command, databases);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -4663,8 +4670,13 @@ FROM config.config_collector_schedules";
     /// tables are hypertables partitioned on <c>collection_time</c>, which this event-time window alone
     /// gives the planner nothing to exclude a chunk on (#4229); the floor lets it skip every chunk older
     /// than the window, without being able to drop a row (an event is collected after it happens).</para>
+    /// <para>$5 is the databases as one <c>text[]</c> (#5244, <see cref="DatabaseFilter.Clause"/>): SQL NULL is every database,
+    /// otherwise BOTH arms count only the named databases' rows. Which arm is read does NOT move with the filter: the DMV
+    /// fallback is taken when the XE source has no row in the window for ANY database (the <c>xe_any</c> probe), so a filter
+    /// that leaves no XE row for its databases does not swap in the other capture path for them, and the two sources are
+    /// never mixed. The unfiltered series is exactly what it was.</para>
     /// </summary>
-    public const string BlockingDurationStatsSql = """
+    public static readonly string BlockingDurationStatsSql = $$"""
         WITH bpr AS (
             SELECT
                 DATE_TRUNC('minute', event_time) AS bucket,
@@ -4675,7 +4687,15 @@ FROM config.config_collector_schedules";
             FROM v_blocked_process_reports
             WHERE server_id = $1 AND event_time >= $2 AND event_time <= $3
             AND   collection_time >= $4
+            {{DatabaseFilter.All.Clause("database_name", 5)}}
             GROUP BY DATE_TRUNC('minute', event_time)
+        ),
+        xe_any AS (
+            SELECT 1
+            FROM v_blocked_process_reports
+            WHERE server_id = $1 AND event_time >= $2 AND event_time <= $3
+            AND   collection_time >= $4
+            LIMIT 1
         ),
         dmv AS (
             SELECT
@@ -4687,11 +4707,12 @@ FROM config.config_collector_schedules";
             FROM v_dmv_blocking_snapshots
             WHERE server_id = $1 AND event_time >= $2 AND event_time <= $3
             AND   collection_time >= $4
+            {{DatabaseFilter.All.Clause("database_name", 5)}}
             GROUP BY DATE_TRUNC('minute', event_time)
         )
         SELECT bucket, event_count, total_duration_ms, max_duration_ms, avg_duration_ms FROM bpr
         UNION ALL
-        SELECT bucket, event_count, total_duration_ms, max_duration_ms, avg_duration_ms FROM dmv WHERE NOT EXISTS (SELECT 1 FROM bpr)
+        SELECT bucket, event_count, total_duration_ms, max_duration_ms, avg_duration_ms FROM dmv WHERE NOT EXISTS (SELECT 1 FROM xe_any)
         ORDER BY bucket
         """;
 
@@ -4726,10 +4747,19 @@ FROM config.config_collector_schedules";
         return await command.ExecuteScalarAsync(cancellationToken) is not null;
     }
 
-    /// <summary>Runs <see cref="BlockingDurationStatsSql"/>.</summary>
+    /// <summary>Runs <see cref="BlockingDurationStatsSql"/> over every database.</summary>
+    public static Task<List<BlockingDurationStatsRow>> GetBlockingDurationStatsAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc,
+        CancellationToken cancellationToken = default) =>
+        GetBlockingDurationStatsAsync(postgres, serverId, startUtc, endUtc, DatabaseFilter.All, cancellationToken);
+
+    /// <summary>
+    /// <see cref="BlockingDurationStatsSql"/> over a SET of databases (#5244): <paramref name="databases"/> empty
+    /// (<see cref="DatabaseFilter.All"/>) is every database, otherwise only the named databases' blocking events are bucketed.
+    /// </summary>
     public static async Task<List<BlockingDurationStatsRow>> GetBlockingDurationStatsAsync(
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc,
-        CancellationToken cancellationToken = default)
+        DatabaseFilter databases, CancellationToken cancellationToken = default)
     {
         var rows = new List<BlockingDurationStatsRow>();
         await using var command = postgres.CreateCommand(BlockingDurationStatsSql);
@@ -4738,6 +4768,7 @@ FROM config.config_collector_schedules";
         AddTimestamp(command, startUtc);
         AddTimestamp(command, endUtc);
         AddTimestamp(command, EventWindowFloor.For(startUtc));
+        AddDatabases(command, databases);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
