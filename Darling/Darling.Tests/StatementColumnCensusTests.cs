@@ -922,9 +922,12 @@ namespace N
     public const string ReleaseGateTestName = nameof(StatementCensus_PendingEntries_BlockARelease);
 
     /// <summary>
-    /// The release-cut gate (see the release-checklist skill). Run by name; with <c>DARLING_RELEASE_CUT=1</c> it
-    /// fails while any statement-column census entry or watched writer is pending, and its message is the pending
-    /// count and the list. Without the variable it passes and prints the count, so CI is unaffected.
+    /// The statement-column ratchet (see the release-checklist skill). It fails while ANY statement-column census entry or
+    /// watched writer is pending, and its message is the pending count and the list. Nothing is pending now, so a pull
+    /// request that adds a statement column or writer without judging it fails here on its own, in every normal Darling
+    /// test run, instead of at the release cut (#5320, ruling 2026-10-06). The name stays because the release workflow's
+    /// gate step and <c>ReleaseStatementGateWorkflowTests</c> bind to it. That step still sets <c>DARLING_RELEASE_CUT=1</c>
+    /// and runs this one test ahead of every publish step; the variable no longer changes what the test asserts.
     /// </summary>
     [Fact]
     public void StatementCensus_PendingEntries_BlockARelease()
@@ -935,9 +938,8 @@ namespace N
 
         Console.WriteLine(summary);
 
-        if (Environment.GetEnvironmentVariable("DARLING_RELEASE_CUT") == "1")
-        {
-            Assert.True(pending.Length == 0, "A release cut needs every statement-column census entry hooked. " + summary);
-        }
+        Assert.True(
+            pending.Length == 0,
+            "Every statement-column census entry and watched writer must be hooked; a pending one fails every test run, not only a release cut. " + summary);
     }
 }
