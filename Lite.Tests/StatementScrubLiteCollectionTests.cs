@@ -201,7 +201,7 @@ VALUES ($1, $2, $3, $4, 78, 'SsfDb', $5, 'running')", _nextId++, Naive(DateTime.
 
         string raw = await McpSessionTools.GetActiveQueries(_service, _serverManager, ServerName);
         string filtered = await CallFilteredAsync("get_active_queries", ("server_name", ServerName));
-        AssertWithheld(raw, filtered);
+        AssertWithheld(raw, filtered, toolJudgesAtRead: true);
 
         Assert.Equal(before, await TableHashAsync("query_snapshots"));
     }
@@ -215,7 +215,7 @@ VALUES ($1, $2, $3, $4, 78, 'SsfDb', $5, 'running')", _nextId++, Naive(DateTime.
 
         string raw = await McpQueryTools.GetTopQueriesByCpu(_service, _serverManager, ServerName, hours_back: 24, top: 20);
         string filtered = await CallFilteredAsync("get_top_queries_by_cpu", ("server_name", ServerName));
-        AssertWithheld(raw, filtered);
+        AssertWithheld(raw, filtered, toolJudgesAtRead: true);
 
         string filteredPlan = await CallFilteredAsync("get_plan_xml", ("query_hash", "0xCANARY01"), ("server_name", ServerName));
         AssertPlanFilteredKeepsTheRest(filteredPlan);
@@ -246,9 +246,19 @@ VALUES ($1, $2, $3, $4, $2, $5, $6)", _nextId++, Naive(DateTime.UtcNow.AddMinute
         foreach (string needle in StatementScrubCanary.SecretNeedles) Assert.DoesNotContain(needle, text, StringComparison.Ordinal);
     }
 
-    private static void AssertWithheld(string raw, string filtered)
+    /* #5320: since PR N the Lite stats and snapshot tools judge the statement at the read (TruncateStatement), so their raw
+       answer already carries the marker and none of the named text; the deadlock tool still returns it raw. */
+    private static void AssertWithheld(string raw, string filtered, bool toolJudgesAtRead = false)
     {
-        Assert.Contains("S3cret-canary-ssf", raw, StringComparison.Ordinal);
+        if (toolJudgesAtRead)
+        {
+            AssertNoSecret(raw);
+            Assert.Contains(SensitiveStatements.PlaceholderText, raw, StringComparison.Ordinal);
+        }
+        else
+        {
+            Assert.Contains("S3cret-canary-ssf", raw, StringComparison.Ordinal);
+        }
         AssertNoSecret(filtered);
         Assert.Contains(SensitiveStatements.PlaceholderText, filtered, StringComparison.Ordinal);
         foreach (string kept in StatementScrubCanary.KeptNeedles.Where(k => raw.Contains(k, StringComparison.Ordinal)))
