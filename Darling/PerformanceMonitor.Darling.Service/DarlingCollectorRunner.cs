@@ -5681,8 +5681,11 @@ public sealed class DarlingCollectorRunner
                 IReadOnlyList<long> landed;
                 try
                 {
+                    /* #4348: the cycle's statement-filter session, so the writer's counters join the cycle's
+                       statement_scrub_* measurements. The writer drops a row the session could not judge. */
                     landed = await QueryStorePlanWriter.WriteAsync(
-                        storeConnection, server.ServerId, databaseName, fetched, context.CollectionTime, itemTimeout, cancellationToken);
+                        storeConnection, server.ServerId, databaseName, fetched, context.CollectionTime, itemTimeout, cancellationToken,
+                        context.BeginStatementScrub());
                 }
                 finally
                 {
@@ -6043,8 +6046,11 @@ public sealed class DarlingCollectorRunner
                 IReadOnlyList<long> landed;
                 try
                 {
+                    /* #4348: the cycle's statement-filter session, so the writer's counters join the cycle's
+                       statement_scrub_* measurements. The writer drops a row the session could not judge. */
                     landed = await QueryStoreTextWriter.WriteAsync(
-                        storeConnection, server.ServerId, databaseName, fetched, context.CollectionTime, itemTimeout, cancellationToken);
+                        storeConnection, server.ServerId, databaseName, fetched, context.CollectionTime, itemTimeout, cancellationToken,
+                        context.BeginStatementScrub());
                 }
                 finally
                 {

@@ -71,7 +71,7 @@ public sealed class StatementColumnCensusTests
         ["procedure_stats.query_plan_xml_bytes"] = Exempt("the byte length of the stored plan, a number"),
 
         /* Row 5: Query Store. Lite stores it live; Darling stores it live and from backfill (R3). */
-        ["query_store.query_text"] = Hooked("5", "R3"),
+        ["query_store.query_text"] = Hooked("5", "R3", pending: false),
         ["query_store.query_plan_hash"] = Exempt("a hash of the plan, not plan text; the filter has nothing to read"),
         ["query_store.query_plan_text"] = Null("the main Query Store query writes a typed NULL here (QueryStoreCollector.cs:738); plan text reaches the store only through the separate by-ids fetch and the plan writer (6.7 row 7, R3)"),
 
@@ -416,12 +416,12 @@ public sealed class StatementColumnCensusTests
     private static readonly Watched[] WatchedWriters =
     {
         // 6.7 row 7: Query Store plans by id. The runner fetches and hands them to the plan writer.
-        new("query store plans by id", "6.7 row 7", "R3", true,
+        new("query store plans by id", "6.7 row 7", "R3", false,
             (Runner, "DarlingCollectorRunner", "FetchAndStorePlansAsync"),
             ("Darling/PerformanceMonitor.Darling.Storage/QueryStorePlanWriter.cs", "QueryStorePlanWriter", "WriteAsync")),
 
         // 6.7 row 6: the Query Store text store.
-        new("query store text store", "6.7 row 6", "R3", true,
+        new("query store text store", "6.7 row 6", "R3", false,
             (Runner, "DarlingCollectorRunner", "FetchAndStoreQueryTextAsync"),
             ("Darling/PerformanceMonitor.Darling.Storage/QueryStoreTextWriter.cs", "QueryStoreTextWriter", "WriteAsync")),
 

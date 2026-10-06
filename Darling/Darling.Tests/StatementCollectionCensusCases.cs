@@ -25,5 +25,6 @@ internal static class StatementCollectionCensusCases
         {
             // Filled by the lanes that hook a column, one line each, for example:
             // ["query_stats.query_text"] = "StatementCollectionCensusTests.QueryStats_QueryText_IsWithheld",
+            ["query_store.query_text"] = "StatementCollectionCensusTests.QueryStore_QueryText_IsWithheld",
         };
 }
