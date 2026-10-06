@@ -1673,13 +1673,12 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 return UnsupportedMediaTypeResult();
             }
 
-            var confirmText = context.Request.Query["confirm"].ToString();
-            if (confirmText.Length > 0 && !string.Equals(confirmText, "true", StringComparison.Ordinal))
+            var (confirm, confirmRefusal) = ParseConfirm(context.Request.Query);
+            if (confirmRefusal is not null)
             {
-                return ErrorResult("confirm must be true, or omitted.", StatusCodes.Status400BadRequest);
+                return ErrorResult(confirmRefusal, StatusCodes.Status400BadRequest);
             }
 
-            var confirm = confirmText.Length > 0;
             var stopwatch = Stopwatch.StartNew();
             var result = await Mcp.DarlingMcpServerTagTools.DeleteServerTagCore(store, id, confirm, context.RequestAborted);
             LogServerTagWrite(logger, context, "delete", id, result, 0);
@@ -5692,6 +5691,45 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         }
 
         return null;
+    }
+
+    /// <summary>
+    /// The ONE reader for a query key that must carry exactly one value (a confirm flag, the access token, the
+    /// sign-in callback's <c>code</c>/<c>state</c>/<c>error</c>/<c>return</c>). Returns false when the key is
+    /// sent more than once (<c>?code=a&amp;code=b</c>): RFC 6749 section 3.1 says such a parameter MUST NOT be
+    /// included more than once, and reading it as <c>Query[key].ToString()</c> joins the copies into
+    /// <c>a,b</c>, which is a value nobody sent (#5245). An absent key is true with an empty
+    /// <paramref name="value"/>, exactly what <c>Query[key].ToString()</c> gave, so a request that sends each
+    /// key once behaves as it always did.
+    /// </summary>
+    internal static bool TrySingleQueryValue(IQueryCollection query, string key, out string value)
+    {
+        var values = query[key];
+        if (values.Count > 1)
+        {
+            value = string.Empty;
+            return false;
+        }
+
+        value = values.ToString();
+        return true;
+    }
+
+    /// <summary>The <c>confirm</c> flag of a delete: absent is false, <c>true</c> is true, anything else (including
+    /// a key sent twice) is a refusal sentence for the 400 (#5245). Pure, so the rule pins without a host.</summary>
+    internal static (bool Confirm, string? Refusal) ParseConfirm(IQueryCollection query)
+    {
+        if (!TrySingleQueryValue(query, "confirm", out var confirmText))
+        {
+            return (false, "confirm must be given once, as true, or omitted.");
+        }
+
+        if (confirmText.Length > 0 && !string.Equals(confirmText, "true", StringComparison.Ordinal))
+        {
+            return (false, "confirm must be true, or omitted.");
+        }
+
+        return (confirmText.Length > 0, null);
     }
 
     /* Pure parse helpers (invariant culture) — the binding logic the tests pin without an HttpContext. */

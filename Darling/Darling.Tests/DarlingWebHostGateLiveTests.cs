@@ -53,7 +53,7 @@ public sealed class DarlingWebHostGateLiveTests
     /// the transport (TestServer instead of Kestrel sockets) and the store pool (a data source that is never
     /// opened, because none of these gates touch Postgres).
     /// </summary>
-    private static async Task<TestServer> BuildServer(bool networkMode, string? publicBaseUrlHost = null, DarlingWebOidcClient? oidcClient = null)
+    private static async Task<TestServer> BuildServer(bool networkMode, string? publicBaseUrlHost = null, DarlingWebOidcClient? oidcClient = null, string accessToken = Token)
     {
         var builder = WebApplication.CreateBuilder();
         builder.WebHost.UseTestServer();
@@ -83,7 +83,7 @@ public sealed class DarlingWebHostGateLiveTests
             networkMode: networkMode,
             networkListenIp: networkMode ? IPAddress.Parse(ListenIp) : null,
             allowedCidr: IPNetwork.Parse(AllowedCidr),
-            accessToken: Token,
+            accessToken: accessToken,
             oidcClient: oidcClient,
             publicBaseUrlHost: publicBaseUrlHost);
 
@@ -338,5 +338,88 @@ public sealed class DarlingWebHostGateLiveTests
 
         Assert.Equal(StatusCodes.Status401Unauthorized, ctx.Response.StatusCode);
         Assert.Contains("\"error\"", body, StringComparison.Ordinal);
+    }
+
+    /* ---- #5245: a single-value query key sent more than once is refused, never read as the joined "a,b" ---- */
+
+    private static DarlingWebOidcClient FakeOidcClient() => new(new DarlingWebOidcClient.ResolvedOptions(
+        "https://idp.example.test", "client-id", null, "openid", null, null,
+        Array.Empty<string>(), Array.Empty<string>()));
+
+    /// <summary>A request with the query string exactly as given (the helpers above build theirs from one token).</summary>
+    private static async Task<(HttpContext Context, string Body)> Fetch(TestServer server, string path, string rawQuery)
+    {
+        var ctx = await server.SendAsync(c =>
+        {
+            c.Request.Method = "GET";
+            c.Request.Path = path;
+            c.Request.QueryString = new QueryString(rawQuery);
+            c.Request.Headers.Host = ListenIp;
+            c.Connection.RemoteIpAddress = InCidrRemote;
+        });
+
+        return (ctx, await new StreamReader(ctx.Response.Body).ReadToEndAsync());
+    }
+
+    /// <summary>A token that itself contains a comma is the one a joined repeated key could equal: <c>?token=left&amp;token=right</c>
+    /// used to read as <c>left,right</c> and pass the gate. It is no token now, and the one-value form still passes.</summary>
+    [Fact]
+    public async Task NetworkMode_RepeatedTokenKey_IsNotAToken_AndTheSingleKeyStillPasses()
+    {
+        using var server = await BuildServer(networkMode: true, accessToken: "left,right");
+
+        var (repeated, _) = await Fetch(server, "/", "?token=left&token=right");
+        Assert.Equal(StatusCodes.Status200OK, repeated.Response.StatusCode);
+        Assert.Equal("text/html; charset=utf-8", repeated.Response.ContentType);
+        Assert.Equal(0, repeated.Response.Headers.SetCookie.Count);
+
+        var (single, _) = await Fetch(server, "/", "?token=left%2Cright");
+        Assert.Equal(StatusCodes.Status302Found, single.Response.StatusCode);
+        Assert.True(single.Response.Headers.SetCookie.Count > 0);
+    }
+
+    [Fact]
+    public async Task OidcLogin_RepeatedReturnKey_IsRefusedBeforeTheProviderIsAsked()
+    {
+        using var server = await BuildServer(networkMode: true, oidcClient: FakeOidcClient());
+
+        var (repeated, body) = await Fetch(server, "/auth/oidc/login", "?return=%2Fa&return=%2Fb");
+        Assert.Equal(StatusCodes.Status400BadRequest, repeated.Response.StatusCode);
+        Assert.Contains("repeated a parameter", body, StringComparison.Ordinal);
+
+        /* One return key takes the old path: the discovery fetch (this IdP does not exist), not the refusal. */
+        var (_, singleBody) = await Fetch(server, "/auth/oidc/login", "?return=%2Fa");
+        Assert.DoesNotContain("repeated a parameter", singleBody, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("?error=a&error=b")]
+    [InlineData("?error=access_denied&error_description=a&error_description=b")]
+    [InlineData("?code=a&code=b&state=s")]
+    [InlineData("?code=a&state=s&state=t")]
+    public async Task OidcCallback_RepeatedKey_IsRefused(string rawQuery)
+    {
+        using var server = await BuildServer(networkMode: true, oidcClient: FakeOidcClient());
+
+        var (ctx, body) = await Fetch(server, "/auth/oidc/callback", rawQuery);
+
+        Assert.Equal(StatusCodes.Status400BadRequest, ctx.Response.StatusCode);
+        Assert.Contains("repeated a parameter", body, StringComparison.Ordinal);
+    }
+
+    /// <summary>Each key once behaves as it always did: a provider error is the provider's 403, and a code with no
+    /// transaction behind it is the stale-attempt 400.</summary>
+    [Theory]
+    [InlineData("?error=access_denied&error_description=nope", StatusCodes.Status403Forbidden, "refused the sign-in")]
+    [InlineData("?code=a&state=s", StatusCodes.Status400BadRequest, "stale or was not started")]
+    public async Task OidcCallback_EachKeyOnce_BehavesAsBefore(string rawQuery, int expectedStatus, string expectedText)
+    {
+        using var server = await BuildServer(networkMode: true, oidcClient: FakeOidcClient());
+
+        var (ctx, body) = await Fetch(server, "/auth/oidc/callback", rawQuery);
+
+        Assert.Equal(expectedStatus, ctx.Response.StatusCode);
+        Assert.Contains(expectedText, body, StringComparison.Ordinal);
+        Assert.DoesNotContain("repeated a parameter", body, StringComparison.Ordinal);
     }
 }
