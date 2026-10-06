@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Linq;
 using System.Security.Cryptography;
 using System.Text;
 using PerformanceMonitor.Darling.Service;
@@ -318,6 +319,49 @@ public sealed class SealedSecretResolverTests
 
         smtp.SecretPin = PinFor(stored, smtp.SecretBinding);
         Assert.Equal(Plain, DarlingSecrets.ResolveSmtpPassword(smtp, Ring, probe.AsWindows()));
+    }
+
+    /* ═══════════ what darling.json declares ═══════════ */
+
+    [Fact]
+    public void TheFileDeclaresAnOldFormatValueAndAReferenceButNotASealedValue()
+    {
+        const string json = """
+            {
+              "servers": [
+                { "name": "alpha", "host": "alpha-host.example.test", "auth": "sql", "username": "monitor", "encryptedPassword": "AQIDBAUGBwgJCg==" },
+                { "name": "beta", "host": "beta-host.example.test", "auth": "sql", "username": "monitor", "encryptedPassword": "sealed:v1:0123456789abcdef:AAAA" },
+                { "name": "gamma", "host": "gamma-host.example.test", "auth": "sql", "username": "monitor", "encryptedPassword": "env:SOME_NOT_REAL_VARIABLE" }
+              ],
+              "smtp": { "host": "mail.example.test", "encryptedPassword": "AQIDBAUGBwgJCg==" }
+            }
+            """;
+        var config = DarlingConfig.Parse(json);
+
+        Assert.True(config.Servers.Single(s => s.Name == "alpha").EncryptedPasswordDeclaredByFile);
+        Assert.False(config.Servers.Single(s => s.Name == "beta").EncryptedPasswordDeclaredByFile);
+        Assert.True(config.Servers.Single(s => s.Name == "gamma").EncryptedPasswordDeclaredByFile);
+        Assert.True(config.Smtp.EncryptedPasswordDeclaredByFile);
+    }
+
+    [Fact]
+    public void AStoreRowIsMarkedOnlyWhenTheFileDeclaresTheSameValueForTheSameConnection()
+    {
+        const string stored = "AQIDBAUGBwgJCg==";
+        var config = DarlingConfig.Parse(
+            """{ "servers": [ { "name": "alpha", "host": "alpha-host.example.test", "auth": "sql", "username": "monitor", "encryptedPassword": "AQIDBAUGBwgJCg==" } ] }""");
+
+        var sameRow = Server(stored: stored);
+        StoreConfigProvider.MarkSlotsTheFileDeclares(sameRow, config);
+        Assert.True(sameRow.EncryptedPasswordDeclaredByFile);
+
+        var movedRow = Server(host: "beta-host.example.test", stored: stored);
+        StoreConfigProvider.MarkSlotsTheFileDeclares(movedRow, config);
+        Assert.False(movedRow.EncryptedPasswordDeclaredByFile);
+
+        var changedValueRow = Server(stored: "AAAAAAAAAAAAAA==");
+        StoreConfigProvider.MarkSlotsTheFileDeclares(changedValueRow, config);
+        Assert.False(changedValueRow.EncryptedPasswordDeclaredByFile);
     }
 
     /* ═══════════ the load-time count ═══════════ */
