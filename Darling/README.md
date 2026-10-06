@@ -868,6 +868,17 @@ PerformanceMonitor.Darling.Service.exe --enable-collector long_query_completions
 
 Without `--server` the change is **fleet-wide** — the schedule row with no server, which every server inherits unless it has a row of its own. `--server <name>` writes that one server's row instead; the name is the display name or storage name the Viewer's sidebar and the MCP tools show, matched exactly first and as a partial name only when the partial is unique — an ambiguous fragment is refused with the candidates listed rather than guessed at, since a toggle landing on the wrong sibling is the same coin flip `remove_server` refuses to make. Only the `enabled` flag is written: a cadence or retention override already on the row survives. The verb owns no SQL of its own — it hands the same `enable_collector` / `disable_collector` command the store's command plane carries to the service's own command executor and runs the executor's plan, so an unknown collector name is refused with the executor's message and the full list of known collectors, and the upsert is one implementation rather than two. After the write it reads the collector's rows **back from the store** and prints them — scope, enabled, cadence, retention, database scope — so what you see is what the service will resolve, not an echo of what you typed. The write bumps the config version the running service polls every sweep, so it takes effect within one sweep with no restart. Add `--config <path>` if `darling.json` is not next to the exe and `DARLING_CONFIG` is not set. Exit `0` only when the row was written and read back, so it works as a step in a provisioning script. A failure exits `1` for a usage or configuration problem and `2` when the store cannot be reached, refuses the login, or refuses the change (a wrong password exits `2`, not `1`), so a script can tell a problem with its own arguments or config from a problem at the store. Managed mode needs Windows (the store credential is DPAPI); a bring-your-own store works on any platform, exactly as `--add-server` does. There is deliberately **no MCP tool** for this: the MCP surface has config writers (`add_servers`, alert tuning, custom views) but no collector-schedule writer, and adding one is a product decision the verb does not take — the CLI was the smallest surface that closes the headless gap.
 
+### Make a new password key (`--reset-password-key`)
+
+The service keeps one key pair for the SQL login passwords saved in the store: it publishes the public half, and every place that saves a password seals it to that key. The verb marks the current key replaced, so the next service start retires the old key file and makes a new key.
+
+```
+PerformanceMonitor.Darling.Service.exe --reset-password-key
+PerformanceMonitor.Darling.Service.exe --reset-password-key --config /etc/darling/darling.json
+```
+
+It changes the store only, as the store owner, and never touches a key file. It prints how many saved passwords were sealed to the old key: restart the service, then enter those passwords again.
+
 ### Set the time of day a daily collector runs (`--set-collector-run-at`)
 
 A collector that runs once a day or less often, such as `index_object_stats`, can start at a time you choose. The verb writes the same row as the Viewer's Collector Schedules window. It takes a collector name and one of three values:

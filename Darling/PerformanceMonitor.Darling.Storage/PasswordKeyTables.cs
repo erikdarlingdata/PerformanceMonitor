@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
@@ -186,6 +187,22 @@ ALTER TABLE config.legacy_secret_pin ENABLE ALWAYS TRIGGER trg_legacy_secret_pin
 ALTER TABLE config.legacy_secret_pin ENABLE ALWAYS TRIGGER trg_legacy_secret_pin_owner_only_truncate;
 ALTER TABLE config.legacy_secret_pin_marker ENABLE ALWAYS TRIGGER trg_legacy_secret_pin_marker_owner_only_row;
 ALTER TABLE config.legacy_secret_pin_marker ENABLE ALWAYS TRIGGER trg_legacy_secret_pin_marker_owner_only_truncate;";
+
+    /// <summary>
+    /// The eight triggers <see cref="CreateSql"/> creates, by table: a row trigger and a truncate trigger on each of the
+    /// four key tables. The service checks the catalog against this list and expects every one to be <c>ENABLE ALWAYS</c>.
+    /// </summary>
+    public static readonly IReadOnlyList<(string Table, string Trigger)> OwnerOnlyTriggers = new[]
+    {
+        ("password_key", "trg_password_key_owner_only_row"),
+        ("password_key", "trg_password_key_owner_only_truncate"),
+        ("password_key_service", "trg_password_key_service_owner_only_row"),
+        ("password_key_service", "trg_password_key_service_owner_only_truncate"),
+        ("legacy_secret_pin", "trg_legacy_secret_pin_owner_only_row"),
+        ("legacy_secret_pin", "trg_legacy_secret_pin_owner_only_truncate"),
+        ("legacy_secret_pin_marker", "trg_legacy_secret_pin_marker_owner_only_row"),
+        ("legacy_secret_pin_marker", "trg_legacy_secret_pin_marker_owner_only_truncate"),
+    };
 
     /// <summary>The one key whose state is <c>current</c>; the unique index allows at most one such row.</summary>
     public const string ReadCurrentSql = @"

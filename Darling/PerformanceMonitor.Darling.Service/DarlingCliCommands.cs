@@ -175,6 +175,69 @@ public static class DarlingCliCommands
     public static bool IsDisableCollectorVerb(string arg) =>
         string.Equals(arg, "--disable-collector", StringComparison.OrdinalIgnoreCase);
 
+    /// <summary>The verb <see cref="ResetPasswordKeyAsync"/> handles: mark the service's current password key replaced, so
+    /// the next start makes a new one (#5366). It changes the store only (as the store owner) and never touches a key file.</summary>
+    public static bool IsResetPasswordKeyVerb(string arg) =>
+        string.Equals(arg, "--reset-password-key", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>The text <c>--reset-password-key</c> prints when the key was marked replaced. <paramref name="sealedPasswords"/>
+    /// is how many saved passwords are sealed to the old key and must be entered again.</summary>
+    public static string ResetPasswordKeyRestartSentence(int sealedPasswords) =>
+        sealedPasswords == 1
+            ? "Restart the service. It will make a new password key, and this 1 saved password must be entered again."
+            : $"Restart the service. It will make a new password key, and these {sealedPasswords.ToString(System.Globalization.CultureInfo.InvariantCulture)} saved passwords must be entered again.";
+
+    /// <summary>
+    /// <c>--reset-password-key [--config &lt;path&gt;]</c>: on the owner connection, in one transaction, counts the saved
+    /// passwords sealed to the current key and marks that key <c>replaced</c> with the reason <c>reset</c>. The next service
+    /// start retires the key file and makes a new key. Key files are never touched here.
+    /// </summary>
+    public static async Task<int> ResetPasswordKeyAsync(
+        string[] rest, TextWriter output, TextWriter error, CancellationToken cancellationToken)
+    {
+        const string Verb = "--reset-password-key";
+        string? configPath = null;
+        for (var i = 0; i < rest.Length; i++)
+        {
+            if (string.Equals(rest[i], "--config", StringComparison.OrdinalIgnoreCase) && i + 1 < rest.Length && !rest[i + 1].StartsWith('-'))
+            {
+                configPath = rest[++i];
+                continue;
+            }
+
+            error.WriteLine($"Unknown or incomplete option for {Verb}: {rest[i]}");
+            output.WriteLine($"Usage: {Verb} [--config <path to darling.json>]");
+            return CollectorToggleExitCode.UsageOrConfig;
+        }
+
+        var created = TryCreateCollectorStoreDataSource(Verb, configPath, error);
+        if (created is null)
+        {
+            return CollectorToggleExitCode.UsageOrConfig;
+        }
+
+        await using var dataSource = created;
+        try
+        {
+            await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
+            await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+            var sealedPasswords = await DarlingPasswordKeyStore.CountSealedPasswordsAsync(connection, cancellationToken);
+            var replaced = await DarlingPasswordKeyStore.MarkCurrentResetAsync(connection, cancellationToken);
+            await transaction.CommitAsync(cancellationToken);
+            output.WriteLine();
+            output.WriteLine(replaced is null
+                ? "The store publishes no password key, so there is nothing to reset."
+                : ResetPasswordKeyRestartSentence(sealedPasswords));
+            output.WriteLine();
+            return CollectorToggleExitCode.Success;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            error.WriteLine($"Could not reset the password key in the store: {ex.Message}");
+            return CollectorToggleExitCode.StoreUnavailable;
+        }
+    }
+
     /// <summary>The verb <see cref="SetCollectorRunAtAsync"/> handles: set, stop or clear the time of day a collector that runs once
     /// a day starts, fleet-wide or for one server (#4938). A heavy daily collector otherwise runs whenever the service happened to
     /// start, which is often a busy hour; this names a quiet one, on the monitored server's own clock.</summary>
@@ -229,7 +292,8 @@ public static class DarlingCliCommands
         || IsEnableCollectorVerb(arg)
         || IsDisableCollectorVerb(arg)
         || IsSetCollectorRunAtVerb(arg)
-        || IsDropXeSessionsVerb(arg);
+        || IsDropXeSessionsVerb(arg)
+        || IsResetPasswordKeyVerb(arg);
 
     /// <summary>
     /// Classifies the exe's command line from its FIRST argument (#1581): no args → run the host; a recognized
