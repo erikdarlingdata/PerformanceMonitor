@@ -231,7 +231,8 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)",
             foreach (string needle in StatementScrubCanary.SecretNeedles) Assert.DoesNotContain(needle, filteredPlan, StringComparison.Ordinal);
             Assert.Contains(StatementFilterCensus.Marker, filteredPlan, StringComparison.Ordinal);
             Assert.Contains("canary_plain_ssf", filteredPlan, StringComparison.Ordinal);
-            var (planStatus, planBody) = await WebReadAsync("get_plan_xml", rawPlan);
+            /* The web route wraps the tool's plan in its JSON envelope before the sweep writes it. */
+            var (planStatus, planBody) = await WebReadAsync("get_plan_xml", DarlingWebEndpoints.WrapPlanXml(rawPlan, "0xQHC", Db));
             Assert.Equal(200, planStatus);
             foreach (string needle in StatementScrubCanary.SecretNeedles) Assert.DoesNotContain(needle, planBody, StringComparison.Ordinal);
             Assert.Contains(StatementFilterCensus.Marker, planBody, StringComparison.Ordinal);
