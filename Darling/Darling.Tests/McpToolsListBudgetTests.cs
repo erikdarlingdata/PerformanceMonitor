@@ -220,7 +220,9 @@ public sealed class McpToolsListBudgetTests
        is under 160 characters. */
     // Both additions above together (edit_server #5240 plus the three raw-plan reads #5228), as McpToolsListBudgetTests measured the tree
     // merged with dev c1679bcdd: 188,119 -> 191,056 (= 188,119 + 1,052 + 1,885), 173 -> 177 tools. The ceiling now covers all 177 served tools.
-    private const int TotalCeilingBytes = 191_056;
+    // get_active_queries gains its wait_type parameter (#5235, a 190-character description; the served head is unchanged). Constant set to the
+    // value McpToolsListBudgetTests itself measured on this tree: 191,283, against the previous ceiling of 191,056.
+    private const int TotalCeilingBytes = 191_283;
 
 
 
