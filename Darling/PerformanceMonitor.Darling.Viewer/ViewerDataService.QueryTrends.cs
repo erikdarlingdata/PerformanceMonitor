@@ -115,7 +115,7 @@ public sealed partial class ViewerDataService
     /// Query-stats duration trend: elapsed ms/sec + executions/sec per BUCKET —
     /// <see cref="DurationTrendRouting.BuildBucketedRawTrendSql"/> over <c>query_stats</c> with the viewer's $4
     /// database filter (#4234; #3653 A11 before it). Until #4234 this read was the per-collection builder's
-    /// output (<see cref="DurationTrendRouting.QueryDurationTrendRawSql"/>), and a 7-day chart could hold as
+    /// output (the builder's <c>QueryDurationTrendRawSql</c>, since deleted), and a 7-day chart could hold as
     /// many rows as the window had collections — the issue's measured number for the sibling wait/perfmon
     /// charts this same fix applied to. The per-collection CTE and its three-state interval (the collection's
     /// STORED <c>sample_interval_seconds</c>, MAX over its rows, 0 → NULL so a restart pass is unrated, NULL →
@@ -145,7 +145,7 @@ public sealed partial class ViewerDataService
     /// Procedure-stats duration trend: elapsed ms/sec + executions/sec per BUCKET —
     /// <see cref="DurationTrendRouting.BuildBucketedRawTrendSql"/> over <c>procedure_stats</c> with the
     /// viewer's $4 database filter (#4234). Until #4234 this read was the per-collection builder's output
-    /// (<see cref="DurationTrendRouting.ProcedureDurationTrendRawSql"/>, itself an alias since #3653); see
+    /// (the builder's <c>ProcedureDurationTrendRawSql</c>, itself an alias since #3653, since deleted); see
     /// <see cref="QueryDurationTrendSql"/> for why the read is bucketed now and what stays the same.
     ///
     /// <para>#3540 (V128): the interval is the collection's STORED one where the rows have it — <c>MAX</c>
