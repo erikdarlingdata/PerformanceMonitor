@@ -8,10 +8,16 @@
 
 /* FinOps "Locking & Contention" tab: the per-index lock and latch waits from get_object_locking (latest daily
    snapshot, most contended first, up to 200 rows), with the lock-wait counts and reserved size the server
-   page's Object Contention table leaves out. The read has no database filter, so there is no picker. The
-   read's snapshot time (captured_at) is not shown: a table panel has no slot for a top-level field. */
+   page's Object Contention table leaves out. A Database box (database-box.js) above the table narrows the read to one database:
+   it takes one name, sent exactly as typed except that a name matching a suggestion ignoring case goes in its stored spelling, and
+   empty means All databases. Its suggestions come from /api/server-databases, which stops at 5,000 names; when it cuts the list the
+   box asks the route again with the typed text, so a name past the cut can still be found. The choice is kept per server in module
+   state, so it survives the page's poll rebuilds, and a new choice remounts only the table below the box. The read's snapshot
+   time (captured_at) is not shown: a table panel has no slot for a top-level field. */
 
+import { el, mount } from "../../util.js";
 import { renderPanel } from "../../panels.js";
+import { databaseBox, newBoxChoice } from "./database-box.js";
 
 const LOCKING_COLUMNS = [
   { key: "database_name", label: "Database" },
@@ -30,24 +36,52 @@ const LOCKING_COLUMNS = [
   { key: "page_io_latch_wait_ms", label: "Page IO latch", format: "ms" },
 ];
 
+// The latest choice per server: the Database box's fields (db, draft, caret, focused, names, ...).
+const choices = new Map();
+
+function choiceFor(server) {
+  let c = choices.get(server);
+  if (!c) {
+    c = newBoxChoice();
+    choices.set(server, c);
+  }
+  return c;
+}
+
 export const tab = {
   id: "locking",
   label: "Locking & Contention",
   build(server, ctx) {
-    return renderPanel({
-      title: "Locking & Contention",
-      subtitle: "daily collection",
-      read: "get_object_locking",
-      params: { server, limit: 200 },
-      viz: "table",
-      rowsKey: "objects",
-      columns: LOCKING_COLUMNS,
-      emptyText: "No lock-wait rows recorded. Index and object stats are collected daily.",
-      noteKey: "optimized_locking_note",
-      /* `note` is the read's truncation sentence ("TRUNCATED: more than N indexes ...") when the 200-row cap
-         cuts the list, and a "Complete: ..." sentence otherwise, so a capped page never looks like the whole. */
-      moreNoteKeys: ["note", "separately_monitored_note"],
-      span: 2,
-    });
+    const choice = choiceFor(server);
+    const content = el("div", {});
+    const box = databaseBox(choice, { onCommit: () => show(), server });
+    const controls = el("div", { class: "sort-control" }, box.nodes);
+
+    function show() {
+      const params = { server, limit: 200 };
+      if (choice.db) params.database_name = choice.db;
+      mount(content, [
+        renderPanel({
+          title: "Locking & Contention",
+          subtitle: choice.db ? "daily collection, database " + choice.db : "daily collection",
+          read: "get_object_locking",
+          params,
+          viz: "table",
+          rowsKey: "objects",
+          columns: LOCKING_COLUMNS,
+          emptyText: choice.db
+            ? "No lock-wait rows recorded for this database. Index and object stats are collected daily."
+            : "No lock-wait rows recorded. Index and object stats are collected daily.",
+          noteKey: "optimized_locking_note",
+          /* `note` is the read's truncation sentence ("TRUNCATED: more than N indexes ...") when the 200-row cap
+             cuts the list, and a "Complete: ..." sentence otherwise, so a capped page never looks like the whole. */
+          moreNoteKeys: ["note", "separately_monitored_note"],
+          span: 2,
+        }),
+      ]);
+    }
+
+    show();
+    return el("div", {}, [controls, content]);
   },
 };
