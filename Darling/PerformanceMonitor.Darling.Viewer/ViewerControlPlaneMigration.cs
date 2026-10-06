@@ -116,6 +116,12 @@ public sealed class ViewerControlPlaneMigration
                 var sealOutcome = _appSettings.SmtpEnabled
                     ? await SealSmtpPasswordAsync(dataService, viewerNotify, smtpPassword, cancellationToken)
                     : SmtpSealOutcome.Done;
+                /* The Teams and Slack URLs are sealed the same way, to the settings row's own binding. */
+                if (sealOutcome != SmtpSealOutcome.NoKey)
+                {
+                    sealOutcome = await SealWebhookValuesAsync(dataService, viewerNotify, cancellationToken);
+                }
+
                 if (sealOutcome == SmtpSealOutcome.NoKey)
                 {
                     deferred = true;
@@ -199,6 +205,62 @@ public sealed class ViewerControlPlaneMigration
         }
 
         return SmtpSealOutcome.Done;
+    }
+
+    /// <summary>
+    /// Seals the Teams and Slack webhook URLs the migration moves, for the settings row and each channel's proxy (#5366), with
+    /// the service's key (no window to ask in, as for the SMTP password). With no key the section waits for a later run
+    /// (<see cref="SmtpSealOutcome.NoKey"/>). A URL that cannot be stored (invalid text) is left out and logged, without its value.
+    /// </summary>
+    internal static async Task<SmtpSealOutcome> SealWebhookValuesAsync(
+        ViewerDataService dataService, NotificationRow row, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(row.TeamsUrl) && string.IsNullOrWhiteSpace(row.SlackUrl))
+        {
+            return SmtpSealOutcome.Done;
+        }
+
+        var key = await ViewerPasswordKey.GetSealKeyAsync(dataService, null, cancellationToken);
+        if (key.Sealer is null)
+        {
+            ViewerLogger.Warn("ViewerControlPlaneMigration", "The webhook URLs were not moved yet: " + key.Refusal);
+            return SmtpSealOutcome.NoKey;
+        }
+
+        SealWebhookValues(row, key.Sealer);
+        return SmtpSealOutcome.Done;
+    }
+
+    /// <summary>Seals the row's Teams and Slack URLs with <paramref name="sealer"/> (pure). A URL that cannot be stored is
+    /// emptied and logged, and does not stop the other from moving.</summary>
+    internal static void SealWebhookValues(NotificationRow row, ViewerPasswordSealer sealer)
+    {
+        var teams = row.TeamsUrl;
+        var slack = row.SlackUrl;
+        try
+        {
+            ViewerWebhookSealing.ResolveSettingsRow(row, null, sealer, null);
+        }
+        catch (ViewerPasswordRefusedException)
+        {
+            /* One value cannot be stored: seal each on its own so a good one still moves. */
+            row.TeamsUrl = SealOne(new NotificationRow { TeamsUrl = teams, TeamsProxy = row.TeamsProxy }, sealer, "Teams webhook URL")?.TeamsUrl ?? "";
+            row.SlackUrl = SealOne(new NotificationRow { SlackUrl = slack, SlackProxy = row.SlackProxy }, sealer, "Slack webhook URL")?.SlackUrl ?? "";
+        }
+    }
+
+    private static NotificationRow? SealOne(NotificationRow single, ViewerPasswordSealer sealer, string label)
+    {
+        try
+        {
+            ViewerWebhookSealing.ResolveSettingsRow(single, null, sealer, null);
+            return single;
+        }
+        catch (ViewerPasswordRefusedException ex)
+        {
+            ViewerLogger.Warn("ViewerControlPlaneMigration", $"The {label} was not moved: {ex.Message}");
+            return null;
+        }
     }
 
     /// <summary>Projects the viewer's alert + analysis app settings onto a store row (pure — pinned by tests).</summary>

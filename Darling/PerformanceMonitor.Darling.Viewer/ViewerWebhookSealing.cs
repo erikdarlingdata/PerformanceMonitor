@@ -7,6 +7,8 @@
  */
 
 using System;
+using System.Collections.Generic;
+using System.Linq;
 using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Viewer;
@@ -44,6 +46,48 @@ public static class ViewerWebhookSealing
     {
         var text = value?.Trim() ?? "";
         return text.Length > 0 && text != ClearMarker && !(PasswordSeal.IsSealed(text) && string.Equals(text, stored, StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// What a Send Test button says when its box is blank because the value is saved (#5366), or null when the test can go
+    /// ahead. A saved value is sealed and cannot be read here, so a blank box would test nothing; the value has to be typed.
+    /// </summary>
+    public static string? CannotTestSavedValueText(string? typed, string? stored, string label)
+    {
+        if (!string.IsNullOrWhiteSpace(typed) || !PasswordSeal.IsSealed(stored))
+        {
+            return null;
+        }
+
+        return $"The {label} is saved, and a saved value cannot be tested from here. Type the {label} to test it.";
+    }
+
+    /// <summary>What the Settings window says after a save that changed a channel's proxy while a route holds a value sealed
+    /// for the old proxy: the route's value no longer opens, so its channel sends nothing until it is entered again.</summary>
+    public const string RouteValuesNeedEnteringAgainText =
+        "Route webhook values were saved for the old proxy. Enter them again on each route.";
+
+    /// <summary>
+    /// Whether saving <paramref name="row"/> over <paramref name="stored"/> changes the proxy of a channel for which some route
+    /// holds a sealed value (#5366). A route value is bound to its channel's proxy on the settings row, so it stops opening
+    /// when that proxy changes. A legacy plaintext route value is not bound to anything and is not counted.
+    /// </summary>
+    public static bool RouteValuesNeedEnteringAgain(NotificationRow? stored, NotificationRow row, IEnumerable<NotificationRouteRow> routes)
+    {
+        ArgumentNullException.ThrowIfNull(row);
+        ArgumentNullException.ThrowIfNull(routes);
+        if (stored is null)
+        {
+            return false;
+        }
+
+        var teams = !string.Equals(row.TeamsProxy ?? "", stored.TeamsProxy ?? "", StringComparison.Ordinal);
+        var slack = !string.Equals(row.SlackProxy ?? "", stored.SlackProxy ?? "", StringComparison.Ordinal);
+        var generic = !string.Equals(row.GenericProxy ?? "", stored.GenericProxy ?? "", StringComparison.Ordinal);
+        var pagerDuty = !string.Equals(row.PagerDutyProxy ?? "", stored.PagerDutyProxy ?? "", StringComparison.Ordinal);
+        return routes.Any(r =>
+            (teams && PasswordSeal.IsSealed(r.TeamsUrl)) || (slack && PasswordSeal.IsSealed(r.SlackUrl))
+            || (generic && PasswordSeal.IsSealed(r.GenericUrl)) || (pagerDuty && PasswordSeal.IsSealed(r.PagerDutyRoutingKey)));
     }
 
     /// <summary>Whether any webhook value on the settings row needs the key.</summary>

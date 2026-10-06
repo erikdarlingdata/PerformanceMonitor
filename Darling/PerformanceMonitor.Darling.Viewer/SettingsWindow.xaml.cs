@@ -1431,6 +1431,24 @@ public partial class SettingsWindow : Window
     }
 
     /// <summary>
+    /// Whether this save changes a channel's proxy while a route holds a value sealed for the old proxy (#5366). A route list
+    /// that cannot be read says nothing: the save itself does not depend on it.
+    /// </summary>
+    private async Task<bool> RouteValuesNeedEnteringAgainAsync(NotificationRow row)
+    {
+        try
+        {
+            var routes = await _dataService!.GetNotificationRoutesAsync();
+            return ViewerWebhookSealing.RouteValuesNeedEnteringAgain(_loadedNotification, row, routes);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            ViewerLogger.Warn("SettingsWindow", "The routes could not be read to check them against a proxy change: " + ex.Message);
+            return false;
+        }
+    }
+
+    /// <summary>
     /// Decides the SMTP password for a save (#5366). A blank box keeps the stored value, and is refused when the host, port,
     /// SSL flag or user name changed (the stored password only opens for the settings it was sealed for). A typed password
     /// is sealed later, in <see cref="SealSmtpPasswordAsync"/>, once the service's key has been read; its text is checked here.
@@ -1624,8 +1642,26 @@ public partial class SettingsWindow : Window
         TestPagerDutyButton.IsEnabled = enabled;
     }
 
+    /// <summary>Shows why a Send Test cannot run when its box is blank because the value is saved (#5366). True when it was shown.</summary>
+    private static bool RefuseTestOfSavedValue(string? typed, string? stored, string label)
+    {
+        var text = ViewerWebhookSealing.CannotTestSavedValueText(typed, stored, label);
+        if (text is null)
+        {
+            return false;
+        }
+
+        MessageBox.Show(text, "Test Webhook", MessageBoxButton.OK, MessageBoxImage.Information);
+        return true;
+    }
+
     private async void TestPagerDutyButton_Click(object sender, RoutedEventArgs e)
     {
+        if (RefuseTestOfSavedValue(PagerDutyRoutingKeyBox.Text, _loadedNotification.PagerDutyRoutingKey, "PagerDuty routing key"))
+        {
+            return;
+        }
+
         TestPagerDutyButton.IsEnabled = false;
         TestPagerDutyButton.Content = "Sending...";
 
@@ -1657,6 +1693,11 @@ public partial class SettingsWindow : Window
 
     private async void TestTeamsButton_Click(object sender, RoutedEventArgs e)
     {
+        if (RefuseTestOfSavedValue(TeamsWebhookUrlBox.Text, _loadedNotification.TeamsUrl, "Teams webhook URL"))
+        {
+            return;
+        }
+
         TestTeamsButton.IsEnabled = false;
         TestTeamsButton.Content = "Sending...";
 
@@ -1688,6 +1729,11 @@ public partial class SettingsWindow : Window
 
     private async void TestSlackButton_Click(object sender, RoutedEventArgs e)
     {
+        if (RefuseTestOfSavedValue(SlackWebhookUrlBox.Text, _loadedNotification.SlackUrl, "Slack webhook URL"))
+        {
+            return;
+        }
+
         TestSlackButton.IsEnabled = false;
         TestSlackButton.Content = "Sending...";
 
@@ -1740,6 +1786,12 @@ public partial class SettingsWindow : Window
     /// </summary>
     private async void TestGenericButton_Click(object sender, RoutedEventArgs e)
     {
+        if (RefuseTestOfSavedValue(GenericWebhookUrlBox.Text, _loadedNotification.GenericUrl, "generic webhook URL")
+            || RefuseTestOfSavedValue(GenericWebhookHeadersBox.Text, _loadedNotification.GenericHeaders, "generic webhook headers"))
+        {
+            return;
+        }
+
         var url = GenericWebhookUrlBox.Text?.Trim() ?? "";
         var headers = GenericWebhookHeadersBox.Text?.Trim();
 
@@ -1876,10 +1928,18 @@ public partial class SettingsWindow : Window
                 }
 
                 await SealWebhookValuesAsync(notifyRow);
+                var routeValuesNeedEnteringAgain = await RouteValuesNeedEnteringAgainAsync(notifyRow);
                 await _dataService.UpsertAlertSettingsAsync(alertRow);
                 await _dataService.UpsertNotificationAsync(notifyRow);
                 await _dataService.UpdateServiceFlagsAsync(capturePlans, mcpEnabled, mcpPort, webEnabled, webPort,
                     QueryStoreBackfillCheckBox.IsChecked == true, textBudgetMb, maxSweeps);
+                if (routeValuesNeedEnteringAgain)
+                {
+                    /* The settings were saved; the routes' sealed values were bound to the old proxy (#5366). */
+                    MessageBox.Show(
+                        ViewerWebhookSealing.RouteValuesNeedEnteringAgainText,
+                        "Settings", MessageBoxButton.OK, MessageBoxImage.Warning);
+                }
             }
             catch (ViewerReadOnlyException ex)
             {

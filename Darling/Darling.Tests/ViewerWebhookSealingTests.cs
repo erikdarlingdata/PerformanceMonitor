@@ -168,4 +168,56 @@ public sealed class ViewerWebhookSealingTests
 
         Assert.Equal(stored.TeamsUrl, route.TeamsUrl);
     }
+
+    [Fact]
+    public void AChangedProxy_WithARouteValueSealedForTheOldProxy_SaysSoOnSave()
+    {
+        using var key = PasswordPrivateKey.Generate();
+        var stored = new NotificationRow { SlackProxy = "http://proxy.example:8080" };
+        var row = new NotificationRow { SlackProxy = "http://other-proxy.example:3128" };
+        var routes = new[]
+        {
+            new NotificationRouteRow { RouteId = 4, MetricMatch = "High CPU", SlackUrl = Seal(key, TeamsUrl, "slack", "route:4", "http://proxy.example:8080") },
+        };
+
+        Assert.True(ViewerWebhookSealing.RouteValuesNeedEnteringAgain(stored, row, routes));
+        Assert.Equal(
+            "Route webhook values were saved for the old proxy. Enter them again on each route.",
+            ViewerWebhookSealing.RouteValuesNeedEnteringAgainText);
+    }
+
+    [Fact]
+    public void AProxyChange_WithNoSealedRouteValueForThatChannel_SaysNothing()
+    {
+        using var key = PasswordPrivateKey.Generate();
+        var stored = new NotificationRow { SlackProxy = "http://proxy.example:8080", TeamsProxy = "" };
+        var row = new NotificationRow { SlackProxy = "http://other-proxy.example:3128", TeamsProxy = "" };
+        var routes = new[]
+        {
+            /* A Teams value (its proxy did not change) and a legacy plaintext Slack value (not bound to a proxy). */
+            new NotificationRouteRow { RouteId = 4, MetricMatch = "High CPU", TeamsUrl = Seal(key, TeamsUrl, "teams", "route:4") },
+            new NotificationRouteRow { RouteId = 5, MetricMatch = "Low Memory", SlackUrl = "https://example.test/slack-legacy" },
+        };
+
+        Assert.False(ViewerWebhookSealing.RouteValuesNeedEnteringAgain(stored, row, routes));
+        Assert.False(ViewerWebhookSealing.RouteValuesNeedEnteringAgain(null, row, routes));
+        Assert.False(ViewerWebhookSealing.RouteValuesNeedEnteringAgain(stored, stored, routes));
+    }
+
+    [Fact]
+    public void ABlankTestBox_ForASavedValue_SaysItCannotBeTested_AndATypedOrUnsavedOneGoesAhead()
+    {
+        using var key = PasswordPrivateKey.Generate();
+        var saved = Seal(key, TeamsUrl, "teams", "notification");
+
+        var text = ViewerWebhookSealing.CannotTestSavedValueText("", saved, "Teams webhook URL");
+
+        Assert.Equal(
+            "The Teams webhook URL is saved, and a saved value cannot be tested from here. Type the Teams webhook URL to test it.",
+            text);
+        Assert.DoesNotContain("sealed:", text, StringComparison.Ordinal);
+        Assert.Null(ViewerWebhookSealing.CannotTestSavedValueText(TeamsUrl, saved, "Teams webhook URL"));
+        Assert.Null(ViewerWebhookSealing.CannotTestSavedValueText("", "", "Teams webhook URL"));
+        Assert.Null(ViewerWebhookSealing.CannotTestSavedValueText("", "https://example.test/legacy-plaintext", "Teams webhook URL"));
+    }
 }
