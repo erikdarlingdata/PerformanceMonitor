@@ -62,7 +62,8 @@ public sealed class SensitiveStatementHostFilterTests : IDisposable
     public async Task TheHostsRealFilterList_WithholdsTheCanaryPrecisely_WithAndWithoutGcf(bool gcf)
     {
         Environment.SetEnvironmentVariable("DARLING_OUTPUT_FORMAT", gcf ? "gcf" : null);
-        using var server = await StatementFilterCensus.BuildHostAsync();
+        // gcf: null = the production wiring, the environment variable (#5320); the census default pins plain output
+        using var server = await StatementFilterCensus.BuildHostAsync(gcf: null);
         string raw = CanaryRows();
         StatementFilterCensus.AssertRawHoldsTheCanary(raw);
         if (gcf)
@@ -95,13 +96,71 @@ public sealed class SensitiveStatementHostFilterTests : IDisposable
         }
     }
 
+    /// <summary>#5320: the census host's format is pinned, so the environment variable (which another class in this
+    /// collection, or a live class running beside it, may have set) cannot change what a census answer looks like. Pinned
+    /// plain output returns a page with no hit byte for byte, while the variable says gcf.</summary>
+    [Fact]
+    public async Task APinnedPlainHost_ReturnsAPageWithNoHitUnchanged_EvenWhileTheEnvironmentSaysGcf()
+    {
+        Environment.SetEnvironmentVariable("DARLING_OUTPUT_FORMAT", "gcf");
+        using var server = await StatementFilterCensus.BuildHostAsync(gcf: false);
+        string clean = CleanRows();
+        Assert.NotNull(GcfOutput.TryEncode(clean)); // the precondition: an unpinned GCF host WOULD re-encode this page
+
+        var (text, isError) = await StatementFilterCensus.FilterThroughHostAsync(server, clean);
+
+        Assert.False(isError);
+        Assert.Equal(clean, text);
+    }
+
+    /// <summary>#5320: the other pin. GCF pinned ON re-encodes the answer whatever the variable says, the filter still
+    /// reads the tool's own JSON first (it sits next to the tool), and so a hit is still the marker after GCF encoding.</summary>
+    [Fact]
+    public async Task APinnedGcfHost_StillWithholdsTheCanary_AfterGcfEncoding_WhileTheEnvironmentIsUnset()
+    {
+        Environment.SetEnvironmentVariable("DARLING_OUTPUT_FORMAT", null);
+        using var server = await StatementFilterCensus.BuildHostAsync(gcf: true);
+        string raw = CanaryRows();
+        StatementFilterCensus.AssertRawHoldsTheCanary(raw);
+        Assert.NotNull(GcfOutput.TryEncode(raw));
+
+        var (text, isError) = await StatementFilterCensus.FilterThroughHostAsync(server, raw);
+
+        Assert.False(isError);
+        Assert.False(LooksLikeJson(text), "the pinned-on host did not GCF-encode the answer");
+        StatementFilterCensus.AssertFilteredWithholdsTheCanary(raw, text);
+        Assert.DoesNotContain("canary_ssf", text);
+        Assert.DoesNotContain("canary_split_ssf", text);
+        Assert.Equal(2, Count(text, Marker));
+        Assert.Equal(6, Count(text, "canary_plain_ssf"));
+    }
+
+    /// <summary>Eight uniform plain rows: nothing for the filter to withhold, and big enough for GCF to be smaller.</summary>
+    private static string CleanRows()
+    {
+        var rows = new JsonArray();
+        for (int i = 0; i < 8; i++)
+        {
+            rows.Add(new JsonObject
+            {
+                ["id"] = i,
+                ["database_name"] = "db_" + i,
+                ["query_text"] = StatementScrubCanary.PlainStatement,
+                ["duration_ms"] = 100 + i,
+            });
+        }
+
+        return new JsonObject { ["rows"] = rows }.ToJsonString();
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
     public async Task AnErrorResultThroughTheHostsRealFilterList_IsSwept_AndStaysAnError(bool gcf)
     {
         Environment.SetEnvironmentVariable("DARLING_OUTPUT_FORMAT", gcf ? "gcf" : null);
-        using var server = await StatementFilterCensus.BuildHostAsync();
+        // gcf: null = the production wiring, the environment variable (#5320); the census default pins plain output
+        using var server = await StatementFilterCensus.BuildHostAsync(gcf: null);
         string raw = new JsonObject
         {
             ["status"] = "error",
