@@ -197,6 +197,54 @@ public class SensitiveStatementXmlTests
         Assert.Equal("it's fine", doc.Descendants("After").Single().Value);
     }
 
+    [Fact]
+    public void InsideAScope_AValueHoldingABinaryLiteralIsWithheld_ExceptTheHashAndHandleAttributes()
+    {
+        const string xml =
+            "<r><StmtSimple StatementText=\"x CANARY\" QueryHash=\"0x0A1B2C3D4E5F6071\" QueryPlanHash=\"0x0A1B2C3D4E5F6072\" " +
+            "StatementSqlHandle=\"0x09000000AB\" ParameterizedPlanHandle=\"0x06000100AB\">" +
+            "<PlanAffectingConvert ConvertIssue=\"Seek Plan\" Expression=\"CONVERT_IMPLICIT(varbinary(64),[t].[h],0)=0x0200ABCD\"/>" +
+            "<RemoteQuery>SELECT 1 WHERE h = 0xDEADBEEF</RemoteQuery><Plain Note=\"index 0x is empty\" Cost=\"7\"/>" +
+            "<PlanHandle>0x05000100CD</PlanHandle></StmtSimple>" +
+            "<After><PlanAffectingConvert Expression=\"CONVERT_IMPLICIT(varbinary(64),[t].[h],0)=0x0200ABCD\"/><RemoteQuery>h = 0xDEADBEEF</RemoteQuery></After></r>";
+
+        var doc = XDocument.Parse(Run(xml)!);
+        var stmt = doc.Descendants("StmtSimple").Single();
+
+        Assert.Equal(P, (string?)doc.Descendants("PlanAffectingConvert").First().Attribute("Expression"));
+        Assert.Equal("Seek Plan", (string?)doc.Descendants("PlanAffectingConvert").First().Attribute("ConvertIssue"));
+        Assert.Equal(P, doc.Descendants("RemoteQuery").First().Value);
+        Assert.Equal("index 0x is empty", (string?)doc.Descendants("Plain").Single().Attribute("Note"));
+        Assert.Equal("0x0A1B2C3D4E5F6071", (string?)stmt.Attribute("QueryHash"));
+        Assert.Equal("0x0A1B2C3D4E5F6072", (string?)stmt.Attribute("QueryPlanHash"));
+        Assert.Equal("0x09000000AB", (string?)stmt.Attribute("StatementSqlHandle"));
+        Assert.Equal("0x06000100AB", (string?)stmt.Attribute("ParameterizedPlanHandle"));
+        Assert.Equal("0x05000100CD", doc.Descendants("PlanHandle").Single().Value);
+        // outside a withheld scope the value is kept (the judge does not name it)
+        Assert.Equal("CONVERT_IMPLICIT(varbinary(64),[t].[h],0)=0x0200ABCD",
+            (string?)doc.Descendants("PlanAffectingConvert").Last().Attribute("Expression"));
+        Assert.Equal("h = 0xDEADBEEF", doc.Descendants("RemoteQuery").Last().Value);
+    }
+
+    [Fact]
+    public void AnElementThatIsNotNamedStmtButCarriesAStatementText_OpensTheScope()
+    {
+        // The showplan schema names every statement element Stmt*; an element of another name that carries the
+        // statement attributes is read the same way, in both passes (the ordinals stay in step).
+        const string xml =
+            "<r><Wrapper StatementText=\"x CANARY\" Lit=\"'a'\"><Inner Lit=\"'b'\"/><ConstValue>7</ConstValue></Wrapper>" +
+            "<StmtSimple StatementText=\"SELECT 1\" Lit=\"'c'\"/><Other Lit=\"'d'\"/></r>";
+
+        var doc = XDocument.Parse(Run(xml)!);
+
+        Assert.Equal(P, (string?)doc.Descendants("Wrapper").Single().Attribute("StatementText"));
+        Assert.Equal(P, (string?)doc.Descendants("Wrapper").Single().Attribute("Lit"));
+        Assert.Equal(P, (string?)doc.Descendants("Inner").Single().Attribute("Lit"));
+        Assert.Equal(P, doc.Descendants("ConstValue").Single().Value);
+        Assert.Equal("'c'", (string?)doc.Descendants("StmtSimple").Single().Attribute("Lit"));
+        Assert.Equal("'d'", (string?)doc.Descendants("Other").Single().Attribute("Lit"));
+    }
+
     // ── other XML: reports, graphs, events ──
 
     [Fact]

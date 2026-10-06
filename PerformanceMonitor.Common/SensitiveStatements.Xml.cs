@@ -78,7 +78,13 @@ public static partial class SensitiveStatements
                 // so the document is withheld whole without asking the judge.
                 if (XmlRun.ProbeCouldHaveMattered(xml))
                     return placeholder;
-                return isNamed(WebUtility.HtmlDecode(xml)) ? placeholder : xml;
+                string decoded = WebUtility.HtmlDecode(xml);
+                if (isNamed(decoded))
+                    return placeholder;
+                // The parsed path judges the statement with each token put back; with no value to put back the
+                // token is N'?', so a statement the judge names that way is withheld here too.
+                string? probed = XmlRun.TokensAsPlaceholderValues(decoded);
+                return probed is not null && isNamed(probed) ? placeholder : xml;
             }
             catch (Exception)
             {
@@ -140,6 +146,38 @@ public static partial class SensitiveStatements
         };
 
         private static bool IsStmt(string localName) => localName.StartsWith("Stmt", StringComparison.Ordinal);
+
+        /// <summary>Whether the element the reader is on is a statement element: every statement element of the
+        /// showplan schema is named <c>Stmt*</c> (checked against the published schema, 2005 to 2022), and an element
+        /// of any other name that carries a <c>StatementText</c> or <c>ParameterizedText</c> attribute is read the
+        /// same way. Both passes ask this of the same element, so the statement ordinals stay in step.</summary>
+        private static bool IsStatementElement(XmlReader reader) =>
+            IsStmt(reader.LocalName)
+            || (reader.HasAttributes
+                && (reader.GetAttribute("StatementText") is not null || reader.GetAttribute("ParameterizedText") is not null));
+
+        /// <summary>The hash and handle attributes a plan keeps inside a withheld scope although their value is a
+        /// binary literal.</summary>
+        private static bool IsHashOrHandle(string localName) =>
+            localName == "QueryHash" || localName == "QueryPlanHash" || localName == "StatementSqlHandle"
+            || localName == "ParameterizedPlanHandle" || localName == "PlanHandle" || localName == "SqlHandle";
+
+        /// <summary>Whether <paramref name="value"/> holds <c>0x</c> followed by a hex digit: a binary literal, which
+        /// has no quote for the quote rule to find.</summary>
+        private static bool HoldsBinaryLiteral(string value)
+        {
+            for (int i = value.IndexOf('0'); i >= 0 && i + 2 < value.Length; i = value.IndexOf('0', i + 1))
+            {
+                if ((value[i + 1] == 'x' || value[i + 1] == 'X') && char.IsAsciiHexDigit(value[i + 2]))
+                    return true;
+            }
+            return false;
+        }
+
+        /// <summary>The withheld-scope rule for a value outside the H2 list: it holds a quote or a binary literal
+        /// (a hash or handle attribute is exempt from the second).</summary>
+        private static bool WithheldInScope(string name, string value) =>
+            value.Contains('\'') || (HoldsBinaryLiteral(value) && !IsHashOrHandle(name));
 
         /// <summary>Kept outside a withheld statement: the values a plan stores for its own parameters.</summary>
         private static bool IsExempt(string localName) =>
@@ -265,6 +303,25 @@ public static partial class SensitiveStatements
                 || xml.Contains("ParameterRuntimeValue", StringComparison.Ordinal))
             && HasToken(xml);
 
+        /// <summary><paramref name="text"/> with every auto-parameter token replaced by <c>N'?'</c>, or null when it
+        /// holds no token.</summary>
+        internal static string? TokensAsPlaceholderValues(string text)
+        {
+            var sb = new StringBuilder(text.Length + 16);
+            int copied = 0;
+            int from = 0;
+            bool any = false;
+            while (NextToken(text, ref from, out int start, out int end))
+            {
+                sb.Append(text, copied, start - copied).Append("N'?'");
+                copied = end;
+                any = true;
+            }
+            if (!any)
+                return null;
+            return sb.Append(text, copied, text.Length - copied).ToString();
+        }
+
         private static bool HasToken(string text)
         {
             int from = 0;
@@ -348,7 +405,7 @@ public static partial class SensitiveStatements
                         case XmlNodeType.Element:
                         {
                             string local = reader.LocalName;
-                            bool isStmt = IsStmt(local);
+                            bool isStmt = IsStatementElement(reader);
                             bool isColumn = readOn && parameterLists > 0 && local == "ColumnReference";
                             string? column = null, compiled = null, runtime = null, statementText = null;
                             if (reader.HasAttributes)
@@ -543,7 +600,7 @@ public static partial class SensitiveStatements
         private void WriteElement(XmlReader reader, XmlWriter writer, Stack<string> open, ref int scopeDepth)
         {
             string local = reader.LocalName;
-            bool isStmt = IsStmt(local);
+            bool isStmt = IsStatementElement(reader);
             int ordinal = isStmt ? ++_stmtOrdinal : 0;
             bool empty = reader.IsEmptyElement;
             int depth = reader.Depth;
@@ -619,7 +676,7 @@ public static partial class SensitiveStatements
                     return value;
                 return (knownVerdict ?? Judge(value)) ? _placeholder : value;
             }
-            if (IsScopeList(name) || value.Contains('\''))
+            if (IsScopeList(name) || WithheldInScope(name, value))
                 return _placeholder;
             return (knownVerdict ?? Judge(value)) ? _placeholder : value;
         }
@@ -627,7 +684,7 @@ public static partial class SensitiveStatements
         /// <summary>What a text or CDATA node is written as; <paramref name="parent"/> is its element's local name.</summary>
         private string TextValue(string value, string parent, bool inScope)
         {
-            if (inScope && (IsScopeList(parent) || value.Contains('\'')))
+            if (inScope && (IsScopeList(parent) || WithheldInScope(parent, value)))
                 return _placeholder;
             return Judge(value) ? _placeholder : value;
         }

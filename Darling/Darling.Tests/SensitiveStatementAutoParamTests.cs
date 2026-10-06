@@ -378,7 +378,26 @@ public class SensitiveStatementAutoParamTests
         Assert.DoesNotContain("ParameterCompiledValue", cut);
         Assert.DoesNotContain("ParameterRuntimeValue", cut);
 
-        Assert.Same(cut, Run(cut));
+        // a column the judge does not name: with every token put back as N'?' it still names nothing
+        string neutral = cut.Replace("[password]", "[note]", StringComparison.Ordinal);
+        Assert.Contains("[note] = @1", neutral);
+        Assert.Same(neutral, Run(neutral));
+    }
+
+    [Fact]
+    public void CutPlan_WithATokenAndNoParameterValues_IsJudgedWithTheTokensPutBackAsAPlaceholderValue()
+    {
+        // The stored text names nothing on its own (set [password] = @1); the parsed twin judges
+        // set [password] = N'?', names it, and withholds the statement's residual literals. The cut text has no
+        // parameter value to put back, but the same judgment applies.
+        string xml = Fixture("autoparam_update_prepared.xml");
+        string cut = xml.Substring(0, xml.IndexOf("<ParameterList>", StringComparison.Ordinal) + 8);
+        Assert.Contains("[password] = @1", cut);
+        Assert.False(StandIn(System.Net.WebUtility.HtmlDecode(cut)));
+        Assert.Equal(P, Run(cut));
+
+        const string issue = "<ShowPlanXML><StmtSimple StatementText=\"UPDATE [t] set [password] = @1 WHERE [note] LIKE N&apos;%abc%&apos;\"";
+        Assert.Equal(P, Run(issue));
     }
 
     // ── measurements: the walk's cost with the probe (printed; the ceilings are loose) ──
