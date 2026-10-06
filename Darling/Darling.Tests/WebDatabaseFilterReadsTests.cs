@@ -18,7 +18,7 @@ namespace Darling.Tests;
 /// <summary>
 /// <para>The server page's database filter (#5244, #5245) sorts every SQL Server read the page names into exactly one of four
 /// classes, in <c>wwwroot/js/database-filter-reads.js</c>: FILTERED (the route takes the chosen databases), UNFILTERED (a
-/// database-scoped read that cannot take them yet), IDENTITY (the query drill and the four plan-viewer reads, which take
+/// database-scoped read that cannot take them yet), IDENTITY (the query drill and the seven plan-viewer reads, which take
 /// <c>database_name</c> as a row's identity) and SERVER_WIDE (the data has no database). These tests hold the sorting
 /// together without Node, so they run where the harness behind <see cref="WebDatabaseFilterBehaviourTests"/> cannot.</para>
 ///
@@ -223,16 +223,16 @@ public sealed class WebDatabaseFilterReadsTests
         Assert.True(unknown.Length == 0, "database-filter-reads.js names reads the catalog does not have:\n" + string.Join("\n", unknown));
     }
 
-    /// <summary>The identity reads are the query drill and the four plan-viewer reads, and no others: the filter is never injected
-    /// into them, so a sixth would silently lose its panel's filter. The database-scoped reads are 34 in all (FILTERED and UNFILTERED
+    /// <summary>The identity reads are the query drill and the seven plan-viewer reads, and no others: the filter is never injected
+    /// into them, so a tenth would silently lose its panel's filter. The database-scoped reads are 34 in all (FILTERED and UNFILTERED
     /// together; moving a read from one to the other keeps the total), and FILTERED is a subset of what the plan filters: none of
     /// the three deadlock reads.</summary>
     [Fact]
-    public void TheIdentityReads_AreTheSixRowIdentityReads_AndTheDatabaseScopedReadsAreThirtyFour()
+    public void TheIdentityReads_AreTheNineRowIdentityReads_AndTheDatabaseScopedReadsAreThirtyFour()
     {
         var classes = Classes();
         Assert.Equal(
-            Sorted(new[] { "get_query_trend", "get_plan_xml", "get_query_store_plan_xml", "get_active_query_plan_xml", "get_procedure_plan_xml", "get_query_store_query_history" }),
+            Sorted(new[] { "get_query_trend", "get_plan_xml", "get_query_store_plan_xml", "get_active_query_plan_xml", "get_procedure_plan_xml", "get_query_store_query_history", "get_blocking_plan_xml", "get_deadlock_plan_xml", "get_query_repro_script" }),
             Sorted(classes["IDENTITY"]));
         Assert.Equal(34, classes["FILTERED"].Length + classes["UNFILTERED"].Length);
         Assert.DoesNotContain(classes["FILTERED"], read => read is "get_deadlock_trend" or "get_deadlocks" or "get_deadlock_detail");

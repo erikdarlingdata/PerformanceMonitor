@@ -127,7 +127,7 @@ public sealed class WebDatabaseFilterChipsBehaviourTests
     }
 
     /// <summary>With no filter, an emptied one, or off the server page, no panel draws a chip. A read that names a database as the
-    /// identity of a row (the query drill and the four plan-viewer reads) never draws one either, and neither does a panel with no
+    /// identity of a row (the query drill and the seven plan-viewer reads) never draws one either, and neither does a panel with no
     /// read of its own.</summary>
     [Fact]
     public void NoChipDrawsWithoutAnActiveFilter_OrForAnIdentityRead()

@@ -40,12 +40,14 @@ export const UNFILTERED = new Set([
   "get_deadlock_trend", "get_deadlocks", "get_deadlock_detail",
 ]);
 
-/** Reads that take `database_name` as the identity of a row, not as a filter: the query drill, the four plan-viewer
- *  reads and the Query Store History panel's read (#5300: one Query Store query, keyed by its database and query_id). The page
- *  always sends the row's own database, so the filter is never injected into them and they show no chip. */
+/** Reads that take `database_name` as the identity of a row, not as a filter: the query drill, the seven plan-viewer
+ *  reads (the four plan reads, the Blocking and Deadlocks grids' plan reads of #5236, and the repro script of #5233, which
+ *  name one stored row and send that row's own database, or none) and the Query Store History panel's read (#5300: one Query
+ *  Store query, keyed by its database and query_id). The page always sends the row's own database, so the filter is never
+ *  injected into them and they show no chip. */
 export const IDENTITY = new Set([
   "get_query_trend", "get_plan_xml", "get_query_store_plan_xml", "get_active_query_plan_xml", "get_procedure_plan_xml",
-  "get_query_store_query_history",
+  "get_query_store_query_history", "get_blocking_plan_xml", "get_deadlock_plan_xml", "get_query_repro_script",
 ]);
 
 /** Every other SQL Server read a module of the server page names: the data has no database, so the filter does not apply.

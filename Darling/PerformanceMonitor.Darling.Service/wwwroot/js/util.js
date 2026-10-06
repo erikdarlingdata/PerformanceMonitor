@@ -930,7 +930,7 @@ const DEADLOCK_READS = new Set(["get_deadlock_trend", "get_deadlocks", "get_dead
  *   "unfiltered"   a database-scoped read that cannot take it, so it shows every database
  *   "server"       the data has no database
  *   "process-rows" the Deadlock Graphs panel: each graph whole, its process rows filtered in the browser
- *   null           an identity read (the query drill and the four plan-viewer reads), or a read no class names
+ *   null           an identity read (the query drill and the seven plan-viewer reads), or a read no class names
  */
 export function dbScopeState(read, override) {
   if (!liveDatabaseFilter()) return null;

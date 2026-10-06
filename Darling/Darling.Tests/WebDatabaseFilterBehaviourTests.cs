@@ -260,6 +260,7 @@ public sealed class WebDatabaseFilterBehaviourTests
         var scopes = r.GetProperty("scopes");
         Assert.Equal(3, scopes.GetProperty("UNFILTERED").GetInt32());
         /* Six since #5300: the Query Store History panel's read is one query's own rows, keyed by its database and query_id. */
-        Assert.Equal(6, scopes.GetProperty("IDENTITY").GetInt32());
+        /* Nine since the Blocking and Deadlocks plan reads (#5236) and the repro script (#5233) joined the plan viewer: each names one stored row. */
+        Assert.Equal(9, scopes.GetProperty("IDENTITY").GetInt32());
     }
 }
