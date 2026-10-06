@@ -5513,7 +5513,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                for the identical reason - rather than silently dropping to the new MCP default. 200 is well
                under both McpHelpers.MaxTop and MaxRowLimit (1000 each), so the value is never refused or
                reclamped by either validation layer. */
-            ["get_object_locking"] = (c, pg, an) => DarlingMcpObjectStatsTools.GetObjectLocking(pg, Server(c), Rows(c, "limit", 200), registryState, c.RequestAborted),
+            ["get_object_locking"] = (c, pg, an) => DarlingMcpObjectStatsTools.GetObjectLockingWithHeatAsync(pg, Server(c), Rows(c, "limit", 200), registryState, DatabaseFilter.All, c.RequestAborted),
             ["get_table_index_sizes"] = (c, pg, an) => DarlingMcpObjectStatsTools.GetTableIndexSizes(pg, Server(c), cancellationToken: c.RequestAborted),
 
             /* ── plan cache / scheduler ── */

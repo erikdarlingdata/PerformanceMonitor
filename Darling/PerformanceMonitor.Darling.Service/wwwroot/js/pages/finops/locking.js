@@ -19,6 +19,13 @@ import { el, mount } from "../../util.js";
 import { renderPanel } from "../../panels.js";
 import { databaseBox, newBoxChoice } from "./database-box.js";
 
+/* #5311: the four wait columns are shaded the desktop's way. The service bands each column over the rows it returns and
+   sends `heat: [row lock, page lock, page latch, page I/O latch]` (a band 0 to 7, or null for no shade); the browser only
+   turns the band it was given into the existing .heat-band-N class and computes nothing. */
+function heatClass(i) {
+  return (row) => (Array.isArray(row.heat) && Number.isInteger(row.heat[i]) ? "heat-band-" + row.heat[i] : null);
+}
+
 const LOCKING_COLUMNS = [
   { key: "database_name", label: "Database" },
   { key: "schema_name", label: "Schema" },
@@ -28,12 +35,12 @@ const LOCKING_COLUMNS = [
   { key: "reserved_mb", label: "Reserved (MB)", format: "num1" },
   { key: "total_rows", label: "Rows", format: "int" },
   { key: "row_lock_wait_count", label: "Row lock waits", format: "int" },
-  { key: "row_lock_wait_ms", label: "Row lock wait", format: "ms" },
+  { key: "row_lock_wait_ms", label: "Row lock wait", format: "ms", cellClass: heatClass(0) },
   { key: "page_lock_wait_count", label: "Page lock waits", format: "int" },
-  { key: "page_lock_wait_ms", label: "Page lock wait", format: "ms" },
+  { key: "page_lock_wait_ms", label: "Page lock wait", format: "ms", cellClass: heatClass(1) },
   { key: "lock_escalations", label: "Escalations", format: "int" },
-  { key: "page_latch_wait_ms", label: "Page latch", format: "ms" },
-  { key: "page_io_latch_wait_ms", label: "Page IO latch", format: "ms" },
+  { key: "page_latch_wait_ms", label: "Page latch", format: "ms", cellClass: heatClass(2) },
+  { key: "page_io_latch_wait_ms", label: "Page IO latch", format: "ms", cellClass: heatClass(3) },
 ];
 
 // The latest choice per server: the Database box's fields (db, draft, caret, focused, names, ...).

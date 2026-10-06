@@ -51,7 +51,7 @@ public sealed class FinOpsTabLockingPageTests
         var src = ToolSource();
         var start = src.IndexOf("internal static async Task<string> GetObjectLockingCoreAsync(", System.StringComparison.Ordinal);
         Assert.True(start >= 0, "GetObjectLockingCoreAsync not found");
-        var end = src.IndexOf("objects = result", start, System.StringComparison.Ordinal);
+        var end = src.IndexOf("objects = objectRows", start, System.StringComparison.Ordinal);
         Assert.True(end > start, "the end of the get_object_locking projection was not found");
         return src.Substring(start, end - start);
     }

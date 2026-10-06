@@ -295,6 +295,51 @@ public sealed class DarlingMcpObjectStatsTools
         separate is not null
         && (databases.IsAll || separate.Any(sep => databases.Names.Contains(sep, StringComparer.OrdinalIgnoreCase)));
 
+    /// <summary>How many discrete bands a Locking cell's shade falls into: the web's <c>.heat-band-0</c> to <c>.heat-band-7</c> classes.</summary>
+    internal const int ObjectLockingHeatBandCount = 8;
+
+    /// <summary>
+    /// #5311: the four shaded columns' bands for each row, <c>[row lock, page lock, page latch, page I/O latch]</c>, the
+    /// desktop's way (<c>FinOpsTab.Locking</c>'s <c>ApplyLockingHeat</c>): each column on its OWN log scale over the rows
+    /// given (<see cref="FinOpsHeatmapBuilder.ColumnLogIntensities"/>), then the intensity cut into
+    /// <see cref="ObjectLockingHeatBandCount"/> bands (<c>floor(intensity * count)</c>, the top one reached at the column's
+    /// largest). A zero value has no band (null): the desktop leaves it unshaded.
+    /// </summary>
+    internal static int?[][] ObjectLockingHeatBands(IReadOnlyList<DarlingObjectStatsReader.IndexLockingRow> rows)
+    {
+        static int?[] Band(double[] intensities) =>
+            intensities.Select(i => i > 0 ? (int?)Math.Clamp((int)Math.Floor(i * ObjectLockingHeatBandCount), 0, ObjectLockingHeatBandCount - 1) : null).ToArray();
+        var rowLock = Band(FinOpsHeatmapBuilder.ColumnLogIntensities(rows.Select(r => r.RowLockWaitInMs).ToList()));
+        var pageLock = Band(FinOpsHeatmapBuilder.ColumnLogIntensities(rows.Select(r => r.PageLockWaitInMs).ToList()));
+        var pageLatch = Band(FinOpsHeatmapBuilder.ColumnLogIntensities(rows.Select(r => r.PageLatchWaitInMs).ToList()));
+        var pageIo = Band(FinOpsHeatmapBuilder.ColumnLogIntensities(rows.Select(r => r.PageIoLatchWaitInMs).ToList()));
+        return rows.Select((_, i) => new[] { rowLock[i], pageLock[i], pageLatch[i], pageIo[i] }).ToArray();
+    }
+
+    /// <summary>#5311: each serialized row with its <c>heat</c> list added (web only).</summary>
+    private static IEnumerable<object> WithHeat(IEnumerable<object> rows, int?[][] heat) =>
+        rows.Select((row, i) =>
+        {
+            var node = JsonSerializer.SerializeToNode(row, McpHelpers.JsonOptions)!.AsObject();
+            node["heat"] = JsonSerializer.SerializeToNode(heat[i], McpHelpers.JsonOptions);
+            return (object)node;
+        }).ToList();
+
+    /// <summary>
+    /// The web Locking page's read (#5311): <c>get_object_locking</c>'s answer for <paramref name="databases"/> with each
+    /// row's <c>heat</c> bands added, computed over the filtered, capped page. The MCP tool never calls this, so its
+    /// schema and payload stay as they were.
+    /// </summary>
+    internal static async Task<string> GetObjectLockingWithHeatAsync(
+        NpgsqlDataSource postgres, string? server_name, int limit, MonitoredServerRegistryState? registryState,
+        DatabaseFilter databases, CancellationToken cancellationToken)
+    {
+        var validation = McpHelpers.ValidateTop(limit);
+        if (validation != null) return validation;
+
+        return await GetObjectLockingCoreAsync(postgres, server_name, limit, registryState, null, cancellationToken, databases, heat: true);
+    }
+
     [McpServerTool(Name = "get_object_locking"), Description("Gets per-index locking and latch contention (row/page lock waits in ms, lock escalations, page-latch and page-IO-latch waits) from the latest daily snapshot, top contended objects first. Use to find tables/indexes driving blocking and contention. Counters are cumulative since the last instance restart. LATEST IS A TIME: this reads the newest index/object snapshot for the server, not a window, and captured_at is the instant it was collected - these are the databases and indexes that existed AT that stamp, and because object stats are collected DAILY the stamp can be most of a day old on a healthy server and older still on one whose collector has stalled.")]
     public static async Task<string> GetObjectLocking(
         NpgsqlDataSource postgres,
@@ -323,7 +368,7 @@ public sealed class DarlingMcpObjectStatsTools
     internal static async Task<string> GetObjectLockingCoreAsync(
         NpgsqlDataSource postgres, string? server_name, int limit, MonitoredServerRegistryState? registryState,
         Func<int, CancellationToken, Task<IReadOnlyList<string>?>>? resolver, CancellationToken cancellationToken,
-        DatabaseFilter databases = default)
+        DatabaseFilter databases = default, bool heat = false)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
@@ -388,6 +433,10 @@ public sealed class DarlingMcpObjectStatsTools
                 page_io_latch_wait_ms = r.PageIoLatchWaitInMs
             });
 
+            /* #5311: the web page's heat shading. Banded over THIS page (the filtered, capped rows), then each row
+               gains `heat`; the MCP call never asks for it, so its rows keep exactly the fields above. */
+            IEnumerable<object> objectRows = heat ? WithHeat(result, ObjectLockingHeatBands(rows)) : result;
+
             return JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
@@ -412,7 +461,7 @@ public sealed class DarlingMcpObjectStatsTools
                     : $"Complete: every index with lock/latch contention{inScope} at the latest snapshot is included.",
                 optimized_locking_note = optimizedLockingNote,
                 separately_monitored_note = separatelyMonitoredNote,
-                objects = result
+                objects = objectRows
             }, McpHelpers.JsonOptions);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
