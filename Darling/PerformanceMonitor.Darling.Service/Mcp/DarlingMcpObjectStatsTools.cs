@@ -345,13 +345,16 @@ public sealed class DarlingMcpObjectStatsTools
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Maximum rows to return. Default 75.")] int limit = ObjectLockingTop,
+        [Description("Limit to one database. Omit for all databases.")] string? database_name = null,
         MonitoredServerRegistryState? registryState = null,
         CancellationToken cancellationToken = default)
     {
         var validation = McpHelpers.ValidateTop(limit);
         if (validation != null) return validation;
 
-        return await GetObjectLockingCoreAsync(postgres, server_name, limit, registryState, null, cancellationToken, databases: DatabaseFilter.All);
+        /* #5231: database_name is the LAST schema parameter (the two after it are injected, not in the schema), the
+           shape Lite's twin has. Blank or whitespace means no filter, exactly as get_index_usage reads it. */
+        return await GetObjectLockingCoreAsync(postgres, server_name, limit, registryState, null, cancellationToken, DatabaseFilter.One(database_name));
     }
 
     /// <summary>

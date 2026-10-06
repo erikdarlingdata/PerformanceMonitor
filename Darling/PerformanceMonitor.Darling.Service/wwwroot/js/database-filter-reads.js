@@ -16,6 +16,9 @@ export const FILTERED = new Set([
   // Top queries, procedures, active queries, Query Store and the heatmap.
   "get_top_queries_by_cpu", "get_top_procedures_by_cpu", "get_active_queries", "get_query_store_top",
   "get_query_store_regressions", "get_query_heatmap",
+  // Object contention and index usage (#5231 PR2): the Locking page reads both. The Locking row's detail request
+  // (the `detail_*` selector) names its own database and ignores the injected filter.
+  "get_object_locking", "get_index_usage",
 ]);
 
 /** Database-scoped reads that cannot take the filter yet, so they show every database and say so (the "All databases"
@@ -23,8 +26,6 @@ export const FILTERED = new Set([
  *  deadlock reads, which stay unfiltered on purpose (as on the desktop): a deadlock spans several databases, and they are
  *  inside each deadlock graph. The groups follow the page that moves each read into FILTERED. */
 export const UNFILTERED = new Set([
-  // Object contention and index usage.
-  "get_object_locking", "get_index_usage",
   // Blocking.
   "get_blocking_trend", "get_waiting_tasks", "get_blocking", "get_current_waits_trend", "get_blocking_stats",
   "get_blocked_process_xml",

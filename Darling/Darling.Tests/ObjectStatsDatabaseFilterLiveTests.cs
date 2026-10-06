@@ -12,10 +12,12 @@ using System.Linq;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.AspNetCore.Http;
 using Npgsql;
 using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
@@ -326,6 +328,90 @@ public sealed class ObjectStatsDatabaseFilterLiveTests
             var singleMessage = single.GetProperty("message").GetString()!;
             Assert.Contains($"No index usage rows for database '{A}' on", singleMessage, StringComparison.Ordinal);
             Assert.Contains("Check the database name against get_database_sizes", singleMessage, StringComparison.Ordinal);
+        }, Cleanup);
+
+    // ---------------------------------------------------------------- #5231 PR2 lane W2: the web dispatch and the MCP parameter
+
+    /// <summary>A read through the web dispatch, one <c>database_name</c> key per chosen database.</summary>
+    private static async Task<string> WebReadAsync(NpgsqlDataSource postgres, string read, string serverName, params string[] databases)
+    {
+        var query = new List<KeyValuePair<string, string?>> { new("server_name", serverName) };
+        query.AddRange(databases.Select(d => new KeyValuePair<string, string?>("database_name", d)));
+        var context = new DefaultHttpContext();
+        context.Request.QueryString = QueryString.Create(query);
+        return await DarlingWebEndpoints.BuildReadDispatch()[read](context, postgres, null!);
+    }
+
+    [Theory]
+    [InlineData("get_object_locking", "objects")]
+    [InlineData("get_index_usage", "indexes")]
+    public Task WebDispatch_TwoRepeatedDatabaseNameKeys_ReturnOnlyThoseDatabasesRows(string read, string property) =>
+        WithStoreAsync("obj-filter-web-" + read, async (connection, postgres, serverId, serverName, now, ct) =>
+        {
+            await SeedThreeAsync(connection, ct, serverId, serverName, now);
+
+            /* RED on base: the dispatch ignored the keys (get_object_locking passed All; get_index_usage read one name). */
+            var two = JsonDocument.Parse(await WebReadAsync(postgres, read, serverName, A, B)).RootElement;
+            Assert.Equal([A, B], JsonDatabases(two, property));
+
+            var one = JsonDocument.Parse(await WebReadAsync(postgres, read, serverName, C)).RootElement;
+            Assert.Equal([C], JsonDatabases(one, property));
+
+            /* No key is every database; the same name twice is one database. */
+            Assert.Equal([A, B, C], JsonDatabases(JsonDocument.Parse(await WebReadAsync(postgres, read, serverName)).RootElement, property));
+            Assert.Equal([B], JsonDatabases(JsonDocument.Parse(await WebReadAsync(postgres, read, serverName, B, B)).RootElement, property));
+
+            /* A blank-only list is refused, never widened to "all databases". */
+            var refused = JsonDocument.Parse(await WebReadAsync(postgres, read, serverName, "  ", "")).RootElement;
+            Assert.Equal("invalid", refused.GetProperty("status").GetString());
+        }, Cleanup);
+
+    [Fact]
+    public Task WebLockingDispatch_TheHeatBandsAreComputedOverTheFilteredRows_AndTheDetailSelectorIgnoresTheFilter() =>
+        WithStoreAsync("obj-filter-web-heat", async (connection, postgres, serverId, serverName, now, ct) =>
+        {
+            await SeedThreeAsync(connection, ct, serverId, serverName, now);
+
+            /* C holds the largest waits. Unfiltered, A and B's small waits band low; filtered to A and B, the largest of THEM
+               takes a higher band, so the bands moved with the filter. */
+            int TopBand(JsonElement root, string database) => root.GetProperty("objects").EnumerateArray()
+                .Where(r => r.GetProperty("database_name").GetString() == database)
+                .Max(r => r.GetProperty("heat")[0].GetInt32());
+            var unfiltered = JsonDocument.Parse(await WebReadAsync(postgres, "get_object_locking", serverName)).RootElement;
+            var filtered = JsonDocument.Parse(await WebReadAsync(postgres, "get_object_locking", serverName, A, B)).RootElement;
+            Assert.True(TopBand(filtered, A) > TopBand(unfiltered, A),
+                $"A's top row-lock band was {TopBand(unfiltered, A)} over every database and {TopBand(filtered, A)} over A and B");
+
+            /* The detail read names its own database: a database_name key beside it is ignored. */
+            var query = new List<KeyValuePair<string, string?>>
+            {
+                new("server_name", serverName), new("database_name", B),
+                new("detail_database", A), new("detail_schema", "dbo"), new("detail_table", "T_IX_a1"), new("detail_index", "IX_a1"),
+            };
+            var context = new DefaultHttpContext();
+            context.Request.QueryString = QueryString.Create(query);
+            var detail = JsonDocument.Parse(await DarlingWebEndpoints.BuildReadDispatch()["get_object_locking"](context, postgres, null!)).RootElement;
+            Assert.Equal(A, detail.GetProperty("detail").GetProperty("database_name").GetString());
+        }, Cleanup);
+
+    [Fact]
+    public Task ObjectLockingTool_DatabaseName_LimitsTheAnswerToThatDatabase_BlankMeansAll() =>
+        WithStoreAsync("obj-filter-locking-param", async (connection, postgres, serverId, serverName, now, ct) =>
+        {
+            await SeedThreeAsync(connection, ct, serverId, serverName, now);
+
+            var one = JsonDocument.Parse(await DarlingMcpObjectStatsTools.GetObjectLocking(postgres, serverName, database_name: A, cancellationToken: ct)).RootElement;
+            Assert.Equal([A], JsonDatabases(one, "objects"));
+            Assert.Equal(2, one.GetProperty("objects").GetArrayLength());
+
+            foreach (var blank in new string?[] { null, "", "   " })
+            {
+                var all = JsonDocument.Parse(await DarlingMcpObjectStatsTools.GetObjectLocking(postgres, serverName, database_name: blank, cancellationToken: ct)).RootElement;
+                Assert.Equal([A, B, C], JsonDatabases(all, "objects"));
+            }
+
+            /* The positional shape the tool has always had still means "every database". */
+            Assert.Equal([A, B, C], JsonDatabases(JsonDocument.Parse(await DarlingMcpObjectStatsTools.GetObjectLocking(postgres, serverName, 75)).RootElement, "objects"));
         }, Cleanup);
 
     private static async Task WithStoreAsync(

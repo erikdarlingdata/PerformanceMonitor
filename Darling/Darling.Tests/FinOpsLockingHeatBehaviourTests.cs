@@ -87,7 +87,7 @@ public sealed class FinOpsLockingHeatBehaviourTests
     [Fact]
     public void TheTabSource_ComputesNoBand_ItOnlyNamesTheClassFromTheRow()
     {
-        var js = ReadRepoFileLf("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "finops", "locking.js");
+        var js = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "finops", "locking.js");
         Assert.DoesNotMatch(new Regex(@"Math\.(log|floor|max|min|round|ceil)", RegexOptions.None, TimeSpan.FromSeconds(5)), js);
         Assert.Equal(4, Regex.Matches(js, @"cellClass: heatClass\([0-3]\)", RegexOptions.None, TimeSpan.FromSeconds(5)).Count);
     }

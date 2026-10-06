@@ -240,7 +240,9 @@ public sealed class McpToolsListBudgetTests
     /* #5233 merged with dev 2c60dcae2 (#5236 plan reads, #5301, #5322): both sides added a tool, so neither ceiling was taken.
        Re-measured on the merged tree by ToolsList_TotalBytes_IsAtOrUnderTheCeiling: 195,143 bytes, 181 tools (dev 180 plus get_query_repro_script; dev's ceiling was 193,975, this PR's was 192,981). The repro tool's own pre-merge delta was
        191,814 -> 192,981 (+1,167), 178 -> 179 tools. Constant set to the measured value, not the deltas added by hand. */
-    private const int TotalCeilingBytes = 195_143;
+    /* #5231 PR2 (W2): get_object_locking gains database_name (the 46-character shared sentence, as Lite's twin): 195,143 -> 195,240 bytes (+97), 181 tools.
+       Constant set to the measured value. */
+    private const int TotalCeilingBytes = 195_240;
 
 
 

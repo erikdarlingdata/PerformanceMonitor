@@ -90,7 +90,8 @@ public sealed class DarlingMcpObjectStatsToolsSurfaceAndSqlTests
     {
         var p = McpParams("get_object_locking");
 
-        Assert.Equal(new[] { "server_name", "limit" }, p.Select(x => x.Name).ToArray());
+        /* #5231 PR2: database_name is appended LAST (Lite's twin has it too), and optional like the others. */
+        Assert.Equal(new[] { "server_name", "limit", "database_name" }, p.Select(x => x.Name).ToArray());
         Assert.All(p, x => Assert.True(x.Optional, $"{x.Name} must stay optional — existing callers pass neither"));
     }
 
