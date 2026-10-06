@@ -470,6 +470,11 @@ builder.Services.AddSingleton<WebRuntimeState>();
    log line ever reported its expiry). */
 builder.Services.AddSingleton<WebTlsCertificateState>();
 
+/* #5288: the MCP listener's twin of the seam above, a SEPARATE singleton so each listener publishes and
+   clears only its own certificate: a web restart can never clear or resolve an MCP alert, and a certificate
+   both listeners serve is published to both and alerts (and resolves) twice, independently. */
+builder.Services.AddSingleton<McpTlsCertificateState>();
+
 /* #2298: the worker-published monitored-server registry the MCP host's plan-fetch resolver reads,
    replacing its own mcp-role re-read of rows whose encrypted_password column that role is
    deliberately denied. */

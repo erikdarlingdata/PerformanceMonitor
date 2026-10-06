@@ -422,7 +422,10 @@ public sealed class SelfAlertFailedSendCensusTests
     [InlineData("ApplyCustomRuleHealthAsync", 0, "CustomRuleHealthMetric", "SharedCooldown")]
     [InlineData("ApplyStaleMuteRulesAsync", 0, "StaleMuteMetric", "StaleMuteRefire")]
     [InlineData("ApplyStoreSettingsAsync", 0, "StoreSettingsMetric", "StoreSettingsRefire")]
-    [InlineData("ApplyWebTlsCertificateAsync", 0, "WebTlsCertExpiryMetric", "WebTlsCertRefire")]
+    /* #5288: the web and MCP certificate alerts are one body, ApplyListenerTlsCertificateAsync, which fires and
+       reports under its listener descriptor's metric (the band.Metric precedent below), so ONE row covers both
+       listeners. The interval is still the shared daily WebTlsCertRefire. */
+    [InlineData("ApplyListenerTlsCertificateAsync", 0, "tls.ExpiryMetric", "WebTlsCertRefire")]
     [InlineData("ApplyFleetGateAsync", 0, "FleetGateMetric", "SharedCooldown")]
     [InlineData("ApplyStoreJobCadenceAsync", 0, "JobCadenceMetric", "SharedCooldown")]
     [InlineData("ApplyRetentionHoldsAsync", 0, "RetentionHoldMetric", "SharedCooldown")]

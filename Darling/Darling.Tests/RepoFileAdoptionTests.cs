@@ -133,6 +133,10 @@ public sealed class RepoFileAdoptionTests
         /* #4887: its StoredEventCopies census takes each helper's table from that class's own source, on an anchor
            that runs from the helper's `=>` across the line break to the `Read("v_` on the next line. */
         "ConsumedTimestampFrameDisciplineTests.cs",
+        /* #5288: its host-source pins slice TryStartServerAsync and the release methods out of
+           DarlingMcpHostService.cs and anchor on the line break and indent that close a block (the
+           `if (networkMode)` gate), which a CRLF checkout spells differently. */
+        "DarlingMcpHostTests.cs",
         "DarlingPathFilterGateTests.cs",
         /* #3653 (A8e, PostgreSQL host): its per-arm fire-site pin anchors `Severity: null,` on the line break
            that follows it, so the CODE spelling is told apart from the same words inside the arms' own

@@ -196,14 +196,70 @@ public sealed class HostHeaderGuardTests
            AFTER TryStartServerAsync's own unrelated "if (networkMode)" (its post-start logging branch) —
            so the FIRST "if (networkMode)" after Build() is no longer necessarily the one that gates the
            auth middleware. Searching from the guard's own position finds the auth-gating conditional that
-           actually follows it in the same method, which is the invariant this test claims either way. */
-        var networkOnly = afterBuild.IndexOf("if (networkMode)", guard, StringComparison.Ordinal);
+           actually follows it in the same method, which is the invariant this test claims either way.
+           #5288: the prefix, not the whole condition, because the auth gate also installs on the loopback-only
+           server that network mode fell back to (if (networkMode || requireTokenWhenLoopbackOnly)). */
+        var networkOnly = afterBuild.IndexOf("if (networkMode", guard, StringComparison.Ordinal);
 
         Assert.True(networkOnly >= 0, "expected a network-mode-only middleware block to exist after the guard");
         Assert.True(
             guard < networkOnly,
             "the Host-header guard must be registered BEFORE the network-mode-only block — inside it, the " +
             "tokenless loopback bind is left unguarded, which is issue #1648.");
+    }
+
+    /// <summary>
+    /// #5288: a start that network mode degraded out of after its token resolved (a refused TLS certificate) keeps the
+    /// token gate on the loopback-only server. The behavior is proven through <c>ConfigurePipeline</c> in
+    /// <c>DarlingMcpHostGateLiveTests</c> and <c>DarlingWebHostGateLiveTests</c>
+    /// (<c>TlsRefusal_DegradedLoopbackServer_StillRequiresTheToken</c>); this pins the host's own glue, which a
+    /// network-mode start cannot drive from a test: the flag is derived from the FINAL mode and the token local (set
+    /// only once the token resolved, so a start with no network block, or an unreadable token, leaves it false), after
+    /// the TLS decision, and is handed to the pipeline.
+    /// </summary>
+    [Theory]
+    [InlineData("DarlingMcpHostService.cs", "bearerToken")]
+    [InlineData("DarlingWebHostService.cs", "accessToken")]
+    public void TlsRefusal_TheHostHandsThePipelineTheTokenFlag_DerivedFromTheFinalMode(string fileName, string tokenLocal)
+    {
+        var source = ReadHostSource(fileName);
+
+        var tlsDecision = source.IndexOf("networkMode = tlsOutcome.Expose;", StringComparison.Ordinal);
+        var flag = source.IndexOf(
+            $"var requireTokenWhenLoopbackOnly = !networkMode && {tokenLocal}.Length > 0;", StringComparison.Ordinal);
+        var call = source.IndexOf("ConfigurePipeline(_app,", StringComparison.Ordinal);
+
+        Assert.True(
+            tlsDecision > 0 && flag > tlsDecision && call > flag,
+            $"{fileName}: the token flag must be derived after the TLS decision and before the pipeline call");
+
+        var callText = source[call..source.IndexOf(';', call)];
+        Assert.EndsWith(", requireTokenWhenLoopbackOnly)", callText, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #5288: a start that network mode degraded out of listens on loopback only, so its Host guard admits loopback
+    /// names only. The behavior is proven through <c>ConfigurePipeline</c> in <c>DarlingMcpHostGateLiveTests</c> and
+    /// <c>DarlingWebHostGateLiveTests</c> (<c>TlsRefusal_DegradedLoopbackServer_AdmitsLoopbackNamesOnly_NotTheListenAddress</c>),
+    /// which build the pipeline through <c>ResolveHostGuardListenIp</c> with the final mode; this pins the host's own
+    /// glue, which a network-mode start cannot drive from a test: the pipeline call hands over the resolver's answer,
+    /// decided after the TLS decision, and never the parsed address itself.
+    /// </summary>
+    [Theory]
+    [InlineData("DarlingMcpHostService.cs", "ResolveHostGuardListenIp(networkMode, networkListenIp)")]
+    [InlineData("DarlingWebHostService.cs", "DarlingMcpHostService.ResolveHostGuardListenIp(networkMode, networkListenIp)")]
+    public void TlsRefusal_TheHostHandsThePipelineTheGuardAddress_DecidedFromTheFinalMode(string fileName, string resolverCall)
+    {
+        var source = ReadHostSource(fileName);
+
+        var tlsDecision = source.IndexOf("networkMode = tlsOutcome.Expose;", StringComparison.Ordinal);
+        var call = source.IndexOf("ConfigurePipeline(_app,", StringComparison.Ordinal);
+        Assert.True(tlsDecision > 0 && call > tlsDecision, $"{fileName}: the pipeline call must come after the TLS decision");
+
+        var callText = source[call..source.IndexOf(';', call)];
+        Assert.Contains(resolverCall, callText, StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "networkListenIp", callText.Replace(resolverCall, string.Empty, StringComparison.Ordinal), StringComparison.Ordinal);
     }
 
     /// <summary>And it must precede the endpoint mapping, or a request reaches a handler before being judged.</summary>
@@ -313,5 +369,49 @@ public sealed class HostHeaderGuardTests
             stateless > transport && configure > stateless,
             "options.Stateless = true must be set in the same WithHttpTransport block as ConfigureSessionOptions");
         Assert.False(source.Contains("Stateless = false", StringComparison.Ordinal), "the MCP transport must stay stateless while /core is mapped");
+    }
+
+    /// <summary>
+    /// #5288, review F2: the MCP host's extra Host name (<c>mcp.network.hostName</c>) is admitted in NETWORK mode
+    /// only. The rule lives in <c>ResolveAllowedHostName</c>, so the wiring this pins is that
+    /// <c>TryStartServerAsync</c> hands <c>ConfigurePipeline</c> exactly that method's answer, decided from
+    /// <c>networkMode</c> after the last place it can change (nothing assigns it afterwards), and that the raw
+    /// config value is normalized nowhere else in the host. A call site that passed the config value straight
+    /// through would admit the name on the tokenless loopback surface while every behavioral test of the helper
+    /// stayed green, because the live gate test builds its own pipeline through the helper and cannot see this.
+    /// </summary>
+    [Fact]
+    public void McpHost_HostNameReachesThePipeline_OnlyThroughTheNetworkModeGate()
+    {
+        var source = ReadHostSource("DarlingMcpHostService.cs");
+
+        var build = source.IndexOf("_app = builder.Build();", StringComparison.Ordinal);
+        var callStart = source.IndexOf("ConfigurePipeline(_app,", StringComparison.Ordinal);
+        Assert.True(build >= 0 && callStart > build, "ConfigurePipeline is no longer called after Build() - this test needs rewriting");
+
+        var call = source[callStart..source.IndexOf(';', callStart)];
+        Assert.EndsWith(", allowedHostName, requireTokenWhenLoopbackOnly)", call, StringComparison.Ordinal);
+
+        var decision = System.Text.RegularExpressions.Regex.Match(
+            source[build..callStart],
+            @"var allowedHostName = ResolveAllowedHostName\(\s*config\.Mcp\.Network\?\.HostName\s*,\s*networkMode\s*,");
+        Assert.True(
+            decision.Success,
+            "the name must be decided by ResolveAllowedHostName(config.Mcp.Network?.HostName, networkMode, ...) between Build() and the ConfigurePipeline call");
+
+        // networkMode is final by the decision: no assignment to it follows.
+        Assert.DoesNotMatch(@"\bnetworkMode\s*=[^=]", source[(build + decision.Index)..]);
+
+        // The raw value is normalized in one place: that one call sits inside the host's NormalizedHostName wrapper,
+        // which the Host guard's name (ResolveAllowedHostName) and the certificate's name check both read. A second
+        // McpNetworkConfig.NormalizeHostName call anywhere in the host could make the two disagree.
+        var normalizeCalls = System.Text.RegularExpressions.Regex.Matches(source, @"McpNetworkConfig\.NormalizeHostName\(").Count;
+        Assert.Equal(1, normalizeCalls);
+
+        // And the guard admits exactly what the pipeline was handed.
+        Assert.Contains(
+            "DarlingHostBinding.IsAllowedHost(context.Request.Host.Host, networkListenIp, admittedHostName)",
+            source,
+            StringComparison.Ordinal);
     }
 }

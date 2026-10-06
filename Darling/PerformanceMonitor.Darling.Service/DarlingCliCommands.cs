@@ -2162,6 +2162,16 @@ public static class DarlingCliCommands
             storeNow.Roles is null ? null : string.Join(", ", storeNow.Roles), storeNow.DegradeReason));
         output.WriteLine(DarlingNetworkConfigEditor.FormatExposureState(
             "MCP  ", mcpNowExposed, config.Mcp.Network?.Listen, config.Mcp.Network?.AllowFrom, null, mcpNowDegrade));
+
+        /* #5288: the MCP twin of the dashboard's TLS line below, printed directly under the MCP line it
+           belongs to, with the same rule: only when exposed, because TLS means nothing on a loopback-only
+           endpoint. Both lines come from DescribeExposureTls, so the two cannot drift. */
+        if (mcpNowExposed)
+        {
+            output.WriteLine(DescribeExposureTls(
+                config.Mcp.Network?.Tls, "mcp", "MCP server", "the bearer token and every tool result cross the segment in the clear"));
+        }
+
         output.WriteLine(DarlingNetworkConfigEditor.FormatExposureState(
             "Web  ", webNowExposed, config.Web.Network?.Listen, config.Web.Network?.AllowFrom, null, webNowDegrade));
 
@@ -2172,24 +2182,8 @@ public static class DarlingCliCommands
            (web.network.tls is file-defined and restart-only, like the rest of the block); it reports it. */
         if (webNowExposed)
         {
-            var tls = DarlingWebTls.Describe(config.Web.Network?.Tls);
-            output.WriteLine(tls.Shape switch
-            {
-                DarlingWebTls.TlsShape.NotConfigured =>
-                    "         TLS: off — the access token and its session cookie cross the segment in the clear. "
-                    + "Set web.network.tls to serve HTTPS.",
-                DarlingWebTls.TlsShape.Invalid =>
-                    $"         TLS: MISCONFIGURED — {tls.Problem} The dashboard will bind loopback-only.",
-                /* The warning rides along: this verb is the one an operator runs to see what is open, and a
-                   stale PKCS#12 password beside a working PEM pair is exactly the "I thought the bundle was
-                   being served" state they came here to resolve. The service logs it at every start; nobody
-                   reading this summary should have to go find that line. */
-                DarlingWebTls.TlsShape.Pem =>
-                    $"         TLS: on (PEM pair, {config.Web.Network!.Tls!.CertPath})."
-                    + (tls.Warning is null ? string.Empty : $" NOTE: {tls.Warning}"),
-                _ => $"         TLS: on (PKCS#12, {config.Web.Network!.Tls!.PfxPath})."
-                     + (tls.Warning is null ? string.Empty : $" NOTE: {tls.Warning}"),
-            });
+            output.WriteLine(DescribeExposureTls(
+                config.Web.Network?.Tls, "web", "dashboard", "the access token and its session cookie cross the segment in the clear"));
         }
 
         output.WriteLine($"  Service: {await DescribeServiceStateAsync(cancellationToken)}");
@@ -2417,7 +2411,8 @@ public static class DarlingCliCommands
             output,
             store is not null, postgres.Port, store?.AllowFrom,
             mcp is not null, config.Mcp.Port, mcp?.AllowFrom, config.Mcp.Enabled,
-            web is not null, config.Web.Port, web?.AllowFrom, config.Web.Enabled, web?.Listen);
+            web is not null, config.Web.Port, web?.AllowFrom, config.Web.Enabled, web?.Listen,
+            reparsed.Web.Network?.Tls);
 
         await OfferRestartAsync(input, output, error, cancellationToken);
         return 0;
@@ -2696,7 +2691,7 @@ public static class DarlingCliCommands
                 return null;
             }
 
-            var allowFrom = Prompt(input, output, "Allowed remote CIDR (e.g. 192.168.1.0/24)");
+            var allowFrom = Prompt(input, output, "Allowed remote CIDR(s), one or several separated by commas (e.g. 192.168.1.0/24,10.8.0.0/16)");
             if (allowFrom is null)
             {
                 output.WriteLine("Cancelled — no changes made.");
@@ -2719,7 +2714,10 @@ public static class DarlingCliCommands
             var decision = DarlingMcpHostService.ResolveMcpBind(candidate, managed: true);
             if (decision.Mode == DarlingMcpHostService.McpBindMode.NetworkAndLoopback)
             {
-                return (listen, allowFrom, encryptedToken, plainToken, generatedPlain);
+                /* #5288: ONE entry stays as typed; a LIST comes back canonical (masked, de-duplicated, comma-joined).
+                   This is the value the block writer stores AND the firewall hint is built from, so the rule the
+                   operator is told to run carries the scope the service enforces. */
+                return (listen, DarlingNetworkConfigEditor.AllowFromText(allowFrom), encryptedToken, plainToken, generatedPlain);
             }
 
             output.WriteLine($"  Not accepted: {McpDegradeText(decision.Reason, candidate)}");
@@ -2773,7 +2771,7 @@ public static class DarlingCliCommands
                 return null;
             }
 
-            var allowFrom = Prompt(input, output, "Allowed remote CIDR (e.g. 192.168.1.0/24)");
+            var allowFrom = Prompt(input, output, "Allowed remote CIDR(s), one or several separated by commas (e.g. 192.168.1.0/24,10.8.0.0/16)");
             if (allowFrom is null)
             {
                 output.WriteLine("Cancelled — no changes made.");
@@ -2796,7 +2794,10 @@ public static class DarlingCliCommands
             var decision = DarlingWebHostService.ResolveWebBind(candidate, managed: true);
             if (decision.Mode == DarlingHostBinding.BindMode.NetworkAndLoopback)
             {
-                return (listen, allowFrom, encryptedToken, plainToken, generatedPlain);
+                /* #5288: ONE entry stays as typed; a LIST comes back canonical (masked, de-duplicated, comma-joined).
+                   This is the value the block writer stores AND the firewall hint is built from, so the rule the
+                   operator is told to run carries the scope the service enforces. */
+                return (listen, DarlingNetworkConfigEditor.AllowFromText(allowFrom), encryptedToken, plainToken, generatedPlain);
             }
 
             output.WriteLine($"  Not accepted: {WebDegradeText(decision.Reason, candidate)}");
@@ -2812,7 +2813,7 @@ public static class DarlingCliCommands
         DarlingHostBinding.BindReason.TokenMissing =>
             "no access token is set (the wizard should have supplied one — this is unexpected).",
         DarlingHostBinding.BindReason.AllowFromInvalid =>
-            $"web.network.allowFrom '{web.Network?.AllowFrom}' is not a valid CIDR or its address family does not match listen (e.g. 192.168.1.0/24, host bits zeroed).",
+            $"web.network.allowFrom '{web.Network?.AllowFrom}' is not a valid CIDR list or an entry's address family does not match listen. Use one CIDR (e.g. 192.168.1.0/24) or several separated by commas (e.g. 10.8.0.0/16,192.168.1.5/32): every entry in CIDR form (/32 for one address), with each IPv4 address written as four plain decimal numbers (no leading zeros) and no IPv6 zone index, and of the same family as listen (a :: listen takes IPv6 entries only). Host bits are masked, not refused (192.168.1.5/24 means 192.168.1.0/24).",
         DarlingHostBinding.BindReason.ManagedModeRequired =>
             "network exposure is managed-mode only.",
         _ => "the web bind resolver rejected these values.",
@@ -2826,7 +2827,7 @@ public static class DarlingCliCommands
         DarlingMcpHostService.McpBindReason.TokenMissing =>
             "no bearer token is set (the wizard should have supplied one — this is unexpected).",
         DarlingMcpHostService.McpBindReason.AllowFromInvalid =>
-            $"mcp.network.allowFrom '{mcp.Network?.AllowFrom}' is not a valid CIDR or its address family does not match listen (e.g. 192.168.1.0/24, host bits zeroed).",
+            $"mcp.network.allowFrom '{mcp.Network?.AllowFrom}' is not a valid CIDR list or an entry's address family does not match listen. Use one CIDR (e.g. 192.168.1.0/24) or several separated by commas (e.g. 10.8.0.0/16,192.168.1.5/32): every entry in CIDR form (/32 for one address), with each IPv4 address written as four plain decimal numbers (no leading zeros) and no IPv6 zone index, and of the same family as listen (a :: listen takes IPv6 entries only). Host bits are masked, not refused (192.168.1.5/24 means 192.168.1.0/24).",
         DarlingMcpHostService.McpBindReason.ManagedModeRequired =>
             "network exposure is managed-mode only.",
         _ => "the MCP resolver rejected these values.",
@@ -2941,7 +2942,7 @@ public static class DarlingCliCommands
         TextWriter output,
         bool storeConfigured, int storePort, string? storeCidr,
         bool mcpConfigured, int mcpPort, string? mcpCidr, bool mcpEnabled,
-        bool webConfigured, int webPort, string? webCidr, bool webEnabled, string? webListen)
+        bool webConfigured, int webPort, string? webCidr, bool webEnabled, string? webListen, WebTlsConfig? webTls)
     {
         output.WriteLine();
         output.WriteLine("Next steps:");
@@ -2987,17 +2988,93 @@ public static class DarlingCliCommands
             output.WriteLine("   --configure-firewall ELEVATED instead and it resolves the effective port and moves the rule.)");
 
             /* The one login step a human does differently for Web: a remote browser presents the access token
-               once via ?token= and is 302'd back with a session cookie. A 0.0.0.0 bind has no single address
-               to print, so fall back to a placeholder. */
-            var webHost = webListen == "0.0.0.0" ? "<a-LAN-IP-of-this-machine>" : webListen;
-            output.WriteLine("  Remote browser login (after the service restarts):");
-            output.WriteLine($"    http://{webHost}:{webPort}/?token=<your-access-token>");
-            output.WriteLine("  (the token is exchanged for a session cookie and stripped from the URL; loopback needs no token)");
+               once via ?token= and is 302'd back with a session cookie. BuildWebLoginHint decides the scheme
+               and the host, so a test can pin them. */
+            foreach (var line in BuildWebLoginHint(webListen, webPort, webTls))
+            {
+                output.WriteLine(line);
+            }
             /* #2389: the MCP note's twin — unconditional, and about which plane decides. */
             output.WriteLine("  NOTE: the network block you just wrote is FILE-authoritative and applies on restart, but whether");
             output.WriteLine("        the dashboard runs at all is config.config_service.web_enabled — darling.json's web.enabled is");
             output.WriteLine($"        only the first-run seed, and it currently reads {(webEnabled ? "true" : "false")}. Enable with --enable-web or Settings.");
         }
+    }
+
+    /// <summary>
+    /// The TLS line the <c>--configure-network</c> exposure summary prints under an EXPOSED endpoint. #2562 wrote
+    /// it for the dashboard and #5288 shares it with MCP, so the two cannot drift. <paramref name="section"/> is
+    /// <c>"web"</c> or <c>"mcp"</c>: it names the setting (<c>{section}.network.tls</c>) in every branch, through
+    /// <see cref="DarlingWebTls.Describe"/>, which is also the decision the running service makes.
+    /// <paramref name="surface"/> names what binds loopback-only when the block is MISCONFIGURED, and
+    /// <paramref name="cleartextRisk"/> says what crosses the segment when there is no block. With the dashboard's
+    /// words the text is byte-for-byte what it was before MCP had a line. The PKCS#12 / PEM warning rides along
+    /// because this verb is the one an operator runs to see what is open, and a stale password beside a working
+    /// PEM pair is the "I thought the bundle was being served" state they came here to resolve. Pure.
+    /// </summary>
+    internal static string DescribeExposureTls(WebTlsConfig? tls, string section, string surface, string cleartextRisk)
+    {
+        var plan = DarlingWebTls.Describe(tls, section);
+        return plan.Shape switch
+        {
+            DarlingWebTls.TlsShape.NotConfigured =>
+                $"         TLS: off — {cleartextRisk}. Set {section}.network.tls to serve HTTPS.",
+            DarlingWebTls.TlsShape.Invalid =>
+                $"         TLS: MISCONFIGURED — {plan.Problem} The {surface} will bind loopback-only.",
+            DarlingWebTls.TlsShape.Pem =>
+                $"         TLS: on (PEM pair, {tls!.CertPath})."
+                + (plan.Warning is null ? string.Empty : $" NOTE: {plan.Warning}"),
+            _ => $"         TLS: on (PKCS#12, {tls!.PfxPath})."
+                 + (plan.Warning is null ? string.Empty : $" NOTE: {plan.Warning}"),
+        };
+    }
+
+    /// <summary>
+    /// The browser-login hint the wizard prints after it writes a web block: the URL a remote browser opens once
+    /// with the token, then one line on what becomes of the token. Pure, so the three facts it states can be pinned.
+    ///
+    /// <list type="bullet">
+    /// <item><b>The scheme follows the certificate (#5288).</b> It is <c>https</c> when <c>web.network.tls</c> names a
+    /// PKCS#12 bundle or a PEM pair, because the network listener then speaks TLS only and an <c>http://</c> URL
+    /// fails the handshake. Anything else, a MISCONFIGURED block included, keeps <c>http</c>: a refused block
+    /// leaves the dashboard loopback-only, so there is no remote URL to get right.</item>
+    /// <item><b>A wildcard listen has no single address to print.</b> <c>0.0.0.0</c> and <c>::</c> both print the
+    /// placeholder. Any other IPv6 literal is bracketed, because <c>http://2001:db8::5:5153/</c> is not a URL.</item>
+    /// <item><b>Loopback presents the token too.</b> While the dashboard is exposed a request from the box itself
+    /// still needs the token or the cookie (#1649), so the line no longer says loopback needs no token.</item>
+    /// </list>
+    /// </summary>
+    internal static IReadOnlyList<string> BuildWebLoginHint(string? listen, int port, WebTlsConfig? tls)
+    {
+        var scheme = DarlingWebTls.Describe(tls).Shape is DarlingWebTls.TlsShape.Pfx or DarlingWebTls.TlsShape.Pem
+            ? "https"
+            : "http";
+
+        return
+        [
+            "  Remote browser login (after the service restarts):",
+            $"    {scheme}://{WebLoginHost(listen)}:{port}/?token=<your-access-token>",
+            "  (the token is exchanged for a session cookie and stripped from the URL; loopback presents the token too)",
+        ];
+    }
+
+    /// <summary>The host part of the login URL: a placeholder for a wildcard listen, brackets around an IPv6 literal, the text as given otherwise.</summary>
+    private static string WebLoginHost(string? listen)
+    {
+        if (string.IsNullOrWhiteSpace(listen) || !IPAddress.TryParse(listen.Trim(), out var address))
+        {
+            return listen ?? string.Empty;
+        }
+
+        if (address.Equals(IPAddress.Any) || address.Equals(IPAddress.IPv6Any))
+        {
+            return "<a-LAN-IP-of-this-machine>";
+        }
+
+        var text = listen.Trim();
+        return address.AddressFamily == AddressFamily.InterNetworkV6 && !text.StartsWith('[')
+            ? $"[{text}]"
+            : listen;
     }
 
     /// <summary>
@@ -3233,32 +3310,39 @@ public static class DarlingCliCommands
         : elevated ? EndpointFirewallPlan.RunElevated
         : EndpointFirewallPlan.Handoff;
 
-    /// <summary>Whether an ENABLE toggle's <c>allowFrom</c> can be used as a firewall <c>-RemoteAddress</c> (#1646).</summary>
+    /// <summary>Whether an ENABLE toggle's <c>allowFrom</c> (one CIDR, or a comma-separated list of them since #5288) can be used as a firewall <c>-RemoteAddress</c> (#1646).</summary>
     public enum EndpointAllowFromVerdict
     {
         /// <summary>Absent/blank — the service would fail-close this endpoint to loopback, so there is nothing to open.</summary>
         Missing,
 
-        /// <summary>Present but not a CIDR — REFUSE. Never build a firewall command from it.</summary>
+        /// <summary>Present but not a CIDR list (one bad or empty entry makes the whole list invalid) — REFUSE. Never build a firewall command from it.</summary>
         Invalid,
 
-        /// <summary>A valid CIDR; the canonical <c>IPNetwork.ToString()</c> form is what reaches the command.</summary>
+        /// <summary>A valid CIDR list; the canonical <see cref="CidrAllowList.ToString"/> form (one CIDR, or CIDRs joined by commas with no spaces) is what reaches the command.</summary>
         Valid,
     }
 
     /// <summary>
-    /// PURE <c>allowFrom</c> gate for a toggle verb (#1646). <c>darling.json</c> is operator-supplied text that
-    /// <see cref="DarlingConfig.Load"/> only deserializes — it never calls <see cref="DarlingConfig.Validate"/> —
-    /// so this was the ONE <see cref="DarlingManagedPostgres.BuildFirewallEnableCommand"/> caller that reached
-    /// the PowerShell <c>-Command</c> string with an unparsed value, where a blank-check was the only gate.
-    /// Every other call site passes a canonicalized <c>IPNetwork.ToString()</c>; this makes that universal.
-    /// Parsing is the security property, not the formatting: <see cref="IPNetwork.TryParse"/> accepts ONLY a
-    /// single <c>address/prefix</c> pair, so no shell metacharacter, statement separator, or second CIDR can
-    /// survive it — and <paramref name="canonicalCidr"/> is the PARSER'S output, never the caller's string, so
-    /// nothing unvalidated is carried through even on the valid path. That last point is load-bearing rather
-    /// than belt-and-braces: <c>TryParse</c> MASKS host bits instead of rejecting them (<c>192.168.1.5/24</c>
-    /// parses, as <c>192.168.1.0/24</c>), so "validate, then use the original" would forward a string the
-    /// parser had already decided meant something else.
+    /// PURE <c>allowFrom</c> gate for a toggle verb (#1646, a CIDR LIST since #5288). <c>darling.json</c> is
+    /// operator-supplied text that <see cref="DarlingConfig.Load"/> only deserializes — it never calls
+    /// <see cref="DarlingConfig.Validate"/> — so this is the gate in front of the PowerShell <c>-Command</c>
+    /// string that <see cref="DarlingManagedPostgres.BuildFirewallEnableCommand"/> builds, where a blank-check
+    /// was once the only gate. Every other call site already passes a canonical list; this makes that universal.
+    ///
+    /// <para>Parsing is the security property, not the formatting. The text goes through
+    /// <see cref="CidrAllowList.TryParse"/>, the one parser the bind ladder and both hosts' gates use (no second
+    /// split, trim or de-dupe lives here to drift from it), and <paramref name="canonicalCidr"/> is that
+    /// parser's <see cref="CidrAllowList.ToString"/>, never the caller's string. So every ELEMENT that reaches
+    /// the command is parser output: an <c>address/prefix</c> pair that <see cref="IPNetwork"/> formatted
+    /// itself, and no shell metacharacter, statement separator or hostile token can survive the parse (one bad
+    /// or empty entry refuses the whole list). The comma is the only separator a list adds, and
+    /// <see cref="DarlingManagedPostgres.BuildFirewallEnableCommand"/> splits on it and single-quotes each element
+    /// on its own, so the second layer holds per element too.</para>
+    ///
+    /// <para>The canonical form is load-bearing rather than belt-and-braces: the parser MASKS host bits instead
+    /// of rejecting them (<c>192.168.1.5/24</c> parses, as <c>192.168.1.0/24</c>), so "validate, then use the
+    /// original" would forward a string the parser had already decided meant something else.</para>
     /// </summary>
     public static EndpointAllowFromVerdict ClassifyAllowFrom(string? allowFrom, out string canonicalCidr)
     {
@@ -3269,12 +3353,12 @@ public static class DarlingCliCommands
             return EndpointAllowFromVerdict.Missing;
         }
 
-        if (!IPNetwork.TryParse(allowFrom.Trim(), out var cidr))
+        if (!CidrAllowList.TryParse(allowFrom, out var list))
         {
             return EndpointAllowFromVerdict.Invalid;
         }
 
-        canonicalCidr = cidr.ToString();
+        canonicalCidr = list.ToString();
         return EndpointAllowFromVerdict.Valid;
     }
 
@@ -3548,8 +3632,8 @@ public static class DarlingCliCommands
             return;
         }
 
-        /* #1646: parse allowFrom as a CIDR BEFORE it can reach a PowerShell -Command string, and pass the
-           parser's canonical form — the posture every other BuildFirewallEnableCommand caller already had.
+        /* #1646: parse allowFrom as a CIDR (a LIST since #5288) BEFORE it can reach a PowerShell -Command string,
+           and pass the parser's canonical form — the posture every other BuildFirewallEnableCommand caller already had.
            An unparseable value is refused outright: the firewall is NOT touched and nothing is printed for an
            operator to paste into an elevated shell, because the injected text would run either way (this verb
            runs the command itself when elevated, and hands it to a human to run elevated when it is not). */
@@ -3562,16 +3646,18 @@ public static class DarlingCliCommands
                     /* Non-loopback listen but no allowFrom CIDR: the service itself would fail-close this to loopback, so
                        there is nothing to open. Point at the wizard rather than emit a malformed New-NetFirewallRule. */
                     output.WriteLine(
-                        $"Firewall: the network block sets listen '{listen}' but no allowFrom CIDR, so the service will bind " +
+                        $"Firewall: the network block sets listen '{listen}' but no allowFrom (one CIDR, or several separated by commas), so the service will bind " +
                         "loopback-only until it is completed. Run --configure-network to finish the block; not opening the firewall.");
                     return;
 
                 case EndpointAllowFromVerdict.Invalid:
                     error.WriteLine(
-                        $"Firewall: allowFrom in darling.json is not a valid CIDR, so NO firewall change was made and no " +
+                        $"Firewall: allowFrom in darling.json is not a valid CIDR list, so NO firewall change was made and no " +
                         "command is being printed to run by hand. The endpoint toggle itself already succeeded; the service " +
-                        "will bind loopback-only until allowFrom is fixed. Expected an address/prefix with the host bits " +
-                        "zeroed, e.g. 192.168.1.0/24 or 2001:db8::/32. Run --configure-network to rewrite the block.");
+                        "will bind loopback-only until allowFrom is fixed. Expected one address/prefix (e.g. 192.168.1.0/24 " +
+                        "or 2001:db8::/32) or several separated by commas (e.g. 10.8.0.0/16,192.168.1.5/32); an empty entry " +
+                        "(a doubled or trailing comma) is refused, and host bits are masked rather than refused " +
+                        "(192.168.1.5/24 means 192.168.1.0/24). Run --configure-network to rewrite the block.");
                     return;
             }
         }
@@ -3798,8 +3884,9 @@ public static class DarlingCliCommands
         return plans;
     }
 
-    /// <summary>The parser's canonical CIDR, or null when it will not parse. The bind resolvers have already
-    /// refused exposure in the null case, so an Open plan always carries a real CIDR; this never forwards the
+    /// <summary>The parser's canonical CIDR list (one CIDR, or CIDRs joined by commas, #5288), or null when it
+    /// will not parse. The bind resolvers have already refused exposure in the null case, so an Open plan always
+    /// carries a real list; this never forwards the
     /// caller's raw string into a PowerShell command (#1646).</summary>
     private static string? CanonicalCidrOrNull(string? allowFrom) =>
         ClassifyAllowFrom(allowFrom, out var canonical) == EndpointAllowFromVerdict.Valid ? canonical : null;
@@ -3853,7 +3940,7 @@ public static class DarlingCliCommands
             DarlingMcpHostService.McpBindReason.TokenMissing =>
                 $"{section}.network is set but its token is missing or unreadable, so the service fail-closes this endpoint to loopback",
             DarlingMcpHostService.McpBindReason.AllowFromInvalid =>
-                $"{section}.network.allowFrom is missing or not a valid CIDR, so the service fail-closes this endpoint to loopback",
+                $"{section}.network.allowFrom is missing, is not a valid CIDR list (every entry in CIDR form, with each IPv4 address written as four plain decimal numbers (no leading zeros) and no IPv6 zone index), or has an entry whose address family does not match listen, so the service fail-closes this endpoint to loopback",
             DarlingMcpHostService.McpBindReason.ManagedModeRequired =>
                 $"{section}.network is set but postgres.managed = false; LAN exposure is managed-mode only and is ignored",
             _ => null,
