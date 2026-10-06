@@ -111,6 +111,16 @@ internal sealed class PlanDigestCache<TKey>
         }
     }
 
+    /// <summary>Forgets every entry, confirmed and pending (#5367 review, A-L1: a cache filled under one filter mode
+    /// must not answer a run in another).</summary>
+    public void Clear()
+    {
+        lock (_gate)
+        {
+            _entries.Clear();
+        }
+    }
+
     /// <summary>Drops pending entries whose write failed. A confirmed entry is never touched.</summary>
     public void DiscardPending(IEnumerable<TKey> keys)
     {
