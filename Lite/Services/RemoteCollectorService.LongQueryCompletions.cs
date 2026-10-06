@@ -227,6 +227,15 @@ public partial class RemoteCollectorService
                     return;
                 }
 
+                /* #5378: a login that was told no is not asked again this session. The create and start DDL needs ALTER ANY
+                   EVENT SESSION, and a denial is not transient: re-running it every cycle only repeats the denial in the
+                   server's audit and error logs. The kept fault stays, so the run still records PERMISSIONS. */
+                if (LongQueryTracePermissionDenialHolds(server))
+                {
+                    AppLogger.Debug("XeSession", $"[{server.DisplayName}] Long-query completion XE session not ensured - permission denied this session");
+                    return;
+                }
+
                 var monitored = await EnsureLongQueryCompletionsXeSessionAsync(server, sessionName, isAzureSqlDatabase, separatelyMonitored, createRepeats, pass, afterTheCap, cancellationToken);
                 _longQueryTraceReadOnlyRefused.TryRemove(server.Id, out _);
 
@@ -511,6 +520,19 @@ public partial class RemoteCollectorService
        is not tried again for an hour, or sooner when the state key changes. The kept fault stays, so every run still
        records it. In memory, so a restart tries again. */
     private readonly ConcurrentDictionary<string, (string StateKey, DateTime AtUtc)> _longQueryTraceReadOnlyRefused = new();
+
+    /// <summary>
+    /// #5378: whether a permission denial stops the create of the long-query session, for the same lifetime as the PERMISSIONS
+    /// suppression every collector gets (<see cref="IsCollectorPermissionRestricted"/>): the rest of the app session, cleared
+    /// on a restart and, for a removed server, with its health. It holds in two cases. The collector's run recorded PERMISSIONS
+    /// (the flag). Or the reconcile itself was denied and the run that records it has not come yet (the kept fault is a
+    /// permission denial): the run is dispatched on its own interval, and the DDL must not repeat while it waits. Turning the
+    /// trace off clears the kept fault, so turning it on again tries once; the flag, like every collector's, waits for a restart.
+    /// </summary>
+    private bool LongQueryTracePermissionDenialHolds(ServerConnection server) =>
+        IsCollectorPermissionRestricted(GetServerId(server), LongQueryCompletionsCollector.Instance.Name)
+        || (_longQueryTraceFault.TryGetValue(server.Id, out var fault)
+            && ErrorNumbersOf(fault).Any(SqlServerPermissionErrors.IsPermissionDenied));
 
     private bool LongQueryTraceReadOnlyRefusalHolds(string serverId, string stateKey, DateTime utcNow) =>
         _longQueryTraceReadOnlyRefused.TryGetValue(serverId, out var refused)
