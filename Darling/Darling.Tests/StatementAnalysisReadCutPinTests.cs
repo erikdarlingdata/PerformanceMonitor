@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using PerformanceMonitor.Common;
@@ -33,14 +34,59 @@ public sealed class StatementAnalysisReadCutPinTests
 
         var offenders = Directory.GetFiles(Path.Combine(root!, "Darling", "PerformanceMonitor.Darling.Analysis"), "*.cs")
             .Where(f => !f.EndsWith("PgDrillDownCollector.Plans.cs", StringComparison.Ordinal))
-            .SelectMany(f => File.ReadAllLines(f).Select((line, i) => (File: Path.GetFileName(f), Line: i + 1, Text: line)))
-            .Where(x => !x.Text.TrimStart().StartsWith("///", StringComparison.Ordinal) && !x.Text.TrimStart().StartsWith("//", StringComparison.Ordinal))
-            .Where(x => System.Text.RegularExpressions.Regex.IsMatch(x.Text,
-                @"LEFT\(\s*(MAX\(|COALESCE\()?\s*\w*\.?(query_text|query_sql_text|victim_sql_text|blocked_sql_text|blocking_sql_text|latest_victim_statement|latest_graph_text)\b"))
-            .Select(x => x.File + ":" + x.Line)
+            .SelectMany(f => CutSites(File.ReadAllText(f)).Select(line => Path.GetFileName(f) + ":" + line))
             .ToList();
 
         Assert.Empty(offenders);
+    }
+
+    /// <summary>
+    /// The 1-based line of every SQL cut of a statement-named column in one C# source. Reads the string literals
+    /// through <see cref="CSharpSourceWalker.StringLiteralBodies"/> rather than splitting lines on a comment prefix,
+    /// so a block comment's continuation lines (no leading asterisk) are not read as SQL, and the SQL in a
+    /// verbatim or raw literal is (#3052).
+    /// </summary>
+    private static List<int> CutSites(string source)
+    {
+        var sites = new List<int>();
+
+        foreach (var (start, body) in CSharpSourceWalker.StringLiteralBodies(source))
+        {
+            foreach (System.Text.RegularExpressions.Match m in System.Text.RegularExpressions.Regex.Matches(body,
+                @"LEFT\(\s*(MAX\(|COALESCE\()?\s*\w*\.?(query_text|query_sql_text|victim_sql_text|blocked_sql_text|blocking_sql_text|latest_victim_statement|latest_graph_text)\b"))
+            {
+                var line = 1;
+                for (var i = 0; i < start && i < source.Length; i++)
+                {
+                    if (source[i] == '\n') line++;
+                }
+
+                sites.Add(line + body.Take(m.Index).Count(c => c == '\n'));
+            }
+        }
+
+        return sites;
+    }
+
+    [Fact]
+    public void TheCutScan_ReadsLiteralsNotComments_AndFindsACutInEitherLiteralForm()
+    {
+        const string fixture = """
+            class Probe
+            {
+                /* A note that mentions LEFT(query_text, 200) in a block comment
+                   LEFT(MAX(t.query_text), 5) on a line with no asterisk. */
+                // LEFT(query_text, 9) in a line comment
+                const string Plain = "SELECT LEFT(MAX(t.query_text), 200) FROM q";
+                const string Verbatim = @"SELECT 1,
+                    LEFT(COALESCE(d.query_text, ''), 10) FROM q";
+            }
+            """;
+
+        var sites = CutSites(fixture);
+
+        Assert.Equal(2, sites.Count);
+        Assert.Equal(new[] { 6, 8 }, sites.ToArray());
     }
 
     [Fact]
