@@ -140,4 +140,12 @@ public interface IAlertSettings
     /// routes table and its adapter takes this default. Only Darling's store-backed adapter overrides it.</para>
     /// </summary>
     System.Collections.Generic.IReadOnlyList<NotificationRoute> NotificationRoutes => System.Array.Empty<NotificationRoute>();
+
+    /// <summary>
+    /// The settings one webhook delivery reads from (#5366): every webhook URL, routing key, header, body template and
+    /// proxy the delivery uses comes from this one view, so a saved setting that changes while the delivery is in flight
+    /// does not move a later channel of the same delivery. Defaulted to the live settings: an adapter whose values are
+    /// plain fields (Lite) is unchanged. Darling's adapter overrides it with a frozen copy.
+    /// </summary>
+    IAlertSettings SnapshotForDelivery() => this;
 }

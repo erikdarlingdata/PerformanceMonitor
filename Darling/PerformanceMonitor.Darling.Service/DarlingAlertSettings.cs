@@ -37,12 +37,27 @@ public sealed class DarlingAlertSettings : IAlertEngineSettings, IAlertSettings
     private OpenedWebhooks? _opened;
     private HashSet<string> _reportedFailures = new(StringComparer.Ordinal);
 
+    /// <summary>The opened values a delivery snapshot is frozen on (#5366); null on the live settings.</summary>
+    private readonly OpenedWebhooks? _pinned;
+
     public DarlingAlertSettings(DarlingConfig config, ILogger? logger = null, IPasswordKeyRing? ring = null)
     {
         _config = config ?? throw new ArgumentNullException(nameof(config));
         _logger = logger;
         _ring = ring;
     }
+
+    /// <summary>A snapshot: this settings object with its opened webhook values frozen at <paramref name="pinned"/>.</summary>
+    private DarlingAlertSettings(DarlingAlertSettings live, OpenedWebhooks pinned)
+        : this(live._config, live._logger, live._ring)
+    {
+        _pinned = pinned;
+    }
+
+    /// <summary>One frozen view of the webhook settings for one delivery (#5366): the URLs, headers, body template,
+    /// region flag, proxies and routes all come from one opening of the saved values, so a change saved while the delivery
+    /// is in flight does not move a later channel of that delivery. The rest of the settings read live, as before.</summary>
+    IAlertSettings IAlertSettings.SnapshotForDelivery() => new DarlingAlertSettings(this, Opened);
 
     /// <summary>
     /// The webhook settings and routes with their sealed values opened (#5366). Opened on the first read and again only
@@ -53,6 +68,11 @@ public sealed class DarlingAlertSettings : IAlertEngineSettings, IAlertSettings
     {
         get
         {
+            if (_pinned is not null)
+            {
+                return _pinned;
+            }
+
             var ring = _ring ?? DarlingPasswordKey.Current;
             var webhooks = _config.Webhooks;
             var routes = _config.NotificationRoutes;
@@ -379,25 +399,25 @@ public sealed class DarlingAlertSettings : IAlertEngineSettings, IAlertSettings
 
     public bool TeamsWebhookEnabled => !string.IsNullOrWhiteSpace(Opened.Webhooks.TeamsUrl);
     public string TeamsWebhookUrl => Opened.Webhooks.TeamsUrl;
-    public string TeamsProxyAddress => _config.Webhooks.TeamsProxy;
+    public string TeamsProxyAddress => Opened.Webhooks.TeamsProxy;
 
     public bool SlackWebhookEnabled => !string.IsNullOrWhiteSpace(Opened.Webhooks.SlackUrl);
     public string SlackWebhookUrl => Opened.Webhooks.SlackUrl;
-    public string SlackProxyAddress => _config.Webhooks.SlackProxy;
+    public string SlackProxyAddress => Opened.Webhooks.SlackProxy;
 
     /* Generic webhook (#1506) — enabled by a non-empty URL, the same no-speculative-enable-flag derivation
        the sibling channels use. */
     public bool GenericWebhookEnabled => !string.IsNullOrWhiteSpace(Opened.Webhooks.GenericUrl);
     public string GenericWebhookUrl => Opened.Webhooks.GenericUrl;
     public string GenericWebhookHeadersJson => Opened.Webhooks.GenericHeaders;
-    public string GenericWebhookBodyTemplate => _config.Webhooks.GenericBodyTemplate;
-    public string GenericWebhookProxyAddress => _config.Webhooks.GenericProxy;
+    public string GenericWebhookBodyTemplate => Opened.Webhooks.GenericBodyTemplate;
+    public string GenericWebhookProxyAddress => Opened.Webhooks.GenericProxy;
 
     /* PagerDuty webhook — enabled by a non-empty routing key, like the sibling channels. */
     public bool PagerDutyEnabled => !string.IsNullOrWhiteSpace(Opened.Webhooks.PagerDutyRoutingKey);
     public string PagerDutyRoutingKey => Opened.Webhooks.PagerDutyRoutingKey;
-    public bool PagerDutyUseEuRegion => _config.Webhooks.PagerDutyUseEuRegion;
-    public string PagerDutyProxyAddress => _config.Webhooks.PagerDutyProxy;
+    public bool PagerDutyUseEuRegion => Opened.Webhooks.PagerDutyUseEuRegion;
+    public string PagerDutyProxyAddress => Opened.Webhooks.PagerDutyProxy;
 
     /// <summary>#3598 (V131): the sparse notification routes, read live through the by-reference config seam
     /// like every sibling — <c>StoreConfigProvider.ApplyToConfig</c> swaps the list on every beacon change,
