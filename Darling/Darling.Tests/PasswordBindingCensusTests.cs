@@ -209,7 +209,7 @@ public sealed class PasswordBindingCensusTests
         Assert.True(ServerConnectionIdentity.Differ(Base, Base with { Host = "EXAMPLE-SQL-01" }));
     }
 
-    private static DarlingMcpServerAdminTools.ServerConnectionSettings Settings(ServerConnectionIdentity c) =>
+    private static ServerConnectionSettings Settings(ServerConnectionIdentity c) =>
         new(c.Host, c.Port, c.Engine, c.Database, c.ReadOnlyIntent, c.Auth, c.Username, c.EncryptMode,
             c.TrustServerCertificate, c.MultiSubnetFailover);
 
