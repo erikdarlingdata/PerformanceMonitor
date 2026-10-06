@@ -85,7 +85,7 @@ public class ArchiveViewDedupTests : IDisposable
     [Fact]
     public async Task VJobHistory_DedupsReCollectedRowsOnServerAndInstanceId()
     {
-        var initializer = new DuckDbInitializer(_dbPath);
+        using var initializer = new DuckDbInitializer(_dbPath);
         await initializer.InitializeAsync();
 
         using (var connection = await OpenAsync())
@@ -135,7 +135,7 @@ VALUES
     [Fact]
     public async Task VDefaultTraceEvents_DedupsReCollectedRowsOnEventTimeAndSequence()
     {
-        var initializer = new DuckDbInitializer(_dbPath);
+        using var initializer = new DuckDbInitializer(_dbPath);
         await initializer.InitializeAsync();
 
         using (var connection = await OpenAsync())
@@ -178,7 +178,7 @@ VALUES
 
     private async Task<int> StageDeadlocksAsync(string archived, string live)
     {
-        var initializer = new DuckDbInitializer(_dbPath);
+        using var initializer = new DuckDbInitializer(_dbPath);
         await initializer.InitializeAsync();
         using (var connection = await OpenAsync())
         {
@@ -198,7 +198,7 @@ VALUES
     (1, TIMESTAMP '2026-01-01 00:00:00', 1, 'S1', TIMESTAMP '2026-01-01 10:00:00', 'p1', 'q', '<deadlock>A</deadlock>')";
         var live = $@"INSERT INTO deadlocks {DeadlockInsertColumns} VALUES
     (11, TIMESTAMP '2026-06-01 00:00:00', 1, 'S1', TIMESTAMP '2026-01-01 10:00:00', 'p1', 'q', '<deadlock>A</deadlock>')";
-        var initializer = new DuckDbInitializer(_dbPath);
+        using var initializer = new DuckDbInitializer(_dbPath);
         await initializer.InitializeAsync();
         using (var connection = await OpenAsync())
         {

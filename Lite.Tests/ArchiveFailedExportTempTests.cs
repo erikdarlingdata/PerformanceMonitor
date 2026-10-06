@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
@@ -27,6 +28,8 @@ namespace PerformanceMonitorLite.Tests;
 [Collection("CollectionResetGate")]
 public sealed class ArchiveFailedExportTempTests : IDisposable
 {
+    private readonly List<DuckDbInitializer> _initializers = [];
+
     private readonly string _tempDir;
     private readonly string _dbPath;
     private readonly string _archiveDir;
@@ -42,6 +45,11 @@ public sealed class ArchiveFailedExportTempTests : IDisposable
 
     public void Dispose()
     {
+        foreach (var initializer in _initializers)
+        {
+            initializer.Dispose();
+        }
+
         try
         {
             if (Directory.Exists(_tempDir))
@@ -80,6 +88,7 @@ public sealed class ArchiveFailedExportTempTests : IDisposable
     private async Task<DuckDbInitializer> SeedACopyThatFailsMidQueryAsync()
     {
         var initializer = new DuckDbInitializer(_dbPath);
+        _initializers.Add(initializer);
         await initializer.InitializeAsync();
 
         await ExecAsync(@"

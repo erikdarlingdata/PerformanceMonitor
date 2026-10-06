@@ -21,6 +21,8 @@ namespace PerformanceMonitorLite.Tests;
 [Collection("CollectionResetGate")]
 public sealed class ArchivedHistoryReadersTests : IDisposable
 {
+    private readonly List<DuckDbInitializer> _initializers = [];
+
     private const int ServerId = TestDataSeeder.TestServerId;
 
     private readonly string _tempDir;
@@ -38,6 +40,11 @@ public sealed class ArchivedHistoryReadersTests : IDisposable
 
     public void Dispose()
     {
+        foreach (var initializer in _initializers)
+        {
+            initializer.Dispose();
+        }
+
         try
         {
             if (Directory.Exists(_tempDir))
@@ -75,6 +82,7 @@ public sealed class ArchivedHistoryReadersTests : IDisposable
     private async Task<LocalDataService> WriteThenResetAsync(string table, Func<DuckDbInitializer, Task> seed)
     {
         var initializer = new DuckDbInitializer(_dbPath);
+        _initializers.Add(initializer);
         await initializer.InitializeAsync();
         await seed(initializer);
         Assert.True(await HotRowsAsync(table) > 0, $"the seed wrote no {table} row");

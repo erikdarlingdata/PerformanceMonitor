@@ -42,6 +42,182 @@ public sealed class DarlingCliCommandsTests
     }
 
     [Fact]
+    public void PlanFirewallRules_Lists_CarryCanonicalScope()
+    {
+        /* #5288: an allowFrom LIST reaches the plan as the parser's canonical text (trimmed, host bits masked,
+           duplicates dropped, comma-joined), and the builder turns it into one quoted literal per range. */
+        var config = new DarlingConfig();
+        config.Postgres!.Managed = true;
+        config.Mcp.Enabled = true;
+        config.Mcp.Network = new McpNetworkConfig { Listen = "192.168.1.205", AllowFrom = " 10.8.0.0/16 , 192.168.1.5/24,10.8.0.0/16", Token = "t" };
+        config.Web.Enabled = true;
+        config.Web.Network = new WebNetworkConfig { Listen = "192.168.1.205", AllowFrom = "192.168.1.77/24,10.8.0.0/16", Token = "t" };
+
+        var plans = DarlingCliCommands.PlanFirewallRules(config);
+        var mcp = Assert.Single(plans, p => p.Surface == "MCP");
+        var web = Assert.Single(plans, p => p.Surface == "web dashboard");
+        Assert.Equal(DarlingCliCommands.FirewallRuleAction.Open, mcp.Action);
+        Assert.Equal("10.8.0.0/16,192.168.1.0/24", mcp.Cidr);
+        Assert.Equal(DarlingCliCommands.FirewallRuleAction.Open, web.Action);
+        Assert.Equal("192.168.1.0/24,10.8.0.0/16", web.Cidr);
+        Assert.Contains("-RemoteAddress '10.8.0.0/16','192.168.1.0/24' |",
+            DarlingManagedPostgres.BuildFirewallEnableCommand(mcp.RuleName, mcp.Port, mcp.Cidr!), StringComparison.Ordinal);
+
+        /* One wrong-family entry: the resolver refuses the whole list, so nothing opens and no scope is forwarded. */
+        config.Mcp.Network = new McpNetworkConfig { Listen = "192.168.1.205", AllowFrom = "10.8.0.0/16,2001:db8::/32", Token = "t" };
+        var refused = Assert.Single(DarlingCliCommands.PlanFirewallRules(config), p => p.Surface == "MCP");
+        Assert.Equal(DarlingCliCommands.FirewallRuleAction.Remove, refused.Action);
+        Assert.Null(refused.Cidr);
+        Assert.Contains("CIDR list", refused.Note, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The reason the firewall verb gives for a refused allowFrom list names the address spelling rule (each IPv4
+    /// address is four plain decimal numbers, with no IPv6 zone index) in the words both hosts' Critical line and the
+    /// wizard's re-prompts use. The refused list is an IPv4 address with a leading zero, the spelling the rule exists
+    /// for, and it is refused on both surfaces.
+    /// </summary>
+    [Theory]
+    [InlineData("mcp", "MCP")]
+    [InlineData("web", "web dashboard")]
+    public void PlanFirewallRules_ARefusedAllowFrom_NamesTheAddressSpellingRule(string section, string surface)
+    {
+        const string Clause = "with each IPv4 address written as four plain decimal numbers (no leading zeros) and no IPv6 zone index";
+        var config = new DarlingConfig();
+        config.Postgres!.Managed = true;
+        config.Mcp.Enabled = true;
+        config.Mcp.Network = new McpNetworkConfig { Listen = "192.168.1.205", AllowFrom = "10.8.0.0/16,192.168.010.0/24", Token = "t" };
+        config.Web.Enabled = true;
+        config.Web.Network = new WebNetworkConfig { Listen = "192.168.1.205", AllowFrom = "10.8.0.0/16,192.168.010.0/24", Token = "t" };
+
+        var plan = Assert.Single(DarlingCliCommands.PlanFirewallRules(config), p => p.Surface == surface);
+
+        Assert.Equal(DarlingCliCommands.FirewallRuleAction.Remove, plan.Action);
+        Assert.Null(plan.Cidr);
+        Assert.StartsWith(section + ".network.allowFrom is missing, is not a valid CIDR list (every entry in CIDR form, " + Clause + "), or has an entry whose address family does not match listen", plan.Note, StringComparison.Ordinal);
+    }
+
+    /* ---- #5288 (F9): the web login hint the wizard prints after it writes a web block ---- */
+
+    [Theory]
+    [InlineData("pfx")]
+    [InlineData("pem")]
+    public void WebLoginHint_TlsSet_PrintsHttps(string form)
+    {
+        var tls = form == "pfx"
+            ? new WebTlsConfig { PfxPath = @"C:\certs\dash.pfx" }
+            : new WebTlsConfig { CertPath = @"C:\certs\dash.crt", KeyPath = @"C:\certs\dash.key" };
+
+        var hint = DarlingCliCommands.BuildWebLoginHint("192.168.1.205", 5153, tls);
+
+        /* The network listener speaks TLS only once a certificate is set, so an http:// URL fails the handshake. */
+        Assert.Equal("    https://192.168.1.205:5153/?token=<your-access-token>", hint[1]);
+        Assert.DoesNotContain(hint, line => line.Contains("http://", StringComparison.Ordinal));
+
+        /* A block the service REFUSES (both forms) leaves the dashboard loopback-only: no remote URL, so http stays. */
+        var refused = DarlingCliCommands.BuildWebLoginHint(
+            "192.168.1.205", 5153, new WebTlsConfig { PfxPath = "a.pfx", CertPath = "a.crt", KeyPath = "a.key" });
+        Assert.Equal("    http://192.168.1.205:5153/?token=<your-access-token>", refused[1]);
+    }
+
+    [Fact]
+    public void WebLoginHint_NoTls_ByteIdentical()
+    {
+        /* Without a certificate the header and the URL line are exactly what the wizard printed before #5288. */
+        foreach (var tls in new WebTlsConfig?[] { null, new WebTlsConfig() })
+        {
+            var hint = DarlingCliCommands.BuildWebLoginHint("192.168.1.205", 5153, tls);
+            Assert.Equal(3, hint.Count);
+            Assert.Equal("  Remote browser login (after the service restarts):", hint[0]);
+            Assert.Equal("    http://192.168.1.205:5153/?token=<your-access-token>", hint[1]);
+        }
+
+        Assert.Equal(
+            "    http://<a-LAN-IP-of-this-machine>:5153/?token=<your-access-token>",
+            DarlingCliCommands.BuildWebLoginHint("0.0.0.0", 5153, null)[1]);
+
+        /* The one line that changed (F9): loopback presents the token too (#1649), so it no longer says it needs none. */
+        var note = DarlingCliCommands.BuildWebLoginHint("192.168.1.205", 5153, null)[2];
+        Assert.Contains("loopback presents the token too", note, StringComparison.Ordinal);
+        Assert.DoesNotContain("needs no token", note, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("2001:db8::5", "    http://[2001:db8::5]:5153/?token=<your-access-token>")]
+    [InlineData("[2001:db8::5]", "    http://[2001:db8::5]:5153/?token=<your-access-token>")]
+    [InlineData("::", "    http://<a-LAN-IP-of-this-machine>:5153/?token=<your-access-token>")]
+    [InlineData("0.0.0.0", "    http://<a-LAN-IP-of-this-machine>:5153/?token=<your-access-token>")]
+    public void WebLoginHint_Ipv6Listen_IsBracketed(string listen, string expectedUrlLine)
+    {
+        /* http://2001:db8::5:5153/ is not a URL, and a :: listen printed http://:::5153/ before this. */
+        Assert.Equal(expectedUrlLine, DarlingCliCommands.BuildWebLoginHint(listen, 5153, null)[1]);
+
+        /* TLS only changes the scheme. */
+        Assert.Equal(
+            expectedUrlLine.Replace("http://", "https://", StringComparison.Ordinal),
+            DarlingCliCommands.BuildWebLoginHint(listen, 5153, new WebTlsConfig { PfxPath = "a.pfx" })[1]);
+    }
+
+    /* ---- #5288: the TLS line the exposure summary prints, shared by MCP and web ---- */
+
+    private const string McpRisk = "the bearer token and every tool result cross the segment in the clear";
+    private const string WebRisk = "the access token and its session cookie cross the segment in the clear";
+
+    [Fact]
+    public void ExposureSummary_McpTlsLine_NotConfigured_SaysOff_AndNamesTheMcpSetting()
+    {
+        Assert.Equal(
+            "         TLS: off — the bearer token and every tool result cross the segment in the clear. Set mcp.network.tls to serve HTTPS.",
+            DarlingCliCommands.DescribeExposureTls(null, "mcp", "MCP server", McpRisk));
+        Assert.Equal(
+            DarlingCliCommands.DescribeExposureTls(null, "mcp", "MCP server", McpRisk),
+            DarlingCliCommands.DescribeExposureTls(new McpNetworkConfig().Tls, "mcp", "MCP server", McpRisk));
+    }
+
+    [Fact]
+    public void ExposureSummary_McpTlsLine_Invalid_NamesTheProblem_AndLoopbackOnly()
+    {
+        var both = new WebTlsConfig { PfxPath = "a.pfx", CertPath = "a.crt", KeyPath = "a.key" };
+        var line = DarlingCliCommands.DescribeExposureTls(both, "mcp", "MCP server", McpRisk);
+
+        Assert.StartsWith("         TLS: MISCONFIGURED — mcp.network.tls names BOTH", line, StringComparison.Ordinal);
+        Assert.EndsWith(" The MCP server will bind loopback-only.", line, StringComparison.Ordinal);
+        Assert.DoesNotContain("web.network.tls", line, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ExposureSummary_McpTlsLine_Pfx_And_Pem_NameTheFile_AndCarryTheWarning()
+    {
+        Assert.Equal(
+            @"         TLS: on (PKCS#12, C:\certs\mcp.pfx).",
+            DarlingCliCommands.DescribeExposureTls(new WebTlsConfig { PfxPath = @"C:\certs\mcp.pfx" }, "mcp", "MCP server", McpRisk));
+        Assert.Equal(
+            @"         TLS: on (PEM pair, C:\certs\mcp.crt).",
+            DarlingCliCommands.DescribeExposureTls(
+                new WebTlsConfig { CertPath = @"C:\certs\mcp.crt", KeyPath = @"C:\certs\mcp.key" }, "mcp", "MCP server", McpRisk));
+
+        /* A stale PKCS#12 password beside a working PEM pair: the service logs it at every start, and so does this line. */
+        var stale = DarlingCliCommands.DescribeExposureTls(
+            new WebTlsConfig { CertPath = "c.crt", KeyPath = "c.key", PfxPassword = "x" }, "mcp", "MCP server", McpRisk);
+        Assert.Contains(" NOTE: mcp.network.tls sets a PKCS#12 password alongside a PEM pair", stale, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ExposureSummary_WebTlsLine_StaysByteIdentical_AfterTheSharing()
+    {
+        Assert.Equal(
+            "         TLS: off — the access token and its session cookie cross the segment in the clear. Set web.network.tls to serve HTTPS.",
+            DarlingCliCommands.DescribeExposureTls(null, "web", "dashboard", WebRisk));
+        Assert.Equal(
+            @"         TLS: on (PKCS#12, C:\certs\dash.pfx).",
+            DarlingCliCommands.DescribeExposureTls(new WebTlsConfig { PfxPath = @"C:\certs\dash.pfx" }, "web", "dashboard", WebRisk));
+        Assert.EndsWith(
+            " The dashboard will bind loopback-only.",
+            DarlingCliCommands.DescribeExposureTls(new WebTlsConfig { CertPath = "only.crt" }, "web", "dashboard", WebRisk),
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void FormatProbeLine_Success_ShowsVersionEditionAndMsdb()
     {
         var probe = new ConnectionProbeResult(
@@ -996,6 +1172,105 @@ public sealed class DarlingConfigureNetworkTests
         }
     }
 
+    /// <summary>
+    /// #5288: the wizard takes a comma list, writes ONE canonical JSON string (never an array: an older service
+    /// refuses to start on one), and builds the firewall hint from the same canonical text, so the rule the
+    /// operator is told to run carries the scope the service enforces (not the typed spaces and host bits).
+    /// </summary>
+    [Theory]
+    [InlineData("2", "mcp")]
+    [InlineData("3", "web")]
+    public async Task ConfigureNetwork_TwoRanges_WritesOneCanonicalString_AndTheFirewallHintCarriesBoth(string choice, string surface)
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "The wizard generates a DPAPI-protected token.");
+
+        var root = Directory.CreateTempSubdirectory("darling-confignet-list-");
+        try
+        {
+            var configPath = CopySampleTo(root.FullName);
+            var input = Script(choice, "192.168.1.205", " 10.8.0.0/16 , 192.168.1.5/24", "n");
+            var output = new StringWriter();
+            var error = new StringWriter();
+
+            var exit = await DarlingCliCommands.ConfigureNetworkAsync(configPath, input, output, error, CancellationToken.None);
+            Assert.Equal(0, exit);
+
+            var written = await File.ReadAllTextAsync(configPath);
+            Assert.Contains("\"allowFrom\": \"10.8.0.0/16,192.168.1.0/24\"", written, StringComparison.Ordinal);
+            using (var doc = JsonDocument.Parse(written, new JsonDocumentOptions { CommentHandling = JsonCommentHandling.Skip, AllowTrailingCommas = true }))
+            {
+                Assert.Equal(JsonValueKind.String, doc.RootElement.GetProperty(surface).GetProperty("network").GetProperty("allowFrom").ValueKind);
+            }
+
+            var config = DarlingConfig.Parse(written);
+            if (surface == "mcp")
+            {
+                Assert.Equal(Host.McpBindMode.NetworkAndLoopback, Host.ResolveMcpBind(config.Mcp, managed: true).Mode);
+            }
+            else
+            {
+                Assert.Equal(DarlingHostBinding.BindMode.NetworkAndLoopback, WebHost.ResolveWebBind(config.Web, managed: true).Mode);
+            }
+
+            Assert.Contains("-RemoteAddress '10.8.0.0/16','192.168.1.0/24' | Out-Null", output.ToString(), StringComparison.Ordinal);
+        }
+        finally
+        {
+            root.Delete(recursive: true);
+        }
+    }
+
+    /// <summary>
+    /// The re-prompt after a refused list names the list form and the address spelling rule (each IPv4 address is
+    /// four plain decimal numbers, with no IPv6 zone index), in the words both hosts' Critical line uses. The second
+    /// bad list is an IPv4 address with a leading zero, the spelling the rule exists for.
+    /// </summary>
+    [Theory]
+    [InlineData("2", "mcp")]
+    [InlineData("3", "web")]
+    public async Task ConfigureNetwork_ListWithABadEntry_RePromptsWithTheListAwareText_AndTheAddressSpellingRule(string choice, string surface)
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "The wizard generates a DPAPI-protected token.");
+
+        var root = Directory.CreateTempSubdirectory("darling-confignet-listbad-");
+        try
+        {
+            var configPath = CopySampleTo(root.FullName);
+
+            /* The first two lists each have a bad entry, so the resolver refuses them and the wizard asks listen + allowFrom again. */
+            var input = Script(choice, "192.168.1.205", "10.8.0.0/16,bogus", "192.168.1.205", "10.8.0.0/16,192.168.010.0/24", "192.168.1.205", "10.8.0.0/16,192.168.1.0/24", "n");
+            var output = new StringWriter();
+            var error = new StringWriter();
+
+            var exit = await DarlingCliCommands.ConfigureNetworkAsync(configPath, input, output, error, CancellationToken.None);
+            Assert.Equal(0, exit);
+
+            var text = output.ToString();
+            Assert.Equal(2, CountOccurrences(text, "not a valid CIDR list"));
+            Assert.Contains(surface + ".network.allowFrom '10.8.0.0/16,bogus' is not a valid CIDR list", text, StringComparison.Ordinal);
+            Assert.Contains(surface + ".network.allowFrom '10.8.0.0/16,192.168.010.0/24' is not a valid CIDR list", text, StringComparison.Ordinal);
+            Assert.Equal(2, CountOccurrences(text, "every entry in CIDR form (/32 for one address), with each IPv4 address written as four plain decimal numbers (no leading zeros) and no IPv6 zone index, and of the same family as listen"));
+            Assert.Contains("masked, not refused", text, StringComparison.Ordinal);
+            Assert.DoesNotContain("host bits zeroed", text, StringComparison.Ordinal);
+            Assert.Contains("\"allowFrom\": \"10.8.0.0/16,192.168.1.0/24\"", await File.ReadAllTextAsync(configPath), StringComparison.Ordinal);
+        }
+        finally
+        {
+            root.Delete(recursive: true);
+        }
+    }
+
+    /// <summary>The README's two allowFrom sentences (the store's one range, the MCP list) carry the same address spelling clause as the re-prompt.</summary>
+    [Fact]
+    public void Readme_NamesTheAddressSpellingRule_OnTheStoreRangeAndOnTheList()
+    {
+        const string Clause = "with each IPv4 address written as four plain decimal numbers (no leading zeros) and no IPv6 zone index";
+        var readme = RepoFile.ReadRepoFile("Darling", "README.md");
+
+        Assert.Contains("**`allowFrom`**: one range in CIDR form, " + Clause + ". The store takes ONE range and never a list", readme, StringComparison.Ordinal);
+        Assert.Contains("Each entry must be in CIDR form (use `/32` for one address), " + Clause + ", and must match the address family of `listen`.", readme, StringComparison.Ordinal);
+    }
+
     [Fact]
     public async Task ConfigureNetwork_Web_ExistingToken_KeptByDefault()
     {
@@ -1292,6 +1567,55 @@ public sealed class DarlingConfigureNetworkTests
                 DarlingHostBinding.BindMode.LoopbackOnly,
                 WebHost.ResolveWebBind(config.Web, managed: true).Mode);
             Assert.NotEmpty(Directory.GetFiles(root.FullName, "darling.json.bak-*"));
+        }
+        finally
+        {
+            root.Delete(recursive: true);
+        }
+    }
+
+    /// <summary>
+    /// #5288: the wizard's exposure summary prints each endpoint's TLS line directly under its own surface line, and
+    /// only for an exposed one. The pure tests pin the words; this one pins that the wizard calls them, in that
+    /// order, with the arguments the endpoint needs (a correct builder nothing calls is a defect we have had).
+    /// </summary>
+    [Fact]
+    public async Task ExposureSummary_McpTlsLine_PrintsUnderTheMcpLine_BeforeTheWebLine()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "The wizard queries the Windows service.");
+
+        var root = Directory.CreateTempSubdirectory("darling-confignet-tlsline-");
+        try
+        {
+            var configPath = Path.Combine(root.FullName, "darling.json");
+            await File.WriteAllTextAsync(configPath, """
+                {
+                  "postgres": { "managed": true },
+                  "mcp": {
+                    "network": {
+                      "listen": "192.168.1.205", "allowFrom": "192.168.1.0/24", "token": "mcp-secret",
+                      "tls": { "pfxPath": "C:\\certs\\mcp.pfx" }
+                    }
+                  },
+                  "web": {
+                    "network": { "listen": "192.168.1.205", "allowFrom": "192.168.1.0/24", "token": "web-secret" }
+                  },
+                  "servers": [ { "host": "S" } ]
+                }
+                """);
+
+            var output = new StringWriter();
+            var exit = await DarlingCliCommands.ConfigureNetworkAsync(
+                configPath, Script("q"), output, new StringWriter(), CancellationToken.None);
+            Assert.Equal(0, exit);
+
+            var text = output.ToString().Replace("\r\n", "\n", StringComparison.Ordinal);
+            Assert.Contains(
+                "  MCP  : EXPOSED — listen 192.168.1.205, allowFrom 192.168.1.0/24\n"
+                + "         TLS: on (PKCS#12, C:\\certs\\mcp.pfx).\n"
+                + "  Web  : EXPOSED — listen 192.168.1.205, allowFrom 192.168.1.0/24\n"
+                + "         TLS: off — the access token and its session cookie cross the segment in the clear. Set web.network.tls to serve HTTPS.\n",
+                text, StringComparison.Ordinal);
         }
         finally
         {

@@ -11,10 +11,14 @@ using System.IO;
 using System.Linq;
 using System.Net;
 using System.Net.Sockets;
+using System.Security.Cryptography;
+using System.Security.Cryptography.X509Certificates;
 using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
 using PerformanceMonitor.Darling.Service;
+using PerformanceMonitor.Darling.Service.Hosting;
+using PerformanceMonitor.Darling.Service.Mcp;
 using Xunit;
 
 namespace Darling.Tests;
@@ -368,6 +372,142 @@ public sealed class DiagnosticsBundleHardeningTests
         {
             Assert.DoesNotContain(forbidden, text, StringComparison.OrdinalIgnoreCase);
         }
+    }
+
+    /* ── mcp.network.hostName (#5288) ──
+       The operator types this DNS name, and the service log writes it twice: the certificate-name warning names its
+       NORMALIZED form at every start (the trailing dot dropped, an internationalized name in its ASCII form), and the
+       warning for a value that is not a bare DNS name echoes it AS WRITTEN. A bundle built from a config that sets
+       the name holds neither spelling. The warning texts below are the product's own. */
+
+    /* The service-log section as the bundle builds it: parsed, aliased whole, then checked by the output verifier. */
+    private static string BundleOfServiceLogMessages(BundleAliaser aliaser, params string[] messages)
+    {
+        var t = DateTime.Now;
+        var log = string.Join("\n", messages.Select(m => $"{t:yyyy-MM-dd HH:mm:ss.fff} [WARN ] [Mcp] {m}"));
+        var entries = DiagnosticsBundleServiceLog.Parse(log, false, t.AddHours(-1), DiagnosticsBundleServiceLog.AliasInputChars);
+        Assert.Equal(messages.Length, entries.Count);
+        var section = new JsonObject
+        {
+            ["status"] = "ok",
+            ["entries"] = new JsonArray(entries.Select(e => (JsonNode?)new JsonObject { ["message"] = e.Message }).ToArray()),
+        };
+
+        var sections = new[] { new BundleSection("service_log", section, false, DiagnosticsBundleRunner.CapServiceLogMessages) };
+        var (text, leaks, _) = DiagnosticsBundle.Assemble(sections, aliaser, DiagnosticsBundle.BuildManifest(1, "fleet", 0));
+        Assert.Empty(leaks);
+        return text!;
+    }
+
+    [Theory]
+    [InlineData("gate.kappacorp.example.test", "kappacorp")]
+    [InlineData("  Gate.KappaCorp.Example.Test.  ", "kappacorp")]    // the log names it trimmed and without the trailing dot
+    [InlineData("gate.käppacorp.example.test", "kppacorp")]     // written in Unicode, named in its ASCII form
+    public void McpHostName_InTheCertificateNameWarning_ComesOutAliased(string configured, string distinctive)
+    {
+        var config = new DarlingConfig { Mcp = { Network = new McpNetworkConfig { HostName = configured } } };
+        var aliaser = new BundleAliaser();
+        DiagnosticsBundle.SeedFromConfig(aliaser, config, null);
+
+        using var key = RSA.Create(2048);
+        var request = new CertificateRequest("CN=bundle-test", key, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+        using var certificate = request.CreateSelfSigned(DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddDays(30));
+        var normalized = DarlingMcpHostService.NormalizedHostName(configured);
+        var warning = DarlingListenerTls.SanWarning(ListenerTlsLabels.Mcp, certificate, IPAddress.Parse("192.0.2.10"), 5152, normalized);
+        Assert.Contains(normalized!, warning!, StringComparison.Ordinal);
+
+        var text = BundleOfServiceLogMessages(aliaser, warning!);
+        Assert.DoesNotContain(normalized!, text, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(distinctive, text, StringComparison.OrdinalIgnoreCase);
+        Assert.Matches(@"host-\d+", text);
+    }
+
+    [Theory]
+    [InlineData("https://gate.kappacorp.example.test:5152/")]
+    [InlineData("gate.kappacorp.example.test:5152")]
+    [InlineData("*.kappacorp.example.test")]
+    public void McpHostName_ARefusedValue_AndTheHostHeadersThatFollowIt_ComeOutAliased(string configured)
+    {
+        var config = new DarlingConfig { Mcp = { Network = new McpNetworkConfig { HostName = configured } } };
+        var aliaser = new BundleAliaser();
+        DiagnosticsBundle.SeedFromConfig(aliaser, config, null);
+
+        var logger = new CapturingTestLogger();
+        Assert.Null(DarlingMcpHostService.ResolveAllowedHostName(configured, networkMode: true, logger));
+        var warning = Assert.Single(logger.Lines);
+        Assert.Contains(configured, warning, StringComparison.Ordinal);
+
+        /* The value is refused, so a client that connects by the real name is refused too, and the log names that Host alone. */
+        var refusal = "the Host header 'gate.kappacorp.example.test' is not an address this endpoint binds" + DarlingMcpHostService.HostRefusalAdmits;
+        var text = BundleOfServiceLogMessages(aliaser, warning, refusal);
+        Assert.DoesNotContain("kappacorp", text, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /* The service log's own words for its two listeners ("MCP server", "Web dashboard", mcp.network.allowFrom): a host
+       name that starts with one of them is aliased whole, with its domain, and the words stay readable. The texts are
+       the cleartext warning each listener logs at every start. */
+    [Theory]
+    [InlineData("mcp", "mcp.corp.example.test")]              // mcp.network.hostName
+    [InlineData("web", "web.corp.example.test")]              // web.publicBaseUrl
+    [InlineData("dashboard", "dashboard.corp.example.test")]  // web.publicBaseUrl
+    public void AHostNameThatStartsWithAListenerWord_KeepsTheServiceLogsWordsAndAliasesTheHost(string firstLabel, string hostName)
+    {
+        var config = firstLabel == "mcp"
+            ? new DarlingConfig { Mcp = { Network = new McpNetworkConfig { HostName = hostName } } }
+            : new DarlingConfig { Web = { PublicBaseUrl = "https://" + hostName + "/" } };
+        var aliaser = new BundleAliaser();
+        DiagnosticsBundle.SeedFromConfig(aliaser, config, null);
+
+        var text = BundleOfServiceLogMessages(
+            aliaser,
+            DarlingListenerTls.CleartextWarning(ListenerTlsLabels.Mcp),
+            DarlingListenerTls.CleartextWarning(ListenerTlsLabels.Web),
+            "clients connect to " + hostName,
+            "the Host header '" + hostName + "' is not an address this endpoint binds" + DarlingMcpHostService.HostRefusalAdmits);
+
+        Assert.Contains("MCP server is LAN-exposed WITHOUT TLS", text, StringComparison.Ordinal);
+        /* The Host-refusal line names mcp.network.listen and mcp.network.hostName: the settings stay readable, the Host header named beside them is aliased. */
+        Assert.Contains("mcp.network.listen when LAN-exposed, or mcp.network.hostName when LAN-exposed", text, StringComparison.Ordinal);
+        Assert.Contains("mcp.network.allowFrom bounds only who can route to the port", text, StringComparison.Ordinal);
+        Assert.Contains("Web dashboard is LAN-exposed WITHOUT TLS", text, StringComparison.Ordinal);
+        Assert.Contains("web.network.allowFrom bounds only who can route to the port", text, StringComparison.Ordinal);
+        Assert.DoesNotContain(hostName, text, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("corp.example", text, StringComparison.OrdinalIgnoreCase);
+        Assert.Matches(@"clients connect to host-\d+", text);
+    }
+
+    /* A webhook proxy goes through the same first-label registration: a proxy host name that starts with "proxy" is
+       aliased whole, with its domain, and the log's "reverse proxy" words stay readable. */
+    [Fact]
+    public void AProxyHostNameThatStartsWithProxy_KeepsTheReverseProxyWordsAndAliasesTheHost()
+    {
+        var config = new DarlingConfig();
+        config.Webhooks.TeamsProxy = "http://proxy.corp.example.test:3128";
+        var aliaser = new BundleAliaser();
+        DiagnosticsBundle.SeedFromConfig(aliaser, config, null);
+
+        var text = BundleOfServiceLogMessages(
+            aliaser,
+            DarlingListenerTls.CleartextWarning(ListenerTlsLabels.Mcp),
+            "webhooks go out through proxy.corp.example.test:3128");
+
+        Assert.Contains("or front the port with a TLS-terminating reverse proxy", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("proxy.corp.example", text, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("corp.example", text, StringComparison.OrdinalIgnoreCase);
+        Assert.Matches(@"webhooks go out through host-\d+", text);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("   ")]
+    public void McpHostName_NotSet_SeedsNothing(string? configured)
+    {
+        var withName = new BundleAliaser();
+        DiagnosticsBundle.SeedFromConfig(withName, new DarlingConfig { Mcp = { Network = new McpNetworkConfig { HostName = configured } } }, null);
+        var without = new BundleAliaser();
+        DiagnosticsBundle.SeedFromConfig(without, new DarlingConfig(), null);
+        Assert.Equal(without.TokenCount, withName.TokenCount);
     }
 
     [Theory]

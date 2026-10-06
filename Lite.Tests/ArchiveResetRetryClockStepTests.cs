@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Runtime.CompilerServices;
 using System.Text.RegularExpressions;
@@ -32,6 +33,8 @@ namespace PerformanceMonitorLite.Tests;
 [Collection("CollectionResetGate")]
 public sealed class ArchiveResetRetryClockStepTests : IDisposable
 {
+    private readonly List<DuckDbInitializer> _initializers = [];
+
     private readonly string _tempDir;
     private readonly string _dbPath;
     private readonly string _archiveDir;
@@ -47,6 +50,11 @@ public sealed class ArchiveResetRetryClockStepTests : IDisposable
 
     public void Dispose()
     {
+        foreach (var initializer in _initializers)
+        {
+            initializer.Dispose();
+        }
+
         try
         {
             if (Directory.Exists(_tempDir))
@@ -63,6 +71,7 @@ public sealed class ArchiveResetRetryClockStepTests : IDisposable
     private async Task<(ArchiveService Service, Func<int> ExportsStarted)> FailingServiceAsync()
     {
         var initializer = new DuckDbInitializer(_dbPath);
+        _initializers.Add(initializer);
         await initializer.InitializeAsync();
 
         using (var connection = new DuckDBConnection($"Data Source={_dbPath}"))
@@ -143,7 +152,8 @@ SELECT i, 1, 'S1', 'wait_stats', TIMESTAMP '2026-09-01 00:00:00' + INTERVAL (i) 
         var now = new DateTime(2026, 9, 29, 12, 0, 0, DateTimeKind.Utc);
         var backoff = TimeSpan.FromMinutes(15);
 
-        Assert.Equal(backoff, new ArchiveService(new DuckDbInitializer(Path.Combine(_tempDir, "unused.duckdb")), _archiveDir).ResetRetryBackoff);
+        using var unused = new DuckDbInitializer(Path.Combine(_tempDir, "unused.duckdb"));
+        Assert.Equal(backoff, new ArchiveService(unused, _archiveDir).ResetRetryBackoff);
 
         /* The stamp a failed attempt writes is the longest lead there is, and is a wait. */
         Assert.Equal(now + backoff, CollectorCadence.ClampDue(now + backoff, now, backoff));

@@ -58,12 +58,24 @@ public sealed class FinOpsStorageGrowthWindowBehaviourTests
 
     private static string[] Hours(JsonElement step) => step.GetProperty("reads").EnumerateArray().Select(e => e.GetProperty("hours").GetString()!).ToArray();
 
+    private static string?[] Limits(JsonElement step) => step.GetProperty("reads").EnumerateArray().Select(e => e.GetProperty("limit").GetString()).ToArray();
+
     [Fact]
     public void TheDatabasesLevelHasNoSelectAndReadsTwentyFourHours()
     {
         var d = Run().GetProperty("databases");
         Assert.Equal(new[] { "24" }, Hours(d));
         Assert.Equal(0, d.GetProperty("selects").GetInt32());
+    }
+
+    [Fact]
+    public void TheDatabasesLevelAsksForFiveHundredDatabases_AndTheObjectsLevelForTwenty()
+    {
+        var run = Run();
+        // #5238: the databases list is the desktop's every-database grid, so the tab asks for the most the service takes at this level.
+        Assert.Equal(new[] { "500" }, Limits(run.GetProperty("databases")));
+        Assert.Equal(new[] { "500" }, Limits(run.GetProperty("other")));
+        Assert.Equal(new[] { "20" }, Limits(run.GetProperty("objects")));
     }
 
     [Fact]

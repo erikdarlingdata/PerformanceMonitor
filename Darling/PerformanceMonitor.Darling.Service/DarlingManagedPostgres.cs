@@ -5163,10 +5163,20 @@ public sealed class DarlingManagedPostgres
                 $"postgres.network.listen '{network.Listen}' is not a valid IP address (use a specific IP, e.g. 192.168.1.205, or 0.0.0.0 for all interfaces)");
         }
 
-        if (string.IsNullOrWhiteSpace(network.AllowFrom) || !IPNetwork.TryParse(network.AllowFrom.Trim(), out var cidr))
+        /* #5288: the same plain-spelling rule as the MCP and web allowFrom lists (Hosting.CidrAllowList): the
+           address is four plain decimal numbers (no leading zero, no short or hex form) and carries no IPv6 zone
+           index. IPNetwork.TryParse alone would read 192.168.010.0/24 as 192.168.8.0/24, and this value feeds the
+           pg_hba line and the firewall rule, so the range written is the range enforced. Checked as written,
+           before the host bits are masked. */
+        if (string.IsNullOrWhiteSpace(network.AllowFrom)
+            || !IPNetwork.TryParse(network.AllowFrom.Trim(), out var cidr)
+            || !Hosting.CidrAllowList.IsPlainCidrText(network.AllowFrom.Trim()))
         {
             return Degrade(
-                $"postgres.network.allowFrom '{network.AllowFrom}' is not a valid CIDR (e.g. 192.168.1.0/24, with host bits zeroed)");
+                $"postgres.network.allowFrom '{network.AllowFrom}' is not a valid CIDR. The store takes ONE range in CIDR form "
+                + "(e.g. 192.168.1.0/24, or /32 for one address), never a list. Host bits are masked, not refused "
+                + "(192.168.1.5/24 means 192.168.1.0/24). Write an IPv4 address as four plain decimal numbers "
+                + "(no leading zeros, no short or hex form), and leave off any IPv6 zone index (%)");
         }
 
         if (cidr.BaseAddress.AddressFamily != listenIp.AddressFamily)
@@ -5195,7 +5205,7 @@ public sealed class DarlingManagedPostgres
                 "move postgres.dataDirectory to a space-free path to expose the store over TLS");
         }
 
-        /* Canonical base/prefix form (IPNetwork requires zeroed host bits) for the pg_hba line + firewall. */
+        /* Canonical base/prefix form (IPNetwork.TryParse masked any host bits) for the pg_hba line + firewall. */
         return new NetworkExposureDecision(true, listenIp.ToString(), $"{cidr.BaseAddress}/{cidr.PrefixLength}", roles, null);
 
         static NetworkExposureDecision Degrade(string reason) => new(false, null, null, null, reason);
@@ -5796,21 +5806,88 @@ public sealed class DarlingManagedPostgres
     /// <summary>
     /// PowerShell single-quoted literal. Inside <c>'…'</c> PowerShell expands nothing — no <c>$</c>, no
     /// backtick escapes, no subexpressions — so the ONE metacharacter is the quote itself, escaped by
-    /// doubling it. Every value the firewall builders interpolate goes through this (#1646): the builders
-    /// are then safe no matter what a caller hands them, INDEPENDENT of the caller-side CIDR parse that is
-    /// the primary fix. The rule names are internally generated and contain no quotes, so quoting them
-    /// leaves the emitted command byte-for-byte what it has always been.
+    /// doubling it. PowerShell reads FIVE characters as a single quote: the apostrophe U+0027 and the
+    /// typographic U+2018, U+2019, U+201A and U+201B (it closes a single-quoted string on any of them, and a
+    /// quote character followed by another stands for one quote inside the string), so all five are doubled
+    /// — the same rule as the PowerShell SDK's <c>CodeGeneration.EscapeSingleQuotedStringContent</c>. Every
+    /// value the firewall builders interpolate goes through this (#1646): the builders are then safe no
+    /// matter what a caller hands them, INDEPENDENT of the caller-side CIDR parse that is the primary fix.
+    /// The rule names are internally generated and contain no quotes, so quoting them leaves the emitted
+    /// command byte-for-byte what it has always been.
     /// <para><c>internal</c> so <see cref="DarlingFirewallCheck.BuildProbeCommand"/> escapes the rule name
     /// through this same one helper rather than growing a second, subtly different quoting rule (#1771).</para>
     /// </summary>
     internal static string SingleQuotedPowerShell(string value)
-        => "'" + value.Replace("'", "''", StringComparison.Ordinal) + "'";
+    {
+        var quoted = new StringBuilder(value.Length + 2);
+        quoted.Append('\'');
+        foreach (var c in value)
+        {
+            quoted.Append(c);
+            if (c is '\'' or '‘' or '’' or '‚' or '‛')
+            {
+                quoted.Append(c);
+            }
+        }
+
+        return quoted.Append('\'').ToString();
+    }
 
     /// <summary>Idempotent-named enable command (remove-by-name then add) — the exact scoped command the docs
-    /// lead with (D1). Pure + testable.</summary>
+    /// lead with (D1). Pure + testable.
+    ///
+    /// <para>#5288: <paramref name="remoteCidr"/> is ONE CIDR, or the CANONICAL comma-joined list
+    /// (<c>CidrAllowList.ToString()</c>, the text <c>FirewallRulePlan.Cidr</c> and both hosts carry). Each
+    /// element is single-quoted on its own and the elements are joined by <c>,</c> with no spaces — PowerShell's
+    /// array syntax, which <c>-RemoteAddress</c> takes: <c>-RemoteAddress '10.8.0.0/16','192.168.1.5/32'</c>.
+    /// ONE CIDR is byte-for-byte what it was before the list existed: <c>-RemoteAddress '192.168.1.0/24'</c>.
+    /// An EMPTY element (a blank value, a doubled comma, a trailing comma) throws
+    /// <see cref="ArgumentException"/> instead of emitting <c>''</c>: a rule scoped by a quietly dropped entry
+    /// is the wrong way to find a typo. An element holding a character outside an address and prefix length
+    /// (<c>0-9</c>, <c>A-F</c>, <c>a-f</c>, <c>:</c>, <c>.</c>, <c>/</c>) throws as well, so only an address-shaped
+    /// element is ever quoted into the command. This is still no parser — the split is on the already-canonical
+    /// text and does no parsing and no trimming (<see cref="Hosting.CidrAllowList"/> owns those) — and each
+    /// element is one single-quoted literal through <see cref="SingleQuotedPowerShell"/> (#1646).</para></summary>
     internal static string BuildFirewallEnableCommand(string ruleName, int port, string remoteCidr)
         => $"Remove-NetFirewallRule -DisplayName {SingleQuotedPowerShell(ruleName)} -ErrorAction SilentlyContinue; " +
-           $"New-NetFirewallRule -DisplayName {SingleQuotedPowerShell(ruleName)} -Direction Inbound -Action Allow -Protocol TCP -LocalPort {port} -RemoteAddress {SingleQuotedPowerShell(remoteCidr)} | Out-Null";
+           $"New-NetFirewallRule -DisplayName {SingleQuotedPowerShell(ruleName)} -Direction Inbound -Action Allow -Protocol TCP -LocalPort {port} -RemoteAddress {QuotedRemoteAddressList(remoteCidr)} | Out-Null";
+
+    /// <summary>#5288: the <c>-RemoteAddress</c> value for <see cref="BuildFirewallEnableCommand"/> — every
+    /// comma-separated element through <see cref="SingleQuotedPowerShell"/>, joined by <c>,</c>. Throws
+    /// <see cref="ArgumentException"/> on an empty (or whitespace-only) element rather than emitting <c>''</c>,
+    /// and on an element holding any character outside <c>[0-9A-Fa-f:./]</c> (an address and prefix length) —
+    /// a quote, a space, a semicolon — rather than quoting it.</summary>
+    private static string QuotedRemoteAddressList(string remoteCidr)
+    {
+        ArgumentNullException.ThrowIfNull(remoteCidr);
+
+        var elements = remoteCidr.Split(',');
+        for (var i = 0; i < elements.Length; i++)
+        {
+            if (string.IsNullOrWhiteSpace(elements[i]))
+            {
+                throw new ArgumentException(
+                    "The firewall -RemoteAddress list has an empty element (a blank value, a doubled comma or a " +
+                    "trailing comma); refusing to emit an empty -RemoteAddress.",
+                    nameof(remoteCidr));
+            }
+
+            foreach (var c in elements[i])
+            {
+                if (c is not ((>= '0' and <= '9') or (>= 'A' and <= 'F') or (>= 'a' and <= 'f') or ':' or '.' or '/'))
+                {
+                    throw new ArgumentException(
+                        $"The firewall -RemoteAddress list element {i + 1} holds a character outside an address and " +
+                        "prefix length (0-9, A-F, ':', '.', '/'); refusing to emit it.",
+                        nameof(remoteCidr));
+                }
+            }
+
+            elements[i] = SingleQuotedPowerShell(elements[i]);
+        }
+
+        return string.Join(",", elements);
+    }
 
     /// <summary>
     /// Idempotent-named disable command (remove-by-name). Pure + testable.
