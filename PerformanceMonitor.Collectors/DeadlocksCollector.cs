@@ -513,21 +513,52 @@ OUTER APPLY
         return new CollectorQuery(text, parameters);
     }
 
+    /// <summary>The separator inside the identity text of a whole-marker graph (see <see cref="GetIdentity"/>). An
+    /// XML graph cannot hold it, so no real graph can equal a whole-marker identity.</summary>
+    public const char WholeMarkerIdentitySeparator = '';
+
+    /// <summary>
+    /// The SQL expression (PostgreSQL and DuckDB both run it) that gives a stored row the same identity text
+    /// <see cref="GetIdentity"/> gives the row it was written from: the graph itself, except that a graph equal to
+    /// the statement filter's marker becomes marker + victim process id + database name. A marker row with no victim
+    /// process id has nothing to tell it apart, so it stays the bare marker, which no row's identity ever equals
+    /// (#4348, R4b).
+    /// </summary>
+    public const string StoredGraphIdentitySql =
+        "CASE WHEN deadlock_graph_xml = '" + SensitiveStatements.PlaceholderText + "' "
+        + "AND victim_process_id IS NOT NULL AND victim_process_id <> '' "
+        + "THEN deadlock_graph_xml || chr(1) || victim_process_id || chr(1) || COALESCE(database_name, '') "
+        + "ELSE deadlock_graph_xml END";
+
     /// <inheritdoc />
     public (DateTime Time, string Graph)? GetIdentity(Row row)
     {
-        /* #4348: a graph the statement filter withheld WHOLE is the marker, the same text for every such graph. Two
-           different deadlocks at the same time would share this identity and one would be dropped, so a whole-marker
-           graph has no identity, like a row with no graph: it is never dropped. The cost is that the same whole-marker
-           deadlock re-read inside CursorReReadOverlap is stored again (a whole-marker graph only appears when the
-           filter's budget ran out or the graph did not parse). */
-        if (row.DeadlockTime is not { } time || string.IsNullOrEmpty(row.GraphXml)
-            || string.Equals(row.GraphXml, SensitiveStatements.PlaceholderText, StringComparison.Ordinal))
+        if (row.DeadlockTime is not { } time || string.IsNullOrEmpty(row.GraphXml))
         {
             return null;
         }
 
-        return (new DateTime(time.Ticks - (time.Ticks % 10), time.Kind), row.GraphXml);
+        var graph = row.GraphXml;
+
+        /* #4348: a graph the statement filter withheld WHOLE is the marker, the same text for every such graph, so
+           the text cannot tell two deadlocks at one time apart. The identity is then built from the columns this row
+           parsed from the raw graph before judging it: the event time (above), the victim process id and the
+           database. The same deadlock re-read inside CursorReReadOverlap gets the same identity and is dropped as a
+           copy; a different deadlock at that time has another victim process. A marker row with no victim process id
+           has nothing to tell it apart, so it has no identity and is never dropped. StoredGraphIdentitySql builds
+           the same text for a stored row. */
+        if (string.Equals(graph, SensitiveStatements.PlaceholderText, StringComparison.Ordinal))
+        {
+            if (string.IsNullOrEmpty(row.VictimProcessId))
+            {
+                return null;
+            }
+
+            graph = string.Concat(graph, WholeMarkerIdentitySeparator.ToString(), row.VictimProcessId,
+                WholeMarkerIdentitySeparator.ToString(), row.DatabaseName ?? string.Empty);
+        }
+
+        return (new DateTime(time.Ticks - (time.Ticks % 10), time.Kind), graph);
     }
 
     /// <inheritdoc />

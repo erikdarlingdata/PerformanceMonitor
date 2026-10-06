@@ -166,13 +166,17 @@ WHERE server_id = $1";
        stored just before midnight is seen; the candidates are confined to [$2, $3). key_count = 1 leaves alone any
        row whose (collection_time, deadlock_id) is shared, so a keyed delete can never match a keeper. The graph
        is compared with COLLATE "C" so the identity is ordinal whatever the database collation. #4348: a graph the
-       statement filter withheld WHOLE is the marker text, the same for every such graph, so two different deadlocks
-       at the same time would look like copies; a marker graph is never a candidate. */
+       statement filter withheld WHOLE is the marker text, the same for every such graph, so the text cannot tell two
+       deadlocks at one time apart. A marker row's identity adds its victim process id and database (the two
+       PARTITION BY CASEs, NULL for a real graph, so a real graph's identity is unchanged), and a marker row with no
+       victim process id is never a candidate. */
     private const string CandidateSql = @"
 SELECT collection_time, deadlock_id, deadlock_time, deadlock_graph_xml
 FROM (
     SELECT collection_time, deadlock_id, deadlock_time, deadlock_graph_xml,
-           row_number() OVER (PARTITION BY server_id, deadlock_time, deadlock_graph_xml COLLATE ""C""
+           row_number() OVER (PARTITION BY server_id, deadlock_time, deadlock_graph_xml COLLATE ""C"",
+                              CASE WHEN deadlock_graph_xml COLLATE ""C"" = '" + SensitiveStatements.PlaceholderText + @"' THEN victim_process_id COLLATE ""C"" END,
+                              CASE WHEN deadlock_graph_xml COLLATE ""C"" = '" + SensitiveStatements.PlaceholderText + @"' THEN COALESCE(database_name, '') COLLATE ""C"" END
                               ORDER BY collection_time, deadlock_id) AS rn,
            count(*) OVER (PARTITION BY collection_time, deadlock_id) AS key_count
     FROM collect.deadlocks
@@ -180,7 +184,8 @@ FROM (
     AND   collection_time >= $2 - INTERVAL '1 day' AND collection_time < $3
     AND   deadlock_time IS NOT NULL
     AND   deadlock_graph_xml IS NOT NULL AND deadlock_graph_xml <> ''
-    AND   deadlock_graph_xml COLLATE ""C"" <> '" + SensitiveStatements.PlaceholderText + @"'
+    AND   (deadlock_graph_xml COLLATE ""C"" <> '" + SensitiveStatements.PlaceholderText + @"'
+           OR (victim_process_id IS NOT NULL AND victim_process_id <> ''))
 ) x
 WHERE x.rn > 1
 AND   x.key_count = 1

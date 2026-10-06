@@ -9,6 +9,8 @@
 using System;
 using System.Collections.Generic;
 using DuckDB.NET.Data;
+using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Common;
 using PerformanceMonitorLite.Services;
 using Xunit;
 
@@ -40,17 +42,19 @@ public sealed class DeadlockStoredIdentityReadLiteTests
         using (var create = connection.CreateCommand())
         {
             create.CommandText =
-                "CREATE TABLE deadlocks (server_id INTEGER, deadlock_time TIMESTAMP, collection_time TIMESTAMP, deadlock_graph_xml VARCHAR)";
+                "CREATE TABLE deadlocks (server_id INTEGER, deadlock_time TIMESTAMP, collection_time TIMESTAMP, deadlock_graph_xml VARCHAR, victim_process_id VARCHAR, database_name VARCHAR)";
             create.ExecuteNonQuery();
         }
 
-        void Insert(string graph, DateTime collected, DateTime? time = null)
+        void Insert(string graph, DateTime collected, DateTime? time = null, string? victim = null, string? database = null)
         {
             using var insert = connection.CreateCommand();
-            insert.CommandText = "INSERT INTO deadlocks VALUES (1, $1, $2, $3)";
+            insert.CommandText = "INSERT INTO deadlocks VALUES (1, $1, $2, $3, $4, $5)";
             insert.Parameters.Add(new DuckDBParameter { Value = time ?? EventTime });
             insert.Parameters.Add(new DuckDBParameter { Value = collected });
             insert.Parameters.Add(new DuckDBParameter { Value = graph });
+            insert.Parameters.Add(new DuckDBParameter { Value = (object?)victim ?? DBNull.Value });
+            insert.Parameters.Add(new DuckDBParameter { Value = (object?)database ?? DBNull.Value });
             insert.ExecuteNonQuery();
         }
 
@@ -58,6 +62,11 @@ public sealed class DeadlockStoredIdentityReadLiteTests
         Insert("edge", EventTime.AddDays(-1));
         Insert("before", EventTime.AddDays(-1).AddSeconds(-1));
         Insert("", EventTime.AddMinutes(5));
+        /* #4348 (R4b): a whole-marker graph reads back as marker + victim + database, the text the collector builds
+           for the row it is about to write; one with no victim process id reads back as the bare marker. */
+        Insert(SensitiveStatements.PlaceholderText, EventTime.AddMinutes(5), victim: "process1", database: "db1");
+        Insert(SensitiveStatements.PlaceholderText, EventTime.AddMinutes(5), victim: "process2");
+        Insert(SensitiveStatements.PlaceholderText, EventTime.AddMinutes(5));
 
         var found = new List<string>();
         using (var read = connection.CreateCommand())
@@ -75,6 +84,16 @@ public sealed class DeadlockStoredIdentityReadLiteTests
         }
 
         found.Sort(StringComparer.Ordinal);
-        Assert.Equal(new[] { "edge", "inside" }, found);
+        var marker = SensitiveStatements.PlaceholderText;
+        var expected = new[]
+        {
+            "edge", "inside", marker, marker + "process1db1", marker + "process2",
+        };
+        Array.Sort(expected, StringComparer.Ordinal);
+        Assert.Equal(expected, found);
+
+        /* The same text the collector gives a row it is about to write. */
+        var row = new DeadlocksCollector.Row { DeadlockTime = EventTime, GraphXml = marker, VictimProcessId = "process1", DatabaseName = "db1" };
+        Assert.Equal(marker + "process1db1", DeadlocksCollector.Instance.GetIdentity(row)!.Value.Graph);
     }
 }
