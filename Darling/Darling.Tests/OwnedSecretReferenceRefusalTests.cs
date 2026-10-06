@@ -103,7 +103,7 @@ public sealed class OwnedSecretReferenceRefusalTests : IDisposable
     {
         foreach (var pw in new[] { "file:" + Path.Combine(_owned, "secret.txt"), "env:DARLING_CONFIG" })
         {
-            var (entries, invalid, whole) = DarlingMcpServerAdminTools.ParseRequest(Body(pw), isWindows: false, allowSecretReferences: true);
+            var (entries, invalid, whole) = DarlingMcpServerAdminTools.ParseRequest(Body(pw), TestKeyRings.NotReady.Status, allowSecretReferences: true);
             Assert.Null(whole);
             Assert.Empty(entries);
             var r = Assert.Single(invalid);
@@ -116,7 +116,7 @@ public sealed class OwnedSecretReferenceRefusalTests : IDisposable
     {
         foreach (var pw in new[] { "file:" + Path.Combine(_root, "other", "pw"), "env:SOME_OTHER_VAR" })
         {
-            var (entries, invalid, _) = DarlingMcpServerAdminTools.ParseRequest(Body(pw), isWindows: false, allowSecretReferences: true);
+            var (entries, invalid, _) = DarlingMcpServerAdminTools.ParseRequest(Body(pw), TestKeyRings.NotReady.Status, allowSecretReferences: true);
             Assert.Empty(invalid);
             Assert.Single(entries);
         }

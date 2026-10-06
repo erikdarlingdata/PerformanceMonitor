@@ -10,6 +10,7 @@ using System;
 using System.IO;
 using System.Linq;
 using Microsoft.Data.SqlClient;
+using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Notifications;
 using Xunit;
@@ -681,7 +682,7 @@ public sealed class DarlingConfigTests
         Assert.NotEqual("s3cret!", blob);
         Assert.Equal("s3cret!", DarlingSecrets.Unprotect(blob));
 
-        var server = Server(s => { s.Auth = "sql"; s.Username = "u"; s.EncryptedPassword = blob; s.Password = "wrong-plaintext"; });
+        var server = Server(s => { s.Auth = "sql"; s.Username = "u"; s.EncryptedPassword = blob; s.EncryptedPasswordDeclaredByFile = true; s.Password = "wrong-plaintext"; });
         Assert.Equal("s3cret!", DarlingSecrets.ResolvePassword(server, out var usedPlaintext));
         Assert.False(usedPlaintext);
 
@@ -696,26 +697,42 @@ public sealed class DarlingConfigTests
 
     /// <summary>
     /// #2087's storage half: a reference passes through UNTOUCHED on every platform (the Linux onboarding
-    /// path), a literal still DPAPI-encrypts on Windows, and Windows-auth (no password) stays null.
+    /// path), a literal is sealed for the connection it is saved with and opens only for it (#5366), and Windows-auth
+    /// (no password) stays null.
     /// </summary>
     [Fact]
-    public void ProtectPasswordForStorage_ReferencesPassThrough_LiteralsEncrypt()
+    public void ProtectPasswordForStorage_ReferencesPassThrough_LiteralsAreSealed()
     {
+        var ring = TestKeyRings.Healthy;
+        var binding = PasswordBinding.ForServer(
+            ServerConnectionIdentity.FromStoredColumns("sql-example", 0, "sqlserver", null, false, "sql", "monitor", "Mandatory", false, false));
+
         Assert.Equal(
             "file:/run/secrets/sql_password",
-            DarlingMcpServerAdminTools.ProtectPasswordForStorage("file:/run/secrets/sql_password"));
-        Assert.Equal(
-            "env:SQL_PW",
-            DarlingMcpServerAdminTools.ProtectPasswordForStorage("env:SQL_PW"));
-        Assert.Null(DarlingMcpServerAdminTools.ProtectPasswordForStorage(null));
-        Assert.Null(DarlingMcpServerAdminTools.ProtectPasswordForStorage(""));
+            DarlingMcpServerAdminTools.ProtectPasswordForStorage("file:/run/secrets/sql_password", binding, ring));
+        Assert.Equal("env:SQL_PW", DarlingMcpServerAdminTools.ProtectPasswordForStorage("env:SQL_PW", binding, ring));
+        Assert.Null(DarlingMcpServerAdminTools.ProtectPasswordForStorage(null, binding, ring));
+        Assert.Null(DarlingMcpServerAdminTools.ProtectPasswordForStorage("", binding, ring));
 
-        if (OperatingSystem.IsWindows())
-        {
-            var stored = DarlingMcpServerAdminTools.ProtectPasswordForStorage("literal-pw");
-            Assert.NotNull(stored);
-            Assert.NotEqual("literal-pw", stored);
-            Assert.Equal("literal-pw", DarlingSecrets.Unprotect(stored!));
-        }
+        var stored = DarlingMcpServerAdminTools.ProtectPasswordForStorage("literal-pw", binding, ring);
+        Assert.NotNull(stored);
+        Assert.StartsWith(PasswordSeal.V1Prefix, stored, StringComparison.Ordinal);
+        Assert.DoesNotContain("literal-pw", stored, StringComparison.Ordinal);
+        Assert.Equal("literal-pw", ring.Open(stored!, binding));
+
+        var other = PasswordBinding.ForServer(
+            ServerConnectionIdentity.FromStoredColumns("sql-other", 0, "sqlserver", null, false, "sql", "monitor", "Mandatory", false, false));
+        Assert.Throws<PasswordSealException>(() => { _ = ring.Open(stored!, other); });
+    }
+
+    [Fact]
+    public void ProtectPasswordForStorage_ALiteralWhileTheKeyIsNotReady_Throws_WithTheKeysReason()
+    {
+        var binding = PasswordBinding.ForServer(
+            ServerConnectionIdentity.FromStoredColumns("sql-example", 0, "sqlserver", null, false, "sql", "monitor", "Mandatory", false, false));
+
+        var ex = Assert.Throws<InvalidOperationException>(
+            () => { _ = DarlingMcpServerAdminTools.ProtectPasswordForStorage("literal-pw", binding, TestKeyRings.NotReady); });
+        Assert.Equal(DarlingPasswordKey.NotReadyReason, ex.Message);
     }
 }
