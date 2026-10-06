@@ -282,6 +282,8 @@ public sealed class DarlingSecretsOwnedReferenceTests : IDisposable
             StoredServerId = declared.ServerId,
             Host = declared.Host,
             Port = declared.Port,
+            Auth = declared.Auth,
+            Username = declared.Username,
             EncryptedPassword = declared.EncryptedPassword,
         };
 

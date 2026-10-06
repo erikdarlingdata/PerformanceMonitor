@@ -704,37 +704,13 @@ public sealed partial class DarlingMcpServerAdminTools
         string.Equals(storeAuth, ServerStoreAuth.Sql, StringComparison.OrdinalIgnoreCase)
         || string.Equals(storeAuth, ServerStoreAuth.ServicePrincipal, StringComparison.OrdinalIgnoreCase);
 
-    /// <summary>
-    /// The edit core's own rule for "the server is at the same address": the host text is equal ordinally (a request's host
-    /// is trimmed when it is read; the text is compared exactly as stored, and case counts) and the port is equal. An edit that fails it
-    /// has moved the server, so the stored password is not reused. <c>StoreConfigProvider</c> applies the same rule to
-    /// decide whether a row still sits at the address darling.json declares.
-    /// </summary>
+    /// <summary>The shared address rule (<see cref="ServerConnectionRule.SameAddress"/>), kept under this name for the edit core and its tests.</summary>
     internal static bool SameAddress(string host, int port, string otherHost, int otherPort) =>
-        string.Equals(host, otherHost, StringComparison.Ordinal) && port == otherPort;
+        ServerConnectionRule.SameAddress(host, port, otherHost, otherPort);
 
-    /// <summary>Every setting that decides where a server is reached and how it is trusted: what an edit and a
-    /// <c>test_connect</c> compare against the stored row before a stored password may be used.</summary>
-    internal readonly record struct ServerConnectionSettings(
-        string Host, int Port, string Engine, string? Database, bool ReadOnlyIntent, string Auth, string? Username,
-        string EncryptMode, bool TrustServerCertificate, bool MultiSubnetFailover);
-
-    /// <summary>
-    /// The ONE rule for "this definition connects differently from that one", shared by the edit core and
-    /// <c>test_connect</c> so neither lets a stored password go anywhere the other would refuse. Host, username and
-    /// database compare ordinally (<see cref="SameAddress"/> for host and port); auth, encrypt mode and engine ignore
-    /// case; the rest compare as stored. The store function in <c>provision-roles.sql</c> (<c>password_needed</c>) names the same set.
-    /// </summary>
+    /// <summary>The shared connection-settings rule (<see cref="ServerConnectionRule.ConnectionSettingsDiffer"/>), kept under this name for the edit core.</summary>
     internal static bool ConnectionSettingsDiffer(ServerConnectionSettings a, ServerConnectionSettings b) =>
-        !SameAddress(a.Host, a.Port, b.Host, b.Port)
-        || !string.Equals(a.Engine, b.Engine, StringComparison.OrdinalIgnoreCase)
-        || !string.Equals(a.Database, b.Database, StringComparison.Ordinal)
-        || a.ReadOnlyIntent != b.ReadOnlyIntent
-        || !string.Equals(a.Auth, b.Auth, StringComparison.OrdinalIgnoreCase)
-        || !string.Equals(a.Username, b.Username, StringComparison.Ordinal)
-        || !string.Equals(a.EncryptMode, b.EncryptMode, StringComparison.OrdinalIgnoreCase)
-        || a.TrustServerCertificate != b.TrustServerCertificate
-        || a.MultiSubnetFailover != b.MultiSubnetFailover;
+        ServerConnectionRule.ConnectionSettingsDiffer(a, b);
 
 
     /// <summary>

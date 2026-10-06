@@ -1756,24 +1756,45 @@ ORDER BY name", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoo
             RemediationEncryptedPassword = reader.IsDBNull(18) ? null : reader.GetString(18),
         };
 
-        if (server.RequiresResolvedSecret && string.IsNullOrWhiteSpace(server.EncryptedPassword))
-        {
-            /* Service principal keeps its client secret in the same EncryptedPassword slot as a SQL password,
-               so the bootstrap backfill (store row minted without the secret) covers it identically. #3484. */
-            var matches = bootstrap.Servers.Where(s =>
-                s.RequiresResolvedSecret
-                && string.Equals(s.StorageName, server.StorageName, StringComparison.OrdinalIgnoreCase)
-                && string.Equals(s.Username, server.Username, StringComparison.Ordinal)).ToList();
-
-            if (matches.Count == 1)
-            {
-                server.EncryptedPassword = matches[0].EncryptedPassword;
-                server.Password = matches[0].Password;
-            }
-        }
-
+        BackfillSecretFromFile(server, bootstrap);
         MarkSlotsTheFileDeclares(server, bootstrap);
         return server;
+    }
+
+    /// <summary>The connection settings of a server definition, with the same NULL defaults the edit core reads a row with.</summary>
+    internal static ServerConnectionSettings ConnectionSettingsOf(MonitoredServer server) =>
+        ServerConnectionSettings.WithDefaults(
+            server.Host, server.Port, server.Engine, server.Database, server.ReadOnlyIntent, server.Auth, server.Username,
+            server.EncryptMode, server.TrustServerCertificate, server.MultiSubnetFailover);
+
+    /// <summary>
+    /// Copies the darling.json secret into a server built from a store row that carries none, when exactly one file entry
+    /// holds the same connection: the storage name and username, and all ten connection settings plus engine
+    /// (<see cref="ServerConnectionRule.ConnectionSettingsDiffer"/>, authentication compared exactly). A row that differs in any
+    /// of them is left without the file's secret.
+    /// </summary>
+    internal static void BackfillSecretFromFile(MonitoredServer server, DarlingConfig bootstrap)
+    {
+        if (!server.RequiresResolvedSecret || !string.IsNullOrWhiteSpace(server.EncryptedPassword))
+        {
+            return;
+        }
+
+        /* Service principal keeps its client secret in the same EncryptedPassword slot as a SQL password,
+           so the bootstrap backfill (store row minted without the secret) covers it identically. #3484. */
+        var rowSettings = ConnectionSettingsOf(server);
+        var matches = bootstrap.Servers.Where(s =>
+            s is not null
+            && s.RequiresResolvedSecret
+            && string.Equals(s.StorageName, server.StorageName, StringComparison.OrdinalIgnoreCase)
+            && string.Equals(s.Username, server.Username, StringComparison.Ordinal)
+            && !ServerConnectionRule.ConnectionSettingsDiffer(ConnectionSettingsOf(s), rowSettings)).ToList();
+
+        if (matches.Count == 1)
+        {
+            server.EncryptedPassword = matches[0].EncryptedPassword;
+            server.Password = matches[0].Password;
+        }
     }
 
     /// <summary>
@@ -1781,9 +1802,9 @@ ORDER BY name", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoo
     /// reference, in that same slot, for the same server id, which is the one case where an owned reference may resolve
     /// (<see cref="DarlingSecrets.ResolvePassword"/>). Nothing in the row can set a mark: it takes a file entry (itself
     /// marked when the file was read) with this server's id and exactly this text. A store row for another server id, or a
-    /// row whose slot was changed to another reference, finds no such entry and is left unmarked. The row must also sit at
-    /// the entry's address (host and port, compared with the edit core's own rule), so a reference the file declares for one
-    /// address is never sent to another: an operator who moves a file server updates its darling.json entry too (the file
+    /// row whose slot was changed to another reference, finds no such entry and is left unmarked. The row must also agree with
+    /// the entry on all ten connection settings plus engine (the edit core's own rule, authentication compared exactly), so a
+    /// reference the file declares for one connection is never sent to another: an operator who moves a file server updates its darling.json entry too (the file
     /// then declares the reference for the new address), or uses a reference that is not owned.
     /// </summary>
     internal static void MarkSlotsTheFileDeclares(MonitoredServer server, DarlingConfig bootstrap)
@@ -1793,8 +1814,7 @@ ORDER BY name", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoo
             /* A null element is skipped, as DarlingConfig.Parse's own loop skips it (#5240). */
             if (declared is null
                 || declared.ServerId != server.ServerId
-                || !PerformanceMonitor.Darling.Service.Mcp.DarlingMcpServerAdminTools.SameAddress(
-                    declared.Host ?? "", declared.Port, server.Host ?? "", server.Port))
+                || ServerConnectionRule.ConnectionSettingsDiffer(ConnectionSettingsOf(declared), ConnectionSettingsOf(server)))
             {
                 continue;
             }
