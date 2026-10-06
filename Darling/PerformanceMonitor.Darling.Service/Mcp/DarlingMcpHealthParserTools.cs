@@ -148,11 +148,8 @@ public sealed class DarlingMcpHealthParserTools
         try
         {
             var now = windowEnd;
-            /* database_id → name resolution needs the collected size-stats mapping (the shred left it null). */
-            var mapTask = DarlingSystemHealthReader.GetDatabaseNameMapAsync(postgres, resolved.ServerId, cancellationToken);
             var xmls = await DarlingSystemHealthReader.ReadEventXmlAsync(
                 postgres, resolved.ServerId, now.AddHours(-hours_back), now, SystemHealthParser.ErrorReportedEvent, cancellationToken);
-            var map = await mapTask;
             var lastCapturedAt = await DarlingSystemHealthReader.GetLastCaptureAsync(postgres, resolved.ServerId, cancellationToken);
 
             var rows = xmls
@@ -160,6 +157,13 @@ public sealed class DarlingMcpHealthParserTools
                 .Where(r => r != null && SystemHealthSignificance.IsSignificant(r))
                 .Select(r => r!)
                 .ToList();
+            /* database_id → name resolution needs the collected size-stats history (the shred left it null). #5373: each
+               error gets the name its id carried at the error's own time, not the server's latest name for the id.
+               Only the errors shown are resolved, so the history read covers just their time range. */
+            var shown = rows.Take(limit).ToList();
+            var names = await DatabaseNameHistoryReader.ReadAsync(
+                postgres, resolved.ServerId, shown.Select(r => (r.DatabaseId, r.EventTime)),
+                McpCommandDeadlines.ReadSeconds, cancellationToken);
             if (rows.Count == 0)
                 return await EmptyAsync(
                     postgres, new Collected<SevereErrorRecord>(null, resolved.ServerId, resolved.ServerName, rows, xmls.Count, lastCapturedAt, now),
@@ -180,14 +184,14 @@ public sealed class DarlingMcpHealthParserTools
                 last_captured_at = Stamp(lastCapturedAt),
                 error_count = rows.Count,
                 shown = Math.Min(rows.Count, limit),
-                errors = rows.Take(limit).Select(r => new
+                errors = shown.Select(r => new
                 {
                     event_time = r.EventTime?.ToString("o"),
                     error_number = r.ErrorNumber,
                     severity = r.Severity,
                     state = r.State,
                     database_id = r.DatabaseId,
-                    database_name = DarlingSystemHealthReader.ResolveDatabaseName(r.DatabaseId, map),
+                    database_name = names.Resolve(r.DatabaseId, r.EventTime),
                     message = r.Message
                 })
             }, McpHelpers.JsonOptions));
