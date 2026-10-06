@@ -284,6 +284,27 @@ public sealed class ManageTagsBehaviourTests
         Assert.Equal("Keep me", r.GetProperty("kept").GetString());
     }
 
+    /// <summary>#5240 review finding 2: the write transport reports session expiry the way <c>send</c> always has. A 401, a 2xx whose body is
+    /// a sign-in page and a 2xx whose body is empty each hand over to the shell once with the house message and "/" (never the body's
+    /// own login), and none of them reads as a saved change.</summary>
+    [Theory]
+    [InlineData("401")]
+    [InlineData("html")]
+    [InlineData("empty")]
+    public void AWriteTheSessionGateAnswers_HandsOverToTheShellOnce_AndShowsNoSuccess(string answer)
+    {
+        if (!TryRun("expiry:" + answer, out var r)) return;
+
+        var hand = Assert.Single(r.GetProperty("expired").EnumerateArray().ToArray());
+        Assert.Equal("Your session has expired. Sign in again.", hand[0].GetString());
+        Assert.Equal("/", hand[1].GetString());
+        var text = r.GetProperty("text").GetString();
+        Assert.Contains("Your session has expired. Sign in again.", text);
+        Assert.DoesNotContain("Tag created.", text);
+        Assert.Equal(1, r.GetProperty("writes").GetInt32());
+        Assert.Equal(1, r.GetProperty("formOpen").GetInt32());
+    }
+
     [Fact]
     public void AnEditAnsweredUnknownParent_KeepsTheFormTheNameAndTheTicks_AndResetsTheParent()
     {
