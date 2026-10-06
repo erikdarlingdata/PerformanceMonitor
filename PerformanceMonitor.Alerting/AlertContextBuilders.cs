@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using System.Text;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Notifications;
 
 namespace PerformanceMonitor.Alerting;
@@ -79,9 +80,9 @@ public static class AlertContextBuilders
             if (!string.IsNullOrEmpty(g.Database))
                 item.Fields.Add(("Database", g.Database));
             if (!string.IsNullOrEmpty(g.BlockedQuery))
-                item.Fields.Add(("Blocked Query", TruncateText(g.BlockedQuery)));
+                item.Fields.Add(("Blocked Query", TruncateStatement(g.BlockedQuery)));
             if (!string.IsNullOrEmpty(g.BlockingQuery))
-                item.Fields.Add(("Blocking Query", TruncateText(g.BlockingQuery)));
+                item.Fields.Add(("Blocking Query", TruncateStatement(g.BlockingQuery)));
             item.Fields.Add(("Wait Range", g.Incident.WaitRange ?? g.MaxWaitMs.ToString()));
             context.Details.Add(item);
         }
@@ -171,7 +172,7 @@ public static class AlertContextBuilders
             if (p.Databases.Count > 0)
                 item.Fields.Add(("Database", string.Join(", ", p.Databases)));
             if (!string.IsNullOrEmpty(p.Row.VictimSqlText))
-                item.Fields.Add(("Victim SQL", TruncateText(p.Row.VictimSqlText)));
+                item.Fields.Add(("Victim SQL", TruncateStatement(p.Row.VictimSqlText)));
             if (!string.IsNullOrEmpty(p.Row.ProcessSummary))
                 item.Fields.Add(("Processes", p.Row.ProcessSummary));
             /* #3442: the same per-party facts the fingerprinted item carries. Both render paths take
@@ -510,7 +511,10 @@ public static class AlertContextBuilders
                 e.HasReportXml
                     ? new AlertIncidentAttachment(
                         e.BlockedProcessReportXml, AlertIncidentAttachment.BlockedProcessReportFileName)
-                    : null)));
+                    : null)),
+            /* #5320: the card's statement cut judges the whole statement first. Identity reads the raw text,
+               so a withheld statement does not change which incident a sample belongs to. */
+            statement => TruncateStatement(statement));
 
     /* The graph parse, shared by the render path and #2216's observation path. The fingerprint's object
        set, the #2109 Database fact and #3442's per-party facts all come off the same pass, so parsing once
@@ -580,7 +584,7 @@ public static class AlertContextBuilders
     {
         var f = new List<AlertIncidentField>();
         if (databases.Count > 0) f.Add(new AlertIncidentField("Database", string.Join(", ", databases)));
-        if (!string.IsNullOrWhiteSpace(victimSql)) f.Add(new AlertIncidentField("Victim SQL", TruncateText(victimSql)));
+        if (!string.IsNullOrWhiteSpace(victimSql)) f.Add(new AlertIncidentField("Victim SQL", TruncateStatement(victimSql!)));
         if (!string.IsNullOrWhiteSpace(processes)) f.Add(new AlertIncidentField("Processes", processes!));
         foreach (var (label, value) in parties) f.Add(new AlertIncidentField(label, value));
         return f.Count > 0 ? f : null;
@@ -675,7 +679,7 @@ public static class AlertContextBuilders
                         : $"(name unresolved) Job 0x{AgentJobStepQuery.ToProgramNameHex(jobKey.JobId)}, step {jobKey.StepId}"));
             }
             if (!string.IsNullOrEmpty(q.QueryText))
-                item.Fields.Add(("Query", TruncateText(q.QueryText)));
+                item.Fields.Add(("Query", TruncateStatement(q.QueryText)));
             item.Fields.Add(("CPU Time", $"{q.CpuTimeMs:N0} ms"));
             item.Fields.Add(("Reads", $"{q.Reads:N0}"));
             item.Fields.Add(("Writes", $"{q.Writes:N0}"));
@@ -1215,6 +1219,19 @@ public static class AlertContextBuilders
         if (string.IsNullOrEmpty(text)) return "";
         text = text.Replace('\r', ' ').Replace('\n', ' ').Trim();
         return text.Length <= maxLength ? text : text.Substring(0, maxLength) + "...";
+    }
+
+    /// <summary>
+    /// <see cref="TruncateText"/> for statement text (#5320): the statement is judged WHOLE by
+    /// <see cref="SensitiveStatements.Text"/> and the result is cut, never the other way round. A judge that sees
+    /// an already-cut statement misses a value whose naming text (a <c>CREATE LOGIN</c> head, a
+    /// <c>PASSWORD =</c> keyword) lies past the cut. A withheld statement reads as
+    /// <see cref="SensitiveStatements.PlaceholderText"/>, which is shorter than any cut.
+    /// </summary>
+    public static string TruncateStatement(string text, int maxLength = 300)
+    {
+        var judged = SensitiveStatements.Text(text) ?? "";
+        return TruncateText(judged, maxLength);
     }
 
     private static string FormatDuration(long seconds)

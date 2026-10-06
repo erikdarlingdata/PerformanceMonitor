@@ -107,10 +107,11 @@ public sealed class DarlingMcpBlockingTools
         [Description("Optional alert fingerprint (the alert's Dedup Key). The key is scoped to the server's display name and the incident's involved objects. The fingerprint scan runs over the window BEFORE limit.")] string? dedup_key = null,
         [Description("Return each row's full blocked_sql_text/blocking_sql_text instead of a 150-character preview. Default false. A dedup_key call ignores this and always returns the full text.")] bool full_text = false,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        [Description("Limit to one database. Omit for all databases.")] string? database_name = null,
         MonitoredServerRegistryState? registryState = null,
         ILogger? logger = null,
         CancellationToken cancellationToken = default) =>
-        GetBlocking(postgres, server_name, hours_back, limit, dedup_key, full_text, as_of, SqlTextPreviewLength, registryState, logger, cancellationToken);
+        GetBlocking(postgres, server_name, hours_back, limit, dedup_key, full_text, as_of, DatabaseFilter.One(database_name), SqlTextPreviewLength, registryState, logger, cancellationToken);
 
     /// <summary>
     /// get_blocking under an explicit <paramref name="sqlTextPreviewLength"/> (#4198): the MCP tool passes
@@ -118,8 +119,21 @@ public sealed class DarlingMcpBlockingTools
     /// viewer's <c>/api/read</c> mirror passes <see cref="WebSqlTextPreviewLength"/> so its page does not
     /// change.
     /// </summary>
-    internal static async Task<string> GetBlocking(
+    internal static Task<string> GetBlocking(
         NpgsqlDataSource postgres, string? server_name, int hours_back, int limit, string? dedup_key, bool full_text, string? as_of, int sqlTextPreviewLength,
+        MonitoredServerRegistryState? registryState = null, ILogger? logger = null, CancellationToken cancellationToken = default) =>
+        GetBlocking(postgres, server_name, hours_back, limit, dedup_key, full_text, as_of, DatabaseFilter.All, sqlTextPreviewLength, registryState, logger, cancellationToken);
+
+    /// <summary>
+    /// get_blocking over a SET of databases (#5244): <paramref name="databases"/> empty (<see cref="DatabaseFilter.All"/>) is every
+    /// database, otherwise both arms (the XE reports and the DMV fallback) keep only the named databases' rows, before the fingerprint
+    /// scan and before <paramref name="limit"/>, so the page is the newest <c>limit</c> events of the chosen databases. The empty answer
+    /// and a dedup_key miss say "for the chosen databases" so they are not read as a verdict on a database the read never looked at;
+    /// the status word is unchanged (<c>empty</c>: we looked at the chosen databases and found nothing).
+    /// </summary>
+    internal static async Task<string> GetBlocking(
+        NpgsqlDataSource postgres, string? server_name, int hours_back, int limit, string? dedup_key, bool full_text, string? as_of,
+        DatabaseFilter databases, int sqlTextPreviewLength,
         MonitoredServerRegistryState? registryState = null, ILogger? logger = null, CancellationToken cancellationToken = default)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveWithFingerprintNameAsync(postgres, server_name, cancellationToken);
@@ -155,12 +169,12 @@ public sealed class DarlingMcpBlockingTools
             */
             var fetch = filtering ? DarlingBlockingReader.FingerprintScanCeiling + 1 : limit + 1;
             var rows = await DarlingBlockingReader.GetRecentBlockedProcessReportsAsync(
-                postgres, resolved.ServerId, now.AddHours(-hours_back), now, fetch, cancellationToken);
+                postgres, resolved.ServerId, now.AddHours(-hours_back), now, fetch, databases, cancellationToken);
             if (rows.Count == 0)
                 return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "blocked_process_report", cancellationToken)
                     /* #4966: an empty answer over a window the store may not reach back to is not a true negative, so the window keys
                        ride on it under hints. The page is fed by two collectors, so the probe is both (the earlier of the two). */
-                    ?? McpHelpers.Status("empty", "No blocking events found in the specified time range.",
+                    ?? McpHelpers.Status("empty", $"No blocking events found in the specified time range{ForChosenDatabases(databases)}.",
                         (await DarlingMcpWindowNotice.ReadEventAsync(
                             () => DarlingMcpWindowNotice.Probe(postgres, BlockingPageSources, resolved.ServerName, windowStart, now, cancellationToken),
                             null, windowStart, now, BlockingPageTables, emptyAnswer: true, logger: logger, cancellationToken: cancellationToken)).AsHints());
@@ -191,6 +205,7 @@ public sealed class DarlingMcpBlockingTools
                 if (kept.Count == 0)
                     return McpHelpers.Status("empty", DarlingIncidentFingerprint.NoMatchMessage(
                         "blocking events", dedup_key!, resolved.FingerprintName, examined)
+                        + ChosenDatabasesScanClause(databases)
                         + ScanCeilingClause(scanTruncated));
 
                 keys = kept.Select(r => wanted).Cast<string?>().ToList();
@@ -240,14 +255,14 @@ public sealed class DarlingMcpBlockingTools
                 blocked_client_app = r.BlockedClientApp,
                 blocked_host_name = r.BlockedHostName,
                 blocked_login_name = r.BlockedLoginName,
-                blocked_sql_text = showFullText ? r.BlockedSqlText : McpHelpers.Truncate(r.BlockedSqlText, sqlTextPreviewLength),
+                blocked_sql_text = showFullText ? r.BlockedSqlText : McpHelpers.TruncateStatement(r.BlockedSqlText, sqlTextPreviewLength),
                 blocked_sql_text_truncated = !showFullText && r.BlockedSqlText != null && r.BlockedSqlText.Length > sqlTextPreviewLength,
                 blocking_status = r.BlockingStatus,
                 blocking_isolation_level = r.BlockingIsolationLevel,
                 blocking_client_app = r.BlockingClientApp,
                 blocking_host_name = r.BlockingHostName,
                 blocking_login_name = r.BlockingLoginName,
-                blocking_sql_text = showFullText ? r.BlockingSqlText : McpHelpers.Truncate(r.BlockingSqlText, sqlTextPreviewLength),
+                blocking_sql_text = showFullText ? r.BlockingSqlText : McpHelpers.TruncateStatement(r.BlockingSqlText, sqlTextPreviewLength),
                 blocking_sql_text_truncated = !showFullText && r.BlockingSqlText != null && r.BlockingSqlText.Length > sqlTextPreviewLength,
                 blocked_transaction_name = r.BlockedTransactionName,
                 blocking_transaction_name = r.BlockingTransactionName,
@@ -279,6 +294,8 @@ public sealed class DarlingMcpBlockingTools
                 effective_start = notice.EffectiveStart,
                 window_truncated = notice.WindowTruncated,
                 truncation_note = notice.TruncationNote,
+                /* #5244: which databases the page is limited to: the name for one, "the chosen databases" for two or more, null for all. */
+                database_name = databases.Describe(),
                 dedup_key = filtering ? DarlingIncidentFingerprint.NormalizeKey(dedup_key) : null,
                 /*
                     #3541 A3: `total_events` is gone. It was the reader's capped row count — neither the
@@ -329,6 +346,28 @@ public sealed class DarlingMcpBlockingTools
 
     /// <summary>The table names <see cref="BlockingPageSources"/> probes, as the truncation note names them.</summary>
     private const string BlockingPageTables = "blocked_process_reports and dmv_blocking_snapshots";
+
+    /// <summary>
+    /// What a database selection adds to an empty answer's sentence (#5244): nothing for every database, " for the database X" for one,
+    /// and " for the chosen databases" for two or more (<see cref="DatabaseFilter.Describe"/>'s words). An empty answer under a
+    /// selection is about the CHOSEN databases only; it says nothing about the rest.
+    /// </summary>
+    internal static string ForChosenDatabases(DatabaseFilter databases) =>
+        databases.Describe() switch
+        {
+            null => string.Empty,
+            DatabaseFilter.ManyDatabasesDescription => " for " + DatabaseFilter.ManyDatabasesDescription,
+            var one => " for the database " + one,
+        };
+
+    /// <summary>
+    /// The sentence a dedup_key miss carries under a database selection (#5244): the fingerprint scan ran over the chosen databases'
+    /// events only, so an incident whose events are in another database cannot match. Empty for every database.
+    /// </summary>
+    private static string ChosenDatabasesScanClause(DatabaseFilter databases) =>
+        databases.IsAll
+            ? string.Empty
+            : $" The scan was limited to the events{ForChosenDatabases(databases)}, so an incident whose events are in another database is not in it.";
 
     /// <summary>
     /// The sentence appended to a no-match answer when the fingerprint scan hit
@@ -431,7 +470,7 @@ public sealed class DarlingMcpBlockingTools
                 deadlock_time = r.DeadlockTime?.ToString("o"),
                 database_name = r.DatabaseName,
                 victim_process_id = r.VictimProcessId,
-                victim_sql_text = McpHelpers.Truncate(r.VictimSqlText, 2000),
+                victim_sql_text = McpHelpers.TruncateStatement(r.VictimSqlText, 2000),
                 process_summary = r.ProcessSummary,
                 has_deadlock_xml = r.HasDeadlockXml,
                 /* #5236: whether the victim's plan is stored, for the web grid's plan button (the XML is
@@ -606,6 +645,14 @@ public sealed class DarlingMcpBlockingTools
                 var (processes, processesTruncated) = DarlingDeadlockProcessRows.Build(
                     r.DeadlockGraphXml, r.DeadlockTime, showFullGraph ? int.MaxValue : rowBudget, statementLength);
                 if (!showFullGraph) rowBudget -= processes.Count;
+                /* #5320: the graph is judged WHOLE before the preview cuts it, as Lite's get_deadlock_detail does (#4348). A cut
+                   graph may end inside a statement's text, and the truncated flag is read off the FILTERED text: a graph withheld
+                   whole is a short placeholder (not truncated), and one the filter re-serialised past the cut is truncated,
+                   whatever its raw length was. The judge is told the cut so a long graph stops being read once nothing before
+                   it can change. */
+                var filteredGraph = showFullGraph || string.IsNullOrEmpty(r.DeadlockGraphXml)
+                    ? r.DeadlockGraphXml
+                    : SensitiveStatements.Xml(r.DeadlockGraphXml, DeadlockGraphPreviewLength) ?? SensitiveStatements.PlaceholderText;
                 return new
             {
                 collection_time = r.CollectionTime.ToString("o"),
@@ -614,8 +661,8 @@ public sealed class DarlingMcpBlockingTools
                 dedup_key = keys[i],
                 processes,
                 processes_truncated = processesTruncated,
-                deadlock_graph_xml = showFullGraph ? r.DeadlockGraphXml : McpHelpers.Truncate(r.DeadlockGraphXml, DeadlockGraphPreviewLength),
-                deadlock_graph_xml_truncated = !showFullGraph && r.DeadlockGraphXml.Length > DeadlockGraphPreviewLength
+                deadlock_graph_xml = showFullGraph ? filteredGraph : McpHelpers.Truncate(filteredGraph, DeadlockGraphPreviewLength),
+                deadlock_graph_xml_truncated = !showFullGraph && filteredGraph!.Length > DeadlockGraphPreviewLength
             };
             });
 
@@ -653,14 +700,25 @@ public sealed class DarlingMcpBlockingTools
     }
 
     [McpServerTool(Name = "get_blocked_process_xml"), Description("Gets the raw blocked process report XML from extended events, NEWEST FIRST. Contains full detail about both the blocked and blocking sessions for deep analysis. Only rows that CARRY a report (the XE capture; the DMV fallback never has one) are counted against limit; reports_returned, truncated and oldest_returned_event_time / newest_returned_event_time describe the page the same way get_blocking does, and truncated means the window held more reports than limit.")]
-    public static async Task<string> GetBlockedProcessXml(
+    public static Task<string> GetBlockedProcessXml(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history. Default 24.")] int hours_back = 24,
         [Description("Maximum reports WITH XML to return, newest first. Default 5. Read truncated to know whether the window held more.")] int limit = 5,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        [Description("Limit to one database. Omit for all databases.")] string? database_name = null,
         ILogger? logger = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) =>
+        GetBlockedProcessXml(postgres, server_name, hours_back, limit, as_of, DatabaseFilter.One(database_name), logger, cancellationToken);
+
+    /// <summary>
+    /// get_blocked_process_xml over a SET of databases (#5244): the report-XML predicate and the database predicate are both in the
+    /// SQL, so the page is the newest <paramref name="limit"/> reports WITH XML of the chosen databases, and the empty answer says
+    /// "for the chosen databases" (status unchanged).
+    /// </summary>
+    internal static async Task<string> GetBlockedProcessXml(
+        NpgsqlDataSource postgres, string? server_name, int hours_back, int limit, string? as_of, DatabaseFilter databases,
+        ILogger? logger = null, CancellationToken cancellationToken = default)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
@@ -681,7 +739,7 @@ public sealed class DarlingMcpBlockingTools
                asking for five reports had at most the newest 200 merged rows to find them in, DMV rows
                included, and nothing said so. */
             var candidates = await DarlingBlockingReader.GetRecentBlockedProcessReportsWithXmlAsync(
-                postgres, resolved.ServerId, now.AddHours(-hours_back), now, limit + 1, cancellationToken);
+                postgres, resolved.ServerId, now.AddHours(-hours_back), now, limit + 1, databases, cancellationToken);
             var truncated = candidates.Count > limit;
             var withXml = candidates.Take(limit).ToList();
             if (withXml.Count == 0)
@@ -691,7 +749,7 @@ public sealed class DarlingMcpBlockingTools
                     ?? await DarlingRuntimePrecondition.StatusAsync(postgres, resolved.ServerId, resolved.ServerName, "blocked_process_report", cancellationToken)
                     /* #4966: the report XML exists only in the XE arm, so the probe is the XE collector's alone: the DMV snapshots are
                        not a source of these rows, and their longer history must not read as coverage of reports they cannot hold. */
-                    ?? McpHelpers.Status("empty", "No blocked process report XML available in the specified time range.",
+                    ?? McpHelpers.Status("empty", $"No blocked process report XML available in the specified time range{ForChosenDatabases(databases)}.",
                         (await DarlingMcpWindowNotice.ReadEventAsync(
                             () => DarlingMcpWindowNotice.Probe(postgres, "blocked_process_reports", resolved.ServerName, windowStart, now, cancellationToken),
                             null, windowStart, now, "blocked_process_reports", emptyAnswer: true, logger: logger, cancellationToken: cancellationToken)).AsHints());
@@ -721,6 +779,8 @@ public sealed class DarlingMcpBlockingTools
                 effective_start = notice.EffectiveStart,
                 window_truncated = notice.WindowTruncated,
                 truncation_note = notice.TruncationNote,
+                /* #5244: which databases the page is limited to: the name for one, "the chosen databases" for two or more, null for all. */
+                database_name = databases.Describe(),
                 /* #3541 A3: the page bounds, on get_blocking's names. truncated means "more reports WITH
                    XML in the window than limit". */
                 reports_returned = withXml.Count,
@@ -740,12 +800,24 @@ public sealed class DarlingMcpBlockingTools
         }
     }
 
-    [McpServerTool(Name = "get_blocking_trend"), Description("Gets a time-series of blocking event counts per minute over time (blocked process reports, falling back to the always-on DMV blocking snapshot). Useful for identifying patterns (e.g., blocking spikes during batch jobs) or confirming whether blocking is a new, worsening, or resolved issue.")]
-    public static async Task<string> GetBlockingTrend(
+    [McpServerTool(Name = "get_blocking_trend"), Description("Gets a time-series of blocking event counts per minute over time (blocked process reports, falling back to the always-on DMV blocking snapshot). Useful for identifying patterns (e.g., blocking spikes during batch jobs) or confirming whether blocking is a new, worsening, or resolved issue. The source key names the collector that answered, blocked-process-report or DMV snapshot; the DMV snapshot is used only when the blocked process reports have no rows for the chosen databases, so source can differ between filters.")]
+    public static Task<string> GetBlockingTrend(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history. Default 24.")] int hours_back = 24,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        [Description("Limit to one database. Omit for all databases.")] string? database_name = null,
+        CancellationToken cancellationToken = default) =>
+        GetBlockingTrend(postgres, server_name, hours_back, as_of, DatabaseFilter.One(database_name), cancellationToken);
+
+    /// <summary>
+    /// get_blocking_trend over a SET of databases (#5244): both arms of the trend (XE reports and the DMV fallback) count only the
+    /// named databases' blocking. The empty answer keeps its status words and says "for the chosen databases": the collector-run
+    /// counts behind it are the SERVER's (a collector looks at every database), so "empty" means the captures ran and none of the
+    /// chosen databases' blocking was in them, and "unavailable" is still no capture at all.
+    /// </summary>
+    internal static async Task<string> GetBlockingTrend(
+        NpgsqlDataSource postgres, string? server_name, int hours_back, string? as_of, DatabaseFilter databases,
         CancellationToken cancellationToken = default)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
@@ -759,7 +831,7 @@ public sealed class DarlingMcpBlockingTools
             var now = windowEnd;
             var start = now.AddHours(-hours_back);
             var points = await DarlingBlockingTrendReader.GetBlockingTrendAsync(
-                postgres, resolved.ServerId, start, now, cancellationToken);
+                postgres, resolved.ServerId, start, now, databases, cancellationToken);
 
             if (points.Count == 0)
             {
@@ -779,15 +851,20 @@ public sealed class DarlingMcpBlockingTools
 
                 var captures = await DarlingBlockingTrendReader.GetBlockingCaptureCountsAsync(
                     postgres, resolved.ServerId, start, now, cancellationToken);
-                return await EmptyTrend(
+                return WithNullSource(await EmptyTrend(
                     "blocking", resolved.ServerName, hours_back, captures,
-                    () => DarlingBlockingTrendReader.HasAnyBlockingCollectorRunAsync(postgres, resolved.ServerId, cancellationToken));
+                    () => DarlingBlockingTrendReader.HasAnyBlockingCollectorRunAsync(postgres, resolved.ServerId, cancellationToken),
+                    databases));
             }
 
             return JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
                 hours_back,
+                /* #5244: which databases the trend is limited to (null for all), and which collector answered: the blocked-process
+                   reports, or the DMV snapshot when those have no rows for the chosen databases. One source per answer. */
+                database_name = databases.Describe(),
+                source = points[0].Source,
                 trend = points.Select(p => new { time = p.Time.ToString("o"), count = p.Count })
             }, McpHelpers.JsonOptions);
         }
@@ -936,6 +1013,18 @@ public sealed class DarlingMcpBlockingTools
     }
 
     /// <summary>
+    /// #5244: the empty answers of get_blocking_trend carry <c>source: null</c> -- the same key a non-empty answer names its collector in,
+    /// and the value get_blocking_stats gives when its blocking series has no rows -- so a caller reads one shape for "which collector
+    /// answered" whether or not any collector did. Appended to the status envelope; the deadlock trend shares EmptyTrend and does not call this.
+    /// </summary>
+    private static string WithNullSource(string statusAnswer)
+    {
+        var node = JsonNode.Parse(statusAnswer)!.AsObject();
+        node["source"] = null;
+        return node.ToJsonString(McpHelpers.JsonOptions);
+    }
+
+    /// <summary>
     /// The empty answer both per-minute trends give, and the whole point of #2485: <c>trend: []</c> is the
     /// same bytes on a server that had no blocking and on one that collected nothing, and an agent holding
     /// only the JSON cannot tell a clean bill of health from a hole in coverage.
@@ -956,7 +1045,8 @@ public sealed class DarlingMcpBlockingTools
         string serverName,
         int hoursBack,
         List<DarlingBlockingTrendReader.CaptureCount> captures,
-        Func<Task<bool>> hasEverCapturedAsync)
+        Func<Task<bool>> hasEverCapturedAsync,
+        DatabaseFilter databases = default)
     {
         var captureCount = captures.Sum(c => c.Runs);
         var hints = new
@@ -976,7 +1066,7 @@ public sealed class DarlingMcpBlockingTools
         if (captureCount > 0)
             return McpHelpers.Status(
                 "empty",
-                $"No {subject} was recorded for {serverName} in the last {hoursBack} hour(s). {captureCount} collector run(s) DID execute over this window, so this is a genuine all-clear rather than missing data — see hints.captures for which collectors ran and when.",
+                $"No {subject} was recorded for {serverName}{ForChosenDatabases(databases)} in the last {hoursBack} hour(s). {captureCount} collector run(s) DID execute over this window, so this is a genuine all-clear rather than missing data — see hints.captures for which collectors ran and when.",
                 hints);
 
         var everCaptured = await hasEverCapturedAsync();

@@ -20,6 +20,13 @@ namespace PerformanceMonitor.Ui;
 public static class ServerOverviewFilter
 {
     /// <summary>
+    /// The line both apps show when a search matched no Overview card (#5352). One sentence in one place so
+    /// Lite and the viewer cannot drift, and so the viewer's "all N servers are healthy" all-clear is never
+    /// the thing on screen when the search is what emptied the grid.
+    /// </summary>
+    public const string NoMatchText = "No server matches the search.";
+
+    /// <summary>
     /// Normalises a raw search-box value: trimmed, with empty/whitespace collapsed to null — the "no
     /// filter, everything matches" sentinel. Callers store the result so an empty box is cheap (no
     /// per-item work) and never accidentally filters everything out.

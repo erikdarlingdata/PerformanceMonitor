@@ -42,7 +42,7 @@ public sealed class ServerEditLiveTests : IDisposable
 
     private static readonly string RolePassword = Convert.ToHexString(RandomNumberGenerator.GetBytes(16));
 
-    private const string SecretRef = "env:SYNTH_EDIT_LIVE_REF";
+    private const string SecretRef = "Synth-Edit-Live-Pw-1";
 
     private static readonly Edit.ServerProbe Reachable = (_, _) => Task.FromResult(
         new ConnectionProbeResult(true, 15, 3, "Enterprise", false, false, false, true, null));
@@ -137,12 +137,13 @@ public sealed class ServerEditLiveTests : IDisposable
     }
 
     private static Task SeedServerAsync(
-        NpgsqlDataSource owner, int id, string name, string host, string auth, string? username, string? blob, CancellationToken ct) =>
+        NpgsqlDataSource owner, int id, string name, string host, string auth, string? username, string? blob, CancellationToken ct,
+        string? remediationBlob = null) =>
         ExecAsync(owner, $@"INSERT INTO config_monitored_servers
             (server_id, name, host, auth, username, encrypted_password, excluded_databases, capture_plans, is_enabled,
              alert_delivery_mode_override, plan_force_bot_enabled, remediation_username, remediation_encrypted_password, monthly_cost_usd)
             VALUES ({id}, '{name}', '{host}', '{auth}', {(username is null ? "NULL" : "'" + username + "'")}, {(blob is null ? "NULL" : "'" + blob + "'")},
-                    ARRAY['tempdb','model'], TRUE, FALSE, 'PerEvent', TRUE, 'rem-user', 'rem-blob', 7)", ct);
+                    ARRAY['tempdb','model'], TRUE, FALSE, 'PerEvent', TRUE, 'rem-user', {(remediationBlob is null ? "NULL" : "'" + remediationBlob + "'")}, 7)", ct);
 
     private static async Task<string> RowSignatureAsync(NpgsqlDataSource owner, int id, CancellationToken ct) =>
         await ScalarAsync<string>(owner, $@"SELECT concat_ws('|', is_enabled, array_to_string(excluded_databases, ','), capture_plans,
@@ -194,6 +195,36 @@ public sealed class ServerEditLiveTests : IDisposable
             var same = Parse(await Edit.EditServerByNameAsync(rig.Mcp, "Orders", "{\"display_name\":\"Orders\"}", Reachable, true, null, ct));
             Assert.Equal("unchanged", same["status"]!.GetValue<string>());
             Assert.Equal(versionMid, await ScalarAsync<long>(rig.Owner, "SELECT config_version FROM config_service", ct));
+            ok = true;
+        }
+        finally
+        {
+            await DropRoleAsync(rig, ok);
+        }
+    }
+
+    [Fact]
+    public async Task AsTheMcpRole_AnAddressEditOnARowWithARemediationLogin_IsRefused_AndWritesNothing_WhileANameEditSaves()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var rig = await OpenAsync(ct);
+        var ok = false;
+        try
+        {
+            await SeedServerAsync(rig.Owner, 5191, "alpha-91", "alpha-91.example.test", "integrated", null, null, ct, remediationBlob: "rem-blob");
+            var before = await RowSignatureAsync(rig.Owner, 5191, ct);
+            var versionBefore = await ScalarAsync<long>(rig.Owner, "SELECT config_version FROM config_service", ct);
+
+            var moved = Parse(await Edit.EditServerByNameAsync(rig.Mcp, "alpha-91.example.test", "{\"host\":\"alpha-99.example.test\"}", Reachable, true, null, ct));
+            Assert.Equal("invalid", moved["status"]!.GetValue<string>());
+            Assert.Equal(Edit.EditRemediationKeptText, moved["message"]!.GetValue<string>());
+            Assert.Equal("alpha-91.example.test", await ScalarAsync<string>(rig.Owner, "SELECT host FROM config_monitored_servers WHERE server_id = 5191", ct));
+            Assert.Equal(before, await RowSignatureAsync(rig.Owner, 5191, ct));
+            Assert.Equal(versionBefore, await ScalarAsync<long>(rig.Owner, "SELECT config_version FROM config_service", ct));
+
+            var renamed = Parse(await Edit.EditServerByNameAsync(rig.Mcp, "alpha-91.example.test", "{\"display_name\":\"Renamed\"}", Reachable, true, null, ct));
+            Assert.Equal("updated", renamed["status"]!.GetValue<string>());
+            Assert.Equal(before, await RowSignatureAsync(rig.Owner, 5191, ct));
             ok = true;
         }
         finally
@@ -269,7 +300,7 @@ public sealed class ServerEditLiveTests : IDisposable
     }
 
     [Fact]
-    public async Task ASecretEdit_StoresTheReference_AndTheMcpRoleStillCannotReadItBack()
+    public async Task ASecretEdit_StoresTheProtectedSecret_AndTheMcpRoleStillCannotReadItBack()
     {
         var ct = TestContext.Current.CancellationToken;
         await using var rig = await OpenAsync(ct);
@@ -285,8 +316,9 @@ public sealed class ServerEditLiveTests : IDisposable
             var saved = Parse(await Edit.EditServerByNameAsync(rig.Mcp, "alpha-31", $"{{\"host\":\"alpha-32.example.test\",\"password\":\"{SecretRef}\"}}", Reachable, true, null, ct));
             Assert.Equal("updated", saved["status"]!.GetValue<string>());
             Assert.True(saved["tested"]!.GetValue<bool>());
-            Assert.DoesNotContain("SYNTH_EDIT_LIVE_REF", saved.ToJsonString(), StringComparison.Ordinal);
-            Assert.Equal(SecretRef, await ScalarAsync<string>(rig.Owner, "SELECT encrypted_password FROM config_monitored_servers WHERE server_id = 5131", ct));
+            Assert.DoesNotContain(SecretRef, saved.ToJsonString(), StringComparison.Ordinal);
+            var storedAfterSave = await ScalarAsync<string>(rig.Owner, "SELECT encrypted_password FROM config_monitored_servers WHERE server_id = 5131", ct);
+            Assert.Equal(SecretRef, DarlingSecrets.Unprotect(storedAfterSave));
 
             var denied = await Assert.ThrowsAsync<PostgresException>(async () => await ScalarAsync<string>(rig.Mcp, "SELECT encrypted_password FROM config_monitored_servers", ct));
             Assert.Equal("42501", denied.SqlState);
@@ -299,7 +331,7 @@ public sealed class ServerEditLiveTests : IDisposable
             /* A name-only edit leaves the stored secret alone, with no password in the request. */
             var rename = Parse(await Edit.EditServerByNameAsync(rig.Mcp, "alpha-31", "{\"display_name\":\"Beta\"}", Reachable, true, null, ct));
             Assert.Equal("updated", rename["status"]!.GetValue<string>());
-            Assert.Equal(SecretRef, await ScalarAsync<string>(rig.Owner, "SELECT encrypted_password FROM config_monitored_servers WHERE server_id = 5131", ct));
+            Assert.Equal(storedAfterSave, await ScalarAsync<string>(rig.Owner, "SELECT encrypted_password FROM config_monitored_servers WHERE server_id = 5131", ct));
             ok = true;
         }
         finally
@@ -324,20 +356,20 @@ public sealed class ServerEditLiveTests : IDisposable
         var ok = false;
         try
         {
+            var wrong = "not-the-password-" + Guid.NewGuid().ToString("N")[..6];
             Environment.SetEnvironmentVariable("SYNTH_EDIT_LIVE_GOOD", password);
-            Environment.SetEnvironmentVariable("SYNTH_EDIT_LIVE_BAD", "not-the-password-" + Guid.NewGuid().ToString("N")[..6]);
             await SeedServerAsync(rig.Owner, 5141, "alpha-41", host!, "sql", user, "env:SYNTH_EDIT_LIVE_GOOD", ct);
             await ExecAsync(rig.Owner, "UPDATE config_monitored_servers SET trust_server_certificate = TRUE WHERE server_id = 5141", ct);
             var before = await ScalarAsync<string>(rig.Owner, "SELECT concat_ws('|', database, encrypted_password, modified_at::text) FROM config_monitored_servers WHERE server_id = 5141", ct);
 
             Edit.ServerProbe real = (config, c) => DarlingServerConnector.ProbeAsync(config, null, c);
 
-            var bad = Parse(await Edit.EditServerByNameAsync(rig.Mcp, "alpha-41", "{\"database\":\"master\",\"password\":\"env:SYNTH_EDIT_LIVE_BAD\"}", real, true, null, ct));
+            var bad = Parse(await Edit.EditServerByNameAsync(rig.Mcp, "alpha-41", "{\"database\":\"master\",\"password\":\"" + wrong + "\"}", real, true, null, ct));
             Assert.Equal("connection_failed", bad["status"]!.GetValue<string>());
-            Assert.DoesNotContain("SYNTH_EDIT_LIVE_BAD", bad.ToJsonString(), StringComparison.Ordinal);
+            Assert.DoesNotContain(wrong, bad.ToJsonString(), StringComparison.Ordinal);
             Assert.Equal(before, await ScalarAsync<string>(rig.Owner, "SELECT concat_ws('|', database, encrypted_password, modified_at::text) FROM config_monitored_servers WHERE server_id = 5141", ct));
 
-            var good = Parse(await Edit.EditServerByNameAsync(rig.Mcp, "alpha-41", "{\"database\":\"master\",\"password\":\"env:SYNTH_EDIT_LIVE_GOOD\"}", real, true, null, ct));
+            var good = Parse(await Edit.EditServerByNameAsync(rig.Mcp, "alpha-41", "{\"database\":\"master\",\"password\":\"" + password + "\"}", real, true, null, ct));
             Assert.Equal("updated", good["status"]!.GetValue<string>());
             Assert.True(good["tested"]!.GetValue<bool>());
             Assert.Equal("master", await ScalarAsync<string>(rig.Owner, "SELECT database FROM config_monitored_servers WHERE server_id = 5141", ct));
@@ -346,7 +378,6 @@ public sealed class ServerEditLiveTests : IDisposable
         finally
         {
             Environment.SetEnvironmentVariable("SYNTH_EDIT_LIVE_GOOD", null);
-            Environment.SetEnvironmentVariable("SYNTH_EDIT_LIVE_BAD", null);
             await DropRoleAsync(rig, ok);
         }
     }

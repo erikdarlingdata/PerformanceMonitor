@@ -16,6 +16,7 @@ using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Xml.Linq;
+using ModelContextProtocol;
 using ModelContextProtocol.Protocol;
 using ModelContextProtocol.Server;
 using PerformanceMonitor.Common;
@@ -48,6 +49,34 @@ public sealed class SensitiveStatementOutputFilterTests
         McpRequestHandler<CallToolRequestParams, CallToolResult> handler =
             SensitiveStatementOutputFilter.Instance((_, _) => ValueTask.FromResult(result));
         return await handler(null!, CancellationToken.None);
+    }
+
+    private static async Task<McpException> ThrownThroughFilterAsync(McpException thrown)
+    {
+        McpRequestHandler<CallToolRequestParams, CallToolResult> handler =
+            SensitiveStatementOutputFilter.Instance((_, _) => throw thrown);
+        return await Assert.ThrowsAnyAsync<McpException>(async () => await handler(null!, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task AThrownMcpException_IsRethrownWithItsMessageSwept_KeepingTypeCodeAndInnerException()
+    {
+        // L1: the SDK writes a thrown McpException's message into an error result outside the result sweep
+        var inner = new InvalidOperationException("inner");
+        var plain = await ThrownThroughFilterAsync(new McpException("server_name is required", inner));
+        Assert.Equal("server_name is required", plain.Message);
+
+        var swept = await ThrownThroughFilterAsync(new McpException(StatementScrubCanary.CanaryStatement, inner));
+        Assert.Equal(typeof(McpException), swept.GetType());
+        Assert.Same(inner, swept.InnerException);
+        Assert.Equal(Marker, swept.Message);
+
+        var protocol = await ThrownThroughFilterAsync(
+            new McpProtocolException(StatementScrubCanary.CanaryStatement, inner, McpErrorCode.InvalidParams));
+        var rethrown = Assert.IsType<McpProtocolException>(protocol);
+        Assert.Equal(McpErrorCode.InvalidParams, rethrown.ErrorCode);
+        Assert.Same(inner, rethrown.InnerException);
+        Assert.Equal(Marker, rethrown.Message);
     }
 
     private static CallToolResult Text(string text, bool? isError = null) => new()
@@ -432,7 +461,7 @@ public sealed class SensitiveStatementOutputFilterTests
         }
 
         _output.WriteLine($"100-value case over 3 runs: worst {worst:F0} ms, best {best:F0} ms");
-        Assert.True(best <= 1950, $"best elapsed {best:F0} ms (worst {worst:F0} ms)");
+        TimingClaim.AtMost(best, 1950, $"100 timing-out values, best of 3 (worst {worst:F0} ms)");
         var parsed = JsonNode.Parse(TextOf(last!))!.AsArray();
         Assert.Equal(100, parsed.Count);
         AssertEveryStringIsTheMarker(parsed);
@@ -470,7 +499,7 @@ public sealed class SensitiveStatementOutputFilterTests
         }
 
         _output.WriteLine($"two blocks of 50 timing-out values over 3 runs: worst {worst:F0} ms, best {best:F0} ms");
-        Assert.True(best <= 1950, $"best {best:F0} ms (worst {worst:F0} ms)");
+        TimingClaim.AtMost(best, 1950, $"two blocks of 50 timing-out values, best of 3 (worst {worst:F0} ms)");
         foreach (var block in result!.Content.Cast<TextContentBlock>())
             AssertEveryStringIsTheMarker(JsonNode.Parse(block.Text)!.AsArray());
     }

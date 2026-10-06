@@ -220,6 +220,9 @@ public sealed class RepoFileAdoptionTests
         /* #5320: its gate pins split build.yml into steps by line and anchor the gate step's PowerShell check (the
            Tee-Object line through the Select-String line that reads the same log) across the lines between them. */
         "ReleaseStatementGateWorkflowTests.cs",
+        /* #5374: its start pin slices the provisioning chain of DarlingWorker.cs, comments removed, and matches the rules call
+           inside each branch of it, across line breaks. */
+        "SelfManagedStoreRulesStartPinTests.cs",
         /* Its heading pin slices fillServerHead's body out of server.js, from its declaration to the closing brace
            on its own line, and asserts the display-name assignment sits inside it and ahead of the dot update. */
         "ServerPageTitlePinTests.cs",

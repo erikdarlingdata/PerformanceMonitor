@@ -18,6 +18,7 @@ using Microsoft.Extensions.Logging;
 using Npgsql;
 using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Notifications;
 
@@ -643,6 +644,15 @@ public sealed class CustomAlertEvaluator
             DisplayName: safeName);
     }
 
+    /// <summary>
+    /// A rule's operator-typed name, judged by the statement filter (#5320, L4 of #5360). The name rides a resolution
+    /// row's title (the history row's metric_name) and, on the teardown row, its message; both rows go out to the
+    /// history store, so the name is judged there like the display name of a fired alert. The local log line and the
+    /// server name stay as they are (the log never leaves the machine; the server name is a routing key). The
+    /// " Resolved" suffix is added after the judgment, so a withheld name still reads as a resolution.
+    /// </summary>
+    internal static string JudgedRuleName(string safeName) => SensitiveStatements.Text(safeName) ?? safeName;
+
     private async Task DeliverResolveAsync(CustomAlertRule row, int serverId, string displayName, double value)
     {
         var metricName = MetricNameFor(row.Id);
@@ -651,11 +661,12 @@ public sealed class CustomAlertEvaluator
            and its Message becomes detail_text, so a crafted rule name must be newline-stripped + capped here
            too or it re-opens the mute-pre-fill spoof on the recovery row. */
         var safeName = SanitizeDisplayText(row.Name, CustomAlertRuleStore.MaxNameLength);
-        var title = safeName + " Resolved";
+        var title = JudgedRuleName(safeName) + " Resolved";
         var message = string.Create(CultureInfo.InvariantCulture,
             $"{displayName}: {safeName} back within threshold (now {value:0.###})");
 
-        _logger.LogInformation("{Line}", AlertFiringLog.Resolved(displayName, title, message));
+        /* The local log line keeps the name as typed (L4, #5360): it never leaves the machine. */
+        _logger.LogInformation("{Line}", AlertFiringLog.Resolved(displayName, safeName + " Resolved", message));
 
         try
         {
@@ -693,10 +704,10 @@ public sealed class CustomAlertEvaluator
         long ruleId, string ruleName, int serverId, string serverName, string reason)
     {
         var safeName = SanitizeDisplayText(ruleName, CustomAlertRuleStore.MaxNameLength);
-        var title = safeName + " Resolved";
-        var message = string.Create(CultureInfo.InvariantCulture, $"{serverName}: {safeName} resolved because {reason}");
+        var title = JudgedRuleName(safeName) + " Resolved";
+        var message = string.Create(CultureInfo.InvariantCulture, $"{serverName}: {JudgedRuleName(safeName)} resolved because {reason}");
 
-        logger?.LogInformation("{Line}", AlertFiringLog.Resolved(serverName, title, message));
+        logger?.LogInformation("{Line}", AlertFiringLog.Resolved(serverName, safeName + " Resolved", string.Create(CultureInfo.InvariantCulture, $"{serverName}: {safeName} resolved because {reason}")));
 
         try
         {

@@ -250,7 +250,7 @@ public sealed class StatementMarkerReaderTests
     private static readonly DateTime PileupAt = new(2026, 10, 5, 12, 0, 0, DateTimeKind.Utc);
 
     private static SameStatementPileupDetector.SnapshotRow PileupRow(DateTime at, int session, long elapsedMs, string text) =>
-        new(at, session, QueryHash: null, text, "db1", "suspended", "PAGEIOLATCH_SH", 5, elapsedMs, 100, 1_000, 10);
+        new(at, session, QueryHash: null, text, "db1", "suspended", "PAGEIOLATCH_SH", 5, elapsedMs, 100, 1_000, 10, PreviewText: text);
 
     private static List<SameStatementPileupDetector.SnapshotRow> Window(params string[] texts)
     {

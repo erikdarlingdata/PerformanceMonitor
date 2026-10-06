@@ -214,7 +214,11 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)",
             string before = await TableHashAsync(connection, "query_stats", ReadStatsId, ct);
 
             string raw = await DarlingMcpDataTools.GetTopQueriesByCpu(postgres, server, cancellationToken: ct);
-            Assert.Contains("S3cret-canary-ssf", raw, StringComparison.Ordinal);
+            /* #5320: since PR C these tools judge the statement text at the read itself (McpHelpers.TruncateStatement), so the
+               tool answer already carries the marker and none of the named text; the host filter and the web sweep that
+               follow must still hold it. */
+            foreach (string needle in StatementScrubCanary.SecretNeedles) Assert.DoesNotContain(needle, raw, StringComparison.Ordinal);
+            Assert.Contains(StatementFilterCensus.Marker, raw, StringComparison.Ordinal);
             await AssertMcpAndWebAsync(host, "get_top_queries_by_cpu", raw);
 
             string rawPlan = await DarlingMcpPlanTools.GetPlanXml(postgres, "0xQHC", server, cancellationToken: ct);
@@ -267,7 +271,11 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$
             string before = await TableHashAsync(connection, "query_snapshots", ReadSnapshotsId, ct);
 
             string raw = await DarlingMcpSessionTools.GetActiveQueries(postgres, server, cancellationToken: ct);
-            Assert.Contains("S3cret-canary-ssf", raw, StringComparison.Ordinal);
+            /* #5320: since PR C these tools judge the statement text at the read itself (McpHelpers.TruncateStatement), so the
+               tool answer already carries the marker and none of the named text; the host filter and the web sweep that
+               follow must still hold it. */
+            foreach (string needle in StatementScrubCanary.SecretNeedles) Assert.DoesNotContain(needle, raw, StringComparison.Ordinal);
+            Assert.Contains(StatementFilterCensus.Marker, raw, StringComparison.Ordinal);
             await AssertMcpAndWebAsync(host, "get_active_queries", raw);
 
             Assert.Equal(before, await TableHashAsync(connection, "query_snapshots", ReadSnapshotsId, ct));

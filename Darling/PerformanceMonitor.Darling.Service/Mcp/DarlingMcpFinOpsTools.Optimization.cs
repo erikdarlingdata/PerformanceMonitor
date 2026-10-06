@@ -112,7 +112,8 @@ public sealed partial class DarlingMcpFinOpsTools
             total_reads = r.TotalReads,
             avg_reads_per_exec = r.AvgReadsPerExec,
             executions = r.Executions,
-            query_preview = r.QueryPreview,
+            /* #5320: judged on the whole statement, then cut to the 200 characters the SQL preview carries. */
+            query_preview = McpHelpers.StatementPreview(r.FullQueryText, 200),
             has_plan = r.QueryPlanXml != null,
             query_hash = r.QueryHash,
             est_cost_usd = OptimizationCostShare(r.TotalCpuMs, total, monthly, hoursBack),

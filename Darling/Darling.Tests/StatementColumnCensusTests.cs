@@ -441,9 +441,11 @@ public sealed class StatementColumnCensusTests
             ("Darling/PerformanceMonitor.Darling.Service/DarlingWorker.cs", "DarlingWorker", "PlanResultOutcome")),
 
         // The slow-read log stores up to 4 KB of a slow call's arguments (a plan or a statement a caller passed).
-        new("slow-read log: the MCP filter's offer", "plan section 1 (slow-read log)", "L7 and L8", true,
-            ("Darling/PerformanceMonitor.Darling.Service/Mcp/McpToolLatencyFilter.cs", "McpToolLatencyFilter", "OfferSlow")),
-        new("slow-read log: the log's offer", "plan section 1 (slow-read log)", "L7 and L8", true,
+        // L7: every surface's offer ends in SlowReadLog.Offer, which judges the arguments before they are stored.
+        new("slow-read log: the MCP filter's offer", "plan section 1 (slow-read log)", "L7 and L8", false,
+            ("Darling/PerformanceMonitor.Darling.Service/Mcp/McpToolLatencyFilter.cs", "McpToolLatencyFilter", "OfferSlow"),
+            ("Darling/PerformanceMonitor.Darling.Service/SlowReadLog.cs", "SlowReadLog", "Offer")),
+        new("slow-read log: the log's offer", "plan section 1 (slow-read log)", "L7 and L8", false,
             ("Darling/PerformanceMonitor.Darling.Service/SlowReadLog.cs", "SlowReadLog", "Offer")),
     };
 
@@ -638,13 +640,15 @@ public sealed class StatementColumnCensusTests
 
     /// <summary>
     /// Whether <paramref name="body"/> (of a method on <paramref name="ownType"/>) calls the site
-    /// <paramref name="target"/>: an unqualified call when it is on the same type, <c>Type.Method(</c> otherwise.
+    /// <paramref name="target"/>: an unqualified call when it is on the same type, <c>Type.Method(</c> otherwise, or a
+    /// call on a private instance field (<c>_field.Method(</c>) of another type: the MCP filter hands a slow call's
+    /// arguments to the slow-read log through its <c>_slowReads</c> field (#5320, dev's #5362 merged into #5367).
     /// </summary>
     private static bool CallsSite(string body, string ownType, (string Type, string Method) target)
     {
         var pattern = target.Type == ownType
             ? @"(?<![\w.])" + Regex.Escape(target.Method) + @"\s*\("
-            : @"(?<![\w])" + Regex.Escape(target.Type) + @"\s*\.\s*" + Regex.Escape(target.Method) + @"\s*\(";
+            : @"(?<![\w])(?:" + Regex.Escape(target.Type) + @"|_\w+)\s*\.\s*" + Regex.Escape(target.Method) + @"\s*\(";
         return Regex.IsMatch(body, pattern, RegexOptions.CultureInvariant);
     }
 
@@ -761,6 +765,17 @@ namespace N
         Assert.Empty(WatchedProblems(new[] { one with { Sites = new[] { ("f.cs", "W", "Hooked") } } }, _ => Source));
         Assert.Single(WatchedProblems(new[] { one with { Pending = true, Sites = new[] { ("f.cs", "W", "Gone") } } }, _ => Source));
         Assert.Single(WatchedProblems(new[] { one with { Pending = true } }, _ => null));
+    }
+
+    [Fact]
+    public void TheWatchedScan_SeesACallOnAPrivateFieldOfAnotherType_ButNotOnALocalOrAnUnrelatedMethod()
+    {
+        var target = ("SlowReadLog", "Offer");
+        Assert.True(CallsSite("_slowReads.Offer(a, b);", "McpToolLatencyFilter", target));
+        Assert.True(CallsSite("SlowReadLog.Offer(a);", "McpToolLatencyFilter", target));
+        Assert.False(CallsSite("local.Offer(a);", "McpToolLatencyFilter", target));
+        Assert.False(CallsSite("_slowReads.ShouldRecord(a);", "McpToolLatencyFilter", target));
+        Assert.False(CallsSite("Offer(a);", "McpToolLatencyFilter", target));
     }
 
     [Fact]
