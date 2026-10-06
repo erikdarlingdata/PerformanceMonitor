@@ -57,8 +57,9 @@ public sealed class QueryStoreTextAfterRankingTests : IDisposable
     private async Task<DuckDbInitializer> BuildStoreAsync(int textRepeat, int queries = Queries, bool hotToday = true)
     {
         Directory.CreateDirectory(_dir);
-        var duckDb = new DuckDbInitializer(Path.Combine(_dir, "test.duckdb"));
-        _duckDb = duckDb;
+        /* Assigned straight to the field, which Dispose() releases: DuckDbInitializerDisposalGuardTests (#5208) accepts a field only when it is written this way. */
+        _duckDb = new DuckDbInitializer(Path.Combine(_dir, "test.duckdb"));
+        var duckDb = _duckDb;
         await duckDb.InitializeAsync();
         Directory.CreateDirectory(duckDb.ArchivePath);
 
