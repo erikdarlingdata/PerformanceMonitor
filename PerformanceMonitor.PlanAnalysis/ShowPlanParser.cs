@@ -595,6 +595,10 @@ public static class ShowPlanParser
         stmt.QueryHash = stmtEl.Attribute("QueryHash")?.Value;
         stmt.QueryPlanHash = stmtEl.Attribute("QueryPlanHash")?.Value;
 
+        // SQL Server records ParameterizedText as an ATTRIBUTE of the statement element (an Adhoc shell statement
+        // has no QueryPlan, so it never reaches ParseQueryPlanElements). The element form stays as the fallback.
+        stmt.ParameterizedText = stmtEl.Attribute("ParameterizedText")?.Value ?? stmt.ParameterizedText;
+
         // Bug fix 1.3: CE version is on StmtSimple per XSD
         stmt.CardinalityEstimationModelVersion = (int)ParseDouble(stmtEl.Attribute("CardinalityEstimationModelVersion")?.Value);
 
@@ -682,7 +686,7 @@ public static class ShowPlanParser
         stmt.UsePlan = queryPlanEl.Attribute("UsePlan")?.Value is "true" or "1";
 
         // Wave 3.5: ParameterizedText
-        stmt.ParameterizedText = queryPlanEl.Element(Ns + "ParameterizedText")?.Value;
+        stmt.ParameterizedText ??= queryPlanEl.Element(Ns + "ParameterizedText")?.Value;
 
         // XSD gap: QueryPlan-level attributes
         stmt.ContainsInterleavedExecutionCandidates = queryPlanEl.Attribute("ContainsInterleavedExecutionCandidates")?.Value is "true" or "1";
