@@ -1781,13 +1781,18 @@ ORDER BY name", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoo
     /// reference, in that same slot, for the same server id, which is the one case where an owned reference may resolve
     /// (<see cref="DarlingSecrets.ResolvePassword"/>). Nothing in the row can set a mark: it takes a file entry (itself
     /// marked when the file was read) with this server's id and exactly this text. A store row for another server id, or a
-    /// row whose slot was changed to another reference, finds no such entry and is left unmarked.
+    /// row whose slot was changed to another reference, finds no such entry and is left unmarked. The row must also sit at
+    /// the entry's address (host and port, compared with the edit core's own rule), so a reference the file declares for one
+    /// address is never sent to another: an operator who moves a file server updates its darling.json entry too (the file
+    /// then declares the reference for the new address), or uses a reference that is not owned.
     /// </summary>
     internal static void MarkSlotsTheFileDeclares(MonitoredServer server, DarlingConfig bootstrap)
     {
         foreach (var declared in bootstrap.Servers)
         {
-            if (declared.ServerId != server.ServerId)
+            if (declared.ServerId != server.ServerId
+                || !PerformanceMonitor.Darling.Service.Mcp.DarlingMcpServerAdminTools.SameAddress(
+                    declared.Host ?? "", declared.Port, server.Host ?? "", server.Port))
             {
                 continue;
             }
