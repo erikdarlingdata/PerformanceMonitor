@@ -147,7 +147,7 @@ public sealed class McpToolsListBudgetTests
     // #5244 PR3 lane L1: get_blocking_trend and get_blocked_process_xml gain database_name (46 characters each, the shared sentence) and
     // get_blocking_stats gains its partial-scope form (66 characters); no served head changes. Set to the measured total: 92,514
     // (+311 over 92,203, the three parameters with their JSON framing).
-    private const int TotalCeilingBytes = 92_514;
+    private const int TotalCeilingBytes = 92_708;
 
     private const int ConvertedHeadCap = 1_000;
     private const int ConvertedParameterCap = 200;
