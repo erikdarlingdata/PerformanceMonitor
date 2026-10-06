@@ -195,7 +195,7 @@ public partial class QueryStatsHistoryWindow : Window
             // Fall back to live server if DuckDB didn't have it
             if (string.IsNullOrEmpty(plan) && !string.IsNullOrEmpty(_connectionString))
             {
-                plan = await LocalDataService.FetchQueryPlanOnDemandAsync(_connectionString, _queryHash);
+                plan = LivePlanDisplay.Filter(await LocalDataService.FetchQueryPlanOnDemandAsync(_connectionString, _queryHash));
                 source = "live server";
             }
 
@@ -301,7 +301,7 @@ public partial class QueryStatsHistoryWindow : Window
         try { plan = await _dataService.GetCachedQueryPlanAsync(_serverId, _queryHash); }
         catch { /* DuckDB lookup failed — fall through to the live server */ }
         if (string.IsNullOrEmpty(plan) && !string.IsNullOrEmpty(_connectionString))
-            plan = await LocalDataService.FetchQueryPlanOnDemandAsync(_connectionString, _queryHash);
+            plan = LivePlanDisplay.Filter(await LocalDataService.FetchQueryPlanOnDemandAsync(_connectionString, _queryHash));
         return plan;
     }
 

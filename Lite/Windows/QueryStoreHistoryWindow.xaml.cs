@@ -206,7 +206,7 @@ public partial class QueryStoreHistoryWindow : Window
         btn.Content = "...";
         try
         {
-            var plan = await LocalDataService.FetchQueryStorePlanAsync(_connectionString, _databaseName, rowPlanId);
+            var plan = LivePlanDisplay.Filter(await LocalDataService.FetchQueryStorePlanAsync(_connectionString, _databaseName, rowPlanId));
             if (string.IsNullOrEmpty(plan))
             {
                 MessageBox.Show("No query plan found in Query Store for this plan ID.", "Plan Not Found", MessageBoxButton.OK, MessageBoxImage.Information);
@@ -305,7 +305,7 @@ public partial class QueryStoreHistoryWindow : Window
     private async System.Threading.Tasks.Task<string?> FetchPlanAsync(long planId)
     {
         if (string.IsNullOrEmpty(_connectionString) || planId == 0) return null;
-        return await LocalDataService.FetchQueryStorePlanAsync(_connectionString, _databaseName, planId);
+        return LivePlanDisplay.Filter(await LocalDataService.FetchQueryStorePlanAsync(_connectionString, _databaseName, planId));
     }
 
     private async void ViewPlan_Click(object sender, RoutedEventArgs e)

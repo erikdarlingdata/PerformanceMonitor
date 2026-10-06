@@ -30,5 +30,10 @@ internal static class StatementCollectionCensusCases
             ["system_health_events.event_xml"] = "StatementCollectionCensusTests.SystemHealthEvents_EventXml_WithholdsTheSqlTextActionAndKeepsTheRestOfTheEvent",
             ["job_history.message"] = "StatementCollectionCensusTests.JobHistory_Message_IsWithheldWhenItEchoesAStatement_AndAPlainMessageIsUntouched",
             ["query_store.query_text"] = "StatementCollectionCensusTests.QueryStore_QueryText_IsWithheld",
+            ["query_snapshots.query_text"] = "StatementCollectionCensusTests.QuerySnapshots_QueryText_IsWithheld",
+            ["query_snapshots.query_plan"] = "StatementCollectionCensusTests.QuerySnapshots_QueryPlan_IsFiltered",
+            ["query_snapshots.live_query_plan"] = "StatementCollectionCensusTests.QuerySnapshots_LiveQueryPlan_IsFiltered",
+            ["plan_correction.query_text"] = "StatementCollectionCensusTests.PlanCorrection_QueryText_IsWithheld",
+            ["plan_correction.implementation_script"] = "StatementCollectionCensusTests.PlanCorrection_ImplementationScript_IsWithheld",
         };
 }

@@ -186,7 +186,7 @@ public partial class FinOpsTab : UserControl
         {
             var connStr = GetSelectedConnectionString();
             if (!string.IsNullOrEmpty(connStr))
-                plan = await LocalDataService.FetchQueryPlanOnDemandAsync(connStr, queryHash);
+                plan = LivePlanDisplay.Filter(await LocalDataService.FetchQueryPlanOnDemandAsync(connStr, queryHash));
         }
         return plan;
     }
