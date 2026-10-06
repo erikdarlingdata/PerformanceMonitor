@@ -424,7 +424,7 @@ public sealed class DarlingConfigTests
 
     [Theory]
     [InlineData("mcp.corp.example", "mcp.corp.example")]
-    [InlineData("mcp-01.corp.example", "mcp-01.corp.example")]
+    [InlineData("alpha-01.corp.example", "alpha-01.corp.example")]
     [InlineData("localhost", "localhost")]
     [InlineData("darling", "darling")]
     public void NormalizeHostName_AcceptsABareDnsName(string raw, string expected)
