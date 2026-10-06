@@ -51,6 +51,27 @@ internal static class SensitiveStatementCorpus
         "UPDATE dbo.Users SET password = @p",
         "SELECT 1 WHERE client_secret = 'S3cret'",
 
+        // a typed declaration of a password variable (#5320): the name, a type with an optional length, then the literal
+        "DECLARE @mypassword nvarchar(20) = N'S3cret'",
+        "DECLARE @pwd varchar(max) = 'S3cret'",
+        "DECLARE @secret sysname = N'S3cret'",
+        "DECLARE @a int = 1, @pwd varchar(10) = 'S3cret'",
+        "DECLARE @a int = 1, @b nvarchar(20) = N'x', @db_passwd nvarchar(20) = N'S3cret', @c int",
+        "DECLARE @mypassword varbinary(64) = 0x0200AB",
+        "DECLARE @mypassword AS nvarchar(20) = N'S3cret'",
+        "DECLARE @mypassword [nvarchar](20) = N'S3cret'",
+        "DECLARE @mypassword sys.sysname = N'S3cret'",
+        "DECLARE @mypassword nvarchar (20) = N'S3cret'",
+        "DECLARE @mypassword decimal(10, 2) = N'S3cret'",
+        "DECLARE @pwd nvarchar(20) /* x */ = -- y\r\n N'S3cret'",
+        "CREATE PROCEDURE dbo.p @password nvarchar(20) = N'S3cret' AS SELECT 1",
+        "exec sp_executesql N'SELECT 1', N'@password nvarchar(20) = N''S3cret'''",
+        "DECLARE pwd text := 'secret-x'; BEGIN NULL; END",
+        "DECLARE db_secret varchar(20) = 'secret-x'",
+        "DECLARE api_secret constant text := e'secret-x'",
+        "DECLARE pwd text DEFAULT 'secret-x'",
+        "DECLARE pwd text := $q$secret-x$q$",
+
         // the PostgreSQL forms
         "ALTER ROLE app PASSWORD 'secret-x'",
         "CREATE ROLE r LOGIN PASSWORD 'secret-x'",
@@ -75,6 +96,18 @@ internal static class SensitiveStatementCorpus
         "SELECT secret_id FROM dbo.t WHERE secret_id = 5",
         "SELECT * FROM t WHERE pwd = @p",
         "SELECT * FROM t WHERE pwd = $1",
+
+        // typed declarations that carry no literal, and neighbours of the typed-declaration shape (#5320)
+        "DECLARE @password nvarchar(20) = @p",
+        "DECLARE @mypassword nvarchar(20)",
+        "DECLARE pwd text := $1",
+        "CREATE PROCEDURE dbo.p @password nvarchar(20) = NULL AS SELECT 1",
+        "CREATE TABLE dbo.u (id int, password_hash varbinary(64) NOT NULL)",
+        "SELECT * FROM t WHERE pwd_len int",
+        "DECLARE @pwd_len int = 8",
+        "DECLARE @pwd int = 8",
+        "SELECT password varchar FROM t WHERE x = 'a'",
+        "SELECT * FROM t WHERE is_secret AND state = 'x'",
         "SELECT [password] FROM t",
         "SET password_encryption = 'scram-sha-256'",
         "ALTER INDEX ix ON dbo.t REBUILD",
@@ -96,6 +129,18 @@ internal static class SensitiveStatementCorpus
     {
         "create" + string.Concat(Enumerable.Repeat(" --", 40)) + "x",
         "password" + string.Concat(Enumerable.Repeat(" --", 40)) + "x",
+    };
+
+    /// <summary>Strings aimed at the typed-declaration alternative (#5320): a password word, then many comment
+    /// tokens, a type and a long length part, but no literal. The pre-check answers Clean for each of them. Kept
+    /// apart from <see cref="Adversarial"/>, which the output-filter tests prefix with a pre-check hit so the
+    /// full judge runs and times out; these do not make the full judge slow.</summary>
+    public static readonly string[] TypedDeclarationAdversarial =
+    {
+        "pwd" + string.Concat(Enumerable.Repeat(" --", 40)) + " nvarchar(20) = x",
+        "secret" + string.Concat(Enumerable.Repeat(" /* c */", 40)) + " text :",
+        "pwd varchar(" + new string(' ', 100_000) + "x",
+        "declare @pwd " + string.Concat(Enumerable.Repeat("nvarchar ", 5_000)) + "= @p",
     };
 
     /// <summary>A named statement as written, lower-cased, and with a leading block comment.</summary>

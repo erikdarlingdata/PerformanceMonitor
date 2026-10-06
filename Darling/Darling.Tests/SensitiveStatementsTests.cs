@@ -88,7 +88,7 @@ public sealed class SensitiveStatementsTests
     }
 
     private const string PinnedTranslation = """
-        (?:(?<!(?-i:[0-9A-Za-z_]))(?=(?-i:[0-9A-Za-z_]))(?:(create|alter)([\s]|/[*]([^*]|[*]+[^*/])*[*]+/|--[^\p{Cc}]*)+(role|user|group|subscription|server)(?<=(?-i:[0-9A-Za-z_]))(?!(?-i:[0-9A-Za-z_]))|password(?<=(?-i:[0-9A-Za-z_]))(?!(?-i:[0-9A-Za-z_]))([\s]|/[*]([^*]|[*]+[^*/])*[*]+/|--[^\p{Cc}]*)*(=|to)?([\s]|/[*]([^*]|[*]+[^*/])*[*]+/|--[^\p{Cc}]*)*(e?'|u&'|[$][^0-9])|(pg)?password[\s]*=[\s]*[^$\s]|(create|alter)([\s]|/[*]([^*]|[*]+[^*/])*[*]+/|--[^\p{Cc}]*)+(login|credential)(?<=(?-i:[0-9A-Za-z_]))(?!(?-i:[0-9A-Za-z_]))|scoped([\s]|/[*]([^*]|[*]+[^*/])*[*]+/|--[^\p{Cc}]*)+credential(?<=(?-i:[0-9A-Za-z_]))(?!(?-i:[0-9A-Za-z_]))|([a-z0-9_]*(password|passwd|pwd|secret)|key_source)(?<=(?-i:[0-9A-Za-z_]))(?!(?-i:[0-9A-Za-z_]))([\s]|/[*]([^*]|[*]+[^*/])*[*]+/|--[^\p{Cc}]*)*(=|to)?([\s]|/[*]([^*]|[*]+[^*/])*[*]+/|--[^\p{Cc}]*)*(n?'|e'|u&'|0x|[$][^0-9])|pwd[\s]*=[\s]*[^$@\s]|(sp_addlogin|sp_password|sp_addlinkedsrvlogin|sp_addapprole|sp_approlepassword|sp_setapprole|sp_change_users_login|sp_adddistributor|sp_changedistributor_password|sp_adddistpublisher|sp_addsubscriber|sp_link_publication|sp_control_dbmasterkey_password|sp_xp_cmdshell_proxy_account)(?<=(?-i:[0-9A-Za-z_]))(?!(?-i:[0-9A-Za-z_]))|(encryptbypassphrase|decryptbypassphrase|decryptbykeyautocert|decryptbykeyautoasymkey|decryptbyasymkey|decryptbycert|signbycert|signbyasymkey|pwdencrypt|pwdcompare)(?<=(?-i:[0-9A-Za-z_]))(?!(?-i:[0-9A-Za-z_]))|opendatasource(?<=(?-i:[0-9A-Za-z_]))(?!(?-i:[0-9A-Za-z_]))|openrowset([\s]|/[*]([^*]|[*]+[^*/])*[*]+/|--[^\p{Cc}]*)*[(]([\s]|/[*]([^*]|[*]+[^*/])*[*]+/|--[^\p{Cc}]*)*n?'|[a-z0-9_]*(password|passwd|pwd|secret)(]|")([\s]|/[*]([^*]|[*]+[^*/])*[*]+/|--[^\p{Cc}]*)*=([\s]|/[*]([^*]|[*]+[^*/])*[*]+/|--[^\p{Cc}]*)*(n?'|e'|u&'|0x)))|[a-z][a-z0-9+.-]*://[^\s/@:]+:[^\s/@]+@
+        (?:(?<!(?-i:[0-9A-Za-z_]))(?=(?-i:[0-9A-Za-z_]))(?:(create|alter)([\s]|/[*]([^*]|[*]+[^*/])*[*]+/|--[^\p{Cc}]*)+(role|user|group|subscription|server)(?<=(?-i:[0-9A-Za-z_]))(?!(?-i:[0-9A-Za-z_]))|password(?<=(?-i:[0-9A-Za-z_]))(?!(?-i:[0-9A-Za-z_]))([\s]|/[*]([^*]|[*]+[^*/])*[*]+/|--[^\p{Cc}]*)*(=|to)?([\s]|/[*]([^*]|[*]+[^*/])*[*]+/|--[^\p{Cc}]*)*(e?'|u&'|[$][^0-9])|(pg)?password[\s]*=[\s]*[^$\s]|(create|alter)([\s]|/[*]([^*]|[*]+[^*/])*[*]+/|--[^\p{Cc}]*)+(login|credential)(?<=(?-i:[0-9A-Za-z_]))(?!(?-i:[0-9A-Za-z_]))|scoped([\s]|/[*]([^*]|[*]+[^*/])*[*]+/|--[^\p{Cc}]*)+credential(?<=(?-i:[0-9A-Za-z_]))(?!(?-i:[0-9A-Za-z_]))|([a-z0-9_]*(password|passwd|pwd|secret)|key_source)(?<=(?-i:[0-9A-Za-z_]))(?!(?-i:[0-9A-Za-z_]))([\s]|/[*]([^*]|[*]+[^*/])*[*]+/|--[^\p{Cc}]*)*(=|to)?([\s]|/[*]([^*]|[*]+[^*/])*[*]+/|--[^\p{Cc}]*)*(n?'|e'|u&'|0x|[$][^0-9])|pwd[\s]*=[\s]*[^$@\s]|(sp_addlogin|sp_password|sp_addlinkedsrvlogin|sp_addapprole|sp_approlepassword|sp_setapprole|sp_change_users_login|sp_adddistributor|sp_changedistributor_password|sp_adddistpublisher|sp_addsubscriber|sp_link_publication|sp_control_dbmasterkey_password|sp_xp_cmdshell_proxy_account)(?<=(?-i:[0-9A-Za-z_]))(?!(?-i:[0-9A-Za-z_]))|(encryptbypassphrase|decryptbypassphrase|decryptbykeyautocert|decryptbykeyautoasymkey|decryptbyasymkey|decryptbycert|signbycert|signbyasymkey|pwdencrypt|pwdcompare)(?<=(?-i:[0-9A-Za-z_]))(?!(?-i:[0-9A-Za-z_]))|opendatasource(?<=(?-i:[0-9A-Za-z_]))(?!(?-i:[0-9A-Za-z_]))|openrowset([\s]|/[*]([^*]|[*]+[^*/])*[*]+/|--[^\p{Cc}]*)*[(]([\s]|/[*]([^*]|[*]+[^*/])*[*]+/|--[^\p{Cc}]*)*n?'|[a-z0-9_]*(password|passwd|pwd|secret)(]|")([\s]|/[*]([^*]|[*]+[^*/])*[*]+/|--[^\p{Cc}]*)*=([\s]|/[*]([^*]|[*]+[^*/])*[*]+/|--[^\p{Cc}]*)*(n?'|e'|u&'|0x)|[a-z0-9_]*(password|passwd|pwd|secret)([\s]|/[*]([^*]|[*]+[^*/])*[*]+/|--[^\p{Cc}]*)+((as|constant)([\s]|/[*]([^*]|[*]+[^*/])*[*]+/|--[^\p{Cc}]*)+)?[[]?[a-z_][a-z0-9_.]*]?([\s]*[(][\s0-9a-z,]{0,20}[)])?([\s]|/[*]([^*]|[*]+[^*/])*[*]+/|--[^\p{Cc}]*)*(:?=|default(?<=(?-i:[0-9A-Za-z_]))(?!(?-i:[0-9A-Za-z_])))([\s]|/[*]([^*]|[*]+[^*/])*[*]+/|--[^\p{Cc}]*)*(n?'|e'|u&'|0x|[$][^0-9])))|[a-z][a-z0-9+.-]*://[^\s/@:]+:[^\s/@]+@
         """;
 
     [Fact]
@@ -185,6 +185,21 @@ public sealed class SensitiveStatementsTests
         }
     }
 
+    /// <summary>The same for the strings aimed at the typed-declaration alternative (#5320): a password word, many
+    /// comment tokens or a long length part, and no literal. The pre-check finds no literal, so they are Clean.</summary>
+    [Fact]
+    public void EachTypedDeclarationAdversarialStringIsCleanWithin50Ms()
+    {
+        SensitiveStatements.Judge("warm the regex up");
+        foreach (var text in SensitiveStatementCorpus.TypedDeclarationAdversarial)
+        {
+            var best = BestOfJudging(text, SensitiveStatements.Verdict.Clean, 5);
+
+            Assert.True(best < 50, $"best of 5 took {best} ms: {text.Substring(0, 24)}");
+            Assert.False(SensitiveStatements.Names(text));
+        }
+    }
+
     /// <summary>Ordinary banner comments: a run of dashes after <c>create</c>, a comment after a column named
     /// <c>pwd</c>, and so on. The full judge splits a dash run exponentially on these, so only the pre-check
     /// keeps them Clean.</summary>
@@ -223,6 +238,29 @@ public sealed class SensitiveStatementsTests
 
         Assert.True(best <= 300, $"best of 3 took {best} ms");
         Assert.True(SensitiveStatements.Names(text));
+    }
+
+    /// <summary>A typed declaration of a password variable behind many comment tokens (#5320). The full judge may
+    /// backtrack on the second string, so the answer is Named or TimedOut (named either way), never Clean, and the
+    /// call returns inside the match timeout.</summary>
+    [Fact]
+    public void ATypedDeclarationBehindManyCommentTokensIsNeverClean_AndReturnsInsideTheTimeout()
+    {
+        var comments = string.Concat(Enumerable.Repeat(" --", 40));
+        SensitiveStatements.Judge("warm the regex up");
+        foreach (var text in new[]
+        {
+            "declare @pwd" + comments + "\n nvarchar(20) = N'x'",
+            "declare @pwd" + comments + " nvarchar(20) = N'x'",
+        })
+        {
+            var watch = Stopwatch.StartNew();
+            var verdict = SensitiveStatements.Judge(text);
+            watch.Stop();
+
+            Assert.NotEqual(SensitiveStatements.Verdict.Clean, verdict);
+            Assert.True(watch.ElapsedMilliseconds < 1000, $"took {watch.ElapsedMilliseconds} ms: {text.Substring(0, 24)}");
+        }
     }
 
     /// <summary>A 100 KB binary literal (200,000 hex characters) in an INSERT, and the other long single-run
@@ -276,6 +314,7 @@ public sealed class SensitiveStatementsTests
         "update", "set", "dbo.t", "col", "bulk", "(", ")", "'", "n'", "e'", "u&'", "0x", "0xff", "$1", "$a", "=",
         "to", ":", "@", "/", "://", "user:pw@", "http://", "]", "[", "\"", "[pwd]", "\"secret\"", ";", ",", "_",
         "9", "a", " ", " ", " ", "\n", "\t", "--", "-- c", "/* c */", "/*", "*/", "*",
+        "nvarchar", "varchar(20)", "(max)", "text", "int", "as", "constant", "default", ":=", "[nvarchar]", "sys.sysname",
     };
 
     /// <summary>A seeded set of short strings built from the tokens the pattern is made of, so a large share of

@@ -95,6 +95,35 @@ public sealed class SensitiveStatementsParityLiveTests
         }
     }
 
+    /// <summary>The strings aimed at the typed-declaration alternative (#5320) carry no literal, so both engines
+    /// answer Clean, and PostgreSQL answers them quickly.</summary>
+    [Fact]
+    public async Task PostgresAndTheDotNetEvaluationAgreeOnTheTypedDeclarationAdversarialStrings()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrWhiteSpace(connectionString),
+            "Set DARLING_TEST_PG to a connection string to compare the #5320 typed-declaration strings in both engines.");
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(connectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+
+        foreach (var text in SensitiveStatementCorpus.TypedDeclarationAdversarial)
+        {
+            var watch = Stopwatch.StartNew();
+            var pg = await IsNamedAsync(connection, text, ct);
+            watch.Stop();
+            var dotnet = SensitiveStatements.Names(text);
+            TestContext.Current.SendDiagnosticMessage(string.Create(CultureInfo.InvariantCulture,
+                $"pg ~* on typed-declaration string '{text.Substring(0, 8)}...': named={pg}, {watch.ElapsedMilliseconds} ms"));
+
+            Assert.False(pg, text.Substring(0, 24));
+            Assert.Equal(dotnet, pg);
+            Assert.True(watch.ElapsedMilliseconds < 2000, $"{watch.ElapsedMilliseconds} ms: {text.Substring(0, 24)}");
+        }
+    }
+
     /// <summary>A U+212A (Kelvin sign) next to a named keyword is not a word character under the C collation,
     /// and the .NET word class is case-sensitive so it is not one there either (#5320 L1). PostgreSQL's
     /// answer depends on the cluster's locale, so the match runs with <c>COLLATE "C"</c> and the fact runs
