@@ -86,6 +86,23 @@ public interface IAlertSettings
     /// Empty means direct, matching Teams/Slack/Generic.</summary>
     string PagerDutyProxyAddress { get; }
 
+    /// <summary>
+    /// Opt-in, PagerDuty-only: when true, the CLOSING edge of an edge-type alert pair
+    /// (<see cref="AlertFamily.RecoveryPairs"/> — a connection's "Server Restored", a replica's
+    /// "AG Replica Reconnected") is sent as a <c>resolve</c> event on the SAME dedup_key its firing edge's
+    /// trigger opened, closing the PagerDuty incident as part of the tool's own incident lifecycle. Default
+    /// false — the tool does not auto-resolve incidents with third parties unless the operator asks it to,
+    /// and the closing edge is delivered as an info-severity <c>trigger</c> on that dedup_key (correlated
+    /// into the open incident, not resolving it). No other channel, and no other alert type, is affected.
+    ///
+    /// <para>Defaulted on the interface rather than declared abstract, on
+    /// <see cref="UncorroboratedFindingRoute"/>'s precedent and for the same reason: the default IS the
+    /// ruling, so an adapter that does not implement this member has opted into nothing but the shipped
+    /// behaviour. Darling reads it from the store (<c>config_notification.pagerduty_auto_resolve</c>);
+    /// Lite from its settings file; the deprecated Dashboard keeps the interface default.</para>
+    /// </summary>
+    bool PagerDutyAutoResolve => false;
+
     /* Scheduled-analysis notifications */
     double AnalysisNotifySeverity { get; }
     int    AnalysisNotifyCooldownMinutes { get; }

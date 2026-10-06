@@ -2409,7 +2409,8 @@ public class WebhookAlertService
             var payload = BuildPagerDutyPayload(
                 metricName, serverName, currentValue, thresholdValue, _branding,
                 routingKey, context: context, dedupKey: dedupKey, triageUrl: triageUrl,
-                detailText: detailText, displayName: displayName, nowUtc: nowUtc);
+                detailText: detailText, displayName: displayName, nowUtc: nowUtc,
+                autoResolve: _settings.PagerDutyAutoResolve);
 
             var endpoint = PagerDutyEndpoint(_settings.PagerDutyUseEuRegion);
             var error = await PostWebhookAsync(endpoint, payload, _settings.PagerDutyProxyAddress, cancellationToken: cancellationToken);
@@ -2450,9 +2451,13 @@ public class WebhookAlertService
     }
 
     /// <summary>
-    /// Builds a PagerDuty Events API v2 payload. Always sends event_action: "trigger" (no resolve wiring —
-    /// matches Teams/Slack/Generic which also don't deliver "Cleared" notifications). The dedup_key correlates
-    /// repeated triggers for the same ongoing incident into one PagerDuty alert.
+    /// Builds a PagerDuty Events API v2 payload. Firing conditions send event_action: "trigger". The CLOSING
+    /// edge of an edge-type alert pair (<see cref="AlertFamily.RecoveryPairs"/> — "Server Restored",
+    /// "AG Replica Reconnected") sends "resolve" ONLY when <paramref name="autoResolve"/> is set — an opt-in,
+    /// PagerDuty-only auto-close of the incident its firing edge's trigger opened — otherwise it is an
+    /// info-severity trigger on the same dedup_key and the incident stays open. Teams/Slack/Generic still
+    /// deliver no "Cleared" notifications; this is PagerDuty's own incident lifecycle. The dedup_key
+    /// correlates repeated triggers for the same ongoing incident into one PagerDuty alert.
     /// <para>#2710: a non-null <paramref name="triageUrl"/> rides in BOTH the Events v2 <c>links</c> array
     /// (which PD renders as a first-class link on the alert) and <c>custom_details["Triage"]</c> (so an
     /// integration reading only the details table still gets it). Null renders the pre-#2710 payload — no
@@ -2476,7 +2481,8 @@ public class WebhookAlertService
         string? triageUrl = null,
         string? detailText = null,
         string? displayName = null,
-        DateTime? nowUtc = null)
+        DateTime? nowUtc = null,
+        bool autoResolve = false)
     {
         var (_, badgeText, _) = AlertSeverity.ForMetric(metricName, context?.SeverityOverride);
         var severity = MapToPagerDutySeverity(badgeText);
@@ -2484,6 +2490,16 @@ public class WebhookAlertService
            dedup_key below stay on the immutable metric name so correlation/dedup are rename-safe. */
         var titleName = string.IsNullOrEmpty(displayName) ? metricName : displayName;
         var utcNow = nowUtc ?? DateTime.UtcNow;
+
+        /* Auto-resolve is opt-in and PagerDuty-only: the closing edge of an edge-type pair (the
+           <see cref="AlertFamily.RecoveryPairs"/> census — connection restore, replica reconnect) closes the
+           incident its firing edge's trigger opened, via event_action "resolve" on the SAME dedup_key. Off
+           (the default), the closing edge is an info-severity trigger and the incident stays open, so the
+           tool never auto-resolves a third-party incident unasked. A test notification always triggers (it
+           carries a throwaway key and has no incident to close). */
+        var eventAction = !isTest && autoResolve && AlertFamily.RecoveryPairs.ContainsKey(metricName)
+            ? "resolve"
+            : "trigger";
 
         /* PD-CEF caps summary at 1024 chars — no truncation needed given the source strings, but document
            the constraint matching this codebase's habit of documenting limits even when unreachable. */
@@ -2509,7 +2525,7 @@ public class WebhookAlertService
         var payload = new Dictionary<string, object>
         {
             ["routing_key"] = routingKey,
-            ["event_action"] = "trigger",
+            ["event_action"] = eventAction,
             ["dedup_key"] = effectiveDedupKey,
             ["payload"] = new
             {
@@ -2620,14 +2636,35 @@ public class WebhookAlertService
 
     /// <summary>
     /// Derives the PagerDuty dedup_key from the same fingerprint the cooldown uses, so repeated alerts for
-    /// the same ongoing incident correlate into one PagerDuty alert. Falls back to a stable metric+server
-    /// key when there is no incident (mirrors the cooldown's own "no incidents → metric-level fallback key" rule).
+    /// the same ongoing incident correlate into one PagerDuty alert. Falls back to a stable server+incident
+    /// key when there is no incident (mirrors the cooldown's own "no incidents → metric-level fallback key"
+    /// rule).
+    ///
+    /// <para><b>Edge pairs are renamed to their incident.</b> The edge-type alerts ("Server Unreachable"
+    /// / "Server Restored", "AG Replica Disconnected" / "AG Replica Reconnected") are two halves of ONE
+    /// incident, so both edges derive the key from the pair's canonical FIRING name
+    /// (<see cref="AlertFamily.RecoveryPairs"/>) instead of keying on the metric name: the name encodes the
+    /// current STATE, so using it minted a distinct dedup_key per edge and PagerDuty showed two incidents for
+    /// one outage (and a closing edge could never resolve the open one — its key named a different
+    /// incident). Every future pair added to that census joins this by construction. All three consumers of
+    /// this helper (PagerDuty, the generic <c>{{dedup_key}}</c> token, and the triage link) share the
+    /// normalized key, which is the cross-channel correlation those call sites document.</para>
+    ///
+    /// <para>The rename runs before the incident-fingerprint path on purpose: a closing edge that ever
+    /// carried incident fingerprints would hash them under its own state name and split the pair again, and
+    /// the deliverable recovery set is pinned to stateless notices — the incident identity IS the firing's
+    /// canonical name.</para>
     ///
     /// <para>Internal (#4220), not private: <see cref="EmailSendCore"/> reads it too, so the triage link's
     /// dedup key agrees with PagerDuty's for the same firing across every channel, email included.</para>
     /// </summary>
     internal static string DerivePagerDutyDedupKey(string serverId, string metricName, AlertContext? context)
     {
+        /* Edge pairs: one incident identity regardless of which edge is notifying — the firing's
+           canonical name, so the firing edge's own name is unchanged and the closing edge renames to it. */
+        if (AlertFamily.RecoveryPairs.TryGetValue(metricName, out var firing))
+            return $"{serverId}:{firing}";
+
         var incidents = context?.Incidents;
         if (incidents is { Count: > 0 })
         {

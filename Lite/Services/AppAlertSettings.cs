@@ -50,6 +50,7 @@ public sealed class AppAlertSettings : IAlertSettings
     public string PagerDutyRoutingKey   => App.PagerDutyRoutingKey;
     public bool   PagerDutyUseEuRegion  => App.PagerDutyUseEuRegion;
     public string PagerDutyProxyAddress => App.PagerDutyProxyAddress;
+    public bool   PagerDutyAutoResolve  => App.PagerDutyAutoResolve;
 
     public double AnalysisNotifySeverity        => App.AnalysisNotifySeverity;
     public int    AnalysisNotifyCooldownMinutes => App.AnalysisNotifyCooldownMinutes;
