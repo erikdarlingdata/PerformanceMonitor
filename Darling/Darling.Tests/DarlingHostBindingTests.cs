@@ -179,6 +179,37 @@ public sealed class DarlingHostBindingTests
         Assert.Equal(DarlingHostBinding.BindReason.AllowFromInvalid, decision.Reason);
     }
 
+    [Theory]
+    [InlineData("DarlingMcpHostService.cs")]
+    [InlineData("DarlingWebHostService.cs")]
+    public void TheAllowFromInvalidCriticalLine_NamesTheCommaList_AndNoJsonArray(string fileName)
+    {
+        /* The comma string is the form that loads on every version, so it is the one the line recommends: a
+           service older than #5288 cannot deserialize a JSON array and fails to start, collection included. */
+        var source = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", fileName);
+        var start = source.IndexOf(".AllowFromInvalid:", StringComparison.Ordinal);
+        Assert.True(start >= 0, "the AllowFromInvalid case is gone, so this pin would read nothing");
+        var end = source.IndexOf("break;", start, StringComparison.Ordinal);
+        Assert.True(end > start, "the AllowFromInvalid case has no break, so this pin would read nothing");
+        var line = source[start..end];
+
+        Assert.Contains("separated by commas", line, StringComparison.Ordinal);
+        Assert.DoesNotContain("JSON array", line, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TheDocumentedAllowFromInvalidLine_NamesTheCommaList_AndNoJsonArray()
+    {
+        var doc = RepoFile.ReadRepoFile("docs", "uat-onboarding.md");
+        var line = Array.Find(
+            doc.Split('\n'),
+            l => l.StartsWith("MCP network exposure requested but mcp.network.allowFrom", StringComparison.Ordinal));
+
+        Assert.NotNull(line);
+        Assert.Contains("separated by commas", line, StringComparison.Ordinal);
+        Assert.DoesNotContain("JSON array", line, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void ResolveBind_Exposed_Byo_IsLoopbackOnly_ManagedModeRequired()
     {
