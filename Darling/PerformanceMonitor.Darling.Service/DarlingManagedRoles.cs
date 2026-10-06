@@ -13,6 +13,7 @@ using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Runtime.Versioning;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
@@ -1127,7 +1128,7 @@ GRANT INSERT, UPDATE, DELETE ON {config}.config_monitored_servers TO {mcp};
 --     rather than a natural clear's 'tray' (a teardown surfaces no operator notification) -- so a caller can
 --     page nothing and fabricate no fire; only server_id/name and the already-sanitized title/detail vary.
 --     Definer-safe: owned by the store owner (the creating provisioning role, {owner}), an explicit pinned
---     search_path so no injected path can redirect the unqualified config_alert_log or now(), and a fully
+--     search_path with pg_temp last and the table named by its schema, so no temporary object can redirect the config_alert_log write or now(), and a fully
 --     parameterized INSERT with NO dynamic SQL. Created + REVOKEd-from-PUBLIC by the shared builder below;
 --     EXECUTE is the only privilege the least-privilege roles get, and admin/owner keep their direct INSERT and
 --     never call it. NOT a versioned migration: CREATE OR REPLACE is idempotent and owner-run every start and
@@ -1145,6 +1146,11 @@ GRANT EXECUTE ON FUNCTION {config}.record_custom_alert_resolution(integer, text,
 --     tools/provision-roles.sql, and is told to re-run it when the function is missing.
 {BuildEditMonitoredServerFunctionSql(config)}
 GRANT EXECUTE ON FUNCTION {config}.edit_monitored_server({EditMonitoredServerSignature}) TO {viewer}, {mcp};
+-- The store's own password rules for every role but the owner (see BuildServerPasswordRulesSql): a trigger on
+--     config_monitored_servers that refuses a password reference (env: or file:) and a move that keeps the stored
+--     password. Created here, not in a migration: CREATE OR REPLACE is idempotent and owner-run every start. A
+--     self-managed store gets the same function and trigger from tools/provision-roles.sql.
+{BuildServerPasswordRulesSql(config)}
 
 -- 11. Role memberships (#3914): the three roles hold none. Nothing above grants one, so every membership in which
 --     admin, viewer or mcp is the MEMBER was given by someone else, and each outranks the grants above -- a
@@ -1184,8 +1190,8 @@ END $do$;
     /// freshly created function is EXECUTE-able by PUBLIC by default, so revoking is mandatory); the caller adds
     /// the narrow <c>GRANT EXECUTE</c>. Shared so the gated live proof test creates the IDENTICAL function rather
     /// than a drifting hand-copy. Definer-safe by construction: owned by whoever runs it (the provisioning owner,
-    /// which holds the config_alert_log INSERT the body needs), an explicit <c>SET search_path = {config},
-    /// pg_catalog</c> so neither the unqualified table nor <c>now()</c> can be redirected by a caller's
+    /// which holds the config_alert_log INSERT the body needs), an explicit <c>SET search_path = pg_catalog,
+    /// pg_temp</c> so neither the schema-qualified table nor <c>now()</c> can be redirected by a caller's
     /// search_path, and a fully parameterized INSERT that hardcodes the resolution shape (never a fire) with no
     /// dynamic SQL. The 12-column list matches <c>PgAlertHistoryStore.RecordAlertAsync</c>'s write for a
     /// <c>BuildResolutionRecord</c> and so do the fixed values, EXCEPT this is pinned to a no-channel row
@@ -1201,9 +1207,9 @@ CREATE OR REPLACE FUNCTION {config}.record_custom_alert_resolution(
 RETURNS void
 LANGUAGE sql
 SECURITY DEFINER
-SET search_path = {config}, pg_catalog
+SET search_path = pg_catalog, pg_temp
 AS $fn$
-   INSERT INTO config_alert_log
+   INSERT INTO {config}.config_alert_log
       (alert_time, server_id, server_name, metric_name, current_value, threshold_value,
        alert_sent, notification_type, send_error, muted, detail_text, context_json)
    VALUES
@@ -1221,7 +1227,8 @@ REVOKE ALL ON FUNCTION {config}.record_custom_alert_resolution(integer, text, te
     /// (viewer) and the MCP <c>edit_server</c> tool (mcp). Returns the <c>CREATE OR REPLACE FUNCTION</c> plus the
     /// <c>REVOKE ALL ... FROM PUBLIC</c>; the caller adds the <c>GRANT EXECUTE</c>. It locks the row, compares
     /// <c>modified_at</c> to the token the edit read (exact to the microsecond), works out a change of host or port
-    /// itself from the stored row, and answers <c>password_needed</c> instead of writing when that change, or a switch
+    /// itself from the stored row, answers <c>remediation_kept</c> instead of writing when the row holds a remediation login,
+    /// and answers <c>password_needed</c> instead of writing when that change, or a switch
     /// of authentication mode, would keep the stored secret on a SQL or service-principal row. A row whose
     /// authentication stores no secret never keeps one. Same builder for the managed batch, the script's text and the
     /// live tests, so none drifts. Pinned <c>search_path</c>, fixed statements, no dynamic SQL.
@@ -1246,7 +1253,7 @@ CREATE OR REPLACE FUNCTION {config}.edit_monitored_server(
 RETURNS TABLE (outcome text, new_modified_at timestamp)
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = {config}, pg_catalog
+SET search_path = pg_catalog, pg_temp
 AS $fn$
 DECLARE
    v_old_modified_at timestamp;
@@ -1272,14 +1279,17 @@ DECLARE
    v_new_secret boolean;
    v_secret_set boolean;
    v_secret text;
+   v_remediation_held boolean;
+   v_connection_changed boolean;
 BEGIN
    p_columns := COALESCE(p_columns, ARRAY[]::text[]);
 
    SELECT s.modified_at, s.host, s.port, s.auth, s.database, s.read_only_intent, s.username, s.encrypt_mode,
-          s.trust_server_certificate, s.multi_subnet_failover
+          s.trust_server_certificate, s.multi_subnet_failover, COALESCE(s.remediation_encrypted_password, '') <> ''
    INTO v_old_modified_at, v_old_host, v_old_port, v_old_auth, v_old_database, v_old_read_only_intent,
-        v_old_username, v_old_encrypt_mode, v_old_trust_server_certificate, v_old_multi_subnet_failover
-   FROM config_monitored_servers AS s
+        v_old_username, v_old_encrypt_mode, v_old_trust_server_certificate, v_old_multi_subnet_failover,
+        v_remediation_held
+   FROM {config}.config_monitored_servers AS s
    WHERE s.server_id = p_server_id
    FOR UPDATE OF s;
 
@@ -1306,19 +1316,35 @@ BEGIN
    v_secret_auth := lower(v_auth) IN ('sql', 'serviceprincipal');
    v_new_secret := 'encrypted_password' = ANY (p_columns) AND COALESCE(p_secret, '') <> '';
 
+   -- The store takes the password itself from these roles: a secret that starts with env: or file: (a reference,
+   -- compared as the service reads one, case-sensitive and at the start of the text) is refused. References are set
+   -- in the configuration file.
+   IF v_new_secret AND (left(p_secret, 4) = 'env:' OR left(p_secret, 5) = 'file:') THEN
+      RETURN QUERY SELECT 'reference_refused'::text, NULL::timestamp;
+      RETURN;
+   END IF;
+
    -- Any change to how the row connects (host, port, database, read-only intent, authentication mode, username,
    -- encryption, certificate trust, multi-subnet failover) never keeps the stored secret on a row that has one:
    -- the same set the route refuses (#5240). The caller's word is not taken: the change is worked out from the row.
-   IF v_secret_auth AND NOT v_new_secret
-      AND (v_host IS DISTINCT FROM v_old_host
-           OR v_port IS DISTINCT FROM v_old_port
-           OR v_database IS DISTINCT FROM v_old_database
-           OR v_read_only_intent IS DISTINCT FROM v_old_read_only_intent
-           OR lower(v_auth) IS DISTINCT FROM lower(v_old_auth)
-           OR v_username IS DISTINCT FROM v_old_username
-           OR lower(v_encrypt_mode) IS DISTINCT FROM lower(v_old_encrypt_mode)
-           OR v_trust_server_certificate IS DISTINCT FROM v_old_trust_server_certificate
-           OR v_multi_subnet_failover IS DISTINCT FROM v_old_multi_subnet_failover) THEN
+   v_connection_changed := v_host IS DISTINCT FROM v_old_host
+      OR v_port IS DISTINCT FROM v_old_port
+      OR v_database IS DISTINCT FROM v_old_database
+      OR v_read_only_intent IS DISTINCT FROM v_old_read_only_intent
+      OR lower(v_auth) IS DISTINCT FROM lower(v_old_auth)
+      OR v_username IS DISTINCT FROM v_old_username
+      OR lower(v_encrypt_mode) IS DISTINCT FROM lower(v_old_encrypt_mode)
+      OR v_trust_server_certificate IS DISTINCT FROM v_old_trust_server_certificate
+      OR v_multi_subnet_failover IS DISTINCT FROM v_old_multi_subnet_failover;
+
+   -- A row that holds a remediation secret is not moved from here, whatever else the call sends: that secret is
+   -- set and changed on the service host, and a new main password does not replace it.
+   IF v_connection_changed AND v_remediation_held THEN
+      RETURN QUERY SELECT 'remediation_kept'::text, NULL::timestamp;
+      RETURN;
+   END IF;
+
+   IF v_secret_auth AND NOT v_new_secret AND v_connection_changed THEN
       RETURN QUERY SELECT 'password_needed'::text, NULL::timestamp;
       RETURN;
    END IF;
@@ -1335,7 +1361,7 @@ BEGIN
       v_secret := NULL;
    END IF;
 
-   UPDATE config_monitored_servers AS s
+   UPDATE {config}.config_monitored_servers AS s
    SET name = CASE WHEN 'name' = ANY (p_columns) THEN p_name ELSE s.name END,
        host = v_host,
        port = v_port,
@@ -1357,6 +1383,208 @@ BEGIN
 END;
 $fn$;
 REVOKE ALL ON FUNCTION {config}.edit_monitored_server(integer, timestamp, text[], text, text, integer, text, boolean, text, text, text, text, boolean, boolean, numeric) FROM PUBLIC;";
+
+    /// <summary>
+    /// The store's own password rules for every role but the owner: a <c>BEFORE INSERT OR UPDATE</c> trigger on
+    /// <c>config_monitored_servers</c> and its function. A password that starts with <c>env:</c> or <c>file:</c> (a
+    /// reference, read as <see cref="DarlingSecretSource.IsReference"/> reads it) is refused on insert and on change, and an
+    /// update that changes how the row connects while it keeps a stored password is refused, and one that changes it on a
+    /// row holding a remediation login is refused with its own state (<c>PW003</c>). The owner (the table's
+    /// owner or a superuser: the service, <c>--add-server</c>, the configuration-file seed and the body of
+    /// <c>edit_monitored_server</c>) is not held to either rule, and no existing row is touched. The same text is
+    /// in <c>tools/provision-roles.sql</c> for a self-managed store.
+    /// </summary>
+    internal static string BuildServerPasswordRulesSql(string config) => $@"
+CREATE OR REPLACE FUNCTION {config}.monitored_server_password_rules()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog, pg_temp
+AS $rules$
+DECLARE
+   v_reference_main boolean;
+   v_reference_remediation boolean;
+   v_held boolean;
+   v_moved boolean;
+BEGIN
+   -- The store owner (the role that owns the table, and a superuser) writes what it writes: the service, the
+   -- --add-server verb, the configuration-file seed, and the body of edit_monitored_server, which runs as the
+   -- function's owner. Every other role is held to the two rules below.
+   IF pg_has_role(current_user, (SELECT c.relowner FROM pg_catalog.pg_class AS c WHERE c.oid = TG_RELID), 'USAGE') THEN
+      RETURN NEW;
+   END IF;
+
+   v_reference_main := COALESCE(left(NEW.encrypted_password, 4) = 'env:' OR left(NEW.encrypted_password, 5) = 'file:', false);
+   v_reference_remediation := COALESCE(left(NEW.remediation_encrypted_password, 4) = 'env:' OR left(NEW.remediation_encrypted_password, 5) = 'file:', false);
+
+   IF TG_OP = 'INSERT' THEN
+      -- A new row never holds a reference. The one pass: an upsert's proposed row for a server whose stored value is
+      -- already that exact reference (the row is locked, so it cannot go away before the write), which then meets the
+      -- UPDATE rules below. A role that cannot read or lock the row (viewer, mcp) gets the refusal.
+      IF v_reference_main OR v_reference_remediation THEN
+         v_held := false;
+         BEGIN
+            PERFORM 1
+            FROM {config}.config_monitored_servers AS s
+            WHERE s.server_id = NEW.server_id
+              AND (NOT v_reference_main OR s.encrypted_password = NEW.encrypted_password)
+              AND (NOT v_reference_remediation OR s.remediation_encrypted_password = NEW.remediation_encrypted_password)
+            FOR UPDATE OF s;
+            v_held := FOUND;
+         EXCEPTION WHEN insufficient_privilege THEN
+            v_held := false;
+         END;
+
+         IF NOT v_held THEN
+            RAISE EXCEPTION '%', 'Enter the password itself. References (env: or file:) can only be set in the configuration file.' USING ERRCODE = 'PW001';
+         END IF;
+      END IF;
+
+      RETURN NEW;
+   END IF;
+
+   -- An update never sets a reference.
+   IF (v_reference_main AND NEW.encrypted_password IS DISTINCT FROM OLD.encrypted_password)
+      OR (v_reference_remediation AND NEW.remediation_encrypted_password IS DISTINCT FROM OLD.remediation_encrypted_password) THEN
+      RAISE EXCEPTION '%', 'Enter the password itself. References (env: or file:) can only be set in the configuration file.' USING ERRCODE = 'PW001';
+   END IF;
+
+   -- An update that changes how the row connects (the set edit_monitored_server counts, plus the engine) never keeps
+   -- a stored secret that is still there: the main password is typed again with the change, and a remediation
+   -- password is changed on the service host.
+   v_moved := NEW.host IS DISTINCT FROM OLD.host
+      OR NEW.port IS DISTINCT FROM OLD.port
+      OR NEW.engine IS DISTINCT FROM OLD.engine
+      OR NEW.database IS DISTINCT FROM OLD.database
+      OR NEW.read_only_intent IS DISTINCT FROM OLD.read_only_intent
+      OR lower(NEW.auth) IS DISTINCT FROM lower(OLD.auth)
+      OR NEW.username IS DISTINCT FROM OLD.username
+      OR lower(NEW.encrypt_mode) IS DISTINCT FROM lower(OLD.encrypt_mode)
+      OR NEW.trust_server_certificate IS DISTINCT FROM OLD.trust_server_certificate
+      OR NEW.multi_subnet_failover IS DISTINCT FROM OLD.multi_subnet_failover;
+
+   -- A remediation secret that is kept goes with the login name it was stored for: that name is as much a part of how
+   -- the row is reached as the host is, so it is not changed here either. Not part of v_moved, so it never raises PW002.
+   IF COALESCE(OLD.remediation_encrypted_password, '') <> ''
+      AND NEW.remediation_encrypted_password IS NOT DISTINCT FROM OLD.remediation_encrypted_password
+      AND (v_moved OR NEW.remediation_username IS DISTINCT FROM OLD.remediation_username) THEN
+      RAISE EXCEPTION '%', 'This server has a remediation login stored. Change how it is reached on the service host, in the configuration file or with --add-server.' USING ERRCODE = 'PW003';
+   END IF;
+
+   IF v_moved
+      AND COALESCE(OLD.encrypted_password, '') <> ''
+      AND NEW.encrypted_password IS NOT DISTINCT FROM OLD.encrypted_password THEN
+      RAISE EXCEPTION '%', 'Changing how this server is reached needs its password again: it is stored encrypted and this surface cannot read it back.' USING ERRCODE = 'PW002';
+   END IF;
+
+   RETURN NEW;
+END;
+$rules$;
+REVOKE ALL ON FUNCTION {config}.monitored_server_password_rules() FROM PUBLIC;
+CREATE OR REPLACE TRIGGER trg_monitored_server_password_rules
+   BEFORE INSERT OR UPDATE ON {config}.config_monitored_servers
+   FOR EACH ROW EXECUTE FUNCTION {config}.monitored_server_password_rules();";
+
+    /// <summary>
+    /// A self-managed store (not the managed one, and not the compose store the service provisions) has its password rules
+    /// from <c>tools/provision-roles.sql</c> alone, so a store upgraded without re-running the script has none. This runs
+    /// <see cref="BuildServerPasswordRulesSql"/> on the service's own connection, which owns the tables, on every start. It
+    /// never throws and never fails the start: when the connection may not create the function or the trigger, one warning
+    /// names <c>provision-roles.sql</c>. Rules that are already in place are left alone: when the trigger exists, is
+    /// enabled and its function has the built text and search path (a function another role created from the script
+    /// included, which this connection could not replace), nothing is run and nothing is warned, and no lock is taken on
+    /// the table. Returns whether the rules are in place.
+    /// </summary>
+    public static async Task<bool> EnsureServerPasswordRulesAsync(
+        NpgsqlDataSource dataSource, ILogger logger, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(dataSource);
+        ArgumentNullException.ThrowIfNull(logger);
+
+        try
+        {
+            await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
+            if (await ServerPasswordRulesAreInPlaceAsync(connection, cancellationToken))
+            {
+                logger.LogInformation("The store's password rules are already in place on config.config_monitored_servers");
+                return true;
+            }
+
+            await using var command = new NpgsqlCommand(BuildServerPasswordRulesSql("config"), connection)
+            {
+                CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds,
+            };
+            await command.ExecuteNonQueryAsync(cancellationToken);
+            logger.LogInformation("The store's password rules are in place on config.config_monitored_servers");
+            return true;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogWarning(
+                "Could not create the store's password rules on config.config_monitored_servers ({Message}). Run provision-roles.sql against the store as the role that owns its tables.",
+                ex.Message);
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Whether the trigger is on <c>config_monitored_servers</c>, enabled, a row-level BEFORE INSERT OR UPDATE one, and its
+    /// function has the text <see cref="BuildServerPasswordRulesSql"/> builds (full-line comments and spacing set aside) and
+    /// the pinned search path. A read that fails answers false, so the caller falls back to creating them.
+    /// </summary>
+    private static async Task<bool> ServerPasswordRulesAreInPlaceAsync(NpgsqlConnection connection, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await using var read = new NpgsqlCommand(@"
+SELECT p.prosrc, p.proconfig
+FROM pg_catalog.pg_trigger AS t
+JOIN pg_catalog.pg_proc AS p ON p.oid = t.tgfoid
+WHERE t.tgrelid = 'config.config_monitored_servers'::regclass
+  AND t.tgname = 'trg_monitored_server_password_rules'
+  AND t.tgenabled = 'O'
+  AND t.tgtype = 23
+  AND p.proname = 'monitored_server_password_rules'
+  AND p.pronamespace = 'config'::regnamespace", connection)
+            {
+                CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds,
+            };
+            await using var reader = await read.ExecuteReaderAsync(cancellationToken);
+            if (!await reader.ReadAsync(cancellationToken))
+            {
+                return false;
+            }
+
+            var stored = reader.GetString(0);
+            var settings = reader.IsDBNull(1) ? Array.Empty<string>() : reader.GetFieldValue<string[]>(1);
+            if (settings.Length != 1 || !string.Equals(settings[0], "search_path=pg_catalog, pg_temp", StringComparison.Ordinal))
+            {
+                return false;
+            }
+
+            var built = BuildServerPasswordRulesSql("config");
+            const string quote = "$rules$";
+            var open = built.IndexOf(quote, StringComparison.Ordinal);
+            var close = built.IndexOf(quote, open + quote.Length, StringComparison.Ordinal);
+            if (open < 0 || close < 0)
+            {
+                return false;
+            }
+
+            return string.Equals(
+                NormalizeRulesText(stored),
+                NormalizeRulesText(built.Substring(open + quote.Length, close - open - quote.Length)),
+                StringComparison.Ordinal);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>The function text with full-line comments and runs of white space set aside, the comparison the script's
+    /// copy of the rules is held to as well.</summary>
+    private static string NormalizeRulesText(string sql) =>
+        Regex.Replace(Regex.Replace(sql, @"(?m)^\s*--.*$", ""), @"\s+", " ").Trim();
 
     /// <summary>
     /// Fails closed unless <paramref name="secret"/> is a SCRAM-SHA-256 verifier (#3910). This refuses a plain
@@ -1823,10 +2051,11 @@ WHERE u.rolname = current_user";
                     var verdict = JudgeComposeCredentialDirectory(before, modes.Get(directory));
                     if (verdict.Distrust is not { } wasOpen || !verdict.MayWrite)
                     {
-                        /* #4004 review, round 3: a directory this process found open and could not empty stays refused
-                           to every later caller this start, though it now reads owner-only, so "nothing in it is used this
-                           start" holds for all of them. The next start trusts it: only a directory can be left, and no
-                           reader takes one for a credential. */
+                        /* A directory this process found open and could not empty stays refused to every later caller
+                           this start, though it now reads owner-only, so "nothing in it is used this start" holds for
+                           all of them. The next start trusts it, so what was left must not pass for a credential then:
+                           a password key that could not be moved aside leaves an empty file at its quarantine name (so
+                           its load refuses on every start), and a directory at a credential's name is read by nothing. */
                         return verdict.Distrust is null && guard.LeftBehind(directory) is { } leftBehind
                             ? new ComposeCredentialDirectoryTrust(leftBehind, MayWrite: false)
                             : verdict;
@@ -1900,7 +2129,9 @@ WHERE u.rolname = current_user";
 
     /// <summary>
     /// Every file the service reads from a credentials directory, and the temporary file each is written through
-    /// (#4004 review, round 2): the three role passwords and the log-hash key, under both platforms' names.
+    /// (#4004, round 2): the three role passwords and the log-hash key, under both platforms' names. The
+    /// password key's own two names are not here, because an open directory keeps that file, renamed
+    /// (<see cref="PasswordKeyNames"/>); only the temporary files it is written through are.
     /// </summary>
     internal static IReadOnlyList<string> CredentialDirectoryFileNames { get; } = BuildCredentialDirectoryFileNames();
 
@@ -1914,16 +2145,28 @@ WHERE u.rolname = current_user";
             DarlingLogHashKeyFile.UnixFileName,
             DarlingLogHashKeyFile.WindowsFileName,
         };
-        return names.SelectMany(name => new[] { name, name + ".tmp" }).ToArray();
+        return names.SelectMany(name => new[] { name, name + ".tmp" })
+            .Concat(PasswordKeyNames.Select(name => name + ".tmp"))
+            .ToArray();
     }
 
+    /// <summary>The password key's file name on each platform (#5366). The directory check does not remove these when it
+    /// finds the directory open: it renames what is at them to the quarantine name
+    /// (<see cref="DarlingPasswordKeyFile.QuarantineSuffix"/>), so the key's load can say so, on this start and every
+    /// later one, and the caller can check the key against what it published.</summary>
+    internal static IReadOnlyList<string> PasswordKeyNames =>
+        [DarlingPasswordKeyFile.UnixFileName, DarlingPasswordKeyFile.WindowsFileName];
+
     /// <summary>
-    /// The directory was open to other users until this call set it owner-only (#4004 review, round 2), so any file
-    /// in it could have been planted, and the file check cannot tell (it cannot see a Unix owner). Every entry at a
-    /// name the service reads is removed NOW, before anything reads it, so the discard does not depend on this start
-    /// living long enough to reach whichever step would have replaced that file: the chmod is permanent, and the
-    /// next start, finding the directory owner-only, trusts what is left. Removed, the directory holds only what the
-    /// service writes from here on, so it is trusted.
+    /// The directory was open to other users until this call set it owner-only (#4004, round 2), so any file
+    /// in it could have been planted. Every entry at a name the service reads, except the password key, is removed NOW,
+    /// before anything reads it, so the discard does not depend on this start living long enough to reach whichever
+    /// step would have replaced that file: the chmod is permanent, and the next start, finding the directory
+    /// owner-only, trusts what is left. Removed, the directory holds only what the service writes from here on, so it
+    /// is trusted. The password key is the one file that cannot be regenerated, so it is renamed, not removed
+    /// (<see cref="SetPasswordKeyAside"/>): the live name is empty before the directory lock is released, the kept file
+    /// stays on disk under its quarantine name, and every later start finds it there until the key's owner accepts or
+    /// retires it (<see cref="DarlingPasswordKeyFile.Accept"/>, <see cref="DarlingPasswordKeyFile.Retire"/>).
     ///
     /// <para><b>Every name is tried, and the directory stays owner-only whatever is left</b> (#4004 review, round 3).
     /// Round 2 stopped at the first entry it could not remove and set the directory back to the mode it was found
@@ -1947,7 +2190,32 @@ WHERE u.rolname = current_user";
     {
         var removed = new List<string>();
         var left = new List<string>();
-        foreach (var name in CredentialDirectoryFileNames)
+
+        /* #5366: the password key is kept, not removed: whatever is at its name is renamed (never overwritten) to a name
+           that says it was found while the directory was open, so the record is on disk and survives a restart. The live
+           name is empty before the lock is released, and the key's load reads the kept file under its usual checks. */
+        foreach (var name in PasswordKeyNames)
+        {
+            SetPasswordKeyAside(directory, name, guard, left, logger);
+        }
+
+        /* The password key is written through a temporary file with a name of its own each time (#5366): the ones a
+           crashed write left are removed with the rest. */
+        var names = new List<string>(CredentialDirectoryFileNames);
+        foreach (var keyName in PasswordKeyNames)
+        {
+            try
+            {
+                names.AddRange(Directory.EnumerateFileSystemEntries(directory, keyName + DarlingServiceKeyFile.UniqueTemporaryInfix + "*")
+                    .Select(Path.GetFileName)!);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                left.Add($"{Path.Combine(directory, keyName + DarlingServiceKeyFile.UniqueTemporaryInfix)}* (they could not be listed: {ex.Message})");
+            }
+        }
+
+        foreach (var name in names)
         {
             var path = Path.Combine(directory, name);
             var info = new FileInfo(path);
@@ -2001,6 +2269,106 @@ WHERE u.rolname = current_user";
 
         guard.RecordLeftBehind(directory, null);
         return new ComposeCredentialDirectoryTrust(null, MayWrite: true);
+    }
+
+    /// <summary>
+    /// Renames whatever is at <paramref name="name"/> in <paramref name="directory"/> to the password key's quarantine name
+    /// (<see cref="DarlingPasswordKeyFile.QuarantineSuffix"/>), with no overwrite (#5366). A file already at the
+    /// quarantine name is never replaced and never trusted: this one goes to the next free
+    /// <c>name.discarded-N</c> instead. Nothing is deleted. A directory or a link at the name is moved as it is, never
+    /// followed. On Unix a regular file that is kept is set to 0600 afterwards (a mount's group setting can add group
+    /// bits back); when that fails the load reports the file untrusted. An entry that cannot be moved is added to
+    /// <paramref name="left"/>, which refuses the directory this start.
+    /// </summary>
+    private static void SetPasswordKeyAside(string directory, string name, ComposeCredentialDirectoryGuard guard, List<string> left, ILogger logger)
+    {
+        var path = Path.Combine(directory, name);
+        var quarantine = path + DarlingPasswordKeyFile.QuarantineSuffix;
+        var target = quarantine;
+        var moveStarted = false;
+        try
+        {
+            if (!DarlingServiceKeyFile.AnythingAt(path))
+            {
+                return;
+            }
+
+            for (var attempt = 1; DarlingServiceKeyFile.AnythingAt(target) && attempt < 1000; attempt++)
+            {
+                target = path + ".discarded-" + attempt.ToString(CultureInfo.InvariantCulture);
+            }
+
+            var regularFile = new FileInfo(path).LinkTarget is null && File.Exists(path);
+            moveStarted = true;
+            if (!regularFile && Directory.Exists(path) && new FileInfo(path).LinkTarget is null)
+            {
+                Directory.Move(path, target);
+            }
+            else
+            {
+                File.Move(path, target, overwrite: false);
+            }
+
+            moveStarted = false;
+            if (regularFile && guard.UnixModes is { } modes)
+            {
+                SetKeptKeyOwnerOnly(modes, target, logger);
+            }
+
+            logger.LogWarning(
+                "The password key at {Path} was found while the credentials directory {Directory} was open to other users, and is kept as {Kept} (#5366). It is not deleted, and the key's load checks it against the store before it is used.",
+                path, directory, target);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException)
+        {
+            left.Add($"{path} (it could not be set aside as {Path.GetFileName(target)}: {ex.Message})");
+
+            /* A move that failed leaves the key at its live name in a directory that is owner-only from now on, which the
+               next start would trust and load with nothing to say it was found open (#5366). An empty file at the
+               quarantine name makes every later load refuse (two names, or an empty key), however many starts follow. When
+               the quarantine name was taken already, that file is the record and nothing is added. */
+            if (moveStarted && target == quarantine)
+            {
+                try
+                {
+                    var options = new FileStreamOptions { Mode = FileMode.CreateNew, Access = FileAccess.Write };
+                    if (!OperatingSystem.IsWindows())
+                    {
+                        options.UnixCreateMode = OwnerOnlyFile;
+                    }
+
+                    using var marker = new FileStream(quarantine, options);
+                }
+                catch (Exception markerEx) when (markerEx is IOException or UnauthorizedAccessException)
+                {
+                    logger.LogError("Could not leave a marker at {Path} for the password key that could not be set aside: {Message}", quarantine, markerEx.Message);
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// Sets a kept password key to 0600 (#5366; a mount's group setting can add group bits back), but only a file that is
+    /// the service's own with one name: as root, a chmod would otherwise change the mode of whatever file someone
+    /// linked in while the directory was open. A file whose owner cannot be told is left as it is; the load then
+    /// reports it untrusted by its mode.
+    /// </summary>
+    private static void SetKeptKeyOwnerOnly(IUnixDirectoryModes modes, string target, ILogger logger)
+    {
+        try
+        {
+            if (DarlingServiceKeyFile.UnexpectedOwnerReason(target) is { } notOurs)
+            {
+                logger.LogDebug("Left {File} as it is: {Reason}", target, notOurs);
+                return;
+            }
+
+            modes.Set(target, OwnerOnlyFile);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            logger.LogDebug("Could not set {File} to owner-only: {Message}", target, ex.Message);
+        }
     }
 
     private const UnixFileMode GroupOrOtherAccess =
@@ -2388,7 +2756,17 @@ internal interface IUnixDirectoryModes
     UnixFileMode Get(string directory);
 
     void Set(string directory, UnixFileMode mode);
+
+    /// <summary>The owner's user id and the link count of the file at <paramref name="path"/> (#5366), or null when they
+    /// cannot be read here (Windows, a platform whose stat layout is not known, a stand-in that does not model them).</summary>
+    UnixFileOwner? OwnerOf(string path) => null;
+
+    /// <summary>The user id this process runs as, for comparing with <see cref="UnixFileOwner.UserId"/>.</summary>
+    uint EffectiveUserId => 0;
 }
+
+/// <summary>Who owns a file and how many names it has (#5366).</summary>
+internal readonly record struct UnixFileOwner(uint UserId, ulong Links);
 
 /// <summary>The platform's own <see cref="IUnixDirectoryModes"/>, on every platform but Windows.</summary>
 [UnsupportedOSPlatform("windows")]
@@ -2399,4 +2777,8 @@ internal sealed class PlatformUnixDirectoryModes : IUnixDirectoryModes
     public UnixFileMode Get(string directory) => File.GetUnixFileMode(directory);
 
     public void Set(string directory, UnixFileMode mode) => File.SetUnixFileMode(directory, mode);
+
+    public UnixFileOwner? OwnerOf(string path) => FileIdentity.UnixOwnerOf(path);
+
+    public uint EffectiveUserId => FileIdentity.EffectiveUserId();
 }

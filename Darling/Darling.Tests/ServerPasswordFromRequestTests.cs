@@ -26,6 +26,7 @@ using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Hosting;
 using PerformanceMonitor.Darling.Service.Mcp;
+using PerformanceMonitor.Darling.Storage;
 using Xunit;
 using Core = PerformanceMonitor.Darling.Service.Mcp.DarlingMcpServerAdminTools;
 
@@ -426,19 +427,19 @@ public sealed class ServerPasswordFromRequestTests : IDisposable
     };
 
     /// <summary>The stored row the tested server (<see cref="Tested"/>) matches on every setting.</summary>
-    private static DarlingMcpServerAdminTools.ServerConnectionSettings StoredRow(string host, int port = 0) =>
+    private static ServerConnectionSettings StoredRow(string host, int port = 0) =>
         new(host, port, "sqlserver", null, false, "sql", "monitor", "Mandatory", false, false);
 
     private sealed class StoredAddresses
     {
-        public List<DarlingMcpServerAdminTools.ServerConnectionSettings> Rows { get; } = [];
+        public List<ServerConnectionSettings> Rows { get; } = [];
 
         public List<string> Asked { get; } = [];
 
-        public Task<IReadOnlyList<DarlingMcpServerAdminTools.ServerConnectionSettings>> ReadAsync(string reference, CancellationToken cancellationToken)
+        public Task<IReadOnlyList<ServerConnectionSettings>> ReadAsync(string reference, CancellationToken cancellationToken)
         {
             Asked.Add(reference);
-            return Task.FromResult<IReadOnlyList<DarlingMcpServerAdminTools.ServerConnectionSettings>>(Rows.ToList());
+            return Task.FromResult<IReadOnlyList<ServerConnectionSettings>>(Rows.ToList());
         }
     }
 

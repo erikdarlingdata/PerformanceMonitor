@@ -99,8 +99,15 @@ public sealed partial class DarlingMcpServerAdminTools
     private const string EditNoteAddress =
         "This server keeps its id and history. The old address cannot be added as a new server under the same spelling.";
 
-    internal const string EditPasswordNeededText =
-        "Changing how this server is reached needs its password again: it is stored encrypted and this surface cannot read it back.";
+    internal const string EditPasswordNeededText = ServerConnectionRule.PasswordNeededOnMoveText;
+
+    /// <summary>The answer when the store refuses a password that is a reference (env: or file:): the store takes the
+    /// password itself from the viewer, admin and MCP roles. The same words in the store's own trigger and edit function.</summary>
+    internal const string EditReferenceRefusedText = ServerConnectionRule.ReferenceRefusedText;
+
+    /// <summary>The answer when the store refuses a change to how a server is reached because the row holds a remediation
+    /// login: that secret is set and changed on the service host. The same words in the store's own trigger.</summary>
+    internal const string EditRemediationKeptText = ServerConnectionRule.RemediationKeptText;
 
     /// <summary>The fixed answer when the store has no edit function the calling role may run (#5240): a self-managed store
     /// whose roles were provisioned before the function existed. Never PostgreSQL's own text.</summary>
@@ -344,6 +351,12 @@ public sealed partial class DarlingMcpServerAdminTools
                 /* The store's own check: a move of host or port that keeps the stored secret. The plan refuses it first, so
                    this is the answer when the two ever read the row differently, and it is the same sentence. */
                 return Outcome(EditStatus.Invalid, EditPasswordNeededText);
+            case ServerEditWriteKind.ReferenceRefused:
+                /* The store's own check of a new password: it never takes a reference from this role. */
+                return Outcome(EditStatus.Invalid, EditReferenceRefusedText);
+            case ServerEditWriteKind.RemediationKept:
+                /* The store's own check of a change to how the row connects while it holds a remediation login: nothing is written. */
+                return Outcome(EditStatus.Invalid, EditRemediationKeptText);
             case ServerEditWriteKind.Conflict:
                 /* Same shape as the pre-probe conflict: the current non-secret values, so the caller can retry. */
                 if (await store.ReadRowAsync(serverId, cancellationToken) is { } currentRow)
@@ -696,37 +709,13 @@ public sealed partial class DarlingMcpServerAdminTools
         string.Equals(storeAuth, ServerStoreAuth.Sql, StringComparison.OrdinalIgnoreCase)
         || string.Equals(storeAuth, ServerStoreAuth.ServicePrincipal, StringComparison.OrdinalIgnoreCase);
 
-    /// <summary>
-    /// The edit core's own rule for "the server is at the same address": the host text is equal ordinally (a request's host
-    /// is trimmed when it is read; the text is compared exactly as stored, and case counts) and the port is equal. An edit that fails it
-    /// has moved the server, so the stored password is not reused. <c>StoreConfigProvider</c> applies the same rule to
-    /// decide whether a row still sits at the address darling.json declares.
-    /// </summary>
+    /// <summary>The shared address rule (<see cref="ServerConnectionRule.SameAddress"/>), kept under this name for the edit core and its tests.</summary>
     internal static bool SameAddress(string host, int port, string otherHost, int otherPort) =>
-        string.Equals(host, otherHost, StringComparison.Ordinal) && port == otherPort;
+        ServerConnectionRule.SameAddress(host, port, otherHost, otherPort);
 
-    /// <summary>Every setting that decides where a server is reached and how it is trusted: what an edit and a
-    /// <c>test_connect</c> compare against the stored row before a stored password may be used.</summary>
-    internal readonly record struct ServerConnectionSettings(
-        string Host, int Port, string Engine, string? Database, bool ReadOnlyIntent, string Auth, string? Username,
-        string EncryptMode, bool TrustServerCertificate, bool MultiSubnetFailover);
-
-    /// <summary>
-    /// The ONE rule for "this definition connects differently from that one", shared by the edit core and
-    /// <c>test_connect</c> so neither lets a stored password go anywhere the other would refuse. Host, username and
-    /// database compare ordinally (<see cref="SameAddress"/> for host and port); auth, encrypt mode and engine ignore
-    /// case; the rest compare as stored. The store function in <c>provision-roles.sql</c> (<c>password_needed</c>) names the same set.
-    /// </summary>
+    /// <summary>The shared connection-settings rule (<see cref="ServerConnectionRule.ConnectionSettingsDiffer"/>), kept under this name for the edit core.</summary>
     internal static bool ConnectionSettingsDiffer(ServerConnectionSettings a, ServerConnectionSettings b) =>
-        !SameAddress(a.Host, a.Port, b.Host, b.Port)
-        || !string.Equals(a.Engine, b.Engine, StringComparison.OrdinalIgnoreCase)
-        || !string.Equals(a.Database, b.Database, StringComparison.Ordinal)
-        || a.ReadOnlyIntent != b.ReadOnlyIntent
-        || !string.Equals(a.Auth, b.Auth, StringComparison.OrdinalIgnoreCase)
-        || !string.Equals(a.Username, b.Username, StringComparison.Ordinal)
-        || !string.Equals(a.EncryptMode, b.EncryptMode, StringComparison.OrdinalIgnoreCase)
-        || a.TrustServerCertificate != b.TrustServerCertificate
-        || a.MultiSubnetFailover != b.MultiSubnetFailover;
+        ServerConnectionRule.ConnectionSettingsDiffer(a, b);
 
 
     /// <summary>
@@ -905,7 +894,7 @@ public sealed partial class DarlingMcpServerAdminTools
     /// <summary><c>Occupied</c>: another definition holds the address the edit moves to. <c>ActualOccupied</c>: another
     /// definition holds the storage key the probe's connected database gives (#5240), the refusal
     /// <see cref="ActualIdentityCollision"/> gives before the write. Neither commits.</summary>
-    internal enum ServerEditWriteKind { Written, NotFound, Conflict, Occupied, PasswordNeeded, ActualOccupied }
+    internal enum ServerEditWriteKind { Written, NotFound, Conflict, Occupied, PasswordNeeded, ActualOccupied, ReferenceRefused, RemediationKept }
 
     internal sealed record ServerEditWrite(ServerEditWriteKind Kind, DateTime ModifiedAt);
 
@@ -1095,6 +1084,10 @@ FROM config_monitored_servers WHERE server_id = $1";
                     return new ServerEditWrite(ServerEditWriteKind.Conflict, expectedModifiedAt);
                 case "password_needed":
                     return new ServerEditWrite(ServerEditWriteKind.PasswordNeeded, expectedModifiedAt);
+                case "reference_refused":
+                    return new ServerEditWrite(ServerEditWriteKind.ReferenceRefused, expectedModifiedAt);
+                case "remediation_kept":
+                    return new ServerEditWrite(ServerEditWriteKind.RemediationKept, expectedModifiedAt);
                 case "saved":
                     break;
                 default:
