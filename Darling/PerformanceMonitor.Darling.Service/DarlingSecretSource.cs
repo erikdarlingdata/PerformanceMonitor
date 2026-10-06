@@ -8,6 +8,7 @@
 
 using System;
 using System.IO;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Service;
 
@@ -39,8 +40,7 @@ public static class DarlingSecretSource
 
     /// <summary>The sentence every request path answers with when a password field holds a reference. It names no
     /// value: the text the caller typed is never repeated.</summary>
-    internal const string RequestReferenceRefusalText =
-        "Enter the password itself. References (env: or file:) can only be set in the configuration file.";
+    internal const string RequestReferenceRefusalText = ServerConnectionRule.ReferenceRefusedText;
 
     /// <summary>
     /// The one question a request path asks of a password it was handed (web add, web edit, MCP add_servers, MCP
