@@ -91,7 +91,8 @@ public abstract class ListenerTlsCertificateState
         _current = new Snapshot(default, default, string.Empty, string.Empty, RefusedNotYetValid: false, reason ?? string.Empty);
 
     /// <summary>Clears the published snapshot back to "nothing to watch" (the owning host only) - called when the
-    /// host STOPS serving TLS: a runtime disable of the listener. A failed start clears through
+    /// host STOPS serving TLS: a runtime disable of the listener, including one that finds it not running after a
+    /// failed start (<see cref="ReleasesWhenDisabled"/>). A failed start clears through
     /// <see cref="ClearUnlessRefusal"/> instead. A certificate that cannot be loaded is not a clear: see
     /// <see cref="PublishLoadRefusal"/>. Without
     /// this the snapshot is write-once and the worker keeps re-firing the expiry alert about a certificate the
@@ -119,6 +120,17 @@ public abstract class ListenerTlsCertificateState
 
         _current = null;
     }
+
+    /// <summary>Whether a supervisor tick releases the certificate state of a listener that is not running and is
+    /// disabled. A failed start keeps a refusal or an expired verdict published (<see cref="ClearUnlessRefusal"/>), and
+    /// a runtime disable that comes AFTER it finds nothing running, so no stop runs and the kept verdict would hold the
+    /// worker's alert open until the next successful start or a service restart. The release is the one a stop makes
+    /// (<see cref="Clear"/>), and it runs once per transition to disabled: <paramref name="lastEnabled"/> is the
+    /// previous tick's enabled flag (null on the first tick), so a listener that stays disabled releases once rather
+    /// than on every poll tick, and one that is running is left to the stop the supervisor already runs for it. Pure,
+    /// so a test pins the transitions without a server.</summary>
+    internal static bool ReleasesWhenDisabled(bool running, bool enabled, bool? lastEnabled) =>
+        !running && !enabled && lastEnabled != false;
 
     /// <summary>The latest published snapshot, or null when the host has no TLS certificate to report
     /// (loopback-only, no <c>tls</c> block, a misconfigured one, or after a stop) - read by the worker as

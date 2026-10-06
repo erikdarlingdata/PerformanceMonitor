@@ -194,6 +194,10 @@ public sealed class DarlingWebHostService : BackgroundService
         /* #2389: the last control-plane-override report emitted, so a steady disagreement is stated once per
            distinct state instead of on every 5s poll tick. */
         string? lastOverrideReport = null;
+        /* #5288: the last tick's enabled flag (null before the first tick), so the certificate release for a listener
+           that is disabled and not running below runs once per transition to disabled, not on every poll tick - the
+           same last-state shape as lastOverrideReport. */
+        bool? lastEnabled = null;
         while (!stoppingToken.IsCancellationRequested)
         {
             if (config is null && CollectorCadence.IntervalElapsed(lastFailedStartUtc, DateTime.UtcNow, FailedStartBackoff))
@@ -267,7 +271,18 @@ public sealed class DarlingWebHostService : BackgroundService
                         lastFailedStartUtc = DateTime.UtcNow;
                     }
                     break;
+
+                /* #5288: not running and disabled. A failed start keeps a certificate refusal or an expired verdict
+                   published (ClearUnlessRefusal), and a runtime disable that comes after it finds no app to stop, so
+                   no stop runs and the worker's alert would stay open until the next start or a service restart.
+                   Release the state with the call StopServerAsync makes, once per transition to disabled. */
+                case WebSupervisorAction.None
+                    when ListenerTlsCertificateState.ReleasesWhenDisabled(_app is not null, toggle.Enabled, lastEnabled):
+                    _certState.Clear();
+                    break;
             }
+
+            lastEnabled = toggle.Enabled;
 
             try
             {
