@@ -25,15 +25,13 @@ namespace Darling.Tests;
 /// </summary>
 public sealed class DarlingManagedRolesTests
 {
-    /// <summary>The viewer's column-level UPDATE on <c>config.config_monitored_servers</c> (#5240), as the managed batch and
-    /// <c>Darling/tools/provision-roles.sql</c> both carry it: exactly the columns the edit core may SET, plus
-    /// <c>modified_at</c>.</summary>
-    private const string EditGrant =
-        "GRANT UPDATE (name, host, port, database, read_only_intent, auth, username, encrypted_password, encrypt_mode, trust_server_certificate, multi_subnet_failover, monthly_cost_usd, modified_at) ON config.config_monitored_servers TO viewer;";
+    /// <summary>The EXECUTE grant of the edit function (#5240), as the managed batch and <c>Darling/tools/provision-roles.sql</c>
+    /// both carry it. The edit's one write goes through that function; viewer holds no UPDATE on the table.</summary>
+    private static readonly string EditGrant =
+        "GRANT EXECUTE ON FUNCTION config.edit_monitored_server(" + DarlingManagedRoles.EditMonitoredServerSignature + ") TO viewer, mcp;";
 
-    /// <summary>The REVOKE that must come right before <see cref="EditGrant"/> (#5240): revoking the table privilege also
-    /// revokes every column privilege, so each run resets viewer to exactly the granted columns and strips a table-level
-    /// UPDATE granted by hand.</summary>
+    /// <summary>The REVOKE (#5240): revoking the table privilege also revokes every column privilege, so each run leaves viewer
+    /// with no UPDATE on the table and strips one granted by an earlier build or by hand.</summary>
     private const string EditRevoke = "REVOKE UPDATE ON config.config_monitored_servers FROM viewer;";
 
     /// <summary>
@@ -80,26 +78,26 @@ public sealed class DarlingManagedRolesTests
             ViewerGrantsOnMonitoredServers(sql + "\nGRANT SELECT (server_id, name, host) ON config.config_monitored_servers TO viewer;"));
     }
 
+    private static string NormalizeSql(string sql) =>
+        Regex.Replace(Regex.Replace(sql, @"(?m)^\s*--.*$", ""), @"\s+", " ").Trim();
+
     /// <summary>
-    /// A store that is not managed is told to RE-RUN <c>Darling/tools/provision-roles.sql</c>, so that script is the grant it
-    /// gets, and nothing tied it to the managed batch's: the edit grant (#5240) in the script is the same column-level
-    /// statement the batch carries, preceded by the same REVOKE, and never a table-level UPDATE. Comment lines are dropped
-    /// first, so a statement quoted in prose cannot satisfy the pin.
+    /// A store that is not managed is told to RE-RUN <c>Darling/tools/provision-roles.sql</c>, so that script is what it gets,
+    /// and nothing tied it to the managed batch's: the script carries the SAME edit function the batch does (text compared
+    /// with comments and spacing set aside), the same EXECUTE grant, the REVOKE of any viewer UPDATE, and never a viewer
+    /// grant on the table beyond INSERT.
     /// </summary>
     [Fact]
-    public void TheByoScript_CarriesTheSameColumnLevelEditGrant_AsTheManagedBatch()
+    public void TheByoScript_CarriesTheSameEditFunction_AsTheManagedBatch()
     {
         var byo = Regex.Replace(RepoFile.ReadRepoFile("Darling", "tools", "provision-roles.sql"), @"(?m)^\s*--.*$", "");
 
+        Assert.Contains(NormalizeSql(DarlingManagedRoles.BuildEditMonitoredServerFunctionSql("config")), NormalizeSql(byo), StringComparison.Ordinal);
         Assert.Contains(EditGrant, byo, StringComparison.Ordinal);
-        Assert.DoesNotContain("GRANT UPDATE ON config.config_monitored_servers TO viewer", byo, StringComparison.Ordinal);
-
-        /* The REVOKE comes first, as in the batch: it resets viewer to exactly the listed columns on every run, and strips a
-           table-level UPDATE granted by hand. After the grant it would strip the very columns just granted. */
-        var revokeAt = byo.IndexOf(EditRevoke, StringComparison.Ordinal);
-        Assert.True(revokeAt >= 0, "provision-roles.sql no longer REVOKEs viewer's UPDATE on config_monitored_servers before the column grant");
-        Assert.True(revokeAt < byo.IndexOf(EditGrant, StringComparison.Ordinal), "provision-roles.sql must REVOKE UPDATE before the column-level edit grant");
+        Assert.Contains("GRANT INSERT ON config.config_monitored_servers TO viewer;", byo, StringComparison.Ordinal);
+        Assert.DoesNotMatch(@"GRANT[^;]*\bUPDATE\b[^;]*ON config\.config_monitored_servers TO [^;]*viewer", byo);
         Assert.Single(Regex.Matches(byo, @"REVOKE UPDATE ON config\.config_monitored_servers FROM [^;]*viewer[^;]*;"));
+        Assert.Contains(EditRevoke, byo, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -214,40 +212,22 @@ public sealed class DarlingManagedRolesTests
         Assert.Contains("GRANT INSERT, UPDATE, DELETE ON config.server_tags TO viewer;", sql, StringComparison.Ordinal);
         Assert.Contains("GRANT INSERT, UPDATE, DELETE ON config.server_tag_map TO viewer;", sql, StringComparison.Ordinal);
 
-        /* #4843: the web add-server route runs the add_servers core as viewer: INSERT on config_monitored_servers. #5240: the
-           web edit route runs the edit_server core as viewer: a COLUMN-level UPDATE on exactly the columns that core may
-           SET, plus modified_at (the optimistic token). No DELETE (no web route removes a server), no table-level UPDATE.
-           The census is the whole set of viewer grants on the table, so a widened or extra grant fails here. The credential
-           column stays SELECT-carved (asserted with the carve below). The column-level SELECT carve is not a write, so the census
-           skips exactly that shape (a SELECT list in parentheses straight onto ON); a table-level SELECT, or a write riding
-           behind a column SELECT in one statement, is still counted. */
+        /* #4843: the web add-server route runs the add_servers core as viewer: INSERT on config_monitored_servers and nothing
+           else on it: no UPDATE (#5240: the edit's write is the config.edit_monitored_server function, granted EXECUTE below),
+           no DELETE. The census is the whole set of viewer grants on the table. The credential column stays SELECT-carved. */
         Assert.Contains("GRANT INSERT ON config.config_monitored_servers TO viewer;", sql, StringComparison.Ordinal);
-        Assert.Contains(EditGrant, sql, StringComparison.Ordinal);
+        Assert.Equal(new[] { "GRANT INSERT ON config.config_monitored_servers TO viewer;" }, ViewerGrantsOnMonitoredServers(sql));
 
-        /* #5240 review: the edit grant is REVOKE-then-GRANT, like the SELECT carve, so it resets viewer to exactly the listed
-           columns on every run instead of only ever adding. The REVOKE is not a GRANT, so the census below never sees it;
-           it is pinned here, and it must sit BEFORE the grant (after it, it would strip the very columns just granted). */
-        var revokeAt = sql.IndexOf(EditRevoke, StringComparison.Ordinal);
-        Assert.True(revokeAt >= 0, "the managed batch no longer REVOKEs viewer's UPDATE on config_monitored_servers before the column grant");
-        Assert.True(revokeAt < sql.IndexOf(EditGrant, StringComparison.Ordinal), "the REVOKE UPDATE must come before the column-level edit grant");
+        /* The REVOKE takes away any UPDATE an earlier build granted viewer; it is not a GRANT, so the census never sees it. */
         Assert.Single(Regex.Matches(Regex.Replace(sql, @"(?m)^\s*--.*$", ""), @"REVOKE UPDATE ON config\.config_monitored_servers FROM [^;]*viewer[^;]*;"));
-        Assert.Equal(
-            new[] { "GRANT INSERT ON config.config_monitored_servers TO viewer;", EditGrant },
-            ViewerGrantsOnMonitoredServers(sql));
+        Assert.Contains(EditRevoke, sql, StringComparison.Ordinal);
 
-        /* The columns the edit grant must NOT name: a server's enabled state, engine, identity and remediation credentials. */
-        var editColumns = EditGrant[(EditGrant.IndexOf('(', StringComparison.Ordinal) + 1)..EditGrant.IndexOf(')', StringComparison.Ordinal)]
-            .Split(',').Select(c => c.Trim()).ToArray();
-        foreach (var forbidden in new[]
-                 {
-                     "is_enabled", "excluded_databases", "engine", "server_id", "capture_plans", "alert_delivery_mode_override",
-                     "plan_force_bot_enabled", "remediation_encrypted_password",
-                 })
-        {
-            Assert.DoesNotContain(forbidden, editColumns);
-        }
-
-        Assert.DoesNotContain("remediation", EditGrant, StringComparison.Ordinal);
+        /* The edit function (#5240): created, REVOKEd from PUBLIC, then EXECUTE to viewer and mcp only. */
+        Assert.Contains("CREATE OR REPLACE FUNCTION config.edit_monitored_server(", sql, StringComparison.Ordinal);
+        Assert.Contains(DarlingManagedRoles.BuildEditMonitoredServerFunctionSql("config"), sql, StringComparison.Ordinal);
+        Assert.Contains(EditGrant, sql, StringComparison.Ordinal);
+        var functionRevokeAt = sql.IndexOf("REVOKE ALL ON FUNCTION config.edit_monitored_server(", StringComparison.Ordinal);
+        Assert.True(functionRevokeAt >= 0 && functionRevokeAt < sql.IndexOf(EditGrant, StringComparison.Ordinal), "the PUBLIC revoke must precede the EXECUTE grant.");
 
         /* It must NOT widen the schema-wide config write to viewer (that grant stays admin-only, pinned here). */
         Assert.Contains("GRANT INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA config TO admin;", sql, StringComparison.Ordinal);
