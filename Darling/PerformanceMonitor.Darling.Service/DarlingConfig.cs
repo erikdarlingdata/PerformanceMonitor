@@ -230,7 +230,7 @@ public sealed class DarlingConfig
     /// plan handle, its cached time and a fingerprint of its statements) and checks that identity against the plans
     /// this host has committed, recording in the run's collection-log note how many it would have skipped and how
     /// many of those the identity got wrong (<c>deferred_would_hit</c>, <c>deferred_false_hit</c> when the plan's shape changed;
-    /// a change to only its memory grant counts as <c>deferred_grant_only</c>, not a false hit). <c>on</c> skips
+    /// a render whose shape held, in the field only the memory grant moved, counts as <c>deferred_same_shape</c>, not a false hit). <c>on</c> skips
     /// the render for a recognized plan, sends its stored digest instead, and renders only the rest, at most 150 a run.
     /// An unrecognized value logs a warning and means <c>off</c>.
     ///

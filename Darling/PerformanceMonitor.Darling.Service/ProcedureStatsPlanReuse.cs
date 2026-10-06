@@ -8,7 +8,6 @@
 
 using System;
 using System.Collections.Generic;
-using System.Globalization;
 using System.IO;
 using System.Security.Cryptography;
 using System.Text;
@@ -64,16 +63,17 @@ internal static class ProcedureStatsPlanReuse
 
         /// <summary>
         /// Shadow: would-hits whose cached plan's SHAPE differs from the plan the run just rendered (#5158): a statement
-        /// recompiled, or one came or went. A change to the memory grant alone is <see cref="GrantOnly"/>, not this.
+        /// recompiled, or one came or went. A render whose shape held is <see cref="SameShape"/>, not this.
         /// </summary>
         public int FalseHit { get; set; }
 
         /// <summary>
-        /// Shadow: would-hits whose rendered plan differs in bytes from the cached one but not in shape: grant feedback
-        /// adjusted the cached plan in place. That is a minor mutation of a plan the store already holds, so it is not
+        /// Shadow: would-hits whose rendered plan differs in bytes from the cached one but whose shape held. In the field
+        /// only the memory grant moved: grant feedback adjusted the cached plan in place. The hash key proves the shape
+        /// held, not that nothing else did. That is a minor mutation of a plan the store already holds, so it is not
         /// a new plan and not a false hit (#5158).
         /// </summary>
-        public int GrantOnly { get; set; }
+        public int SameShape { get; set; }
 
         /// <summary>Rows the cache did not hold, or held past its age limit, or could not key.</summary>
         public int Miss { get; set; }
@@ -100,11 +100,14 @@ internal static class ProcedureStatsPlanReuse
         Convert.ToHexString(PayloadDimensions.Digest(PgCollectorRowWriter.StripEmbeddedNuls(planXml)));
 
     /// <summary>
-    /// The shape of a plan (#5158): the ordered <c>QueryPlanHash</c> of each <c>StmtSimple</c> statement, and how many
-    /// there are, hashed to one key. Two renders of the same cached plan have the same shape even when the engine's
-    /// memory-grant feedback rewrote <c>MemoryGrantInfo</c> and the operators' <c>MemoryFractions</c> in place.
-    /// A plan with no statement, or with a statement that has no <c>QueryPlanHash</c>, falls back to a hash of the whole
-    /// XML with the attributes of those two elements left out. Returns null for XML that does not parse; the caller
+    /// The shape of a plan (#5158): every <c>Stmt*</c> element in document order (<c>StmtSimple</c>, <c>StmtCond</c>,
+    /// <c>StmtCursor</c> and the rest), each as its element name and its <c>QueryPlanHash</c> (a dash when it has none:
+    /// <c>SET</c>, <c>RETURN</c>, <c>ASSIGN</c> and <c>COND</c> wrappers carry no plan), hashed to one key. Two renders of
+    /// the same cached plan have the same shape even when the engine's memory-grant feedback rewrote
+    /// <c>MemoryGrantInfo</c> and the operators' <c>MemoryFractions</c> in place. A statement with no hash has no shape to
+    /// compare, so it does not send the plan to the fallback. The fallback, a hash of the whole XML with the attributes of
+    /// those two elements left out, runs only when a <c>QueryPlan</c> opens under a statement that has no hash (a
+    /// shape the key cannot see) or when the plan has no statement. Returns null for XML that does not parse; the caller
     /// then cannot prove the shape unchanged. Forward-only: no DOM is built.
     /// </summary>
     internal static string? ShapeOf(string planXml)
@@ -114,32 +117,38 @@ internal static class ProcedureStatsPlanReuse
         var text = PgCollectorRowWriter.StripEmbeddedNuls(planXml);
         try
         {
-            var hashes = new StringBuilder();
-            var statements = 0;
-            var allHashed = true;
+            var statements = new StringBuilder();
+            var count = 0;
+            var lastHadHash = true;
+            var unseenPlan = false;
             using (var reader = OpenReader(text))
             {
                 while (reader.Read())
                 {
-                    if (reader.NodeType == XmlNodeType.Element && reader.LocalName == "StmtSimple")
+                    if (reader.NodeType != XmlNodeType.Element)
                     {
-                        statements++;
-                        var hash = reader.GetAttribute("QueryPlanHash");
-                        if (string.IsNullOrEmpty(hash))
-                        {
-                            allHashed = false;
-                            break;
-                        }
+                        continue;
+                    }
 
-                        hashes.Append(hash).Append(',');
+                    var name = reader.LocalName;
+                    if (name.StartsWith("Stmt", StringComparison.Ordinal))
+                    {
+                        count++;
+                        var hash = reader.GetAttribute("QueryPlanHash");
+                        lastHadHash = !string.IsNullOrEmpty(hash);
+                        statements.Append(name).Append('=').Append(lastHadHash ? hash : "-").Append(',');
+                    }
+                    else if (name == "QueryPlan" && !lastHadHash)
+                    {
+                        unseenPlan = true;
+                        break;
                     }
                 }
             }
 
-            if (allHashed && statements > 0)
+            if (!unseenPlan && count > 0)
             {
-                return "h:" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(
-                    statements.ToString(CultureInfo.InvariantCulture) + ":" + hashes)));
+                return "h:" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(statements.ToString())));
             }
 
             return "x:" + GrantlessDigestOf(text);
@@ -254,7 +263,7 @@ internal static class ProcedureStatsPlanReuse
                 shapeKnown = true;
                 if (shape is not null && string.Equals(shape, entry.Shape, StringComparison.Ordinal))
                 {
-                    outcome.GrantOnly++;
+                    outcome.SameShape++;
                 }
                 else
                 {

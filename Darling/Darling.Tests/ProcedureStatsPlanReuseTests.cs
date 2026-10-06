@@ -419,8 +419,70 @@ public sealed class ProcedureStatsPlanReuseTests
         return "<ShowPlanXML><BatchSequence><Batch><Statements>" + statements + "</Statements></Batch></BatchSequence></ShowPlanXML>";
     }
 
+    /// <summary>
+    /// A procedure plan the way the engine renders it: a <c>SET NOCOUNT ON</c> statement with no plan and no hash, an
+    /// <c>IF EXISTS</c> <c>StmtCond</c> whose condition has its own plan and <c>QueryPlanHash</c>, the statement under the
+    /// IF, and a <c>RETURN</c> with no plan and no hash. The grant fields sit on the statement under the IF.
+    /// </summary>
+    private static string ProcedurePlan(string desiredMemory, string fractionInput, string conditionHash, string selectHash, string cachedPlanSize = "24") =>
+        "<ShowPlanXML><BatchSequence><Batch><Statements>"
+        + "<StmtSimple StatementId=\"1\" StatementType=\"SET ON/OFF\" RetrievedFromCache=\"true\" />"
+        + "<StmtCond StatementId=\"2\" StatementType=\"COND\" QueryPlanHash=\"" + conditionHash + "\">"
+        + "<Condition><QueryPlan CachedPlanSize=\"16\"><RelOp NodeId=\"0\" PhysicalOp=\"Index Seek\" EstimateRows=\"1\" /></QueryPlan></Condition>"
+        + "<Then><Statements><StmtSimple StatementId=\"3\" StatementType=\"SELECT\" QueryPlanHash=\"" + selectHash + "\">"
+        + "<QueryPlan CachedPlanSize=\"" + cachedPlanSize + "\"><MemoryGrantInfo SerialRequiredMemory=\"512\" SerialDesiredMemory=\"" + desiredMemory + "\" />"
+        + "<RelOp NodeId=\"0\" PhysicalOp=\"Sort\" EstimateRows=\"10\"><MemoryFractions Input=\"" + fractionInput + "\" Output=\"" + fractionInput + "\" /></RelOp>"
+        + "</QueryPlan></StmtSimple></Statements></Then></StmtCond>"
+        + "<StmtSimple StatementId=\"4\" StatementType=\"RETURN\" RetrievedFromCache=\"true\" />"
+        + "</Statements></Batch></BatchSequence></ShowPlanXML>";
+
+    private static PlanDigestCache<ProcedureStatsPlanKey> WarmedWith(string plan)
+    {
+        var cache = new PlanDigestCache<ProcedureStatsPlanKey>();
+        var first = ProcedureStatsPlanReuse.ApplyShadow(1, cache, new List<ProcedureStatsCollector.Row> { RowFor(1, plan) }, 1, s_now, null);
+        cache.ConfirmPending(first.Pending, s_now);
+        return cache;
+    }
+
     [Fact]
-    public void Shadow_ARenderThatDiffersOnlyInTheMemoryGrant_IsAWouldHitAndGrantOnly_NotAFalseHit()
+    public void Shadow_AProcedurePlanWithASetStatement_KeysOnTheHashPath_AndAGrantChangeIsTheSameShape()
+    {
+        var cached = ProcedurePlan("1024", "0.5", "0xC1", "0xAA");
+        var rendered = ProcedurePlan("2048", "0.25", "0xC1", "0xAA");
+        Assert.StartsWith("h:", ProcedureStatsPlanReuse.ShapeOf(cached), StringComparison.Ordinal);
+        Assert.Equal(ProcedureStatsPlanReuse.ShapeOf(cached), ProcedureStatsPlanReuse.ShapeOf(rendered));
+
+        var cache = WarmedWith(cached);
+        var outcome = ProcedureStatsPlanReuse.ApplyShadow(
+            1, cache, new List<ProcedureStatsCollector.Row> { RowFor(1, rendered) }, 2, s_now, _ => Assert.Fail("a grant change is not a false hit"));
+
+        Assert.Equal(1, outcome.WouldHit);
+        Assert.Equal(1, outcome.SameShape);
+        Assert.Equal(0, outcome.FalseHit);
+    }
+
+    [Fact]
+    public void Shadow_AStmtCondWhoseConditionPlanChanged_IsAFalseHit_EvenWithAGrantChangeBesideIt()
+    {
+        /* no SET or RETURN here: a procedure that opens with the IF, so every StmtSimple has a hash and a key that read
+           only StmtSimple would take the hash path and miss the condition's own plan */
+        static string WithoutPlanlessStatements(string plan) =>
+            plan.Replace("<StmtSimple StatementId=\"1\" StatementType=\"SET ON/OFF\" RetrievedFromCache=\"true\" />", string.Empty, StringComparison.Ordinal)
+                .Replace("<StmtSimple StatementId=\"4\" StatementType=\"RETURN\" RetrievedFromCache=\"true\" />", string.Empty, StringComparison.Ordinal);
+
+        var cache = WarmedWith(WithoutPlanlessStatements(ProcedurePlan("1024", "0.5", "0xC1", "0xAA")));
+        var reported = new List<ProcedureStatsPlanKey>();
+
+        var outcome = ProcedureStatsPlanReuse.ApplyShadow(
+            1, cache, new List<ProcedureStatsCollector.Row> { RowFor(1, WithoutPlanlessStatements(ProcedurePlan("2048", "0.25", "0xC2", "0xAA"))) }, 2, s_now, reported.Add);
+
+        Assert.Equal(1, outcome.FalseHit);
+        Assert.Equal(0, outcome.SameShape);
+        Assert.Single(reported);
+    }
+
+    [Fact]
+    public void Shadow_ARenderThatDiffersOnlyInTheMemoryGrant_IsAWouldHitAndSameShape_NotAFalseHit()
     {
         var cached = PlanWithGrant("1024", "0.5", "0xAA", "0xBB");
         var rendered = PlanWithGrant("2048", "0.25", "0xAA", "0xBB");
@@ -434,16 +496,16 @@ public sealed class ProcedureStatsPlanReuseTests
         var outcome = ProcedureStatsPlanReuse.ApplyShadow(1, cache, rows, 2, s_now, _ => Assert.Fail("a grant change is not a false hit"));
 
         Assert.Equal(1, outcome.WouldHit);
-        Assert.Equal(1, outcome.GrantOnly);
+        Assert.Equal(1, outcome.SameShape);
         Assert.Equal(0, outcome.FalseHit);
         Assert.Equal(0, outcome.Miss);
         Assert.Equal(rendered, rows[0].QueryPlanXml); /* the row still carries what the render produced */
 
-        /* the cache now holds the new bytes, so the same render is an exact hit, not a second grant-only */
+        /* the cache now holds the new bytes, so the same render is an exact hit, not a second same-shape */
         cache.ConfirmPending(outcome.Pending, s_now);
         var again = ProcedureStatsPlanReuse.ApplyShadow(1, cache, rows, 3, s_now, _ => Assert.Fail("healed"));
         Assert.Equal(1, again.WouldHit);
-        Assert.Equal(0, again.GrantOnly);
+        Assert.Equal(0, again.SameShape);
         Assert.Equal(0, again.FalseHit);
     }
 
@@ -461,7 +523,7 @@ public sealed class ProcedureStatsPlanReuseTests
 
         Assert.Equal(1, outcome.WouldHit);
         Assert.Equal(1, outcome.FalseHit);
-        Assert.Equal(0, outcome.GrantOnly);
+        Assert.Equal(0, outcome.SameShape);
         Assert.Single(reported);
 
         /* a statement added or dropped changes the count, which is a shape change too */
@@ -469,7 +531,7 @@ public sealed class ProcedureStatsPlanReuseTests
         var dropped = ProcedureStatsPlanReuse.ApplyShadow(
             1, cache, new List<ProcedureStatsCollector.Row> { RowFor(1, PlanWithGrant("1024", "0.5", "0xAA")) }, 3, s_now, null);
         Assert.Equal(1, dropped.FalseHit);
-        Assert.Equal(0, dropped.GrantOnly);
+        Assert.Equal(0, dropped.SameShape);
     }
 
     [Fact]
@@ -484,7 +546,7 @@ public sealed class ProcedureStatsPlanReuseTests
             1, cache, new List<ProcedureStatsCollector.Row> { RowFor(1, PlanWithGrant("4096", "0.9", "0xDD")) }, 2, s_now, null);
 
         Assert.Equal(1, outcome.FalseHit);
-        Assert.Equal(0, outcome.GrantOnly);
+        Assert.Equal(0, outcome.SameShape);
     }
 
     [Fact]
@@ -499,7 +561,7 @@ public sealed class ProcedureStatsPlanReuseTests
         var grant = ProcedureStatsPlanReuse.ApplyShadow(
             1, cache, new List<ProcedureStatsCollector.Row> { RowFor(1, PlanWithGrant("2048", "0.25", "0xAA", null)) }, 2, s_now,
             _ => Assert.Fail("grant only"));
-        Assert.Equal(1, grant.GrantOnly);
+        Assert.Equal(1, grant.SameShape);
         Assert.Equal(0, grant.FalseHit);
         cache.ConfirmPending(grant.Pending, s_now);
 
@@ -507,23 +569,30 @@ public sealed class ProcedureStatsPlanReuseTests
         var changed = ProcedureStatsPlanReuse.ApplyShadow(
             1, cache, new List<ProcedureStatsCollector.Row> { RowFor(1, PlanWithGrant("1024", "0.5", "0xEE", null)) }, 2, s_now, null);
         Assert.Equal(1, changed.FalseHit);
-        Assert.Equal(0, changed.GrantOnly);
+        Assert.Equal(0, changed.SameShape);
 
         /* and a plan that is not XML at all can never be proved unchanged */
         Assert.Null(ProcedureStatsPlanReuse.ShapeOf("<unclosed"));
     }
 
     [Fact]
-    public void Shadow_AnEntryCachedWithoutAShape_StaysAFalseHit()
+    public void Shadow_AnEntryCachedWithoutAShape_IsOneFalseHit_ThenGainsAShape_AndStopsOverCounting()
     {
         /* what an entry written by on mode, or an older build, looks like: a digest and no shape */
-        var cache = ConfirmedCache(new[] { RowFor(1, PlanWithGrant("1024", "0.5", "0xAA")) });
+        var cache = ConfirmedCache(new[] { RowFor(1, ProcedurePlan("1024", "0.5", "0xC1", "0xAA")) });
 
-        var outcome = ProcedureStatsPlanReuse.ApplyShadow(
-            1, cache, new List<ProcedureStatsCollector.Row> { RowFor(1, PlanWithGrant("2048", "0.5", "0xAA")) }, 2, s_now, null);
+        var first = ProcedureStatsPlanReuse.ApplyShadow(
+            1, cache, new List<ProcedureStatsCollector.Row> { RowFor(1, ProcedurePlan("2048", "0.5", "0xC1", "0xAA")) }, 2, s_now, null);
+        Assert.Equal(1, first.FalseHit);
+        Assert.Equal(0, first.SameShape);
 
-        Assert.Equal(1, outcome.FalseHit);
-        Assert.Equal(0, outcome.GrantOnly);
+        /* the false-hit render stored its shape, so a second grant-only render is the same shape */
+        cache.ConfirmPending(first.Pending, s_now);
+        var second = ProcedureStatsPlanReuse.ApplyShadow(
+            1, cache, new List<ProcedureStatsCollector.Row> { RowFor(1, ProcedurePlan("4096", "0.1", "0xC1", "0xAA")) }, 3, s_now,
+            _ => Assert.Fail("the entry has a shape now"));
+        Assert.Equal(1, second.SameShape);
+        Assert.Equal(0, second.FalseHit);
     }
 
     [Fact]
@@ -540,6 +609,40 @@ public sealed class ProcedureStatsPlanReuseTests
         var fallback = ProcedureStatsPlanReuse.ShapeOf(PlanWithGrant("1", "1", "0xAA", null));
         Assert.NotEqual(fallback, ProcedureStatsPlanReuse.ShapeOf(PlanWithGrant("1", "1", "0xAB", null)));
         Assert.Equal(fallback, ProcedureStatsPlanReuse.ShapeOf(PlanWithGrant("77", "0.7", "0xAA", null)));
+    }
+
+    [Fact]
+    public void TheShapeKey_OnAProcedurePlan_ReadsEveryStatementElement_AndNothingElse()
+    {
+        var plan = ProcedurePlan("1024", "0.5", "0xC1", "0xAA");
+        var shape = ProcedureStatsPlanReuse.ShapeOf(plan);
+        Assert.StartsWith("h:", shape, StringComparison.Ordinal);
+
+        /* what moves the key: the StmtCond's own hash, the nested statement's hash */
+        Assert.NotEqual(shape, ProcedureStatsPlanReuse.ShapeOf(ProcedurePlan("1024", "0.5", "0xC2", "0xAA")));
+        Assert.NotEqual(shape, ProcedureStatsPlanReuse.ShapeOf(ProcedurePlan("1024", "0.5", "0xC1", "0xAB")));
+
+        /* a statement with no plan counts: a SET statement dropped from the front is a different key */
+        Assert.NotEqual(shape, ProcedureStatsPlanReuse.ShapeOf(plan.Replace(
+            "<StmtSimple StatementId=\"1\" StatementType=\"SET ON/OFF\" RetrievedFromCache=\"true\" />", string.Empty, StringComparison.Ordinal)));
+
+        /* what does not: the grant fields, and (on this path) attributes the hashes already answer for */
+        Assert.Equal(shape, ProcedureStatsPlanReuse.ShapeOf(ProcedurePlan("9", "0.1", "0xC1", "0xAA")));
+        Assert.Equal(shape, ProcedureStatsPlanReuse.ShapeOf(ProcedurePlan("1024", "0.5", "0xC1", "0xAA", cachedPlanSize: "99")));
+
+        /* the fallback, by contrast, sees every non-grant attribute: a QueryPlan under a statement with no hash */
+        var noHash = plan.Replace(" QueryPlanHash=\"0xAA\"", string.Empty, StringComparison.Ordinal);
+        var fallback = ProcedureStatsPlanReuse.ShapeOf(noHash);
+        Assert.StartsWith("x:", fallback, StringComparison.Ordinal);
+        Assert.NotEqual(fallback, ProcedureStatsPlanReuse.ShapeOf(noHash.Replace("CachedPlanSize=\"24\"", "CachedPlanSize=\"25\"", StringComparison.Ordinal)));
+        Assert.NotEqual(fallback, ProcedureStatsPlanReuse.ShapeOf(noHash.Replace("EstimateRows=\"10\"", "EstimateRows=\"11\"", StringComparison.Ordinal)));
+        Assert.Equal(fallback, ProcedureStatsPlanReuse.ShapeOf(noHash.Replace("SerialDesiredMemory=\"1024\"", "SerialDesiredMemory=\"7\"", StringComparison.Ordinal)));
+
+        /* no statement at all: the fallback too */
+        Assert.StartsWith("x:", ProcedureStatsPlanReuse.ShapeOf("<ShowPlanXML><BatchSequence /></ShowPlanXML>"), StringComparison.Ordinal);
+
+        /* a StmtCond with no hash that opens a QueryPlan is a shape the key cannot see: the fallback */
+        Assert.StartsWith("x:", ProcedureStatsPlanReuse.ShapeOf(plan.Replace(" QueryPlanHash=\"0xC1\"", string.Empty, StringComparison.Ordinal)), StringComparison.Ordinal);
     }
 
     [Fact]
@@ -561,17 +664,17 @@ public sealed class ProcedureStatsPlanReuseTests
         string? Note() => CollectorMeasurementNote.Compose(null, second.Measurements);
         var rows2 = new List<ProcedureStatsCollector.Row>
         {
-            RowFor(1, PlanWithGrant("2048", "0.25", "0xAA")),   /* grant only */
+            RowFor(1, PlanWithGrant("2048", "0.25", "0xAA")),   /* same shape: a grant change */
             RowFor(2, PlanWithGrant("1024", "0.5", "0xBB")),    /* a statement recompiled */
         };
         await flipper.Runner.ApplyProcedureStatsPlanReuseAsync(null!, null!, ServerFor(), second, rows2, mode, CancellationToken.None);
 
-        Assert.Equal(1, second.Measurements.First(m => m.Label == "deferred_grant_only").Value);
+        Assert.Equal(1, second.Measurements.First(m => m.Label == "deferred_same_shape").Value);
         Assert.Equal(1, second.Measurements.First(m => m.Label == "deferred_false_hit").Value);
         Assert.Equal(2, second.Measurements.First(m => m.Label == "deferred_would_hit").Value);
-        Assert.Contains("deferred_grant_only=1", Note(), StringComparison.Ordinal);
+        Assert.Contains("deferred_same_shape=1", Note(), StringComparison.Ordinal);
         Assert.Contains("deferred_false_hit=1", Note(), StringComparison.Ordinal);
-        Assert.Equal(1, flipper.Log.CountAtLevel(LogLevel.Warning)); /* the grant-only row did not warn */
+        Assert.Equal(1, flipper.Log.CountAtLevel(LogLevel.Warning)); /* the same-shape row did not warn */
     }
 
     [Fact]

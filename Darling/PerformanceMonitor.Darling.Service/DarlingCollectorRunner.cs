@@ -7284,8 +7284,8 @@ RETURNING s.state_key";
     /// connection, inside the same wall-clock budget, at most <see cref="ProcedureStatsPlanReuse.MaxMissesPerRun"/>.
     ///
     /// <para>What this pass counts goes into the run's collection-log note beside <c>plans_rendered</c>:
-    /// <c>deferred_would_hit</c>, <c>deferred_false_hit</c> (the plan's shape changed), <c>deferred_grant_only</c> (only its memory
-    /// grant changed) and <c>deferred_miss</c> in shadow, <c>deferred_hit</c> and
+    /// <c>deferred_would_hit</c>, <c>deferred_false_hit</c> (the plan's shape changed), <c>deferred_same_shape</c> (the shape held; in the field
+    /// only the memory grant moved) and <c>deferred_miss</c> in shadow, <c>deferred_hit</c> and
     /// <c>deferred_miss</c> in on. A failed second query ships the rows it covered without plans, caches nothing, and does
     /// not fail the run. Returns the keys to confirm after the batch commits, or discard.</para>
     /// </summary>
@@ -7355,7 +7355,7 @@ RETURNING s.state_key";
         {
             context.Measure("deferred_would_hit", outcome.WouldHit);
             context.Measure("deferred_false_hit", outcome.FalseHit);
-            context.Measure("deferred_grant_only", outcome.GrantOnly);
+            context.Measure("deferred_same_shape", outcome.SameShape);
         }
         else
         {
@@ -7371,7 +7371,7 @@ RETURNING s.state_key";
             shadow ? "shadow" : "on",
             context.CapturePlanXml ? "capture" : "gated",
             shadow
-                ? $"would_hit={outcome.WouldHit} false_hit={outcome.FalseHit} grant_only={outcome.GrantOnly} miss={outcome.Miss}"
+                ? $"would_hit={outcome.WouldHit} false_hit={outcome.FalseHit} same_shape={outcome.SameShape} miss={outcome.Miss}"
                 : $"hit={outcome.Hit} miss={outcome.Miss} over_cap={outcome.OverCap}",
             outcome.Rendered);
 
