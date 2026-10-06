@@ -96,6 +96,39 @@ public sealed class ViewerPasswordSealer(PasswordPublicKey key)
         }
     }
 
+    /// <summary>Seals a webhook URL, routing key or header text for a webhook binding (<see cref="PasswordBinding.ForWebhook"/>).
+    /// Throws <see cref="ViewerPasswordRefusedException"/> when the text is not valid or is too long.</summary>
+    public string SealWebhook(string plaintext, PasswordBinding binding)
+    {
+        ArgumentNullException.ThrowIfNull(plaintext);
+        ArgumentNullException.ThrowIfNull(binding);
+        if (!string.Equals(binding.Purpose, PasswordBinding.WebhookPurpose, StringComparison.Ordinal))
+        {
+            throw new ArgumentException("A webhook value is sealed with a webhook binding.", nameof(binding));
+        }
+
+        if (!IsValidText(plaintext))
+        {
+            throw new ViewerPasswordRefusedException("The value contains characters that cannot be stored.");
+        }
+
+        try
+        {
+            return PasswordSeal.Seal(plaintext, key, binding);
+        }
+        catch (PasswordSealException)
+        {
+            throw new ViewerPasswordRefusedException(
+                s_strictUtf8.GetByteCount(plaintext) > PasswordSeal.MaxPlaintextBytes
+                    ? "The value is longer than can be stored."
+                    : "The value contains characters that cannot be stored.");
+        }
+        catch (ArgumentException)
+        {
+            throw new ViewerPasswordRefusedException("The value contains characters that cannot be stored.");
+        }
+    }
+
     private static bool IsValidText(string? text)
     {
         if (text is null)

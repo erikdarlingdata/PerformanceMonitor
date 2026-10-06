@@ -57,6 +57,9 @@ public partial class SettingsWindow : Window
     /// without being wiped — mirrors the server dialog's DPAPI "re-enter to change" handling.</summary>
     private string? _loadedSmtpBlob;
 
+    /// <summary>The notification row as last read, for the sealed webhook values a blank box keeps (#5366).</summary>
+    private NotificationRow? _loadedNotification;
+
     /// <summary>The service's paused state as last read from <c>config_service</c>, reflected on the button.</summary>
     private bool _paused;
 
@@ -1291,15 +1294,21 @@ public partial class SettingsWindow : Window
             : "";
 
         TeamsWebhookEnabledCheckBox.IsChecked = !string.IsNullOrWhiteSpace(r.TeamsUrl);
-        TeamsWebhookUrlBox.Text = r.TeamsUrl;
+        _loadedNotification = r;
+        TeamsWebhookUrlBox.Text = ViewerWebhookSealing.ShownText(r.TeamsUrl);
+        TeamsStatusText.Text = ViewerWebhookSealing.IsSaved(r.TeamsUrl) ? ViewerWebhookSealing.KeepHint : "";
         TeamsProxyAddressBox.Text = r.TeamsProxy;
         SlackWebhookEnabledCheckBox.IsChecked = !string.IsNullOrWhiteSpace(r.SlackUrl);
-        SlackWebhookUrlBox.Text = r.SlackUrl;
+        SlackWebhookUrlBox.Text = ViewerWebhookSealing.ShownText(r.SlackUrl);
+        SlackStatusText.Text = ViewerWebhookSealing.IsSaved(r.SlackUrl) ? ViewerWebhookSealing.KeepHint : "";
         SlackProxyAddressBox.Text = r.SlackProxy;
 
         GenericWebhookEnabledCheckBox.IsChecked = !string.IsNullOrWhiteSpace(r.GenericUrl);
-        GenericWebhookUrlBox.Text = r.GenericUrl;
-        GenericWebhookHeadersBox.Text = r.GenericHeaders;
+        GenericWebhookUrlBox.Text = ViewerWebhookSealing.ShownText(r.GenericUrl);
+        GenericWebhookHeadersBox.Text = ViewerWebhookSealing.ShownText(r.GenericHeaders);
+        GenericStatusText.Text = ViewerWebhookSealing.IsSaved(r.GenericUrl) || ViewerWebhookSealing.IsSaved(r.GenericHeaders)
+            ? ViewerWebhookSealing.KeepHint
+            : "";
         /* Blank means "use the built-in default" — show it, so the operator has something to edit rather
            than a blank box whose shape they have to guess. */
         GenericWebhookBodyBox.Text = string.IsNullOrWhiteSpace(r.GenericBodyTemplate)
@@ -1308,7 +1317,8 @@ public partial class SettingsWindow : Window
         GenericWebhookProxyAddressBox.Text = r.GenericProxy;
 
         PagerDutyWebhookEnabledCheckBox.IsChecked = !string.IsNullOrWhiteSpace(r.PagerDutyRoutingKey);
-        PagerDutyRoutingKeyBox.Text = r.PagerDutyRoutingKey;
+        PagerDutyRoutingKeyBox.Text = ViewerWebhookSealing.ShownText(r.PagerDutyRoutingKey);
+        PagerDutyStatusText.Text = ViewerWebhookSealing.IsSaved(r.PagerDutyRoutingKey) ? ViewerWebhookSealing.KeepHint : "";
         PagerDutyEuRegionCheckBox.IsChecked = r.PagerDutyUseEuRegion;
         PagerDutyProxyAddressBox.Text = r.PagerDutyProxy;
 
@@ -1346,20 +1356,20 @@ public partial class SettingsWindow : Window
 
         if (TeamsWebhookEnabledCheckBox.IsChecked == true)
         {
-            row.TeamsUrl = TeamsWebhookUrlBox.Text?.Trim() ?? "";
+            row.TeamsUrl = ViewerWebhookSealing.CarryKept(TeamsWebhookUrlBox.Text, _loadedNotification?.TeamsUrl);
             row.TeamsProxy = TeamsProxyAddressBox.Text?.Trim() ?? "";
         }
 
         if (SlackWebhookEnabledCheckBox.IsChecked == true)
         {
-            row.SlackUrl = SlackWebhookUrlBox.Text?.Trim() ?? "";
+            row.SlackUrl = ViewerWebhookSealing.CarryKept(SlackWebhookUrlBox.Text, _loadedNotification?.SlackUrl);
             row.SlackProxy = SlackProxyAddressBox.Text?.Trim() ?? "";
         }
 
         if (GenericWebhookEnabledCheckBox.IsChecked == true)
         {
-            row.GenericUrl = GenericWebhookUrlBox.Text?.Trim() ?? "";
-            row.GenericHeaders = GenericWebhookHeadersBox.Text?.Trim() ?? "";
+            row.GenericUrl = ViewerWebhookSealing.CarryKept(GenericWebhookUrlBox.Text, _loadedNotification?.GenericUrl);
+            row.GenericHeaders = ViewerWebhookSealing.CarryKept(GenericWebhookHeadersBox.Text, _loadedNotification?.GenericHeaders);
             /* Persist the empty "use built-in default" sentinel unless the operator actually edited the body box
                (the Settings load pre-fills it with the default), so a future release can still improve it. */
             row.GenericBodyTemplate = WebhookAlertService.IsDefaultBodyTemplate(GenericWebhookBodyBox.Text)
@@ -1369,7 +1379,9 @@ public partial class SettingsWindow : Window
 
             /* A malformed headers JSON / body template would let the service accept the channel and then
                drop every alert with only a log line to show for it — block the Save instead (#1506). */
-            var configError = WebhookAlertService.ValidateGenericConfig(row.GenericHeaders, row.GenericBodyTemplate);
+            var configError = WebhookAlertService.ValidateGenericConfig(
+                PasswordSeal.IsSealed(row.GenericHeaders) || row.GenericHeaders == ViewerWebhookSealing.ClearMarker ? "" : row.GenericHeaders,
+                row.GenericBodyTemplate);
             if (configError != null)
             {
                 errors.Add(configError);
@@ -1378,12 +1390,35 @@ public partial class SettingsWindow : Window
 
         if (PagerDutyWebhookEnabledCheckBox.IsChecked == true)
         {
-            row.PagerDutyRoutingKey = PagerDutyRoutingKeyBox.Text?.Trim() ?? "";
+            row.PagerDutyRoutingKey = ViewerWebhookSealing.CarryKept(PagerDutyRoutingKeyBox.Text, _loadedNotification?.PagerDutyRoutingKey);
             row.PagerDutyUseEuRegion = PagerDutyEuRegionCheckBox.IsChecked == true;
             row.PagerDutyProxy = PagerDutyProxyAddressBox.Text?.Trim() ?? "";
         }
 
         return row;
+    }
+
+    /// <summary>
+    /// Seals the typed webhook values for the settings row (#5366): kept values stay as stored, anything typed is sealed to the
+    /// service's key for its slot, proxy and (for the headers) generic URL. The key is asked for only when something was typed.
+    /// A key notice is shown once. Throws <see cref="ViewerPasswordRefusedException"/> when a value cannot be saved.
+    /// </summary>
+    private async Task SealWebhookValuesAsync(NotificationRow row)
+    {
+        ViewerPasswordSealer? sealer = null;
+        string? refusal = null;
+        if (ViewerWebhookSealing.NeedsKey(row, _loadedNotification))
+        {
+            var key = await ViewerPasswordKey.GetSealKeyAsync(_dataService!, this);
+            sealer = key.Sealer;
+            refusal = key.Refusal;
+            if (key.Notice is { } notice)
+            {
+                MessageBox.Show(notice, "Settings", MessageBoxButton.OK, MessageBoxImage.Information);
+            }
+        }
+
+        ViewerWebhookSealing.ResolveSettingsRow(row, _loadedNotification, sealer, refusal);
     }
 
     /// <summary>The SMTP blob to persist: seal the typed password when the box holds one; otherwise keep the
@@ -1756,6 +1791,7 @@ public partial class SettingsWindow : Window
         {
             try
             {
+                await SealWebhookValuesAsync(notifyRow);
                 await _dataService.UpsertAlertSettingsAsync(alertRow);
                 await _dataService.UpsertNotificationAsync(notifyRow);
                 await _dataService.UpdateServiceFlagsAsync(capturePlans, mcpEnabled, mcpPort, webEnabled, webPort,
@@ -1764,6 +1800,13 @@ public partial class SettingsWindow : Window
             catch (ViewerReadOnlyException ex)
             {
                 MessageBox.Show(ex.Message, "Read-only connection", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+            catch (ViewerPasswordRefusedException ex)
+            {
+                MessageBox.Show(
+                    "The webhook settings were not saved:\n\n" + ex.Message,
+                    "Settings", MessageBoxButton.OK, MessageBoxImage.Warning);
                 return;
             }
             catch (ViewerSchemaSkewException ex)
