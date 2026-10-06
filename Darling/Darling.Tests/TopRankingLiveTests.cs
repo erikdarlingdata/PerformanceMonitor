@@ -148,7 +148,7 @@ public sealed class TopRankingLiveTests
 
     /// <summary>
     /// Reads ranks on the window's <c>delta_logical_reads</c>, never the lifetime <c>total_logical_reads</c>. QCUM has the
-    /// huge cumulative total and a small delta; QDELTA the reverse. The ask is for ONE row (the statement over-fetches
+    /// huge cumulative total and a small delta; QDELTA the reverse, spread over three snapshots. The ask is for ONE row (the statement over-fetches
     /// five more than that, then re-ranks the page by the summed delta), so six fillers whose cumulative totals beat
     /// QDELTA's fill that page when the inner sort reads the cumulative column: with it QDELTA never reaches the outer
     /// re-rank at all. This is the test shown RED by pointing <c>TopRankings.Apply</c>'s reads metric at <c>total_logical_reads</c>.
@@ -163,7 +163,7 @@ public sealed class TopRankingLiveTests
 
             var first = Assert.Single(rows);
             Assert.Equal(QueryHash("QDELTA"), first.QueryHash);
-            Assert.Equal(5_000L, first.TotalLogicalReads);
+            Assert.Equal(5_100L, first.TotalLogicalReads);
         });
 
     /// <summary>The same pin on the procedures grid, whose single-level statement sorts and caps in one place.</summary>
@@ -177,7 +177,7 @@ public sealed class TopRankingLiveTests
 
             var first = Assert.Single(rows);
             Assert.Equal(ProcName("QDELTA"), first.ObjectName);
-            Assert.Equal(5_000L, first.TotalLogicalReads);
+            Assert.Equal(5_100L, first.TotalLogicalReads);
         });
 
     // ---------------------------------------------------------------- the web read dispatch
@@ -242,35 +242,63 @@ public sealed class TopRankingLiveTests
 
             await using var count = new NpgsqlCommand("SELECT count(*) FROM query_stats WHERE server_id = $1", connection);
             count.Parameters.AddWithValue(ServerId);
-            Assert.Equal((long)Seeds.Length, Convert.ToInt64(await count.ExecuteScalarAsync(ct)));
+            Assert.Equal((long)Seeds.Length * SnapshotsPerGroup, Convert.ToInt64(await count.ExecuteScalarAsync(ct)));
         });
 
     // ---------------------------------------------------------------- planting and plumbing
 
-    /// <summary>Plants the four-group seed on both grids, two hours back, with the interval an honest collection carries.</summary>
+    /// <summary>
+    /// Plants the four-group seed on both grids, two hours back, with the interval an honest collection carries. Each group
+    /// lands as THREE snapshots a minute apart whose halves, quarters and remainder add up to the seed's totals (#5226 F7):
+    /// with one row per group SUM, MAX, AVG and "the last value" all answer the same, so a ranking that stopped summing would
+    /// still pass. <see cref="SnapshotsPerGroup"/> is how many rows a group holds.
+    /// </summary>
     private static async Task PlantSeedsAsync(NpgsqlConnection connection, CancellationToken ct, DateTime now)
     {
         foreach (var seed in Seeds)
         {
-            await PlantQueryAsync(connection, ct, "query_stats", ServerId, ServerName, now.AddHours(-2), seed.Name,
-                seed.CpuUs, seed.ElapsedUs, seed.Reads, seed.Executions);
-            await PlantProcedureAsync(connection, ct, "procedure_stats", ServerId, ServerName, now.AddHours(-2), seed.Name,
-                seed.CpuUs, seed.ElapsedUs, seed.Reads, seed.Executions);
+            for (var i = 0; i < SnapshotsPerGroup; i++)
+            {
+                var at = now.AddHours(-2).AddMinutes(i);
+                await PlantQueryAsync(connection, ct, "query_stats", ServerId, ServerName, at, seed.Name,
+                    Part(seed.CpuUs, i), Part(seed.ElapsedUs, i), Part(seed.Reads, i), Part(seed.Executions, i));
+                await PlantProcedureAsync(connection, ct, "procedure_stats", ServerId, ServerName, at, seed.Name,
+                    Part(seed.CpuUs, i), Part(seed.ElapsedUs, i), Part(seed.Reads, i), Part(seed.Executions, i));
+            }
         }
     }
 
+    /// <summary>How many snapshots <see cref="PlantSeedsAsync"/> plants per group.</summary>
+    internal const int SnapshotsPerGroup = 3;
+
+    /// <summary>Snapshot <paramref name="index"/> of a total split in halves, quarters and the remainder; the three parts add up to it.</summary>
+    internal static long Part(long total, int index) => index switch
+    {
+        0 => total / 2,
+        1 => total / 4,
+        _ => total - total / 2 - total / 4,
+    };
+
     /// <summary>
-    /// QCUM: a delta of 10 against a lifetime total of fifty billion. QDELTA: a delta of 5,000 against a lifetime total of
-    /// 1,000. Six fillers sit between them on the cumulative column (more than QDELTA's total, a window delta under
-    /// 110), so a read that ranks on the lifetime total fills the over-fetched page without QDELTA.
+    /// QCUM: a delta of 10 against a lifetime total of fifty billion. QDELTA: three snapshots of 1,700 (a window sum of
+    /// 5,100) against a lifetime total of 1,000. QMAXDECOY: ONE snapshot of 4,000, so only a SUM puts QDELTA first (its MAX,
+    /// its AVG and its last value are all 1,700, under the decoy; #5226 F7). Six fillers sit between them on the cumulative
+    /// column (more than QDELTA's total, a window delta under 110), so a read that ranks on the lifetime total fills the
+    /// over-fetched page without QDELTA.
     /// </summary>
     private static async Task PlantCumulativeSeedAsync(NpgsqlConnection connection, CancellationToken ct, DateTime now)
     {
         var at = now.AddHours(-2);
         await PlantQueryAsync(connection, ct, "query_stats", ServerId, ServerName, at, "QCUM", 10_000, 10_000, 10, 5, cumulativeReads: 50_000_000_000L);
-        await PlantQueryAsync(connection, ct, "query_stats", ServerId, ServerName, at, "QDELTA", 10_000, 10_000, 5_000, 5, cumulativeReads: 1_000L);
         await PlantProcedureAsync(connection, ct, "procedure_stats", ServerId, ServerName, at, "QCUM", 10_000, 10_000, 10, 5, cumulativeReads: 50_000_000_000L);
-        await PlantProcedureAsync(connection, ct, "procedure_stats", ServerId, ServerName, at, "QDELTA", 10_000, 10_000, 5_000, 5, cumulativeReads: 1_000L);
+        for (var i = 0; i < 3; i++)
+        {
+            await PlantQueryAsync(connection, ct, "query_stats", ServerId, ServerName, at.AddMinutes(i), "QDELTA", 10_000, 10_000, 1_700, 5, cumulativeReads: 1_000L);
+            await PlantProcedureAsync(connection, ct, "procedure_stats", ServerId, ServerName, at.AddMinutes(i), "QDELTA", 10_000, 10_000, 1_700, 5, cumulativeReads: 1_000L);
+        }
+
+        await PlantQueryAsync(connection, ct, "query_stats", ServerId, ServerName, at, "QMAXDECOY", 10_000, 10_000, 4_000, 5, cumulativeReads: 500L);
+        await PlantProcedureAsync(connection, ct, "procedure_stats", ServerId, ServerName, at, "QMAXDECOY", 10_000, 10_000, 4_000, 5, cumulativeReads: 500L);
         for (var i = 1; i <= 6; i++)
         {
             await PlantQueryAsync(connection, ct, "query_stats", ServerId, ServerName, at, "QFILL" + i, 10_000, 10_000, 100 + i, 5, cumulativeReads: 1_000_000L + i);

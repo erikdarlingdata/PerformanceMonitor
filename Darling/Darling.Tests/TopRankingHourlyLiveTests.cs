@@ -172,28 +172,36 @@ public sealed class TopRankingHourlyLiveTests
         WithHourlyStoreAsync(async (scratch, connection, ct) =>
         {
             var now = DarlingMcpTestData.Naive(DateTime.UtcNow);
+            /* Each group is planted twice: at now minus 6 h (the row the seven-day read reaches back to) and at now minus 1 h
+               (the row the three-hour read finds). #5226 F6: with only the six-hour rows the three-hour window held nothing, the
+               read answered an empty envelope with no retention_notice key at all, and a notice builder that fired on every
+               reads read would have passed the "inside the floor" arm. */
             foreach (var seed in TopRankingLiveTests.Seeds)
             {
-                await TopRankingLiveTests.PlantQueryAsync(connection, ct, "collect.query_stats", ServerId, ServerName, now.AddHours(-6),
-                    seed.Name, seed.CpuUs, seed.ElapsedUs, seed.Reads, seed.Executions);
-                await TopRankingLiveTests.PlantProcedureAsync(connection, ct, "collect.procedure_stats", ServerId, ServerName, now.AddHours(-6),
-                    seed.Name, seed.CpuUs, seed.ElapsedUs, seed.Reads, seed.Executions);
+                foreach (var hoursBack in new[] { 6, 1 })
+                {
+                    await TopRankingLiveTests.PlantQueryAsync(connection, ct, "collect.query_stats", ServerId, ServerName, now.AddHours(-hoursBack),
+                        seed.Name, seed.CpuUs, seed.ElapsedUs, seed.Reads, seed.Executions);
+                    await TopRankingLiveTests.PlantProcedureAsync(connection, ct, "collect.procedure_stats", ServerId, ServerName, now.AddHours(-hoursBack),
+                        seed.Name, seed.CpuUs, seed.ElapsedUs, seed.Reads, seed.Executions);
+                }
             }
 
             await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
-            foreach (var read in new[] { "get_top_queries_by_cpu", "get_top_procedures_by_cpu" })
+            foreach (var (read, rowsKey) in new[] { ("get_top_queries_by_cpu", "queries"), ("get_top_procedures_by_cpu", "procedures") })
             {
-                var before = NoticeOf(await TopRankingLiveTests.WebReadAsync(postgres, read, $"?server={ServerName}&hours=168&order_by=reads"));
+                var before = NoticeOf(await TopRankingLiveTests.WebReadAsync(postgres, read, $"?server={ServerName}&hours=168&order_by=reads"), rowsKey, read);
                 Assert.True(before is not null, $"{read}: a reads ranking over seven days starts before raw's floor and must carry the notice");
                 Assert.Contains("partial window", before, StringComparison.Ordinal);
                 Assert.Contains("raw tier", before, StringComparison.Ordinal);
 
-                var inside = NoticeOf(await TopRankingLiveTests.WebReadAsync(postgres, read, $"?server={ServerName}&hours=3&order_by=reads"));
+                /* NoticeOf asserts the answer holds rows, so a null here is a data answer that carries no notice, not an empty envelope. */
+                var inside = NoticeOf(await TopRankingLiveTests.WebReadAsync(postgres, read, $"?server={ServerName}&hours=3&order_by=reads"), rowsKey, read);
                 Assert.True(inside is null, $"{read}: a reads ranking that starts inside raw's floor carries no notice, but read: {inside}");
 
                 foreach (var other in new[] { "", "&order_by=cpu", "&order_by=duration", "&order_by=executions" })
                 {
-                    var notice = NoticeOf(await TopRankingLiveTests.WebReadAsync(postgres, read, $"?server={ServerName}&hours=168{other}"));
+                    var notice = NoticeOf(await TopRankingLiveTests.WebReadAsync(postgres, read, $"?server={ServerName}&hours=168{other}"), rowsKey, read + other);
                     Assert.True(notice is null, $"{read}{other}: only the reads ranking carries the notice, but read: {notice}");
                 }
             }
@@ -201,13 +209,22 @@ public sealed class TopRankingHourlyLiveTests
 
     // ---------------------------------------------------------------- plumbing
 
-    /// <summary>The notice the payload carries, or null when it carries none (a JSON null, or the property left out).</summary>
-    private static string? NoticeOf(string json)
+    /// <summary>
+    /// The notice a DATA answer carries, or null when it carries none. The payload must hold at least one row under
+    /// <paramref name="rowsKey"/> and its <c>retention_notice</c> must be present: a JSON null or a string. An empty envelope
+    /// (no rows, no <c>retention_notice</c> key) fails here instead of reading as "no notice", which is what let the
+    /// "carries no notice" arms pass without reading anything (#5226 F6).
+    /// </summary>
+    private static string? NoticeOf(string json, string rowsKey, string label)
     {
         using var doc = JsonDocument.Parse(json);
-        return doc.RootElement.TryGetProperty("retention_notice", out var notice) && notice.ValueKind == JsonValueKind.String
-            ? notice.GetString()
-            : null;
+        var root = doc.RootElement;
+        Assert.True(
+            root.TryGetProperty(rowsKey, out var rows) && rows.ValueKind == JsonValueKind.Array && rows.GetArrayLength() > 0,
+            $"{label}: expected a data answer with rows under '{rowsKey}', but read: {json[..Math.Min(json.Length, 300)]}");
+        Assert.True(root.TryGetProperty("retention_notice", out var notice), $"{label}: a data answer carries a retention_notice key");
+        Assert.True(notice.ValueKind is JsonValueKind.Null or JsonValueKind.String, $"{label}: retention_notice is null or a string");
+        return notice.ValueKind == JsonValueKind.String ? notice.GetString() : null;
     }
 
     /// <summary>Deletes the seed's raw rows (the first three hours of the window) and leaves the survivor.</summary>
