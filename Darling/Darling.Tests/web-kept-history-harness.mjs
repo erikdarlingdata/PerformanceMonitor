@@ -104,26 +104,11 @@ const serverPageScenario = scenario === "offeredRanges" || scenario.startsWith("
 const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "kept-history-"));
 let modules;
 try {
-  fs.mkdirSync(path.join(scratch, "pages"));
+  /* Copy the whole js tree (js/, js/pages/ and every subdirectory) rather than a hand-kept list (#5279): a page module that
+     another PR adds then needs no edit here. Only imported files load, so the rest are inert; every stand-in below is
+     written AFTER the copy, so it still replaces the real file. */
+  fs.cpSync(jsDir, scratch, { recursive: true });
   fs.writeFileSync(path.join(scratch, "package.json"), '{ "type": "module" }');
-  fs.copyFileSync(path.join(jsDir, "util.js"), path.join(scratch, "util.js"));
-  fs.copyFileSync(path.join(jsDir, "panels.js"), path.join(scratch, "panels.js"));
-  fs.copyFileSync(path.join(jsDir, "grid-tools.js"), path.join(scratch, "grid-tools.js"));
-  fs.copyFileSync(path.join(jsDir, "pages", "server-tabs.js"), path.join(scratch, "pages", "server-tabs.js"));
-  /* Copied when present, so this harness keeps working in a tree where server-tabs.js does not import it. */
-  const findings = path.join("pages", "analysis-findings.js");
-  if (fs.existsSync(path.join(jsDir, findings))) fs.copyFileSync(path.join(jsDir, findings), path.join(scratch, findings));
-  fs.copyFileSync(path.join(jsDir, "read-fields.js"), path.join(scratch, "read-fields.js"));
-  for (const file of ["viewer-local.js", "viewer-local-ui.js"]) fs.copyFileSync(path.join(jsDir, file), path.join(scratch, file));
-  for (const rel of ["grid-tools.js", "multi-picker.js", path.join("pages", "analysis-findings.js"), path.join("pages", "plan-viewer.js"), path.join("pages", "pg-plan-viewer.js")]) {
-    const from = path.join(jsDir, rel);
-    if (!fs.existsSync(from)) continue;
-    fs.mkdirSync(path.dirname(path.join(scratch, rel)), { recursive: true });
-    fs.copyFileSync(from, path.join(scratch, rel));
-  }
-  /* #5246: the Graph cell of the Deadlock Graphs grid. */
-  fs.mkdirSync(path.join(scratch, "pages"), { recursive: true });
-  fs.copyFileSync(path.join(jsDir, "pages", "deadlock-graph.js"), path.join(scratch, "pages", "deadlock-graph.js"));
   fs.writeFileSync(
     path.join(scratch, "charts.js"),
     'import { el } from "./util.js";\n' +
@@ -139,9 +124,6 @@ try {
       "export function chartZoomScope() { return ''; }\n"
   );
   if (editorScenario) {
-    for (const file of ["derive.js", "alert-seed.js", "views-api.js", "refresh-policy.js", "refresh-control.js"]) {
-      fs.copyFileSync(path.join(jsDir, file), path.join(scratch, file));
-    }
     fs.writeFileSync(
       path.join(scratch, "editor.js"),
       fs.readFileSync(path.join(jsDir, "editor.js"), "utf8") + "\nexport { ensureFieldConfigs };\n"
@@ -149,13 +131,6 @@ try {
     fs.writeFileSync(path.join(scratch, "compose.js"), "export function renderComposedPanelCard() { throw new Error('not drawn here'); }\n");
   }
   if (serverPageScenario) {
-    fs.copyFileSync(path.join(jsDir, "pages", "fleet.js"), path.join(scratch, "pages", "fleet.js"));
-    fs.copyFileSync(path.join(jsDir, "fleet-groups.js"), path.join(scratch, "fleet-groups.js"));
-    /* The fleet page imports the mute-rules writes and the session read; copied when present, with what they import. */
-    for (const rel of ["alerts-api.js", "views-api.js", "derive.js", "alert-seed.js", "refresh-policy.js", "refresh-control.js", path.join("pages", "mute-rules.js")]) {
-      const from = path.join(jsDir, rel);
-      if (fs.existsSync(from) && !fs.existsSync(path.join(scratch, rel))) fs.copyFileSync(from, path.join(scratch, rel));
-    }
     fs.writeFileSync(
       path.join(scratch, "pages", "server.js"),
       fs.readFileSync(path.join(jsDir, "pages", "server.js"), "utf8") + "\nexport { RANGE_OPTIONS, WIDEST_RANGE_HOURS };\n"

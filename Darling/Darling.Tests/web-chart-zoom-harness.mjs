@@ -67,9 +67,10 @@ globalThis.location = { hash: "#/server/A/waits" };
 const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "chart-zoom-"));
 let charts;
 try {
+  /* Copy the whole js tree (js/, js/pages/ and every subdirectory) rather than a hand-kept list (#5279): a page module that
+     another PR adds then needs no edit here. Only imported files load, so the rest are inert. */
+  fs.cpSync(jsDir, scratch, { recursive: true });
   fs.writeFileSync(path.join(scratch, "package.json"), '{ "type": "module" }');
-  fs.copyFileSync(path.join(jsDir, "util.js"), path.join(scratch, "util.js"));
-  fs.copyFileSync(path.join(jsDir, "charts.js"), path.join(scratch, "charts.js"));
   charts = await import(pathToFileURL(path.join(scratch, "charts.js")).href);
 } finally {
   fs.rmSync(scratch, { recursive: true, force: true });

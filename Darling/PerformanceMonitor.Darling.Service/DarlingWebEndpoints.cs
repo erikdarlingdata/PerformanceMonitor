@@ -3008,7 +3008,13 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// #4605: runs <see cref="IntervalRollupCountGuard.QueryStatsSql"/> on the run's snapshot connection and returns the verdict
     /// the compiler needs to take the hourly-plus-raw-edges route, or null. The guard runs under its own 15 s
     /// <c>statement_timeout</c>, which is put back to the compose deadline before the panel statement. Only a count of 0 is a
-    /// pass; any other count, any fault and any timeout return null, and the panel reads raw. The guard's <c>$3</c> is bound
+    /// pass; any other count, a ledger that does not cover the window (<see cref="IntervalRollupCountGuard.UncoveredResult"/>, noted as
+    /// <see cref="ReadFallback.LedgerUncovered"/> with no log line), any fault and any timeout return null, and the panel reads raw.
+    /// A store before V164 has no ledger table, and it is found by its schema version, not by the guard's fault: right after the
+    /// savepoint, and before the guard's statement timeout and SQL, the run reads the version (<see cref="QueryStoreWideSchemaVersionSql"/>,
+    /// the Query Store route's own probe). Below <see cref="QueryStatsHourLedger.RungVersion"/> the guard never runs; the read is
+    /// noted <see cref="ReadFallback.GateFailed"/> with no log line, for a state the store's migration ends. An undefined table on a
+    /// store at the rung is a real fault and takes the normal path below: one Warning. The guard's <c>$3</c> is bound
     /// from <see cref="ComposeSourceRouter.NormalizeServerScope"/> alone, and the verdict carries that same scope, so a verdict
     /// proven for one scope never serves another. A failed guard is undone to its savepoint so the transaction stays usable
     /// for the raw panel statement. If that undo itself fails, the failure is rethrown and the snapshot is abandoned.
@@ -3022,6 +3028,24 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         try
         {
             await ExecuteSnapshotStatementAsync(connection, HourlyEdgesSavepointSql, McpCommandDeadlines.ReadSeconds, cancellationToken);
+
+            /* A store before V164 has no ledger table, and its migration ends that state at the next start. Its schema version says so,
+               so read it first (the Query Store wide-table route's own probe, #4617) and do not run a guard that cannot plan: the read
+               stays a failed gate (gate_failures in get_read_latency) with no Warning per panel run. The probe sits inside the savepoint,
+               so a fault in it is undone like the guard's, and ahead of the guard's statement timeout, so nothing needs putting back.
+               Every guard fault, an undefined table on a store at the rung included, still reaches the catch and warns once. */
+            int schemaVersion;
+            await using (var probe = new NpgsqlCommand(QueryStoreWideSchemaVersionSql, connection) { CommandTimeout = McpCommandDeadlines.ReadSeconds })
+            {
+                schemaVersion = Convert.ToInt32(await probe.ExecuteScalarAsync(cancellationToken));
+            }
+
+            if (schemaVersion < QueryStatsHourLedger.RungVersion)
+            {
+                ReadScope.Note(ReadFallback.GateFailed);
+                return null;
+            }
+
             await ExecuteSnapshotStatementAsync(connection, HourlyEdgesGuardTimeoutSql(guardSeconds), McpCommandDeadlines.ReadSeconds, cancellationToken);
 
             long mismatches;
@@ -3039,6 +3063,15 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
 
             await ExecuteSnapshotStatementAsync(connection, HourlyEdgesRestoreTimeoutSql, McpCommandDeadlines.ReadSeconds, cancellationToken);
 
+            /* The hour ledger does not cover the window yet (its counted_since is after the window start, or its state row is missing).
+               That is an expected state, not a fault and not a mismatch: nothing is logged, the scope notes the reason so the read shows
+               as a fallback in get_read_latency, and the panel reads raw on this same transaction (#4605). */
+            if (mismatches == IntervalRollupCountGuard.UncoveredResult)
+            {
+                ReadScope.Note(ReadFallback.LedgerUncovered);
+                return null;
+            }
+
             return mismatches == 0
                 ? new ComposeHourlyEdgesVerdict(candidate.SourceTable, candidate.HourStartUtc, candidate.HourEndUtc, scope)
                 : null;
@@ -3046,6 +3079,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             ReadScope.NoteFallback(ReadFallback.GateFailed, "#4605 compose hourly-edges count guard", ex);
+
             try
             {
                 await ExecuteSnapshotStatementAsync(connection, HourlyEdgesRollbackToSavepointSql, McpCommandDeadlines.ReadSeconds, cancellationToken);
