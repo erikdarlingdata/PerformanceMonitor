@@ -94,6 +94,22 @@ INSERT INTO config_monitored_servers (" + MonitoredServerColumns + @", created_a
 VALUES (" + MonitoredServerValues + @")
 ON CONFLICT (server_id) DO NOTHING";
 
+    /// <summary>
+    /// The one lock every write that gives a definition an ADDRESS takes (#5240): the service's add and edit
+    /// (web and MCP) and this class's <see cref="AddMonitoredServerAsync"/> and <see cref="UpsertMonitoredServerAsync"/>.
+    /// A COPY of the service's <c>DarlingMcpServerAdminTools.IdentityLockSql</c>, because this project cannot
+    /// reference the service; <c>ServerIdentityLockSourcePinTests</c> reads both files and fails when the two texts
+    /// differ, since a viewer locking on another key would serialise with nothing.
+    ///
+    /// <para><c>server_id</c> is the hash of the storage key, an edit keeps its row's old id, and the table has no
+    /// unique index on the key, so nothing in the database stops two writers from each finding an address free and
+    /// each taking it. Taken first inside the write's transaction, the lock makes the occupancy check that follows
+    /// it a check against a table no other identity write is changing, and the transaction's end (commit or
+    /// rollback) releases it. <c>pg_advisory_xact_lock</c> and <c>hashtext</c> are executable by PUBLIC, so the
+    /// read-only <c>viewer</c> role needs no grant: its INSERT still fails with SQLSTATE 42501, as it always did.</para>
+    /// </summary>
+    public const string MonitoredServerIdentityLockSql = "SELECT pg_advisory_xact_lock(hashtext('config_monitored_servers.identity'))";
+
     /// <summary>Deletes a server definition (the Remove action) — the service drops it from the monitored
     /// set on its next reload. $1 server_id.</summary>
     public const string MonitoredServerDeleteSql = "DELETE FROM config_monitored_servers WHERE server_id = $1";
@@ -404,30 +420,221 @@ ORDER BY COALESCE(s.display_name, c.name)";
     /// changes (#2158), so the write lands on the row that already owns it. An ADD does not come through here
     /// (#4789): it goes through <see cref="AddMonitoredServerAsync"/>, which refuses to overwrite a different
     /// server that hashes to the same id.
+    ///
+    /// <para><b>One transaction, behind the identity lock (#5240).</b> The dialog's address check ran before this
+    /// call, so another writer (a web or MCP edit, an add) can claim the address in between, and the upsert's
+    /// <c>ON CONFLICT (server_id)</c> arm is no help: an edit keeps its row's old id, so a second row with the same
+    /// address is not a conflict on the id. The write therefore takes <see cref="MonitoredServerIdentityLockSql"/>
+    /// first, reads every other definition's address again under it, and writes only when the address is still
+    /// free. A claimed address throws <see cref="MonitoredServerAddressClaimedException"/> and nothing is written; the
+    /// dialog's save handler catches that type on its own and shows its message as it is.</para>
+    ///
+    /// <para><b>A move never carries the stored password along (#5240).</b> The upsert rewrites
+    /// <c>encrypted_password</c> from the row it is given, so a row handed in with the blob it was read with would
+    /// send the stored password to a new address. Under the same lock, the write therefore reads the stored host, port
+    /// and blob, and when a SQL or service-principal row's host or port differs, it writes only a row that carries a
+    /// newly protected password: a missing blob, or the stored one, throws <see cref="MonitoredServerPasswordNeededException"/>
+    /// and nothing is written. The rule is the web and MCP edit's (<c>DarlingMcpServerAdminTools.PlanEdit</c> and the
+    /// store's edit function), with the same sentence; every other change keeps the stored password as before.</para>
     /// </summary>
     public async Task UpsertMonitoredServerAsync(MonitoredServerRow row, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(row);
 
-        await using var command = _dataSource.CreateCommand(MonitoredServerUpsertSql);
+        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+
+        /* The row an edit rewrites is not a claimant of its own address. A refusal throws out of this block and
+           the transaction's disposal rolls it back, which releases the lock. */
+        var claimant = await TakeIdentityLockAndFindClaimantAsync(connection, transaction, row, row.ServerId, cancellationToken);
+        if (claimant is not null)
+        {
+            throw new MonitoredServerAddressClaimedException(claimant);
+        }
+
+        await RefuseStoredPasswordOnMovedReachAsync(connection, transaction, row, cancellationToken);
+
+        await using var command = new NpgsqlCommand(MonitoredServerUpsertSql, connection, transaction);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         BindMonitoredServer(command, row);
         await ExecuteWriteAsync(command, cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
+    }
+
+    /// <summary>The sentence a refused move gives: the same text the web and MCP edit answer with
+    /// (<c>DarlingMcpServerAdminTools.EditPasswordNeededText</c>), because this project cannot reference the service.
+    /// <c>ServerEditPasswordRulePinTests</c> fails when the two texts differ.</summary>
+    public const string EditPasswordNeededText =
+        "Changing how this server is reached needs its password again: it is stored encrypted and this surface cannot read it back.";
+
+    /// <summary>The stored host, port, auth mode, and whether the stored blob is the one a row carries, for one server id ($1 id,
+    /// $2 the row's blob). Reads <c>encrypted_password</c> only to compare it, in the write's own transaction: an
+    /// <c>admin</c>-role write, like the upsert it guards.</summary>
+    public const string MonitoredServerStoredReachSql = @"
+SELECT host, COALESCE(port, 0), auth, COALESCE(encrypted_password = $2, false)
+FROM config_monitored_servers
+WHERE server_id = $1";
+
+    /// <summary>The sentence a switch into SQL authentication gives when no new password comes with it: the edit core's
+    /// (<c>DarlingMcpServerAdminTools.PlanEdit</c>). The core's sentence is an inline literal, so
+    /// <c>ServerEditPasswordRuleViewerTests</c> drives the core and fails if the two texts differ.</summary>
+    public const string EditSwitchToSqlNeedsPasswordText = "Switching to SQL authentication needs the password.";
+
+    /// <summary>The service-principal twin of <see cref="EditSwitchToSqlNeedsPasswordText"/>.</summary>
+    public const string EditSwitchToServicePrincipalNeedsSecretText =
+        "Switching to ServicePrincipal authentication needs the client secret as password.";
+
+    /// <summary>
+    /// True when the row's connection moved off the stored one the way the web and MCP edit count a move: the host
+    /// (the incoming host trimmed of spaces, the stored host compared exactly as stored, the instance being part of it)
+    /// or the port differs. Mirrors <c>DarlingMcpServerAdminTools.SameAddress</c> and the store's edit function
+    /// (<c>btrim(host)</c> on the incoming value, then <c>IS DISTINCT FROM</c>).
+    /// </summary>
+    internal static bool ReachMoved(string storedHost, int storedPort, string newHost, int newPort) =>
+        !string.Equals(newHost.Trim(' '), storedHost, StringComparison.Ordinal) || newPort != storedPort;
+
+    /// <summary>
+    /// Refuses (throws <see cref="MonitoredServerPasswordNeededException"/>) a write that moves a SQL or
+    /// service-principal server's host or port, or switches its auth mode (into SQL or service principal, from any
+    /// other mode, including the other of the two), while carrying no newly entered password: the row's blob is
+    /// missing, or is the stored one. A switch gets the core's switch sentence, ahead of the move sentence, as in the
+    /// core. A Windows or managed-identity row stores no secret and is never refused; a row that is not in
+    /// the store yet has nothing to reuse. Runs inside the caller's transaction, after the identity lock.
+    /// </summary>
+    private async Task RefuseStoredPasswordOnMovedReachAsync(
+        NpgsqlConnection connection, NpgsqlTransaction transaction, MonitoredServerRow row, CancellationToken cancellationToken)
+    {
+        if (!string.Equals(row.Auth, ServerStoreCredential.Sql, StringComparison.OrdinalIgnoreCase)
+            && !string.Equals(row.Auth, ServerStoreCredential.ServicePrincipal, StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        string storedHost;
+        int storedPort;
+        string storedAuth;
+        bool carriesStoredBlob;
+        try
+        {
+            await using var command = new NpgsqlCommand(MonitoredServerStoredReachSql, connection, transaction);
+            command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
+            command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = row.ServerId });
+            AddNullableText(command, row.EncryptedPassword);
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            if (!await reader.ReadAsync(cancellationToken))
+            {
+                return;
+            }
+
+            storedHost = reader.GetString(0);
+            storedPort = reader.GetInt32(1);
+            storedAuth = reader.GetString(2);
+            carriesStoredBlob = reader.GetBoolean(3);
+        }
+        catch (PostgresException ex) when (ex.SqlState == InsufficientPrivilegeSqlState)
+        {
+            throw new ViewerReadOnlyException(ex);
+        }
+        catch (PostgresException ex) when (ex.SqlState is UndefinedColumnSqlState or UndefinedTableSqlState)
+        {
+            throw new ViewerSchemaSkewException(ex);
+        }
+
+        if (!string.IsNullOrEmpty(row.EncryptedPassword) && !carriesStoredBlob)
+        {
+            return;
+        }
+
+        if (!string.Equals(storedAuth, row.Auth, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new MonitoredServerPasswordNeededException(
+                string.Equals(row.Auth, ServerStoreCredential.ServicePrincipal, StringComparison.OrdinalIgnoreCase)
+                    ? EditSwitchToServicePrincipalNeedsSecretText
+                    : EditSwitchToSqlNeedsPasswordText);
+        }
+
+        if (ReachMoved(storedHost, storedPort, row.Host, row.Port))
+        {
+            throw new MonitoredServerPasswordNeededException();
+        }
+    }
+
+    /// <summary>The address (storage key) a definition is stored under: the same five columns, folded the same way,
+    /// that the collectors, the service's seed and the web and MCP writers key a server on
+    /// (<see cref="ComputeServerId"/> hashes it).</summary>
+    private static string StorageKeyOf(MonitoredServerRow row) =>
+        ServerIdHelper.BuildStorageName(row.Host, row.Database, row.ReadOnlyIntent, row.Engine, row.Port);
+
+    /// <summary>
+    /// The first two steps of every identity write (#5240), inside the caller's open transaction: take
+    /// <see cref="MonitoredServerIdentityLockSql"/>, then read every definition again (secret-free, the list
+    /// projection) and return the one that already holds <paramref name="candidate"/>'s address, or null when the
+    /// address is free. The address is compared the way the service's add and edit compare it: the storage key,
+    /// case-insensitively. <paramref name="exceptServerId"/> is the row an edit rewrites, which never counts as the
+    /// claimant of its own address; an add passes null. The caller ends the transaction, which releases the lock, and a
+    /// caller that returns without committing rolls back.
+    /// </summary>
+    private static async Task<MonitoredServerRow?> TakeIdentityLockAndFindClaimantAsync(
+        NpgsqlConnection connection, NpgsqlTransaction transaction, MonitoredServerRow candidate, int? exceptServerId,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            await using (var identityLock = new NpgsqlCommand(MonitoredServerIdentityLockSql, connection, transaction))
+            {
+                identityLock.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
+                await identityLock.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            var candidateKey = StorageKeyOf(candidate);
+            await using var definitions = new NpgsqlCommand(MonitoredServersSelectSql, connection, transaction);
+            definitions.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
+            await using var reader = await definitions.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                var existing = ReadMonitoredServerRowNoSecret(reader);
+                if (existing.ServerId != exceptServerId
+                    && string.Equals(StorageKeyOf(existing), candidateKey, StringComparison.OrdinalIgnoreCase))
+                {
+                    return existing;
+                }
+            }
+
+            return null;
+        }
+        catch (PostgresException ex) when (ex.SqlState is UndefinedColumnSqlState or UndefinedTableSqlState)
+        {
+            /* The write executors' own translation: a store behind this viewer's schema says so, in words. */
+            throw new ViewerSchemaSkewException(ex);
+        }
     }
 
     /// <summary>
     /// Inserts a server definition only when its <c>server_id</c> is absent — the migrate-in. Returns true
     /// when a row was actually written (so the caller can count the imported servers), false when the id
     /// already existed (the service seed or a prior migrate already has it).
+    ///
+    /// <para>It gives a definition an address, so it is an identity write like <see cref="AddMonitoredServerAsync"/>
+    /// (#5240): one transaction behind <see cref="MonitoredServerIdentityLockSql"/>, and an address another
+    /// definition already holds, under whatever id, is refused the same way a taken id is: false, nothing written.</para>
     /// </summary>
     public async Task<bool> InsertMonitoredServerIfAbsentAsync(MonitoredServerRow row, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(row);
 
-        await using var command = _dataSource.CreateCommand(MonitoredServerInsertIfAbsentSql);
+        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        if (await TakeIdentityLockAndFindClaimantAsync(connection, transaction, row, null, cancellationToken) is not null)
+        {
+            return false;
+        }
+
+        await using var command = new NpgsqlCommand(MonitoredServerInsertIfAbsentSql, connection, transaction);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         BindMonitoredServer(command, row);
-        return await ExecuteWriteAsync(command, cancellationToken) > 0;
+        var written = await ExecuteWriteAsync(command, cancellationToken) > 0;
+        await transaction.CommitAsync(cancellationToken);
+        return written;
     }
 
     /// <summary>
@@ -444,18 +651,46 @@ ORDER BY COALESCE(s.display_name, c.name)";
     ///
     /// <para>An edit does not come through here: it keeps its row's id when the address changes (#2158) and still
     /// updates in place through <see cref="UpsertMonitoredServerAsync"/>.</para>
+    ///
+    /// <para><b>One transaction, behind the identity lock (#5240).</b> The id check above only sees a row that holds
+    /// THIS id, and an edit keeps its row's old id, so an edit that moved another server onto this address a moment
+    /// ago is invisible to it: the insert would land and two servers would hold one address. The add therefore takes
+    /// <see cref="MonitoredServerIdentityLockSql"/> first, reads every definition's address again under it, and
+    /// answers <see cref="MonitoredServerAddOutcome.Duplicate"/>, naming the definition that holds it, when the address is
+    /// claimed: the same meaning the service's add gives a key claimed in the meantime. Only a free address reaches the
+    /// insert, in the same transaction, and the holder of a taken id is read in it too.</para>
     /// </summary>
     public async Task<MonitoredServerAddResult> AddMonitoredServerAsync(MonitoredServerRow row, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(row);
 
-        if (await InsertMonitoredServerIfAbsentAsync(row, cancellationToken))
+        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+
+        /* A claimed address returns without committing: the transaction's disposal rolls back, which releases the
+           lock. A new add has no row of its own to leave out, so no id is excepted. */
+        var claimant = await TakeIdentityLockAndFindClaimantAsync(connection, transaction, row, null, cancellationToken);
+        if (claimant is not null)
         {
+            return new MonitoredServerAddResult(MonitoredServerAddOutcome.Duplicate, claimant);
+        }
+
+        int written;
+        await using (var insert = new NpgsqlCommand(MonitoredServerInsertIfAbsentSql, connection, transaction))
+        {
+            insert.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
+            BindMonitoredServer(insert, row);
+            written = await ExecuteWriteAsync(insert, cancellationToken);
+        }
+
+        if (written > 0)
+        {
+            await transaction.CommitAsync(cancellationToken);
             return new MonitoredServerAddResult(MonitoredServerAddOutcome.Added, null);
         }
 
         MonitoredServerRow? occupant;
-        await using (var command = _dataSource.CreateCommand(MonitoredServerByIdNoSecretSql))
+        await using (var command = new NpgsqlCommand(MonitoredServerByIdNoSecretSql, connection, transaction))
         {
             command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
             command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = row.ServerId });
@@ -716,8 +951,10 @@ public enum MonitoredServerAddOutcome
     /// <summary>The <c>server_id</c> was free and the row was written.</summary>
     Added,
 
-    /// <summary>The <c>server_id</c> is held by the SAME server (same host, database, read-only intent, engine and
-    /// port): it is already monitored. Nothing was written.</summary>
+    /// <summary>The SAME server (same host, database, read-only intent, engine and port) is already monitored:
+    /// its definition holds this <c>server_id</c>, or holds the address under an older id because an edit moved it
+    /// there (#5240), which is what an add that finds the address claimed under the identity lock answers.
+    /// Nothing was written.</summary>
     Duplicate,
 
     /// <summary>The <c>server_id</c> is held by a DIFFERENT server: the two identities hash to one id. Nothing was
@@ -733,3 +970,47 @@ public enum MonitoredServerAddOutcome
 /// taken, the secret-free row that holds it (the server to name in the refusal). <see cref="Occupant"/> is null
 /// for <see cref="MonitoredServerAddOutcome.Added"/> and <see cref="MonitoredServerAddOutcome.NotSaved"/>.</summary>
 public sealed record MonitoredServerAddResult(MonitoredServerAddOutcome Outcome, MonitoredServerRow? Occupant);
+
+/// <summary>
+/// <see cref="ViewerDataService.UpsertMonitoredServerAsync"/> refused an edit (#5240): it moves a SQL or
+/// service-principal server's host or port and carries no newly entered password, so the stored one would have been
+/// sent to the new address, or it switches between SQL and service-principal authentication and keeps the stored
+/// secret. The message is <see cref="ViewerDataService.EditPasswordNeededText"/> for a move, the switch sentence for
+/// a switch; the dialog's save
+/// handler shows it as it is, as it does a claimed address.
+/// </summary>
+public sealed class MonitoredServerPasswordNeededException : InvalidOperationException
+{
+    public MonitoredServerPasswordNeededException()
+        : base(ViewerDataService.EditPasswordNeededText)
+    {
+    }
+
+    /// <summary>A refusal with the edit core's switch sentence (<see cref="ViewerDataService.EditSwitchToSqlNeedsPasswordText"/>
+    /// or its service-principal twin).</summary>
+    public MonitoredServerPasswordNeededException(string message)
+        : base(message)
+    {
+    }
+}
+
+/// <summary>
+/// <see cref="ViewerDataService.UpsertMonitoredServerAsync"/> refused an edit (#5240): under the identity lock,
+/// another definition already holds the address the edit moves this server to, so nothing was written. The same
+/// meaning as <see cref="MonitoredServerAddOutcome.Duplicate"/> for an add. The Add/Edit dialog's save handler catches
+/// this type before its general catch and shows the message as it is (no "Error saving server:" prefix, nothing
+/// logged at error level), so the operator reads why without new UI.
+/// </summary>
+public sealed class MonitoredServerAddressClaimedException : InvalidOperationException
+{
+    public MonitoredServerAddressClaimedException(MonitoredServerRow claimant)
+        : base(
+            "Already monitored: another change to the server list claimed this address (host, database, read-only intent, " +
+            "engine and port) while this one was saving, so nothing was changed.")
+    {
+        Claimant = claimant;
+    }
+
+    /// <summary>The secret-free row that holds the address.</summary>
+    public MonitoredServerRow Claimant { get; }
+}

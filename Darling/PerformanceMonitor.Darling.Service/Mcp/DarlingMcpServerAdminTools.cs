@@ -243,10 +243,31 @@ public sealed partial class DarlingMcpServerAdminTools
                 try
                 {
                     var encryptedPassword = ProtectPasswordForStorage(entry.PlaintextPassword);
-                    var rowsWritten = await definitions.InsertAsync(entry, encryptedPassword, cancellationToken);
+
+                    /* #5240: the key the check above compared (the database the probe reached), handed to the write so
+                       it is compared again under the identity lock: a definition at that key may have been committed
+                       during the probe, after the claimed set was read. Null when the probe named nothing new. */
+                    var actualStorageKey = ActualStorageKeyOf(entry, probeResult.ConnectedDatabase);
+                    var rowsWritten = await definitions.InsertAsync(entry, encryptedPassword, actualStorageKey, cancellationToken);
                     if (rowsWritten > 0)
                     {
                         results.Add(new ServerResult(entry.Order, entry.DisplayName, AddStatus.Added, DescribeProbe(probeResult)));
+                    }
+                    else if (rowsWritten == InsertKeyClaimed)
+                    {
+                        /* #5240: under the identity lock the store showed another definition already holding this
+                           entry's address: an edit or another add claimed it during the probe above, after the
+                           duplicate gate read the table. Nothing was written; the entry is the duplicate it would
+                           have been had the other write landed a moment sooner. */
+                        results.Add(new ServerResult(entry.Order, entry.DisplayName, AddStatus.Duplicate,
+                            "Already monitored: another change to the server list claimed this address while this call ran; skipped."));
+                    }
+                    else if (rowsWritten == InsertActualKeyClaimed)
+                    {
+                        /* #5240: the same refusal the check above gives, reached under the lock: the database the probe
+                           reached was claimed by another definition while the probe ran. Nothing was written. */
+                        results.Add(new ServerResult(entry.Order, entry.DisplayName, AddStatus.Collides,
+                            ActualIdentityCollisionText(entry, probeResult.ConnectedDatabase!)));
                     }
                     else
                     {
@@ -902,7 +923,27 @@ ORDER BY d.host, d.database";
     internal static string? ActualIdentityCollision(
         ParsedServerEntry entry, string? connectedDatabase, ISet<string> claimedKeys)
     {
-        if (entry is null || claimedKeys is null || string.IsNullOrWhiteSpace(connectedDatabase))
+        if (claimedKeys is null)
+        {
+            return null;
+        }
+
+        var actualKey = ActualStorageKeyOf(entry, connectedDatabase);
+        return actualKey is null || !claimedKeys.Contains(actualKey)
+            ? null
+            : ActualIdentityCollisionText(entry, connectedDatabase!);
+    }
+
+    /// <summary>
+    /// The storage key this entry would have if it were keyed on the database the probe ACTUALLY reached, or null when
+    /// there is nothing to check: no entry, a probe that reported no database, a connected database equal to the
+    /// declared one, or a key equal to the entry's own. <see cref="ActualIdentityCollision"/> compares it against the keys
+    /// read before the probe, and the write (<see cref="InsertServerAsync"/>, the edit store's <c>WriteAsync</c>) is
+    /// given the same key and compares it again under the identity lock (#5240), so one rule decides both reads.
+    /// </summary>
+    internal static string? ActualStorageKeyOf(ParsedServerEntry entry, string? connectedDatabase)
+    {
+        if (entry is null || string.IsNullOrWhiteSpace(connectedDatabase))
         {
             return null;
         }
@@ -918,12 +959,14 @@ ORDER BY d.host, d.database";
             entry.ProbeConfig.Host, connectedDatabase.Trim(), entry.ProbeConfig.ReadOnlyIntent,
             entry.ProbeConfig.Engine, entry.ProbeConfig.Port);
 
-        if (string.Equals(actualKey, entry.StorageKey, StringComparison.OrdinalIgnoreCase)
-            || !claimedKeys.Contains(actualKey))
-        {
-            return null;
-        }
+        return string.Equals(actualKey, entry.StorageKey, StringComparison.OrdinalIgnoreCase) ? null : actualKey;
+    }
 
+    /// <summary>The refusal for an entry whose connected database is already covered by another definition: the one
+    /// text the check before the probe's write and the check under the lock both give.</summary>
+    internal static string ActualIdentityCollisionText(ParsedServerEntry entry, string connectedDatabase)
+    {
+        var declared = entry.ProbeConfig.Database;
         var declaredText = string.IsNullOrWhiteSpace(declared) ? "no database" : $"database '{declared}'";
         return $"Not added: this registration names {declaredText} but its connection lands in " +
                $"'{connectedDatabase.Trim()}', which another monitored server already covers. Adding it would " +
@@ -937,7 +980,9 @@ ORDER BY d.host, d.database";
     /// the insert is <c>ON CONFLICT (server_id) DO NOTHING</c>, so a write can save nothing without throwing: two
     /// different keys can hash to one id, and a concurrent add of the same server can land between the duplicate
     /// gate's read and this write. <paramref name="holderStorageKey"/> is the storage key of the row that holds the id
-    /// now, or null when none does.
+    /// now, or null when none does. (#5240: the store's write reads the keys again under the identity lock first, so
+    /// a same-key add or edit that committed during the probe is answered there as <see cref="InsertKeyClaimed"/>;
+    /// the same-key arm below is for a write that still returns 0, and for a definitions seam that is not the store.)
     ///
     /// <list type="bullet">
     /// <item>A DIFFERENT key holds the id: <c>collides</c>. The entry is not a duplicate — its identity is not
@@ -1015,8 +1060,11 @@ ORDER BY d.host, d.database";
     /// (the seed authority), so a tool-added row is byte-identical to a seeded one. <c>capture_plans</c> and
     /// <c>alert_delivery_mode_override</c> default to NULL (inherit the globals), <c>monthly_cost_usd</c>/
     /// <c>excluded_databases</c> are the neutral defaults, and <c>is_enabled</c> is TRUE (collection starts at
-    /// once). ON CONFLICT DO NOTHING guards a race with a concurrent writer — the dedupe gate is the primary
-    /// guard. DO NOTHING is silent, so the caller checks the rows changed (#4734): 0 means nothing was saved.</summary>
+    /// once). The dedupe gate is the first guard and <see cref="IdentityLockSql"/> the second: the INSERT runs in a
+    /// transaction that holds the identity lock, after the storage keys were read again under it (#5240). ON CONFLICT
+    /// DO NOTHING stays as the last: <c>server_id</c> is a hash of the key, so two different keys can share an id,
+    /// and a lock does not change that. DO NOTHING is silent, so the caller checks the rows changed (#4734): 0 means
+    /// nothing was saved.</summary>
     public const string InsertServerSql = @"
 INSERT INTO config_monitored_servers (
     server_id, name, host, database, auth, username, encrypted_password, encrypt_mode,
@@ -1024,6 +1072,33 @@ INSERT INTO config_monitored_servers (
     monthly_cost_usd, capture_plans, alert_delivery_mode_override, engine, port, is_enabled, created_at, modified_at)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NULL, NULL, $15, $16, TRUE, $14, $14)
 ON CONFLICT (server_id) DO NOTHING";
+
+    /// <summary>
+    /// The one lock every write that gives a definition an ADDRESS takes (#5240): <see cref="InsertServerAsync"/> and
+    /// the edit store's <c>WriteAsync</c>. <c>server_id</c> is the hash of the storage key, an edit keeps its row's
+    /// old id, and the table has no unique index on the key, so nothing in the database stops two writers from each
+    /// finding an address free and each taking it: an add's INSERT lands under <c>hash(K)</c> while an edit moves
+    /// another row onto K, or two edits move two rows onto K. Taken first inside the write's transaction, the lock
+    /// makes the occupancy check that follows it a check against a table no other identity write is changing, and
+    /// the transaction's end (commit or rollback) releases it, so no path can leave it held.
+    ///
+    /// <para>Transaction-scoped on purpose: a session lock would outlive a pooled connection's return. It covers the
+    /// re-check and the write only; the connection probe (up to about 45 seconds) runs before the write opens its
+    /// transaction. <c>pg_advisory_xact_lock</c> and <c>hashtext</c> are executable by PUBLIC, so the <c>viewer</c>
+    /// and <c>mcp</c> roles need no grant. The wait for the lock is bounded by the command's own deadline.</para>
+    /// </summary>
+    internal const string IdentityLockSql = "SELECT pg_advisory_xact_lock(hashtext('config_monitored_servers.identity'))";
+
+    /// <summary>What <see cref="IServerDefinitions.InsertAsync"/> returns when, under the identity lock, another
+    /// definition already holds the entry's storage key: nothing was written, and the answer is <c>duplicate</c>.
+    /// Not a row count, so it cannot be mistaken for one: 1 is saved, 0 is "the id was taken".</summary>
+    internal const int InsertKeyClaimed = -1;
+
+    /// <summary>What <see cref="IServerDefinitions.InsertAsync"/> returns when, under the identity lock, another
+    /// definition already holds the storage key the probe's connected database gives
+    /// (<see cref="ActualStorageKeyOf"/>): nothing was written, and the answer is the same <c>collides</c> refusal
+    /// <see cref="ActualIdentityCollision"/> gives before the write.</summary>
+    internal const int InsertActualKeyClaimed = -2;
 
     private static async Task<List<string>> LoadExistingStorageKeysAsync(NpgsqlDataSource postgres, CancellationToken cancellationToken)
     {
@@ -1067,13 +1142,59 @@ ON CONFLICT (server_id) DO NOTHING";
         return await reader.ReadAsync(cancellationToken) ? StorageKeyOf(reader) : null;
     }
 
+    /// <summary>
+    /// Writes one entry in its own short transaction (#5240): the identity lock first, then the storage keys read
+    /// again under it, then the INSERT. When the entry's key is now claimed by a definition the duplicate gate did not
+    /// see (an edit or another add committed during the probe), nothing is written and the answer is
+    /// <see cref="InsertKeyClaimed"/>. The same read also looks for <paramref name="actualStorageKey"/>, the key the
+    /// probe's connected database gives when it differs from the entry's own (null otherwise): a definition holding it
+    /// answers <see cref="InsertActualKeyClaimed"/>, the refusal the pre-probe check gives, so a definition committed
+    /// during the probe cannot leave two rows collecting one database. The entry's own key is judged first. Each entry
+    /// of a batch takes and releases the lock in its own transaction, so a long batch never holds it across a probe.
+    /// </summary>
     private static async Task<int> InsertServerAsync(
-        NpgsqlDataSource postgres, ParsedServerEntry entry, string? encryptedPassword, CancellationToken cancellationToken)
+        NpgsqlDataSource postgres, ParsedServerEntry entry, string? encryptedPassword, string? actualStorageKey, CancellationToken cancellationToken)
     {
         var config = entry.ProbeConfig;
         var now = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
 
-        await using var command = postgres.CreateCommand(InsertServerSql);
+        await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+
+        /* Two-arg on the store connection with the transaction set on it: the shape McpReadCommandTimeoutTests
+           recognises as a store command (see remove_server). */
+        await using (var identityLock = new NpgsqlCommand(IdentityLockSql, connection) { Transaction = transaction })
+        {
+            identityLock.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+            await identityLock.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        var actualKeyHeld = false;
+        await using (var keys = new NpgsqlCommand(ExistingServersSql, connection) { Transaction = transaction })
+        {
+            keys.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+            await using var reader = await keys.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                /* Case-folded, as the duplicate gate is. The rollback on this return releases the lock. */
+                var held = StorageKeyOf(reader);
+                if (string.Equals(held, entry.StorageKey, StringComparison.OrdinalIgnoreCase))
+                {
+                    return InsertKeyClaimed;
+                }
+
+                actualKeyHeld |= actualStorageKey is not null && string.Equals(held, actualStorageKey, StringComparison.OrdinalIgnoreCase);
+            }
+        }
+
+        if (actualKeyHeld)
+        {
+            /* The entry's own key is free but the database its probe reached is held: the same refusal, and the
+               rollback on this return releases the lock. */
+            return InsertActualKeyClaimed;
+        }
+
+        await using var command = new NpgsqlCommand(InsertServerSql, connection) { Transaction = transaction };
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = ServerIdOf(entry) });                                   // $1
         command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = config.Name });                                            // $2
@@ -1091,7 +1212,9 @@ ON CONFLICT (server_id) DO NOTHING";
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = now });                           // $14
         command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = config.Engine });                                           // $15
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = config.Port });                                                // $16
-        return await command.ExecuteNonQueryAsync(cancellationToken);
+        var written = await command.ExecuteNonQueryAsync(cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
+        return written;
     }
 
     /// <summary>The <c>server_id</c> an entry is stored under: the deterministic hash of its storage key, the same
@@ -1109,8 +1232,12 @@ ON CONFLICT (server_id) DO NOTHING";
         Task<List<string>> LoadStorageKeysAsync(CancellationToken cancellationToken);
 
         /// <summary>Writes one entry and returns how many rows the write changed: 1 when it was saved, 0 when
-        /// <c>ON CONFLICT (server_id) DO NOTHING</c> found the id already taken and wrote nothing.</summary>
-        Task<int> InsertAsync(ParsedServerEntry entry, string? encryptedPassword, CancellationToken cancellationToken);
+        /// <c>ON CONFLICT (server_id) DO NOTHING</c> found the id already taken and wrote nothing, and
+        /// <see cref="InsertKeyClaimed"/> when another definition already holds the entry's storage key (read under the
+        /// identity lock, #5240) and nothing was written. <paramref name="actualStorageKey"/> is the key the probe's
+        /// connected database gives when it differs from the entry's own, else null; a definition holding it, read under
+        /// the same lock, answers <see cref="InsertActualKeyClaimed"/> with nothing written.</summary>
+        Task<int> InsertAsync(ParsedServerEntry entry, string? encryptedPassword, string? actualStorageKey, CancellationToken cancellationToken);
 
         /// <summary>The storage key of the row that holds <paramref name="serverId"/>, or null when none does.</summary>
         Task<string?> ReadStorageKeyAsync(int serverId, CancellationToken cancellationToken);
@@ -1126,8 +1253,8 @@ ON CONFLICT (server_id) DO NOTHING";
         public Task<List<string>> LoadStorageKeysAsync(CancellationToken cancellationToken) =>
             LoadExistingStorageKeysAsync(_postgres, cancellationToken);
 
-        public Task<int> InsertAsync(ParsedServerEntry entry, string? encryptedPassword, CancellationToken cancellationToken) =>
-            InsertServerAsync(_postgres, entry, encryptedPassword, cancellationToken);
+        public Task<int> InsertAsync(ParsedServerEntry entry, string? encryptedPassword, string? actualStorageKey, CancellationToken cancellationToken) =>
+            InsertServerAsync(_postgres, entry, encryptedPassword, actualStorageKey, cancellationToken);
 
         public Task<string?> ReadStorageKeyAsync(int serverId, CancellationToken cancellationToken) =>
             ReadStorageKeyByIdAsync(_postgres, serverId, cancellationToken);
