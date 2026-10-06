@@ -677,6 +677,103 @@ public sealed class ProcedureStatsPlanReuseTests
         Assert.Equal(1, flipper.Log.CountAtLevel(LogLevel.Warning)); /* the same-shape row did not warn */
     }
 
+    /// <summary>Warms a cache through shadow (so each entry keeps its shape) and confirms it.</summary>
+    private static PlanDigestCache<ProcedureStatsPlanKey> ShapedCache(string plan)
+    {
+        var cache = new PlanDigestCache<ProcedureStatsPlanKey>();
+        var first = ProcedureStatsPlanReuse.ApplyShadow(1, cache, new List<ProcedureStatsCollector.Row> { RowFor(1, plan) }, 1, s_now, null);
+        cache.ConfirmPending(first.Pending, s_now);
+        return cache;
+    }
+
+    private static List<ProcedureStatsPlanReuse.FalseHitCause> CausesOf(
+        PlanDigestCache<ProcedureStatsPlanKey> cache, ProcedureStatsCollector.Row row)
+    {
+        var causes = new List<ProcedureStatsPlanReuse.FalseHitCause>();
+        var outcome = ProcedureStatsPlanReuse.ApplyShadow(
+            1, cache, new List<ProcedureStatsCollector.Row> { row }, 2, s_now, null, (_, cause) => causes.Add(cause));
+        Assert.Equal(1, outcome.FalseHit);
+        return causes;
+    }
+
+    [Fact]
+    public void Shadow_FalseHitCause_ShapeChanged_WhenBothShapesWereComparedAndDiffer()
+    {
+        var cache = ShapedCache(PlanWithGrant("1024", "0.5", "0xAA"));
+        Assert.Equal(
+            ProcedureStatsPlanReuse.FalseHitCause.ShapeChanged,
+            Assert.Single(CausesOf(cache, RowFor(1, PlanWithGrant("1024", "0.5", "0xBB")))));
+    }
+
+    [Fact]
+    public void Shadow_FalseHitCause_EntryHasNoShape_WhenTheCachedEntryWasStoredWithoutOne()
+    {
+        var cache = ConfirmedCache(new[] { RowFor(1, PlanWithGrant("1024", "0.5", "0xAA")) });
+        Assert.Equal(
+            ProcedureStatsPlanReuse.FalseHitCause.EntryHasNoShape,
+            Assert.Single(CausesOf(cache, RowFor(1, PlanWithGrant("2048", "0.5", "0xAA")))));
+    }
+
+    [Fact]
+    public void Shadow_FalseHitCause_OverCapRender_WhenTheRenderHasNoText()
+    {
+        var cache = ShapedCache(PlanWithGrant("1024", "0.5", "0xAA"));
+        var over = QueryPlanXmlCaptureLimits.MaxCapturedPlanXmlBytes + 5L;
+        Assert.Equal(
+            ProcedureStatsPlanReuse.FalseHitCause.OverCapRender,
+            Assert.Single(CausesOf(cache, RowFor(1, null, over))));
+    }
+
+    [Fact]
+    public void Shadow_FalseHitCause_RenderUnparseable_WhenTheXmlDoesNotParse()
+    {
+        var cache = ShapedCache(PlanWithGrant("1024", "0.5", "0xAA"));
+        Assert.Equal(
+            ProcedureStatsPlanReuse.FalseHitCause.RenderUnparseable,
+            Assert.Single(CausesOf(cache, RowFor(1, "<ShowPlanXML><unclosed"))));
+    }
+
+    [Fact]
+    public void TheFalseHitWarningText_NamesEachCase_AndOnlyAChangedShapeSaysTheShapeChanged()
+    {
+        var texts = Enum.GetValues<ProcedureStatsPlanReuse.FalseHitCause>()
+            .ToDictionary(cause => cause, ProcedureStatsPlanReuse.DescribeFalseHit);
+
+        Assert.Equal("the plan's shape changed", texts[ProcedureStatsPlanReuse.FalseHitCause.ShapeChanged]);
+        Assert.Contains("no shape yet", texts[ProcedureStatsPlanReuse.FalseHitCause.EntryHasNoShape], StringComparison.Ordinal);
+        Assert.Contains("size cap", texts[ProcedureStatsPlanReuse.FalseHitCause.OverCapRender], StringComparison.Ordinal);
+        Assert.Contains("did not parse", texts[ProcedureStatsPlanReuse.FalseHitCause.RenderUnparseable], StringComparison.Ordinal);
+        Assert.Equal(texts.Count, texts.Values.Distinct(StringComparer.Ordinal).Count());
+        foreach (var (cause, text) in texts.Where(t => t.Key != ProcedureStatsPlanReuse.FalseHitCause.ShapeChanged))
+        {
+            Assert.Contains("not compared", text, StringComparison.Ordinal);
+            Assert.DoesNotContain("changed", text, StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
+    public async Task TheFalseHitWarning_SaysWhyItFired_NotJustThatTheShapeDiffered()
+    {
+        var flipper = new FlippableRunner("shadow");
+        var context = StampedContext(flipper.Runner, capture: true);
+        var mode = ProcedureStatsPlanFetchModes.OfRun(context);
+        var pending = await flipper.Runner.ApplyProcedureStatsPlanReuseAsync(
+            null!, null!, ServerFor(), context,
+            new List<ProcedureStatsCollector.Row> { RowFor(1, PlanWithGrant("1024", "0.5", "0xAA")) }, mode, CancellationToken.None);
+        var caches = (System.Collections.IDictionary)typeof(DarlingCollectorRunner)
+            .GetField("_procedureStatsPlanCaches", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!
+            .GetValue(flipper.Runner)!;
+        ((PlanDigestCache<ProcedureStatsPlanKey>)caches[ServerFor().ServerId]!).ConfirmPending(pending, DateTime.UtcNow);
+
+        await flipper.Runner.ApplyProcedureStatsPlanReuseAsync(
+            null!, null!, ServerFor(), StampedContext(flipper.Runner, capture: true),
+            new List<ProcedureStatsCollector.Row> { RowFor(1, PlanWithGrant("1024", "0.5", "0xBB")) }, mode, CancellationToken.None);
+
+        Assert.Equal(1, flipper.Log.CountAtLevel(LogLevel.Warning));
+        Assert.Contains("Why: the plan's shape changed", flipper.Log.Joined, StringComparison.Ordinal);
+        Assert.DoesNotContain("a plan of a different shape", flipper.Log.Joined, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void Shadow_ACold_Miss_WarmsTheCache_AndLeavesEveryRowUntouched()
     {
