@@ -7,6 +7,11 @@
  */
 
 using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Globalization;
+using System.Linq;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
@@ -34,12 +39,13 @@ namespace Darling.Tests;
 public sealed class PgSensitiveStatementFilterLiveTests
 {
     /// <summary>
-    /// Each of the five statement forms the pattern exists to catch, each also with a leading comment and in
-    /// lower case, plus statements that must NOT match: normalized DML, a non-credential setting, a bare
-    /// SELECT, and DDL merely naming a table "passwords".
+    /// The T-SQL corpus (#4348): every statement the shared pattern must name, each also lower-cased and with
+    /// a leading block comment, and the statements it must leave alone, judged in PostgreSQL's own regex
+    /// engine (the engine that decides every stored PostgreSQL statement). The adversarial strings the
+    /// .NET evaluation bounds with a budget are NOT in this parity set: they are only timed here.
     /// </summary>
     [Fact]
-    public async Task ThePatternMatchesTheFiveCredentialFormsAndNothingElse()
+    public async Task TheTSqlCorpusIsNamedAndTheNeighboursAreNot_InPostgresOwnRegexEngine()
     {
         var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
         Assert.SkipWhen(string.IsNullOrWhiteSpace(connectionString),
@@ -50,49 +56,78 @@ public sealed class PgSensitiveStatementFilterLiveTests
         await using var connection = new NpgsqlConnection(scratch.ConnectionString);
         await connection.OpenAsync(ct);
 
-        var cases = new (string Text, bool Sensitive)[]
+        var failures = new List<string>();
+        foreach (var text in SensitiveStatementCorpus.Named)
         {
-            ("ALTER ROLE app PASSWORD 'secret-x'", true),
-            ("/* c */ ALTER ROLE app PASSWORD 'secret-x'", true),
-            ("alter role app password 'secret-x'", true),
-
-            ("CREATE ROLE r LOGIN PASSWORD 'secret-x'", true),
-            ("/* c */ CREATE ROLE r LOGIN PASSWORD 'secret-x'", true),
-            ("create role r login password 'secret-x'", true),
-
-            ("CREATE USER MAPPING FOR u SERVER s OPTIONS (user 'u', password 'secret-x')", true),
-            ("/* c */ CREATE USER MAPPING FOR u SERVER s OPTIONS (user 'u', password 'secret-x')", true),
-            ("create user mapping for u server s options (user 'u', password 'secret-x')", true),
-
-            ("ALTER SYSTEM SET primary_conninfo = 'host=h password=secret-x'", true),
-            ("/* c */ ALTER SYSTEM SET primary_conninfo = 'host=h password=secret-x'", true),
-            ("alter system set primary_conninfo = 'host=h password=secret-x'", true),
-
-            ("CREATE SUBSCRIPTION sub CONNECTION 'host=h password=secret-x' PUBLICATION p", true),
-            ("/* c */ CREATE SUBSCRIPTION sub CONNECTION 'host=h password=secret-x' PUBLICATION p", true),
-            ("create subscription sub connection 'host=h password=secret-x' publication p", true),
-
-            // role/user/group/subscription/server DDL is withheld whole, whatever it sets
-            ("ALTER ROLE app SET work_mem = '64MB'", true),
-
-            ("CREATE USER MAPPING FOR u SERVER s OPTIONS (user 'u', secret_access_key 'secret-x')", true),
-            ("ALTER SERVER s OPTIONS (ADD token 'secret-x')", true),
-            ("CREATE SERVER s FOREIGN DATA WRAPPER w OPTIONS (api_key 'secret-x')", true),
-
-            ("SELECT * FROM t WHERE password_changed_at > $1", false),
-            ("SET work_mem = '64MB'", false),
-            ("SELECT rolname FROM pg_roles", false),
-            ("SELECT 1", false),
-            ("CREATE TABLE passwords (id int)", false),
-        };
-
-        foreach (var (text, sensitive) in cases)
-        {
-            await using var command = new NpgsqlCommand("SELECT $1 ~* $2", connection);
-            command.Parameters.AddWithValue(text);
-            command.Parameters.AddWithValue(PgSensitiveStatementFilter.SensitiveStatementPattern);
-            var actual = (bool)(await command.ExecuteScalarAsync(ct))!;
-            Assert.True(sensitive == actual, $"sensitive({text}) should be {sensitive}, was {actual}");
+            foreach (var variant in SensitiveStatementCorpus.Variants(text))
+            {
+                if (!await IsNamedAsync(connection, variant, ct))
+                {
+                    failures.Add("should be named: " + variant);
+                }
+            }
         }
+
+        foreach (var text in SensitiveStatementCorpus.NotNamed)
+        {
+            if (await IsNamedAsync(connection, text, ct))
+            {
+                failures.Add("should NOT be named: " + text);
+            }
+        }
+
+        Assert.True(failures.Count == 0, string.Join(Environment.NewLine, failures));
+    }
+
+    /// <summary>
+    /// A 1,000,000-character ordinary statement is not named and comes back quickly, and the two strings the
+    /// .NET side bounds with a time budget are timed (not compared) in PostgreSQL's engine, which backtracks
+    /// differently. Each answer and time is written to the test's diagnostics so a run records it.
+    /// </summary>
+    [Fact]
+    public async Task ALargeOrdinaryStatementIsNotNamed_AndTheAdversarialStringsAreTimedInPostgres()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrWhiteSpace(connectionString),
+            "Set DARLING_TEST_PG to a connection string to judge the #4348 pattern in PostgreSQL's regex engine.");
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(connectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+
+        var unit = "SELECT col_a, col_b FROM dbo.t WHERE c = 1 AND d <> 2 ";
+        var big = new StringBuilder(1_000_000 + unit.Length);
+        while (big.Length < 1_000_000)
+        {
+            big.Append(unit);
+        }
+
+        var bigText = big.ToString(0, 1_000_000);
+        var watch = Stopwatch.StartNew();
+        var bigNamed = await IsNamedAsync(connection, bigText, ct);
+        watch.Stop();
+        TestContext.Current.SendDiagnosticMessage(string.Create(CultureInfo.InvariantCulture,
+            $"pg ~* on 1,000,000 chars: named={bigNamed}, {watch.ElapsedMilliseconds} ms"));
+        Assert.False(bigNamed);
+        Assert.True(watch.ElapsedMilliseconds < 5000, $"1,000,000-char statement took {watch.ElapsedMilliseconds} ms");
+
+        var adversarial = SensitiveStatementCorpus.Adversarial;
+        foreach (var text in adversarial)
+        {
+            watch.Restart();
+            var named = await IsNamedAsync(connection, text, ct);
+            watch.Stop();
+            TestContext.Current.SendDiagnosticMessage(string.Create(CultureInfo.InvariantCulture,
+                $"pg ~* on adversarial '{text.Substring(0, 8)}...': named={named}, {watch.ElapsedMilliseconds} ms"));
+        }
+    }
+
+    private static async Task<bool> IsNamedAsync(NpgsqlConnection connection, string text, CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand("SELECT $1 ~* $2", connection);
+        command.Parameters.AddWithValue(text);
+        command.Parameters.AddWithValue(PgSensitiveStatementFilter.SensitiveStatementPattern);
+        return (bool)(await command.ExecuteScalarAsync(ct))!;
     }
 }
