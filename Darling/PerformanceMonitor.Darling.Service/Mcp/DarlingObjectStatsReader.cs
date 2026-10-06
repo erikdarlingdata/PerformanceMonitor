@@ -112,6 +112,16 @@ internal static class DarlingObjectStatsReader
         double ReservedMb, long TotalRows, long RowLockWaitCount, long RowLockWaitInMs, long PageLockWaitCount,
         long PageLockWaitInMs, long IndexLockPromotionCount, long PageLatchWaitInMs, long PageIoLatchWaitInMs);
 
+    /// <summary>
+    /// #5311: the four counters of one index's locking detail pane, the ones the Locking list leaves out (row lock count,
+    /// page lock count, page latch wait count, page I/O latch wait count). <c>CollectionTime</c> is the snapshot's own
+    /// stamp, first for the reason <see cref="IndexLockingRow"/> carries it first.
+    /// </summary>
+    public sealed record IndexLockingDetailRow(
+        DateTime CollectionTime,
+        string DatabaseName, string SchemaName, string TableName, string? IndexName,
+        long RowLockCount, long PageLockCount, long PageLatchWaitCount, long PageIoLatchWaitCount);
+
     /// <summary>One database file's latest size snapshot. <c>TotalSizeMb</c> is null for the LOG file of an Azure SQL
     /// Database Hyperscale database (the log service): see <see cref="PerformanceMonitor.Common.HyperscaleLogSize"/>.
     /// <c>FileId</c> is null for the one row another database on an Azure SQL Database server gets, which holds
@@ -569,6 +579,66 @@ internal static class DarlingObjectStatsReader
         }
 
         return rows;
+    }
+
+    /// <summary>
+    /// #5311: ONE index's four detail counters at the server's latest capture, for the web Locking page's detail pane
+    /// (the desktop's <c>ShowLockingDetail</c>). The index is named exactly by database ($2, the database filter's one
+    /// <c>text[]</c> parameter as the list read binds it), schema ($3), table ($4) and index name ($5; NULL names a heap,
+    /// which is why it compares with <c>IS NOT DISTINCT FROM</c>). Every name is a bound parameter, never part of the
+    /// statement text. The snapshot anchor is the list read's: the server's newest capture, so a detail row is the same
+    /// instant the list row it came from showed.
+    /// </summary>
+    public const string IndexLockingDetailSql = """
+        SELECT
+            ios.collection_time,
+            ios.database_name,
+            ios.schema_name,
+            ios.table_name,
+            ios.index_name,
+            COALESCE(ios.row_lock_count, 0) AS row_lock_count,
+            COALESCE(ios.page_lock_count, 0) AS page_lock_count,
+            COALESCE(ios.page_latch_wait_count, 0) AS page_latch_wait_count,
+            COALESCE(ios.page_io_latch_wait_count, 0) AS page_io_latch_wait_count
+        FROM v_index_object_stats ios
+        WHERE ios.server_id = $1
+        AND   ios.collection_time = (SELECT MAX(collection_time) FROM v_index_object_stats WHERE server_id = $1)
+        AND   ($2::text[] IS NULL OR ios.database_name = ANY($2))
+        AND   ios.schema_name = $3
+        AND   ios.table_name = $4
+        AND   ios.index_name IS NOT DISTINCT FROM $5
+        LIMIT 1
+        """;
+
+    /// <summary>
+    /// #5311: the one index <see cref="IndexLockingDetailSql"/> names, or null when the latest capture holds no such
+    /// index. <paramref name="database"/> must name a database (a blank name would be the "every database" filter, and
+    /// a selector never widens): the caller refuses a blank one.
+    /// </summary>
+    public static async Task<IndexLockingDetailRow?> GetIndexLockingDetailAsync(
+        NpgsqlDataSource postgres, int serverId, DatabaseFilter database, string schema, string table, string? index,
+        CancellationToken cancellationToken = default)
+    {
+        if (database.IsAll) throw new ArgumentException("A detail read names one database.", nameof(database));
+        await using var command = postgres.CreateCommand(IndexLockingDetailSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        DarlingMcpReadParameters.AddInt(command, serverId);
+        command.Parameters.Add(database.Parameter());
+        DarlingMcpReadParameters.AddText(command, schema);
+        DarlingMcpReadParameters.AddText(command, table);
+        DarlingMcpReadParameters.AddNullableText(command, index);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken)) return null;
+        return new IndexLockingDetailRow(
+            reader.GetDateTime(0),
+            reader.IsDBNull(1) ? "" : reader.GetString(1),
+            reader.IsDBNull(2) ? "" : reader.GetString(2),
+            reader.IsDBNull(3) ? "" : reader.GetString(3),
+            reader.IsDBNull(4) ? null : reader.GetString(4),
+            reader.IsDBNull(5) ? 0 : reader.GetInt64(5),
+            reader.IsDBNull(6) ? 0 : reader.GetInt64(6),
+            reader.IsDBNull(7) ? 0 : reader.GetInt64(7),
+            reader.IsDBNull(8) ? 0 : reader.GetInt64(8));
     }
 
     /* ─────────────────────────── database sizes ─────────────────────────── */

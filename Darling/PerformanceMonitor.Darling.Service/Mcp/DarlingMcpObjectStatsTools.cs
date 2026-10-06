@@ -317,7 +317,7 @@ public sealed class DarlingMcpObjectStatsTools
     }
 
     /// <summary>#5311: each serialized row with its <c>heat</c> list added (web only).</summary>
-    private static IEnumerable<object> WithHeat(IEnumerable<object> rows, int?[][] heat) =>
+    private static List<object> WithHeat(IEnumerable<object> rows, int?[][] heat) =>
         rows.Select((row, i) =>
         {
             var node = JsonSerializer.SerializeToNode(row, McpHelpers.JsonOptions)!.AsObject();
@@ -462,6 +462,57 @@ public sealed class DarlingMcpObjectStatsTools
                 optimized_locking_note = optimizedLockingNote,
                 separately_monitored_note = separatelyMonitoredNote,
                 objects = objectRows
+            }, McpHelpers.JsonOptions);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return McpHelpers.FormatError("get_object_locking", ex);
+        }
+    }
+
+    /* The detail read sits after get_object_locking's body so the latest-snapshot-stamp census reads its captured_at as part of
+       that (stamped, rostered) tool, not as part of get_index_usage above it. */
+    /// <summary>
+    /// #5311: the web Locking page's detail pane. One index, named exactly by <paramref name="database"/>, schema, table
+    /// and <paramref name="index"/> (null names a heap), answered with the four counters the list leaves out: row lock
+    /// count, page lock count, page latch wait count, page I/O latch wait count, from the server's newest capture
+    /// (<c>captured_at</c> is that capture). An index the latest capture does not hold answers an <c>empty</c> status
+    /// sentence, never an error. WEB ONLY: the MCP <c>get_object_locking</c> has no such selector, and its schema and
+    /// payload are unchanged. The names bind as parameters; the caller has checked that none is blank.
+    /// </summary>
+    internal static async Task<string> GetObjectLockingDetailAsync(
+        NpgsqlDataSource postgres, string? server_name,
+        string database, string schema, string table, string? index, CancellationToken cancellationToken)
+    {
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
+        if (error != null) return error;
+
+        try
+        {
+            var row = await DarlingObjectStatsReader.GetIndexLockingDetailAsync(
+                postgres, resolved.ServerId, DatabaseFilter.One(database), schema, table, index, cancellationToken);
+            if (row is null)
+            {
+                return McpHelpers.Status("empty",
+                    $"No such index in the latest snapshot of {resolved.ServerName}: the page's database, schema, table and index "
+                    + "names must match exactly, and an index dropped or renamed since the list was read is no longer there.");
+            }
+
+            return JsonSerializer.Serialize(new
+            {
+                server = resolved.ServerName,
+                captured_at = row.CollectionTime.ToString("o"),
+                detail = new
+                {
+                    database_name = row.DatabaseName,
+                    schema_name = row.SchemaName,
+                    table_name = row.TableName,
+                    index_name = row.IndexName,
+                    row_lock_count = row.RowLockCount,
+                    page_lock_count = row.PageLockCount,
+                    page_latch_wait_count = row.PageLatchWaitCount,
+                    page_io_latch_wait_count = row.PageIoLatchWaitCount
+                }
             }, McpHelpers.JsonOptions);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
