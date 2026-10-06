@@ -215,6 +215,25 @@ public sealed class ViewerPasswordKeyTests : IDisposable
     }
 
     [Fact]
+    public void TheSealCache_TellsApartSettingsWhoseFieldTextRunsTogether()
+    {
+        var sealer = new ViewerPasswordSealer(_key.PublicKey);
+        var cache = new ViewerSealCache();
+        var one = Row("alpha-sql");
+        one.Username = "monitormandatory";
+        one.EncryptMode = "optional";
+        var other = Row("alpha-sql");
+        other.Username = "monitor";
+        other.EncryptMode = "mandatoryoptional";
+
+        var first = cache.GetOrSeal(sealer, "p@ss-not-real", one);
+        var second = cache.GetOrSeal(sealer, "p@ss-not-real", other);
+
+        /* Sealing again gives new text, so a cache hit would hand back the first value for the second settings. */
+        Assert.NotEqual(first, second);
+    }
+
+    [Fact]
     public void ASealedValueHasNothingToPrefill()
     {
         Assert.Null(ViewerServerSecret.TryUnprotect(new ViewerPasswordSealer(_key.PublicKey).Seal("p@ss-not-real", Row("alpha-sql"))));

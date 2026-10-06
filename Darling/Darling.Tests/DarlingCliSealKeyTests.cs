@@ -71,6 +71,26 @@ public sealed class DarlingCliSealKeyTests
             DarlingCliSealKey.Decide(new PublishedKeyWithWrongId(FileKey).Value, State("ok"), null).Ring.Status.Reason);
     }
 
+    [Fact]
+    public void WithNoKeyFile_AnOkStateRowForAnotherKey_OrWithNoKeyId_Refuses_AndOneForThePublishedKey_Seals()
+    {
+        var published = Published(FileKey);
+        var otherKey = new PasswordServiceStateFor("0000000000000000", "ok");
+        var noKeyId = new PasswordServiceStateFor(null, "ok");
+
+        Assert.Equal(DarlingCliSealKey.NoStateReason, DarlingCliSealKey.Decide(published, otherKey.Value, null).Ring.Status.Reason);
+        Assert.Equal(DarlingCliSealKey.NoStateReason, DarlingCliSealKey.Decide(published, noKeyId.Value, null).Ring.Status.Reason);
+        Assert.Null(DarlingCliSealKey.Decide(published, State("ok"), null).Ring.Status.Reason);
+    }
+
+    private sealed class PasswordServiceStateFor
+    {
+        public PasswordServiceStateFor(string? keyId, string state) =>
+            Value = new("host-example", keyId, state, null, DateTime.UtcNow);
+
+        public PasswordKeyServiceState Value { get; }
+    }
+
     private sealed class PublishedKeyWithWrongId
     {
         public PublishedKeyWithWrongId(PasswordPrivateKey key) => Value = new("0000000000000000", key.PublicKey.Spki, PasswordSeal.Algorithm);

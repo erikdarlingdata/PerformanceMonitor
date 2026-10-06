@@ -20,24 +20,34 @@ using Xunit;
 namespace PerformanceMonitorLite.Tests;
 
 /// <summary>
-/// #5366: the generic webhook's configured headers go only to an endpoint with the same scheme, host and port as
-/// the generic URL they were configured with. A route can point the generic channel at another URL; that URL gets
-/// the body and not the headers. The sender is shared, so Lite and Darling follow the same rule.
+/// #5366: the generic webhook's configured headers go only to the generic URL itself or a path under it (same
+/// scheme, host and port, and the path equal or continuing at a "/"), and are never sent across a redirect. A route
+/// can point the generic channel at another URL; that URL gets the body and not the headers. The sender is shared,
+/// so Lite and Darling follow the same rule.
 /// </summary>
 public sealed class GenericWebhookHeadersOriginTests
 {
     private const string HeadersJson = "{\"X-Fake-Key\":\"not-real-value\"}";
 
     [Theory]
-    [InlineData("https://example.test/a", "https://example.test/b", true)]
-    [InlineData("https://example.test/a", "HTTPS://EXAMPLE.TEST:443/b", true)]
+    [InlineData("https://example.test/a", "https://example.test/a", true)]
+    [InlineData("HTTPS://EXAMPLE.TEST:443/a", "https://example.test/a", true)]
+    [InlineData("https://example.test/alerts/team-a", "https://example.test/alerts", true)]
+    [InlineData("https://example.test/alerts/team-a", "https://example.test/alerts/", true)]
+    [InlineData("https://example.test/alerts?x=1", "https://example.test/alerts?y=2", true)]
+    [InlineData("https://example.test/anything", "https://example.test", true)]
+    [InlineData("https://example.test/alerts2", "https://example.test/alerts", false)]
+    [InlineData("https://example.test/other", "https://example.test/alerts", false)]
+    [InlineData("https://example.test/Alerts", "https://example.test/alerts", false)]
+    [InlineData("https://example.test/alerts/../other", "https://example.test/alerts", false)]
+    [InlineData("https://example.test", "https://example.test/alerts", false)]
     [InlineData("http://example.test/a", "https://example.test/a", false)]
-    [InlineData("https://example.test/a", "https://other.example.test/a", false)]
-    [InlineData("https://example.test/a", "https://example.test:8443/a", false)]
-    [InlineData("https://example.test/a", "", false)]
+    [InlineData("https://other.example.test/a", "https://example.test/a", false)]
+    [InlineData("https://example.test:8443/a", "https://example.test/a", false)]
+    [InlineData("", "https://example.test/a", false)]
     [InlineData("not a url", "not a url", false)]
-    public void SameOrigin_ComparesSchemeHostAndPort(string left, string right, bool expected) =>
-        Assert.Equal(expected, WebhookAlertService.SameOrigin(left, right));
+    public void HeadersApplyTo_ComparesOriginAndPath(string route, string generic, bool expected) =>
+        Assert.Equal(expected, WebhookAlertService.HeadersApplyTo(route, generic));
 
     [Fact]
     public async Task TheConfiguredEndpoint_ReceivesTheHeaders()
@@ -74,17 +84,46 @@ public sealed class GenericWebhookHeadersOriginTests
         Assert.DoesNotContain("X-Fake-Key", routed.LastRequestHead, StringComparison.OrdinalIgnoreCase);
     }
 
+    [Fact]
+    public async Task ARouteToADifferentPathOnTheSameHost_ReceivesTheBodyAndNoHeaders()
+    {
+        using var shared = new Capture();
+
+        await SendAsync(shared.Url + "/alerts", routedUrl: shared.Url + "/other");
+
+        Assert.Equal(1, shared.Requests);
+        Assert.DoesNotContain("X-Fake-Key", shared.LastRequestHead, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task ARedirectAnswerToAHeaderSend_IsAFailedSend_AndTheTargetIsNotCalled()
+    {
+        using var target = new Capture();
+        using var configured = new Capture(redirectTo: target.Url + "/final");
+        var service = NewService(configured.Url, Array.Empty<NotificationRoute>());
+
+        var result = await service.TrySendWebhookAlertsAsync("High CPU", "example-server", "97%", "90%", serverId: "1");
+
+        Assert.Equal(1, configured.Requests);
+        Assert.Equal(0, target.Requests);
+        Assert.NotNull(result.SendError);
+        Assert.Contains("redirect", result.SendError, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(target.Url, result.SendError, StringComparison.Ordinal);
+        Assert.DoesNotContain("not-real-value", result.SendError, StringComparison.Ordinal);
+    }
+
     private static async Task SendAsync(string configuredUrl, string? routedUrl)
     {
         var routes = routedUrl is null
             ? Array.Empty<NotificationRoute>()
             : new[] { new NotificationRoute(1, "High CPU", "", "", routedUrl, "", "", true) };
-        var settings = new Settings(configuredUrl, routes);
-        var service = new WebhookAlertService(
-            settings, EmailAlertService.Branding, new AppLoggerAdapter<WebhookAlertService>());
+        var service = NewService(configuredUrl, routes);
 
         await service.TrySendWebhookAlertsAsync("High CPU", "example-server", "97%", "90%", serverId: "1");
     }
+
+    private static WebhookAlertService NewService(string configuredUrl, IReadOnlyList<NotificationRoute> routes) =>
+        new(new Settings(configuredUrl, routes), EmailAlertService.Branding, new AppLoggerAdapter<WebhookAlertService>());
 
     private sealed class Settings : IAlertSettings
     {
@@ -142,8 +181,11 @@ public sealed class GenericWebhookHeadersOriginTests
         private int _requests;
         private volatile string _lastHead = "";
 
-        public Capture()
+        private readonly string? _redirectTo;
+
+        public Capture(string? redirectTo = null)
         {
+            _redirectTo = redirectTo;
             _listener.Start();
             Url = $"http://127.0.0.1:{((IPEndPoint)_listener.LocalEndpoint).Port}";
             _accepting = Task.Run(AcceptLoopAsync);
@@ -167,8 +209,9 @@ public sealed class GenericWebhookHeadersOriginTests
                     _lastHead = head;
                     Interlocked.Increment(ref _requests);
 
-                    var response = Encoding.ASCII.GetBytes(
-                        "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                    var response = Encoding.ASCII.GetBytes(_redirectTo is null
+                        ? "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                        : $"HTTP/1.1 302 Found\r\nLocation: {_redirectTo}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
                     await stream.WriteAsync(response, _stop.Token);
                     await stream.FlushAsync(_stop.Token);
                 }

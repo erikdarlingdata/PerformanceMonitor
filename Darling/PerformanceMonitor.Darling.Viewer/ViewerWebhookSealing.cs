@@ -46,6 +46,21 @@ public static class ViewerWebhookSealing
         return text.Length > 0 && text != ClearMarker && !(PasswordSeal.IsSealed(text) && string.Equals(text, stored, StringComparison.Ordinal));
     }
 
+    /// <summary>What the Settings window says when new generic headers are typed and the generic URL box is blank.</summary>
+    public const string RetypeUrlForHeadersText = "Type the generic webhook URL again to change its headers.";
+
+    /// <summary>
+    /// Whether the generic headers box holds new or changed text while the generic URL box is blank and a saved URL is kept
+    /// (#5366). The URL is then not on screen, so the plain-http warning could not see it; the save asks for it again.
+    /// </summary>
+    public static bool HeadersNeedUrlRetyped(string? typedHeaders, string? typedUrl, string? storedHeaders, string? storedUrl)
+    {
+        var headers = CarryKept(typedHeaders, storedHeaders);
+        return NeedsKey(headers, storedHeaders)
+            && string.IsNullOrWhiteSpace(typedUrl)
+            && PasswordSeal.IsSealed(storedUrl);
+    }
+
     /// <summary>Whether any webhook value on the settings row needs the key.</summary>
     public static bool NeedsKey(NotificationRow row, NotificationRow? stored) =>
         NeedsKey(row.TeamsUrl, stored?.TeamsUrl) || NeedsKey(row.SlackUrl, stored?.SlackUrl)

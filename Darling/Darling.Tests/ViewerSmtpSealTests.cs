@@ -301,4 +301,14 @@ public sealed class ViewerSmtpSealLiveTests
             await scratch.DisposeAsync();
         }
     }
+
+    [Fact]
+    public void TheSettingsWindow_NeverPutsASavedSmtpPasswordBackInTheBox()
+    {
+        var source = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "SettingsWindow.xaml.cs");
+
+        Assert.DoesNotContain("TryUnprotect(", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("_loadedSmtpPlain", source, StringComparison.Ordinal);
+        Assert.Contains("SmtpPasswordBox.Password = \"\";", source, StringComparison.Ordinal);
+    }
 }

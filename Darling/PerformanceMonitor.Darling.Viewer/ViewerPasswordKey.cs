@@ -168,7 +168,9 @@ public sealed class ViewerSealCache
             throw new ViewerPasswordRefusedException(ViewerPasswordSealer.PasswordCharactersText);
         }
 
-        var signature = sealer.KeyId + "|" + string.Join('\u001f', binding.Fields) + "|"
+        /* #5366: the settings part is the hash of the binding's own encoding for this key, which marks where each field
+           ends, so no two different settings share a cache key. */
+        var signature = Convert.ToHexString(SHA256.HashData(binding.EncodeAad(sealer.KeyId))) + "|"
             + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(plaintext)));
         if (_signature == signature && _sealed is not null)
         {

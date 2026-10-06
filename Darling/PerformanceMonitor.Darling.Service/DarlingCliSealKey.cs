@@ -151,6 +151,13 @@ internal static class DarlingCliSealKey
             return Refused(StateReason(state));
         }
 
+        /* #5366: the state row must be about the key that is published now; a row that names another key says
+           nothing about this one. */
+        if (!string.Equals(state.KeyId, published.KeyId, StringComparison.Ordinal))
+        {
+            return Refused(NoStateReason);
+        }
+
         return new Decision(new PublishedKeyRing(publicKey), NoticeFor(publicKey.KeyId));
     }
 

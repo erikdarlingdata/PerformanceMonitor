@@ -168,4 +168,20 @@ public sealed class ViewerWebhookSealingTests
 
         Assert.Equal(stored.TeamsUrl, route.TeamsUrl);
     }
+
+    [Fact]
+    public void NewGenericHeaders_WithABlankUrlBoxAndASavedUrl_AskForTheUrlAgain()
+    {
+        using var key = PasswordPrivateKey.Generate();
+        var savedUrl = Seal(key, "https://example.test/generic-not-real", "generic", "notification");
+        var savedHeaders = Seal(key, "{\"X-Key\":\"not-real\"}", "generic_headers", "notification", url: savedUrl);
+
+        Assert.True(ViewerWebhookSealing.HeadersNeedUrlRetyped("{\"X-Key\":\"changed-not-real\"}", "", savedHeaders, savedUrl));
+        Assert.True(ViewerWebhookSealing.HeadersNeedUrlRetyped("{\"X-Key\":\"new-not-real\"}", "  ", null, savedUrl));
+        Assert.False(ViewerWebhookSealing.HeadersNeedUrlRetyped("{\"X-Key\":\"changed-not-real\"}", "https://example.test/generic-not-real", savedHeaders, savedUrl));
+        Assert.False(ViewerWebhookSealing.HeadersNeedUrlRetyped("", "", savedHeaders, savedUrl));
+        Assert.False(ViewerWebhookSealing.HeadersNeedUrlRetyped(ViewerWebhookSealing.ClearMarker, "", savedHeaders, savedUrl));
+        Assert.False(ViewerWebhookSealing.HeadersNeedUrlRetyped("{\"X-Key\":\"new-not-real\"}", "", null, null));
+        Assert.Equal("Type the generic webhook URL again to change its headers.", ViewerWebhookSealing.RetypeUrlForHeadersText);
+    }
 }
