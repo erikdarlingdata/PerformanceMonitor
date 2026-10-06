@@ -422,8 +422,8 @@ internal static class DiagnosticsBundle
 
     /// <summary>
     /// The other places a config names a host: the SMTP host, the domains of the From and To addresses, the dashboard's
-    /// public base URL, and every webhook URL and proxy. A webhook URL carries its secret in the path, so each is also
-    /// a secret.
+    /// public base URL, the MCP listener's host name, and every webhook URL and proxy. A webhook URL carries its secret
+    /// in the path, so each is also a secret.
     /// </summary>
     internal static void SeedNotificationIdentifiers(BundleAliaser aliaser, DarlingConfig config)
     {
@@ -459,6 +459,7 @@ internal static class DiagnosticsBundle
         }
 
         AddUrlHost(aliaser, config.Web?.PublicBaseUrl);
+        AddMcpHostName(aliaser, config.Mcp?.Network?.HostName);
         if (config.Webhooks is { } hooks)
         {
             foreach (var url in new[] { hooks.TeamsUrl, hooks.SlackUrl, hooks.GenericUrl })
@@ -493,6 +494,21 @@ internal static class DiagnosticsBundle
         {
             aliaser.AddName(AliasKind.Host, uri.Host);
         }
+    }
+
+    /// <summary>
+    /// <c>mcp.network.hostName</c> is a DNS name the operator typed, and the service log writes it in two spellings: the
+    /// certificate-name warning names the normalized form (the trailing dot dropped, an internationalized name in its
+    /// ASCII form) at every start, and the warning for a value that is not a bare DNS name echoes it as written. Both
+    /// are registered, and so is the host of a URL-shaped value, because the Host-header refusals that follow a refused
+    /// value name that host on its own (#5288).
+    /// </summary>
+    private static void AddMcpHostName(BundleAliaser aliaser, string? hostName)
+    {
+        var written = hostName?.Trim();
+        aliaser.AddName(AliasKind.Host, written);
+        aliaser.AddName(AliasKind.Host, McpNetworkConfig.NormalizeHostName(written));
+        AddUrlHost(aliaser, written);
     }
 
     /// <summary>Adds a connection string's hosts, database and login as names and its password as a secret.</summary>
