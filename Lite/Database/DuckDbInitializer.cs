@@ -173,6 +173,10 @@ public partial class DuckDbInitializer : IDisposable
        from inside the code under test (see OnArchiveViewRebuildForTests), not from a thread of its own. */
     internal static bool IsWriteLockHeldForTests => s_dbLock.IsWriteLockHeld;
 
+    /* Test seam (#5371): how many threads are parked waiting for a read lock right now. A test that holds the write lock reads it
+       to know a read has reached the lock wait, instead of sleeping and hoping the pool started it. */
+    internal static int WaitingReadCountForTests => s_dbLock.WaitingReadCount;
+
     /* Fires in ResetDatabaseCoreAsync after the database and WAL files are deleted and before the schema is
        recreated: a test throws from it to stand in for a process kill with no database file on disk. */
     internal static Action? AfterDatabaseFilesDeletedForTests { get; set; }
