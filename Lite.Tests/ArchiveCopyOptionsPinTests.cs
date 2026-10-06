@@ -12,6 +12,7 @@ using System.IO;
 using System.Linq;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
+using Darling.Tests;
 using DuckDB.NET.Data;
 using PerformanceMonitorLite.Database;
 using PerformanceMonitorLite.Services;
@@ -123,16 +124,20 @@ public sealed class ArchiveCopyOptionsSourceScanTests
                 continue;
             }
 
-            var lines = text.Split('\n');
-            for (var i = 0; i < lines.Length; i++)
+            /* Read the string-literal bodies the walker finds, not lines filtered by a comment prefix: a
+               "FORMAT PARQUET" inside a comment is not a literal, and a block comment's continuation line
+               carries no prefix to filter on. Line numbers come from the body's offset in the file. */
+            foreach (var (start, body) in CSharpSourceWalker.StringLiteralBodies(text))
             {
-                if (lines[i].Contains("FORMAT PARQUET", StringComparison.OrdinalIgnoreCase)
-                    && !lines[i].Contains("EXPORT DATABASE", StringComparison.Ordinal)
-                    && !lines[i].TrimStart().StartsWith("//", StringComparison.Ordinal)
-                    && !lines[i].TrimStart().StartsWith("/*", StringComparison.Ordinal)
-                    && !lines[i].TrimStart().StartsWith('*'))
+                var firstLine = text.AsSpan(0, start).Count('\n') + 1;
+                var lines = body.Split('\n');
+                for (var i = 0; i < lines.Length; i++)
                 {
-                    offenders.Add($"{path}:{i + 1}");
+                    if (lines[i].Contains("FORMAT PARQUET", StringComparison.OrdinalIgnoreCase)
+                        && !lines[i].Contains("EXPORT DATABASE", StringComparison.Ordinal))
+                    {
+                        offenders.Add($"{path}:{firstLine + i}");
+                    }
                 }
             }
         }
