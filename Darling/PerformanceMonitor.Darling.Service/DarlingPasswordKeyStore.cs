@@ -119,9 +119,9 @@ WHERE NOT t.tgisinternal
     internal static async Task<bool> IsReplacedAsync(NpgsqlConnection c, string keyId, CancellationToken ct)
     {
         await using var command = new NpgsqlCommand(
-            "SELECT EXISTS (SELECT 1 FROM config.password_key WHERE key_id = @id AND state = 'replaced');", c);
+            "SELECT EXISTS (SELECT 1 FROM config.password_key WHERE key_id = $1 AND state = 'replaced');", c);
         command.CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds;
-        command.Parameters.AddWithValue("id", keyId);
+        command.Parameters.AddWithValue(keyId);
         return (bool)(await command.ExecuteScalarAsync(ct).ConfigureAwait(false))!;
     }
 
@@ -130,11 +130,11 @@ WHERE NOT t.tgisinternal
     internal static async Task PublishAsync(NpgsqlConnection c, string keyId, byte[] spki, CancellationToken ct)
     {
         await using var command = new NpgsqlCommand(
-            "INSERT INTO config.password_key (key_id, public_key, algorithm, state) VALUES (@id, @key, @algorithm, 'current');", c);
+            "INSERT INTO config.password_key (key_id, public_key, algorithm, state) VALUES ($1, $2, $3, 'current');", c);
         command.CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds;
-        command.Parameters.AddWithValue("id", keyId);
-        command.Parameters.AddWithValue("key", spki);
-        command.Parameters.AddWithValue("algorithm", PasswordSeal.Algorithm);
+        command.Parameters.AddWithValue(keyId);
+        command.Parameters.AddWithValue(spki);
+        command.Parameters.AddWithValue(PasswordSeal.Algorithm);
         await command.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
     }
 
@@ -145,22 +145,22 @@ WHERE NOT t.tgisinternal
     {
         await using (var upsert = new NpgsqlCommand(@"
 INSERT INTO config.password_key_service (service_host, key_id, state, note, updated_at)
-VALUES (@host, @key, @state, @note, now() AT TIME ZONE 'UTC')
+VALUES ($1, $2, $3, $4, now() AT TIME ZONE 'UTC')
 ON CONFLICT (service_host) DO UPDATE
 SET key_id = EXCLUDED.key_id, state = EXCLUDED.state, note = EXCLUDED.note, updated_at = EXCLUDED.updated_at;", c))
         {
             upsert.CommandTimeout = timeoutSeconds;
-            upsert.Parameters.AddWithValue("host", serviceHost);
-            upsert.Parameters.AddWithValue("key", (object?)keyId ?? DBNull.Value);
-            upsert.Parameters.AddWithValue("state", state);
-            upsert.Parameters.AddWithValue("note", (object?)note ?? DBNull.Value);
+            upsert.Parameters.AddWithValue(serviceHost);
+            upsert.Parameters.AddWithValue((object?)keyId ?? DBNull.Value);
+            upsert.Parameters.AddWithValue(state);
+            upsert.Parameters.AddWithValue((object?)note ?? DBNull.Value);
             await upsert.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
         }
 
         await using var purge = new NpgsqlCommand(
-            "DELETE FROM config.password_key_service WHERE updated_at < (now() AT TIME ZONE 'UTC') - make_interval(days => @days);", c);
+            "DELETE FROM config.password_key_service WHERE updated_at < (now() AT TIME ZONE 'UTC') - make_interval(days => $1);", c);
         purge.CommandTimeout = timeoutSeconds;
-        purge.Parameters.AddWithValue("days", StaleServiceRowDays);
+        purge.Parameters.AddWithValue(StaleServiceRowDays);
         await purge.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
     }
 
@@ -226,10 +226,10 @@ RETURNING key_id;", c);
 
         var next = windows ? "done" : "skipped";
         await using (var update = new NpgsqlCommand(
-            "UPDATE config.legacy_secret_pin_marker SET state = @state, changed_at = now() AT TIME ZONE 'UTC' WHERE id = 1;", c, tx))
+            "UPDATE config.legacy_secret_pin_marker SET state = $1, changed_at = now() AT TIME ZONE 'UTC' WHERE id = 1;", c, tx))
         {
             update.CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds;
-            update.Parameters.AddWithValue("state", next);
+            update.Parameters.AddWithValue(next);
             await update.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
         }
 
@@ -337,13 +337,13 @@ RETURNING key_id;", c);
     {
         await using var command = new NpgsqlCommand(@"
 INSERT INTO config.legacy_secret_pin (server_id, slot, value_sha256, binding_sha256)
-VALUES (@server, @slot, @value, @binding)
+VALUES ($1, $2, $3, $4)
 ON CONFLICT (server_id, slot) DO NOTHING;", c, tx);
         command.CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds;
-        command.Parameters.AddWithValue("server", serverId);
-        command.Parameters.AddWithValue("slot", slot);
-        command.Parameters.AddWithValue("value", SHA256.HashData(Encoding.UTF8.GetBytes(storedText)));
-        command.Parameters.AddWithValue("binding", binding.LegacyPinHash());
+        command.Parameters.AddWithValue(serverId);
+        command.Parameters.AddWithValue(slot);
+        command.Parameters.AddWithValue(SHA256.HashData(Encoding.UTF8.GetBytes(storedText)));
+        command.Parameters.AddWithValue(binding.LegacyPinHash());
         await command.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
     }
 
