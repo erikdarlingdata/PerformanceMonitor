@@ -132,6 +132,7 @@ async function send(method, path, body) {
   const res = await apiWrite(method, path, body);
   if (res.status === 0) return { kind: "error", message: res.message };
   if (res.expired) return { kind: "expired", message: "Your session has expired. Sign in again." };
+  if (res.unexpected) return { kind: "error", message: "The service gave an unexpected answer (HTTP " + res.status + "). Check the list before trying again." };
   return interpretWrite(res.status, res.body);
 }
 

@@ -108,8 +108,8 @@ public sealed class AdminServersRouteTests
            or an index would read 0, 1, 2 here. */
         var rows = DarlingAdminServersReader.Build(new[]
         {
-            Config(9, "Bravo", "bravo-01"),
-            Config(3, "Charlie", "charlie-01"),
+            Config(9, "Bravo", "beta-01"),
+            Config(3, "Charlie", "gamma-01"),
             Config(5, "Alpha", "alpha-01"),
         }, Now);
         Assert.Equal(new[] { 5, 9, 3 }, rows.Select(r => r.server_id).ToArray());

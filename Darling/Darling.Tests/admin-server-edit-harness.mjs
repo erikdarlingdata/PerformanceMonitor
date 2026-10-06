@@ -509,6 +509,10 @@ try {
     },
     network: { id: 1, edits: { display_name: "Alpha Two" }, down: true, answer: () => updated("Alpha Two") },
     expired: { id: 1, edits: { display_name: "Alpha Two" }, answer: () => ({ status: 200, raw: "<html><body>Sign in</body></html>" }) },
+    /* #5356: a 200 whose text IS JSON but not an object is no sign-in page; the form stays open with a sentence. */
+    jsonArray: { id: 1, edits: { display_name: "Alpha Two" }, answer: () => ({ status: 200, raw: "[]" }) },
+    jsonString: { id: 1, edits: { display_name: "Alpha Two" }, answer: () => ({ status: 200, raw: '"saved"' }) },
+    jsonNull: { id: 1, edits: { display_name: "Alpha Two" }, answer: () => ({ status: 200, raw: "null" }) },
     collides: { id: 3, edits: { host: "alpha" }, typed: true, answer: () => ({ status: 409, body: { status: "collides", message: "Another server already uses the address alpha." } }) },
     conflict: { id: 1, edits: { display_name: "Alpha Two" }, answer: () => ({ status: 409, body: { status: "conflict", message: "changed", current: { ...reads.alpha, display_name: "Alpha Elsewhere" } } }) },
     // The answer is read by its status word, never by its message: a collision whose text talks about a change is no conflict, and a
@@ -776,7 +780,7 @@ try {
       if (c.down) state.networkDown = true;
       const during = await gatedSave();
       const after = view();
-      const result = { typed, during, after };
+      const result = { typed, during, after, form: formSnapshot() };
       if (c.again) {
         await clickText(main, "Save");
         await settle(30);
@@ -926,7 +930,7 @@ try {
     /* T6 and the password's whole life: "SECRET-PW" typed into Charlie's form, then it leaves by `path`: "cancel"; "saved" (the service
        updates it); "badrequest", "echo" (a 400 whose message repeats the password) and "limited" (429); "conflict" (a 409 whose
        current values carry the password as a display name, so the panel line must show [redacted]); "reapply" and "reload" after
-       a plain 409; "hash" (the window goes to another page); "listexpired" (the next list read answers 401, so the shell takes
+       a plain 409 ("reapplytyped" and "reloadtyped": the password typed again after the 409, before the button); "hash" (the window goes to another page); "listexpired" (the next list read answers 401, so the shell takes
        the page over). The password box typed into is kept, so it is read after it was detached. */
     secret: async (path) => {
       seed();
@@ -944,14 +948,19 @@ try {
         conflict: () => conflictAnswer({ ...stale, display_name: SECRET }),
         reapply: () => conflictAnswer(stale),
         reload: () => conflictAnswer(stale),
+        reapplytyped: () => conflictAnswer(stale),
+        reloadtyped: () => conflictAnswer(stale),
       };
       if (path in answers) {
         await edit("host", "charlie-two");
         state.responder = answers[path];
         await clickText(main, "Save");
         await settle(30);
-        if (path === "reapply") await clickText(main, "Reapply my changes");
-        if (path === "reload") await clickText(main, "Reload current values");
+        /* #5356: the 409 left the form open with its password box emptied; the user types the password AGAIN before choosing, and
+           the box that holds it is then replaced by the redraw, so it must be emptied first (the "...typed" paths). */
+        if (path.endsWith("typed")) await typeInto(pw, SECRET);
+        if (path.startsWith("reapply")) await clickText(main, "Reapply my changes");
+        if (path.startsWith("reload")) await clickText(main, "Reload current values");
       } else if (path === "cancel") await clickText(main, "Cancel");
       else if (path === "hash") await leaveHash("#/fleet");
       else if (path === "listexpired") {

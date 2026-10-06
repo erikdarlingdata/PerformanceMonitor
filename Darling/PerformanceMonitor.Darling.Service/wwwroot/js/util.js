@@ -618,11 +618,15 @@ export async function apiSend(method, path, body) {
  *   { status, body }                    - the answer. `body` is the parsed JSON, or null when the text is not JSON (an
  *                                         empty body included). A 400, 404, 409, 429, 500 and the rest come back this way.
  *   { status: 0, body: null, message }  - no answer at all (a network error); `message` is "Network error: ..."
- *   { status, body, expired: true }     - the session is gone: a 401, or a 2xx whose body is not a JSON object (a sign-in
+ *   { status, body, expired: true }     - the session is gone: a 401, or a 2xx whose text is not JSON at all (a sign-in
  *                                         page in front of the API, or an empty body). The shell has been told once
  *                                         (reportSessionExpired, with the house message and "/", never the body's own
  *                                         login), so the caller drops what it has open and shows no success. This is
  *                                         stricter than apiGet, which reads an empty 2xx as data.
+ *   { status, body, unexpected: true }  - a 2xx whose text IS JSON but not a JSON object (an array, a string, a number, null).
+ *                                         A sign-in page is never valid JSON, so this is not the session going; it is an
+ *                                         answer no write of this service gives (#5356). The shell is NOT told: the caller
+ *                                         keeps what it has open and says so, and shows no success.
  * Like apiSend it ALWAYS declares Content-Type: application/json, which the server demands of a mutation (a 415
  * otherwise; it is what forces a CORS preflight on a cross-origin write), and it counts as no in-flight read.
  * An undefined body sends none.
@@ -639,16 +643,19 @@ export async function apiWrite(method, path, body) {
     return { status: 0, body: null, message: "Network error: " + (e && e.message ? e.message : String(e)) };
   }
   let parsed = null;
+  let isJson = false;
   try {
     parsed = JSON.parse(await resp.text());
+    isJson = true;
   } catch {
     parsed = null;
   }
   const succeeded = resp.status >= 200 && resp.status < 300;
-  if (resp.status === 401 || (succeeded && (parsed === null || typeof parsed !== "object"))) {
+  if (resp.status === 401 || (succeeded && !isJson)) {
     reportSessionExpired("Your session has expired. Sign in again.", "/");
     return { status: resp.status, body: parsed, expired: true };
   }
+  if (succeeded && (parsed === null || typeof parsed !== "object" || Array.isArray(parsed))) return { status: resp.status, body: parsed, unexpected: true };
   return { status: resp.status, body: parsed };
 }
 

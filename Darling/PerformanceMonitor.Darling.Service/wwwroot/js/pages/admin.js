@@ -362,17 +362,22 @@ export function buildEditBody(original, values, token, password) {
   return body;
 }
 
+const UNEXPECTED_ANSWER = "The service gave an answer this page does not understand, so it is not known whether anything was saved. Your entries are kept; check the server list before saving again.";
+
 /** What one answer to the edit means, from the HTTP status, the parsed body and (for status 0) the transport's own
     message: { kind, close, reread, banner?, notice?, current? }. `close` drops the form, `reread` reads the list again,
     `banner` is the sentence for the form's error strip and `notice` the sentence for the page. It branches on the
     status and the body's status word, never on message text. The sentence is the body's message, else its error, else
-    "Request failed (HTTP n).". A 2xx whose body is not a JSON object is the sign-in page of an expired session. */
-export function interpretEdit(status, body, message) {
+    "Request failed (HTTP n).". The session is gone only when the transport says so (`expired`: a 401, or a 2xx whose text is
+    not JSON, which is a sign-in page); a 2xx whose body is JSON but not an object is an unexpected answer that keeps the
+    form and its typed values, with a sentence (#5356). */
+export function interpretEdit(status, body, message, expired) {
   const b = body !== null && typeof body === "object" && !Array.isArray(body) ? body : null;
   const word = b && typeof b.status === "string" ? b.status : "";
   const sentence = (b && [b.message, b.error].find((s) => typeof s === "string" && s !== "")) || "Request failed (HTTP " + status + ").";
   if (status === 0) return { kind: "network", close: false, reread: false, banner: asText(message) || "Network error." };
-  if (status === 401 || (status >= 200 && status < 300 && !b)) return { kind: "expired", close: true, reread: false };
+  if (status === 401 || expired === true) return { kind: "expired", close: true, reread: false };
+  if (status >= 200 && status < 300 && !b) return { kind: "unexpected", close: false, reread: false, banner: UNEXPECTED_ANSWER };
   if (status === 403) return { kind: "readonly", close: true, reread: false, notice: "This account has read-only access. Nothing was saved." };
   if (status === 404) return { kind: "notfound", close: true, reread: true, notice: sentence };
   if (status === 409 && word === "conflict" && b.current && typeof b.current === "object") {
@@ -871,6 +876,8 @@ function refillEdit(f, current, keepMine) {
   f.token = current.modified_at;
   f.usernames = usernamesOf(f.values);
   f.shownAuth = undefined;
+  /* The redraw detaches the old password box; whatever was typed into it since the 409 goes first (#5356), as closeEdit does. */
+  if (f.passwordInput) f.passwordInput.value = "";
   showForm(f);
 }
 
@@ -932,7 +939,7 @@ async function submitEdit() {
   let late = false;
   try {
     const res = await apiWrite("PATCH", "/api/servers/" + f.id, body);
-    out = interpretEdit(res.status, res.body, res.message);
+    out = interpretEdit(res.status, res.body, res.message, res.expired === true);
     late = editForm !== f;
     landEdit(f, out, password);
   } finally {

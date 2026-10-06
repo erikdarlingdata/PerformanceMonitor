@@ -44,6 +44,8 @@ public sealed class ManageTagsPageTests
            mutation (a 415 otherwise) is declared there, once. The pin follows it: the page must send through apiWrite,
            and apiWrite itself (not apiSend, which carries the same header line) must declare the header. */
         Assert.Contains("const res = await apiWrite(method, path, body);", page);
+        // #5356: a 2xx that is JSON but not an object is an error answer here, not a saved change and not an expired session.
+        Assert.Contains("if (res.unexpected) return { kind: \"error\"", page);
         Assert.DoesNotContain("fetch(", page);
         var util = Wwwroot("js", "util.js");
         var write = util.IndexOf("export async function apiWrite(method, path, body) {", System.StringComparison.Ordinal);

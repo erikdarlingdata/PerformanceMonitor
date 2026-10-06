@@ -340,12 +340,49 @@ public sealed class AdminServerEditBehaviourTests
         }
     }
 
+    private const string UnexpectedAnswer = "The service gave an answer this page does not understand, so it is not known whether anything was saved. Your entries are kept; check the server list before saving again.";
+
+    [Fact]
+    public void OnlyTheTransportsExpiredFlag_OrA401_ClosesTheFormAsAnExpiredSession()
+    {
+        var results = PureAll(
+            ("interpretEdit", new object?[] { 200, null, null, true }),
+            ("interpretEdit", new object?[] { 200, JsonNode.Parse("[]"), null, true }),
+            ("interpretEdit", new object?[] { 200, JsonNode.Parse("[]"), null, false }));
+        Assert.Equal("expired", results[0].GetProperty("kind").GetString());
+        Assert.True(results[0].GetProperty("close").GetBoolean());
+        Assert.Equal("expired", results[1].GetProperty("kind").GetString());
+        Assert.Equal("unexpected", results[2].GetProperty("kind").GetString());
+        Assert.False(results[2].GetProperty("close").GetBoolean());
+    }
+
+    // #5356: a 200 whose body is JSON but not an object (an array, a string, null) is not a sign-in page, so the shell is not told and
+    // the form stays open with its typed entries and a sentence; the real expiry (a body that is no JSON at all) still closes it.
+    [Theory]
+    [InlineData("jsonArray")]
+    [InlineData("jsonString")]
+    [InlineData("jsonNull")]
+    public void AJsonAnswerThatIsNotAnObject_KeepsTheFormOpenWithASentence(string kind)
+    {
+        var page = Run("save:" + kind);
+        var after = page.GetProperty("after");
+
+        Assert.Empty(page.GetProperty("expired").EnumerateArray());
+        Assert.Equal(1, after.GetProperty("forms").GetInt32());
+        Assert.Equal(new[] { UnexpectedAnswer }, Lines(after, "banner"));
+        Assert.Equal("Alpha Two", page.GetProperty("form").GetProperty("values").GetProperty("display_name").GetString());
+        Assert.False(after.GetProperty("saveDisabled").GetBoolean());
+    }
+
     private static readonly (string Name, int Status, string? Body, string? Message, string Expected)[] Answers =
     [
         ("no answer at all shows the transport's message", 0, null, "Network error: connection refused",
             """{"kind":"network","close":false,"reread":false,"banner":"Network error: connection refused"}"""),
         ("a 401 is an expired session", 401, """{"error":"sign in"}""", null, """{"kind":"expired","close":true,"reread":false}"""),
-        ("a 2xx that is not a JSON object is the sign-in page of an expired session", 200, null, null, """{"kind":"expired","close":true,"reread":false}"""),
+        ("a 2xx that is not a JSON object keeps the form with a sentence; only the transport's expired flag closes it (#5356)", 200, null, null,
+            """{"kind":"unexpected","close":false,"reread":false,"banner":"UNEXPECTED"}""".Replace("UNEXPECTED", UnexpectedAnswer, StringComparison.Ordinal)),
+        ("a 2xx whose body is a JSON array keeps the form with the same sentence", 200, "[]", null,
+            """{"kind":"unexpected","close":false,"reread":false,"banner":"UNEXPECTED"}""".Replace("UNEXPECTED", UnexpectedAnswer, StringComparison.Ordinal)),
         ("a 403 closes the form with the read-only notice, whatever the body says", 403, """{"error":"something else"}""", null,
             """{"kind":"readonly","close":true,"reread":false,"notice":"This account has read-only access. Nothing was saved."}"""),
         ("a 404 closes the form, re-reads the list and shows the server's sentence", 404, """{"error":"This server's definition no longer exists."}""", null,
@@ -1330,6 +1367,9 @@ public sealed class AdminServerEditBehaviourTests
     // Reapply and Reload draw the form again, so the box typed into is gone and its replacement is empty.
     [InlineData("reapply", 1, false)]
     [InlineData("reload", 1, false)]
+    // #5356: a password typed again after the 409 and before Reapply or Reload must not stay in the box the redraw detaches.
+    [InlineData("reapplytyped", 1, false)]
+    [InlineData("reloadtyped", 1, false)]
     public void NothingSecret_StaysInTheDom_AfterCloseSaveErrorOrLeaving(string path, int forms, bool connected)
     {
         var page = Run("secret:" + path);
