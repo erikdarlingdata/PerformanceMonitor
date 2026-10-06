@@ -189,6 +189,10 @@ public sealed class ViewerServerMigration
             var result = await ViewerPasswordKey.GetSealKeyAsync(dataService, null, cancellationToken);
             key.Sealer = result.Sealer;
             key.Refusal = result.Refusal;
+            if (result.Notice is not null)
+            {
+                ViewerLogger.Info("ViewerServerMigration", result.Notice);
+            }
             if (key.Sealer is not null)
             {
                 (row, reason) = TryProjectEntry(entry, key.Sealer);

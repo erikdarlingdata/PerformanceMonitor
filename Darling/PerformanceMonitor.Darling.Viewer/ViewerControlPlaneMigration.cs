@@ -32,7 +32,7 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// leaves the marker unwritten so a later writable run finishes.</para>
 ///
 /// <para><b>Secrets.</b> The SMTP password is read from Windows Credential Manager (the old viewer-local vault)
-/// and re-sealed as the service-decryptable DPAPI-LocalMachine blob (<see cref="ViewerServerSecret"/>); the
+/// and sealed to the service's published key for the host, port, SSL flag and user name it is written with (#5366); the
 /// Teams/Slack URLs (also formerly in the vault) carry as the store's plain-text channel URLs. So the SMTP
 /// secret path is Windows-only; the alert/analysis/MCP imports are platform-independent.</para>
 ///
@@ -90,6 +90,7 @@ public sealed class ViewerControlPlaneMigration
         }
 
         var imported = 0;
+        var deferred = false;
         try
         {
             /* Alerts + automated analysis. */
@@ -103,15 +104,27 @@ public sealed class ViewerControlPlaneMigration
 
             /* SMTP + Teams/Slack delivery (secrets from the old vault, re-sealed for the service). */
             var storeNotify = await dataService.GetNotificationAsync(cancellationToken);
+            var smtpPassword = ViewerSecretStore.GetSmtpPassword();
             var viewerNotify = BuildNotificationRow(
                 _appSettings,
-                ViewerSecretStore.GetSmtpPassword(),
                 ViewerSecretStore.GetTeamsWebhookUrl(),
                 ViewerSecretStore.GetSlackWebhookUrl());
             if (storeNotify is not null && ShouldImportNotification(storeNotify, viewerNotify))
             {
-                await dataService.UpsertNotificationAsync(viewerNotify, cancellationToken);
-                imported++;
+                /* The SMTP password is sealed to the service's key for the host, port, SSL flag and user name it is
+                   written with (#5366). With no key to seal with, the section waits for a later run, with the marker unwritten. */
+                var sealOutcome = _appSettings.SmtpEnabled
+                    ? await SealSmtpPasswordAsync(dataService, viewerNotify, smtpPassword, cancellationToken)
+                    : SmtpSealOutcome.Done;
+                if (sealOutcome == SmtpSealOutcome.NoKey)
+                {
+                    deferred = true;
+                }
+                else
+                {
+                    await dataService.UpsertNotificationAsync(viewerNotify, cancellationToken);
+                    imported++;
+                }
             }
 
             /* MCP toggle/port (config_service, UPDATE-only; preserve the store's current capture_plans). The web
@@ -136,8 +149,56 @@ public sealed class ViewerControlPlaneMigration
             return imported;
         }
 
-        WriteMarker();
+        if (!deferred)
+        {
+            WriteMarker();
+        }
+
         return imported;
+    }
+
+    /// <summary>How sealing the SMTP password for the migration went.</summary>
+    internal enum SmtpSealOutcome
+    {
+        /// <summary>The row carries the sealed password, or there was no password to seal.</summary>
+        Done,
+
+        /// <summary>A password needs sealing and the service's key could not be had: the section is left for a later run.</summary>
+        NoKey,
+    }
+
+    /// <summary>
+    /// Seals the viewer's old SMTP password into <paramref name="row"/> for the host, port, SSL flag and user name the row
+    /// carries (#5366). There is no window to ask in, so a changed key is refused rather than put to the user. A password
+    /// that cannot be stored (invalid text) is left out and logged, without its value.
+    /// </summary>
+    internal static async Task<SmtpSealOutcome> SealSmtpPasswordAsync(
+        ViewerDataService dataService, NotificationRow row, string? smtpPassword, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrEmpty(smtpPassword))
+        {
+            row.SmtpEncryptedPassword = null;
+            return SmtpSealOutcome.Done;
+        }
+
+        var key = await ViewerPasswordKey.GetSealKeyAsync(dataService, null, cancellationToken);
+        if (key.Sealer is null)
+        {
+            ViewerLogger.Warn("ViewerControlPlaneMigration", "The SMTP password was not moved yet: " + key.Refusal);
+            return SmtpSealOutcome.NoKey;
+        }
+
+        try
+        {
+            row.SmtpEncryptedPassword = key.Sealer.SealSmtp(smtpPassword, row.SmtpHost, row.SmtpPort, row.SmtpUseSsl, row.SmtpUsername);
+        }
+        catch (ViewerPasswordRefusedException ex)
+        {
+            row.SmtpEncryptedPassword = null;
+            ViewerLogger.Warn("ViewerControlPlaneMigration", "The SMTP password was not moved: " + ex.Message);
+        }
+
+        return SmtpSealOutcome.Done;
     }
 
     /// <summary>Projects the viewer's alert + analysis app settings onto a store row (pure — pinned by tests).</summary>
@@ -195,10 +256,11 @@ public sealed class ViewerControlPlaneMigration
     /// Projects the viewer's SMTP/webhook app settings + the vault secrets onto a store row (pure — pinned by
     /// tests). A DISABLED channel writes EMPTY key fields (SMTP host/from/to; a webhook URL) so the service —
     /// which derives enablement from non-empty fields — treats it as off; an enabled channel carries its
-    /// values, with the SMTP password sealed as the service-decryptable DPAPI blob.
+    /// values. The SMTP password is not part of the projection: <see cref="SealSmtpPasswordAsync"/> seals it once the
+    /// row's host, port, SSL flag and user name are known.
     /// </summary>
     [SupportedOSPlatform("windows")]
-    public static NotificationRow BuildNotificationRow(ViewerAppSettings s, string? smtpPassword, string teamsUrl, string slackUrl)
+    public static NotificationRow BuildNotificationRow(ViewerAppSettings s, string teamsUrl, string slackUrl)
     {
         ArgumentNullException.ThrowIfNull(s);
         var row = new NotificationRow
@@ -214,7 +276,6 @@ public sealed class ViewerControlPlaneMigration
             row.SmtpUsername = string.IsNullOrWhiteSpace(s.SmtpUsername) ? null : s.SmtpUsername;
             row.SmtpFromAddress = s.SmtpFromAddress ?? "";
             row.SmtpRecipients = s.SmtpRecipients ?? "";
-            row.SmtpEncryptedPassword = string.IsNullOrEmpty(smtpPassword) ? null : ViewerServerSecret.Protect(smtpPassword);
         }
 
         if (s.TeamsWebhookEnabled)
