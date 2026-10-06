@@ -129,6 +129,42 @@ public sealed class PasswordBindingCensusTests
             + ". Bind it in PasswordBinding (and ServerConnectionIdentity), or add it to the allowlist here with the reason.");
     }
 
+    private static string[] UnboundReads(string source, ISet<string> bound, ISet<string> allowed) =>
+        Regex.Matches(source, @"\bserver\.([A-Za-z_]\w*)")
+            .Select(m => m.Groups[1].Value).Distinct(StringComparer.Ordinal)
+            .Where(r => !bound.Contains(r) && !allowed.Contains(r)).ToArray();
+
+    [Fact]
+    public void Every_server_setting_the_remediation_builder_reads_is_bound_for_remediation_or_on_the_allowlist()
+    {
+        var allowed = new HashSet<string>(StringComparer.Ordinal) { "DisplayName", "IsPostgres", "HasRemediationCredential" };
+        var bound = PasswordBinding.RemediationFieldNames.ToHashSet(StringComparer.Ordinal);
+        var source = Source("PerformanceMonitor.Darling.Service/MonitoredServerConnection.cs");
+        var start = source.IndexOf("public static string BuildRemediationConnectionString(", StringComparison.Ordinal);
+        var end = source.IndexOf("public const string RemediationApplicationName", StringComparison.Ordinal);
+        Assert.True(start > 0 && end > start, "the remediation connection builder moved");
+        var body = source[start..end];
+
+        Assert.Equal(PasswordBinding.ForRemediation(Base, "example_fix").Fields.Count, bound.Count);
+        Assert.Contains("server.Host", body, StringComparison.Ordinal);
+        var unbound = UnboundReads(body, bound, allowed);
+        Assert.True(
+            unbound.Length == 0,
+            "The remediation connection builder reads a server setting that the remediation password is not bound to: "
+            + string.Join(", ", unbound) + ". Bind it in PasswordBinding.ForRemediation, or add it to the allowlist here with the reason.");
+    }
+
+    [Fact]
+    public void The_remediation_check_flags_a_read_of_a_setting_that_is_bound_for_servers_but_not_for_remediation()
+    {
+        var allowed = new HashSet<string>(StringComparer.Ordinal) { "DisplayName", "IsPostgres", "HasRemediationCredential" };
+        var bound = PasswordBinding.RemediationFieldNames.ToHashSet(StringComparer.Ordinal);
+
+        Assert.Equal(new[] { "Port" }, UnboundReads("var x = server.Host + server.Port + server.DisplayName;", bound, allowed));
+        Assert.Equal(new[] { "ReadOnlyIntent" }, UnboundReads("var x = server.ReadOnlyIntent;", bound, allowed));
+        Assert.Empty(UnboundReads("var x = server.Host + server.RemediationUsername + server.Engine;", bound, allowed));
+    }
+
     [Fact]
     public void The_columns_the_edit_function_compares_plus_engine_are_the_identity_properties()
     {

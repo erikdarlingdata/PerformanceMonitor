@@ -70,19 +70,20 @@ public sealed class PasswordSealException : Exception
 public sealed class PasswordPublicKey
 {
     private readonly byte[] _spki;
+    private readonly byte[] _fingerprint;
 
     private PasswordPublicKey(byte[] spki)
     {
         _spki = spki;
         KeyId = PasswordSeal.KeyIdFor(spki);
-        Fingerprint = SHA256.HashData(spki);
+        _fingerprint = SHA256.HashData(spki);
     }
 
     /// <summary>The key id: 16 lowercase hex characters of the SHA-256 of <see cref="Spki"/>.</summary>
     public string KeyId { get; }
 
-    /// <summary>The full SHA-256 of <see cref="Spki"/>, 32 bytes. A viewer pins this.</summary>
-    public byte[] Fingerprint { get; }
+    /// <summary>The full SHA-256 of <see cref="Spki"/>, 32 bytes (a copy). A viewer pins this.</summary>
+    public byte[] Fingerprint => (byte[])_fingerprint.Clone();
 
     /// <summary>The DER SubjectPublicKeyInfo of the key (a copy).</summary>
     public byte[] Spki => (byte[])_spki.Clone();
@@ -101,7 +102,7 @@ public sealed class PasswordPublicKey
         {
             using var rsa = RSA.Create();
             rsa.ImportSubjectPublicKeyInfo(spki, out var read);
-            ok = read == spki.Length && rsa.KeySize == PasswordSeal.KeyBits;
+            ok = read == spki.Length && rsa.KeySize == PasswordSeal.KeyBits && HasStandardExponent(rsa);
         }
         catch (CryptographicException)
         {
@@ -117,6 +118,13 @@ public sealed class PasswordPublicKey
 
         return new PasswordPublicKey((byte[])spki.Clone());
     }
+
+    // Both halves of the key must use the usual public exponent, 65537.
+    internal static bool HasStandardExponent(RSA rsa)
+    {
+        var exponent = rsa.ExportParameters(false).Exponent;
+        return exponent is { Length: 3 } && exponent[0] == 0x01 && exponent[1] == 0x00 && exponent[2] == 0x01;
+    }
 }
 
 /// <summary>The private half of the service's password key. It opens sealed values; it is never stored in the store.</summary>
@@ -124,6 +132,7 @@ public sealed class PasswordPrivateKey : IDisposable
 {
     private readonly RSA _rsa;
     private readonly object _gate = new();
+    private bool _disposed;
 
     private PasswordPrivateKey(RSA rsa)
     {
@@ -147,7 +156,7 @@ public sealed class PasswordPrivateKey : IDisposable
         {
             rsa = RSA.Create();
             rsa.ImportPkcs8PrivateKey(der, out var read);
-            ok = read == der.Length && rsa.KeySize == PasswordSeal.KeyBits;
+            ok = read == der.Length && rsa.KeySize == PasswordSeal.KeyBits && PasswordPublicKey.HasStandardExponent(rsa);
         }
         catch (CryptographicException)
         {
@@ -179,6 +188,7 @@ public sealed class PasswordPrivateKey : IDisposable
     {
         lock (_gate)
         {
+            _disposed = true;
             _rsa.Dispose();
         }
     }
@@ -187,6 +197,11 @@ public sealed class PasswordPrivateKey : IDisposable
     {
         lock (_gate)
         {
+            if (_disposed)
+            {
+                throw new PasswordSealException(PasswordSealFailure.UnknownKey, PublicKey.KeyId);
+            }
+
             return _rsa.Decrypt(wrapped, RSAEncryptionPadding.OaepSHA256);
         }
     }
@@ -213,6 +228,10 @@ public static class PasswordSeal
     public const int MaxPlaintextBytes = 8192;
 
     internal const int KeyBits = 3072;
+
+    /// <summary>The one UTF-8 encoding the format uses: invalid text throws instead of being replaced, so two different
+    /// strings never seal or bind the same.</summary>
+    internal static readonly UTF8Encoding StrictUtf8 = new(false, true);
 
     private const int WrappedKeyBytes = KeyBits / 8;
     private const int NonceBytes = 12;
@@ -269,7 +288,17 @@ public static class PasswordSeal
         ArgumentNullException.ThrowIfNull(key);
         ArgumentNullException.ThrowIfNull(binding);
 
-        var length = Encoding.UTF8.GetByteCount(plaintext);
+        int length;
+        try
+        {
+            length = StrictUtf8.GetByteCount(plaintext);
+        }
+        catch (EncoderFallbackException)
+        {
+            throw new PasswordSealException(
+                PasswordSealFailure.Malformed, "The password contains text that cannot be stored.", null);
+        }
+
         if (length > MaxPlaintextBytes)
         {
             throw new PasswordSealException(
@@ -281,7 +310,7 @@ public static class PasswordSeal
         try
         {
             BinaryPrimitives.WriteInt32BigEndian(padded, length);
-            Encoding.UTF8.GetBytes(plaintext, padded.AsSpan(4));
+            StrictUtf8.GetBytes(plaintext, padded.AsSpan(4));
             RandomNumberGenerator.Fill(aesKey);
 
             var payload = new byte[HeaderBytes + padded.Length];
@@ -369,8 +398,15 @@ public static class PasswordSeal
                 failed = result is null;
             }
         }
-        catch (CryptographicException)
+        catch (PasswordSealException)
         {
+            // The key was disposed: already one of the fixed kinds.
+            throw;
+        }
+        catch (Exception ex) when (ex is not OutOfMemoryException)
+        {
+            // A provider failure of any kind (a bad wrap or tag, a key that is gone, no AES-GCM on this platform) is the
+            // same fixed answer; the provider's text and exception are never passed on.
             failed = true;
         }
         finally
@@ -443,7 +479,7 @@ public static class PasswordSeal
 
         try
         {
-            return new UTF8Encoding(false, true).GetString(padded, 4, length);
+            return StrictUtf8.GetString(padded, 4, length);
         }
         catch (DecoderFallbackException)
         {

@@ -133,6 +133,36 @@ public sealed class DarlingPasswordKeyStateTests
     }
 
     [Fact]
+    public void A_published_key_whose_id_does_not_match_its_key_is_a_mismatch_with_a_file_and_refused_without_one()
+    {
+        var inconsistent = new PublishedKey("not-a-key-id with text", (byte[])SpkiB.Clone());
+
+        var withFile = DarlingPasswordKeyState.Decide(Facts(filePresent: true, fileSpki: SpkiA, current: inconsistent));
+        var withFileSameBytes = DarlingPasswordKeyState.Decide(Facts(filePresent: true, fileSpki: SpkiB, current: inconsistent));
+        var withoutFile = DarlingPasswordKeyState.Decide(Facts(current: inconsistent));
+
+        Assert.Equal(PasswordKeyAction.Mismatch, withFile.Action);
+        Assert.Equal(PasswordKeyAction.Mismatch, withFileSameBytes.Action);
+        Assert.Equal(PasswordKeyAction.Refused, withoutFile.Action);
+        Assert.False(withoutFile.RetireFileFirst);
+        Assert.StartsWith("The store's published password key is inconsistent: its id does not match the key.", withoutFile.Reason, StringComparison.Ordinal);
+        Assert.DoesNotContain("not-a-key-id", withFile.Reason, StringComparison.Ordinal);
+        Assert.DoesNotContain("not-a-key-id", withoutFile.Reason, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void The_reasons_print_the_key_id_worked_out_from_the_key_not_the_text_the_store_holds()
+    {
+        var text = "store-held-text-not-an-id";
+        var withoutFile = DarlingPasswordKeyState.Decide(Facts(current: new PublishedKey(text, (byte[])SpkiB.Clone())));
+        var mismatch = DarlingPasswordKeyState.Decide(Facts(filePresent: true, fileSpki: SpkiA, current: new PublishedKey(text, (byte[])SpkiB.Clone())));
+
+        Assert.DoesNotContain(text, mismatch.Reason, StringComparison.Ordinal);
+        Assert.Contains(PasswordSeal.DisplayKeyId(PasswordSeal.KeyIdFor(SpkiB)), mismatch.Reason, StringComparison.Ordinal);
+        Assert.DoesNotContain(text, withoutFile.Reason, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void A_present_file_with_no_readable_key_is_refused_rather_than_replaced()
     {
         var d = DarlingPasswordKeyState.Decide(Facts(filePresent: true, current: Published(SpkiA)));
@@ -154,7 +184,8 @@ public sealed class DarlingPasswordKeyStateTests
     [Fact]
     public void The_ring_starts_not_ready_and_refuses_to_seal_with_the_not_ready_sentence()
     {
-        var ring = DarlingPasswordKey.Current;
+        // A fresh ring built the way the process-wide one starts, so no other test's setting can change the answer.
+        var ring = DarlingPasswordKey.Refusing(DarlingPasswordKey.NotReadyReason);
         var binding = PasswordBinding.ForSmtp("example-mail-01", 587, true, "example_mail_user");
 
         Assert.False(ring.Status.CanSeal);

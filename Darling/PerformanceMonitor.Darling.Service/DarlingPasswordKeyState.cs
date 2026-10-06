@@ -74,6 +74,19 @@ public static class DarlingPasswordKeyState
         }
 
         var current = f.StoreCurrent;
+
+        // A published key whose id does not match its own key is not one to trust either way.
+        if (current is not null && !string.Equals(current.KeyId, PasswordSeal.KeyIdFor(current.Spki), StringComparison.Ordinal))
+        {
+            return f.FilePresent
+                ? new PasswordKeyDecision(PasswordKeyAction.Mismatch, false, null, MismatchReason(f.FileSpki, current), null)
+                : new PasswordKeyDecision(
+                    PasswordKeyAction.Refused, false, null,
+                    "The store's published password key is inconsistent: its id does not match the key. " +
+                    "Run --reset-password-key and enter the saved passwords again.",
+                    null);
+        }
+
         if (f.FilePresent && f.FoundAfterOpenDirectory)
         {
             if (current is not null && f.FileSpki is not null && SameKey(current.Spki, f.FileSpki))
@@ -109,13 +122,16 @@ public static class DarlingPasswordKeyState
             return new PasswordKeyDecision(PasswordKeyAction.Use, false, null, null, null);
         }
 
-        var fileId = PasswordSeal.DisplayKeyId(PasswordSeal.KeyIdFor(f.FileSpki));
-        var storeId = PasswordSeal.DisplayKeyId(current.KeyId);
-        return new PasswordKeyDecision(
-            PasswordKeyAction.Mismatch, false, null,
-            $"The password key in the credentials directory ({fileId}) is not the key the store publishes ({storeId}). " +
-            "Restore the credentials volume that holds the key, or run --reset-password-key and enter the saved passwords again.",
-            null);
+        return new PasswordKeyDecision(PasswordKeyAction.Mismatch, false, null, MismatchReason(f.FileSpki, current), null);
+    }
+
+    // Both ids are worked out from the key bytes, never printed as the store holds them.
+    private static string MismatchReason(byte[]? fileSpki, PublishedKey current)
+    {
+        var fileId = fileSpki is null ? "unreadable" : PasswordSeal.DisplayKeyId(PasswordSeal.KeyIdFor(fileSpki));
+        var storeId = PasswordSeal.DisplayKeyId(PasswordSeal.KeyIdFor(current.Spki));
+        return $"The password key in the credentials directory ({fileId}) is not the key the store publishes ({storeId}). " +
+            "Restore the credentials volume that holds the key, or run --reset-password-key and enter the saved passwords again.";
     }
 
     private static PasswordKeyDecision DecideWithoutFile(PublishedKey? current) =>
@@ -123,7 +139,7 @@ public static class DarlingPasswordKeyState
             ? new PasswordKeyDecision(PasswordKeyAction.Generate, false, null, null, null)
             : new PasswordKeyDecision(
                 PasswordKeyAction.Missing, false, null,
-                $"The password key {PasswordSeal.DisplayKeyId(current.KeyId)} is missing from the credentials directory. " +
+                $"The password key {PasswordSeal.DisplayKeyId(PasswordSeal.KeyIdFor(current.Spki))} is missing from the credentials directory. " +
                 "Restore the credentials volume, or run --reset-password-key and enter the saved passwords again.",
                 null);
 

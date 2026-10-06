@@ -46,6 +46,16 @@ public sealed class PasswordBinding
         nameof(ServerConnectionIdentity.MultiSubnetFailover), nameof(ServerConnectionIdentity.Engine),
     };
 
+    /// <summary>The names of the remediation purpose's fields, in the order <see cref="ForRemediation"/> binds them. The
+    /// census checks the remediation connection builder against these.</summary>
+    internal static readonly IReadOnlyList<string> RemediationFieldNames = new[]
+    {
+        nameof(ServerConnectionIdentity.Host), nameof(ServerConnectionIdentity.Database),
+        nameof(ServerConnectionIdentity.EncryptMode), nameof(ServerConnectionIdentity.TrustServerCertificate),
+        nameof(ServerConnectionIdentity.MultiSubnetFailover), "RemediationUsername",
+        nameof(ServerConnectionIdentity.Engine),
+    };
+
     private static readonly Dictionary<string, int> FieldCounts = new Dictionary<string, int>(StringComparer.Ordinal)
     {
         [ServerPurpose] = 10,
@@ -120,7 +130,17 @@ public sealed class PasswordBinding
 
     private static void Append(MemoryStream buffer, string? text)
     {
-        var bytes = Encoding.UTF8.GetBytes(text ?? "");
+        byte[] bytes;
+        try
+        {
+            bytes = PasswordSeal.StrictUtf8.GetBytes(text ?? "");
+        }
+        catch (EncoderFallbackException)
+        {
+            // Never echo the value: the message names no field text and carries no inner exception.
+            throw new ArgumentException("A password binding field is not valid text.");
+        }
+
         Span<byte> length = stackalloc byte[4];
         BinaryPrimitives.WriteInt32BigEndian(length, bytes.Length);
         buffer.Write(length);

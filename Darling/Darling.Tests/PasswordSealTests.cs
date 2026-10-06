@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Security.Cryptography;
 using System.Text;
@@ -426,6 +427,264 @@ public sealed class PasswordSealTests
 
         Assert.NotEqual(copy[0], KeyA.PublicKey.Spki[0]);
         Assert.Equal(KeyA.PublicKey.KeyId, PasswordPublicKey.FromSpki(KeyA.PublicKey.Spki).KeyId);
+    }
+
+    [Fact]
+    public void A_public_key_hands_out_a_copy_of_its_fingerprint()
+    {
+        var copy = KeyA.PublicKey.Fingerprint;
+        var before = (byte[])copy.Clone();
+        copy[0] ^= 0xFF;
+
+        Assert.Equal(before, KeyA.PublicKey.Fingerprint);
+        Assert.NotSame(KeyA.PublicKey.Fingerprint, KeyA.PublicKey.Fingerprint);
+    }
+
+    [Fact]
+    public void A_disposed_private_key_gives_an_unknown_key_failure_with_no_inner_exception()
+    {
+        var key = PasswordPrivateKey.Generate();
+        var text = PasswordSeal.Seal(FakePassword, key.PublicKey, ServerBinding());
+        key.Dispose();
+        key.Dispose();
+
+        var ex = Fails(() => PasswordSeal.Open(text, key, ServerBinding()));
+
+        Assert.Equal(PasswordSealFailure.UnknownKey, ex.Kind);
+    }
+
+    [Fact]
+    public void A_password_that_is_not_valid_text_is_refused_and_two_bad_passwords_never_seal_the_same()
+    {
+        var ex = Assert.Throws<PasswordSealException>(() => PasswordSeal.Seal("ab\uD800", KeyA.PublicKey, ServerBinding()));
+
+        Assert.Equal(PasswordSealFailure.Malformed, ex.Kind);
+        Assert.Null(ex.InnerException);
+        Assert.Equal("The password contains text that cannot be stored.", ex.Message);
+        Assert.Equal(
+            PasswordSealFailure.Malformed,
+            Assert.Throws<PasswordSealException>(() => PasswordSeal.Seal("ab\uDFFF", KeyA.PublicKey, ServerBinding())).Kind);
+    }
+
+    [Fact]
+    public void A_binding_field_that_is_not_valid_text_is_refused_without_echoing_it()
+    {
+        var bad = new ServerConnectionIdentity("example-sql-\uD800", 1433, "sqlserver", "example_db", false, "sql", "example_login", "Mandatory", false, false);
+        var binding = PasswordBinding.ForServer(bad);
+
+        var ex = Assert.Throws<ArgumentException>(() => binding.EncodeAad("0123456789abcdef"));
+        var pin = Assert.Throws<ArgumentException>(() => binding.LegacyPinHash());
+        var seal = Assert.Throws<ArgumentException>(() => PasswordSeal.Seal(FakePassword, KeyA.PublicKey, binding));
+
+        foreach (var e in new[] { ex, pin, seal })
+        {
+            Assert.Null(e.InnerException);
+            Assert.DoesNotContain("example-sql", e.Message, StringComparison.Ordinal);
+            Assert.DoesNotContain("D800", e.Message, StringComparison.OrdinalIgnoreCase);
+        }
+    }
+
+    // A value with a good GCM tag but wrong content inside: built with the test key's public half, so only the inner
+    // checks can reject it.
+    private static string Crafted(byte[] aesKey, byte[] padded)
+    {
+        var binding = ServerBinding();
+        var keyId = KeyA.PublicKey.KeyId;
+        var payload = new byte[384 + 12 + 16 + padded.Length];
+        RandomNumberGenerator.Fill(payload.AsSpan(384, 12));
+        using (var rsa = RSA.Create())
+        {
+            rsa.ImportSubjectPublicKeyInfo(KeyA.PublicKey.Spki, out _);
+            rsa.Encrypt(aesKey, RSAEncryptionPadding.OaepSHA256).CopyTo(payload, 0);
+        }
+
+        using (var aes = new AesGcm(aesKey, 16))
+        {
+            aes.Encrypt(payload.AsSpan(384, 12), padded, payload.AsSpan(412), payload.AsSpan(396, 16), binding.EncodeAad(keyId));
+        }
+
+        return PasswordSeal.V1Prefix + keyId + ":" + Convert.ToBase64String(payload);
+    }
+
+    private static byte[] Padded(int declaredLength, byte[] content)
+    {
+        var padded = new byte[32];
+        System.Buffers.Binary.BinaryPrimitives.WriteInt32BigEndian(padded, declaredLength);
+        content.CopyTo(padded, 4);
+        return padded;
+    }
+
+    private static byte[] NewAesKey(int bytes)
+    {
+        var key = new byte[bytes];
+        RandomNumberGenerator.Fill(key);
+        return key;
+    }
+
+    [Fact]
+    public void The_crafting_helper_builds_a_value_that_opens_so_the_failures_below_come_from_the_inner_checks()
+    {
+        var text = Crafted(NewAesKey(32), Padded(3, "abc"u8.ToArray()));
+
+        Assert.Equal("abc", PasswordSeal.Open(text, KeyA, ServerBinding()));
+    }
+
+    [Fact]
+    public void A_value_with_a_good_tag_and_a_length_larger_than_the_content_is_a_binding_or_tamper_failure()
+    {
+        var text = Crafted(NewAesKey(32), Padded(40, "abc"u8.ToArray()));
+
+        Assert.Equal(PasswordSealFailure.BindingOrTamper, Fails(() => PasswordSeal.Open(text, KeyA, ServerBinding())).Kind);
+    }
+
+    [Fact]
+    public void A_value_with_a_good_tag_and_non_zero_padding_is_a_binding_or_tamper_failure()
+    {
+        var padded = Padded(3, "abc"u8.ToArray());
+        padded[20] = 1;
+        var text = Crafted(NewAesKey(32), padded);
+
+        Assert.Equal(PasswordSealFailure.BindingOrTamper, Fails(() => PasswordSeal.Open(text, KeyA, ServerBinding())).Kind);
+    }
+
+    [Fact]
+    public void A_value_with_a_good_tag_and_content_that_is_not_valid_utf8_is_a_binding_or_tamper_failure()
+    {
+        var text = Crafted(NewAesKey(32), Padded(2, new byte[] { 0xC3, 0x28 }));
+
+        Assert.Equal(PasswordSealFailure.BindingOrTamper, Fails(() => PasswordSeal.Open(text, KeyA, ServerBinding())).Kind);
+    }
+
+    [Theory]
+    [InlineData(16)]
+    [InlineData(24)]
+    public void A_value_with_a_good_tag_and_a_wrapped_key_that_is_not_thirty_two_bytes_is_a_binding_or_tamper_failure(int keyBytes)
+    {
+        var text = Crafted(NewAesKey(keyBytes), Padded(3, "abc"u8.ToArray()));
+
+        Assert.Equal(PasswordSealFailure.BindingOrTamper, Fails(() => PasswordSeal.Open(text, KeyA, ServerBinding())).Kind);
+    }
+
+    [Fact]
+    public void Keys_whose_public_exponent_is_not_65537_are_refused_on_both_imports()
+    {
+        var (publicOnly, full) = KeyWithExponentThree();
+
+        Assert.Equal(PasswordSealFailure.Malformed, Assert.Throws<PasswordSealException>(() => PasswordPublicKey.FromSpki(publicOnly)).Kind);
+        Assert.Equal(PasswordSealFailure.Malformed, Assert.Throws<PasswordSealException>(() => PasswordPrivateKey.FromPkcs8(full)).Kind);
+    }
+
+    // A 3072-bit key with e = 3: .NET will not make one, so two primes are found here (test data only).
+    private static (byte[] Spki, byte[] Pkcs8) KeyWithExponentThree()
+    {
+        var e = new BigInteger(3);
+        BigInteger p, q;
+        do
+        {
+            p = TestPrime(1536);
+        }
+        while (BigInteger.GreatestCommonDivisor(p - 1, e) != 1);
+        do
+        {
+            q = TestPrime(1536);
+        }
+        while (q == p || BigInteger.GreatestCommonDivisor(q - 1, e) != 1);
+
+        var d = ModInverse(e, (p - 1) * (q - 1));
+        var n = p * q;
+        static byte[] Be(BigInteger v, int len)
+        {
+            var raw = v.ToByteArray(isUnsigned: true, isBigEndian: true);
+            var padded = new byte[len];
+            raw.CopyTo(padded, len - raw.Length);
+            return padded;
+        }
+
+        var parameters = new RSAParameters
+        {
+            Modulus = Be(n, 384),
+            Exponent = new byte[] { 3 },
+            D = Be(d, 384),
+            P = Be(p, 192),
+            Q = Be(q, 192),
+            DP = Be(d % (p - 1), 192),
+            DQ = Be(d % (q - 1), 192),
+            InverseQ = Be(ModInverse(q, p), 192),
+        };
+        using var rsa = RSA.Create();
+        rsa.ImportParameters(parameters);
+        return (rsa.ExportSubjectPublicKeyInfo(), rsa.ExportPkcs8PrivateKey());
+    }
+
+    private static BigInteger ModInverse(BigInteger a, BigInteger m)
+    {
+        BigInteger oldR = m, r = a % m, t0 = 0, t1 = 1;
+        while (r != 0)
+        {
+            var quotient = oldR / r;
+            (oldR, r) = (r, oldR - quotient * r);
+            (t0, t1) = (t1, t0 - quotient * t1);
+        }
+
+        return ((t0 % m) + m) % m;
+    }
+
+    private static BigInteger TestPrime(int bits)
+    {
+        var bytes = new byte[bits / 8];
+        var smallPrimes = new[] { 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53, 59, 61, 67, 71, 73, 79, 83, 89, 97 };
+        while (true)
+        {
+            RandomNumberGenerator.Fill(bytes);
+            bytes[0] |= 0xC0;
+            bytes[^1] |= 1;
+            var candidate = new BigInteger(bytes, isUnsigned: true, isBigEndian: true);
+            if (smallPrimes.Any(sp => candidate % sp == 0))
+            {
+                continue;
+            }
+
+            var probable = true;
+            for (var round = 0; round < 12 && probable; round++)
+            {
+                var witnessBytes = new byte[bits / 8 - 1];
+                RandomNumberGenerator.Fill(witnessBytes);
+                probable = MillerRabin(candidate, new BigInteger(witnessBytes, isUnsigned: true) + 2);
+            }
+
+            if (probable)
+            {
+                return candidate;
+            }
+        }
+    }
+
+    private static bool MillerRabin(BigInteger n, BigInteger a)
+    {
+        var d = n - 1;
+        var s = 0;
+        while (d.IsEven)
+        {
+            d >>= 1;
+            s++;
+        }
+
+        var x = BigInteger.ModPow(a, d, n);
+        if (x == 1 || x == n - 1)
+        {
+            return true;
+        }
+
+        for (var i = 1; i < s; i++)
+        {
+            x = BigInteger.ModPow(x, 2, n);
+            if (x == n - 1)
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private static string VectorPath([CallerFilePath] string thisFile = "") =>
