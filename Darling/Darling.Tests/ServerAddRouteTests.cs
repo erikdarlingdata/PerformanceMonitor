@@ -97,7 +97,7 @@ public sealed class ServerAddRouteTests
     }
 
     private static async Task<(HttpStatusCode Status, string Body)> PostAsync(
-        Rig rig, string body, string mediaType = "application/json", string? seat = null)
+        Rig rig, string body, string mediaType = "application/json", string? seat = null, string? principal = null)
     {
         var ct = TestContext.Current.CancellationToken;
         using var request = new HttpRequestMessage(HttpMethod.Post, "/api/servers")
@@ -109,8 +109,26 @@ public sealed class ServerAddRouteTests
             request.Headers.Add("X-Seat", seat);
         }
 
+        if (principal is not null)
+        {
+            request.Headers.Add("X-Principal", Uri.EscapeDataString(principal));
+        }
+
         using var response = await rig.Client.SendAsync(request, ct);
         return (response.StatusCode, await response.Content.ReadAsStringAsync(ct));
+    }
+
+    /// <summary>Waits for a captured log line that contains <paramref name="fragment"/>. A late audit line is written by
+    /// a thread-pool continuation after the 503 was answered, so a test waits for it and never asserts the instant it
+    /// releases the core.</summary>
+    private static async Task WaitForLogLineAsync(Rig rig, string fragment)
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(10);
+        while (!rig.Log.Lines.Any(l => l.Contains(fragment, StringComparison.Ordinal)))
+        {
+            Assert.True(DateTime.UtcNow < deadline, $"no log line contained \"{fragment}\"; the log held: {rig.Log.Joined}");
+            await Task.Delay(20, TestContext.Current.CancellationToken);
+        }
     }
 
     private static string Entries(int count, string password = FakeSecret) =>
@@ -405,6 +423,33 @@ public sealed class ServerAddRouteTests
         }
 
         Assert.Equal(HttpStatusCode.OK, accepted);
+    }
+
+    /// <summary>The 503 told the client nothing about the add, but the core commits when it finishes: its audit lines
+    /// (the added server, the failed row with the secret redacted) are written then, for the principal who sent the
+    /// add, and not before.</summary>
+    [Fact]
+    public async Task AnAddThatOutlivesTheTimeout_StillWritesItsAuditLines_ForThePrincipalWhoSentIt_WhenItFinishes()
+    {
+        var hang = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+        await using var rig = await StartAsync(_ => hang.Task, addTimeout: TimeSpan.FromMilliseconds(200));
+
+        var (status, body) = await PostAsync(rig, Entries(2), principal: "dana");
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, status);
+        AssertNoSecret(rig, body);
+        Assert.DoesNotContain(rig.Log.Lines, l => l.Contains("Server added by", StringComparison.Ordinal));
+
+        /* sql00 committed after the 503, and sql01's probe failed with the secret in the driver's text. */
+        hang.SetResult("{\"requested\":2,\"added\":1,\"skipped\":0,\"collided\":0,\"failed\":1,\"results\":["
+            + "{\"server\":\"sql00\",\"status\":\"added\",\"detail\":\"Connected\"},"
+            + "{\"server\":\"sql01\",\"status\":\"connection_failed\",\"detail\":\"login failed for password " + FakeSecret + "\"}]}");
+        await WaitForLogLineAsync(rig, "Server added by");
+
+        var added = Assert.Single(rig.Log.Lines, l => l.Contains("Server added by", StringComparison.Ordinal));
+        Assert.Contains("Server added by dana: sql00, auth SQL", added, StringComparison.Ordinal);
+        var failed = Assert.Single(rig.Log.Lines, l => l.Contains("Server add failed for", StringComparison.Ordinal));
+        Assert.Contains("Server add failed for dana: sql01, connection_failed: login failed for password [redacted]", failed, StringComparison.Ordinal);
+        AssertNoSecret(rig, body);
     }
 
     /* ═══════════════════════ slot release ═══════════════════════ */

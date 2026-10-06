@@ -399,6 +399,19 @@ public sealed class DarlingConfig
         config.SecretReferencesAsWritten = DarlingOwnedSecrets.CollectReferences(config);
         config.UnknownNetworkKeys = DarlingUnknownKeys.Find(json);
 
+        /* #5240: a reference in a server's own secret slot is one the file declares for that server, so the entry read from
+           the file may resolve it even when it is owned. The flags are set here and nowhere from a stored value. */
+        foreach (var server in config.Servers ?? new List<MonitoredServer>())
+        {
+            if (server is null)
+            {
+                continue;
+            }
+
+            server.EncryptedPasswordDeclaredByFile = DarlingSecretSource.IsReference(server.EncryptedPassword);
+            server.RemediationEncryptedPasswordDeclaredByFile = DarlingSecretSource.IsReference(server.RemediationEncryptedPassword);
+        }
+
         /* #1804: postgres.connectionString also takes an env:/file: reference — for the WHOLE string,
            since the password lives inside it and per-field indirection can't reach it. Resolved ONCE
            here at the parse seam so every consumer (worker, MCP/web hosts, CLI verbs) sees the real
@@ -2345,6 +2358,25 @@ public sealed class MonitoredServer
     public bool HasRemediationCredential =>
         !string.IsNullOrWhiteSpace(RemediationUsername) &&
         !string.IsNullOrWhiteSpace(RemediationEncryptedPassword);
+
+    /// <summary>
+    /// Whether darling.json itself declares <see cref="EncryptedPassword"/> as it stands: the same <c>env:</c>/<c>file:</c>
+    /// reference, in this same slot, for this same server id (#5240). It is the one thing that lets such a reference
+    /// resolve when it names one of the service's own configuration files or secrets
+    /// (<see cref="DarlingSecrets.ResolvePassword"/>); every other owned reference is refused where it resolves.
+    ///
+    /// <para>Set in two places, and never from a stored value. <see cref="DarlingConfig.Parse"/> sets it on an entry read from
+    /// the file, since the file declares what it holds. <c>StoreConfigProvider.BuildServerFromRow</c> sets it on a server
+    /// built from a store row only when a file entry with the same server id declares the same text in this slot, so a store
+    /// row that names another server's reference, or whose slot was changed, is not marked. <see cref="JsonIgnore"/>:
+    /// the file cannot set it, and it is not stored.</para>
+    /// </summary>
+    [JsonIgnore]
+    internal bool EncryptedPasswordDeclaredByFile { get; set; }
+
+    /// <summary><see cref="EncryptedPasswordDeclaredByFile"/> for <see cref="RemediationEncryptedPassword"/>.</summary>
+    [JsonIgnore]
+    internal bool RemediationEncryptedPasswordDeclaredByFile { get; set; }
 
     /// <summary>
     /// This server's <c>server_id</c>: the stored value when there is one, otherwise derived from

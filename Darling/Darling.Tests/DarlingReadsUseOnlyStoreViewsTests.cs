@@ -30,7 +30,21 @@ public sealed class DarlingReadsUseOnlyStoreViewsTests
 {
     private static readonly Regex BlockComment = new(@"/\*.*?\*/", RegexOptions.Singleline | RegexOptions.Compiled);
     private static readonly Regex LineComment = new(@"//[^\r\n]*", RegexOptions.Compiled);
-    private static readonly Regex ViewTarget = new(@"\b(?:FROM|JOIN)\s+(v_[a-z0-9_]+)", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+    /// <summary>A <c>FROM</c> or <c>JOIN</c> followed by a <c>v_</c> name. A <c>FROM</c> that follows <c>DISTINCT</c> is the comparison
+    /// operator in <c>IS [NOT] DISTINCT FROM v_old_x</c> (a variable named <c>v_old_x</c>, not a table source), so the lookbehind skips it (#5240).</summary>
+    private static readonly Regex ViewTarget = new(@"(?<!\bDISTINCT\s+)\b(?:FROM|JOIN)\s+(v_[a-z0-9_]+)", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    [Theory]
+    [InlineData("WHERE a IS DISTINCT FROM v_x", false)]
+    [InlineData("WHERE a IS NOT DISTINCT FROM v_x", false)]
+    [InlineData("WHERE a IS DISTINCT   FROM v_x", false)]
+    [InlineData("SELECT 1 FROM v_bogus", true)]
+    [InlineData("SELECT 1 FROM t JOIN v_bogus ON 1 = 1", true)]
+    [InlineData("SELECT 1 WHERE a IS DISTINCT FROM v_x AND EXISTS (SELECT 1 FROM v_bogus)", true)]
+    public void ViewTargetPattern_SkipsIsDistinctFrom_ButStillFlagsRealFromAndJoinTargets(string sql, bool flagged)
+    {
+        Assert.Equal(flagged, ViewTarget.IsMatch(sql));
+    }
 
     [Fact]
     public void EveryViewNamedAsAFromOrJoinTarget_InTheServiceViewerAnalysisAndStorageSql_IsOneTheStoreCreates()

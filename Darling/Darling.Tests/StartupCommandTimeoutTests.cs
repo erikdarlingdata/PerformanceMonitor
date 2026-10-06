@@ -156,7 +156,10 @@ public sealed class StartupCommandTimeoutTests
         ("StoreConfigProvider.cs", "SeedServiceRowAsync", 1, 0, 0, 0),
         ("StoreConfigProvider.cs", "SeedAlertSettingsAsync", 1, 0, 0, 0),
         ("StoreConfigProvider.cs", "SeedNotificationAsync", 1, 0, 0, 0),
-        ("StoreConfigProvider.cs", "SeedMonitoredServersAsync", 1, 0, 0, 0),
+        /* #5240: the seed's INSERT loop runs in one transaction behind the identity lock, so the member gained two
+           more bootstrap commands: the lock itself and the read of the addresses already held, both un-retried,
+           both on this deadline. The INSERT is the third. */
+        ("StoreConfigProvider.cs", "SeedMonitoredServersAsync", 3, 0, 0, 0),
 
         /* The serial collection-loop thread: the control-plane reload body plus the disk-check store-size
            read. Nine of these twelve ALSO run once on the bootstrap path above (LoadViewAsync's seven
@@ -189,7 +192,7 @@ public sealed class StartupCommandTimeoutTests
     };
 
     /// <summary>The group's own totals, so a member that stops creating commands fails loudly.</summary>
-    private const int ExpectedBootstrapSites = 34;
+    private const int ExpectedBootstrapSites = 36;
 
     private const int ExpectedConnectProbeSites = 1;
 
