@@ -16,7 +16,7 @@
  * this string. pages/deadlock-graph.js keeps its own copy for the same reason (it does not import this file).
  */
 
-import { el, mount, parseUtc, axisTime, emptyStrip } from "./util.js";
+import { el, mount, parseUtc, axisTime, emptyStrip, setQueryWaitFilter, waitIsLinked } from "./util.js";
 
 const SVG_NS = "http://www.w3.org/2000/svg";
 
@@ -587,13 +587,32 @@ export function renderLineChart(spec) {
      AddChartDrillDownMenuItem (ServerTab.DrillDown.cs) takes the nearest point's time the same way, so a click a pixel or
      two beside a one-bucket spike on a 7-day chart still opens the hour that holds it. A click past either edge snaps to
      the first or last point; no point on the plot gives undefined, so no items. */
-  const timeAt = atTime
-    ? (clientX) => {
+  /* A wait trend chart (atTime.item "wait", #5235) also names the wait: the series drawn nearest the pointer at that point
+     (its plotted y, the same position the hover dot takes), among the series with a value there. The desktop's
+     GetNearestSeries does the same. No series with a value gives no wait, and the menu offers the generic item. */
+  const pickAt = atTime
+    ? (clientX, clientY) => {
         const idx = nearestPointIdx(toVbX(clientX));
-        return idx < 0 ? undefined : rows[idx].t.getTime();
+        if (idx < 0) return undefined;
+        const picked = { t: rows[idx].t.getTime() };
+        if (atTime.item === "wait") {
+          const rect = root.getBoundingClientRect();
+          const vbY = rect.height ? ((clientY - rect.top) / rect.height) * H : 0;
+          let best = Infinity;
+          for (let k = 0; k < series.length; k++) {
+            const v = rows[idx].r[series[k].key];
+            if (v == null || v === "" || isNaN(v)) continue;
+            const d = Math.abs((usesStack ? plotY(stackTops[idx][k]) : plotY(readVal(rows[idx].r, series[k].key))) - vbY);
+            if (d < best) {
+              best = d;
+              picked.wait = series[k].label || series[k].key;
+            }
+          }
+        }
+        return picked;
       }
     : null;
-  attachChartMenu(chart, root, { title, source, zoomed, onResetZoom, xKey, series, series2, menuKey, atTime, timeAt }, exportRows);
+  attachChartMenu(chart, root, { title, source, zoomed, onResetZoom, xKey, series, series2, menuKey, atTime, pickAt }, exportRows);
   return chart;
 }
 
@@ -1043,7 +1062,63 @@ const AT_TIME_TARGETS = {
   queries: { label: CHART_MENU_LABELS.atQueries, tab: "queries", panel: "Active Queries" },
   blocking: { label: CHART_MENU_LABELS.atBlocking, tab: "blocking", panel: "Blocking" },
   deadlocks: { label: CHART_MENU_LABELS.atDeadlocks, tab: "blocking", panel: "Deadlocks" },
+  /* The wait trend chart's item (#5235): opens Active Queries too; its label names the wait, so the menu builds it. */
+  wait: { label: CHART_MENU_LABELS.atQueries, tab: "queries", panel: "Active Queries" },
 };
+
+/* The custom range an at-this-time item applies: t +- 30 minutes. A range may not end in the future, so near "now" the
+   hour is shifted back to end at the current time (it still holds t). A null t keeps the range the page holds (a wait row
+   with no instant of its own, #5235). Success runs beforeRoute, then scrolls the item's own grid into view and routes to
+   the tab; a refused range calls say with the reason, returns it, sets no filter and does not route. */
+export async function openServerTabAt(server, tMs, item, { beforeRoute = null, say = null } = {}) {
+  const g = AT_TIME_TARGETS[item] || AT_TIME_TARGETS.queries;
+  const tell = (msg) => {
+    if (typeof say === "function") say(msg);
+  };
+  try {
+    if (Number.isFinite(tMs)) {
+      const mod = await import("./pages/server.js");
+      let start = tMs - AT_TIME_HALF_WINDOW_MS;
+      let end = tMs + AT_TIME_HALF_WINDOW_MS;
+      const now = Date.now();
+      if (end > now) {
+        end = now;
+        start = now - 2 * AT_TIME_HALF_WINDOW_MS;
+      }
+      const err = mod.applyCustomRange(server, start, end, now, { redraw: false });
+      if (err) {
+        tell(err);
+        return err;
+      }
+    }
+    if (typeof beforeRoute === "function") beforeRoute();
+    /* Bring the item's own grid into view once the router has built the tab. The router's hashchange listener was
+       added first (app.js), and for a server already on screen renderServer paints the tab synchronously, so the new
+       panels are in place when this one runs. A chart and a grid share the title "Deadlocks"; the grid is the later one.
+       The listener is once-only, and added after the range is taken, so a refused range leaves none behind. */
+    if (typeof window.addEventListener === "function") {
+      window.addEventListener(
+        "hashchange",
+        () => {
+          const heads = [...document.querySelectorAll(".panel > h3")].filter((h) => h.firstChild && h.firstChild.textContent === g.panel);
+          const last = heads[heads.length - 1];
+          if (last && last.parentNode.scrollIntoView) last.parentNode.scrollIntoView({ block: "start" });
+        },
+        { once: true }
+      );
+    }
+    /* A full render, not a panel redraw, so the range picker in the page head shows the new range too (#5230). Setting
+       the hash to the tab already open fires no hashchange, so then the event is raised here. */
+    const target = "#/server/" + encodeURIComponent(server) + "/" + g.tab;
+    if (location.hash === target) window.dispatchEvent(new Event("hashchange"));
+    else location.hash = target;
+    return null;
+  } catch (e) {
+    const msg = "Could not open that time: " + (e && e.message ? e.message : "the page refused.");
+    tell(msg);
+    return msg;
+  }
+}
 
 const SVG_STYLE_PROPS = ["fill", "stroke", "stroke-width", "stroke-dasharray", "stroke-linecap", "stroke-linejoin", "opacity", "fill-opacity", "stroke-opacity", "font-family", "font-size", "font-weight", "font-variant-numeric", "text-anchor", "display"];
 const IMAGE_SCALE = 2;
@@ -1123,7 +1198,7 @@ const chartMenuStates = new Map();
 const MENU_STATE_TTL_MS = 90000;
 
 function attachChartMenu(chart, root, opts, rows) {
-  const { title, source, zoomed, onResetZoom, xKey, series, series2, menuKey, atTime, timeAt } = opts;
+  const { title, source, zoomed, onResetZoom, xKey, series, series2, menuKey, atTime, pickAt } = opts;
   const owner = {};
   const held = menuKey ? chartMenuStates.get(menuKey) : null;
   const restore = held && Date.now() - held.at < MENU_STATE_TTL_MS ? held : null;
@@ -1231,53 +1306,26 @@ function attachChartMenu(chart, root, opts, rows) {
     sourceBox.style.display = "";
   };
 
-  /* The custom range an at-this-time item applies: t ± 30 minutes. A range may not end in the future, so near "now"
-     the hour is shifted back to end at the current time (it still holds t). */
-  const goToTime = async (t, tab, panel) => {
-    try {
-      const mod = await import("./pages/server.js");
-      let start = t - AT_TIME_HALF_WINDOW_MS;
-      let end = t + AT_TIME_HALF_WINDOW_MS;
-      const now = Date.now();
-      if (end > now) {
-        end = now;
-        start = now - 2 * AT_TIME_HALF_WINDOW_MS;
-      }
-      const err = mod.applyCustomRange(atTime.server, start, end, now, { redraw: false });
-      if (err) {
-        say(err);
-        return;
-      }
-      /* Bring the item's own grid into view once the router has built the tab. The router's hashchange listener was
-         added first (app.js), and for a server already on screen renderServer paints the tab synchronously, so the new
-         panels are in place when this one runs. A chart and a grid share the title "Deadlocks"; the grid is the later one.
-         The listener is once-only, and added after the range is taken, so a refused range leaves none behind. */
-      if (typeof window.addEventListener === "function") {
-        window.addEventListener(
-          "hashchange",
-          () => {
-            const heads = [...document.querySelectorAll(".panel > h3")].filter((h) => h.firstChild && h.firstChild.textContent === panel);
-            const last = heads[heads.length - 1];
-            if (last && last.parentNode.scrollIntoView) last.parentNode.scrollIntoView({ block: "start" });
-          },
-          { once: true }
-        );
-      }
-      /* A full render, not a panel redraw, so the range picker in the page head shows the new range too (#5230). Setting
-         the hash to the tab already open fires no hashchange, so then the event is raised here. */
-      const target = "#/server/" + encodeURIComponent(atTime.server) + "/" + tab;
-      if (location.hash === target) window.dispatchEvent(new Event("hashchange"));
-      else location.hash = target;
-    } catch (e) {
-      say("Could not open that time: " + (e && e.message ? e.message : "the page refused."));
-    }
-  };
-
-  const open = (x, y, t) => {
+  const open = (x, y, t, wait) => {
     if (popup) close();
     const hasTime = !!atTime && Number.isFinite(t);
     const g = hasTime ? AT_TIME_TARGETS[atTime.item] || AT_TIME_TARGETS.queries : null;
-    const timed = g ? [{ label: g.label, run: () => goToTime(t, g.tab, g.panel) }] : [];
+    /* The wait item names the wait it was picked on (as text, in the button's label); with none, or a QDS_* wait (never
+       linked, like a row's), it is the generic Active Queries item. The wait item sets the wait filter and the generic
+       queries item clears it; Blocking and Deadlocks leave it alone. */
+    const named = !!g && atTime.item === "wait" && waitIsLinked(wait);
+    const timed = g
+      ? [
+          {
+            label: named ? "Show Queries With " + wait + " at This Time" : g.label,
+            run: () =>
+              openServerTabAt(atTime.server, t, atTime.item, {
+                say,
+                beforeRoute: g.tab === "queries" ? () => setQueryWaitFilter(atTime.server, named ? wait : "") : null,
+              }),
+          },
+        ]
+      : [];
     const items = actions.concat(timed).map((a) => {
       const b = el("button", { class: "chart-menu-item", type: "button", role: "menuitem", text: a.label });
       b.addEventListener("click", () => {
@@ -1288,7 +1336,7 @@ function attachChartMenu(chart, root, opts, rows) {
       return b;
     });
     popup = el("div", { class: "chart-menu", role: "menu" }, items);
-    const at0 = typeof x === "number" && typeof y === "number" ? (hasTime ? { x, y, t } : { x, y }) : null;
+    const at0 = typeof x === "number" && typeof y === "number" ? (hasTime ? (named ? { x, y, t, wait } : { x, y, t }) : { x, y }) : null;
     if (at0) {
       /* The stylesheet pins the menu to the right edge; a click position needs left/top alone. */
       popup.style.right = "auto";
@@ -1340,8 +1388,9 @@ function attachChartMenu(chart, root, opts, rows) {
     const box = chart.getBoundingClientRect();
     /* Only a click on the drawing itself names a time: the legend, the status line, the ⋯ button and the open menu do not,
        and Shift+F10 on the button lands here with the button as the target (#5230). `root` is the plot's SVG. */
-    const onPlot = !!timeAt && !!e.target && root.contains(e.target);
-    open(Math.max(0, e.clientX - box.left), Math.max(0, e.clientY - box.top), onPlot ? timeAt(e.clientX) : undefined);
+    const onPlot = !!pickAt && !!e.target && root.contains(e.target);
+    const at = onPlot ? pickAt(e.clientX, e.clientY) : undefined;
+    open(Math.max(0, e.clientX - box.left), Math.max(0, e.clientY - box.top), at ? at.t : undefined, at ? at.wait : undefined);
   });
   chart.appendChild(button);
   chart.appendChild(status);
@@ -1353,7 +1402,7 @@ function attachChartMenu(chart, root, opts, rows) {
     }
     if (restore.menu) {
       const m = restore.menu;
-      open(typeof m.x === "number" ? m.x : undefined, typeof m.y === "number" ? m.y : undefined, typeof m.t === "number" ? m.t : undefined);
+      open(typeof m.x === "number" ? m.x : undefined, typeof m.y === "number" ? m.y : undefined, typeof m.t === "number" ? m.t : undefined, typeof m.wait === "string" ? m.wait : undefined);
     }
   }
 }

@@ -1261,3 +1261,10 @@ pre.code {
 .reco-card { margin: 0.5rem 0; }
 .reco-fix { white-space: pre-wrap; overflow-wrap: anywhere; background: var(--bg-dark); padding: 0.6rem; border-radius: 4px; }
 .reco-actions { display: flex; gap: 0.5rem; margin-top: 0.4rem; }
+
+/* #5235: a wait cell that links to Active Queries filtered to that wait, and the strip that clears the filter. */
+.wait-link { background: none; border: 0; padding: 0; font: inherit; color: var(--accent); cursor: pointer; text-align: left; text-decoration: underline; text-decoration-style: dotted; }
+.wait-link:hover { text-decoration-style: solid; }
+.wait-link:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.wait-link-note { margin-left: 0.5rem; color: var(--err); font-size: 0.78rem; }
+.wait-filter-strip { display: flex; align-items: center; flex-wrap: wrap; gap: 0.5rem; margin-bottom: 0.5rem; }

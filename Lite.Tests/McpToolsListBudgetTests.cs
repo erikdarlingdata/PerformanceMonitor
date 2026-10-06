@@ -141,7 +141,10 @@ public sealed class McpToolsListBudgetTests
     // (+95). Constant set to the value McpToolsListBudgetTests itself measured on this tree.
     // get_perfmon_stats' head names the new per_second field in its rate clause (521 -> 579), byte-identical
     // with Darling's twin. Constant set to the value McpToolsListBudgetTests itself measured on this tree.
-    private const int TotalCeilingBytes = 92_358;
+    // get_active_queries gains its wait_type parameter (#5235, a 190-character description, byte-identical with Darling's twin; the served head
+    // is unchanged). Constant set to the value McpToolsListBudgetTests itself measured on this tree: 92,203 (the previous ceiling, 92,358, had
+    // headroom even with the parameter in).
+    private const int TotalCeilingBytes = 92_203;
 
     private const int ConvertedHeadCap = 1_000;
     private const int ConvertedParameterCap = 200;
