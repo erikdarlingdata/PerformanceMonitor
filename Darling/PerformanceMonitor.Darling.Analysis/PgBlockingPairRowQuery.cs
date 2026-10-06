@@ -9,9 +9,11 @@
 using System;
 using System.Collections.Generic;
 using System.Data.Common;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using NpgsqlTypes;
 using PerformanceMonitor.Analysis;
 
 namespace PerformanceMonitor.Darling.Analysis;
@@ -76,12 +78,64 @@ SELECT
     blocked_sql_text, blocking_sql_text,
     {IdentityColumns},
     contentious_object,
-    {TrailingIdentityColumns}
+    {TrailingIdentityColumns}{DmvSnapshotTail}";
+
+    /// <summary>The same fetch with an empty string where each statement text is (#5361): the drill-down reads the
+    /// pair-rows without the text, reconstructs, and then reads the whole text of only the levels it shows
+    /// (<see cref="DmvChainLevelTextSql"/>). Every other column and the column order are <see cref="DmvSnapshotSql"/>'s,
+    /// so <see cref="Read"/> maps it unchanged.</summary>
+    public const string DmvSnapshotTextFreeSql = $@"
+SELECT
+    {LeadingColumns},
+    ''::text AS blocked_sql_text, ''::text AS blocking_sql_text,
+    {IdentityColumns},
+    contentious_object,
+    {TrailingIdentityColumns}{DmvSnapshotTail}";
+
+    private const string DmvSnapshotTail = $@"
 FROM v_dmv_blocking_snapshots
 WHERE server_id = $1 AND event_time >= $2 AND event_time <= $3
 {SpidFilter}
 ORDER BY event_time DESC
 LIMIT 5000";
+
+    /* #5361: the whole statement text of the pair-rows a chain's levels were built from, by event key. $1 is the
+       server and $2 to $6 are the keys' event times and spid:ecid pairs as five parallel arrays; the blocked-process
+       report read also takes the collection_time floor the pair-row read used, as $7, so it prunes the same chunks.
+       A missing spid or ecid reads as 0 on both sides, exactly as Read maps it (blocking_spid is never NULL: the
+       pair-row read filters it). Rows of one key are the same event; when more than one is stored, the one with the
+       longest wait is read, which is the row the reconstruction keeps for an edge. */
+    private const string ChainLevelTextHead = @"
+SELECT DISTINCT ON (v.event_time, COALESCE(v.blocked_spid, 0), COALESCE(v.blocked_ecid, 0), v.blocking_spid, COALESCE(v.blocking_ecid, 0))
+    v.event_time,
+    COALESCE(v.blocked_spid, 0) AS blocked_spid,
+    COALESCE(v.blocked_ecid, 0) AS blocked_ecid,
+    v.blocking_spid,
+    COALESCE(v.blocking_ecid, 0) AS blocking_ecid,
+    v.blocked_sql_text,
+    v.blocking_sql_text
+FROM ";
+
+    private const string ChainLevelTextJoin = @" AS v
+JOIN unnest($2::timestamp[], $3::int[], $4::int[], $5::int[], $6::int[])
+    AS k(event_time, blocked_spid, blocked_ecid, blocking_spid, blocking_ecid)
+  ON  v.event_time = k.event_time
+  AND v.blocking_spid = k.blocking_spid
+  AND COALESCE(v.blocked_spid, 0) = k.blocked_spid
+  AND COALESCE(v.blocked_ecid, 0) = k.blocked_ecid
+  AND COALESCE(v.blocking_ecid, 0) = k.blocking_ecid
+WHERE v.server_id = $1";
+
+    private const string ChainLevelTextTail = @"
+ORDER BY v.event_time, COALESCE(v.blocked_spid, 0), COALESCE(v.blocked_ecid, 0), v.blocking_spid, COALESCE(v.blocking_ecid, 0),
+    v.wait_time_ms DESC NULLS LAST";
+
+    /// <summary>The whole statement text of the blocked-process-report pair-rows behind a chain's levels (#5361).</summary>
+    public const string BprChainLevelTextSql = $@"{ChainLevelTextHead}v_blocked_process_reports{ChainLevelTextJoin}
+AND   v.collection_time >= $7{ChainLevelTextTail}";
+
+    /// <summary>The whole statement text of the DMV-snapshot pair-rows behind a chain's levels (#5361).</summary>
+    public const string DmvChainLevelTextSql = $@"{ChainLevelTextHead}v_dmv_blocking_snapshots{ChainLevelTextJoin}{ChainLevelTextTail}";
 
     public static BlockingPairRow Read(DbDataReader reader) => new()
     {
@@ -147,12 +201,14 @@ LIMIT 5000";
     /// </summary>
     internal static async Task AppendDmvSnapshotRowsAsync(
         Func<NpgsqlCommand> createCommand, List<BlockingPairRow> rows, int serverId, DateTime start, DateTime end,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken, bool includeText = true)
     {
         var dmv = new List<BlockingPairRow>();
         using (var cmd = createCommand())
         {
-            cmd.CommandText = DmvSnapshotSql;
+            /* #5361: includeText false is the drill-down's text-free read (empty text, fetched afterwards for the levels it
+               shows); the fact collector and the viewer keep the whole text. */
+            cmd.CommandText = includeText ? DmvSnapshotSql : DmvSnapshotTextFreeSql;
             cmd.Parameters.AddWithValue(serverId);
             cmd.Parameters.AddWithValue(DateTime.SpecifyKind(start, DateTimeKind.Unspecified));
             cmd.Parameters.AddWithValue(DateTime.SpecifyKind(end, DateTimeKind.Unspecified));
@@ -163,5 +219,46 @@ LIMIT 5000";
         }
 
         BlockingPairRowMerge.MergeInto(rows, dmv);
+    }
+
+    /// <summary>
+    /// Reads the whole statement text of the pair-rows behind the chain levels a drill-down shows (#5361), by event key,
+    /// from one source: <paramref name="sql"/> is <see cref="BprChainLevelTextSql"/> (pass the pair-row read's
+    /// <paramref name="collectedFrom"/> floor) or <see cref="DmvChainLevelTextSql"/> (pass null). Returns each key's
+    /// blocked and blocking text, NULL read as empty text as <see cref="Read"/> does; a key whose row is gone is absent.
+    /// One round trip however many levels print: the keys travel as five parallel arrays.
+    /// </summary>
+    internal static async Task<Dictionary<PairRowKey, (string BlockedSql, string BlockingSql)>> ReadChainLevelTextAsync(
+        NpgsqlConnection connection, string sql, int serverId, IReadOnlyCollection<PairRowKey> keys,
+        DateTime? collectedFrom, int commandTimeoutSeconds, CancellationToken cancellationToken)
+    {
+        var text = new Dictionary<PairRowKey, (string BlockedSql, string BlockingSql)>();
+        if (keys.Count == 0)
+            return text;
+
+        using var cmd = new NpgsqlCommand(sql, connection) { CommandTimeout = commandTimeoutSeconds };
+        cmd.Parameters.AddWithValue(serverId);
+        cmd.Parameters.Add(new NpgsqlParameter
+        {
+            NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Timestamp,
+            Value = keys.Select(k => DateTime.SpecifyKind(k.EventTime, DateTimeKind.Unspecified)).ToArray()
+        });
+        cmd.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Integer, Value = keys.Select(k => k.BlockedSpid).ToArray() });
+        cmd.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Integer, Value = keys.Select(k => k.BlockedEcid).ToArray() });
+        cmd.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Integer, Value = keys.Select(k => k.BlockingSpid).ToArray() });
+        cmd.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Integer, Value = keys.Select(k => k.BlockingEcid).ToArray() });
+        if (collectedFrom is { } floor)
+            cmd.Parameters.AddWithValue(DateTime.SpecifyKind(floor, DateTimeKind.Unspecified));
+
+        await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            var key = new PairRowKey(
+                reader.GetDateTime(0), Convert.ToInt32(reader.GetValue(1)), Convert.ToInt32(reader.GetValue(2)),
+                Convert.ToInt32(reader.GetValue(3)), Convert.ToInt32(reader.GetValue(4)));
+            text[key] = (reader.IsDBNull(5) ? string.Empty : reader.GetString(5), reader.IsDBNull(6) ? string.Empty : reader.GetString(6));
+        }
+
+        return text;
     }
 }

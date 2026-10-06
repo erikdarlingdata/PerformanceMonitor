@@ -17,6 +17,7 @@ using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Analysis;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Analysis;
@@ -67,9 +68,10 @@ public sealed partial class PgTargetDrillDownCollector
 
     /// <summary>
     /// The captured deadlock reports in the window, grouped into SHAPES and ranked by recurrence.
-    /// <c>$1</c> server_id, <c>$2</c>/<c>$3</c> window (naive UTC), <c>$4</c> the shape cap, <c>$5</c> and
-    /// <c>$6</c> how much of the statement and the graph are read, which since #4005 is what normalizing them
-    /// needs (<c>PgDeadlockLogParser.NormalizeReadCap</c>) rather than the caps the drill-down shows.
+    /// <c>$1</c> server_id, <c>$2</c>/<c>$3</c> window (naive UTC), <c>$4</c> the shape cap. The statement and
+    /// the graph come back whole (#5320): normalizing withholds one longer than the lexer reads
+    /// (<c>PgDeadlockLogParser.NormalizeReadCap</c>), the statement filter judges the whole normalized text, and the
+    /// caps the drill-down shows are applied last.
     ///
     /// <para><b>A shape is <c>(participant_count, lock_modes, resources)</c>, not <c>deadlock_hash</c>.</b>
     /// The hash is <c>PgDeadlockLogParser.IdentityOf</c> — SHA-256 over the timestamp and the DETAIL block, pids
@@ -85,9 +87,8 @@ public sealed partial class PgTargetDrillDownCollector
     /// <para><b>Windowed on <c>COALESCE(occurred_at, collection_time)</c></b>, the same expression the rate
     /// fact's <c>exemplar_count</c> is counted on and <c>DarlingPgDeadlockReader</c> reads, so the rows here are
     /// the rows that count named and <c>log_captured</c> in the payload agrees with the card and the grid
-    ///. <c>occurred_at</c> is nullable, hence the fallback. <c>$7</c> is the
-    /// <see cref="PerformanceMonitor.Darling.Storage.EventWindowFloor"/> for <c>$2</c>, bound LAST so the
-    /// existing <c>$4</c>–<c>$6</c> keep their numbers; it bounds <c>collection_time</c> from below only, so a
+    ///. <c>occurred_at</c> is nullable, hence the fallback. <c>$5</c> is the
+    /// <see cref="PerformanceMonitor.Darling.Storage.EventWindowFloor"/> for <c>$2</c>, bound LAST; it bounds <c>collection_time</c> from below only, so a
     /// report collected late still counts.</para>
     ///
     /// <para>The exemplar of each shape is its LATEST report (<c>array_agg(… ORDER BY occurred_at DESC NULLS
@@ -117,7 +118,7 @@ WITH shapes AS (
     WHERE server_id = $1
     AND   COALESCE(occurred_at, collection_time) >= $2
     AND   COALESCE(occurred_at, collection_time) <= $3
-    AND   collection_time >= $7
+    AND   collection_time >= $5
     GROUP BY participant_count, lock_modes, resources
 )
 SELECT
@@ -130,9 +131,9 @@ SELECT
     last_seen,
     latest_hash,
     latest_victim_pid,
-    LEFT(latest_victim_statement, $5)                    AS victim_statement,
+    latest_victim_statement                              AS victim_statement,
     length(latest_victim_statement)                      AS victim_statement_length,
-    LEFT(latest_graph_text, $6)                          AS graph_text,
+    latest_graph_text                                    AS graph_text,
     length(latest_graph_text)                            AS graph_text_length,
     CAST(count(*) OVER () AS integer)                    AS distinct_shapes,
     CAST(SUM(reports) OVER () AS integer)                AS total_reports,
@@ -194,9 +195,8 @@ LIMIT $4";
         cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
         cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
         cmd.Parameters.AddWithValue(DeadlockExemplarCap);
-        /* #4005: the read cuts at what normalizing needs, and the caps are applied after it — see below. */
-        cmd.Parameters.AddWithValue(PgDeadlockLogParser.NormalizeReadCap);
-        cmd.Parameters.AddWithValue(PgDeadlockLogParser.NormalizeReadCap);
+        /* #5320: the read returns the whole statement and graph; normalizing withholds one past what the lexer
+           reads, then the statement filter judges the whole normalized text, and the caps are applied after both. */
         cmd.Parameters.AddWithValue(PerformanceMonitor.Darling.Storage.EventWindowFloor.For(context.TimeRangeStart));
 
         using (var reader = await cmd.ExecuteReaderAsync(context.CancellationToken))
@@ -213,9 +213,9 @@ LIMIT $4";
                    it. The read's own bound is past anything the lexer reads, so what it cuts is withheld whole
                    whichever way round. The flags say whether the caps cut what the reader is shown. */
                 var victimRead = reader.IsDBNull(9) ? null : reader.GetString(9);
-                var victimNormalized = PgDeadlockLogParser.NormalizeStatement(victimRead);
+                var victimNormalized = SensitiveStatements.Text(PgDeadlockLogParser.NormalizeStatement(victimRead));
                 var victimStatement = victimNormalized is { Length: > StatementTextCap } ? victimNormalized[..StatementTextCap] : victimNormalized;
-                var graphNormalized = PgDeadlockLogParser.NormalizeGraph(reader.IsDBNull(11) ? null : reader.GetString(11));
+                var graphNormalized = SensitiveStatements.Text(PgDeadlockLogParser.NormalizeGraph(reader.IsDBNull(11) ? null : reader.GetString(11)));
                 var graphCharCut = graphNormalized is { Length: > GraphTextCharCap };
                 var (boundedGraph, graphLines, graphTruncated) = BoundGraphText(
                     graphCharCut ? graphNormalized![..GraphTextCharCap] : graphNormalized, readCut: graphCharCut);

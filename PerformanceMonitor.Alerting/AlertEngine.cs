@@ -1837,7 +1837,7 @@ public sealed class AlertEngine
                     var worst = longRunning[0];                                     /* :353 */
                     var elapsedMinutes = worst.ElapsedSeconds / 60;                 /* :354 — integer division, exactly Lite */
                     /* :355-356 — the query-text preview feeds ShortMessage (the toast body). */
-                    var preview = AlertContextBuilders.TruncateText(worst.QueryText, 80);
+                    var preview = AlertContextBuilders.TruncateStatement(worst.QueryText, 80);
                     var previewSuffix = string.IsNullOrEmpty(preview) ? "" : $" — {preview}";
 
                     var muteCtx = new AlertMuteContext                              /* :358-364 */

@@ -163,7 +163,7 @@ LIMIT 5";
         Assert.DoesNotContain("query_text", sql[..cut], StringComparison.Ordinal);
 
         /* ...it is read after the cut, over the same filter, with a NULL-safe path for a NULL key. */
-        Assert.Contains("SELECT LEFT(MAX(v.query_text), 500)", sql[cut..], StringComparison.Ordinal);
+        Assert.Contains("SELECT MAX(v.query_text)", sql[cut..], StringComparison.Ordinal);
         Assert.Contains("v.database_name IS NOT DISTINCT FROM t.database_name", sql[cut..], StringComparison.Ordinal);
         Assert.Contains("v.query_hash IS NOT DISTINCT FROM t.query_hash", sql[cut..], StringComparison.Ordinal);
     }

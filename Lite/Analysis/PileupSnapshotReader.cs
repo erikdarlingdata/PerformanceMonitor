@@ -13,6 +13,7 @@ using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using Microsoft.Extensions.Logging;
 using PerformanceMonitor.Analysis;
+using PerformanceMonitor.Common;
 using PerformanceMonitorLite.Database;
 
 namespace PerformanceMonitorLite.Analysis;
@@ -35,6 +36,14 @@ namespace PerformanceMonitorLite.Analysis;
 /// </summary>
 public class PileupSnapshotReader
 {
+    /// <summary>The characters of a statement the detector keeps (the bound the read's <c>LEFT()</c> applied until #5320).</summary>
+    internal const int StatementTextCharacters = 1500;
+
+    /// <summary>The first <see cref="StatementTextCharacters"/> text elements of <paramref name="text"/>, unjudged: the cut
+    /// DuckDB's <c>LEFT</c> over the text column made, for the identity surrogate and the noise test only (#5320).</summary>
+    internal static string RawCut(string text) =>
+        text.Length <= StatementTextCharacters ? text : text[..McpHelpers.TextElementCutLength(text, StatementTextCharacters)];
+
     private readonly DuckDbInitializer _duckDb;
     private readonly ILogger? _logger;
 
@@ -65,7 +74,7 @@ public class PileupSnapshotReader
 SELECT collection_time,
        session_id,
        query_hash,
-       LEFT(query_text, 1500) AS query_text,
+       query_text,
        database_name,
        status,
        wait_type,
@@ -87,11 +96,14 @@ LIMIT 5000";
             using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
             while (await reader.ReadAsync(cancellationToken))
             {
+                var rawText = reader.IsDBNull(3) ? null : reader.GetString(3);
                 rows.Add(new SameStatementPileupDetector.SnapshotRow(
                     CollectionTime: reader.GetDateTime(0),
                     SessionId: reader.IsDBNull(1) ? 0 : Convert.ToInt32(reader.GetValue(1)),
                     QueryHash: reader.IsDBNull(2) ? null : reader.GetString(2),
-                    QueryText: reader.IsDBNull(3) ? null : reader.GetString(3),
+                    /* #5320: the raw cut feeds only the identity surrogate and the noise filter, exactly as the SQL cut
+                       did; the text the finding prints is judged whole, then cut (PreviewText). */
+                    QueryText: rawText is null ? null : RawCut(rawText),
                     DatabaseName: reader.IsDBNull(4) ? null : reader.GetString(4),
                     Status: reader.IsDBNull(5) ? null : reader.GetString(5),
                     WaitType: reader.IsDBNull(6) ? null : reader.GetString(6),
@@ -99,7 +111,8 @@ LIMIT 5000";
                     ElapsedMs: reader.IsDBNull(8) ? 0L : Convert.ToInt64(reader.GetValue(8)),
                     CpuTimeMs: reader.IsDBNull(9) ? 0L : Convert.ToInt64(reader.GetValue(9)),
                     LogicalReads: reader.IsDBNull(10) ? 0L : Convert.ToInt64(reader.GetValue(10)),
-                    PhysicalReads: reader.IsDBNull(11) ? 0L : Convert.ToInt64(reader.GetValue(11))));
+                    PhysicalReads: reader.IsDBNull(11) ? 0L : Convert.ToInt64(reader.GetValue(11)),
+                    PreviewText: McpHelpers.StatementPreview(rawText, StatementTextCharacters)));
             }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
