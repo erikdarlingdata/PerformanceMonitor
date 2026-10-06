@@ -156,7 +156,8 @@ public sealed class SensitiveStatementsTests
     public void AMatchThatRunsPastItsTimeoutGivesTimedOut()
     {
         // Nested alternation under a quantifier backtracks exponentially on a near miss.
-        var judge = SensitiveStatements.CreateJudge("(a|aa)+b", TimeSpan.FromMilliseconds(50));
+        // Without the pre-check: its linear-time engine would answer this toy pattern (which has no assertion to drop) Clean.
+        var judge = SensitiveStatements.CreateJudge("(a|aa)+b", TimeSpan.FromMilliseconds(50), prefilter: false);
 
         var verdict = judge(new string('a', 60) + "c");
 
@@ -165,29 +166,231 @@ public sealed class SensitiveStatementsTests
         Assert.Equal(SensitiveStatements.Verdict.Clean, judge("xyz"));
     }
 
-    // The two timing tests take the best of several attempts: the test assembly runs many classes in parallel
-    // and a loaded machine can stretch one wall-clock reading; the verdict itself must hold on every attempt
-    // for the adversarial strings.
+    // The timing tests take the best of several attempts: the test assembly runs many classes in parallel
+    // and a loaded machine can stretch one wall-clock reading; the verdict itself must hold on every attempt.
+
+    /// <summary>The two comment-token strings the plan once pinned as TimedOut. The linear-time pre-check
+    /// (#5320 M1) finds no <c>role</c>, <c>user</c> or literal in them, so they are Clean, which is also what
+    /// PostgreSQL answers.</summary>
     [Fact]
-    public void EachAdversarialStringGivesTimedOutWithin300Ms()
+    public void EachAdversarialStringIsCleanWithin50Ms()
     {
         SensitiveStatements.Judge("warm the regex up");
         foreach (var text in SensitiveStatementCorpus.Adversarial)
         {
-            var best = long.MaxValue;
-            for (var attempt = 0; attempt < 4; attempt++)
-            {
-                var watch = Stopwatch.StartNew();
-                var verdict = SensitiveStatements.Judge(text);
-                watch.Stop();
+            var best = BestOfJudging(text, SensitiveStatements.Verdict.Clean, 5);
 
-                Assert.Equal(SensitiveStatements.Verdict.TimedOut, verdict);
-                best = Math.Min(best, watch.ElapsedMilliseconds);
+            Assert.True(best < 50, $"best of 5 took {best} ms: {text}");
+            Assert.False(SensitiveStatements.Names(text));
+        }
+    }
+
+    /// <summary>Ordinary banner comments: a run of dashes after <c>create</c>, a comment after a column named
+    /// <c>pwd</c>, and so on. The full judge splits a dash run exponentially on these, so only the pre-check
+    /// keeps them Clean.</summary>
+    [Fact]
+    public void OrdinaryDashBannersAreCleanWithin50Ms()
+    {
+        var dashes = new string('-', 60);
+        var banners = new[]
+        {
+            "----" + dashes + "\n-- Create\n----" + dashes + "\nCREATE TABLE dbo.t (id int);",
+            "-- Create " + dashes + "\nSELECT 1",
+            "SELECT 1 AS pwd -- " + dashes,
+            "UPDATE t SET secret -- " + dashes + "\n= 1",
+            "create " + dashes + "x",
+            "create" + string.Concat(Enumerable.Repeat(" --", 20)),
+        };
+        SensitiveStatements.Judge("warm the regex up");
+        foreach (var text in banners)
+        {
+            var best = BestOfJudging(text, SensitiveStatements.Verdict.Clean, 5);
+
+            Assert.True(best < 50, $"best of 5 took {best} ms: {text.Substring(0, Math.Min(40, text.Length))}");
+        }
+    }
+
+    /// <summary>A string the pre-check still hits (<c>xcreate login</c> has no word start, so only the superset
+    /// matches) but the full judge cannot finish: it keeps the TimedOut verdict, which counts as named. A
+    /// planted near-hit can still force a timeout, which is what the process-wide memo is for.</summary>
+    [Fact]
+    public void ANearHitThatReachesTheFullJudgeStillTimesOutAndStaysNamed()
+    {
+        var text = "xcreate login; create" + string.Concat(Enumerable.Repeat(" --", 40)) + "x";
+        SensitiveStatements.Judge("warm the regex up");
+
+        var best = BestOfJudging(text, SensitiveStatements.Verdict.TimedOut, 3);
+
+        Assert.True(best <= 300, $"best of 3 took {best} ms");
+        Assert.True(SensitiveStatements.Names(text));
+    }
+
+    /// <summary>A 100 KB binary literal (200,000 hex characters) in an INSERT, and the other long single-run
+    /// shapes that made the credential-URL branch quadratic in the full judge (#5320 M2).</summary>
+    [Fact]
+    public void ALongHexLiteralAndOtherLongRunsAreCleanAndFast()
+    {
+        var texts = new[]
+        {
+            "INSERT INTO dbo.Files (Id, Body) VALUES (7, 0x" + new string('A', 200_000) + ")",
+            "INSERT INTO dbo.Files (Id, Body) VALUES (7, 0x" + new string('a', 1_000_000) + ")",
+            "SELECT '" + new string('a', 1_000_000) + "'",
+        };
+        SensitiveStatements.Judge("warm the regex up");
+        foreach (var text in texts)
+        {
+            var best = BestOfJudging(text, SensitiveStatements.Verdict.Clean, 5);
+
+            Assert.True(best < 100, $"best of 5 took {best} ms for {text.Length} characters");
+        }
+    }
+
+    private static long BestOfJudging(string text, SensitiveStatements.Verdict expected, int attempts)
+    {
+        var best = long.MaxValue;
+        for (var attempt = 0; attempt < attempts; attempt++)
+        {
+            var watch = Stopwatch.StartNew();
+            var verdict = SensitiveStatements.Judge(text);
+            watch.Stop();
+
+            Assert.Equal(expected, verdict);
+            best = Math.Min(best, watch.ElapsedMilliseconds);
+        }
+
+        return best;
+    }
+
+    private static IEnumerable<string> CorpusAndFuzz()
+    {
+        var corpus = SensitiveStatementCorpus.Named.SelectMany(SensitiveStatementCorpus.Variants)
+            .Concat(SensitiveStatementCorpus.NotNamed);
+        return corpus.Concat(FuzzStrings());
+    }
+
+    private static readonly string[] s_fuzzTokens =
+    {
+        "create", "alter", "role", "user", "group", "subscription", "server", "login", "credential", "scoped",
+        "password", "passwd", "pwd", "secret", "key_source", "x_pwd", "xpassword", "pgpassword", "sp_addlogin",
+        "sp_password", "encryptbypassphrase", "pwdcompare", "opendatasource", "openrowset", "select", "from",
+        "update", "set", "dbo.t", "col", "bulk", "(", ")", "'", "n'", "e'", "u&'", "0x", "0xff", "$1", "$a", "=",
+        "to", ":", "@", "/", "://", "user:pw@", "http://", "]", "[", "\"", "[pwd]", "\"secret\"", ";", ",", "_",
+        "9", "a", " ", " ", " ", "\n", "\t", "--", "-- c", "/* c */", "/*", "*/", "*",
+    };
+
+    /// <summary>A seeded set of short strings built from the tokens the pattern is made of, so a large share of
+    /// them reach a branch of the pattern.</summary>
+    private static IEnumerable<string> FuzzStrings()
+    {
+        var random = new Random(5324);
+        for (var i = 0; i < 30_000; i++)
+        {
+            var count = random.Next(1, 14);
+            var builder = new StringBuilder();
+            for (var j = 0; j < count; j++)
+            {
+                builder.Append(s_fuzzTokens[random.Next(s_fuzzTokens.Length)]);
+                if (random.Next(3) == 0)
+                {
+                    builder.Append(' ');
+                }
             }
 
-            Assert.True(best <= 300, $"best of 4 took {best} ms: {text}");
-            Assert.True(SensitiveStatements.Names(text));
+            yield return builder.ToString();
         }
+    }
+
+    /// <summary>The pre-check is a superset of the full pattern (#5320 M1): every string the full judge names,
+    /// the pre-check also hits, and the pre-checked judge gives the same verdict as the full judge alone. Run
+    /// over the corpus and a seeded fuzz set; no PostgreSQL needed.</summary>
+    [Fact]
+    public void ThePrefilterHitsEveryStringTheFullJudgeNames_OverTheCorpusAndAFuzzSet()
+    {
+        var timeout = TimeSpan.FromSeconds(5);
+        var prefilter = SensitiveStatements.CreatePrefilter(SensitiveStatements.Pattern, timeout);
+        Assert.NotNull(prefilter);
+        var full = SensitiveStatements.CreateJudge(SensitiveStatements.Pattern, timeout, prefilter: false);
+        var combined = SensitiveStatements.CreateJudge(SensitiveStatements.Pattern, timeout);
+
+        var named = 0;
+        var failures = new List<string>();
+        foreach (var text in CorpusAndFuzz())
+        {
+            var verdict = full(text);
+            if (verdict == SensitiveStatements.Verdict.Named)
+            {
+                named++;
+                if (!prefilter!.IsMatch(text))
+                {
+                    failures.Add("the pre-check missed a named string: " + text);
+                }
+            }
+
+            if (combined(text) != verdict)
+            {
+                failures.Add("the pre-checked judge disagrees with the full judge: " + text);
+            }
+        }
+
+        Assert.True(named > 1_000, $"the fuzz set names only {named} strings, too few to pin anything");
+        Assert.True(failures.Count == 0, string.Join(Environment.NewLine, failures.Take(20)));
+    }
+
+    /// <summary>The pre-check uses no lookaround and is built from the one definition: it is the translation
+    /// with only the word-boundary assertions removed.</summary>
+    [Fact]
+    public void ThePrefilterSourceIsTheTranslationWithoutItsAssertions()
+    {
+        Assert.True(SensitiveStatements.TryTranslate(SensitiveStatements.Pattern, factor: false, dropAssertions: true, out var superset));
+
+        Assert.DoesNotContain("(?<", superset, StringComparison.Ordinal);
+        Assert.DoesNotContain("(?=", superset, StringComparison.Ordinal);
+        Assert.DoesNotContain("(?!", superset, StringComparison.Ordinal);
+        Assert.DoesNotContain("[:", superset, StringComparison.Ordinal);
+        Assert.StartsWith("(create|alter)", superset, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AFailedGuardGivesNoPrefilter_AndAPatternItCannotBuildKeepsTheFullJudge()
+    {
+        Assert.Null(SensitiveStatements.CreatePrefilter("a\\b", TimeSpan.FromSeconds(1)));
+        Assert.Null(SensitiveStatements.CreatePrefilter("[[:bogus:]]", TimeSpan.FromSeconds(1)));
+        // A pattern with a lookahead of its own cannot run NonBacktracking, so there is no pre-check and the
+        // full judge still answers.
+        Assert.Null(SensitiveStatements.CreatePrefilter("a(?=b)", TimeSpan.FromSeconds(1)));
+        var judge = SensitiveStatements.CreateJudge("a(?=b)", TimeSpan.FromSeconds(1));
+        Assert.Equal(SensitiveStatements.Verdict.Named, judge("xab"));
+        Assert.Equal(SensitiveStatements.Verdict.Clean, judge("xac"));
+    }
+
+    /// <summary>Hoisting the shared word start out of the alternatives is only a search-order change (#5320 L5).
+    /// The factored and unfactored forms give the same verdict over the corpus and a seeded fuzz set, so the
+    /// factoring is pinned without a PostgreSQL rig. Both run without the pre-check, so it is the regex that is
+    /// compared.</summary>
+    [Fact]
+    public void TheFactoredAndUnfactoredFormsGiveTheSameVerdict_OverTheCorpusAndAFuzzSet()
+    {
+        var timeout = TimeSpan.FromSeconds(5);
+        Assert.True(SensitiveStatements.TryTranslate(SensitiveStatements.Pattern, factor: true, dropAssertions: false, out var factoredSource));
+        Assert.True(SensitiveStatements.TryTranslate(SensitiveStatements.Pattern, factor: false, dropAssertions: false, out var unfactoredSource));
+        Assert.NotEqual(factoredSource, unfactoredSource);
+        var factored = SensitiveStatements.CreateJudge(SensitiveStatements.Pattern, timeout, factor: true, prefilter: false);
+        var unfactored = SensitiveStatements.CreateJudge(SensitiveStatements.Pattern, timeout, factor: false, prefilter: false);
+
+        var named = 0;
+        var failures = new List<string>();
+        foreach (var text in CorpusAndFuzz())
+        {
+            var verdict = factored(text);
+            named += verdict == SensitiveStatements.Verdict.Named ? 1 : 0;
+            if (unfactored(text) != verdict)
+            {
+                failures.Add("factored and unfactored differ: " + text);
+            }
+        }
+
+        Assert.True(named > 1_000, $"the fuzz set names only {named} strings, too few to pin anything");
+        Assert.True(failures.Count == 0, string.Join(Environment.NewLine, failures.Take(20)));
     }
 
     [Fact]
