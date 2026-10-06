@@ -626,14 +626,15 @@ public partial class RemoteCollectorService
     {
         try
         {
-            /* The backfill runs outside the collection gate, so its reads take the read lock (see the slice's write). */
-            using var readLock = _duckDb.AcquireReadLock(cancellationToken);
-            using var conn = _duckDb.CreateConnection();
-            await conn.OpenAsync(cancellationToken);
-
+            /* The backfill runs outside the collection gate, so its reads take the read lock (see the slice's write).
+               #5377: each live read holds it in a scope that ends before the archive read, which takes the
+               limiter first and then its own lock, so a read that waits for the limiter holds no lock. */
             bool liveHit;
-            using (var exists = conn.CreateCommand())
+            using (var readLock = _duckDb.AcquireReadLock(cancellationToken))
             {
+                using var conn = _duckDb.CreateConnection();
+                await conn.OpenAsync(cancellationToken);
+                using var exists = conn.CreateCommand();
                 exists.CommandText = $"SELECT 1 FROM {tableName} WHERE server_id = $1 AND {databaseColumnName} = $2 AND collection_time <= $3 LIMIT 1";
                 exists.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = serverId });
                 exists.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = databaseName });
@@ -646,7 +647,7 @@ public partial class RemoteCollectorService
                at or before the limit exists exactly when that oldest collection_time is <= the limit; and when
                none does, every archived row is newer than the limit, so the unbounded oldest value IS the
                bounded one. Live and archive combine as the lesser value / the OR of the two probes. */
-            var archivedRow = await ReadArchiveViewAsync(conn,
+            var archivedRow = await ReadArchiveViewAsync(
                 $"floor|{tableName}|{columnName}|{databaseColumnName}|{serverId}|{databaseName}",
                 $"SELECT MIN(collection_time), MIN({columnName}) FROM v_{tableName} WHERE server_id = $1 AND {databaseColumnName} = $2",
                 [serverId, databaseName], cancellationToken,
@@ -662,8 +663,11 @@ public partial class RemoteCollectorService
             }
 
             DateTime? liveMin = null;
-            using (var min = conn.CreateCommand())
+            using (var readLock = _duckDb.AcquireReadLock(cancellationToken))
             {
+                using var conn = _duckDb.CreateConnection();
+                await conn.OpenAsync(cancellationToken);
+                using var min = conn.CreateCommand();
                 min.CommandText = $"SELECT MIN({columnName}) FROM {tableName} WHERE server_id = $1 AND {databaseColumnName} = $2 AND collection_time > $3";
                 min.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = serverId });
                 min.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = databaseName });

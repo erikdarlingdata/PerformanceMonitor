@@ -134,6 +134,28 @@ public partial class RemoteCollectorService
     /// <see cref="ArchiveWatermarkCache"/> and <see cref="ReadArchiveViewAsync"/>.
     /// </summary>
     private readonly ArchiveWatermarkCache _archiveWatermarks = new();
+
+    /// <summary>
+    /// The shared limit on expensive archive reads (#5377); see <see cref="ArchiveReadLimiter"/> for the lock
+    /// order. A test swaps in its own instance so it never holds a slot of the process-wide one.
+    /// </summary>
+    private ArchiveReadLimiter _archiveReadLimiter = ArchiveReadLimiter.Shared;
+
+    /// <summary>Test seam (#5377): replaces the process-wide limiter for this service.</summary>
+    internal ArchiveReadLimiter ArchiveReadLimiterForTests { set => _archiveReadLimiter = value; }
+
+    /// <summary>
+    /// Test seam (#5377): called with <c>"limiter"</c> once an archive read holds its slot, <c>"readlock"</c>
+    /// once it also holds the database read lock, and <c>"read"</c> as its SQL is about to run. A test records
+    /// the order to pin limiter-then-read-lock without reading source. Production leaves it null.
+    /// </summary>
+    internal Action<string>? ArchiveReadStepForTests { get; set; }
+
+    private int _archiveViewReads;
+
+    /// <summary>Test seam (#5377): how many archive-view reads have run (cache misses that reached DuckDB).</summary>
+    internal int ArchiveViewReadsForTests => Volatile.Read(ref _archiveViewReads);
+
     private readonly ServerManager _serverManager;
     private readonly ScheduleManager _scheduleManager;
     private readonly ILogger<RemoteCollectorService>? _logger;
@@ -1737,19 +1759,23 @@ public partial class RemoteCollectorService
     {
         try
         {
-            // Read lock (#4343): a plain SELECT, cancelable since this method already carries the token.
-            using var readLock = _duckDb.AcquireReadLock(cancellationToken);
-            using var conn = _duckDb.CreateConnection();
-            await conn.OpenAsync(cancellationToken);
-            using var cmd = conn.CreateCommand();
-            cmd.CommandText = $"SELECT MAX({columnName}) FROM {tableName} WHERE server_id = $1";
-            cmd.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = serverId });
-            var result = await cmd.ExecuteScalarAsync(cancellationToken);
-            var live = result is DateTime dt ? dt : (DateTime?)null;
+            DateTime? live;
+            // Read lock (#4343): a plain SELECT, cancelable since this method already carries the token. Its
+            // scope ends before the archive read (#5377): that read takes the limiter first, then its own lock.
+            using (var readLock = _duckDb.AcquireReadLock(cancellationToken))
+            {
+                using var conn = _duckDb.CreateConnection();
+                await conn.OpenAsync(cancellationToken);
+                using var cmd = conn.CreateCommand();
+                cmd.CommandText = $"SELECT MAX({columnName}) FROM {tableName} WHERE server_id = $1";
+                cmd.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = serverId });
+                var result = await cmd.ExecuteScalarAsync(cancellationToken);
+                live = result is DateTime dt ? dt : (DateTime?)null;
+            }
 
             // The archive's maximum (cached per generation) always joins the live one: a hole fill or a late
             // row can leave live non-null but OLDER than what the reset moved into Parquet.
-            var archived = await ReadArchiveViewAsync(conn,
+            var archived = await ReadArchiveViewAsync(
                 $"time|{tableName}|{columnName}|{serverId}",
                 $"SELECT MAX({columnName}) FROM v_{tableName} WHERE server_id = $1",
                 [serverId], cancellationToken);
@@ -1826,16 +1852,17 @@ public partial class RemoteCollectorService
     {
         try
         {
-            // Read lock (#4343): a plain SELECT, cancelable since this method already carries the token.
-            using var readLock = _duckDb.AcquireReadLock(cancellationToken);
-            using var conn = _duckDb.CreateConnection();
-            await conn.OpenAsync(cancellationToken);
-            using var cmd = conn.CreateCommand();
-            cmd.CommandText = $"SELECT MAX({utcColumnName}), MAX({columnName}) FROM {tableName} WHERE server_id = $1";
-            cmd.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = serverId });
             DateTime? liveUtc = null, liveLocal = null;
-            using (var reader = await cmd.ExecuteReaderAsync(cancellationToken))
+            // Read lock (#4343): a plain SELECT, cancelable since this method already carries the token. Its
+            // scope ends before the archive read (#5377): that read takes the limiter first, then its own lock.
+            using (var readLock = _duckDb.AcquireReadLock(cancellationToken))
             {
+                using var conn = _duckDb.CreateConnection();
+                await conn.OpenAsync(cancellationToken);
+                using var cmd = conn.CreateCommand();
+                cmd.CommandText = $"SELECT MAX({utcColumnName}), MAX({columnName}) FROM {tableName} WHERE server_id = $1";
+                cmd.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = serverId });
+                using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
                 if (await reader.ReadAsync(cancellationToken))
                 {
                     liveUtc = reader.IsDBNull(0) ? null : reader.GetDateTime(0);
@@ -1844,7 +1871,7 @@ public partial class RemoteCollectorService
             }
 
             // The archive's pair (cached per generation) joins the live pair column by column.
-            var archived = await ReadArchiveViewAsync(conn,
+            var archived = await ReadArchiveViewAsync(
                 $"frame|{tableName}|{columnName}|{utcColumnName}|{serverId}",
                 $"SELECT MAX({utcColumnName}), MAX({columnName}) FROM v_{tableName} WHERE server_id = $1",
                 [serverId], cancellationToken, readRow: ReadDatePair);
@@ -1883,13 +1910,31 @@ public partial class RemoteCollectorService
     /// <para>The floor is a SEMANTIC bound, not only a performance one: #2344's contract is that a database with
     /// no row newer than the floor reads NULL. The callers act on the raw value (a clamp warning and a recorded
     /// backfill hole whenever it differs from the clamped one), so an idle database must not return an old
-    /// non-NULL value every cycle. The live read keeps the bound. The archive side first reads the cached
-    /// unbounded per-database maximum A over <c>v_{table}</c> (one entry per (server, database) and archive
-    /// generation; a floor in the key would grow the cache without bound). With no floor, or A above the floor,
-    /// the GREATER of the live and A is returned, which is exact: the row reaching A has collection_time at or
-    /// above last_execution_time = A, which is above the floor. When A is at or below the floor, or absent, the
-    /// floored view SQL runs uncached and its result competes with the live one, which is exactly the floored
-    /// answer over live and archived rows.</para>
+    /// non-NULL value every cycle. The live read keeps the bound.</para>
+    ///
+    /// <para><b>The archive side (#5377).</b> One grouped read per (table, column, database column) and archive
+    /// generation, <c>SELECT server_id, db, MAX(col), MAX(collection_time) FROM v_{table} GROUP BY server_id, db</c>,
+    /// is cached as a map and serves every database of every server: N databases cost one archive scan, not N,
+    /// and concurrent first callers share it. (It is whole-table rather than per-server because the scan reads
+    /// the same columns either way and a store with several servers pays for it once instead of once each.) A
+    /// database the map lacks reads NULL, exactly what the per-database MAX returned. Call the map's maximum A
+    /// and its newest collection C. With no floor, or A above the floor, the GREATER of the live and A is
+    /// returned, which is exact: the row reaching A has collection_time at or above last_execution_time = A,
+    /// which is above the floor.</para>
+    ///
+    /// <para><b>The floored archive read cannot always be dropped.</b> When A is at or below the floor, the
+    /// floored answer is the greatest value among archived rows with collection_time above the floor, and such a
+    /// row can exist: a value is at or below its own collection_time, not the other way round, so a row
+    /// collected just after the floor can carry an older value (A is below the floor, the row's value lower
+    /// still), and the live read returns that same non-NULL value for a live row. Dropping the archive read
+    /// would make the answer depend on whether the reset had run. It IS redundant in two cases, and those skip
+    /// the read: A is NULL (no archived row carries a value at all, and Parquet only changes with the
+    /// generation), and C is at or below the floor (no archived row is that recent). Only the remaining band
+    /// reads (an archived row collected within the floor's window whose value is older than the floor, which a
+    /// database that went idle shortly before an archive can leave for a few hours): the view's rows collected
+    /// after the floor rounded down to the hour, as (collection_time, value) pairs, cached per generation with
+    /// the hour as the entry's variant, so the entry is overwritten each hour rather than growing. The exact
+    /// floor is then applied in memory, so the answer is exactly the floored one.</para>
     /// </summary>
     protected async Task<DateTime?> GetLastCollectedTimeForDatabaseAsync(
         int serverId, string tableName, string columnName, string databaseColumnName, string databaseName,
@@ -1897,42 +1942,44 @@ public partial class RemoteCollectorService
     {
         try
         {
-            // Read lock (#4343): a plain SELECT, cancelable since this method already carries the token.
-            using var readLock = _duckDb.AcquireReadLock(cancellationToken);
-            using var conn = _duckDb.CreateConnection();
-            await conn.OpenAsync(cancellationToken);
-            using var cmd = conn.CreateCommand();
-            cmd.CommandText = collectedSince is null
-                ? $"SELECT MAX({columnName}) FROM {tableName} WHERE server_id = $1 AND {databaseColumnName} = $2"
-                : $"SELECT MAX({columnName}) FROM {tableName} WHERE server_id = $1 AND {databaseColumnName} = $2 AND collection_time > $3";
-            cmd.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = serverId });
-            cmd.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = databaseName });
-            if (collectedSince is DateTime floor)
+            DateTime? live;
+            // Read lock (#4343): a plain SELECT, cancelable since this method already carries the token. Its
+            // scope ends before the archive reads (#5377): they take the limiter first, then their own lock.
+            using (var readLock = _duckDb.AcquireReadLock(cancellationToken))
             {
-                cmd.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = floor });
+                using var conn = _duckDb.CreateConnection();
+                await conn.OpenAsync(cancellationToken);
+                using var cmd = conn.CreateCommand();
+                cmd.CommandText = collectedSince is null
+                    ? $"SELECT MAX({columnName}) FROM {tableName} WHERE server_id = $1 AND {databaseColumnName} = $2"
+                    : $"SELECT MAX({columnName}) FROM {tableName} WHERE server_id = $1 AND {databaseColumnName} = $2 AND collection_time > $3";
+                cmd.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = serverId });
+                cmd.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = databaseName });
+                if (collectedSince is DateTime floor)
+                {
+                    cmd.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = floor });
+                }
+
+                var result = await cmd.ExecuteScalarAsync(cancellationToken);
+                live = result is DateTime dt ? dt : (DateTime?)null;
             }
 
-            var result = await cmd.ExecuteScalarAsync(cancellationToken);
-            var live = result is DateTime dt ? dt : (DateTime?)null;
+            // The archive side (#5377): this database's entry in the per-table map, one grouped archive read per
+            // generation for every database. A database the map lacks has no archived row: NULL, as before.
+            var map = await ReadArchivedDatabaseMapAsync(tableName, columnName, databaseColumnName, cancellationToken);
+            map.TryGetValue((serverId, databaseName), out var entry);
+            var archived = entry.Maximum;
 
-            // The archive side: the cached unbounded per-database maximum A, one entry per (server, database)
-            // however the floor moves. A above the floor (or no floor) is exact for the floored question too:
-            // the row that reaches A has collection_time >= last_execution_time = A > floor, so the floored
-            // MAX is A. A at or below the floor (or no archive value) means the floored answer over live ∪
-            // archive is NULL or no better than the live floored read, so run the floored view SQL uncached.
-            var archived = await ReadArchiveViewAsync(conn,
-                $"db|{tableName}|{columnName}|{databaseColumnName}|{serverId}|{databaseName}",
-                $"SELECT MAX({columnName}) FROM v_{tableName} WHERE server_id = $1 AND {databaseColumnName} = $2",
-                [serverId, databaseName], cancellationToken) as DateTime?;
-            if (collectedSince is DateTime since && (archived is null || archived.Value <= since))
+            // A above the floor (or no floor) is exact for the floored question too: the row that reaches A has
+            // collection_time >= last_execution_time = A > floor, so the floored MAX is A. A NULL, or a newest
+            // archived collection at or below the floor, means no archived row can qualify (Parquet changes only
+            // with the generation, and live rows are the live read's). Only A at or below the floor with a row
+            // collected after it needs the floored rows; see the method remarks.
+            if (collectedSince is DateTime since && archived is not null && archived.Value <= since)
             {
-                using var floored = conn.CreateCommand();
-                floored.CommandText = $"SELECT MAX({columnName}) FROM v_{tableName} WHERE server_id = $1 AND {databaseColumnName} = $2 AND collection_time > $3";
-                floored.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = serverId });
-                floored.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = databaseName });
-                floored.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = since });
-                var flooredResult = await floored.ExecuteScalarAsync(cancellationToken);
-                archived = flooredResult is DateTime fdt ? fdt : null;
+                archived = entry.NewestCollection is DateTime newest && (newest > since)
+                    ? await ReadFlooredArchiveAsync(serverId, tableName, columnName, databaseColumnName, databaseName, since, cancellationToken)
+                    : null;
             }
             return GreaterOf(live, archived);
         }
@@ -1942,6 +1989,84 @@ public partial class RemoteCollectorService
             LogWatermarkReadFailure($"Watermark read for database {databaseName}", tableName, serverId, ex);
         }
         return null;
+    }
+
+    /// <summary>One database's archived watermark: its newest value and the newest collection time of its rows.</summary>
+    private readonly record struct ArchivedDatabaseWatermark(DateTime? Maximum, DateTime? NewestCollection);
+
+    /// <summary>
+    /// The per-table map behind <see cref="GetLastCollectedTimeForDatabaseAsync"/> (#5377): for every (server,
+    /// database) in <c>v_{table}</c>, the maximum of the watermark column and the newest collection time, from
+    /// ONE grouped read per archive generation, cached under a key with no server or database in it. Keys compare
+    /// ordinally, like DuckDB's VARCHAR equality; a NULL database never matches a lookup, so it is not stored.
+    /// </summary>
+    private async Task<Dictionary<(int ServerId, string Database), ArchivedDatabaseWatermark>> ReadArchivedDatabaseMapAsync(
+        string tableName, string columnName, string databaseColumnName, CancellationToken cancellationToken)
+    {
+        var map = await ReadArchiveAsync(
+            $"dbmap|{tableName}|{columnName}|{databaseColumnName}", 0,
+            async (conn, token) =>
+            {
+                using var cmd = conn.CreateCommand();
+                cmd.CommandText =
+                    $"SELECT server_id, {databaseColumnName}, MAX({columnName}), MAX(collection_time) FROM v_{tableName} GROUP BY server_id, {databaseColumnName}";
+                var rows = new Dictionary<(int ServerId, string Database), ArchivedDatabaseWatermark>();
+                using var reader = await cmd.ExecuteReaderAsync(token);
+                while (await reader.ReadAsync(token))
+                {
+                    if (reader.IsDBNull(0) || reader.IsDBNull(1))
+                        continue;
+                    rows[(Convert.ToInt32(reader.GetValue(0)), reader.GetString(1))] = new ArchivedDatabaseWatermark(
+                        reader.GetValue(2) is DateTime maximum ? maximum : null,
+                        reader.GetValue(3) is DateTime newest ? newest : null);
+                }
+
+                return rows;
+            }, cancellationToken);
+        return (Dictionary<(int ServerId, string Database), ArchivedDatabaseWatermark>)map!;
+    }
+
+    /// <summary>
+    /// The floored archive answer for the one band the map cannot settle (#5377): the greatest value among the
+    /// view's rows for this database collected after <paramref name="since"/>. The read takes the rows after the
+    /// floor ROUNDED DOWN to the hour, as (collection_time, value) pairs, and caches them per generation under a
+    /// key with no floor in it, the hour as the entry's variant; the exact floor then filters them in memory, so
+    /// the answer is exactly what the floored view SQL returned each cycle, while the read itself runs once per
+    /// database per hour and generation.
+    /// </summary>
+    private async Task<DateTime?> ReadFlooredArchiveAsync(
+        int serverId, string tableName, string columnName, string databaseColumnName, string databaseName,
+        DateTime since, CancellationToken cancellationToken)
+    {
+        var bucket = new DateTime(since.Ticks - since.Ticks % TimeSpan.TicksPerHour, since.Kind);
+        var rows = await ReadArchiveAsync(
+            $"dbfloor|{tableName}|{columnName}|{databaseColumnName}|{serverId}|{databaseName}", bucket.Ticks,
+            async (conn, token) =>
+            {
+                using var cmd = conn.CreateCommand();
+                cmd.CommandText =
+                    $"SELECT collection_time, MAX({columnName}) FROM v_{tableName} WHERE server_id = $1 AND {databaseColumnName} = $2 AND collection_time > $3 GROUP BY collection_time";
+                cmd.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = serverId });
+                cmd.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = databaseName });
+                cmd.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = bucket });
+                var pairs = new List<(DateTime Collected, DateTime Value)>();
+                using var reader = await cmd.ExecuteReaderAsync(token);
+                while (await reader.ReadAsync(token))
+                {
+                    if (!reader.IsDBNull(0) && reader.GetValue(1) is DateTime value)
+                        pairs.Add((reader.GetDateTime(0), value));
+                }
+
+                return pairs.ToArray();
+            }, cancellationToken);
+
+        DateTime? greatest = null;
+        foreach (var (collected, value) in (rows as (DateTime Collected, DateTime Value)[]) ?? [])
+        {
+            if (collected > since && (greatest is null || value > greatest.Value))
+                greatest = value;
+        }
+        return greatest;
     }
 
     /// <summary>
@@ -1969,23 +2094,24 @@ public partial class RemoteCollectorService
     {
         try
         {
-            // Read lock (#4343): a plain SELECT, cancelable since this method already carries the token.
-            using var readLock = _duckDb.AcquireReadLock(cancellationToken);
-            using var conn = _duckDb.CreateConnection();
-            await conn.OpenAsync(cancellationToken);
-            using var cmd = conn.CreateCommand();
-            cmd.CommandText = $"SELECT collection_time, MAX({columnName}) FROM {tableName} WHERE server_id = $1 "
-                + $"AND collection_time = (SELECT MAX(collection_time) FROM {tableName} WHERE server_id = $1) GROUP BY collection_time";
-            cmd.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = serverId });
             (DateTime BatchTime, long Id)? live = null;
-            using (var reader = await cmd.ExecuteReaderAsync(cancellationToken))
+            // Read lock (#4343): a plain SELECT, cancelable since this method already carries the token. Its
+            // scope ends before the archive read (#5377): that read takes the limiter first, then its own lock.
+            using (var readLock = _duckDb.AcquireReadLock(cancellationToken))
             {
+                using var conn = _duckDb.CreateConnection();
+                await conn.OpenAsync(cancellationToken);
+                using var cmd = conn.CreateCommand();
+                cmd.CommandText = $"SELECT collection_time, MAX({columnName}) FROM {tableName} WHERE server_id = $1 "
+                    + $"AND collection_time = (SELECT MAX(collection_time) FROM {tableName} WHERE server_id = $1) GROUP BY collection_time";
+                cmd.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = serverId });
+                using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
                 if (await reader.ReadAsync(cancellationToken) && !reader.IsDBNull(0) && !reader.IsDBNull(1))
                     live = (reader.GetDateTime(0), Convert.ToInt64(reader.GetValue(1)));
             }
 
             // The archive's newest batch (cached per generation) competes with the live one on batch time.
-            var archivedRow = await ReadArchiveViewAsync(conn,
+            var archivedRow = await ReadArchiveViewAsync(
                 $"id|{tableName}|{columnName}|{serverId}",
                 $"SELECT collection_time, MAX({columnName}) FROM v_{tableName} WHERE server_id = $1 "
                     + $"AND collection_time = (SELECT MAX(collection_time) FROM v_{tableName} WHERE server_id = $1) GROUP BY collection_time",
@@ -2021,20 +2147,23 @@ public partial class RemoteCollectorService
     {
         try
         {
-            // Read lock (#4343): a plain SELECT, cancelable since this method already carries the token.
-            using var readLock = _duckDb.AcquireReadLock(cancellationToken);
-            using var conn = _duckDb.CreateConnection();
-            await conn.OpenAsync(cancellationToken);
-            using var cmd = conn.CreateCommand();
-            cmd.CommandText = "SELECT COUNT(*) FROM collection_log WHERE server_id = $1 AND collector_name = $2 AND status = 'SUCCESS'";
-            cmd.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = serverId });
-            cmd.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = collectorName });
-            var result = await cmd.ExecuteScalarAsync(cancellationToken);
-            if (result is not null && result != DBNull.Value && Convert.ToInt64(result) > 0)
-                return true;
+            // Read lock (#4343): a plain SELECT, cancelable since this method already carries the token. Its
+            // scope ends before the archive read (#5377): that read takes the limiter first, then its own lock.
+            using (var readLock = _duckDb.AcquireReadLock(cancellationToken))
+            {
+                using var conn = _duckDb.CreateConnection();
+                await conn.OpenAsync(cancellationToken);
+                using var cmd = conn.CreateCommand();
+                cmd.CommandText = "SELECT COUNT(*) FROM collection_log WHERE server_id = $1 AND collector_name = $2 AND status = 'SUCCESS'";
+                cmd.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = serverId });
+                cmd.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = collectorName });
+                var result = await cmd.ExecuteScalarAsync(cancellationToken);
+                if (result is not null && result != DBNull.Value && Convert.ToInt64(result) > 0)
+                    return true;
+            }
 
             // No SUCCESS row in the live log: the reset archives collection_log too, so ask its view.
-            var archived = await ReadArchiveViewAsync(conn,
+            var archived = await ReadArchiveViewAsync(
                 $"success|{serverId}|{collectorName}",
                 "SELECT COUNT(*) FROM v_collection_log WHERE server_id = $1 AND collector_name = $2 AND status = 'SUCCESS'",
                 [serverId, collectorName], cancellationToken);
@@ -2067,16 +2196,22 @@ public partial class RemoteCollectorService
     /// <para><b>The generation rule:</b> the answer is cached per archive generation
     /// (<see cref="DuckDbInitializer.ArchiveViewGeneration"/>), including a null answer, so the Parquet files
     /// are not scanned every cycle. Callers key it by the read's identity, never by a moving bound, so the
-    /// cache stays bounded. The generation is sampled before the view is
-    /// queried. The caller holds the read lock and passes its open connection. <paramref name="readRow"/>
-    /// turns the first row of a multi-column read into the cached value.</para>
+    /// cache stays bounded. The generation is sampled before the view is queried.</para>
+    ///
+    /// <para><b>Lock order (#5377): the caller holds NO lock when it calls this.</b> A cache hit takes none. A
+    /// miss takes a slot of the shared <see cref="ArchiveReadLimiter"/> FIRST, then the database read lock,
+    /// opens its own connection, reads, and releases the read lock and then the slot. A read that waits for a
+    /// slot therefore never holds the read lock, which a held read lock would turn into a stall for the
+    /// CHECKPOINT writer and every reader parked behind it. Callers do their live read in a lock scope of its
+    /// own and call this after it ends; combining a live value read just before with an archive value read
+    /// just after is exact for the reason above, and a reset between the two bumps the generation. Concurrent
+    /// misses on one key share one read (see <see cref="ArchiveWatermarkCache"/>).
+    /// <paramref name="readRow"/> turns the first row of a multi-column read into the cached value.</para>
     /// </summary>
-    private async Task<object?> ReadArchiveViewAsync(
-        DuckDB.NET.Data.DuckDBConnection conn, string cacheKey, string viewSql, object[] parameters,
-        CancellationToken cancellationToken, Func<System.Data.Common.DbDataReader, object?>? readRow = null)
-    {
-        var generation = _duckDb.ArchiveViewGeneration;
-        return await _archiveWatermarks.GetOrReadAsync(cacheKey, generation, async () =>
+    private Task<object?> ReadArchiveViewAsync(
+        string cacheKey, string viewSql, object[] parameters,
+        CancellationToken cancellationToken, Func<System.Data.Common.DbDataReader, object?>? readRow = null) =>
+        ReadArchiveAsync(cacheKey, 0, async (conn, token) =>
         {
             using var cmd = conn.CreateCommand();
             cmd.CommandText = viewSql;
@@ -2085,13 +2220,37 @@ public partial class RemoteCollectorService
             if (readRow is not null)
             {
                 // A multi-column read: the delegate turns the first row (or none) into the cached value.
-                using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
-                return await reader.ReadAsync(cancellationToken) ? readRow(reader) : null;
+                using var reader = await cmd.ExecuteReaderAsync(token);
+                return await reader.ReadAsync(token) ? readRow(reader) : null;
             }
 
-            var result = await cmd.ExecuteScalarAsync(cancellationToken);
+            var result = await cmd.ExecuteScalarAsync(token);
             return result == DBNull.Value ? null : result;
-        });
+        }, cancellationToken);
+
+    /// <summary>
+    /// The lock-taking core of <see cref="ReadArchiveViewAsync"/>: serves <paramref name="cacheKey"/> from the
+    /// cache, or runs <paramref name="read"/> on an open connection once, under the limiter and then the read
+    /// lock. <paramref name="variant"/> is the bucket of a slowly moving bound the answer depends on (see
+    /// <see cref="ArchiveWatermarkCache"/>).
+    /// </summary>
+    private async Task<object?> ReadArchiveAsync(
+        string cacheKey, long variant,
+        Func<DuckDB.NET.Data.DuckDBConnection, CancellationToken, Task<object?>> read, CancellationToken cancellationToken)
+    {
+        var generation = _duckDb.ArchiveViewGeneration;
+        return await _archiveWatermarks.GetOrReadAsync(cacheKey, generation, async () =>
+        {
+            using var slot = await _archiveReadLimiter.EnterAsync(cancellationToken);
+            ArchiveReadStepForTests?.Invoke("limiter");
+            using var readLock = _duckDb.AcquireReadLock(cancellationToken);
+            ArchiveReadStepForTests?.Invoke("readlock");
+            using var conn = _duckDb.CreateConnection();
+            await conn.OpenAsync(cancellationToken);
+            ArchiveReadStepForTests?.Invoke("read");
+            Interlocked.Increment(ref _archiveViewReads);
+            return await read(conn, cancellationToken);
+        }, variant, cancellationToken);
     }
 
     /// <summary>Row shape for the two-column twin read: (UTC twin maximum, declared column maximum), either may be null.</summary>
