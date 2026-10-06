@@ -62,19 +62,21 @@ public sealed class TopRankingPagePinTests
     }
 
     /// <summary>
-    /// A reads ranking over a window past what raw keeps carries the raw route's retention notice (<c>retention_notice</c>),
-    /// and every card that can show the ranking draws it: the plain grids through their note keys, the composite itself.
+    /// A reads ranking over a window past what raw keeps carries the raw route's retention notice (<c>retention_notice</c>), and the page
+    /// draws it ONCE (#5299): readTool puts it in the window note's place (util.js), so each card names <c>truncation_note</c> as its one
+    /// note and holds no second key or strip for it. What each card draws is run by <c>TopRankingNoticeBehaviourTests</c>.
     /// </summary>
     [Fact]
-    public void EveryRankedCardDrawsTheRetentionNotice()
+    public void TheRetentionNotice_RidesTheWindowNote_SoNoCardDrawsItTwice()
     {
         var js = Tab();
-        Assert.Contains("const RANKING_NOTE_KEYS = [\"retention_notice\"];", js, StringComparison.Ordinal);
-        /* The three plain grids (queries on the CPU tab, procedures on both tabs) name it as a further note... */
-        Assert.Equal(3, Regex.Matches(js, @"""truncation_note"",\s*RANKING_NOTE_KEYS,").Count);
-        /* ...and the Queries tab's composite draws it itself, the way it draws truncation_note. */
-        Assert.Contains("typeof res.data.retention_notice === \"string\" && res.data.retention_notice.trim()", js, StringComparison.Ordinal);
-        Assert.Contains("parts.unshift(noticeStrip(res.data.retention_notice));", js, StringComparison.Ordinal);
+        Assert.DoesNotContain("RANKING_NOTE_KEYS", js, StringComparison.Ordinal);
+        /* The three plain grids (queries on the CPU tab, procedures on both tabs) name the window note and no further note key... */
+        Assert.Equal(3, Regex.Matches(js, @"""truncation_note"",\s*null,\s*TOP_(QUERY|PROC)_GROUPS,\s*picker").Count);
+        /* ...and the Queries tab's composite draws no strip of its own for the retention notice. */
+        Assert.DoesNotContain("noticeStrip(res.data.retention_notice)", js, StringComparison.Ordinal);
+        var util = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "util.js").ReplaceLineEndings("\n");
+        Assert.Contains("const note = retentionNoticeOf(res.data) ?? windowNoteText(res.data);", util, StringComparison.Ordinal);
     }
 
     /// <summary>The selector sits under the card's title: panels.js draws an optional <c>control</c> before the body.</summary>
