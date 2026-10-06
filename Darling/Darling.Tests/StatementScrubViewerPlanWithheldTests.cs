@@ -112,6 +112,19 @@ public sealed class StatementScrubViewerPlanWithheldTests
     }
 
     /// <summary>
+    /// #5367: a withheld deadlock graph or blocked process report is not "a plan", so its save refusal names what is
+    /// being saved; the plan viewers keep their existing sentence word for word.
+    /// </summary>
+    [Fact]
+    public void TheWithheldSentence_NamesWhatIsSaved_AndThePlanSentenceIsUnchanged()
+    {
+        Assert.Equal("This plan was withheld by the statement filter (#4348).", WithheldPlanGuard.WithheldSentenceFor("plan"));
+        Assert.Equal(SensitiveStatements.WithheldPlanSentence, WithheldPlanGuard.WithheldSentenceFor("plan"));
+        Assert.Equal("This deadlock graph was withheld by the statement filter (#4348).", WithheldPlanGuard.WithheldSentenceFor("deadlock graph"));
+        Assert.Equal("This blocked process report was withheld by the statement filter (#4348).", WithheldPlanGuard.WithheldSentenceFor("blocked process report"));
+    }
+
+    /// <summary>
     /// #5320: a deadlock graph or blocked process report the filter withheld whole is the marker, not XML. The viewer's
     /// two XML downloads go through the shared <c>FileSaveHelper.SaveXmlToFile</c>, which asks the guard before it
     /// opens the save dialog, so the marker is never written to an <c>.xml</c> file and the user is told why.
@@ -123,13 +136,17 @@ public sealed class StatementScrubViewerPlanWithheldTests
         var start = helper.IndexOf("public static void SaveXmlToFile(", StringComparison.Ordinal);
         Assert.True(start >= 0, "SaveXmlToFile not found");
         var dialog = helper.IndexOf("new SaveFileDialog", start, StringComparison.Ordinal);
-        var guard = helper.IndexOf("WithheldPlanGuard.RefuseSave(xml)", start, StringComparison.Ordinal);
-        Assert.True(guard >= 0 && dialog >= 0 && guard < dialog, "SaveXmlToFile must call WithheldPlanGuard.RefuseSave(xml) before it opens the dialog");
+        var guard = helper.IndexOf("WithheldPlanGuard.RefuseSave(xml, withheldSubject)", start, StringComparison.Ordinal);
+        Assert.True(guard >= 0 && dialog >= 0 && guard < dialog, "SaveXmlToFile must call WithheldPlanGuard.RefuseSave(xml, withheldSubject) before it opens the dialog");
 
         var export = File.ReadAllText(RepoFile.PathTo("Darling/PerformanceMonitor.Darling.Viewer/ViewerServerTab.CopyExport.cs"));
         Assert.Contains("using static PerformanceMonitor.Ui.FileSaveHelper;", export, StringComparison.Ordinal);
         Assert.Contains("SaveXmlToFile(row.DeadlockGraphXml", export, StringComparison.Ordinal);
         Assert.Contains("SaveXmlToFile(row.BlockedProcessReportXml", export, StringComparison.Ordinal);
+
+        /* #5367: the sentence names what is saved. A deadlock graph is not "a plan"; each download passes its own subject. */
+        Assert.Contains("SaveXmlToFile(row.DeadlockGraphXml, $\"deadlock_{row.DeadlockTime:yyyyMMdd_HHmmss}.xml\", \"deadlock XML\", \"deadlock graph\")", export, StringComparison.Ordinal);
+        Assert.Contains("\"blocked process XML\", \"blocked process report\")", export, StringComparison.Ordinal);
         Assert.DoesNotContain("File.WriteAllText", export, StringComparison.Ordinal);
     }
 

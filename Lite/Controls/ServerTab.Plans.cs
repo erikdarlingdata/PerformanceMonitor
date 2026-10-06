@@ -795,12 +795,12 @@ public partial class ServerTab : UserControl
     private void DownloadDeadlockXml_Click(object sender, RoutedEventArgs e)
     {
         if (sender is not Button btn || btn.DataContext is not DeadlockProcessDetail row || string.IsNullOrEmpty(row.DeadlockGraphXml)) return;
-        SaveXmlToFile(row.DeadlockGraphXml, $"deadlock_{row.DeadlockTime:yyyyMMdd_HHmmss}.xml", "deadlock XML");
+        SaveXmlToFile(row.DeadlockGraphXml, $"deadlock_{row.DeadlockTime:yyyyMMdd_HHmmss}.xml", "deadlock XML", "deadlock graph");
     }
 
     private void DownloadBlockedProcessXml_Click(object sender, RoutedEventArgs e)
     {
         if (sender is not Button btn || btn.DataContext is not BlockedProcessReportRow row || string.IsNullOrEmpty(row.BlockedProcessReportXml)) return;
-        SaveXmlToFile(row.BlockedProcessReportXml, $"blocked_process_{row.EventTime:yyyyMMdd_HHmmss}.xml", "blocked process XML");
+        SaveXmlToFile(row.BlockedProcessReportXml, $"blocked_process_{row.EventTime:yyyyMMdd_HHmmss}.xml", "blocked process XML", "blocked process report");
     }
 }
