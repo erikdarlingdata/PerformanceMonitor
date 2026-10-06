@@ -20,7 +20,7 @@
    cell is rebuilt reports to the new cell as well as the old one. */
 
 import { el, readTool } from "../util.js";
-import { copyText } from "../grid-tools.js";
+import { copyText, downloadText } from "../grid-tools.js";
 
 const NO_PLAN = "No stored plan was found for this query.";
 const TRUNCATED_NOTE =
@@ -29,6 +29,9 @@ const TRUNCATED_NOTE =
 
 /* key -> { phase: "loading" | "done", result: { kind: "plan" | "none" | "error", ... } }. */
 const openPlans = new Map();
+/* key -> { phase: "loading" | "done", result: { kind: "script" | "none" | "error", ... } } for the Repro script under
+   an open plan panel (#5233). Same module-scope reason as openPlans: the 60 s rebuild draws it open again. */
+const openRepros = new Map();
 /* key -> Set of redraw functions, one per cell currently showing the key. */
 const views = new Map();
 /* The grid build a cell belongs to. Each plan column factory below runs once per grid build, so each call starts a new
@@ -46,6 +49,8 @@ const SOURCES = {
     params: (s) => ({ query_hash: s.query_hash, database_name: s.database_name || null }),
     key: (s) => [s.database_name || "", s.query_hash],
     stem: (s) => s.query_hash,
+    repro: true,
+    reproParams: (s) => ({ kind: "query_hash", query_hash: s.query_hash, database_name: s.database_name || null }),
   },
   active_snapshot: {
     read: "get_active_query_plan_xml",
@@ -57,12 +62,22 @@ const SOURCES = {
     }),
     key: (s) => [s.collection_time, s.session_id, s.request_id == null ? 0 : s.request_id, s.live ? "live" : "est"],
     stem: (s) => "active-" + s.session_id + "-" + s.collection_time + (s.live ? "-live" : ""),
+    /* The script is built from the row's stored text and its estimated plan; a live plan row sends no `live`. */
+    repro: true,
+    reproParams: (s) => ({
+      kind: "active_snapshot",
+      collection_time: s.collection_time,
+      session_id: s.session_id,
+      request_id: s.request_id == null ? 0 : s.request_id,
+    }),
   },
   query_store: {
     read: "get_query_store_plan_xml",
     params: (s) => ({ database_name: s.database_name, query_id: s.query_id, plan_id: s.plan_id == null ? null : s.plan_id }),
     key: (s) => [s.database_name, s.query_id, s.plan_id == null ? "" : s.plan_id],
     stem: (s) => "qs-" + s.database_name + "-" + s.query_id + (s.plan_id == null ? "" : "-" + s.plan_id),
+    repro: true,
+    reproParams: (s) => ({ kind: "query_store", database_name: s.database_name, query_id: s.query_id, plan_id: s.plan_id == null ? null : s.plan_id }),
   },
   procedure: {
     read: "get_procedure_plan_xml",
@@ -70,7 +85,53 @@ const SOURCES = {
     key: (s) => [s.sql_handle],
     stem: (s) => s.sql_handle,
   },
+  /* A blocked process report row (#5236) names the plan of one of its two sides by the report's event time (the XE
+     stamp, as the row holds it), both sessions' ids and ecids, and `side`. The blocked side is the read's default, so
+     it sends no `side`; a row's blocked and blocking plans are two panels. A missing ecid reads as 0, as the tool does.
+     The row's database goes with it: a server that collects several databases (an Azure master target) numbers sessions
+     per database, so two databases' reports can share every other part of the key. The database is in the panel key too,
+     so their rows never share a panel; a row without one sends none and keys with an empty slot. */
+  blocking: {
+    read: "get_blocking_plan_xml",
+    params: (s) => ({
+      event_time: s.event_time,
+      blocked_spid: s.blocked_spid,
+      blocked_ecid: s.blocked_ecid == null ? 0 : s.blocked_ecid,
+      blocking_spid: s.blocking_spid,
+      blocking_ecid: s.blocking_ecid == null ? 0 : s.blocking_ecid,
+      side: s.side === "blocking" ? "blocking" : null,
+      database_name: s.database_name || null,
+    }),
+    key: (s) => [
+      s.database_name || "",
+      s.event_time,
+      s.blocked_spid,
+      s.blocked_ecid == null ? 0 : s.blocked_ecid,
+      s.blocking_spid,
+      s.blocking_ecid == null ? 0 : s.blocking_ecid,
+      s.side === "blocking" ? "blocking" : "blocked",
+    ],
+    stem: (s) => (s.side === "blocking" ? "blocking-" + s.blocking_spid : "blocked-" + s.blocked_spid) + "-" + s.event_time,
+  },
+  /* A deadlock row's victim plan (#5236), by the row's collection and deadlock times. Neither stamp is unique on its own
+     (one monitor pass can report two deadlocks with the same millisecond), so the victim's process id narrows it; a row
+     without one reads by the two times alone, and the read refuses to pick when two deadlocks that name different victims
+     match. The row's database narrows it too, and keys the panel, for the same reason as a blocking row's. The download
+     name carries the victim, so two deadlocks with the same stamps do not download under one file name. */
+  deadlock_victim: {
+    read: "get_deadlock_plan_xml",
+    params: (s) => ({
+      collection_time: s.collection_time,
+      deadlock_time: s.deadlock_time,
+      victim_process_id: s.victim_process_id || null,
+      database_name: s.database_name || null,
+    }),
+    key: (s) => [s.database_name || "", s.collection_time, s.deadlock_time, s.victim_process_id || ""],
+    stem: (s) => "deadlock-victim-" + s.deadlock_time + (s.victim_process_id ? "-" + s.victim_process_id : ""),
+  },
 };
+
+/* A procedure has no `repro`: no query text is kept for one, so no script can be built. */
 
 /* A panel's key: server, then the kind (left out for query_hash, whose key never had one), then the kind's own parts, then
    the source's `scope` when it has one. The kind in the key is what keeps two sources with equal-looking parts from sharing
@@ -91,6 +152,7 @@ export function openPlanKeys() {
 /** Forgets every open panel. Tests only; the page never needs it. */
 export function resetPlanViewer() {
   openPlans.clear();
+  openRepros.clear();
   views.clear();
 }
 
@@ -145,6 +207,11 @@ export function prettyPrintXml(xml) {
  *  name, plus .sqlplan. */
 export function planFileName(stem) {
   return String(stem).replace(/[^A-Za-z0-9._-]/g, "_") + ".sqlplan";
+}
+
+/** The file name a repro script downloads as: the source's stem made safe for a file name, plus .sql. */
+export function reproFileName(stem) {
+  return String(stem).replace(/[^A-Za-z0-9._-]/g, "_") + ".sql";
 }
 
 const REVOKE_AFTER_MS = 10000;
@@ -203,6 +270,77 @@ export function classifyPlanRead(res) {
   return { kind: "none", message: NO_PLAN };
 }
 
+/* What get_query_repro_script answers: JSON { kind, <the key>, plan_found, script } for a script, or a status envelope
+   ("unavailable" / "not_collected") when no query text is stored, which arrives as kind "empty". */
+const NO_REPRO = "No stored query text was found, so no repro script can be built.";
+
+/** Turns a repro read result into { kind: "script" | "none" | "error", ... }, or null when the read was abandoned. */
+export function classifyReproRead(res) {
+  if (!res || res.kind === "aborted" || res.kind === "auth") return null;
+  const text = typeof res.message === "string" ? res.message : "";
+  if (res.kind === "data" && res.data && typeof res.data.script === "string") {
+    return { kind: "script", script: res.data.script, planFound: res.data.plan_found === true };
+  }
+  if (res.kind === "error") return { kind: "error", message: text || "The repro script could not be built." };
+  return { kind: "none", message: text || NO_REPRO };
+}
+
+async function loadRepro(key, server, source) {
+  let res;
+  try {
+    res = await readTool("get_query_repro_script", { server, ...SOURCES[source.kind].reproParams(source) });
+  } catch (e) {
+    res = { kind: "error", message: e && e.message ? e.message : String(e) };
+  }
+  if (!openRepros.has(key)) return; // closed while the read was out
+  const outcome = classifyReproRead(res);
+  if (outcome === null) openRepros.delete(key);
+  else openRepros.set(key, { phase: "done", result: outcome });
+  redraw(key);
+}
+
+/** Opens the Repro script under a plan panel, or closes it if it is already open. */
+export function toggleRepro(server, source) {
+  const key = keyOf(server, source);
+  if (openRepros.has(key)) {
+    openRepros.delete(key);
+    redraw(key);
+    return;
+  }
+  openRepros.set(key, { phase: "loading" });
+  redraw(key);
+  return loadRepro(key, server, source);
+}
+
+function reproPanel(key, stem) {
+  const state = openRepros.get(key);
+  if (state.phase === "loading") return el("div", { class: "repro-panel" }, [el("div", { class: "strip loading", text: "Building the repro script..." })]);
+  const r = state.result;
+  if (r.kind !== "script") {
+    return el("div", { class: "repro-panel" }, [el("div", { class: r.kind === "error" ? "strip error" : "strip empty", text: r.message })]);
+  }
+  const status = el("span", { class: "grid-tools-status", role: "status", "aria-live": "polite" });
+  const copy = el("button", { type: "button", class: "grid-tool", text: "Copy" });
+  copy.addEventListener("click", async () => {
+    const out = await copyText(r.script);
+    status.textContent = out.message;
+  });
+  const download = el("button", { type: "button", class: "grid-tool", text: "Download .sql" });
+  download.addEventListener("click", () => {
+    try {
+      downloadText(reproFileName(stem), [r.script], "application/sql");
+      status.textContent = "Downloaded " + reproFileName(stem) + ".";
+    } catch (e) {
+      status.textContent = "Download failed: " + (e && e.message ? e.message : "the browser refused it.");
+    }
+  });
+  return el("div", { class: "repro-panel" }, [
+    el("div", { class: "grid-tools" }, [copy, download, status]),
+    r.planFound ? null : el("div", { class: "strip notice", text: "No stored plan was found, so the parameters could not be extracted. The script has the query text only." }),
+    el("pre", { class: "code repro-sql", text: r.script }),
+  ]);
+}
+
 async function load(key, server, source) {
   const spec = SOURCES[source.kind];
   let res;
@@ -223,6 +361,7 @@ export function openPlanSource(server, source) {
   const key = keyOf(server, source);
   if (openPlans.has(key)) {
     openPlans.delete(key);
+    openRepros.delete(key);
     redraw(key);
     return;
   }
@@ -236,11 +375,32 @@ export function openStoredPlan(server, queryHash, database) {
   return openPlanSource(server, { kind: "query_hash", query_hash: queryHash, database_name: database || null });
 }
 
-function panelFor(key, stem) {
+function reproButton(key, server, source) {
+  const reproOpen = openRepros.has(key);
+  const repro = el("button", {
+    type: "button",
+    class: "grid-tool",
+    text: reproOpen ? "Hide repro" : "Repro script",
+    "aria-expanded": reproOpen ? "true" : "false",
+    title: "Build a T-SQL repro script from the stored query text and plan",
+  });
+  repro.addEventListener("click", () => toggleRepro(server, source));
+  return repro;
+}
+
+function panelFor(key, stem, server, source) {
   const state = openPlans.get(key);
   const status = el("span", { class: "grid-tools-status", role: "status", "aria-live": "polite" });
   if (state.phase === "loading") return el("div", { class: "plan-panel" }, [el("div", { class: "strip loading", text: "Loading the stored plan..." })]);
   const r = state.result;
+  if (r.kind === "none" && SOURCES[source.kind].repro) {
+    /* No stored plan, but the repro is still built from the stored query text (plan-less), as the Viewer does. */
+    return el("div", { class: "plan-panel" }, [
+      el("div", { class: "grid-tools" }, [reproButton(key, server, source), status]),
+      openRepros.has(key) ? reproPanel(key, stem) : null,
+      el("div", { class: "strip empty", text: r.message }),
+    ]);
+  }
   if (r.kind !== "plan") {
     return el("div", { class: "plan-panel" }, [el("div", { class: r.kind === "error" ? "strip error" : "strip empty", text: r.message })]);
   }
@@ -264,8 +424,12 @@ function panelFor(key, stem) {
       }
     });
   }
+  const tools = [copy, download];
+  if (SOURCES[source.kind].repro) tools.push(reproButton(key, server, source));
+  tools.push(status);
   return el("div", { class: "plan-panel" }, [
-    el("div", { class: "grid-tools" }, [copy, download, status]),
+    el("div", { class: "grid-tools" }, tools),
+    openRepros.has(key) ? reproPanel(key, stem) : null,
     r.truncated ? el("div", { class: "strip notice", text: TRUNCATED_NOTE }) : null,
     el("pre", { class: "code plan-xml", text: pretty }),
   ]);
@@ -294,7 +458,7 @@ export function planSourceCell(server, source, label, title) {
     });
     button.addEventListener("click", () => openPlanSource(server, source));
     host.appendChild(button);
-    if (isOpen) host.appendChild(panelFor(key, stem));
+    if (isOpen) host.appendChild(panelFor(key, stem, server, source));
   };
   draw.host = host;
   draw.generation = generation;
@@ -391,6 +555,79 @@ export function procedurePlanColumn(server) {
     label: "Plan",
     render: (row) =>
       planSourceCell(server, row && row.sql_handle ? { kind: "procedure", sql_handle: row.sql_handle } : null, "Plan", "Show the stored plan for this procedure"),
+    hideWhenEmpty: true,
+    sortable: false,
+    filter: false,
+    csv: false,
+    copy: false,
+  };
+}
+
+/** Blocking (#5236): a "Blocked plan" and a "Blocking plan" column, each gated on the row's own presence flag. The flags
+ *  arrive only when true (a report keeps a plan only when the statement was still in the plan cache, and a DMV row has
+ *  none), so a row without one gets a dash and a grid with none drops the column. A row also needs the event time and both
+ *  session ids the read keys on; without them there is nothing to read by, so it is a dash too. The row's database_name
+ *  goes along when it has one, so a server that collects several databases reads each row's own. */
+export function blockingPlanColumns(server) {
+  const source = (row, side) => ({
+    kind: "blocking",
+    event_time: row.event_time,
+    blocked_spid: row.blocked_spid,
+    blocked_ecid: row.blocked_ecid == null ? 0 : row.blocked_ecid,
+    blocking_spid: row.blocking_spid,
+    blocking_ecid: row.blocking_ecid == null ? 0 : row.blocking_ecid,
+    database_name: row.database_name || null,
+    side,
+  });
+  const keyed = (row) => row.event_time != null && row.event_time !== "" && row.blocked_spid != null && row.blocking_spid != null;
+  return [
+    {
+      key: "has_blocked_plan",
+      label: "Blocked plan",
+      render: (row) =>
+        planSourceCell(server, row && row.has_blocked_plan === true && keyed(row) ? source(row, "blocked") : null, "Blocked plan", "Show the plan captured for the blocked statement"),
+      hideWhenEmpty: true,
+      sortable: false,
+      filter: false,
+      csv: false,
+      copy: false,
+    },
+    {
+      key: "has_blocking_plan",
+      label: "Blocking plan",
+      render: (row) =>
+        planSourceCell(server, row && row.has_blocking_plan === true && keyed(row) ? source(row, "blocking") : null, "Blocking plan", "Show the plan captured for the blocking statement"),
+      hideWhenEmpty: true,
+      sortable: false,
+      filter: false,
+      csv: false,
+      copy: false,
+    },
+  ];
+}
+
+/** Deadlocks (#5236): a "Victim plan" column gated on the row's presence flag (sent only when true, like the blocking
+ *  flags). The read keys on the row's collection and deadlock times, with the victim's process id and the database_name
+ *  when the row has them; a row missing either time is a dash. */
+export function deadlockPlanColumn(server) {
+  return {
+    key: "has_victim_plan",
+    label: "Victim plan",
+    render: (row) =>
+      planSourceCell(
+        server,
+        row && row.has_victim_plan === true && row.collection_time != null && row.collection_time !== "" && row.deadlock_time != null && row.deadlock_time !== ""
+          ? {
+              kind: "deadlock_victim",
+              collection_time: row.collection_time,
+              deadlock_time: row.deadlock_time,
+              victim_process_id: row.victim_process_id || null,
+              database_name: row.database_name || null,
+            }
+          : null,
+        "Victim plan",
+        "Show the plan captured for the deadlock victim"
+      ),
     hideWhenEmpty: true,
     sortable: false,
     filter: false,

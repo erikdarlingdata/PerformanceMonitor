@@ -781,6 +781,92 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
     }
 
     /// <summary>
+    /// #5235: the wait_type filter is in the query, like database_name, so the count, the cap and the truncation flag all see it. One
+    /// capture holds the waits the filter has to tell apart, and a capture two minutes earlier holds one more row on the same wait:
+    /// <code>
+    ///   55 (Db)      LCK_M_X, blocked by 60 (the default wait of a blocked row)
+    ///   60 (Db)      a WAITFOR shell on the WAITFOR wait, blocking 55: the head blocker
+    ///   61 (Db)      "PAGEIOLATCH_SH " with the trailing space an older collector stored
+    ///   62 (Db)      PAGEIOLATCH_EX: another wait with the same prefix
+    ///   63 (OtherDb) PAGEIOLATCH_SH
+    ///   64 (Db)      running, no wait: a NULL wait never matches
+    ///   61 (Db)      PAGEIOLATCH_SH, in the earlier capture
+    /// </code>
+    /// The wait value is bound after the database values, so its parameter index is 5 plus their count: the calls that pair it with a
+    /// database_name prove the index, because a hard-coded one would compare the wait to the database name.
+    /// </summary>
+    [Fact]
+    public async Task GetActiveQueries_WaitTypeFilter_IsInTheQuery_AnyCase_AndNamedInTheMiss()
+    {
+        var t = WholeSecondsNow().AddMinutes(-2);
+        await SeedSnapshotAsync(t, 55, "Db", "UPDATE Posts SET Score = 1", blockingSessionId: 60, cpuMs: 500);
+        await SeedSnapshotAsync(t, 60, "Db", "WAITFOR DELAY '00:05'", blockingSessionId: 0, cpuMs: 1, waitType: "WAITFOR");
+        await SeedSnapshotAsync(t, 61, "Db", "SELECT * FROM Posts", blockingSessionId: 0, cpuMs: 300, waitType: "PAGEIOLATCH_SH ");
+        await SeedSnapshotAsync(t, 62, "Db", "SELECT * FROM Votes", blockingSessionId: 0, cpuMs: 250, waitType: "PAGEIOLATCH_EX");
+        await SeedSnapshotAsync(t, 63, "OtherDb", "SELECT * FROM Sales", blockingSessionId: 0, cpuMs: 200, waitType: "PAGEIOLATCH_SH");
+        await SeedSnapshotAsync(t, 64, "Db", "SELECT COUNT(*) FROM Comments", blockingSessionId: 0, cpuMs: 100);
+        await SeedSnapshotAsync(t.AddMinutes(-2), 61, "Db", "SELECT * FROM Posts", blockingSessionId: 0, cpuMs: 50, waitType: "PAGEIOLATCH_SH");
+
+        async Task<JsonElement> ActiveAsync(string? database = null, bool blockingOnly = false, string? wait = null, int limit = 50) =>
+            Parse(await McpSessionTools.GetActiveQueries(_dataService, _serverManager, ServerName, 1, database, blockingOnly, wait, limit));
+        static int[] Sessions(JsonElement root) =>
+            root.GetProperty("queries").EnumerateArray().Select(r => r.GetProperty("session_id").GetInt32()).ToArray();
+
+        /* No wait filter: the seven rows (the WAITFOR shell stays as a head blocker), and the echo says there was none. */
+        var all = await ActiveAsync();
+        Assert.Equal(7, all.GetProperty("total_snapshots").GetInt64());
+        Assert.Equal(JsonValueKind.Null, all.GetProperty("filters_applied").GetProperty("wait_type").ValueKind);
+
+        /* Lowercase input finds the exact name AND the trailing-space row. The page is newest capture first, highest CPU first within
+           one, so 61 (space) leads 63 and the earlier capture's 61 comes last. 62 (another wait) and 64 (no wait) are out. The echo
+           is the value the caller sent, not the upper-cased match key. */
+        var latch = await ActiveAsync(wait: "pageiolatch_sh");
+        Assert.Equal(3, latch.GetProperty("total_snapshots").GetInt64());
+        Assert.Equal(new[] { 61, 63, 61 }, Sessions(latch));
+        Assert.Equal("pageiolatch_sh", latch.GetProperty("filters_applied").GetProperty("wait_type").GetString());
+
+        /* The input is trimmed (the echo names what was applied); a blank is no filter at all. */
+        var padded = await ActiveAsync(wait: "  PAGEIOLATCH_SH  ");
+        Assert.Equal(3, padded.GetProperty("total_snapshots").GetInt64());
+        Assert.Equal("PAGEIOLATCH_SH", padded.GetProperty("filters_applied").GetProperty("wait_type").GetString());
+        var blank = await ActiveAsync(wait: "   ");
+        Assert.Equal(7, blank.GetProperty("total_snapshots").GetInt64());
+        Assert.Equal(JsonValueKind.Null, blank.GetProperty("filters_applied").GetProperty("wait_type").ValueKind);
+
+        /* A blocker on another wait leaves the page. 55 waits on LCK_M_X; its blocker 60 waits on WAITFOR, so 60 is not in the
+           filtered population and the victim says why, as it does for a blocker in another database. */
+        var locks = await ActiveAsync(wait: "LCK_M_X");
+        Assert.Equal(1, locks.GetProperty("total_snapshots").GetInt64());
+        Assert.Equal(new[] { 55 }, Sessions(locks));
+        Assert.Equal("filtered", Assert.Single(locks.GetProperty("queries").EnumerateArray()).GetProperty("blocker_not_shown").GetString());
+
+        /* It ANDs with database_name, and the wait parameter's index follows the database value's. */
+        var otherDbLatch = await ActiveAsync(database: "OtherDb", wait: "PAGEIOLATCH_SH");
+        Assert.Equal(1, otherDbLatch.GetProperty("total_snapshots").GetInt64());
+        Assert.Equal(new[] { 63 }, Sessions(otherDbLatch));
+        var dbLatch = await ActiveAsync(database: "Db", wait: "PAGEIOLATCH_SH");
+        Assert.Equal(2, dbLatch.GetProperty("total_snapshots").GetInt64());
+        Assert.Equal(new[] { 61, 61 }, Sessions(dbLatch));
+
+        /* The cap and the truncation flag are measured on the filtered population: three matching rows under limit 2. */
+        var cut = await ActiveAsync(wait: "PAGEIOLATCH_SH", limit: 2);
+        Assert.True(cut.GetProperty("truncated").GetBoolean());
+        Assert.Equal(2, cut.GetProperty("snapshots_returned").GetInt32());
+        Assert.Equal(3, cut.GetProperty("total_snapshots").GetInt64());
+
+        /* A miss names the filter instead of calling the window empty, and the three filters are named in one fixed order. */
+        var miss = await ActiveAsync(wait: "NO_SUCH_WAIT");
+        Assert.Equal("empty", miss.GetProperty("status").GetString());
+        Assert.Contains("wait_type 'NO_SUCH_WAIT'", miss.GetProperty("message").GetString(), StringComparison.Ordinal);
+        var missAll = await ActiveAsync(database: "Db", blockingOnly: true, wait: "NO_SUCH_WAIT");
+        Assert.Contains("database_name 'Db' with blocking_only with wait_type 'NO_SUCH_WAIT'", missAll.GetProperty("message").GetString(), StringComparison.Ordinal);
+
+        /* Equality only: a % or _ in the input is literal, so no pattern reaches PAGEIOLATCH_SH. */
+        foreach (var pattern in new[] { "PAGEIOLATCH_%", "PAGEIOLATCH_S_", "%" })
+            Assert.Equal("empty", (await ActiveAsync(wait: pattern)).GetProperty("status").GetString());
+    }
+
+    /// <summary>
     /// #4198: get_active_queries' own response-budget pin. Darling's twin
     /// (<c>DarlingMcpActiveQueriesBudgetLiveTests</c>) measured 81,489 bytes for a synthetic 50-row page
     /// shaped like a busy server (every optional field populated, a fifth of the rows carrying a long
@@ -1190,13 +1276,15 @@ INSERT INTO query_stats
 VALUES ($1, $2, $3, $4, 'Db', $5, '0xPLANHASH', $6, '0xPLANH', $7, $2, $2, 10, $8, $8, 100, 1, $9)",
         _nextId--, Naive(at), _serverId, ServerName, queryHash, "0xSQLH" + queryHash, "SELECT " + queryHash, cpuUs, maxDop);
 
-    private Task SeedSnapshotAsync(DateTime at, int sessionId, string database, string text, int blockingSessionId, long cpuMs) => ExecAsync(@"
+    /// <summary>One query_snapshots row. <paramref name="waitType"/> is the row's own wait; left null it is the old default, LCK_M_X for a
+    /// blocked row and no wait for the rest (#5235 lets a test name any wait, a trailing space included).</summary>
+    private Task SeedSnapshotAsync(DateTime at, int sessionId, string database, string text, int blockingSessionId, long cpuMs, string? waitType = null) => ExecAsync(@"
 INSERT INTO query_snapshots
     (collection_id, collection_time, server_id, server_name, session_id, database_name, query_text, status, blocking_session_id,
      wait_type, cpu_time_ms, total_elapsed_time_ms)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
         _nextId--, Naive(at), _serverId, ServerName, sessionId, database, text,
-        blockingSessionId > 0 ? "suspended" : "running", blockingSessionId, blockingSessionId > 0 ? "LCK_M_X" : null, cpuMs, cpuMs * 2);
+        blockingSessionId > 0 ? "suspended" : "running", blockingSessionId, waitType ?? (blockingSessionId > 0 ? "LCK_M_X" : null), cpuMs, cpuMs * 2);
 
     private Task SeedRunAsync(DateTime at) => ExecAsync(@"
 INSERT INTO collection_log

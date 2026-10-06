@@ -825,7 +825,7 @@ public sealed class DarlingMcpServerAdminToolsSurfaceTests
             Task.FromResult(_visibleToTheGate.ToList());
 
         public Task<int> InsertAsync(
-            DarlingMcpServerAdminTools.ParsedServerEntry entry, string? encryptedPassword, CancellationToken cancellationToken)
+            DarlingMcpServerAdminTools.ParsedServerEntry entry, string? encryptedPassword, string? actualStorageKey, CancellationToken cancellationToken)
         {
             InsertAttempts++;
             if (InsertAttempts == _faultOnInsert)

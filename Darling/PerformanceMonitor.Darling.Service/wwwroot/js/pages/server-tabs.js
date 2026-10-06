@@ -39,7 +39,7 @@
  * touches innerHTML.
  */
 
-import { el, makeActivatable, readTool, readToolWithinKeptHistory, keptWindowStrip, windowFloorStrip, mount, truncate, loadingStrip, errorStrip, readErrorStrip, emptyStrip, disclosure, noticeStrip, getPath, fmtMs, fmtRate, localTime, parseUtc, windowFromHours, daysText } from "../util.js";
+import { el, makeActivatable, readTool, readToolWithinKeptHistory, keptWindowStrip, windowFloorStrip, mount, truncate, loadingStrip, errorStrip, readErrorStrip, emptyStrip, disclosure, noticeStrip, getPath, fmtMs, fmtRate, localTime, parseUtc, windowFromHours, daysText, queryWaitFilter, setQueryWaitFilter, waitIsLinked } from "../util.js";
 import { renderPanel, setPanelSignal, getPanelSignal, VIZ } from "../panels.js";
 import { zoomableLineChart, chartZoomScope, SERIES_COLORS, CATEGORICAL_COLORS } from "../charts.js";
 import { multiPicker, mergeSeriesRows } from "../multi-picker.js";
@@ -48,7 +48,7 @@ import { READ_FIELDS } from "../read-fields.js";
 import { analysisFindingsTab } from "./analysis-findings.js";
 import { downloadText } from "../grid-tools.js";
 import { deadlockGraphCell } from "./deadlock-graph.js";
-import { activePlanColumns, planColumn, procedurePlanColumn, queryStorePlanColumn } from "./plan-viewer.js";
+import { activePlanColumns, blockingPlanColumns, deadlockPlanColumn, planColumn, procedurePlanColumn, queryStorePlanColumn } from "./plan-viewer.js";
 import { queryStoreHistoryColumn } from "./query-store-history.js";
 
 /* ─────────────────────────── shared cell renderers ─────────────────────────── */
@@ -259,7 +259,7 @@ export function waitsPanel(server, ctx) {
 
     const waits = res.data.waits || [];
     /* #4966: the Wait Stats grid says where its table's data starts when that is after the window's start. */
-    const parts = [keptWindowStrip(res), windowFloorStrip(res.data, { viz: "table" }), VIZ.table(res.data, { rowsKey: "waits", columns: WAIT_COLUMNS })];
+    const parts = [keptWindowStrip(res), windowFloorStrip(res.data, { viz: "table" }), VIZ.table(res.data, { rowsKey: "waits", columns: withWaitLink(WAIT_COLUMNS, server, null) })];
 
     if (waits.length) {
       const chartSlot = el("div", {}, [loadingStrip()]);
@@ -360,7 +360,7 @@ export async function drawWaitTrends(slot, server, ctx, checked, metric) {
     seenNotes.size ? noticeStrip([...seenNotes].join(" ")) : null,
     ...failures,
     zoomableLineChart({
-      atTime: { server },
+      atTime: { server, item: "wait" },
       points: mergeSeriesRows(drawn, "time", metric),
       xKey: "time",
       series: drawn.map((d) => ({ key: d.key, label: d.label, color: d.color })),
@@ -1096,7 +1096,7 @@ export const SERVER_TABS = [
         "get_waiting_tasks",
         { server, hours: ctx.hours, limit: 30 },
         "tasks",
-        WAITING_TASK_COLUMNS,
+        withWaitLink(WAITING_TASK_COLUMNS, server, "collection_time"),
         ctx.label,
         "No waiting tasks were captured in this window."
       ),
@@ -1293,7 +1293,7 @@ export const SERVER_TABS = [
         "get_blocking",
         { server, hours: ctx.hours, limit: 30 },
         "events",
-        BLOCKING_COLUMNS,
+        [...BLOCKING_COLUMNS, ...blockingPlanColumns(server)],
         ctx.label,
         "No blocking events in this window.",
         2,
@@ -1306,7 +1306,7 @@ export const SERVER_TABS = [
         "get_deadlocks",
         { server, hours: ctx.hours, limit: 20 },
         "deadlocks",
-        DEADLOCK_COLUMNS,
+        [...DEADLOCK_COLUMNS, deadlockPlanColumn(server)],
         ctx.label,
         "No deadlocks in this window.",
         2,
@@ -1473,15 +1473,7 @@ export const SERVER_TABS = [
       "desktop-viewer features — they need a plan renderer and a command back to the monitored server, neither " +
       "of which this read-only web seat has.",
     build: (server, ctx) => [
-      table(
-        "Active Queries",
-        "get_active_queries",
-        { server, hours: ctx.hours, limit: 50 },
-        "queries",
-        [...ACTIVE_COLUMNS, ...activePlanColumns(server)],
-        ctx.label,
-        "No active-query snapshots in this window."
-      ),
+      activeQueriesPanel(server, ctx),
       /* #2484: the viewer's Performance Trends tab is four charts over three reads. Duration and the
          execution rate come from ONE payload -- via fanout, not two line() calls, because the tab must not
          fetch the same read twice. They get separate charts rather than separate series because ms/sec and
@@ -1940,7 +1932,7 @@ export const SERVER_TABS = [
         "get_health_parser_significant_waits",
         { server, hours: ctx.hours, limit: 50 },
         "waits",
-        SIGNIFICANT_WAIT_COLUMNS,
+        withWaitLink(SIGNIFICANT_WAIT_COLUMNS, server, "event_time"),
         ctx.label,
         "No significant waits (a real session waiting 500 ms+ on a non-idle wait type) in this window."
       ),
@@ -3150,6 +3142,83 @@ const HEALTH_CPU_SERIES = [
   { key: "system_cpu_utilization", label: "System CPU %" },
 ];
 
+/* ───────────────────────── wait links (#5235) ───────────────────────── */
+
+/* A grid's Wait cell as a link to Active Queries filtered to that wait (the desktop's wait drill-down). The column keeps
+   its key, so sort, filter, CSV and copy read the raw wait; only the cell is a button, whose text is the wait. `timeKey`
+   names the row's own instant: the hour around it is the range Active Queries opens on (the hour holds the clicked minute
+   because different collectors capture at different instants). With no timeKey (Wait Stats, whose rows are window totals)
+   the range stays as it is. A row with no wait, a QDS_* wait (waitIsLinked) or a time that does not parse is plain text. */
+function withWaitLink(columns, server, timeKey) {
+  return columns.map((c) => (c.key === "wait_type" ? { ...c, render: (row) => waitLinkCell(server, row, timeKey) } : c));
+}
+
+function waitLinkCell(server, row, timeKey) {
+  const wait = row ? row.wait_type : null;
+  const plain = () => el("span", { text: wait == null || wait === "" ? "—" : String(wait) });
+  if (!waitIsLinked(wait)) return plain();
+  let tMs = null;
+  if (timeKey) {
+    const at = parseUtc(row[timeKey]);
+    if (!at) return plain();
+    tMs = at.getTime();
+  }
+  /* A range the page refuses is said beside the button; the filter is not set and the tab does not move. */
+  const note = el("span", { class: "wait-link-note", role: "status", "aria-live": "polite" });
+  const btn = el("button", {
+    type: "button",
+    class: "wait-link",
+    title: "Show the active queries waiting on " + wait.trim() + (tMs == null ? "" : " around this time"),
+    text: wait,
+  });
+  btn.addEventListener("click", async () => {
+    note.textContent = "";
+    /* Loaded on the click, not at import: a page that stubs the chart module for a test needs no export it never uses. */
+    const { openServerTabAt } = await import("../charts.js");
+    await openServerTabAt(server, tMs, "queries", {
+      beforeRoute: () => setQueryWaitFilter(server, wait),
+      say: (msg) => {
+        note.textContent = msg;
+      },
+    });
+  });
+  return el("span", {}, [btn, note]);
+}
+
+/* The Active Queries grid. With a wait filter set (a wait row or the wait trend chart opened this tab on a wait) it reads
+   that wait only, at Lite's drill-down cap of 500 rows so a one-hour drill holds the clicked minute, and a strip above the
+   grid names the wait as text and clears the filter. The heading stays "Active Queries" (the scroll finder matches it).
+   Unfiltered, the read is the 50-row page it always was. */
+function activeQueriesPanel(server, ctx) {
+  const wait = queryWaitFilter(server);
+  const panel = table(
+    "Active Queries",
+    "get_active_queries",
+    wait ? { server, hours: ctx.hours, limit: 500, wait_type: wait } : { server, hours: ctx.hours, limit: 50 },
+    "queries",
+    [...ACTIVE_COLUMNS, ...activePlanColumns(server)],
+    wait ? ctx.label + ", waiting on " + wait : ctx.label,
+    wait ? "No active queries waiting on " + wait + " were captured in this window." : "No active-query snapshots in this window."
+  );
+  if (wait) {
+    const strip = el("div", { class: "strip notice wait-filter-strip" }, [
+      el("span", { text: "Only requests waiting on " + wait + ". " }),
+      el("button", {
+        type: "button",
+        class: "btn small",
+        text: "Show all active queries",
+        onClick: () => {
+          setQueryWaitFilter(server, "");
+          /* The same hash fires no hashchange, so the router is told to rebuild the tab. */
+          window.dispatchEvent(new Event("hashchange"));
+        },
+      }),
+    ]);
+    panel.insertBefore(strip, panel.lastChild);
+  }
+  return panel;
+}
+
 /* ─────────────────────────── table columns ─────────────────────────── */
 
 const WAIT_COLUMNS = [
@@ -3523,7 +3592,8 @@ const ACTIVE_COLUMNS = [
 ];
 
 /* The desktop Blocked Process Reports grid's columns, order and headers, for every field get_blocking returns. Object is
-   the web's own extra. */
+   the web's own extra. The Blocked plan and Blocking plan buttons are added where the grid is built (blockingPlanColumns,
+   #5236), so this list stays the fields the read returns. */
 /* Blocking column groups: the report, the pair and the wait are always shown; the sessions' status and isolation, the blocked
    transaction and the logins, hosts and apps follow the desktop order in three toggles, with the first two on at first. */
 const BLOCKING_GROUPS = { groups: ["Status and isolation", "Transaction", "Sessions"], defaultGroups: ["Status and isolation", "Transaction"] };
@@ -3556,7 +3626,8 @@ const BLOCKING_COLUMNS = [
   { key: "contentious_object", label: "Object" },
 ];
 
-/* Stays local: this page renders the deadlock text through a codeDisclosure and orders the columns differently from the catalog. */
+/* Stays local: this page renders the deadlock text through a codeDisclosure and orders the columns differently from the catalog.
+   The Victim plan button is added where the grid is built (deadlockPlanColumn, #5236), so the five columns here stay the summary. */
 const DEADLOCK_COLUMNS = [
   { key: "deadlock_time", label: "Deadlock Time", format: "time" },
   { key: "victim_sql_text", label: "Victim SQL", render: (r) => codeDisclosure(r.victim_sql_text) },

@@ -317,7 +317,7 @@ Configuration is a single JSON file with no schedule knobs. See the **[Darling o
 | Alerts (tray + email + webhooks) | Yes | Email + webhooks (headless) | Yes |
 | Themes | Dark and light | Dark and light | Dark and light |
 | Portability | Single executable | Portable service + viewer zip (Windows), service tarball (Linux) | Server-bound |
-| MCP server (LLM integration) | Built-in (89 tools) | On request (178 tools) | Built into Dashboard (66 tools) |
+| MCP server (LLM integration) | Built-in (89 tools) | On request (181 tools) | Built into Dashboard (66 tools) |
 
 ---
 
@@ -455,7 +455,7 @@ claude mcp add --transport http --scope user sql-monitor http://localhost:5151/
 
 ### Available Tools
 
-**Lite** exposes 89 tools; **Darling** exposes 178 (the analysis + data-read surface plus its write tools) on request; the deprecated **Dashboard** exposes 66 (see [deprecated/Dashboard/README.md](deprecated/Dashboard/README.md)). Core tools are shared.
+**Lite** exposes 89 tools; **Darling** exposes 181 (the analysis + data-read surface plus its write tools) on request; the deprecated **Dashboard** exposes 66 (see [deprecated/Dashboard/README.md](deprecated/Dashboard/README.md)). Core tools are shared.
 
 | Category | Tools |
 |---|---|
@@ -484,7 +484,7 @@ claude mcp add --transport http --scope user sql-monitor http://localhost:5151/
 | Default Trace | `get_default_trace_events` |
 | Config Changes | `get_server_config_changes`, `get_database_config_changes`, `get_trace_flag_changes` |
 | Health Parser | `get_health_parser_system_health`, `get_health_parser_severe_errors`, `get_health_parser_io_issues`, `get_health_parser_scheduler_issues`, `get_health_parser_memory_conditions`, `get_health_parser_cpu_tasks`, `get_health_parser_memory_broker`, `get_health_parser_memory_node_oom` |
-| Plan Analysis | `analyze_query_plan`, `analyze_procedure_plan`, `analyze_query_store_plan`, `analyze_plan_xml`, `get_plan_xml`, `get_query_store_plan_xml`, `get_procedure_plan_xml`, `get_active_query_plan_xml` |
+| Plan Analysis | `analyze_query_plan`, `analyze_procedure_plan`, `analyze_query_store_plan`, `analyze_plan_xml`, `get_plan_xml`, `get_query_store_plan_xml`, `get_procedure_plan_xml`, `get_active_query_plan_xml`, `get_blocking_plan_xml`, `get_deadlock_plan_xml` |
 | Diagnostic Analysis | `analyze_server`, `get_analysis_facts`, `compare_analysis`, `audit_config`, `get_analysis_findings`, `mute_analysis_finding` |
 
 Most tools accept optional `server_name` and `hours_back` parameters. If only one server is configured, `server_name` is auto-resolved. Every tool that takes `hours_back` also takes an optional `as_of` — an ISO-8601 UTC instant that moves the END of the window off "now", so a past incident is one call (`as_of` its end, `hours_back` its length) rather than a very wide window filtered by hand. The MCP server binds to `localhost` only and does not accept remote connections. (Darling adds windowed-trend and fleet-overview tools plus agent-driven write tools — Custom Views authoring, alert-settings and mute-rule tuning, and bulk add/remove servers — and supports an opt-in LAN endpoint — see [Darling/README.md](Darling/README.md).)

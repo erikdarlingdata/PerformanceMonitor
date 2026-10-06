@@ -202,8 +202,31 @@ public sealed class DarlingWebEndpointsTests
            live call: no rig in this lane. */
         var source = RepoFile.ReadRepoFileLf("Darling", "PerformanceMonitor.Darling.Service", "DarlingWebEndpoints.cs");
         Assert.Contains(
-            "[\"get_active_queries\"] = (c, pg, an) => DarlingMcpSessionTools.GetActiveQueries(pg, Server(c), Hours(c, 1), Str(c, \"database_name\"), QueryBool(c, \"blocking_only\", false), Rows(c, \"limit\", 50), 2000, AsOf(c), logger, c.RequestAborted),",
+            "[\"get_active_queries\"] = (c, pg, an) => DarlingMcpSessionTools.GetActiveQueries(pg, Server(c), Hours(c, 1), Str(c, \"database_name\"), QueryBool(c, \"blocking_only\", false), Str(c, \"wait_type\"), Rows(c, \"limit\", 50), 2000, AsOf(c), logger, c.RequestAborted),",
             source, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #5235: the Active Queries page sends <c>?wait_type=</c> to <c>/api/read/get_active_queries</c>, so the web read
+    /// has to declare it and pass it on. The catalog row lists it as optional text between blocking_only and limit (the
+    /// tool's own order, so the catalog picker and the MCP signature agree), and the dispatch row hands the raw query
+    /// value to the tool, which trims it and treats a blank as none. Without the catalog row the picker never offers
+    /// the parameter; without the dispatch argument the page's filter is silently ignored and shows every wait.
+    /// </summary>
+    [Fact]
+    public void ReadEndpoints_ActiveQueries_DeclaresWaitType()
+    {
+        var read = DarlingWebEndpoints.CatalogDescriptors["get_active_queries"];
+        Assert.Equal(
+            new[] { "server", "hours", "database_name", "blocking_only", "wait_type", "limit", "as_of" },
+            read.Params.Select(p => p.Name).ToArray());
+        var waitType = Assert.Single(read.Params, p => p.Name == "wait_type");
+        Assert.Equal("text", waitType.Type);
+        Assert.False(waitType.Required);
+        Assert.Null(waitType.Default);
+
+        var source = RepoFile.ReadRepoFileLf("Darling", "PerformanceMonitor.Darling.Service", "DarlingWebEndpoints.cs");
+        Assert.Contains("Str(c, \"wait_type\"), Rows(c, \"limit\", 50), 2000, AsOf(c)", source, StringComparison.Ordinal);
     }
 
     /* ── response-kind mapping (the error envelope -> 500, the invalid envelope -> 400 as the body, the '{'-sniff -> 200, miss envelope -> 200) ── */
@@ -290,6 +313,31 @@ public sealed class DarlingWebEndpointsTests
     [InlineData("get_procedure_plan_xml", "sql_handle=0x", "sql_handle")]
     [InlineData("get_procedure_plan_xml", "sql_handle=0x03%27%3BDROP", "sql_handle")]
     [InlineData("get_procedure_plan_xml", "", "sql_handle")]
+    [InlineData("get_query_repro_script", "", "kind")]
+    [InlineData("get_query_repro_script", "kind=procedure", "kind")]
+    [InlineData("get_query_repro_script", "kind=bogus", "kind")]
+    [InlineData("get_query_repro_script", "kind=query_hash", "query_hash")]
+    [InlineData("get_query_repro_script", "kind=query_store&query_id=1", "database_name")]
+    [InlineData("get_query_repro_script", "kind=query_store&database_name=d", "query_id")]
+    [InlineData("get_query_repro_script", "kind=query_store&database_name=d&query_id=x", "query_id")]
+    [InlineData("get_query_repro_script", "kind=query_store&database_name=d&query_id=1&plan_id=x", "plan_id")]
+    [InlineData("get_query_repro_script", "kind=active_snapshot&session_id=1", "collection_time")]
+    [InlineData("get_query_repro_script", "kind=active_snapshot&collection_time=2026-03-04T05:06:07.1234560Z", "session_id")]
+    [InlineData("get_query_repro_script", "kind=active_snapshot&collection_time=bad&session_id=1", "collection_time")]
+    [InlineData("get_query_repro_script", "kind=active_snapshot&collection_time=2026-03-04T05:06:07.1234560Z&session_id=1&request_id=x", "request_id")]
+    [InlineData("get_blocking_plan_xml", "blocked_spid=1&blocking_spid=2", "event_time")]
+    [InlineData("get_blocking_plan_xml", "event_time=2026-03-04T05:06:07.1234560Z&blocking_spid=2", "blocked_spid")]
+    [InlineData("get_blocking_plan_xml", "event_time=2026-03-04T05:06:07.1234560Z&blocked_spid=1", "blocking_spid")]
+    [InlineData("get_blocking_plan_xml", "event_time=2026-03-04T05:06:07.1234560Z&blocked_spid=abc&blocking_spid=2", "blocked_spid")]
+    [InlineData("get_blocking_plan_xml", "event_time=2026-03-04T05:06:07.1234560Z&blocked_spid=1&blocking_spid=2&blocked_ecid=x", "blocked_ecid")]
+    [InlineData("get_blocking_plan_xml", "event_time=2026-03-04T05:06:07.1234560Z&blocked_spid=1&blocking_spid=2&blocking_ecid=x", "blocking_ecid")]
+    [InlineData("get_blocking_plan_xml", "event_time=2026-03-04&blocked_spid=1&blocking_spid=2", "event_time")]
+    [InlineData("get_blocking_plan_xml", "event_time=not-a-time&blocked_spid=1&blocking_spid=2", "event_time")]
+    [InlineData("get_blocking_plan_xml", "event_time=2026-03-04T05:06:07.1234560Z&blocked_spid=1&blocking_spid=2&side=sideways", "side")]
+    [InlineData("get_deadlock_plan_xml", "deadlock_time=2026-03-04T05:06:07.1234560Z", "collection_time")]
+    [InlineData("get_deadlock_plan_xml", "collection_time=2026-03-04T05:06:07.1234560Z", "deadlock_time")]
+    [InlineData("get_deadlock_plan_xml", "collection_time=2026-03-04&deadlock_time=2026-03-04T05:06:07.1234560Z", "collection_time")]
+    [InlineData("get_deadlock_plan_xml", "collection_time=2026-03-04T05:06:07.1234560Z&deadlock_time=3/4/2026", "deadlock_time")]
     public async Task TheRowPlanReads_RefuseAMissingOrUnparseableKey_BeforeTheStore(string tool, string query, string key)
     {
         var context = new Microsoft.AspNetCore.Http.DefaultHttpContext();

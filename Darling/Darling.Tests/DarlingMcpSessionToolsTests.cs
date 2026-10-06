@@ -70,7 +70,7 @@ public sealed class DarlingMcpSessionToolsSurfaceAndSqlTests
 
     [Theory]
     [InlineData("get_session_stats", "server_name")]
-    [InlineData("get_active_queries", "server_name,hours_back,database_name,blocking_only,limit,full_text,as_of")]
+    [InlineData("get_active_queries", "server_name,hours_back,database_name,blocking_only,wait_type,limit,full_text,as_of")]
     [InlineData("get_waiting_tasks", "server_name,hours_back,limit,as_of")]
     public void ParamContract_MatchesLite(string toolName, string expectedCsv)
     {
@@ -105,6 +105,32 @@ public sealed class DarlingMcpSessionToolsSurfaceAndSqlTests
         Assert.Contains("blocking_session_id", sql, StringComparison.Ordinal);
         Assert.Contains("collection_time >= $2", sql, StringComparison.Ordinal);
         Assert.Contains("NOT LIKE 'WAITFOR%'", sql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #5235: the wait_type filter is a predicate in the <c>population</c> CTE, beside database_name and blocking_only,
+    /// so the <c>COUNT(*) OVER ()</c> behind total_snapshots and truncated, and the <c>LIMIT</c>, are measured on the
+    /// filtered rows. A predicate moved to the outer SELECT would shrink the page and leave the count at the whole
+    /// window. It is an <c>upper()</c> equality (one value, so a % or _ in the input is literal) that also takes the
+    /// name with a trailing space, which an older collector stored.
+    /// </summary>
+    [Fact]
+    public void ActiveQueriesSql_FiltersWaitTypeInThePopulation_BeforeTheCount()
+    {
+        var sql = DarlingSessionReader.ActiveQueriesSql;
+        const string predicate = "($7::text IS NULL OR upper(w.wait_type) IN (upper($7), upper($7) || ' '))";
+        var predicateAt = sql.IndexOf(predicate, StringComparison.Ordinal);
+        Assert.True(predicateAt >= 0, "the wait_type predicate is not in the statement");
+
+        var populationAt = sql.IndexOf("population AS (", StringComparison.Ordinal);
+        var blockingAt = sql.IndexOf("(NOT $6::boolean OR w.blocking_session_id > 0 OR h.session_id IS NOT NULL)", StringComparison.Ordinal);
+        var countAt = sql.IndexOf("COUNT(*) OVER ()", StringComparison.Ordinal);
+        var limitAt = sql.IndexOf("LIMIT $4", StringComparison.Ordinal);
+        Assert.True(populationAt >= 0 && populationAt < blockingAt && blockingAt < predicateAt,
+            "the wait_type predicate must sit in the population CTE's WHERE, after database_name and blocking_only");
+        Assert.True(predicateAt < countAt && countAt < limitAt,
+            "the wait_type predicate must be applied before the population count and the cap, or they count the unfiltered window");
+        Assert.DoesNotContain("wait_type LIKE", sql, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]

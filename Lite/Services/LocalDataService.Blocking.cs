@@ -408,12 +408,20 @@ LIMIT 1";
     /// open-transaction blocker sys.dm_exec_requests never lists; <c>blocker_in_population</c> false is a
     /// blocker the caller's own database filter excluded.</para>
     ///
-    /// <para>The predicates are composed as SQL text from two booleans (a database name is still bound), the
-    /// <see cref="BuildDbInClause"/> way, because DuckDB cannot infer a type for a bare <c>$N IS NULL</c>
-    /// parameter the way PostgreSQL's <c>$N::text</c> cast lets Darling's twin do it.</para>
+    /// <para><b>The wait_type filter (#5235)</b> is one more population predicate, so the count and the cap see it
+    /// and it ANDs with the other two. It matches the request's own wait at the capture by exact name with the case
+    /// ignored (one equality, so a <c>%</c> or <c>_</c> in the input is literal), and a NULL wait never matches. The
+    /// stored value may carry the one trailing space <c>sys.dm_os_wait_stats</c> reports and an older collector kept,
+    /// so the match takes the name with and without it: the same rule as Darling's twin (a copy of its wait trend
+    /// read), <c>upper(w.wait_type) IN (upper($7), upper($7) || ' ')</c>.</para>
+    ///
+    /// <para>The predicates are composed as SQL text from the booleans and the optional wait filter (a database
+    /// name and the wait value are still bound), the <see cref="BuildDbInClause"/> way, because DuckDB cannot infer a
+    /// type for a bare <c>$N IS NULL</c> parameter the way PostgreSQL's <c>$N::text</c> cast lets Darling's twin do
+    /// it. The wait value's index follows the database values, so it is <c>5 + dbValues.Count</c>.</para>
     /// </summary>
     public async Task<(List<QuerySnapshotRow> Rows, long PopulationCount)> GetActiveQueriesPageAsync(
-        int serverId, int hoursBack, int cap, string? databaseName = null, bool blockingOnly = false, DateTime? asOfUtc = null)
+        int serverId, int hoursBack, int cap, string? databaseName = null, bool blockingOnly = false, string? waitType = null, DateTime? asOfUtc = null)
     {
         using var _q = TimeQuery("GetActiveQueriesPageAsync", "v_query_snapshots filtered page (MCP)");
         using var connection = await OpenConnectionAsync();
@@ -423,6 +431,8 @@ LIMIT 1";
         var dbClause = BuildDbInClause(
             string.IsNullOrWhiteSpace(databaseName) ? null : new[] { databaseName.Trim() }, "w.database_name", 5, out var dbValues);
         var blockingClause = blockingOnly ? " AND (w.blocking_session_id > 0 OR h.session_id IS NOT NULL)" : "";
+        var waitFilter = string.IsNullOrWhiteSpace(waitType) ? null : waitType.Trim();
+        var waitClause = waitFilter == null ? "" : $" AND upper(w.wait_type) IN (upper(${5 + dbValues.Count}), upper(${5 + dbValues.Count}) || ' ')";
 
         command.CommandText = @"
 WITH window_rows AS (
@@ -477,7 +487,7 @@ population AS (
     LEFT JOIN heads h
       ON  h.collection_time = w.collection_time
       AND h.session_id = w.session_id
-    WHERE (w.query_text NOT LIKE 'WAITFOR%' OR h.session_id IS NOT NULL)" + dbClause + blockingClause + @"
+    WHERE (w.query_text NOT LIKE 'WAITFOR%' OR h.session_id IS NOT NULL)" + dbClause + blockingClause + waitClause + @"
 )
 SELECT
     p.session_id,
@@ -524,6 +534,8 @@ LIMIT $4";
         command.Parameters.Add(new DuckDBParameter { Value = cap });
         foreach (var db in dbValues)
             command.Parameters.Add(new DuckDBParameter { Value = db });
+        if (waitFilter != null)
+            command.Parameters.Add(new DuckDBParameter { Value = waitFilter });
 
         var items = new List<QuerySnapshotRow>();
         long populationCount = 0;
