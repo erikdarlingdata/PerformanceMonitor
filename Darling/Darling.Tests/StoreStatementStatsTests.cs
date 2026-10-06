@@ -47,7 +47,12 @@ public class StoreStatementStatsTests
            does not name; everything else keeps its timings and reads as withheld, and no row is filtered out on
            its text any more. */
         Assert.Contains($"WHEN s.query ~* {Literal(StoreStatementStats.ReadableStatementPattern)}", sql, StringComparison.Ordinal);
-        Assert.Contains($"AND s.query !~* {Literal(StoreStatementStats.SensitiveStatementPattern)}", sql, StringComparison.Ordinal);
+        /* #5320: the sensitive pattern rides hex-encoded, so the function's recorded text does not name itself;
+           what the server decodes is byte-identical to the shared pattern. */
+        var operand = Regex.Match(sql, @"AND s\.query !~\* \(SELECT pg_catalog\.convert_from\(pg_catalog\.decode\('([0-9a-f]+)', 'hex'\), 'UTF8'\)\)");
+        Assert.True(operand.Success, "the reader function must test the sensitive pattern through the hex operand");
+        Assert.Equal(StoreStatementStats.SensitiveStatementPattern, System.Text.Encoding.UTF8.GetString(Convert.FromHexString(operand.Groups[1].Value)));
+        Assert.DoesNotContain($"!~* {Literal(StoreStatementStats.SensitiveStatementPattern)}", sql, StringComparison.Ordinal);
         /* #3920's review: before PostgreSQL 16, pg_stat_statements keeps a SELECT ... INTO's constants as typed. */
         Assert.Contains("AND NOT (pg_catalog.current_setting('server_version_num')::integer < 160000", sql, StringComparison.Ordinal);
         Assert.Contains($"AND s.query ~* {Literal(StoreStatementStats.SelectIntoPattern)}) THEN s.query", sql, StringComparison.Ordinal);
@@ -146,6 +151,32 @@ public class StoreStatementStatsTests
         Assert.Contains($"GRANT EXECUTE ON FUNCTION %I.{StoreStatementStats.FunctionName}() TO %I", sql, StringComparison.Ordinal);
         Assert.Contains($"GRANT EXECUTE ON FUNCTION %I.{StoreStatementStats.InfoFunctionName}() TO %I", sql, StringComparison.Ordinal);
         Assert.Throws<ArgumentNullException>(() => StoreStatementStats.BuildGrantSql("config", null!));
+    }
+
+    /// <summary>
+    /// #5320: the setup statements a pass runs are utility statements, and pg_stat_statements records them as typed
+    /// while <c>track_utility</c> is on. The scrub removes whatever the shared statement filter names, so a setup
+    /// statement the filter names would be recorded, removed and reported as a credential-bearing statement on
+    /// every pass. The filter's keyword-only alternatives name a few procedure and function names on their own,
+    /// which the reader function's text used to carry inside its pattern literal.
+    /// </summary>
+    [Fact]
+    public void TheSetupStatements_AreNotNamedByTheStatementFilter_SoTheScrubNeverRemovesTheProductsOwnDdl()
+    {
+        foreach (var withInfoView in new[] { true, false })
+        {
+            Assert.False(PerformanceMonitor.Common.SensitiveStatements.Names(StoreStatementStats.BuildFunctionSql("config", "public", withInfoView)),
+                $"the reader function's text (withInfoView={withInfoView}) must not be named by the statement filter");
+        }
+
+        Assert.False(PerformanceMonitor.Common.SensitiveStatements.Names(StoreStatementStats.BuildGrantSql("config", ["pgss_reader", "pgss_other"])),
+            "the grant statements must not be named by the statement filter");
+        Assert.False(PerformanceMonitor.Common.SensitiveStatements.Names(StoreStatementStats.CreateExtensionSql));
+
+        /* The guard bites: the pattern's own text, spelled as a literal, IS named. */
+        var literal = "AND s.query !~* " + Literal(StoreStatementStats.SensitiveStatementPattern);
+        Assert.True(PerformanceMonitor.Common.SensitiveStatements.Names(literal),
+            "the shared pattern's own text is expected to be named, which is why the function embeds it encoded");
     }
 
     /// <summary>The scrub resets only the sensitive statements of THIS database (#3904's review: without the dbid
