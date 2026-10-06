@@ -28,12 +28,22 @@ namespace Darling.Tests;
 /// judged text and its cut is the sanctioned order (<see cref="JudgedLocals"/>).</item>
 /// <item>SQL in a C# string literal: <c>LEFT(</c>, <c>SUBSTRING(</c> or <c>SUBSTR(</c> over such a column, including a
 /// column written as an interpolation hole (<c>LEFT({col}, n)</c>) whose name, or the constant it names, is statement text.</item>
+/// <item>C# (#5361 round 2): <c>x.AsSpan(a, b)</c> (also inside <c>string.Concat</c>), <c>x.AsSpan()[..n]</c>,
+/// <c>x.Slice(...)</c>, <c>x.Remove(n)</c> and a chained <c>x.Split(...).Take(n)</c>. SQL: a DuckDB slice
+/// (<c>text[1:n]</c>, <c>array_slice</c>) and a PostgreSQL <c>::varchar(n)</c> or <c>CAST(... AS varchar(n))</c>.</item>
 /// </list>
 /// The scanner is pinned with planted sources; the real trees are held to a short, named list of exceptions.
+/// <para><b>Known blind spots</b> (a regex over source text cannot read these reliably; they are named here on purpose,
+/// not left silent, so a reviewer of a new statement-text cut checks them by eye):
+/// (1) an alias local: <c>var t = row.QueryText; t[..300]</c> cuts under a name that is not statement-like, and the scan
+/// reads names, not data flow. (2) a ternary, <c>??</c> arm or later re-assignment around a judged local:
+/// <c>var s = flag ? SensitiveStatements.Text(a) : raw; s[..300]</c> is excused because the right side holds a judge call,
+/// and so is a raw re-assignment after a judge. Also not seen: SQL built by concatenation (<c>"LEFT(" + col + ", 500)"</c>)
+/// and a JSON-generic local.</para>
 /// </summary>
 public sealed class StatementCutSourceScanTests
 {
-    /// <summary>Folders scanned, repo-root relative. Lite MCP, services and analysis; Darling service and analysis.</summary>
+    /// <summary>Folders scanned, repo-root relative. Lite MCP, services and analysis; the shared alerting, notification and analysis projects; Darling service and analysis.</summary>
     private static readonly string[] ScannedTrees =
     {
         "Lite/Mcp",
@@ -41,6 +51,7 @@ public sealed class StatementCutSourceScanTests
         "Lite/Analysis",
         "PerformanceMonitor.Alerting",
         "PerformanceMonitor.Notifications",
+        "PerformanceMonitor.Analysis",
         "Darling/PerformanceMonitor.Darling.Service",
         "Darling/PerformanceMonitor.Darling.Analysis",
     };
@@ -56,13 +67,42 @@ public sealed class StatementCutSourceScanTests
     private static readonly Regex TruncateCall = new(@"\bTruncate(?:Text)?\s*\(", RegexOptions.Compiled);
     private static readonly Regex SubstringCall = new(@"([\w][\w\.\?!]*)\s*\.\s*Substring\s*\(", RegexOptions.Compiled);
     private static readonly Regex RangeCut = new(@"([\w][\w\.\?!]*)\s*\[[^\]\[]*\.\.[^\]\[]*\]", RegexOptions.Compiled);
-    private static readonly Regex SqlCut = new(@"\b(left|substring|substr)\s*\(", RegexOptions.Compiled | RegexOptions.IgnoreCase);
+    private static readonly Regex SqlCut = new(@"\b(left|substring|substr|array_slice|list_slice)\s*\(", RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
     /// <summary>The cut helpers that are not <c>Truncate</c>: the code-point cut and the pileup readers' <c>RawCut</c>.</summary>
     private static readonly Regex CutHelperCall = new(@"\b(CutCodePoints|RawCut)\s*\(", RegexOptions.Compiled);
 
     /// <summary><c>x.Take(n)</c>: the cut of a line list. Only a receiver that is statement text, or lines split out of it, counts.</summary>
     private static readonly Regex TakeCall = new(@"([\w][\w\.\?!]*)\s*\.\s*Take\s*\(", RegexOptions.Compiled);
+
+    /// <summary>
+    /// <c>x.AsSpan(a, b)</c> / <c>x.AsSpan(n)</c> (a sliced span, also inside <c>string.Concat</c>), and the whole-text
+    /// <c>x.AsSpan()</c> followed by a range index or <c>.Slice(...)</c>. #5361 F2.
+    /// </summary>
+    private static readonly Regex AsSpanCall = new(@"([\w][\w\.\?!]*)\s*\.\s*AsSpan\s*\(", RegexOptions.Compiled);
+
+    /// <summary><c>x.Remove(n)</c>: drops the tail (or a middle run) of a string.</summary>
+    private static readonly Regex RemoveCall = new(@"([\w][\w\.\?!]*)\s*\.\s*Remove\s*\(", RegexOptions.Compiled);
+
+    /// <summary><c>x.Slice(a, b)</c> on a span or memory of statement text.</summary>
+    private static readonly Regex SliceCall = new(@"([\w][\w\.\?!]*)\s*\.\s*Slice\s*\(", RegexOptions.Compiled);
+
+    /// <summary>The <c>.Take(</c> of any chain, including one after a call (<c>x.Split('\n').Take(5)</c>).</summary>
+    private static readonly Regex AnyTakeCall = new(@"\.\s*Take\s*\(", RegexOptions.Compiled);
+
+    /// <summary>DuckDB slice in SQL: <c>col[1:n]</c>, <c>col[:n]</c>.</summary>
+    private static readonly Regex SqlSlice = new(@"([\w][\w\.]*)\s*\[[^\]\[]*:[^\]\[]*\]", RegexOptions.Compiled);
+
+    /// <summary>The fixed-length character types that truncate in PostgreSQL: <c>varchar(n)</c>, <c>char(n)</c>, <c>character varying(n)</c>.</summary>
+    private const string LengthLimitedType = @"(?:character\s+varying|character|varchar|bpchar|char)\s*\(\s*\d+\s*\)";
+
+    /// <summary>PostgreSQL <c>operand::varchar(n)</c>. The operand is a name, or a parenthesised expression read by <see cref="OperandBefore"/>.</summary>
+    private static readonly Regex SqlCastOperator = new(@"::\s*" + LengthLimitedType, RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
+    /// <summary>PostgreSQL / DuckDB <c>CAST(operand AS varchar(n))</c>.</summary>
+    private static readonly Regex SqlCastCall = new(@"\bcast\s*\(", RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
+    private static readonly Regex SqlCastTail = new(@"\bas\s+" + LengthLimitedType + @"\s*$", RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
     /// <summary>A call that judges statement text whole (the judge itself, or a helper that judges then cuts).</summary>
     private static readonly Regex JudgeCall = new(
@@ -109,6 +149,10 @@ public sealed class StatementCutSourceScanTests
             "ScalarText shortens a nested drill-down object or array for the finding notification's field. The drill-down JSON is what DrillDownCollector stores: its statement values are judge-then-cut there (AnalysisStatementText.Preview), so this cuts judged values and never sees raw statement text"),
         new("PerformanceMonitor.Notifications/WebhookAlertService.cs", "paragraph", 2,
             "SplitProseLabel splits a synthesized advice paragraph on its first ': ' into label and value; both halves are kept, nothing is cut off (the name matches 'graph')"),
+        new("Darling/PerformanceMonitor.Darling.Service/Mcp/TopRanking.cs", "sql", 2,
+            "ReplaceOnce splices a ranking clause into the top-N query's own SQL script with string.Concat over AsSpan; the script is our text, not a statement read from a monitored server"),
+        new("PerformanceMonitor.Analysis/SameStatementPileupDetector.cs", "normalized", 1,
+            "Preview normalizes whitespace and cuts the finding's printed statement; its only caller passes SnapshotRow.PreviewText, which the reader judged whole before it cut (a null PreviewText prints an empty string, #5361 F1). Nothing here sees raw text"),
         new("Lite/Analysis/BaselineProvider.cs", "eventbaselinesql", 3,
             "slices the event-baseline SQL script (our own query text) around its events CTE to swap one column; it is a script, not a statement read from a monitored server"),
         new("Lite/Analysis/PileupSnapshotReader.cs", "rawcut(rawtext)", 1,
@@ -165,6 +209,54 @@ public sealed class StatementCutSourceScanTests
             hits.Add(new Hit("C# Take", LineOf(code, m.Index), Normalize(receiver + ".Take")));
         }
 
+        foreach (Match m in AsSpanCall.Matches(code))
+        {
+            var receiver = m.Groups[1].Value;
+            if (!StatementName.IsMatch(receiver) || IsJudgedLocal(judged, receiver, m.Index)) continue;
+
+            var open = m.Index + m.Length - 1;
+            var args = CallBody(code, open);
+            if (args.Trim().Length == 0)
+            {
+                /* x.AsSpan() on its own is not a cut; x.AsSpan()[..n] and x.AsSpan().Slice(a, b) are. */
+                var after = open + args.Length + 2;
+                while (after < code.Length && char.IsWhiteSpace(code[after])) after++;
+                var ranged = after < code.Length && code[after] == '['
+                    && BracketBody(code, after).Contains("..", StringComparison.Ordinal);
+                var sliced = Regex.IsMatch(code.Substring(after, Math.Min(code.Length - after, 12)), @"^\.\s*Slice\s*\(");
+                if (!ranged && !sliced) continue;
+            }
+
+            hits.Add(new Hit("C# AsSpan", LineOf(code, m.Index), Normalize(receiver)));
+        }
+
+        foreach (Match m in SliceCall.Matches(code))
+        {
+            var receiver = m.Groups[1].Value;
+            if (StatementName.IsMatch(receiver) && !IsJudgedLocal(judged, receiver, m.Index))
+                hits.Add(new Hit("C# Slice", LineOf(code, m.Index), Normalize(receiver)));
+        }
+
+        foreach (Match m in RemoveCall.Matches(code))
+        {
+            var receiver = m.Groups[1].Value;
+            if (StatementName.IsMatch(receiver) && !IsJudgedLocal(judged, receiver, m.Index))
+                hits.Add(new Hit("C# Remove", LineOf(code, m.Index), Normalize(receiver)));
+        }
+
+        foreach (Match m in AnyTakeCall.Matches(code))
+        {
+            /* A Take after a call: x.Split('\n').Take(5). The chain's own names count, its arguments do not. */
+            var before = m.Index;
+            while (before > 0 && char.IsWhiteSpace(code[before - 1])) before--;
+            if (before == 0 || code[before - 1] != ')') continue;
+
+            var chain = ChainBefore(code, before);
+            var root = Identifier.Match(chain);
+            if (!StatementName.IsMatch(chain) || root.Success && IsJudgedLocal(judged, root.Value, m.Index)) continue;
+            hits.Add(new Hit("C# Take", LineOf(code, m.Index), Normalize(chain + ".Take")));
+        }
+
         var constants = StringConstant.Matches(source)
             .GroupBy(c => c.Groups[1].Value, StringComparer.Ordinal)
             .ToDictionary(g => g.Key, g => g.First().Groups[2].Value, StringComparer.Ordinal);
@@ -189,7 +281,106 @@ public sealed class StatementCutSourceScanTests
             }
         }
 
+        /* #5361 F2: the SQL cuts that are not LEFT/SUBSTRING: a DuckDB slice and a PostgreSQL fixed-length cast. */
+        foreach (var (start, body) in CSharpSourceWalker.StringLiteralBodies(source))
+        {
+            foreach (Match m in SqlSlice.Matches(body))
+            {
+                if (StatementName.IsMatch(m.Groups[1].Value))
+                    hits.Add(new Hit("SQL slice", LineOf(source, start + m.Index), Normalize(m.Value)));
+            }
+
+            foreach (Match m in SqlCastOperator.Matches(body))
+            {
+                var operand = OperandBefore(body, m.Index);
+                if (StatementName.IsMatch(operand))
+                    hits.Add(new Hit("SQL cast", LineOf(source, start + m.Index), Normalize(operand + m.Value)));
+            }
+
+            foreach (Match m in SqlCastCall.Matches(body))
+            {
+                var inner = CallBody(body, m.Index + m.Length - 1);
+                var tail = SqlCastTail.Match(inner);
+                if (tail.Success && StatementName.IsMatch(inner.Substring(0, tail.Index)))
+                    hits.Add(new Hit("SQL cast", LineOf(source, start + m.Index), Normalize("cast(" + inner + ")")));
+            }
+        }
+
         return hits;
+    }
+
+    /// <summary>The operand of a <c>::</c> at <paramref name="at"/>: the name before it, or the parenthesised expression.</summary>
+    private static string OperandBefore(string text, int at)
+    {
+        var end = at;
+        while (end > 0 && char.IsWhiteSpace(text[end - 1])) end--;
+        if (end == 0) return "";
+
+        if (text[end - 1] == ')')
+        {
+            var depth = 0;
+            for (var i = end - 1; i >= 0; i--)
+            {
+                if (text[i] == ')') depth++;
+                else if (text[i] == '(' && --depth == 0) return text.Substring(i, end - i);
+            }
+
+            return text.Substring(0, end);
+        }
+
+        var begin = end;
+        while (begin > 0 && (char.IsLetterOrDigit(text[begin - 1]) || text[begin - 1] is '_' or '.')) begin--;
+        return text.Substring(begin, end - begin);
+    }
+
+    /// <summary>The call chain that ends at <paramref name="end"/> (just after a closing paren), with every call's arguments blanked.</summary>
+    private static string ChainBefore(string code, int end)
+    {
+        var sb = new StringBuilder();
+        var i = end;
+        while (i > 0)
+        {
+            var c = code[i - 1];
+            if (c == ')')
+            {
+                var depth = 0;
+                var j = i - 1;
+                for (; j >= 0; j--)
+                {
+                    if (code[j] == ')') depth++;
+                    else if (code[j] == '(' && --depth == 0) break;
+                }
+
+                if (j < 0) break;
+                sb.Insert(0, "()");
+                i = j;
+            }
+            else if (char.IsLetterOrDigit(c) || c is '_' or '.' or '?' or '!')
+            {
+                sb.Insert(0, c);
+                i--;
+            }
+            else if (char.IsWhiteSpace(c))
+            {
+                i--;
+            }
+            else break;
+        }
+
+        return sb.ToString();
+    }
+
+    /// <summary>Everything between the '[' at <paramref name="open"/> and its closing bracket.</summary>
+    private static string BracketBody(string text, int open)
+    {
+        var depth = 0;
+        for (var i = open; i < text.Length; i++)
+        {
+            if (text[i] == '[') depth++;
+            else if (text[i] == ']' && --depth == 0) return text.Substring(open + 1, i - open - 1);
+        }
+
+        return text.Substring(open + 1);
     }
 
     /// <summary>
@@ -507,6 +698,77 @@ public sealed class StatementCutSourceScanTests
         Assert.Contains(ScanBody(body), h => h.Kind == kind);
     }
 
+    // ------------------------------------------------------------------ the shapes added in #5361 round 2 (F2), each with its planted RED
+
+    [Theory]
+    [InlineData("var p = row.QueryText.AsSpan(0, 200).ToString();", "C# AsSpan")]
+    [InlineData("var p = sqlText.AsSpan(200).ToString();", "C# AsSpan")]
+    [InlineData("var p = string.Concat(sqlText.AsSpan(0, 200), \"...\");", "C# AsSpan")]
+    [InlineData("var p = sqlText.AsSpan()[..200].ToString();", "C# AsSpan")]
+    [InlineData("var p = sqlText.AsSpan().Slice(0, 200).ToString();", "C# AsSpan")]
+    [InlineData("var p = statementText.Slice(0, 200);", "C# Slice")]
+    [InlineData("var p = row.Statement.Remove(200);", "C# Remove")]
+    [InlineData("var p = string.Join('\\n', deadlockGraph.Split('\\n').Take(40));", "C# Take")]
+    [InlineData("var p = deadlockGraph.Split('\\n', StringSplitOptions.RemoveEmptyEntries).Take(40).ToList();", "C# Take")]
+    public void TheScanner_CatchesTheCutShapesAddedInRoundTwo(string body, string kind)
+    {
+        Assert.Contains(ScanBody(body), h => h.Kind == kind);
+    }
+
+    [Theory]
+    [InlineData("var p = serverName.AsSpan(0, 3).ToString();")]
+    [InlineData("var n = int.Parse(sqlText.AsSpan());")]
+    [InlineData("var p = tableName.Remove(3);")]
+    [InlineData("var p = names.Split(',').Take(3).ToList();")]
+    [InlineData("var p = string.Concat(label.AsSpan(0, 3), \"x\");")]
+    [InlineData("var sqlText = SensitiveStatements.Text(raw); var p = string.Concat(sqlText.AsSpan(0, 5), \"x\");")]
+    [InlineData("var sqlText = SensitiveStatements.Text(raw); var p = sqlText.Remove(5);")]
+    [InlineData("var graph = SensitiveStatements.Xml(raw, 100); var p = graph.Split('\\n').Take(5).ToList();")]
+    public void TheScanner_LeavesTheRoundTwoShapesThatAreNotACutOfStatementText(string body)
+    {
+        Assert.Empty(ScanBody(body));
+    }
+
+    [Theory]
+    [InlineData("SELECT query_text[1:500] AS q FROM t")]
+    [InlineData("SELECT sql_text[:500] FROM t")]
+    [InlineData("SELECT r.blocked_sql_text[1:200] FROM t r")]
+    [InlineData("SELECT array_slice(query_text, 1, 500) FROM t")]
+    [InlineData("SELECT query_text::varchar(500) FROM t")]
+    [InlineData("SELECT r.query_text :: character varying(500) FROM t r")]
+    [InlineData("SELECT (COALESCE(a.query_text, b.query_text))::varchar(500) FROM t")]
+    [InlineData("SELECT query_text::char(80) FROM t")]
+    [InlineData("SELECT CAST(query_text AS varchar(500)) FROM t")]
+    [InlineData("SELECT CAST(COALESCE(x.statement, y.statement) AS VARCHAR(300)) FROM t")]
+    public void TheScanner_CatchesASqlSliceOrFixedLengthCastOfStatementText(string sql)
+    {
+        var hits = Scan("class C { const string Q = @\"" + sql + "\"; }");
+
+        Assert.Contains(hits, h => h.Kind.StartsWith("SQL ", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData("SELECT relname[1:63] FROM t")]
+    [InlineData("SELECT query_hash::varchar(16) FROM t")]
+    [InlineData("SELECT query_text::text FROM t")]
+    [InlineData("SELECT CAST(query_text AS text) FROM t")]
+    [InlineData("SELECT CAST(query_hash AS varchar(16)) FROM t")]
+    [InlineData("SELECT query_text::varchar FROM t")]
+    [InlineData("SELECT x[1:2] FROM t")]
+    public void TheScanner_LeavesASqlSliceOrCastThatIsNotAFixedLengthCutOfStatementText(string sql)
+    {
+        Assert.Empty(Scan("class C { const string Q = @\"" + sql + "\"; }"));
+    }
+
+    [Fact]
+    public void TheScansDocComment_NamesItsKnownBlindSpots()
+    {
+        var doc = RepoFile.ReadRepoFile("Darling", "Darling.Tests", "StatementCutSourceScanTests.cs");
+        Assert.Contains("Known blind spots", doc, StringComparison.Ordinal);
+        Assert.Contains("alias local", doc, StringComparison.Ordinal);
+        Assert.Contains("ternary", doc, StringComparison.Ordinal);
+    }
+
     [Theory]
     [InlineData("var lines = packageNames.Split(','); var p = lines.Take(5);")]
     [InlineData("var p = ordered.Take(limit);")]
@@ -601,6 +863,14 @@ public sealed class StatementCutSourceScanTests
     public void TheSurfaceOfTheScan_ReachesLiteAnalysis_AndTheIdentityOnlyExceptionsAreNamed()
     {
         Assert.Contains("Lite/Analysis", ScannedTrees);
+
+        /* #5361 F1: the shared analysis project is scanned, and the pileup finding's printed statement is the reader's
+           judged PreviewText with an empty fallback, never the raw identity cut in QueryText. */
+        Assert.Contains("PerformanceMonitor.Analysis", ScannedTrees);
+        var detector = RepoFile.ReadRepoFile("PerformanceMonitor.Analysis", "SameStatementPileupDetector.cs");
+        Assert.Contains("Preview(leader.PreviewText ?? \"\")", detector, StringComparison.Ordinal);
+        Assert.DoesNotContain("PreviewText ?? leader.QueryText", detector, StringComparison.Ordinal);
+        Assert.DoesNotContain("string? PreviewText = null", detector, StringComparison.Ordinal);
         Assert.Contains(Exceptions, e => e.File == "Lite/Analysis/PileupSnapshotReader.cs" && !e.Ceiling);
         Assert.Contains(Exceptions, e => e.File.EndsWith("/PgPileupSnapshotReader.cs", StringComparison.Ordinal) && !e.Ceiling);
         Assert.Contains(Exceptions, e => e.File.EndsWith("/DarlingWebDeadlockGraph.cs", StringComparison.Ordinal) && e.Ceiling);

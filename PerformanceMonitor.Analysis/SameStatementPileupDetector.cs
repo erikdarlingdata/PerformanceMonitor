@@ -98,11 +98,12 @@ public static class SameStatementPileupDetector
     /// <paramref name="ElapsedMs"/> is the row's <c>total_elapsed_time_ms</c> — the in-flight elapsed
     /// at the instant the snapshot was taken, which is what both the pileup floor and the sub-second
     /// baseline compare (an observation, not a completed-execution duration).
-    /// <paramref name="PreviewText"/> (#5320) is the statement text the finding PRINTS, when a reader judged the
-    /// whole statement with the sensitive-statement filter before it cut the text. <paramref name="QueryText"/>
-    /// stays the reader's raw cut, which is only ever hashed (the null-hash identity surrogate) or searched (the
-    /// sp_server_diagnostics noise filter) and is never shown. A reader that does not judge leaves it null and the
-    /// finding prints <paramref name="QueryText"/>.
+    /// <paramref name="PreviewText"/> (#5320) is the statement text the finding PRINTS: the reader judged the
+    /// whole statement with the sensitive-statement filter, then cut it. It is a required parameter, so a reader
+    /// cannot forget it. <paramref name="QueryText"/> stays the reader's raw cut, which is only ever hashed (the
+    /// null-hash identity surrogate) or searched (the sp_server_diagnostics noise filter) and is never shown. A
+    /// null <paramref name="PreviewText"/> prints nothing (the finding fails closed; it never falls back to the
+    /// raw cut).
     /// </summary>
     public sealed record SnapshotRow(
         DateTime CollectionTime,
@@ -117,7 +118,7 @@ public static class SameStatementPileupDetector
         long CpuTimeMs,
         long LogicalReads,
         long PhysicalReads,
-        string? PreviewText = null);
+        string? PreviewText);
 
     /// <summary>One fired pileup: the story (severity, fingerprint, frozen advice) plus the evidence
     /// drill-down the caller attaches to the materialized finding before persisting it.</summary>
@@ -577,7 +578,7 @@ public static class SameStatementPileupDetector
                 identity,
                 database_name = databaseName,
                 snapshot_time = snapshotTime,
-                query_text = Preview(leader.PreviewText ?? leader.QueryText),
+                query_text = Preview(leader.PreviewText ?? ""),
             },
         };
 
