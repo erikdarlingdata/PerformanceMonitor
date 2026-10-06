@@ -308,6 +308,107 @@ public sealed class DarlingListenerTlsTests
         }
     }
 
+    /* ---- the PKCS#12 password slots: only a literal in the config file is named ---- */
+
+    private static string PlaintextPasswordText(ListenerTlsLabels labels)
+        => $"{labels.Surface} TLS: {labels.Section}.network.tls.pfxPassword is set in plaintext (dev convenience). "
+           + "Prefer encryptedPfxPassword (--encrypt-password) or a file:/env: reference.";
+
+    /// <summary>A literal <c>pfxPassword</c> logs one Warning naming the section's setting, and the bundle still loads.</summary>
+    [Theory]
+    [InlineData("web")]
+    [InlineData("mcp")]
+    public void Resolve_PlaintextPfxPassword_Warns(string section)
+    {
+        var labels = section == "web" ? ListenerTlsLabels.Web : ListenerTlsLabels.Mcp;
+        using var temp = new TempDir();
+        using var cert = Make("literal", DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddDays(365), ips: new[] { "192.168.1.205" });
+        var block = WritePfx(temp, cert);
+        block.PfxPassword = "hunter2";
+        var log = new RecordingLogger();
+
+        var outcome = DarlingListenerTls.Resolve(log, new WebTlsCertificateState(), labels, block, Listen, Port, null);
+
+        using (outcome.Certificate!.Value)
+        {
+            Assert.True(outcome.Expose);
+            Assert.Equal(PlaintextPasswordText(labels), Assert.Single(log.At(LogLevel.Warning)));
+        }
+    }
+
+    /// <summary>The warning comes before the load, so a wrong literal that then fails to open the bundle still carries it.</summary>
+    [Fact]
+    public void Resolve_PlaintextPfxPassword_WarnsEvenWhenTheLoadFails()
+    {
+        using var temp = new TempDir();
+        using var cert = Make("literal-wrong", DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddDays(365));
+        var block = WritePfx(temp, cert, exportPassword: "right");
+        block.PfxPassword = "wrong";
+        var log = new RecordingLogger();
+
+        var outcome = DarlingListenerTls.Resolve(log, new WebTlsCertificateState(), ListenerTlsLabels.Mcp, block, Listen, Port, null);
+
+        Assert.False(outcome.Expose);
+        Assert.Equal(PlaintextPasswordText(ListenerTlsLabels.Mcp), Assert.Single(log.At(LogLevel.Warning)));
+        Assert.Single(log.At(LogLevel.Critical));
+    }
+
+    /// <summary>An <c>env:</c> or <c>file:</c> reference is not plaintext in the config, so neither logs a Warning.</summary>
+    [Theory]
+    [InlineData("file")]
+    [InlineData("env")]
+    public void Resolve_ReferencePfxPassword_IsSilent(string kind)
+    {
+        using var temp = new TempDir();
+        using var cert = Make("reference", DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddDays(365), ips: new[] { "192.168.1.205" });
+        var block = WritePfx(temp, cert);
+        const string variable = "DARLING_TEST_5295_L18_PFX_PASSWORD";
+        if (kind == "env")
+        {
+            block.PfxPassword = "env:" + variable;
+        }
+
+        Assert.StartsWith(kind + ":", block.PfxPassword, StringComparison.Ordinal);
+        var log = new RecordingLogger();
+
+        try
+        {
+            Environment.SetEnvironmentVariable(variable, "hunter2");
+            var outcome = DarlingListenerTls.Resolve(log, new WebTlsCertificateState(), ListenerTlsLabels.Mcp, block, Listen, Port, null);
+
+            using (outcome.Certificate!.Value)
+            {
+                Assert.True(outcome.Expose);
+                Assert.Empty(log.At(LogLevel.Warning));
+            }
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(variable, null);
+        }
+    }
+
+    /// <summary>The DPAPI slot is the preferred shape: set on its own it logs no Warning (Windows, where DPAPI is).</summary>
+    [Fact]
+    public void Resolve_EncryptedPfxPassword_IsSilent()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "DPAPI is Windows-only.");
+
+        using var temp = new TempDir();
+        using var cert = Make("encrypted", DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddDays(365), ips: new[] { "192.168.1.205" });
+        var withFile = WritePfx(temp, cert);
+        var block = new WebTlsConfig { PfxPath = withFile.PfxPath, EncryptedPfxPassword = DarlingSecrets.Protect("hunter2") };
+        var log = new RecordingLogger();
+
+        var outcome = DarlingListenerTls.Resolve(log, new WebTlsCertificateState(), ListenerTlsLabels.Mcp, block, Listen, Port, null);
+
+        using (outcome.Certificate!.Value)
+        {
+            Assert.True(outcome.Expose);
+            Assert.Empty(log.At(LogLevel.Warning));
+        }
+    }
+
     [Theory]
     [InlineData("both-forms")]
     [InlineData("pem-cert-without-key")]
@@ -700,7 +801,13 @@ public sealed class DarlingListenerTlsTests
     {
         var path = Path.Combine(temp.Path, Guid.NewGuid().ToString("N") + ".pfx");
         File.WriteAllBytes(path, cert.Export(X509ContentType.Pkcs12, exportPassword));
-        return new WebTlsConfig { PfxPath = path, PfxPassword = configPassword ?? exportPassword };
+
+        /* The password goes in as a file: reference, the shape a deployment is told to use, so a test that counts
+           the Warning lines is not also counting the plaintext-password warning. The tests for that warning put a
+           literal in the block themselves. */
+        var secret = Path.Combine(temp.Path, Guid.NewGuid().ToString("N") + ".secret");
+        File.WriteAllText(secret, configPassword ?? exportPassword);
+        return new WebTlsConfig { PfxPath = path, PfxPassword = "file:" + secret };
     }
 
     private static WebTlsConfig WritePem(TempDir temp, X509Certificate2 cert)
