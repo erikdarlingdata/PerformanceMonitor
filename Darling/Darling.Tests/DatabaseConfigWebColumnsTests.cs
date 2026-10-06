@@ -70,7 +70,7 @@ public sealed class DatabaseConfigWebColumnsTests
     public void EveryDatabaseGridKey_IsEmittedByGetDatabaseConfig()
     {
         var tool = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpConfigTools.cs");
-        var start = tool.IndexOf("public static async Task<string> GetDatabaseConfig(", StringComparison.Ordinal);
+        var start = tool.IndexOf("internal static async Task<string> GetDatabaseConfig(", StringComparison.Ordinal); // #5245: the body moved into the DatabaseFilter overload
         var slice = tool[start..tool.IndexOf("get_trace_flags", start, StringComparison.Ordinal)];
         var keys = Keys(Block(Tab(), "const DB_CONFIG_COLUMNS = ["));
         Assert.Equal(28, keys.Length);
