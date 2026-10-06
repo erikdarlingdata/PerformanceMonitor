@@ -1052,12 +1052,25 @@ jobs:
     # has NO timeout: on release it waits on SignPath's manual approval gate, which can
     # legitimately take hours.
     timeout-minutes: 30
-    # THREE shards cut by CLASS-NAME HASH (#3890), the machinery #3887 proved on the Lite suite.
-    # Measured on this job's own step timings: ~190s fixed (of which Build Darling.Tests is 132s)
-    # plus 266s of tests, so only the 266s shards and the fixed floor decides where the returns
-    # stop - 2 shards land ~5m23s, 3 ~4m39s, 4 ~4m17s. Three is the stop: it puts this job under
-    # the build job's 6m16s, which is what actually bounds the PR wall, and a fourth Windows runner
-    # from the shared pool buys twenty seconds of a number nothing reads.
+    # SIX shards cut by CLASS-NAME HASH (#3890 made it three, #5433 six), the machinery #3887 proved on
+    # the Lite suite. #3890 measured ~190s fixed plus 266s of tests; the suite has since grown to
+    # about 2,060 classes and 27,000 tests, and the three shards of eight merge-train and dev runs on
+    # 2026-10-06 took 13 to 21 minutes each. Per shard that was ~5m fixed (checkout and .NET setup ~1m,
+    # restore ~15s, Build Darling.Tests 2m20s to 3m30s, the PostgreSQL clusters ~30s) plus 10 to 17
+    # minutes in the one step that runs the tests (two runner invocations, because the class list is
+    # chunked under the command-line cap), ~39 minutes of tests in all. The cut was
+    # also uneven: shard 1 ran 14 to 17 minutes of tests every time against 10 to 13 for shards 0
+    # and 2, with about the same number of tests (time per test 0.10s against 0.065s), so a few slow
+    # classes decide a shard. A hash cut ignores that, and no per-class times are recorded for this
+    # job, so the model is the spread of the three observed shards (a relative standard deviation of
+    # ~9% of a shard's tests, which grows with the square root of N-1 for the same slow classes) and the
+    # expected longest shard of N: 3 shards ~19.5m (observed 19 to 21), 4 ~16m, 5 ~14m, 6 ~13m,
+    # 8 ~11m, 10 ~10m. Six is the stop: the longest shard drops under the build job (13 to 14 min) and
+    # the slowest Lite shard (15 to 16 min), which is what bounds the run, and 8 would buy about two
+    # more minutes of a number those two jobs already hide, for two more runners that each pay the ~5
+    # minutes of fixed cost. Check the first merge trains: if the longest shard is over ~14 minutes,
+    # the cut is unlucky and eight is the next step. The cut divides by the matrix size
+    # (strategy.job-total), so changing the shard list below cannot leave a class in no shard.
     #
     # The prebuilt-ladder image this was filed alongside is dead on measurement: the migration
     # ladder replays in ~1s (timed by running one live class twice against one store) and the whole
@@ -1065,7 +1078,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2]
+        shard: [0, 1, 2, 3, 4, 5]
     permissions:
       contents: read
 
@@ -1445,7 +1458,7 @@ jobs:
 
           $sha = [System.Security.Cryptography.SHA256]::Create()
           $mine = @($classes | Where-Object {
-              ($sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($_))[0] % 3) -eq ${{ matrix.shard }}
+              ([System.BitConverter]::ToUInt32($sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($_)), 0) % ${{ strategy.job-total }}) -eq ${{ matrix.shard }}
           })
           Write-Host "shard ${{ matrix.shard }}: $($mine.Count) of $($classes.Count) classes"
           if ($mine.Count -eq 0) { throw "shard ${{ matrix.shard }} selected zero of $($classes.Count) classes - refusing to run, because a runner with no -class arguments runs the whole suite" }
