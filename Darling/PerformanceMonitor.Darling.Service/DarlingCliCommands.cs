@@ -4574,28 +4574,33 @@ public static class DarlingCliCommands
 
             var hasWork = NotElevatedRunHasWork(handoffs.Select(h => h.Handoff));
 
-            error.WriteLine("This shell is not elevated, so NO firewall rule was changed. Run these in an ELEVATED PowerShell:");
+            /* #5413: a run that returns 0 succeeded, and a successful run writes nothing to the error stream
+               (Windows PowerShell 5.1 turns each stderr line into an error record). The handoff stays on stderr
+               when it is confirmed work, because that run exits 1. */
+            var handoffText = hasWork ? error : output;
+
+            handoffText.WriteLine("This shell is not elevated, so NO firewall rule was changed. Run these in an ELEVATED PowerShell:");
             foreach (var (plan, handoff) in handoffs)
             {
                 switch (handoff)
                 {
                     case FirewallHandoff.OpenCommand:
-                        error.WriteLine("  " + DarlingManagedPostgres.BuildFirewallEnableCommand(plan.RuleName, plan.Port, plan.Cidr!));
+                        handoffText.WriteLine("  " + DarlingManagedPostgres.BuildFirewallEnableCommand(plan.RuleName, plan.Port, plan.Cidr!));
                         break;
 
                     /* The same builder and the same wildcard the elevated path would have used, so the command
                        an operator pastes and the command the verb runs cannot drift apart. */
                     case FirewallHandoff.SweepCommand:
-                        error.WriteLine(
+                        handoffText.WriteLine(
                             $"  # {plan.Surface}: a scoped rule is open on this surface and none belongs on any port.");
-                        error.WriteLine("  " + DarlingManagedPostgres.BuildFirewallSweepCommand(
+                        handoffText.WriteLine("  " + DarlingManagedPostgres.BuildFirewallSweepCommand(
                             DarlingFirewallCheck.SurfaceRuleWildcard(plan.RuleName)));
                         break;
 
                     case FirewallHandoff.SweepCommandUnverified:
-                        error.WriteLine(
+                        handoffText.WriteLine(
                             $"  # {plan.Surface}: the read-only rule probe gave no usable answer, so this may be a no-op.");
-                        error.WriteLine("  " + DarlingManagedPostgres.BuildFirewallSweepCommand(
+                        handoffText.WriteLine("  " + DarlingManagedPostgres.BuildFirewallSweepCommand(
                             DarlingFirewallCheck.SurfaceRuleWildcard(plan.RuleName)));
                         break;
 
@@ -4607,7 +4612,7 @@ public static class DarlingCliCommands
 
             if (!hasWork)
             {
-                error.WriteLine(
+                handoffText.WriteLine(
                     "Returning 0: nothing above is CONFIRMED work. The read-only probe could not answer for at " +
                     "least one surface, so those commands are offered as a precaution — and a non-zero exit is a " +
                     "claim about the firewall, which this run has no measurement to support.");
