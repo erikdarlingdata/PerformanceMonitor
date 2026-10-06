@@ -131,7 +131,12 @@ public sealed class WebTopProceduresColumnsTests
     public void TheAggregateSelectsTheDetailColumnsTheReaderMapsByPosition()
     {
         var sql = DarlingDataReader.TopProceduresSql;
-        var select = sql[..sql.IndexOf("FROM procedure_stats", StringComparison.Ordinal)];
+        /* #5226: the statement is two passes. The first FROM procedure_stats belongs to the narrow ranking CTE (its aliases are
+           win_*), so the wide row the reader maps is the SELECT that sits before the JOIN to the winners. */
+        var joinAt = Regex.Match(sql, @"FROM procedure_stats\s+JOIN winners").Index;
+        Assert.True(joinAt > 0, "the wide pass's FROM procedure_stats JOIN winners not found");
+        var select = sql[..joinAt];
+        select = select[select.LastIndexOf("SELECT", StringComparison.Ordinal)..];
         var aliases = Regex.Matches(select, @"AS ([a-z_]+),?\s*$", RegexOptions.Multiline).Select(m => m.Groups[1].Value).ToList();
         Assert.Equal(new[]
         {

@@ -25,6 +25,10 @@ using Xunit;
 
 namespace PerformanceMonitor.Darling.Tests;
 
+/* #1776 own-store: every fact mints its own scratch database through ScratchPostgres (#4650: EXPLAIN reads the chunk list,
+   and a shared store carries other classes' leftovers) and touches nothing on the shared one, so it is not serialized
+   against the live-postgres collection. */
+
 /// <summary>
 /// #5309 and #5313 (inside #5299): the PLAN of the text lookup, read from EXPLAIN (ANALYZE, FORMAT JSON) on a small seed.
 /// Two defects the large-store timing found, each pinned here by what the plan does, not by what the text says.
@@ -41,7 +45,6 @@ namespace PerformanceMonitor.Darling.Tests;
 /// <c>idx_query_stats_server_hash_time</c> once per ranked key. The test asserts the rows the lookup reads from raw are
 /// bounded by the ranked keys, not by the window's row count.</para>
 /// </summary>
-[Collection("live-postgres")]
 public sealed class TopTextLookupPlanLiveTests
 {
     private const string ServerName = "a5299-text-lookup-plan";
@@ -80,23 +83,11 @@ public sealed class TopTextLookupPlanLiveTests
                test store may lack it: make sure it is there, and give the planner statistics, as a store that has run a while has.
                (Without the statistics the unanalyzed seed makes the planner walk the time index and filter on the hash.) */
             const string indexName = "idx_query_stats_server_hash_time";
-            await using var probe = new NpgsqlCommand(
-                "SELECT count(*) FROM pg_indexes WHERE schemaname = 'collect' AND indexname = '" + indexName + "'", connection);
-            var created = (long)(await probe.ExecuteScalarAsync(ct))! == 0;
             await DarlingMcpTestData.ExecAsync(connection, ct,
                 "CREATE INDEX IF NOT EXISTS " + indexName + " ON collect.query_stats (server_id, query_hash, collection_time DESC)");
-            try
-            {
-                await DarlingMcpTestData.ExecAsync(connection, ct, "ANALYZE collect.query_stats");
-                await AssertHourlyLookupAsync(connection, serverId, now, ct);
-            }
-            finally
-            {
-                if (created)
-                {
-                    await DarlingMcpTestData.ExecAsync(connection, ct, "DROP INDEX IF EXISTS collect." + indexName);
-                }
-            }
+            /* The database is this test's own scratch store, so the index goes with it: no teardown to run. */
+            await DarlingMcpTestData.ExecAsync(connection, ct, "ANALYZE collect.query_stats");
+            await AssertHourlyLookupAsync(connection, serverId, now, ct);
         });
 
     private static async Task AssertHourlyLookupAsync(NpgsqlConnection connection, int serverId, DateTime now, CancellationToken ct)
@@ -189,61 +180,49 @@ public sealed class TopTextLookupPlanLiveTests
                window and 20 rows with a text ten days back, and 5,000 rows of other keys sit beside them, so a whole-table
                read is about 7,600 rows and a per-key probe is a handful per key. */
             const string indexName = "idx_query_stats_server_hash_time";
-            await using var probe = new NpgsqlCommand(
-                "SELECT count(*) FROM pg_indexes WHERE schemaname = 'collect' AND indexname = '" + indexName + "'", connection);
-            var created = (long)(await probe.ExecuteScalarAsync(ct))! == 0;
             await DarlingMcpTestData.ExecAsync(connection, ct,
                 "CREATE INDEX IF NOT EXISTS " + indexName + " ON collect.query_stats (server_id, query_hash, collection_time DESC)");
-            try
-            {
-                const string columns = @"(collection_id, collection_time, server_id, server_name, database_name, query_hash, query_plan_hash, sql_handle, plan_handle,
-                           query_text, delta_execution_count, delta_worker_time, delta_elapsed_time, delta_logical_reads,
-                           delta_logical_writes, delta_physical_reads, min_worker_time, max_worker_time, min_elapsed_time, max_elapsed_time,
-                           min_dop, max_dop, sample_interval_seconds)";
-                await DarlingMcpTestData.ExecAsync(connection, ct,
-                    "INSERT INTO query_stats " + columns + @"
-                      SELECT $1 + g, $2, $3, $4, 'PlanDb', '0xK' || g, '0xP', '0xS', '0xL', NULL, 10, 1000000 - g, 100, 100, 0, 0, 1, 100, 1, 100, 1, 1, 3600
-                      FROM generate_series(1, $5) AS g",
-                    CollectionIdGenerator.Next(), now.AddHours(-1), serverId, ServerName, Candidates);
-                await DarlingMcpTestData.ExecAsync(connection, ct,
-                    "INSERT INTO query_stats " + columns + @"
-                      SELECT $1 + g * 100 + r, $2 - (r * interval '1 minute'), $3, $4, 'PlanDb', '0xK' || g, '0xP', '0xS', '0xL', 'a5299-plan old text ' || g, 10, 100, 100, 100, 0, 0, 1, 100, 1, 100, 1, 1, 3600
-                      FROM generate_series(1, $5) AS g CROSS JOIN generate_series(1, 20) AS r",
-                    CollectionIdGenerator.Next() + 1_000_000, now.AddDays(-10), serverId, ServerName, Candidates);
-                await DarlingMcpTestData.ExecAsync(connection, ct,
-                    "INSERT INTO query_stats " + columns + @"
-                      SELECT $1 + g, $2 - (g * interval '1 second'), $3, $4, 'PlanDb', '0xF' || g, '0xP', '0xS', '0xL', 'a5299-plan filler ' || g, 10, 100, 100, 100, 0, 0, 1, 100, 1, 100, 1, 1, 3600
-                      FROM generate_series(1, 5000) AS g",
-                    CollectionIdGenerator.Next() + 2_000_000, now.AddDays(-9), serverId, ServerName);
-                await DarlingMcpTestData.ExecAsync(connection, ct, "ANALYZE collect.query_stats");
+            /* The database is this test's own scratch store, so the index goes with it: no teardown to run. */
+            const string columns = @"(collection_id, collection_time, server_id, server_name, database_name, query_hash, query_plan_hash, sql_handle, plan_handle,
+                       query_text, delta_execution_count, delta_worker_time, delta_elapsed_time, delta_logical_reads,
+                       delta_logical_writes, delta_physical_reads, min_worker_time, max_worker_time, min_elapsed_time, max_elapsed_time,
+                       min_dop, max_dop, sample_interval_seconds)";
+            await DarlingMcpTestData.ExecAsync(connection, ct,
+                "INSERT INTO query_stats " + columns + @"
+                  SELECT $1 + g, $2, $3, $4, 'PlanDb', '0xK' || g, '0xP', '0xS', '0xL', NULL, 10, 1000000 - g, 100, 100, 0, 0, 1, 100, 1, 100, 1, 1, 3600
+                  FROM generate_series(1, $5) AS g",
+                CollectionIdGenerator.Next(), now.AddHours(-1), serverId, ServerName, Candidates);
+            await DarlingMcpTestData.ExecAsync(connection, ct,
+                "INSERT INTO query_stats " + columns + @"
+                  SELECT $1 + g * 100 + r, $2 - (r * interval '1 minute'), $3, $4, 'PlanDb', '0xK' || g, '0xP', '0xS', '0xL', 'a5299-plan old text ' || g, 10, 100, 100, 100, 0, 0, 1, 100, 1, 100, 1, 1, 3600
+                  FROM generate_series(1, $5) AS g CROSS JOIN generate_series(1, 20) AS r",
+                CollectionIdGenerator.Next() + 1_000_000, now.AddDays(-10), serverId, ServerName, Candidates);
+            await DarlingMcpTestData.ExecAsync(connection, ct,
+                "INSERT INTO query_stats " + columns + @"
+                  SELECT $1 + g, $2 - (g * interval '1 second'), $3, $4, 'PlanDb', '0xF' || g, '0xP', '0xS', '0xL', 'a5299-plan filler ' || g, 10, 100, 100, 100, 0, 0, 1, 100, 1, 100, 1, 1, 3600
+                  FROM generate_series(1, 5000) AS g",
+                CollectionIdGenerator.Next() + 2_000_000, now.AddDays(-9), serverId, ServerName);
+            await DarlingMcpTestData.ExecAsync(connection, ct, "ANALYZE collect.query_stats");
 
-                /* The stand-in keeps the window rows only (the rollup outlives raw), so the ranked keys are the 125 textless
-                   keys and every text has to come from the fallback. */
-                var standIn = "(SELECT server_id, collection_time AS bucket, database_name, query_hash, sql_handle, " +
-                    "delta_execution_count AS execution_count_sum, delta_worker_time AS worker_time_sum, " +
-                    "delta_elapsed_time AS elapsed_time_sum FROM collect.query_stats WHERE collection_time >= '" +
-                    now.AddDays(-2).ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture) + "') AS f";
-                var sql = TopRankings.Apply(DarlingDataReader.TopQueriesHourlySql, TopRanking.Cpu, hourly: true)
-                    .Replace("$FROM$", standIn, StringComparison.Ordinal)
-                    .Replace("$CEIL$", "", StringComparison.Ordinal);
-                var plan = await ExplainAsync(connection, sql, ct, serverId, now.AddHours(-24), now.AddMinutes(5),
-                    P(NpgsqlDbType.Integer, Top), P(NpgsqlDbType.Text, null), P(NpgsqlDbType.Integer, Candidates));
+            /* The stand-in keeps the window rows only (the rollup outlives raw), so the ranked keys are the 125 textless
+               keys and every text has to come from the fallback. */
+            var standIn = "(SELECT server_id, collection_time AS bucket, database_name, query_hash, sql_handle, " +
+                "delta_execution_count AS execution_count_sum, delta_worker_time AS worker_time_sum, " +
+                "delta_elapsed_time AS elapsed_time_sum FROM collect.query_stats WHERE collection_time >= '" +
+                now.AddDays(-2).ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture) + "') AS f";
+            var sql = TopRankings.Apply(DarlingDataReader.TopQueriesHourlySql, TopRanking.Cpu, hourly: true)
+                .Replace("$FROM$", standIn, StringComparison.Ordinal)
+                .Replace("$CEIL$", "", StringComparison.Ordinal);
+            var plan = await ExplainAsync(connection, sql, ct, serverId, now.AddHours(-24), now.AddMinutes(5),
+                P(NpgsqlDbType.Integer, Top), P(NpgsqlDbType.Text, null), P(NpgsqlDbType.Integer, Candidates));
 
-                /* Every raw read that is neither the ranking nor the in-window lookup is the fallback (the old shape was inlined into the join, so no CTE name). */
-                var lookup = Nodes(plan.Root, null).Where(n => n.Relation == "query_stats" && n.Cte != "ranked" && n.Cte != "latest_in_window").ToList();
-                Assert.NotEmpty(lookup);
-                var read = lookup.Sum(n => (n.Rows + n.Removed) * n.Loops);
-                Assert.True(read <= Candidates * 4,
-                    $"the hourly fallback read {read} raw rows [{string.Join("; ", lookup.Select(n => $"{n.NodeType} loops={n.Loops} rows={n.Rows} removed={n.Removed}"))}] for {Candidates} missing keys; " +
-                    "it must probe the index about once per key, not read the raw table");
-            }
-            finally
-            {
-                if (created)
-                {
-                    await DarlingMcpTestData.ExecAsync(connection, ct, "DROP INDEX IF EXISTS collect." + indexName);
-                }
-            }
+            /* Every raw read that is neither the ranking nor the in-window lookup is the fallback (the old shape was inlined into the join, so no CTE name). */
+            var lookup = Nodes(plan.Root, null).Where(n => n.Relation == "query_stats" && n.Cte != "ranked" && n.Cte != "latest_in_window").ToList();
+            Assert.NotEmpty(lookup);
+            var read = lookup.Sum(n => (n.Rows + n.Removed) * n.Loops);
+            Assert.True(read <= Candidates * 4,
+                $"the hourly fallback read {read} raw rows [{string.Join("; ", lookup.Select(n => $"{n.NodeType} loops={n.Loops} rows={n.Rows} removed={n.Removed}"))}] for {Candidates} missing keys; " +
+                "it must probe the index about once per key, not read the raw table");
         }, "a5299-hourly-fallback", bulk: false);
 
     // ------------------------------------------------------------------ plan reading
@@ -320,9 +299,12 @@ public sealed class TopTextLookupPlanLiveTests
     /// </summary>
     private static async Task WithSeedAsync(Func<NpgsqlConnection, int, DateTime, CancellationToken, Task> body, string serverName = ServerName, bool bulk = true)
     {
-        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
-        Assert.SkipWhen(string.IsNullOrEmpty(connectionString), "Set DARLING_TEST_PG to run the live plan tests.");
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), "Set DARLING_TEST_PG to run the live plan tests (each mints its own scratch database).");
         var ct = TestContext.Current.CancellationToken;
+        /* #4650: a scratch database, so no other class's leftover chunks shape the plan under test. */
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        var connectionString = scratch.ConnectionString;
         var serverId = ServerIdHelper.GetDeterministicHashCode(serverName);
         var cleanup = string.Format(CultureInfo.InvariantCulture,
             "DELETE FROM query_stats WHERE server_id = {0}; DELETE FROM query_text_dim WHERE query_text LIKE '%a5299-plan%'; DELETE FROM servers WHERE server_id = {0}", serverId);
