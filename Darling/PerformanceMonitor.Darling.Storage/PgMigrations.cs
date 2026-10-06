@@ -663,7 +663,9 @@ CREATE TABLE IF NOT EXISTS config.store_statement_baseline
     ///
     /// <para><b>Only the store owner writes them,</b> by a trigger created here on each table (a row trigger and a
     /// TRUNCATE trigger, both enabled always), which refuses a write from any session that is not the owner. The
-    /// provisioning scripts also remove TRIGGER and REFERENCES from every other role.</para>
+    /// provisioning scripts also revoke every privilege on the four tables from PUBLIC, admin, viewer and mcp (so none
+    /// of them can add a trigger or a foreign key) and drop any trigger or foreign key already there. The two pin
+    /// tables have row security on with no policy.</para>
     ///
     /// <para><b>No Lite twin.</b> Lite keeps its secrets in its own local store.</para>
     /// </summary>

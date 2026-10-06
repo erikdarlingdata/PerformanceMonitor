@@ -498,22 +498,61 @@ GRANT INSERT, UPDATE, DELETE ON config.config_monitored_servers TO mcp;
 
 -- 3g. The password key tables (V165, #5366): written only by the store owner (the service, its command line and the
 --     migration runner); a trigger on each table refuses every other writer. This is the grant side of the same rule,
---     and it comes after EVERY grant above, so none of them can put a privilege back. REVOKE ALL takes every
---     privilege on the four tables from PUBLIC and the three roles, TRIGGER and REFERENCES included, so a re-run after
---     a GRANT ALL leaves no role able to add its own trigger. Then only SELECT on the key and service-state tables is
---     granted back, because the Viewer reads them; the pin tables are read by the owner only. The tables are created by
---     V165: on a store below it the block is skipped, so the rest of the script (the PUBLIC revoke below included)
---     still runs; re-run the script once the service has migrated the store to V165.
+--     and it comes after EVERY grant above, so none of them can put a privilege back. REVOKE ALL ... CASCADE takes every
+--     privilege on the four tables from PUBLIC and the three roles, TRIGGER and REFERENCES included, so no role can add
+--     a new trigger or foreign key. A trigger or foreign key already there (made while a role held the privilege) is
+--     dropped by the loops below, with a WARNING, because it would outlast the REVOKE. Then SELECT on the key and
+--     service-state tables is granted back to admin only (the desktop Viewer reads them as admin), and the DO block
+--     checks that nothing else is left; the pin tables are read by the owner only. The tables are created by V165: on a
+--     store below it the block warns and skips, so the rest of the script (the PUBLIC revoke below included) still
+--     runs; re-run the script once the service has migrated the store to V165.
 DO $do$
+DECLARE
+    stray record;
 BEGIN
-    IF to_regclass('config.password_key') IS NOT NULL
-       AND to_regclass('config.password_key_service') IS NOT NULL
-       AND to_regclass('config.legacy_secret_pin') IS NOT NULL
-       AND to_regclass('config.legacy_secret_pin_marker') IS NOT NULL THEN
+    IF pg_catalog.to_regclass('config.password_key') IS NOT NULL
+       AND pg_catalog.to_regclass('config.password_key_service') IS NOT NULL
+       AND pg_catalog.to_regclass('config.legacy_secret_pin') IS NOT NULL
+       AND pg_catalog.to_regclass('config.legacy_secret_pin_marker') IS NOT NULL THEN
         REVOKE ALL ON config.password_key, config.password_key_service,
-           config.legacy_secret_pin, config.legacy_secret_pin_marker FROM PUBLIC, admin, viewer, mcp;
-        GRANT SELECT ON config.password_key, config.password_key_service TO admin, viewer;
-        GRANT SELECT ON config.password_key, config.password_key_service TO mcp;
+           config.legacy_secret_pin, config.legacy_secret_pin_marker FROM PUBLIC, admin, viewer, mcp CASCADE;
+        GRANT SELECT ON config.password_key, config.password_key_service TO admin;
+
+        FOR stray IN
+           SELECT t.tgname, t.tgrelid::pg_catalog.regclass::pg_catalog.text AS tablename
+           FROM pg_catalog.pg_trigger AS t
+           WHERE NOT t.tgisinternal
+             AND t.tgrelid IN (pg_catalog.to_regclass('config.password_key'), pg_catalog.to_regclass('config.password_key_service'), pg_catalog.to_regclass('config.legacy_secret_pin'), pg_catalog.to_regclass('config.legacy_secret_pin_marker'))
+             AND t.tgname NOT IN ('trg_password_key_owner_only_row', 'trg_password_key_owner_only_truncate', 'trg_password_key_service_owner_only_row', 'trg_password_key_service_owner_only_truncate', 'trg_legacy_secret_pin_owner_only_row', 'trg_legacy_secret_pin_owner_only_truncate', 'trg_legacy_secret_pin_marker_owner_only_row', 'trg_legacy_secret_pin_marker_owner_only_truncate')
+        LOOP
+           RAISE WARNING 'Dropped trigger % from % because only the store owner may write the password key tables.', stray.tgname, stray.tablename;
+           EXECUTE pg_catalog.format('DROP TRIGGER %I ON %s', stray.tgname, stray.tablename);
+        END LOOP;
+
+        FOR stray IN
+           SELECT k.conname, k.conrelid::pg_catalog.regclass::pg_catalog.text AS tablename
+           FROM pg_catalog.pg_constraint AS k
+           WHERE k.contype = 'f'
+             AND k.confrelid IN (pg_catalog.to_regclass('config.password_key'), pg_catalog.to_regclass('config.password_key_service'), pg_catalog.to_regclass('config.legacy_secret_pin'), pg_catalog.to_regclass('config.legacy_secret_pin_marker'))
+        LOOP
+           RAISE WARNING 'Dropped foreign key % on % because it references a password key table.', stray.conname, stray.tablename;
+           EXECUTE pg_catalog.format('ALTER TABLE %s DROP CONSTRAINT %I', stray.tablename, stray.conname);
+        END LOOP;
+
+        IF EXISTS (
+           SELECT 1
+           FROM pg_catalog.pg_class AS c
+           CROSS JOIN LATERAL pg_catalog.aclexplode(c.relacl) AS a
+           LEFT JOIN pg_catalog.pg_roles AS r ON r.oid = a.grantee
+           WHERE c.oid IN (pg_catalog.to_regclass('config.password_key'), pg_catalog.to_regclass('config.password_key_service'), pg_catalog.to_regclass('config.legacy_secret_pin'), pg_catalog.to_regclass('config.legacy_secret_pin_marker'))
+             AND (a.grantee = 0 OR r.rolname IN ('admin', 'viewer', 'mcp'))
+             AND NOT (COALESCE(r.rolname = 'admin', false) AND a.privilege_type = 'SELECT'
+                      AND c.oid IN (pg_catalog.to_regclass('config.password_key'), pg_catalog.to_regclass('config.password_key_service')))
+        ) THEN
+           RAISE EXCEPTION 'A role other than the store owner still holds a privilege it should not on a password key table.';
+        END IF;
+    ELSE
+        RAISE WARNING 'The password key tables were not found, so their grants were skipped. Run this script again after the service has upgraded the store.';
     END IF;
 END
 $do$;

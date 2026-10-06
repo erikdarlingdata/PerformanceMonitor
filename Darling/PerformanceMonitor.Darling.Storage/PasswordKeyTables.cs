@@ -70,7 +70,8 @@ CREATE TABLE IF NOT EXISTS config.password_key
     CONSTRAINT ck_password_key_public_key_size CHECK (octet_length(public_key) BETWEEN 256 AND 2048),
     CONSTRAINT ck_password_key_replaced_columns CHECK (
         (state = 'current' AND replaced_reason IS NULL AND replaced_at IS NULL)
-        OR (state = 'replaced' AND replaced_at IS NOT NULL))
+        OR (state = 'replaced' AND replaced_reason IS NOT NULL AND replaced_at IS NOT NULL)),
+    CONSTRAINT ck_password_key_id_matches_key CHECK (key_id = left(encode(sha256(public_key), 'hex'), 16))
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS ux_password_key_current ON config.password_key ((true)) WHERE state = 'current';
@@ -110,6 +111,10 @@ CREATE TABLE IF NOT EXISTS config.legacy_secret_pin_marker
 INSERT INTO config.legacy_secret_pin_marker (id, state)
 VALUES (1, 'pending')
 ON CONFLICT (id) DO NOTHING;
+
+-- The two pin tables carry no row-security policy, so only the owner and superusers see their rows.
+ALTER TABLE config.legacy_secret_pin ENABLE ROW LEVEL SECURITY;
+ALTER TABLE config.legacy_secret_pin_marker ENABLE ROW LEVEL SECURITY;
 
 CREATE OR REPLACE FUNCTION config.password_key_owner_only() RETURNS trigger
 LANGUAGE plpgsql

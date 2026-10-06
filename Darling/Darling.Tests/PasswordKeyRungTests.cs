@@ -78,10 +78,11 @@ public sealed class PasswordKeyRungTests
             Assert.DoesNotMatch(@"(?m)^\s*" + verb + @"\b", sql);
         }
 
-        /* The only ALTER and DROP statements are the trigger ones: enable it always, and drop it before it is created again. */
+        /* The only ALTER and DROP statements are the trigger ones (enable it always; drop it before it is created again) and
+           the row-security switch on the two pin tables, which carries no policy. */
         foreach (var line in sql.Split('\n').Select(l => l.Trim()).Where(l => l.StartsWith("ALTER", StringComparison.Ordinal) || l.StartsWith("DROP", StringComparison.Ordinal)))
         {
-            Assert.Matches(@"^(ALTER TABLE config\.\w+ ENABLE ALWAYS TRIGGER \w+|DROP TRIGGER IF EXISTS \w+ ON config\.\w+);$", line);
+            Assert.Matches(@"^(ALTER TABLE config\.\w+ ENABLE ALWAYS TRIGGER \w+|ALTER TABLE config\.legacy_secret_pin(_marker)? ENABLE ROW LEVEL SECURITY|DROP TRIGGER IF EXISTS \w+ ON config\.\w+);$", line);
         }
     }
 
@@ -141,7 +142,17 @@ public sealed class PasswordKeyRungTests
         Assert.Contains("CONSTRAINT ck_password_key_algorithm CHECK (algorithm IN ('RSA3072-OAEP-SHA256/A256GCM'))", sql, StringComparison.Ordinal);
         Assert.Contains("CONSTRAINT ck_password_key_public_key_size CHECK (octet_length(public_key) BETWEEN 256 AND 2048)", sql, StringComparison.Ordinal);
         Assert.Contains("(state = 'current' AND replaced_reason IS NULL AND replaced_at IS NULL)", sql, StringComparison.Ordinal);
-        Assert.Contains("OR (state = 'replaced' AND replaced_at IS NOT NULL)", sql, StringComparison.Ordinal);
+        Assert.Contains("OR (state = 'replaced' AND replaced_reason IS NOT NULL AND replaced_at IS NOT NULL)", sql, StringComparison.Ordinal);
+        Assert.Contains("CONSTRAINT ck_password_key_id_matches_key CHECK (key_id = left(encode(sha256(public_key), 'hex'), 16))", sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TheTwoPinTables_HaveRowSecurityOn_WithNoPolicy()
+    {
+        var sql = Statements();
+        Assert.Contains("ALTER TABLE config.legacy_secret_pin ENABLE ROW LEVEL SECURITY;", sql, StringComparison.Ordinal);
+        Assert.Contains("ALTER TABLE config.legacy_secret_pin_marker ENABLE ROW LEVEL SECURITY;", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("CREATE POLICY", sql, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
