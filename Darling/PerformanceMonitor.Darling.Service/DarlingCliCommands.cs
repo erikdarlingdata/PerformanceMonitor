@@ -2813,7 +2813,7 @@ public static class DarlingCliCommands
         DarlingHostBinding.BindReason.TokenMissing =>
             "no access token is set (the wizard should have supplied one — this is unexpected).",
         DarlingHostBinding.BindReason.AllowFromInvalid =>
-            $"web.network.allowFrom '{web.Network?.AllowFrom}' is not a valid CIDR list or an entry's address family does not match listen. Use one CIDR (e.g. 192.168.1.0/24) or several separated by commas (e.g. 10.8.0.0/16,192.168.1.5/32): every entry in CIDR form (/32 for one address) and of the same family as listen (a :: listen takes IPv6 entries only). Host bits are masked, not refused (192.168.1.5/24 means 192.168.1.0/24).",
+            $"web.network.allowFrom '{web.Network?.AllowFrom}' is not a valid CIDR list or an entry's address family does not match listen. Use one CIDR (e.g. 192.168.1.0/24) or several separated by commas (e.g. 10.8.0.0/16,192.168.1.5/32): every entry in CIDR form (/32 for one address), with each IPv4 address written as four plain decimal numbers (no leading zeros) and no IPv6 zone index, and of the same family as listen (a :: listen takes IPv6 entries only). Host bits are masked, not refused (192.168.1.5/24 means 192.168.1.0/24).",
         DarlingHostBinding.BindReason.ManagedModeRequired =>
             "network exposure is managed-mode only.",
         _ => "the web bind resolver rejected these values.",
@@ -2827,7 +2827,7 @@ public static class DarlingCliCommands
         DarlingMcpHostService.McpBindReason.TokenMissing =>
             "no bearer token is set (the wizard should have supplied one — this is unexpected).",
         DarlingMcpHostService.McpBindReason.AllowFromInvalid =>
-            $"mcp.network.allowFrom '{mcp.Network?.AllowFrom}' is not a valid CIDR list or an entry's address family does not match listen. Use one CIDR (e.g. 192.168.1.0/24) or several separated by commas (e.g. 10.8.0.0/16,192.168.1.5/32): every entry in CIDR form (/32 for one address) and of the same family as listen (a :: listen takes IPv6 entries only). Host bits are masked, not refused (192.168.1.5/24 means 192.168.1.0/24).",
+            $"mcp.network.allowFrom '{mcp.Network?.AllowFrom}' is not a valid CIDR list or an entry's address family does not match listen. Use one CIDR (e.g. 192.168.1.0/24) or several separated by commas (e.g. 10.8.0.0/16,192.168.1.5/32): every entry in CIDR form (/32 for one address), with each IPv4 address written as four plain decimal numbers (no leading zeros) and no IPv6 zone index, and of the same family as listen (a :: listen takes IPv6 entries only). Host bits are masked, not refused (192.168.1.5/24 means 192.168.1.0/24).",
         DarlingMcpHostService.McpBindReason.ManagedModeRequired =>
             "network exposure is managed-mode only.",
         _ => "the MCP resolver rejected these values.",
