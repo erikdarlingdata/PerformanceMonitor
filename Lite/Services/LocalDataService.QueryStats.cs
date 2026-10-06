@@ -1132,7 +1132,8 @@ texts AS (
        the latest captured statement from inside the module - parity with the other two comparison
        grids' text columns, labeled a statement rather than the definition.
        #5381: fetched AFTER the comparison is built, for the compared procedures' handles only, and from the
-       comparison's own window (the span of the two ranges). It was a LATERAL over v_query_stats with no time
+       comparison's own two ranges, not the span between them (a baseline weeks before the current range would
+       otherwise read every file in the gap). It was a LATERAL over v_query_stats with no time
        filter, which DuckDB runs as a window over every archived query_stats row with query_text carried through
        it, so the read's memory grew with the archive (an out of memory at Lite's 1 GB limit from five daily
        files). The pick is the same - the newest row of the handle that carries a text - with the row collected
@@ -1146,8 +1147,8 @@ texts AS (
       ON h.text_handle = qs.sql_handle
     WHERE qs.server_id = $1
     AND   qs.query_text IS NOT NULL
-    AND   qs.collection_time >= LEAST($2, $4)
-    AND   qs.collection_time <= GREATEST($3, $5)
+    AND   ((qs.collection_time >= $2 AND qs.collection_time <= $3)
+        OR (qs.collection_time >= $4 AND qs.collection_time <= $5))
     GROUP BY qs.sql_handle
 )
 SELECT j.database_name, j.schema_name, j.object_name,

@@ -685,6 +685,85 @@ COPY (
         Assert.Contains(oldScans, scan => !scan.Contains("collection_time>=", StringComparison.Ordinal));
     }
 
+    /* A far baseline (#5381): the text lookup reads the two compared ranges, not the span from the earlier range's start to
+       the later one's end. The statement used LEAST($2,$4) .. GREATEST($3,$5), so a baseline weeks before the current range read
+       every file in the gap, which is the cost the ranking change removed. Procedures here ran in the last day and in day 1 of
+       the archive (the gap is days 2 to 10, nine files). */
+    private async Task SeedFarBaselineProceduresAsync()
+    {
+        for (var k = 0; k < 30; k++)
+        {
+            var handle = (await RunRawAsync($"SELECT '0x' || md5('h' || {k}::VARCHAR)")).Rows[0][0]!.ToString()!;
+            await InsertProcedureStatsAsync(LastArchiveDayStart.AddHours(12), "db_0", "dbo", $"Proc{k:D2}", handle, 100 + k, 10_000 + k);
+            await InsertProcedureStatsAsync(FirstArchiveDay.AddDays(1).AddHours(12), "db_0", "dbo", $"Proc{k:D2}", handle, 90 + k, 9_000 + k);
+        }
+    }
+
+    private (DateTime CurStart, DateTime CurEnd, DateTime BaseStart, DateTime BaseEnd) FarBaselineWindows() =>
+        (LastArchiveDayStart, LastArchiveDayStart.AddDays(1), FirstArchiveDay.AddDays(1), FirstArchiveDay.AddDays(2));
+
+    /* The span window of the first #5381 revision, rebuilt from the current statement, as the control for the two pins below. */
+    private static string SpanWindowProcedureStatsComparisonSql() =>
+        LocalDataService.ProcedureStatsComparisonSql(string.Empty)
+            .Replace("((qs.collection_time >= $2 AND qs.collection_time <= $3)", "(qs.collection_time >= LEAST($2, $4) AND qs.collection_time <= GREATEST($3, $5)", StringComparison.Ordinal)
+            .Replace("OR (qs.collection_time >= $4 AND qs.collection_time <= $5))", ")", StringComparison.Ordinal);
+
+    [Fact]
+    public async Task ProcedureComparison_AFarBaselineOnAWideArchiveReadsAtTheLowLimit()
+    {
+        await SeedWideArchiveAsync();
+        await SeedFarBaselineProceduresAsync();
+        await SetLowMemoryAsync();
+        var (curStart, curEnd, baseStart, baseEnd) = FarBaselineWindows();
+
+        /* The control: the span window reads the nine gap files' text and cannot fit. */
+        var spanSql = SpanWindowProcedureStatsComparisonSql();
+        Assert.Contains("LEAST", spanSql, StringComparison.Ordinal);
+        var spanFailure = await TryRunAsync(() => RunRawAsync(spanSql, ServerId, curStart, curEnd, baseStart, baseEnd));
+        Assert.NotNull(spanFailure);
+        Assert.Contains("Out of Memory", spanFailure!.Message, StringComparison.OrdinalIgnoreCase);
+
+        var rows = await new LocalDataService(_duckDb).GetProcedureStatsComparisonAsync(ServerId, curStart, curEnd, baseStart, baseEnd);
+        Assert.Equal(30, rows.Count);
+        Assert.All(rows, r => Assert.True(r.QueryText.Length >= TextChars, "each procedure carries its statement's full-width text"));
+    }
+
+    [Fact]
+    public async Task ProcedureComparison_TextScanFilterIsTheTwoRangesNotTheSpanBetweenThem()
+    {
+        await SeedWideArchiveAsync();
+        await SeedFarBaselineProceduresAsync();
+        var (curStart, curEnd, baseStart, baseEnd) = FarBaselineWindows();
+        var gapEdges = new[] { baseEnd, curStart }.Select(t => t.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture)).ToArray();
+
+        /* The query_stats scan is the one that reads the archive text. Its pushed-down filter must still name the baseline's END and
+           the current range's START: DuckDB keeps the OR of the two ranges (a row group that sits in the gap fails both arms and
+           is skipped), where a LEAST/GREATEST span folds to one bound pair and names neither. */
+        var scans = await ParquetScanFiltersAsync(LocalDataService.ProcedureStatsComparisonSql(string.Empty), ServerId, curStart, curEnd, baseStart, baseEnd);
+        Assert.Contains(scans, scan => scan.Contains(gapEdges[0], StringComparison.Ordinal) && scan.Contains(gapEdges[1], StringComparison.Ordinal));
+
+        var spanScans = await ParquetScanFiltersAsync(SpanWindowProcedureStatsComparisonSql(), ServerId, curStart, curEnd, baseStart, baseEnd);
+        Assert.DoesNotContain(spanScans, scan => scan.Contains(gapEdges[0], StringComparison.Ordinal) && scan.Contains(gapEdges[1], StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task ProcedureComparison_ATextOnlyInTheGapBetweenTheRangesReadsBlank()
+    {
+        var now = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
+        await InsertQueryStatsAsync(now.AddDays(-5), "Db1", "0xGAPQ", null, "0xGAPH", "text captured in the gap", 1_000);
+        await InsertQueryStatsAsync(now.AddDays(-10).AddHours(1), "Db1", "0xBASEQ", null, "0xBASEH", "text captured in the baseline range", 1_000);
+        await InsertProcedureStatsAsync(now.AddHours(-3), "Db1", "dbo", "ProcGap", "0xGAPH", 50, 5_000);
+        await InsertProcedureStatsAsync(now.AddDays(-10).AddHours(2), "Db1", "dbo", "ProcGap", "0xGAPH", 40, 4_000);
+        await InsertProcedureStatsAsync(now.AddHours(-3), "Db1", "dbo", "ProcBase", "0xBASEH", 50, 5_000);
+        await InsertProcedureStatsAsync(now.AddDays(-10).AddHours(2), "Db1", "dbo", "ProcBase", "0xBASEH", 40, 4_000);
+
+        var rows = await new LocalDataService(_duckDb).GetProcedureStatsComparisonAsync(
+            ServerId, now.AddHours(-24), now, now.AddDays(-10), now.AddDays(-9));
+
+        Assert.Equal(string.Empty, rows.Single(r => r.ObjectName == "ProcGap").QueryText);
+        Assert.Equal("text captured in the baseline range", rows.Single(r => r.ObjectName == "ProcBase").QueryText);
+    }
+
     /* ---- the other two wide-text reads: bounded by their window, not by the archive ----
        The query stats comparison takes MAX(query_text) over the rows of its two windows and the heatmap projects a 120-character
        preview per row of its window. Neither carries text through an operator over the whole archive, so neither grew with it:
@@ -759,8 +838,10 @@ COPY (
         Assert.NotEmpty(scans);
         foreach (var scan in scans)
         {
+            /* A plain range prints as "collection_time>=..." and an OR of two ranges as an expression with spaces; compare without them. */
+            var squeezed = scan.Replace(" ", string.Empty, StringComparison.Ordinal);
             Assert.True(
-                scan.Contains("collection_time>=", StringComparison.Ordinal) && scan.Contains("collection_time<=", StringComparison.Ordinal),
+                squeezed.Contains("collection_time>=", StringComparison.Ordinal) && squeezed.Contains("collection_time<=", StringComparison.Ordinal),
                 "a read_parquet scan whose pushed-down filters lack the collection_time window: '" + scan + "'");
         }
     }
