@@ -100,4 +100,16 @@ public sealed class QueryStoreHistoryPanelStateTests
         Assert.Equal(end + hour / 2, widened.GetProperty("end").GetInt64());
         Assert.Equal(end + hour / 2 - 6 * hour, widened.GetProperty("start").GetInt64());
     }
+
+    /// <summary>Two grid rows of one query each have a History panel open. The chart takes its id from the panel's own key, so a
+    /// zoom or a hidden series set in one panel's chart is not read back by the other's.</summary>
+    [Fact]
+    public void TwoHistoryPanelsOfOneQuery_KeepTheirOwnChartZoomAndLegend()
+    {
+        var r = Run("panelCharts");
+        var ids = Strs(r, "ids");
+        Assert.Equal(new[] { "qs-history|srv-a|Orders|42|7|Regular|", "qs-history|srv-a|Orders|42|9|Regular|" }, ids);
+        Assert.Equal("hide:p7", r.GetProperty("hiddenInA").GetString());
+        Assert.Equal(JsonValueKind.Null, r.GetProperty("hiddenInB").ValueKind);
+    }
 }

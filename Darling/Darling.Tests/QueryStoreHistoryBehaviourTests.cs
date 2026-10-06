@@ -79,7 +79,7 @@ public sealed class QueryStoreHistoryBehaviourTests
         Assert.Equal("9", plan.GetProperty("query").GetProperty("plan_id").GetString());
         Assert.Equal("42", plan.GetProperty("query").GetProperty("query_id").GetString());
         var chart = r.GetProperty("chart")[0];
-        Assert.Equal("qs-history|Orders|42", Str(chart, "id"));
+        Assert.Equal("qs-history|srv-a|Orders|42|||", Str(chart, "id"));
         Assert.Equal(new[] { "p7", "p9" }, chart.GetProperty("series").EnumerateArray().Select(s => s.GetString()));
         Assert.Equal(2, chart.GetProperty("points").GetInt32());
         Assert.True(r.GetProperty("closed").GetBoolean());

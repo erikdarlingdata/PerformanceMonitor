@@ -53,8 +53,10 @@ fs.cpSync(root, scratch, { recursive: true });
 fs.writeFileSync(path.join(scratch, "charts.js"),
   'export const SERIES_COLORS = ["#2eaef1", "#4dd0e1"];\n' +
   'export const chartZoomScope = (h) => "scope|" + h;\n' +
-  'export function zoomableLineChart(spec, id, scope) { globalThis.__charts.push({ spec, id, scope }); const d = document.createElement("div"); d.className = "zoomable-chart"; return d; }\n');
+  'export function zoomableLineChart(spec, id, scope) { globalThis.__charts.push({ spec, id, scope, hidden: globalThis.__chartState.get(id + "|" + scope) ?? null }); const d = document.createElement("div"); d.className = "zoomable-chart"; return d; }\n');
 globalThis.__charts = [];
+/* Stands for the zoom and legend state charts.js keeps per chart id and scope: a scenario writes it as a click on the legend would. */
+globalThis.__chartState = new Map();
 const mod = await import(pathToFileURL(scratch + "/pages/query-store-history.js").href);
 const util = await import(pathToFileURL(scratch + "/util.js").href);
 const pv = await import(pathToFileURL(scratch + "/pages/plan-viewer.js").href);
@@ -301,6 +303,26 @@ const scenarios = {
     } finally {
       Date.now = realNow;
     }
+  },
+  /* Two rows of one query have a History panel each, and a chart's zoom and hidden series belong to the panel they were set in. */
+  async panelCharts() {
+    respond(history());
+    const c = col();
+    const rowA = { database_name: "Orders", query_id: 42, plan_id: 7, execution_type_desc: "Regular", replica_role: null };
+    const rowB = { ...rowA, plan_id: 9 };
+    body.appendChild(c.render(rowA)).byText("History").click();
+    await flush();
+    const chartA = globalThis.__charts[globalThis.__charts.length - 1];
+    body.appendChild(c.render(rowB)).byText("History").click();
+    await flush();
+    const chartB = globalThis.__charts[globalThis.__charts.length - 1];
+    out.ids = [chartA.id, chartB.id];
+    globalThis.__chartState.set(chartA.id + "|" + chartA.scope, "hide:p7");
+    const redrawn = () => globalThis.__charts[globalThis.__charts.length - 1];
+    body.appendChild(c.render(rowA));
+    out.hiddenInA = redrawn().hidden;
+    body.appendChild(c.render(rowB));
+    out.hiddenInB = redrawn().hidden;
   },
   async cutNotice() {
     respond(history({ points_truncated: true }));

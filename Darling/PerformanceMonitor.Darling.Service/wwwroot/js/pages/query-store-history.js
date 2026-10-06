@@ -166,12 +166,14 @@ function planTable(server, data, scope) {
 
 /* `axis` is the chart's window ({ windowStart, windowEnd }, or null for the data's own extent) as it was when the read was made.
    Under a preset, windowFromHours() reads the clock, so asking again at each redraw would slide the axis away from the data. */
-function chartFor(data, hours, axis) {
+/* The chart's id is built from the panel's own key, so two panels of one query (two grid rows) never share a chart's zoom or
+   its hidden series. The chart keeps both under this id and the scope. */
+function chartFor(key, data, hours, axis) {
   const points = (data.points || []).map((p) => ({ collection_time: p.collection_time, ["p" + p.plan_id]: p.avg_duration_ms }));
   const series = data.plans.map((p, i) => ({ key: "p" + p.plan_id, label: "Plan " + p.plan_id, color: SERIES_COLORS[i % SERIES_COLORS.length] }));
   return zoomableLineChart(
     { points, xKey: "collection_time", series, formatValue: (v) => fmtMs(v), unit: "ms", ...(axis || {}) },
-    "qs-history|" + data.database_name + "|" + data.query_id,
+    "qs-history|" + key,
     chartZoomScope(hours)
   );
 }
@@ -193,7 +195,7 @@ function panelFor(key, server, hours) {
     : null;
   const plansCut = d.plans_truncated ? el("div", { class: "strip notice", text: "Only the " + d.plans.length + " plans with the most total duration are listed." }) : null;
   const cut = d.points_truncated ? el("div", { class: "strip notice", text: "The chart shows the newest " + d.points.length.toLocaleString("en-US") + " snapshots of the window; older ones are not drawn." }) : null;
-  return el("div", { class: "plan-panel qs-history" }, [notice, plansCut, cut, chartFor(d, hours, state.window), planTable(server, d, key)]);
+  return el("div", { class: "plan-panel qs-history" }, [notice, plansCut, cut, chartFor(key, d, hours, state.window), planTable(server, d, key)]);
 }
 
 /**
