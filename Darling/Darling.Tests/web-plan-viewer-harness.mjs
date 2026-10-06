@@ -365,6 +365,22 @@ const scenarios = {
     out.text = c.textContent;
     out.hasPre = pre(c) !== null;
   },
+  /* #5236: a Deadlocks row that names no victim reads by its two times alone, and the read refuses when the deadlocks
+     with those times name more than one victim. The refusal is an "invalid" envelope under a 200, and the panel must
+     show its message, never a blank pane. */
+  async deadlockRefusal() {
+    reply = { status: 200, body: JSON.stringify({ status: "invalid", message: "More than one deadlock shares this collection_time and deadlock_time and they name different victims. Pass the row's victim_process_id to pick one.", hints: { parameter: "victim_process_id" } }) };
+    const c = viewer.planSourceCell("srv-a", { kind: "deadlock_victim", collection_time: "2026-03-04T05:06:08.5000000", deadlock_time: "2026-03-04T05:06:07.1230000", victim_process_id: null });
+    c.byText("Plan").click();
+    await flush();
+    const u = params();
+    out.path = u.pathname;
+    out.hasVictimParam = u.searchParams.has("victim_process_id");
+    out.text = c.textContent;
+    out.hasPre = pre(c) !== null;
+    out.hasDownload = c.byText("Download .sqlplan") !== null;
+    out.strip = c.all((n) => n.className === "strip error").length;
+  },
   async nullSource() {
     out.cell = viewer.planSourceCell("srv-a", null).textContent;
     /* #5236: a blocking or deadlock row without its presence flag (a DMV row never has one, nor does a report whose plans

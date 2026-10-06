@@ -420,11 +420,12 @@ public sealed class DarlingMcpPlanTools
             var read = await DarlingStoredPlanReader.GetDeadlockVictimPlanXmlAsync(
                 postgres, resolved.ServerId, collectionTimeUtc, deadlockTimeUtc, victim_process_id, database_name, cancellationToken);
 
-            /* Two deadlocks with the same stamps and different victims, and no victim named: the plan of the wrong
-               deadlock is worse than none (as with side above), so neither is returned and the caller is told what picks one. */
+            /* Deadlocks with the same stamps that name more than one victim (whether or not each captured a plan), and no victim
+               named: the plan of the wrong deadlock is worse than none (as with side above), so none is returned and the caller is
+               told what picks one. */
             if (read.Ambiguous)
                 return McpHelpers.Refusal("victim_process_id",
-                    "Two deadlocks share this collection_time and deadlock_time and name different victims. Pass the row's victim_process_id to pick one.");
+                    "More than one deadlock shares this collection_time and deadlock_time and they name different victims. Pass the row's victim_process_id to pick one.");
 
             var xml = read.PlanXml;
             if (string.IsNullOrEmpty(xml))

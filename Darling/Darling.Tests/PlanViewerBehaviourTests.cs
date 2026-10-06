@@ -276,6 +276,20 @@ public sealed class PlanViewerBehaviourTests
         Assert.False(r.GetProperty("hasPre").GetBoolean());
     }
 
+    /// <summary>#5236: a Deadlocks row with no victim id reads by its two times alone. When the read refuses (the deadlocks
+    /// with those times name more than one victim), the panel shows the refusal's message in its error strip, not a blank pane.</summary>
+    [Fact]
+    public void ADeadlockRowWithNoVictim_ShowsTheReadsRefusalMessage_NotABlankPane()
+    {
+        var r = Run("deadlockRefusal");
+        Assert.Equal("/api/read/get_deadlock_plan_xml", Str(r, "path"));
+        Assert.False(r.GetProperty("hasVictimParam").GetBoolean());
+        Assert.Contains("Pass the row's victim_process_id to pick one", Str(r, "text"));
+        Assert.Equal(1, r.GetProperty("strip").GetInt32());
+        Assert.False(r.GetProperty("hasPre").GetBoolean());
+        Assert.False(r.GetProperty("hasDownload").GetBoolean());
+    }
+
     [Fact]
     public void ANullSource_IsADash()
     {

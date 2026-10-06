@@ -468,13 +468,16 @@ public sealed class DarlingMcpBlockingToolsSurfaceAndSqlTests
         {
             (DarlingStoredPlanReader.BlockedPlanSql, "blocked_query_plan_xml"),
             (DarlingStoredPlanReader.BlockingPlanSql, "blocking_query_plan_xml"),
-            (DarlingStoredPlanReader.DeadlockVictimPlanSql, "victim_query_plan_xml"),
         };
         foreach (var (sql, column) in pointReads)
         {
             Assert.Contains($"AND   {column} IS NOT NULL", sql, StringComparison.Ordinal);
             Assert.Contains($"AND   {column} <> ''", sql, StringComparison.Ordinal);
         }
+
+        /* The victim read applies the same predicate inside its plan subquery (the first predicate of that WHERE). */
+        Assert.Contains("WHERE victim_query_plan_xml IS NOT NULL", DarlingStoredPlanReader.DeadlockVictimPlanSql, StringComparison.Ordinal);
+        Assert.Contains("AND   victim_query_plan_xml <> ''", DarlingStoredPlanReader.DeadlockVictimPlanSql, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -552,16 +555,22 @@ public sealed class DarlingMcpBlockingToolsSurfaceAndSqlTests
         Assert.Contains("AND   ($5::text IS NULL OR database_name = $5)", DarlingStoredPlanReader.DeadlockVictimPlanSql, StringComparison.Ordinal);
     }
 
-    /// <summary>#5236: the victim read looks at up to TWO rows and returns the victim beside the plan, so two deadlocks that share
-    /// both stamps and name different victims can be told from two copies of one (a one-row read could not).</summary>
+    /// <summary>#5236: the victim read counts the distinct victims among ALL the deadlocks the stamps match (the presence
+    /// predicate is not in that count), and takes the plan from the lowest deadlock_id that captured one, so a twin that captured
+    /// no plan still makes a no-victim read ambiguous and a plan-less copy of one deadlock never hides its sibling's plan.</summary>
     [Fact]
-    public void TheDeadlockVictimPlanSql_ReadsTwoRows_WithTheirVictims_InDeadlockIdOrder()
+    public void TheDeadlockVictimPlanSql_CountsVictimsAcrossEveryMatch_AndTakesThePlanFromTheLowestCapturedCopy()
     {
         var sql = DarlingStoredPlanReader.DeadlockVictimPlanSql;
-        Assert.Contains("SELECT victim_query_plan_xml, victim_process_id", sql, StringComparison.Ordinal);
+        var cte = System.Text.RegularExpressions.Regex.Match(sql, @"WITH twins AS\s*\((.*?)\)\s*SELECT", System.Text.RegularExpressions.RegexOptions.Singleline);
+        Assert.True(cte.Success);
+        Assert.DoesNotContain("victim_query_plan_xml IS NOT NULL", cte.Groups[1].Value, StringComparison.Ordinal);
+        Assert.DoesNotContain("victim_query_plan_xml <>", cte.Groups[1].Value, StringComparison.Ordinal);
+        Assert.Contains("count(DISTINCT coalesce(victim_process_id, ''))", sql, StringComparison.Ordinal);
         Assert.Contains("ORDER BY deadlock_id", sql, StringComparison.Ordinal);
-        Assert.Contains("LIMIT 2", sql, StringComparison.Ordinal);
-        Assert.DoesNotContain("LIMIT 1", sql, StringComparison.Ordinal);
+        Assert.Contains("AS victim_plan_xml", sql, StringComparison.Ordinal);
+        Assert.Contains("AS victim_count", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("LIMIT 2", sql, StringComparison.Ordinal);
     }
 }
 

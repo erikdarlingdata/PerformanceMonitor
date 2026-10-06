@@ -661,4 +661,90 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8)", connection);
             $"DELETE FROM servers WHERE server_id IN ({ServerId}, {OtherServerId});", connection);
         await cleanup.ExecuteNonQueryAsync(ct);
     }
+
+    /// <summary>
+    /// #5236: the twin check looks at EVERY deadlock the stamps match, not only the ones that captured a plan. Two deadlocks that
+    /// share both stamps and name different victims are refused when no victim is sent, whichever of them captured a plan (the
+    /// plan of the other one must not answer for it); with each victim sent, the one that captured a plan answers with it and
+    /// the other is the plain not-captured miss. Two stored copies of ONE deadlock (the same victim) still answer from the copy
+    /// that captured a plan, even when the lower deadlock_id is the copy that did not.
+    /// </summary>
+    [Fact]
+    public async Task DeadlockPlanRead_TwinsRefuse_WhetherOrNotEachCapturedAPlan_AndACopyWithoutAPlanNeverHidesItsSibling()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live row-plan test.");
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+        await using var postgres = NpgsqlDataSource.Create(cs!);
+
+        var bodySucceeded = false;
+        try
+        {
+            await RegisterServerAsync(connection, ct);
+
+            var firstPlan = PlanXml("first-captured");
+            var secondPlan = PlanXml("second-captured");
+            var copyPlan = PlanXml("copy-captured");
+
+            /* Only the first twin captured a plan. */
+            var firstOnlyCollected = Anchor.AddMinutes(40);
+            var firstOnlyStamp = firstOnlyCollected.AddSeconds(-7);
+            await InsertDeadlockAsync(connection, firstOnlyCollected, firstOnlyStamp, "process1a2b", firstPlan, ct);
+            await InsertDeadlockAsync(connection, firstOnlyCollected, firstOnlyStamp, "process3c4d", null, ct);
+
+            /* Only the second twin captured a plan. */
+            var secondOnlyCollected = Anchor.AddMinutes(50);
+            var secondOnlyStamp = secondOnlyCollected.AddSeconds(-7);
+            await InsertDeadlockAsync(connection, secondOnlyCollected, secondOnlyStamp, "process1a2b", "", ct);
+            await InsertDeadlockAsync(connection, secondOnlyCollected, secondOnlyStamp, "process3c4d", secondPlan, ct);
+
+            /* Two copies of one deadlock: the lower deadlock_id captured no plan, the higher one did. */
+            var copyCollected = Anchor.AddMinutes(60);
+            var copyStamp = copyCollected.AddSeconds(-7);
+            await InsertDeadlockAsync(connection, copyCollected, copyStamp, "process7a8b", null, ct);
+            await InsertDeadlockAsync(connection, copyCollected, copyStamp, "process7a8b", copyPlan, ct);
+
+            async Task<string> Read(DateTime collected, DateTime stamp, string? victim) => await DarlingMcpPlanTools.GetDeadlockPlanXml(
+                postgres, collected.ToString("o", CultureInfo.InvariantCulture), stamp.ToString("o", CultureInfo.InvariantCulture), ServerName, victim,
+                cancellationToken: ct);
+
+            void AssertRefused(string answer)
+            {
+                using var doc = JsonDocument.Parse(answer);
+                Assert.Equal("invalid", doc.RootElement.GetProperty("status").GetString());
+                Assert.Equal("victim_process_id", doc.RootElement.GetProperty("hints").GetProperty("parameter").GetString());
+                Assert.Contains("victim_process_id", doc.RootElement.GetProperty("message").GetString(), StringComparison.Ordinal);
+                Assert.DoesNotContain("ShowPlanXML", answer, StringComparison.Ordinal);
+            }
+
+            /* No victim: refused when only the first twin captured a plan, and when only the second did. */
+            foreach (var none in new string?[] { null, "" })
+            {
+                AssertRefused(await Read(firstOnlyCollected, firstOnlyStamp, none));
+                AssertRefused(await Read(secondOnlyCollected, secondOnlyStamp, none));
+            }
+
+            /* Each victim sent: the twin that captured a plan answers with it, the other is the not-captured miss. */
+            Assert.Equal(firstPlan, await Read(firstOnlyCollected, firstOnlyStamp, "process1a2b"));
+            Assert.Equal("unavailable", StatusOf(await Read(firstOnlyCollected, firstOnlyStamp, "process3c4d")));
+            Assert.Equal("unavailable", StatusOf(await Read(secondOnlyCollected, secondOnlyStamp, "process1a2b")));
+            Assert.Equal(secondPlan, await Read(secondOnlyCollected, secondOnlyStamp, "process3c4d"));
+
+            /* Copies of one deadlock answer from the copy that captured a plan, with no victim or with theirs. */
+            Assert.Equal(copyPlan, await Read(copyCollected, copyStamp, null));
+            Assert.Equal(copyPlan, await Read(copyCollected, copyStamp, "process7a8b"));
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
 }

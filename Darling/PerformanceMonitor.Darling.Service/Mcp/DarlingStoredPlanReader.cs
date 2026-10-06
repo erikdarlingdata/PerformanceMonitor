@@ -223,27 +223,41 @@ internal static class DarlingStoredPlanReader
     /// <c>has_victim_plan</c> flag (see <see cref="BlockedPlanSql"/>). A NULL deadlock_time never lists, so it is never
     /// asked for here.
     /// <para>
-    /// It reads up to TWO rows, <c>deadlock_id</c> first, and selects <c>victim_process_id</c> beside the plan so the
-    /// caller can tell whether the one it takes was the only candidate. When no victim is sent and the two rows name
-    /// different victims, the stamps do not say which deadlock was meant, and the plan of the wrong deadlock is worse
-    /// than none, so <see cref="GetDeadlockVictimPlanXmlAsync"/> reports the read as ambiguous and takes neither. Two
-    /// rows that name the same victim are copies of one deadlock, and the lower <c>deadlock_id</c> answers.
+    /// One row, two columns. <c>victim_plan_xml</c> is the plan of the lowest <c>deadlock_id</c> among the matching
+    /// deadlocks that captured one (NULL when none did). <c>victim_count</c> counts the distinct victims among ALL the
+    /// matching deadlocks, whether or not each captured a plan, so a twin that captured nothing still shows. When no
+    /// victim is sent and the count is above one, the stamps do not say which deadlock was meant, and the plan of the
+    /// wrong deadlock is worse than none, so <see cref="GetDeadlockVictimPlanXmlAsync"/> reports the read as ambiguous
+    /// and takes none. Copies of one deadlock name the same victim (count 1), and the lowest <c>deadlock_id</c> that
+    /// captured a plan answers; a copy without one never turns that into "not captured".
     /// </para>
     /// $1 server_id, $2 collection_time, $3 deadlock_time (both naive UTC, microsecond-exact), $4 victim_process_id
     /// (NULL = no victim filter), $5 database_name (NULL = no database filter).
     /// </summary>
     public const string DeadlockVictimPlanSql = """
-        SELECT victim_query_plan_xml, victim_process_id
-        FROM deadlocks
-        WHERE server_id = $1
-        AND   collection_time = $2
-        AND   deadlock_time = $3
-        AND   ($4::text IS NULL OR victim_process_id = $4)
-        AND   ($5::text IS NULL OR database_name = $5)
-        AND   victim_query_plan_xml IS NOT NULL
-        AND   victim_query_plan_xml <> ''
-        ORDER BY deadlock_id
-        LIMIT 2
+        WITH twins AS
+        (
+            SELECT deadlock_id, victim_process_id, victim_query_plan_xml
+            FROM deadlocks
+            WHERE server_id = $1
+            AND   collection_time = $2
+            AND   deadlock_time = $3
+            AND   ($4::text IS NULL OR victim_process_id = $4)
+            AND   ($5::text IS NULL OR database_name = $5)
+        )
+        SELECT
+            (
+                SELECT victim_query_plan_xml
+                FROM twins
+                WHERE victim_query_plan_xml IS NOT NULL
+                AND   victim_query_plan_xml <> ''
+                ORDER BY deadlock_id
+                LIMIT 1
+            ) AS victim_plan_xml,
+            (
+                SELECT count(DISTINCT coalesce(victim_process_id, ''))
+                FROM twins
+            ) AS victim_count
         """;
 
     /// <summary>
@@ -569,8 +583,8 @@ internal static class DarlingStoredPlanReader
 
     /// <summary>
     /// The stored victim plan of one deadlock (<see cref="DeadlockVictimPlanSql"/>), with a null plan when that deadlock
-    /// captured none, or <see cref="DeadlockVictimPlanRead.Ambiguous"/> when no victim was named and the two deadlocks the
-    /// stamps match name different victims. Both times are the row's own, exactly: naive UTC with the store's
+    /// captured none, or <see cref="DeadlockVictimPlanRead.Ambiguous"/> when no victim was named and the deadlocks the
+    /// stamps match name more than one victim. Both times are the row's own, exactly: naive UTC with the store's
     /// microseconds. A null or empty <paramref name="victimProcessId"/> adds no victim filter, and a null or empty
     /// <paramref name="databaseName"/> no database filter.
     /// </summary>
@@ -591,21 +605,13 @@ internal static class DarlingStoredPlanReader
             return new DeadlockVictimPlanRead(null, false);
         }
 
-        var plan = reader.GetString(0);
-        var victim = reader.IsDBNull(1) ? null : reader.GetString(1);
-        if (await reader.ReadAsync(cancellationToken))
-        {
-            /* A second candidate. Two copies of one deadlock name the same victim and the lower deadlock_id answers; two
-               different victims are two deadlocks the stamps cannot tell apart (only reachable when no victim was sent,
-               since a sent victim is in the WHERE), so neither plan is taken. */
-            var other = reader.IsDBNull(1) ? null : reader.GetString(1);
-            if (!string.Equals(victim, other, StringComparison.Ordinal))
-            {
-                return new DeadlockVictimPlanRead(null, true);
-            }
-        }
-
-        return new DeadlockVictimPlanRead(plan, false);
+        var plan = reader.IsDBNull(0) ? null : reader.GetString(0);
+        var victims = reader.GetInt64(1);
+        /* Two or more distinct victims are only reachable when no victim was sent (a sent victim is in the WHERE), and they
+           are deadlocks the stamps cannot tell apart, so neither plan is taken, whether or not each captured one. */
+        return victims > 1
+            ? new DeadlockVictimPlanRead(null, true)
+            : new DeadlockVictimPlanRead(plan, false);
     }
 
     /// <summary>
@@ -641,6 +647,6 @@ internal static class DarlingStoredPlanReader
 internal sealed record QueryStorePlanRead(string PlanXml, long PlanId);
 
 /// <summary>The victim-plan read's answer (#5236): the plan, or null when no deadlock the key matches captured one.
-/// <see cref="Ambiguous"/> is true, with no plan, when no victim was named and two deadlocks that share both stamps name
-/// different victims, so the stamps do not say which one was meant.</summary>
+/// <see cref="Ambiguous"/> is true, with no plan, when no victim was named and the deadlocks that share both stamps name
+/// more than one victim (whether or not each captured a plan), so the stamps do not say which one was meant.</summary>
 internal sealed record DeadlockVictimPlanRead(string? PlanXml, bool Ambiguous);

@@ -2282,9 +2282,8 @@ public sealed class McpPayloadContractCensusTests
 
     /// <summary>
     /// Every literal <c>LIMIT n</c> (<c>n &gt; 1</c>) that ENDS a reader statement on either SKU — the shape
-    /// #3541 A3 and #3659 found behind tools that advertised <c>limit</c>. Eight remain: six in Lite's
-    /// service layer, one in the Darling stored-plan reader (<c>DeadlockVictimPlanSql</c>'s <c>LIMIT 2</c> reads a second row
-    /// only to see whether two deadlocks matched, #5236, so it is a probe and not a page), plus one in the Darling FinOps recommendations reader (<c>MaintenanceWindowSql</c>, the top-10 long-running jobs, a ceiling over a short list; the scan reads Storage subfolders since the FinOps readers live there), none behind a tool that takes a <c>limit</c>: five are viewer-only reads and one
+    /// #3541 A3 and #3659 found behind tools that advertised <c>limit</c>. Seven remain: six in Lite's
+    /// service layer plus one in the Darling FinOps recommendations reader (<c>MaintenanceWindowSql</c>, the top-10 long-running jobs, a ceiling over a short list; the scan reads Storage subfolders since the FinOps readers live there), none behind a tool that takes a <c>limit</c>: five are viewer-only reads and one
     /// (<c>GetPlanCacheSnapshotAsync</c>, behind <c>get_plan_cache_bloat</c>, which takes no cap) is a
     /// ceiling of 30 over a population of a dozen cache types. <c>LIMIT 1</c> is the latest-row idiom and is
     /// not a page. The Long Queries grid's read (<c>GetRecentLongQueryCompletionsAsync</c>) left the roster in
@@ -2297,7 +2296,6 @@ public sealed class McpPayloadContractCensusTests
     public static readonly (string File, string Member, int Limit)[] StatementTerminalLiteralLimits =
     [
         ("DarlingFinOpsRecommendationsReader.cs", "(file scope)", 10),
-        ("DarlingStoredPlanReader.cs", "(file scope)", 2),
         ("LocalDataService.Blocking.cs", "GetBlockingPairRowsAsync", 5000),
         ("LocalDataService.FinOps.Recommendations.cs", "GetRecommendationsAsync", 10),
         ("LocalDataService.PlanCache.cs", "GetPlanCacheSnapshotAsync", 30),
