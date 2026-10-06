@@ -20,9 +20,9 @@
 --              config.config_mute_rules (the web dashboard's dedicated mute-rule endpoints, #3450 -- plus the
 --              two config_service beacon columns their bump trigger writes as the caller), and the single
 --              dismissed column of config.config_alert_log (the web Alert History dismiss, #4843), and INSERT
---              on config.config_monitored_servers plus a column-level UPDATE on the columns the web edit route
---              may set (the web add-server and edit-server routes, #4843 / #5240; its credential column
---              stays SELECT-carved). Every table is non-secret-keyed; over the web every write is gated server-side by the host's auth + seat model -- these
+--              on config.config_monitored_servers and no UPDATE on it: the web add-server route (#4843) inserts, and
+--              the web edit-server route (#5240) edits through config.edit_monitored_server, a function it may
+--              execute (its credential column stays SELECT-carved). Every table is non-secret-keyed; over the web every write is gated server-side by the host's auth + seat model -- these
 --              grants are only the floor beneath that gate. All other write actions degrade gracefully. The
 --              web dashboard's identity, and a locked-down Viewer's (postgres.connectAs = "viewer").
 --   mcp     -- the MCP server's identity: viewer's reads (the same secret-column carve), plus the MCP tools'

@@ -32,7 +32,8 @@ namespace Darling.Tests;
 /// <summary>
 /// The web edit routes (#5240) end to end against a store, on a pool connected as a role holding exactly the grants the
 /// managed <c>viewer</c> role gets (taken from <see cref="DarlingManagedRoles.BuildProvisioningSql"/>, so removing the
-/// column-level UPDATE makes the edit fail with 42501): an edit succeeds, a stale token is a 409 carrying
+/// EXECUTE grant on <c>config.edit_monitored_server</c> makes the edit fail with 42501; the role holds no UPDATE on the
+/// table): an edit succeeds, a stale token is a 409 carrying
 /// <c>current</c>, an edit while an add holds the shared slot is a 429, and the by-id read returns no secret. Edits here
 /// change the name and cost only, which need no probe.
 /// </summary>
@@ -285,6 +286,49 @@ public sealed class ServerEditViewerRoleLiveTests : IDisposable
             Assert.Equal(DarlingMcpServerAdminTools.ServerEditWriteKind.Conflict, stale.Kind);
             Assert.Equal("blob-2", await ScalarAsync(owner, "SELECT encrypted_password FROM config_monitored_servers WHERE server_id = 5204", ct));
             Assert.Equal(versionBefore + 1, long.Parse(await ScalarAsync(owner, "SELECT config_version FROM config_service", ct), System.Globalization.CultureInfo.InvariantCulture));
+            ok = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunOwnedAsync(ok, () => ExecAsync(owner, $"DROP OWNED BY {roleName}; DROP ROLE IF EXISTS {roleName};", CancellationToken.None));
+        }
+    }
+
+    /// <summary>
+    /// The MCP side of the same sentence: <c>edit_server</c> on a store whose roles predate the edit function answers
+    /// the error envelope carrying <see cref="DarlingMcpServerAdminTools.EditStoreNeedsRolesText"/> (re-run
+    /// provision-roles.sql), with none of the driver's own text, and saves nothing. The tool runs the same core and the
+    /// same store write the web route does, so this is the call a token holder makes against such a store.
+    /// </summary>
+    [Fact]
+    public async Task WithoutTheEditFunction_TheMcpEditServerTool_AnswersToRerunTheProvisionScript_AndNothingIsSaved()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var roleName = "srv_mcpn_" + Guid.NewGuid().ToString("N")[..8];
+        var (scratch, owner, ownerString) = await ServerAddViewerRoleLiveTests.OpenAsync(ct);
+        await using var _ = scratch;
+        await using var __ = owner;
+        await using var role = await ServerAddViewerRoleLiveTests.ProvisionAsync(owner, ownerString, roleName, ServerAddViewerRoleLiveTests.MissingEditFunction, ct);
+        var ok = false;
+        try
+        {
+            await ExecAsync(owner, "INSERT INTO config_service (id) VALUES (1) ON CONFLICT DO NOTHING", ct);
+            await ExecAsync(owner, "INSERT INTO config_monitored_servers (server_id, name, host) VALUES (5205, 'echo', 'echo.example.test')", ct);
+
+            /* A rename needs no connection test, so the probe never runs; the write is the first thing that meets the missing function. */
+            var answer = await DarlingMcpServerAdminTools.EditServerByNameAsync(
+                role, "echo", "{\"display_name\":\"Nope\"}", (_, _) => throw new InvalidOperationException("a rename must not be probed"), true, null, ct);
+
+            var envelope = JsonNode.Parse(answer)!;
+            Assert.Equal("error", envelope["status"]!.GetValue<string>());
+            Assert.Contains(DarlingMcpServerAdminTools.EditStoreNeedsRolesText, envelope["message"]!.GetValue<string>(), StringComparison.Ordinal);
+            Assert.Contains("provision-roles.sql", answer, StringComparison.Ordinal);
+            foreach (var driverText in new[] { "42883", "42501", "edit_monitored_server", "does not exist", "permission denied" })
+            {
+                Assert.DoesNotContain(driverText, answer, StringComparison.OrdinalIgnoreCase);
+            }
+
+            Assert.Equal("echo", await ScalarAsync(owner, "SELECT name FROM config_monitored_servers WHERE server_id = 5205", ct));
             ok = true;
         }
         finally

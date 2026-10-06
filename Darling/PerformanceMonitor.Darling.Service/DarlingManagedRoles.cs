@@ -39,10 +39,11 @@ namespace PerformanceMonitor.Darling.Service;
 /// server-tag endpoints) and <c>config.config_mute_rules</c> (#3450, the dedicated mute-rule
 /// endpoints — plus the two <c>config_service</c> beacon columns its bump trigger writes as the caller), and
 /// the single <c>dismissed</c> column of <c>config.config_alert_log</c> (#4843, the web Alert History dismiss),
-/// and INSERT (never DELETE) plus a column-level UPDATE on <c>config.config_monitored_servers</c> (#4843, the web
-/// add-server route, which runs the <c>add_servers</c> core; #5240, the web edit route, whose UPDATE covers exactly
-/// the columns the <c>edit_server</c> core may set; the <c>encrypted_password</c> column stays SELECT-carved, so the
-/// web host can write a password blob and never read one back).
+/// and INSERT (never DELETE, and no UPDATE of any kind) on <c>config.config_monitored_servers</c> (#4843, the web
+/// add-server route, which runs the <c>add_servers</c> core; #5240, the web edit route, which holds no UPDATE on the
+/// table and edits through <c>config.edit_monitored_server</c>, a function the batch grants EXECUTE on to viewer and
+/// mcp; the <c>encrypted_password</c> column stays SELECT-carved, so the web host can write a password blob and
+/// never read one back).
 /// Every table is non-secret-keyed; over the web, editing is gated server-side by the host's auth + the seat model
 /// (an OIDC viewer seat is refused every write) — these grants are only the floor beneath that gate. A
 /// locked-down deployment points the Viewer at this role, and its WPF surfaces still read as "look but
@@ -1051,7 +1052,7 @@ GRANT INSERT, UPDATE, DELETE ON {config}.server_tags TO {viewer};
 GRANT INSERT, UPDATE, DELETE ON {config}.server_tag_map TO {viewer};
 -- #4843: the web dashboard's add-server route (POST /api/servers) runs the SAME add_servers core the MCP tool runs, as
 --    viewer, so viewer gets the INSERT that core issues on config_monitored_servers; no DELETE, because no web route
---    removes a server yet. UPDATE is column-level, see the #5240 grant right below.
+--    removes a server yet. Viewer holds no UPDATE on the table: see the #5240 note right below.
 --    The credential column stays out of reach in both directions that matter here. encrypted_password is still
 --    SELECT-carved from viewer (section 6), so viewer can WRITE a password blob and never READ one back; and the
 --    cores need no carved read to write: the INSERT names no RETURNING, its ON CONFLICT (server_id) DO NOTHING arbiter
