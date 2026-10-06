@@ -316,7 +316,7 @@ public sealed class ServerAddViewerRoleLiveTests : IDisposable
     /// <summary>
     /// The edit's one write as the viewer role (#5240): a direct UPDATE of host is denied, and the function refuses a move
     /// of host that keeps the stored secret on a SQL or service-principal row (the row is unchanged), saves it with a new
-    /// secret, answers a stale token as a conflict, saves a TLS change and a Windows-auth host move with no secret.
+    /// secret, answers a stale token as a conflict, saves a name change on a secret row and a Windows-auth host move with no secret.
     /// </summary>
     [Fact]
     public async Task AsTheViewerRole_TheEditFunction_RefusesAMoveThatKeepsTheSecret_AndSavesTheRest()
@@ -362,13 +362,75 @@ public sealed class ServerAddViewerRoleLiveTests : IDisposable
 
             await using var stamp2 = owner.CreateCommand("SELECT modified_at FROM config_monitored_servers WHERE server_id = 7102");
             var read2 = (DateTime)(await stamp2.ExecuteScalarAsync(ct))!;
-            Assert.Equal("saved", (await CallEditAsync(asViewer, 7102, read2, [Col("encrypt_mode", NpgsqlTypes.NpgsqlDbType.Text, "Optional")], ct)).Outcome);
-            Assert.Equal("Optional|blob-b", await RowAsync(owner, 7102, "encrypt_mode, encrypted_password", ct));
+            Assert.Equal("password_needed", (await CallEditAsync(asViewer, 7102, read2, [Col("encrypt_mode", NpgsqlTypes.NpgsqlDbType.Text, "Optional")], ct)).Outcome);
+            Assert.Equal("Mandatory|blob-b", await RowAsync(owner, 7102, "encrypt_mode, encrypted_password", ct));
+            Assert.Equal("saved", (await CallEditAsync(asViewer, 7102, read2, [Col("name", NpgsqlTypes.NpgsqlDbType.Text, "b-renamed")], ct)).Outcome);
+            Assert.Equal("b-renamed|blob-b", await RowAsync(owner, 7102, "name, encrypted_password", ct));
 
             await using var stamp3 = owner.CreateCommand("SELECT modified_at FROM config_monitored_servers WHERE server_id = 7103");
             var read3 = (DateTime)(await stamp3.ExecuteScalarAsync(ct))!;
             Assert.Equal("saved", (await CallEditAsync(asViewer, 7103, read3, host, ct)).Outcome);
             Assert.Equal("moved.example.test", await RowAsync(owner, 7103, "host", ct));
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunOwnedAsync(bodySucceeded, () => ExecAsync(owner, $"DROP OWNED BY {roleName}; DROP ROLE IF EXISTS {roleName};", CancellationToken.None));
+        }
+    }
+
+    /// <summary>
+    /// The edit function refuses the same connection changes the route refuses (#5240): on a secret row, a direct call as the
+    /// viewer role with no new secret answers <c>password_needed</c> and leaves the row unchanged for each of port, database,
+    /// read-only intent, authentication, username, encrypt mode, certificate trust and multi-subnet failover. A change of
+    /// only the display name, and a change that comes with a new secret, still save.
+    /// </summary>
+    [Fact]
+    public async Task AsTheViewerRole_TheEditFunction_RefusesEveryConnectionChangeThatKeepsTheSecret()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var roleName = "srv_fnc_" + Guid.NewGuid().ToString("N")[..8];
+        var (scratch, owner, ownerString) = await OpenAsync(ct);
+        await using var _ = scratch;
+        await using var __ = owner;
+        await using var asViewer = await ProvisionAsync(owner, ownerString, roleName, null, ct);
+        var bodySucceeded = false;
+        try
+        {
+            await ExecAsync(owner, "INSERT INTO config_service (id) VALUES (1) ON CONFLICT DO NOTHING", ct);
+            await ExecAsync(owner, "INSERT INTO config_monitored_servers (server_id, name, host, port, database, auth, username, encrypted_password, encrypt_mode, trust_server_certificate, read_only_intent, multi_subnet_failover) VALUES (7201, 'a', 'a.example.test', 1433, 'master', 'sql', 'monitor', 'blob-a', 'Mandatory', false, false, false)", ct);
+            const string cols = "name, host, port, database, auth, username, encrypted_password, encrypt_mode, trust_server_certificate, read_only_intent, multi_subnet_failover, modified_at";
+
+            var changes = new (string Label, DarlingMcpServerAdminTools.EditColumnValue Change)[]
+            {
+                ("port", Col("port", NpgsqlTypes.NpgsqlDbType.Integer, 1444)),
+                ("database", Col("database", NpgsqlTypes.NpgsqlDbType.Text, "other")),
+                ("read_only_intent", Col("read_only_intent", NpgsqlTypes.NpgsqlDbType.Boolean, true)),
+                ("auth", Col("auth", NpgsqlTypes.NpgsqlDbType.Text, "serviceprincipal")),
+                ("username", Col("username", NpgsqlTypes.NpgsqlDbType.Text, "someone-else")),
+                ("encrypt_mode", Col("encrypt_mode", NpgsqlTypes.NpgsqlDbType.Text, "Optional")),
+                ("trust_server_certificate", Col("trust_server_certificate", NpgsqlTypes.NpgsqlDbType.Boolean, true)),
+                ("multi_subnet_failover", Col("multi_subnet_failover", NpgsqlTypes.NpgsqlDbType.Boolean, true)),
+            };
+
+            foreach (var (label, change) in changes)
+            {
+                var before = await RowAsync(owner, 7201, cols, ct);
+                var token = DateTime.Parse(before.Split('|')[^1], System.Globalization.CultureInfo.InvariantCulture);
+                Assert.True("password_needed" == (await CallEditAsync(asViewer, 7201, token, [change], ct)).Outcome, $"{label} change with no new secret was not refused");
+                Assert.Equal(before, await RowAsync(owner, 7201, cols, ct));
+            }
+
+            var current = await RowAsync(owner, 7201, cols, ct);
+            var currentToken = DateTime.Parse(current.Split('|')[^1], System.Globalization.CultureInfo.InvariantCulture);
+            var renamed = await CallEditAsync(asViewer, 7201, currentToken, [Col("name", NpgsqlTypes.NpgsqlDbType.Text, "renamed")], ct);
+            Assert.Equal("saved", renamed.Outcome);
+            Assert.Equal("renamed|blob-a", await RowAsync(owner, 7201, "name, encrypted_password", ct));
+
+            var withSecret = await CallEditAsync(asViewer, 7201, renamed.Token!.Value,
+                [Col("database", NpgsqlTypes.NpgsqlDbType.Text, "other"), Col("encrypted_password", NpgsqlTypes.NpgsqlDbType.Text, "blob-new")], ct);
+            Assert.Equal("saved", withSecret.Outcome);
+            Assert.Equal("other|blob-new", await RowAsync(owner, 7201, "database, encrypted_password", ct));
             bodySucceeded = true;
         }
         finally

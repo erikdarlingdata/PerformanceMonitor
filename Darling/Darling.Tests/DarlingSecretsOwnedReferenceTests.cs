@@ -268,6 +268,28 @@ public sealed class DarlingSecretsOwnedReferenceTests : IDisposable
     public Task TheRemediationSlot_KeepsTheReferenceTheFileDeclaresForThatServerId_AndRefusesEveryOtherOwnedReference() =>
         RunStoreRowScenarioAsync(remediationSlot: true);
 
+    /// <summary>A null element in the file's server list is skipped, as <see cref="DarlingConfig.Parse"/> skips it; the
+    /// entry after it still marks the slot it declares.</summary>
+    [Fact]
+    public void MarkSlotsTheFileDeclares_SkipsANullServerElement_AndStillMarksTheDeclaredSlot()
+    {
+        var config = DarlingConfig.Parse(DarlingJson(
+            new { name = "alpha", host = "alpha.example.test", auth = "sql", username = "monitor", encryptedPassword = "env:" + OwnedVariable }));
+        var declared = Assert.Single(config.Servers);
+        var withNull = new DarlingConfig { Servers = new List<MonitoredServer> { null!, declared } };
+        var row = new MonitoredServer
+        {
+            StoredServerId = declared.ServerId,
+            Host = declared.Host,
+            Port = declared.Port,
+            EncryptedPassword = declared.EncryptedPassword,
+        };
+
+        StoreConfigProvider.MarkSlotsTheFileDeclares(row, withNull);
+
+        Assert.True(row.EncryptedPasswordDeclaredByFile);
+    }
+
     private async Task RunStoreRowScenarioAsync(bool remediationSlot)
     {
         var ct = TestContext.Current.CancellationToken;

@@ -1790,7 +1790,9 @@ ORDER BY name", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoo
     {
         foreach (var declared in bootstrap.Servers)
         {
-            if (declared.ServerId != server.ServerId
+            /* A null element is skipped, as DarlingConfig.Parse's own loop skips it (#5240). */
+            if (declared is null
+                || declared.ServerId != server.ServerId
                 || !PerformanceMonitor.Darling.Service.Mcp.DarlingMcpServerAdminTools.SameAddress(
                     declared.Host ?? "", declared.Port, server.Host ?? "", server.Port))
             {

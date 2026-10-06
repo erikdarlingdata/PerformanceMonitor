@@ -1253,9 +1253,21 @@ DECLARE
    v_old_host text;
    v_old_port integer;
    v_old_auth text;
+   v_old_database text;
+   v_old_read_only_intent boolean;
+   v_old_username text;
+   v_old_encrypt_mode text;
+   v_old_trust_server_certificate boolean;
+   v_old_multi_subnet_failover boolean;
    v_host text;
    v_port integer;
    v_auth text;
+   v_database text;
+   v_read_only_intent boolean;
+   v_username text;
+   v_encrypt_mode text;
+   v_trust_server_certificate boolean;
+   v_multi_subnet_failover boolean;
    v_secret_auth boolean;
    v_new_secret boolean;
    v_secret_set boolean;
@@ -1263,8 +1275,10 @@ DECLARE
 BEGIN
    p_columns := COALESCE(p_columns, ARRAY[]::text[]);
 
-   SELECT s.modified_at, s.host, s.port, s.auth
-   INTO v_old_modified_at, v_old_host, v_old_port, v_old_auth
+   SELECT s.modified_at, s.host, s.port, s.auth, s.database, s.read_only_intent, s.username, s.encrypt_mode,
+          s.trust_server_certificate, s.multi_subnet_failover
+   INTO v_old_modified_at, v_old_host, v_old_port, v_old_auth, v_old_database, v_old_read_only_intent,
+        v_old_username, v_old_encrypt_mode, v_old_trust_server_certificate, v_old_multi_subnet_failover
    FROM config_monitored_servers AS s
    WHERE s.server_id = p_server_id
    FOR UPDATE OF s;
@@ -1283,15 +1297,28 @@ BEGIN
    v_host := CASE WHEN 'host' = ANY (p_columns) THEN btrim(p_host) ELSE v_old_host END;
    v_port := CASE WHEN 'port' = ANY (p_columns) THEN p_port ELSE v_old_port END;
    v_auth := CASE WHEN 'auth' = ANY (p_columns) THEN p_auth ELSE v_old_auth END;
+   v_database := CASE WHEN 'database' = ANY (p_columns) THEN p_database ELSE v_old_database END;
+   v_read_only_intent := CASE WHEN 'read_only_intent' = ANY (p_columns) THEN p_read_only_intent ELSE v_old_read_only_intent END;
+   v_username := CASE WHEN 'username' = ANY (p_columns) THEN p_username ELSE v_old_username END;
+   v_encrypt_mode := CASE WHEN 'encrypt_mode' = ANY (p_columns) THEN p_encrypt_mode ELSE v_old_encrypt_mode END;
+   v_trust_server_certificate := CASE WHEN 'trust_server_certificate' = ANY (p_columns) THEN p_trust_server_certificate ELSE v_old_trust_server_certificate END;
+   v_multi_subnet_failover := CASE WHEN 'multi_subnet_failover' = ANY (p_columns) THEN p_multi_subnet_failover ELSE v_old_multi_subnet_failover END;
    v_secret_auth := lower(v_auth) IN ('sql', 'serviceprincipal');
    v_new_secret := 'encrypted_password' = ANY (p_columns) AND COALESCE(p_secret, '') <> '';
 
-   -- A move of host or port (the instance is part of host), or a switch between authentication modes, never keeps
-   -- the stored secret on a row that has one. The caller's word is not taken: the move is worked out from the row.
+   -- Any change to how the row connects (host, port, database, read-only intent, authentication mode, username,
+   -- encryption, certificate trust, multi-subnet failover) never keeps the stored secret on a row that has one:
+   -- the same set the route refuses (#5240). The caller's word is not taken: the change is worked out from the row.
    IF v_secret_auth AND NOT v_new_secret
       AND (v_host IS DISTINCT FROM v_old_host
            OR v_port IS DISTINCT FROM v_old_port
-           OR lower(v_auth) IS DISTINCT FROM lower(v_old_auth)) THEN
+           OR v_database IS DISTINCT FROM v_old_database
+           OR v_read_only_intent IS DISTINCT FROM v_old_read_only_intent
+           OR lower(v_auth) IS DISTINCT FROM lower(v_old_auth)
+           OR v_username IS DISTINCT FROM v_old_username
+           OR lower(v_encrypt_mode) IS DISTINCT FROM lower(v_old_encrypt_mode)
+           OR v_trust_server_certificate IS DISTINCT FROM v_old_trust_server_certificate
+           OR v_multi_subnet_failover IS DISTINCT FROM v_old_multi_subnet_failover) THEN
       RETURN QUERY SELECT 'password_needed'::text, NULL::timestamp;
       RETURN;
    END IF;
@@ -1312,14 +1339,14 @@ BEGIN
    SET name = CASE WHEN 'name' = ANY (p_columns) THEN p_name ELSE s.name END,
        host = v_host,
        port = v_port,
-       database = CASE WHEN 'database' = ANY (p_columns) THEN p_database ELSE s.database END,
-       read_only_intent = CASE WHEN 'read_only_intent' = ANY (p_columns) THEN p_read_only_intent ELSE s.read_only_intent END,
+       database = v_database,
+       read_only_intent = v_read_only_intent,
        auth = v_auth,
-       username = CASE WHEN 'username' = ANY (p_columns) THEN p_username ELSE s.username END,
+       username = v_username,
        encrypted_password = CASE WHEN v_secret_set THEN v_secret ELSE s.encrypted_password END,
-       encrypt_mode = CASE WHEN 'encrypt_mode' = ANY (p_columns) THEN p_encrypt_mode ELSE s.encrypt_mode END,
-       trust_server_certificate = CASE WHEN 'trust_server_certificate' = ANY (p_columns) THEN p_trust_server_certificate ELSE s.trust_server_certificate END,
-       multi_subnet_failover = CASE WHEN 'multi_subnet_failover' = ANY (p_columns) THEN p_multi_subnet_failover ELSE s.multi_subnet_failover END,
+       encrypt_mode = v_encrypt_mode,
+       trust_server_certificate = v_trust_server_certificate,
+       multi_subnet_failover = v_multi_subnet_failover,
        monthly_cost_usd = CASE WHEN 'monthly_cost_usd' = ANY (p_columns) THEN p_monthly_cost_usd ELSE s.monthly_cost_usd END,
        modified_at = (now() AT TIME ZONE 'UTC')
    WHERE s.server_id = p_server_id
