@@ -85,7 +85,7 @@ public sealed class McpLongQueryTools
                     result = r.Result,
                     database_name = r.DatabaseName,
                     object_name = r.ObjectName,
-                    statement = McpHelpers.Truncate(r.StatementText, 2000),
+                    statement = McpHelpers.TruncateStatement(r.StatementText, 2000),
                     session_id = r.SessionId,
                     client_app_name = r.ClientAppName,
                     client_pid = r.ClientPid,
