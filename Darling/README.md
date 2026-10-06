@@ -39,16 +39,19 @@ Nothing is installed on the monitored SQL Servers by either edition beyond two l
 - **Windows** for the service host (Windows-service lifetime, DPAPI password protection) and for the viewer (WPF). Monitored servers can be SQL Server 2016 SP2–2025 (2017 needs CU3 or later), Azure SQL Managed Instance, AWS RDS for SQL Server, or Azure SQL Database.
 - **A PostgreSQL store — bundled or your own.** In managed mode (the shipped default, see [Managed Bundled PostgreSQL](#managed-bundled-postgresql)) the service runs its own bundled PostgreSQL 18 + TimescaleDB and no database provisioning is needed. To bring your own instead, the minimum is PostgreSQL 16, and the service is developed and validated against PostgreSQL 18. The store needs a database and a login the service can create tables in. If that store has TimescaleDB, size its background workers before you rely on compression. The stock PostgreSQL defaults cannot run the policies (see [Background workers](#background-workers-sizing-an-unmanaged-store-and-what-happens-if-you-dont)). On SSD-backed storage, also set `random_page_cost = 1.1` (the managed store does): with the default of 4 the planner prices a BRIN index's heap reads as random I/O and can pick a sequential scan over the index for windows of 12 hours or more. The BRIN index on the per-interval Query Store table is skipped below PostgreSQL 16, because HOT updates past a BRIN index need PostgreSQL 16 or newer.
 - **TimescaleDB is optional and auto-adopted.** If the extension is installed (or pre-created by an administrator) in the store database, the service detects it at startup and automatically converts the collector tables to hypertables with compression; without it, the service runs in plain-PostgreSQL mode, which is fully supported. No configuration flag either way. The detection is also **re-run hourly for as long as it says no** (#3815), so a service that fell back because the store was restarting, failing over or momentarily unreachable at its own start returns to hypertable mode within the hour instead of at the next restart.
-- **Two .NET 10 runtimes on the host**, from <https://dotnet.microsoft.com/download/dotnet/10.0>. Both
-  shipped binaries are framework-dependent, and a stock Windows Server image has neither:
-  - **ASP.NET Core Runtime 10** for the service. Required unconditionally — the MCP package brings the
+- **.NET 10 runtimes on the host**, from <https://dotnet.microsoft.com/download/dotnet/10.0>. Both
+  shipped binaries are framework-dependent, and a stock Windows Server image has none of them:
+  - **.NET Runtime 10 and ASP.NET Core Runtime 10** for the service. The simplest way to get both is the
+    **ASP.NET Core Hosting Bundle 10**, which installs the two together. The standalone ASP.NET Core
+    Runtime installer does **not** include the base .NET Runtime, so with that installer alone you also
+    need the .NET Runtime 10. ASP.NET Core is required unconditionally — the MCP package brings the
     ASP.NET Core framework reference in transitively, so it is needed whether or not you ever enable MCP
     or the web dashboard.
   - **.NET Desktop Runtime 10** for the viewer (WPF). Not needed on a headless collector host, and not
     needed for a remote seat installed from the viewer's own `Setup.exe`, which is self-contained.
 
-  `install-darling.ps1` checks both before it installs anything: it refuses when ASP.NET Core is missing
-  and warns when the Desktop runtime is. The .NET 10 SDK covers both if you are building from source.
+  `install-darling.ps1` checks these before it installs anything: it refuses when the .NET Runtime or
+  ASP.NET Core is missing and warns when the Desktop runtime is. The .NET 10 SDK covers both if you are building from source.
 
 Build from the repository root:
 

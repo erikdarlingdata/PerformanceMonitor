@@ -252,7 +252,7 @@ public sealed class DarlingMcpSessionTools
                 login_name = r.LoginName,
                 host_name = r.HostName,
                 program_name = r.ProgramName,
-                query_text = queryTextPreviewLength.HasValue ? McpHelpers.Truncate(r.QueryText, queryTextPreviewLength.Value) : r.QueryText,
+                query_text = queryTextPreviewLength.HasValue ? McpHelpers.TruncateStatement(r.QueryText, queryTextPreviewLength.Value) : r.QueryText,
                 query_text_truncated = queryTextPreviewLength.HasValue && (r.QueryText?.Length ?? 0) > queryTextPreviewLength.Value
             }).ToList();
 

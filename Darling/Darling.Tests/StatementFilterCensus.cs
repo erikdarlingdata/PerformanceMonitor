@@ -24,6 +24,7 @@ using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
+using ModelContextProtocol;
 using ModelContextProtocol.Protocol;
 using ModelContextProtocol.Server;
 using Npgsql;
@@ -77,9 +78,26 @@ internal static class StatementFilterCensus
         }
     }
 
+    /// <summary>Test-only: a tool that THROWS an <c>McpException</c> carrying <c>message</c>, the way a tool that
+    /// reports a failure through the SDK's exception does. Its text reaches the client through the SDK's own error
+    /// result, so a filter has to see the exception to sweep it.</summary>
+    [McpServerToolType]
+    public sealed class ThrowProbeTools
+    {
+        [McpServerTool(Name = ThrowProbeName), Description("Test-only: throws an McpException with the given message.")]
+        public static CallToolResult Throw([Description("The exception message.")] string message) =>
+            throw new McpException(message);
+    }
+
+    public const string ThrowProbeName = "ssf_census_throw";
+
     /// <summary>A real host: the production tool and filter registration plus the probe tool, behind an in-memory
-    /// server. Dispose it with the test.</summary>
-    public static async Task<TestServer> BuildHostAsync()
+    /// server. Dispose it with the test.
+    /// <para><paramref name="gcf"/> pins the host's GCF format (#5320): <c>false</c> (the default) is plain output and
+    /// <c>true</c> is GCF on. Neither reads <c>DARLING_OUTPUT_FORMAT</c>, so a class in the <c>DarlingOutputFormatEnv</c>
+    /// collection that sets it cannot reach this host. <c>null</c> keeps the production default (the environment variable,
+    /// read on each call), for the test that pins the real wiring.</para></summary>
+    public static async Task<TestServer> BuildHostAsync(bool? gcf = false)
     {
         var builder = WebApplication.CreateBuilder();
         builder.WebHost.UseTestServer();
@@ -87,6 +105,11 @@ internal static class StatementFilterCensus
 
         var postgres = NpgsqlDataSource.Create("Host=localhost;Database=postgres;Username=darling");
         builder.Services.AddSingleton(postgres);
+        if (gcf is bool pinned)
+        {
+            builder.Services.AddSingleton<IGcfOutputFormat>(new FixedGcfOutputFormat(pinned));
+        }
+
         var sharedBaselines = new BaselineCache();
         builder.Services.AddTransient<DarlingAnalysisService>(_ => new DarlingAnalysisService(
             postgres, planFetcher: null, logger: Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance,
@@ -99,7 +122,7 @@ internal static class StatementFilterCensus
             Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance, null);
 
         // Chains onto the SAME builder ConfigureMcpServices created, so every real tool and every real filter stays.
-        builder.Services.AddMcpServer().WithTools<ProbeTools>();
+        builder.Services.AddMcpServer().WithTools<ProbeTools>().WithTools<ThrowProbeTools>();
 
         var app = builder.Build();
         var host = new DarlingMcpHostService(
