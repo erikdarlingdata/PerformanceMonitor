@@ -164,7 +164,6 @@ ORDER BY bucket";
     {
         using var _q = TimeQuery("GetQueryStoreTopQueriesAsync", "v_query_store_stats top N");
         using var connection = await OpenConnectionAsync();
-        using var command = connection.CreateCommand();
 
         var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
         var dbClause = BuildDbInClause(databaseNames, "database_name", 5, out var dbValues);
@@ -178,6 +177,10 @@ ORDER BY bucket";
             ? ""
             : $" AND module_name = ${moduleParameterIndex}";
 
+        /* #5313: one round at a candidate limit; TopFill asks again with a larger one while WAITFOR shells left the page short. */
+        async Task<(List<QueryStoreRow> Rows, int CandidateCount)> RunRoundAsync(int candidates)
+        {
+        using var command = connection.CreateCommand();
         command.CommandText = @"
 WITH deduped AS (
     /* LOAD-BEARING (correctness, not just perf) — #1841. query_store_stats rows are CUMULATIVE
@@ -276,8 +279,9 @@ ranked AS (
     WHERE rn = 1" + moduleClause + @"
     GROUP BY database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role
     ORDER BY SUM(execution_count) * AVG(CAST(avg_duration_us AS DOUBLE PRECISION)) DESC
-    LIMIT $4 + 5
-)
+    LIMIT " + candidates + @"
+),
+page AS (
 SELECT
     r.database_name,
     r.query_id,
@@ -332,7 +336,8 @@ SELECT
     r.avg_num_physical_io_reads,
     r.min_num_physical_io_reads,
     r.max_num_physical_io_reads,
-    r.replica_role
+    r.replica_role,
+    ROW_NUMBER() OVER (ORDER BY r.total_executions * r.avg_duration_ms DESC) AS page_ord
 FROM ranked r
 LEFT JOIN LATERAL (
     SELECT query_text
@@ -347,7 +352,13 @@ LEFT JOIN LATERAL (
 ) t ON TRUE
 WHERE t.query_text IS NULL OR t.query_text NOT LIKE 'WAITFOR%'
 ORDER BY r.total_executions * r.avg_duration_ms DESC
-LIMIT $4";
+LIMIT $4
+)
+/* #5313: the count row rides beside the page so a round trimmed to nothing still reports whether more candidates exist. */
+SELECT p.*, c.candidate_count
+FROM (SELECT COUNT(*) AS candidate_count FROM ranked) c
+LEFT JOIN page p ON TRUE
+ORDER BY p.page_ord";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = startTime });
@@ -361,9 +372,16 @@ LIMIT $4";
             command.Parameters.Add(new DuckDBParameter { Value = moduleName });
 
         var items = new List<QueryStoreRow>();
+        var candidateCount = 0;
         using var reader = await command.ExecuteReaderAsync();
         while (await reader.ReadAsync())
         {
+            candidateCount = reader.IsDBNull(55) ? 0 : Convert.ToInt32(reader.GetValue(55));
+            if (reader.IsDBNull(54))
+            {
+                continue;
+            }
+
             items.Add(new QueryStoreRow
             {
                 DatabaseName = reader.IsDBNull(0) ? "" : reader.GetString(0),
@@ -423,7 +441,10 @@ LIMIT $4";
             });
         }
 
-        return items;
+        return (items, candidateCount);
+        }
+
+        return await TopFill.RunAsync(top, RunRoundAsync);
     }
 
     /// <summary>

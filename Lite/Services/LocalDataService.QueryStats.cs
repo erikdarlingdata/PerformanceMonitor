@@ -103,11 +103,14 @@ ORDER BY bucket";
     {
         using var _q = TimeQuery("GetTopQueriesByCpuAsync", "v_query_stats top N by CPU");
         using var connection = await OpenConnectionAsync();
-        using var command = connection.CreateCommand();
 
         var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
         var dbClause = BuildDbInClause(databaseNames, "database_name", 7, out var dbValues);
 
+        /* #5313: one round at a candidate limit; TopFill asks again with a larger one while WAITFOR shells left the page short. */
+        async Task<(List<QueryStatsRow> Rows, int CandidateCount)> RunRoundAsync(int candidates)
+        {
+        using var command = connection.CreateCommand();
         command.CommandText = @"
 WITH ranked AS (
     SELECT
@@ -173,7 +176,7 @@ WITH ranked AS (
        as 0 and stays out of a filtered page, as the C# arm it replaces did. */
     AND   COALESCE(MAX(max_dop), 0) >= $6
     ORDER BY SUM(delta_worker_time) DESC
-    LIMIT $4 + 5
+    LIMIT " + candidates + @"
 ),
 module AS (
     /* #1568 module attribution: one procedure_stats identity per sql_handle (latest collection_time
@@ -199,14 +202,16 @@ module AS (
         AND   sql_handle <> ''
     ) ranked_modules
     WHERE rn = 1
-)
+),
+page AS (
 SELECT
     r.*,
     t.query_text,
     t.query_plan_xml AS query_plan,
     m.object_name AS module_object_name,
     m.schema_name AS module_schema_name,
-    m.database_name AS module_database_name
+    m.database_name AS module_database_name,
+    ROW_NUMBER() OVER (ORDER BY r.total_cpu_us DESC) AS page_ord
 FROM ranked r
 LEFT JOIN LATERAL (
     SELECT query_text, query_plan_xml
@@ -227,7 +232,13 @@ LEFT JOIN LATERAL (
 LEFT JOIN module m ON m.sql_handle = r.sql_handle
 WHERE t.query_text IS NULL OR t.query_text NOT LIKE 'WAITFOR%'
 ORDER BY r.total_cpu_us DESC
-LIMIT $4";
+LIMIT $4
+)
+/* #5313: the count row rides beside the page so a round trimmed to nothing still reports whether more candidates exist. */
+SELECT p.*, c.candidate_count
+FROM (SELECT COUNT(*) AS candidate_count FROM ranked) c
+LEFT JOIN page p ON TRUE
+ORDER BY p.page_ord";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = startTime });
@@ -242,9 +253,16 @@ LIMIT $4";
             command.Parameters.Add(new DuckDBParameter { Value = db });
 
         var items = new List<QueryStatsRow>();
+        var candidateCount = 0;
         using var reader = await command.ExecuteReaderAsync();
         while (await reader.ReadAsync())
         {
+            candidateCount = reader.IsDBNull(48) ? 0 : Convert.ToInt32(reader.GetValue(48));
+            if (reader.IsDBNull(47))
+            {
+                continue;
+            }
+
             items.Add(new QueryStatsRow
             {
                 DatabaseName = reader.IsDBNull(0) ? "" : reader.GetString(0),
@@ -297,7 +315,10 @@ LIMIT $4";
             });
         }
 
-        return items;
+        return (items, candidateCount);
+        }
+
+        return await TopFill.RunAsync(top, RunRoundAsync);
     }
 
     /// <summary>
