@@ -12,6 +12,7 @@ using System.Linq;
 using System.Text.Json;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
+using PerformanceMonitor.Common;
 using PerformanceMonitorLite.Database;
 using PerformanceMonitorLite.Mcp;
 using PerformanceMonitorLite.Models;
@@ -316,5 +317,86 @@ VALUES ($1, $2, $3, $4, $5, 'Enabled', 'Enabled', 'ok', $6, 'Active', $7, $8, 'S
             _service, _serverManager, ServerName, 24, 25, database_name: "  "));
         Assert.Equal("empty", blank.GetProperty("status").GetString());
         Assert.Equal(JsonValueKind.Null, blank.GetProperty("database_name").ValueKind);
+    }
+
+    /// <summary>
+    /// [#5414 round 2, L3, the other half] A filtered empty answer sends the reader to the opt-in switch only when the window
+    /// notice has no <c>effective_start</c>, which means the store holds no long-query row for this server in the window at all
+    /// (the probe is not database-filtered). With rows for other databases the collector is on, so the sentence stops after the
+    /// database clause (pinned in the test above); on an empty store the opt-in sentence stays, with the database clause
+    /// before it and the database echoed.
+    /// </summary>
+    [Fact]
+    public async Task LongQueries_FilteredEmpty_OnAServerWithNoLongQueryRows_KeepsTheOptInSentence()
+    {
+        var filtered = Parse(await McpLongQueryTools.GetLongQueryCompletions(
+            _service, _serverManager, ServerName, 24, 30, database_name: "DbA"));
+
+        Assert.Equal("empty", filtered.GetProperty("status").GetString());
+        Assert.Equal("No long-running query completions found in the specified time range for the database DbA"
+            + ". The long_query_completions collector is opt-in (default OFF) — enable it in the collector schedule to capture data.",
+            filtered.GetProperty("message").GetString());
+        Assert.Equal("DbA", filtered.GetProperty("database_name").GetString());
+        Assert.False(filtered.GetProperty("hints").TryGetProperty("effective_start", out var start) && start.ValueKind != JsonValueKind.Null,
+            "the notice must carry no effective_start on an empty store; that is what keeps the opt-in sentence");
+    }
+
+    /// <summary>
+    /// [#5414 round 2, L2] The <c>precondition</c> answer (the collector's last run recorded a permission denial, Lite's one
+    /// reachable rung before the empty one) echoes <c>database_name</c>: the name for a chosen database, null for blank.
+    /// </summary>
+    [Fact]
+    public async Task LongQueries_PreconditionAnswer_EchoesTheDatabase_BlankIsNull()
+    {
+        await ExecuteAsync(@"
+INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, status, error_message)
+VALUES ($1, $2, $3, 'long_query_completions', $4, 'PERMISSIONS', 'The server principal is not able to access the database.')",
+            _nextId++, _serverId, ServerName, Naive(DateTime.UtcNow.AddMinutes(-1)));
+
+        var filtered = Parse(await McpLongQueryTools.GetLongQueryCompletions(
+            _service, _serverManager, ServerName, 24, 30, database_name: "DbA"));
+        Assert.Equal("precondition", filtered.GetProperty("status").GetString());
+        Assert.Equal("DbA", filtered.GetProperty("database_name").GetString());
+
+        foreach (var blank in new string?[] { null, "", "   " })
+        {
+            var unfiltered = Parse(await McpLongQueryTools.GetLongQueryCompletions(
+                _service, _serverManager, ServerName, 24, 30, database_name: blank));
+            Assert.Equal("precondition", unfiltered.GetProperty("status").GetString());
+            Assert.True(unfiltered.TryGetProperty("database_name", out var echo));
+            Assert.Equal(JsonValueKind.Null, echo.ValueKind);
+        }
+    }
+
+    /// <summary>
+    /// [#5414 round 2, L2] Every Lite tool wraps its <c>not_collected</c> rung in <c>McpHelpers.WithDatabase</c>. No Lite
+    /// collector these five tools read is gated off on any SQL Server engine edition (<c>CollectorEngineCapability.NotCollectedMessage</c>
+    /// answers null for all of them on editions 0 to 39, and Lite passes no engine kind), so the rung cannot be driven through the
+    /// tools and the envelope shape is pinned at the helper they all call: one name gives the name, two or more give "the chosen
+    /// databases" (<c>McpDatabaseSelection.Describe</c>), blank or all gives null with the key still written, null in gives null
+    /// out, and an envelope that already carries the key is left alone.
+    /// </summary>
+    [Fact]
+    public void WithDatabase_OnANotCollectedEnvelope_EchoesOneNameManyOrNull()
+    {
+        var notCollected = McpHelpers.Status("not_collected", "This server does not collect that.");
+
+        var one = Parse(McpHelpers.WithDatabase(notCollected, McpDatabaseSelection.Describe(new[] { "DbA" }))!);
+        Assert.Equal("not_collected", one.GetProperty("status").GetString());
+        Assert.Equal("DbA", one.GetProperty("database_name").GetString());
+
+        var many = Parse(McpHelpers.WithDatabase(notCollected, McpDatabaseSelection.Describe(new[] { "DbA", "DbB" }))!);
+        Assert.Equal("the chosen databases", many.GetProperty("database_name").GetString());
+
+        foreach (var all in new[] { McpDatabaseSelection.Describe(null), McpDatabaseSelection.Describe(Array.Empty<string>()) })
+        {
+            var none = Parse(McpHelpers.WithDatabase(notCollected, all)!);
+            Assert.True(none.TryGetProperty("database_name", out var echo));
+            Assert.Equal(JsonValueKind.Null, echo.ValueKind);
+        }
+
+        Assert.Null(McpHelpers.WithDatabase(null, "DbA"));
+        var carrying = McpHelpers.StatusForDatabase("not_collected", "m", "DbX");
+        Assert.Equal(carrying, McpHelpers.WithDatabase(carrying, "DbA"));
     }
 }
