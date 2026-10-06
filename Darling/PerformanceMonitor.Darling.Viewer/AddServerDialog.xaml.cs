@@ -697,6 +697,11 @@ public partial class AddServerDialog : Window
             return (null, key.Refusal);
         }
 
+        if (key.Notice is not null)
+        {
+            StatusText.Text = key.Notice;
+        }
+
         try
         {
             row.EncryptedPassword = _sealCache.GetOrSeal(key.Sealer, secret, row);

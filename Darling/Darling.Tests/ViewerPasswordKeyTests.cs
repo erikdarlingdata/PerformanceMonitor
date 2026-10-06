@@ -37,8 +37,10 @@ public sealed class ViewerPasswordKeyTests : IDisposable
     private static PublishedPasswordKey Published(PasswordPrivateKey key) =>
         new(key.PublicKey.KeyId, key.PublicKey.Spki, PasswordSeal.Algorithm);
 
-    private static PasswordKeyServiceState State(string state, string? note = null) =>
-        new("alpha-host", null, state, note, DateTime.UtcNow);
+    private static PasswordKeyServiceState State(string state, string? note = null, string? keyId = null) =>
+        new("alpha-host", keyId, state, note, DateTime.UtcNow);
+
+    private static PasswordKeyServiceState Ok(PasswordPrivateKey key) => State("ok", null, key.PublicKey.KeyId);
 
     private static MonitoredServerRow Row(string host, bool trust = false) => new()
     {
@@ -63,10 +65,10 @@ public sealed class ViewerPasswordKeyTests : IDisposable
     {
         var pins = new ViewerPasswordKeyPins(PinsPath);
 
-        Assert.Equal(ViewerPasswordKey.NoKeyText, ViewerPasswordKey.Evaluate(null, State("ok"), Store, pins).Refusal);
+        Assert.Equal(ViewerPasswordKey.NoKeyText, ViewerPasswordKey.Evaluate(null, Ok(_key), Store, pins).Refusal);
         Assert.Equal(ViewerPasswordKey.NoStateText, ViewerPasswordKey.Evaluate(Published(_key), null, Store, pins).Refusal);
         var wrongId = new PublishedPasswordKey("0000000000000000", _key.PublicKey.Spki, PasswordSeal.Algorithm);
-        Assert.Equal(ViewerPasswordKey.InvalidKeyText, ViewerPasswordKey.Evaluate(wrongId, State("ok"), Store, pins).Refusal);
+        Assert.Equal(ViewerPasswordKey.InvalidKeyText, ViewerPasswordKey.Evaluate(wrongId, Ok(_key), Store, pins).Refusal);
         Assert.False(File.Exists(PinsPath));
     }
 
@@ -75,8 +77,8 @@ public sealed class ViewerPasswordKeyTests : IDisposable
     {
         var pins = new ViewerPasswordKeyPins(PinsPath);
 
-        var first = ViewerPasswordKey.Evaluate(Published(_key), State("ok"), Store, pins);
-        var second = ViewerPasswordKey.Evaluate(Published(_key), State("ok"), Store, pins);
+        var first = ViewerPasswordKey.Evaluate(Published(_key), Ok(_key), Store, pins);
+        var second = ViewerPasswordKey.Evaluate(Published(_key), Ok(_key), Store, pins);
 
         Assert.NotNull(first.Key);
         Assert.Equal(
@@ -92,10 +94,10 @@ public sealed class ViewerPasswordKeyTests : IDisposable
     public void AChangedKey_RefusesUntilTrusted_AndNamesBothKeys()
     {
         var pins = new ViewerPasswordKeyPins(PinsPath);
-        Assert.NotNull(ViewerPasswordKey.Evaluate(Published(_key), State("ok"), Store, pins).Key);
+        Assert.NotNull(ViewerPasswordKey.Evaluate(Published(_key), Ok(_key), Store, pins).Key);
 
         using var replacement = PasswordPrivateKey.Generate();
-        var decision = ViewerPasswordKey.Evaluate(Published(replacement), State("ok"), Store, pins);
+        var decision = ViewerPasswordKey.Evaluate(Published(replacement), Ok(replacement), Store, pins);
 
         Assert.Null(decision.Key);
         Assert.NotNull(decision.Change);
@@ -103,11 +105,11 @@ public sealed class ViewerPasswordKeyTests : IDisposable
         Assert.Contains(PasswordSeal.DisplayKeyId(replacement.PublicKey.KeyId), decision.Refusal, StringComparison.Ordinal);
         Assert.Contains("Trust the new key", decision.Refusal, StringComparison.Ordinal);
         /* Asking again changes nothing: the saved key stays until the operator trusts the new one. */
-        Assert.Null(ViewerPasswordKey.Evaluate(Published(replacement), State("ok"), Store, pins).Key);
+        Assert.Null(ViewerPasswordKey.Evaluate(Published(replacement), Ok(replacement), Store, pins).Key);
 
         /* Trusting replaces the saved key; the new key then seals without asking. */
         pins.Save(Store, decision.Change!.NewKey.Fingerprint, decision.Change.NewKey.KeyId);
-        var trusted = ViewerPasswordKey.Evaluate(Published(replacement), State("ok"), Store, pins);
+        var trusted = ViewerPasswordKey.Evaluate(Published(replacement), Ok(replacement), Store, pins);
         Assert.NotNull(trusted.Key);
         Assert.Null(trusted.Notice);
     }
@@ -116,10 +118,10 @@ public sealed class ViewerPasswordKeyTests : IDisposable
     public void AnotherStoreHasItsOwnSavedKey()
     {
         var pins = new ViewerPasswordKeyPins(PinsPath);
-        Assert.NotNull(ViewerPasswordKey.Evaluate(Published(_key), State("ok"), Store, pins).Key);
+        Assert.NotNull(ViewerPasswordKey.Evaluate(Published(_key), Ok(_key), Store, pins).Key);
 
         using var other = PasswordPrivateKey.Generate();
-        var decision = ViewerPasswordKey.Evaluate(Published(other), State("ok"), "beta-store:5432/pm", pins);
+        var decision = ViewerPasswordKey.Evaluate(Published(other), Ok(other), "beta-store:5432/pm", pins);
 
         Assert.NotNull(decision.Key);
         Assert.Null(decision.Change);
@@ -131,7 +133,7 @@ public sealed class ViewerPasswordKeyTests : IDisposable
         File.WriteAllText(PinsPath, "{ not a list");
         var pins = new ViewerPasswordKeyPins(PinsPath);
 
-        var decision = ViewerPasswordKey.Evaluate(Published(_key), State("ok"), Store, pins);
+        var decision = ViewerPasswordKey.Evaluate(Published(_key), Ok(_key), Store, pins);
 
         Assert.NotNull(decision.Key);
         Assert.Contains(ViewerPasswordKey.UnreadablePinsText, decision.Notice, StringComparison.Ordinal);
@@ -241,5 +243,151 @@ public sealed class ViewerPasswordKeyTests : IDisposable
         {
             Assert.DoesNotContain("ConnectionSettingsDiffer", File.ReadAllText(path), StringComparison.Ordinal);
         }
+    }
+
+    private string UnwritablePinsPath()
+    {
+        /* A file where the folder should be: creating the folder, and so the list, fails. */
+        var blocker = Path.Combine(_directory, "blocker");
+        File.WriteAllText(blocker, "x");
+        return Path.Combine(blocker, "pins.json");
+    }
+
+    [Fact]
+    public void AKeyThatCannotBeSaved_RefusesSealing_OnTheFirstConnect()
+    {
+        var pins = new ViewerPasswordKeyPins(UnwritablePinsPath());
+
+        var decision = ViewerPasswordKey.Evaluate(Published(_key), Ok(_key), Store, pins);
+
+        Assert.Null(decision.Key);
+        Assert.Equal(ViewerPasswordKey.PinsNotSavedText, decision.Refusal);
+        Assert.Equal(
+            "The service's password key could not be saved on this computer, so passwords cannot be stored from here. "
+            + "Check that the Viewer can write to its settings folder.",
+            ViewerPasswordKey.PinsNotSavedText);
+    }
+
+    [Fact]
+    public void AKeyThatCannotBeSaved_RefusesSealing_WhenTheOperatorTrustsANewKey()
+    {
+        var pins = new ViewerPasswordKeyPins(PinsPath);
+        Assert.NotNull(ViewerPasswordKey.Evaluate(Published(_key), Ok(_key), Store, pins).Key);
+        using var replacement = PasswordPrivateKey.Generate();
+        var decision = ViewerPasswordKey.Evaluate(Published(replacement), Ok(replacement), Store, pins);
+        var unwritable = new ViewerPasswordKeyPins(UnwritablePinsPath());
+
+        var result = ViewerPasswordKey.Resolve(decision, Store, unwritable, canAsk: true, _ => true);
+
+        Assert.Null(result.Sealer);
+        Assert.Equal(ViewerPasswordKey.PinsNotSavedText, result.Refusal);
+    }
+
+    [Fact]
+    public void ACorruptSavedList_IsKeptAsBad_AndTheReSaveSaysItCouldNotBeRead()
+    {
+        File.WriteAllText(PinsPath, "{ not a list");
+        var pins = new ViewerPasswordKeyPins(PinsPath);
+
+        var decision = ViewerPasswordKey.Evaluate(Published(_key), Ok(_key), Store, pins);
+
+        Assert.Equal("{ not a list", File.ReadAllText(PinsPath + ".bad"));
+        Assert.Contains(ViewerPasswordKey.UnreadablePinsText, decision.Notice, StringComparison.Ordinal);
+
+        /* A store seen after that is saved again too, and says so while the kept copy is there. */
+        using var other = PasswordPrivateKey.Generate();
+        var next = ViewerPasswordKey.Evaluate(Published(other), Ok(other), "beta-store:5432/pm", new ViewerPasswordKeyPins(PinsPath));
+        Assert.Contains(ViewerPasswordKey.UnreadablePinsText, next.Notice, StringComparison.Ordinal);
+
+        /* A second unreadable file replaces the older kept copy. */
+        File.WriteAllText(PinsPath, "also not a list");
+        using var third = PasswordPrivateKey.Generate();
+        ViewerPasswordKey.Evaluate(Published(third), Ok(third), "gamma-store:5432/pm", new ViewerPasswordKeyPins(PinsPath));
+        Assert.Equal("also not a list", File.ReadAllText(PinsPath + ".bad"));
+    }
+
+    [Fact]
+    public void ASavedEntryWithABadFingerprint_CountsAsUnreadable_NotAsAbsent()
+    {
+        var entry = "[{\"Store\":\"" + Store + "\",\"Fingerprint\":\"not-hex\",\"KeyId\":\"x\",\"PinnedAtUtc\":\"2026-01-01T00:00:00Z\"}]";
+        File.WriteAllText(PinsPath, entry);
+        var pins = new ViewerPasswordKeyPins(PinsPath);
+
+        Assert.Null(pins.Find(Store, out var unreadable));
+        Assert.True(unreadable);
+
+        var decision = ViewerPasswordKey.Evaluate(Published(_key), Ok(_key), Store, pins);
+        Assert.Contains(ViewerPasswordKey.UnreadablePinsText, decision.Notice, StringComparison.Ordinal);
+        Assert.True(File.Exists(PinsPath + ".bad"));
+    }
+
+    [Fact]
+    public void AServiceStateForAnotherKey_OrWithNoKey_Refuses()
+    {
+        var pins = new ViewerPasswordKeyPins(PinsPath);
+        using var other = PasswordPrivateKey.Generate();
+
+        Assert.Equal(
+            ViewerPasswordKey.NoStateText, ViewerPasswordKey.Evaluate(Published(_key), Ok(other), Store, pins).Refusal);
+        Assert.Equal(
+            ViewerPasswordKey.NoStateText, ViewerPasswordKey.Evaluate(Published(_key), State("ok"), Store, pins).Refusal);
+        Assert.False(File.Exists(PinsPath));
+    }
+
+    [Fact]
+    public void WithNoWindowToAsk_AChangedKeyIsRefused_AndNoDialogIsShown()
+    {
+        var pins = new ViewerPasswordKeyPins(PinsPath);
+        Assert.NotNull(ViewerPasswordKey.Evaluate(Published(_key), Ok(_key), Store, pins).Key);
+        using var replacement = PasswordPrivateKey.Generate();
+        var decision = ViewerPasswordKey.Evaluate(Published(replacement), Ok(replacement), Store, pins);
+        var asked = false;
+
+        var refused = ViewerPasswordKey.Resolve(decision, Store, pins, canAsk: false, _ => { asked = true; return true; });
+
+        Assert.False(asked);
+        Assert.Null(refused.Sealer);
+        Assert.Equal(decision.Refusal, refused.Refusal);
+
+        var trusted = ViewerPasswordKey.Resolve(decision, Store, pins, canAsk: true, _ => true);
+        Assert.NotNull(trusted.Sealer);
+        Assert.Equal(replacement.PublicKey.KeyId, trusted.Sealer!.KeyId);
+        Assert.NotNull(ViewerPasswordKey.Evaluate(Published(replacement), Ok(replacement), Store, pins).Key);
+
+        using var again = PasswordPrivateKey.Generate();
+        var declined = ViewerPasswordKey.Resolve(
+            ViewerPasswordKey.Evaluate(Published(again), Ok(again), Store, pins), Store, pins, canAsk: true, _ => false);
+        Assert.Null(declined.Sealer);
+        Assert.NotNull(declined.Refusal);
+    }
+
+    [Fact]
+    public void TheChangedKeyDialog_GetsTheFullFingerprintOfBothKeys_InGroups()
+    {
+        var pins = new ViewerPasswordKeyPins(PinsPath);
+        Assert.NotNull(ViewerPasswordKey.Evaluate(Published(_key), Ok(_key), Store, pins).Key);
+        using var replacement = PasswordPrivateKey.Generate();
+
+        var change = ViewerPasswordKey.Evaluate(Published(replacement), Ok(replacement), Store, pins).Change!;
+
+        Assert.Equal(
+            ViewerPasswordKey.FormatFingerprint(Convert.ToHexString(_key.PublicKey.Fingerprint)), change.SavedFingerprint);
+        Assert.Equal(
+            ViewerPasswordKey.FormatFingerprint(Convert.ToHexString(replacement.PublicKey.Fingerprint)), change.NewFingerprint);
+        Assert.Equal(8, change.NewFingerprint.Split('-').Length);
+        Assert.All(change.NewFingerprint.Split('-'), group => Assert.Equal(8, group.Length));
+    }
+
+    [Fact]
+    public void ACachedValue_NeverSkipsTheLoneSurrogateRefusal()
+    {
+        var sealer = new ViewerPasswordSealer(_key.PublicKey);
+        var cache = new ViewerSealCache();
+        /* A lone surrogate hashes like the replacement character, so a cached value for that text must not answer for it. */
+        cache.GetOrSeal(sealer, "p@ss-�", Row("alpha-sql"));
+
+        var ex = Assert.Throws<ViewerPasswordRefusedException>(() => cache.GetOrSeal(sealer, "p@ss-\uD800", Row("alpha-sql")));
+
+        Assert.Equal(ViewerPasswordSealer.PasswordCharactersText, ex.Message);
     }
 }
