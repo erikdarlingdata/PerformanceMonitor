@@ -636,9 +636,6 @@ public sealed class DocCommentHygieneTests
         ["CallerMemberNameAttribute"] =
             "OUTSIDE. Same elision as the entry above.",
 
-        ["IConvertible"] =
-            "OUTSIDE. System.IConvertible, named only to explain what a conversion does NOT go through.",
-
         ["JsonEncodedText.Encode(string)"] =
             "OUTSIDE, and it is important that this entry says so rather than DANGLING: the compiler "
             + "rejects this target too, but for the unrelated reason that the one-argument overload does "
