@@ -418,14 +418,24 @@ public sealed class DarlingSecretsOwnedReferenceTests : IDisposable
         DarlingOwnedSecrets.Set(DarlingOwnedSet.Empty);
         var seededRows = await ReadStoreAsync();
         var alphaId = seededRows.Single(s => s.Name == "alpha").ServerId;
-        var body = remediationSlot
-            ? "{\"host\":\"moved.example.test\",\"password\":\"typed-secret-Q7\"}"
-            : $"{{\"host\":\"moved.example.test\",\"password\":\"{references[0]}\"}}";
-        var answer = await Edit.EditServerCoreAsync(
-            new Edit.PostgresServerEditStore(owner), alphaId, body,
-            (_, _) => Task.FromResult(new ConnectionProbeResult(true, 15, 3, "Enterprise", false, false, false, true, null)),
-            isWindows: true, logger: null, ct);
-        Assert.Equal("updated", System.Text.Json.Nodes.JsonNode.Parse(answer)!["status"]!.GetValue<string>());
+        if (remediationSlot)
+        {
+            var answer = await Edit.EditServerCoreAsync(
+                new Edit.PostgresServerEditStore(owner), alphaId, "{\"host\":\"moved.example.test\",\"password\":\"typed-secret-Q7\"}",
+                (_, _) => Task.FromResult(new ConnectionProbeResult(true, 15, 3, "Enterprise", false, false, false, true, null)),
+                isWindows: true, logger: null, ct);
+            Assert.Equal("updated", System.Text.Json.Nodes.JsonNode.Parse(answer)!["status"]!.GetValue<string>());
+        }
+        else
+        {
+            /* The web and MCP edit take the password itself, so a reference cannot be typed through them. The row that holds
+               one at a moved host is written directly, as a process that is not the service's would write it. */
+            await using var move = owner.CreateCommand(
+                "UPDATE config_monitored_servers SET host = 'moved.example.test', encrypted_password = $1 WHERE server_id = $2");
+            move.Parameters.Add(new Npgsql.NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Text, Value = references[0] });
+            move.Parameters.Add(new Npgsql.NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Integer, Value = alphaId });
+            Assert.Equal(1, await move.ExecuteNonQueryAsync(ct));
+        }
 
         /* A direct write that moves only the port of another file server. */
         await using (var update = owner.CreateCommand("UPDATE config_monitored_servers SET port = 1434 WHERE name = 'beta'"))
