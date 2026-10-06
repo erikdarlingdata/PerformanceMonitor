@@ -148,8 +148,6 @@ public sealed class StatementCutSourceScanTests
             "SplitProseLabel splits a synthesized advice paragraph on its first ': ' into label and value; both halves are kept, nothing is cut off (the name matches 'graph')"),
         new("Darling/PerformanceMonitor.Darling.Service/Mcp/TopRanking.cs", "sql", 2,
             "ReplaceOnce splices a ranking clause into the top-N query's own SQL script with string.Concat over AsSpan; the script is our text, not a statement read from a monitored server"),
-        new("PerformanceMonitor.Notifications/MuteRule.cs", "querytext", 1,
-            "SeedQueryTextPattern pre-fills the mute dialog's editable query-text pattern from an alert's QueryText, which is parsed out of the stored alert detail the alert sender already judged whole (#5360); a withheld statement's marker is refused above the cut, so a named statement is never seeded and the cut text is a pattern the user edits, not a shown statement (#5367)"),
         new("PerformanceMonitor.Analysis/SameStatementPileupDetector.cs", "normalized", 1,
             "Preview normalizes whitespace and cuts the finding's printed statement; its only caller passes SnapshotRow.PreviewText, which the reader judged whole before it cut (a null PreviewText prints an empty string, #5361 F1). Nothing here sees raw text"),
         new("Lite/Analysis/BaselineProvider.cs", "eventbaselinesql", 3,

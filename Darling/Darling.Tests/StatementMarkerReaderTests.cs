@@ -121,24 +121,49 @@ public sealed class StatementMarkerReaderTests
     public void AMuteDialogSeedsAPlainStatementTruncatedToTheLimit()
     {
         var context = new AlertMuteContext { QueryText = Plain };
-        Assert.Equal(Plain, context.SeedQueryTextPattern());
+        Assert.Equal(Plain, context.SeedQueryTextPattern(SensitiveStatements.Text));
 
         context.QueryText = new string('x', 500);
-        Assert.Equal(AlertMuteContext.SeedQueryTextMax, context.SeedQueryTextPattern()!.Length);
+        Assert.Equal(AlertMuteContext.SeedQueryTextMax, context.SeedQueryTextPattern(SensitiveStatements.Text)!.Length);
     }
 
     [Fact]
     public void AMuteDialogSeedsNoPatternFromTheMarker()
     {
-        Assert.Null(new AlertMuteContext { QueryText = Marker }.SeedQueryTextPattern());
-        Assert.Null(new AlertMuteContext { QueryText = "  " + Marker + " " }.SeedQueryTextPattern());
-        Assert.Null(new AlertMuteContext { QueryText = null }.SeedQueryTextPattern());
+        Assert.Null(new AlertMuteContext { QueryText = Marker }.SeedQueryTextPattern(SensitiveStatements.Text));
+        Assert.Null(new AlertMuteContext { QueryText = "  " + Marker + " " }.SeedQueryTextPattern(SensitiveStatements.Text));
+        Assert.Null(new AlertMuteContext { QueryText = null }.SeedQueryTextPattern(SensitiveStatements.Text));
 
         /* The same value arrives through the alert's detail text. */
         var parsed = new AlertMuteContext();
         parsed.PopulateFromDetailText("  Database: db1\n  Blocked Query: " + Marker + "\n  Wait Type: LCK_M_X\n");
-        Assert.Null(parsed.SeedQueryTextPattern());
+        Assert.Null(parsed.SeedQueryTextPattern(SensitiveStatements.Text));
         Assert.Equal("LCK_M_X", parsed.WaitType);
+    }
+
+    [Fact]
+    public void AMuteDialogSeedsNothingFromAPreFilterAlertWhoseStatementTheFilterNames()
+    {
+        /* #5320: an alert stored before the filter was on holds raw text. The seed judges the whole text first, so
+           a statement the filter names seeds nothing, however its secret sits against the 200-character cut. */
+        const string old = "CREATE LOGIN [a] WITH PASSWORD = 'p'";
+        Assert.Equal(Marker, SensitiveStatements.Text(old));
+
+        var parsed = new AlertMuteContext();
+        parsed.PopulateFromDetailText("  Database: db1\n  Blocked Query: " + old + "\n  Wait Type: LCK_M_X\n");
+        Assert.Equal(old, parsed.QueryText);
+        Assert.Null(parsed.SeedQueryTextPattern(SensitiveStatements.Text));
+
+        /* The secret lies past the cut: a cut-then-judge seed would be the clean first 200 characters. */
+        var late = new AlertMuteContext { QueryText = new string('x', 250) + " " + old };
+        Assert.Null(late.SeedQueryTextPattern(SensitiveStatements.Text));
+
+        /* A plain statement still seeds its first 200 characters. */
+        var plain = new AlertMuteContext { QueryText = "SELECT " + new string('y', 400) };
+        Assert.Equal(plain.QueryText![..AlertMuteContext.SeedQueryTextMax], plain.SeedQueryTextPattern(SensitiveStatements.Text));
+
+        /* A judge that returns null seeds nothing. */
+        Assert.Null(new AlertMuteContext { QueryText = Plain }.SeedQueryTextPattern(_ => null));
     }
 
     private static string RunNode(string script)
