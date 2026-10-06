@@ -33,7 +33,9 @@ public static partial class SensitiveStatements
         TimedOut,
     }
 
-    private const string WordChars = "[0-9A-Za-z_]";
+    // Case-sensitive on purpose (#5320 L1): under IgnoreCase .NET also reads U+212A (the Kelvin sign) as a member
+    // of [A-Za-z], which a C-locale PostgreSQL word-boundary check does not.
+    private const string WordChars = "(?-i:[0-9A-Za-z_])";
 
     // Lazily built, once. Null after a failed guard: every value is then named (fail closed).
     private static readonly Lazy<Func<string, Verdict>> s_judge =
@@ -251,6 +253,8 @@ public static partial class SensitiveStatements
         }
     }
 
+    private const string WarmUpText = "create user warm_up password 'x'";
+
     /// <summary>Builds a judge for a pattern source. A failed guard, or a translation .NET cannot compile,
     /// gives a judge that names every value. <paramref name="factor"/> and <paramref name="prefilter"/> exist so
     /// a test can build the unfactored form and the judge without the pre-check.</summary>
@@ -275,6 +279,20 @@ public static partial class SensitiveStatements
         }
 
         var precheck = prefilter ? CreatePrefilter(source, timeout) : null;
+
+        // #5320 L3: the build stays outside any budget. The regex is compiled above, and the first match still
+        // pays the one-time JIT of the compiled code (inside the match timeout and the caller's clock), so run
+        // each engine once on a short value here, where a budget does not time it.
+        try
+        {
+            precheck?.IsMatch(WarmUpText);
+            regex.IsMatch(WarmUpText);
+        }
+#pragma warning disable CA1031 // a failed warm-up only costs the first caller its time
+        catch (Exception)
+#pragma warning restore CA1031
+        {
+        }
 
         return text =>
         {
@@ -302,7 +320,9 @@ public static partial class SensitiveStatements
     }
 
     /// <summary>Judges one value against <see cref="Pattern"/>. Null or empty is clean; an exception is named.</summary>
-    internal static Verdict Judge(string text)
+    internal static Verdict Judge(string text) => JudgeShared(s_judge, text);
+
+    private static Verdict JudgeShared(Lazy<Func<string, Verdict>> shared, string text)
     {
         if (string.IsNullOrEmpty(text))
         {
@@ -311,7 +331,7 @@ public static partial class SensitiveStatements
 
         try
         {
-            return s_judge.Value(text);
+            return shared.Value(text);
         }
 #pragma warning disable CA1031 // fail closed
         catch (Exception)
@@ -363,9 +383,15 @@ public static partial class SensitiveStatements
     /// (<see cref="Spent"/>), every later value is returned as named without running the judge and is counted
     /// unjudged.
     /// </summary>
-    internal sealed class JudgeBudget(TimeSpan limit, Func<string, Verdict>? judge = null)
+    internal sealed class JudgeBudget(
+        TimeSpan limit,
+        Func<string, Verdict>? judge = null,
+        Func<TimeSpan>? clock = null,
+        Lazy<Func<string, Verdict>>? shared = null)
     {
-        private readonly Func<string, Verdict> _judge = judge ?? SensitiveStatements.Judge;
+        private readonly Func<string, Verdict>? _judge = judge;
+        private readonly Lazy<Func<string, Verdict>> _shared = shared ?? s_judge;
+        private readonly Func<TimeSpan> _now = clock ?? (static () => Stopwatch.GetElapsedTime(0));
         private TimeSpan _elapsed;
 
         public TimeSpan Limit { get; } = limit;
@@ -400,11 +426,25 @@ public static partial class SensitiveStatements
                 return Verdict.Named;
             }
 
-            var started = Stopwatch.GetTimestamp();
+            if (_judge is null)
+            {
+                // #5320 L3: build the shared judge before the clock starts, so the budget is charged matching only.
+                try
+                {
+                    _ = _shared.Value;
+                }
+#pragma warning disable CA1031 // fail closed: a build that throws names the value below
+                catch (Exception)
+#pragma warning restore CA1031
+                {
+                }
+            }
+
+            var started = _now();
             Verdict verdict;
             try
             {
-                verdict = _judge(text);
+                verdict = _judge is not null ? _judge(text) : JudgeShared(_shared, text);
             }
 #pragma warning disable CA1031 // fail closed
             catch (Exception)
@@ -413,7 +453,7 @@ public static partial class SensitiveStatements
                 verdict = Verdict.Named;
             }
 
-            _elapsed += Stopwatch.GetElapsedTime(started);
+            _elapsed += _now() - started;
             if (verdict == Verdict.Named)
             {
                 Named++;

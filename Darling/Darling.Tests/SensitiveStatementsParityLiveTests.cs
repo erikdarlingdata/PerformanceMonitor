@@ -95,6 +95,36 @@ public sealed class SensitiveStatementsParityLiveTests
         }
     }
 
+    /// <summary>A U+212A (Kelvin sign) next to a named keyword is not a word character in a C-locale cluster,
+    /// and the .NET word class is case-sensitive so it is not one there either (#5320 L1). The two verdicts
+    /// are compared only on a cluster whose character type is C or POSIX; a libc locale reads the sign as a
+    /// letter, so there the answer is recorded and not compared. Not part of the corpus: lower-casing the
+    /// sign gives an ASCII k.</summary>
+    [Fact]
+    public async Task AKelvinSignNextToANamedKeywordGetsTheSameVerdictInBothEngines_OnACLocaleCluster()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrWhiteSpace(connectionString),
+            "Set DARLING_TEST_PG to a connection string to compare the #5320 Kelvin-sign case in both engines.");
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(connectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+
+        await using var show = new NpgsqlCommand("SELECT datctype FROM pg_database WHERE datname = current_database()", connection);
+        var ctype = (string)(await show.ExecuteScalarAsync(ct))!;
+        const string text = "x \u212Asp_addlogin 'a'";
+        var pg = await IsNamedAsync(connection, text, ct);
+        var dotnet = SensitiveStatements.Names(text);
+        TestContext.Current.SendDiagnosticMessage(string.Create(CultureInfo.InvariantCulture,
+            $"kelvin sign: ctype={ctype} pg={pg} dotnet={dotnet}"));
+
+        Assert.True(dotnet);
+        Assert.SkipUnless(ctype is "C" or "POSIX", "The cluster's character type is " + ctype + ", not C: PostgreSQL reads U+212A as a letter there.");
+        Assert.Equal(dotnet, pg);
+    }
+
     private static async Task<bool> IsNamedAsync(NpgsqlConnection connection, string text, CancellationToken ct)
     {
         await using var command = new NpgsqlCommand("SELECT $1 ~* $2", connection);

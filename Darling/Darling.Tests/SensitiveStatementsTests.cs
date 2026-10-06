@@ -88,7 +88,7 @@ public sealed class SensitiveStatementsTests
     }
 
     private const string PinnedTranslation = """
-        (?:(?<![0-9A-Za-z_])(?=[0-9A-Za-z_])(?:(create|alter)([\s]|/[*]([^*]|[*]+[^*/])*[*]+/|--[^\p{Cc}]*)+(role|user|group|subscription|server)(?<=[0-9A-Za-z_])(?![0-9A-Za-z_])|password(?<=[0-9A-Za-z_])(?![0-9A-Za-z_])([\s]|/[*]([^*]|[*]+[^*/])*[*]+/|--[^\p{Cc}]*)*(=|to)?([\s]|/[*]([^*]|[*]+[^*/])*[*]+/|--[^\p{Cc}]*)*(e?'|u&'|[$][^0-9])|(pg)?password[\s]*=[\s]*[^$\s]|(create|alter)([\s]|/[*]([^*]|[*]+[^*/])*[*]+/|--[^\p{Cc}]*)+(login|credential)(?<=[0-9A-Za-z_])(?![0-9A-Za-z_])|scoped([\s]|/[*]([^*]|[*]+[^*/])*[*]+/|--[^\p{Cc}]*)+credential(?<=[0-9A-Za-z_])(?![0-9A-Za-z_])|([a-z0-9_]*(password|passwd|pwd|secret)|key_source)(?<=[0-9A-Za-z_])(?![0-9A-Za-z_])([\s]|/[*]([^*]|[*]+[^*/])*[*]+/|--[^\p{Cc}]*)*(=|to)?([\s]|/[*]([^*]|[*]+[^*/])*[*]+/|--[^\p{Cc}]*)*(n?'|e'|u&'|0x|[$][^0-9])|pwd[\s]*=[\s]*[^$@\s]|(sp_addlogin|sp_password|sp_addlinkedsrvlogin|sp_addapprole|sp_approlepassword|sp_setapprole|sp_change_users_login|sp_adddistributor|sp_changedistributor_password|sp_adddistpublisher|sp_addsubscriber|sp_link_publication|sp_control_dbmasterkey_password|sp_xp_cmdshell_proxy_account)(?<=[0-9A-Za-z_])(?![0-9A-Za-z_])|(encryptbypassphrase|decryptbypassphrase|decryptbykeyautocert|decryptbykeyautoasymkey|decryptbyasymkey|decryptbycert|signbycert|signbyasymkey|pwdencrypt|pwdcompare)(?<=[0-9A-Za-z_])(?![0-9A-Za-z_])|opendatasource(?<=[0-9A-Za-z_])(?![0-9A-Za-z_])|openrowset([\s]|/[*]([^*]|[*]+[^*/])*[*]+/|--[^\p{Cc}]*)*[(]([\s]|/[*]([^*]|[*]+[^*/])*[*]+/|--[^\p{Cc}]*)*n?'|[a-z0-9_]*(password|passwd|pwd|secret)(]|")([\s]|/[*]([^*]|[*]+[^*/])*[*]+/|--[^\p{Cc}]*)*=([\s]|/[*]([^*]|[*]+[^*/])*[*]+/|--[^\p{Cc}]*)*(n?'|e'|u&'|0x)))|[a-z][a-z0-9+.-]*://[^\s/@:]+:[^\s/@]+@
+        (?:(?<!(?-i:[0-9A-Za-z_]))(?=(?-i:[0-9A-Za-z_]))(?:(create|alter)([\s]|/[*]([^*]|[*]+[^*/])*[*]+/|--[^\p{Cc}]*)+(role|user|group|subscription|server)(?<=(?-i:[0-9A-Za-z_]))(?!(?-i:[0-9A-Za-z_]))|password(?<=(?-i:[0-9A-Za-z_]))(?!(?-i:[0-9A-Za-z_]))([\s]|/[*]([^*]|[*]+[^*/])*[*]+/|--[^\p{Cc}]*)*(=|to)?([\s]|/[*]([^*]|[*]+[^*/])*[*]+/|--[^\p{Cc}]*)*(e?'|u&'|[$][^0-9])|(pg)?password[\s]*=[\s]*[^$\s]|(create|alter)([\s]|/[*]([^*]|[*]+[^*/])*[*]+/|--[^\p{Cc}]*)+(login|credential)(?<=(?-i:[0-9A-Za-z_]))(?!(?-i:[0-9A-Za-z_]))|scoped([\s]|/[*]([^*]|[*]+[^*/])*[*]+/|--[^\p{Cc}]*)+credential(?<=(?-i:[0-9A-Za-z_]))(?!(?-i:[0-9A-Za-z_]))|([a-z0-9_]*(password|passwd|pwd|secret)|key_source)(?<=(?-i:[0-9A-Za-z_]))(?!(?-i:[0-9A-Za-z_]))([\s]|/[*]([^*]|[*]+[^*/])*[*]+/|--[^\p{Cc}]*)*(=|to)?([\s]|/[*]([^*]|[*]+[^*/])*[*]+/|--[^\p{Cc}]*)*(n?'|e'|u&'|0x|[$][^0-9])|pwd[\s]*=[\s]*[^$@\s]|(sp_addlogin|sp_password|sp_addlinkedsrvlogin|sp_addapprole|sp_approlepassword|sp_setapprole|sp_change_users_login|sp_adddistributor|sp_changedistributor_password|sp_adddistpublisher|sp_addsubscriber|sp_link_publication|sp_control_dbmasterkey_password|sp_xp_cmdshell_proxy_account)(?<=(?-i:[0-9A-Za-z_]))(?!(?-i:[0-9A-Za-z_]))|(encryptbypassphrase|decryptbypassphrase|decryptbykeyautocert|decryptbykeyautoasymkey|decryptbyasymkey|decryptbycert|signbycert|signbyasymkey|pwdencrypt|pwdcompare)(?<=(?-i:[0-9A-Za-z_]))(?!(?-i:[0-9A-Za-z_]))|opendatasource(?<=(?-i:[0-9A-Za-z_]))(?!(?-i:[0-9A-Za-z_]))|openrowset([\s]|/[*]([^*]|[*]+[^*/])*[*]+/|--[^\p{Cc}]*)*[(]([\s]|/[*]([^*]|[*]+[^*/])*[*]+/|--[^\p{Cc}]*)*n?'|[a-z0-9_]*(password|passwd|pwd|secret)(]|")([\s]|/[*]([^*]|[*]+[^*/])*[*]+/|--[^\p{Cc}]*)*=([\s]|/[*]([^*]|[*]+[^*/])*[*]+/|--[^\p{Cc}]*)*(n?'|e'|u&'|0x)))|[a-z][a-z0-9+.-]*://[^\s/@:]+:[^\s/@]+@
         """;
 
     [Fact]
@@ -139,7 +139,7 @@ public sealed class SensitiveStatementsTests
     {
         Assert.True(SensitiveStatements.TryTranslate("[[:<:]]ab|[[:<:]]cd|ef", out var translated));
 
-        Assert.Equal("(?:(?<![0-9A-Za-z_])(?=[0-9A-Za-z_])(?:ab|cd))|ef", translated);
+        Assert.Equal("(?:(?<!(?-i:[0-9A-Za-z_]))(?=(?-i:[0-9A-Za-z_]))(?:ab|cd))|ef", translated);
         var judge = SensitiveStatements.CreateJudge("[[:<:]]ab|[[:<:]]cd|ef", SensitiveStatements.MatchTimeout);
         Assert.Equal(SensitiveStatements.Verdict.Named, judge("x cd"));
         Assert.Equal(SensitiveStatements.Verdict.Named, judge("xef"));
@@ -437,6 +437,23 @@ public sealed class SensitiveStatementsTests
         Assert.Same(harmless, SensitiveStatements.Text(harmless));
     }
 
+    /// <summary>With IgnoreCase .NET reads U+212A (the Kelvin sign) as a word character, which PostgreSQL's
+    /// C-locale word-start check does not (#5320 L1). The word class is case-sensitive, so a Kelvin sign next
+    /// to a named keyword is a boundary here too, and the pre-check still hits it.</summary>
+    [Fact]
+    public void AKelvinSignNextToANamedKeywordIsAWordBoundary_AndThePrefilterStillHitsIt()
+    {
+        const string text = "x \u212Asp_addlogin 'a'";
+        var timeout = TimeSpan.FromSeconds(5);
+        var prefilter = SensitiveStatements.CreatePrefilter(SensitiveStatements.Pattern, timeout);
+
+        Assert.Equal(SensitiveStatements.Verdict.Named, SensitiveStatements.Judge(text));
+        Assert.True(SensitiveStatements.Names(text));
+        Assert.NotNull(prefilter);
+        Assert.Matches(prefilter!, text);
+        Assert.Equal(SensitiveStatements.Verdict.Named, SensitiveStatements.CreateJudge(SensitiveStatements.Pattern, timeout, prefilter: false)(text));
+    }
+
     // ---- JudgeBudget -------------------------------------------------------------------------------------
 
     [Fact]
@@ -511,6 +528,34 @@ public sealed class SensitiveStatementsTests
 
         Assert.Equal(SensitiveStatements.Verdict.Named, budget.Judge("x"));
         Assert.Equal(1, budget.Named);
+    }
+
+    /// <summary>The build of the shared judge (the regex compile, the pre-check and a warm-up match) is not
+    /// charged to a budget (#5320 L3): the first call is charged its match time only. The fake clock moves
+    /// 100 ms inside the build and 1 ms inside the match.</summary>
+    [Fact]
+    public void TheFirstCallOfABudgetIsChargedItsMatchTimeNotTheBuild()
+    {
+        var now = TimeSpan.Zero;
+        var built = 0;
+        var shared = new Lazy<Func<string, SensitiveStatements.Verdict>>(() =>
+        {
+            built++;
+            now += TimeSpan.FromMilliseconds(100);
+            return _ =>
+            {
+                now += TimeSpan.FromMilliseconds(1);
+                return SensitiveStatements.Verdict.Clean;
+            };
+        });
+        var budget = new SensitiveStatements.JudgeBudget(TimeSpan.FromSeconds(1), judge: null, clock: () => now, shared: shared);
+
+        Assert.Equal(SensitiveStatements.Verdict.Clean, budget.Judge("SELECT 1"));
+        Assert.Equal(SensitiveStatements.Verdict.Clean, budget.Judge("SELECT 2"));
+
+        Assert.Equal(1, built);
+        Assert.Equal(TimeSpan.FromMilliseconds(2), budget.Elapsed);
+        Assert.False(budget.Spent);
     }
 
     [Fact]
