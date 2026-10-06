@@ -8,8 +8,12 @@
 
 using System;
 using System.Collections.Generic;
+using System.IO;
+using System.Security.Cryptography;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
+using System.Xml;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Storage;
 
@@ -57,8 +61,35 @@ internal static class ProcedureStatsPlanReuse
         /// <summary>Shadow: rows whose identity was in the cache.</summary>
         public int WouldHit { get; set; }
 
-        /// <summary>Shadow: would-hits whose cached plan differs from the plan the run just rendered.</summary>
+        /// <summary>
+        /// Shadow: would-hits whose cached plan's SHAPE differs from the plan the run just rendered (#5158): a statement
+        /// recompiled, or one came or went. A render whose shape held is <see cref="SameShape"/>, not this.
+        /// </summary>
         public int FalseHit { get; set; }
+
+        /// <summary>
+        /// Shadow: the part of <see cref="FalseHit"/> where both shapes were known and differ, a real shape change.
+        /// The four <c>FalseHit*</c> causes always sum to <see cref="FalseHit"/>; the other three are plans no shape
+        /// was compared for, so a field read can tell a shape change from an uncompared plan (#5158).
+        /// </summary>
+        public int FalseHitShape { get; set; }
+
+        /// <summary>Shadow: the part of <see cref="FalseHit"/> where the cached entry had no shape yet.</summary>
+        public int FalseHitNoShape { get; set; }
+
+        /// <summary>Shadow: the part of <see cref="FalseHit"/> where the render was over the size cap and was compared by byte size only.</summary>
+        public int FalseHitOverCap { get; set; }
+
+        /// <summary>Shadow: the part of <see cref="FalseHit"/> where the render's XML did not parse.</summary>
+        public int FalseHitUnparsed { get; set; }
+
+        /// <summary>
+        /// Shadow: would-hits whose rendered plan differs in bytes from the cached one but whose shape held. In the field
+        /// only the memory grant moved: grant feedback adjusted the cached plan in place. The hash key proves the shape
+        /// held, not that nothing else did. That is a minor mutation of a plan the store already holds, so it is not
+        /// a new plan and not a false hit (#5158).
+        /// </summary>
+        public int SameShape { get; set; }
 
         /// <summary>Rows the cache did not hold, or held past its age limit, or could not key.</summary>
         public int Miss { get; set; }
@@ -85,17 +116,150 @@ internal static class ProcedureStatsPlanReuse
         Convert.ToHexString(PayloadDimensions.Digest(PgCollectorRowWriter.StripEmbeddedNuls(planXml)));
 
     /// <summary>
+    /// The shape of a plan (#5158): every <c>Stmt*</c> element in document order (<c>StmtSimple</c>, <c>StmtCond</c>,
+    /// <c>StmtCursor</c> and the rest), each as its element name and its <c>QueryPlanHash</c> (a dash when it has none:
+    /// <c>SET</c>, <c>RETURN</c>, <c>ASSIGN</c> and <c>COND</c> wrappers carry no plan), hashed to one key. Two renders of
+    /// the same cached plan have the same shape even when the engine's memory-grant feedback rewrote
+    /// <c>MemoryGrantInfo</c> and the operators' <c>MemoryFractions</c> in place. A statement with no hash has no shape to
+    /// compare, so it does not send the plan to the fallback. The fallback, a hash of the whole XML with the attributes of
+    /// those two elements left out, runs only when a <c>QueryPlan</c> opens under a statement that has no hash (a
+    /// shape the key cannot see) or when the plan has no statement. Returns null for XML that does not parse; the caller
+    /// then cannot prove the shape unchanged. Forward-only: no DOM is built.
+    /// </summary>
+    internal static string? ShapeOf(string planXml)
+    {
+        ArgumentNullException.ThrowIfNull(planXml);
+
+        var text = PgCollectorRowWriter.StripEmbeddedNuls(planXml);
+        try
+        {
+            var statements = new StringBuilder();
+            var count = 0;
+            var lastHadHash = true;
+            var unseenPlan = false;
+            using (var reader = OpenReader(text))
+            {
+                while (reader.Read())
+                {
+                    if (reader.NodeType != XmlNodeType.Element)
+                    {
+                        continue;
+                    }
+
+                    var name = reader.LocalName;
+                    if (name.StartsWith("Stmt", StringComparison.Ordinal))
+                    {
+                        count++;
+                        var hash = reader.GetAttribute("QueryPlanHash");
+                        lastHadHash = !string.IsNullOrEmpty(hash);
+                        statements.Append(name).Append('=').Append(lastHadHash ? hash : "-").Append(',');
+                    }
+                    else if (name == "QueryPlan" && !lastHadHash)
+                    {
+                        unseenPlan = true;
+                        break;
+                    }
+                }
+            }
+
+            if (!unseenPlan && count > 0)
+            {
+                return "h:" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(statements.ToString())));
+            }
+
+            return "x:" + GrantlessDigestOf(text);
+        }
+        catch (XmlException)
+        {
+            return null;
+        }
+    }
+
+    private static XmlReader OpenReader(string text) =>
+        XmlReader.Create(
+            new StringReader(text),
+            new XmlReaderSettings { DtdProcessing = DtdProcessing.Prohibit, XmlResolver = null, CheckCharacters = false });
+
+    /// <summary>A hash of the plan's XML, element by element, leaving out the attributes grant feedback rewrites.</summary>
+    private static string GrantlessDigestOf(string text)
+    {
+        using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        using var reader = OpenReader(text);
+        while (reader.Read())
+        {
+            switch (reader.NodeType)
+            {
+                case XmlNodeType.Element:
+                    AppendToken(hash, "<" + reader.LocalName);
+                    if (reader.LocalName is not ("MemoryGrantInfo" or "MemoryFractions") && reader.MoveToFirstAttribute())
+                    {
+                        do
+                        {
+                            AppendToken(hash, " " + reader.Name + "=" + reader.Value);
+                        }
+                        while (reader.MoveToNextAttribute());
+                        reader.MoveToElement();
+                    }
+
+                    break;
+                case XmlNodeType.EndElement:
+                    AppendToken(hash, ">");
+                    break;
+                case XmlNodeType.Text:
+                case XmlNodeType.CDATA:
+                    AppendToken(hash, "#" + reader.Value);
+                    break;
+                default:
+                    break;
+            }
+        }
+
+        return Convert.ToHexString(hash.GetHashAndReset());
+    }
+
+    private static readonly byte[] s_tokenSeparator = { 0 };
+
+    private static void AppendToken(IncrementalHash hash, string token)
+    {
+        hash.AppendData(Encoding.UTF8.GetBytes(token));
+        hash.AppendData(s_tokenSeparator);
+    }
+
+    /// <summary>Why shadow counted a would-hit as a false hit. Only <see cref="ShapeChanged"/> compared two shapes (#5158).</summary>
+    internal enum FalseHitCause
+    {
+        /// <summary>Both shapes were known and they differ.</summary>
+        ShapeChanged,
+        /// <summary>The cached entry has no shape yet (cached by <c>on</c>, or after a parse failure), so nothing was compared.</summary>
+        EntryHasNoShape,
+        /// <summary>The render was over the size cap and has no text, so it has no shape to compare.</summary>
+        OverCapRender,
+        /// <summary>The render's XML did not parse, so it has no shape to compare.</summary>
+        RenderUnparseable,
+    }
+
+    /// <summary>The words the shadow false-hit warning uses for each <see cref="FalseHitCause"/>.</summary>
+    internal static string DescribeFalseHit(FalseHitCause cause) => cause switch
+    {
+        FalseHitCause.ShapeChanged => "the plan's shape changed",
+        FalseHitCause.EntryHasNoShape => "the cached entry has no shape yet, so the shapes were not compared",
+        FalseHitCause.OverCapRender => "the rendered plan is over the size cap, so the shapes were not compared",
+        _ => "the rendered plan's XML did not parse, so the shapes were not compared",
+    };
+
+    /// <summary>
     /// Shadow: the rows already carry their inline plans. Looks each identity up, compares a would-hit with the
     /// plan just rendered, and warms the cache from the inline render. Changes no row.
     /// </summary>
-    /// <param name="onFalseHit">Called with the identity of each would-hit whose cached plan differs.</param>
+    /// <param name="onFalseHit">Called with the identity of each would-hit counted as a false hit and which case it was (#5158):
+    /// a shape that changed, or a case where no two shapes were compared.</param>
     internal static Outcome ApplyShadow(
         int serverId,
         PlanDigestCache<ProcedureStatsPlanKey> cache,
         IReadOnlyList<ProcedureStatsCollector.Row> rows,
         long captureOrdinal,
         DateTime nowUtc,
-        Action<ProcedureStatsPlanKey>? onFalseHit)
+        Action<ProcedureStatsPlanKey, FalseHitCause>? onFalseHit)
     {
         var outcome = new Outcome();
         foreach (var row in rows)
@@ -114,6 +278,8 @@ internal static class ProcedureStatsPlanReuse
             }
 
             var inlineDigest = row.QueryPlanXml is null ? null : DigestOf(row.QueryPlanXml);
+            string? shape = null;
+            var shapeKnown = false;
             if (cache.TryGet(key, nowUtc, out var entry) && !IsExpired(entry, captureOrdinal))
             {
                 outcome.WouldHit++;
@@ -129,8 +295,32 @@ internal static class ProcedureStatsPlanReuse
                     continue;
                 }
 
-                outcome.FalseHit++;
-                onFalseHit?.Invoke(key);
+                /* The bytes differ. It is a false hit only when the shape does (#5158): grant feedback adjusts a cached
+                   plan in place, and that is not a new plan. A render with no text (over the cap) has no shape to
+                   compare, and neither has an entry cached without one; those stay false hits, as before. */
+                shape = row.QueryPlanXml is null ? null : ShapeOf(row.QueryPlanXml);
+                shapeKnown = true;
+                if (shape is not null && string.Equals(shape, entry.Shape, StringComparison.Ordinal))
+                {
+                    outcome.SameShape++;
+                }
+                else
+                {
+                    outcome.FalseHit++;
+                    var cause = row.QueryPlanXml is null ? FalseHitCause.OverCapRender
+                        : shape is null ? FalseHitCause.RenderUnparseable
+                        : entry.Shape is null ? FalseHitCause.EntryHasNoShape
+                        : FalseHitCause.ShapeChanged;
+                    switch (cause)
+                    {
+                        case FalseHitCause.OverCapRender: outcome.FalseHitOverCap++; break;
+                        case FalseHitCause.RenderUnparseable: outcome.FalseHitUnparsed++; break;
+                        case FalseHitCause.EntryHasNoShape: outcome.FalseHitNoShape++; break;
+                        default: outcome.FalseHitShape++; break;
+                    }
+
+                    onFalseHit?.Invoke(key, cause);
+                }
             }
             else
             {
@@ -141,7 +331,13 @@ internal static class ProcedureStatsPlanReuse
                 }
             }
 
-            cache.AddPending(key, inlineDigest, row.QueryPlanXmlBytes, nowUtc, captureOrdinal);
+            /* The shape rides in the cache beside the digest, so the next render compares with it. */
+            if (!shapeKnown && row.QueryPlanXml is not null)
+            {
+                shape = ShapeOf(row.QueryPlanXml);
+            }
+
+            cache.AddPending(key, inlineDigest, row.QueryPlanXmlBytes, nowUtc, captureOrdinal, shape);
             outcome.Pending.Add(key);
         }
 
