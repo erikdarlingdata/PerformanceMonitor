@@ -614,10 +614,11 @@ public sealed partial class ViewerDataService
     /// PG dialect deviations from Lite's DuckDB: <c>::double precision</c> casts on the summed bigints
     /// before the per-execution division; the period joins are null-safe like Lite's
     /// <c>IS NOT DISTINCT FROM</c> but written as <c>COALESCE(key,'') = COALESCE(key,'')</c> plus an
-    /// <c>IS NULL</c> pair (#5420), and the outer FULL JOIN uses <c>COALESCE(key,'')</c> equality —
-    /// Postgres only joins on merge/hash-joinable conditions and <c>IS NOT DISTINCT FROM</c> is
-    /// neither, so it ran as a nested loop over every window row (query_hash / database_name are never
-    /// the empty string, so the sentinel is collision-free in the outer join).
+    /// <c>IS NULL</c> pair (#5420), and the outer FULL JOIN uses the same pair — Postgres only joins on
+    /// merge/hash-joinable conditions and <c>IS NOT DISTINCT FROM</c> is neither, so it ran as a nested
+    /// loop over every window row. The <c>IS NULL</c> half of the pair keeps a NULL key and an
+    /// empty-string key apart in the outer join too (#5420): the <c>COALESCE</c> alone would merge
+    /// the two groups and fan a row out.
     /// $1 server_id, $2/$3 current window, $4/$5 baseline window (naive UTC).
     /// </summary>
     public const string QueryStatsComparisonSql = """
@@ -713,6 +714,8 @@ public sealed partial class ViewerDataService
         FULL OUTER JOIN baseline_period b
           ON  COALESCE(c.database_name, '') = COALESCE(b.database_name, '')
           AND COALESCE(c.query_hash, '') = COALESCE(b.query_hash, '')
+          AND (c.database_name IS NULL) = (b.database_name IS NULL)
+          AND (c.query_hash IS NULL) = (b.query_hash IS NULL)
         """;
 
     /// <summary>Top-Queries current-vs-baseline comparison rows (shared .Ui item; delta % + NEW/GONE badges).</summary>

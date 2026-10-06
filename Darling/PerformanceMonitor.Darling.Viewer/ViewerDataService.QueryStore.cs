@@ -632,7 +632,8 @@ public sealed partial class ViewerDataService
     /// Query-Store comparison — Lite's <c>GetQueryStoreComparisonAsync</c> ported. Uses execution-count
     /// weighted averages (<c>SUM(execution_count * avg_metric) / SUM(execution_count)</c>) so periods with
     /// uneven interval counts aggregate correctly, top-100-union + FULL OUTER JOIN keyed on
-    /// (database, query_hash). Returns the shared <see cref="QueryStatsComparisonItem"/>.
+    /// (database, query_hash), each key joined as <c>COALESCE(key,'') = COALESCE(key,'')</c> plus an <c>IS NULL</c> pair so
+    /// a NULL key and an empty-string key stay apart (#5420). Returns the shared <see cref="QueryStatsComparisonItem"/>.
     /// $1 server_id, $2/$3 current window, $4/$5 baseline window (naive UTC).
     /// </summary>
     public const string QueryStoreComparisonSql = """
@@ -792,6 +793,8 @@ public sealed partial class ViewerDataService
         FULL OUTER JOIN baseline_period b
           ON  COALESCE(c.database_name, '') = COALESCE(b.database_name, '')
           AND COALESCE(c.query_hash, '') = COALESCE(b.query_hash, '')
+          AND (c.database_name IS NULL) = (b.database_name IS NULL)
+          AND (c.query_hash IS NULL) = (b.query_hash IS NULL)
         """;
 
     /// <summary>Query-Store current-vs-baseline comparison rows (shared .Ui item; delta % + NEW/GONE badges).</summary>

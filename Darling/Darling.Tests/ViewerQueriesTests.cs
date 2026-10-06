@@ -291,8 +291,14 @@ public sealed class ViewerQueriesSqlTests
             Assert.Equal(2, CountOf(sql, $"COALESCE(w.{key}, '') = COALESCE({topAlias}.{key}, '')"));
             Assert.Equal(2, CountOf(sql, $"(w.{key} IS NULL) = ({topAlias}.{key} IS NULL)"));
         }
-        /* ...and the FULL JOIN must be COALESCE-equality — PG can't FULL-JOIN on IS NOT DISTINCT FROM. */
-        Assert.Contains("COALESCE(c.database_name, '') = COALESCE(b.database_name, '')", sql, StringComparison.Ordinal);
+        /* ...and the FULL JOIN must be COALESCE-equality plus the IS NULL pair, on EVERY key column — PG can't FULL-JOIN on
+           IS NOT DISTINCT FROM, and a COALESCE alone would merge a NULL-key group with its empty-key twin and fan a row out (#5420).
+           Both halves are one-side equalities, so the join stays hashable. Counted once each, so a dropped half fails. */
+        foreach (var key in keyColumns.Split(','))
+        {
+            Assert.Equal(1, CountOf(sql, $"COALESCE(c.{key}, '') = COALESCE(b.{key}, '')"));
+            Assert.Equal(1, CountOf(sql, $"(c.{key} IS NULL) = (b.{key} IS NULL)"));
+        }
     }
 
     private static int CountOf(string text, string part)

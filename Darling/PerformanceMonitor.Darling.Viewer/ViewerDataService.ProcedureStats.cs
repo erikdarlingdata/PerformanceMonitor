@@ -330,7 +330,9 @@ public sealed partial class ViewerDataService
     /// <summary>
     /// Top-Procedures comparison — Lite's <c>GetProcedureStatsComparisonAsync</c> ported. Same
     /// top-100-union / FULL OUTER JOIN shape as the query-stats comparison, keyed on
-    /// (database, schema, object). Returns the shared <see cref="ProcedureStatsComparisonItem"/>.
+    /// (database, schema, object). All three key columns are nullable in <c>procedure_stats</c>, so the period joins and
+    /// the outer FULL JOIN each pair <c>COALESCE(key,'') = COALESCE(key,'')</c> with an <c>IS NULL</c> pair, keeping a
+    /// NULL key and an empty-string key apart (#5420). Returns the shared <see cref="ProcedureStatsComparisonItem"/>.
     /// $1 server_id, $2/$3 current window, $4/$5 baseline window (naive UTC).
     /// </summary>
     public const string ProcedureStatsComparisonSql = """
@@ -451,6 +453,9 @@ public sealed partial class ViewerDataService
           ON  COALESCE(c.database_name, '') = COALESCE(b.database_name, '')
           AND COALESCE(c.schema_name, '') = COALESCE(b.schema_name, '')
           AND COALESCE(c.object_name, '') = COALESCE(b.object_name, '')
+          AND (c.database_name IS NULL) = (b.database_name IS NULL)
+          AND (c.schema_name IS NULL) = (b.schema_name IS NULL)
+          AND (c.object_name IS NULL) = (b.object_name IS NULL)
         /* #1981: a REPRESENTATIVE statement of the procedure via the same normalized sql_handle
            join #1568's module attribution relies on (both stores persist the identical
            CONVERT(varchar(130), ..., 1) text). procedure_stats captures no text of its own, so

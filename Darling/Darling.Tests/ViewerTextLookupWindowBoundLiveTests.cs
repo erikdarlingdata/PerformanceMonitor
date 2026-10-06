@@ -542,6 +542,46 @@ CROSS JOIN generate_series(TIMESTAMP '2026-02-08 12:00:00', TIMESTAMP '2026-02-2
 
     /// <summary>Migrates a scratch store, converts the collector tables to hypertables BEFORE any row lands (so the
     /// seed creates real 1-day chunks), runs the seeds and hands the body a connection.</summary>
+    /// <summary>
+    /// Six groups per twin, each pair a NULL key beside the empty-string key it must stay apart from, all heavy enough to make the
+    /// top 100 in BOTH windows (one row each at 06:00 of the baseline day and of the current day; the counts are 100 to 600 in
+    /// the current window and a tenth of that in the baseline). The outer FULL JOIN that merged a NULL key with an empty one
+    /// would fan a row out here (#5420).
+    /// </summary>
+    private const string QueryStatsNullEmptySeedSql = @"
+INSERT INTO collect.query_stats
+(collection_id, collection_time, server_id, server_name, database_name, query_hash, sql_handle, query_text, delta_execution_count,
+ delta_worker_time, delta_elapsed_time, delta_physical_reads)
+SELECT 7000000 + row_number() OVER ()::bigint, g.t, 5420, 'srv', v.db, v.h, '0xN' || v.n, 'SELECT ' || v.n,
+       CASE WHEN g.cur THEN v.cur_exec ELSE v.cur_exec / 10 END, 1000, 2000, 3
+FROM (VALUES (1, 'dbA'::text, NULL::text, 100), (2, 'dbA', '', 200), (3, NULL, 'hC', 300), (4, '', 'hC', 400),
+             (5, NULL, NULL, 500), (6, '', '', 600)) AS v(n, db, h, cur_exec)
+CROSS JOIN (VALUES (TIMESTAMP '2026-02-20 06:00:00', true), (TIMESTAMP '2026-02-19 06:00:00', false)) AS g(t, cur);";
+
+    /// <summary>The same six NULL-versus-empty groups as <see cref="QueryStatsNullEmptySeedSql"/>, in <c>query_store_stats</c>.</summary>
+    private const string QueryStoreNullEmptySeedSql = @"
+INSERT INTO collect.query_store_stats
+(collection_id, collection_time, server_id, server_name, database_name, query_id, plan_id, execution_type_desc, first_execution_time,
+ last_execution_time, query_text, query_hash, execution_count, avg_duration_us, avg_cpu_time_us, avg_logical_io_reads,
+ avg_logical_io_writes, avg_physical_io_reads, avg_rowcount, query_plan_hash, runtime_stats_interval_id)
+SELECT 7000000 + row_number() OVER ()::bigint, g.t, 5420, 'srv', v.db, v.n, v.n, 'Regular', g.t, g.t, 'SELECT ' || v.n, v.h,
+       CASE WHEN g.cur THEN v.cur_exec ELSE v.cur_exec / 10 END, 1000, 2000, 3, 5, 5, 5, 'ph' || v.n,
+       v.n * 100000 + g.cur::int
+FROM (VALUES (1, 'dbA'::text, NULL::text, 100), (2, 'dbA', '', 200), (3, NULL, 'hC', 300), (4, '', 'hC', 400),
+             (5, NULL, NULL, 500), (6, '', '', 600)) AS v(n, db, h, cur_exec)
+CROSS JOIN (VALUES (TIMESTAMP '2026-02-20 06:00:00', true), (TIMESTAMP '2026-02-19 06:00:00', false)) AS g(t, cur);";
+
+    /// <summary>Six procedures in <c>procedure_stats</c>, a NULL part beside the empty-string one in each of the three key columns.</summary>
+    private const string ProcedureNullEmptySeedSql = @"
+INSERT INTO collect.procedure_stats
+(collection_id, collection_time, server_id, server_name, database_name, schema_name, object_name, sql_handle,
+ delta_execution_count, delta_worker_time, delta_elapsed_time, delta_physical_reads)
+SELECT 7000000 + row_number() OVER ()::bigint, g.t, 5420, 'srv', v.db, v.sch, v.obj, '0xN' || v.n,
+       CASE WHEN g.cur THEN v.cur_exec ELSE v.cur_exec / 10 END, 1000, 2000, 3
+FROM (VALUES (1, 'dbA'::text, 'dbo'::text, NULL::text, 100), (2, 'dbA', 'dbo', '', 200), (3, NULL, 'dbo', 'pX', 300),
+             (4, '', 'dbo', 'pX', 400), (5, 'dbA', NULL, 'pX', 500), (6, 'dbA', '', 'pX', 600)) AS v(n, db, sch, obj, cur_exec)
+CROSS JOIN (VALUES (TIMESTAMP '2026-02-20 06:00:00', true), (TIMESTAMP '2026-02-19 06:00:00', false)) AS g(t, cur);";
+
     private static async Task RunLiveAsync(string[] seeds, Func<NpgsqlConnection, CancellationToken, Task> body)
     {
         Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), SkipText);
@@ -991,6 +1031,38 @@ CROSS JOIN generate_series(TIMESTAMP '2026-02-08 12:00:00', TIMESTAMP '2026-02-2
                 {
                     Assert.True(oldRow[i] == current[key][i], $"{key}: column {i} was {oldRow[i]}, is now {current[key][i]}.");
                 }
+            }
+        });
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    [InlineData(2)]
+    public async Task TheComparison_KeepsANullKeyAndItsEmptyKeyPartnerApart_WhenBothMakeTheTopHundredInBothWindows(int twin)
+    {
+        var (seed, sql, keyColumns, expected) = twin switch
+        {
+            0 => (QueryStatsNullEmptySeedSql, ViewerDataService.QueryStatsComparisonSql, 2, new[] { "dbA|<null>", "dbA|", "<null>|hC", "|hC", "<null>|<null>", "|" }),
+            1 => (QueryStoreNullEmptySeedSql, ViewerDataService.QueryStoreComparisonSql, 2, new[] { "dbA|<null>", "dbA|", "<null>|hC", "|hC", "<null>|<null>", "|" }),
+            _ => (ProcedureNullEmptySeedSql, ViewerDataService.ProcedureStatsComparisonSql, 3, new[] { "dbA|dbo|<null>", "dbA|dbo|", "<null>|dbo|pX", "|dbo|pX", "dbA|<null>|pX", "dbA||pX" }),
+        };
+        await RunLiveAsync(new[] { seed }, async (connection, ct) =>
+        {
+            /* the outer join is still a hash or merge FULL JOIN with both halves (Postgres refuses a FULL JOIN it cannot hash or merge). */
+            var plan = await ExplainAsync(connection, sql, AddComparisonParameters, ct);
+            Assert.Contains(Nodes(plan), n => Text(n, "Node Type") is "Hash Join" or "Merge Join" && Text(n, "Join Type") == "Full");
+
+            /* RunKeyedAsync adds each row under its key, so a fanned-out row (the same key twice) fails right there. */
+            var rows = await RunKeyedAsync(connection, sql, AddComparisonParameters, keyColumns, ct);
+            Assert.Equal(expected.OrderBy(k => k, StringComparer.Ordinal), rows.Keys);
+            for (var i = 0; i < expected.Length; i++)
+            {
+                /* each group is paired with its OWN baseline: the counts are 100 to 600 now and a tenth of that before, in key order of the seed. */
+                var current = (100 * (i + 1)).ToString(CultureInfo.InvariantCulture);
+                var baseline = (10 * (i + 1)).ToString(CultureInfo.InvariantCulture);
+                Assert.Equal(current, rows[expected[i]][3]);
+                Assert.Equal(baseline, rows[expected[i]][7]);
             }
         });
     }
