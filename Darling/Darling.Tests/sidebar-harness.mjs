@@ -77,8 +77,10 @@ const fleet = { cards, tags: forest };
 const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "sidebar-"));
 const out = {};
 try {
+  /* Copy the whole js tree (js/, js/pages/ and every subdirectory) rather than a hand-kept list (#5279): a page module that
+     another PR adds then needs no edit here. Only imported files load, so the rest are inert. */
+  fs.cpSync(jsDir, scratch, { recursive: true });
   fs.writeFileSync(path.join(scratch, "package.json"), '{ "type": "module" }');
-  for (const f of fs.readdirSync(jsDir)) if (f.endsWith(".js")) fs.copyFileSync(path.join(jsDir, f), path.join(scratch, f));
   const load = (rel) => import(pathToFileURL(path.join(scratch, rel)).href);
   const groups = await load("fleet-groups.js");
   const side = await load("sidebar.js");
