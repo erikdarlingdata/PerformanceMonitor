@@ -46,6 +46,8 @@
     <!-- The per-type argument table and its test-only probe tool, shared for the same reason: both SKUs run one
          table of values through the same real call path. -->
     <Compile Include="..\Darling\Darling.Tests\McpArgumentTypeRows.cs" Link="McpArgumentTypeRows.cs" />
+    <!-- #4348: the statement-filter canary plan and its needles, shared so both SKUs' plan tools are held to the same text. -->
+    <Compile Include="..\Darling\Darling.Tests\StatementScrubCanary.cs" Link="StatementScrubCanary.cs" />
   </ItemGroup>
 
   <ItemGroup>

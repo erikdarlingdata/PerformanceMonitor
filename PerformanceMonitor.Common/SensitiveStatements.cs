@@ -6,6 +6,9 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+using System;
+using System.Net;
+
 namespace PerformanceMonitor.Common;
 
 /// <summary>
@@ -73,4 +76,79 @@ public static partial class SensitiveStatements
     /// names. Fixed, so a reader never has to distinguish "withheld" from "not captured yet" by anything other
     /// than this literal.</summary>
     public const string PlaceholderText = "-- statement text withheld (#4348)";
+
+    /// <summary>What <see cref="Json"/> returns when it cannot read a result. Fixed, so a caller can tell a refusal
+    /// from withheld text, and never the input.</summary>
+    public const string JsonRefusal = "Output withheld: the sensitive-statement filter could not read this result.";
+
+    /// <summary>One read-time call may spend this long judging and parsing (the outermost <see cref="Xml"/> or
+    /// <see cref="Json"/> call; every nested value shares it). One value may still overrun by its own match
+    /// timeout, so a call is bounded by about 1.75 s.</summary>
+    internal static readonly TimeSpan ReadBudget = TimeSpan.FromMilliseconds(1500);
+
+    /// <summary>
+    /// Judges every value of a plan, report or event XML document (see <see cref="XmlCore"/>) and returns the SAME
+    /// instance when nothing is named. Never throws. A document the read cannot finish inside its budget comes back
+    /// as <see cref="PlaceholderText"/>.
+    /// </summary>
+    /// <param name="xml">The document or fragment.</param>
+    /// <param name="maxOutputChars">The caller will cut the result at this length; work stops once nothing before
+    /// the cut can change.</param>
+    public static string? Xml(string? xml, int maxOutputChars = int.MaxValue) =>
+        string.IsNullOrEmpty(xml) ? xml : Xml(xml, new JudgeBudget(ReadBudget), maxOutputChars);
+
+    /// <summary>
+    /// Judges every string (and key) of a whole tool result (see <see cref="JsonCore"/>) and returns the SAME
+    /// instance when nothing is named. Never throws: a result it cannot read comes back as
+    /// <see cref="JsonRefusal"/>, not as the input.
+    /// </summary>
+    public static string Json(string output) => Json(output, new JudgeBudget(ReadBudget));
+
+    /// <summary><see cref="Xml(string?, int)"/> under a budget the caller owns, so one outermost call can share it
+    /// across every value it judges.</summary>
+    internal static string? Xml(string? xml, JudgeBudget budget, int maxOutputChars = int.MaxValue)
+    {
+        if (string.IsNullOrEmpty(xml)) return xml;
+        try
+        {
+            return XmlCore(
+                xml,
+                value => IsNamedUnder(budget, value),
+                () => budget.Spent,
+                PlaceholderText,
+                budget.AddElapsed,
+                maxOutputChars);
+        }
+#pragma warning disable CA1031 // fail closed
+        catch (Exception)
+#pragma warning restore CA1031
+        {
+            return PlaceholderText;
+        }
+    }
+
+    /// <summary><see cref="Json(string)"/> under a budget the caller owns.</summary>
+    internal static string Json(string output, JudgeBudget budget) =>
+        JsonCore(output, value => TextUnder(budget, value), value => Xml(value, budget), JsonRefusal);
+
+    /// <summary>True when <paramref name="value"/>, or its HTML-decoded form, is named or not judged in time.</summary>
+    private static bool IsNamedUnder(JudgeBudget budget, string value) =>
+        budget.Judge(value) != Verdict.Clean
+        || (value.Contains('&', StringComparison.Ordinal) && budget.Judge(WebUtility.HtmlDecode(value)) != Verdict.Clean);
+
+    /// <summary><see cref="Text(string?)"/> under a budget: a spent budget or a failed match gives the marker.</summary>
+    private static string? TextUnder(JudgeBudget budget, string? value)
+    {
+        if (string.IsNullOrEmpty(value)) return value;
+        try
+        {
+            return IsNamedUnder(budget, value) ? PlaceholderText : value;
+        }
+#pragma warning disable CA1031 // fail closed
+        catch (Exception)
+#pragma warning restore CA1031
+        {
+            return PlaceholderText;
+        }
+    }
 }

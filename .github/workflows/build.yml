@@ -1980,6 +1980,7 @@ jobs:
               - 'Darling/Darling.Tests/CSharpSourceWalker.cs'
               - 'Darling/Darling.Tests/McpInProcessHost.cs'
               - 'Darling/Darling.Tests/McpArgumentTypeRows.cs'
+              - 'Darling/Darling.Tests/StatementScrubCanary.cs'
       # How much of the Lite suite THIS leg runs, decided from the filter answers alone (no build needed):
       #   full  - a Lite, Lite.Tests, core or root path changed, or a Darling.Tests file that Lite.Tests
       #           compiles into itself, or the event is not a pull request (a push
