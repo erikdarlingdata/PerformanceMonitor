@@ -148,6 +148,29 @@ public sealed class AlertDelivererInventoryPinTests
         Assert.Equal(sends, filters);
     }
 
+    [Theory]
+    [InlineData("Task<PerformanceMonitor.Notifications.AlertDelivery?> SendConnectionAlert(")]
+    [InlineData("Task<PerformanceMonitor.Notifications.AlertDelivery?> SendAgAlert(")]
+    public void EachLiteDirectSendFiltersItsOwnTextAndSendsTheFilteredCopy(string signature)
+    {
+        /* #5320: both sends are WPF window methods no unit test can run, so this source pin is what fails when one of
+           them loses its filter. Checked per method (a count over the file is satisfied by a filter call in a third
+           place): the filter runs before the send, and the send reads the filtered copy, not the raw text. */
+        var text = CSharpSourceWalker.StripCommentsAndStrings(ReadRepoFile("Lite", "MainWindow.AlertEngine.cs"));
+        var start = text.IndexOf(signature, StringComparison.Ordinal);
+        Assert.True(start > 0, signature + " not found");
+        var body = CSharpSourceWalker.BraceBalanced(text, text.IndexOf('{', start));
+
+        var filter = body.IndexOf("filtered = AlertStatementFilter.Apply(", StringComparison.Ordinal);
+        var send = body.IndexOf("_emailAlertService.TrySendAlertEmailAsync(", StringComparison.Ordinal);
+        Assert.True(filter >= 0, signature + " does not run the statement filter");
+        Assert.True(send > filter, "the filter must run before the send in " + signature);
+
+        var call = body[send..];
+        Assert.Contains("filtered.ShortMessage", call, StringComparison.Ordinal);
+        Assert.Contains("filtered.DetailText", call, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void EveryResolutionRowIsBuiltThroughTheFilteredRecordBuilder()
     {
