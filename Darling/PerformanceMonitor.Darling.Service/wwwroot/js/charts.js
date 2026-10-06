@@ -860,7 +860,8 @@ function thresholdLine(x1, y1, x2, y2, lx, ly, anchor, text) {
 
 /** The series key below a time chart. onSelect (design D6): a grouped series' entry becomes an activatable (mouse +
  *  keyboard) control that calls onSelect(series.drill) to re-run the panel filtered to that series' group value.
- *  onLegend (#5247): when given, a click on an entry (on a drillable entry, its swatch) hides or shows that series,
+ *  onLegend (#5247): when given, a click on an entry (on a drillable entry, its swatch; the label keeps the drill, by
+ *  click or Enter / Space) hides or shows that series,
  *  a double-click or Shift+click isolates it (double-click on the isolated one shows all), and a hidden entry is
  *  marked off (struck through, hollow swatch, aria-pressed=false). While anything is hidden a "Show all" button
  *  follows the entries. onLegend(action, key) takes "toggle" | "isolate" | "all". */
@@ -872,12 +873,15 @@ function buildLegend(series, onSelect, hidden, onLegend) {
     const off = switchable && hiddenSet.has(s.key);
     const props = { class: "item" + (drillable ? " drillable" : "") + (switchable ? " switchable" : "") + (off ? " legend-off" : "") };
     const swatch = el("span", { class: "swatch", style: "background:" + normalizeColor(s.color) });
-    const label = el("span", { text: s.label });
+    /* A drillable entry drills from its label, and the label is a real control: Enter or Space on it drills, as a click
+       does. When the entry is also a switch the swatch is the switch and the label stays the drill, so the two gestures
+       never overlap; with no switch (no onLegend) the whole entry drills, as it did before the legend could hide a
+       series (#5247). */
+    const label = el("span", drillable && switchable ? { text: s.label, onActivate: () => onSelect(s.drill) } : { text: s.label });
     if (drillable) {
-      label.addEventListener("click", () => onSelect(s.drill));
       props.title = "Filter to " + s.label;
+      if (!switchable) props.onActivate = () => onSelect(s.drill);
     }
-    const hit = drillable ? null : "item";
     const wire = (node) => {
       node.setAttribute("role", "button");
       node.setAttribute("tabindex", "0");
@@ -893,17 +897,7 @@ function buildLegend(series, onSelect, hidden, onLegend) {
       node.addEventListener("dblclick", () => onLegend("isolate", s.key));
     };
     const node = el("span", props, [swatch, label]);
-    if (switchable) wire(hit ? node : swatch);
-    else if (drillable) {
-      node.setAttribute("role", "button");
-      node.setAttribute("tabindex", "0");
-      node.addEventListener("keydown", (e) => {
-        if (e.key === "Enter" || e.key === " ") {
-          e.preventDefault();
-          onSelect(s.drill);
-        }
-      });
-    }
+    if (switchable) wire(drillable ? swatch : node);
     return node;
   });
   if (onLegend && hiddenSet.size > 0) {
