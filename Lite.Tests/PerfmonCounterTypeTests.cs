@@ -443,7 +443,7 @@ public sealed class PerfmonCounterTypeReadTests : IClassFixture<SharedDuckDbFixt
         Directory.CreateDirectory(dbDir);
         var dbPath = Path.Combine(dbDir, "lite-v61.duckdb");
 
-        var initializer = new DuckDbInitializer(dbPath);
+        using var initializer = new DuckDbInitializer(dbPath);
         await initializer.InitializeAsync();
 
         using (var conn = new DuckDBConnection($"Data Source={dbPath}"))
@@ -480,7 +480,7 @@ public sealed class PerfmonCounterTypeReadTests : IClassFixture<SharedDuckDbFixt
             await ExecAsync(conn, "INSERT INTO schema_version (version) VALUES (61)");
         }
 
-        var upgraded = new DuckDbInitializer(dbPath);
+        using var upgraded = new DuckDbInitializer(dbPath);
         await upgraded.InitializeAsync();
 
         using (var conn = new DuckDBConnection($"Data Source={dbPath}"))

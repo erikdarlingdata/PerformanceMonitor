@@ -38,6 +38,8 @@ namespace Lite.Tests;
 [Collection("app-logger-statics")]
 public sealed class AlwaysOnXeReadOnlyIntentLiteTests : IDisposable
 {
+    private readonly List<DuckDbInitializer> _initializers = [];
+
     private const string Host = "intent.database.windows.net";
 
     private readonly string _tempDir;
@@ -54,6 +56,11 @@ public sealed class AlwaysOnXeReadOnlyIntentLiteTests : IDisposable
 
     public void Dispose()
     {
+        foreach (var initializer in _initializers)
+        {
+            initializer.Dispose();
+        }
+
         try
         {
             if (Directory.Exists(_tempDir))
@@ -227,6 +234,7 @@ public sealed class AlwaysOnXeReadOnlyIntentLiteTests : IDisposable
     private async Task<Rig> BuildRigAsync(bool readOnlyIntent)
     {
         var duckDb = new DuckDbInitializer(_dbPath);
+        _initializers.Add(duckDb);
         await duckDb.InitializeAsync();
 
         var server = new ServerConnection
