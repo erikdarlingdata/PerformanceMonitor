@@ -86,15 +86,15 @@ public sealed class DatabaseSizeLatestPlanShapeLiveTests
             foreach (var (name, id) in AllServers)
             {
                 var oldLatest = await ReadOldLatestAsync(connection, id, ct);
-                var newLatest = FormatViewerLatest(await viewer.GetDatabaseSizeLatestAsync(id, ct));
+                var newLatest = FormatViewerLatest(await viewer.GetDatabaseSizeLatestAsync(id, cancellationToken: ct));
                 Assert.Equal(oldLatest, newLatest);
 
                 var oldSummary = await ReadOldSummaryAsync(connection, id, ct);
-                var newSummary = FormatSummary(await viewer.GetDatabaseSizeSummaryAsync(id, 10, ct));
+                var newSummary = FormatSummary(await viewer.GetDatabaseSizeSummaryAsync(id, 10, cancellationToken: ct));
                 Assert.Equal(oldSummary, newSummary);
 
                 var oldGrowth = await ReadOldGrowthAsync(connection, id, now, ct);
-                var newGrowth = FormatGrowth(await viewer.GetStorageGrowthAsync(id, ct));
+                var newGrowth = FormatGrowth(await viewer.GetStorageGrowthAsync(id, cancellationToken: ct));
                 Assert.Equal(oldGrowth, newGrowth);
 
                 var oldMcp = await ReadOldMcpLatestAsync(connection, id, ct);
@@ -105,9 +105,9 @@ public sealed class DatabaseSizeLatestPlanShapeLiveTests
             /* Not vacuous: the current server actually has rows, the empty one actually has none, and the
                future server's resolved row really does carry a collection_time after "now" — the case a
                windowed probe or fallback bounded by DateTime.UtcNow would silently drop. */
-            Assert.NotEmpty(await viewer.GetDatabaseSizeLatestAsync(CurrentId, ct));
-            Assert.Empty(await viewer.GetDatabaseSizeLatestAsync(EmptyId, ct));
-            var futureRows = await viewer.GetDatabaseSizeLatestAsync(FutureId, ct);
+            Assert.NotEmpty(await viewer.GetDatabaseSizeLatestAsync(CurrentId, cancellationToken: ct));
+            Assert.Empty(await viewer.GetDatabaseSizeLatestAsync(EmptyId, cancellationToken: ct));
+            var futureRows = await viewer.GetDatabaseSizeLatestAsync(FutureId, cancellationToken: ct);
             Assert.NotEmpty(futureRows);
             var futureMcp = await DarlingObjectStatsReader.GetLatestDatabaseSizesAsync(postgres, FutureId, ct);
             Assert.All(futureMcp, r => Assert.True(r.CollectionTime > now, $"expected {r.CollectionTime:o} after {now:o}"));

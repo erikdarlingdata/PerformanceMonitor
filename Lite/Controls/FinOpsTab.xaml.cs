@@ -146,6 +146,23 @@ public partial class FinOpsTab : UserControl
             ServerSelector.SelectedIndex = 0;
     }
 
+    /// <summary>
+    /// #5312: the selected server's saved per-server database filter (the one the server tab's database picker persists in
+    /// <see cref="ServerConnection.ViewFilterDatabases"/>) as a reader argument: null (= every database, the unfiltered
+    /// statement) when nothing is chosen. Read from the manager's current entry, because the instance in the selector can be
+    /// older than a filter change made on the server tab. Call on the UI thread, before the read goes to the pool.
+    /// </summary>
+    private IReadOnlyList<string>? SelectedDatabaseFilter()
+    {
+        var shown = ServerSelector.SelectedItem as ServerConnection;
+        var current = shown == null ? null : _serverManager?.GetServerById(shown.Id) ?? shown;
+        return DatabaseFilterOf(current);
+    }
+
+    /// <summary>The filter of <paramref name="server"/> as a reader argument: null when it has none.</summary>
+    internal static IReadOnlyList<string>? DatabaseFilterOf(ServerConnection? server) =>
+        server == null || server.ViewFilterDatabases.Count == 0 ? null : server.ViewFilterDatabases.ToList();
+
     private int GetSelectedServerId()
     {
         if (ServerSelector.SelectedItem is ServerConnection server)
@@ -311,6 +328,9 @@ public partial class FinOpsTab : UserControl
                 data.MonthlyCost = _currentServerMonthlyCost;
 
                 // Compute free space % for health score from database sizes
+                /* #5312: deliberately NOT filtered. This read feeds the server's free-space health score, which is a
+                   server-wide figure, so the saved database filter must not move it. The Database Sizes grid and the
+                   size chart below take the filter. */
                 dbSizes = await Task.Run(() => _dataService.GetDatabaseSizeLatestAsync(serverId));
                 if (_loads.Superseded(nameof(LoadUtilizationAsync), gen)) return;
                 var totalStorageMb = DatabaseSizeRow.AllocatedTotalMb(dbSizes);
@@ -339,7 +359,8 @@ public partial class FinOpsTab : UserControl
                 topAvg = byAvg;
                 if (_loads.Superseded(nameof(LoadUtilizationAsync), gen)) return;
 
-                dbSizeSummary = await Task.Run(() => _dataService.GetDatabaseSizeSummaryAsync(serverId));
+                var sizeChartFilter = SelectedDatabaseFilter();
+                dbSizeSummary = await Task.Run(() => _dataService.GetDatabaseSizeSummaryAsync(serverId, 10, sizeChartFilter));
                 if (_loads.Superseded(nameof(LoadUtilizationAsync), gen)) return;
 
                 provisioningTrend = await Task.Run(() => _dataService.GetProvisioningTrendAsync(serverId));
@@ -591,7 +612,8 @@ public partial class FinOpsTab : UserControl
 
         try
         {
-            var data = await Task.Run(() => _dataService.GetDatabaseSizeLatestAsync(serverId));
+            var sizesFilter = SelectedDatabaseFilter();
+            var data = await Task.Run(() => _dataService.GetDatabaseSizeLatestAsync(serverId, sizesFilter));
             if (_loads.Superseded(nameof(LoadDatabaseSizesAsync), gen)) return;
 
             // Compute proportional cost shares
@@ -661,7 +683,8 @@ public partial class FinOpsTab : UserControl
 
         try
         {
-            var data = await Task.Run(() => _dataService.GetPvsStatsLatestAsync(serverId));
+            var pvsFilter = SelectedDatabaseFilter();
+            var data = await Task.Run(() => _dataService.GetPvsStatsLatestAsync(serverId, pvsFilter));
             if (_loads.Superseded(nameof(LoadPvsStatsAsync), gen)) return;
 
             _pvsStatsFilterMgr!.UpdateData(data);
@@ -681,7 +704,7 @@ public partial class FinOpsTab : UserControl
             var openTab = _openTabClock.Invoke(serverId);
             var dataService = _dataService;
             var (trend, collected) = await Task.Run(async () =>
-                (await dataService.GetPvsTrendAsync(serverId, DateTime.UtcNow.AddDays(-7)),
+                (await dataService.GetPvsTrendAsync(serverId, DateTime.UtcNow.AddDays(-7), pvsFilter),
                  await dataService.GetServerClockAsync(serverId)));
             if (_loads.Superseded(nameof(LoadPvsStatsAsync), gen)) return;
 
@@ -805,7 +828,8 @@ public partial class FinOpsTab : UserControl
 
         try
         {
-            var data = await Task.Run(() => _dataService.GetStorageGrowthAsync(serverId));
+            var storageGrowthFilter = SelectedDatabaseFilter();   // #5312: UI thread, before the read goes to the pool
+            var data = await Task.Run(() => _dataService.GetStorageGrowthAsync(serverId, storageGrowthFilter));
             if (_loads.Superseded(nameof(LoadStorageGrowthAsync), gen)) return;
             _storageGrowthFilterMgr!.UpdateData(data);
             _storageGrowthNeedReload = data.Count == 0;
