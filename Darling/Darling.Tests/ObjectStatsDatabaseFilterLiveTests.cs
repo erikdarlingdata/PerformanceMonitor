@@ -178,6 +178,17 @@ public sealed class ObjectStatsDatabaseFilterLiveTests
             Assert.Contains("for the chosen databases, or for any other database on this server", bareFiltered.GetProperty("message").GetString(), StringComparison.Ordinal);
             Assert.DoesNotContain("chosen databases", bareUnfiltered.GetProperty("message").GetString(), StringComparison.Ordinal);
 
+            /* #5372 (r2 Low): a latest snapshot that holds an index with NO contention anywhere is a true negative, `empty`
+               (the collector looked); only a server with no snapshot at all stays `unavailable` above. Unfiltered and
+               filtered answer alike, and the filtered sentence names its scope. */
+            await PlantIndexAsync(connection, ct, serverId, serverName, now, A, "IX_quiet", waitMs: 0, reads: 5);
+            var quietUnfiltered = JsonDocument.Parse(await DarlingMcpObjectStatsTools.GetObjectLocking(postgres, serverName)).RootElement;
+            Assert.Equal("empty", quietUnfiltered.GetProperty("status").GetString());
+            Assert.Equal($"No lock/latch contention on {serverName} at the latest snapshot.", quietUnfiltered.GetProperty("message").GetString());
+            var quietFiltered = JsonDocument.Parse(await DarlingMcpObjectStatsTools.GetObjectLockingCoreAsync(postgres, serverName, 50, null, null, ct, databases: DatabaseFilter.One(A))).RootElement;
+            Assert.Equal("empty", quietFiltered.GetProperty("status").GetString());
+            Assert.Equal($"No lock/latch contention in database '{A}' or in any other database on {serverName} at the latest snapshot.", quietFiltered.GetProperty("message").GetString());
+
             /* Contention exists, but only in C: a filter on A and B looked and found nothing, which is "empty", not "unavailable". */
             await PlantIndexAsync(connection, ct, serverId, serverName, now, C, "IX_c1", waitMs: 900, reads: 0);
 
