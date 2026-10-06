@@ -41,6 +41,16 @@ public sealed class FinOpsDatabaseSizesViewTests
         Assert.Contains("database_sizes", DarlingMcpFinOpsTools.Views);
     }
 
+    /* #5238: index_analysis and storage_growth's databases level take a limit up to 500 too, and storage_growth reads the default 10 as 50 the way
+       this view reads it as 70, so the guide no longer calls its own ceiling "this view only". */
+    [Fact]
+    public void TheGuide_NamesTheDefaultMeaningSeventy_AndNoLongerCallsTheCeilingThisViewOnly()
+    {
+        var guide = DarlingMcpFinOpsTools.DatabaseSizesViewGuide;
+        Assert.DoesNotContain("this view only", guide, StringComparison.Ordinal);
+        Assert.Contains("limit 11 to 500 lists that many (the default 10 means 70)", guide, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void ADefaultCall_OnALargeStore_StaysUnderTheResponseTarget()
     {

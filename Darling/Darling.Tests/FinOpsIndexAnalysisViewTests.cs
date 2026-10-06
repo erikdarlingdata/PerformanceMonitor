@@ -99,6 +99,17 @@ public sealed class FinOpsIndexAnalysisViewTests
         Assert.Contains("in full with no size cap", guide, StringComparison.Ordinal);
     }
 
+    /* #5238: a limit of 500 is a 0.45 to 3.5 MB answer (a recommendation is about 900 bytes with typical names, 2 KB with long ones, 7 KB with
+       full_text on wide indexes) and the MCP layer never trims an answer (#4198), so the guide tells a caller what asking for 500 costs. */
+    [Fact]
+    public void Guide_SaysHowBigAnAnswerAtLimit500Is_AtTypicalLongAndFullTextWidths()
+    {
+        var guide = DarlingMcpFinOpsTools.IndexAnalysisViewGuide;
+        Assert.Contains(
+            "At limit 500 the answer is about 0.45 MB with typical names, around 1 MB with long names, and up to about 3.5 MB with full_text on wide indexes; use database_name or a smaller limit for less.",
+            guide, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void RecommendationOrder_IsSizeThenFullNameChain_SoEqualRowsOrderByIndexName()
     {

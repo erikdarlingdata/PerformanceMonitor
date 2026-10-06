@@ -77,6 +77,13 @@ public sealed class FinOpsTabStorageGrowthPageTests
         // Pins the databases-level read: view and the 24 hours it keeps (the databases level ignores the window).
         Assert.Contains("const params = { server, view: \"storage_growth\", hours: HOURS };", tab);
         Assert.Matches("(?m)^const HOURS = 24;$", tab);
+        // Pins the databases-level limit (#5238): the 500 the service honours at this level (MaxStorageGrowthDatabaseRows), not its default top 50.
+        Assert.Contains("if (state.level === \"databases\") params.limit = DATABASE_LIMIT;", tab);
+        var databaseLimit = Regex.Match(tab, "(?m)^const DATABASE_LIMIT = (\\d+);$");
+        var serviceMax = Regex.Match(ToolSource(), "internal const int MaxStorageGrowthDatabaseRows = (\\d+);");
+        Assert.True(databaseLimit.Success && serviceMax.Success);
+        Assert.Equal(500, int.Parse(serviceMax.Groups[1].Value));
+        Assert.Equal(serviceMax.Groups[1].Value, databaseLimit.Groups[1].Value);
         // Pins the objects-level read: the database plus the desktop's top 20, the most the view allows.
         Assert.Contains("if (state.level === \"objects\") Object.assign(params, { database_name: state.database, limit: OBJECT_LIMIT, hours: state.days * 24 });", tab);
         Assert.Matches("(?m)^const OBJECT_LIMIT = 20;$", tab);
