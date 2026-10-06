@@ -96,6 +96,11 @@ internal static class DarlingDefaultTraceReader
     /// <c>collection_time</c>, which this event-time window alone gives the planner nothing to exclude a chunk
     /// on (#4229). The real UTC event time is always ≤ <c>collection_time</c> (store UTC at collection), so the
     /// floor cannot drop a qualifying row.</para>
+    ///
+    /// <para>#5245: $5 is the chosen databases as ONE <c>text[]</c> (SQL NULL for every database, so the statement text
+    /// never changes with the selection): <c>database_name = ANY($5)</c>, a residual filter inside the window. An event
+    /// with no database name (a server-level event) is not in any chosen database, as on the desktop. Like the
+    /// window, it is applied in SQL before the tool's page limit, so the page is the top N of the chosen databases.</para>
     /// </summary>
     public const string EventsByWindowSql = """
         WITH svr AS (
@@ -128,12 +133,21 @@ internal static class DarlingDefaultTraceReader
         AND   dte.event_time - make_interval(mins => svr.offset_minutes) >= $2 - interval '1 hour'
         AND   dte.event_time - make_interval(mins => svr.offset_minutes) <= $3 + interval '1 hour'
         AND   dte.collection_time >= $4
+        AND   ($5::text[] IS NULL OR dte.database_name = ANY($5))
         ORDER BY event_time_local DESC
         """;
 
-    /// <summary>Reads the stored Default Trace event rows over the window (newest first).</summary>
+    /// <summary>Reads the stored Default Trace event rows over the window (newest first), for every database.</summary>
+    public static Task<List<DefaultTraceEventRow>> ReadEventsAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default) =>
+        ReadEventsAsync(postgres, serverId, startUtc, endUtc, DatabaseFilter.All, cancellationToken);
+
+    /// <summary>
+    /// The same read over a SET of databases (#5245): <see cref="DatabaseFilter.All"/> is every database, and the
+    /// names are bound once as the <c>text[]</c> <see cref="EventsByWindowSql"/> reads as <c>$5</c>.
+    /// </summary>
     public static async Task<List<DefaultTraceEventRow>> ReadEventsAsync(
-        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default)
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, DatabaseFilter databases, CancellationToken cancellationToken = default)
     {
         var clock = await DarlingServerClockReader.ReadAsync(postgres, serverId, cancellationToken);
 
@@ -141,6 +155,7 @@ internal static class DarlingDefaultTraceReader
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddWindow(command, serverId, startUtc, endUtc);
         DarlingMcpReadParameters.AddTimestamp(command, EventWindowFloor.For(startUtc));
+        command.Parameters.Add(databases.Parameter());
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         return await ReadEventRowsAsync(reader, clock, startUtc, endUtc, cancellationToken);
     }

@@ -41,12 +41,29 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 public sealed class DarlingMcpDefaultTraceTools
 {
     [McpServerTool(Name = "get_default_trace_events"), Description("Gets significant server events from the built-in Default Trace: file auto-grow/shrink stalls over 1 second, ErrorLog writes at severity 16+ (a null severity also counts), schema DDL, security audits, and Server Memory Change, each tagged with category, over an event_time window ending at as_of, newest first. Config-change events are excluded: use get_server_config_changes / get_database_config_changes / get_trace_flag_changes instead. Empty: nothing significant in the window, or nothing collected in it; not_collected means this engine has no default trace (Azure SQL Database). <<GUIDE>> Gets significant server events captured by the built-in Default Trace (stored, read-only): data/log file auto-grow/shrink STALLS (over 1 second), severe ErrorLog writes (severity >= 16), schema DDL (object create/alter/delete), security audits (audit-change / DBCC / alter-trace), and Server Memory Change. Each event is tagged with a category. event_time is UTC here, the same frame as this tool's own as_of, so it lines up directly against get_collection_log's collection_time and list_servers' last_collection (the Default Trace stores its StartTime in the monitored server's local clock; this read de-skews it). NOTE: configuration-change events are intentionally excluded here to avoid double-counting — use get_server_config_changes / get_database_config_changes / get_trace_flag_changes for those. Not available on Azure SQL Database (no default trace there).")]
-    public static async Task<string> GetDefaultTraceEvents(
+    public static Task<string> GetDefaultTraceEvents(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history to retrieve. Default 24.")] int hours_back = 24,
         [Description("Maximum number of events to return. Default 100.")] int limit = 100,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        ILogger? logger = null,
+        CancellationToken cancellationToken = default) =>
+        GetDefaultTraceEvents(postgres, server_name, hours_back, limit, DatabaseFilter.All, as_of, logger, cancellationToken);
+
+    /// <summary>
+    /// The same read over a SET of databases (#5245). The MCP tool passes <see cref="DatabaseFilter.All"/> (it takes no
+    /// database name) until a later lane wires the list. The filter is applied in SQL, before the page limit, so the page and
+    /// <c>total_events</c> are the chosen databases' events. An empty answer under a filter says "for the chosen databases":
+    /// it is no verdict on a database the read did not look at, and the not_collected answer stays the server's own.
+    /// </summary>
+    internal static async Task<string> GetDefaultTraceEvents(
+        NpgsqlDataSource postgres,
+        string? server_name,
+        int hours_back,
+        int limit,
+        DatabaseFilter databases,
+        string? as_of,
         ILogger? logger = null,
         CancellationToken cancellationToken = default)
     {
@@ -61,7 +78,7 @@ public sealed class DarlingMcpDefaultTraceTools
             var now = windowEnd;
             var windowStart = now.AddHours(-hours_back);
             var all = await DarlingDefaultTraceReader.ReadEventsAsync(
-                postgres, resolved.ServerId, windowStart, now, cancellationToken);
+                postgres, resolved.ServerId, windowStart, now, databases, cancellationToken);
 
             /* The significant-set gate (shared with the viewer's System Events surface): every curated
                category is significant as collected, except ErrorLog which must clear the severity floor. */
@@ -93,7 +110,12 @@ public sealed class DarlingMcpDefaultTraceTools
                 windowStart, now, "default_trace_events", emptyAnswer: significant.Count == 0, logger: logger, cancellationToken: cancellationToken);
 
             if (significant.Count == 0)
-                return McpHelpers.Status("empty", "No significant default trace events found in the requested time range.", notice.AsHints());
+                return McpHelpers.Status(
+                    "empty",
+                    databases.IsAll
+                        ? "No significant default trace events found in the requested time range."
+                        : "No significant default trace events found in the requested time range for the chosen databases.",
+                    notice.AsHints());
 
             var events = significant.Take(limit).Select(r =>
             {

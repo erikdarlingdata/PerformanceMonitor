@@ -16,6 +16,7 @@ using System.Threading.Tasks;
 using ModelContextProtocol.Server;
 using Npgsql;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Storage;
 
 #pragma warning disable CA1707 // MCP tools use snake_case naming convention
 
@@ -75,10 +76,23 @@ public sealed class DarlingMcpConfigTools
     }
 
     [McpServerTool(Name = "get_database_config"), Description("Gets database-level configuration for all databases (sys.databases). Shows recovery model, RCSI, auto-shrink, auto-close, Query Store, compatibility level, page verify, and other settings. Critical for identifying misconfigured databases. LATEST IS A TIME: captured when the collector connects, not on a schedule - captured_at is the instant these settings are as of, and a database created or altered since is not reflected until the next connect.")]
-    public static async Task<string> GetDatabaseConfig(
+    public static Task<string> GetDatabaseConfig(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Filter to a specific database. Omit for all databases.")] string? database_name = null,
+        CancellationToken cancellationToken = default) =>
+        GetDatabaseConfig(postgres, server_name, DatabaseFilter.One(database_name), cancellationToken);
+
+    /// <summary>
+    /// The same read over a SET of databases (#5245). The MCP tool passes <see cref="DatabaseFilter.One"/> of its one
+    /// <c>database_name</c> until a later lane wires the list. <b>A whitespace-only name now means every database</b>
+    /// (it used to filter to nothing); any other name is matched as before, ignoring case, and a list matches any name in it.
+    /// "Nothing collected" is judged on the whole snapshot, before the filter.
+    /// </summary>
+    internal static async Task<string> GetDatabaseConfig(
+        NpgsqlDataSource postgres,
+        string? server_name,
+        DatabaseFilter databases,
         CancellationToken cancellationToken = default)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
@@ -93,9 +107,7 @@ public sealed class DarlingMcpConfigTools
                         "unavailable",
                         "No database configuration data available. The config collector may not have run yet.");
 
-            IEnumerable<DarlingCurrentConfigReader.DatabaseConfigReadRow> filtered = snapshot.Rows;
-            if (!string.IsNullOrEmpty(database_name))
-                filtered = filtered.Where(r => r.DatabaseName.Equals(database_name, StringComparison.OrdinalIgnoreCase));
+            var filtered = DarlingCurrentConfigReader.FilterToDatabases(snapshot.Rows, databases);
 
             var result = filtered.Select(r => new
             {
