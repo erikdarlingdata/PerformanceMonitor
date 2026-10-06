@@ -20,8 +20,9 @@
 --              config.config_mute_rules (the web dashboard's dedicated mute-rule endpoints, #3450 -- plus the
 --              two config_service beacon columns their bump trigger writes as the caller), and the single
 --              dismissed column of config.config_alert_log (the web Alert History dismiss, #4843), and INSERT
---              on config.config_monitored_servers (the web add-server route, #4843; its credential column
---              stays SELECT-carved). Every table is non-secret-keyed; over the web every write is gated server-side by the host's auth + seat model -- these
+--              on config.config_monitored_servers and no UPDATE on it: the web add-server route (#4843) inserts, and
+--              the web edit-server route (#5240) edits through config.edit_monitored_server, a function it may
+--              execute (its credential column stays SELECT-carved). Every table is non-secret-keyed; over the web every write is gated server-side by the host's auth + seat model -- these
 --              grants are only the floor beneath that gate. All other write actions degrade gracefully. The
 --              web dashboard's identity, and a locked-down Viewer's (postgres.connectAs = "viewer").
 --   mcp     -- the MCP server's identity: viewer's reads (the same secret-column carve), plus the MCP tools'
@@ -324,10 +325,155 @@ GRANT INSERT, UPDATE, DELETE ON config.server_tags TO viewer;
 GRANT INSERT, UPDATE, DELETE ON config.server_tag_map TO viewer;
 
 -- #4843: the web dashboard's add-server route runs the add_servers core as viewer, so viewer gets INSERT on
---     config_monitored_servers (never UPDATE or DELETE: the core never updates a row and no web route removes one). The
+--     config_monitored_servers (never DELETE: no web route removes a server). The
 --     credential column stays SELECT-carved from viewer, so it can write a password blob and never read one back;
 --     the write's bump trigger is served by the two config_service beacon columns granted above.
 GRANT INSERT ON config.config_monitored_servers TO viewer;
+
+-- #5240: the web dashboard's edit route (PATCH /api/servers/{id}) and the MCP edit_server tool change a monitored
+--     server through config.edit_monitored_server, created right below. Viewer holds NO UPDATE on the table: the
+--     function checks the optimistic token, works out for itself whether host or port moves, and refuses a move that
+--     keeps the stored secret on a SQL or service-principal row. RE-RUN THIS SCRIPT AFTER UPGRADING to the release that
+--     adds the edit route (the precedent is the V117 note above): a store whose roles predate the function answers
+--     every web edit with an error that says to re-run it. The function is owned by whoever runs the script, so run it
+--     as the store owner, the role that owns config.config_monitored_servers.
+--     REVOKE first, like the SELECT carve above: it takes away any UPDATE an earlier release granted viewer here, and
+--     revoking the table privilege also revokes every column privilege on it. A plain REVOKE removes only the privileges
+--     recorded as granted by the role that issues it (a superuser or the owner counts as the owner), so run this script
+--     as the same owner every time, as above.
+REVOKE UPDATE ON config.config_monitored_servers FROM viewer;
+
+CREATE OR REPLACE FUNCTION config.edit_monitored_server(
+   p_server_id integer,
+   p_expected_modified_at timestamp,
+   p_columns text[],
+   p_name text,
+   p_host text,
+   p_port integer,
+   p_database text,
+   p_read_only_intent boolean,
+   p_auth text,
+   p_username text,
+   p_secret text,
+   p_encrypt_mode text,
+   p_trust_server_certificate boolean,
+   p_multi_subnet_failover boolean,
+   p_monthly_cost_usd numeric)
+RETURNS TABLE (outcome text, new_modified_at timestamp)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = config, pg_catalog
+AS $fn$
+DECLARE
+   v_old_modified_at timestamp;
+   v_old_host text;
+   v_old_port integer;
+   v_old_auth text;
+   v_old_database text;
+   v_old_read_only_intent boolean;
+   v_old_username text;
+   v_old_encrypt_mode text;
+   v_old_trust_server_certificate boolean;
+   v_old_multi_subnet_failover boolean;
+   v_host text;
+   v_port integer;
+   v_auth text;
+   v_database text;
+   v_read_only_intent boolean;
+   v_username text;
+   v_encrypt_mode text;
+   v_trust_server_certificate boolean;
+   v_multi_subnet_failover boolean;
+   v_secret_auth boolean;
+   v_new_secret boolean;
+   v_secret_set boolean;
+   v_secret text;
+BEGIN
+   p_columns := COALESCE(p_columns, ARRAY[]::text[]);
+
+   SELECT s.modified_at, s.host, s.port, s.auth, s.database, s.read_only_intent, s.username, s.encrypt_mode,
+          s.trust_server_certificate, s.multi_subnet_failover
+   INTO v_old_modified_at, v_old_host, v_old_port, v_old_auth, v_old_database, v_old_read_only_intent,
+        v_old_username, v_old_encrypt_mode, v_old_trust_server_certificate, v_old_multi_subnet_failover
+   FROM config_monitored_servers AS s
+   WHERE s.server_id = p_server_id
+   FOR UPDATE OF s;
+
+   IF NOT FOUND THEN
+      RETURN QUERY SELECT 'not_found'::text, NULL::timestamp;
+      RETURN;
+   END IF;
+
+   -- The token is compared as it was read, to the microsecond.
+   IF v_old_modified_at IS DISTINCT FROM p_expected_modified_at THEN
+      RETURN QUERY SELECT 'conflict'::text, v_old_modified_at;
+      RETURN;
+   END IF;
+
+   v_host := CASE WHEN 'host' = ANY (p_columns) THEN btrim(p_host) ELSE v_old_host END;
+   v_port := CASE WHEN 'port' = ANY (p_columns) THEN p_port ELSE v_old_port END;
+   v_auth := CASE WHEN 'auth' = ANY (p_columns) THEN p_auth ELSE v_old_auth END;
+   v_database := CASE WHEN 'database' = ANY (p_columns) THEN p_database ELSE v_old_database END;
+   v_read_only_intent := CASE WHEN 'read_only_intent' = ANY (p_columns) THEN p_read_only_intent ELSE v_old_read_only_intent END;
+   v_username := CASE WHEN 'username' = ANY (p_columns) THEN p_username ELSE v_old_username END;
+   v_encrypt_mode := CASE WHEN 'encrypt_mode' = ANY (p_columns) THEN p_encrypt_mode ELSE v_old_encrypt_mode END;
+   v_trust_server_certificate := CASE WHEN 'trust_server_certificate' = ANY (p_columns) THEN p_trust_server_certificate ELSE v_old_trust_server_certificate END;
+   v_multi_subnet_failover := CASE WHEN 'multi_subnet_failover' = ANY (p_columns) THEN p_multi_subnet_failover ELSE v_old_multi_subnet_failover END;
+   v_secret_auth := lower(v_auth) IN ('sql', 'serviceprincipal');
+   v_new_secret := 'encrypted_password' = ANY (p_columns) AND COALESCE(p_secret, '') <> '';
+
+   -- Any change to how the row connects (host, port, database, read-only intent, authentication mode, username,
+   -- encryption, certificate trust, multi-subnet failover) never keeps the stored secret on a row that has one:
+   -- the same set the route refuses (#5240). The caller's word is not taken: the change is worked out from the row.
+   IF v_secret_auth AND NOT v_new_secret
+      AND (v_host IS DISTINCT FROM v_old_host
+           OR v_port IS DISTINCT FROM v_old_port
+           OR v_database IS DISTINCT FROM v_old_database
+           OR v_read_only_intent IS DISTINCT FROM v_old_read_only_intent
+           OR lower(v_auth) IS DISTINCT FROM lower(v_old_auth)
+           OR v_username IS DISTINCT FROM v_old_username
+           OR lower(v_encrypt_mode) IS DISTINCT FROM lower(v_old_encrypt_mode)
+           OR v_trust_server_certificate IS DISTINCT FROM v_old_trust_server_certificate
+           OR v_multi_subnet_failover IS DISTINCT FROM v_old_multi_subnet_failover) THEN
+      RETURN QUERY SELECT 'password_needed'::text, NULL::timestamp;
+      RETURN;
+   END IF;
+
+   -- A row whose authentication stores no secret never keeps one.
+   IF NOT v_secret_auth THEN
+      v_secret_set := true;
+      v_secret := NULL;
+   ELSIF 'encrypted_password' = ANY (p_columns) THEN
+      v_secret_set := true;
+      v_secret := p_secret;
+   ELSE
+      v_secret_set := false;
+      v_secret := NULL;
+   END IF;
+
+   UPDATE config_monitored_servers AS s
+   SET name = CASE WHEN 'name' = ANY (p_columns) THEN p_name ELSE s.name END,
+       host = v_host,
+       port = v_port,
+       database = v_database,
+       read_only_intent = v_read_only_intent,
+       auth = v_auth,
+       username = v_username,
+       encrypted_password = CASE WHEN v_secret_set THEN v_secret ELSE s.encrypted_password END,
+       encrypt_mode = v_encrypt_mode,
+       trust_server_certificate = v_trust_server_certificate,
+       multi_subnet_failover = v_multi_subnet_failover,
+       monthly_cost_usd = CASE WHEN 'monthly_cost_usd' = ANY (p_columns) THEN p_monthly_cost_usd ELSE s.monthly_cost_usd END,
+       modified_at = (now() AT TIME ZONE 'UTC')
+   WHERE s.server_id = p_server_id
+   RETURNING s.modified_at INTO new_modified_at;
+
+   outcome := 'saved';
+   RETURN NEXT;
+END;
+$fn$;
+REVOKE ALL ON FUNCTION config.edit_monitored_server(integer, timestamp, text[], text, text, integer, text, boolean, text, text, text, text, boolean, boolean, numeric) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION config.edit_monitored_server(integer, timestamp, text[], text, text, integer, text, boolean, text, text, text, text, boolean, boolean, numeric) TO viewer, mcp;
 
 -- 3e. Custom alert rules (#3285): the web dashboard's rule editor (/api/alerts, as viewer) and the MCP rule
 --     tools (as mcp) create, edit and delete config.custom_alert_rules -- non-secret rule JSON, the same

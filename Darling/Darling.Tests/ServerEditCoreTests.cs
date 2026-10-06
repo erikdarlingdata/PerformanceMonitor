@@ -63,6 +63,7 @@ public sealed class ServerEditCoreTests : IDisposable
         public int Writes { get; private set; }
         public List<Edit.EditColumnValue> LastSets { get; private set; } = [];
         public string? LastNewKey { get; private set; }
+        public string? LastActualKey { get; private set; }
         public Edit.ServerEditWriteKind WriteResult { get; set; } = Edit.ServerEditWriteKind.Written;
 
         public Task<Edit.ServerEditRow?> ReadRowAsync(int serverId, CancellationToken cancellationToken)
@@ -75,11 +76,12 @@ public sealed class ServerEditCoreTests : IDisposable
             Task.FromResult(OtherKeys.ToList());
 
         public Task<Edit.ServerEditWrite> WriteAsync(
-            int serverId, DateTime expectedModifiedAt, IReadOnlyList<Edit.EditColumnValue> sets, string? newStorageKey, CancellationToken cancellationToken)
+            int serverId, DateTime expectedModifiedAt, IReadOnlyList<Edit.EditColumnValue> sets, string? newStorageKey, string? actualStorageKey, CancellationToken cancellationToken)
         {
             Writes++;
             LastSets = sets.ToList();
             LastNewKey = newStorageKey;
+            LastActualKey = actualStorageKey;
             return Task.FromResult(new Edit.ServerEditWrite(WriteResult, Stamp.AddSeconds(1)));
         }
     }
@@ -206,27 +208,33 @@ public sealed class ServerEditCoreTests : IDisposable
     }
 
     [Fact]
-    public void TheUpdateSql_ListsOnlyTheColumnsGiven_CarriesTheTokenPredicate_AndNeverReadsTheSecretColumn()
+    public void TheFunctionCall_NamesOnlyTheColumnsGiven_PassesTheTokenUnrounded_AndLeavesTheRestNull()
     {
-        var sql = Edit.BuildEditUpdateSql(
-        [
-            new Edit.EditColumnValue("display_name", "name", NpgsqlDbType.Text, "x"),
-            new Edit.EditColumnValue("password", "encrypted_password", NpgsqlDbType.Text, "blob"),
-        ]);
+        var token = Stamp.AddTicks(7);
+        var parameters = Edit.BuildEditFunctionParameters(
+            41, token,
+            [
+                new Edit.EditColumnValue("display_name", "name", NpgsqlDbType.Text, "x"),
+                new Edit.EditColumnValue("password", "encrypted_password", NpgsqlDbType.Text, "blob"),
+            ]);
 
+        Assert.Equal(15, parameters.Count);
+        Assert.Equal(["name", "encrypted_password"], (string[])parameters[2].Value!);
+        Assert.Equal(token, (DateTime)parameters[1].Value!);
+        Assert.Equal("x", parameters[3].Value);
+        Assert.Equal("blob", parameters[10].Value);
+        Assert.Equal(DBNull.Value, parameters[4].Value);
+        Assert.DoesNotContain("encrypted_password", Edit.EditFunctionSql, StringComparison.Ordinal);
         Assert.Equal(
-            "UPDATE config_monitored_servers SET name = $3, encrypted_password = $4, modified_at = (now() AT TIME ZONE 'UTC') " +
-            "WHERE server_id = $1 AND modified_at = $2 RETURNING modified_at", sql);
-        Assert.DoesNotContain("COALESCE", sql, StringComparison.OrdinalIgnoreCase);
-        Assert.DoesNotContain("SET server_id", sql, StringComparison.Ordinal);
-        Assert.DoesNotContain("now()", sql.Replace("(now() AT TIME ZONE 'UTC')", ""), StringComparison.Ordinal);
+            Edit.EditColumnOfField.Values.Order(StringComparer.Ordinal).ToArray(),
+            Edit.EditFunctionColumns.Select(c => c.Column).Order(StringComparer.Ordinal).ToArray());
     }
 
     [Fact]
     public void ASetOnAnUnlistedColumn_ThrowsBeforeAnySql()
     {
         var ex = Assert.Throws<InvalidOperationException>(() =>
-            Edit.BuildEditUpdateSql([new Edit.EditColumnValue("x", "is_enabled", NpgsqlDbType.Boolean, false)]));
+            Edit.BuildEditFunctionParameters(41, Stamp, [new Edit.EditColumnValue("x", "is_enabled", NpgsqlDbType.Boolean, false)]));
         Assert.Contains("is_enabled", ex.Message, StringComparison.Ordinal);
     }
 
@@ -576,10 +584,10 @@ public sealed class ServerEditCoreTests : IDisposable
             ["database", "encrypt_mode", "encrypted_password", "host", "monthly_cost_usd", "multi_subnet_failover", "name", "port",
              "read_only_intent", "trust_server_certificate", "username"],
             columns);
-        var sql = Edit.BuildEditUpdateSql(store.LastSets);
-        foreach (var banned in new[] { "server_id =", "engine", "is_enabled", "excluded_databases", "remediation_", "plan_force_bot_enabled", "capture_plans" })
+        var listed = (string[])Edit.BuildEditFunctionParameters(41, Stamp, store.LastSets)[2].Value!;
+        foreach (var banned in new[] { "server_id", "engine", "is_enabled", "excluded_databases", "remediation_username", "remediation_encrypted_password", "plan_force_bot_enabled", "capture_plans" })
         {
-            Assert.DoesNotContain(banned, sql.Replace("WHERE server_id = $1", ""), StringComparison.Ordinal);
+            Assert.DoesNotContain(banned, listed);
         }
     }
 
@@ -643,5 +651,59 @@ public sealed class ServerEditCoreTests : IDisposable
         await Run(new FakeStore { Row = SqlRow() }, "{\"monthly_cost_usd\":10}", logger: quiet);
         await Run(new FakeStore { Row = SqlRow(), WriteResult = Edit.ServerEditWriteKind.Conflict }, "{\"monthly_cost_usd\":11}", logger: quiet);
         Assert.Empty(quiet.Lines);
+    }
+
+    /* ---------------- a move of host or port asks for the password BEFORE any connection test (#5240) ---------------- */
+
+    [Theory]
+    [InlineData("sql", "sqlserver", "{\"host\":\"beta-01.example.test\"}")]
+    [InlineData("serviceprincipal", "sqlserver", "{\"host\":\"beta-01.example.test\"}")]
+    [InlineData("sql", "postgres", "{\"port\":5433}")]
+    [InlineData("sql", "postgres", "{\"host\":\"beta-01.example.test\"}")]
+    public async Task AMoveOfHostOrPort_OnASecretRow_AsksForThePasswordBeforeTheTest_WithNoProbeAndNoWrite(string auth, string engine, string changes)
+    {
+        var probed = 0;
+        Edit.ServerProbe counting = (config, ct) =>
+        {
+            probed++;
+            return Reachable(config, ct);
+        };
+        var store = new FakeStore { Row = SqlRow(auth: auth, engine: engine) };
+
+        var answer = JsonNode.Parse(await Run(store, changes, counting))!;
+
+        Assert.Equal("invalid", answer["status"]!.GetValue<string>());
+        Assert.Equal(Edit.EditPasswordNeededText, answer["message"]!.GetValue<string>());
+        Assert.Equal(0, probed);
+        Assert.Equal(0, store.Writes);
+    }
+
+    [Fact]
+    public async Task AMoveOfHost_WithThePassword_TestsWithTheNewOne_AndSavesIt()
+    {
+        string? testedWith = null;
+        Edit.ServerProbe capturing = (config, ct) =>
+        {
+            testedWith = config.Password;
+            return Reachable(config, ct);
+        };
+        var store = new FakeStore { Row = SqlRow() };
+
+        var answer = await Run(store, "{\"host\":\"beta-01.example.test\",\"password\":\"" + Secret + "\"}", capturing);
+
+        Assert.Equal("updated", Status(answer));
+        Assert.Equal(Secret, testedWith);
+        Assert.Contains(store.LastSets, s => s.Column == "encrypted_password");
+    }
+
+    [Fact]
+    public async Task AStoreThatRefusesAMoveWithoutASecret_GivesTheSameAnswerThePlanGives()
+    {
+        var store = new FakeStore { Row = SqlRow(), WriteResult = Edit.ServerEditWriteKind.PasswordNeeded };
+
+        var answer = JsonNode.Parse(await Run(store, "{\"monthly_cost_usd\":5}"))!;
+
+        Assert.Equal("invalid", answer["status"]!.GetValue<string>());
+        Assert.Equal(Edit.EditPasswordNeededText, answer["message"]!.GetValue<string>());
     }
 }
