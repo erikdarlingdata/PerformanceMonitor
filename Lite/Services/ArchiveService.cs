@@ -78,6 +78,14 @@ public class ArchiveService
     internal static Func<Task>? BetweenPreserveCopyAndResetForTests { get; set; }
     internal long CompactionBatchInputBytes { get; set; } = ParquetCompaction.DefaultBatchInputBytes;
 
+    /// <summary>
+    /// The most disk space (bytes) the last compaction pass found a single month/table group would need for its
+    /// merged output: the on-disk size of the files it would read, which its temps match until the swap removes
+    /// them (#5377). 0 before the first pass. The volume warning at the start of each archive pass compares the
+    /// volume's free space with this and the database file's size.
+    /// </summary>
+    internal long LastCompactionLargestNeedBytes { get; private set; }
+
     /* Stand in for a process kill at the two points of the periodic export where one matters (#4720): the first
        fires after the table's journal is written and before the file is promoted, the second after the file is
        promoted and before its rows are deleted. A seam throws SimulatedKillException to abort the whole run the
@@ -209,6 +217,10 @@ public class ArchiveService
         {
         await RemoveUnfinishedResetExportsAndRefreshViewsAsync();
         await RecoverInterruptedArchiveWorkAsync();
+
+        /* Once per pass (#5377): the compaction at the end of this pass and the next CHECKPOINT both write
+           next to what they replace, so a volume with less free space than they need is named here. */
+        _duckDb.WarnIfDataVolumeLow(LastCompactionLargestNeedBytes);
 
         var cutoffDate = hotDataHours.HasValue
             ? DateTime.UtcNow.AddHours(-hotDataHours.Value)
@@ -939,6 +951,11 @@ COPY (
         Directory.CreateDirectory(spillDir);
         var spillDirSql = spillDir.Replace("\\", "/");
 
+        /* Groups this pass could not merge in full for want of free disk space (#5377), reported in ONE warning
+           after the loop rather than one per group. */
+        var lowSpaceGroups = new List<(string Month, string Table, long NeededBytes, long FreeBytes, long MergedBytes, long ReserveBytes, int HeldBack)>();
+        var largestNeedBytes = 0L;
+
         foreach (var ((month, table), files) in groups)
         {
             /* Best-effort: some tables can't be merged within the memory cap and
@@ -953,7 +970,7 @@ COPY (
                YYYYMM_table_ptNNN, with or without the imported_ prefix), there are no new per-cycle files
                to fold in, so skip. Otherwise a month that legitimately split into N part files (input over
                the per-batch budget) gets re-read and re-written on every archival cycle. */
-            if (files.All(f => Regex.IsMatch(Path.GetFileNameWithoutExtension(f), @"^(imported_)?\d{6}_.+?(_pt\d{3})?$")))
+            if (files.All(IsMergedFileName))
             {
                 continue;
             }
@@ -966,12 +983,12 @@ COPY (
             var batchOutputs = new List<(string TempPath, string FinalPath)>();
             try
             {
-                var sourcePaths = files
+                var groupPaths = files
                     .Select(f => Path.Combine(_archivePath, f).Replace("\\", "/"))
                     .ToList();
 
                 /* Sort smallest-first so size-budget batches fill cheaply at first. */
-                var sorted = sourcePaths
+                var sorted = groupPaths
                     .OrderBy(p => new FileInfo(p.Replace("/", "\\")).Length)
                     .ToList();
 
@@ -982,14 +999,80 @@ COPY (
                    proxy and they fit one batch with many files (#933). */
                 var batches = ParquetCompaction.BuildSizeBudgetedBatches(sorted, CompactionBatchInputBytes);
 
-                /* Plan the output names. With one batch we keep the existing YYYYMM_table.parquet name
-                   (backward compatible). With multiple batches we emit YYYYMM_table_ptNNN.parquet; the
-                   archive views glob both shapes, so readers see them all. */
+                /* Merge only what changes, and only what fits (#5377).
+
+                   A batch that holds one file already in its final YYYYMM_table or _ptNNN form is that file
+                   alone: the budget gave it a batch of its own because nothing else fits beside it. Merging it
+                   would read it and write it back unchanged, so a full month of a wide table (Query Store: 32
+                   files, 5.86 GiB in one report) was rewritten in full on EVERY hourly pass to fold in a few
+                   MB of new rows. Those files are left where they are.
+
+                   What is left is written to temps that all exist at once, next to the inputs they replace
+                   (the swap below removes the inputs only after every temp is in place). A batch whose input
+                   would not fit in the free space, with the headroom a merge needs, is held back for a later
+                   pass; its files stay as they are, readable, and the pass says so once, below. Batches are
+                   disjoint, so any subset of them is a complete merge of its own files. */
+                var wantedBatches = batches
+                    .Where(b => !(b.Count == 1 && IsMergedFileName(Path.GetFileName(b[0]))))
+                    .ToList();
+                var wantedBytes = wantedBatches.Sum(BatchInputBytes);
+                largestNeedBytes = Math.Max(largestNeedBytes, wantedBytes);
+
+                var freeBytes = _duckDb.AvailableFreeBytesProvider(_archivePath);
+                /* The database keeps writing while these merges run (WAL, CHECKPOINT growth), so the fit leaves
+                   the larger of the flat headroom and the database file's size free, not just 64 MiB. */
+                var reserveBytes = DataVolumeSpace.CompactionReserveBytes(_duckDb.DatabasePath);
+                var keptBytes = 0L;
+                batches = [];
+                foreach (var wanted in wantedBatches)
+                {
+                    var bytes = BatchInputBytes(wanted);
+                    if (freeBytes is long free && keptBytes + bytes + reserveBytes > free)
+                    {
+                        continue;
+                    }
+
+                    batches.Add(wanted);
+                    keptBytes += bytes;
+                }
+
+                if (freeBytes is long observedFree && batches.Count < wantedBatches.Count)
+                {
+                    lowSpaceGroups.Add((month, table, wantedBytes + reserveBytes, observedFree, keptBytes, reserveBytes, wantedBatches.Count - batches.Count));
+                }
+
+                if (batches.Count == 0)
+                {
+                    continue;
+                }
+
+                var sourcePaths = batches.SelectMany(b => b).ToList();
+
+                /* Plan the output names. With one batch and nothing left beside it we keep the existing
+                   YYYYMM_table.parquet name (backward compatible). Otherwise we emit YYYYMM_table_ptNNN.parquet,
+                   the lowest numbers no file that stays is using; the archive views glob both shapes, so readers
+                   see them all. An output may take the name of an input it consumes (a replacing output, which
+                   the swap handles); it never takes the name of a file that stays. */
+                var staying = groupPaths.Except(sourcePaths, StringComparer.OrdinalIgnoreCase)
+                    .Select(p => Path.GetFileName(p))
+                    .ToHashSet(StringComparer.OrdinalIgnoreCase);
+                var nextPart = 1;
                 for (var i = 0; i < batches.Count; i++)
                 {
-                    var finalName = batches.Count == 1
-                        ? $"{month}_{table}.parquet"
-                        : $"{month}_{table}_pt{i + 1:D3}.parquet";
+                    string finalName;
+                    if (batches.Count == 1 && staying.Count == 0)
+                    {
+                        finalName = $"{month}_{table}.parquet";
+                    }
+                    else
+                    {
+                        do
+                        {
+                            finalName = $"{month}_{table}_pt{nextPart++:D3}.parquet";
+                        }
+                        while (staying.Contains(finalName));
+                    }
+
                     var finalPath = Path.Combine(_archivePath, finalName).Replace("\\", "/");
                     batchOutputs.Add((TempPath: finalPath + ".tmp", FinalPath: finalPath));
                 }
@@ -1047,12 +1130,12 @@ COPY (
 
                 if (batches.Count == 1)
                 {
-                    _logger?.LogDebug("Compacted {Count} files into {Target}", files.Count, batchOutputs[0].FinalPath);
+                    _logger?.LogDebug("Compacted {Count} files into {Target}", sourcePaths.Count, batchOutputs[0].FinalPath);
                 }
                 else
                 {
                     _logger?.LogInformation("Compacted {Count} files into {Parts} part files for {Month}/{Table} (input too large for single batch)",
-                        files.Count, batches.Count, month, table);
+                        sourcePaths.Count, batches.Count, month, table);
                 }
             }
             catch (Exception ex)
@@ -1065,6 +1148,18 @@ COPY (
                     try { File.Delete(tempPath); } catch { /* best effort */ }
                 }
             }
+        }
+
+        LastCompactionLargestNeedBytes = largestNeedBytes;
+        if (lowSpaceGroups.Count > 0)
+        {
+            var details = string.Join("; ", lowSpaceGroups.Select(g => FormattableString.Invariant(
+                $"{g.Table} ({g.Month}) needs {g.NeededBytes:N0} bytes ({DataVolumeSpace.FormatBytes(g.NeededBytes)}) and {g.FreeBytes:N0} are free ({DataVolumeSpace.FormatBytes(g.FreeBytes)}), keeps {g.ReserveBytes:N0} bytes ({DataVolumeSpace.FormatBytes(g.ReserveBytes)}) free for the database, holds back {g.HeldBack} of its batches, ") +
+                (g.MergedBytes > 0 ? $"{DataVolumeSpace.FormatBytes(g.MergedBytes)} merged anyway" : "nothing merged")));
+            _logger?.LogWarning(
+                "Parquet compaction in {Folder} could not merge everything for lack of free disk space: {Details}. " +
+                "The files it left are merged on a later pass once the space is there; until then the archive keeps more files, and every read of those tables opens each one",
+                _archivePath, details);
         }
 
         if (totalMerged > 0)
@@ -1082,6 +1177,17 @@ COPY (
             }
         }
     }
+
+    /* A file already in its final monthly form: YYYYMM_table or YYYYMM_table_ptNNN, with or without the imported_
+       prefix. Compaction produces these, so a group made only of them has no new per-cycle files to fold in, and
+       a batch of one of them has nothing to merge. */
+    private static readonly Regex s_mergedFileNamePattern = new(@"^(imported_)?\d{6}_.+?(_pt\d{3})?$", RegexOptions.Compiled);
+
+    private static bool IsMergedFileName(string fileName) =>
+        s_mergedFileNamePattern.IsMatch(Path.GetFileNameWithoutExtension(fileName));
+
+    private static long BatchInputBytes(List<string> batch) =>
+        batch.Sum(p => new FileInfo(p.Replace("/", "\\")).Length);
 
     /* One month/table swap: the merged outputs about to replace the group's inputs. An output is "replacing"
        when a file already exists at its final name (the month's existing file or part file, itself one of the
@@ -1457,6 +1563,9 @@ COPY (
         {
             await RemoveUnfinishedResetExportsAndRefreshViewsAsync();
             await RecoverInterruptedArchiveWorkAsync();
+
+            /* The reset exports every table and checkpoints; the same once-per-pass volume check (#5377). */
+            _duckDb.WarnIfDataVolumeLow(LastCompactionLargestNeedBytes);
 
             var timestamp = DateTime.UtcNow.ToString("yyyyMMdd_HHmm");
 
