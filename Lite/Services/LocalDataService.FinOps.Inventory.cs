@@ -17,12 +17,16 @@ public partial class LocalDataService
 {
     /// <summary>
     /// Gets the latest database size snapshot per server per file (cross-server).
+    /// <para>#5312: <paramref name="databaseNames"/> is the saved per-server database filter (null or empty = every database,
+    /// the statement as it always read). It narrows the OUTER rows only: the newest snapshot is still the server's newest, so a
+    /// filter never changes which snapshot is read.</para>
     /// </summary>
-    public async Task<List<DatabaseSizeRow>> GetDatabaseSizeLatestAsync(int serverId)
+    public async Task<List<DatabaseSizeRow>> GetDatabaseSizeLatestAsync(int serverId, IReadOnlyList<string>? databaseNames = null)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
-        command.CommandText = @"
+        var dbClause = BuildDbInClause(databaseNames, "database_name", 2, out var dbValues);
+        command.CommandText = $@"
 SELECT
     database_name,
     file_type_desc,
@@ -44,10 +48,12 @@ AND   collection_time = (
     SELECT MAX(collection_time)
     FROM v_database_size_stats
     WHERE server_id = $1
-)
+){dbClause}
 ORDER BY database_name, file_type_desc, file_name";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        foreach (var db in dbValues)
+            command.Parameters.Add(new DuckDBParameter { Value = db });
 
         var items = new List<DatabaseSizeRow>();
         using var reader = await command.ExecuteReaderAsync();
@@ -81,13 +87,17 @@ ORDER BY database_name, file_type_desc, file_name";
     /// <summary>
     /// Gets per-database total allocated and used space for the utilization size chart.
     /// Aggregates across all files per database for the selected server.
+    /// <para>#5312: <paramref name="databaseNames"/> is the saved database filter (null or empty = every database). The top
+    /// <paramref name="topN"/> is taken among the chosen databases; the newest snapshot is still the server's newest.</para>
     /// </summary>
-    public async Task<List<DatabaseSizeSummaryRow>> GetDatabaseSizeSummaryAsync(int serverId, int topN = 10)
+    public async Task<List<DatabaseSizeSummaryRow>> GetDatabaseSizeSummaryAsync(int serverId, int topN = 10, IReadOnlyList<string>? databaseNames = null)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        command.CommandText = @"
+        /* $1 server, $2 topN, so the optional database list starts at $3. */
+        var dbClause = BuildDbInClause(databaseNames, "database_name", 3, out var dbValues);
+        command.CommandText = $@"
 SELECT
     database_name,
     SUM(total_size_mb) AS total_mb,
@@ -98,13 +108,15 @@ FROM v_database_size_stats
 WHERE server_id = $1
 AND   collection_time = (
     SELECT MAX(collection_time) FROM v_database_size_stats WHERE server_id = $1
-)
+){dbClause}
 GROUP BY database_name
 ORDER BY total_mb DESC
 LIMIT $2";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = topN });
+        foreach (var db in dbValues)
+            command.Parameters.Add(new DuckDBParameter { Value = db });
 
         var items = new List<DatabaseSizeSummaryRow>();
         using var reader = await command.ExecuteReaderAsync();

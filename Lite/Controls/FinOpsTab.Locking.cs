@@ -48,7 +48,9 @@ public partial class FinOpsTab : UserControl
 
         try
         {
-            var dbs = await Task.Run(() => _dataService.GetIndexLockingDatabasesAsync(serverId));
+            /* #5312: the box lists only databases inside the saved database filter. */
+            var lockingFilter = SelectedDatabaseFilter();
+            var dbs = await Task.Run(() => _dataService.GetIndexLockingDatabasesAsync(serverId, lockingFilter));
             if (_loads.Superseded(nameof(PopulateLockingDbSelectorAsync), gen)) return;
             var items = new List<string> { "All databases" };
             items.AddRange(dbs);
@@ -77,7 +79,9 @@ public partial class FinOpsTab : UserControl
         try
         {
             var db = SelectedLockingDb();
-            var data = await Task.Run(() => _dataService.GetIndexLockingAsync(serverId, 200, db));
+            /* #5312: the saved database filter and the box both apply. */
+            var lockingFilter = SelectedDatabaseFilter();
+            var data = await Task.Run(() => _dataService.GetIndexLockingAsync(serverId, 200, db, lockingFilter));
             if (_loads.Superseded(nameof(LoadIndexLockingGridAsync), gen)) return;
             ApplyLockingHeat(data);
             _indexLockingFilterMgr!.UpdateData(data);
@@ -88,7 +92,7 @@ public partial class FinOpsTab : UserControl
             string? optimizedLockingNote = null;
             try
             {
-                optimizedLockingNote = await Task.Run(() => _dataService.GetOptimizedLockingNoteAsync(serverId, db));
+                optimizedLockingNote = await Task.Run(() => _dataService.GetOptimizedLockingNoteAsync(serverId, db, lockingFilter));
             }
             catch (Exception noteEx)
             {
