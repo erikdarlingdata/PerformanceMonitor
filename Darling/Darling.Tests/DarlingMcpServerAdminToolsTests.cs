@@ -1182,7 +1182,7 @@ public sealed class DarlingMcpServerAdminToolsLivePostgresTests
                 $"\"encrypt_mode\":\"Strict\",\"trust_server_certificate\":true}}," +
                 $"{{\"host\":\"{winHost}\"}}," +
                 $"{{\"host\":\"{winHost.ToUpperInvariant()}\"}}]";
-            var added = await DarlingMcpServerAdminTools.AddServersAsync(postgres, json, SuccessProbe, ct);
+            var added = await DarlingMcpServerAdminTools.AddServersAsync(postgres, json, SuccessProbe, ct, TestKeyRings.Healthy);
             using (var doc = JsonDocument.Parse(added))
             {
                 Assert.Equal(3, doc.RootElement.GetProperty("requested").GetInt32());
@@ -1197,12 +1197,30 @@ public sealed class DarlingMcpServerAdminToolsLivePostgresTests
             var versionAfter = Convert.ToInt64(await ScalarAsync(connection, ct, "SELECT config_version FROM config_service WHERE id = 1"));
             Assert.True(versionAfter > versionBefore, "config_version should self-bump on a config_monitored_servers write");
 
-            /* SQL server: the password is DPAPI-ENCRYPTED at rest (not plaintext) and round-trips; the exposed TLS
-               options + auth landed as sent. (Darling.Tests is net10.0-windows, so DPAPI is available here.) */
+            /* SQL server: the password is SEALED at rest (not plaintext) and opens with the ring that sealed it, for the
+               connection settings the row holds (#5366); the exposed TLS options + auth landed as sent. */
             var storedSecret = await ScalarAsync(connection, ct, $"SELECT encrypted_password FROM config_monitored_servers WHERE server_id = {sqlId}") as string;
             Assert.False(string.IsNullOrEmpty(storedSecret));
             Assert.NotEqual(password, storedSecret);
-            Assert.Equal(password, DarlingSecrets.Unprotect(storedSecret!));
+            await using (var identityRead = new NpgsqlCommand(
+                $"SELECT {ServerConnectionIdentity.StoredColumns} FROM config_monitored_servers WHERE server_id = {sqlId}", connection))
+            await using (var identityRow = await identityRead.ExecuteReaderAsync(ct))
+            {
+                Assert.True(await identityRow.ReadAsync(ct));
+                var identity = ServerConnectionIdentity.FromStoredColumns(
+                    identityRow.IsDBNull(0) ? null : identityRow.GetString(0),
+                    identityRow.IsDBNull(1) ? null : identityRow.GetInt32(1),
+                    identityRow.IsDBNull(2) ? null : identityRow.GetString(2),
+                    identityRow.IsDBNull(3) ? null : identityRow.GetString(3),
+                    identityRow.GetBoolean(4),
+                    identityRow.IsDBNull(5) ? null : identityRow.GetString(5),
+                    identityRow.IsDBNull(6) ? null : identityRow.GetString(6),
+                    identityRow.IsDBNull(7) ? null : identityRow.GetString(7),
+                    identityRow.GetBoolean(8),
+                    identityRow.GetBoolean(9));
+                Assert.Equal(password, TestKeyRings.Healthy.Open(storedSecret!, PasswordBinding.ForServer(identity)));
+            }
+
             Assert.Equal("sql", await ScalarAsync(connection, ct, $"SELECT auth FROM config_monitored_servers WHERE server_id = {sqlId}") as string);
             Assert.Equal("Strict", await ScalarAsync(connection, ct, $"SELECT encrypt_mode FROM config_monitored_servers WHERE server_id = {sqlId}") as string);
             Assert.True((bool)(await ScalarAsync(connection, ct, $"SELECT trust_server_certificate FROM config_monitored_servers WHERE server_id = {sqlId}"))!);
