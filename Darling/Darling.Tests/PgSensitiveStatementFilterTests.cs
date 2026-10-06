@@ -69,7 +69,7 @@ public sealed class PgSensitiveStatementFilterTests
 
         Assert.Equal(1, hits);
         Assert.NotNull(onlyFile);
-        Assert.EndsWith("PgSensitiveStatementFilter.cs", onlyFile, StringComparison.Ordinal);
+        Assert.EndsWith("SensitiveStatements.cs", onlyFile, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -128,11 +128,28 @@ public sealed class PgSensitiveStatementFilterTests
     [Fact]
     public void SqlPredicate_MatchesTheLiteralExpectedSql()
     {
+        // The pattern is typed out by hand here (never built from the shared constants) so a change to the
+        // shared pattern fails this test until the expected text is updated on purpose. A1-A4 are the original
+        // alternatives, byte-identical; T1-T9 are the appended T-SQL alternatives (#4348).
+        const string gap = "([[:space:]]|/[*]([^*]|[*]+[^*/])*[*]+/|--[^[:cntrl:]]*)";
         const string expected =
-            "CASE WHEN c ~* '[[:<:]](create|alter)([[:space:]]|/[*]([^*]|[*]+[^*/])*[*]+/|--[^[:cntrl:]]*)+" +
-            "(role|user|group|subscription|server)[[:>:]]|[[:<:]]password[[:>:]]([[:space:]]|/[*]([^*]|[*]+[^*/])*[*]+/|" +
-            "--[^[:cntrl:]]*)*(=|to)?([[:space:]]|/[*]([^*]|[*]+[^*/])*[*]+/|--[^[:cntrl:]]*)*(e?''|u&''|[$][^0-9])|" +
-            "[[:<:]](pg)?password[[:space:]]*=[[:space:]]*[^$[:space:]]|[a-z][a-z0-9+.-]*://[^[:space:]/@:]+:[^[:space:]/@]+@' " +
+            "CASE WHEN c ~* '[[:<:]](create|alter)" + gap + "+(role|user|group|subscription|server)[[:>:]]" +
+            "|[[:<:]]password[[:>:]]" + gap + "*(=|to)?" + gap + "*(e?''|u&''|[$][^0-9])" +
+            "|[[:<:]](pg)?password[[:space:]]*=[[:space:]]*[^$[:space:]]" +
+            "|[a-z][a-z0-9+.-]*://[^[:space:]/@:]+:[^[:space:]/@]+@" +
+            "|[[:<:]](create|alter)" + gap + "+(login|credential)[[:>:]]" +
+            "|[[:<:]]scoped" + gap + "+credential[[:>:]]" +
+            "|[[:<:]]([a-z0-9_]*(password|passwd|pwd|secret)|key_source)[[:>:]]" + gap + "*(=|to)?" +
+            gap + "*(n?''|e''|u&''|0x|[$][^0-9])" +
+            "|[[:<:]]pwd[[:space:]]*=[[:space:]]*[^$@[:space:]]" +
+            "|[[:<:]](sp_addlogin|sp_password|sp_addlinkedsrvlogin|sp_addapprole|sp_approlepassword|sp_setapprole" +
+            "|sp_change_users_login|sp_adddistributor|sp_changedistributor_password|sp_adddistpublisher" +
+            "|sp_addsubscriber|sp_link_publication|sp_control_dbmasterkey_password|sp_xp_cmdshell_proxy_account)[[:>:]]" +
+            "|[[:<:]](encryptbypassphrase|decryptbypassphrase|decryptbykeyautocert|decryptbykeyautoasymkey" +
+            "|decryptbyasymkey|decryptbycert|signbycert|signbyasymkey|pwdencrypt|pwdcompare)[[:>:]]" +
+            "|[[:<:]]opendatasource[[:>:]]" +
+            "|[[:<:]]openrowset" + gap + "*[(]" + gap + "*n?''" +
+            "|[[:<:]][a-z0-9_]*(password|passwd|pwd|secret)(]|\")" + gap + "*=" + gap + "*(n?''|e''|u&''|0x)' " +
             "THEN '-- statement text withheld (#4348)' ELSE c END";
 
         Assert.Equal(expected, PgSensitiveStatementFilter.SqlPredicate("c"));

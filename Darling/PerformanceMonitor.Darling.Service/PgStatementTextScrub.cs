@@ -72,8 +72,10 @@ public static class PgStatementTextScrub
 
     /// <summary>Bumped when the shared pattern changes in a way that would redact more (or differently)
     /// than a prior run already covered, so a store that already ran this scrub runs it again rather than
-    /// trusting a stale "done".</summary>
-    public const int ScrubVersion = 1;
+    /// trusting a stale "done". Version 2: the shared pattern gained the T-SQL alternatives (#4348), which also
+    /// name more PostgreSQL text (a word ending in password or secret assigned a literal, a quoted
+    /// <c>"password" = '...'</c>), so every store re-scrubs once more.</summary>
+    public const int ScrubVersion = 2;
 
     /// <summary>The candidate read's deadline for one server's <c>pg_statement_text</c> batch.</summary>
     internal const int CandidateReadTimeoutSeconds = 300;

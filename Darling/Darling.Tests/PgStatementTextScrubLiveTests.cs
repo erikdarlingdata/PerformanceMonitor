@@ -194,6 +194,67 @@ public sealed class PgStatementTextScrubLiveTests
         Assert.Equal(PgStatementTextScrub.ScrubVersion.ToString(CultureInfo.InvariantCulture), markerValue);
     }
 
+    /// <summary>#4348 version 2: the shared pattern gained the T-SQL alternatives, so <c>ScrubVersion</c> is 2
+    /// and a store whose marker still says 1 (it ran the first scrub) runs the background job again. A
+    /// planted row the version-1 pattern missed (<c>"password" = 'x'</c>) is withheld by the re-run, a plain
+    /// row stays byte-identical, and the marker moves to 2.</summary>
+    [Fact]
+    public async Task AStoreMarkedVersionOneIsScrubbedAgain_WithTheWiderPattern_AndAPlainRowIsUntouched()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live #4348 version-2 statement-text re-scrub (it mints its own scratch database).");
+
+        Assert.Equal(2, PgStatementTextScrub.ScrubVersion);
+
+        var ct = TestContext.Current.CancellationToken;
+        const string widened = "UPDATE t SET \"password\" = 'x'";
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+
+        await using (var setupConnection = new NpgsqlConnection(scratch.ConnectionString))
+        {
+            await setupConnection.OpenAsync(ct);
+            await PgMigrations.MigrateAsync(setupConnection, ct);
+
+            await InsertStatementTextAsync(setupConnection, ServerA, 3001, widened, ct);
+            await InsertStatementTextAsync(setupConnection, ServerA, 3002, Neighbor, ct);
+
+            /* The marker a store that already ran the first scrub carries. */
+            await using var marker = new NpgsqlCommand(@"
+INSERT INTO collect.collector_state (server_id, collector_name, state_key, state_value, updated_at)
+VALUES ($1, $2, $3, '1', now()::timestamp)", setupConnection);
+            marker.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = DarlingObservability.FleetServerId });
+            marker.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = PgStatementTextScrub.StateCollectorName });
+            marker.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = PgStatementTextScrub.ScrubVersionStateKey });
+            await marker.ExecuteNonQueryAsync(ct);
+        }
+
+        await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        var run = await PgStatementTextScrub.RunAsync(postgres, logger: null, ct);
+        Assert.False(run.AlreadyDone);
+        Assert.Equal(1, run.StatementTextRowsUpdated);
+
+        await using var verifyConnection = new NpgsqlConnection(scratch.ConnectionString);
+        await verifyConnection.OpenAsync(ct);
+
+        Assert.Equal(PerformanceMonitor.Collectors.PgSensitiveStatementFilter.PlaceholderText,
+            await ScalarTextAsync(verifyConnection, "SELECT query_text FROM collect.pg_statement_text WHERE server_id = $1 AND queryid = $2", ServerA, 3001, ct));
+        Assert.Equal(Neighbor,
+            await ScalarTextAsync(verifyConnection, "SELECT query_text FROM collect.pg_statement_text WHERE server_id = $1 AND queryid = $2", ServerA, 3002, ct));
+
+        var markerValue = await ScalarTextAsync(
+            verifyConnection,
+            "SELECT state_value FROM collect.collector_state WHERE server_id = $1 AND collector_name = $2 AND state_key = $3",
+            DarlingObservability.FleetServerId, PgStatementTextScrub.StateCollectorName, PgStatementTextScrub.ScrubVersionStateKey, ct);
+        Assert.Equal("2", markerValue);
+
+        /* Once the marker is 2 the job is a no-op again. */
+        var again = await PgStatementTextScrub.RunAsync(postgres, logger: null, ct);
+        Assert.True(again.AlreadyDone);
+    }
+
     private static async Task<bool> ContainsSecretAsync(NpgsqlConnection connection, CancellationToken ct)
     {
         var countCommand = new NpgsqlCommand(
