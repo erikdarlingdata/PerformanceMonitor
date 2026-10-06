@@ -41,7 +41,7 @@
 
 import { el, makeActivatable, readTool, readToolWithinKeptHistory, keptWindowStrip, windowFloorStrip, mount, truncate, loadingStrip, errorStrip, readErrorStrip, emptyStrip, disclosure, noticeStrip, getPath, fmtMs, fmtRate, localTime, parseUtc, windowFromHours, daysText, queryWaitFilter, setQueryWaitFilter, waitIsLinked } from "../util.js";
 import { renderPanel, setPanelSignal, getPanelSignal, VIZ } from "../panels.js";
-import { zoomableLineChart, chartZoomScope, SERIES_COLORS, CATEGORICAL_COLORS, openServerTabAt } from "../charts.js";
+import { zoomableLineChart, chartZoomScope, SERIES_COLORS, CATEGORICAL_COLORS } from "../charts.js";
 import { multiPicker, mergeSeriesRows } from "../multi-picker.js";
 import { pgPlanColumn } from "./pg-plan-viewer.js";
 import { READ_FIELDS } from "../read-fields.js";
@@ -3076,9 +3076,11 @@ function waitLinkCell(server, row, timeKey) {
     title: "Show the active queries waiting on " + wait.trim() + (tMs == null ? "" : " around this time"),
     text: wait,
   });
-  btn.addEventListener("click", () => {
+  btn.addEventListener("click", async () => {
     note.textContent = "";
-    openServerTabAt(server, tMs, "queries", {
+    /* Loaded on the click, not at import: a page that stubs the chart module for a test needs no export it never uses. */
+    const { openServerTabAt } = await import("../charts.js");
+    await openServerTabAt(server, tMs, "queries", {
       beforeRoute: () => setQueryWaitFilter(server, wait),
       say: (msg) => {
         note.textContent = msg;

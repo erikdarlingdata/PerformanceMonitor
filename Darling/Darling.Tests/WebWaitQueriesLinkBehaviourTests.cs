@@ -63,7 +63,7 @@ public sealed class WebWaitQueriesLinkBehaviourTests
     }
 
     private static string Js(params string[] rel) =>
-        ReadRepoFileLf(Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", Path.Combine(rel)));
+        ReadRepoFile(Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", Path.Combine(rel)));
 
     private static string[] Strings(JsonElement e) => e.EnumerateArray().Select(x => x.GetString()!).ToArray();
 

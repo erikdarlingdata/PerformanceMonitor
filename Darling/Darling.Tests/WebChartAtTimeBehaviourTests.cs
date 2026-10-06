@@ -168,7 +168,9 @@ public sealed class WebChartAtTimeBehaviourTests
 
         // The panel titles charts.js names are the grids the tabs really have: a rename would leave the scroll finding nothing.
         Assert.Contains("panel: \"Active Queries\"", charts);
-        Assert.Matches(@"table\(\s*""Active Queries"",", Tab("queries"));
+        // The Queries tab builds the grid through activeQueriesPanel (#5235), which holds the table().
+        Assert.Contains("activeQueriesPanel(server, ctx)", Tab("queries"));
+        Assert.Matches(@"table\(\s*""Active Queries"",", tabs);
         var blocking = Tab("blocking");
         Assert.Contains("panel: \"Blocking\"", charts);
         Assert.Matches(@"table\(\s*""Blocking"",", blocking);
