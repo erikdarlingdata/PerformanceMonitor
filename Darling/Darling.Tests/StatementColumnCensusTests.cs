@@ -430,9 +430,11 @@ public sealed class StatementColumnCensusTests
             ("Darling/PerformanceMonitor.Darling.Service/OversizedPlanBacklogSweep.cs", "OversizedPlanBacklogSweep", "FetchOnePlanAsync")),
 
         // The slow-read log stores up to 4 KB of a slow call's arguments (a plan or a statement a caller passed).
-        new("slow-read log: the MCP filter's offer", "plan section 1 (slow-read log)", "L7 and L8", true,
-            ("Darling/PerformanceMonitor.Darling.Service/Mcp/McpToolLatencyFilter.cs", "McpToolLatencyFilter", "OfferSlow")),
-        new("slow-read log: the log's offer", "plan section 1 (slow-read log)", "L7 and L8", true,
+        // L7: every surface's offer ends in SlowReadLog.Offer, which judges the arguments before they are stored.
+        new("slow-read log: the MCP filter's offer", "plan section 1 (slow-read log)", "L7 and L8", false,
+            ("Darling/PerformanceMonitor.Darling.Service/Mcp/McpToolLatencyFilter.cs", "McpToolLatencyFilter", "OfferSlow"),
+            ("Darling/PerformanceMonitor.Darling.Service/SlowReadLog.cs", "SlowReadLog", "Offer")),
+        new("slow-read log: the log's offer", "plan section 1 (slow-read log)", "L7 and L8", false,
             ("Darling/PerformanceMonitor.Darling.Service/SlowReadLog.cs", "SlowReadLog", "Offer")),
     };
 

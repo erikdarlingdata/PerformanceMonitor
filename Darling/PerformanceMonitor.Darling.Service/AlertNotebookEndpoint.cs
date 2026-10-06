@@ -245,7 +245,8 @@ internal static partial class AlertNotebookEndpoint
                 body["scope_server"] = scopeServer;
             }
 
-            return Results.Text(body.ToJsonString(), "application/json");
+            /* #4348: the notebook's own body carries the alert row's text, so it is swept whole. */
+            return DarlingWebStatementSweep.JsonText(body, "/api/alert-notebook", logger, 0);
         });
     }
 
