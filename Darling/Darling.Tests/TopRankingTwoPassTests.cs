@@ -90,7 +90,7 @@ public sealed class TopRankingTwoPassTests
     /// <summary>Every ORDER BY that decides which groups survive or in what order (the latest-text lookup's is not one).</summary>
     private static List<string> RankingOrderBys(string sql) =>
         Regex.Matches(sql, @"(?m)^\s*ORDER BY ([^\r\n]+)").Select(m => m.Groups[1].Value.Trim())
-            .Where(o => !o.StartsWith("collection_time", StringComparison.Ordinal)).ToList();
+            .Where(o => !o.StartsWith("collection_time", StringComparison.Ordinal) && !o.StartsWith("q.", StringComparison.Ordinal)).ToList();
 
     [Theory]
     [MemberData(nameof(AllFive))]
@@ -121,7 +121,7 @@ public sealed class TopRankingTwoPassTests
     {
         var sql = Sql(name);
         var p1 = sql[sql.IndexOf("winners AS MATERIALIZED (", StringComparison.Ordinal)..];
-        var limitAt = p1.IndexOf("LIMIT $4", StringComparison.Ordinal);
+        var limitAt = p1.IndexOf(name == "TopProceduresSql" ? "LIMIT $4" : "LIMIT $7", StringComparison.Ordinal);
         p1 = p1[..p1.IndexOfAny(new[] { '\r', '\n' }, limitAt)];   /* through the end of pass 1's LIMIT line */
         Assert.DoesNotContain("COUNT(DISTINCT", p1, StringComparison.Ordinal);
         Assert.DoesNotContain("MAX(plan_handle)", p1, StringComparison.Ordinal);
@@ -140,8 +140,9 @@ public sealed class TopRankingTwoPassTests
         Assert.Contains(name == "TopQueriesSql"
             ? "GROUP BY database_name, query_hash, host_object_name"
             : "CASE WHEN host_object_name IS NULL THEN query_hash END", p1, StringComparison.Ordinal);
-        Assert.EndsWith("LIMIT $4 + 5", p1.TrimEnd(), StringComparison.Ordinal);   /* the over-fetch stays in pass 1, and only there */
-        Assert.Single(Regex.Matches(sql, Regex.Escape("LIMIT $4 + 5")));
+        Assert.EndsWith("LIMIT $7", p1.TrimEnd(), StringComparison.Ordinal);   /* the candidate limit (#5313) stays in pass 1, and only there */
+        Assert.Single(Regex.Matches(sql, Regex.Escape("LIMIT $7")));
+        Assert.DoesNotContain("+ 5", sql, StringComparison.Ordinal);   /* no fixed over-fetch: TopFill picks the candidate limit */
     }
 
     [Theory]
@@ -156,8 +157,9 @@ public sealed class TopRankingTwoPassTests
         })
         {
             var text = filter.Replace("{TimescaleSupport.IntervalHonestSourceFilter}", "sample_interval_seconds IS DISTINCT FROM 0", StringComparison.Ordinal);
-            /* once per pass; the queries' latest-text lookup also scopes by server */
-            Assert.Equal(filter == "server_id = $1" && name != "TopProceduresSql" ? 3 : 2, Regex.Matches(sql, Regex.Escape(text)).Count);
+            /* once per pass; the queries' one latest-text lookup (#5309) scopes by server and reads the window too */
+            var lookup = name != "TopProceduresSql" && (filter == "server_id = $1" || filter.StartsWith("collection_time", StringComparison.Ordinal));
+            Assert.Equal(lookup ? 3 : 2, Regex.Matches(sql, Regex.Escape(text)).Count);
         }
 
         var p2 = sql[sql.IndexOf("JOIN winners AS w", StringComparison.Ordinal)..];
@@ -189,10 +191,13 @@ public sealed class TopRankingTwoPassTests
             return;
         }
 
-        var lateral = sql.IndexOf("LEFT JOIN LATERAL", StringComparison.Ordinal);
+        /* #5309: the text is ONE lookup over the winners (the latest_text CTE), joined to the ranked rows once. */
+        Assert.DoesNotContain("LATERAL", sql, StringComparison.Ordinal);
+        var lookup = sql.IndexOf("latest_text AS (", StringComparison.Ordinal);
+        var lookupJoin = sql.IndexOf("LEFT JOIN latest_text AS t", StringComparison.Ordinal);
         var waitfor = sql.IndexOf("NOT LIKE 'WAITFOR%'", StringComparison.Ordinal);
         var finalLimit = sql.LastIndexOf("LIMIT $4", StringComparison.Ordinal);
-        Assert.True(pass2 < lateral && lateral < waitfor && waitfor < finalLimit, "text lookup, WAITFOR trim and LIMIT $4 follow pass 2");
+        Assert.True(pass2 < lookup && lookup < lookupJoin && lookupJoin < waitfor && waitfor < finalLimit, "text lookup, WAITFOR trim and LIMIT $4 follow pass 2");
         Assert.Single(Regex.Matches(sql, @"LIMIT \$4\s*$", RegexOptions.Multiline));
     }
 }

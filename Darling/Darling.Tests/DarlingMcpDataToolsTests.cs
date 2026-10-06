@@ -634,11 +634,15 @@ public sealed class DarlingMcpDataToolsSurfaceAndSqlTests
            base table's inline query_text is NULL on every row written since. ("FROM v_query_stats" does not
            contain "FROM query_stats", so these two assertions name two different relations.) */
         var rankedRead = sql.IndexOf("FROM query_stats", StringComparison.Ordinal);
-        var lateral = sql.IndexOf("LEFT JOIN LATERAL", StringComparison.Ordinal);
-        var textRead = sql.IndexOf("FROM v_query_stats", StringComparison.Ordinal);
+        var lookupAt = sql.IndexOf("latest_text AS (", StringComparison.Ordinal);
+        var dimRead = sql.IndexOf("query_text_dim", StringComparison.Ordinal);
         Assert.True(rankedRead >= 0, "the ranked CTE must aggregate the base query_stats table");
-        Assert.True(textRead > lateral && lateral > rankedRead,
-            "the base-table aggregate comes first; the resolving view is read by the latest-text LATERAL");
+        /* #5309: the one latest-text lookup resolves the dimension itself (what v_query_stats' COALESCE does) for
+           the newest row only, instead of a per-row LATERAL over the view. */
+        Assert.DoesNotContain("LATERAL", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("FROM v_query_stats", sql, StringComparison.Ordinal);
+        Assert.True(dimRead > lookupAt && lookupAt > rankedRead,
+            "the base-table aggregate comes first; the dimension is read by the one latest-text lookup");
 
         Assert.Contains("SUM(delta_worker_time)", sql, StringComparison.Ordinal);
         Assert.Contains("SUM(delta_elapsed_time)", sql, StringComparison.Ordinal);

@@ -102,7 +102,7 @@ public sealed class TopRankingTests
             Assert.Equal(cpuSql.Replace("$RANK$", metric, StringComparison.Ordinal), sql);
         }
 
-        Assert.Contains("LIMIT $4 + 5", TopRankings.Apply(DarlingDataReader.TopQueriesSql, ranking, hourly: false), StringComparison.Ordinal);
+        Assert.Contains("LIMIT $7", TopRankings.Apply(DarlingDataReader.TopQueriesSql, ranking, hourly: false), StringComparison.Ordinal);
         Assert.Contains("NOT LIKE 'WAITFOR%'", TopRankings.Apply(DarlingDataReader.TopQueriesByHostObjectSql, ranking, hourly: false), StringComparison.Ordinal);
     }
 

@@ -82,12 +82,14 @@ public sealed class TopQueriesHourlyRoutingTests
     public void TopQueriesHourlySql_LooksUpTextInStatement_AndSelectsNoDeltaExtremes()
     {
         var sql = DarlingDataReader.TopQueriesHourlySql;
-        Assert.Contains("LEFT JOIN LATERAL", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("LATERAL", sql, StringComparison.Ordinal);   /* #5309: one lookup, not one per row */
+        Assert.Contains("latest_in_window AS (", sql, StringComparison.Ordinal);
         Assert.Contains("MAX(sql_handle)", sql, StringComparison.Ordinal);
         Assert.Contains("NOT LIKE 'WAITFOR%'", sql, StringComparison.Ordinal);
-        Assert.Contains("LIMIT $4 + 5", sql, StringComparison.Ordinal);
+        Assert.Contains("LIMIT $6", sql, StringComparison.Ordinal);   /* #5313: the candidate limit; the ceiling moved to $7 */
+        Assert.DoesNotContain("+ 5", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("worker_time_min", sql, StringComparison.Ordinal);
-        Assert.DoesNotContain("$6", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("$7", sql, StringComparison.Ordinal);   /* the ceiling is a $CEIL$ placeholder, bound only when known */
         Assert.Null(typeof(DarlingDataReader).GetField("TopQueriesHourlyTextLookupSql",
             System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static));
 

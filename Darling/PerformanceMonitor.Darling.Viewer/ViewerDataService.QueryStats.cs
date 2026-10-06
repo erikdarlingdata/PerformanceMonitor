@@ -132,23 +132,25 @@ public sealed partial class ViewerDataService
     /// (database_name, query_hash, host_object_name) over the window (#2012 stage 2 — the host object
     /// splits same-hash statements hosted by different procs, e.g. INSERT...EXEC callers; SQL GROUP BY
     /// treats NULLs as equal so ad-hoc rows still collapse), sum the deltas + carry the min/max spreads,
-    /// fetch each group's latest non-null query text via a LATERAL join constrained to the group's own
-    /// host object, drop WAITFOR shells (over-fetch by 5
-    /// exactly like Lite's <c>LIMIT top + 5</c> → filter → <c>LIMIT top</c>), and cap at top.
+    /// fetch each group's latest non-null query text with ONE lookup for every ranked group (#5309),
+    /// constrained to the group's own host object, drop WAITFOR shells (over-fetch by 5 as Lite's
+    /// <c>LIMIT top + 5</c> → filter → <c>LIMIT top</c> does, and refill while the page is short and more
+    /// candidates exist, #5313), and cap at top.
     /// Viewer deviations from Lite: (1) Postgres <c>SUM(bigint)</c> is numeric, so each summed aggregate
     /// is CAST back to bigint for the typed GetInt64 readers (MIN/MAX of bigint stay bigint, no cast);
     /// (2) Lite's server-local <c>last_execution_time</c> staleness filter and its utcOffsetMinutes
     /// parameter are dropped (the viewer has no per-server UTC offset; the delta HAVING already excludes
-    /// plans that never ran in the window); (3) the LATERAL fetches only query_text; the collected
+    /// plans that never ran in the window); (3) the text lookup fetches only query_text; the collected
     /// query_plan_xml is not carried per row (it can be multi-KB) — instead a bool_or presence test rides
     /// back as has_query_plan to gate the grid's Query Plan column, and the plan itself is
     /// fetched on demand by <see cref="GetQueryStatsPlanXmlAsync"/>. The flag answers "the server had a plan
     /// for this row", which is what the on-demand fetch can act on; it has never promised the fetch will
     /// find content, since a digest can outlive the dimension row the GC pruned.
-    /// $1 server_id, $2 window start, $3 window end (naive UTC), $4 top.
+    /// $1 server_id, $2 window start, $3 window end (naive UTC), $4 top, $5 database filter, $6 the candidate
+    /// limit (#5313: top + 5 first, larger on a refill round).
     /// </summary>
     public const string TopQueriesSql = """
-        WITH ranked AS (
+        WITH ranked AS MATERIALIZED (
             SELECT
                 database_name,
                 query_hash,
@@ -195,7 +197,7 @@ public sealed partial class ViewerDataService
                    CTE aggregates the whole window and needs only a presence flag, and reading the
                    resolving view would make Postgres join the plan dimension per row to evaluate
                    it (it can drop an unreferenced unique join, but the COALESCE references it).
-                   The LATERAL below, which needs the actual text, does read the view.
+                   The latest_text lookup below resolves the text from the dimension itself, for the newest row of each group only.
 
                    The third term is the capped rows (#3392), and it needs no cap literal to find
                    them: DATALENGTH of a NULL plan is NULL, so a non-null query_plan_xml_bytes
@@ -212,7 +214,46 @@ public sealed partial class ViewerDataService
             GROUP BY database_name, query_hash, host_object_name
             HAVING SUM(delta_execution_count) > 0 OR SUM(delta_elapsed_time) > 0
             ORDER BY SUM(delta_elapsed_time) DESC
-            LIMIT $4 + 5
+            /* #5313: $6 is the candidate limit, not a fixed over-fetch of five. The caller starts at top plus five and, when the
+               WAITFOR trim below leaves fewer than top rows while more candidates exist, asks again with a
+               larger $6 (TopFill, at most three rounds). The final LIMIT stays $4. */
+            LIMIT $6
+        ),
+        latest_text AS (
+            /* #5309: the representative text of EVERY ranked group in ONE lookup. This was a lateral
+               lookup of the newest row, one per ranked row, which on a store without TimescaleDB scanned the
+               raw table once per row. One pass reads the window's rows for the ranked keys and keeps the
+               newest row per key; the text is resolved from the dimension for that one row afterwards, so the
+               sort never carries a wide text. A row counts as having text when its inline text or its
+               dimension row exists, the rule v_query_stats' COALESCE gives. The key match is NULL-safe (ad-hoc
+               rows carry a NULL host object) with the COALESCE equality as the hashable pre-filter. The
+               group's own host object keeps one caller's text from labelling another's (#2012). */
+            SELECT
+                l.database_name,
+                l.query_hash,
+                l.host_object_name,
+                COALESCE(l.query_text, d.query_text) AS query_text
+            FROM
+            (
+                SELECT DISTINCT ON (q.database_name, q.query_hash, q.host_object_name)
+                    q.database_name,
+                    q.query_hash,
+                    q.host_object_name,
+                    q.query_text,
+                    q.query_text_digest
+                FROM query_stats AS q
+                JOIN ranked AS rk
+                    ON  COALESCE(q.query_hash, '') = COALESCE(rk.query_hash, '')
+                    AND q.database_name IS NOT DISTINCT FROM rk.database_name
+                    AND q.query_hash IS NOT DISTINCT FROM rk.query_hash
+                    AND q.host_object_name IS NOT DISTINCT FROM rk.host_object_name
+                WHERE q.server_id = $1
+                AND   q.collection_time >= $2
+                AND   q.collection_time <= $3
+                AND   (q.query_text IS NOT NULL OR EXISTS (SELECT 1 FROM query_text_dim AS d0 WHERE d0.digest = q.query_text_digest))
+                ORDER BY q.database_name, q.query_hash, q.host_object_name, q.collection_time DESC
+            ) AS l
+            LEFT JOIN query_text_dim AS d ON d.digest = l.query_text_digest
         ),
         module AS (
             /* #1568 module attribution: one procedure_stats identity per sql_handle (latest
@@ -286,22 +327,15 @@ public sealed partial class ViewerDataService
             m.object_name AS module_object_name,
             m.schema_name AS module_schema_name,
             m.database_name AS module_database_name,
-            r.host_object_name
+            r.host_object_name,
+            /* #5313: candidates the ranking produced (last column), so the caller can tell a short page that
+               has more candidates behind it from one that has run out. Every earlier ordinal is unchanged. */
+            (SELECT COUNT(*) FROM ranked) AS candidate_count
         FROM ranked AS r
-        LEFT JOIN LATERAL (
-            SELECT query_text
-            FROM v_query_stats
-            WHERE server_id = $1
-            AND   query_hash = r.query_hash
-            AND   database_name = r.database_name
-            /* #2012 stage 2: the representative text must come from THIS group's own rows — without
-               the host constraint a hash shared across host objects could label one caller's row
-               with another caller's text (NOT DISTINCT FROM so ad-hoc NULL hosts still match). */
-            AND   host_object_name IS NOT DISTINCT FROM r.host_object_name
-            AND   query_text IS NOT NULL
-            ORDER BY collection_time DESC
-            LIMIT 1
-        ) AS t ON TRUE
+        LEFT JOIN latest_text AS t
+            ON  t.database_name IS NOT DISTINCT FROM r.database_name
+            AND t.query_hash IS NOT DISTINCT FROM r.query_hash
+            AND t.host_object_name IS NOT DISTINCT FROM r.host_object_name
         LEFT JOIN module AS m ON m.sql_handle = r.sql_handle
         WHERE t.query_text IS NULL OR t.query_text NOT LIKE 'WAITFOR%'
         ORDER BY r.total_elapsed_us DESC
@@ -460,16 +494,23 @@ public sealed partial class ViewerDataService
     private async Task<List<ViewerQueryStatsRow>> GetTopQueriesByCpuRawAsync(
         int serverId, DateTime startUtc, DateTime endUtc, int top, IReadOnlyList<string>? databaseNames, CancellationToken cancellationToken)
     {
+        /* #5313: the WAITFOR trim can leave the page short; TopFill asks again with a larger candidate limit ($6)
+           while more candidates exist, under its bound. */
+        return await TopFill.RunAsync(top, async candidates =>
+        {
         var rows = new List<ViewerQueryStatsRow>();
+        var candidateCount = 0;
 
         await using var command = _dataSource.CreateCommand(TopQueriesSql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         AddServerWindowParameters(command, serverId, startUtc, endUtc);
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = top });
         command.Parameters.Add(DatabaseFilterParameter(databaseNames));
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = candidates });
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
+            candidateCount = reader.IsDBNull(46) ? 0 : Convert.ToInt32(reader.GetValue(46), System.Globalization.CultureInfo.InvariantCulture);
             rows.Add(new ViewerQueryStatsRow
             {
                 DatabaseName = reader.IsDBNull(0) ? "" : reader.GetString(0),
@@ -521,7 +562,8 @@ public sealed partial class ViewerDataService
             });
         }
 
-        return rows;
+        return (rows, candidateCount);
+        });
     }
 
     /// <summary>
