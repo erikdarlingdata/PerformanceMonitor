@@ -36,7 +36,7 @@ public sealed class PgSensitiveStatementFilterTests
     public void TheStoredTextScrubKeepsItsFrozenVersionOnePattern()
     {
         const string gap = "([[:space:]]|/[*]([^*]|[*]+[^*/])*[*]+/|--[^[:cntrl:]]*)";
-        var shippedVersionOne =
+        const string shippedVersionOne =
             "[[:<:]](create|alter)" + gap + "+(role|user|group|subscription|server)[[:>:]]" +
             "|[[:<:]]password[[:>:]]" + gap + "*(=|to)?" + gap + "*(e?'|u&'|[$][^0-9])" +
             "|[[:<:]](pg)?password[[:space:]]*=[[:space:]]*[^$[:space:]]" +
