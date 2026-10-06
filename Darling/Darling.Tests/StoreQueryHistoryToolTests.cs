@@ -9,6 +9,7 @@
 using System;
 using System.Threading.Tasks;
 using Npgsql;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Service.Mcp;
 using Xunit;
 
@@ -30,6 +31,15 @@ public sealed class StoreQueryHistoryToolTests
 
         Assert.StartsWith("{\"status\":\"invalid\"", result, StringComparison.Ordinal);
         Assert.Contains($"\"parameter\":\"{parameter}\"", result, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TheTextRead_KeepsTheSharedSensitiveStatementPredicate_OnTopOfTheReaderFunctionsOwnFilter()
+    {
+        /* #5097: the diagnostics bundle applied the shared predicate in its own statement-text read and now reads the text through
+           this tool, so the tool's read applies it: a store whose reader function is older than the pattern still withholds. The
+           predicate wraps the text the read chooses (max(query) per query id), so it is the shown text that is tested. */
+        Assert.Contains(PgSensitiveStatementFilter.SqlPredicate("max(f.query)"), DarlingMcpStoreQueryHistoryTools.TextSql, StringComparison.Ordinal);
     }
 
     [Fact]
