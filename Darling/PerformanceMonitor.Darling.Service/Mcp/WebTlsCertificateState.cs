@@ -37,8 +37,9 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 ///
 /// <para>Thread-safety: one writer (the web host's start path), one reader (the worker's sweep). State is a
 /// single immutable record reference swapped atomically, so the reader never sees a torn snapshot. Null until
-/// the host publishes — which it does only when it has a loaded certificate; loopback-only installs, an
-/// unconfigured <c>tls</c> block and an unusable one all leave it null, and the worker reads null as "no LAN
+/// the host publishes — which it does when it has a loaded certificate, or when it could not load the one it
+/// was told to (<see cref="ListenerTlsCertificateState.Snapshot.LoadRefusal"/>); loopback-only installs, an
+/// unconfigured <c>tls</c> block and a misconfigured one all leave it null, and the worker reads null as "no LAN
 /// TLS certificate to watch" and raises nothing.</para>
 ///
 /// <para>The members (<c>Publish</c>, <c>Clear</c>, <c>Read</c> and the <c>Snapshot</c> record) live on

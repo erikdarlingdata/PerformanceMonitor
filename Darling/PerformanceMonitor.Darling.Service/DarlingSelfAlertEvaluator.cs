@@ -751,6 +751,15 @@ internal sealed class DarlingSelfAlertEvaluator
     /// each re-stating on its own stamp.</summary>
     internal static readonly TimeSpan WebTlsCertRefire = TimeSpan.FromDays(1);
 
+    /// <summary>Appended to a listener's fleet key to name the re-state stamp of its load-refusal alert (#5288),
+    /// so a refusal and an in-window warning on the same listener each wait on their own daily interval. Not a
+    /// fleet key itself: it never reaches a store, only the in-memory stamp map.</summary>
+    private const string LoadRefusalStampSuffix = ":load";
+
+    /// <summary>Length cap for the loader's message in a load-refusal alert's detail (#5288). A real message
+    /// names the setting, the path and the cause; the cap bounds a runaway one.</summary>
+    private const int MaxTlsLoadRefusalLength = 300;
+
     /// <summary>Length cap for one stale rule's operator-authored reason in the alert detail. Generous
     /// enough to carry a real sentence, bounded so <see cref="MaxListedStaleMuteRules"/> lines cannot grow
     /// the body without limit.</summary>
@@ -5602,6 +5611,10 @@ internal sealed class DarlingSelfAlertEvaluator
     /// <paramref name="NotBeforeUtc"/> still ahead of the clock, refused the certificate, and bound loopback-only
     /// — a decision it does not revisit until its next start, which is why it travels as a flag and is never
     /// re-derived here from the date.
+    /// <paramref name="LoadRefusal"/> is the host's other load-time verdict (#5288): the configured certificate
+    /// could not be loaded at all, so the listener is loopback-only, and the text is why. Null when the
+    /// certificate loaded. A report that carries it has no certificate facts: its date and identity fields are
+    /// blank and are never read.
     /// </summary>
     internal sealed record WebTlsCertReport(
         bool Configured,
@@ -5609,7 +5622,8 @@ internal sealed class DarlingSelfAlertEvaluator
         DateTimeOffset NotAfterUtc,
         string Subject,
         string Thumbprint,
-        bool RefusedNotYetValid);
+        bool RefusedNotYetValid,
+        string? LoadRefusal = null);
 
     /// <summary>
     /// The isolating entry point the worker's sweep calls for the web-dashboard TLS certificate expiry
@@ -5708,6 +5722,14 @@ internal sealed class DarlingSelfAlertEvaluator
     /// the host does not re-decide when the date passes: it stays loopback-only until it is restarted, and a
     /// date-derived arm would have resolved the alert about a dashboard that was still down.</para>
     ///
+    /// <para><b>The load-refusal arm (#5288).</b> A certificate that could not be loaded at all (a changed
+    /// password, a key that does not match) leaves the listener loopback-only with nothing to read a date from.
+    /// The host says so (<see cref="WebTlsCertReport.LoadRefusal"/>) rather than clearing its state, because a
+    /// cleared state is the healthy "no certificate to watch" reading and would resolve a standing expiry alert
+    /// under "Renewed" while the endpoint is down. This arm fires the same family at CRITICAL, under the same key
+    /// and metric, and on its own re-state stamp so it is raised at once even when an in-window warning was sent
+    /// minutes ago. It ignores the date fields entirely, so a blank date can never read as expired.</para>
+    ///
     /// <para>A STANDING condition like its siblings: fire on entry, re-state per <see cref="WebTlsCertRefire"/>
     /// while it holds, and ONE resolution when the served certificate is healthy again (renewed past the
     /// window) or TLS is no longer configured — the not-yet-valid arm shares that resolution: the host
@@ -5730,18 +5752,23 @@ internal sealed class DarlingSelfAlertEvaluator
         /* The host's verdict, not the clock's: see the method summary. Meaningful only when configured. */
         var refusedNotYetValid = report.Configured && report.RefusedNotYetValid;
 
+        /* The host's other verdict (#5288): the certificate could not be loaded, so there is no date to read. */
+        var loadRefusal = report.Configured ? report.LoadRefusal : null;
+        var loadRefused = loadRefusal is not null;
+
         /* Healthy is either "no certificate to watch" or "being served, with more than the warning window
            still to run". The subtraction is DateTime-on-DateTime so it is a pure TimeSpan and never trips the
-           DateTimeOffset(...) Kind guard on a test-injected clock. */
+           DateTimeOffset(...) Kind guard on a test-injected clock. A load refusal is neither. */
         var healthy =
             !report.Configured
-            || (!refusedNotYetValid && report.NotAfterUtc.UtcDateTime - now > WebTlsCertWarnWindow);
+            || (!loadRefused && !refusedNotYetValid && report.NotAfterUtc.UtcDateTime - now > WebTlsCertWarnWindow);
 
         if (healthy)
         {
             if (_activeListenerTlsCert.TryRemove(tls.Key, out var was) && was)
             {
                 _lastListenerTlsCertAlert.TryRemove(tls.Key, out _);
+                _lastListenerTlsCertAlert.TryRemove(tls.Key + LoadRefusalStampSuffix, out _);
                 /* The configured-and-healthy line names BOTH facts the family alerts on — served, and outside
                    the window — because the active alert it clears may have been either arm (#3517): a
                    dashboard toggled off and on within one supervisor tick re-publishes a now-usable
@@ -5759,35 +5786,45 @@ internal sealed class DarlingSelfAlertEvaluator
 
         _activeListenerTlsCert[tls.Key] = true;
 
+        /* A load refusal keeps its own stamp beside the family's: a standing in-window warning (or a refusal the
+           host made earlier) must not hold back the first Critical about a certificate that has just failed to
+           load, and the refusal then re-states on its own daily interval like every other arm. */
+        var stampKey = loadRefused ? tls.Key + LoadRefusalStampSuffix : tls.Key;
+
         /* Standing condition: fire on entry, re-state only per WebTlsCertRefire while it holds — its OWN
            interval rather than the shared cooldown, for the StaleMuteRefire reason (a fixed date measured
            against the clock, identical every sweep). */
-        if (LastFiredStamp.TryGet(_lastListenerTlsCertAlert, tls.Key, now, out var lastFired)
+        if (LastFiredStamp.TryGet(_lastListenerTlsCertAlert, stampKey, now, out var lastFired)
             && now - lastFired < WebTlsCertRefire)
         {
             return;
         }
 
-        _lastListenerTlsCertAlert[tls.Key] = now;
+        _lastListenerTlsCertAlert[stampKey] = now;
 
-        var expired = report.NotAfterUtc.UtcDateTime <= now;
-        var (shortMessage, detail, currentValue) = RenderListenerTlsCert(tls, report, now, expired, refusedNotYetValid);
+        /* No dates exist for a load refusal, and a blank NotAfter would read as expired: never derive it there. */
+        var expired = !loadRefused && report.NotAfterUtc.UtcDateTime <= now;
+        var (shortMessage, detail, currentValue) =
+            RenderListenerTlsCert(tls, report, now, expired, refusedNotYetValid, loadRefusal);
 
         var delivery = await FireAsync(
             StoreKey(tls.Key), _storeLabel, tls.ExpiryMetric,
             currentValue: currentValue,
-            /* The not-yet-valid arm has no window to name — the bar it failed is "valid now". */
-            thresholdValue: refusedNotYetValid && !expired
-                ? "valid at service start"
-                : $"{Hosting.DarlingWebTls.ExpiryWarningDays} days",
+            /* The refusal arms have no window to name — the bar they failed is "loads" and "valid now". */
+            thresholdValue: loadRefused
+                ? "loads at service start"
+                : refusedNotYetValid && !expired
+                    ? "valid at service start"
+                    : $"{Hosting.DarlingWebTls.ExpiryWarningDays} days",
             detail: detail,
-            /* Critical for BOTH refusals: expired and not-yet-valid leave the LAN listener equally unreachable. */
-            severity: expired || refusedNotYetValid ? AlertSeverityLevel.Critical : AlertSeverityLevel.Warning,
+            /* Critical for EVERY refusal: expired, not-yet-valid and cannot-load leave the LAN listener equally
+               unreachable. */
+            severity: expired || refusedNotYetValid || loadRefused ? AlertSeverityLevel.Critical : AlertSeverityLevel.Warning,
             shortMessage: shortMessage,
             /* State-only: an expiry is a date, not a quantity — see WebTlsCertExpiryMetric. */
             numericCurrentValue: StateOnlyValue, numericThresholdValue: StateOnlyValue,
             cancellationToken);
-        AfterSelfFire(tls.ExpiryMetric, _lastListenerTlsCertAlert, tls.Key, now, WebTlsCertRefire, delivery);
+        AfterSelfFire(tls.ExpiryMetric, _lastListenerTlsCertAlert, stampKey, now, WebTlsCertRefire, delivery);
     }
 
     /// <summary>Renders the (shortMessage, detail, currentValue) for a listener's TLS certificate alert. The
@@ -5799,10 +5836,29 @@ internal sealed class DarlingSelfAlertEvaluator
     /// <para>Expired outranks not-yet-valid when both hold (a refused-at-start certificate the process then
     /// outlived): fixing the clock cannot bring an expired certificate back, so that is the fact to lead
     /// with; the not-yet-valid text below is for the case a clock fix or the right certificate plus a restart
-    /// actually cures.</para></summary>
+    /// actually cures. A load refusal outranks both: it has no dates, so it is rendered from its reason
+    /// alone.</para></summary>
     private static (string ShortMessage, string Detail, string CurrentValue) RenderListenerTlsCert(
-        TlsListenerDescriptor tls, WebTlsCertReport report, DateTime now, bool expired, bool refusedNotYetValid)
+        TlsListenerDescriptor tls, WebTlsCertReport report, DateTime now, bool expired, bool refusedNotYetValid,
+        string? loadRefusal)
     {
+        if (loadRefusal is not null)
+        {
+            /* The reason is the loader's own message: one line, capped, because it lands in the detail text the
+               mute pre-fill parses line by line. */
+            var reason = CustomAlertEvaluator.SanitizeDisplayText(loadRefusal, MaxTlsLoadRefusalLength);
+            var because = reason.Length == 0 ? string.Empty : $" ({reason})";
+            var refusedValue = "not loaded; not being served";
+            var refusedShort =
+                $"{tls.Surface} TLS certificate COULD NOT BE LOADED — {tls.Endpoint} is loopback-only";
+            var refusedDetail =
+                $"The {tls.Surface}'s configured TLS certificate could not be loaded when the service started{because}, "
+                + $"so the host refused to expose the {tls.Endpoint}: it is bound LOOPBACK-ONLY — unreachable from the "
+                + "network, and it will not fall back to plain HTTP. Check the certificate file or files, the password, "
+                + "and that the private key matches the certificate, then restart the service so the host loads it again.";
+            return (refusedShort, refusedDetail, refusedValue);
+        }
+
         var notAfter = report.NotAfterUtc.UtcDateTime;
         var certRef = $"Certificate: subject {report.Subject}, thumbprint {report.Thumbprint}.";
 

@@ -296,8 +296,10 @@ internal static class DarlingListenerTls
             loaded = null;
 
             /* #3514 follow-up: this degrade may have published the certificate at load but is about to serve
-               loopback-only, so retract the expiry advertisement too. */
-            certState.Clear();
+               loopback-only, so that advertisement is replaced, not left standing. What replaces it is the host's
+               verdict that the certificate could not be loaded (#5288): a cleared state reads as "no certificate
+               to watch", which is healthy, and would resolve a standing expiry alert while the listener is down. */
+            certState.PublishLoadRefusal(ex.Message);
 
             logger.LogCritical(
                 "{Surface} TLS certificate could not be loaded ({Message}) — refusing to expose; binding loopback-only.",
