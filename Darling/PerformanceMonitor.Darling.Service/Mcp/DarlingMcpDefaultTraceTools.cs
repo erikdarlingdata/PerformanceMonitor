@@ -119,7 +119,7 @@ public sealed class DarlingMcpDefaultTraceTools
                         : (double?)null,
                     error_number = r.ErrorNumber,
                     severity = r.Severity,
-                    text_data = McpHelpers.Truncate(r.TextData, 2000)
+                    text_data = McpHelpers.TruncateStatement(r.TextData, 2000)
                 };
             }).ToList();
 

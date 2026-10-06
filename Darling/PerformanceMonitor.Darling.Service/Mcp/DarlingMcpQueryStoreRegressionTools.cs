@@ -174,7 +174,7 @@ public sealed class DarlingMcpQueryStoreRegressionTools
                     baseline_plan_count = r.BaselinePlanCount,
                     recent_plan_count = r.RecentPlanCount,
                     last_execution_time = r.LastExecutionTime?.ToString("o"),
-                    query_text = full_text ? r.QueryTextSample : McpHelpers.Truncate(r.QueryTextSample, QueryTextPreviewLength),
+                    query_text = full_text ? r.QueryTextSample : McpHelpers.TruncateStatement(r.QueryTextSample, QueryTextPreviewLength),
                     query_text_truncated = !full_text && r.QueryTextSample.Length > QueryTextPreviewLength,
                 }),
             }, McpHelpers.JsonOptions);

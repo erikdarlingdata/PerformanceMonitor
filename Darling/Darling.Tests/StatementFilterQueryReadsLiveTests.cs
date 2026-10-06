@@ -83,22 +83,40 @@ public sealed class StatementFilterQueryReadsLiveTests
 
             var reads = ReadsFor(postgres, tool, ct);
             Assert.NotEmpty(reads);
-            foreach (var (form, read) in reads)
+            foreach (var (form, readerJudges, read) in reads)
             {
                 string label = tool + " (" + form + ")";
 
-                string raw = await read(CanaryServer);
-                Assert.True(raw.Contains("S3cret-canary-ssf", StringComparison.Ordinal), label + ": the raw read lost the canary, so the plant did not reach the output");
-                string filtered = (await StatementFilterCensus.FilterThroughHostAsync(host, raw)).Text;
-                try
-                {
-                    StatementFilterCensus.AssertFilteredWithholdsTheCanary(raw, filtered);
-                }
-                catch (Exception ex)
-                {
-                    throw new Xunit.Sdk.XunitException(label + ": " + ex.Message);
-                }
+                /* The plant is real: the stored rows still hold the canary, whatever the read does with it. */
+                Assert.True(await StoreHoldsTheCanaryAsync(connection, CanaryId, ct), label + ": the stored rows lost the canary, so the plant never reached the store");
 
+                string raw = await read(CanaryServer);
+                string filtered;
+                if (readerJudges)
+                {
+                    /* #5320: this form's reader judges the WHOLE statement before it cuts it, so the reader's own answer already
+                       holds the marker and not one secret needle, and the plain statement beside it is kept. The host filter then
+                       has nothing left to withhold (the answer is unchanged), which proves the reader did the whole job. */
+                    foreach (string needle in StatementScrubCanary.SecretNeedles)
+                        Assert.False(raw.Contains(needle, StringComparison.Ordinal), label + ": the reader's own answer still holds a secret needle");
+                    Assert.True(raw.Contains(StatementFilterCensus.Marker, StringComparison.Ordinal), label + ": the reader's own answer does not carry the withheld marker");
+                    Assert.True(raw.Contains("canary_plain_ssf", StringComparison.Ordinal), label + ": the reader's own answer lost the plain statement beside the canary");
+                    filtered = (await StatementFilterCensus.FilterThroughHostAsync(host, raw)).Text;
+                    Assert.True(string.Equals(raw, filtered, StringComparison.Ordinal), label + ": the host filter changed an answer the reader had already judged");
+                }
+                else
+                {
+                    Assert.True(raw.Contains("S3cret-canary-ssf", StringComparison.Ordinal), label + ": the raw read lost the canary, so the plant did not reach the output");
+                    filtered = (await StatementFilterCensus.FilterThroughHostAsync(host, raw)).Text;
+                    try
+                    {
+                        StatementFilterCensus.AssertFilteredWithholdsTheCanary(raw, filtered);
+                    }
+                    catch (Exception ex)
+                    {
+                        throw new Xunit.Sdk.XunitException(label + ": " + ex.Message);
+                    }
+                }
                 /* The no-hit page: nothing to withhold, so the answer is the raw read, byte for byte. The host is built with GCF
                    pinned off (#5320), so no other class's DARLING_OUTPUT_FORMAT reaches it and the identity holds every run. */
                 string clean = await read(CleanServer);
@@ -118,42 +136,42 @@ public sealed class StatementFilterQueryReadsLiveTests
         }
     }
 
-    /// <summary>Every form of the tool the census reads: the default (preview) and the <c>full_text</c> form where the tool has one.</summary>
-    private static List<(string Form, Func<string, Task<string>> Read)> ReadsFor(NpgsqlDataSource postgres, string tool, CancellationToken ct)
+    /// <summary>Every form of the tool the census reads: the default (preview) and the <c>full_text</c> form where the tool has one. <c>ReaderJudges</c> is true for a form whose reader judges the whole statement itself (#5320: the preview forms, which judge then cut, and the heatmap, whose reader judges both), so the census holds that form to the reader's own answer; a false form returns the stored text raw and the host filter is the one that withholds it.</summary>
+    private static List<(string Form, bool ReaderJudges, Func<string, Task<string>> Read)> ReadsFor(NpgsqlDataSource postgres, string tool, CancellationToken ct)
     {
-        var reads = new List<(string, Func<string, Task<string>>)>();
+        var reads = new List<(string, bool, Func<string, Task<string>>)>();
         switch (tool)
         {
             case "get_active_queries":
-                reads.Add(("preview", s => DarlingMcpSessionTools.GetActiveQueries(postgres, s, cancellationToken: ct)));
-                reads.Add(("full_text", s => DarlingMcpSessionTools.GetActiveQueries(postgres, s, full_text: true, cancellationToken: ct)));
+                reads.Add(("preview", true, s => DarlingMcpSessionTools.GetActiveQueries(postgres, s, cancellationToken: ct)));
+                reads.Add(("full_text", false, s => DarlingMcpSessionTools.GetActiveQueries(postgres, s, full_text: true, cancellationToken: ct)));
                 break;
             case "get_top_queries_by_cpu":
-                reads.Add(("default", s => DarlingMcpDataTools.GetTopQueriesByCpu(postgres, s, cancellationToken: ct)));
-                reads.Add(("detail=full", s => DarlingMcpDataTools.GetTopQueriesByCpu(postgres, s, detail: "full", cancellationToken: ct)));
-                reads.Add(("group_by=host_object", s => DarlingMcpDataTools.GetTopQueriesByCpu(postgres, s, group_by: "host_object", cancellationToken: ct)));
+                reads.Add(("default", true, s => DarlingMcpDataTools.GetTopQueriesByCpu(postgres, s, cancellationToken: ct)));
+                reads.Add(("detail=full", true, s => DarlingMcpDataTools.GetTopQueriesByCpu(postgres, s, detail: "full", cancellationToken: ct)));
+                reads.Add(("group_by=host_object", true, s => DarlingMcpDataTools.GetTopQueriesByCpu(postgres, s, group_by: "host_object", cancellationToken: ct)));
                 break;
             case "get_query_store_top":
-                reads.Add(("preview", s => DarlingMcpDataTools.GetQueryStoreTop(postgres, s, cancellationToken: ct)));
-                reads.Add(("full_text", s => DarlingMcpDataTools.GetQueryStoreTop(postgres, s, full_text: true, cancellationToken: ct)));
+                reads.Add(("preview", true, s => DarlingMcpDataTools.GetQueryStoreTop(postgres, s, cancellationToken: ct)));
+                reads.Add(("full_text", false, s => DarlingMcpDataTools.GetQueryStoreTop(postgres, s, full_text: true, cancellationToken: ct)));
                 break;
             case "get_query_store_regressions":
-                reads.Add(("preview", s => DarlingMcpQueryStoreRegressionTools.GetQueryStoreRegressions(postgres, s, cancellationToken: ct)));
-                reads.Add(("full_text", s => DarlingMcpQueryStoreRegressionTools.GetQueryStoreRegressions(postgres, s, full_text: true, cancellationToken: ct)));
+                reads.Add(("preview", true, s => DarlingMcpQueryStoreRegressionTools.GetQueryStoreRegressions(postgres, s, cancellationToken: ct)));
+                reads.Add(("full_text", false, s => DarlingMcpQueryStoreRegressionTools.GetQueryStoreRegressions(postgres, s, full_text: true, cancellationToken: ct)));
                 break;
             case "get_query_heatmap":
-                reads.Add(("preview", s => DarlingMcpQueryHeatmapTools.GetQueryHeatmap(postgres, s, cancellationToken: ct)));
-                reads.Add(("full_text", s => DarlingMcpQueryHeatmapTools.GetQueryHeatmap(postgres, s, full_text: true, cancellationToken: ct)));
+                reads.Add(("preview", true, s => DarlingMcpQueryHeatmapTools.GetQueryHeatmap(postgres, s, cancellationToken: ct)));
+                reads.Add(("full_text", true, s => DarlingMcpQueryHeatmapTools.GetQueryHeatmap(postgres, s, full_text: true, cancellationToken: ct)));
                 break;
             case "get_plan_corrections":
-                reads.Add(("preview", s => DarlingMcpPlanCorrectionTools.GetPlanCorrections(postgres, s, cancellationToken: ct)));
-                reads.Add(("full_text", s => DarlingMcpPlanCorrectionTools.GetPlanCorrections(postgres, s, full_text: true, cancellationToken: ct)));
+                reads.Add(("preview", true, s => DarlingMcpPlanCorrectionTools.GetPlanCorrections(postgres, s, cancellationToken: ct)));
+                reads.Add(("full_text", false, s => DarlingMcpPlanCorrectionTools.GetPlanCorrections(postgres, s, full_text: true, cancellationToken: ct)));
                 break;
             case "get_finops high_impact":
-                reads.Add(("high_impact", s => DarlingMcpFinOpsTools.GetFinOps(postgres, "high_impact", s, cancellationToken: ct)));
+                reads.Add(("high_impact", true, s => DarlingMcpFinOpsTools.GetFinOps(postgres, "high_impact", s, cancellationToken: ct)));
                 break;
             case "get_finops optimization":
-                reads.Add(("optimization", s => DarlingMcpFinOpsTools.GetFinOps(postgres, "optimization", s, cancellationToken: ct)));
+                reads.Add(("optimization", true, s => DarlingMcpFinOpsTools.GetFinOps(postgres, "optimization", s, cancellationToken: ct)));
                 break;
             default:
                 throw new ArgumentOutOfRangeException(nameof(tool), tool, null);
@@ -267,6 +285,18 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
         }
     }
 
+    /// <summary>True when a stored statement column of the server's rows still holds the canary (the tables the cases plant in).</summary>
+    private static async Task<bool> StoreHoldsTheCanaryAsync(NpgsqlConnection connection, int serverId, CancellationToken ct)
+    {
+        await using var cmd = new NpgsqlCommand(
+            @"SELECT EXISTS (SELECT 1 FROM query_snapshots WHERE server_id = $1 AND position('S3cret-canary-ssf' IN query_text) > 0)
+                  OR EXISTS (SELECT 1 FROM query_stats WHERE server_id = $1 AND position('S3cret-canary-ssf' IN query_text) > 0)
+                  OR EXISTS (SELECT 1 FROM query_store_stats WHERE server_id = $1 AND position('S3cret-canary-ssf' IN query_text) > 0)
+                  OR EXISTS (SELECT 1 FROM plan_correction WHERE server_id = $1 AND position('S3cret-canary-ssf' IN query_text) > 0)",
+            connection);
+        cmd.Parameters.AddWithValue(serverId);
+        return (bool)(await cmd.ExecuteScalarAsync(ct))!;
+    }
     private static async Task DeleteRowsAsync(NpgsqlConnection connection, CancellationToken ct)
     {
         foreach (int id in new[] { CanaryId, CleanId })

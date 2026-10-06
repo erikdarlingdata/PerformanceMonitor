@@ -119,7 +119,7 @@ public sealed class DarlingMcpPlanCorrectionTools
                 execute_action_initiated_time = r.ExecuteActionInitiatedTimeUtc?.ToString("o"),
                 revert_action_initiated_by = r.RevertActionInitiatedBy,
                 revert_action_initiated_time = r.RevertActionInitiatedTimeUtc?.ToString("o"),
-                query_text = full_text ? r.QueryText : McpHelpers.Truncate(r.QueryText, QueryTextPreviewLength),
+                query_text = full_text ? r.QueryText : McpHelpers.TruncateStatement(r.QueryText, QueryTextPreviewLength),
                 query_text_truncated = !full_text && r.QueryText != null && r.QueryText.Length > QueryTextPreviewLength,
             });
 

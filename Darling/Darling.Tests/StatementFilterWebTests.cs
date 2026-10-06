@@ -257,18 +257,18 @@ public sealed class StatementFilterWebTests
             psi.ArgumentList.Add("answeredPlan");
             psi.ArgumentList.Add(file);
 
-            Process proc;
+            Process? started = null;
             try
             {
-                proc = Process.Start(psi)!;
+                started = Process.Start(psi);
             }
             catch (Win32Exception)
             {
                 Assert.Skip("Node is not installed, so the shipped page script cannot be run.");
-                return;
             }
 
-            using (proc)
+            /* Assert.Skip throws, so a missing Node never reaches here; the null is only a Start that returned no process. */
+            using var proc = started ?? throw new InvalidOperationException("Starting the plan viewer harness returned no process.");
             {
                 var error = proc.StandardError.ReadToEndAsync();
                 string output = proc.StandardOutput.ReadToEnd().Trim();
