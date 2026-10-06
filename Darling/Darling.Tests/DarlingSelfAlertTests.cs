@@ -2261,6 +2261,137 @@ public sealed class DarlingSelfAlertTests
         Assert.Equal("The MCP server is no longer serving a TLS certificate to watch", gone.DetailText);
     }
 
+    /* ---------------- a certificate that cannot be loaded (#5288) ---------------- */
+
+    private const string LoadFailureReason =
+        "mcp.network.tls.pfxPath 'mcp.pfx' could not be loaded (the password is incorrect)";
+
+    /// <summary>The report the worker builds when the MCP host published a load refusal, through the same state
+    /// class and builder the sweep uses, so the verdict is read exactly as production reads it.</summary>
+    private static DarlingSelfAlertEvaluator.WebTlsCertReport McpLoadRefusalReport(string reason = LoadFailureReason)
+    {
+        var state = new McpTlsCertificateState();
+        state.PublishLoadRefusal(reason);
+        return DarlingWorker.BuildWebTlsCertReport(state.Read());
+    }
+
+    [Fact]
+    public async Task McpTlsCert_LoadRefusal_FiresCritical_NamingTheReasonAndTheRestart()
+    {
+        var h = new Harness { Now = CertClock };
+        var e = h.Build();
+
+        await e.ApplyMcpTlsCertificateAsync(McpLoadRefusalReport(), Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal(DarlingSelfAlertEvaluator.McpTlsCertExpiryMetric, fired.MetricName);   // the family, not a new metric
+        Assert.Equal("mcptlscert", fired.ServerKey);
+        Assert.Equal(AlertSeverityLevel.Critical, fired.Severity);
+        Assert.Equal(
+            "MCP server TLS certificate COULD NOT BE LOADED — LAN MCP endpoint is loopback-only", fired.ShortMessage);
+        Assert.Contains(LoadFailureReason, fired.DetailText);
+        Assert.Contains("refused to expose the LAN MCP endpoint: it is bound LOOPBACK-ONLY", fired.DetailText);
+        Assert.Contains("restart the service", fired.DetailText);
+        Assert.DoesNotContain("expired", fired.ShortMessage + fired.DetailText, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("0001", fired.ShortMessage + fired.DetailText);   // blank dates are never rendered
+        Assert.Empty(h.History.Records);
+    }
+
+    /// <summary>A live in-window expiry alert, then the host restarts and the new certificate fails to load: the
+    /// alert is raised Critical at once and is NOT resolved as "Renewed" while the endpoint is down.</summary>
+    [Fact]
+    public async Task McpTlsCert_LoadFailureAfterWindowAlert_FiresCriticalNotRenewed()
+    {
+        var h = new Harness { Now = CertClock };
+        var e = h.Build();
+
+        await e.ApplyMcpTlsCertificateAsync(McpCert(CertClock.AddDays(10)), Ct);   // the 30-day warning is standing
+        var warning = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal(AlertSeverityLevel.Warning, warning.Severity);
+
+        h.Now = CertClock.AddMinutes(30);   // well inside the daily re-state interval of the warning
+        await e.ApplyMcpTlsCertificateAsync(McpLoadRefusalReport(), Ct);
+
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+        Assert.Equal(AlertSeverityLevel.Critical, h.Deliverer.Outcomes[1].Severity);
+        Assert.Contains("COULD NOT BE LOADED", h.Deliverer.Outcomes[1].ShortMessage);
+        Assert.Empty(h.History.Records);   // no "MCP TLS Certificate Renewed" while the endpoint is down
+
+        /* The refusal re-states on its own daily interval, not on every sweep. */
+        await e.ApplyMcpTlsCertificateAsync(McpLoadRefusalReport(), Ct);
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+        h.Now = CertClock.Add(DarlingSelfAlertEvaluator.WebTlsCertRefire).AddMinutes(31);
+        await e.ApplyMcpTlsCertificateAsync(McpLoadRefusalReport(), Ct);
+        Assert.Equal(3, h.Deliverer.Outcomes.Count);
+        Assert.Empty(h.History.Records);
+
+        /* The operator fixes the certificate and restarts: a healthy served certificate resolves it, once. */
+        await e.ApplyMcpTlsCertificateAsync(McpCert(CertClock.AddDays(400)), Ct);
+        var resolution = Assert.Single(h.History.Records);
+        Assert.Equal(DarlingSelfAlertEvaluator.McpTlsCertRenewedMetric, resolution.MetricName);
+    }
+
+    /// <summary>The verdict decides, not the dates: a load refusal that arrives beside far-out dates is still not
+    /// healthy, and a live in-window alert is not resolved by it.</summary>
+    [Fact]
+    public async Task McpTlsCert_LoadRefusal_IsNotHealthy_WhateverDatesItCarries()
+    {
+        var h = new Harness { Now = CertClock };
+        var e = h.Build();
+        var refusedWithFarDates = McpCert(CertClock.AddDays(400)) with { LoadRefusal = LoadFailureReason };
+
+        await e.ApplyMcpTlsCertificateAsync(McpCert(CertClock.AddDays(10)), Ct);   // a standing warning
+        await e.ApplyMcpTlsCertificateAsync(refusedWithFarDates, Ct);
+
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+        Assert.Equal(AlertSeverityLevel.Critical, h.Deliverer.Outcomes[1].Severity);
+        Assert.Empty(h.History.Records);   // not resolved as Renewed
+    }
+
+    [Fact]
+    public async Task WebTlsCert_LoadRefusal_FiresCritical_UnderTheWebFamilyKey_AndTheReasonIsOneLine()
+    {
+        var h = new Harness { Now = CertClock };
+        var e = h.Build();
+        var state = new WebTlsCertificateState();
+        state.PublishLoadRefusal("first line\nDatabase: master\r\n" + new string('x', 600));
+
+        await e.ApplyWebTlsCertificateAsync(DarlingWorker.BuildWebTlsCertReport(state.Read()), Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal(DarlingSelfAlertEvaluator.WebTlsCertExpiryMetric, fired.MetricName);
+        Assert.Equal("webtlscert", fired.ServerKey);
+        Assert.Equal(AlertSeverityLevel.Critical, fired.Severity);
+        Assert.StartsWith("web dashboard TLS certificate COULD NOT BE LOADED", fired.ShortMessage, StringComparison.Ordinal);
+        Assert.DoesNotContain("\n", fired.DetailText);   // the mute pre-fill parses the detail line by line
+        Assert.DoesNotContain(new string('x', 400), fired.DetailText);   // capped
+        Assert.Contains("first line Database: master", fired.DetailText);
+    }
+
+    [Fact]
+    public void LoadRefusal_CrossesTheSeamUntouched_AndPublishingOrClearingReplacesIt()
+    {
+        var state = new McpTlsCertificateState();
+        state.PublishLoadRefusal("could not be loaded");
+
+        var report = DarlingWorker.BuildWebTlsCertReport(state.Read());
+        Assert.True(report.Configured);
+        Assert.Equal("could not be loaded", report.LoadRefusal);
+        Assert.False(report.RefusedNotYetValid);
+        Assert.Equal(string.Empty, report.Thumbprint);
+
+        /* A later successful publish replaces the verdict; a clear removes it. */
+        state.Publish(
+            new DateTimeOffset(2029, 1, 1, 0, 0, 0, TimeSpan.Zero),
+            new DateTimeOffset(2030, 1, 1, 0, 0, 0, TimeSpan.Zero),
+            "CN=x", "THUMB", refusedNotYetValid: false);
+        Assert.Null(DarlingWorker.BuildWebTlsCertReport(state.Read()).LoadRefusal);
+
+        state.PublishLoadRefusal("again");
+        state.Clear();
+        Assert.False(DarlingWorker.BuildWebTlsCertReport(state.Read()).Configured);
+    }
+
     /// <summary>
     /// One certificate served by BOTH listeners raises TWO alerts, each under its own key and metric and each
     /// naming its own listener, and each resolves on its own: a listener drops to loopback-only on its own, so

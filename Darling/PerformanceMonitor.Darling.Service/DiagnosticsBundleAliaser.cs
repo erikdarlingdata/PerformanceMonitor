@@ -56,13 +56,18 @@ internal sealed class BundleAliaser
     internal const int TokenMinimumLength = 2;
 
     /// <summary>
-    /// Names that identify nothing and appear in product text: the system databases, the product's own roles, and
-    /// the operating-system accounts every install shares. Pinned by a test.
+    /// Names that identify nothing and appear in product text: the system databases, the product's own roles, the
+    /// operating-system accounts every install shares, and the words the service log uses for its own two listeners
+    /// (<c>mcp</c>, <c>web</c> and <c>dashboard</c>: "MCP server", "Web dashboard", <c>mcp.network.allowFrom</c>). The
+    /// last group is what lets a configured host name start with one of those words (<c>mcp.corp.example</c> as
+    /// <c>mcp.network.hostName</c>, <c>https://web.corp.example</c> as <c>web.publicBaseUrl</c>): the host name is
+    /// aliased whole, with its domain, but its first label is not registered on its own, so the log's own words
+    /// are not rewritten as <c>host-N</c> (#5288). Pinned by a test.
     /// </summary>
     internal static readonly string[] KeptNames =
     {
         "master", "model", "msdb", "tempdb", "distribution", "rdsadmin", "postgres", "template0", "template1",
-        "darling", "root", "localhost",
+        "darling", "root", "localhost", "mcp", "web", "dashboard",
     };
 
     /// <summary>The product's own store roles. A <c>role_name</c> in this set is kept; any other role name is a login and is aliased.</summary>

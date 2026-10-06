@@ -443,6 +443,36 @@ public sealed class DiagnosticsBundleHardeningTests
         Assert.DoesNotContain("kappacorp", text, StringComparison.OrdinalIgnoreCase);
     }
 
+    /* The service log's own words for its two listeners ("MCP server", "Web dashboard", mcp.network.allowFrom): a host
+       name that starts with one of them is aliased whole, with its domain, and the words stay readable. The texts are
+       the cleartext warning each listener logs at every start. */
+    [Theory]
+    [InlineData("mcp", "mcp.corp.example.test")]              // mcp.network.hostName
+    [InlineData("web", "web.corp.example.test")]              // web.publicBaseUrl
+    [InlineData("dashboard", "dashboard.corp.example.test")]  // web.publicBaseUrl
+    public void AHostNameThatStartsWithAListenerWord_KeepsTheServiceLogsWordsAndAliasesTheHost(string firstLabel, string hostName)
+    {
+        var config = firstLabel == "mcp"
+            ? new DarlingConfig { Mcp = { Network = new McpNetworkConfig { HostName = hostName } } }
+            : new DarlingConfig { Web = { PublicBaseUrl = "https://" + hostName + "/" } };
+        var aliaser = new BundleAliaser();
+        DiagnosticsBundle.SeedFromConfig(aliaser, config, null);
+
+        var text = BundleOfServiceLogMessages(
+            aliaser,
+            DarlingListenerTls.CleartextWarning(ListenerTlsLabels.Mcp),
+            DarlingListenerTls.CleartextWarning(ListenerTlsLabels.Web),
+            "clients connect to " + hostName);
+
+        Assert.Contains("MCP server is LAN-exposed WITHOUT TLS", text, StringComparison.Ordinal);
+        Assert.Contains("mcp.network.allowFrom bounds only who can route to the port", text, StringComparison.Ordinal);
+        Assert.Contains("Web dashboard is LAN-exposed WITHOUT TLS", text, StringComparison.Ordinal);
+        Assert.Contains("web.network.allowFrom bounds only who can route to the port", text, StringComparison.Ordinal);
+        Assert.DoesNotContain(hostName, text, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("corp.example", text, StringComparison.OrdinalIgnoreCase);
+        Assert.Matches(@"clients connect to host-\d+", text);
+    }
+
     [Theory]
     [InlineData(null)]
     [InlineData("")]

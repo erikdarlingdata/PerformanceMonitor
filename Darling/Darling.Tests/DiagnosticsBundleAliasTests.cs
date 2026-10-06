@@ -171,6 +171,31 @@ public sealed class DiagnosticsBundleAliasTests
     }
 
     [Fact]
+    public void KeptNames_AlsoHoldTheWordsTheServiceLogUsesForItsListeners()
+    {
+        foreach (var word in new[] { "mcp", "web", "dashboard" })
+        {
+            Assert.Contains(word, BundleAliaser.KeptNames);
+            Assert.True(BundleAliaser.IsKept(word.ToUpperInvariant()));
+        }
+    }
+
+    /* The service log says "MCP server", "Web dashboard", "the dashboard" and mcp.network.allowFrom. A configured host
+       name whose first label is one of those words is aliased whole, with its domain, and the log's own words stay. */
+    [Theory]
+    [InlineData("mcp.corp.example.test", "MCP server is LAN-exposed WITHOUT TLS, and mcp.network.allowFrom bounds only who can route to the port")]
+    [InlineData("web.corp.example.test", "Web dashboard is LAN-exposed WITHOUT TLS, and web.network.allowFrom bounds only who can route to the port")]
+    [InlineData("dashboard.corp.example.test", "The dashboard stops serving when it lapses")]
+    public void AHostNameThatStartsWithAListenerWord_IsAliasedWhole_AndTheServiceLogsOwnWordsSurvive(string hostName, string productText)
+    {
+        var a = new BundleAliaser();
+        a.AddName(AliasKind.Host, hostName);
+
+        Assert.Equal(productText + "; clients connect to host-1", a.Alias(productText + "; clients connect to " + hostName));
+        Assert.Equal("domain-1", a.Alias("corp.example.test"));
+    }
+
+    [Fact]
     public void ProductRoles_AreKept_AndOtherRolesAreAliased()
     {
         var a = new BundleAliaser();

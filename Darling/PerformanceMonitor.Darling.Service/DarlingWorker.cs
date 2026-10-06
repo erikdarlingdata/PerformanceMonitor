@@ -2208,8 +2208,8 @@ LIMIT 1";
     /// #5288, which share one snapshot type) to the report the evaluator consumes (#3514):
     /// a null snapshot — nothing served, or <c>Clear()</c>ed when the dashboard stopped — becomes
     /// <c>Configured=false</c> (the evaluator's resolve arm), and a live snapshot carries its validity window,
-    /// identity and the host's not-yet-valid verdict (#3517) through unchanged — the verdict is the host's to
-    /// make and this mapping must not re-derive or drop it. Pure + static so the null-to-unconfigured seam
+    /// identity and the host's not-yet-valid verdict (#3517) and load-refusal verdict (#5288) through unchanged —
+    /// the verdict is the host's to make and this mapping must not re-derive or drop it. Pure + static so the null-to-unconfigured seam
     /// pins in a unit test rather than only through the sweep loop — the <see cref="BuildStoreUpgradeReport"/>
     /// precedent, and the seam the #3514 review flagged as previously tested only from the sides.
     /// </summary>
@@ -2221,7 +2221,8 @@ LIMIT 1";
             NotAfterUtc: snapshot?.NotAfterUtc ?? default,
             Subject: snapshot?.Subject ?? string.Empty,
             Thumbprint: snapshot?.Thumbprint ?? string.Empty,
-            RefusedNotYetValid: snapshot?.RefusedNotYetValid ?? false);
+            RefusedNotYetValid: snapshot?.RefusedNotYetValid ?? false,
+            LoadRefusal: snapshot?.LoadRefusal);
 
     /// <summary>
     /// Maps the fleet gate's last-hour counts to the report the "Collection Falling Behind" arm consumes (#4732).
