@@ -121,7 +121,8 @@ public sealed class DarlingMcpPlanCorrectionToolsTests
         Assert.DoesNotContain("@", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("N'", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("getdate", sql.ToLowerInvariant());
-        Assert.DoesNotContain("[", sql, StringComparison.Ordinal);
+        /* #5244: the database list predicate casts its parameter to text[], an array type, not a T-SQL bracket identifier. */
+        Assert.DoesNotContain("[", sql.Replace("text[]", "", StringComparison.Ordinal), StringComparison.Ordinal);
     }
 }
 

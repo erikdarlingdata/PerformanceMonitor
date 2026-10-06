@@ -651,7 +651,7 @@ public sealed class QueryStoreClutterTests
     public void TheToolBody_ReadsTheFleetOverTheSameAnchoredWindow()
     {
         var source = ReadRepoFile(ToolSource.Split('/'));
-        var body = source[source.IndexOf("public static async Task<string> GetQueryStoreClutter", StringComparison.Ordinal)..];
+        var body = source[source.IndexOf("internal static async Task<string> GetQueryStoreClutter", StringComparison.Ordinal)..];
         Assert.DoesNotContain("DateTime.UtcNow", body, StringComparison.Ordinal);
         /* #4203: cancellationToken threads to every store call, so the anchor pin matches the call text
            including the token rather than the pre-#4203 shape. */
