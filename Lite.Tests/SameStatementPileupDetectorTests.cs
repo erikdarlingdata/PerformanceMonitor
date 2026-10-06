@@ -743,7 +743,7 @@ public class SameStatementPileupDetectorTests
     [Fact]
     public void TheFinding_IsComputedFromSnapshotRowsAlone()
     {
-        /* The row type IS the contract: every member is a query_snapshots column. A field added here
+        /* The row type IS the contract: every member is a query_snapshots column (PreviewText, #5320, is the same text judged whole before the cut). A field added here
            from a query_store source would break this list and have to be justified. */
         var members = typeof(SameStatementPileupDetector.SnapshotRow)
             .GetProperties()
@@ -755,7 +755,7 @@ public class SameStatementPileupDetectorTests
             new[]
             {
                 "CollectionTime", "CpuTimeMs", "DatabaseName", "ElapsedMs", "LogicalReads",
-                "PhysicalReads", "QueryHash", "QueryText", "SessionId", "Status", "WaitTimeMs", "WaitType",
+                "PhysicalReads", "PreviewText", "QueryHash", "QueryText", "SessionId", "Status", "WaitTimeMs", "WaitType",
             },
             members);
 

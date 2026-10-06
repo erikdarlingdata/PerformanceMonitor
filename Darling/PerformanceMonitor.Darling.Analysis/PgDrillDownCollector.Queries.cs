@@ -31,6 +31,15 @@ public sealed partial class PgDrillDownCollector
     /// </summary>
     private const int DrillDownCommandTimeoutSeconds = 30;
 
+    /// <summary>The characters of a statement a drill-down prints. The reads return the WHOLE text, the statement
+    /// filter judges it, and the cut to this length comes after (#5320): a cut made in SQL first leaves the filter a
+    /// prefix, which can hold a value whose naming text sits past the cut.</summary>
+    internal const int StatementPreviewLength = 500;
+
+    /// <summary>A statement read whole, judged, then cut to <see cref="StatementPreviewLength"/> characters.</summary>
+    internal static string StatementPreview(string? raw) =>
+        AnalysisStatementText.Preview(raw, StatementPreviewLength) ?? "";
+
     public const string SpikePeakSql = @"
 SELECT collection_time, sqlserver_cpu_utilization
 FROM v_cpu_utilization_stats
@@ -42,7 +51,7 @@ LIMIT 1";
 SELECT collection_time, session_id, database_name, status,
        cpu_time_ms, total_elapsed_time_ms, logical_reads,
        wait_type, dop, parallel_worker_count,
-       LEFT(query_text, 500) AS query_text
+       query_text
 FROM v_query_snapshots
 WHERE server_id = $1
 AND   collection_time >= $2
@@ -100,7 +109,7 @@ LIMIT 5";
                     wait_type = reader.IsDBNull(7) ? "" : reader.GetString(7),
                     dop = reader.IsDBNull(8) ? 0 : reader.GetInt32(8),
                     parallel_workers = reader.IsDBNull(9) ? 0 : reader.GetInt32(9),
-                    query_text = reader.IsDBNull(10) ? "" : reader.GetString(10)
+                    query_text = reader.IsDBNull(10) ? "" : StatementPreview(reader.GetString(10))
                 });
             }
         }
@@ -141,7 +150,7 @@ LIMIT 5";
     /// <para>#3959: the ranking and the cut to five happen without the statement text, and <c>query_text</c> is
     /// read afterwards for the five that print. <c>v_query_stats</c> resolves text from the fleet-wide
     /// <c>query_text_dim</c> for every row it returns, so projecting it inside the window resolved and sorted
-    /// the whole window's text to keep five. The printed value is the same <c>LEFT(MAX(query_text), 500)</c>
+    /// the whole window's text to keep five. The printed value is the same <c>MAX(query_text)</c>, judged whole and then cut to 500 (#5320),
     /// over the same rows.</para>
     /// </summary>
     public const string TopCpuQueriesSql = @"
@@ -192,7 +201,7 @@ SELECT t.database_name, t.query_hash,
        COALESCE
        (
            (
-               SELECT LEFT(MAX(v.query_text), 500)
+               SELECT MAX(v.query_text)
                FROM v_query_stats AS v
                WHERE v.server_id = $1 AND v.collection_time >= $2 AND v.collection_time <= $3
                AND   v.delta_worker_time > 0
@@ -201,7 +210,7 @@ SELECT t.database_name, t.query_hash,
            ),
            CASE WHEN t.database_name IS NULL OR t.query_hash IS NULL THEN
            (
-               SELECT LEFT(MAX(v.query_text), 500)
+               SELECT MAX(v.query_text)
                FROM v_query_stats AS v
                WHERE v.server_id = $1 AND v.collection_time >= $2 AND v.collection_time <= $3
                AND   v.delta_worker_time > 0
@@ -243,7 +252,7 @@ ORDER BY t.total_cpu_us DESC";
                 /* #3648: newest plan's reading, null when unknown — never 0. History fields follow. */
                 max_dop = maxDop,
                 spills = reader.IsDBNull(5) ? 0L : Convert.ToInt64(reader.GetValue(5)),
-                query_text = reader.IsDBNull(6) ? "" : reader.GetString(6),
+                query_text = reader.IsDBNull(6) ? "" : StatementPreview(reader.GetString(6)),
                 plan_count = planCount,
                 max_dop_any_plan = maxDopAnyPlan,
                 max_dop_any_plan_last_seen = maxDopAnyPlanLastSeen?.ToString("o"),
@@ -259,7 +268,7 @@ ORDER BY t.total_cpu_us DESC";
 SELECT database_name, query_hash,
        SUM(delta_spills)::BIGINT AS total_spills,
        SUM(delta_execution_count)::BIGINT AS exec_count,
-       LEFT(MAX(query_text), 500) AS query_text
+       MAX(query_text) AS query_text
 FROM v_query_stats
 WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3
 AND   delta_spills > 0
@@ -287,7 +296,7 @@ LIMIT 5";
                 query_hash = reader.IsDBNull(1) ? "" : reader.GetString(1),
                 total_spills = reader.IsDBNull(2) ? 0L : Convert.ToInt64(reader.GetValue(2)),
                 execution_count = reader.IsDBNull(3) ? 0L : Convert.ToInt64(reader.GetValue(3)),
-                query_text = reader.IsDBNull(4) ? "" : reader.GetString(4)
+                query_text = reader.IsDBNull(4) ? "" : StatementPreview(reader.GetString(4))
             });
         }
 
@@ -402,7 +411,7 @@ SELECT
     -- dimension here would resolve text for all of them to print five (#3902). The text of the plans that
     -- print is resolved by a second read, by digest, for those plans only (ParameterSensitiveTextSql); the
     -- reader takes this inline text first and that read's text otherwise, as the view's COALESCE did.
-    LEFT(o.query_text, 500) AS query_text,
+    o.query_text,
     -- Appended after the older columns so their ordinals are untouched (#4821): the plan's local creation time
     -- and the newest snapshot's offset and zone, for the reader's conversion, then the text digest for the
     -- second read.
@@ -418,13 +427,12 @@ ORDER BY o.worker_ratio DESC";
     /// dimension row per digest by primary key, so the read touches the digests it is given and nothing else.
     /// <see cref="ParameterSensitiveSql"/> runs before the reader's cap and so cannot resolve text itself
     /// without resolving it for every plan that passes its rough filter. <c>$1</c> is ONE <c>bytea[]</c> (the
-    /// dimension's digest type): the digests <see cref="DigestsToResolve"/> picks. The cut to 500 characters stays
-    /// in SQL, so it is still PostgreSQL's character count, and <c>LEFT(COALESCE(a, b), 500)</c> is
-    /// <c>COALESCE(LEFT(a, 500), LEFT(b, 500))</c>: the reader takes the inline text when the row has it and
-    /// this read's text otherwise, as the view's own <c>COALESCE</c> did.
+    /// dimension's digest type): the digests <see cref="DigestsToResolve"/> picks. The text comes back whole and
+    /// <see cref="StatementPreview"/> judges and cuts it (#5320): the reader takes the inline text when the row has it
+    /// and this read's text otherwise, as the view's own <c>COALESCE</c> did.
     /// </summary>
     public const string ParameterSensitiveTextSql = @"
-SELECT digest, LEFT(query_text, 500)
+SELECT digest, query_text
 FROM query_text_dim
 WHERE digest = ANY($1)";
 
@@ -534,7 +542,7 @@ WHERE digest = ANY($1)";
             worker_ratio = p.WorkerRatio,
             grant_ratio = p.GrantRatio,
             spills_on_some_inputs = p.SpillsOnSomeInputs,
-            query_text = SettledQueryText(p.InlineText, p.TextDigest, dimensionText)
+            query_text = StatementPreview(SettledQueryText(p.InlineText, p.TextDigest, dimensionText))
         }).ToList();
     }
 
@@ -829,7 +837,7 @@ scored AS
         -- grain `latest` is already at — so it resolves with the keyed join below rather than being carried
         -- up through any_value(). l.query_text stays as the fallback: it is where text lived before the
         -- cutover, so history collected earlier still shows a statement instead of an empty drill-down.
-        LEFT(COALESCE(x.query_sql_text, l.query_text), 500) AS query_text,
+        COALESCE(x.query_sql_text, l.query_text) AS query_text,
         l.replica_role,
         l.execs * l.cpu_per_exec AS latest_total_cpu_us,
         -- #2138 gap 3: does this regressed query ALSO carry the parameter-sensitivity signature in the
@@ -959,7 +967,7 @@ LIMIT 5";
                 best_cpu_per_exec_us = reader.IsDBNull(7) ? 0.0 : Convert.ToDouble(reader.GetValue(7)),
                 best_duration_per_exec_us = reader.IsDBNull(8) ? 0.0 : Convert.ToDouble(reader.GetValue(8)),
                 regression_factor = reader.IsDBNull(9) ? 0.0 : Convert.ToDouble(reader.GetValue(9)),
-                query_text = reader.IsDBNull(10) ? "" : reader.GetString(10),
+                query_text = reader.IsDBNull(10) ? "" : StatementPreview(reader.GetString(10)),
                 /* #1850: which replica this regression was measured on. NULL — rendered as "" — on every
                    standalone/non-AG/pre-2022 server, which is the overwhelming majority; it is only
                    populated on an AG primary with Query Store for secondary replicas enabled, where two
@@ -1007,7 +1015,7 @@ WITH windowed AS
     AND   query_hash = $4
 )
 SELECT database_name, query_hash,
-       LEFT(MAX(query_text), 500) AS query_text,
+       MAX(query_text) AS query_text,
        SUM(delta_execution_count)::BIGINT AS exec_count,
        CASE WHEN SUM(delta_execution_count) > 0
             THEN SUM(delta_worker_time)::DOUBLE PRECISION / SUM(delta_execution_count) / 1000.0
@@ -1054,7 +1062,7 @@ GROUP BY database_name, query_hash";
             {
                 database = reader.IsDBNull(0) ? "" : reader.GetString(0),
                 query_hash = reader.IsDBNull(1) ? "" : reader.GetString(1),
-                query_text = reader.IsDBNull(2) ? "" : reader.GetString(2),
+                query_text = reader.IsDBNull(2) ? "" : StatementPreview(reader.GetString(2)),
                 execution_count = reader.IsDBNull(3) ? 0L : Convert.ToInt64(reader.GetValue(3)),
                 avg_cpu_ms = reader.IsDBNull(4) ? 0.0 : Math.Round(Convert.ToDouble(reader.GetValue(4)), 2),
                 avg_elapsed_ms = reader.IsDBNull(5) ? 0.0 : Math.Round(Convert.ToDouble(reader.GetValue(5)), 2),

@@ -606,6 +606,14 @@ public sealed class DarlingMcpBlockingTools
                 var (processes, processesTruncated) = DarlingDeadlockProcessRows.Build(
                     r.DeadlockGraphXml, r.DeadlockTime, showFullGraph ? int.MaxValue : rowBudget, statementLength);
                 if (!showFullGraph) rowBudget -= processes.Count;
+                /* #5320: the graph is judged WHOLE before the preview cuts it, as Lite's get_deadlock_detail does (#4348). A cut
+                   graph may end inside a statement's text, and the truncated flag is read off the FILTERED text: a graph withheld
+                   whole is a short placeholder (not truncated), and one the filter re-serialised past the cut is truncated,
+                   whatever its raw length was. The judge is told the cut so a long graph stops being read once nothing before
+                   it can change. */
+                var filteredGraph = showFullGraph || string.IsNullOrEmpty(r.DeadlockGraphXml)
+                    ? r.DeadlockGraphXml
+                    : SensitiveStatements.Xml(r.DeadlockGraphXml, DeadlockGraphPreviewLength) ?? SensitiveStatements.PlaceholderText;
                 return new
             {
                 collection_time = r.CollectionTime.ToString("o"),
@@ -614,8 +622,8 @@ public sealed class DarlingMcpBlockingTools
                 dedup_key = keys[i],
                 processes,
                 processes_truncated = processesTruncated,
-                deadlock_graph_xml = showFullGraph ? r.DeadlockGraphXml : McpHelpers.TruncateStatement(r.DeadlockGraphXml, DeadlockGraphPreviewLength),
-                deadlock_graph_xml_truncated = !showFullGraph && r.DeadlockGraphXml.Length > DeadlockGraphPreviewLength
+                deadlock_graph_xml = showFullGraph ? filteredGraph : McpHelpers.Truncate(filteredGraph, DeadlockGraphPreviewLength),
+                deadlock_graph_xml_truncated = !showFullGraph && filteredGraph!.Length > DeadlockGraphPreviewLength
             };
             });
 
