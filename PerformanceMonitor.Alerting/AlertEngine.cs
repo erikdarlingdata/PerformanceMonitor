@@ -3256,7 +3256,7 @@ public sealed class AlertEngine
            outcome.Muted, so a rule keyed on a statement still matches; only what leaves the process (the log,
            the channels, the history row) is filtered. Both deliverers re-derive their text from the context, so
            the context is rewritten, not just DetailText. */
-        outcome = AlertStatementFilter.Apply(outcome);
+        outcome = AlertStatementFilter.MarkJudged(AlertStatementFilter.Apply(outcome));
 
         _logger?.LogWarning(
             "{Line}",

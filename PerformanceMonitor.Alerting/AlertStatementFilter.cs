@@ -19,7 +19,9 @@ namespace PerformanceMonitor.Alerting;
 /// same <see cref="SensitiveStatements"/> judge the MCP tools and the web pages use.
 ///
 /// <para><b>Where it runs.</b> <c>AlertEngine.FireAsync</c> applies it to every <see cref="AlertOutcome"/> before
-/// the firing is logged or delivered, and the two finding senders apply it to a <see cref="FindingAlert"/>
+/// the firing is logged or delivered, and both deliverers apply it again at their own entry (#5320), so a caller that
+/// hands an outcome straight to a deliverer (the PostgreSQL families, the self alerts, the custom alert rules) is
+/// covered too; <see cref="AlertOutcome.StatementFiltered"/> keeps an engine alert from being judged twice. The two finding senders apply it to a <see cref="FindingAlert"/>
 /// before they compose a message or a history row. Mute rules are evaluated BEFORE the fire, on the raw
 /// text, so a rule keyed on a statement still matches; only what leaves the process is filtered.</para>
 ///
@@ -52,6 +54,13 @@ public static class AlertStatementFilter
     {
         ArgumentNullException.ThrowIfNull(outcome);
 
+        /* #5320: an outcome that already went through the filter (the engine's FireAsync marks its own) is
+           not judged again at the deliverer's choke point. */
+        if (outcome.StatementFiltered)
+        {
+            return outcome;
+        }
+
         try
         {
             var budget = new SensitiveStatements.JudgeBudget(SensitiveStatements.ReadBudget);
@@ -68,14 +77,18 @@ public static class AlertStatementFilter
 
             var shortMessage = SensitiveStatements.TextUnder(budget, outcome.ShortMessage);
 
+            /* A custom alert rule's name is user-written and rides the subject and title (#5320). */
+            var displayName = SensitiveStatements.TextUnder(budget, outcome.DisplayName);
+
             if (ReferenceEquals(context, outcome.Context)
+                && ReferenceEquals(displayName, outcome.DisplayName)
                 && ReferenceEquals(detailText, outcome.DetailText)
                 && ReferenceEquals(shortMessage, outcome.ShortMessage))
             {
                 return outcome;
             }
 
-            return outcome with { Context = context, DetailText = detailText, ShortMessage = shortMessage };
+            return outcome with { Context = context, DetailText = detailText, ShortMessage = shortMessage, DisplayName = displayName, StatementFiltered = true };
         }
 #pragma warning disable CA1031 // fail closed: the filter never lets the input through after a failure
         catch (Exception)
@@ -86,8 +99,22 @@ public static class AlertStatementFilter
                 Context = Cleared(outcome.Context),
                 DetailText = string.IsNullOrEmpty(outcome.DetailText) ? outcome.DetailText : SensitiveStatements.PlaceholderText,
                 ShortMessage = string.IsNullOrEmpty(outcome.ShortMessage) ? outcome.ShortMessage : SensitiveStatements.PlaceholderText,
+                DisplayName = string.IsNullOrEmpty(outcome.DisplayName) ? outcome.DisplayName : SensitiveStatements.PlaceholderText,
+                StatementFiltered = true,
             };
         }
+    }
+
+    /// <summary>
+    /// The outcome <see cref="Apply(AlertOutcome)"/> returns, marked as judged (#5320). <c>AlertEngine.FireAsync</c>
+    /// calls this after <see cref="Apply(AlertOutcome)"/> so a plain alert (one with nothing named, which
+    /// <c>Apply</c> hands back as the same instance) also reaches the deliverer marked, and the deliverer's own
+    /// filter does not judge it a second time. An already marked outcome comes back as the same instance.
+    /// </summary>
+    public static AlertOutcome MarkJudged(AlertOutcome outcome)
+    {
+        ArgumentNullException.ThrowIfNull(outcome);
+        return outcome.StatementFiltered ? outcome : outcome with { StatementFiltered = true };
     }
 
     /// <summary>
