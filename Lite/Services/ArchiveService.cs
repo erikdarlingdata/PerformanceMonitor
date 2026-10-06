@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Linq;
@@ -104,6 +105,13 @@ public class ArchiveService
        rebuilt (#4720): the same moment for a replay that the seam above marks for a swap. */
     internal Action? AfterCompactionReplayForTests { get; set; }
 
+    /* How long one compaction pass keeps starting new merges of a daily table (query_snapshots, #5393). A store
+       that already holds months of per-cycle files merges one day per group, slowly (the table's budget is a few
+       MiB and one thread), so the first pass could hold the pass for hours; past this time it starts no further
+       daily merge and the rest of the backlog goes on in the next pass. The first daily merge always starts, so a
+       pass makes progress whatever this is set to. A merge already running is not interrupted. */
+    internal TimeSpan DailyCompactionPassBudget { get; set; } = TimeSpan.FromMinutes(5);
+
     /* Replaces the minute-resolution file-name prefix, so a test can put two runs in different "minutes"
        without waiting for the clock. */
     internal string? TimestampForTests { get; set; }
@@ -128,7 +136,7 @@ public class ArchiveService
        deleted only once every new file is in place. The suffix keeps them out of every *.parquet scan and glob. */
     private const string ReplacedSuffix = ".replaced";
 
-    /* One per month/table being swapped: written after every batch is merged and before any file is renamed,
+    /* One per month/table (or day/table, for a table merged per day) being swapped: written after every batch is merged and before any file is renamed,
        removed when the swap is complete. Found at the start of a later run, it means the previous run did
        not finish, and the run finishes or undoes that swap before merging anything. */
     private const string SwapJournalSuffix = ".swap";
@@ -483,6 +491,28 @@ public class ArchiveService
         }
     }
 
+    /* The file names the live .archive-pending journals name. A journal that cannot be read names nothing. */
+    private HashSet<string> PendingArchiveFileNames()
+    {
+        var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var journalPath in Directory.GetFiles(_archivePath, "*" + PendingArchiveSuffix))
+        {
+            try
+            {
+                if (ReadPendingArchive(journalPath) is { } pending)
+                {
+                    names.Add(pending.FileName);
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogWarning(ex, "Could not read the archive journal {Journal}; compaction goes on without it", Path.GetFileName(journalPath));
+            }
+        }
+
+        return names;
+    }
+
     /* Null for a journal without a readable cutoff and file name (a truncated or foreign file). */
     private static (DateTime Cutoff, string FileName)? ReadPendingArchive(string journalPath)
     {
@@ -760,11 +790,11 @@ COPY (
             }
             catch (Exception ex)
             {
-                _logger?.LogError(ex, "Could not resolve the compaction swap {Journal}; its month is left as it is until the next run", journalName);
+                _logger?.LogError(ex, "Could not resolve the compaction swap {Journal}; its month (or day) is left as it is until the next run", journalName);
             }
 
-            /* A journal still present, resolved or not, keeps its month out of this run's merge: a new swap
-               for the month would write over the journal and forget the files it still has to delete. */
+            /* A journal still present, resolved or not, keeps its month (or day) out of this run's merge: a new swap
+               for the month (or day) would write over the journal and forget the files it still has to delete. */
             if (File.Exists(journalPath))
             {
                 /* The group's period is a month (6 digits) or, for a table merged per day, a day (8 digits). */
@@ -809,9 +839,16 @@ COPY (
 
         var (alreadyFolded, unresolvedGroups) = ReplayCompactionSwapJournals();
 
+        /* A file a live .archive-pending journal names is not compacted. The journal means the run that wrote the
+           file died before it deleted the archived rows, and recovery finishes that DELETE only while the file
+           is still there: a per-cycle file folded into a day (or month) file and removed first would read as
+           "never written", the rows would stay in the table and be exported a second time, and the archive
+           would hold them twice (#5393). */
+        var pendingArchiveFiles = PendingArchiveFileNames();
+
         var allFiles = Directory.GetFiles(_archivePath, "*.parquet")
             .Select(f => Path.GetFileName(f))
-            .Where(f => !alreadyFolded.Contains(f))
+            .Where(f => !alreadyFolded.Contains(f) && !pendingArchiveFiles.Contains(f))
             .ToList();
 
         /* Group files by (month, table). Recognized formats:
@@ -917,6 +954,21 @@ COPY (
                 }
             }
 
+            /* imported_YYYYMMDD_tablename, or imported_YYYYMMDD_tablename_ptNNN: a day file of a table merged per
+               day (query_snapshots), imported from a previous install (DataImportService prefixes imported_ to the
+               name). Without this it matched no shape and logged "Unrecognized parquet file format" on every pass
+               (#5393). Grouped under its month, where the table's compaction skip leaves it alone, like the other
+               imported shapes. The per-cycle form above has HHMM after the date, so it never reads as this. */
+            if (month == null)
+            {
+                m = Regex.Match(name, @"^imported_(\d{8})_(.+?)(_pt\d{3})?$");
+                if (m.Success)
+                {
+                    month = m.Groups[1].Value[..6];
+                    table = m.Groups[2].Value;
+                }
+            }
+
             /* YYYYMM_tablename_ptNNN (multi-part monthly — must match before the
                generic YYYYMM_tablename regex below, otherwise the trailing _ptNNN
                gets captured as part of the table name and groups get split). */
@@ -981,6 +1033,10 @@ COPY (
         var lowSpaceGroups = new List<(string Month, string Table, long NeededBytes, long FreeBytes, long MergedBytes, long ReserveBytes, int HeldBack)>();
         var largestNeedBytes = 0L;
 
+        var compactionClock = Stopwatch.StartNew();
+        var dailyMergesStarted = 0;
+        var dailyGroupsDeferred = 0;
+
         foreach (var ((month, table), files) in groups)
         {
             /* A table merged per day (query_snapshots, #5393) has no monthly merge: its monthly, legacy and
@@ -990,10 +1046,11 @@ COPY (
                 continue;
             }
 
-            /* If every file in the group is already in final monthly/part format (YYYYMM_table or
-               YYYYMM_table_ptNNN, with or without the imported_ prefix), there are no new per-cycle files
-               to fold in, so skip. Otherwise a month that legitimately split into N part files (input over
-               the per-batch budget) gets re-read and re-written on every archival cycle. */
+            /* If every file in the group is already in final format (YYYYMM_table or YYYYMM_table_ptNNN, or for
+               a table merged per day YYYYMMDD_table or YYYYMMDD_table_ptNNN, with or without the imported_
+               prefix), there are no new per-cycle files to fold in, so skip. Otherwise a month (or day) that
+               legitimately split into N part files (input over the per-batch budget) gets re-read and
+               re-written on every archival cycle. */
             if (files.All(IsMergedFileName))
             {
                 continue;
@@ -1074,10 +1131,25 @@ COPY (
                     continue;
                 }
 
+                /* A daily table's merge is slow, so a pass that has spent its time budget on them (a first pass
+                   over months of per-cycle files) starts no further one; the rest waits for the next pass. The
+                   first merge always starts, so a pass makes progress. */
+                if (isDaily)
+                {
+                    if (dailyMergesStarted > 0 && compactionClock.Elapsed >= DailyCompactionPassBudget)
+                    {
+                        dailyGroupsDeferred++;
+                        continue;
+                    }
+
+                    dailyMergesStarted++;
+                }
+
                 var sourcePaths = batches.SelectMany(b => b).ToList();
 
                 /* Plan the output names. With one batch and nothing left beside it we keep the existing
-                   YYYYMM_table.parquet name (backward compatible). Otherwise we emit YYYYMM_table_ptNNN.parquet,
+                   YYYYMM_table.parquet name (backward compatible). Otherwise we emit YYYYMM_table_ptNNN.parquet
+                   (a daily table's period is a day: YYYYMMDD_table.parquet and its _ptNNN parts),
                    the lowest numbers no file that stays is using; the archive views glob both shapes, so readers
                    see them all. An output may take the name of an input it consumes (a replacing output, which
                    the swap handles); it never takes the name of a file that stays. */
@@ -1179,6 +1251,13 @@ COPY (
             }
         }
 
+        if (dailyGroupsDeferred > 0)
+        {
+            _logger?.LogInformation(
+                "Parquet compaction in {Folder} merged {Started} day group(s) of its daily tables in {Minutes:F1} minutes and left {Deferred} more for the next pass",
+                _archivePath, dailyMergesStarted, compactionClock.Elapsed.TotalMinutes, dailyGroupsDeferred);
+        }
+
         LastCompactionLargestNeedBytes = largestNeedBytes;
         if (lowSpaceGroups.Count > 0)
         {
@@ -1231,7 +1310,7 @@ COPY (
     private static long BatchInputBytes(List<string> batch) =>
         batch.Sum(p => new FileInfo(p.Replace("/", "\\")).Length);
 
-    /* One month/table swap: the merged outputs about to replace the group's inputs. An output is "replacing"
+    /* One month/table (or day/table) swap: the merged outputs about to replace the group's inputs. An output is "replacing"
        when a file already exists at its final name (the month's existing file or part file, itself one of the
        inputs); a "fresh" output has nothing at its name. Inputs are the group's files that are not output
        names. Everything is a full path. */
