@@ -636,10 +636,6 @@ public sealed class DocCommentHygieneTests
         ["CallerMemberNameAttribute"] =
             "OUTSIDE. Same elision as the entry above.",
 
-        ["HostString.Host"] =
-            "OUTSIDE. Microsoft.AspNetCore.Http.HostString, reached through a property chain rather than "
-            + "named, so the type name appears in no code here.",
-
         ["IConvertible"] =
             "OUTSIDE. System.IConvertible, named only to explain what a conversion does NOT go through.",
 
