@@ -16,10 +16,12 @@ namespace PerformanceMonitor.Darling.Service;
 /// capture cap, which has no stored plan), its measured size, whether a commit has proved it, and when this
 /// host last saw the identity. <paramref name="RenderedOrdinal"/> is the caller's own count of the run that
 /// rendered the plan (a collector that expires entries by age in runs keeps one); it is never refreshed by a hit,
-/// and is 0 when the caller keeps none.
+/// and is 0 when the caller keeps none. <paramref name="Shape"/> is the caller's own key for the plan's shape
+/// (#5158: what stays the same when a plan's bytes change only because its memory grant was adjusted in place); null
+/// when the caller keeps none or could not compute one.
 /// </summary>
 internal readonly record struct PlanDigestEntry(
-    string? Digest, long? Bytes, bool Confirmed, DateTime LastSeenUtc, long RenderedOrdinal = 0);
+    string? Digest, long? Bytes, bool Confirmed, DateTime LastSeenUtc, long RenderedOrdinal = 0, string? Shape = null);
 
 /// <summary>
 /// What the host remembers about statement plans it has already committed, keyed by whatever identity a
@@ -81,13 +83,14 @@ internal sealed class PlanDigestCache<TKey>
 
     /// <summary>
     /// Records a plan this run rendered. <paramref name="digest"/> is null for a plan over the cap.
-    /// <paramref name="renderedOrdinal"/> is the caller's count of this run, kept for <see cref="PlanDigestEntry.RenderedOrdinal"/>.
+    /// <paramref name="renderedOrdinal"/> is the caller's count of this run, kept for <see cref="PlanDigestEntry.RenderedOrdinal"/>;
+    /// <paramref name="shape"/> is kept for <see cref="PlanDigestEntry.Shape"/>.
     /// </summary>
-    public void AddPending(TKey key, string? digest, long? bytes, DateTime nowUtc, long renderedOrdinal = 0)
+    public void AddPending(TKey key, string? digest, long? bytes, DateTime nowUtc, long renderedOrdinal = 0, string? shape = null)
     {
         lock (_gate)
         {
-            _entries[key] = new PlanDigestEntry(digest, bytes, Confirmed: false, nowUtc, renderedOrdinal);
+            _entries[key] = new PlanDigestEntry(digest, bytes, Confirmed: false, nowUtc, renderedOrdinal, shape);
         }
     }
 
