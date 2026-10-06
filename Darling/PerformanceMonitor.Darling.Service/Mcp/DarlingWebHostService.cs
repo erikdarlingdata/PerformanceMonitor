@@ -1978,8 +1978,9 @@ document.getElementById('return').value = location.pathname + location.search + 
                 _logger.Log(level.Value,
                     "Web dashboard network exposure requested but web.network.allowFrom '{AllowFrom}' is not a valid CIDR list or an " +
                     "entry's address family does not match web.network.listen — refusing to expose; binding loopback-only. " +
-                    "Use one CIDR (e.g. 192.168.1.0/24) or several, separated by commas or as a JSON array " +
-                    "(e.g. 10.8.0.0/16,192.168.1.5/32): every entry in CIDR form (/32 for one address) and of the same " +
+                    "Use one CIDR (e.g. 192.168.1.0/24) or several, separated by commas " +
+                    "(e.g. 10.8.0.0/16,192.168.1.5/32): every entry in CIDR form (/32 for one address), with each IPv4 " +
+                    "address written as four plain decimal numbers (no leading zeros) and no IPv6 zone index, and of the same " +
                     "family as listen (a :: listen takes IPv6 entries only). Host bits are masked (192.168.1.5/24 means 192.168.1.0/24).",
                     web.Network?.AllowFrom);
                 break;
