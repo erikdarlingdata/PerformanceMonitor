@@ -756,6 +756,7 @@ td.cell-picked { outline: 1px solid var(--accent); outline-offset: -1px; }
 .strip.empty { background: var(--bg-dark); border: 1px solid var(--border); color: var(--muted); }
 .strip.notice { background: rgba(255, 213, 79, 0.10); border: 1px solid rgba(255, 213, 79, 0.35); color: var(--warn); }
 .strip.loading { color: var(--muted); }
+.strip.source { color: var(--muted); font-size: 0.85em; }
 
 .all-healthy {
   display: flex;

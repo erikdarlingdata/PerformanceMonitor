@@ -39,7 +39,7 @@
  * touches innerHTML.
  */
 
-import { el, makeActivatable, readTool, readToolWithinKeptHistory, keptWindowStrip, windowFloorStrip, mount, truncate, loadingStrip, errorStrip, readErrorStrip, emptyStrip, disclosure, noticeStrip, getPath, fmtMs, fmtRate, localTime, parseUtc, windowFromHours, daysText, dbScopeChip, getActiveDatabaseFilter, queryWaitFilter, setQueryWaitFilter, waitIsLinked } from "../util.js";
+import { el, makeActivatable, readTool, readToolWithinKeptHistory, keptWindowStrip, windowFloorStrip, mount, truncate, loadingStrip, errorStrip, readErrorStrip, emptyStrip, disclosure, noticeStrip, getPath, fmtMs, fmtRate, localTime, parseUtc, windowFromHours, daysText, dbScopeChip, sourceStrip, getActiveDatabaseFilter, queryWaitFilter, setQueryWaitFilter, waitIsLinked } from "../util.js";
 import { renderPanel, setPanelSignal, getPanelSignal, VIZ } from "../panels.js";
 import { zoomableLineChart, chartZoomScope, SERIES_COLORS, CATEGORICAL_COLORS } from "../charts.js";
 import { multiPicker, mergeSeriesRows } from "../multi-picker.js";
@@ -226,7 +226,7 @@ function fanout(read, params, specs) {
            opts.atTimeItem; Active Queries when it names none. */
         const rendered = VIZ[spec.viz](res.data, { ...spec, read, windowHours: res.keptHours || (params && params.hours), atTime: spec.atTime === false || !params || !params.server ? null : { server: params.server, item: spec.atTimeItem || "queries" } });
 
-        mount(body, [keptWindowStrip(res), windowFloorStrip(res.data, spec), typeof note === "string" && note.trim() ? noticeStrip(note) : null, rendered]);
+        mount(body, [keptWindowStrip(res), windowFloorStrip(res.data, spec), sourceStrip(res.data, spec), typeof note === "string" && note.trim() ? noticeStrip(note) : null, rendered]);
       } catch (e) {
         mount(body, errorStrip("Could not render this panel: " + (e && e.message ? e.message : String(e))));
       }
@@ -1028,6 +1028,8 @@ function line(title, read, params, rowsKey, xKey, series, opts = {}) {
     format: opts.format,
     unit: opts.unit,
     emptyText: opts.emptyText,
+    /* #5244: the answer's field naming the collector that answered (get_blocking_trend's `source`); absent on every other line. */
+    sourceKey: opts.sourceKey,
     span: opts.span ?? 1,
     /* The chart menu's "at This Time" item opens the SQL Server Queries or Blocking tab, so a panel on a registry
        without them (the one PostgreSQL line) passes atTime: false. A chart offers the one item that matches it, as the
@@ -1069,6 +1071,7 @@ export const SERVER_TABS = [
         subtitle: ctx.label,
         format: "int",
         atTimeItem: "blocking",
+        sourceKey: "source",
         emptyText: "No blocking events in this window — an empty trend here means none happened, not that nothing was collected.",
       }),
       line("Deadlocks", "get_deadlock_trend", { server, hours: ctx.hours }, "trend", "time", COUNT_SERIES, {
@@ -1289,6 +1292,7 @@ export const SERVER_TABS = [
         subtitle: ctx.label,
         format: "int",
         atTimeItem: "blocking",
+        sourceKey: "source",
         emptyText: "No blocking events in this window — an empty trend here means none happened, not that nothing was collected.",
       }),
       line("Deadlocks", "get_deadlock_trend", { server, hours: ctx.hours }, "trend", "time", COUNT_SERIES, {
@@ -1369,6 +1373,7 @@ export const SERVER_TABS = [
           subtitle: ctx.label,
           viz: "line",
           atTimeItem: "blocking",
+          sourceKey: "source",
           rowsKey: "blocking_duration",
           xKey: "time",
           series: BLOCKING_SEVERITY_SERIES,
