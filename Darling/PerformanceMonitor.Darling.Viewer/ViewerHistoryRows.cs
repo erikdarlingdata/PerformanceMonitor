@@ -7,6 +7,8 @@
  */
 
 using System;
+using System.Collections.Generic;
+using System.Linq;
 
 namespace PerformanceMonitor.Darling.Viewer;
 
@@ -234,8 +236,49 @@ public sealed class ViewerQueryStoreHistoryRow
     public string QueryHash { get; set; } = "";
     public string QueryPlanHash { get; set; } = "";
 
+    // The rest of the interval identity, beside PlanId / FirstExecutionTime / ExecutionTypeDesc above (#5306).
+    // Not shown in the grid: LatestPerInterval keys on them. NULL on rows collected before the columns existed
+    // (runtime_stats_interval_id, #1841 tier 2) and, for replica_role, off an availability group.
+    public long? RuntimeStatsIntervalId { get; set; }
+    public string? ReplicaRole { get; set; }
+
     public double TotalDurationMs => ExecutionCount * AvgDurationMs;
     public double TotalCpuMs => ExecutionCount * AvgCpuTimeMs;
+
+    /// <summary>
+    /// #5306: the newest snapshot of each Query Store interval among <paramref name="rows"/> — Lite's
+    /// <c>QueryStoreHistoryRow.LatestPerInterval</c>.
+    ///
+    /// <para>The history grid lists EVERY stored snapshot on purpose (see <c>ViewerDataService.QueryStoreHistorySql</c>),
+    /// and query_store_stats rows are cumulative per interval: an interval the collector fetched N times is N rows with
+    /// a growing execution_count. Anything that ADDS those rows up counts the interval about N times, so a total takes
+    /// this first. The input is not changed: the window binds the same list to its grid.</para>
+    ///
+    /// <para>The interval identity and the "latest" order are the aggregate reads' in ViewerDataService (#1841, #1907).
+    /// The key is plan_id, runtime_stats_interval_id, first_execution_time, execution_type_desc and replica_role; the
+    /// survivor is the greatest collection_time, then the greatest execution_count (the #1907 tie-break, which picks
+    /// the flushed slice of an interval stored twice at one collection time). database_name and query_id are in those
+    /// reads' key too and are constant here, because the history read is scoped to one of each. A NULL part of the key
+    /// matches another NULL, as in the aggregate reads' partitioning, which is also how the rows collected before the
+    /// id was stored keep the first_execution_time proxy.</para>
+    /// </summary>
+    public static IReadOnlyList<ViewerQueryStoreHistoryRow> LatestPerInterval(IEnumerable<ViewerQueryStoreHistoryRow> rows) =>
+        rows
+            .GroupBy(r => (r.PlanId, r.RuntimeStatsIntervalId, r.FirstExecutionTime, r.ExecutionTypeDesc, r.ReplicaRole))
+            .Select(interval => interval
+                .OrderByDescending(r => r.CollectionTime)
+                .ThenByDescending(r => r.ExecutionCount)
+                .First())
+            .ToList();
+
+    /// <summary>
+    /// #5306: the executions of the queries <paramref name="rows"/> hold, counting each interval once at its latest
+    /// snapshot (<see cref="LatestPerInterval"/>). The history window's summary line shows this as Total Executions;
+    /// adding <see cref="ExecutionCount"/> up over the grid's rows counted an interval collected N times about N times.
+    /// </summary>
+    public static long TotalExecutions(IEnumerable<ViewerQueryStoreHistoryRow> rows) =>
+        LatestPerInterval(rows).Sum(r => r.ExecutionCount);
+
     public string CollectionTimeLocal => HistoryTime.CollectionLocal(CollectionTime);
     /* query_store_stats, not query_stats: both stamps are naive UTC (see the file header), so they take
        the same conversion CollectionTime above takes rather than the server-clock one the two DMV history

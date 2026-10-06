@@ -15,7 +15,6 @@ using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
-using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
@@ -25,7 +24,7 @@ namespace PerformanceMonitor.Darling.Service;
 
 /// <summary>
 /// Reads every bundle section and drives <see cref="DiagnosticsBundle.Assemble"/>. Reads only: it opens the store
-/// through readers that already exist and runs three small catalog and history reads of its own.
+/// through readers that already exist (the statement history is the MCP tool's) and runs a few small catalog reads of its own.
 /// </summary>
 internal static class DiagnosticsBundleRunner
 {
@@ -68,41 +67,19 @@ AND   database_name IS NOT NULL";
 
     /// <summary>
     /// Whether the statement-history tables exist. Names match V163 as merged; the section reads
-    /// <c>not_present</c> when the tables are absent, so the verb works on a store below that schema.
+    /// <c>not_present</c> when the tables are absent, so the verb works on a store below that schema. This is the
+    /// only read of the history tables the bundle makes itself: the statements come from
+    /// <see cref="DarlingMcpStoreQueryHistoryTools.GetStoreQueryHistoryUncut"/>.
     /// </summary>
     internal const string StatementHistoryPresentSql = @"
 SELECT to_regclass('collect.store_statement_history') IS NOT NULL AND to_regclass('collect.store_statement_captures') IS NOT NULL";
 
-    internal const string StatementCapturesSql = @"
-SELECT capture_time, interval_seconds, dealloc_delta, statements_seen, statements_kept, hidden_statements, outcome
-FROM collect.store_statement_captures
-WHERE capture_time >= $1
-ORDER BY capture_time DESC
-LIMIT 500";
-
-    internal const string StatementHistoryTopSql = @"
-SELECT queryid
-FROM collect.store_statement_history
-WHERE capture_time >= $1
-GROUP BY queryid
-ORDER BY SUM(delta_total_exec_ms) DESC, queryid
-LIMIT 25";
-
-    internal const string StatementHistoryRowsSql = @"
-SELECT capture_time, interval_seconds, role_name, queryid, delta_calls, delta_total_exec_ms, delta_rows,
-       delta_shared_blks_hit, delta_shared_blks_read, delta_temp_blks_written, max_exec_ms,
-       first_seen, entry_restarted, reset_in_interval
-FROM collect.store_statement_history
-WHERE capture_time >= $1
-AND   queryid = ANY($2)
-ORDER BY queryid, capture_time DESC
-LIMIT 1500";
-
-    /// <summary>The text of the listed statements, withheld where the shared sensitive-statement filter names it.</summary>
-    internal static readonly string StatementTextSql = @"
-SELECT queryid, " + PgSensitiveStatementFilter.SqlPredicate("query") + @" AS query
-FROM " + PgSchemaGenerator.ConfigSchema + "." + StoreStatementStats.FunctionName + @"()
-WHERE queryid = ANY($1)";
+    /// <summary>
+    /// How many rows the history lists: the 25 that spent the most time in the window, one row per role and statement. The
+    /// tool ranks that way, so a statement two roles ran takes two of the 25 rows, and the section can name fewer than 25
+    /// distinct statements. 25 is the cap the section has always had. The tool's default page is 20.
+    /// </summary>
+    internal const int StatementHistoryTop = 25;
 
     /// <summary>The outcome of building and writing a bundle.</summary>
     internal sealed record Outcome(
@@ -536,18 +513,38 @@ WHERE queryid = ANY($1)";
     {
         var cumulative = DiagnosticsBundle.ParseReader(
             await DarlingMcpStoreQueryStatsTools.GetStoreQueryStats(postgres, null, "total_time", 25, true, ct));
-        return new JsonObject
+        var section = new JsonObject
         {
             ["cumulative"] = cumulative,
             ["history"] = await StatementHistoryAsync(postgres, hours, ct),
         };
+
+        /* A tool's error answer is a member, one level down, so the section's own status would still read ok while the member
+           failed (#5097). A section that throws reads error in its body, in the manifest and in the exit code; this one reads
+           the same when either member answered an error, keeping both members with the tool's own error in the one that failed.
+           The exit code (RunSectionAsync) and the manifest (Assemble) both take a section's failure from this status. */
+        if (MemberFailed(section))
+        {
+            section.Insert(0, "status", "error");
+        }
+
+        return section;
     }
 
     /// <summary>
-    /// Part 3's statement history. Table and column names match V163 as merged. Never reads the
-    /// diff-state baseline table. Absent tables report <c>not_present</c>.
+    /// The statement history, read through <c>get_store_query_history</c> (#5097): the answer of the tool's ranked mode, the
+    /// 25 rows that spent the most time in the window (one per role and statement), becomes the member as the tool wrote it,
+    /// with each statement's text whole (<see cref="DarlingMcpStoreQueryHistoryTools.GetStoreQueryHistoryUncut"/>), because
+    /// the bundle aliases the text before <see cref="CompactStatementTexts"/> cuts it. A refusal or an error the tool answers
+    /// is the member as it is, with its <c>status</c>. The existence probe stays: a store before V163 reads <c>not_present</c>
+    /// with the reason below, and never reaches the tool. Never reads the diff-state baseline table.
     /// </summary>
-    private static async Task<JsonNode?> StatementHistoryAsync(NpgsqlDataSource postgres, int hours, CancellationToken ct)
+    /// <remarks>
+    /// The window is the bundle's <c>--hours</c>, clamped to the tool's range (1 to <see cref="DarlingMcpStoreQueryHistoryTools.MaxHours"/>).
+    /// <c>--hours</c> stops at 168 today, so the clamp is a guard for the day that range widens; when it acts, the member
+    /// carries <c>hours_back_clamped_from</c> with the value that was asked for.
+    /// </remarks>
+    internal static async Task<JsonNode?> StatementHistoryAsync(NpgsqlDataSource postgres, int hours, CancellationToken ct)
     {
         bool present;
         await using (var probe = postgres.CreateCommand(StatementHistoryPresentSql))
@@ -561,93 +558,25 @@ WHERE queryid = ANY($1)";
             return new JsonObject { ["status"] = "not_present", ["reason"] = "This store has no statement-history tables yet." };
         }
 
-        var since = DateTime.SpecifyKind(DateTime.UtcNow.AddHours(-hours), DateTimeKind.Unspecified);
-        var captures = new JsonArray();
-        await using (var command = postgres.CreateCommand(StatementCapturesSql))
+        var hoursBack = Math.Clamp(hours, 1, DarlingMcpStoreQueryHistoryTools.MaxHours);
+        var answer = DiagnosticsBundle.ParseReader(
+            await DarlingMcpStoreQueryHistoryTools.GetStoreQueryHistoryUncut(postgres, hoursBack, StatementHistoryTop, ct));
+        if (hoursBack != hours && answer is JsonObject history)
         {
-            command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
-            command.Parameters.AddWithValue(since);
-            await using var reader = await command.ExecuteReaderAsync(ct);
-            while (await reader.ReadAsync(ct))
-            {
-                captures.Add(new JsonObject
-                {
-                    ["capture_time"] = reader.GetDateTime(0).ToString("o", CultureInfo.InvariantCulture),
-                    ["interval_seconds"] = reader.IsDBNull(1) ? null : reader.GetInt32(1),
-                    ["dealloc_delta"] = reader.IsDBNull(2) ? null : reader.GetInt64(2),
-                    ["statements_seen"] = reader.GetInt32(3),
-                    ["statements_kept"] = reader.GetInt32(4),
-                    ["hidden_statements"] = reader.GetInt32(5),
-                    ["outcome"] = reader.GetString(6),
-                });
-            }
+            history["hours_back_clamped_from"] = hours;
         }
 
-        var queryIds = new List<long>();
-        await using (var command = postgres.CreateCommand(StatementHistoryTopSql))
-        {
-            command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
-            command.Parameters.AddWithValue(since);
-            await using var reader = await command.ExecuteReaderAsync(ct);
-            while (await reader.ReadAsync(ct))
-            {
-                queryIds.Add(reader.GetInt64(0));
-            }
-        }
-
-        var texts = new Dictionary<long, string>();
-        if (queryIds.Count > 0)
-        {
-            try
-            {
-                await using var command = postgres.CreateCommand(StatementTextSql);
-                command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
-                command.Parameters.AddWithValue(queryIds.ToArray());
-                await using var reader = await command.ExecuteReaderAsync(ct);
-                while (await reader.ReadAsync(ct))
-                {
-                    var raw = reader.IsDBNull(1) ? string.Empty : reader.GetString(1);
-                    texts[reader.GetInt64(0)] = DarlingMcpStoreQueryStatsTools.ShownText(raw);
-                }
-            }
-            catch (Exception ex) when (ex is NpgsqlException or InvalidOperationException)
-            {
-                /* The text reader is gated on the extension; without it the history still stands, with no text. */
-            }
-        }
-
-        var rows = new JsonArray();
-        if (queryIds.Count > 0)
-        {
-            await using var command = postgres.CreateCommand(StatementHistoryRowsSql);
-            command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
-            command.Parameters.AddWithValue(since);
-            command.Parameters.AddWithValue(queryIds.ToArray());
-            await using var reader = await command.ExecuteReaderAsync(ct);
-            while (await reader.ReadAsync(ct))
-            {
-                var id = reader.GetInt64(3);
-                rows.Add(new JsonObject
-                {
-                    ["capture_time"] = reader.GetDateTime(0).ToString("o", CultureInfo.InvariantCulture),
-                    ["interval_seconds"] = reader.IsDBNull(1) ? null : reader.GetInt32(1),
-                    ["role_name"] = reader.IsDBNull(2) ? null : reader.GetString(2),
-                    ["queryid"] = id.ToString(CultureInfo.InvariantCulture),
-                    ["delta_calls"] = reader.GetInt64(4),
-                    ["delta_total_exec_ms"] = reader.GetDouble(5),
-                    ["delta_rows"] = reader.GetInt64(6),
-                    ["delta_shared_blks_hit"] = reader.GetInt64(7),
-                    ["delta_shared_blks_read"] = reader.GetInt64(8),
-                    ["delta_temp_blks_written"] = reader.GetInt64(9),
-                    ["max_exec_ms_cumulative"] = reader.IsDBNull(10) ? null : reader.GetDouble(10),
-                    ["first_seen"] = reader.GetBoolean(11),
-                    ["entry_restarted"] = reader.GetBoolean(12),
-                    ["reset_in_interval"] = reader.GetBoolean(13),
-                    ["query"] = texts.TryGetValue(id, out var text) ? text : null,
-                });
-            }
-        }
-
-        return new JsonObject { ["status"] = "ok", ["captures"] = captures, ["top_statement_rows"] = rows };
+        return answer;
     }
+
+    /// <summary>
+    /// Whether either member of the section, <c>cumulative</c> or <c>history</c>, is the tool's error answer. A member is nested
+    /// under the section, so the section's own status does not show it; <see cref="StoreStatementsSectionAsync"/> then gives the
+    /// section the status a section that throws gets (<c>error</c>), so the exit code and the manifest both count it as failed,
+    /// as they did when a failed read threw. A precondition or a refusal is not an error: it is how a store that cannot serve
+    /// the read yet answers, and it is not counted.
+    /// </summary>
+    internal static bool MemberFailed(JsonNode? section) =>
+        section is JsonObject o
+        && (DiagnosticsBundle.StatusOf(o["history"]) == "error" || DiagnosticsBundle.StatusOf(o["cumulative"]) == "error");
 }
