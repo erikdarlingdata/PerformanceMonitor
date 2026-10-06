@@ -78,7 +78,7 @@ public sealed class DarlingMcpPlanTools
             // Server Context card can see cost threshold/max memory/database. Non-fatal (null on a miss or a
             // read failure) — the analyzer then falls back to its Info branch.
             var metadata = await DarlingServerMetadataReader.ReadAsync(postgres, resolved.ServerId, database_name, cancellationToken);
-            return McpPlanAnalysisFormatter.BuildAnalysisResult(xml, resolved.ServerName, "query_stats", query_hash, analyzerConfig, metadata, cancellationToken);
+            return AnalyzeFilteredPlan(xml, resolved.ServerName, "query_stats", query_hash, analyzerConfig, metadata, cancellationToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -118,7 +118,7 @@ public sealed class DarlingMcpPlanTools
             // #4530: one store read per call so rule 38 can see the server's edition/MAXDOP. No database
             // name is available for a procedure looked up by sql_handle alone, so Database stays null (#4597).
             var metadata = await DarlingServerMetadataReader.ReadAsync(postgres, resolved.ServerId, cancellationToken: cancellationToken);
-            return McpPlanAnalysisFormatter.BuildAnalysisResult(xml, resolved.ServerName, "procedure_stats", sql_handle, analyzerConfig, metadata, cancellationToken);
+            return AnalyzeFilteredPlan(xml, resolved.ServerName, "procedure_stats", sql_handle, analyzerConfig, metadata, cancellationToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -160,7 +160,7 @@ public sealed class DarlingMcpPlanTools
             // #4530/#4597: one store read per call so rule 38 can see the server's edition/MAXDOP, and the
             // Server Context card can see cost threshold/max memory/database.
             var metadata = await DarlingServerMetadataReader.ReadAsync(postgres, resolved.ServerId, database_name, cancellationToken);
-            return McpPlanAnalysisFormatter.BuildAnalysisResult(xml, resolved.ServerName, "query_store", identifier, analyzerConfig, metadata, cancellationToken);
+            return AnalyzeFilteredPlan(xml, resolved.ServerName, "query_store", identifier, analyzerConfig, metadata, cancellationToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -189,10 +189,10 @@ public sealed class DarlingMcpPlanTools
 
         try
         {
-            // #4348: the caller's XML has no stored-plan read to filter it, so the statement filter runs here, before
-            // the analysis lifts parameter values and statement text out of it into fields the JSON sweep cannot pair.
-            plan_xml = SensitiveStatements.Xml(plan_xml) ?? SensitiveStatements.PlaceholderText;
-            return McpPlanAnalysisFormatter.BuildAnalysisResult(plan_xml, null, "xml", null, analyzerConfig, cancellationToken);
+            // #4348: the caller's XML has no stored-plan read to filter it, so AnalyzeFilteredPlan runs the statement
+            // filter before the analysis lifts parameter values and statement text out of it into fields the JSON sweep
+            // cannot pair.
+            return AnalyzeFilteredPlan(plan_xml, null, "xml", null, analyzerConfig, null, cancellationToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -345,6 +345,34 @@ public sealed class DarlingMcpPlanTools
         {
             return McpHelpers.FormatError("get_active_query_plan_xml", ex);
         }
+    }
+
+    /// <summary>
+    /// #4348: said when the statement filter withheld a plan whole, so the analysis is skipped instead of reading the
+    /// placeholder as XML and reporting a parse error. Worded once for the four analysis tools.
+    /// </summary>
+    internal const string WithheldPlanMessage = "This plan was withheld by the statement filter (#4348), so it was not analysed.";
+
+    /// <summary>
+    /// #4348: the one way every plan-analysis tool here turns plan XML into its result. The statement filter runs on
+    /// the XML first, because the analysis lifts parameter values and statement text out of it into fields the JSON
+    /// sweep cannot pair with their statement. A plan the filter withholds whole is answered with
+    /// <see cref="WithheldPlanMessage"/>. Kept out of <c>McpPlanAnalysisFormatter.BuildAnalysisResult</c>, which the
+    /// desktop Dashboard also calls.
+    /// </summary>
+    internal static string AnalyzeFilteredPlan(
+        string xml,
+        string? serverName,
+        string source,
+        string? identifier,
+        AnalyzerConfig? analyzerConfig,
+        ServerMetadata? metadata,
+        CancellationToken cancellationToken)
+    {
+        xml = SensitiveStatements.Xml(xml) ?? SensitiveStatements.PlaceholderText;
+        if (xml == SensitiveStatements.PlaceholderText)
+            return McpHelpers.Status("unavailable", WithheldPlanMessage);
+        return McpPlanAnalysisFormatter.BuildAnalysisResult(xml, serverName, source, identifier, analyzerConfig, metadata, cancellationToken);
     }
 
     /// <summary>" in database 'X'" when a database was supplied, else empty — keeps the miss message honest
