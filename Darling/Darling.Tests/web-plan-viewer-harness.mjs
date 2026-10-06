@@ -5,18 +5,21 @@
 import { pathToFileURL } from "node:url";
 
 class FakeNode {
-  constructor(tag) { this.tag = tag; this.children = []; this.attrs = {}; this.listeners = {}; this.parent = null; this._text = ""; this.className = ""; this.style = {}; }
+  constructor(tag) { this.tag = tag; this.children = []; this.attrs = {}; this.listeners = {}; this.parent = null; this._text = ""; this.className = ""; this.style = {}; this.isConnected = FakeNode.newConnected; }
   get firstChild() { return this.children[0] || null; }
   get textContent() { return this._text + this.children.map((c) => c.textContent).join(""); }
   set textContent(v) { this._text = String(v); this.children = []; }
   setAttribute(k, v) { this.attrs[k] = String(v); }
-  appendChild(c) { if (c.parent) c.parent.children = c.parent.children.filter((x) => x !== c); c.parent = this; this.children.push(c); return c; }
-  removeChild(c) { this.children = this.children.filter((x) => x !== c); c.parent = null; }
+  appendChild(c) { if (c.parent) c.parent.children = c.parent.children.filter((x) => x !== c); c.parent = this; this.children.push(c); c.isConnected = true; return c; }
+  removeChild(c) { this.children = this.children.filter((x) => x !== c); c.parent = null; c.isConnected = false; }
   addEventListener(t, fn) { (this.listeners[t] ||= []).push(fn); }
   click() { for (const fn of this.listeners.click || []) fn({ preventDefault() {}, target: this }); }
   all(pred, acc = []) { if (pred(this)) acc.push(this); for (const c of this.children) c.all && c.all(pred, acc); return acc; }
   byText(t) { return this.all((n) => n.tag === "button" && n.textContent === t)[0] || null; }
 }
+/* A new node starts on the page here. A scenario that builds a grid sets this to false, as a browser would: a node is not on
+   the page until something puts it there. */
+FakeNode.newConnected = true;
 class FakeText extends FakeNode { constructor(t) { super("#text"); this._text = t; } }
 globalThis.Node = FakeNode;
 const body = new FakeNode("body");
@@ -250,6 +253,48 @@ const scenarios = {
     out.open = second.byText("Hide plan") !== null;
     out.showsPlan = pre(second) !== null;
     out.refetched = fetches.length - before;
+  },
+  /* A source's `scope` is part of its panel key: the same plan opened from two places is two panels. The scope names who owns
+     the button and never goes to the read. */
+  async scopedSource() {
+    planReply(XML);
+    const src = { kind: "query_store", database_name: "Orders", query_id: 42, plan_id: 7 };
+    const plain = viewer.planSourceCell("srv-a", src);
+    const scoped = viewer.planSourceCell("srv-a", { ...src, scope: "panel-a" });
+    const other = viewer.planSourceCell("srv-a", { ...src, scope: "panel-b" });
+    scoped.byText("Plan").click();
+    await flush();
+    out.scopedOpen = scoped.byText("Hide plan") !== null && pre(scoped) !== null;
+    out.plainOpen = plain.byText("Hide plan") !== null;
+    out.otherOpen = other.byText("Hide plan") !== null;
+    out.query = Object.fromEntries(params().searchParams);
+    out.keys = viewer.openPlanKeys();
+    const before = fetches.length;
+    const again = viewer.planSourceCell("srv-a", { ...src, scope: "panel-a" });
+    out.againOpen = again.byText("Hide plan") !== null;
+    out.refetched = fetches.length - before;
+  },
+  /* A plan column's factory runs once per grid build, and the page throws the old grid away. A cell nobody clicked leaves the
+     redraw set once its grid is gone, so the set holds about two builds' cells however many builds go by, whether the rows are
+     the same each time or new each time. A cell of the build in progress is not on the page yet and stays in the set. */
+  async rebuildsBounded() {
+    FakeNode.newConnected = false;
+    const total = () => Object.values(viewer.planViewerViewCounts()).reduce((a, b) => a + b, 0);
+    const rows = (build) => [1, 2, 3].map((i) => ({ database_name: "Orders", query_id: build * 10 + i, plan_id: i }));
+    let page = [];
+    out.sameRows = { during: [], after: [] };
+    out.newRows = { during: [], after: [] };
+    for (let build = 0; build < 12; build++) {
+      const phase = build < 6 ? out.sameRows : out.newRows;
+      const grid = viewer.queryStorePlanColumn("srv-a");
+      const cells = rows(build < 6 ? 0 : build).map((r) => grid.render(r));
+      phase.during.push(total());
+      cells.forEach((x) => body.appendChild(x));
+      page.forEach((x) => body.removeChild(x));
+      page = cells;
+      phase.after.push(total());
+    }
+    out.keys = Object.keys(viewer.planViewerViewCounts()).length;
   },
   async noPlanKind() {
     reply = { status: 200, body: JSON.stringify({ status: "unavailable", message: "No stored Query Store plan found for query_id 42 in database 'Orders'." }) };
