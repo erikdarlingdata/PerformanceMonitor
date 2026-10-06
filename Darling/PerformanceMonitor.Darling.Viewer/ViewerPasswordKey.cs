@@ -24,7 +24,7 @@ public sealed class ViewerPasswordRefusedException(string message) : Exception(m
 /// Seals a server password to the service's published key, for the connection settings of one store row (#5366). The
 /// sealed text is readable only by the service, and only for those settings.
 /// </summary>
-public sealed class ViewerPasswordSealer(PasswordPublicKey key)
+public sealed partial class ViewerPasswordSealer(PasswordPublicKey key)
 {
     private static readonly UTF8Encoding s_strictUtf8 = new(false, true);
 
