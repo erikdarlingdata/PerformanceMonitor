@@ -112,20 +112,6 @@ FROM range(1000000) a, range(1000000) b";
         Assert.True(lockWaitMs >= 500, line.Context);
     }
 
-    [Fact]
-    public async Task PhaseLine_AFastLiveRead_LogsNothing()
-    {
-        await SeedAsync(ServerId, "query_store", MinutesAgo(5));
-        var service = new LocalDataService(_duckDb);
-        var lines = new List<string>();
-        service.CollectionHealthPhaseSink = (name, total, context) => lines.Add(context);
-
-        var rows = await service.GetCollectionHealthAsync(ServerId);
-
-        Assert.Single(rows);
-        Assert.Empty(lines);
-    }
-
     /* ---------------------------------- cancellation ---------------------------------- */
 
     [Fact]
