@@ -387,7 +387,10 @@ public sealed class ViewerTextLookupWindowBoundLiveTests
     /// <summary>
     /// <c>query_stats</c> for the Top Queries comparison twin: 130 hashes, one row every 2 hours for 12 days, with every delta
     /// column set so the averages are real numbers. NULL parts: the database of every 25th, the hash of every 40th and of 125
-    /// (so 125 is NULL on both keys, and 40, 80 and 120 merge into one NULL-hash group); 100-109 only before the current window
+    /// (so 125 is NULL on both keys, and 40, 80 and 120 merge into one NULL-hash group). Empty-string keys beside them, each against a NULL it must stay apart from: 48
+    /// is the one empty hash, in the database that the heavy NULL-hash group (40, 80, 120) sits in, and 127 is the one empty
+    /// database while 51 is a NULL database on its hash. 48 and 51 carry one execution per row, so they never make the top 100 and a
+    /// join that merged a NULL key with an empty one would fan the heavy row out; 100-109 only before the current window
     /// (GONE) and 110-119 only inside it (NEW). 100 hashes cannot hold all of them, so the top-100 cut trims each period.
     /// </summary>
     private const string QueryStatsTwinSeedSql = @"
@@ -395,10 +398,11 @@ INSERT INTO collect.query_stats
 (collection_id, collection_time, server_id, server_name, database_name, query_hash, sql_handle, query_text,
  delta_execution_count, delta_worker_time, delta_elapsed_time, delta_physical_reads)
 SELECT 3000000 + row_number() OVER ()::bigint, g.t, 5420, 'srv',
-       CASE WHEN p % 25 = 0 THEN NULL ELSE 'db' || (p % 4) END,
-       CASE WHEN p % 40 = 0 OR p = 125 THEN NULL ELSE '0xQ' || p END,
+       CASE WHEN p % 25 = 0 OR p = 51 THEN NULL WHEN p = 127 THEN '' ELSE 'db' || (p % 4) END,
+       CASE WHEN p % 40 = 0 OR p = 125 THEN NULL WHEN p = 48 THEN '' WHEN p = 51 THEN '0xQ127' ELSE '0xQ' || p END,
        '0xT' || p, 'SELECT ' || p || ' /* ' || to_char(g.t, 'YYYY-MM-DD HH24:MI') || ' */',
-       CASE WHEN (p + extract(epoch FROM g.t)::bigint / 7200) % 7 = 0 THEN 0
+       CASE WHEN p IN (48, 51) THEN 1
+            WHEN (p + extract(epoch FROM g.t)::bigint / 7200) % 7 = 0 THEN 0
             ELSE (CASE WHEN p <= 10 OR p % 25 = 0 OR p % 40 = 0 OR p >= 100 THEN 1000 ELSE 1 END)
                  * (1 + (p * 31 + extract(epoch FROM g.t)::bigint / 7200) % 50) END,
        1000 + (p * 7919) % 90000 + (extract(epoch FROM g.t)::bigint / 7200) % 13,
@@ -411,7 +415,8 @@ AND   NOT (p BETWEEN 110 AND 119 AND g.t <= TIMESTAMP '2026-02-19 12:00:00');";
 
     /// <summary>
     /// <c>query_store_stats</c> for the Query Store comparison twin: 130 queries, one snapshot an hour with two snapshots per
-    /// 2-hour interval (so the dedupe keeps the later one), the same NULL and GONE/NEW shapes as the Top Queries seed, and a
+    /// 2-hour interval (so the dedupe keeps the later one), the same NULL, empty-string (47: the one empty hash, in the database the NULL-hash group 80 sits in; 127: the one
+    /// empty database, 51 is a NULL database on its hash; 47 and 51 never make the top 100) and GONE/NEW shapes as the Top Queries seed, and a
     /// <c>query_store_text</c> row for every query whose inline text is NULL (q divisible by 3, outside the NULL-database ones).
     /// </summary>
     private const string QueryStoreTwinSeedSql = @"
@@ -424,11 +429,12 @@ INSERT INTO collect.query_store_stats
  last_execution_time, query_text, query_hash, execution_count, avg_duration_us, avg_cpu_time_us, avg_logical_io_reads,
  avg_logical_io_writes, avg_physical_io_reads, avg_rowcount, query_plan_hash, runtime_stats_interval_id)
 SELECT 4000000 + row_number() OVER ()::bigint, g.t, 5420, 'srv',
-       CASE WHEN q % 25 = 0 THEN NULL ELSE 'db' || (q % 3) END, q, q, 'Regular',
+       CASE WHEN q % 25 = 0 OR q = 51 THEN NULL WHEN q = 127 THEN '' ELSE 'db' || (q % 3) END, q, q, 'Regular',
        date_bin(INTERVAL '2 hours', g.t, TIMESTAMP '2026-02-08 12:00:00'), g.t,
        CASE WHEN q % 3 = 0 THEN NULL ELSE 'SELECT ' || q || ' /* inline */' END,
-       CASE WHEN q % 40 = 0 OR q = 125 THEN NULL ELSE 'h' || q END,
-       CASE WHEN (q + extract(epoch FROM g.t)::bigint / 3600) % 7 = 0 THEN 0
+       CASE WHEN q % 40 = 0 OR q = 125 THEN NULL WHEN q = 47 THEN '' WHEN q = 51 THEN 'h127' ELSE 'h' || q END,
+       CASE WHEN q IN (47, 51) THEN 1
+            WHEN (q + extract(epoch FROM g.t)::bigint / 3600) % 7 = 0 THEN 0
             ELSE (CASE WHEN q <= 10 OR q % 25 = 0 OR q % 40 = 0 OR q >= 100 THEN 1000 ELSE 1 END)
                  * (1 + (q * 31 + extract(epoch FROM g.t)::bigint / 3600) % 50) END,
        1000 + (q * 7919) % 90000 + (extract(epoch FROM g.t)::bigint / 3600) % 13,
@@ -965,6 +971,17 @@ CROSS JOIN generate_series(TIMESTAMP '2026-02-08 12:00:00', TIMESTAMP '2026-02-2
                 Assert.Contains(old.Keys, k => k.StartsWith("<null>|", StringComparison.Ordinal));        /* a NULL database */
                 Assert.Contains(old.Keys, k => k.EndsWith("|<null>", StringComparison.Ordinal));          /* a NULL hash */
                 Assert.Contains(old.Keys, k => k == "<null>|<null>");                                     /* both NULL */
+                /* an empty key and a NULL one that must stay apart, both in the seed's tables (so the lookup has the temptation) and one
+                   of each pair in the answer: the heavy NULL-hash group and the heavy empty database are compared, the light empty
+                   hash and the light NULL database are trimmed, and a join that merged them would fan a heavy row out. */
+                var (table, emptyHashDb, emptyDbHash) = queryStats ? ("collect.query_stats", "db0", "0xQ127") : ("collect.query_store_stats", "db2", "h127");
+                Assert.Contains(old.Keys, k => k == $"{emptyHashDb}|<null>");
+                Assert.Contains(old.Keys, k => k == $"|{emptyDbHash}");
+                Assert.DoesNotContain(old.Keys, k => k == $"{emptyHashDb}|");
+                Assert.DoesNotContain(old.Keys, k => k == $"<null>|{emptyDbHash}");
+                await using var seeded = new NpgsqlCommand(
+                    $"SELECT count(*) FROM {table} WHERE (database_name = '{emptyHashDb}' AND query_hash = '') OR (database_name IS NULL AND query_hash = '{emptyDbHash}')", connection);
+                Assert.True((long)(await seeded.ExecuteScalarAsync(ct))! > 0, "the empty-versus-NULL seed rows are missing.");
             }
 
             Assert.Equal(old.Keys, current.Keys);

@@ -271,10 +271,10 @@ public sealed class ViewerQueriesSqlTests
     // ── Comparisons ──
 
     [Theory]
-    [InlineData(nameof(ViewerDataService.QueryStatsComparisonSql), "query_stats", "(w.query_hash IS NULL) = (th.query_hash IS NULL)")]
-    [InlineData(nameof(ViewerDataService.QueryStoreComparisonSql), "query_store_stats", "(w.query_hash IS NULL) = (th.query_hash IS NULL)")]
-    [InlineData(nameof(ViewerDataService.ProcedureStatsComparisonSql), "procedure_stats", "(w.object_name IS NULL) = (tp.object_name IS NULL)")]
-    public void ComparisonSql_UnionsTop100_FullOuterJoins_NullSafe(string sqlName, string table, string periodJoinNullHalf)
+    [InlineData(nameof(ViewerDataService.QueryStatsComparisonSql), "query_stats", "th", "database_name,query_hash")]
+    [InlineData(nameof(ViewerDataService.QueryStoreComparisonSql), "query_store_stats", "th", "database_name,query_hash")]
+    [InlineData(nameof(ViewerDataService.ProcedureStatsComparisonSql), "procedure_stats", "tp", "database_name,schema_name,object_name")]
+    public void ComparisonSql_UnionsTop100_FullOuterJoins_NullSafe(string sqlName, string table, string topAlias, string keyColumns)
     {
         var sql = SqlByName(sqlName);
         Assert.Contains($"FROM {table}", sql, StringComparison.Ordinal);
@@ -284,9 +284,26 @@ public sealed class ViewerQueriesSqlTests
         Assert.Contains("FULL OUTER JOIN baseline_period b", sql, StringComparison.Ordinal);
         /* #5420: the period joins are null-safe the hashable way, a COALESCE equality plus an IS NULL pair, because
            IS NOT DISTINCT FROM ran as a nested loop over every window row (ViewerTextLookupWindowBoundLiveTests pins the plan)... */
-        Assert.Contains(periodJoinNullHalf, sql, StringComparison.Ordinal);
+        foreach (var key in keyColumns.Split(','))
+        {
+            /* both halves of EVERY key column, in both periods' text join: a dropped IS NULL pair makes a NULL key and an empty
+               one meet, and the COALESCE half alone cannot tell them apart. */
+            Assert.Equal(2, CountOf(sql, $"COALESCE(w.{key}, '') = COALESCE({topAlias}.{key}, '')"));
+            Assert.Equal(2, CountOf(sql, $"(w.{key} IS NULL) = ({topAlias}.{key} IS NULL)"));
+        }
         /* ...and the FULL JOIN must be COALESCE-equality — PG can't FULL-JOIN on IS NOT DISTINCT FROM. */
         Assert.Contains("COALESCE(c.database_name, '') = COALESCE(b.database_name, '')", sql, StringComparison.Ordinal);
+    }
+
+    private static int CountOf(string text, string part)
+    {
+        var count = 0;
+        for (var at = text.IndexOf(part, StringComparison.Ordinal); at >= 0; at = text.IndexOf(part, at + part.Length, StringComparison.Ordinal))
+        {
+            count++;
+        }
+
+        return count;
     }
 
     [Fact]
