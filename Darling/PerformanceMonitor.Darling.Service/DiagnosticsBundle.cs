@@ -164,6 +164,24 @@ internal static class DiagnosticsBundle
         };
     }
 
+    /// <summary>
+    /// The password key's part of the store section (#5366): the published key's id as the service log prints it, and the
+    /// newest service state word with the id the service holds and when it wrote it. Never the key, the key's public
+    /// bytes, the service's host name or its note (free text). <paramref name="state"/> is null when no service has written
+    /// a row.
+    /// </summary>
+    internal static JsonObject BuildPasswordKeyInfo(PublishedPasswordKey? published, PasswordKeyServiceState? state)
+    {
+        return new JsonObject
+        {
+            ["status"] = published is null ? "not_published" : "ok",
+            ["published_key_id"] = published is null ? null : PasswordSeal.DisplayKeyId(published.KeyId),
+            ["service_state"] = state?.State,
+            ["service_key_id"] = string.IsNullOrEmpty(state?.KeyId) ? null : PasswordSeal.DisplayKeyId(state!.KeyId!),
+            ["service_updated_at_utc"] = state?.UpdatedAtUtc.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", CultureInfo.InvariantCulture),
+        };
+    }
+
     /// <summary>Parses the arguments after the verb. Returns the options, or the error sentence.</summary>
     internal static (DiagnosticsBundleOptions? Options, string? Error) ParseArgs(string[] args)
     {
