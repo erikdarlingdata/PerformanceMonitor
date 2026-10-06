@@ -199,15 +199,14 @@ public sealed class ServerEditViewerRoleLiveTests : IDisposable
     }
 
     [Fact]
-    public async Task WithoutTheEditGrant_TheWebEdit_IsA500WithTheFixedBody_AndNothingIsSaved()
+    public async Task WithoutTheEditFunction_TheWebEdit_IsA500ThatSaysToRerunTheProvisionScript_AndNothingIsSaved()
     {
         var ct = TestContext.Current.CancellationToken;
         var roleName = "srv_nogr_" + Guid.NewGuid().ToString("N")[..8];
         var (scratch, owner, ownerString) = await ServerAddViewerRoleLiveTests.OpenAsync(ct);
         await using var _ = scratch;
         await using var __ = owner;
-        var edit = ServerAddViewerRoleLiveTests.ViewerStatements(roleName, null).Single(s => s.StartsWith("GRANT UPDATE (name,", StringComparison.Ordinal));
-        await using var viewer = await ServerAddViewerRoleLiveTests.ProvisionAsync(owner, ownerString, roleName, edit.Replace(" TO " + roleName, " TO viewer", StringComparison.Ordinal) + ";", ct);
+        await using var viewer = await ServerAddViewerRoleLiveTests.ProvisionAsync(owner, ownerString, roleName, ServerAddViewerRoleLiveTests.MissingEditFunction, ct);
         var ok = false;
         try
         {
@@ -219,8 +218,13 @@ public sealed class ServerEditViewerRoleLiveTests : IDisposable
 
             var token = JsonNode.Parse(await client.GetStringAsync("/api/admin/servers/5203", ct))!["modified_at"]!.GetValue<string>();
             var (status, body) = await PatchAsync(client, 5203, "{\"display_name\":\"Nope\",\"expected_modified_at\":\"" + token + "\"}", ct);
-            Assert.True((int)status >= 500, "answered " + (int)status);
-            Assert.DoesNotContain("42501", body, StringComparison.Ordinal);
+            Assert.Equal(HttpStatusCode.InternalServerError, status);
+            Assert.Equal(DarlingMcpServerAdminTools.EditStoreNeedsRolesText, JsonNode.Parse(body)!["error"]!.GetValue<string>());
+            Assert.Contains("provision-roles.sql", body, StringComparison.Ordinal);
+            foreach (var driverText in new[] { "42883", "42501", "edit_monitored_server", "does not exist", "permission denied" })
+            {
+                Assert.DoesNotContain(driverText, body, StringComparison.OrdinalIgnoreCase);
+            }
             Assert.Equal("delta", await ScalarAsync(owner, "SELECT name FROM config_monitored_servers WHERE server_id = 5203", ct));
             ok = true;
         }

@@ -40,9 +40,9 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// is checked by the same <see cref="ValidateSecret"/> add uses, and no secret value is put in an answer or a log
 /// line.</para>
 ///
-/// <para><b>Concurrency.</b> The row is read without a lock, probed, then re-checked inside one transaction under
-/// <c>FOR UPDATE</c>; the <c>UPDATE</c> carries <c>modified_at</c> as a predicate, so a write that landed in between
-/// is answered <c>conflict</c> and nothing is written. A caller may also send the <c>modified_at</c> it read as
+/// <para><b>Concurrency.</b> The row is read without a lock, probed, then written inside one transaction by
+/// <c>config.edit_monitored_server</c>, which locks the row and compares <c>modified_at</c> to the token the edit read,
+/// so a write that landed in between is answered <c>conflict</c> and nothing is written. A caller may also send the <c>modified_at</c> it read as
 /// <c>expected_modified_at</c>. That transaction takes <see cref="IdentityLockSql"/> first, the lock the add's INSERT
 /// takes too, and checks that the new address is still free under it: the address check before the probe is only a
 /// fast refusal, and without the lock an add or another edit could claim the address during the probe (#5240).</para>
@@ -101,6 +101,11 @@ public sealed partial class DarlingMcpServerAdminTools
 
     internal const string EditPasswordNeededText =
         "Changing how this server is reached needs its password again: it is stored encrypted and this surface cannot read it back.";
+
+    /// <summary>The fixed answer when the store has no edit function the calling role may run (#5240): a self-managed store
+    /// whose roles were provisioned before the function existed. Never PostgreSQL's own text.</summary>
+    internal const string EditStoreNeedsRolesText =
+        "This store's roles predate server edits: re-run provision-roles.sql against the store, then try again.";
 
     /* ─────────────────────────────── the tool ─────────────────────────────── */
 
@@ -317,6 +322,10 @@ public sealed partial class DarlingMcpServerAdminTools
                 return Outcome(EditStatus.NotFound, "This server's definition was removed while the edit ran; nothing was changed.");
             case ServerEditWriteKind.Occupied:
                 return OccupiedAnswer(plan.NewStorageKey);
+            case ServerEditWriteKind.PasswordNeeded:
+                /* The store's own check: a move of host or port that keeps the stored secret. The plan refuses it first, so
+                   this is the answer when the two ever read the row differently, and it is the same sentence. */
+                return Outcome(EditStatus.Invalid, EditPasswordNeededText);
             case ServerEditWriteKind.Conflict:
                 /* Same shape as the pre-probe conflict: the current non-secret values, so the caller can retry. */
                 if (await store.ReadRowAsync(serverId, cancellationToken) is { } currentRow)
@@ -835,7 +844,7 @@ public sealed partial class DarlingMcpServerAdminTools
         string? Username, string EncryptMode, bool TrustServerCertificate, bool MultiSubnetFailover, decimal MonthlyCostUsd,
         DateTime ModifiedAt);
 
-    internal enum ServerEditWriteKind { Written, NotFound, Conflict, Occupied }
+    internal enum ServerEditWriteKind { Written, NotFound, Conflict, Occupied, PasswordNeeded }
 
     internal sealed record ServerEditWrite(ServerEditWriteKind Kind, DateTime ModifiedAt);
 
@@ -850,10 +859,11 @@ public sealed partial class DarlingMcpServerAdminTools
         /// <summary>The storage key of every OTHER definition.</summary>
         Task<List<string>> LoadOtherStorageKeysAsync(int serverId, CancellationToken cancellationToken);
 
-        /// <summary>Re-checks and writes in one transaction: the identity lock (<see cref="IdentityLockSql"/>), the row
-        /// under <c>FOR UPDATE</c>, <c>modified_at</c> against <paramref name="expectedModifiedAt"/>, and, when
-        /// <paramref name="newStorageKey"/> is given, the other rows' keys, now read under the lock; then one
-        /// column-listed UPDATE.</summary>
+        /// <summary>Re-checks and writes in one transaction: the identity lock (<see cref="IdentityLockSql"/>), then
+        /// <c>config.edit_monitored_server</c>, which locks the row, compares <c>modified_at</c> with
+        /// <paramref name="expectedModifiedAt"/>, refuses a move of host or port that keeps the stored secret, and writes
+        /// the listed columns; then, when <paramref name="newStorageKey"/> is given, the other rows' keys, read under the
+        /// lock. An address another row holds undoes the write: the transaction is never committed.</summary>
         Task<ServerEditWrite> WriteAsync(
             int serverId, DateTime expectedModifiedAt, IReadOnlyList<EditColumnValue> sets, string? newStorageKey, CancellationToken cancellationToken);
     }
@@ -867,33 +877,56 @@ FROM config_monitored_servers WHERE server_id = $1";
     internal const string OtherServersSql =
         "SELECT host, database, read_only_intent, engine, port FROM config_monitored_servers WHERE server_id <> $1";
 
-    internal const string LockEditRowSql =
-        "SELECT modified_at FROM config_monitored_servers WHERE server_id = $1 FOR UPDATE";
+    /// <summary>
+    /// The one write of an edit (#5240): <c>config.edit_monitored_server</c>, the owner-owned SECURITY DEFINER function
+    /// (<see cref="DarlingManagedRoles.BuildEditMonitoredServerFunctionSql"/>). The web route's viewer role and the MCP
+    /// tool's mcp role both run it, and neither holds a column UPDATE on the table. <c>$1</c> is the id, <c>$2</c> the
+    /// expected <c>modified_at</c>, <c>$3</c> the names of the columns to write, then one value per editable column in
+    /// <see cref="EditFunctionColumns"/> order (null for a column not listed): the new secret rides at <c>$11</c>.
+    /// </summary>
+    internal const string EditFunctionSql =
+        "SELECT outcome, new_modified_at FROM config.edit_monitored_server($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)";
+
+    /// <summary>The editable columns in the order the function takes their values (<c>$4</c> onwards).</summary>
+    internal static readonly (string Column, NpgsqlDbType DbType)[] EditFunctionColumns =
+    [
+        ("name", NpgsqlDbType.Text), ("host", NpgsqlDbType.Text), ("port", NpgsqlDbType.Integer), ("database", NpgsqlDbType.Text),
+        ("read_only_intent", NpgsqlDbType.Boolean), ("auth", NpgsqlDbType.Text), ("username", NpgsqlDbType.Text),
+        ("encrypted_password", NpgsqlDbType.Text), ("encrypt_mode", NpgsqlDbType.Text),
+        ("trust_server_certificate", NpgsqlDbType.Boolean), ("multi_subnet_failover", NpgsqlDbType.Boolean),
+        ("monthly_cost_usd", NpgsqlDbType.Numeric),
+    ];
 
     /// <summary>
-    /// The UPDATE for a set of columns: <c>SET</c> lists exactly those columns plus <c>modified_at</c>, the predicate
-    /// is the id and the <c>modified_at</c> the edit read, and nothing refers to <c>encrypted_password</c> in an
-    /// expression (the writing role has no SELECT on it). <c>$1</c> is the id, <c>$2</c> the expected
-    /// <c>modified_at</c>, <c>$3</c> onwards the values in order. Every column is checked against
-    /// <see cref="EditColumnOfField"/>, so a SET list cannot name another one.
+    /// The arguments of <see cref="EditFunctionSql"/> for a set of columns. Every column is checked against
+    /// <see cref="EditColumnOfField"/>, so a set list cannot name another one. The expected <c>modified_at</c> is passed as
+    /// the <see cref="DateTime"/> the edit read (a microsecond value), never rounded, because the function compares it exactly.
     /// </summary>
-    internal static string BuildEditUpdateSql(IReadOnlyList<EditColumnValue> sets)
+    internal static List<NpgsqlParameter> BuildEditFunctionParameters(
+        int serverId, DateTime expectedModifiedAt, IReadOnlyList<EditColumnValue> sets)
     {
         var allowed = new HashSet<string>(EditColumnOfField.Values, StringComparer.Ordinal);
-        var setClauses = new List<string>();
-        for (var i = 0; i < sets.Count; i++)
+        foreach (var set in sets)
         {
-            if (!allowed.Contains(sets[i].Column))
+            if (!allowed.Contains(set.Column))
             {
-                throw new InvalidOperationException("An edit may not write column '" + sets[i].Column + "'.");
+                throw new InvalidOperationException("An edit may not write column '" + set.Column + "'.");
             }
-
-            setClauses.Add(sets[i].Column + " = $" + (i + 3).ToString(CultureInfo.InvariantCulture));
         }
 
-        setClauses.Add("modified_at = (now() AT TIME ZONE 'UTC')");
-        return "UPDATE config_monitored_servers SET " + string.Join(", ", setClauses) +
-               " WHERE server_id = $1 AND modified_at = $2 RETURNING modified_at";
+        var parameters = new List<NpgsqlParameter>
+        {
+            new NpgsqlParameter<int> { TypedValue = serverId }, // $1
+            new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = expectedModifiedAt }, // $2
+            new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text, Value = sets.Select(s => s.Column).ToArray() }, // $3
+        };
+        foreach (var (column, dbType) in EditFunctionColumns)
+        {
+            var set = sets.FirstOrDefault(s => string.Equals(s.Column, column, StringComparison.Ordinal));
+            parameters.Add(new NpgsqlParameter { NpgsqlDbType = dbType, Value = set?.Value ?? DBNull.Value });
+        }
+
+        return parameters;
     }
 
     internal sealed class PostgresServerEditStore : IServerEditStore
@@ -942,13 +975,13 @@ FROM config_monitored_servers WHERE server_id = $1";
         public async Task<ServerEditWrite> WriteAsync(
             int serverId, DateTime expectedModifiedAt, IReadOnlyList<EditColumnValue> sets, string? newStorageKey, CancellationToken cancellationToken)
         {
-            var updateSql = BuildEditUpdateSql(sets);
+            var parameters = BuildEditFunctionParameters(serverId, expectedModifiedAt, sets);
             var postgres = _postgres;
             await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
             await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
 
-            /* #5240: the identity lock, FIRST, before the row lock and the occupancy check below, so that check runs
-               against a table no other identity write (an add's INSERT, another edit) is in the middle of changing.
+            /* #5240: the identity lock, FIRST, before the function locks the row and the occupancy check below runs, so that
+               check sees a table no other identity write (an add's INSERT, another edit) is in the middle of changing.
                The probe that preceded this write ran outside it; the lock covers this transaction only.
 
                Every command here is two-arg on the store connection with the transaction set on it: the shape
@@ -959,24 +992,55 @@ FROM config_monitored_servers WHERE server_id = $1";
                 await identityLock.ExecuteNonQueryAsync(cancellationToken);
             }
 
-            await using (var lockRow = new NpgsqlCommand(LockEditRowSql, connection) { Transaction = transaction })
+            /* The write is the function, so the calling role needs no UPDATE on the table. A store whose roles predate it
+               (or a role that may not run it) answers one of these two errors; both become the fixed sentence that says to
+               re-run provision-roles.sql, and the driver's own text goes no further. */
+            string outcome;
+            var written = DateTime.MinValue;
+            try
             {
-                lockRow.CommandTimeout = McpCommandDeadlines.ReadSeconds;
-                lockRow.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId }); // $1
-                var current = await lockRow.ExecuteScalarAsync(cancellationToken);
-                if (current is null or DBNull)
+                await using var call = new NpgsqlCommand(EditFunctionSql, connection) { Transaction = transaction };
+                call.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+                foreach (var parameter in parameters)
                 {
-                    return new ServerEditWrite(ServerEditWriteKind.NotFound, expectedModifiedAt);
+                    call.Parameters.Add(parameter);
                 }
 
-                if ((DateTime)current != expectedModifiedAt)
+                await using var reader = await call.ExecuteReaderAsync(cancellationToken);
+                if (!await reader.ReadAsync(cancellationToken))
                 {
-                    return new ServerEditWrite(ServerEditWriteKind.Conflict, expectedModifiedAt);
+                    throw new InvalidOperationException("The edit function returned no outcome.");
                 }
+
+                outcome = reader.GetString(0);
+                if (!reader.IsDBNull(1))
+                {
+                    written = reader.GetDateTime(1);
+                }
+            }
+            catch (PostgresException ex) when (ex.SqlState is PostgresErrorCodes.UndefinedFunction or PostgresErrorCodes.InsufficientPrivilege)
+            {
+                throw new InvalidOperationException(EditStoreNeedsRolesText, ex);
+            }
+
+            switch (outcome)
+            {
+                case "not_found":
+                    return new ServerEditWrite(ServerEditWriteKind.NotFound, expectedModifiedAt);
+                case "conflict":
+                    return new ServerEditWrite(ServerEditWriteKind.Conflict, expectedModifiedAt);
+                case "password_needed":
+                    return new ServerEditWrite(ServerEditWriteKind.PasswordNeeded, expectedModifiedAt);
+                case "saved":
+                    break;
+                default:
+                    throw new InvalidOperationException("The edit function answered an outcome this build does not know.");
             }
 
             if (newStorageKey is not null)
             {
+                /* After the function, in the same transaction: an occupied address returns here WITHOUT a commit, which
+                   undoes the function's write (and its reload beacon), so the order of the answers is unchanged. */
                 await using var others = new NpgsqlCommand(OtherServersSql, connection) { Transaction = transaction };
                 others.CommandTimeout = McpCommandDeadlines.ReadSeconds;
                 others.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId }); // $1
@@ -988,26 +1052,6 @@ FROM config_monitored_servers WHERE server_id = $1";
                         return new ServerEditWrite(ServerEditWriteKind.Occupied, expectedModifiedAt);
                     }
                 }
-            }
-
-            DateTime written;
-            await using (var update = new NpgsqlCommand(updateSql, connection) { Transaction = transaction })
-            {
-                update.CommandTimeout = McpCommandDeadlines.ReadSeconds;
-                update.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId }); // $1
-                update.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = expectedModifiedAt }); // $2
-                foreach (var set in sets)
-                {
-                    update.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = set.DbType, Value = set.Value ?? DBNull.Value });
-                }
-
-                var result = await update.ExecuteScalarAsync(cancellationToken);
-                if (result is not DateTime stamp)
-                {
-                    return new ServerEditWrite(ServerEditWriteKind.Conflict, expectedModifiedAt);
-                }
-
-                written = stamp;
             }
 
             await transaction.CommitAsync(cancellationToken);

@@ -48,6 +48,9 @@ public sealed class ServerAddViewerRoleLiveTests : IDisposable
 
     private const string ServerGrant = "GRANT INSERT ON config.config_monitored_servers TO viewer;";
 
+    /// <summary>Pass as <c>skip</c> to provision a role WITHOUT the edit function (a store whose roles predate it).</summary>
+    internal const string MissingEditFunction = "<no edit function>";
+
     private static readonly DarlingMcpServerAdminTools.ServerProbe Reachable = (_, _) => Task.FromResult(
         new ConnectionProbeResult(
             Success: true, MajorVersion: 15, EngineEdition: 3, EngineEditionDescription: "Enterprise",
@@ -119,6 +122,13 @@ public sealed class ServerAddViewerRoleLiveTests : IDisposable
         foreach (var statement in ViewerStatements(roleName, skip))
         {
             await ExecAsync(owner, statement, ct);
+        }
+
+        /* The edit function (#5240), from the shared builder so it is the real one, owned by the owner; EXECUTE for the role. */
+        if (!string.Equals(skip, MissingEditFunction, StringComparison.Ordinal))
+        {
+            await ExecAsync(owner, DarlingManagedRoles.BuildEditMonitoredServerFunctionSql("config"), ct);
+            await ExecAsync(owner, $"GRANT EXECUTE ON FUNCTION config.edit_monitored_server({DarlingManagedRoles.EditMonitoredServerSignature}) TO {roleName}", ct);
         }
 
         return NpgsqlDataSource.Create(new NpgsqlConnectionStringBuilder(ownerString) { Username = roleName, Password = RolePassword }.ConnectionString);
@@ -241,26 +251,8 @@ public sealed class ServerAddViewerRoleLiveTests : IDisposable
         }
     }
 
-    /// <summary>One UPDATE per column the edit grant (#5240) covers, each setting a valid literal.</summary>
-    private static readonly (string Column, string Literal)[] EditableColumns =
-    [
-        ("name", "'renamed'"), ("host", "'renamed-host'"), ("port", "1433"), ("database", "'orders'"), ("read_only_intent", "TRUE"),
-        ("auth", "'sql'"), ("username", "'monitor'"), ("encrypted_password", "'blob-not-a-secret'"), ("encrypt_mode", "'Optional'"),
-        ("trust_server_certificate", "TRUE"), ("multi_subnet_failover", "TRUE"), ("monthly_cost_usd", "12.5"),
-        ("modified_at", "(now() AT TIME ZONE 'UTC')"),
-    ];
-
-    /// <summary>The columns the viewer must NOT be able to write: an edit cannot flip a server on or off, change its
-    /// engine or identity, or reach a remediation credential.</summary>
-    private static readonly (string Column, string Literal)[] RefusedColumns =
-    [
-        ("is_enabled", "FALSE"), ("excluded_databases", "ARRAY['tempdb']"), ("engine", "'postgresql'"), ("server_id", "-4844"),
-        ("capture_plans", "FALSE"), ("alert_delivery_mode_override", "'PerEvent'"), ("plan_force_bot_enabled", "TRUE"),
-        ("remediation_username", "'x'"), ("remediation_encrypted_password", "'x'"),
-    ];
-
     [Fact]
-    public async Task TheViewerRole_MayUpdateExactlyTheEditColumns_AndNothingElseOnTheMonitoredServersTable_AndNeverReadsTheCredential()
+    public async Task TheViewerRole_HoldsNoUpdate_OnTheMonitoredServersTable_AndNoWriteOnTheCredentialColumn()
     {
         var ct = TestContext.Current.CancellationToken;
         var roleName = "srv_upd_" + Guid.NewGuid().ToString("N")[..8];
@@ -272,72 +264,24 @@ public sealed class ServerAddViewerRoleLiveTests : IDisposable
         var bodySucceeded = false;
         try
         {
-            await ExecAsync(owner, "INSERT INTO config_service (id) VALUES (1) ON CONFLICT DO NOTHING", ct);
-            await ExecAsync(owner, "INSERT INTO config_monitored_servers (server_id, name, host) VALUES (-4843, 'seed', 'seed-host')", ct);
-
-            /* The edit core locks the row first: SELECT ... FOR UPDATE needs UPDATE on at least one column. */
-            await using (var lockRow = asViewer.CreateCommand("SELECT modified_at FROM config_monitored_servers WHERE server_id = -4843 FOR UPDATE"))
+            await using (var seed = owner.CreateCommand("INSERT INTO config_monitored_servers (server_id, name, host) VALUES (-4843, 'seed', 'seed-host')"))
             {
-                Assert.NotNull(await lockRow.ExecuteScalarAsync(ct));
+                await seed.ExecuteNonQueryAsync(ct);
             }
 
-            /* Every editable column accepts a write, and the statement-level beacon trigger fires as viewer. */
-            foreach (var (column, literal) in EditableColumns)
-            {
-                await using var update = asViewer.CreateCommand($"UPDATE config_monitored_servers SET {column} = {literal} WHERE server_id = -4843");
-                Assert.Equal(1, await update.ExecuteNonQueryAsync(ct));
-            }
-
-            /* Nothing else is writable. */
-            foreach (var (column, literal) in RefusedColumns)
-            {
-                var denied = await Assert.ThrowsAsync<PostgresException>(async () =>
-                {
-                    await using var update = asViewer.CreateCommand($"UPDATE config_monitored_servers SET {column} = {literal} WHERE server_id = -4843");
-                    await update.ExecuteNonQueryAsync(ct);
-                });
-                Assert.True(denied.SqlState == "42501", $"UPDATE of {column} answered {denied.SqlState}, not 42501");
-            }
-
-            /* The credential column is writable (a blob goes in) and stays unreadable, in every form. */
             foreach (var sql in new[]
             {
-                "SELECT encrypted_password FROM config_monitored_servers",
-                "SELECT count(*) FROM config_monitored_servers WHERE encrypted_password IS NULL",
-                "UPDATE config_monitored_servers SET encrypted_password = encrypted_password WHERE server_id = -4843",
-                "UPDATE config_monitored_servers SET encrypted_password = COALESCE(NULL, encrypted_password) WHERE server_id = -4843",
+                "UPDATE config_monitored_servers SET is_enabled = FALSE WHERE server_id = -4843",
+                "UPDATE config_monitored_servers SET encrypted_password = 'x' WHERE server_id = -4843",
             })
             {
                 var denied = await Assert.ThrowsAsync<PostgresException>(async () =>
                 {
-                    await using var peek = asViewer.CreateCommand(sql);
-                    await peek.ExecuteScalarAsync(ct);
+                    await using var update = asViewer.CreateCommand(sql);
+                    await update.ExecuteNonQueryAsync(ct);
                 });
                 Assert.Equal("42501", denied.SqlState);
             }
-
-            /* Still no DELETE and no table-level UPDATE. */
-            var deleteDenied = await Assert.ThrowsAsync<PostgresException>(async () =>
-            {
-                await using var delete = asViewer.CreateCommand("DELETE FROM config_monitored_servers WHERE server_id = -4843");
-                await delete.ExecuteNonQueryAsync(ct);
-            });
-            Assert.Equal("42501", deleteDenied.SqlState);
-
-            /* The WPF read-only probe discriminates on config_alert_log UPDATE (table level), which stays false. */
-            await using (var probe = owner.CreateCommand($"SELECT has_table_privilege('{roleName}', 'config.config_alert_log', 'UPDATE')"))
-            {
-                Assert.False((bool)(await probe.ExecuteScalarAsync(ct))!);
-            }
-
-            await using (var tableLevel = owner.CreateCommand($"SELECT has_table_privilege('{roleName}', 'config.config_monitored_servers', 'UPDATE')"))
-            {
-                Assert.False((bool)(await tableLevel.ExecuteScalarAsync(ct))!);
-            }
-
-            /* The refused list above names today's nine columns, so a column granted by mistake later would pass every loop
-               above. The granted set itself is compared with the exact list: one extra or one missing column fails here. */
-            Assert.Equal(EditColumnList, await GrantedUpdateColumnsAsync(owner, roleName, ct));
 
             bodySucceeded = true;
         }
@@ -347,14 +291,127 @@ public sealed class ServerAddViewerRoleLiveTests : IDisposable
         }
     }
 
-    /// <summary>The UPDATE columns the edit grant (#5240) gives viewer, comma-joined in byte order of the column names (the "C"
-    /// collation, so the order does not depend on the cluster's locale): the exact list the grant names, so a column added to
-    /// the grant by mistake (or dropped from it) changes this string.</summary>
-    private const string EditColumnList =
-        "auth,database,encrypt_mode,encrypted_password,host,modified_at,monthly_cost_usd,multi_subnet_failover,name,port,read_only_intent,trust_server_certificate,username";
+    private static DarlingMcpServerAdminTools.EditColumnValue Col(string column, NpgsqlTypes.NpgsqlDbType type, object? value) => new(column, column, type, value);
 
-    /// <summary>The UPDATE privileges <paramref name="roleName"/> holds on <c>config.config_monitored_servers</c> columns, as
-    /// the owner reads them (column privileges, so a table-level UPDATE shows as every column).</summary>
+    private static async Task<(string Outcome, DateTime? Token)> CallEditAsync(
+        NpgsqlDataSource source, int id, DateTime expected, IReadOnlyList<DarlingMcpServerAdminTools.EditColumnValue> sets, CancellationToken ct)
+    {
+        await using var call = source.CreateCommand(DarlingMcpServerAdminTools.EditFunctionSql);
+        foreach (var parameter in DarlingMcpServerAdminTools.BuildEditFunctionParameters(id, expected, sets))
+        {
+            call.Parameters.Add(parameter);
+        }
+
+        await using var reader = await call.ExecuteReaderAsync(ct);
+        Assert.True(await reader.ReadAsync(ct));
+        return (reader.GetString(0), reader.IsDBNull(1) ? null : reader.GetDateTime(1));
+    }
+
+    private static async Task<string> RowAsync(NpgsqlDataSource owner, int id, string columns, CancellationToken ct)
+    {
+        await using var read = owner.CreateCommand($"SELECT concat_ws('|', {columns}) FROM config_monitored_servers WHERE server_id = {id}");
+        return (string)(await read.ExecuteScalarAsync(ct))!;
+    }
+
+    /// <summary>
+    /// The edit's one write as the viewer role (#5240): a direct UPDATE of host is denied, and the function refuses a move
+    /// of host that keeps the stored secret on a SQL or service-principal row (the row is unchanged), saves it with a new
+    /// secret, answers a stale token as a conflict, saves a TLS change and a Windows-auth host move with no secret.
+    /// </summary>
+    [Fact]
+    public async Task AsTheViewerRole_TheEditFunction_RefusesAMoveThatKeepsTheSecret_AndSavesTheRest()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var roleName = "srv_fn_" + Guid.NewGuid().ToString("N")[..8];
+        var (scratch, owner, ownerString) = await OpenAsync(ct);
+        await using var _ = scratch;
+        await using var __ = owner;
+        await using var asViewer = await ProvisionAsync(owner, ownerString, roleName, null, ct);
+        var bodySucceeded = false;
+        try
+        {
+            await ExecAsync(owner, "INSERT INTO config_service (id) VALUES (1) ON CONFLICT DO NOTHING", ct);
+            await ExecAsync(owner, "INSERT INTO config_monitored_servers (server_id, name, host, auth, username, encrypted_password) VALUES (7101, 'a', 'a.example.test', 'sql', 'monitor', 'blob-a'), (7102, 'b', 'b.example.test', 'serviceprincipal', 'client-id', 'blob-b'), (7103, 'c', 'c.example.test', 'integrated', NULL, NULL)", ct);
+            var host = new[] { Col("host", NpgsqlTypes.NpgsqlDbType.Text, "moved.example.test") };
+            var secret = Col("encrypted_password", NpgsqlTypes.NpgsqlDbType.Text, "blob-new");
+
+            var denied = await Assert.ThrowsAsync<PostgresException>(async () =>
+            {
+                await using var update = asViewer.CreateCommand("UPDATE config_monitored_servers SET host = 'moved.example.test' WHERE server_id = 7101");
+                await update.ExecuteNonQueryAsync(ct);
+            });
+            Assert.Equal("42501", denied.SqlState);
+
+            foreach (var id in new[] { 7101, 7102 })
+            {
+                var before = await RowAsync(owner, id, "host, encrypted_password, modified_at", ct);
+                var token = DateTime.Parse(before.Split('|')[2], System.Globalization.CultureInfo.InvariantCulture);
+                Assert.Equal("password_needed", (await CallEditAsync(asViewer, id, token, host, ct)).Outcome);
+                Assert.Equal(before, await RowAsync(owner, id, "host, encrypted_password, modified_at", ct));
+            }
+
+            await using var stamp = owner.CreateCommand("SELECT modified_at FROM config_monitored_servers WHERE server_id = 7101");
+            var read = (DateTime)(await stamp.ExecuteScalarAsync(ct))!;
+            var saved = await CallEditAsync(asViewer, 7101, read, [host[0], secret], ct);
+            Assert.Equal("saved", saved.Outcome);
+            Assert.True(saved.Token > read);
+            Assert.Equal("moved.example.test|blob-new", await RowAsync(owner, 7101, "host, encrypted_password", ct));
+
+            Assert.Equal("conflict", (await CallEditAsync(asViewer, 7101, read, [Col("name", NpgsqlTypes.NpgsqlDbType.Text, "late")], ct)).Outcome);
+            Assert.Equal("not_found", (await CallEditAsync(asViewer, 999999, read, host, ct)).Outcome);
+
+            await using var stamp2 = owner.CreateCommand("SELECT modified_at FROM config_monitored_servers WHERE server_id = 7102");
+            var read2 = (DateTime)(await stamp2.ExecuteScalarAsync(ct))!;
+            Assert.Equal("saved", (await CallEditAsync(asViewer, 7102, read2, [Col("encrypt_mode", NpgsqlTypes.NpgsqlDbType.Text, "Optional")], ct)).Outcome);
+            Assert.Equal("Optional|blob-b", await RowAsync(owner, 7102, "encrypt_mode, encrypted_password", ct));
+
+            await using var stamp3 = owner.CreateCommand("SELECT modified_at FROM config_monitored_servers WHERE server_id = 7103");
+            var read3 = (DateTime)(await stamp3.ExecuteScalarAsync(ct))!;
+            Assert.Equal("saved", (await CallEditAsync(asViewer, 7103, read3, host, ct)).Outcome);
+            Assert.Equal("moved.example.test", await RowAsync(owner, 7103, "host", ct));
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunOwnedAsync(bodySucceeded, () => ExecAsync(owner, $"DROP OWNED BY {roleName}; DROP ROLE IF EXISTS {roleName};", CancellationToken.None));
+        }
+    }
+
+    /// <summary>The batch's REVOKE (#5240) takes away any UPDATE an earlier build gave viewer (column-level or table-level),
+    /// every run, and a second run changes nothing.</summary>
+    [Fact]
+    public async Task EveryRunOfTheBatch_TakesAnyViewerUpdateOnTheMonitoredServersTableAway_AndIsIdempotent()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var roleName = "srv_rst_" + Guid.NewGuid().ToString("N")[..8];
+        var (scratch, owner, ownerString) = await OpenAsync(ct);
+        await using var _ = scratch;
+        await using var __ = owner;
+        await using var asViewer = await ProvisionAsync(owner, ownerString, roleName, null, ct);
+        var bodySucceeded = false;
+        try
+        {
+            Assert.Equal("", await GrantedUpdateColumnsAsync(owner, roleName, ct));
+            await ExecAsync(owner, $"GRANT UPDATE (name, host, encrypted_password, modified_at) ON config.config_monitored_servers TO {roleName}", ct);
+            Assert.NotEqual("", await GrantedUpdateColumnsAsync(owner, roleName, ct));
+            await ExecAsync(owner, $"GRANT UPDATE ON config.config_monitored_servers TO {roleName}", ct);
+            Assert.True(await HasTableLevelUpdateAsync(owner, roleName, ct), "setup: the table-level UPDATE did not take");
+
+            foreach (var run in new[] { 1, 2 })
+            {
+                await RunViewerStatementsAsync(owner, roleName, ct);
+                Assert.Equal("", await GrantedUpdateColumnsAsync(owner, roleName, ct));
+                Assert.False(await HasTableLevelUpdateAsync(owner, roleName, ct), $"run {run} left a table-level UPDATE");
+            }
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunOwnedAsync(bodySucceeded, () => ExecAsync(owner, $"DROP OWNED BY {roleName}; DROP ROLE IF EXISTS {roleName};", CancellationToken.None));
+        }
+    }
+
     private static async Task<string> GrantedUpdateColumnsAsync(NpgsqlDataSource owner, string roleName, CancellationToken ct)
     {
         await using var granted = owner.CreateCommand(
@@ -363,7 +420,6 @@ public sealed class ServerAddViewerRoleLiveTests : IDisposable
         return (string)(await granted.ExecuteScalarAsync(ct))!;
     }
 
-    /// <summary>Runs the managed batch's viewer statements again (what the next managed startup does).</summary>
     private static async Task RunViewerStatementsAsync(NpgsqlDataSource owner, string roleName, CancellationToken ct)
     {
         foreach (var statement in ViewerStatements(roleName, null))
@@ -376,77 +432,6 @@ public sealed class ServerAddViewerRoleLiveTests : IDisposable
     {
         await using var tableLevel = owner.CreateCommand($"SELECT has_table_privilege('{roleName}', 'config.config_monitored_servers', 'UPDATE')");
         return (bool)(await tableLevel.ExecuteScalarAsync(ct))!;
-    }
-
-    /// <summary>
-    /// The edit grant is REVOKE-then-GRANT (#5240 review), so every run of the batch resets viewer to EXACTLY the listed
-    /// columns. A bare GRANT only ever adds, so a table-level UPDATE granted by hand (a DBA, a support script) would survive
-    /// every startup and make the column list meaningless, and a column a later release takes out of the list would stay
-    /// granted. Re-running the same statements leaves the same grants (idempotent).
-    /// </summary>
-    [Fact]
-    public async Task EveryRunOfTheEditGrant_ResetsViewerToExactlyTheEditColumns_StripsAHandGrantedUpdate_AndIsIdempotent()
-    {
-        var ct = TestContext.Current.CancellationToken;
-        var roleName = "srv_rst_" + Guid.NewGuid().ToString("N")[..8];
-        var (scratch, owner, ownerString) = await OpenAsync(ct);
-        await using var _ = scratch;
-        await using var __ = owner;
-
-        await using var asViewer = await ProvisionAsync(owner, ownerString, roleName, null, ct);
-        var bodySucceeded = false;
-        try
-        {
-            /* The first run grants exactly the edit columns and no table-level UPDATE. */
-            Assert.Equal(EditColumnList, await GrantedUpdateColumnsAsync(owner, roleName, ct));
-            Assert.False(await HasTableLevelUpdateAsync(owner, roleName, ct));
-
-            await ExecAsync(owner, "INSERT INTO config_service (id) VALUES (1) ON CONFLICT DO NOTHING", ct);
-            await ExecAsync(owner, "INSERT INTO config_monitored_servers (server_id, name, host) VALUES (-5244, 'reset', 'reset-host')", ct);
-
-            /* A single column the list never names, granted by hand (what a narrowed list leaves behind on a store that ran
-               the older build). The setup proves itself: viewer can write it until the batch runs again. */
-            await ExecAsync(owner, $"GRANT UPDATE (is_enabled) ON config.config_monitored_servers TO {roleName}", ct);
-            await using (var beforeRun = asViewer.CreateCommand("UPDATE config_monitored_servers SET is_enabled = TRUE WHERE server_id = -5244"))
-            {
-                Assert.Equal(1, await beforeRun.ExecuteNonQueryAsync(ct));
-            }
-
-            await RunViewerStatementsAsync(owner, roleName, ct);
-            Assert.Equal(EditColumnList, await GrantedUpdateColumnsAsync(owner, roleName, ct));
-            var denied = await Assert.ThrowsAsync<PostgresException>(async () =>
-            {
-                await using var update = asViewer.CreateCommand("UPDATE config_monitored_servers SET is_enabled = FALSE WHERE server_id = -5244");
-                await update.ExecuteNonQueryAsync(ct);
-            });
-            Assert.Equal("42501", denied.SqlState);
-
-            /* A table-level UPDATE, granted by hand: it covers every column (is_enabled and the remediation credential
-               included) and, left in place, makes the column list meaningless. */
-            await ExecAsync(owner, $"GRANT UPDATE ON config.config_monitored_servers TO {roleName}", ct);
-            Assert.True(await HasTableLevelUpdateAsync(owner, roleName, ct), "setup: the hand-granted table-level UPDATE did not take");
-
-            await RunViewerStatementsAsync(owner, roleName, ct);
-            Assert.False(await HasTableLevelUpdateAsync(owner, roleName, ct), "the batch left a hand-granted table-level UPDATE in place");
-            Assert.Equal(EditColumnList, await GrantedUpdateColumnsAsync(owner, roleName, ct));
-
-            /* Idempotent: the batch run again changes nothing. */
-            await RunViewerStatementsAsync(owner, roleName, ct);
-            Assert.False(await HasTableLevelUpdateAsync(owner, roleName, ct));
-            Assert.Equal(EditColumnList, await GrantedUpdateColumnsAsync(owner, roleName, ct));
-
-            /* And the reset costs the edit core nothing: its UPDATE still works after the re-run. */
-            await using (var update = asViewer.CreateCommand("UPDATE config_monitored_servers SET name = 'still-edits' WHERE server_id = -5244"))
-            {
-                Assert.Equal(1, await update.ExecuteNonQueryAsync(ct));
-            }
-
-            bodySucceeded = true;
-        }
-        finally
-        {
-            await LiveStoreCleanup.RunOwnedAsync(bodySucceeded, () => ExecAsync(owner, $"DROP OWNED BY {roleName}; DROP ROLE IF EXISTS {roleName};", CancellationToken.None));
-        }
     }
 
     private static async Task ExecAsync(NpgsqlDataSource source, string sql, CancellationToken ct)

@@ -1062,26 +1062,18 @@ GRANT INSERT, UPDATE, DELETE ON {config}.server_tag_map TO {viewer};
 --    unsafe method); the grant is only the floor beneath that gate. The WPF Viewer's read-only probe is unchanged: it
 --    discriminates on config_alert_log UPDATE (ViewerDataService.ReadOnlyProbeSql), which this grant does not touch.
 GRANT INSERT ON {config}.config_monitored_servers TO {viewer};
--- #5240: the web dashboard's edit route (PATCH /api/servers/{{id}}) runs the edit_server core as viewer, which UPDATEs
---    one row of config_monitored_servers. The grant is COLUMN-level on exactly the columns that core may SET (its
---    EditColumnOfField table) plus modified_at, the optimistic token every writer bumps. is_enabled,
---    excluded_databases, engine, server_id, capture_plans, alert_delivery_mode_override, plan_force_bot_enabled and
---    the remediation_* columns stay unwritable by viewer: an edit cannot flip a server on or off, change its engine
---    or reach a remediation credential. encrypted_password is WRITABLE here and stays SELECT-carved (section 6):
---    viewer can replace a password blob and never read one back, the posture add already has. SELECT ... FOR UPDATE
---    needs UPDATE on at least one column, which this grant supplies. The BEACON is the two-column config_service grant
---    above (the write fires trg_bump_monitored_servers as viewer). The WPF read-only probe discriminates on
---    config_alert_log UPDATE, which this grant does not touch. Idempotent, applied on every managed startup: not a
---    migration rung.
---    REVOKE first, the same shape as the section-6 read carve: revoking the table privilege also revokes every column
---    privilege on it, so each run resets viewer to EXACTLY the columns listed below. A bare GRANT only ever adds: a later
---    release that narrows this list (or a revert of this change) would leave viewer holding the old columns, and a
---    table-level UPDATE granted by hand would survive every startup and make the column list meaningless. A plain REVOKE
---    removes only the privileges recorded as granted by the role that issues it (a superuser or the owner counts as the
---    owner); this batch grants and revokes as that same owner, so it undoes its own grants and any the owner or a
---    superuser added by hand. A grant made by another role holding GRANT OPTION is not reached.
+-- #5240: the web dashboard's edit route (PATCH /api/servers/{{id}}) and the MCP edit_server tool change a monitored
+--    server through {config}.edit_monitored_server, a SECURITY DEFINER function granted to viewer and mcp in section 10.
+--    Viewer holds NO UPDATE on this table, column-level or otherwise: the function checks the optimistic token, works
+--    out for itself whether host or port moves, and refuses a move that keeps the stored secret on a SQL or
+--    service-principal row, so a session holding the viewer login cannot send a stored secret to a host it picks.
+--    REVOKE, not merely an absent grant: a store that ran a build with a column-level UPDATE keeps it until this
+--    statement takes it away, and revoking the table privilege also revokes every column privilege on it, so each run
+--    leaves viewer with no UPDATE at all (the same shape as the section-6 read carve). A plain REVOKE removes only the
+--    privileges recorded as granted by the role that issues it (a superuser or the owner counts as the owner); this
+--    batch grants and revokes as that same owner. The write fires trg_bump_monitored_servers inside the function, as
+--    the owner. Idempotent, applied on every managed startup: not a migration rung.
 REVOKE UPDATE ON {config}.config_monitored_servers FROM {viewer};
-GRANT UPDATE (name, host, port, database, read_only_intent, auth, username, encrypted_password, encrypt_mode, trust_server_certificate, multi_subnet_failover, monthly_cost_usd, modified_at) ON {config}.config_monitored_servers TO {viewer};
 -- #3314: the DELIVERY cooldown -- the sole throttle on a Slack/Teams/PagerDuty/webhook post -- is the one
 -- alert-engine knob stored on config_notification rather than config_alert_settings, so update_alert_settings
 -- spans two tables and needs a write here. This DOES widen mcp into a table holding bearer secrets (the SMTP
@@ -1142,6 +1134,16 @@ GRANT INSERT, UPDATE, DELETE ON {config}.config_monitored_servers TO {mcp};
 --     probe rung + ladder fixture + version-pin tests for no gain.
 {BuildCustomAlertResolveFunctionSql(config)}
 GRANT EXECUTE ON FUNCTION {config}.record_custom_alert_resolution(integer, text, text, text) TO {viewer}, {mcp};
+-- #5240: the edit write. The web edit route (viewer) and the MCP edit_server tool (mcp) call
+--     {config}.edit_monitored_server for their one UPDATE of a config_monitored_servers row. It locks the row, checks
+--     the expected modified_at, and refuses a change of host or port that keeps the stored secret on a SQL or
+--     service-principal row (the caller must send a new secret with it). Owned by the store owner, pinned
+--     search_path, one fixed UPDATE with no dynamic SQL; created and REVOKEd from PUBLIC by the shared builder
+--     below, and EXECUTE is the only privilege viewer and mcp get for this write. NOT a versioned migration:
+--     CREATE OR REPLACE is idempotent and owner-run every start. A self-managed store gets the same function from
+--     tools/provision-roles.sql, and is told to re-run it when the function is missing.
+{BuildEditMonitoredServerFunctionSql(config)}
+GRANT EXECUTE ON FUNCTION {config}.edit_monitored_server({EditMonitoredServerSignature}) TO {viewer}, {mcp};
 
 -- 11. Role memberships (#3914): the three roles hold none. Nothing above grants one, so every membership in which
 --     admin, viewer or mcp is the MEMBER was given by someone else, and each outranks the grants above -- a
@@ -1208,6 +1210,125 @@ AS $fn$
        false, 'none', NULL, false, p_detail_text, NULL);
 $fn$;
 REVOKE ALL ON FUNCTION {config}.record_custom_alert_resolution(integer, text, text, text) FROM PUBLIC;";
+
+    /// <summary>The argument types of <c>config.edit_monitored_server</c> (#5240), in order. The one place the signature is
+    /// spelled for the <c>GRANT EXECUTE</c>, so a changed parameter list cannot leave the grant naming another function.</summary>
+    internal const string EditMonitoredServerSignature = "integer, timestamp, text[], text, text, integer, text, boolean, text, text, text, text, boolean, boolean, numeric";
+
+    /// <summary>
+    /// The <c>SECURITY DEFINER</c> function (#5240) that is the one write of a monitored-server edit, for the web edit route
+    /// (viewer) and the MCP <c>edit_server</c> tool (mcp). Returns the <c>CREATE OR REPLACE FUNCTION</c> plus the
+    /// <c>REVOKE ALL ... FROM PUBLIC</c>; the caller adds the <c>GRANT EXECUTE</c>. It locks the row, compares
+    /// <c>modified_at</c> to the token the edit read (exact to the microsecond), works out a change of host or port
+    /// itself from the stored row, and answers <c>password_needed</c> instead of writing when that change, or a switch
+    /// of authentication mode, would keep the stored secret on a SQL or service-principal row. A row whose
+    /// authentication stores no secret never keeps one. Same builder for the managed batch, the script's text and the
+    /// live tests, so none drifts. Pinned <c>search_path</c>, fixed statements, no dynamic SQL.
+    /// </summary>
+    internal static string BuildEditMonitoredServerFunctionSql(string config) => $@"
+CREATE OR REPLACE FUNCTION {config}.edit_monitored_server(
+   p_server_id integer,
+   p_expected_modified_at timestamp,
+   p_columns text[],
+   p_name text,
+   p_host text,
+   p_port integer,
+   p_database text,
+   p_read_only_intent boolean,
+   p_auth text,
+   p_username text,
+   p_secret text,
+   p_encrypt_mode text,
+   p_trust_server_certificate boolean,
+   p_multi_subnet_failover boolean,
+   p_monthly_cost_usd numeric)
+RETURNS TABLE (outcome text, new_modified_at timestamp)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = {config}, pg_catalog
+AS $fn$
+DECLARE
+   v_old_modified_at timestamp;
+   v_old_host text;
+   v_old_port integer;
+   v_old_auth text;
+   v_host text;
+   v_port integer;
+   v_auth text;
+   v_secret_auth boolean;
+   v_new_secret boolean;
+   v_secret_set boolean;
+   v_secret text;
+BEGIN
+   p_columns := COALESCE(p_columns, ARRAY[]::text[]);
+
+   SELECT s.modified_at, s.host, s.port, s.auth
+   INTO v_old_modified_at, v_old_host, v_old_port, v_old_auth
+   FROM config_monitored_servers AS s
+   WHERE s.server_id = p_server_id
+   FOR UPDATE OF s;
+
+   IF NOT FOUND THEN
+      RETURN QUERY SELECT 'not_found'::text, NULL::timestamp;
+      RETURN;
+   END IF;
+
+   -- The token is compared as it was read, to the microsecond.
+   IF v_old_modified_at IS DISTINCT FROM p_expected_modified_at THEN
+      RETURN QUERY SELECT 'conflict'::text, v_old_modified_at;
+      RETURN;
+   END IF;
+
+   v_host := CASE WHEN 'host' = ANY (p_columns) THEN btrim(p_host) ELSE v_old_host END;
+   v_port := CASE WHEN 'port' = ANY (p_columns) THEN p_port ELSE v_old_port END;
+   v_auth := CASE WHEN 'auth' = ANY (p_columns) THEN p_auth ELSE v_old_auth END;
+   v_secret_auth := lower(v_auth) IN ('sql', 'serviceprincipal');
+   v_new_secret := 'encrypted_password' = ANY (p_columns) AND COALESCE(p_secret, '') <> '';
+
+   -- A move of host or port (the instance is part of host), or a switch between authentication modes, never keeps
+   -- the stored secret on a row that has one. The caller's word is not taken: the move is worked out from the row.
+   IF v_secret_auth AND NOT v_new_secret
+      AND (v_host IS DISTINCT FROM v_old_host
+           OR v_port IS DISTINCT FROM v_old_port
+           OR lower(v_auth) IS DISTINCT FROM lower(v_old_auth)) THEN
+      RETURN QUERY SELECT 'password_needed'::text, NULL::timestamp;
+      RETURN;
+   END IF;
+
+   -- A row whose authentication stores no secret never keeps one.
+   IF NOT v_secret_auth THEN
+      v_secret_set := true;
+      v_secret := NULL;
+   ELSIF 'encrypted_password' = ANY (p_columns) THEN
+      v_secret_set := true;
+      v_secret := p_secret;
+   ELSE
+      v_secret_set := false;
+      v_secret := NULL;
+   END IF;
+
+   UPDATE config_monitored_servers AS s
+   SET name = CASE WHEN 'name' = ANY (p_columns) THEN p_name ELSE s.name END,
+       host = v_host,
+       port = v_port,
+       database = CASE WHEN 'database' = ANY (p_columns) THEN p_database ELSE s.database END,
+       read_only_intent = CASE WHEN 'read_only_intent' = ANY (p_columns) THEN p_read_only_intent ELSE s.read_only_intent END,
+       auth = v_auth,
+       username = CASE WHEN 'username' = ANY (p_columns) THEN p_username ELSE s.username END,
+       encrypted_password = CASE WHEN v_secret_set THEN v_secret ELSE s.encrypted_password END,
+       encrypt_mode = CASE WHEN 'encrypt_mode' = ANY (p_columns) THEN p_encrypt_mode ELSE s.encrypt_mode END,
+       trust_server_certificate = CASE WHEN 'trust_server_certificate' = ANY (p_columns) THEN p_trust_server_certificate ELSE s.trust_server_certificate END,
+       multi_subnet_failover = CASE WHEN 'multi_subnet_failover' = ANY (p_columns) THEN p_multi_subnet_failover ELSE s.multi_subnet_failover END,
+       monthly_cost_usd = CASE WHEN 'monthly_cost_usd' = ANY (p_columns) THEN p_monthly_cost_usd ELSE s.monthly_cost_usd END,
+       modified_at = (now() AT TIME ZONE 'UTC')
+   WHERE s.server_id = p_server_id
+   RETURNING s.modified_at INTO new_modified_at;
+
+   outcome := 'saved';
+   RETURN NEXT;
+END;
+$fn$;
+REVOKE ALL ON FUNCTION {config}.edit_monitored_server(integer, timestamp, text[], text, text, integer, text, boolean, text, text, text, text, boolean, boolean, numeric) FROM PUBLIC;";
 
     /// <summary>
     /// Fails closed unless <paramref name="secret"/> is a SCRAM-SHA-256 verifier (#3910). This refuses a plain

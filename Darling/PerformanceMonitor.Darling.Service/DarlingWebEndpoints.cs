@@ -1171,7 +1171,16 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             var result = ran.Answer!;
             if (ClassifyToolResponse(result) is ToolResponseKind.ServerError)
             {
-                return ServerErrorResult(RedactSecrets(McpHelpers.ErrorMessageOf(result), secrets), "/api/servers/{id}", logger, ran.Stopwatch!.ElapsedMilliseconds);
+                var sentence = RedactSecrets(McpHelpers.ErrorMessageOf(result), secrets);
+                if (sentence.Contains(DarlingMcpServerAdminTools.EditStoreNeedsRolesText, StringComparison.Ordinal))
+                {
+                    /* A store whose roles predate the edit function (#5240): still a 500, but the body says what to do
+                       instead of the generic sentence. The text is ours; PostgreSQL's own error never reaches this far. */
+                    DarlingWebFailureLog.Report(logger, "/api/servers/{id}", ran.Stopwatch!.ElapsedMilliseconds, sentence);
+                    return ErrorResult(DarlingMcpServerAdminTools.EditStoreNeedsRolesText, StatusCodes.Status500InternalServerError);
+                }
+
+                return ServerErrorResult(sentence, "/api/servers/{id}", logger, ran.Stopwatch!.ElapsedMilliseconds);
             }
 
             var answer = RedactEditAnswer(result, secrets);

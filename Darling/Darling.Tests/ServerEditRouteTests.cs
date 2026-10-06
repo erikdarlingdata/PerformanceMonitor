@@ -772,4 +772,17 @@ public sealed class ServerEditRouteTests
             Assert.Equal(1, Volatile.Read(ref reads));
         }
     }
+
+    [Fact]
+    public async Task AStoreWhoseRolesPredateTheEditFunction_Answers500_WithABodyThatSaysToRerunTheProvisionScript()
+    {
+        var envelope = PerformanceMonitor.Common.McpHelpers.FormatError("edit_server", new InvalidOperationException(DarlingMcpServerAdminTools.EditStoreNeedsRolesText));
+        await using var rig = await StartAsync(edit: (_, _) => Task.FromResult(envelope));
+
+        var (status, body) = await PatchAsync(rig, Changes());
+
+        Assert.Equal(HttpStatusCode.InternalServerError, status);
+        Assert.Equal(DarlingMcpServerAdminTools.EditStoreNeedsRolesText, JsonNode.Parse(body)!["error"]!.GetValue<string>());
+        Assert.Contains("provision-roles.sql", body, StringComparison.Ordinal);
+    }
 }
