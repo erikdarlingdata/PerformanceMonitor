@@ -26,6 +26,11 @@ const openHistories = new Map();
 /* key -> Set of redraw functions, one per cell currently showing the key. Each draw carries `draw.host`, the cell it draws
    into, so redraw() can tell a cell the page threw away (a grid rebuild, a tab switch) from one still on it. */
 const views = new Map();
+/* The grid build a cell belongs to. queryStoreHistoryColumn() runs once per grid build, so each call starts a new generation,
+   and a cell stamps its draw with the generation it registers under. `sweptGeneration` is the last one swept (see
+   dropOlderDetached). */
+let generation = 0;
+let sweptGeneration = 0;
 
 /* One key per grid row: get_query_store_top groups by database, query, plan, execution type and replica role. A part a row
    does not carry (a standalone server has no replica role) joins as nothing. */
@@ -45,6 +50,20 @@ const redraw = (key) => {
     else draw();
   }
   if (set.size === 0) views.delete(key);
+};
+
+/* Runs when the first cell of a generation registers: every draw of an OLDER generation whose cell has left the page goes,
+   under whatever key. redraw() prunes only the key it is called for, and a row nobody clicks (or one that has left the top
+   list) never reaches it, so without this each rebuild would leave a cell per row in the set for the life of the page (#5234).
+   The generation is what makes this safe: the cells of the build in progress are not on the page yet (the grid is attached
+   after its rows are drawn) and are never dropped here, and a cell of an older build that is still on the page stays too. */
+const dropOlderDetached = () => {
+  for (const [key, set] of views) {
+    for (const draw of [...set]) {
+      if (draw.generation < generation && draw.host && draw.host.isConnected === false) set.delete(draw);
+    }
+    if (set.size === 0) views.delete(key);
+  }
 };
 
 /** Forgets every open panel. Tests only; the page never needs it. */
@@ -177,9 +196,11 @@ function panelFor(key, server, hours) {
 /**
  * The History column for the Query Store grid: a button per row, and the panel under it while that query's history is
  * open. A row without a database or query id gets a dash. The key is synthetic (no row field carries it), so the
- * column is never sorted, filtered, exported or copied.
+ * column is never sorted, filtered, exported or copied. The page calls this once per grid build, so each call starts a new
+ * generation of cells for the redraw set.
  */
 export function queryStoreHistoryColumn(server, hours) {
+  generation += 1;
   return {
     key: "query_store_history",
     label: "History",
@@ -209,6 +230,11 @@ export function queryStoreHistoryColumn(server, hours) {
         if (isOpen) host.appendChild(panelFor(key, server, hours));
       };
       draw.host = host;
+      draw.generation = generation;
+      if (sweptGeneration !== generation) {
+        sweptGeneration = generation;
+        dropOlderDetached();
+      }
       if (!views.has(key)) views.set(key, new Set());
       views.get(key).add(draw);
       draw();

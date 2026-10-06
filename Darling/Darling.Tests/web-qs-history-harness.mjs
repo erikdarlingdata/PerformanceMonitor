@@ -10,7 +10,7 @@ import path from "node:path";
 /* isConnected is a plain flag here: true for a node that was built or put under a parent, false once removeChild took it
    out (the page throwing a cell away). */
 class FakeNode {
-  constructor(tag) { this.tag = tag; this.children = []; this.attrs = {}; this.listeners = {}; this.parent = null; this._text = ""; this.className = ""; this.style = {}; this.isConnected = true; }
+  constructor(tag) { this.tag = tag; this.children = []; this.attrs = {}; this.listeners = {}; this.parent = null; this._text = ""; this.className = ""; this.style = {}; this.isConnected = FakeNode.newConnected; }
   get firstChild() { return this.children[0] || null; }
   get textContent() { return this._text + this.children.map((c) => c.textContent).join(""); }
   set textContent(v) { this._text = String(v); this.children = []; }
@@ -22,6 +22,9 @@ class FakeNode {
   all(pred, acc = []) { if (pred(this)) acc.push(this); for (const c of this.children) c.all && c.all(pred, acc); return acc; }
   byText(t) { return this.all((n) => n.tag === "button" && n.textContent === t)[0] || null; }
 }
+/* A new node starts on the page here. A scenario that builds a grid sets this to false, as a browser would: a node is not on
+   the page until something puts it there. */
+FakeNode.newConnected = true;
 class FakeText extends FakeNode { constructor(t) { super("#text"); this._text = t; } }
 globalThis.Node = FakeNode;
 const body = new FakeNode("body");
@@ -250,6 +253,29 @@ const scenarios = {
     await flush();
     out.afterOtherTableButton = { a: openPlans(cellA), b: openPlans(cellB), grid: openPlans(gridPlan) };
     out.planPanels = pv.openPlanKeys().length;
+  },
+  /* The page rebuilds the grid every minute and throws the old one away. A cell nobody clicked leaves the redraw set once its
+     grid is gone, so the set holds about two builds' cells however many builds go by, whether the rows are the same each time or
+     new each time. A cell of the build in progress is not on the page yet and stays in the set. */
+  async rebuildsBounded() {
+    FakeNode.newConnected = false;
+    respond(history());
+    const total = () => Object.values(mod.queryStoreHistoryViewCounts()).reduce((a, b) => a + b, 0);
+    const rows = (build) => [1, 2, 3].map((i) => ({ database_name: "Orders", query_id: build * 10 + i, plan_id: i, execution_type_desc: "Regular", replica_role: null }));
+    let page = [];
+    out.sameRows = { during: [], after: [] };
+    out.newRows = { during: [], after: [] };
+    for (let build = 0; build < 12; build++) {
+      const phase = build < 6 ? out.sameRows : out.newRows;
+      const grid = col();
+      const cells = rows(build < 6 ? 0 : build).map((r) => grid.render(r));
+      phase.during.push(total());
+      cells.forEach((x) => body.appendChild(x));
+      page.forEach((x) => body.removeChild(x));
+      page = cells;
+      phase.after.push(total());
+    }
+    out.keys = Object.keys(mod.queryStoreHistoryViewCounts()).length;
   },
   async cutNotice() {
     respond(history({ points_truncated: true }));

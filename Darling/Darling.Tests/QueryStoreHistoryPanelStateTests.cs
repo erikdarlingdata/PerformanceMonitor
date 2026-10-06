@@ -26,6 +26,8 @@ public sealed class QueryStoreHistoryPanelStateTests
 
     private static string[] Strs(JsonElement r, string name) => r.GetProperty(name).EnumerateArray().Select(e => e.GetString()!).ToArray();
 
+    private static int[] Ints(JsonElement r, string name) => r.GetProperty(name).EnumerateArray().Select(e => e.GetInt32()).ToArray();
+
     private static void AssertOpenPlans(JsonElement r, string name, int a, int b, int grid)
     {
         var o = r.GetProperty(name);
@@ -55,5 +57,23 @@ public sealed class QueryStoreHistoryPanelStateTests
         AssertOpenPlans(r, "afterGridButton", a: 1, b: 0, grid: 1);
         AssertOpenPlans(r, "afterOtherTableButton", a: 1, b: 1, grid: 1);
         Assert.Equal(3, r.GetProperty("planPanels").GetInt32());
+    }
+
+    /// <summary>Three rows a build, rebuilt twelve times without a click: first the same rows each time, then new rows each
+    /// time. The set holds the grid on the page and the one being built, so six cells at most.</summary>
+    [Fact]
+    public void RebuildingTheGridWithoutAClick_KeepsTheRedrawSetBounded()
+    {
+        var r = Run("rebuildsBounded");
+        foreach (var phase in new[] { "sameRows", "newRows" })
+        {
+            var p = r.GetProperty(phase);
+            var after = Ints(p, "after");
+            Assert.All(after, n => Assert.InRange(n, 3, 6));
+            Assert.Equal(6, after[^1]);
+            // The cells of the build in progress are not on the page yet, and a later cell of that build must not drop them.
+            Assert.Equal(6, Ints(p, "during")[^1]);
+        }
+        Assert.Equal(6, r.GetProperty("keys").GetInt32());
     }
 }
