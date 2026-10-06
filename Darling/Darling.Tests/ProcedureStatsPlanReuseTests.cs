@@ -407,6 +407,173 @@ public sealed class ProcedureStatsPlanReuseTests
         Assert.Equal(0, again.FalseHit);
     }
 
+    /// <summary>A module plan the way the engine renders it: one StmtSimple per entry in <paramref name="planHashes"/> (null: none), and the grant fields.</summary>
+    private static string PlanWithGrant(string desiredMemory, string fractionInput, params string?[] planHashes)
+    {
+        var statements = string.Concat(planHashes.Select((hash, i) =>
+            "<StmtSimple StatementId=\"" + (i + 1).ToString(CultureInfo.InvariantCulture) + "\""
+            + (hash is null ? string.Empty : " QueryPlanHash=\"" + hash + "\"") + ">"
+            + "<QueryPlan CachedPlanSize=\"24\"><MemoryGrantInfo SerialRequiredMemory=\"512\" SerialDesiredMemory=\"" + desiredMemory + "\" />"
+            + "<RelOp NodeId=\"0\" PhysicalOp=\"Sort\"><MemoryFractions Input=\"" + fractionInput + "\" Output=\"" + fractionInput + "\" /></RelOp>"
+            + "</QueryPlan></StmtSimple>"));
+        return "<ShowPlanXML><BatchSequence><Batch><Statements>" + statements + "</Statements></Batch></BatchSequence></ShowPlanXML>";
+    }
+
+    [Fact]
+    public void Shadow_ARenderThatDiffersOnlyInTheMemoryGrant_IsAWouldHitAndGrantOnly_NotAFalseHit()
+    {
+        var cached = PlanWithGrant("1024", "0.5", "0xAA", "0xBB");
+        var rendered = PlanWithGrant("2048", "0.25", "0xAA", "0xBB");
+        Assert.NotEqual(ProcedureStatsPlanReuse.DigestOf(cached), ProcedureStatsPlanReuse.DigestOf(rendered));
+
+        var cache = new PlanDigestCache<ProcedureStatsPlanKey>();
+        var first = ProcedureStatsPlanReuse.ApplyShadow(1, cache, new List<ProcedureStatsCollector.Row> { RowFor(1, cached) }, 1, s_now, null);
+        cache.ConfirmPending(first.Pending, s_now);
+
+        var rows = new List<ProcedureStatsCollector.Row> { RowFor(1, rendered) };
+        var outcome = ProcedureStatsPlanReuse.ApplyShadow(1, cache, rows, 2, s_now, _ => Assert.Fail("a grant change is not a false hit"));
+
+        Assert.Equal(1, outcome.WouldHit);
+        Assert.Equal(1, outcome.GrantOnly);
+        Assert.Equal(0, outcome.FalseHit);
+        Assert.Equal(0, outcome.Miss);
+        Assert.Equal(rendered, rows[0].QueryPlanXml); /* the row still carries what the render produced */
+
+        /* the cache now holds the new bytes, so the same render is an exact hit, not a second grant-only */
+        cache.ConfirmPending(outcome.Pending, s_now);
+        var again = ProcedureStatsPlanReuse.ApplyShadow(1, cache, rows, 3, s_now, _ => Assert.Fail("healed"));
+        Assert.Equal(1, again.WouldHit);
+        Assert.Equal(0, again.GrantOnly);
+        Assert.Equal(0, again.FalseHit);
+    }
+
+    [Fact]
+    public void Shadow_ARenderWhoseOneStatementChangedItsQueryPlanHash_IsAFalseHit()
+    {
+        var cache = new PlanDigestCache<ProcedureStatsPlanKey>();
+        var first = ProcedureStatsPlanReuse.ApplyShadow(
+            1, cache, new List<ProcedureStatsCollector.Row> { RowFor(1, PlanWithGrant("1024", "0.5", "0xAA", "0xBB")) }, 1, s_now, null);
+        cache.ConfirmPending(first.Pending, s_now);
+
+        var reported = new List<ProcedureStatsPlanKey>();
+        var rows = new List<ProcedureStatsCollector.Row> { RowFor(1, PlanWithGrant("1024", "0.5", "0xAA", "0xCC")) };
+        var outcome = ProcedureStatsPlanReuse.ApplyShadow(1, cache, rows, 2, s_now, reported.Add);
+
+        Assert.Equal(1, outcome.WouldHit);
+        Assert.Equal(1, outcome.FalseHit);
+        Assert.Equal(0, outcome.GrantOnly);
+        Assert.Single(reported);
+
+        /* a statement added or dropped changes the count, which is a shape change too */
+        cache.ConfirmPending(outcome.Pending, s_now);
+        var dropped = ProcedureStatsPlanReuse.ApplyShadow(
+            1, cache, new List<ProcedureStatsCollector.Row> { RowFor(1, PlanWithGrant("1024", "0.5", "0xAA")) }, 3, s_now, null);
+        Assert.Equal(1, dropped.FalseHit);
+        Assert.Equal(0, dropped.GrantOnly);
+    }
+
+    [Fact]
+    public void Shadow_AGrantChangeAlongsideAChangedStatementHash_IsStillAFalseHit()
+    {
+        var cache = new PlanDigestCache<ProcedureStatsPlanKey>();
+        var first = ProcedureStatsPlanReuse.ApplyShadow(
+            1, cache, new List<ProcedureStatsCollector.Row> { RowFor(1, PlanWithGrant("1024", "0.5", "0xAA")) }, 1, s_now, null);
+        cache.ConfirmPending(first.Pending, s_now);
+
+        var outcome = ProcedureStatsPlanReuse.ApplyShadow(
+            1, cache, new List<ProcedureStatsCollector.Row> { RowFor(1, PlanWithGrant("4096", "0.9", "0xDD")) }, 2, s_now, null);
+
+        Assert.Equal(1, outcome.FalseHit);
+        Assert.Equal(0, outcome.GrantOnly);
+    }
+
+    [Fact]
+    public void Shadow_AStatementWithoutAQueryPlanHash_FallsBackToTheXmlWithoutTheGrantAttributes_BothWays()
+    {
+        /* the second statement has no QueryPlanHash, so the shape is the XML minus MemoryGrantInfo and MemoryFractions attributes */
+        var cached = PlanWithGrant("1024", "0.5", "0xAA", null);
+        var cache = new PlanDigestCache<ProcedureStatsPlanKey>();
+        var first = ProcedureStatsPlanReuse.ApplyShadow(1, cache, new List<ProcedureStatsCollector.Row> { RowFor(1, cached) }, 1, s_now, null);
+        cache.ConfirmPending(first.Pending, s_now);
+
+        var grant = ProcedureStatsPlanReuse.ApplyShadow(
+            1, cache, new List<ProcedureStatsCollector.Row> { RowFor(1, PlanWithGrant("2048", "0.25", "0xAA", null)) }, 2, s_now,
+            _ => Assert.Fail("grant only"));
+        Assert.Equal(1, grant.GrantOnly);
+        Assert.Equal(0, grant.FalseHit);
+        cache.ConfirmPending(grant.Pending, s_now);
+
+        /* another attribute of the plan moves: the hash of the first statement here, which the fallback still sees */
+        var changed = ProcedureStatsPlanReuse.ApplyShadow(
+            1, cache, new List<ProcedureStatsCollector.Row> { RowFor(1, PlanWithGrant("1024", "0.5", "0xEE", null)) }, 2, s_now, null);
+        Assert.Equal(1, changed.FalseHit);
+        Assert.Equal(0, changed.GrantOnly);
+
+        /* and a plan that is not XML at all can never be proved unchanged */
+        Assert.Null(ProcedureStatsPlanReuse.ShapeOf("<unclosed"));
+    }
+
+    [Fact]
+    public void Shadow_AnEntryCachedWithoutAShape_StaysAFalseHit()
+    {
+        /* what an entry written by on mode, or an older build, looks like: a digest and no shape */
+        var cache = ConfirmedCache(new[] { RowFor(1, PlanWithGrant("1024", "0.5", "0xAA")) });
+
+        var outcome = ProcedureStatsPlanReuse.ApplyShadow(
+            1, cache, new List<ProcedureStatsCollector.Row> { RowFor(1, PlanWithGrant("2048", "0.5", "0xAA")) }, 2, s_now, null);
+
+        Assert.Equal(1, outcome.FalseHit);
+        Assert.Equal(0, outcome.GrantOnly);
+    }
+
+    [Fact]
+    public void TheShapeKey_IgnoresGrantAttributes_AndNothingElse()
+    {
+        var shape = ProcedureStatsPlanReuse.ShapeOf(PlanWithGrant("1024", "0.5", "0xAA", "0xBB"));
+        Assert.NotNull(shape);
+        Assert.Equal(shape, ProcedureStatsPlanReuse.ShapeOf(PlanWithGrant("9", "0.1", "0xAA", "0xBB")));
+        Assert.NotEqual(shape, ProcedureStatsPlanReuse.ShapeOf(PlanWithGrant("1024", "0.5", "0xBB", "0xAA"))); /* order matters */
+        Assert.StartsWith("h:", shape, StringComparison.Ordinal);
+        Assert.StartsWith("x:", ProcedureStatsPlanReuse.ShapeOf(PlanWithGrant("1", "1", "0xAA", null)), StringComparison.Ordinal);
+        Assert.StartsWith("x:", ProcedureStatsPlanReuse.ShapeOf("<plan/>"), StringComparison.Ordinal);
+
+        var fallback = ProcedureStatsPlanReuse.ShapeOf(PlanWithGrant("1", "1", "0xAA", null));
+        Assert.NotEqual(fallback, ProcedureStatsPlanReuse.ShapeOf(PlanWithGrant("1", "1", "0xAB", null)));
+        Assert.Equal(fallback, ProcedureStatsPlanReuse.ShapeOf(PlanWithGrant("77", "0.7", "0xAA", null)));
+    }
+
+    [Fact]
+    public async Task TheCounters_ReachTheCollectionLogNote_AndOnlyAShapeChangeWarns()
+    {
+        var flipper = new FlippableRunner("shadow");
+        var context = StampedContext(flipper.Runner, capture: true);
+        var mode = ProcedureStatsPlanFetchModes.OfRun(context);
+
+        /* first run warms the cache, and the host commits it (the runner's own confirm is the writer's; do it through the cache) */
+        var rows1 = new List<ProcedureStatsCollector.Row> { RowFor(1, PlanWithGrant("1024", "0.5", "0xAA")), RowFor(2, PlanWithGrant("1024", "0.5", "0xAA")) };
+        var pending = await flipper.Runner.ApplyProcedureStatsPlanReuseAsync(null!, null!, ServerFor(), context, rows1, mode, CancellationToken.None);
+        var caches = (System.Collections.IDictionary)typeof(DarlingCollectorRunner)
+            .GetField("_procedureStatsPlanCaches", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!
+            .GetValue(flipper.Runner)!;
+        ((PlanDigestCache<ProcedureStatsPlanKey>)caches[ServerFor().ServerId]!).ConfirmPending(pending, DateTime.UtcNow);
+
+        var second = StampedContext(flipper.Runner, capture: true);
+        string? Note() => CollectorMeasurementNote.Compose(null, second.Measurements);
+        var rows2 = new List<ProcedureStatsCollector.Row>
+        {
+            RowFor(1, PlanWithGrant("2048", "0.25", "0xAA")),   /* grant only */
+            RowFor(2, PlanWithGrant("1024", "0.5", "0xBB")),    /* a statement recompiled */
+        };
+        await flipper.Runner.ApplyProcedureStatsPlanReuseAsync(null!, null!, ServerFor(), second, rows2, mode, CancellationToken.None);
+
+        Assert.Equal(1, second.Measurements.First(m => m.Label == "deferred_grant_only").Value);
+        Assert.Equal(1, second.Measurements.First(m => m.Label == "deferred_false_hit").Value);
+        Assert.Equal(2, second.Measurements.First(m => m.Label == "deferred_would_hit").Value);
+        Assert.Contains("deferred_grant_only=1", Note(), StringComparison.Ordinal);
+        Assert.Contains("deferred_false_hit=1", Note(), StringComparison.Ordinal);
+        Assert.Equal(1, flipper.Log.CountAtLevel(LogLevel.Warning)); /* the grant-only row did not warn */
+    }
+
     [Fact]
     public void Shadow_ACold_Miss_WarmsTheCache_AndLeavesEveryRowUntouched()
     {
