@@ -25,7 +25,7 @@
  * R4 (XSS): every value, the fix script included, reaches the DOM through el()'s text path.
  */
 
-import { el, readToolWithinKeptHistory, keptWindowStrip, noticeStrip, readErrorStrip, emptyStrip, loadingStrip, localTime, bandClass } from "../util.js";
+import { el, readToolWithinKeptHistory, keptWindowStrip, noticeStrip, readErrorStrip, emptyStrip, loadingStrip, localTime, bandClass, dbScopeChip } from "../util.js";
 
 /** The desktop's severity cutoffs: >= 1.5 Critical, >= 0.75 Warning, else Info. */
 export function severityLabel(severity) {
@@ -200,6 +200,6 @@ export const analysisFindingsTab = {
       while (body.firstChild) body.removeChild(body.firstChild);
       for (const n of renderFindings(server, res)) if (n) body.appendChild(n);
     })();
-    return [el("div", { class: "panel card span-2" }, [el("h3", {}, ["Recommendations", el("span", { class: "panel-sub", text: " " + ctx.label })]), body])];
+    return [el("div", { class: "panel card span-2" }, [el("h3", {}, ["Recommendations", el("span", { class: "panel-sub", text: " " + ctx.label }), dbScopeChip("get_analysis_findings")]), body])];
   },
 };

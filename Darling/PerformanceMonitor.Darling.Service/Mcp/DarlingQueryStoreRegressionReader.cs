@@ -11,7 +11,7 @@ using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
-using NpgsqlTypes;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
 
@@ -248,17 +248,13 @@ internal static class DarlingQueryStoreRegressionReader
     /// exclusion).</summary>
     public static async Task<List<RegressionRow>> GetQueryStoreRegressionsAsync(
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc,
-        string? databaseName, int limit, DateTime baselineStartUtc, CancellationToken cancellationToken = default)
+        DatabaseFilter databases, int limit, DateTime baselineStartUtc, CancellationToken cancellationToken = default)
     {
         var rows = new List<RegressionRow>();
         await using var command = postgres.CreateCommand(QueryStoreRegressionsSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddWindow(command, serverId, startUtc, endUtc);
-        command.Parameters.Add(new NpgsqlParameter
-        {
-            NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text,
-            Value = string.IsNullOrWhiteSpace(databaseName) ? DBNull.Value : new[] { databaseName },
-        });
+        command.Parameters.Add(databases.Parameter());
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = limit });
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(baselineStartUtc, DateTimeKind.Unspecified) });
 
@@ -290,21 +286,18 @@ internal static class DarlingQueryStoreRegressionReader
         return rows;
     }
 
-    /// <summary>Runs <see cref="RegressionCoverageSql"/>. <paramref name="databaseName"/> narrows both questions to
-    /// one database, as <see cref="GetQueryStoreRegressionsAsync"/> does (null or blank: every database).</summary>
+    /// <summary>Runs <see cref="RegressionCoverageSql"/>. <paramref name="databases"/> narrows both questions to
+    /// the chosen databases, as <see cref="GetQueryStoreRegressionsAsync"/> does (#5245; <see cref="DatabaseFilter.All"/>,
+    /// the default: every database).</summary>
     public static async Task<(bool HasBaseline, bool HasRecent)> GetCoverageAsync(
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, DateTime baselineStartUtc,
-        string? databaseName = null, CancellationToken cancellationToken = default)
+        DatabaseFilter databases = default, CancellationToken cancellationToken = default)
     {
         await using var command = postgres.CreateCommand(RegressionCoverageSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddWindow(command, serverId, startUtc, endUtc);
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(baselineStartUtc, DateTimeKind.Unspecified) });
-        command.Parameters.Add(new NpgsqlParameter
-        {
-            NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text,
-            Value = string.IsNullOrWhiteSpace(databaseName) ? DBNull.Value : new[] { databaseName },
-        });
+        command.Parameters.Add(databases.Parameter());
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         if (!await reader.ReadAsync(cancellationToken))
             return (false, false);

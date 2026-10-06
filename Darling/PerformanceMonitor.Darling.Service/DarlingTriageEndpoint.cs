@@ -875,9 +875,8 @@ internal static class DarlingTriageEndpoint
         ["detail_text"] = row.DetailText,
     };
 
-    private static string? Query(HttpContext context, string key)
-    {
-        var value = context.Request.Query[key].ToString();
-        return string.IsNullOrEmpty(value) ? null : value;
-    }
+    /// <summary>The first non-empty value for a query key, or null — the read surface's binding rule, which this
+    /// calls rather than restates (#5245: a repeated key is its first value, not the values joined by a comma).</summary>
+    internal static string? Query(HttpContext context, string key) =>
+        DarlingWebEndpoints.First(context, key);
 }

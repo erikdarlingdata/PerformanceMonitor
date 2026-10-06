@@ -288,10 +288,15 @@ internal static class McpHelpers
     /// Exception filter, and it is a measured zero: Query Store is collecting and the window has rows, just none
     /// with that outcome. Without it the read fell through to the "Query Store may not be enabled" guess, which
     /// is the one thing the unfiltered rows prove false. Shared so both SKUs say it in the same words.
+    ///
+    /// <para><paramref name="scopeText"/> (#5245) is for a read over SEVERAL databases, which has no one name to put in
+    /// the sentence: the caller hands the whole phrase (" for the chosen databases") and it replaces the
+    /// <c>in database 'X'</c> text. Left null, the text is exactly what it was, so Lite's answers and every one-name
+    /// answer are byte-identical.</para>
     /// </summary>
-    public static string QueryStoreExecutionTypeEmpty(string executionType, int hoursBack, string? databaseName, object? hints = null)
+    public static string QueryStoreExecutionTypeEmpty(string executionType, int hoursBack, string? databaseName, object? hints = null, string? scopeText = null)
     {
-        var scope = string.IsNullOrWhiteSpace(databaseName) ? "" : $" in database '{databaseName}'";
+        var scope = scopeText ?? (string.IsNullOrWhiteSpace(databaseName) ? "" : $" in database '{databaseName}'");
         return Status(
             "empty",
             $"No {executionType} executions{scope} in the {hoursBack}-hour window searched. The same read without "
@@ -307,14 +312,15 @@ internal static class McpHelpers
     /// filter too when one rode along, since either can be why nothing matched. Shared so both SKUs say it in the
     /// same words. Both SKUs pass their window floor (<paramref name="windowTruncated"/> and the served window as
     /// <paramref name="hints"/>), because the raw tier can stop short of the window asked for (#2364 on Darling,
-    /// #4231 on Lite).
+    /// #4231 on Lite). <paramref name="scopeText"/> (#5245) is the several-databases phrase, as on
+    /// <see cref="QueryStoreExecutionTypeEmpty"/>; null keeps today's text.
     /// </summary>
     public static string QueryStoreModuleEmpty(
         string moduleName, string? executionType, int hoursBack, string? databaseName,
-        bool windowTruncated = false, object? hints = null)
+        bool windowTruncated = false, object? hints = null, string? scopeText = null)
     {
         var outcome = executionType is null ? "" : $" with execution_type {executionType}";
-        var scope = string.IsNullOrWhiteSpace(databaseName) ? "" : $" in database '{databaseName}'";
+        var scope = scopeText ?? (string.IsNullOrWhiteSpace(databaseName) ? "" : $" in database '{databaseName}'");
         return Status(
             "empty",
             $"No Query Store rows matched module_name '{moduleName}'{outcome}{scope} in the {hoursBack}-hour window "
