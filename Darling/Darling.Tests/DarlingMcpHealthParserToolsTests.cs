@@ -103,16 +103,6 @@ public sealed class DarlingMcpHealthParserToolsSurfaceAndSqlTests
         Assert.Contains("ORDER BY event_time DESC", sql, StringComparison.Ordinal);
     }
 
-    [Fact]
-    public void DatabaseNameMapSql_LatestNamePerId_FromSizeStatsView()
-    {
-        var sql = DarlingSystemHealthReader.DatabaseNameMapSql;
-        Assert.Contains("DISTINCT ON (database_id)", sql, StringComparison.Ordinal);
-        Assert.Contains("FROM v_database_size_stats", sql, StringComparison.Ordinal);
-        Assert.Contains("WHERE server_id = $1", sql, StringComparison.Ordinal);
-        Assert.Contains("ORDER BY database_id, collection_time DESC", sql, StringComparison.Ordinal);
-    }
-
     /// <summary>
     /// #2484 → #3541 A12: the probes that let an empty parse-on-read answer say WHICH nothing it found must
     /// read the SAME source the read itself reads. A probe on the base table would report a server as
@@ -149,7 +139,6 @@ public sealed class DarlingMcpHealthParserToolsSurfaceAndSqlTests
 
     [Theory]
     [InlineData(nameof(DarlingSystemHealthReader.SystemHealthEventsByTypeSql))]
-    [InlineData(nameof(DarlingSystemHealthReader.DatabaseNameMapSql))]
     [InlineData(nameof(DarlingSystemHealthReader.LastCaptureSql))]
     [InlineData(nameof(DarlingSystemHealthReader.LastCaptureOfTypeSql))]
     public void Reads_ArePostgresDialect_PositionalParams(string sqlName)
@@ -341,19 +330,6 @@ public sealed class DarlingMcpHealthParserToolsSurfaceAndSqlTests
         var r = SystemHealthParser.ParseSystemHealth(LoadFixture("sp_server_diagnostics_system.xml"))!;
         Assert.Equal("CLEAN", r.State);
         Assert.True(r.EventTime.HasValue);
-    }
-
-    [Fact]
-    public void SevereError_DatabaseNameResolution_MatchesViewer()
-    {
-        // Same rules as the viewer's ViewerDataService.ResolveDatabaseName: mapped id → name; 0/null → blank
-        // (no DB context); a real-but-unmapped id surfaces the raw id rather than silently blanking.
-        var map = new Dictionary<int, string> { [5] = "AdventureWorks", [1] = "master" };
-        Assert.Equal("AdventureWorks", DarlingSystemHealthReader.ResolveDatabaseName(5, map));
-        Assert.Equal("master", DarlingSystemHealthReader.ResolveDatabaseName(1, map));
-        Assert.Equal("", DarlingSystemHealthReader.ResolveDatabaseName(0, map));
-        Assert.Equal("", DarlingSystemHealthReader.ResolveDatabaseName(null, map));
-        Assert.Equal("database_id 7", DarlingSystemHealthReader.ResolveDatabaseName(7, map));
     }
 }
 

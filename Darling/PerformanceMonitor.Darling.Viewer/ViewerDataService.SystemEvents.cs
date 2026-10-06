@@ -35,7 +35,7 @@ namespace PerformanceMonitor.Darling.Viewer;
  * ViewerTimeHelper.FormatForDisplay the deadlock / blocked-process grids use (a Default Trace row is a
  * stored server wall clock instead, so it renders the bare wall time through
  * SystemEventRowFormat.StoredWallClock and never takes the repeated-hour offset, #4766). Only SevereError
- * adds a resolved DatabaseName (see ResolveDatabaseName).
+ * adds a resolved DatabaseName (see DatabaseNameHistory).
  */
 
 /// <summary>Shared machine-local render of a naive-UTC event timestamp for the System Events grids.</summary>
@@ -75,8 +75,8 @@ public sealed class SchedulerIssueRow(SchedulerIssueRecord record)
 
 /// <summary>
 /// One severe-error row (Severe Errors sub-tab). Mirrors <c>*_SevereErrors</c>. <see cref="DatabaseName"/>
-/// is resolved from the store's collected database_id↔database_name mapping (see
-/// <see cref="ViewerDataService.ResolveDatabaseName"/>) — Stage 2a's DB-free shred left it null.
+/// is resolved from the store's collected database_id↔database_name history, the name the id carried at the error's
+/// time (see <see cref="DatabaseNameHistory"/>, #5373) — Stage 2a's DB-free shred left it null.
 /// </summary>
 public sealed class SevereErrorRow(SevereErrorRecord record, string databaseName)
 {
@@ -328,57 +328,6 @@ public sealed partial class ViewerDataService
         ORDER BY event_time DESC
         """;
 
-    /// <summary>
-    /// The server's latest database_id↔database_name mapping from the collected size-stats
-    /// (<c>DISTINCT ON (database_id)</c> keeps the most-recently-collected name for each id — handles a
-    /// dropped-and-recreated id). Feeds <see cref="ResolveDatabaseName"/> for the Severe Errors tab.
-    /// <c>database_size_stats</c> is the mapping source because it is the only collected table carrying
-    /// BOTH database_id and database_name for every online DB (system + user); <c>database_config</c>
-    /// carries the name but no id. $1 server_id.
-    /// </summary>
-    public const string DatabaseNameMapSql = """
-        SELECT DISTINCT ON (database_id)
-            database_id,
-            database_name
-        FROM v_database_size_stats
-        WHERE server_id = $1
-        ORDER BY database_id, collection_time DESC
-        """;
-
-    /// <summary>
-    /// Resolves a severe-error <c>database_id</c> to a display name using the collected mapping. A null or
-    /// 0 id means "no database context" (error_reported often carries database_id 0; <c>DB_NAME(0)</c> is
-    /// NULL server-side too) → empty. A real id absent from the map (a database dropped before the latest
-    /// size-stats snapshot, or one never captured) is surfaced as its raw id rather than silently blanked.
-    /// </summary>
-    public static string ResolveDatabaseName(int? databaseId, IReadOnlyDictionary<int, string> databaseNameMap)
-    {
-        if (databaseId is not { } id || id == 0)
-            return string.Empty;
-        if (databaseNameMap.TryGetValue(id, out var name))
-            return name;
-        return $"database_id {id}";
-    }
-
-    /// <summary>Loads the server's latest database_id → database_name map for Severe Errors DB resolution.</summary>
-    public async Task<Dictionary<int, string>> GetDatabaseNameMapAsync(int serverId, CancellationToken cancellationToken = default)
-    {
-        var map = new Dictionary<int, string>();
-
-        await using var command = _dataSource.CreateCommand(DatabaseNameMapSql);
-        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
-        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        while (await reader.ReadAsync(cancellationToken))
-        {
-            if (reader.IsDBNull(0) || reader.IsDBNull(1))
-                continue;
-            map[reader.GetInt32(0)] = reader.GetString(1);
-        }
-
-        return map;
-    }
-
     /// <summary>The five System Events parameters ($1 server_id, $2/$3 naive-UTC window, $4 XE event_type,
     /// $5 the <see cref="EventWindowFloor"/> for $2).</summary>
     private static void AddSystemEventParameters(NpgsqlCommand command, int serverId, DateTime startUtc, DateTime endUtc, string eventType)
@@ -437,31 +386,41 @@ public sealed partial class ViewerDataService
     public async Task<List<SevereErrorRow>> GetSevereErrorsAsync(
         int serverId, DateTime startUtc, DateTime endUtc, IReadOnlyList<string>? databaseNames = null, CancellationToken cancellationToken = default)
     {
-        var mapTask = GetDatabaseNameMapAsync(serverId, cancellationToken);
         var xmls = await ReadSystemHealthEventXmlAsync(
             serverId, startUtc, endUtc, SystemHealthParser.ErrorReportedEvent, cancellationToken);
-        var map = await mapTask;
 
-        /* #1319 database filter: severe_errors has no database_name column (the DB is resolved in C# from the
-           event's database_id via the collected id↔name map), so the filter is applied client-side on the
-           resolved name. A null/empty selection leaves every row (today's behavior). */
-        var filter = databaseNames is { Count: > 0 } ? new HashSet<string>(databaseNames, StringComparer.OrdinalIgnoreCase) : null;
-
-        return await Task.Run(() =>
+        var records = await Task.Run(() =>
         {
-            var rows = new List<SevereErrorRow>();
+            var parsed = new List<SevereErrorRecord>();
             foreach (var xml in xmls)
             {
                 var record = SystemHealthParser.ParseSevereError(xml);
                 if (record != null && SystemEventSignificance.IsSignificant(record))
-                {
-                    var databaseName = ResolveDatabaseName(record.DatabaseId, map);
-                    if (filter == null || filter.Contains(databaseName))
-                        rows.Add(new SevereErrorRow(record, databaseName));
-                }
+                    parsed.Add(record);
             }
-            return rows;
+            return parsed;
         }, cancellationToken);
+
+        /* #5373: each error is named by what its database_id carried at the error's own time (the collected
+           database-size snapshots), not by the server's latest name for the id: SQL Server reuses a dropped
+           database's id. */
+        var names = await DatabaseNameHistoryReader.ReadAsync(
+            _dataSource, serverId, records.Where(r => r.DatabaseId.HasValue).Select(r => r.DatabaseId!.Value), records.Select(r => r.EventTime),
+            ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
+
+        /* #1319 database filter: severe_errors has no database_name column (the DB is resolved in C# from the
+           event's database_id), so the filter is applied client-side on the resolved name. A null/empty
+           selection leaves every row (today's behavior). */
+        var filter = databaseNames is { Count: > 0 } ? new HashSet<string>(databaseNames, StringComparer.OrdinalIgnoreCase) : null;
+
+        var rows = new List<SevereErrorRow>();
+        foreach (var record in records)
+        {
+            var databaseName = names.Resolve(record.DatabaseId, record.EventTime);
+            if (filter == null || filter.Contains(databaseName))
+                rows.Add(new SevereErrorRow(record, databaseName));
+        }
+        return rows;
     }
 
     // ── Memory Conditions ──
