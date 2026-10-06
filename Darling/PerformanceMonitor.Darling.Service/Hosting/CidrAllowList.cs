@@ -32,6 +32,14 @@ namespace PerformanceMonitor.Darling.Service.Hosting;
 /// line) shows the masked form, which is how a masked entry becomes visible. Duplicates (after masking) are
 /// dropped and the first-seen order is kept.</para>
 ///
+/// <para><b>An address must be spelled the plain way</b> (<see cref="IsPlainCidrText"/>): an IPv4 address, or the
+/// dotted tail of an IPv6 one, is exactly four decimal numbers 0-255 with no leading zero, and an IPv6 zone
+/// index (<c>%</c>) is refused, so the range written is the range enforced and opened in the firewall.
+/// <c>IPNetwork.TryParse</c> alone also takes the inet_aton spellings (<c>192.168.010.0/24</c> reads as
+/// <c>192.168.8.0/24</c> because a leading zero is octal, <c>0x0A.0.0.0/8</c> as <c>10.0.0.0/8</c>, <c>10/8</c>
+/// as <c>0.0.0.0/8</c>); those are refused. The text is checked as written, BEFORE masking, so
+/// <c>192.168.1.5/24</c> still parses.</para>
+///
 /// <para><b>An IPv4-mapped IPv6 entry (<c>::ffff:10.0.0.0/104</c>) is refused.</b> <c>IPNetwork.Parse</c>
 /// accepts it, but <see cref="DarlingHostBinding.IsRemoteAddressAllowed"/> maps a mapped REMOTE to IPv4 before
 /// it tests the list, so a mapped entry can never match anything — dead config the family rule exists to
@@ -59,9 +67,9 @@ internal readonly struct CidrAllowList
 
     /// <summary>
     /// Parses <paramref name="text"/> (one CIDR, or CIDRs separated by commas) per the rules on the type.
-    /// Null, empty, whitespace-only, an empty entry, a non-CIDR entry (including a bare address with no prefix)
-    /// and an IPv4-mapped IPv6 entry all return false with <paramref name="list"/> left at <c>default</c>.
-    /// Never throws.
+    /// Null, empty, whitespace-only, an empty entry, a non-CIDR entry (including a bare address with no prefix),
+    /// an address not spelled the plain way (<see cref="IsPlainCidrText"/>) and an IPv4-mapped IPv6 entry all
+    /// return false with <paramref name="list"/> left at <c>default</c>. Never throws.
     /// </summary>
     internal static bool TryParse(string? text, out CidrAllowList list)
     {
@@ -78,7 +86,8 @@ internal readonly struct CidrAllowList
             var entry = raw.Trim();
             if (entry.Length == 0
                 || !IPNetwork.TryParse(entry, out var network)
-                || network.BaseAddress.IsIPv4MappedToIPv6)
+                || network.BaseAddress.IsIPv4MappedToIPv6
+                || !IsPlainCidrText(entry))
             {
                 return false;
             }
@@ -90,6 +99,81 @@ internal readonly struct CidrAllowList
         }
 
         list = new CidrAllowList(entries.ToArray());
+        return true;
+    }
+
+    /// <summary>
+    /// #5288: true when the ONE entry <paramref name="cidr"/> (<c>address/prefix</c>, already trimmed) spells its
+    /// address the plain way. The text before the LAST <c>/</c> is checked as written, BEFORE any masking, so
+    /// <c>192.168.1.5/24</c> is plain (the parser masks it to <c>192.168.1.0/24</c> afterwards). An IPv4 address,
+    /// or the dotted tail of an IPv6 address (<c>64:ff9b::192.0.2.33/96</c>), must be exactly four decimal
+    /// numbers 0-255 with no leading zero. An IPv6 address with no dotted tail is hex groups only and has no
+    /// second reading. Any <c>%</c> (an IPv6 zone index) is false.
+    ///
+    /// <para>This is shared by <see cref="TryParse"/> and the store's single-CIDR check
+    /// (<c>DarlingManagedPostgres.ResolveNetworkExposure</c>, which feeds <c>pg_hba.conf</c>). It does not
+    /// replace <c>IPNetwork.TryParse</c>: call it on an entry that parser already accepted. Pure; never throws.</para>
+    /// </summary>
+    internal static bool IsPlainCidrText(string cidr)
+    {
+        if (cidr.Contains('%', StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        var slash = cidr.LastIndexOf('/');
+        if (slash <= 0)
+        {
+            return false;
+        }
+
+        var address = cidr[..slash];
+        var colon = address.LastIndexOf(':');
+        if (colon < 0)
+        {
+            return IsPlainDottedQuad(address);
+        }
+
+        /* IPv6: only a dotted tail has a decimal spelling to check, and it can only sit after the last colon. */
+        var tail = address[(colon + 1)..];
+        return !address.AsSpan(0, colon).Contains('.')
+            && (!tail.Contains('.', StringComparison.Ordinal) || IsPlainDottedQuad(tail));
+    }
+
+    /// <summary>Exactly four decimal numbers 0-255 joined by <c>.</c>, each one to three ASCII digits with no
+    /// leading zero (a lone <c>0</c> is fine).</summary>
+    private static bool IsPlainDottedQuad(string text)
+    {
+        var parts = text.Split('.');
+        if (parts.Length != 4)
+        {
+            return false;
+        }
+
+        foreach (var part in parts)
+        {
+            if (part.Length is 0 or > 3 || (part.Length > 1 && part[0] == '0'))
+            {
+                return false;
+            }
+
+            var value = 0;
+            foreach (var c in part)
+            {
+                if (c is < '0' or > '9')
+                {
+                    return false;
+                }
+
+                value = (value * 10) + (c - '0');
+            }
+
+            if (value > 255)
+            {
+                return false;
+            }
+        }
+
         return true;
     }
 

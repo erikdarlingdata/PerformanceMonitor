@@ -150,6 +150,35 @@ public sealed class DarlingHostBindingTests
         Assert.Equal(DarlingHostBinding.BindReason.AllowFromInvalid, decision.Reason);
     }
 
+    [Theory]
+    [InlineData("192.168.1.205", "192.168.010.0/24")]             // a leading zero reads as octal: another range
+    [InlineData("192.168.1.205", "010.0.0.0/8")]
+    [InlineData("192.168.1.205", "10/8")]                         // short forms are zero-padded
+    [InlineData("192.168.1.205", "10.1/16")]
+    [InlineData("192.168.1.205", "0x0A.0.0.0/8")]                 // 0x reads as hex
+    [InlineData("192.168.1.205", "1.2.3.04/32")]
+    [InlineData("192.168.1.205", "192.168.1.0/24,192.168.010.0/24")]   // refused wherever it sits in the list
+    [InlineData("192.168.1.205", "010.0.0.0/8,192.168.1.0/24")]
+    public void ResolveBind_List_NonCanonicalIPv4_IsAllowFromInvalid(string listen, string allowFrom)
+    {
+        var decision = DarlingHostBinding.ResolveBind(listen, allowFrom, tokenPresent: true, networkConfigured: true, managed: true);
+
+        Assert.Equal(DarlingHostBinding.BindMode.LoopbackOnly, decision.Mode);
+        Assert.Equal(DarlingHostBinding.BindReason.AllowFromInvalid, decision.Reason);
+    }
+
+    [Theory]
+    [InlineData("::", "fe80::1%5/64")]
+    [InlineData("::", "2001:db8::/32,fe80::1%5/64")]
+    [InlineData("::", "fe80::1%x';calc;'/64")]
+    public void ResolveBind_List_IPv6ZoneIndex_IsAllowFromInvalid(string listen, string allowFrom)
+    {
+        var decision = DarlingHostBinding.ResolveBind(listen, allowFrom, tokenPresent: true, networkConfigured: true, managed: true);
+
+        Assert.Equal(DarlingHostBinding.BindMode.LoopbackOnly, decision.Mode);
+        Assert.Equal(DarlingHostBinding.BindReason.AllowFromInvalid, decision.Reason);
+    }
+
     [Fact]
     public void ResolveBind_Exposed_Byo_IsLoopbackOnly_ManagedModeRequired()
     {

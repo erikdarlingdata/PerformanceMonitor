@@ -1390,7 +1390,8 @@ public sealed class McpNetworkConfig
     /// folded to lower case as IDNA does), and every rule below runs on that ASCII form. A name the mapping
     /// refuses (an empty label, a label over 63 characters once encoded, a lone surrogate) is refused: null. So
     /// is a mapped name that ends in a dot, which the mapping can produce from an ideographic full stop. An
-    /// all-ASCII name is never mapped, so it keeps its case and its spelling.</item>
+    /// all-ASCII name is never mapped, so it keeps its spelling, and its case too unless it has an <c>xn--</c>
+    /// label (see the last rule).</item>
     /// <item>Only a DNS name survives: <c>Uri.CheckHostName</c> must say <c>Dns</c>, on the ASCII form. An IP
     /// address (the guard admits the listen IP by itself, and a fullwidth <c>10.1.2.3</c> maps to one), a port
     /// (<c>host:5152</c>), a scheme or path (<c>https://host/</c>), a wildcard (<c>*.corp.example</c>) and
@@ -1398,16 +1399,20 @@ public sealed class McpNetworkConfig
     /// <item>A name with an <c>xn--</c> label must decode: <c>IdnMapping.GetUnicode</c> must not throw for it. The
     /// MCP host decodes the name the same way before the Host-header guard compares it, and a malformed label
     /// (<c>xn--a</c>) is a valid DNS name to <c>Uri.CheckHostName</c> yet makes that decode throw, so it is refused
-    /// here: null. The name itself is never rewritten, so a name that decodes keeps its case and its spelling.</item>
+    /// here: null. A name that decodes is never rewritten to Unicode, but it is folded to lower case: IDNA names
+    /// are case-insensitive, and the framework decodes a Host header's <c>xn--</c> labels only when the prefix is
+    /// lower case (the form a client sends), so every spelling of one punycode name has to reach the guard in that
+    /// one form.</item>
     /// </list>
     ///
-    /// <para>An ASCII name keeps its case as written, because the Host-header guard compares ignoring case. A
+    /// <para>An ASCII name keeps its case as written, because the Host-header guard compares ignoring case; the one
+    /// exception is a name with an <c>xn--</c> label, which is folded to lower case (the last rule above). A
     /// caller tells "not set" from "set but refused" by testing <see cref="HostName"/> for blank first: a refused
     /// value is ignored with one Warning at start, never an error, and never a reason to degrade a listener.</para>
     /// </summary>
     /// <param name="value">The raw <see cref="HostName"/>.</param>
-    /// <returns>The trimmed name without its trailing dot (its ASCII form when it was written in Unicode), or
-    /// null when unset or refused.</returns>
+    /// <returns>The trimmed name without its trailing dot (its ASCII form when it was written in Unicode, folded to
+    /// lower case when it has an <c>xn--</c> label), or null when unset or refused.</returns>
     public static string? NormalizeHostName(string? value)
     {
         if (string.IsNullOrWhiteSpace(value))
@@ -1432,7 +1437,7 @@ public sealed class McpNetworkConfig
            value could never match what the guard compares it with. Map it to that form first; the DNS test below
            then runs on the ASCII form, which is also what refuses a fullwidth "10.1.2.3" (it maps to an IPv4
            address) or a "host:5152" the mapping let through. Only a name with a non-ASCII character is mapped:
-           an ASCII name is left exactly as written, case included. The mapping throws ArgumentException for a
+           an ASCII name is left exactly as written (an xn-- label folds the case further down). The mapping throws ArgumentException for a
            name that is not a valid IDN (an empty label, a label too long once encoded, a lone surrogate): refused,
            never an exception out of a start-up config read. */
         if (!System.Text.Ascii.IsValid(name))
@@ -1464,8 +1469,8 @@ public sealed class McpNetworkConfig
            malformed label such as "xn--a" is ASCII letters and a hyphen, so it passes the DNS test above, then makes
            that decode throw ArgumentException, which stopped MCP from starting. A name the framework cannot decode
            could never equal a decoded Host anyway: it is refused here, so the host logs its one "set but refused"
-           Warning and admits nothing for it (fail closed). Only the check runs, on the ASCII form: the result is
-           dropped, so the name keeps its case and its spelling. A name with no xn-- label is never decoded. */
+           Warning and admits nothing for it (fail closed). Only the check runs, on the ASCII form: the decoded
+           result is dropped, so the name is never rewritten to Unicode. A name with no xn-- label is never decoded. */
         if (name.Contains("xn--", StringComparison.OrdinalIgnoreCase))
         {
             try
@@ -1475,6 +1480,17 @@ public sealed class McpNetworkConfig
             catch (ArgumentException)
             {
                 return null;
+            }
+
+            /* IDNA names are case-insensitive, and the framework decodes a Host header's xn-- labels only when the
+               prefix is lower case, which is the form a client sends. The guard decodes this name the same way, so
+               an upper-case spelling would stay undecoded while the client's header is decoded, and the two would
+               not compare equal. A name with an xn-- label is therefore folded to lower case here (it is all ASCII
+               by now), which is also the form the mapping above gives a Unicode name. A name with no xn-- label
+               keeps its case as written. */
+            if (Array.Exists(name.Split('.'), label => label.StartsWith("xn--", StringComparison.OrdinalIgnoreCase)))
+            {
+                name = name.ToLowerInvariant();
             }
         }
 

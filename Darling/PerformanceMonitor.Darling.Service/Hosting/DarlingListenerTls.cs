@@ -209,6 +209,16 @@ internal static class DarlingListenerTls
         DarlingWebTls.LoadedCertificate? loaded = null;
         try
         {
+            /* #5288: a literal PKCS#12 password in darling.json is readable by every interactive user, so it is
+               named BEFORE the load (a load that then fails on a wrong password still carries the nudge). The
+               DPAPI slot and a file:/env: reference are the supported shapes and do not warn, and only the
+               PKCS#12 form reads the password at all: beside a PEM pair a stray password is the plan's own
+               warning below. */
+            if (plan.Shape == DarlingWebTls.TlsShape.Pfx && UsesPlaintextPfxPassword(tls))
+            {
+                logger.LogWarning("{Surface} TLS: {Warning}", labels.Surface, PlaintextPfxPasswordWarning(labels));
+            }
+
             loaded = DarlingWebTls.Load(tls, plan.Shape, labels.Section);
             var certificate = loaded.Value.Leaf;
 
@@ -304,6 +314,28 @@ internal static class DarlingListenerTls
                 labels.Surface, ex.Message);
             return new ListenerTlsOutcome(Expose: false, Certificate: null, plan.Shape);
         }
+    }
+
+    /// <summary>
+    /// True when the PKCS#12 password the loader will read is a literal in the config file: <c>pfxPassword</c> is
+    /// set, is not an <c>env:</c>/<c>file:</c> reference, and the DPAPI slot (<c>encryptedPfxPassword</c>), which
+    /// <see cref="WebTlsConfig.ResolvePfxPassword"/> prefers, is blank. Reads no secret, so it cannot throw. PURE.
+    /// </summary>
+    private static bool UsesPlaintextPfxPassword(WebTlsConfig tls)
+        => !string.IsNullOrWhiteSpace(tls.PfxPassword)
+           && string.IsNullOrWhiteSpace(tls.EncryptedPfxPassword)
+           && !DarlingSecretSource.IsReference(tls.PfxPassword);
+
+    /// <summary>
+    /// The warning for a PKCS#12 password written as a literal in <c>darling.json</c>. It names the setting for the
+    /// listener's section and the two supported shapes. PURE.
+    /// </summary>
+    internal static string PlaintextPfxPasswordWarning(ListenerTlsLabels labels)
+    {
+        ArgumentNullException.ThrowIfNull(labels);
+
+        return $"{labels.Section}.network.tls.pfxPassword is set in plaintext (dev convenience). "
+            + "Prefer encryptedPfxPassword (--encrypt-password) or a file:/env: reference.";
     }
 
     /// <summary>
