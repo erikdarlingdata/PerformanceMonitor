@@ -387,6 +387,115 @@ public sealed class DarlingPasswordKeyStoreLiveTests
     }
 
     [Fact]
+    public async Task ADroppedTrigger_OrOneEnabledButNotSetToFireAlways_MakesTheRingRefuse()
+    {
+        await using var store = await StoreFixture.CreateAsync();
+        var bodySucceeded = false;
+        try
+        {
+            // Enabled for ordinary sessions only (tgenabled = 'O'), not for every session state.
+            await store.ExecAsync("ALTER TABLE config.password_key ENABLE TRIGGER trg_password_key_owner_only_row;");
+            var ordinary = await store.StartAsync();
+            Assert.Equal("refused", ordinary.State);
+            Assert.False(ordinary.Ring.Status.CanSeal);
+            Assert.Contains("trg_password_key_owner_only_row", ordinary.Ring.Status.Reason, StringComparison.Ordinal);
+            Assert.Null(await store.ReadCurrentAsync());
+
+            await store.ExecAsync("ALTER TABLE config.password_key ENABLE ALWAYS TRIGGER trg_password_key_owner_only_row;");
+            Assert.Equal("ok", (await store.StartAsync()).State);
+
+            // A trigger that is gone.
+            await store.ExecAsync("DROP TRIGGER trg_password_key_owner_only_row ON config.password_key;");
+            var dropped = await store.StartAsync();
+            Assert.Equal("refused", dropped.State);
+            Assert.False(dropped.Ring.Status.CanSeal);
+            Assert.Contains("trg_password_key_owner_only_row", dropped.Ring.Status.Reason, StringComparison.Ordinal);
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await store.CleanupAsync(bodySucceeded);
+        }
+    }
+
+    [Fact]
+    public async Task AValueAddedAfterTheSnapshotIsDone_IsNotPinned_AndAValueThatDoesNotOpenIsNeverPinned()
+    {
+        await using var store = await StoreFixture.CreateAsync();
+        var bodySucceeded = false;
+        try
+        {
+            await store.SeedServersAsync();
+            // Server 5 holds a value the unprotect step cannot open; it is not pinned at the snapshot.
+            await store.ExecAsync(@"
+INSERT INTO config.config_monitored_servers (server_id, name, host, database, auth, username, encrypted_password, port)
+VALUES (5, 'epsilon-example', 'epsilon-example', NULL, 'sql', 'monitor_login', 'unreadable-blob', 1433);");
+            string? Open(string stored) => stored.StartsWith("legacy-", StringComparison.Ordinal) ? "p@ss-not-real" : throw new CryptographicException("not a blob");
+
+            await store.StartAsync(isWindows: true, unprotect: Open);
+            Assert.Equal("done", await store.MarkerAsync());
+            Assert.Equal(["0/smtp", "1/remediation", "1/server"], (await store.ReadPinsAsync()).Keys.Order(StringComparer.Ordinal).ToArray());
+
+            // After the snapshot is done a new legacy-looking value is not pinned, on this start or the next.
+            await store.ExecAsync(@"
+INSERT INTO config.config_monitored_servers (server_id, name, host, database, auth, username, encrypted_password, port)
+VALUES (6, 'zeta-example', 'zeta-example', NULL, 'sql', 'monitor_login', 'legacy-new-blob', 1433);");
+            await store.StartAsync(isWindows: true, unprotect: Open);
+            await store.StartAsync(isWindows: true, unprotect: Open);
+
+            var pins = await store.ReadPinsAsync();
+            Assert.Equal(3, pins.Count);
+            Assert.DoesNotContain("6/server", pins.Keys);
+            Assert.DoesNotContain("5/server", pins.Keys);
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await store.CleanupAsync(bodySucceeded);
+        }
+    }
+
+    [Fact]
+    public async Task TwoStartsAtOnceAgainstThePendingMarker_PinOnce_AndTheSecondSeesDone()
+    {
+        await using var store = await StoreFixture.CreateAsync();
+        var bodySucceeded = false;
+        try
+        {
+            await store.SeedServersAsync();
+            var ct = TestContext.Current.CancellationToken;
+            var firstOpening = new ManualResetEventSlim(false);
+            string? SlowOpen(string stored)
+            {
+                // Holds the first snapshot's transaction open until the second one is waiting on the marker.
+                firstOpening.Set();
+                Thread.Sleep(1500);
+                return stored.StartsWith("legacy-", StringComparison.Ordinal) ? "p@ss-not-real" : throw new CryptographicException("not a blob");
+            }
+
+            var first = Task.Run(
+                () => DarlingPasswordKeyStore.SnapshotLegacyPinsAsync(store.Source, true, SlowOpen, new ListLogger(), ct), ct);
+            Assert.True(firstOpening.Wait(TimeSpan.FromSeconds(30), ct));
+            var second = Task.Run(
+                () => DarlingPasswordKeyStore.SnapshotLegacyPinsAsync(
+                    store.Source, true, static _ => throw new InvalidOperationException("must not be called"), new ListLogger(), ct), ct);
+
+            var results = await Task.WhenAll(first, second);
+
+            Assert.Equal(3, results[0].Pinned);
+            Assert.Equal("done", results[0].MarkerState);
+            Assert.Equal(0, results[1].Pinned);
+            Assert.Equal("done", results[1].MarkerState);
+            Assert.Equal(3, (await store.ReadPinsAsync()).Count);
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await store.CleanupAsync(bodySucceeded);
+        }
+    }
+
+    [Fact]
     public async Task ANonOwnerWhoUpdatesThePublishedKey_GetsPW010()
     {
         await using var store = await StoreFixture.CreateAsync();

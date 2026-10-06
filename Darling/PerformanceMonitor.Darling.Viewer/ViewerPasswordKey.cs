@@ -96,7 +96,7 @@ public sealed class ViewerPasswordSealer(PasswordPublicKey key)
         }
     }
 
-    private static bool IsValidText(string? text)
+    internal static bool IsValidText(string? text)
     {
         if (text is null)
         {
@@ -128,6 +128,13 @@ public sealed class ViewerSealCache
     public string GetOrSeal(ViewerPasswordSealer sealer, string plaintext, MonitoredServerRow row)
     {
         var binding = ViewerPasswordSealer.BindingOf(row);
+        /* Checked before the cache key: the key hashes the text as UTF-8, which turns a lone surrogate into the same bytes as
+           the replacement character, so a cached value must never answer for text that cannot be stored. */
+        if (!ViewerPasswordSealer.IsValidText(plaintext))
+        {
+            throw new ViewerPasswordRefusedException(ViewerPasswordSealer.PasswordCharactersText);
+        }
+
         var signature = sealer.KeyId + "|" + string.Join('\u001f', binding.Fields) + "|"
             + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(plaintext)));
         if (_signature == signature && _sealed is not null)
@@ -159,7 +166,8 @@ public sealed record ViewerPasswordKeyDecision(
     PasswordPublicKey? Key, string? Refusal, string? Notice, ViewerPasswordKeyChange? Change);
 
 /// <summary>A published key that differs from the saved one, with what the trust dialog shows.</summary>
-public sealed record ViewerPasswordKeyChange(string SavedDisplay, string NewDisplay, PasswordPublicKey NewKey);
+public sealed record ViewerPasswordKeyChange(
+    string SavedDisplay, string NewDisplay, PasswordPublicKey NewKey, string SavedFingerprint = "", string NewFingerprint = "");
 
 /// <summary>
 /// The viewer's read of the key it seals passwords with (#5366). A password is sealed only when the store publishes a
@@ -181,6 +189,10 @@ public static class ViewerPasswordKey
 
     public const string NoTablesText =
         "Passwords cannot be saved: this store has no password key tables yet. Update or restart the Darling service.";
+
+    public const string PinsNotSavedText =
+        "The service's password key could not be saved on this computer, so passwords cannot be stored from here. "
+        + "Check that the Viewer can write to its settings folder.";
 
     public const string UnreadablePinsText =
         "The saved list of password keys could not be read, so this store's key was saved again.";
@@ -251,11 +263,21 @@ public static class ViewerPasswordKey
             return Refused($"Passwords cannot be saved: the Darling service reports its password key as {state.State}.{note}");
         }
 
+        /* An ok state counts only when it is for the key that is published now. */
+        if (!string.Equals(state.KeyId, key.KeyId, StringComparison.Ordinal))
+        {
+            return Refused(NoStateText);
+        }
+
         var saved = pins.Find(storeId, out var unreadable);
         var fingerprint = Convert.ToHexString(publicKey.Fingerprint).ToLowerInvariant();
         if (saved is null)
         {
-            pins.Save(storeId, publicKey.Fingerprint, publicKey.KeyId);
+            if (!pins.Save(storeId, publicKey.Fingerprint, publicKey.KeyId))
+            {
+                return Refused(PinsNotSavedText);
+            }
+
             var notice = FirstConnectNotice(PasswordSeal.DisplayKeyId(publicKey.KeyId));
             return new ViewerPasswordKeyDecision(publicKey, null, unreadable ? UnreadablePinsText + " " + notice : notice, null);
         }
@@ -268,13 +290,29 @@ public static class ViewerPasswordKey
         var savedDisplay = PasswordSeal.DisplayKeyId(saved[..16]);
         var newDisplay = PasswordSeal.DisplayKeyId(publicKey.KeyId);
         return new ViewerPasswordKeyDecision(
-            null, ChangedText(savedDisplay, newDisplay), null, new ViewerPasswordKeyChange(savedDisplay, newDisplay, publicKey));
+            null, ChangedText(savedDisplay, newDisplay), null,
+            new ViewerPasswordKeyChange(savedDisplay, newDisplay, publicKey, FormatFingerprint(saved), FormatFingerprint(fingerprint)));
+    }
+
+    /// <summary>A full fingerprint (64 hex characters) as upper-case groups of eight joined by dashes, for the operator to compare.</summary>
+    public static string FormatFingerprint(string hex)
+    {
+        var upper = (hex ?? "").ToUpperInvariant();
+        var groups = new System.Collections.Generic.List<string>();
+        for (var i = 0; i < upper.Length; i += 8)
+        {
+            groups.Add(upper.Substring(i, Math.Min(8, upper.Length - i)));
+        }
+
+        return string.Join('-', groups);
     }
 
     /// <summary>
     /// Reads the key the store publishes and decides whether this viewer may seal with it. A changed key shows
     /// <see cref="PasswordKeyChangedDialog"/> over <paramref name="owner"/>: trusting it replaces the saved key and the
-    /// save goes on, declining refuses with the changed-key sentence. A read-only connection never reads the key tables.
+    /// save goes on, declining refuses with the changed-key sentence. A null <paramref name="owner"/> means there is no
+    /// window to ask in: a changed key is refused with the changed-key sentence and no dialog is shown. A read-only
+    /// connection never reads the key tables.
     /// </summary>
     public static async Task<ViewerSealKeyResult> GetSealKeyAsync(
         ViewerDataService data, Window? owner, CancellationToken ct = default)
@@ -303,17 +341,36 @@ public static class ViewerPasswordKey
 
         var pins = new ViewerPasswordKeyPins();
         var decision = Evaluate(key, state, data.StoreConnectionIdentity, pins);
-        if (decision.Change is { } change)
+        return Resolve(decision, data.StoreConnectionIdentity, pins, owner is not null, change =>
         {
-            var dialog = new PasswordKeyChangedDialog(change.SavedDisplay, change.NewDisplay);
+            var dialog = new PasswordKeyChangedDialog(change);
             if (owner is not null && owner.IsLoaded)
             {
                 dialog.Owner = owner;
             }
 
-            if (dialog.ShowDialog() == true)
+            return dialog.ShowDialog() == true;
+        });
+    }
+
+    /// <summary>
+    /// Turns a decision into the answer for the caller. A changed key is put to <paramref name="ask"/> only when
+    /// <paramref name="canAsk"/> is true; trusting it saves the new key (and refuses when that cannot be saved), declining
+    /// or having no one to ask refuses with the changed-key sentence.
+    /// </summary>
+    internal static ViewerSealKeyResult Resolve(
+        ViewerPasswordKeyDecision decision, string storeId, ViewerPasswordKeyPins pins, bool canAsk,
+        Func<ViewerPasswordKeyChange, bool> ask)
+    {
+        if (decision.Change is { } change)
+        {
+            if (canAsk && ask(change))
             {
-                pins.Save(data.StoreConnectionIdentity, change.NewKey.Fingerprint, change.NewKey.KeyId);
+                if (!pins.Save(storeId, change.NewKey.Fingerprint, change.NewKey.KeyId))
+                {
+                    return new ViewerSealKeyResult { Refusal = PinsNotSavedText };
+                }
+
                 return new ViewerSealKeyResult { Sealer = new ViewerPasswordSealer(change.NewKey) };
             }
 
