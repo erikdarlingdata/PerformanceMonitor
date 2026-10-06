@@ -37,8 +37,8 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// which holds the network path + credentials — unlike the Viewer, whose dialogs enqueue a <c>test_connect</c>
 /// command for the service to run); the case-folded dedupe gate is the shared <see cref="ServerIdHelper.BuildStorageName"/>
 /// identity in a <c>HashSet&lt;string&gt;(OrdinalIgnoreCase)</c> exactly as the bulk dialog (#1549) uses; the SQL
-/// password is DPAPI-encrypted through <see cref="DarlingSecrets.Protect"/> (the SAME service identity that
-/// decrypts it during collection, so it round-trips) and NEVER stored, logged, or echoed in plaintext; and the
+/// password is sealed with the service's password key (<see cref="ProtectPasswordForStorage"/>, for the connection
+/// settings the row is saved with; the service opens it during collection, so it round-trips) and NEVER stored, logged, or echoed in plaintext; and the
 /// INSERT mirrors <c>StoreConfigProvider.SeedMonitoredServersAsync</c>'s exact column set + <c>server_id =
 /// ServerIdHelper.GetDeterministicHashCode(StorageName)</c> identity, so a tool-written row JOINs the collected
 /// data and the service's reconcile matches it.</para>
@@ -46,13 +46,13 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// <para><b>add_servers</b> processes its JSON array SEQUENTIALLY (mirroring #1549's Darling bulk probe, which is
 /// serial to avoid a probe storm): for each server it validates the fields, skips an exact/case-variant DUPLICATE
 /// of an existing or earlier-in-batch server (<c>status:"duplicate"</c>), probes the connection (a failure is
-/// <c>status:"connection_failed"</c> and does NOT abort the batch), DPAPI-encrypts the SQL password or the service-
+/// <c>status:"connection_failed"</c> and does NOT abort the batch), seals the SQL password or the service-
 /// principal client secret, and INSERTs the row (<c>status:"added"</c>). A save that throws is caught PER ENTRY: that
 /// entry and every one after it are <c>status:"not_saved"</c> (the rest are not probed), and the entries before it
 /// stay <c>added</c> in the results (#4734). An INSERT that changes no rows (its <c>server_id</c> is taken) is
 /// answered from the row that holds the id — <c>collides</c> for a different identity, <c>duplicate</c> for the same
-/// one — and never as <c>added</c>. A LITERAL password or client secret is <c>invalid</c> off Windows, where DPAPI is
-/// not available (#4734). Windows/integrated and managed-identity
+/// one — and never as <c>added</c>. A LITERAL password or client secret is <c>invalid</c> while the service's password key
+/// cannot seal it, and an <c>env:</c>/<c>file:</c> reference always is (#4734, #5366). Windows/integrated and managed-identity
 /// auth store no secret; a service principal stores its client secret exactly like a SQL password; the INTERACTIVE
 /// Entra modes (MFA / device-code / default-credential) are rejected (<c>status:"invalid"</c>) — they need a broker
 /// or a signed-in user and cannot run headless, whereas ServicePrincipal and ManagedIdentity are non-interactive
@@ -72,7 +72,7 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 ///
 /// <para><b>Security.</b> These tools connect (like every MCP tool) as the least-privilege <c>mcp</c> role, granted
 /// (see <see cref="DarlingManagedRoles"/>) INSERT/UPDATE/DELETE on <c>config.config_monitored_servers</c> — a single
-/// non-secret-key table (the DPAPI password blob is written but the <c>encrypted_password</c> column is SELECT-
+/// non-secret-key table (the sealed password is written but the <c>encrypted_password</c> column is SELECT-
 /// carved from <c>mcp</c>, so a token-holder can WRITE a credential but never READ one back) — and nothing else, so
 /// it still cannot reach the <c>config_command</c> service-credential pivot or the carved secret columns. The
 /// <c>config_monitored_servers</c> write fires the existing <c>trg_bump_monitored_servers → config_bump_version</c>
@@ -126,10 +126,9 @@ public sealed partial class DarlingMcpServerAdminTools
         "covers (it names one database but connects to a different one, e.g. a wrong Initial Catalog) is refused as " +
         "status \"collides\" — adding it would store one database's history under two identities and alert twice. " +
         "So is a server whose id is already held by a different server (two identities that hash to one id). " +
-        "A SQL password or service-principal client secret is encrypted at rest (DPAPI, the service identity) and " +
-        "is never returned. password is the password itself: a value that starts with env: or file: is rejected as " +
-        "\"invalid\", because references are set in the configuration file. Where DPAPI is not available (Linux) a " +
-        "literal password or client secret is rejected as \"invalid\" too; use --add-server on the service host. " +
+        "A SQL password or service-principal client secret is sealed with the service's password key before it is " +
+        "stored, and is never returned. password is the password itself: a value that starts with env: or file: is " +
+        "rejected as \"invalid\", because references are set in the configuration file. " +
         "Returns {requested:N, added:N, skipped:N, collided:N, failed:N, results:[{server, " +
         "status:\"added\"|\"duplicate\"|\"collides\"|\"connection_failed\"|\"not_saved\"|\"invalid\", detail}]}. requested is " +
         "the number of entries you sent and the four counters SUM to it — every entry lands in exactly one: " +
@@ -153,8 +152,9 @@ public sealed partial class DarlingMcpServerAdminTools
     /// runs BEFORE any store access, and when NO structurally-valid candidate remains the store is never opened —
     /// so a call whose entries are all invalid (bad field, MFA auth) returns without a connection or a probe.</summary>
     internal static Task<string> AddServersAsync(
-        NpgsqlDataSource postgres, string servers_json, ServerProbe probe, CancellationToken cancellationToken) =>
-        AddServersAsync(new PostgresServerDefinitions(postgres), servers_json, probe, cancellationToken);
+        NpgsqlDataSource postgres, string servers_json, ServerProbe probe, CancellationToken cancellationToken,
+        IPasswordKeyRing? ring = null) =>
+        AddServersAsync(new PostgresServerDefinitions(postgres), servers_json, probe, cancellationToken, ring: ring);
 
     /// <summary>
     /// The add the <c>--add-server</c> verb runs: the same core with the one difference that a password may be an
@@ -163,18 +163,19 @@ public sealed partial class DarlingMcpServerAdminTools
     /// the only way to register a server whose password cannot be encrypted. A reference to Darling's own configuration
     /// or secrets is still refused (<see cref="ValidateSecret"/>).
     /// </summary>
-    internal static Task<string> AddServersFromHostCommandLineAsync(NpgsqlDataSource postgres, string servers_json) =>
-        AddServersAsync(new PostgresServerDefinitions(postgres), servers_json, DefaultProbeAsync, CancellationToken.None, allowSecretReferences: true);
+    internal static Task<string> AddServersFromHostCommandLineAsync(NpgsqlDataSource postgres, string servers_json, IPasswordKeyRing? ring = null) =>
+        AddServersAsync(new PostgresServerDefinitions(postgres), servers_json, DefaultProbeAsync, CancellationToken.None, allowSecretReferences: true, ring: ring);
 
     /// <summary>The same flow over an injected <see cref="IServerDefinitions"/>, so a test can stand in a
     /// definitions table that faults on a chosen write or swallows one without a live database.</summary>
     internal static async Task<string> AddServersAsync(
         IServerDefinitions definitions, string servers_json, ServerProbe probe, CancellationToken cancellationToken,
-        bool allowSecretReferences = false)
+        bool allowSecretReferences = false, IPasswordKeyRing? ring = null)
     {
+        ring ??= DarlingPasswordKey.Current;
         try
         {
-            var (entries, invalidResults, wholeError) = ParseRequest(servers_json, OperatingSystem.IsWindows(), allowSecretReferences);
+            var (entries, invalidResults, wholeError) = ParseRequest(servers_json, ring.Status, allowSecretReferences);
             if (wholeError != null)
             {
                 return Outcome("invalid", wholeError);
@@ -249,12 +250,13 @@ public sealed partial class DarlingMcpServerAdminTools
                     continue;
                 }
 
-                /* DPAPI-encrypt the SQL password for storage (the service identity encrypts here and decrypts it
-                   during collection, so it round-trips); Windows-auth servers store no secret. The plaintext never
-                   leaves this method — it is not logged, not echoed in a result. */
+                /* Seal the SQL password for storage with the service's password key, for the connection settings this
+                   row is inserted with (the service opens it for that connection during collection, so it round-trips);
+                   Windows-auth servers store no secret. The plaintext never leaves this method: it is not logged, not
+                   echoed in a result. */
                 try
                 {
-                    var encryptedPassword = ProtectPasswordForStorage(entry.PlaintextPassword);
+                    var encryptedPassword = ProtectPasswordForStorage(entry.PlaintextPassword, BindingOf(entry.ProbeConfig), ring);
 
                     /* #5240: the key the check above compared (the database the probe reached), handed to the write so
                        it is compared again under the identity lock: a definition at that key may have been committed
@@ -467,7 +469,7 @@ public sealed partial class DarlingMcpServerAdminTools
     /// <summary>One structurally-valid server ready for dedupe → probe → insert. <see cref="StorageKey"/> is the
     /// shared case-folded identity (<see cref="ServerIdHelper.BuildStorageName"/>); <see cref="ProbeConfig"/> is the
     /// <see cref="MonitoredServer"/> the in-process probe connects with (carrying the plaintext password for the
-    /// connect); <see cref="PlaintextPassword"/> is retained ONLY until the post-probe DPAPI encrypt, never stored
+    /// connect); <see cref="PlaintextPassword"/> is retained ONLY until the post-probe seal, never stored
     /// or echoed. <see cref="Order"/> is the entry's index in the input array, so the aggregated results echo input
     /// order.</summary>
     internal sealed record ParsedServerEntry(
@@ -714,12 +716,12 @@ ORDER BY d.host, d.database";
     /// returns a single <c>{status:"invalid"}</c> without opening the store.
     /// </summary>
     internal static (List<ParsedServerEntry> Entries, List<ServerResult> Invalid, string? WholeError) ParseRequest(string servers_json) =>
-        ParseRequest(servers_json, OperatingSystem.IsWindows());
+        ParseRequest(servers_json, DarlingPasswordKey.Current.Status);
 
-    /// <summary><see cref="ParseRequest(string)"/> with the platform named, so a test can ask what either platform
-    /// answers for a literal password without running on it.</summary>
+    /// <summary><see cref="ParseRequest(string)"/> with the password key's status named, so a test can ask what a
+    /// healthy key and a key that is not ready each answer for a literal password.</summary>
     internal static (List<ParsedServerEntry> Entries, List<ServerResult> Invalid, string? WholeError) ParseRequest(
-        string servers_json, bool isWindows, bool allowSecretReferences = false)
+        string servers_json, PasswordKeyStatus key, bool allowSecretReferences = false)
     {
         var entries = new List<ParsedServerEntry>();
         var invalid = new List<ServerResult>();
@@ -746,7 +748,7 @@ ORDER BY d.host, d.database";
 
         for (var i = 0; i < array.Count; i++)
         {
-            var (entry, result) = ParseEntry(i, array[i], isWindows, allowSecretReferences);
+            var (entry, result) = ParseEntry(i, array[i], key, allowSecretReferences);
             if (entry != null)
             {
                 entries.Add(entry);
@@ -764,7 +766,7 @@ ORDER BY d.host, d.database";
     /// problem. The service honors Windows, SQL, and the two non-interactive Entra modes (ServicePrincipal,
     /// ManagedIdentity); the interactive Entra modes (MFA/device-code/default-credential) are rejected — they
     /// cannot run headless (#3484).</summary>
-    private static (ParsedServerEntry? Entry, ServerResult? Result) ParseEntry(int index, JsonNode? node, bool isWindows, bool allowSecretReferences)
+    private static (ParsedServerEntry? Entry, ServerResult? Result) ParseEntry(int index, JsonNode? node, PasswordKeyStatus key, bool allowSecretReferences)
     {
         if (node is not JsonObject obj)
         {
@@ -801,7 +803,7 @@ ORDER BY d.host, d.database";
         if (storeAuth == ServerStoreAuth.Sql || storeAuth == ServerStoreAuth.ServicePrincipal)
         {
             /* Service principal takes the same two fields as SQL auth — the application/client id as username,
-               the client secret as the password (DPAPI-encrypted after a successful probe, exactly like a SQL
+               the client secret as the password (sealed after a successful probe, exactly like a SQL
                password) — so the requirement and the storage are identical; only the wording differs. */
             var isSp = storeAuth == ServerStoreAuth.ServicePrincipal;
             username = TryGetString(obj, "username");
@@ -822,10 +824,13 @@ ORDER BY d.host, d.database";
             }
 
             /* The password a request carries is the password itself: a reference is refused HERE, before the probe
-               resolves anything and before the write (ValidateSecret). Then #4734: a literal where it cannot be
-               encrypted, before the probe and the write; left to ProtectPasswordForStorage it threw after the probe, in
+               resolves anything and before the write (ValidateSecret). Then #4734: a literal while the password key
+               cannot seal it, before the probe and the write; left to ProtectPasswordForStorage it threw after the probe, in
                the middle of the batch. Add and edit share the helper, so the two cannot disagree. */
-            var secretRefusal = ValidateSecret(plaintextPassword, isWindows, isSp, allowSecretReferences);
+            var secretRefusal = ValidateSecret(plaintextPassword, key, isSp, allowSecretReferences)
+                ?? (DarlingSecretSource.IsReference(plaintextPassword)
+                    ? null
+                    : SealableTextRefusal(plaintextPassword, host, database, username));
             if (secretRefusal != null)
             {
                 return (null, Invalid(secretRefusal));
@@ -895,7 +900,7 @@ ORDER BY d.host, d.database";
             Auth = storeAuth,
             Username = username,
             /* Plaintext for the probe's connect (ResolvePassword's dev-plaintext fallback); the stored blob is the
-               DPAPI encryption of this, produced only AFTER a successful probe. */
+               sealed form of this, produced only AFTER a successful probe. */
             Password = plaintextPassword,
             EncryptMode = encryptMode,
             TrustServerCertificate = trustCert,
@@ -1312,49 +1317,106 @@ ON CONFLICT (server_id) DO NOTHING";
     /// <summary>
     /// The refusals every SQL password or service-principal client secret meets before it is probed or stored: a
     /// reference when it came in a request (<see cref="DarlingSecretSource.RequestReferenceRefusal"/>, the one place
-    /// web add, web edit, <c>add_servers</c> and <c>edit_server</c> all ask it), then a literal where DPAPI is not
-    /// available (<see cref="LiteralSecretRefusal"/>), then a reference to Darling's own configuration or secrets
+    /// web add, web edit, <c>add_servers</c> and <c>edit_server</c> all ask it), then a literal while the password key
+    /// cannot seal it (<see cref="LiteralSecretRefusal"/>), then a reference to Darling's own configuration or secrets
     /// (<see cref="DarlingOwnedSecrets.ReferenceRefusal(string?)"/>), which only the host command line can reach
     /// (<paramref name="allowSecretReferences"/>, set by <see cref="AddServersFromHostCommandLineAsync"/> alone).
     /// Null when the secret may be used. Add and edit both call it.
     /// </summary>
-    internal static string? ValidateSecret(string? secret, bool isWindows, bool isServicePrincipal, bool allowSecretReferences = false) =>
+    internal static string? ValidateSecret(string? secret, PasswordKeyStatus key, bool isServicePrincipal, bool allowSecretReferences = false) =>
         (allowSecretReferences ? null : DarlingSecretSource.RequestReferenceRefusal(secret))
-        ?? LiteralSecretRefusal(secret, isWindows, isServicePrincipal)
+        ?? LiteralSecretRefusal(secret, key, isServicePrincipal)
         ?? DarlingOwnedSecrets.ReferenceRefusal(secret);
 
     /// <summary>
-    /// PURE platform check for a SQL password or service-principal client secret (#4734): null when the value can be
-    /// stored on this platform, otherwise the refusal sentence. A LITERAL is encrypted with DPAPI, which is Windows-
-    /// only, so off Windows it cannot be saved; an <c>env:</c>/<c>file:</c> reference (#1804) is stored as given and
-    /// needs no encryption, so it is accepted everywhere. <see cref="ParseEntry"/> asks this before any probe or
-    /// write, which makes the entry <c>invalid</c> up front instead of throwing from
-    /// <see cref="ProtectPasswordForStorage"/> after the probe, in the middle of a batch.
+    /// PURE check of a SQL password or service-principal client secret against the service's password key (#4734,
+    /// #5366): null when the value can be stored now, otherwise the key's own reason. A LITERAL is sealed with the key, so
+    /// it is accepted wherever the key is ready, on any platform; an <c>env:</c>/<c>file:</c> reference (#1804) is stored as
+    /// given and needs no key, so it is accepted always. <see cref="ParseEntry"/> asks this before any probe or write,
+    /// which makes the entry <c>invalid</c> up front instead of throwing from <see cref="ProtectPasswordForStorage"/>
+    /// after the probe, in the middle of a batch.
     /// </summary>
-    internal static string? LiteralSecretRefusal(string? secret, bool isWindows, bool isServicePrincipal)
+    internal static string? LiteralSecretRefusal(string? secret, PasswordKeyStatus key, bool isServicePrincipal)
     {
-        if (isWindows || string.IsNullOrEmpty(secret) || DarlingSecretSource.IsReference(secret))
+        if (key.CanSeal || string.IsNullOrEmpty(secret) || DarlingSecretSource.IsReference(secret))
         {
             return null;
         }
 
         var noun = isServicePrincipal ? "client secret" : "password";
-        return $"A literal {noun} cannot be saved on this platform: encrypting it needs Windows DPAPI. A reference " +
-               "(env:NAME or file:/run/secrets/<name>) can be set in the configuration file, or with --add-server on " +
-               "the service host.";
+        return $"A literal {noun} cannot be saved. {key.Reason ?? DarlingPasswordKey.NotReadyReason}";
     }
 
+    /// <summary>The refusal for a password that is not valid text (a lone surrogate); never echoes the value.</summary>
+    internal const string PasswordCharactersText = "The password contains characters that cannot be stored.";
+
+    /// <summary>The refusal for a password longer than a sealed value can hold.</summary>
+    internal const string PasswordTooLongText = "The password is longer than can be stored.";
+
+    /// <summary>The refusal for a connection field that is not valid text, naming the field and never its value.</summary>
+    internal static string FieldCharactersText(string field) => $"The {field} contains characters that cannot be stored.";
+
+    private static readonly System.Text.UTF8Encoding s_strictUtf8 = new(false, true);
+
+    private static bool IsValidText(string? text)
+    {
+        if (text is null)
+        {
+            return true;
+        }
+
+        try
+        {
+            _ = s_strictUtf8.GetByteCount(text);
+            return true;
+        }
+        catch (System.Text.EncoderFallbackException)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Null when a literal secret and the connection fields it is bound to are valid UTF-16 text and the secret fits a
+    /// sealed value; otherwise the plain sentence to refuse with (#5366). A lone surrogate cannot be sealed, so it is
+    /// refused before the probe, naming the field and never echoing the value.
+    /// </summary>
+    internal static string? SealableTextRefusal(string? secret, string? host, string? database, string? username)
+    {
+        if (!IsValidText(secret))
+        {
+            return PasswordCharactersText;
+        }
+
+        if (secret is not null && s_strictUtf8.GetByteCount(secret) > PasswordSeal.MaxPlaintextBytes)
+        {
+            return PasswordTooLongText;
+        }
+
+        foreach (var (name, text) in new (string, string?)[] { ("host", host), ("database name", database), ("username", username) })
+        {
+            if (!IsValidText(text))
+            {
+                return FieldCharactersText(name);
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>The binding a server's password is sealed for: the connection settings the row holds (or is written
+    /// with), read the one way every stored row is read.</summary>
+    internal static PasswordBinding BindingOf(MonitoredServer server) =>
+        PasswordBinding.ForServer(server.ConnectionIdentity);
+
     /// <summary>Prepares a SQL password for storage: an <c>env:</c>/<c>file:</c> secret REFERENCE (#1804) is
-    /// stored VERBATIM — a reference is a pointer, not a secret; the secret stays in the mounted file or
-    /// environment variable, which is the whole Linux/compose contract and needs no DPAPI (#2087: before this,
-    /// <c>add_servers</c> refused ALL SQL-auth passwords off-Windows, dead-ending the designed onboarding path
-    /// for compose deployments — the store-authoritative control plane means darling.json edits do not add
-    /// servers after first seed). A LITERAL password is DPAPI-encrypted and therefore Windows-only, with the
-    /// refusal now pointing at references as the cross-platform alternative. <see cref="ParseEntry"/> refuses a literal
-    /// off Windows first (<see cref="LiteralSecretRefusal"/>, #4734), so a request never reaches this throw; it stays as
-    /// the backstop for any other caller. Null for Windows auth (no secret).
-    /// The plaintext is not logged and never leaves this method.</summary>
-    internal static string? ProtectPasswordForStorage(string? plaintextPassword)
+    /// stored VERBATIM (a reference is a pointer, not a secret; the secret stays in the mounted file or environment
+    /// variable, #2087). A LITERAL password is sealed with the service's password key for
+    /// <paramref name="binding"/>, the connection settings it is saved with, on any platform (#5366).
+    /// <see cref="ParseEntry"/> refuses a literal while the key cannot seal (<see cref="LiteralSecretRefusal"/>, #4734), so a
+    /// request never reaches the throw; it stays as the backstop for any other caller. Null for Windows auth (no
+    /// secret). The plaintext is not logged and never leaves this method.</summary>
+    internal static string? ProtectPasswordForStorage(string? plaintextPassword, PasswordBinding binding, IPasswordKeyRing ring)
     {
         if (string.IsNullOrEmpty(plaintextPassword))
         {
@@ -1366,15 +1428,7 @@ ON CONFLICT (server_id) DO NOTHING";
             return plaintextPassword;
         }
 
-        if (!OperatingSystem.IsWindows())
-        {
-            throw new PlatformNotSupportedException(
-                "Storing a LITERAL SQL-auth password requires Windows (DPAPI). On Linux, pass an env:/file: " +
-                "secret reference instead (e.g. file:/run/secrets/sql_password) — it is stored as-is and " +
-                "resolved at connect time (#1804).");
-        }
-
-        return DarlingSecrets.Protect(plaintextPassword);
+        return ring.Seal(plaintextPassword, binding);
     }
 
     /// <summary>

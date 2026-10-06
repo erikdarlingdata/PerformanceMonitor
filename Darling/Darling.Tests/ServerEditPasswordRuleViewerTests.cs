@@ -46,12 +46,12 @@ public sealed class ServerEditPasswordRuleViewerTests
         Assert.Equal(Edit.EditPasswordNeededText, new MonitoredServerPasswordNeededException().Message);
     }
 
-    /// <summary>The rule the viewer's edit applies (<see cref="ServerConnectionRule.ConnectionSettingsDiffer"/>, with the
+    /// <summary>The rule the viewer's edit applies (<see cref="ServerConnectionIdentity.Differ"/>, with the
     /// form's host trimmed of spaces as the dialog trims it) to a form that changes only the host and port.</summary>
     private static bool ViewerMoves(string storedHost, int storedPort, string newHost, int newPort) =>
-        ServerConnectionRule.ConnectionSettingsDiffer(
-            ServerConnectionSettings.WithDefaults(newHost.Trim(' '), newPort, null, null, null, null, null, null, null, null),
-            ServerConnectionSettings.WithDefaults(storedHost, storedPort, null, null, null, null, null, null, null, null));
+        ServerConnectionIdentity.Differ(
+            ServerConnectionIdentity.FromStoredColumns(newHost.Trim(' '), newPort, null, null, false, null, null, null, false, false),
+            ServerConnectionIdentity.FromStoredColumns(storedHost, storedPort, null, null, false, null, null, null, false, false));
 
     [Theory]
     [InlineData("edit-rule.example.test", 0, "edit-rule.example.test", 0, false)]
@@ -97,7 +97,7 @@ public sealed class ServerEditPasswordRuleViewerTests
         var (changes, parseError) = Edit.ParseEditChanges("{\"auth\":\"" + (newAuth == "sql" ? "SQL" : "ServicePrincipal") + "\",\"username\":\"app-user\"}");
         Assert.Null(parseError);
 
-        var (plan, error) = Edit.PlanEdit(row, changes!, isWindows: true);
+        var (plan, error) = Edit.PlanEdit(row, changes!, TestKeyRings.Healthy.Status);
 
         Assert.Null(plan);
         Assert.Equal(

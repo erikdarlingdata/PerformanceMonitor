@@ -164,6 +164,24 @@ internal static class DiagnosticsBundle
         };
     }
 
+    /// <summary>
+    /// The password key's part of the store section (#5366): the published key's id as the service log prints it, and the
+    /// newest service state word with the id the service holds and when it wrote it. Never the key, the key's public
+    /// bytes, the service's host name or its note (free text). <paramref name="state"/> is null when no service has written
+    /// a row.
+    /// </summary>
+    internal static JsonObject BuildPasswordKeyInfo(PublishedPasswordKey? published, PasswordKeyServiceState? state)
+    {
+        return new JsonObject
+        {
+            ["status"] = published is null ? "not_published" : "ok",
+            ["published_key_id"] = published is null ? null : PasswordSeal.DisplayKeyId(published.KeyId),
+            ["service_state"] = state?.State,
+            ["service_key_id"] = string.IsNullOrEmpty(state?.KeyId) ? null : PasswordSeal.DisplayKeyId(state!.KeyId!),
+            ["service_updated_at_utc"] = state?.UpdatedAtUtc.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", CultureInfo.InvariantCulture),
+        };
+    }
+
     /// <summary>Parses the arguments after the verb. Returns the options, or the error sentence.</summary>
     internal static (DiagnosticsBundleOptions? Options, string? Error) ParseArgs(string[] args)
     {
@@ -381,9 +399,12 @@ internal static class DiagnosticsBundle
     /// <summary>
     /// Seeds the name set from darling.json and the local machine: every configured server's name, host and database,
     /// the store connection string's hosts, database and login, the machine and domain names, and the secrets (every
-    /// string in the config under a secret-named key, and the store password).
+    /// string in the config under a secret-named key, and the store password). <paramref name="keyRing"/> opens the sealed
+    /// webhook values (see <see cref="SeedNotificationIdentifiers"/>); the notes it returns include the one saying webhook
+    /// hosts could not be aliased.
     /// </summary>
-    internal static IReadOnlyList<string> SeedFromConfig(BundleAliaser aliaser, DarlingConfig config, string? storeConnectionString)
+    internal static IReadOnlyList<string> SeedFromConfig(
+        BundleAliaser aliaser, DarlingConfig config, string? storeConnectionString, IPasswordKeyRing? keyRing = null)
     {
         foreach (var server in config.Servers)
         {
@@ -416,16 +437,24 @@ internal static class DiagnosticsBundle
             SeedFromConnectionString(aliaser, cs);
         }
 
-        SeedNotificationIdentifiers(aliaser, config);
-        return AddLocalIdentity(aliaser);
+        var notes = new List<string>(SeedNotificationIdentifiers(aliaser, config, keyRing));
+        notes.AddRange(AddLocalIdentity(aliaser));
+        return notes;
     }
+
+    /// <summary>The line the bundle carries when a sealed webhook value could not be opened, so its host could not be
+    /// registered.</summary>
+    internal const string WebhookHostsNotAliasedNote =
+        "Webhook hosts could not be aliased: a saved webhook value is sealed and the password key could not open it.";
 
     /// <summary>
     /// The other places a config names a host: the SMTP host, the domains of the From and To addresses, the dashboard's
     /// public base URL, the MCP listener's host name, and every webhook URL and proxy. A webhook URL carries its secret
-    /// in the path, so each is also a secret.
+    /// in the path, so each is also a secret. A sealed value is opened with <paramref name="keyRing"/> (the service's own
+    /// ring when the service makes the bundle, or the key file read only when the CLI does) and its host and value are
+    /// registered too; when a sealed value cannot be opened, the returned notes say webhook hosts could not be aliased.
     /// </summary>
-    internal static void SeedNotificationIdentifiers(BundleAliaser aliaser, DarlingConfig config)
+    internal static IReadOnlyList<string> SeedNotificationIdentifiers(BundleAliaser aliaser, DarlingConfig config, IPasswordKeyRing? keyRing = null)
     {
         if (config.Smtp is { } smtp)
         {
@@ -472,6 +501,71 @@ internal static class DiagnosticsBundle
             {
                 AddUrlHost(aliaser, proxy);
             }
+        }
+
+        return SeedSealedWebhookValues(aliaser, config, keyRing);
+    }
+
+    /// <summary>Opens the sealed webhook values and registers what they hold: each URL's host and the URL itself, each
+    /// routing key, and each header value. Returns the note when any sealed value stayed closed.</summary>
+    private static string[] SeedSealedWebhookValues(BundleAliaser aliaser, DarlingConfig config, IPasswordKeyRing? keyRing)
+    {
+        var hooks = config.Webhooks ?? new WebhooksConfig();
+        var routes = config.NotificationRoutes ?? new List<PerformanceMonitor.Notifications.NotificationRoute>();
+        var anySealed = new[] { hooks.TeamsUrl, hooks.SlackUrl, hooks.GenericUrl, hooks.GenericHeaders, hooks.PagerDutyRoutingKey }.Any(PasswordSeal.IsSealed)
+            || routes.Any(r => new[] { r.TeamsUrl, r.SlackUrl, r.GenericUrl, r.PagerDutyRoutingKey }.Any(PasswordSeal.IsSealed));
+        if (!anySealed)
+        {
+            return Array.Empty<string>();
+        }
+
+        if (keyRing is null || !keyRing.Status.CanSeal)
+        {
+            return new[] { WebhookHostsNotAliasedNote };
+        }
+
+        var opened = DarlingWebhookSecrets.Open(hooks, routes, keyRing);
+        foreach (var url in new[] { opened.Webhooks.TeamsUrl, opened.Webhooks.SlackUrl, opened.Webhooks.GenericUrl }
+                     .Concat(opened.Routes.SelectMany(r => new[] { r.TeamsUrl, r.SlackUrl, r.GenericUrl })))
+        {
+            AddUrlHost(aliaser, url);
+            aliaser.AddSecret(url);
+        }
+
+        aliaser.AddSecret(opened.Webhooks.PagerDutyRoutingKey);
+        foreach (var route in opened.Routes)
+        {
+            aliaser.AddSecret(route.PagerDutyRoutingKey);
+        }
+
+        AddHeaderValues(aliaser, opened.Webhooks.GenericHeaders);
+        return opened.Failures.Count == 0 ? Array.Empty<string>() : new[] { WebhookHostsNotAliasedNote };
+    }
+
+    /// <summary>Registers each string value of a headers JSON object as a secret. Text that is not a JSON object adds nothing.</summary>
+    private static void AddHeaderValues(BundleAliaser aliaser, string? headersJson)
+    {
+        if (string.IsNullOrWhiteSpace(headersJson))
+        {
+            return;
+        }
+
+        try
+        {
+            if (JsonNode.Parse(headersJson) is JsonObject headers)
+            {
+                foreach (var header in headers)
+                {
+                    if (header.Value is JsonValue v && v.TryGetValue<string>(out var text))
+                    {
+                        aliaser.AddSecret(text);
+                    }
+                }
+            }
+        }
+        catch (JsonException)
+        {
+            /* Not a headers object: nothing to register. */
         }
     }
 
