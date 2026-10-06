@@ -35,5 +35,8 @@ internal static class StatementCollectionCensusCases
             ["query_snapshots.live_query_plan"] = "StatementCollectionCensusTests.QuerySnapshots_LiveQueryPlan_IsFiltered",
             ["plan_correction.query_text"] = "StatementCollectionCensusTests.PlanCorrection_QueryText_IsWithheld",
             ["plan_correction.implementation_script"] = "StatementCollectionCensusTests.PlanCorrection_ImplementationScript_IsWithheld",
+            ["query_stats.query_text"] = "StatementCollectionCensusTests.QueryStats_QueryText_IsWithheld",
+            ["query_stats.query_plan_xml"] = "StatementCollectionCensusTests.QueryStats_QueryPlanXml_InlinePlanIsFiltered",
+            ["procedure_stats.query_plan_xml"] = "StatementCollectionCensusTests.ProcedureStats_QueryPlanXml_InlinePlanIsFiltered",
         };
 }

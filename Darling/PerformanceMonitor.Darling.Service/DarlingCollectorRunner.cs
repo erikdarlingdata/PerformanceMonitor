@@ -7217,7 +7217,8 @@ RETURNING s.state_key";
                 using (var command = CreateCollectorCommand(provider, query, targetConnection, CommandTimeoutSeconds))
                 using (var planReader = await command.ExecuteReaderAsync(cancellationToken))
                 {
-                    fetched = await QueryStatsCollector.ReadPlanFetchAsync(planReader, cancellationToken);
+                    /* #4348: one filter session per fetch call; the digest below is taken from the FILTERED plan. */
+                    fetched = await QueryStatsCollector.ReadPlanFetchAsync(planReader, context.BeginStatementScrub(), cancellationToken);
                 }
 
                 foreach (var (ord, result) in fetched)
@@ -7237,6 +7238,14 @@ RETURNING s.state_key";
                     {
                         /* Over the cap: the size, a NULL plan, and an entry that stops the next run rendering it again. */
                         cache.AddPending(key, null, result.Bytes, now);
+                    }
+                    else if (QueryStatsCollector.IsWithheldWhole(result.PlanXml))
+                    {
+                        /* #4348: the filter withheld the whole plan (its budget ran out). This row stores the marker;
+                           nothing is cached and nothing is pending, so the next cycle fetches and filters the plan
+                           again instead of answering from a cached marker digest. */
+                        row.QueryPlanXml = result.PlanXml;
+                        continue;
                     }
                     else
                     {
@@ -7338,7 +7347,7 @@ RETURNING s.state_key";
                     var query = ProcedureStatsCollector.BuildPlanFetchQuery(context, handles);
                     using var command = CreateCollectorCommand(provider, query, targetConnection, CommandTimeoutSeconds);
                     using var planReader = await command.ExecuteReaderAsync(token);
-                    return await QueryStatsCollector.ReadPlanFetchAsync(planReader, token);
+                    return await QueryStatsCollector.ReadPlanFetchAsync(planReader, context.BeginStatementScrub(), token);
                 },
                 cancellationToken);
             fetchWatch.Stop();

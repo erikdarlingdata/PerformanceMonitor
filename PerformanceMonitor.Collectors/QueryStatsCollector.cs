@@ -12,6 +12,7 @@ using System.Data.Common;
 using System.Globalization;
 using System.Threading;
 using System.Threading.Tasks;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Collectors;
 
@@ -410,13 +411,15 @@ OPTION(RECOMPILE);";
     }
 
     /// <summary>
-    /// Reads <see cref="BuildPlanFetchQuery"/>'s result into <c>ord</c> -> (plan, size). A key whose plan
+    /// Reads <see cref="BuildPlanFetchQuery"/>'s result into <c>ord</c> -> (plan, size), each plan through the
+    /// caller's statement filter session (#4348), so a caller digests and caches the filtered plan. A key whose plan
     /// aged out maps to (null, null); a plan over the cap maps to (null, size).
     /// </summary>
     public static async ValueTask<Dictionary<int, (string? PlanXml, long? Bytes)>> ReadPlanFetchAsync(
-        DbDataReader reader, CancellationToken cancellationToken)
+        DbDataReader reader, SensitiveStatements.Session scrub, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(reader);
+        ArgumentNullException.ThrowIfNull(scrub);
 
         var results = new Dictionary<int, (string? PlanXml, long? Bytes)>();
         while (await reader.ReadAsync(cancellationToken))
@@ -424,12 +427,21 @@ OPTION(RECOMPILE);";
             var ord = Convert.ToInt32(reader.GetValue(0), CultureInfo.InvariantCulture);
             /* Convert, not GetInt64: the same DATALENGTH-width reasoning as the inline read of this column. */
             results[ord] = (
-                reader.IsDBNull(1) ? null : reader.GetString(1),
+                reader.IsDBNull(1) ? null : scrub.Xml(reader.GetString(1)),
                 reader.IsDBNull(2) ? null : Convert.ToInt64(reader.GetValue(2), CultureInfo.InvariantCulture));
         }
 
         return results;
     }
+
+    /// <summary>
+    /// #4348: true for a plan the statement filter withheld whole (<see cref="SensitiveStatements.PlaceholderText"/>:
+    /// the session's budget ran out, or its judge failed). The row stores the marker for this cycle, but a host must
+    /// NOT cache the plan's digest: the next cycle should fetch and filter the plan again, and a cached marker digest
+    /// would answer every cycle after this one with the marker.
+    /// </summary>
+    public static bool IsWithheldWhole(string? planXml) =>
+        string.Equals(planXml, SensitiveStatements.PlaceholderText, StringComparison.Ordinal);
 
     /// <summary>
     /// True when the main query carries the plan columns itself: the host captures plans and has not
@@ -563,6 +575,9 @@ OPTION(RECOMPILE);";
     {
         var rows = new List<Row>();
         var inlinePlan = InlinePlanCapture(context);
+        /* #4348: the statement filter runs where the text and the inline plan first enter a row, so nothing
+           downstream (the writer, the plan digest, the dimension tables, Lite's store) ever holds the raw value. */
+        var scrub = context.BeginStatementScrub();
 
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -606,7 +621,7 @@ OPTION(RECOMPILE);";
                 MaxSpills = reader.IsDBNull(35) ? 0L : reader.GetInt64(35),
                 SqlHandle = reader.IsDBNull(36) ? null : reader.GetString(36),
                 PlanHandle = reader.IsDBNull(37) ? null : reader.GetString(37),
-                QueryText = reader.IsDBNull(38) ? null : reader.GetString(38),
+                QueryText = reader.IsDBNull(38) ? null : scrub.Text(reader.GetString(38)),
                 PlanGenerationNum = reader.IsDBNull(39) ? 0L : reader.GetInt64(39),
                 StatementStartOffset = reader.IsDBNull(40) ? 0 : reader.GetInt32(40),
                 StatementEndOffset = reader.IsDBNull(41) ? 0 : reader.GetInt32(41),
@@ -620,7 +635,7 @@ OPTION(RECOMPILE);";
                 /* query_plan_xml is the trailing column present only when CapturePlanXml spliced it
                    into the SELECT (ordinal 44); the short-circuit skips it entirely when off, and also when
                    the host defers the plan fetch (#5158), which leaves the main query without it. */
-                QueryPlanXml = inlinePlan && !reader.IsDBNull(44) ? reader.GetString(44) : null,
+                QueryPlanXml = inlinePlan && !reader.IsDBNull(44) ? scrub.Xml(reader.GetString(44)) : null,
                 /* #3392: the plan's measured size rides the same splice at ordinal 45, so the same
                    short-circuit covers it. Convert rather than GetInt64: DATALENGTH's return type widens to
                    bigint only for the max types, and a provider that hands back an Int32 here would throw

@@ -63,9 +63,9 @@ public sealed class StatementColumnCensusTests
     private static readonly Dictionary<string, Entry> Listed = new(StringComparer.Ordinal)
     {
         /* Rows 1-4: query_stats and procedure_stats text and plans, inline and deferred fetch (R2). */
-        ["query_stats.query_text"] = Hooked("1", "R2"),
-        ["query_stats.query_plan_xml"] = Hooked("2 and 3 (deferred plan fetch)", "R2"),
-        ["procedure_stats.query_plan_xml"] = Hooked("3 and 4 (deferred plan fetch, inline)", "R2"),
+        ["query_stats.query_text"] = Hooked("1", "R2", pending: false),
+        ["query_stats.query_plan_xml"] = Hooked("2 and 3 (deferred plan fetch)", "R2", pending: false),
+        ["procedure_stats.query_plan_xml"] = Hooked("3 and 4 (deferred plan fetch, inline)", "R2", pending: false),
         ["query_stats.query_plan_hash"] = Exempt("a hash of the plan, not plan text; the filter has nothing to read"),
         ["query_stats.query_plan_xml_bytes"] = Exempt("the byte length of the stored plan, a number"),
         ["procedure_stats.query_plan_xml_bytes"] = Exempt("the byte length of the stored plan, a number"),
