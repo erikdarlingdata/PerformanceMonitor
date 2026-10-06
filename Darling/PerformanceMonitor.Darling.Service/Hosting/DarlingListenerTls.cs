@@ -9,6 +9,7 @@
 using System;
 using System.Globalization;
 using System.Net;
+using System.Security.Authentication;
 using System.Security.Cryptography.X509Certificates;
 using Microsoft.AspNetCore.Server.Kestrel.Https;
 using Microsoft.Extensions.Logging;
@@ -208,6 +209,16 @@ internal static class DarlingListenerTls
         DarlingWebTls.LoadedCertificate? loaded = null;
         try
         {
+            /* #5288: a literal PKCS#12 password in darling.json is readable by every interactive user, so it is
+               named BEFORE the load (a load that then fails on a wrong password still carries the nudge). The
+               DPAPI slot and a file:/env: reference are the supported shapes and do not warn, and only the
+               PKCS#12 form reads the password at all: beside a PEM pair a stray password is the plan's own
+               warning below. */
+            if (plan.Shape == DarlingWebTls.TlsShape.Pfx && UsesPlaintextPfxPassword(tls))
+            {
+                logger.LogWarning("{Surface} TLS: {Warning}", labels.Surface, PlaintextPfxPasswordWarning(labels));
+            }
+
             loaded = DarlingWebTls.Load(tls, plan.Shape, labels.Section);
             var certificate = loaded.Value.Leaf;
 
@@ -306,6 +317,28 @@ internal static class DarlingListenerTls
     }
 
     /// <summary>
+    /// True when the PKCS#12 password the loader will read is a literal in the config file: <c>pfxPassword</c> is
+    /// set, is not an <c>env:</c>/<c>file:</c> reference, and the DPAPI slot (<c>encryptedPfxPassword</c>), which
+    /// <see cref="WebTlsConfig.ResolvePfxPassword"/> prefers, is blank. Reads no secret, so it cannot throw. PURE.
+    /// </summary>
+    private static bool UsesPlaintextPfxPassword(WebTlsConfig tls)
+        => !string.IsNullOrWhiteSpace(tls.PfxPassword)
+           && string.IsNullOrWhiteSpace(tls.EncryptedPfxPassword)
+           && !DarlingSecretSource.IsReference(tls.PfxPassword);
+
+    /// <summary>
+    /// The warning for a PKCS#12 password written as a literal in <c>darling.json</c>. It names the setting for the
+    /// listener's section and the two supported shapes. PURE.
+    /// </summary>
+    internal static string PlaintextPfxPasswordWarning(ListenerTlsLabels labels)
+    {
+        ArgumentNullException.ThrowIfNull(labels);
+
+        return $"{labels.Section}.network.tls.pfxPassword is set in plaintext (dev convenience). "
+            + "Prefer encryptedPfxPassword (--encrypt-password) or a file:/env: reference.";
+    }
+
+    /// <summary>
     /// The warning for a listener exposed in plain HTTP because no <c>tls</c> block is set: the credential and
     /// what it protects cross the segment in the clear, and the CIDR list bounds only who can route to the port.
     /// PURE. The web text is the one the web host has logged since #2562; the MCP text is the same sentence with
@@ -321,11 +354,12 @@ internal static class DarlingListenerTls
     }
 
     /// <summary>
-    /// The shared body of the one <c>UseHttps</c> call each host keeps: the leaf, and the intermediates that must
-    /// travel with it. Kestrel presents ONLY what it is handed, so an intermediate left out here is an
-    /// incomplete chain and a failed handshake on every client that has not independently cached it, and MCP
-    /// clients are mostly Node and Python SDKs, which never fetch a missing intermediate. Measured against a real
-    /// leaf-plus-intermediate PEM before the web host wired it: the server sent one certificate (#2562, #5288).
+    /// The shared body of the one <c>UseHttps</c> call each host keeps: the leaf, the intermediates that must
+    /// travel with it, and the protocol floor (TLS 1.2 or 1.3, nothing older). Kestrel presents ONLY what it is
+    /// handed, so an intermediate left out here is an incomplete chain and a failed handshake on every client that
+    /// has not independently cached it, and MCP clients are mostly Node and Python SDKs, which never fetch a
+    /// missing intermediate. Measured against a real leaf-plus-intermediate PEM before the web host wired it: the
+    /// server sent one certificate (#2562, #5288).
     ///
     /// <para>A host keeps exactly ONE <c>UseHttps</c> call, on its network listener, and the loopback listeners
     /// stay plain HTTP. This body is shared; the call is not, because a second call is how a loopback listener
@@ -338,6 +372,12 @@ internal static class DarlingListenerTls
         ArgumentNullException.ThrowIfNull(https);
 
         https.ServerCertificate = certificate.Leaf;
+
+        /* The floor is stated, not inherited: both listeners negotiate TLS 1.2 or 1.3 and nothing older. Left at
+           its default the protocol set belongs to the operating system, and that default differs by Windows
+           version, so one release would accept a version another refuses (#5288). */
+        https.SslProtocols = SslProtocols.Tls12 | SslProtocols.Tls13;
+
         if (certificate.Chain is { Count: > 0 })
         {
             https.ServerCertificateChain = certificate.Chain;

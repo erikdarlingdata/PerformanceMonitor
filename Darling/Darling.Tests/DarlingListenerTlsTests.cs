@@ -14,6 +14,7 @@ using System.Linq;
 using System.Net;
 using System.Net.Security;
 using System.Net.Sockets;
+using System.Security.Authentication;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using System.Threading.Tasks;
@@ -21,6 +22,7 @@ using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Hosting.Server;
 using Microsoft.AspNetCore.Hosting.Server.Features;
+using Microsoft.AspNetCore.Server.Kestrel.Https;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -128,26 +130,64 @@ public sealed class DarlingListenerTlsTests
     public void Resolve_NotConfigured_WarnsCleartext_ExposesWithoutCertificate(string section)
     {
         var labels = section == "web" ? ListenerTlsLabels.Web : ListenerTlsLabels.Mcp;
-        foreach (var block in new WebTlsConfig?[] { null, new WebTlsConfig() })
-        {
-            var log = new RecordingLogger();
-            var state = new WebTlsCertificateState();
 
-            var outcome = DarlingListenerTls.Resolve(log, state, labels, block, Listen, Port, null);
+        /* Only an ABSENT block is plain HTTP. A block that is present but sets none of its keys is refused
+           (Resolve_TypoedTlsBlock_RefusesToExpose). */
+        var log = new RecordingLogger();
+        var state = new WebTlsCertificateState();
 
-            Assert.True(outcome.Expose);
-            Assert.Null(outcome.Certificate);
-            Assert.Equal(DarlingWebTls.TlsShape.NotConfigured, outcome.Shape);
-            Assert.False(outcome.ExposesWithoutItsCertificate);
-            Assert.Null(state.Read());
-            Assert.Equal(DarlingListenerTls.CleartextWarning(labels), Assert.Single(log.At(LogLevel.Warning)));
-        }
+        var outcome = DarlingListenerTls.Resolve(log, state, labels, null, Listen, Port, null);
+
+        Assert.True(outcome.Expose);
+        Assert.Null(outcome.Certificate);
+        Assert.Equal(DarlingWebTls.TlsShape.NotConfigured, outcome.Shape);
+        Assert.False(outcome.ExposesWithoutItsCertificate);
+        Assert.Null(state.Read());
+        Assert.Equal(DarlingListenerTls.CleartextWarning(labels), Assert.Single(log.At(LogLevel.Warning)));
 
         Assert.Equal(
             section == "web"
                 ? "Web dashboard is LAN-exposed WITHOUT TLS — the access token and its session cookie cross the segment in the clear, and web.network.allowFrom bounds only who can route to the port. Configure web.network.tls (a PKCS#12 bundle or a PEM pair), or front the port with a TLS-terminating reverse proxy."
                 : "MCP server is LAN-exposed WITHOUT TLS: the bearer token and every tool result cross the segment in the clear, and mcp.network.allowFrom bounds only who can route to the port. Configure mcp.network.tls (a PKCS#12 bundle or a PEM pair), or front the port with a TLS-terminating reverse proxy.",
             DarlingListenerTls.CleartextWarning(labels));
+    }
+
+    /// <summary>
+    /// #5288: a <c>tls</c> block whose keys the config reader does not know parses to an all-blank block, and an
+    /// all-blank block is not plain HTTP: the listener is refused (loopback-only, Critical line) rather than
+    /// exposed with no certificate and a cleartext warning. Real JSON, so the skipped-key path is the one under test.
+    /// </summary>
+    [Theory]
+    [InlineData("web")]
+    [InlineData("mcp")]
+    public void Resolve_TypoedTlsBlock_RefusesToExpose(string section)
+    {
+        var labels = section == "web" ? ListenerTlsLabels.Web : ListenerTlsLabels.Mcp;
+        foreach (var json in new[]
+        {
+            @"{ ""cert"": ""/run/secrets/tls_cert"", ""key"": ""/run/secrets/tls_key"" }",
+            @"{ ""pfx_path"": ""/certs/a.pfx"" }",
+            "{}",
+        })
+        {
+            var block = DarlingWebTlsTests.ParseTlsBlock(section, json);
+            Assert.NotNull(block);
+            var log = new RecordingLogger();
+            var state = new WebTlsCertificateState();
+
+            var outcome = DarlingListenerTls.Resolve(log, state, labels, block, Listen, Port, null);
+
+            Assert.False(outcome.Expose);
+            Assert.Null(outcome.Certificate);
+            Assert.Equal(DarlingWebTls.TlsShape.Invalid, outcome.Shape);
+            Assert.False(outcome.ExposesWithoutItsCertificate);
+            Assert.Null(state.Read());
+            Assert.Empty(log.At(LogLevel.Warning));
+            Assert.Equal(
+                $"{labels.Surface} TLS is misconfigured ({section}.network.tls is present but sets none of pfxPath, certPath or keyPath. "
+                + "Check the key names, or remove the block for plain HTTP.) — refusing to expose; binding loopback-only.",
+                Assert.Single(log.At(LogLevel.Critical)));
+        }
     }
 
     /* ---- the web's texts, whole, exactly as the web host logged them before the block moved ---- */
@@ -268,11 +308,113 @@ public sealed class DarlingListenerTlsTests
         }
     }
 
+    /* ---- the PKCS#12 password slots: only a literal in the config file is named ---- */
+
+    private static string PlaintextPasswordText(ListenerTlsLabels labels)
+        => $"{labels.Surface} TLS: {labels.Section}.network.tls.pfxPassword is set in plaintext (dev convenience). "
+           + "Prefer encryptedPfxPassword (--encrypt-password) or a file:/env: reference.";
+
+    /// <summary>A literal <c>pfxPassword</c> logs one Warning naming the section's setting, and the bundle still loads.</summary>
+    [Theory]
+    [InlineData("web")]
+    [InlineData("mcp")]
+    public void Resolve_PlaintextPfxPassword_Warns(string section)
+    {
+        var labels = section == "web" ? ListenerTlsLabels.Web : ListenerTlsLabels.Mcp;
+        using var temp = new TempDir();
+        using var cert = Make("literal", DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddDays(365), ips: new[] { "192.168.1.205" });
+        var block = WritePfx(temp, cert);
+        block.PfxPassword = "hunter2";
+        var log = new RecordingLogger();
+
+        var outcome = DarlingListenerTls.Resolve(log, new WebTlsCertificateState(), labels, block, Listen, Port, null);
+
+        using (outcome.Certificate!.Value)
+        {
+            Assert.True(outcome.Expose);
+            Assert.Equal(PlaintextPasswordText(labels), Assert.Single(log.At(LogLevel.Warning)));
+        }
+    }
+
+    /// <summary>The warning comes before the load, so a wrong literal that then fails to open the bundle still carries it.</summary>
+    [Fact]
+    public void Resolve_PlaintextPfxPassword_WarnsEvenWhenTheLoadFails()
+    {
+        using var temp = new TempDir();
+        using var cert = Make("literal-wrong", DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddDays(365));
+        var block = WritePfx(temp, cert, exportPassword: "right");
+        block.PfxPassword = "wrong";
+        var log = new RecordingLogger();
+
+        var outcome = DarlingListenerTls.Resolve(log, new WebTlsCertificateState(), ListenerTlsLabels.Mcp, block, Listen, Port, null);
+
+        Assert.False(outcome.Expose);
+        Assert.Equal(PlaintextPasswordText(ListenerTlsLabels.Mcp), Assert.Single(log.At(LogLevel.Warning)));
+        Assert.Single(log.At(LogLevel.Critical));
+    }
+
+    /// <summary>An <c>env:</c> or <c>file:</c> reference is not plaintext in the config, so neither logs a Warning.</summary>
+    [Theory]
+    [InlineData("file")]
+    [InlineData("env")]
+    public void Resolve_ReferencePfxPassword_IsSilent(string kind)
+    {
+        using var temp = new TempDir();
+        using var cert = Make("reference", DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddDays(365), ips: new[] { "192.168.1.205" });
+        var block = WritePfx(temp, cert);
+        const string variable = "DARLING_TEST_5295_L18_PFX_PASSWORD";
+        if (kind == "env")
+        {
+            block.PfxPassword = "env:" + variable;
+        }
+
+        Assert.StartsWith(kind + ":", block.PfxPassword, StringComparison.Ordinal);
+        var log = new RecordingLogger();
+
+        try
+        {
+            Environment.SetEnvironmentVariable(variable, "hunter2");
+            var outcome = DarlingListenerTls.Resolve(log, new WebTlsCertificateState(), ListenerTlsLabels.Mcp, block, Listen, Port, null);
+
+            using (outcome.Certificate!.Value)
+            {
+                Assert.True(outcome.Expose);
+                Assert.Empty(log.At(LogLevel.Warning));
+            }
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(variable, null);
+        }
+    }
+
+    /// <summary>The DPAPI slot is the preferred shape: set on its own it logs no Warning (Windows, where DPAPI is).</summary>
+    [Fact]
+    public void Resolve_EncryptedPfxPassword_IsSilent()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "DPAPI is Windows-only.");
+
+        using var temp = new TempDir();
+        using var cert = Make("encrypted", DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddDays(365), ips: new[] { "192.168.1.205" });
+        var withFile = WritePfx(temp, cert);
+        var block = new WebTlsConfig { PfxPath = withFile.PfxPath, EncryptedPfxPassword = DarlingSecrets.Protect("hunter2") };
+        var log = new RecordingLogger();
+
+        var outcome = DarlingListenerTls.Resolve(log, new WebTlsCertificateState(), ListenerTlsLabels.Mcp, block, Listen, Port, null);
+
+        using (outcome.Certificate!.Value)
+        {
+            Assert.True(outcome.Expose);
+            Assert.Empty(log.At(LogLevel.Warning));
+        }
+    }
+
     [Theory]
     [InlineData("both-forms")]
     [InlineData("pem-cert-without-key")]
     [InlineData("pem-key-without-cert")]
     [InlineData("password-without-bundle")]
+    [InlineData("block-with-no-known-keys")]
     [InlineData("unreadable-file")]
     [InlineData("wrong-password")]
     [InlineData("expired")]
@@ -291,6 +433,7 @@ public sealed class DarlingListenerTlsTests
             "pem-cert-without-key" => new WebTlsConfig { CertPath = "/certs/a.crt" },
             "pem-key-without-cert" => new WebTlsConfig { KeyPath = "/certs/a.key" },
             "password-without-bundle" => new WebTlsConfig { PfxPassword = "hunter2" },
+            "block-with-no-known-keys" => new WebTlsConfig(),
             "unreadable-file" => new WebTlsConfig { PfxPath = Path.Combine(temp.Path, "absent.pfx") },
             "wrong-password" => WritePfx(temp, good, "right", "wrong"),
             "expired" => WritePfx(temp, old),
@@ -614,6 +757,20 @@ public sealed class DarlingListenerTlsTests
         }
     }
 
+    [Fact]
+    public void ConfigureHttps_NegotiatesTls12AndTls13Only()
+    {
+        /* #5288: the protocol floor is stated on the options rather than left to the operating system's default,
+           and the one shared body sets it for the web and the MCP listener alike. */
+        using var cert = Make("floor", DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddDays(30));
+        var https = new HttpsConnectionAdapterOptions();
+
+        DarlingListenerTls.ConfigureHttps(https, new DarlingWebTls.LoadedCertificate(cert, new X509Certificate2Collection()));
+
+        Assert.Equal(SslProtocols.Tls12 | SslProtocols.Tls13, https.SslProtocols);
+        Assert.Same(cert, https.ServerCertificate);
+    }
+
     /* ---- helpers ---- */
 
     private static X509Certificate2 Make(
@@ -644,7 +801,13 @@ public sealed class DarlingListenerTlsTests
     {
         var path = Path.Combine(temp.Path, Guid.NewGuid().ToString("N") + ".pfx");
         File.WriteAllBytes(path, cert.Export(X509ContentType.Pkcs12, exportPassword));
-        return new WebTlsConfig { PfxPath = path, PfxPassword = configPassword ?? exportPassword };
+
+        /* The password goes in as a file: reference, the shape a deployment is told to use, so a test that counts
+           the Warning lines is not also counting the plaintext-password warning. The tests for that warning put a
+           literal in the block themselves. */
+        var secret = Path.Combine(temp.Path, Guid.NewGuid().ToString("N") + ".secret");
+        File.WriteAllText(secret, configPassword ?? exportPassword);
+        return new WebTlsConfig { PfxPath = path, PfxPassword = "file:" + secret };
     }
 
     private static WebTlsConfig WritePem(TempDir temp, X509Certificate2 cert)
