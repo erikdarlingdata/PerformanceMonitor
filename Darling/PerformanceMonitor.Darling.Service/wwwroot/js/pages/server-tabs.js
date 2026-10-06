@@ -604,14 +604,11 @@ function topQueriesCard(server, ctx, ranking, picker) {
           "before it reports non-zero values.",
       }),
     ];
-    /* #5226: a reads ranking over a window past what raw keeps carries the raw route's retention notice (RANKING_NOTE_KEYS gives the
-       plain table() panels the same line). It sits under `truncation_note` below, which is added after it. */
-    if (typeof res.data.retention_notice === "string" && res.data.retention_notice.trim()) {
-      parts.unshift(noticeStrip(res.data.retention_notice));
-    }
     /* #4231: this composite calls VIZ.table directly rather than going through table()/renderPanel, so it
        misses loadPanel's automatic noteKey handling (#3278) and has to render `truncation_note` itself —
-       same field, same meaning, as the plain table() panels below it on this page. */
+       same field, same meaning, as the plain table() panels below it on this page. #5299: a reads ranking past what raw keeps carries
+       `retention_notice` as well, and readTool already put that sentence in `truncation_note`'s place (util.js localizeWindowNote), so this
+       draws the one window note and the retention notice is not drawn a second time. */
     if (typeof res.data.truncation_note === "string" && res.data.truncation_note.trim()) {
       parts.unshift(noticeStrip(res.data.truncation_note));
     }
@@ -746,8 +743,9 @@ const TOP_RANKINGS = [
 const topRankingPick = { queries: "cpu", procedures: "cpu" };
 
 /* A reads ranking can only read raw (the hourly rollups keep no logical reads), so over a window past what raw keeps the read says so in
-   `retention_notice`, the retention notice the composed panels carry. Drawn above the grid as text, so a ranking is never silently partial. */
-const RANKING_NOTE_KEYS = ["retention_notice"];
+   `retention_notice`, the retention notice the composed panels carry. It is drawn above the grid as text, once: readTool puts it in the
+   window note's place (util.js localizeWindowNote, #5299), so the cards below name `truncation_note` as their one note and need no key of
+   their own for it, and a ranking is never silently partial. */
 
 function topRankingLabel(ranking) {
   return (TOP_RANKINGS.find((r) => r.value === ranking) || TOP_RANKINGS[0]).label;
@@ -1151,7 +1149,7 @@ export const SERVER_TABS = [
           "No query stats in this window. Delta-based collection needs at least two cycles (~30 minutes) before it reports non-zero values.",
           2,
           "truncation_note",
-          RANKING_NOTE_KEYS,
+          null,
           TOP_QUERY_GROUPS,
           picker
         )
@@ -1167,7 +1165,7 @@ export const SERVER_TABS = [
           "No procedure stats in this window. Delta-based collection needs at least two cycles (~30 minutes).",
           2,
           "truncation_note",
-          RANKING_NOTE_KEYS,
+          null,
           TOP_PROC_GROUPS,
           picker
         )
@@ -1558,7 +1556,7 @@ export const SERVER_TABS = [
           "No procedure stats in this window. Delta-based collection needs at least two cycles (~30 minutes).",
           2,
           "truncation_note",
-          RANKING_NOTE_KEYS,
+          null,
           TOP_PROC_GROUPS,
           picker
         )
