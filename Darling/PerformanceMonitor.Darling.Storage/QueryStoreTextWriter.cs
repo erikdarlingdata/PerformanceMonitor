@@ -57,8 +57,8 @@ public static class QueryStoreTextWriter
         IReadOnlyList<FetchedQueryText> texts,
         DateTime collectionTimeUtc,
         int commandTimeoutSeconds,
-        CancellationToken cancellationToken = default,
-        SensitiveStatements.Session? scrub = null)
+        SensitiveStatements.Session? scrub = null,
+        CancellationToken cancellationToken = default)
     {
         if (connection is null)
         {

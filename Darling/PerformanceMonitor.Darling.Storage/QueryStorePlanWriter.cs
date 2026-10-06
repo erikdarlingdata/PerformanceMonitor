@@ -72,8 +72,8 @@ public static class QueryStorePlanWriter
         IReadOnlyList<FetchedPlan> plans,
         DateTime collectionTimeUtc,
         int commandTimeoutSeconds,
-        CancellationToken cancellationToken = default,
-        SensitiveStatements.Session? scrub = null)
+        SensitiveStatements.Session? scrub = null,
+        CancellationToken cancellationToken = default)
     {
         if (connection is null)
         {

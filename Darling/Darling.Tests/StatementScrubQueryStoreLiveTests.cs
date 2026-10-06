@@ -116,7 +116,7 @@ public sealed class StatementScrubQueryStoreLiveTests
                     new FetchedQueryText(2, StatementScrubCanary.PlainStatement, "0xBB"),
                     new FetchedQueryText(3, null, "0xCC"),
                 },
-                DateTime.UtcNow, TestTimeoutSeconds, ct);
+                DateTime.UtcNow, TestTimeoutSeconds, cancellationToken: ct);
 
             Assert.Equal(new long[] { 1, 2, 3 }, landed);
             var stored = await StoredTextsAsync(connection, ct);
@@ -162,7 +162,7 @@ public sealed class StatementScrubQueryStoreLiveTests
 
             var fake = new FakeJudge(TimeSpan.FromSeconds(1));
             var landed = await QueryStoreTextWriter.WriteAsync(
-                connection, ServerId, Db, texts, DateTime.UtcNow, TestTimeoutSeconds, ct, SessionSpentAfter(fake, 3));
+                connection, ServerId, Db, texts, DateTime.UtcNow, TestTimeoutSeconds, SessionSpentAfter(fake, 3), ct);
 
             Assert.Equal(new long[] { 1, 2, 3 }, landed);
             var afterFirst = await StoredTextsAsync(connection, ct);
@@ -171,7 +171,7 @@ public sealed class StatementScrubQueryStoreLiveTests
 
             /* The next cycle: the probe sees ids 4-6 as missing, the fetch ships them, a fresh session judges them. */
             var second = await QueryStoreTextWriter.WriteAsync(
-                connection, ServerId, Db, texts.Skip(3).ToArray(), DateTime.UtcNow, TestTimeoutSeconds, ct);
+                connection, ServerId, Db, texts.Skip(3).ToArray(), DateTime.UtcNow, TestTimeoutSeconds, cancellationToken: ct);
 
             Assert.Equal(new long[] { 4, 5, 6 }, second);
             var afterSecond = await StoredTextsAsync(connection, ct);
@@ -213,7 +213,7 @@ public sealed class StatementScrubQueryStoreLiveTests
             Assert.NotEqual(canary, filtered);
 
             var landed = await QueryStorePlanWriter.WriteAsync(
-                connection, ServerId, Db, new[] { new FetchedPlan(1, canary, "0xAAAA") }, DateTime.UtcNow, TestTimeoutSeconds, ct);
+                connection, ServerId, Db, new[] { new FetchedPlan(1, canary, "0xAAAA") }, DateTime.UtcNow, TestTimeoutSeconds, cancellationToken: ct);
 
             Assert.Equal(new long[] { 1 }, landed);
             var map = await MapDigestsAsync(connection, ct);
@@ -277,7 +277,7 @@ public sealed class StatementScrubQueryStoreLiveTests
             var spent = SessionSpentAfter(new FakeJudge(TimeSpan.FromSeconds(1)), perPlan * 2 + 0.5);
             var landed = await QueryStorePlanWriter.WriteAsync(
                 connection, ServerId, Db, plans.Append(new FetchedPlan(5, null, "0x05")).ToArray(),
-                DateTime.UtcNow, TestTimeoutSeconds, ct, spent);
+                DateTime.UtcNow, TestTimeoutSeconds, spent, ct);
 
             Assert.Equal(new long[] { 1, 2, 5 }, landed);
             var afterFirst = await MapDigestsAsync(connection, ct);
@@ -285,7 +285,7 @@ public sealed class StatementScrubQueryStoreLiveTests
             Assert.Null(afterFirst[5]);
 
             var second = await QueryStorePlanWriter.WriteAsync(
-                connection, ServerId, Db, plans.Skip(2).ToArray(), DateTime.UtcNow, TestTimeoutSeconds, ct);
+                connection, ServerId, Db, plans.Skip(2).ToArray(), DateTime.UtcNow, TestTimeoutSeconds, cancellationToken: ct);
 
             Assert.Equal(new long[] { 3, 4 }, second);
             var afterSecond = await MapDigestsAsync(connection, ct);
