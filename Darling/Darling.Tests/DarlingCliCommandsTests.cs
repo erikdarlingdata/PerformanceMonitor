@@ -71,6 +71,32 @@ public sealed class DarlingCliCommandsTests
         Assert.Contains("CIDR list", refused.Note, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// The reason the firewall verb gives for a refused allowFrom list names the address spelling rule (each IPv4
+    /// address is four plain decimal numbers, with no IPv6 zone index) in the words both hosts' Critical line and the
+    /// wizard's re-prompts use. The refused list is an IPv4 address with a leading zero, the spelling the rule exists
+    /// for, and it is refused on both surfaces.
+    /// </summary>
+    [Theory]
+    [InlineData("mcp", "MCP")]
+    [InlineData("web", "web dashboard")]
+    public void PlanFirewallRules_ARefusedAllowFrom_NamesTheAddressSpellingRule(string section, string surface)
+    {
+        const string Clause = "with each IPv4 address written as four plain decimal numbers (no leading zeros) and no IPv6 zone index";
+        var config = new DarlingConfig();
+        config.Postgres!.Managed = true;
+        config.Mcp.Enabled = true;
+        config.Mcp.Network = new McpNetworkConfig { Listen = "192.168.1.205", AllowFrom = "10.8.0.0/16,192.168.010.0/24", Token = "t" };
+        config.Web.Enabled = true;
+        config.Web.Network = new WebNetworkConfig { Listen = "192.168.1.205", AllowFrom = "10.8.0.0/16,192.168.010.0/24", Token = "t" };
+
+        var plan = Assert.Single(DarlingCliCommands.PlanFirewallRules(config), p => p.Surface == surface);
+
+        Assert.Equal(DarlingCliCommands.FirewallRuleAction.Remove, plan.Action);
+        Assert.Null(plan.Cidr);
+        Assert.StartsWith(section + ".network.allowFrom is missing, is not a valid CIDR list (every entry in CIDR form, " + Clause + "), or has an entry whose address family does not match listen", plan.Note, StringComparison.Ordinal);
+    }
+
     /* ---- #5288 (F9): the web login hint the wizard prints after it writes a web block ---- */
 
     [Theory]

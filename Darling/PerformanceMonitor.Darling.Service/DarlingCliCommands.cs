@@ -3940,7 +3940,7 @@ public static class DarlingCliCommands
             DarlingMcpHostService.McpBindReason.TokenMissing =>
                 $"{section}.network is set but its token is missing or unreadable, so the service fail-closes this endpoint to loopback",
             DarlingMcpHostService.McpBindReason.AllowFromInvalid =>
-                $"{section}.network.allowFrom is missing, is not a valid CIDR list, or has an entry whose address family does not match listen, so the service fail-closes this endpoint to loopback",
+                $"{section}.network.allowFrom is missing, is not a valid CIDR list (every entry in CIDR form, with each IPv4 address written as four plain decimal numbers (no leading zeros) and no IPv6 zone index), or has an entry whose address family does not match listen, so the service fail-closes this endpoint to loopback",
             DarlingMcpHostService.McpBindReason.ManagedModeRequired =>
                 $"{section}.network is set but postgres.managed = false; LAN exposure is managed-mode only and is ignored",
             _ => null,
