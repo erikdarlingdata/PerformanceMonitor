@@ -9,9 +9,11 @@
 using System;
 using System.Linq;
 using System.Threading;
+using System.Threading.Tasks;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Analysis;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Mcp;
@@ -553,6 +555,11 @@ if (OperatingSystem.IsWindows())
             SingleInstanceGuard.ServiceMutexName);
     }
 }
+
+/* #5320 N1: the statement filter's judge takes 250-900 ms to build. Build it in the background now, so the
+   first MCP tool call, plan analysis or alert after start does not wait for it. Placed after the single-instance
+   guard so a refused second instance does not pay for it. */
+_ = Task.Run(SensitiveStatements.WarmUp);
 
 try
 {
