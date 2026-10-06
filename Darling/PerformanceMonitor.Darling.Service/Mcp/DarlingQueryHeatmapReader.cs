@@ -11,7 +11,7 @@ using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
-using NpgsqlTypes;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
 
@@ -277,17 +277,13 @@ internal static class DarlingQueryHeatmapReader
     /// <paramref name="previewLength"/> before it reaches <see cref="HeatmapCellRow.TopQueryText"/>.</summary>
     public static async Task<List<HeatmapCellRow>> GetQueryHeatmapAsync(
         NpgsqlDataSource postgres, int serverId, HeatmapMetric metric, DateTime startUtc, DateTime endUtc,
-        string? databaseName, int bucketMinutes, int limit, int previewLength, CancellationToken cancellationToken = default)
+        DatabaseFilter databases, int bucketMinutes, int limit, int previewLength, CancellationToken cancellationToken = default)
     {
         var rows = new List<HeatmapCellRow>();
         await using var command = postgres.CreateCommand(BuildQueryHeatmapSql(metric));
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddWindow(command, serverId, startUtc, endUtc);
-        command.Parameters.Add(new NpgsqlParameter
-        {
-            NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text,
-            Value = string.IsNullOrWhiteSpace(databaseName) ? DBNull.Value : new[] { databaseName },
-        });
+        command.Parameters.Add(databases.Parameter());
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = bucketMinutes });
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = limit });
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = previewLength + 1 });
