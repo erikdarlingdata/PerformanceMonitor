@@ -111,6 +111,18 @@ services:
       # been planted, so it removes them all and logs an error); keep the volume owner-only. Without the volume a
       # recreated container generates a new one. A new key gives every log event stored after it a new identity
       # (one repeat of each entry still in the log tail, and new fingerprints).
+      # #5366: it also holds password-key, the service's key for the SQL login passwords saved in the store.
+      # Passwords are sealed to its public half, which the store publishes. Only the service can open them.
+      # Back this volume up after the first start and again after every --reset-password-key.
+      # Keep that backup apart from the store's backups.
+      # A store restored without this volume cannot open its saved passwords.
+      # The service reports the key as missing until you restore the volume.
+      # Or run --reset-password-key and enter the passwords again.
+      # The service log has a 'Password key' line with the key's fingerprint at each start.
+      # The Viewer shows the same fingerprint the first time it saves a password to the store.
+      # If the key may have been copied, run --reset-password-key and restart the service.
+      # Then change the SQL logins' passwords and delete password-key.retired from the volume.
+      # Update every Viewer that saves passwords to this store: an older one does not know the key.
       # Run ONE darling service per credentials volume: no `--scale`, and on Kubernetes one replica with
       # `strategy: Recreate`. The start's check of this directory is not locked across processes, so a second
       # service starting beside the first could read planted files between the first one's chmod and its removal.

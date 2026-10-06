@@ -248,7 +248,7 @@ public sealed class ServerIdentityLockLiveTests
 
         var race = await RaceAsync(rig,
             probe => Edit.AddServersAsync(rig.Owner, AddJson(AddressK), probe, ct),
-            probe => Edit.EditServerByNameAsync(rig.Owner, "race-x", "{\"host\":\"" + AddressK + "\"}", probe, true, null, ct),
+            probe => Edit.EditServerByNameAsync(rig.Owner, "race-x", "{\"host\":\"" + AddressK + "\"}", probe, TestKeyRings.Healthy, null, ct),
             ct);
 
         var addStatus = AddStatusOf(race.FirstAnswer);
@@ -283,8 +283,8 @@ public sealed class ServerIdentityLockLiveTests
         await SeedServerAsync(rig.Owner, 7312, "race-y", "race-y.example.test", ct);
 
         var race = await RaceAsync(rig,
-            probe => Edit.EditServerByNameAsync(rig.Owner, "race-x", "{\"host\":\"" + AddressK + "\"}", probe, true, null, ct),
-            probe => Edit.EditServerByNameAsync(rig.Owner, "race-y", "{\"host\":\"" + AddressK + "\"}", probe, true, null, ct),
+            probe => Edit.EditServerByNameAsync(rig.Owner, "race-x", "{\"host\":\"" + AddressK + "\"}", probe, TestKeyRings.Healthy, null, ct),
+            probe => Edit.EditServerByNameAsync(rig.Owner, "race-y", "{\"host\":\"" + AddressK + "\"}", probe, TestKeyRings.Healthy, null, ct),
             ct);
 
         var statuses = new[] { Parse(race.FirstAnswer), Parse(race.SecondAnswer) }.Select(a => a["status"]!.GetValue<string>()).Order().ToArray();
@@ -307,7 +307,7 @@ public sealed class ServerIdentityLockLiveTests
 
         var race = await RaceAsync(rig,
             probe => Edit.AddServersAsync(rig.Owner, AddJson("race-added.example.test"), probe, ct),
-            probe => Edit.EditServerByNameAsync(rig.Owner, "race-x", "{\"host\":\"race-moved.example.test\"}", probe, true, null, ct),
+            probe => Edit.EditServerByNameAsync(rig.Owner, "race-x", "{\"host\":\"race-moved.example.test\"}", probe, TestKeyRings.Healthy, null, ct),
             ct);
 
         Assert.Equal("added", AddStatusOf(race.FirstAnswer));
@@ -330,7 +330,7 @@ public sealed class ServerIdentityLockLiveTests
 
         var parked = new ParkedProbe();
         var add = Task.Run(() => Edit.AddServersAsync(rig.Owner, AddJson("race-added.example.test"), parked.Probe, ct), ct);
-        var edit = Task.Run(() => Edit.EditServerByNameAsync(rig.Owner, "race-x", "{\"host\":\"race-moved.example.test\"}", parked.Probe, true, null, ct), ct);
+        var edit = Task.Run(() => Edit.EditServerByNameAsync(rig.Owner, "race-x", "{\"host\":\"race-moved.example.test\"}", parked.Probe, TestKeyRings.Healthy, null, ct), ct);
         var bodySucceeded = false;
         try
         {
@@ -463,7 +463,7 @@ public sealed class ServerIdentityLockLiveTests
         Func<Task<string>> viewerAdd = async () => (await viewer.AddMonitoredServerAsync(
             ViewerRow(ViewerDataService.ComputeServerId(AddressK, null, false), "viewer-added", AddressK), ct)).Outcome.ToString();
         Func<Task<string>> mcpEdit = async () => Parse(await Edit.EditServerByNameAsync(
-            rig.Owner, "race-x", "{\"host\":\"" + AddressK + "\"}", ReachedAtOnce, true, null, ct))["status"]!.GetValue<string>();
+            rig.Owner, "race-x", "{\"host\":\"" + AddressK + "\"}", ReachedAtOnce, TestKeyRings.Healthy, null, ct))["status"]!.GetValue<string>();
 
         var race = viewerFirst
             ? await QueuedRaceAsync(rig, viewerAdd, mcpEdit, ct)
@@ -705,7 +705,7 @@ public sealed class ServerIdentityLockLiveTests
         };
 
         var changes = movesTheAddress ? "{\"host\":\"" + AddressH + "\"}" : "{\"trust_server_certificate\":true}";
-        var answer = Parse(await Edit.EditServerByNameAsync(rig.Owner, "race-a", changes, probe, true, null, ct));
+        var answer = Parse(await Edit.EditServerByNameAsync(rig.Owner, "race-a", changes, probe, TestKeyRings.Healthy, null, ct));
 
         Assert.Equal("added", AddStatusOf(secondWriter));
         Assert.Equal("collides", answer["status"]!.GetValue<string>());
@@ -763,7 +763,7 @@ public sealed class ServerIdentityLockLiveTests
         Edit.ServerProbe probe = (_, _) => Task.FromResult(ReachedDatabase("X"));
 
         Assert.Equal("added", AddStatusOf(await Edit.AddServersAsync(rig.Owner, AddJson(AddressH), probe, ct)));
-        var edit = Parse(await Edit.EditServerByNameAsync(rig.Owner, AddressH, "{\"trust_server_certificate\":true}", probe, true, null, ct));
+        var edit = Parse(await Edit.EditServerByNameAsync(rig.Owner, AddressH, "{\"trust_server_certificate\":true}", probe, TestKeyRings.Healthy, null, ct));
         Assert.Equal("updated", edit["status"]!.GetValue<string>());
 
         var keys = await StorageKeysAsync(rig.Owner, ct);
