@@ -172,7 +172,12 @@ internal static class DarlingBlockingReader
     /// to the columns Lite's get_blocked_process_reports surfaces. Reads the BASE table (the viewer reads
     /// base here too, for the V7 plan-column safety). The six transaction/batch stamps come back as the server's
     /// local clock and <see cref="MapXeRow"/> converts them to naive UTC with the server's clock (#4793);
-    /// <c>event_time</c> is the XE <c>@timestamp</c> and is already UTC, so it is deliberately left alone. $1 server_id, $2/$3 window (naive UTC), $4 row cap.
+    /// <c>event_time</c> is the XE <c>@timestamp</c> and is already UTC, so it is deliberately left alone. $1 server_id, $2/$3 window (naive UTC), $4 row cap, $5 the <see cref="EventWindowFloor"/>,
+    /// $6 database filter (<c>text[]</c>, NULL = all; #5244).
+    ///
+    /// <para><b>The database predicate is the list form (#5244).</b> <see cref="DatabaseFilter.Clause"/> on <c>database_name</c> at $6,
+    /// so one name and several names are the same statement text; it sits in the WHERE before the ORDER BY / LIMIT, so the cap is the
+    /// top N of the chosen databases.</para>
     ///
     /// <para>The cap is a PARAMETER, not a literal (#3541 A3). It was <c>LIMIT 200</c> while the tool advertised
     /// a caller-supplied <c>limit</c> and applied it with <c>Take(limit)</c>, so a window with 5,000 blocking
@@ -185,8 +190,9 @@ internal static class DarlingBlockingReader
     /// after a capped fetch was the shape of the defect: a page of graph-less rows read as "no XML in the
     /// window" while older rows with reports sat behind the cap.</para>
     /// </summary>
-    public const string BlockedProcessReportsSql = BlockedProcessReportsBody + """
-
+    public static readonly string BlockedProcessReportsSql = $$"""
+        {{BlockedProcessReportsBody}}
+        {{DatabaseFilter.All.Clause("database_name", 6)}}
         ORDER BY event_time DESC
         LIMIT $4
         """;
@@ -195,8 +201,9 @@ internal static class DarlingBlockingReader
     /// <c>get_blocked_process_xml</c> pages over. Same parameters as <see cref="BlockedProcessReportsSql"/>.
     /// The predicate is on the base-table column, not on the projection, so the planner can apply it before
     /// the ORDER BY / LIMIT rather than after materializing every row's XML.</summary>
-    public const string BlockedProcessReportsWithXmlSql = BlockedProcessReportsBody + """
-
+    public static readonly string BlockedProcessReportsWithXmlSql = $$"""
+        {{BlockedProcessReportsBody}}
+        {{DatabaseFilter.All.Clause("database_name", 6)}}
         AND   blocked_process_report_xml IS NOT NULL
         AND   blocked_process_report_xml <> ''
         ORDER BY event_time DESC
@@ -292,10 +299,10 @@ internal static class DarlingBlockingReader
     /// priorities). Its <c>event_time</c> is the collector's own naive-UTC <c>collection_time</c>
     /// (<c>DmvBlockingSnapshotCollector</c> stamps it from <c>context.CollectionTime</c>), while its two
     /// transaction stamps come straight off <c>sys.dm_tran_active_transactions</c> and are server-local — so
-    /// the same conversion applies here (in <see cref="MapDmvRow"/>), on two columns instead of six. Same parameters as
-    /// <see cref="BlockedProcessReportsSql"/>, including the $4 row cap.
+    /// the same conversion applies here (in <see cref="MapDmvRow"/>), on two columns instead of six. $1 server_id, $2/$3 window (naive UTC), $4 row cap, $5 database filter
+    /// (<c>text[]</c>, NULL = all; #5244; the DMV arm has no floor, so the filter takes $5 where the XE read's takes $6).
     /// </summary>
-    public const string DmvBlockingSnapshotsSql = """
+    public static readonly string DmvBlockingSnapshotsSql = $$"""
         SELECT
             event_time,
             database_name,
@@ -321,6 +328,7 @@ internal static class DarlingBlockingReader
         WHERE server_id = $1
         AND   collection_time >= $2
         AND   collection_time <= $3
+        {{DatabaseFilter.All.Clause("database_name", 5)}}
         ORDER BY event_time DESC
         LIMIT $4
         """;
@@ -342,8 +350,18 @@ internal static class DarlingBlockingReader
     /// full page as complete. The merge then re-caps to <paramref name="cap"/>, so a result of exactly
     /// <paramref name="cap"/> rows means "at least this many" and a shorter one means "all of them".</para>
     /// </summary>
+    public static Task<List<BlockedProcessReadRow>> GetRecentBlockedProcessReportsAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int cap, CancellationToken cancellationToken = default) =>
+        GetRecentBlockedProcessReportsAsync(postgres, serverId, startUtc, endUtc, cap, DatabaseFilter.All, cancellationToken);
+
+    /// <summary>
+    /// The same read over a SET of databases (#5244): <paramref name="databases"/> empty (<see cref="DatabaseFilter.All"/>) is every
+    /// database, otherwise both arms (the XE reports AND the DMV fallback) keep only the named databases' rows, so the cap, the
+    /// DMV arm's <c>cap + XE rows</c> over-fetch and the merge all run over the chosen databases.
+    /// </summary>
     public static async Task<List<BlockedProcessReadRow>> GetRecentBlockedProcessReportsAsync(
-        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int cap, CancellationToken cancellationToken = default)
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int cap, DatabaseFilter databases,
+        CancellationToken cancellationToken = default)
     {
         var items = new List<BlockedProcessReadRow>();
         var dmvItems = new List<BlockedProcessReadRow>();
@@ -352,7 +370,7 @@ internal static class DarlingBlockingReader
         var clock = await DarlingServerClockReader.ReadAsync(postgres, serverId, cancellationToken);
         await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
 
-        await ReadXeRowsAsync(connection, BlockedProcessReportsSql, serverId, startUtc, endUtc, cap, clock, items, cancellationToken);
+        await ReadXeRowsAsync(connection, BlockedProcessReportsSql, serverId, startUtc, endUtc, cap, databases, clock, items, cancellationToken);
 
         await using (var command = new NpgsqlCommand(DmvBlockingSnapshotsSql, connection))
         {
@@ -361,6 +379,7 @@ internal static class DarlingBlockingReader
             /* cap + the XE rows in hand: one DMV row can hide behind each XE row in the merge (see the
                method remarks), so this is what keeps a surplus observable after the dedupe. */
             DarlingMcpReadParameters.AddInt(command, cap + items.Count);
+            command.Parameters.Add(databases.Parameter());
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             while (await reader.ReadAsync(cancellationToken))
             {
@@ -381,20 +400,27 @@ internal static class DarlingBlockingReader
     /// it in would only add rows the caller has to discard, and discarding after a cap is the defect this
     /// exists to remove. Callers detecting truncation pass <c>limit + 1</c>.
     /// </summary>
+    public static Task<List<BlockedProcessReadRow>> GetRecentBlockedProcessReportsWithXmlAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int cap, CancellationToken cancellationToken = default) =>
+        GetRecentBlockedProcessReportsWithXmlAsync(postgres, serverId, startUtc, endUtc, cap, DatabaseFilter.All, cancellationToken);
+
+    /// <summary>The same XE-only read over a SET of databases (#5244): <see cref="DatabaseFilter.All"/> is every database, otherwise
+    /// only the named databases' reports are the population the cap runs over.</summary>
     public static async Task<List<BlockedProcessReadRow>> GetRecentBlockedProcessReportsWithXmlAsync(
-        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int cap, CancellationToken cancellationToken = default)
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int cap, DatabaseFilter databases,
+        CancellationToken cancellationToken = default)
     {
         var items = new List<BlockedProcessReadRow>();
         var clock = await DarlingServerClockReader.ReadAsync(postgres, serverId, cancellationToken);
         await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
-        await ReadXeRowsAsync(connection, BlockedProcessReportsWithXmlSql, serverId, startUtc, endUtc, cap, clock, items, cancellationToken);
+        await ReadXeRowsAsync(connection, BlockedProcessReportsWithXmlSql, serverId, startUtc, endUtc, cap, databases, clock, items, cancellationToken);
         return items;
     }
 
     /// <summary>Runs one of the two XE consts (same projection, same parameters) and appends its rows. One
     /// mapper for both so the with-XML variant cannot drift a column from the unfiltered one.</summary>
     private static async Task ReadXeRowsAsync(
-        NpgsqlConnection connection, string sql, int serverId, DateTime startUtc, DateTime endUtc, int cap,
+        NpgsqlConnection connection, string sql, int serverId, DateTime startUtc, DateTime endUtc, int cap, DatabaseFilter databases,
         ServerClock clock, List<BlockedProcessReadRow> items, CancellationToken cancellationToken)
     {
         await using var command = new NpgsqlCommand(sql, connection);
@@ -402,6 +428,7 @@ internal static class DarlingBlockingReader
         DarlingMcpReadParameters.AddWindow(command, serverId, startUtc, endUtc);
         DarlingMcpReadParameters.AddInt(command, cap);
         DarlingMcpReadParameters.AddTimestamp(command, EventWindowFloor.For(startUtc));
+        command.Parameters.Add(databases.Parameter());
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {

@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using ModelContextProtocol.Server;
 using PerformanceMonitorLite.Analysis;
 using PerformanceMonitorLite.Services;
@@ -203,7 +204,8 @@ public sealed class McpBlockingTools
         [Description("Hours of history. Default 24.")] int hours_back = 24,
         [Description("Maximum rows to return, newest first. Default 15. This is what bounds the page — read truncated to know whether the window held more.")] int limit = 15,
         [Description("Return each row's full blocked_sql_text/blocking_sql_text instead of a 150-character preview. Default false.")] bool full_text = false,
-        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        [Description("Limit to one database. Omit for all databases.")] string? database_name = null)
     {
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
         if (error != null) return error;
@@ -215,6 +217,11 @@ public sealed class McpBlockingTools
 
             var limitError = McpHelpers.ValidateTop(limit);
             if (limitError != null) return limitError;
+
+            /* #5244: database_name appended LAST (H1), as get_blocked_process_xml has it: the one name rides the reader's
+               database list into the SQL (both arms, the XE reports and the DMV fallback) before the limit + 1 fetch, so
+               limit counts the CHOSEN database's reports. A blank or whitespace name is "no filter". */
+            var database = string.IsNullOrWhiteSpace(database_name) ? null : database_name;
 
             /* The stamps below are THIS server's local wall clock in the store, so putting them in the
                naive-UTC frame every other field on this payload uses needs THIS server's clock, not the
@@ -229,11 +236,11 @@ public sealed class McpBlockingTools
             /* #3541 A3: the caller's limit + 1 as the fetch, the extra row as the OBSERVED truncation
                signal. The reader capped at 200 newest-first whatever `limit` said, so a 24-hour request on a
                server blocking steadily was answered from its newest few minutes with nothing saying so. */
-            var rows = await dataService.GetRecentBlockedProcessReportsAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd, limit: limit + 1);
+            var rows = await dataService.GetRecentBlockedProcessReportsAsync(resolved.ServerId, hours_back, databaseNames: database == null ? null : new[] { database }, asOfUtc: windowEnd, limit: limit + 1);
             if (rows.Count == 0)
             {
                 return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "blocked_process_report")
-                    ?? McpHelpers.Status("empty", "No blocked process reports found in the specified time range.",
+                    ?? McpHelpers.Status("empty", $"No blocked process reports found in the specified time range{ForChosenDatabase(database)}.",
                         (await McpQueryTools.EventWindowNoticeAsync(
                             () => dataService.GetQueryWindowFloorAsync(QueryWindowRelation.BlockedProcessReports, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd),
                             null, windowEnd.AddHours(-hours_back), windowEnd, "blocked_process_report", emptyAnswer: true)).AsHints());
@@ -304,6 +311,8 @@ public sealed class McpBlockingTools
                 effective_start = notice.EffectiveStart,
                 window_truncated = notice.WindowTruncated,
                 truncation_note = notice.TruncationNote,
+                /* #5244: the database the page is limited to, null for all; after the three notice keys, as on Darling's twin. */
+                database_name = database,
                 /* #3541 A3: the page described as a page, on the names Darling's get_blocking uses. Newest-first
                    makes the page a contiguous slice of the window's tail, so oldest_returned_event_time IS the
                    reach of this read — the #3287 figure, and the field a caller has to read before believing
@@ -330,7 +339,8 @@ public sealed class McpBlockingTools
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history. Default 24.")] int hours_back = 24,
         [Description("Maximum reports WITH XML to return, newest first. Default 5. Read truncated to know whether the window held more.")] int limit = 5,
-        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        [Description("Limit to one database. Omit for all databases.")] string? database_name = null)
     {
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
         if (error != null) return error;
@@ -347,7 +357,12 @@ public sealed class McpBlockingTools
                fetch is the caller's limit + 1. It used to Where() the merged 200-row page for XML in C#, so a
                caller asking for five reports had at most the newest 200 merged rows to find them in, DMV
                rows included, and nothing said so. */
-            var candidates = await dataService.GetRecentBlockedProcessReportsAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd, limit: limit + 1, xmlOnly: true);
+            /* #5244: database_name appended LAST (H1). The reader already takes a database list (the Blocking tab's
+               filter), so the one name rides it into the SQL before the limit + 1 fetch: limit counts the CHOSEN
+               database's reports, not the server's. A blank is "no filter". */
+            var database = string.IsNullOrWhiteSpace(database_name) ? null : database_name;
+            var candidates = await dataService.GetRecentBlockedProcessReportsAsync(
+                resolved.ServerId, hours_back, databaseNames: database == null ? null : new[] { database }, asOfUtc: windowEnd, limit: limit + 1, xmlOnly: true);
             var truncated = candidates.Count > limit;
             var withXml = truncated ? candidates.Take(limit).ToList() : candidates;
             if (withXml.Count == 0)
@@ -356,7 +371,7 @@ public sealed class McpBlockingTools
                     /* #2546: same order and same reason as get_deadlocks — a blocked-process capture the
                        collector cannot read is indistinguishable here from a server that never blocked. */
                     ?? await McpRuntimePrecondition.StatusAsync(dataService, resolved.ServerId, resolved.ServerName, "blocked_process_report")
-                    ?? McpHelpers.Status("empty", "No blocked process report XML available in the specified time range.",
+                    ?? McpHelpers.Status("empty", $"No blocked process report XML available in the specified time range{ForChosenDatabase(database)}.",
                         (await McpQueryTools.EventWindowNoticeAsync(
                             () => dataService.GetQueryWindowFloorAsync(QueryWindowRelation.BlockedProcessReports, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, includeAlsoCovered: false),
                             null, windowEnd.AddHours(-hours_back), windowEnd, "blocked_process_report", emptyAnswer: true)).AsHints());
@@ -391,6 +406,8 @@ public sealed class McpBlockingTools
                 effective_start = notice.EffectiveStart,
                 window_truncated = notice.WindowTruncated,
                 truncation_note = notice.TruncationNote,
+                /* #5244: the database the page is limited to, null for all; after the three notice keys, as on Darling's twin. */
+                database_name = database,
                 /* #3541 A3: the page bounds, on get_blocked_process_reports' names. truncated means "more
                    reports WITH XML in the window than limit". */
                 reports_returned = withXml.Count,
@@ -407,13 +424,14 @@ public sealed class McpBlockingTools
         }
     }
 
-    [McpServerTool(Name = "get_blocking_trend"), Description("Gets a time-series of blocking event counts over time. Useful for identifying patterns (e.g., blocking spikes during batch jobs) or confirming whether blocking is a new, worsening, or resolved issue.")]
+    [McpServerTool(Name = "get_blocking_trend"), Description("Gets a time-series of blocking event counts over time. Useful for identifying patterns (e.g., blocking spikes during batch jobs) or confirming whether blocking is a new, worsening, or resolved issue. The source key names the collector that answered, blocked-process-report or DMV snapshot; the DMV snapshot is used only when the blocked process reports have no rows for the chosen databases, so source can differ between filters.")]
     public static async Task<string> GetBlockingTrend(
         LocalDataService dataService,
         ServerManager serverManager,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history. Default 24.")] int hours_back = 24,
-        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        [Description("Limit to one database. Omit for all databases.")] string? database_name = null)
     {
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
         if (error != null) return error;
@@ -422,6 +440,12 @@ public sealed class McpBlockingTools
         {
             var hoursError = McpHelpers.ValidateWindow(hours_back, as_of, out var anchorEnd);
             if (hoursError != null) return hoursError;
+
+            /* #5244: database_name appended LAST (H1). GetBlockingTrendAsync already takes a database list on both
+               arms (the Blocking tab's filter), and the DMV-snapshot arm still fills in only where the FILTERED report
+               arm has no rows. The capture counts behind an empty answer stay the server's own: a collector looks at
+               every database. A blank is "no filter". */
+            var database = string.IsNullOrWhiteSpace(database_name) ? null : database_name;
 
             /* One instant for BOTH reads. Resolving now separately in the trend and the capture count
                lets a row arrive between them, and the two answers exist to be compared -- Darling's
@@ -433,7 +457,7 @@ public sealed class McpBlockingTools
                that end once (hours_back gives the length), both reads take their window from it, and one
                value still means one instant. */
             var points = await dataService.GetBlockingTrendAsync(
-                resolved.ServerId, hours_back, asOfUtc: anchorEnd);
+                resolved.ServerId, hours_back, databaseNames: database == null ? null : new[] { database }, asOfUtc: anchorEnd);
 
             if (points.Count == 0)
             {
@@ -453,9 +477,10 @@ public sealed class McpBlockingTools
 
                 var captures = await dataService.GetBlockingCaptureCountsAsync(
                     resolved.ServerId, hours_back, asOfUtc: anchorEnd);
-                return await EmptyTrend(
+                return WithNullSource(await EmptyTrend(
                     "blocking", resolved.ServerName, hours_back, captures,
-                    () => dataService.HasAnyBlockingCollectorRunAsync(resolved.ServerId));
+                    () => dataService.HasAnyBlockingCollectorRunAsync(resolved.ServerId),
+                    database));
             }
 
             var result = points.Select(p => new { time = p.Time.ToString("o"), count = p.Count });
@@ -464,6 +489,10 @@ public sealed class McpBlockingTools
             {
                 server = resolved.ServerName,
                 hours_back,
+                /* #5244: the database the trend is limited to (null for all), and which collector answered: the blocked-process
+                   reports, or the DMV snapshot when those have no rows for the chosen databases. One source per answer. */
+                database_name = database,
+                source = points[0].Source,
                 trend = result
             }, McpHelpers.JsonOptions);
         }
@@ -596,6 +625,18 @@ public sealed class McpBlockingTools
     }
 
     /// <summary>
+    /// #5244: the empty answers of get_blocking_trend carry <c>source: null</c> -- the same key a non-empty answer names its collector in,
+    /// and the value get_blocking_stats gives when its blocking series has no rows -- so a caller reads one shape for "which collector
+    /// answered" whether or not any collector did. Appended to the status envelope; the deadlock trend shares EmptyTrend and does not call this.
+    /// </summary>
+    private static string WithNullSource(string statusAnswer)
+    {
+        var node = JsonNode.Parse(statusAnswer)!.AsObject();
+        node["source"] = null;
+        return node.ToJsonString(McpHelpers.JsonOptions);
+    }
+
+    /// <summary>
     /// The empty answer both trends give, and the whole point of #2485: <c>trend: []</c> is the same bytes
     /// on a server that had no blocking and on one that collected nothing, and an agent holding only the
     /// JSON cannot tell a clean bill of health from a hole in coverage.
@@ -617,7 +658,8 @@ public sealed class McpBlockingTools
         string serverName,
         int hoursBack,
         List<CollectorCaptureCount> captures,
-        Func<Task<bool>> hasEverCapturedAsync)
+        Func<Task<bool>> hasEverCapturedAsync,
+        string? database = null)
     {
         var captureCount = captures.Sum(c => c.Runs);
         var hints = new
@@ -637,7 +679,7 @@ public sealed class McpBlockingTools
         if (captureCount > 0)
             return McpHelpers.Status(
                 "empty",
-                $"No {subject} was recorded for {serverName} in the last {hoursBack} hour(s). {captureCount} collector run(s) DID execute over this window, so this is a genuine all-clear rather than missing data — see hints.captures for which collectors ran and when.",
+                $"No {subject} was recorded for {serverName}{ForChosenDatabase(database)} in the last {hoursBack} hour(s). {captureCount} collector run(s) DID execute over this window, so this is a genuine all-clear rather than missing data — see hints.captures for which collectors ran and when.",
                 hints);
 
         var everCaptured = await hasEverCapturedAsync();
@@ -648,4 +690,13 @@ public sealed class McpBlockingTools
                 : $"No {subject} collector runs have EVER been recorded for {serverName}, so this is NOT an all-clear — there is nothing to read. Check that collection is running for this server before concluding it was quiet.",
             hints);
     }
+
+    /// <summary>
+    /// What a database selection adds to an empty answer's sentence (#5244): nothing for every database, " for the database X"
+    /// for one, built by <see cref="McpDatabaseSelection.ForChosen"/> so it says what Darling's
+    /// <c>DarlingMcpBlockingTools.ForChosenDatabases</c> says for one name and for two or more. An empty answer under a selection is
+    /// about the CHOSEN databases only and says nothing about the rest.
+    /// </summary>
+    internal static string ForChosenDatabase(string? database) =>
+        McpDatabaseSelection.ForChosen(database == null ? null : new[] { database });
 }
