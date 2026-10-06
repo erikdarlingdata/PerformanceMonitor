@@ -634,11 +634,15 @@ public sealed class DarlingMcpDataToolsSurfaceAndSqlTests
            base table's inline query_text is NULL on every row written since. ("FROM v_query_stats" does not
            contain "FROM query_stats", so these two assertions name two different relations.) */
         var rankedRead = sql.IndexOf("FROM query_stats", StringComparison.Ordinal);
-        var lateral = sql.IndexOf("LEFT JOIN LATERAL", StringComparison.Ordinal);
-        var textRead = sql.IndexOf("FROM v_query_stats", StringComparison.Ordinal);
+        var lookupAt = sql.IndexOf("latest_text AS MATERIALIZED (", StringComparison.Ordinal);
+        var dimRead = sql.IndexOf("query_text_dim", StringComparison.Ordinal);
         Assert.True(rankedRead >= 0, "the ranked CTE must aggregate the base query_stats table");
-        Assert.True(textRead > lateral && lateral > rankedRead,
-            "the base-table aggregate comes first; the resolving view is read by the latest-text LATERAL");
+        /* #5309: the one latest-text lookup resolves the dimension itself (what v_query_stats' COALESCE does) for
+           the newest row only, instead of a per-row LATERAL over the view. */
+        Assert.DoesNotContain("LATERAL", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("FROM v_query_stats", sql, StringComparison.Ordinal);
+        Assert.True(dimRead > lookupAt && lookupAt > rankedRead,
+            "the base-table aggregate comes first; the dimension is read by the one latest-text lookup");
 
         Assert.Contains("SUM(delta_worker_time)", sql, StringComparison.Ordinal);
         Assert.Contains("SUM(delta_elapsed_time)", sql, StringComparison.Ordinal);
@@ -658,7 +662,7 @@ public sealed class DarlingMcpDataToolsSurfaceAndSqlTests
         Assert.Contains("FROM procedure_stats", sql, StringComparison.Ordinal);
         Assert.Contains("GROUP BY database_name, schema_name, object_name, object_type", sql, StringComparison.Ordinal);
         Assert.Contains("$5::text IS NULL OR database_name = $5", sql, StringComparison.Ordinal);
-        Assert.Contains("SUM(delta_worker_time) DESC", sql, StringComparison.Ordinal);
+        Assert.Contains("SUM(delta_worker_time) AS rank_metric", TopRankings.Apply(sql, TopRanking.Cpu, hourly: false), StringComparison.Ordinal);
     }
 
     /* #3523: every by-CPU read RANKED by summed elapsed time — on a wait-bound server the real CPU
@@ -672,13 +676,16 @@ public sealed class DarlingMcpDataToolsSurfaceAndSqlTests
     [InlineData(nameof(DarlingDataReader.TopProceduresSql))]
     public void ByCpuReads_RankByWorkerTime_NeverElapsed(string sqlName)
     {
-        var sql = SqlByName(sqlName);
-        Assert.Contains("ORDER BY SUM(delta_worker_time) DESC", sql, StringComparison.Ordinal);
+        /* #5226: the const spells the ranking as the anchor; the CPU default is the const expanded to worker time. */
+        var sql = TopRankings.Apply(SqlByName(sqlName), TopRanking.Cpu, hourly: false);
+        Assert.Contains("SUM(delta_worker_time) AS rank_metric", sql, StringComparison.Ordinal);
+        Assert.Contains("ORDER BY rank_metric DESC NULLS LAST, rank_cpu DESC NULLS LAST", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("SUM(delta_elapsed_time) AS rank_metric", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("SUM(delta_elapsed_time) DESC", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("total_elapsed_us DESC", sql, StringComparison.Ordinal);
         if (sqlName != nameof(DarlingDataReader.TopProceduresSql))
         {
-            Assert.Contains("ORDER BY r.total_cpu_us DESC", sql, StringComparison.Ordinal);
+            Assert.Contains("ORDER BY r.rank_metric DESC NULLS LAST, r.rank_cpu DESC NULLS LAST", sql, StringComparison.Ordinal);
         }
     }
 
@@ -707,7 +714,7 @@ public sealed class DarlingMcpDataToolsSurfaceAndSqlTests
         var rankedCte = sql.IndexOf("ranked AS", StringComparison.Ordinal);
         var dedupSurvivor = sql.IndexOf("WHERE rn = 1", rankedCte, StringComparison.Ordinal);
         var moduleFilter = sql.IndexOf("$7::text IS NULL OR module_name = $7", StringComparison.Ordinal);
-        var firstLimit = sql.IndexOf("LIMIT $4 + 5", StringComparison.Ordinal);
+        var firstLimit = sql.IndexOf("LIMIT $8", StringComparison.Ordinal);   /* #5313: the round's candidate limit, no longer top + 5 */
 
         Assert.True(dedupSurvivor > rankedCte && moduleFilter > dedupSurvivor,
             "module_name must filter only the latest cumulative interval snapshots");
