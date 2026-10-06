@@ -188,6 +188,9 @@ public sealed class McpPlanTools
 
         try
         {
+            // #4348: the caller's XML has no stored-plan read to filter it, so the statement filter runs here, before
+            // the analysis lifts parameter values and statement text out of it into fields the JSON sweep cannot pair.
+            plan_xml = SensitiveStatements.Xml(plan_xml) ?? SensitiveStatements.PlaceholderText;
             return McpPlanAnalysisFormatter.BuildAnalysisResult(plan_xml, null, "xml", null, App.AnalyzerConfig, cancellationToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
