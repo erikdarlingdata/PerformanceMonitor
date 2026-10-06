@@ -1994,8 +1994,8 @@ public class EntraDeviceCodeTests
                 ReadOnlyIntent = true,
             };
             servers.AddServer(server);
-            var probe = new DatabaseOpenProbe(
-                new DuckDbInitializer(Path.Combine(tempDir, "test.duckdb")), servers, new ScheduleManager(configDir));
+            using var duckDb = new DuckDbInitializer(Path.Combine(tempDir, "test.duckdb"));
+            var probe = new DatabaseOpenProbe(duckDb, servers, new ScheduleManager(configDir));
 
             var builder = new SqlConnectionStringBuilder();
             ServerConnection.ApplyAuthentication(builder, AuthenticationTypes.EntraDeviceCode, null, null, null, null);
@@ -2095,6 +2095,7 @@ public class EntraDeviceCodeTests
     {
         private readonly string _tempDir = Path.Combine(Path.GetTempPath(), "LiteTests_" + Guid.NewGuid().ToString("N")[..8]);
         private readonly TcpListener _listener = new(IPAddress.Loopback, 0);
+        private readonly DuckDbInitializer _duckDb;
 
         public SilentServerSetup(string authenticationType)
         {
@@ -2112,8 +2113,8 @@ public class EntraDeviceCodeTests
                 ReadOnlyIntent = true,
             };
             Servers.AddServer(Server);
-            Probe = new DatabaseOpenProbe(
-                new DuckDbInitializer(Path.Combine(_tempDir, "test.duckdb")), Servers, new ScheduleManager(configDir));
+            _duckDb = new DuckDbInitializer(Path.Combine(_tempDir, "test.duckdb"));
+            Probe = new DatabaseOpenProbe(_duckDb, Servers, new ScheduleManager(configDir));
         }
 
         public ServerManager Servers { get; }
@@ -2128,6 +2129,7 @@ public class EntraDeviceCodeTests
         public void Dispose()
         {
             _listener.Stop();
+            _duckDb.Dispose();
 
             try
             {

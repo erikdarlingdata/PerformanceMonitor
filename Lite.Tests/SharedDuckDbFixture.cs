@@ -123,6 +123,9 @@ AND   table_name NOT IN ('schema_version', 'analysis_schema_version', 'store_ide
 
     public ValueTask DisposeAsync()
     {
+        /* Close the sentinel first (#5208): deleting the folder alone leaves the database open for the life of the test
+           process, one set of threads and handles per class. */
+        DuckDb.Dispose();
         try
         {
             if (Directory.Exists(_tempDir))

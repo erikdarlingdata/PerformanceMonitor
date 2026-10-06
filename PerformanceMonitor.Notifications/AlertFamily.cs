@@ -120,6 +120,9 @@ public static class AlertFamily
         ["Custom Alert Rules Unhealthy"] = SelfMonitor,
         ["Stale Mute Rules"] = SelfMonitor,
         ["Web TLS Certificate Expiring"] = SelfMonitor,
+        /* #5288: the MCP endpoint's twin of the web certificate alert, its own metric so a mute or route for
+           one never covers the other. */
+        ["MCP TLS Certificate Expiring"] = SelfMonitor,
         /* #4732: collection skipped a share of the slots that came due over the last hour. */
         ["Collection Falling Behind"] = SelfMonitor,
         /* #4215: a managed store's darling-managed.conf fell back to the last-good copy, is

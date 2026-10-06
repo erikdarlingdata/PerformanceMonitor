@@ -171,6 +171,80 @@ public sealed class DiagnosticsBundleAliasTests
     }
 
     [Fact]
+    public void FirstLabelWords_AreTheServiceLogsListenerAndProxyWords_AndAreNotKeptNames()
+    {
+        Assert.Equal(new[] { "mcp", "web", "dashboard", "proxy" }, BundleAliaser.KeptFirstLabels);
+        foreach (var word in BundleAliaser.KeptFirstLabels)
+        {
+            Assert.True(BundleAliaser.IsKeptFirstLabel(word.ToUpperInvariant()));
+            Assert.DoesNotContain(word, BundleAliaser.KeptNames);
+            Assert.False(BundleAliaser.IsKept(word));
+        }
+    }
+
+    /* The service log says "MCP server", "Web dashboard", "the dashboard", "reverse proxy" and mcp.network.allowFrom. A
+       configured host name whose first label is one of those words is aliased whole, with its domain, and the log's
+       own words stay. */
+    [Theory]
+    [InlineData("mcp.corp.example.test", "MCP server is LAN-exposed WITHOUT TLS, and mcp.network.allowFrom bounds only who can route to the port")]
+    [InlineData("web.corp.example.test", "Web dashboard is LAN-exposed WITHOUT TLS, and web.network.allowFrom bounds only who can route to the port")]
+    [InlineData("dashboard.corp.example.test", "The dashboard stops serving when it lapses")]
+    [InlineData("proxy.corp.example.test", "Front the port with a TLS-terminating reverse proxy")]
+    public void AHostNameThatStartsWithAListenerWord_IsAliasedWhole_AndTheServiceLogsOwnWordsSurvive(string hostName, string productText)
+    {
+        var a = new BundleAliaser();
+        a.AddName(AliasKind.Host, hostName);
+
+        Assert.Equal(productText + "; clients connect to host-1", a.Alias(productText + "; clients connect to " + hostName));
+        Assert.Equal("domain-1", a.Alias("corp.example.test"));
+    }
+
+    /* The words are skipped only as a host name's first label. A server, a database or a host that is literally called
+       one of them is a name like any other and is aliased, even though that also rewrites the same word in the log. */
+    [Theory]
+    [InlineData("Database", "dashboard", "db-1")]
+    [InlineData("Server", "web", "server-1")]
+    [InlineData("Server", "mcp", "server-1")]
+    [InlineData("Host", "proxy", "host-1")]
+    public void ANameThatIsAListenerWordOnItsOwn_IsAliased(string kind, string name, string alias)
+    {
+        var a = new BundleAliaser();
+        a.AddName(Enum.Parse<AliasKind>(kind), name);
+
+        Assert.Equal("the " + alias + " is down", a.Alias("the " + name + " is down"));
+    }
+
+    [Fact]
+    public void ADatabaseNamedDashboard_IsAliasedAcrossTheBundle()
+    {
+        var a = new BundleAliaser();
+        var tree = JsonNode.Parse("""{"r":[{"database_name":"dashboard","note":"the dashboard database is large"}]}""");
+        a.Harvest(tree);
+        var text = a.AliasTree(tree)!.ToJsonString();
+
+        Assert.DoesNotContain("dashboard", text, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("the db-1 database is large", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AMonitoredServerNamedWeb_IsAliasedByNameAndById()
+    {
+        var a = new BundleAliaser();
+        Assert.Equal("server-1", a.AddServer(3, "web"));
+
+        Assert.Equal("server-1", a.AliasForServerId(3));
+        Assert.Equal("server-1 is down", a.Alias("web is down"));
+    }
+
+    [Fact]
+    public void AQuotedAccountWhoseDomainIsAListenerWord_HasBothHalvesAliased()
+    {
+        var a = new BundleAliaser();
+
+        Assert.Equal(@"Login failed for user 'domain-1\login-1'.", a.Alias(@"Login failed for user 'WEB\svc_zeta'."));
+    }
+
+    [Fact]
     public void ProductRoles_AreKept_AndOtherRolesAreAliased()
     {
         var a = new BundleAliaser();

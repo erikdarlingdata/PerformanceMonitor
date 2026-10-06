@@ -55,6 +55,8 @@
     <None Include="Fixtures\SystemHealth\real\*.xml" CopyToOutputDirectory="PreserveNewest" />
     <!-- Deadlock graph parser/layout golden samples (real sql2025 captures + synthetic edge cases). -->
     <None Include="Fixtures\Deadlocks\*.xml" CopyToOutputDirectory="PreserveNewest" />
+    <!-- Statement-filter XML walk fixtures (#4348): plan XML carrying canary values. -->
+    <None Include="Fixtures\StatementScrub\*.xml" CopyToOutputDirectory="PreserveNewest" />
     <None Include="Fixtures\FinOpsInventory\golden.json" CopyToOutputDirectory="PreserveNewest" />
     <None Include="Fixtures\FinOpsRecommendations\golden.json" CopyToOutputDirectory="PreserveNewest" />
     <None Include="Fixtures\FinOpsApplicationConnections\golden.json" CopyToOutputDirectory="PreserveNewest" />

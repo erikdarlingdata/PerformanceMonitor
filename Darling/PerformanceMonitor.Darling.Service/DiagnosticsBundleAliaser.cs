@@ -57,13 +57,27 @@ internal sealed class BundleAliaser
 
     /// <summary>
     /// Names that identify nothing and appear in product text: the system databases, the product's own roles, and
-    /// the operating-system accounts every install shares. Pinned by a test.
+    /// the operating-system accounts every install shares. A name in this set is never aliased, wherever it stands.
+    /// Pinned by a test.
     /// </summary>
     internal static readonly string[] KeptNames =
     {
         "master", "model", "msdb", "tempdb", "distribution", "rdsadmin", "postgres", "template0", "template1",
         "darling", "root", "localhost",
     };
+
+    /// <summary>
+    /// The words the service log uses for its own listeners and for a reverse proxy (<c>mcp</c>, <c>web</c> and
+    /// <c>dashboard</c>: "MCP server", "Web dashboard", <c>mcp.network.allowFrom</c>; <c>proxy</c>: "reverse proxy"),
+    /// skipped only as the FIRST LABEL of a host name. A configured host name that starts with one of them
+    /// (<c>mcp.corp.example</c> as <c>mcp.network.hostName</c>, <c>https://web.corp.example</c> as
+    /// <c>web.publicBaseUrl</c>, <c>http://proxy.corp.example:3128</c> as a webhook proxy) is aliased whole, with its
+    /// domain, but its first label is not registered on its own, so the log's own words are not rewritten as
+    /// <c>host-N</c> (#5288). The words are deliberately not in <see cref="KeptNames"/>: a server, a database or an
+    /// account domain that is literally called <c>web</c> is a name like any other and is aliased, even though that
+    /// also rewrites the log's "Web" words. Privacy wins over readability here. Pinned by a test.
+    /// </summary>
+    internal static readonly string[] KeptFirstLabels = { "mcp", "web", "dashboard", "proxy" };
 
     /// <summary>The product's own store roles. A <c>role_name</c> in this set is kept; any other role name is a login and is aliased.</summary>
     internal static readonly string[] ProductRoles = { "owner", "admin", "viewer", "mcp" };
@@ -92,6 +106,8 @@ internal sealed class BundleAliaser
 
     private static readonly HashSet<string> s_kept = new(KeptNames, StringComparer.OrdinalIgnoreCase);
 
+    private static readonly HashSet<string> s_keptFirstLabels = new(KeptFirstLabels, StringComparer.OrdinalIgnoreCase);
+
     private const string Octet = @"(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)";
     private const string Ipv4 = Octet + @"(?:\." + Octet + "){3}";
     /* An IPv4 address written inside an IPv6 one (::ffff:203.0.113.77, 64:ff9b::203.0.113.77, 0:0:0:0:0:ffff:203.0.113.77).
@@ -117,6 +133,9 @@ internal sealed class BundleAliaser
 
     /// <summary>True when <paramref name="name"/> is one of the names that are never aliased.</summary>
     internal static bool IsKept(string name) => s_kept.Contains(name.Trim());
+
+    /// <summary>True when <paramref name="label"/> is one of the <see cref="KeptFirstLabels"/>: skipped as a host name's first label, and nowhere else.</summary>
+    internal static bool IsKeptFirstLabel(string label) => s_keptFirstLabels.Contains(label.Trim());
 
     /// <summary>Adds a secret value the verifier must never find. Empty text is ignored.</summary>
     internal void AddSecret(string? secret)
@@ -639,7 +658,9 @@ internal sealed class BundleAliaser
         {
             var firstLabel = baseName[..dot];
             var suffix = baseName[(dot + 1)..];
-            var alias = IsKept(firstLabel) ? null : AliasOf(firstLabel, kind);
+            /* A kept name, or a product word that is only skipped as a first label (KeptFirstLabels), is not registered on
+               its own: the whole host name takes the alias, so the product's own word stays readable elsewhere. */
+            var alias = (IsKept(firstLabel) || IsKeptFirstLabel(firstLabel)) ? null : AliasOf(firstLabel, kind);
             if (alias is not null)
             {
                 Map(baseName, alias);

@@ -31,6 +31,7 @@ public sealed class ArchiveCompactionSwapTests : IDisposable
 {
     private readonly string _tempDir;
     private readonly string _archiveDir;
+    private readonly List<DuckDbInitializer> _initializers = [];
 
     public ArchiveCompactionSwapTests()
     {
@@ -42,6 +43,11 @@ public sealed class ArchiveCompactionSwapTests : IDisposable
 
     public void Dispose()
     {
+        foreach (var initializer in _initializers)
+        {
+            initializer.Dispose();
+        }
+
         try
         {
             if (Directory.Exists(_tempDir))
@@ -55,8 +61,12 @@ public sealed class ArchiveCompactionSwapTests : IDisposable
 
     private string P(string fileName) => Path.Combine(_archiveDir, fileName).Replace("\\", "/");
 
-    private ArchiveService NewService() =>
-        new(new DuckDbInitializer(Path.Combine(_tempDir, "test.duckdb")), _archiveDir);
+    private ArchiveService NewService()
+    {
+        var initializer = new DuckDbInitializer(Path.Combine(_tempDir, "test.duckdb"));
+        _initializers.Add(initializer);
+        return new(initializer, _archiveDir);
+    }
 
     private static void Exec(string sql)
     {

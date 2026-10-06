@@ -337,6 +337,300 @@ public sealed class DarlingConfigTests
         Assert.True(config.Mcp.Network.IsConfigured);
     }
 
+    /// <summary>
+    /// #5288, "no new setting = unchanged", the allowFrom half: a darling.json that spells allowFrom as ONE plain
+    /// string, exactly as every existing config does, loads that string untouched on both listeners (the
+    /// converter reshapes an ARRAY only), parses to the one-entry list <c>IPNetwork</c> gave, and resolves the
+    /// same bind. The tls and hostName halves (#5288): neither key is in the file, so both read null, the MCP
+    /// listener's TLS shape is "not configured" (plain HTTP, as today), and the host-name normalizer has nothing
+    /// to say about an absent name.
+    /// </summary>
+    [Fact]
+    public void NoNewSettings_McpTlsAndHostNameNull_AllowFromStringAsToday()
+    {
+        var config = DarlingConfig.Parse(@"{
+            ""postgres"": { ""managed"": true },
+            ""mcp"": { ""enabled"": true, ""network"": { ""listen"": ""192.168.1.205"", ""allowFrom"": ""192.168.1.0/24"", ""token"": ""dev-token"" } },
+            ""web"": { ""enabled"": true, ""network"": { ""listen"": ""192.168.1.205"", ""allowFrom"": ""192.168.1.0/24"", ""token"": ""dev-token"" } },
+            ""servers"": [ { ""host"": ""SQL2022"" } ]
+        }");
+
+        Assert.Equal("192.168.1.0/24", config.Mcp.Network!.AllowFrom);
+        Assert.Equal("192.168.1.0/24", config.Web.Network!.AllowFrom);
+
+        var asList = PerformanceMonitor.Darling.Service.Hosting.CidrAllowList.Parse(config.Mcp.Network.AllowFrom!);
+        Assert.Equal(System.Net.IPNetwork.Parse("192.168.1.0/24").ToString(), asList.ToString());
+        Assert.Equal(1, asList.Count);
+
+        var mcpBind = PerformanceMonitor.Darling.Service.Mcp.DarlingMcpHostService.ResolveMcpBind(config.Mcp, managed: true, inContainer: false);
+        Assert.Equal(PerformanceMonitor.Darling.Service.Mcp.DarlingMcpHostService.McpBindMode.NetworkAndLoopback, mcpBind.Mode);
+        Assert.Equal(PerformanceMonitor.Darling.Service.Mcp.DarlingMcpHostService.McpBindReason.NetworkExposed, mcpBind.Reason);
+
+        var webBind = PerformanceMonitor.Darling.Service.Mcp.DarlingWebHostService.ResolveWebBind(config.Web, managed: true, inContainer: false);
+        Assert.Equal(PerformanceMonitor.Darling.Service.Hosting.DarlingHostBinding.BindMode.NetworkAndLoopback, webBind.Mode);
+        Assert.Equal(PerformanceMonitor.Darling.Service.Hosting.DarlingHostBinding.BindReason.NetworkExposed, webBind.Reason);
+
+        /* The tls and hostName halves (#5288). */
+        Assert.Null(config.Mcp.Network.Tls);
+        Assert.Null(config.Mcp.Network.HostName);
+        Assert.Null(config.Web.Network.Tls);
+        Assert.Null(McpNetworkConfig.NormalizeHostName(config.Mcp.Network.HostName));
+        Assert.Equal(
+            PerformanceMonitor.Darling.Service.Hosting.DarlingWebTls.TlsShape.NotConfigured,
+            PerformanceMonitor.Darling.Service.Hosting.DarlingWebTls.Describe(config.Mcp.Network.Tls, "mcp").Shape);
+        Assert.True(config.Mcp.Network.IsConfigured);
+    }
+
+    [Fact]
+    public void Network_ParsesMcpTlsAndHostName()
+    {
+        /* #5288: the two keys bind by the names the README and the sample document, and the tls block is the same
+           type the web uses, so its slots resolve the same way and Describe reads it under the MCP section. */
+        var config = DarlingConfig.Parse(@"{
+            ""postgres"": { ""managed"": true },
+            ""mcp"": {
+                ""enabled"": true,
+                ""network"": {
+                    ""listen"": ""192.168.1.205"", ""allowFrom"": ""192.168.1.0/24"", ""token"": ""dev-token"",
+                    ""hostName"": ""mcp.corp.example"",
+                    ""tls"": { ""certPath"": ""/certs/mcp.crt"", ""keyPath"": ""/certs/mcp.key"" }
+                }
+            },
+            ""servers"": [ { ""host"": ""SQL2022"" } ]
+        }");
+
+        var network = config.Mcp.Network!;
+        Assert.Equal("mcp.corp.example", network.HostName);
+        Assert.Equal("mcp.corp.example", McpNetworkConfig.NormalizeHostName(network.HostName));
+        Assert.NotNull(network.Tls);
+        Assert.Equal("/certs/mcp.crt", network.Tls!.CertPath);
+        Assert.Equal("/certs/mcp.key", network.Tls.KeyPath);
+        Assert.Equal(
+            PerformanceMonitor.Darling.Service.Hosting.DarlingWebTls.TlsShape.Pem,
+            PerformanceMonitor.Darling.Service.Hosting.DarlingWebTls.Describe(network.Tls, "mcp").Shape);
+        Assert.True(network.IsConfigured);
+    }
+
+    [Fact]
+    public void McpNetworkConfig_IsConfigured_SeesTlsAndHostName_IgnoresBlankOnes()
+    {
+        /* IsConfigured drives the BYO "network.* is ignored" notice, so a block carrying only a certificate or only
+           a host name must trip it, and a block of blank values must not: the two rules WebNetworkConfig has. */
+        Assert.False(new McpNetworkConfig().IsConfigured);
+        Assert.False(new McpNetworkConfig { Tls = new WebTlsConfig(), HostName = "   " }.IsConfigured);
+        Assert.True(new McpNetworkConfig { Tls = new WebTlsConfig { PfxPath = "/certs/mcp.pfx" } }.IsConfigured);
+        Assert.True(new McpNetworkConfig { HostName = "mcp.corp.example" }.IsConfigured);
+    }
+
+    [Theory]
+    [InlineData("mcp.corp.example", "mcp.corp.example")]
+    [InlineData("alpha-01.corp.example", "alpha-01.corp.example")]
+    [InlineData("localhost", "localhost")]
+    [InlineData("darling", "darling")]
+    public void NormalizeHostName_AcceptsABareDnsName(string raw, string expected)
+        /* One label is a DNS name too: a LAN box is routinely reached by its short name. */
+        => Assert.Equal(expected, McpNetworkConfig.NormalizeHostName(raw));
+
+    [Theory]
+    [InlineData("  mcp.corp.example  ", "mcp.corp.example")]
+    [InlineData("\tmcp.corp.example\r\n", "mcp.corp.example")]
+    [InlineData("mcp.corp.example.", "mcp.corp.example")]
+    [InlineData("  mcp.corp.example. ", "mcp.corp.example")]
+    public void NormalizeHostName_TrimsWhitespace_AndStripsOneTrailingDot(string raw, string expected)
+        => Assert.Equal(expected, McpNetworkConfig.NormalizeHostName(raw));
+
+    [Theory]
+    [InlineData("MCP.Corp.Example")]
+    [InlineData("Darling-Box")]
+    public void NormalizeHostName_KeepsCaseAsWritten(string raw)
+        /* The Host-header guard compares ignoring case, so folding here would only change what the log shows. The one
+           exception is a name with an xn-- label (NormalizeHostName_FoldsAnUpperCasePunycodeName_ToLowerCase). */
+        => Assert.Equal(raw, McpNetworkConfig.NormalizeHostName(raw));
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("   ")]
+    [InlineData("\t\r\n")]
+    public void NormalizeHostName_BlankIsNotSet_NullWithNothingToWarnAbout(string? raw)
+        => Assert.Null(McpNetworkConfig.NormalizeHostName(raw));
+
+    [Theory]
+    [InlineData("10.1.2.3")]
+    [InlineData("192.168.1.205")]
+    [InlineData("::1")]
+    [InlineData("[::1]")]
+    [InlineData("fe80::1")]
+    public void NormalizeHostName_RefusesAnIpAddress(string raw)
+        /* The guard already admits the listen IP by itself, and a name that is really an address would be a second,
+           unwritten way in. */
+        => Assert.Null(McpNetworkConfig.NormalizeHostName(raw));
+
+    [Theory]
+    [InlineData("mcp.corp.example:5152")]
+    [InlineData("https://mcp.corp.example")]
+    [InlineData("http://mcp.corp.example:5152/")]
+    [InlineData("mcp.corp.example/mcp")]
+    [InlineData("user@mcp.corp.example")]
+    [InlineData("*.corp.example")]
+    [InlineData("*")]
+    [InlineData("mcp corp.example")]
+    public void NormalizeHostName_RefusesAPortASchemeAPathAWildcardOrWhitespaceInside(string raw)
+        => Assert.Null(McpNetworkConfig.NormalizeHostName(raw));
+
+    [Theory]
+    [InlineData("mcp.corp.example..")]
+    [InlineData(".")]
+    [InlineData("..")]
+    [InlineData(".mcp.corp.example")]
+    [InlineData("mcp..corp.example")]
+    public void NormalizeHostName_RefusesEmptyLabels_AndMoreThanOneTrailingDot(string raw)
+        /* One trailing dot is a fully qualified name; two is a typo, and a result still ending in a dot would
+           never match what a client sends as its Host. */
+        => Assert.Null(McpNetworkConfig.NormalizeHostName(raw));
+
+    [Theory]
+    [InlineData("b\u00FCcher.example", "xn--bcher-kva.example")]
+    [InlineData("mcp.b\u00FCcher.example", "mcp.xn--bcher-kva.example")]
+    [InlineData("\u043F\u0440\u0438\u043C\u0435\u0440.example", "xn--e1afmkfd.example")]
+    [InlineData("\u65E5\u672C\u8A9E.example", "xn--wgv71a119e.example")]
+    [InlineData("  b\u00FCcher.example. ", "xn--bcher-kva.example")]
+    [InlineData("b\u00FCcher\u3002example", "xn--bcher-kva.example")]
+    [InlineData("B\u00DCCHER.Example", "xn--bcher-kva.example")]
+    public void NormalizeHostName_MapsAUnicodeNameToItsPunycodeForm(string raw, string expected)
+        /* #5288: a client sends the ASCII (xn--) form in its Host header, so that is the form the guard has to hold.
+           The trim and the one trailing dot still come first; an ideographic full stop between labels is a dot; and
+           IDNA folds case, which changes nothing the guard (it compares ignoring case) can see. */
+        => Assert.Equal(expected, McpNetworkConfig.NormalizeHostName(raw));
+
+    [Theory]
+    [InlineData("xn--bcher-kva.example")]
+    [InlineData("MCP.Corp.Example")]
+    public void NormalizeHostName_AnAsciiName_IsNeverMapped_SoItKeepsItsSpelling(string raw)
+        /* The mapping runs only for a name with a non-ASCII character. An ASCII name that is already punycode must
+           not be decoded and encoded again: it comes back as written (a name with an upper-case xn-- label is only
+           folded to lower case, see NormalizeHostName_FoldsAnUpperCasePunycodeName_ToLowerCase). */
+        => Assert.Equal(raw, McpNetworkConfig.NormalizeHostName(raw));
+
+    [Theory]
+    [InlineData("b\u00FCcher..example")]       // an empty label
+    [InlineData("b\u00FCcher.example..")]      // two trailing dots, the same typo as in an ASCII name
+    [InlineData("b\u00FCcher.example\u3002")]  // a trailing ideographic full stop maps to a trailing dot
+    [InlineData("b\u200D\u00FCcher.example")]  // a zero-width joiner the IDN rules do not allow there
+    public void NormalizeHostName_RefusesAnInvalidInternationalizedName(string raw)
+        => Assert.Null(McpNetworkConfig.NormalizeHostName(raw));
+
+    [Theory]
+    [InlineData("xn--a")]                // decodes to a control character, which IDNA disallows
+    [InlineData("mcp.xn--a.example")]    // the same label inside a longer name
+    [InlineData("MCP.XN--A.Example")]    // the prefix is not case sensitive
+    public void NormalizeHostName_RefusesAnXnLabelThatDoesNotDecode(string raw)
+        /* #5288: an ASCII name made of letters and a hyphen is a DNS name to Uri.CheckHostName, so "xn--a" used to be
+           kept. The MCP host then decodes it with HostString.FromUriComponent, which throws ArgumentException for a
+           label that does not decode, and MCP failed to start. Refused here, the host logs its one "set but refused"
+           Warning and admits nothing (fail closed). */
+        => Assert.Null(McpNetworkConfig.NormalizeHostName(raw));
+
+    [Theory]
+    [InlineData("xn--bcher-kva.example")]
+    [InlineData("mcp.xn--bcher-kva.example")]
+    [InlineData("xn--e1afmkfd.example")]
+    public void NormalizeHostName_KeepsAnXnNameThatDecodes_AsWritten(string raw)
+        /* The decode is a check, not a rewrite (#5288): a lower-case punycode name that decodes is returned exactly as
+           written, not decoded to Unicode. */
+        => Assert.Equal(raw, McpNetworkConfig.NormalizeHostName(raw));
+
+    [Theory]
+    [InlineData("XN--BCHER-KVA.EXAMPLE", "xn--bcher-kva.example")]
+    [InlineData("XN--BCHER-KVA.Example", "xn--bcher-kva.example")]
+    [InlineData("Xn--BCHER-kva.example", "xn--bcher-kva.example")]
+    [InlineData("MCP.XN--E1AFMKFD.Example", "mcp.xn--e1afmkfd.example")]
+    [InlineData("  XN--BCHER-KVA.EXAMPLE. ", "xn--bcher-kva.example")]
+    public void NormalizeHostName_FoldsAnUpperCasePunycodeName_ToLowerCase(string raw, string expected)
+        /* #5288: IDNA names are case-insensitive, and the framework decodes a Host header's xn-- labels only when the
+           prefix is lower case (the form a client sends). Every spelling of one punycode name has to come out in one
+           form, and it is the lower-case one. */
+        => Assert.Equal(expected, McpNetworkConfig.NormalizeHostName(raw));
+
+    [Fact]
+    public void NormalizeHostName_UpperAndLowerCasePunycode_NormalizeTheSame_AndBothMatchTheClientsName()
+    {
+        var upper = McpNetworkConfig.NormalizeHostName("XN--BCHER-KVA.EXAMPLE");
+        var lower = McpNetworkConfig.NormalizeHostName("xn--bcher-kva.example");
+
+        Assert.NotNull(upper);
+        Assert.Equal(lower, upper);
+
+        /* What the Host guard compares: the name a client sends, decoded the way the framework decodes a Host header.
+           The MCP host runs the configured name through the same conversion. */
+        var clientsName = Microsoft.AspNetCore.Http.HostString.FromUriComponent("xn--bcher-kva.example");
+        Assert.Equal(clientsName.Value, Microsoft.AspNetCore.Http.HostString.FromUriComponent(upper).Value);
+        Assert.Equal(clientsName.Value, Microsoft.AspNetCore.Http.HostString.FromUriComponent(lower!).Value);
+    }
+
+    [Theory]
+    [InlineData("MCP.Corp.Example")]
+    [InlineData("A-XN--B.Example")]      // "XN--" inside a label is not an ACE prefix: there is no label to fold
+    public void NormalizeHostName_ANameWithNoXnLabel_KeepsItsCase(string raw)
+        => Assert.Equal(raw, McpNetworkConfig.NormalizeHostName(raw));
+
+    [Theory]
+    [InlineData("mcp.corp.example")]
+    [InlineData("MCP.Corp.Example.")]
+    [InlineData("bücher.example")]
+    [InlineData("xn--bcher-kva.example")]
+    [InlineData("XN--BCHER-KVA.EXAMPLE")]
+    [InlineData("a-xn--b.example")]      // "xn--" inside a label is not an ACE prefix: nothing to decode
+    public void NormalizeHostName_AnyNameItKeeps_IsOneHostStringFromUriComponentAccepts(string raw)
+    {
+        /* The invariant the MCP host leans on (#5288): whatever NormalizeHostName returns converts without throwing,
+           so the Host guard's name never makes start-up fail. */
+        var name = McpNetworkConfig.NormalizeHostName(raw);
+
+        Assert.NotNull(name);
+        var converted = Record.Exception(() => { _ = Microsoft.AspNetCore.Http.HostString.FromUriComponent(name); });
+        Assert.Null(converted);
+    }
+
+    [Fact]
+    public void NormalizeHostName_RefusesALoneSurrogate_AndALabelTooLongOnceEncoded()
+    {
+        /* Built at run time: a lone surrogate in an [InlineData] literal is not safe to serialize into a test id. */
+        Assert.Null(McpNetworkConfig.NormalizeHostName("mcp" + (char)0xD800 + ".example"));
+
+        /* The 63-character label limit applies to the ENCODED form: 30 u-umlauts encode to a valid label, 60 do not. */
+        Assert.NotNull(McpNetworkConfig.NormalizeHostName(new string('\u00FC', 30) + ".example"));
+        Assert.Null(McpNetworkConfig.NormalizeHostName(new string('\u00FC', 60) + ".example"));
+    }
+
+    [Theory]
+    [InlineData("https://b\u00FCcher.example")]    // a scheme
+    [InlineData("b\u00FCcher.example:5152")]       // a port
+    [InlineData("b\u00FCcher.example/mcp")]        // a path
+    [InlineData("*.b\u00FCcher.example")]          // a wildcard
+    [InlineData("b\u00FCcher corp.example")]       // whitespace inside
+    [InlineData("\uFF11\uFF10.1.2.3")]             // a fullwidth "10": the whole name MAPS to an IPv4 address
+    [InlineData("\uFF3B\uFF1A\uFF1A\uFF11\uFF3D")] // a fullwidth "[::1]": it maps to an IPv6 address
+    public void NormalizeHostName_RunsTheDnsTestOnTheAsciiForm_SoAMappedNonNameIsStillRefused(string raw)
+        /* The mapping lets these through (it only rewrites the Unicode); what refuses them is the same
+           Uri.CheckHostName test an ASCII name gets, now run on the mapped form. Without that second look a fullwidth
+           IP address would become an ASCII one and be admitted as a name. */
+        => Assert.Null(McpNetworkConfig.NormalizeHostName(raw));
+
+    [Fact]
+    public void NormalizeHostName_ASetButRefusedValue_IsDistinguishableFromNotSet()
+    {
+        /* The host logs ONE Warning for a value that is set but refused (and ignores it), and nothing for an unset
+           one. The distinction is "HostName not blank" together with a null result, so both halves must hold. */
+        var refused = new McpNetworkConfig { HostName = "https://mcp.corp.example" };
+        Assert.False(string.IsNullOrWhiteSpace(refused.HostName));
+        Assert.Null(McpNetworkConfig.NormalizeHostName(refused.HostName));
+
+        var unset = new McpNetworkConfig { HostName = "  " };
+        Assert.True(string.IsNullOrWhiteSpace(unset.HostName));
+        Assert.Null(McpNetworkConfig.NormalizeHostName(unset.HostName));
+    }
+
     [Fact]
     public void McpNetworkConfig_ResolveToken_PrefersEncrypted_FlagsPlaintext()
     {

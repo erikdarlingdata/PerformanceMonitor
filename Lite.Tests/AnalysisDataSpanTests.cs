@@ -65,7 +65,7 @@ public sealed class AnalysisDataSpanTests : IDisposable
     [Fact]
     public async Task DataSpan_CountsArchivedParquetHistory_AcrossAnArchiveReset()
     {
-        var initializer = new DuckDbInitializer(_dbPath);
+        using var initializer = new DuckDbInitializer(_dbPath);
         await initializer.InitializeAsync();
 
         using (var connection = new DuckDBConnection($"Data Source={_dbPath}"))
@@ -106,7 +106,7 @@ VALUES
     [Fact]
     public async Task DataSpan_StillGatesAGenuinelyYoungInstall()
     {
-        var initializer = new DuckDbInitializer(_dbPath);
+        using var initializer = new DuckDbInitializer(_dbPath);
         await initializer.InitializeAsync();
 
         using (var connection = new DuckDBConnection($"Data Source={_dbPath}"))
@@ -134,7 +134,7 @@ VALUES
     [Fact]
     public async Task InsufficientHistoryMessage_IsSetForANewServer()
     {
-        var initializer = new DuckDbInitializer(_dbPath);
+        using var initializer = new DuckDbInitializer(_dbPath);
         await initializer.InitializeAsync();
         await SeedWaitStatsAsync(initializer, hoursOfHistory: 2);
 
@@ -150,7 +150,7 @@ VALUES
     [Fact]
     public async Task InsufficientHistoryMessage_IsNullOnceTheServerHasEnoughHistory()
     {
-        var initializer = new DuckDbInitializer(_dbPath);
+        using var initializer = new DuckDbInitializer(_dbPath);
         await initializer.InitializeAsync();
         await SeedWaitStatsAsync(initializer, hoursOfHistory: 30);
 
@@ -163,7 +163,7 @@ VALUES
     [Fact]
     public async Task InsufficientHistoryMessage_IsSetForAServerWithNoRows()
     {
-        var initializer = new DuckDbInitializer(_dbPath);
+        using var initializer = new DuckDbInitializer(_dbPath);
         await initializer.InitializeAsync();
 
         var analysis = new AnalysisService(initializer);
@@ -176,7 +176,7 @@ VALUES
     public async Task InsufficientHistoryMessage_IsNullWhenTheSpanReadFails()
     {
         /* Never initialized: v_wait_stats does not exist, so the span read throws. */
-        var initializer = new DuckDbInitializer(_dbPath);
+        using var initializer = new DuckDbInitializer(_dbPath);
         var analysis = new AnalysisService(initializer);
 
         Assert.Null(await analysis.TryGetTotalDataSpanHoursAsync(serverId: 1));
@@ -187,7 +187,7 @@ VALUES
     [Fact]
     public async Task LiteService_DefaultsToTheSharedMinimum()
     {
-        var initializer = new DuckDbInitializer(_dbPath);
+        using var initializer = new DuckDbInitializer(_dbPath);
         await initializer.InitializeAsync();
 
         Assert.Equal(AnalysisHistoryGate.MinimumDataHours, new AnalysisService(initializer).MinimumDataHours);

@@ -103,11 +103,14 @@ ORDER BY bucket";
     {
         using var _q = TimeQuery("GetTopQueriesByCpuAsync", "v_query_stats top N by CPU");
         using var connection = await OpenConnectionAsync();
-        using var command = connection.CreateCommand();
 
         var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
         var dbClause = BuildDbInClause(databaseNames, "database_name", 7, out var dbValues);
 
+        /* #5313: one round at a candidate limit; TopFill asks again with a larger one while WAITFOR shells left the page short. */
+        async Task<(List<QueryStatsRow> Rows, int CandidateCount)> RunRoundAsync(int candidates)
+        {
+        using var command = connection.CreateCommand();
         command.CommandText = @"
 WITH ranked AS (
     SELECT
@@ -172,8 +175,10 @@ WITH ranked AS (
        and the cap — see the method's note. $6 = 0 admits every group; NULL max_dop (never captured) reads
        as 0 and stays out of a filtered page, as the C# arm it replaces did. */
     AND   COALESCE(MAX(max_dop), 0) >= $6
-    ORDER BY SUM(delta_worker_time) DESC
-    LIMIT $4 + 5
+    /* #5299 round 3 (O16): the ranking ends on the whole group key, so a tie at the candidate cut picks the same keys in every
+       refill round, as the Darling and Viewer twins do. */
+    ORDER BY SUM(delta_worker_time) DESC, database_name, query_hash, host_object_name
+    LIMIT " + candidates + @"
 ),
 module AS (
     /* #1568 module attribution: one procedure_stats identity per sql_handle (latest collection_time
@@ -192,21 +197,23 @@ module AS (
             object_name,
             schema_name,
             database_name,
-            ROW_NUMBER() OVER (PARTITION BY sql_handle ORDER BY collection_time DESC) AS rn
+            ROW_NUMBER() OVER (PARTITION BY sql_handle ORDER BY collection_time DESC, collection_id DESC) AS rn
         FROM v_procedure_stats
         WHERE server_id = $1
         AND   sql_handle IS NOT NULL
         AND   sql_handle <> ''
     ) ranked_modules
     WHERE rn = 1
-)
+),
+page AS (
 SELECT
     r.*,
     t.query_text,
     t.query_plan_xml AS query_plan,
     m.object_name AS module_object_name,
     m.schema_name AS module_schema_name,
-    m.database_name AS module_database_name
+    m.database_name AS module_database_name,
+    ROW_NUMBER() OVER (ORDER BY r.total_cpu_us DESC, r.database_name, r.query_hash, r.host_object_name) AS page_ord
 FROM ranked r
 LEFT JOIN LATERAL (
     SELECT query_text, query_plan_xml
@@ -219,13 +226,21 @@ LEFT JOIN LATERAL (
        another caller's text (NOT DISTINCT FROM so ad-hoc NULL hosts still match ad-hoc rows). */
     AND   host_object_name IS NOT DISTINCT FROM r.host_object_name
     AND   query_text IS NOT NULL
-    ORDER BY collection_time DESC
+    /* #5299 round 2 (N3): two rows of one key at one collection_time (two plans, one collection) must give the
+       same text on every read, so a tie on the time breaks on the row collected last. */
+    ORDER BY collection_time DESC, collection_id DESC
     LIMIT 1
 ) t ON TRUE
 LEFT JOIN module m ON m.sql_handle = r.sql_handle
 WHERE t.query_text IS NULL OR t.query_text NOT LIKE 'WAITFOR%'
-ORDER BY r.total_cpu_us DESC
-LIMIT $4";
+ORDER BY r.total_cpu_us DESC, r.database_name, r.query_hash, r.host_object_name
+LIMIT $4
+)
+/* #5313: the count row rides beside the page so a round trimmed to nothing still reports whether more candidates exist. */
+SELECT p.*, c.candidate_count
+FROM (SELECT COUNT(*) AS candidate_count FROM ranked) c
+LEFT JOIN page p ON TRUE
+ORDER BY p.page_ord";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = startTime });
@@ -240,9 +255,16 @@ LIMIT $4";
             command.Parameters.Add(new DuckDBParameter { Value = db });
 
         var items = new List<QueryStatsRow>();
+        var candidateCount = 0;
         using var reader = await command.ExecuteReaderAsync();
         while (await reader.ReadAsync())
         {
+            candidateCount = reader.IsDBNull(48) ? 0 : Convert.ToInt32(reader.GetValue(48));
+            if (reader.IsDBNull(47))
+            {
+                continue;
+            }
+
             items.Add(new QueryStatsRow
             {
                 DatabaseName = reader.IsDBNull(0) ? "" : reader.GetString(0),
@@ -295,7 +317,10 @@ LIMIT $4";
             });
         }
 
-        return items;
+        return (items, candidateCount);
+        }
+
+        return await TopFill.RunAsync(top, RunRoundAsync);
     }
 
     /// <summary>

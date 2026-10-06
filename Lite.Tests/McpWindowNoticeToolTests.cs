@@ -57,6 +57,7 @@ public sealed class McpWindowNoticeToolTests : IDisposable
     public void Dispose()
     {
         _seed.Dispose();
+        _duckDb.Dispose();
         try { if (Directory.Exists(_tempDir)) Directory.Delete(_tempDir, recursive: true); }
         catch { /* best-effort cleanup */ }
     }
