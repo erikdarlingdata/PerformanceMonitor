@@ -39,10 +39,10 @@ namespace PerformanceMonitor.Alerting;
 /// judged. Only <c>AlertEngine</c> (same assembly) and the test projects can mark an instance without judging it
 /// (<see cref="MarkJudged(AlertOutcome)"/> is internal).</para>
 ///
-/// <para><b>Names.</b> A custom alert rule's display name is judged (it rides subjects and titles, and the resolution
-/// row's title is judged by the evaluator that builds it). The server name, the metric name and the metric-name keyed
-/// title of a record are routing and pairing keys and stay as typed, and the local log lines (which never leave the
-/// machine) are not filtered.</para>
+/// <para><b>Names.</b> A custom alert rule's display name is judged (it rides subjects and titles), and so is the
+/// name on the resolution rows the rule's evaluator writes (<c>CustomAlertEvaluator.JudgedRuleName</c>), because those
+/// rows go out to the history store. The server name and the metric name are routing and pairing keys and stay as
+/// typed, and local log lines (which never leave the machine) are not filtered.</para>
 ///
 /// <para><b>Budget.</b> One 1.5 s <c>JudgeBudget</c> per <see cref="Apply(AlertOutcome)"/> call, shared by every value
 /// it judges. Past it a value is withheld unjudged (the marker), never passed. A list of finding alerts shares one
