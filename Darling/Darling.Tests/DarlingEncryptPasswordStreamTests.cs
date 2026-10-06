@@ -10,6 +10,7 @@ using System;
 using System.Diagnostics;
 using System.IO;
 using System.Text;
+using System.Threading.Tasks;
 using Xunit;
 
 namespace Darling.Tests;
@@ -54,7 +55,7 @@ public class DarlingEncryptPasswordStreamTests
         return new ProcessStartInfo(exe);
     }
 
-    private static RunResult RunEncryptPassword(string? stdin)
+    private static async Task<RunResult> RunEncryptPassword(string? stdin)
     {
         var info = ServiceStartInfo();
         info.ArgumentList.Add("--encrypt-password");
@@ -77,15 +78,15 @@ public class DarlingEncryptPasswordStreamTests
         var stdoutTask = process.StandardOutput.ReadToEndAsync();
         var stderrTask = process.StandardError.ReadToEndAsync();
         Assert.True(process.WaitForExit(60_000), "--encrypt-password did not exit within 60 seconds.");
-        return new RunResult(process.ExitCode, stdoutTask.GetAwaiter().GetResult(), stderrTask.GetAwaiter().GetResult());
+        return new RunResult(process.ExitCode, await stdoutTask, await stderrTask);
     }
 
     [Fact]
-    public void EncryptPassword_ScriptedSuccess_WritesNothingToStderr_AndOnlyTheBlobToStdout()
+    public async Task EncryptPassword_ScriptedSuccess_WritesNothingToStderr_AndOnlyTheBlobToStdout()
     {
         Assert.SkipUnless(OperatingSystem.IsWindows(), "DPAPI requires Windows.");
 
-        var result = RunEncryptPassword(DummyInput);
+        var result = await RunEncryptPassword(DummyInput);
 
         Assert.Equal(0, result.ExitCode);
         Assert.Equal(string.Empty, result.StdErr);
@@ -99,11 +100,11 @@ public class DarlingEncryptPasswordStreamTests
     [Theory]
     [InlineData(null)]
     [InlineData("")]
-    public void EncryptPassword_EmptyRead_StillExitsOne_WithErrorLineAndStdoutGuidance(string? stdin)
+    public async Task EncryptPassword_EmptyRead_StillExitsOne_WithErrorLineAndStdoutGuidance(string? stdin)
     {
         Assert.SkipUnless(OperatingSystem.IsWindows(), "DPAPI requires Windows.");
 
-        var result = RunEncryptPassword(stdin);
+        var result = await RunEncryptPassword(stdin);
 
         /* #2097 unchanged: the error line stays on stderr, the guidance rides stdout, and the exit code is 1. */
         Assert.Equal(1, result.ExitCode);
@@ -118,7 +119,7 @@ public class DarlingEncryptPasswordStreamTests
     /// Any stderr line becomes a terminating error, so the script never reaches its last line.
     /// </summary>
     [Fact]
-    public void EncryptPassword_UnderWindowsPowerShell51_WithStopAndMergedStreams_Succeeds()
+    public async Task EncryptPassword_UnderWindowsPowerShell51_WithStopAndMergedStreams_Succeeds()
     {
         Assert.SkipUnless(OperatingSystem.IsWindows(), "DPAPI requires Windows.");
 
@@ -147,8 +148,8 @@ public class DarlingEncryptPasswordStreamTests
             var stdoutTask = process!.StandardOutput.ReadToEndAsync();
             var stderrTask = process.StandardError.ReadToEndAsync();
             Assert.True(process.WaitForExit(120_000), "powershell.exe did not exit within 120 seconds.");
-            var stdout = stdoutTask.GetAwaiter().GetResult();
-            var stderr = stderrTask.GetAwaiter().GetResult();
+            var stdout = await stdoutTask;
+            var stderr = await stderrTask;
 
             Assert.True(string.IsNullOrWhiteSpace(stderr), $"The script stopped on an error record:\n{stderr}");
             Assert.Equal(0, process.ExitCode);
