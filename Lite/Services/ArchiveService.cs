@@ -596,7 +596,7 @@ public class ArchiveService
             cmd.CommandText = $@"
 COPY (
     SELECT * FROM {table} WHERE {timeColumn} < $1
-) TO '{EscapeSqlPath(filePath)}' (FORMAT PARQUET, COMPRESSION ZSTD)";
+) TO '{EscapeSqlPath(filePath)}' ({ParquetCompaction.ArchiveCopyOptions})";
             cmd.Parameters.Add(new DuckDBParameter { Value = cutoff });
             await cmd.ExecuteNonQueryAsync();
         });
@@ -1459,7 +1459,7 @@ COPY (
                         await WithRaisedCopyMemoryLimit(connection, async () =>
                         {
                             using var exportCmd = connection.CreateCommand();
-                            exportCmd.CommandText = $"COPY (SELECT * FROM {table}) TO '{EscapeSqlPath(tempParquetPath)}' (FORMAT PARQUET, COMPRESSION ZSTD)";
+                            exportCmd.CommandText = $"COPY (SELECT * FROM {table}) TO '{EscapeSqlPath(tempParquetPath)}' ({ParquetCompaction.ArchiveCopyOptions})";
                             await exportCmd.ExecuteNonQueryAsync();
                         });
 
@@ -1531,7 +1531,7 @@ COPY (
                             await WithRaisedCopyMemoryLimit(copyConnection, async () =>
                             {
                                 using var exportCmd = copyConnection.CreateCommand();
-                                exportCmd.CommandText = $"COPY (SELECT * FROM {table}) TO '{EscapeSqlPath(preservePath)}' (FORMAT PARQUET)";
+                                exportCmd.CommandText = $"COPY (SELECT * FROM {table}) TO '{EscapeSqlPath(preservePath)}' ({ParquetCompaction.ArchiveCopyOptions})";
                                 await exportCmd.ExecuteNonQueryAsync();
                             });
                             preservedFiles[table] = preservePath;
