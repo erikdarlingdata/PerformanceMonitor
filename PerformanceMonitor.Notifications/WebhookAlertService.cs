@@ -1895,13 +1895,12 @@ public class WebhookAlertService
                 return headerError;
             }
 
-            /* #5366: the configured headers go only to the endpoint they were set up for. A route can redirect the
-               POST to another URL; that URL gets the body but not the parent's headers, which can carry a
-               credential for the parent endpoint. */
-            if (headers.Count > 0 && !SameOrigin(webhookUrl, _settings.GenericWebhookUrl))
+            /* #5366: the configured headers go only to the generic URL itself or a path under it on the same
+               scheme, host and port. A route to any other URL gets the body but not the headers. */
+            if (headers.Count > 0 && !HeadersApplyTo(webhookUrl, _settings.GenericWebhookUrl))
             {
                 headers = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-                _logger.LogInformation("Generic webhook headers were not sent: the routed endpoint is not the configured generic endpoint");
+                _logger.LogInformation("Generic webhook headers were not sent: the routed endpoint is not the generic URL or a path under it");
             }
 
             var payload = BuildGenericPayload(
@@ -1948,18 +1947,30 @@ public class WebhookAlertService
         }
     }
 
-    /// <summary>Whether two endpoint URLs have the same scheme, host and port (#5366). Text that is not an absolute
-    /// URL matches nothing, not even itself.</summary>
-    internal static bool SameOrigin(string? left, string? right)
+    /// <summary>Whether the generic headers go to <paramref name="routeUrl"/> (#5366): it has the same scheme, host
+    /// and port as <paramref name="genericUrl"/>, and its path is the generic path or continues it at a "/"
+    /// boundary, so "/alerts" covers "/alerts" and "/alerts/team-a" but not "/alerts2" or "/other". Paths compare
+    /// case-sensitively after URI parsing; the query string is ignored. Text that is not an absolute URL
+    /// matches nothing, not even itself.</summary>
+    internal static bool HeadersApplyTo(string? routeUrl, string? genericUrl)
     {
-        if (!Uri.TryCreate(left?.Trim(), UriKind.Absolute, out var a) || !Uri.TryCreate(right?.Trim(), UriKind.Absolute, out var b))
+        if (!Uri.TryCreate(routeUrl?.Trim(), UriKind.Absolute, out var a) || !Uri.TryCreate(genericUrl?.Trim(), UriKind.Absolute, out var b))
         {
             return false;
         }
 
-        return string.Equals(a.Scheme, b.Scheme, StringComparison.OrdinalIgnoreCase)
-            && string.Equals(a.IdnHost, b.IdnHost, StringComparison.OrdinalIgnoreCase)
-            && a.Port == b.Port;
+        if (!string.Equals(a.Scheme, b.Scheme, StringComparison.OrdinalIgnoreCase)
+            || !string.Equals(a.IdnHost, b.IdnHost, StringComparison.OrdinalIgnoreCase)
+            || a.Port != b.Port)
+        {
+            return false;
+        }
+
+        var genericPath = b.AbsolutePath.TrimEnd('/');
+        var routePath = a.AbsolutePath;
+
+        return routePath.Equals(genericPath, StringComparison.Ordinal)
+            || routePath.StartsWith(genericPath + "/", StringComparison.Ordinal);
     }
 
     /* The Teams/Slack log-throttle shape (loud for the first 3, then every 50th) — factored out only
@@ -2727,6 +2738,15 @@ public class WebhookAlertService
 
     private static readonly ConcurrentDictionary<string, HttpClient> s_proxyClients = new();
 
+    /* #5366: a send that carries the generic headers does not follow redirects, so the headers go to the URL they
+       were set up for and nowhere else. These two clients serve only those sends; sends without headers keep the
+       clients above. */
+    private static readonly HttpClient s_defaultNoRedirectClient =
+        new(new SocketsHttpHandler { PooledConnectionLifetime = TimeSpan.FromMinutes(5), AllowAutoRedirect = false })
+        { Timeout = TimeSpan.FromSeconds(30) };
+
+    private static readonly ConcurrentDictionary<string, HttpClient> s_proxyNoRedirectClients = new();
+
     /* #4752: how long ONE webhook post may take, from the send to the last byte of the response. The pooled
        clients' 30-second Timeout stays as the outer bound and is not what a post normally meets. A delivery
        posts to up to four channels one after another, so an endpoint that accepts the connection and never
@@ -2735,17 +2755,18 @@ public class WebhookAlertService
        slower one is reported as failed, with the timeout as the reason, instead of being waited on. */
     internal static readonly TimeSpan WebhookPostTimeout = TimeSpan.FromSeconds(10);
 
-    private static HttpClient GetHttpClient(string? proxyAddress)
+    private static HttpClient GetHttpClient(string? proxyAddress, bool followRedirects = true)
     {
         if (string.IsNullOrWhiteSpace(proxyAddress))
-            return s_defaultClient;
+            return followRedirects ? s_defaultClient : s_defaultNoRedirectClient;
 
-        return s_proxyClients.GetOrAdd(proxyAddress, addr =>
+        return (followRedirects ? s_proxyClients : s_proxyNoRedirectClients).GetOrAdd(proxyAddress, addr =>
             new HttpClient(new SocketsHttpHandler
             {
                 Proxy = new WebProxy(addr),
                 UseProxy = true,
-                PooledConnectionLifetime = TimeSpan.FromMinutes(5)
+                PooledConnectionLifetime = TimeSpan.FromMinutes(5),
+                AllowAutoRedirect = followRedirects
             })
             { Timeout = TimeSpan.FromSeconds(30) });
     }
@@ -2782,7 +2803,8 @@ public class WebhookAlertService
         TimeSpan postTimeout,
         CancellationToken cancellationToken)
     {
-        var client = GetHttpClient(proxyAddress);
+        var sendsHeaders = headers is { Count: > 0 };
+        var client = GetHttpClient(proxyAddress, followRedirects: !sendsHeaders);
         using var content = new StringContent(jsonPayload, Encoding.UTF8, "application/json");
         using var request = new HttpRequestMessage(HttpMethod.Post, webhookUrl) { Content = content };
 
@@ -2804,6 +2826,13 @@ public class WebhookAlertService
 
             if (response.IsSuccessStatusCode)
                 return null;
+
+            /* #5366: a redirect is not followed on a send with headers. The message names no URL and no header. */
+            if (sendsHeaders && (int)response.StatusCode is >= 300 and < 400)
+            {
+                return string.Create(CultureInfo.InvariantCulture,
+                    $"HTTP {(int)response.StatusCode}: the endpoint answered with a redirect. Set the webhook URL to the final address.");
+            }
 
             /* Cap the destination's error body: it goes into the log + the health getter, and an unbounded read
                lets a hostile/misconfigured endpoint bloat both (and, if it echoes request headers, spill more of

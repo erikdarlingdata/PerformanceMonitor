@@ -59,7 +59,6 @@ public partial class SettingsWindow : Window
 
     /// <summary>The password the box was pre-filled with: a value saved before passwords were sealed that this machine
     /// could read. Null when the box was left blank (nothing saved, or a sealed value nobody here can read).</summary>
-    private string? _loadedSmtpPlain;
 
     /// <summary>The password typed for a save that seals it, held between reading the controls and the async key read.</summary>
     private string? _smtpPasswordToSeal;
@@ -1293,12 +1292,11 @@ public partial class SettingsWindow : Window
         SmtpRecipientsBox.Text = r.SmtpRecipients;
         EmailCooldownBox.Text = r.EmailCooldownMinutes.ToString(CultureInfo.InvariantCulture);
 
-        /* A sealed value opens only in the service, so the box stays blank and says the password is saved (#5366). A value
-           saved before sealing is still pre-filled where this machine can read it. */
+        /* A saved password is never put back in the box, sealed or in the older format: the box stays blank and says the
+           password is saved (#5366). A blank box keeps it; a changed host, port, SSL flag or user name asks for it again. */
         _loadedNotification = r;
-        _loadedSmtpPlain = OperatingSystem.IsWindows() ? ViewerServerSecret.TryUnprotect(r.SmtpEncryptedPassword) : null;
-        SmtpPasswordBox.Password = _loadedSmtpPlain ?? "";
-        SmtpStatusText.Text = !string.IsNullOrEmpty(r.SmtpEncryptedPassword) && _loadedSmtpPlain is null
+        SmtpPasswordBox.Password = "";
+        SmtpStatusText.Text = !string.IsNullOrEmpty(r.SmtpEncryptedPassword)
             ? ViewerSmtpSeal.SavedText
             : "";
 
@@ -1379,6 +1377,12 @@ public partial class SettingsWindow : Window
         {
             row.GenericUrl = ViewerWebhookSealing.CarryKept(GenericWebhookUrlBox.Text, _loadedNotification?.GenericUrl);
             row.GenericHeaders = ViewerWebhookSealing.CarryKept(GenericWebhookHeadersBox.Text, _loadedNotification?.GenericHeaders);
+            if (ViewerWebhookSealing.HeadersNeedUrlRetyped(
+                    GenericWebhookHeadersBox.Text, GenericWebhookUrlBox.Text,
+                    _loadedNotification?.GenericHeaders, _loadedNotification?.GenericUrl))
+            {
+                errors.Add(ViewerWebhookSealing.RetypeUrlForHeadersText);
+            }
             /* Persist the empty "use built-in default" sentinel unless the operator actually edited the body box
                (the Settings load pre-fills it with the default), so a future release can still improve it. */
             row.GenericBodyTemplate = WebhookAlertService.IsDefaultBodyTemplate(GenericWebhookBodyBox.Text)
@@ -1459,7 +1463,7 @@ public partial class SettingsWindow : Window
         row.SmtpEncryptedPassword = _loadedNotification.SmtpEncryptedPassword;
 
         var typed = SmtpPasswordBox.Password;
-        switch (ViewerSmtpSeal.Decide(_loadedNotification, _loadedSmtpPlain, row, typed))
+        switch (ViewerSmtpSeal.Decide(_loadedNotification, null, row, typed))
         {
             case ViewerSmtpPasswordAction.Refuse:
                 errors.Add(ViewerSmtpSeal.ReenterText);
@@ -1574,10 +1578,9 @@ public partial class SettingsWindow : Window
             /* Build the test settings straight from the live UI (test before save), so the user verifies
                exactly what they typed. The shared EmailSendCore renders + sends — no store/service needed. */
             var settings = TestAlertSettings.FromUi(this);
-            if (SmtpPasswordBox.Password.Length == 0 && !string.IsNullOrEmpty(_loadedNotification.SmtpEncryptedPassword)
-                && _loadedSmtpPlain is null)
+            if (SmtpPasswordBox.Password.Length == 0 && !string.IsNullOrEmpty(_loadedNotification.SmtpEncryptedPassword))
             {
-                /* The saved password is sealed for the service: nothing here can read it to send with. */
+                /* The saved password is never read back into this window: nothing here can send with it. */
                 MessageBox.Show(ViewerSmtpSeal.SavedCannotTestText, "Test Email", MessageBoxButton.OK, MessageBoxImage.Information);
                 return;
             }

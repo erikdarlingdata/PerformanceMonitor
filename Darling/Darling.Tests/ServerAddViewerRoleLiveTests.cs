@@ -44,7 +44,7 @@ public sealed class ServerAddViewerRoleLiveTests : IDisposable
 
     public void Dispose() => DarlingOwnedSecrets.Set(_ownedBefore);
 
-    private static readonly string RolePassword = Convert.ToHexString(RandomNumberGenerator.GetBytes(16));
+    internal static readonly string RolePassword = Convert.ToHexString(RandomNumberGenerator.GetBytes(16));
 
     private const string ServerGrant = "GRANT INSERT ON config.config_monitored_servers TO viewer;";
 

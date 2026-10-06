@@ -57,7 +57,15 @@ if (args.Length > 0 && DarlingCliCommands.IsEncryptPasswordVerb(args[0]))
         return 1;
     }
 
-    Console.Error.Write("Password: ");
+    /* #5413: Windows PowerShell 5.1 turns every line a native command writes to a captured or redirected error
+       stream into an error record, so under $ErrorActionPreference = 'Stop' a successful scripted run stopped the
+       script. The prompt goes to stderr so stdout stays exactly the blob (`... > blob.txt`), but only a person at a
+       keyboard needs it; a pipe or a file feeding stdin does not. */
+    if (!Console.IsInputRedirected)
+    {
+        Console.Error.Write("Password: ");
+    }
+
     var plaintext = Console.ReadLine();
     if (string.IsNullOrEmpty(plaintext))
     {
@@ -69,7 +77,13 @@ if (args.Length > 0 && DarlingCliCommands.IsEncryptPasswordVerb(args[0]))
     }
 
     Console.WriteLine(DarlingSecrets.Protect(plaintext));
-    Console.Error.WriteLine("Paste the line above into the server's \"encryptedPassword\" in darling.json.");
+
+    /* The paste hint is for a person reading the console; a script that captured stdout is not reading it. */
+    if (!Console.IsOutputRedirected)
+    {
+        Console.Error.WriteLine("Paste the line above into the server's \"encryptedPassword\" in darling.json.");
+    }
+
     return 0;
 }
 
