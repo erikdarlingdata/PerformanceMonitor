@@ -234,6 +234,9 @@ public sealed class RepoFileAdoptionTests
         "ViewTemplatesTests.cs",
         "ViewerFinOpsPickerRefreshPinTests.cs",
         "ViewerSidebarDotRendersTheCardStatusTests.cs",
+        /* #5245: pins that the filtered reads' catalog rows, dispatch entries and FILTERED list agree, over
+           DarlingWebEndpoints.cs and the js tree. */
+        "WebDatabaseFilterReadsTests.cs",
         /* #4961: its RunOneAsync pin takes the body from the method's declaration to the closing brace on its own line
            (`\n    }\n`), which only matches once the line endings are one spelling. */
         "XeSessionMissingWarningTests.cs",

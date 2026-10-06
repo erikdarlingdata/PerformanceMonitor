@@ -91,8 +91,9 @@ public sealed class WebDatabaseFilterChipsBehaviourTests
         /* Queries: filtered (seeded), unfiltered, and server-wide, on one tab. */
         AssertChip(Heading(r, "queries", "Top Queries by CPU"), "filtered", "2 databases", "SalesDb\nOrders");
         AssertChip(Heading(r, "queries", "Active Queries"), "filtered", "2 databases");
-        AssertChip(Heading(r, "queries", "Query Store Regressions"), "unfiltered", "All databases", UnfilteredTitle);
-        AssertChip(Heading(r, "queries", "Top Procedures by CPU"), "unfiltered", "All databases", UnfilteredTitle);
+        /* #5245 PR1: all six top reads take the filter now, so the other two of them name the databases as well. */
+        AssertChip(Heading(r, "queries", "Query Store Regressions"), "filtered", "2 databases", "SalesDb\nOrders");
+        AssertChip(Heading(r, "queries", "Top Procedures by CPU"), "filtered", "2 databases", "SalesDb\nOrders");
 
         /* The Query Store fanout: Clutter is database-scoped and says so; the overhead table and the memory clerk are instance-wide
            and override the shared read's class. */

@@ -439,6 +439,118 @@ public sealed class TopQueriesDatabaseFilterScratchLiveTests
         }
     }
 
+    /// <summary>
+    /// The hourly route's refill (#5313 with #5245): twelve WAITFOR shells (six in A, six in B) outrank every real group, so
+    /// round one (top + 5 = 8 candidates) holds only shells and TopFill asks again with a larger candidate limit. C's real
+    /// groups outrank the real groups of A and B, so a refill round that dropped the filter would fill the page from C.
+    /// Every round of the hourly statement binds the list ($5), so the page is A's and B's real groups; the unfiltered
+    /// control shows the same refill filling the page from C, which is what the filter has to stop.
+    /// </summary>
+    [Fact]
+    public async Task TheHourlyTier_ARefillRound_UnderTheFilter_NeverReturnsAnUnchosenDatabase()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live hourly refill database filter test.");
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        var timescaleEnabled = await TimescaleSupport.TryEnableAsync(connection, null, ct);
+        Assert.SkipWhen(!timescaleEnabled, "The live hourly refill database filter test needs TimescaleDB.");
+        await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
+        Assert.True(await TimescaleSupport.EnsureCollectionLogHypertableAsync(connection, null, ct));
+        await using (var stop = new NpgsqlCommand("SELECT _timescaledb_functions.stop_background_workers()", connection))
+        {
+            await stop.ExecuteNonQueryAsync(ct);
+        }
+
+        await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+        await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
+
+        var bodySucceeded = false;
+        try
+        {
+            var windowEnd = WindowStart.AddDays(1);
+            const string WaitforText = "WAITFOR DELAY '00:00:30'";
+            var tick = 0;
+
+            async Task PlantAsync(DateTime at, string db, string tag, string text, long weight) =>
+                await DarlingMcpTestData.ExecAsync(connection, ct,
+                    @"INSERT INTO collect.query_stats (collection_id, collection_time, server_id, server_name, database_name, query_hash, sql_handle, query_text,
+                          delta_execution_count, delta_worker_time, delta_elapsed_time, delta_logical_reads, total_logical_reads, sample_interval_seconds)
+                      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 10, $9, $9, 100, 1000, 3600)",
+                    CollectionIdGenerator.Next(), at, ServerId, ServerName, db, "0xQ" + tag, "0xSQLH" + tag, text, weight);
+
+            foreach (var db in new[] { A, B })
+            {
+                for (var i = 1; i <= 6; i++)
+                {
+                    tick++;
+                    var tag = "Shell" + db + i;
+                    await PlantAsync(WindowStart.AddHours(1).AddSeconds(tick), db, tag, WaitforText, 1_000_000 - tick);
+                    /* The text lookup reads raw and the purge below removes the first hours: this later row keeps the shell's text findable. */
+                    await PlantAsync(SurvivorAt.AddSeconds(tick), db, tag, WaitforText, 1);
+                }
+
+                for (var i = 1; i <= 2; i++)
+                {
+                    tick++;
+                    await PlantAsync(WindowStart.AddHours(1).AddSeconds(tick), db, "Real" + db + i, "SELECT real " + db + i, 10_000 - tick * 100);
+                }
+            }
+
+            for (var i = 1; i <= 6; i++)
+            {
+                tick++;
+                await PlantAsync(WindowStart.AddHours(1).AddSeconds(tick), C, "Real" + C + i, "SELECT real " + C + i, 500_000 - tick);
+            }
+
+            await using (var refresh = new NpgsqlCommand($"CALL refresh_continuous_aggregate('collect.{TimescaleSupport.QueryStatsIntervalHourlyView}'::regclass, $1::timestamp, $2::timestamp)", connection))
+            {
+                refresh.Parameters.AddWithValue(WindowStart);
+                refresh.Parameters.AddWithValue(windowEnd.AddHours(1));
+                await refresh.ExecuteNonQueryAsync(ct);
+            }
+
+            await using (var purge = new NpgsqlCommand("DELETE FROM collect.query_stats WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3", connection))
+            {
+                purge.Parameters.AddWithValue(ServerId);
+                purge.Parameters.AddWithValue(WindowStart);
+                purge.Parameters.AddWithValue(WindowStart.AddHours(3));
+                await purge.ExecuteNonQueryAsync(ct);
+            }
+
+            await using var hourly = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+            var filtered = await DarlingDataReader.GetTopQueriesByCpuRoutedAsync(hourly, ServerId, WindowStart, windowEnd, 3, Of(A, B), ranking: TopRanking.Cpu, cancellationToken: ct);
+            Assert.True(filtered.Tier == RetentionTier.Hourly, $"expected the hourly tier but read {filtered.Tier}");
+            Assert.True(filtered.Rows.Count == 3, $"{filtered.Rows.Count} rows, expected 3 (the refill must reach past the shells)");
+            Assert.DoesNotContain(filtered.Rows, r => (r.QueryText ?? "").StartsWith("WAITFOR", StringComparison.Ordinal));
+            Assert.DoesNotContain(filtered.Rows, r => r.DatabaseName == C);
+            Assert.Equal([A, B], Databases(filtered.Rows.Select(r => r.DatabaseName)));
+
+            /* Control: the same refill with no filter fills the page from C. */
+            var unfiltered = await DarlingDataReader.GetTopQueriesByCpuRoutedAsync(hourly, ServerId, WindowStart, windowEnd, 3, DatabaseFilter.All, ranking: TopRanking.Cpu, cancellationToken: ct);
+            Assert.Equal(RetentionTier.Hourly, unfiltered.Tier);
+            Assert.All(unfiltered.Rows, r => Assert.Equal(C, r.DatabaseName));
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                await using var probe = new NpgsqlCommand(
+                    "SELECT count(*) FROM pg_catalog.pg_stat_activity WHERE datname = pg_catalog.current_database() " +
+                    "AND backend_type LIKE 'TimescaleDB Background Worker Scheduler%'", cleanup);
+                Assert.Equal(0L, Convert.ToInt64(await probe.ExecuteScalarAsync(cleanupCt)));
+            });
+        }
+    }
+
     private static readonly DateTime QsEnd = new(2026, 1, 14, 6, 0, 0, DateTimeKind.Unspecified);
     private static readonly DateTime QsBuildNow = new(2026, 1, 15, 12, 0, 0, DateTimeKind.Unspecified);
 
