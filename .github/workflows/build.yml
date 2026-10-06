@@ -1863,7 +1863,9 @@ jobs:
   #     .github/scripts/lite-shard-pack.py packs classes longest-first into the least-loaded shard,
   #     weighing each class by the per-test timings the shards already upload (lite-tests-timing-N)
   #     from the run the gate pinned (its timing-source step). A class with no timing history gets
-  #     the mean weight, so it is placed, never dropped.
+  #     the mean weight, so it is placed, never dropped. A class in a DisableParallelization collection
+  #     (run one at a time) weighs its seconds in full, any other class a third of that (about 3.4
+  #     classes overlap), so the serial classes spread across the shards instead of piling on one.
   #   - The HASH cut, the original: a SHA-256 over the class name, modulo the shard count (SHA-256
   #     rather than string.GetHashCode(), which is randomized per process ON PURPOSE). It is the
   #     fallback: no timing source, or timings the packer cannot use (missing, corrupt, empty, all
@@ -2036,7 +2038,7 @@ jobs:
         if: steps.scope.outputs.run == 'true'
         run: dotnet build Lite.Tests/Lite.Tests.csproj -c Release --no-restore
 
-      # #5208: the packer's own proof (totality, input-order determinism, the hash fallback). No build needed.
+      # #5208: the packer's own proof (totality, input-order determinism, the hash fallback, serial-aware weighting). No build needed.
       - name: Shard packer self-test
         if: matrix.shard == 0
         run: python .github/scripts/lite-shard-pack.py --self-test
