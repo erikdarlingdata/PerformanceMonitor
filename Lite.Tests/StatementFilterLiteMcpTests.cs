@@ -76,7 +76,23 @@ public sealed class StatementFilterLiteMcpTests : IClassFixture<SharedDuckDbFixt
 
         string raw = await McpSessionTools.GetActiveQueries(_service, _serverManager, ServerName);
         string filtered = await CallFilteredAsync("get_active_queries", ("server_name", ServerName));
-        AssertWithheld(raw, filtered);
+        AssertWithheld(raw, filtered, rawAlreadyWithheld: true);
+    }
+
+    /// <summary>
+    /// #5320: the 400-character preview used to be cut BEFORE the host's sweep, and a URI's <c>user:secret@</c> is named by
+    /// its closing at-sign, so a cut between the secret's first characters and the at-sign was judged clean and left with
+    /// them. The statement is now judged whole, then cut.
+    /// </summary>
+    [Fact]
+    public async Task GetActiveQueries_WithholdsAUriSecret_ThatStraddlesTheFourHundredCharacterCut()
+    {
+        await SeedSnapshotAsync(79, StatementScrubCanary.UriStatement(400));
+
+        string filtered = await CallFilteredAsync("get_active_queries", ("server_name", ServerName));
+
+        Assert.DoesNotContain(StatementScrubCanary.UriSecretPartial, filtered, StringComparison.Ordinal);
+        Assert.Contains(SensitiveStatements.PlaceholderText, filtered);
     }
 
     [Fact]
@@ -87,7 +103,7 @@ public sealed class StatementFilterLiteMcpTests : IClassFixture<SharedDuckDbFixt
 
         string raw = await McpQueryTools.GetTopQueriesByCpu(_service, _serverManager, ServerName, hours_back: 24, top: 20);
         string filtered = await CallFilteredAsync("get_top_queries_by_cpu", ("server_name", ServerName));
-        AssertWithheld(raw, filtered);
+        AssertWithheld(raw, filtered, rawAlreadyWithheld: true);
     }
 
     [Fact]
@@ -174,9 +190,12 @@ VALUES ($1, $2, $3, 'Blocking Detected', 1, 0, $4)", Naive(DateTime.UtcNow.AddMi
 
     // ── plumbing ──
 
-    private static void AssertWithheld(string raw, string filtered)
+    /// <param name="rawAlreadyWithheld">True for a tool whose own preview already filters the statement (#5320), so the unswept
+    /// answer holds the marker rather than the canary.</param>
+    private static void AssertWithheld(string raw, string filtered, bool rawAlreadyWithheld = false)
     {
-        Assert.Contains("S3cret-canary-ssf", raw);
+        if (rawAlreadyWithheld) Assert.DoesNotContain("S3cret-canary-ssf", raw);
+        else Assert.Contains("S3cret-canary-ssf", raw);
         foreach (string needle in StatementScrubCanary.SecretNeedles) Assert.DoesNotContain(needle, filtered);
         Assert.Contains(SensitiveStatements.PlaceholderText, filtered);
         foreach (string kept in StatementScrubCanary.KeptNeedles.Where(k => raw.Contains(k, StringComparison.Ordinal)))
