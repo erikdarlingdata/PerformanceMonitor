@@ -23,6 +23,7 @@ using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.ResponseCompression;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -635,6 +636,14 @@ public sealed class DarlingWebHostService : BackgroundService
             var listenerCertificate = serverCertificate;
             builder.WebHost.ConfigureKestrel(options =>
             {
+                /* #5288: the listeners below are the ONLY ones this host binds. Kestrel adds the endpoints written in
+                   the "Kestrel:Endpoints" section of configuration (an appsettings file in the content root, or a
+                   Kestrel__Endpoints__* variable in the service environment) to whatever the code listens on, with
+                   none of the scheme or certificate decisions made here. Handing it an empty configuration replaces
+                   that loader, so the layout below is the whole layout. The MCP host's ConfigureListeners starts
+                   with the same line. */
+                options.Configure(new ConfigurationBuilder().Build());
+
                 if (networkMode)
                 {
                     /* Bind the specific family, then ALSO both loopback families (unless the listen is itself

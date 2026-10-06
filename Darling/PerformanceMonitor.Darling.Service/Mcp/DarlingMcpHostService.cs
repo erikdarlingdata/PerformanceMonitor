@@ -810,6 +810,13 @@ public sealed class DarlingMcpHostService : BackgroundService
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(primaryBind);
 
+        /* #5288: the listeners below are the ONLY ones this host binds. Kestrel adds the endpoints written in the
+           "Kestrel:Endpoints" section of configuration (an appsettings file in the content root, or a
+           Kestrel__Endpoints__* variable in the service environment) to whatever the code listens on, with none of the
+           scheme or certificate decisions made here. Handing it an empty configuration replaces that loader, so the
+           layout below is the whole layout. The web host starts its own listener callback with the same line. */
+        options.Configure(new ConfigurationBuilder().Build());
+
         if (networkMode)
         {
             /* Bind the specific family (not ListenAnyIP), then ALSO both loopback families so a local
