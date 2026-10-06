@@ -39,6 +39,8 @@ public sealed class WaitsDatabaseFilterLiveTests
     private const string DmvOnlyServerName = "darling-waits-dbfilter-dmvonly-e2e";
     private static readonly int ServerId = ServerIdHelper.GetDeterministicHashCode(ServerName);
     private static readonly int DmvOnlyServerId = ServerIdHelper.GetDeterministicHashCode(DmvOnlyServerName);
+    private const string MixedServerName = "darling-waits-dbfilter-mixed-e2e";
+    private static readonly int MixedServerId = ServerIdHelper.GetDeterministicHashCode(MixedServerName);
     private const string DbA = "WaitsDbA";
     private const string DbB = "WaitsDbB";
     private const string DbC = "WaitsDbC";
@@ -51,10 +53,11 @@ public sealed class WaitsDatabaseFilterLiveTests
     {
         Assert.Contains("($5::text[] IS NULL OR database_name = ANY($5))", DarlingSessionReader.WaitingTasksSql, StringComparison.Ordinal);
         Assert.Contains("($4::text[] IS NULL OR database_name = ANY($4))", DarlingDataReader.BlockedSessionTrendSql, StringComparison.Ordinal);
-        /* Both arms of the blocking series carry it, and the source choice reads the UNFILTERED xe_any probe. */
+        /* Both arms of the blocking series carry it, and the source choice reads the FILTERED bpr (Lite's and get_blocking_trend's rule). */
         var stats = DarlingDataReader.BlockingDurationStatsSql;
         Assert.Equal(2, CountOf(stats, "($5::text[] IS NULL OR database_name = ANY($5))"));
-        Assert.Contains("NOT EXISTS (SELECT 1 FROM xe_any)", stats, StringComparison.Ordinal);
+        Assert.Contains("NOT EXISTS (SELECT 1 FROM bpr)", stats, StringComparison.Ordinal);
+        Assert.DoesNotContain("xe_any", stats, StringComparison.Ordinal);
         foreach (var sql in new[] { DarlingSessionReader.WaitingTasksSql, DarlingDataReader.BlockedSessionTrendSql, stats })
         {
             Assert.DoesNotContain("{{", sql, StringComparison.Ordinal);
@@ -286,10 +289,10 @@ public sealed class WaitsDatabaseFilterLiveTests
             var oneC = await DarlingDataReader.GetBlockingDurationStatsAsync(postgres, ServerId, start, seed.End, DatabaseFilter.One(DbC), ct);
             Assert.Equal(new[] { (seed.M2, 1L, 7000L) }, oneC.Select(r => (r.Time, r.EventCount, r.TotalDurationMs)).ToArray());
 
-            /* The source does not move with the filter. D has DMV rows only; the server HAS XE rows (for A, B and C), so D's
-               series is empty, never the DMV rows swapped in for it, and the unfiltered series carries no DMV row either. */
+            /* The DMV arm is read only when the XE arm has no rows for the CHOSEN databases (#5244, Lite's rule). D has DMV rows only,
+               so D's series is the DMV row, while the unfiltered series (XE has rows) carries no DMV row. */
             var d = await DarlingDataReader.GetBlockingDurationStatsAsync(postgres, ServerId, start, seed.End, DatabaseFilter.One(DbD), ct);
-            Assert.Empty(d);
+            Assert.Equal(new[] { (seed.M3, 1L, 999L) }, d.Select(r => (r.Time, r.EventCount, r.TotalDurationMs)).ToArray());
             Assert.DoesNotContain(all, r => r.Time == seed.M3);
 
             /* DMV arm: a server with no XE row falls back to the DMV snapshot, and the list applies there too. */
@@ -366,6 +369,53 @@ public sealed class WaitsDatabaseFilterLiveTests
         }
     }
 
+    [Fact]
+    public async Task BlockingStats_AndBlockingTrend_ChooseTheSameSource_TheDmvArmOnlyWhenXeHasNoRowsForTheChosenDatabases()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), SkipReason);
+        var ct = TestContext.Current.CancellationToken;
+        await using var postgres = NpgsqlDataSource.Create(cs!);
+        var bodySucceeded = false;
+        try
+        {
+            var seed = await SeedAsync(cs!, ct);
+            var start = seed.End.AddHours(-1);
+
+            /* MixedServer: XE has a row for B only (m1, 5000), DMV has a row for A only (m2, 222). Filter [A] has no XE row, so BOTH tools
+               answer from the DMV arm; [A, B] has an XE row, so BOTH answer from the XE arm (and never mix in A's DMV row). */
+            async Task<((DateTime, long, long)[] Stats, (DateTime, int)[] Trend)> AskAsync(DatabaseFilter filter)
+            {
+                var stats = await DarlingDataReader.GetBlockingDurationStatsAsync(postgres, MixedServerId, start, seed.End, filter, ct);
+                var trend = await DarlingBlockingTrendReader.GetBlockingTrendAsync(postgres, MixedServerId, start, seed.End, filter, ct);
+                return (stats.Select(r => (r.Time, r.EventCount, r.TotalDurationMs)).ToArray(), trend.Select(p => (p.Time, p.Count)).ToArray());
+            }
+
+            var a = await AskAsync(DatabaseFilter.Of([DbA]));
+            Assert.Equal(new[] { (seed.M2, 1L, 222L) }, a.Stats);
+            Assert.Equal(new[] { (seed.M2, 1) }, a.Trend);
+
+            var ab = await AskAsync(DatabaseFilter.Of([DbA, DbB]));
+            Assert.Equal(new[] { (seed.M1, 1L, 5000L) }, ab.Stats);
+            Assert.Equal(new[] { (seed.M1, 1) }, ab.Trend);
+
+            var b = await AskAsync(DatabaseFilter.One(DbB));
+            Assert.Equal(ab.Stats, b.Stats);
+            Assert.Equal(ab.Trend, b.Trend);
+
+            /* Unfiltered: XE has rows, so the XE arm, as always. */
+            var all = await AskAsync(DatabaseFilter.All);
+            Assert.Equal(ab.Stats, all.Stats);
+            Assert.Equal(ab.Trend, all.Trend);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) => await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
     private static int CountOf(string text, string needle)
     {
         var count = 0;
@@ -384,6 +434,7 @@ public sealed class WaitsDatabaseFilterLiveTests
     /// reports: minute m1 has A 1000 and 3000 and B 5000, minute m2 has C 7000. DMV snapshots (which must never be read while XE has
     /// rows): D 999 at m3 and A 111 at m1. A collection_log row says the blocking collector ran.</para>
     /// <para>DmvOnlyServerName: no XE row; DMV snapshots at m1 of A 100, A 200 and B 300.</para>
+    /// <para>MixedServerName: one XE report for B at m1 (5000) and one DMV snapshot for A at m2 (222).</para>
     /// </summary>
     private static async Task<Seed> SeedAsync(string cs, CancellationToken ct)
     {
@@ -393,6 +444,7 @@ public sealed class WaitsDatabaseFilterLiveTests
         await DeleteRowsAsync(connection, ct);
         await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
         await DarlingMcpTestData.RegisterServerAsync(connection, DmvOnlyServerId, DmvOnlyServerName, ct);
+        await DarlingMcpTestData.RegisterServerAsync(connection, MixedServerId, MixedServerName, ct);
 
         var end = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow);
         var capture = DarlingMcpTestData.Naive(end.AddMinutes(-10));
@@ -430,6 +482,12 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
             await InsertDmvAsync(connection, DmvOnlyServerId, DmvOnlyServerName, m1, db, wait, spid, ct);
         }
 
+        /* MixedServerName: XE has B only (m1, 5000) and DMV has A only (m2, 222), so which arm answers depends on the filter. */
+        await DarlingMcpTestData.ExecAsync(connection, ct,
+            "INSERT INTO blocked_process_reports (blocked_report_id, collection_time, server_id, server_name, event_time, wait_time_ms, blocking_spid, blocked_spid, blocking_status, database_name) VALUES ($1,$2,$3,$4,$2,$5,60,$6,'suspended',$7)",
+            CollectionIdGenerator.Next(), m1, MixedServerId, MixedServerName, 5000L, 91, DbB);
+        await InsertDmvAsync(connection, MixedServerId, MixedServerName, m2, DbA, 222L, 92, ct);
+
         await DarlingMcpTestData.ExecAsync(connection, ct,
             "INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, rows_collected) VALUES ($1,$2,$3,'blocked_process_report',$4,10,'SUCCESS',0)",
             CollectionIdGenerator.Next(), ServerId, ServerName, capture);
@@ -444,7 +502,7 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
 
     private static async Task DeleteRowsAsync(NpgsqlConnection connection, CancellationToken ct)
     {
-        foreach (var id in new[] { ServerId, DmvOnlyServerId })
+        foreach (var id in new[] { ServerId, DmvOnlyServerId, MixedServerId })
         {
             using var cleanup = new NpgsqlCommand(
                 $"DELETE FROM waiting_tasks WHERE server_id = {id}; DELETE FROM blocked_process_reports WHERE server_id = {id}; "

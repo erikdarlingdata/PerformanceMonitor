@@ -45,10 +45,7 @@ public sealed class EventWindowedReadsCarryTheFloorTests
         { nameof(ViewerDataService) + "." + nameof(ViewerDataService.DefaultTraceEventsByWindowSql), ViewerDataService.DefaultTraceEventsByWindowSql, 1 },
         { nameof(DarlingDefaultTraceReader) + ".EventsByWindowSql", DarlingDefaultTraceReader.EventsByWindowSql, 1 },
         { nameof(ViewerDataService) + "." + nameof(ViewerDataService.BlockingDurationStatsSql), ViewerDataService.BlockingDurationStatsSql, 2 },
-        { nameof(DarlingDataReader) + "." + nameof(DarlingDataReader.BlockingDurationStatsSql), DarlingDataReader.BlockingDurationStatsSql, 3 },
-        /* 3, not 2 (#5244): the database filter made the source choice an UNFILTERED probe (the xe_any CTE, LIMIT 1) beside the
-           two filtered arms, so a filter cannot swap the DMV fallback in for databases the XE session simply did not catch. It
-           scans the same hypertable and carries the same floor. */
+        { nameof(DarlingDataReader) + "." + nameof(DarlingDataReader.BlockingDurationStatsSql), DarlingDataReader.BlockingDurationStatsSql, 2 },
         { nameof(ViewerDataService) + "." + nameof(ViewerDataService.BlockingPairRowsSql), ViewerDataService.BlockingPairRowsSql, 1 },
         { nameof(ViewerDataService) + "." + nameof(ViewerDataService.MemoryPressureEventsSql), ViewerDataService.MemoryPressureEventsSql, 1 },
         /* 2, not 1: #4229's own fix split the single job_history scan into two — job_stats (the per-job

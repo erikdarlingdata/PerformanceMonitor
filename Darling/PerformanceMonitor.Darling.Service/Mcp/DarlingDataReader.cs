@@ -4664,17 +4664,17 @@ FROM config.config_collector_schedules";
     /// <summary>
     /// Blocking-duration aggregate per minute, the viewer's Blocking Stats read verbatim.
     /// <para>XE blocked-process reports are the primary source and the DMV snapshot is the fallback, and
-    /// the fallback contributes ONLY when the XE source has no rows in the window at all. Mixing them
+    /// the fallback contributes ONLY when the XE source has no rows in the window (for the chosen databases, when filtered). Mixing them
     /// would double-count the same incident from two captures, so it is a fallback and never a union.
     /// $1 server_id, $2 start, $3 end (naive UTC). $4 is the <see cref="EventWindowFloor"/> for $2 — both
     /// tables are hypertables partitioned on <c>collection_time</c>, which this event-time window alone
     /// gives the planner nothing to exclude a chunk on (#4229); the floor lets it skip every chunk older
     /// than the window, without being able to drop a row (an event is collected after it happens).</para>
     /// <para>$5 is the databases as one <c>text[]</c> (#5244, <see cref="DatabaseFilter.Clause"/>): SQL NULL is every database,
-    /// otherwise BOTH arms count only the named databases' rows. Which arm is read does NOT move with the filter: the DMV
-    /// fallback is taken when the XE source has no row in the window for ANY database (the <c>xe_any</c> probe), so a filter
-    /// that leaves no XE row for its databases does not swap in the other capture path for them, and the two sources are
-    /// never mixed. The unfiltered series is exactly what it was.</para>
+    /// otherwise BOTH arms count only the named databases' rows, and the rule above is read over those rows: the DMV fallback
+    /// is taken only when the XE source has no row for the CHOSEN databases (<c>NOT EXISTS (SELECT 1 FROM bpr)</c> over the
+    /// filtered <c>bpr</c>), exactly as the desktop's blocking reads and <c>get_blocking_trend</c> choose, so the tools answer
+    /// from one source for one filter and the two sources are never mixed. The unfiltered series is exactly what it was.</para>
     /// </summary>
     public static readonly string BlockingDurationStatsSql = $$"""
         WITH bpr AS (
@@ -4689,13 +4689,6 @@ FROM config.config_collector_schedules";
             AND   collection_time >= $4
             {{DatabaseFilter.All.Clause("database_name", 5)}}
             GROUP BY DATE_TRUNC('minute', event_time)
-        ),
-        xe_any AS (
-            SELECT 1
-            FROM v_blocked_process_reports
-            WHERE server_id = $1 AND event_time >= $2 AND event_time <= $3
-            AND   collection_time >= $4
-            LIMIT 1
         ),
         dmv AS (
             SELECT
@@ -4712,7 +4705,7 @@ FROM config.config_collector_schedules";
         )
         SELECT bucket, event_count, total_duration_ms, max_duration_ms, avg_duration_ms FROM bpr
         UNION ALL
-        SELECT bucket, event_count, total_duration_ms, max_duration_ms, avg_duration_ms FROM dmv WHERE NOT EXISTS (SELECT 1 FROM xe_any)
+        SELECT bucket, event_count, total_duration_ms, max_duration_ms, avg_duration_ms FROM dmv WHERE NOT EXISTS (SELECT 1 FROM bpr)
         ORDER BY bucket
         """;
 

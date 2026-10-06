@@ -38,7 +38,7 @@ internal static class DarlingBlockingTrendReader
     /// Blocking-incident count per minute — the viewer's <c>BlockingTrendSql</c>. XE blocked-process reports
     /// (<c>v_blocked_process_reports</c>) are the primary source, bucketed on <c>event_time</c>; the always-on
     /// DMV snapshot (<c>v_dmv_blocking_snapshots</c>) is appended only when the XE source has no rows in the
-    /// window (<c>WHERE NOT EXISTS</c>), so a server with both sources never double-counts. $1 server_id,
+    /// window for the chosen databases (<c>WHERE NOT EXISTS</c> over the filtered <c>bpr</c>, the rule <c>get_blocking_stats</c> and the desktop use too), so a server with both sources never double-counts. $1 server_id,
     /// $2 window start, $3 window end (naive UTC). $4 is the <see cref="EventWindowFloor"/> for $2, and $5 the
     /// database filter (<c>text[]</c>, NULL = all; #5244) — both
     /// tables are hypertables partitioned on <c>collection_time</c>, which this event-time window alone gives
