@@ -345,6 +345,42 @@ public class SensitiveStatementAutoParamTests
         Assert.DoesNotContain("S3cret-fixture", result);
     }
 
+    // ── a plan that does not parse: withheld whole when the probe could have mattered ──
+
+    [Fact]
+    public void CutPreparedPlan_InsideItsParameterList_IsWithheldWhole()
+    {
+        string xml = Fixture("autoparam_update_prepared.xml");
+        int at = xml.IndexOf("ParameterCompiledValue=\"N&apos;S3", StringComparison.Ordinal) + 30;
+        string cut = xml.Substring(0, at);
+
+        // the judge alone names nothing in the cut text (the stored text is [password] = @1)
+        Assert.False(StandIn(System.Net.WebUtility.HtmlDecode(cut)));
+        Assert.Equal(P, Run(cut));
+    }
+
+    [Fact]
+    public void CutPlan_WithNoToken_TakesTheWholeTextPath()
+    {
+        const string plain = "<ShowPlanXML><StmtSimple StatementText=\"SELECT 1 WHERE [x] = 1\" ParameterCompiledValue=\"(5)\"><QueryPlan";
+        const string named = "<ShowPlanXML><StmtSimple StatementText=\"UPDATE t SET password = N'S3cret'\" ParameterCompiledValue=\"(5)\"><QueryPlan";
+
+        Assert.Same(plain, Run(plain));
+        Assert.Equal(P, Run(named));
+    }
+
+    [Fact]
+    public void CutPlan_WithATokenButNoParameterValues_TakesTheWholeTextPath()
+    {
+        string xml = Fixture("autoparam_update_prepared.xml");
+        string cut = xml.Substring(0, xml.IndexOf("<ParameterList>", StringComparison.Ordinal) + 8);
+        Assert.Contains("@1", cut);
+        Assert.DoesNotContain("ParameterCompiledValue", cut);
+        Assert.DoesNotContain("ParameterRuntimeValue", cut);
+
+        Assert.Same(cut, Run(cut));
+    }
+
     // ── measurements: the walk's cost with the probe (printed; the ceilings are loose) ──
 
     private const string FillerRelOp =

@@ -73,6 +73,11 @@ public static partial class SensitiveStatements
             {
                 if (budgetSpent())
                     return placeholder;
+                // A plan that does not parse cannot be probed. When the probe could have mattered (an
+                // auto-parameter token, and parameter values to put back) the stored text names nothing on its own,
+                // so the document is withheld whole without asking the judge.
+                if (XmlRun.ProbeCouldHaveMattered(xml))
+                    return placeholder;
                 return isNamed(WebUtility.HtmlDecode(xml)) ? placeholder : xml;
             }
             catch (Exception)
@@ -252,6 +257,13 @@ public static partial class SensitiveStatements
             from = text.Length;
             return false;
         }
+
+        /// <summary>The parse-failure rule: the raw text holds an auto-parameter token AND a parameter value
+        /// attribute, so a probe would have been made had the plan parsed.</summary>
+        internal static bool ProbeCouldHaveMattered(string xml) =>
+            (xml.Contains("ParameterCompiledValue", StringComparison.Ordinal)
+                || xml.Contains("ParameterRuntimeValue", StringComparison.Ordinal))
+            && HasToken(xml);
 
         private static bool HasToken(string text)
         {
