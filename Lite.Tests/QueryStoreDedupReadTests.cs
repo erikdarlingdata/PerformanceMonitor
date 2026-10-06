@@ -919,10 +919,11 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
         var rankFilters = Regex.Matches(source, @"(?:WHERE|AND)\s+(?:qs\.)?rn = 1").Count;
 
         Assert.Equal(6, partitions);
-        /* Eight, not six: the comparison's two deduped CTEs are each consumed TWICE — once to pick the
-           top 100 hashes and once by the value aggregate — and an rn filter missing from either consumer
-           would let the un-deduped rows straight back into the numbers. */
-        Assert.Equal(8, rankFilters);
+        /* Ten, not six: the comparison's two deduped CTEs are each consumed THREE times — once to pick the
+           top 100 hashes, once by the value aggregate, and (#5381) once by the winner CTE that names the rows
+           whose query_text is read after the ranking — and an rn filter missing from any consumer would let
+           the un-deduped rows straight back into the numbers (or the text). */
+        Assert.Equal(10, rankFilters);
 
         /* Every dedup orders by collection_time FIRST — "latest" is never decided by execution_count, which
            can sit still across a hundred re-collections of the same interval.

@@ -167,8 +167,9 @@ ORDER BY bucket";
         using var connection = await OpenConnectionAsync();
 
         var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
-        var dbClause = BuildDbInClause(databaseNames, "database_name", 5, out var dbValues);
-        var executionTypeParameterIndex = 5 + dbValues.Count;
+        /* #5381: $4 used to be the page limit; the limit is applied after the text lookup now, so the filter parameters start at $4. */
+        var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
+        var executionTypeParameterIndex = 4 + dbValues.Count;
         var executionTypeClause = string.IsNullOrWhiteSpace(executionType)
             ? ""
             : $" AND execution_type_desc = ${executionTypeParameterIndex}";
@@ -189,8 +190,10 @@ WITH deduped AS (
        as its last_execution_time advances, so the SAME interval is stored repeatedly with a growing
        execution_count. SUM(execution_count) over the raw rows reports 10 + 25 + 40 for an interval that
        reached 40, and AVG(avg_*) becomes an avg-of-avgs weighted by how many times each interval happened
-       to be re-collected. Keep the LATEST snapshot per interval. SELECT * because the aggregate below
-       projects nearly every payload column.
+       to be re-collected. Keep the LATEST snapshot per interval. The aggregate below projects nearly every
+       payload column, so they are listed here; #5381: query_text and query_plan_text are NOT among them. SELECT *
+       carried both wide columns through the ROW_NUMBER sort for every row in the window, which is what ran Lite out
+       of its memory_limit on a wide window. The text is read after the ranking, for the page's rows only (below).
 
        runtime_stats_interval_id is the REAL interval identity (tier 2), with first_execution_time kept
        beside it as the tier-1 proxy for rows collected before it existed — see the slicer above for why
@@ -200,7 +203,18 @@ WITH deduped AS (
        (or MAXed) on them: the dedup key must be at least as fine as the read's own row identity, or
        dedup would silently drop a row the grid is supposed to show rather than de-duplicate one. */
     SELECT
-        *,
+        database_name, query_id, plan_id, query_hash, replica_role, module_name, execution_type_desc,
+        runtime_stats_interval_id, first_execution_time, last_execution_time, collection_time,
+        execution_count, avg_duration_us, avg_cpu_time_us, avg_logical_io_reads, avg_logical_io_writes,
+        avg_physical_io_reads, avg_rowcount, min_dop, max_dop, query_plan_hash, is_forced_plan,
+        plan_forcing_type, avg_clr_time_us, avg_tempdb_space_used, avg_log_bytes_used, plan_type,
+        force_failure_count, last_force_failure_reason, compatibility_level, min_duration_us,
+        max_duration_us, min_cpu_time_us, max_cpu_time_us, min_logical_io_reads, max_logical_io_reads,
+        min_logical_io_writes, max_logical_io_writes, min_physical_io_reads, max_physical_io_reads,
+        min_clr_time_us, max_clr_time_us, min_rowcount, max_rowcount, min_log_bytes_used,
+        max_log_bytes_used, min_tempdb_space_used, max_tempdb_space_used, avg_query_max_used_memory,
+        min_query_max_used_memory, max_query_max_used_memory, avg_num_physical_io_reads,
+        min_num_physical_io_reads, max_num_physical_io_reads,
         ROW_NUMBER() OVER
         (
             PARTITION BY database_name, query_id, plan_id, runtime_stats_interval_id, first_execution_time, execution_type_desc, replica_role
@@ -283,13 +297,36 @@ ranked AS (
     ORDER BY SUM(execution_count) * AVG(CAST(avg_duration_us AS DOUBLE PRECISION)) DESC, database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role
     LIMIT " + candidates + @"
 ),
+/* #5381: which row holds each candidate's text, found on NARROW columns only. This is the row the old lateral
+   picked (latest by collection_time, then collection_id) except that it does not look at query_text: the text itself
+   is read for these rows by key afterwards, so no wide column is carried through a window or a join. The all-history
+   reach of the old lateral is unchanged; only its width is. A candidate whose latest row has a NULL text is
+   re-resolved to its latest NON-NULL text by the caller, which is what the old IS NOT NULL guard did. */
+latest_row AS (
+    SELECT database_name, query_id, collection_id, collection_time
+    FROM
+    (
+        SELECT
+            v.database_name,
+            v.query_id,
+            v.collection_id,
+            v.collection_time,
+            ROW_NUMBER() OVER (PARTITION BY v.database_name, v.query_id ORDER BY v.collection_time DESC, v.collection_id DESC) AS lr
+        FROM v_query_store_stats v
+        INNER JOIN (SELECT DISTINCT database_name, query_id FROM ranked) k
+          ON  k.database_name = v.database_name
+          AND k.query_id = v.query_id
+        WHERE v.server_id = $1
+    ) x
+    WHERE lr = 1
+),
 page AS (
 SELECT
     r.database_name,
     r.query_id,
     r.plan_id,
     r.query_hash,
-    t.query_text,
+    CAST(NULL AS VARCHAR) AS query_text,
     r.module_name,
     r.total_executions,
     r.avg_duration_ms,
@@ -339,24 +376,17 @@ SELECT
     r.min_num_physical_io_reads,
     r.max_num_physical_io_reads,
     r.replica_role,
-    ROW_NUMBER() OVER (ORDER BY r.total_executions * r.avg_duration_ms DESC, r.database_name, r.query_id, r.plan_id, r.query_hash, r.execution_type_desc, r.replica_role) AS page_ord
+    ROW_NUMBER() OVER (ORDER BY r.total_executions * r.avg_duration_ms DESC, r.database_name, r.query_id, r.plan_id, r.query_hash, r.execution_type_desc, r.replica_role) AS page_ord,
+    lr.collection_id AS text_collection_id,
+    lr.collection_time AS text_collection_time
 FROM ranked r
-LEFT JOIN LATERAL (
-    SELECT query_text
-    FROM v_query_store_stats
-    WHERE server_id = $1
-    AND   query_id = r.query_id
-    AND   database_name = r.database_name
-    AND   query_text IS NOT NULL
-    /* #5299 round 2 (N3): a tie on the time breaks on the row collected last - see GetTopQueriesByCpuAsync. */
-    ORDER BY collection_time DESC, collection_id DESC
-    LIMIT 1
-) t ON TRUE
-WHERE t.query_text IS NULL OR t.query_text NOT LIKE 'WAITFOR%'
-ORDER BY r.total_executions * r.avg_duration_ms DESC, r.database_name, r.query_id, r.plan_id, r.query_hash, r.execution_type_desc, r.replica_role
-LIMIT $4
+LEFT JOIN latest_row lr
+  ON  lr.database_name = r.database_name
+  AND lr.query_id = r.query_id
 )
-/* #5313: the count row rides beside the page so a round trimmed to nothing still reports whether more candidates exist. */
+/* #5313: the count row rides beside the page so a round trimmed to nothing still reports whether more candidates exist.
+   #5381: the WAITFOR filter and the page limit need the text, so they run in code after the by-key text read, over
+   the candidates in page_ord order - the same rows in the same order the old statement's WHERE and LIMIT $4 kept. */
 SELECT p.*, c.candidate_count
 FROM (SELECT COUNT(*) AS candidate_count FROM ranked) c
 LEFT JOIN page p ON TRUE
@@ -365,7 +395,6 @@ ORDER BY p.page_ord";
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = startTime });
         command.Parameters.Add(new DuckDBParameter { Value = endTime });
-        command.Parameters.Add(new DuckDBParameter { Value = top });
         foreach (var db in dbValues)
             command.Parameters.Add(new DuckDBParameter { Value = db });
         if (!string.IsNullOrWhiteSpace(executionType))
@@ -373,18 +402,19 @@ ORDER BY p.page_ord";
         if (!string.IsNullOrWhiteSpace(moduleName))
             command.Parameters.Add(new DuckDBParameter { Value = moduleName });
 
-        var items = new List<QueryStoreRow>();
+        var candidatesWithKeys = new List<(QueryStoreRow Row, long? TextCollectionId, DateTime? TextCollectionTime)>();
         var candidateCount = 0;
-        using var reader = await command.ExecuteReaderAsync();
+        using (var reader = await command.ExecuteReaderAsync())
+        {
         while (await reader.ReadAsync())
         {
-            candidateCount = reader.IsDBNull(55) ? 0 : Convert.ToInt32(reader.GetValue(55));
+            candidateCount = reader.IsDBNull(57) ? 0 : Convert.ToInt32(reader.GetValue(57));
             if (reader.IsDBNull(54))
             {
                 continue;
             }
 
-            items.Add(new QueryStoreRow
+            var candidate = new QueryStoreRow
             {
                 DatabaseName = reader.IsDBNull(0) ? "" : reader.GetString(0),
                 QueryId = reader.IsDBNull(1) ? 0 : reader.GetInt64(1),
@@ -440,7 +470,42 @@ ORDER BY p.page_ord";
                 MinNumPhysicalIoReads = reader.IsDBNull(51) ? 0 : ToDouble(reader.GetValue(51)),
                 MaxNumPhysicalIoReads = reader.IsDBNull(52) ? 0 : ToDouble(reader.GetValue(52)),
                 ReplicaRole = reader.IsDBNull(53) ? null : reader.GetString(53)
-            });
+            };
+            candidatesWithKeys.Add((candidate,
+                reader.IsDBNull(55) ? (long?)null : reader.GetInt64(55),
+                reader.IsDBNull(56) ? (DateTime?)null : reader.GetDateTime(56)));
+        }
+        }
+
+        /* #5381: the text, for the candidates only and by key. */
+        var texts = await ReadQueryStoreTextByRowAsync(
+            connection, serverId,
+            candidatesWithKeys.Where(c => c.TextCollectionId.HasValue && c.TextCollectionTime.HasValue)
+                .Select(c => (c.TextCollectionId!.Value, c.TextCollectionTime!.Value)));
+        var items = new List<QueryStoreRow>();
+        foreach (var (row, textId, textTime) in candidatesWithKeys)
+        {
+            string? text = null;
+            if (textId.HasValue && textTime.HasValue)
+            {
+                texts.TryGetValue((textId.Value, textTime.Value), out text);
+                /* The old lateral skipped NULL texts: a latest row with no text resolves to the latest row WITH one. */
+                text ??= await ReadQueryStoreLatestNonNullTextAsync(connection, serverId, row.DatabaseName, row.QueryId);
+            }
+
+            /* The old statement's WHERE (NOT LIKE is case sensitive, a prefix test) and LIMIT $4, in page_ord order. */
+            if (text is not null && text.StartsWith("WAITFOR", StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            if (items.Count >= top)
+            {
+                break;
+            }
+
+            row.QueryText = text ?? "";
+            items.Add(row);
         }
 
         return (items, candidateCount);
@@ -478,9 +543,11 @@ WITH deduped_current AS (
        delta this comparison exists to compute. One deduped CTE per window, so both arms are treated
        identically. */
     SELECT
+        collection_id,
+        collection_time,
         database_name,
+        query_id,
         query_hash,
-        query_text,
         execution_count,
         avg_duration_us,
         avg_cpu_time_us,
@@ -496,9 +563,11 @@ WITH deduped_current AS (
 ),
 deduped_baseline AS (
     SELECT
+        collection_id,
+        collection_time,
         database_name,
+        query_id,
         query_hash,
-        query_text,
         execution_count,
         avg_duration_us,
         avg_cpu_time_us,
@@ -543,8 +612,7 @@ current_period AS (
            SUM(qs.execution_count) AS exec_count,
            SUM(qs.execution_count * qs.avg_duration_us::DOUBLE PRECISION) / NULLIF(SUM(qs.execution_count), 0) / 1000.0 AS avg_duration_ms,
            SUM(qs.execution_count * qs.avg_cpu_time_us::DOUBLE PRECISION) / NULLIF(SUM(qs.execution_count), 0) / 1000.0 AS avg_cpu_ms,
-           SUM(qs.execution_count * qs.avg_logical_io_reads::DOUBLE PRECISION) / NULLIF(SUM(qs.execution_count), 0) AS avg_reads,
-           MAX(qs.query_text) AS query_text
+           SUM(qs.execution_count * qs.avg_logical_io_reads::DOUBLE PRECISION) / NULLIF(SUM(qs.execution_count), 0) AS avg_reads
     FROM top_hashes th
     INNER JOIN deduped_current qs
       ON  qs.query_hash IS NOT DISTINCT FROM th.query_hash
@@ -558,8 +626,7 @@ baseline_period AS (
            SUM(qs.execution_count) AS exec_count,
            SUM(qs.execution_count * qs.avg_duration_us::DOUBLE PRECISION) / NULLIF(SUM(qs.execution_count), 0) / 1000.0 AS avg_duration_ms,
            SUM(qs.execution_count * qs.avg_cpu_time_us::DOUBLE PRECISION) / NULLIF(SUM(qs.execution_count), 0) / 1000.0 AS avg_cpu_ms,
-           SUM(qs.execution_count * qs.avg_logical_io_reads::DOUBLE PRECISION) / NULLIF(SUM(qs.execution_count), 0) AS avg_reads,
-           MAX(qs.query_text) AS query_text
+           SUM(qs.execution_count * qs.avg_logical_io_reads::DOUBLE PRECISION) / NULLIF(SUM(qs.execution_count), 0) AS avg_reads
     FROM top_hashes th
     INNER JOIN deduped_baseline qs
       ON  qs.query_hash IS NOT DISTINCT FROM th.query_hash
@@ -567,19 +634,74 @@ baseline_period AS (
     WHERE qs.rn = 1
     AND   qs.execution_count > 0
     GROUP BY th.database_name, th.query_hash
+),
+/* #5381: query_text is not carried through the window above; it is read afterwards for the rows asked for here.
+   Each period's text used to be MAX(query_text) over that period's kept rows for the (database, hash) pair. The rows
+   to read are the latest kept row of each query_id inside the pair: a query_id has one text for life in Query Store,
+   so the MAX over those rows is the MAX over every kept row, and the lookup touches one row per query instead of
+   one per collected interval. kind 1 = current period's rows, kind 2 = baseline's, kind 0 = the comparison rows. */
+current_winner AS (
+    SELECT database_name, query_hash, collection_id, collection_time
+    FROM
+    (
+        SELECT
+            th.database_name,
+            th.query_hash,
+            qs.collection_id,
+            qs.collection_time,
+            ROW_NUMBER() OVER (PARTITION BY th.database_name, th.query_hash, qs.query_id ORDER BY qs.collection_time DESC, qs.collection_id DESC) AS wr
+        FROM top_hashes th
+        INNER JOIN deduped_current qs
+          ON  qs.query_hash IS NOT DISTINCT FROM th.query_hash
+          AND qs.database_name IS NOT DISTINCT FROM th.database_name
+        WHERE qs.rn = 1
+        AND   qs.execution_count > 0
+    ) x
+    WHERE wr = 1
+),
+baseline_winner AS (
+    SELECT database_name, query_hash, collection_id, collection_time
+    FROM
+    (
+        SELECT
+            th.database_name,
+            th.query_hash,
+            qs.collection_id,
+            qs.collection_time,
+            ROW_NUMBER() OVER (PARTITION BY th.database_name, th.query_hash, qs.query_id ORDER BY qs.collection_time DESC, qs.collection_id DESC) AS wr
+        FROM top_hashes th
+        INNER JOIN deduped_baseline qs
+          ON  qs.query_hash IS NOT DISTINCT FROM th.query_hash
+          AND qs.database_name IS NOT DISTINCT FROM th.database_name
+        WHERE qs.rn = 1
+        AND   qs.execution_count > 0
+    ) x
+    WHERE wr = 1
 )
-SELECT COALESCE(c.database_name, b.database_name) AS database_name,
+SELECT 0 AS kind,
+       COALESCE(c.database_name, b.database_name) AS database_name,
        COALESCE(c.query_hash, b.query_hash) AS query_hash,
-       COALESCE(c.query_text, b.query_text) AS query_text,
        c.exec_count, c.avg_duration_ms, c.avg_cpu_ms, c.avg_reads,
        b.exec_count AS baseline_exec_count,
        b.avg_duration_ms AS baseline_avg_duration_ms,
        b.avg_cpu_ms AS baseline_avg_cpu_ms,
-       b.avg_reads AS baseline_avg_reads
+       b.avg_reads AS baseline_avg_reads,
+       CAST(NULL AS BIGINT) AS text_collection_id,
+       CAST(NULL AS TIMESTAMP) AS text_collection_time
 FROM current_period c
 FULL OUTER JOIN baseline_period b
   ON  c.database_name IS NOT DISTINCT FROM b.database_name
-  AND c.query_hash IS NOT DISTINCT FROM b.query_hash;";
+  AND c.query_hash IS NOT DISTINCT FROM b.query_hash
+UNION ALL
+SELECT 1, database_name, query_hash,
+       NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+       collection_id, collection_time
+FROM current_winner
+UNION ALL
+SELECT 2, database_name, query_hash,
+       NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+       collection_id, collection_time
+FROM baseline_winner;";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = currentStart });
@@ -590,23 +712,52 @@ FULL OUTER JOIN baseline_period b
             command.Parameters.Add(new DuckDBParameter { Value = db });
 
         var items = new List<QueryStatsComparisonItem>();
-        using var reader = await command.ExecuteReaderAsync();
-        while (await reader.ReadAsync())
+        var currentKeys = new Dictionary<(string?, string?), List<(long, DateTime)>>();
+        var baselineKeys = new Dictionary<(string?, string?), List<(long, DateTime)>>();
+        var itemKeys = new List<(string?, string?)>();
+        using (var reader = await command.ExecuteReaderAsync())
         {
-            items.Add(new QueryStatsComparisonItem
+            while (await reader.ReadAsync())
             {
-                DatabaseName = reader.IsDBNull(0) ? "" : reader.GetString(0),
-                QueryHash = reader.IsDBNull(1) ? "" : reader.GetString(1),
-                QueryText = reader.IsDBNull(2) ? "" : reader.GetString(2),
-                ExecutionCount = reader.IsDBNull(3) ? 0 : ToInt64(reader.GetValue(3)),
-                AvgDurationMs = reader.IsDBNull(4) ? 0 : ToDouble(reader.GetValue(4)),
-                AvgCpuMs = reader.IsDBNull(5) ? 0 : ToDouble(reader.GetValue(5)),
-                AvgReads = reader.IsDBNull(6) ? 0 : ToDouble(reader.GetValue(6)),
-                BaselineExecutionCount = reader.IsDBNull(7) ? 0 : ToInt64(reader.GetValue(7)),
-                BaselineAvgDurationMs = reader.IsDBNull(8) ? 0 : ToDouble(reader.GetValue(8)),
-                BaselineAvgCpuMs = reader.IsDBNull(9) ? 0 : ToDouble(reader.GetValue(9)),
-                BaselineAvgReads = reader.IsDBNull(10) ? 0 : ToDouble(reader.GetValue(10)),
-            });
+                var kind = reader.GetInt32(0);
+                var key = (reader.IsDBNull(1) ? null : reader.GetString(1), reader.IsDBNull(2) ? null : reader.GetString(2));
+                if (kind != 0)
+                {
+                    var keys = kind == 1 ? currentKeys : baselineKeys;
+                    if (!keys.TryGetValue(key, out var list))
+                    {
+                        keys[key] = list = [];
+                    }
+                    list.Add((reader.GetInt64(11), reader.GetDateTime(12)));
+                    continue;
+                }
+
+                itemKeys.Add(key);
+                items.Add(new QueryStatsComparisonItem
+                {
+                    DatabaseName = key.Item1 ?? "",
+                    QueryHash = key.Item2 ?? "",
+                    QueryText = "",
+                    ExecutionCount = reader.IsDBNull(3) ? 0 : ToInt64(reader.GetValue(3)),
+                    AvgDurationMs = reader.IsDBNull(4) ? 0 : ToDouble(reader.GetValue(4)),
+                    AvgCpuMs = reader.IsDBNull(5) ? 0 : ToDouble(reader.GetValue(5)),
+                    AvgReads = reader.IsDBNull(6) ? 0 : ToDouble(reader.GetValue(6)),
+                    BaselineExecutionCount = reader.IsDBNull(7) ? 0 : ToInt64(reader.GetValue(7)),
+                    BaselineAvgDurationMs = reader.IsDBNull(8) ? 0 : ToDouble(reader.GetValue(8)),
+                    BaselineAvgCpuMs = reader.IsDBNull(9) ? 0 : ToDouble(reader.GetValue(9)),
+                    BaselineAvgReads = reader.IsDBNull(10) ? 0 : ToDouble(reader.GetValue(10)),
+                });
+            }
+        }
+
+        /* #5381: the text, read by key after the ranking. COALESCE(current text, baseline text), each a MAX in UTF-8 order. */
+        var texts = await ReadQueryStoreTextByRowAsync(
+            connection, serverId,
+            currentKeys.Values.Concat(baselineKeys.Values).SelectMany(v => v).Select(v => (v.Item1, v.Item2)));
+        for (var i = 0; i < items.Count; i++)
+        {
+            var text = MaxUtf8Text(currentKeys, itemKeys[i], texts) ?? MaxUtf8Text(baselineKeys, itemKeys[i], texts);
+            items[i].QueryText = text ?? "";
         }
 
         return items;

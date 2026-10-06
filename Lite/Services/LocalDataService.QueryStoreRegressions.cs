@@ -117,10 +117,11 @@ WITH deduped_baseline AS (
 ),
 deduped_recent AS (
     SELECT
+        collection_id,
+        collection_time,
         database_name,
         query_id,
         plan_id,
-        query_text,
         execution_count,
         avg_duration_us,
         avg_cpu_time_us,
@@ -153,7 +154,6 @@ recent_performance AS (
     SELECT
         database_name,
         query_id,
-        MAX(query_text) AS query_text_sample,
         AVG(CAST(avg_duration_us AS DOUBLE PRECISION)) / 1000.0 AS avg_duration_ms,
         AVG(CAST(avg_cpu_time_us AS DOUBLE PRECISION)) / 1000.0 AS avg_cpu_time_ms,
         AVG(CAST(avg_logical_io_reads AS DOUBLE PRECISION)) AS avg_logical_io_reads,
@@ -163,6 +163,24 @@ recent_performance AS (
     FROM deduped_recent
     WHERE rn = 1
     GROUP BY database_name, query_id
+),
+/* #5381: query_text is not carried through the windows above. The sample used to be MAX(query_text) over the
+   query's kept recent rows; it is read afterwards, by key, for the rows this statement returns, from the latest kept
+   row of each query: a query_id has one text for life in Query Store, so that is the same text. */
+recent_winner AS (
+    SELECT database_name, query_id, collection_id, collection_time
+    FROM
+    (
+        SELECT
+            database_name,
+            query_id,
+            collection_id,
+            collection_time,
+            ROW_NUMBER() OVER (PARTITION BY database_name, query_id ORDER BY collection_time DESC, collection_id DESC) AS wr
+        FROM deduped_recent
+        WHERE rn = 1
+    ) x
+    WHERE wr = 1
 )
 SELECT
     r.database_name,
@@ -187,12 +205,16 @@ SELECT
         WHEN (r.avg_duration_ms - b.avg_duration_ms) * 100.0 / NULLIF(b.avg_duration_ms, 0) > 25 THEN 'MEDIUM'
         ELSE 'LOW'
     END AS severity,
-    r.query_text_sample,
-    r.last_execution_time
+    w.collection_id AS text_collection_id,
+    r.last_execution_time,
+    w.collection_time AS text_collection_time
 FROM recent_performance AS r
 JOIN baseline_performance AS b
   ON  b.database_name = r.database_name
   AND b.query_id = r.query_id
+LEFT JOIN recent_winner AS w
+  ON  w.database_name = r.database_name
+  AND w.query_id = r.query_id
 WHERE (r.avg_cpu_time_ms - b.avg_cpu_time_ms) * 100.0 / NULLIF(b.avg_cpu_time_ms, 0) > 25
 ORDER BY additional_duration_ms DESC
 LIMIT $" + limitIndex;
@@ -206,9 +228,12 @@ LIMIT $" + limitIndex;
         command.Parameters.Add(new DuckDBParameter { Value = maxRows });
 
         var rows = new List<QueryStoreRegressionRow>();
-        using var reader = await command.ExecuteReaderAsync();
+        var textKeys = new List<(long? Id, DateTime? Time)>();
+        using (var reader = await command.ExecuteReaderAsync())
+        {
         while (await reader.ReadAsync())
         {
+            textKeys.Add((reader.IsDBNull(17) ? null : reader.GetInt64(17), reader.IsDBNull(19) ? null : reader.GetDateTime(19)));
             rows.Add(new QueryStoreRegressionRow
             {
                 DatabaseName = reader.IsDBNull(0) ? "" : reader.GetString(0),
@@ -228,9 +253,27 @@ LIMIT $" + limitIndex;
                 BaselinePlanCount = reader.IsDBNull(14) ? 0 : Convert.ToInt32(reader.GetValue(14)),
                 RecentPlanCount = reader.IsDBNull(15) ? 0 : Convert.ToInt32(reader.GetValue(15)),
                 Severity = reader.IsDBNull(16) ? "" : reader.GetString(16),
-                QueryTextSample = reader.IsDBNull(17) ? "" : reader.GetString(17),
+                QueryTextSample = "",
                 LastExecutionTime = reader.IsDBNull(18) ? null : reader.GetDateTime(18),
             });
+        }
+        }
+
+        /* #5381: the text sample, read by key for the returned rows only. */
+        var texts = await ReadQueryStoreTextByRowAsync(
+            connection, serverId,
+            textKeys.Where(k => k.Id.HasValue && k.Time.HasValue).Select(k => (k.Id!.Value, k.Time!.Value)));
+        for (var i = 0; i < rows.Count; i++)
+        {
+            string? text = null;
+            if (textKeys[i].Id.HasValue && textKeys[i].Time.HasValue)
+            {
+                texts.TryGetValue((textKeys[i].Id!.Value, textKeys[i].Time!.Value), out text);
+                /* The latest row carried no text: the old MAX skipped NULLs, so take any text the query has in the window. */
+                text ??= await ReadQueryStoreWindowTextAsync(connection, serverId, rows[i].DatabaseName, rows[i].QueryId, startTime, endTime);
+            }
+
+            rows[i].QueryTextSample = text ?? "";
         }
 
         return rows;
