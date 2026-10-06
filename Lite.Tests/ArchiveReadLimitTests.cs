@@ -802,6 +802,19 @@ public sealed class ArchiveGroupedWatermarkReadTests : IDisposable
         Assert.Equal([false], samples);
     }
 
+    /// <summary>Inserts into the live tables WITHOUT <c>InitializeAsync</c>, which rebuilds the views and bumps the archive generation.</summary>
+    private async Task InsertHotAsync(params string[] statements)
+    {
+        using var connection = new DuckDBConnection($"Data Source={_dbPath}");
+        await connection.OpenAsync(TestContext.Current.CancellationToken);
+        foreach (var sql in statements)
+        {
+            using var cmd = connection.CreateCommand();
+            cmd.CommandText = sql;
+            await cmd.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+        }
+    }
+
     /// <summary>
     /// A hot row appears AFTER the cache was warmed, and the archive-and-reset moves it to Parquet at the moment the
     /// archive read has sampled the generation (the cached answer is now one generation stale, and a cache hit takes
@@ -830,23 +843,23 @@ public sealed class ArchiveGroupedWatermarkReadTests : IDisposable
         switch (caller)
         {
             case "time":
-                await ExecuteAsync(QueryStore(1, recent, "Active", recent));
+                await InsertHotAsync(QueryStore(1, recent, "Active", recent));
                 armed = true;
                 Assert.Equal(recent, await reads.TimeAsync(1, Table, Column, TestContext.Current.CancellationToken));
                 break;
             case "database":
-                await ExecuteAsync(QueryStore(1, recent, "Active", recent));
+                await InsertHotAsync(QueryStore(1, recent, "Active", recent));
                 armed = true;
                 Assert.Equal(recent, await reads.DatabaseTimeAsync(1, "Active", since: null, TestContext.Current.CancellationToken));
                 break;
             case "frame":
-                await ExecuteAsync(QueryStore(1, recent, "Active", recent));
+                await InsertHotAsync(QueryStore(1, recent, "Active", recent));
                 armed = true;
                 Assert.Equal((recent, true), await reads.FrameAsync(1, TestContext.Current.CancellationToken));
                 break;
             case "identity":
             {
-                await ExecuteAsync(QueryStore(1, recent, "Active", recent));
+                await InsertHotAsync(QueryStore(1, recent, "Active", recent));
                 long newest;
                 using (var conn = _duckDb.CreateConnection())
                 {
@@ -861,14 +874,14 @@ public sealed class ArchiveGroupedWatermarkReadTests : IDisposable
                 break;
             }
             case "success":
-                await ExecuteAsync(
+                await InsertHotAsync(
                     $"INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, status) VALUES (9001, 1, 'S1', 'no_such_collector', {Ts(recent)}, 'SUCCESS')");
                 armed = true;
                 Assert.True(await reads.SuccessAsync(1, "no_such_collector", TestContext.Current.CancellationToken));
                 break;
             case "backfill":
                 /* ArchOnlyRecent's archived rows start at Now-2h, above the limit; the new hot row is older still. */
-                await ExecuteAsync(QueryStore(1, recent, "ArchOnlyRecent", Now.AddHours(-4)));
+                await InsertHotAsync(QueryStore(1, recent, "ArchOnlyRecent", Now.AddHours(-4)));
                 armed = true;
                 Assert.Equal(Now.AddHours(-4), await reads.BackfillFloorAsync(1, "ArchOnlyRecent", Now.AddHours(-3), TestContext.Current.CancellationToken));
                 break;
