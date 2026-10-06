@@ -5826,7 +5826,7 @@ internal sealed class DarlingSelfAlertEvaluator
             var detail =
                 $"The {tls.Surface}'s configured TLS certificate was not yet valid when the service started (not valid "
                 + $"until {notBefore:u}), so the host refused to serve it and the {tls.Endpoint} is bound LOOPBACK-ONLY — "
-                + $"unreachable from the network, and it will not fall back to plain HTTP. {clockLine} Correct the system "
+                + $"unreachable from the network, and it will not fall back to plain HTTP. The token is still required on the loopback listener. {clockLine} Correct the system "
                 + "clock or install the currently-valid certificate, then restart the service so the host loads it "
                 + $"again. {certRef}";
             return (shortMessage, detail, currentValue);
@@ -5840,7 +5840,7 @@ internal sealed class DarlingSelfAlertEvaluator
                 $"{tls.Surface} TLS certificate EXPIRED {notAfter:u} ({agoDays} day{(agoDays == 1 ? string.Empty : "s")} ago)";
             var detail =
                 $"The {tls.Surface}'s TLS certificate expired on {notAfter:u}. An expired certificate fails every TLS "
-                + $"handshake, so the {tls.Endpoint} is unreachable now and binds loopback-only on the next service restart. "
+                + $"handshake, so the {tls.Endpoint} is unreachable now and binds loopback-only on the next service restart, with the token still required. "
                 + $"Install a renewed certificate and restart the service. {certRef}";
             return (shortMessage, detail, currentValue);
         }
@@ -5851,7 +5851,7 @@ internal sealed class DarlingSelfAlertEvaluator
         var shortMsg = $"{tls.Surface} TLS certificate expires in {days} day{plural} ({notAfter:u})";
         var det =
             $"The {tls.Surface}'s TLS certificate expires on {notAfter:u}, in {days} day{plural}. When it lapses the {tls.Endpoint} "
-            + "stops serving (it fails closed to loopback-only, never plain HTTP), so renew it and restart the "
+            + "stops serving (it fails closed to loopback-only with the token still required, never plain HTTP), so renew it and restart the "
             + $"service before then. {certRef}";
         return (shortMsg, det, current);
     }

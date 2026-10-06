@@ -54,7 +54,9 @@ public sealed class DarlingWebHostGateLiveTests
     /// the transport (TestServer instead of Kestrel sockets) and the store pool (a data source that is never
     /// opened, because none of these gates touch Postgres).
     /// </summary>
-    private static async Task<TestServer> BuildServer(bool networkMode, string? publicBaseUrlHost = null, DarlingWebOidcClient? oidcClient = null)
+    private static async Task<TestServer> BuildServer(
+        bool networkMode, string? publicBaseUrlHost = null, DarlingWebOidcClient? oidcClient = null,
+        bool requireTokenWhenLoopbackOnly = false)
     {
         var builder = WebApplication.CreateBuilder();
         builder.WebHost.UseTestServer();
@@ -86,7 +88,10 @@ public sealed class DarlingWebHostGateLiveTests
             allowedCidr: IPNetwork.Parse(AllowedCidr),
             accessToken: Token,
             oidcClient: oidcClient,
-            publicBaseUrlHost: publicBaseUrlHost);
+            publicBaseUrlHost: publicBaseUrlHost,
+            // #5288: true only for a start that network mode degraded out of (TLS refused, token resolved); the
+            // never-network loopback-only server in the tests below leaves it false, exactly as the host does.
+            requireTokenWhenLoopbackOnly: requireTokenWhenLoopbackOnly);
 
         await app.StartAsync();
         return app.GetTestServer();
@@ -304,6 +309,77 @@ public sealed class DarlingWebHostGateLiveTests
         var ctx = await Send(server, "/", "evil.com", IPAddress.Loopback);
 
         Assert.Equal(StatusCodes.Status400BadRequest, ctx.Response.StatusCode);
+    }
+
+    /// <summary>
+    /// #5288: network mode configured, then degraded to loopback-only because the TLS certificate was refused, token
+    /// resolved. The loopback-only server keeps the token-to-cookie gate (the host passes
+    /// <c>requireTokenWhenLoopbackOnly</c> for exactly that start): no credential on an <c>/api/*</c> path gets 401
+    /// and on a page route gets the login form, the right token is exchanged for a session cookie, and that cookie
+    /// then gets past the gate. Every client presented the token before the certificate lapsed, so nothing that
+    /// worked stops working.
+    /// </summary>
+    [Fact]
+    public async Task TlsRefusal_DegradedLoopbackServer_StillRequiresTheToken()
+    {
+        using var server = await BuildServer(networkMode: false, requireTokenWhenLoopbackOnly: true);
+
+        var (api, apiBody) = await SendWithBody(server, "/api/fleet", "localhost", IPAddress.Loopback);
+        Assert.Equal(StatusCodes.Status401Unauthorized, api.Response.StatusCode);
+        Assert.Contains("\"error\"", apiBody, StringComparison.Ordinal);
+
+        var page = await Send(server, "/", "localhost", IPAddress.Loopback);
+        Assert.Equal(StatusCodes.Status200OK, page.Response.StatusCode);
+        Assert.Equal("text/html; charset=utf-8", page.Response.ContentType);
+
+        var wrong = await Send(server, "/api/fleet", "localhost", IPAddress.Loopback, token: "not-the-token");
+        Assert.Equal(StatusCodes.Status401Unauthorized, wrong.Response.StatusCode);
+
+        var exchange = await Send(server, "/", "localhost", IPAddress.Loopback, token: Token);
+        Assert.Equal(StatusCodes.Status302Found, exchange.Response.StatusCode);
+        var setCookie = Assert.Single(exchange.Response.Headers.SetCookie) ?? string.Empty;
+        var cookie = setCookie[..setCookie.IndexOf(';')];
+
+        // A path nothing maps answers 404 once the gate lets the request through; without the cookie it is the login form.
+        var withCookie = await Send(server, "/some/unmapped/path", "localhost", IPAddress.Loopback, cookie: cookie);
+        Assert.Equal(StatusCodes.Status404NotFound, withCookie.Response.StatusCode);
+    }
+
+    /// <summary>The Host guard still runs first on the token-keeping loopback-only server, so a foreign Host is 400
+    /// even with the right token.</summary>
+    [Fact]
+    public async Task TlsRefusal_DegradedLoopbackServer_ForeignHostIsStill400()
+    {
+        using var server = await BuildServer(networkMode: false, requireTokenWhenLoopbackOnly: true);
+        var ctx = await Send(server, "/", "evil.com", IPAddress.Loopback, token: Token);
+
+        Assert.Equal(StatusCodes.Status400BadRequest, ctx.Response.StatusCode);
+    }
+
+    /// <summary>
+    /// #5288: the web checks the CIDR before it looks at any credential, and keeps doing so: an address outside
+    /// <c>allowFrom</c> is answered 403 whatever it sends (no token, a wrong token, the right token), on a page
+    /// route and on an <c>/api/*</c> path alike. An in-list client with the wrong token is not refused with a 403.
+    /// </summary>
+    [Theory]
+    [InlineData("/", null)]
+    [InlineData("/", "not-the-token")]
+    [InlineData("/", Token)]
+    [InlineData("/api/fleet", null)]
+    [InlineData("/api/fleet", "not-the-token")]
+    [InlineData("/api/fleet", Token)]
+    public async Task OffListRemote_RightOrWrongToken_Both403(string path, string? token)
+    {
+        using var server = await BuildServer(networkMode: true);
+
+        var offList = await Send(server, path, ListenIp, IPAddress.Parse("203.0.113.50"), token: token);
+        Assert.Equal(StatusCodes.Status403Forbidden, offList.Response.StatusCode);
+
+        if (token == "not-the-token")
+        {
+            var inList = await Send(server, path, ListenIp, InCidrRemote, token: token);
+            Assert.NotEqual(StatusCodes.Status403Forbidden, inList.Response.StatusCode);
+        }
     }
 
     /// <summary>Loopback mode's own posture: no token middleware is registered at all, so a loopback Host

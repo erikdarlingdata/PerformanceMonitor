@@ -2071,7 +2071,7 @@ public sealed class DarlingSelfAlertTests
         Assert.Equal("web dashboard TLS certificate expires in 10 days (2026-07-11 12:00:00Z)", warned.ShortMessage);
         Assert.Equal(
             "The web dashboard's TLS certificate expires on 2026-07-11 12:00:00Z, in 10 days. When it lapses the LAN "
-            + "dashboard stops serving (it fails closed to loopback-only, never plain HTTP), so renew it and restart the "
+            + "dashboard stops serving (it fails closed to loopback-only with the token still required, never plain HTTP), so renew it and restart the "
             + "service before then. Certificate: subject CN=Darling Web, thumbprint ABC123DEF456.",
             warned.DetailText);
 
@@ -2085,7 +2085,7 @@ public sealed class DarlingSelfAlertTests
         Assert.Equal("web dashboard TLS certificate EXPIRED 2026-06-29 12:00:00Z (2 days ago)", lapsed.ShortMessage);
         Assert.Equal(
             "The web dashboard's TLS certificate expired on 2026-06-29 12:00:00Z. An expired certificate fails every TLS "
-            + "handshake, so the LAN dashboard is unreachable now and binds loopback-only on the next service restart. "
+            + "handshake, so the LAN dashboard is unreachable now and binds loopback-only on the next service restart, with the token still required. "
             + "Install a renewed certificate and restart the service. "
             + "Certificate: subject CN=Darling Web, thumbprint ABC123DEF456.",
             lapsed.DetailText);
@@ -2106,7 +2106,7 @@ public sealed class DarlingSelfAlertTests
         Assert.Equal(
             "The web dashboard's configured TLS certificate was not yet valid when the service started (not valid until "
             + "2026-07-04 12:00:00Z), so the host refused to serve it and the LAN dashboard is bound LOOPBACK-ONLY — "
-            + "unreachable from the network, and it will not fall back to plain HTTP. The window opens 2026-07-04 12:00:00Z: "
+            + "unreachable from the network, and it will not fall back to plain HTTP. The token is still required on the loopback listener. The window opens 2026-07-04 12:00:00Z: "
             + "if that is in the past by any wall clock you trust, this host's clock is behind; if it is genuinely ahead, "
             + "the certificate installed is one issued for a future rotation." + refusedTail,
             early.DetailText);
@@ -2117,7 +2117,7 @@ public sealed class DarlingSelfAlertTests
         Assert.Equal(
             "The web dashboard's configured TLS certificate was not yet valid when the service started (not valid until "
             + "2026-07-04 12:00:00Z), so the host refused to serve it and the LAN dashboard is bound LOOPBACK-ONLY — "
-            + "unreachable from the network, and it will not fall back to plain HTTP. The window opened 2026-07-04 12:00:00Z, "
+            + "unreachable from the network, and it will not fall back to plain HTTP. The token is still required on the loopback listener. The window opened 2026-07-04 12:00:00Z, "
             + "after the service started — the host judged the certificate once, at load, and stays loopback-only on "
             + "that verdict until it is restarted." + refusedTail,
             late.DetailText);
@@ -2332,7 +2332,7 @@ public sealed class DarlingSelfAlertTests
         Assert.Equal(thresholdDays, warned.ThresholdValue);
         Assert.Equal(
             "The MCP server's TLS certificate expires on 2026-07-11 12:00:00Z, in 10 days. When it lapses the LAN MCP "
-            + "endpoint stops serving (it fails closed to loopback-only, never plain HTTP), so renew it and restart the "
+            + "endpoint stops serving (it fails closed to loopback-only with the token still required, never plain HTTP), so renew it and restart the "
             + "service before then. " + certRef,
             warned.DetailText);
 
@@ -2342,7 +2342,7 @@ public sealed class DarlingSelfAlertTests
         Assert.Equal("expired 2026-06-29 12:00:00Z", lapsed.CurrentValue);
         Assert.Equal(
             "The MCP server's TLS certificate expired on 2026-06-29 12:00:00Z. An expired certificate fails every TLS "
-            + "handshake, so the LAN MCP endpoint is unreachable now and binds loopback-only on the next service restart. "
+            + "handshake, so the LAN MCP endpoint is unreachable now and binds loopback-only on the next service restart, with the token still required. "
             + "Install a renewed certificate and restart the service. " + certRef,
             lapsed.DetailText);
 
@@ -2354,7 +2354,7 @@ public sealed class DarlingSelfAlertTests
         Assert.Equal(
             "The MCP server's configured TLS certificate was not yet valid when the service started (not valid until "
             + "2026-07-04 12:00:00Z), so the host refused to serve it and the LAN MCP endpoint is bound LOOPBACK-ONLY — "
-            + "unreachable from the network, and it will not fall back to plain HTTP. The window opens 2026-07-04 12:00:00Z: "
+            + "unreachable from the network, and it will not fall back to plain HTTP. The token is still required on the loopback listener. The window opens 2026-07-04 12:00:00Z: "
             + "if that is in the past by any wall clock you trust, this host's clock is behind; if it is genuinely ahead, "
             + "the certificate installed is one issued for a future rotation. Correct the system clock or install the "
             + "currently-valid certificate, then restart the service so the host loads it again. "

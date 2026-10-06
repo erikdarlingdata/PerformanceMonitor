@@ -57,7 +57,8 @@ public sealed class DarlingMcpHostGateLiveTests
     /// Postgres — a request is refused or reaches tools/list before any tool body runs).
     /// </summary>
     private static async Task<TestServer> BuildServer(
-        bool networkMode, string? hostName = null, ILogger? logger = null, string? rawAllowedHostName = null)
+        bool networkMode, string? hostName = null, ILogger? logger = null, string? rawAllowedHostName = null,
+        bool requireTokenWhenLoopbackOnly = false)
     {
         var builder = WebApplication.CreateBuilder();
         builder.WebHost.UseTestServer();
@@ -92,7 +93,10 @@ public sealed class DarlingMcpHostGateLiveTests
             // rawAllowedHostName is the one exception, for the test that hands ConfigurePipeline a name the resolver
             // would never pass it (a malformed punycode label): the pipeline itself must survive that.
             allowedHostName: rawAllowedHostName ?? DarlingMcpHostService.ResolveAllowedHostName(
-                hostName, networkMode, logger ?? Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance));
+                hostName, networkMode, logger ?? Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance),
+            // #5288: true only for a start that network mode degraded out of (TLS refused, token resolved); the
+            // never-network loopback-only server in the tests below leaves it false, exactly as the host does.
+            requireTokenWhenLoopbackOnly: requireTokenWhenLoopbackOnly);
 
         await app.StartAsync();
         return app.GetTestServer();
@@ -174,6 +178,71 @@ public sealed class DarlingMcpHostGateLiveTests
         var (statusCode, _) = await ToolsListAsync(server, path, ListenIp, InCidrRemote);
 
         Assert.Equal(StatusCodes.Status401Unauthorized, statusCode);
+    }
+
+    /// <summary>
+    /// #5288: network mode configured, then degraded to loopback-only because the TLS certificate was refused, token
+    /// resolved. The loopback-only server keeps the bearer-token gate (the host passes
+    /// <c>requireTokenWhenLoopbackOnly</c> for exactly that start), on both paths and both loopback families: no token
+    /// and a wrong token get 401, the right token gets <c>tools/list</c>. Every client presented the token before the
+    /// certificate lapsed, so nothing that worked stops working.
+    /// </summary>
+    [Theory]
+    [InlineData("/", "127.0.0.1")]
+    [InlineData("/core", "127.0.0.1")]
+    [InlineData("/", "::1")]
+    [InlineData("/core", "::1")]
+    public async Task TlsRefusal_DegradedLoopbackServer_StillRequiresTheToken(string path, string loopback)
+    {
+        using var server = await BuildServer(networkMode: false, requireTokenWhenLoopbackOnly: true);
+        var remote = IPAddress.Parse(loopback);
+
+        var (noToken, _) = await ToolsListAsync(server, path, "localhost", remote);
+        Assert.Equal(StatusCodes.Status401Unauthorized, noToken);
+
+        var (wrongToken, _) = await ToolsListAsync(server, path, "localhost", remote, "not-the-token");
+        Assert.Equal(StatusCodes.Status401Unauthorized, wrongToken);
+
+        var (withToken, body) = await ToolsListAsync(server, path, "localhost", remote, Token);
+        Assert.True(withToken == StatusCodes.Status200OK, $"the right token must reach tools/list, got {withToken}: {body}");
+    }
+
+    /// <summary>The Host guard still runs first on the token-keeping loopback-only server, so a foreign Host is 400
+    /// whatever token it carries.</summary>
+    [Fact]
+    public async Task TlsRefusal_DegradedLoopbackServer_ForeignHostIsStill400()
+    {
+        using var server = await BuildServer(networkMode: false, requireTokenWhenLoopbackOnly: true);
+        var ctx = await SendRaw(server, "/", "evil.com", IPAddress.Loopback, bearer: Token);
+
+        Assert.Equal(StatusCodes.Status400BadRequest, ctx.Response.StatusCode);
+    }
+
+    /// <summary>
+    /// #5288: the CIDR check runs BEFORE the token check, so an address outside <c>allowFrom</c> is answered 403
+    /// whatever it sends: no token, a wrong token and the right token all get the same status, and a client that
+    /// cannot route in learns nothing about the token from the port. An in-list client with the same wrong token
+    /// still gets 401, so the two gates stay distinguishable to the operator.
+    /// </summary>
+    [Theory]
+    [InlineData("/", null)]
+    [InlineData("/", "not-the-token")]
+    [InlineData("/", Token)]
+    [InlineData("/core", null)]
+    [InlineData("/core", "not-the-token")]
+    [InlineData("/core", Token)]
+    public async Task OffListRemote_RightOrWrongToken_Both403(string path, string? bearer)
+    {
+        using var server = await BuildServer(networkMode: true);
+
+        var (offList, _) = await ToolsListAsync(server, path, ListenIp, IPAddress.Parse("203.0.113.50"), bearer);
+        Assert.Equal(StatusCodes.Status403Forbidden, offList);
+
+        if (bearer == "not-the-token")
+        {
+            var (inList, _) = await ToolsListAsync(server, path, ListenIp, InCidrRemote, bearer);
+            Assert.Equal(StatusCodes.Status401Unauthorized, inList);
+        }
     }
 
     /// <summary>A foreign Host header is refused on both paths, in both modes — the DNS-rebinding guard runs
