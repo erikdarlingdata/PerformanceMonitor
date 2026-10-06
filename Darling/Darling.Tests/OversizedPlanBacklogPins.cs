@@ -818,6 +818,7 @@ public sealed class OversizedPlanBacklogPins
             OversizedPlanBacklog.RecordCaptureSql,
             OversizedPlanBacklog.RecordExpirySql,
             OversizedPlanBacklog.RecordAttemptSql,
+            OversizedPlanBacklog.RecordFailureSql,
         })
         {
             foreach (var column in new[]
@@ -829,11 +830,16 @@ public sealed class OversizedPlanBacklogPins
                 Assert.Contains(column, sql, StringComparison.Ordinal);
             }
 
-            /* Every attempt is counted, whatever it established — a chronically unfetchable row has to be
-               legible in the TABLE, not only in a log line nobody greps. */
-            Assert.Contains("attempt_count = attempt_count + 1", sql, StringComparison.Ordinal);
+            /* Every outcome stamps when the row was last tried, which is what puts it at the back of the claim. */
             Assert.Contains("last_attempt_at = $7", sql, StringComparison.Ordinal);
         }
+
+        /* attempt_count is the sweep's retirement limit (#5367 review, A-M1): the capture (which retires the row) and a
+           judge timeout add to it; a connect failure and an expiry do not. */
+        Assert.Contains("attempt_count = attempt_count + 1", OversizedPlanBacklog.RecordCaptureSql, StringComparison.Ordinal);
+        Assert.Contains("attempt_count = attempt_count + 1", OversizedPlanBacklog.RecordAttemptSql, StringComparison.Ordinal);
+        Assert.DoesNotContain("attempt_count", OversizedPlanBacklog.RecordExpirySql, StringComparison.Ordinal);
+        Assert.DoesNotContain("attempt_count", OversizedPlanBacklog.RecordFailureSql, StringComparison.Ordinal);
 
         /* Only the capture stores content, and only the expiry stamps an expiry. A failed fetch established
            nothing about the handle, so it must not retire the row. */
@@ -841,6 +847,8 @@ public sealed class OversizedPlanBacklogPins
         Assert.DoesNotContain("plan_xml", OversizedPlanBacklog.RecordExpirySql, StringComparison.Ordinal);
         Assert.DoesNotContain("plan_xml", OversizedPlanBacklog.RecordAttemptSql, StringComparison.Ordinal);
         Assert.DoesNotContain("expired_at", OversizedPlanBacklog.RecordAttemptSql, StringComparison.Ordinal);
+        Assert.DoesNotContain("plan_xml", OversizedPlanBacklog.RecordFailureSql, StringComparison.Ordinal);
+        Assert.DoesNotContain("expired_at", OversizedPlanBacklog.RecordFailureSql, StringComparison.Ordinal);
     }
 
     [Fact]

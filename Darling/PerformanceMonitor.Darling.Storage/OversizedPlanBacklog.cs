@@ -98,8 +98,8 @@ public static class OversizedPlanBacklog
     /// <para><c>attempt_count</c> and <c>last_attempt_at</c> are not bookkeeping. Ordering the claim by
     /// <c>last_attempt_at</c> is what makes head-of-line starvation impossible: a row that was just tried
     /// goes to the back, so one plan that can never be fetched cannot occupy a slot every tick forever. The
-    /// count then makes a chronic failure legible in the TABLE rather than only in a log line nobody
-    /// greps.</para>
+    /// count is the sweep's retirement limit: it grows only when a plan that had the whole judging budget to
+    /// itself overran it (#5367 review, A-M1), so a connect failure or an expiry does not move it.</para>
     /// </summary>
     public const string CreateTableSql = @"
 CREATE TABLE IF NOT EXISTS collect.oversized_plan_backlog
@@ -213,13 +213,22 @@ SET plan_xml = $8,
     public const string RecordExpirySql = @"
 UPDATE collect.oversized_plan_backlog
 SET expired_at = $7,
-    last_attempt_at = $7,
-    attempt_count = attempt_count + 1" + KeyPredicate + ";";
+    last_attempt_at = $7" + KeyPredicate + ";";
 
     /// <summary>
-    /// A fetch that could not complete — connect failure, driver fault, or its own budget. NOT an expiry:
-    /// nothing was learned about the handle, so the row stays claimable and simply goes to the back of the
-    /// queue.
+    /// A fetch that could not complete — connect failure, driver fault, its own budget, or a judging budget an
+    /// earlier plan had already used. NOT an expiry: nothing was learned about the handle, so the row stays
+    /// claimable and simply goes to the back of the queue. Not counted in <c>attempt_count</c>, which is the
+    /// retirement limit's count of judge timeouts and nothing else (#5367 review, A-M1).
+    /// </summary>
+    public const string RecordFailureSql = @"
+UPDATE collect.oversized_plan_backlog
+SET last_attempt_at = $7" + KeyPredicate + ";";
+
+    /// <summary>
+    /// A plan that had the whole judging budget to itself and overran it: the one outcome that adds to
+    /// <c>attempt_count</c>. The row stays claimable and goes to the back of the queue, until the count reaches
+    /// the sweep's limit and the whole-plan marker is stored as the capture.
     /// </summary>
     public const string RecordAttemptSql = @"
 UPDATE collect.oversized_plan_backlog
@@ -303,9 +312,9 @@ LIMIT 1;";
     /// along because the outcome statements address the full key.</param>
     /// <param name="Observation">The cache coordinates and the measured size, in the same shape the
     /// collector described it.</param>
-    /// <param name="AttemptCount">The row's <c>attempt_count</c> at claim time: how many fetches already ended
-    /// without a capture or an expiry (and the captures and expiries that did, which retire the row anyway).
-    /// The sweep retires a plan the judging budget keeps failing to cover once this reaches its limit (#5320).</param>
+    /// <param name="AttemptCount">The row's <c>attempt_count</c> at claim time: how many times the plan has had the
+    /// whole judging budget to itself and overrun it. The sweep retires a plan the judging budget keeps failing to
+    /// cover once this reaches its limit (#5320); a connect failure or an expiry does not add to it.</param>
     public sealed record PendingPlan(string CollectorName, OversizedPlanObservation Observation, int AttemptCount = 0);
 
     /// <summary>
