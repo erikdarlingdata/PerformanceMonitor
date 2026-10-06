@@ -173,6 +173,37 @@ public sealed class SensitiveStatementHostFilterTests : IDisposable
         StatementFilterCensus.AssertFilteredWithholdsTheCanary(raw, text);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task AnMcpExceptionThatNamesAStatement_ThroughTheHostsRealFilterList_ReachesTheClientSwept(bool gcf)
+    {
+        // L1: the SDK builds an error result from a thrown McpException's message OUTSIDE the result sweep, so the
+        // filter has to catch the exception itself. Without that catch the client reads the canary in the message.
+        Environment.SetEnvironmentVariable("DARLING_OUTPUT_FORMAT", gcf ? "gcf" : null);
+        using var server = await StatementFilterCensus.BuildHostAsync();
+        string message = StatementScrubCanary.CanaryStatement;
+
+        var (text, isError) = await StatementFilterCensus.CallRealToolAsync(
+            server, StatementFilterCensus.ThrowProbeName, new JsonObject { ["message"] = message });
+
+        Assert.True(isError);
+        StatementFilterCensus.AssertFilteredWithholdsTheCanary(message, text);
+    }
+
+    [Fact]
+    public async Task AnMcpExceptionThatNamesNoStatement_ThroughTheHostsRealFilterList_KeepsItsMessage()
+    {
+        using var server = await StatementFilterCensus.BuildHostAsync();
+
+        var (text, isError) = await StatementFilterCensus.CallRealToolAsync(
+            server, StatementFilterCensus.ThrowProbeName, new JsonObject { ["message"] = "server_name is required" });
+
+        Assert.True(isError);
+        Assert.Contains("server_name is required", text);
+        Assert.DoesNotContain(Marker, text);
+    }
+
     [Fact]
     public async Task AnalyzePlanXmlOnTheCanaryPlan_ThroughTheHost_WithholdsStatementOneAndKeepsStatementTwo()
     {
