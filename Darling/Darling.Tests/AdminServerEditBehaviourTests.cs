@@ -850,8 +850,9 @@ public sealed class AdminServerEditBehaviourTests
     {
         var source = File.ReadAllText(PathTo("Darling", "Darling.Tests", "admin-server-edit-harness.mjs"));
 
-        Assert.Contains("copyTree(jsDir, scratch)", source, StringComparison.Ordinal);
-        Assert.Contains("withFileTypes: true", source, StringComparison.Ordinal);
+        Assert.Contains("fs.cpSync(jsDir, scratch, { recursive: true })", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("copyTree", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("copyFileSync", source, StringComparison.Ordinal);
         Assert.DoesNotContain("\"util.js\", \"panels.js\"", source, StringComparison.Ordinal);
         Assert.Contains("process.env.TZ = \"UTC\"", source, StringComparison.Ordinal);
     }
