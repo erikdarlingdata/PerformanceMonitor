@@ -29,5 +29,6 @@ internal static class StatementCollectionCensusCases
             ["default_trace_events.text_data"] = "StatementCollectionCensusTests.DefaultTraceEvents_TextData_IsWithheldAndThePlainStatementIsUntouched",
             ["system_health_events.event_xml"] = "StatementCollectionCensusTests.SystemHealthEvents_EventXml_WithholdsTheSqlTextActionAndKeepsTheRestOfTheEvent",
             ["job_history.message"] = "StatementCollectionCensusTests.JobHistory_Message_IsWithheldWhenItEchoesAStatement_AndAPlainMessageIsUntouched",
+            ["query_store.query_text"] = "StatementCollectionCensusTests.QueryStore_QueryText_IsWithheld",
         };
 }
