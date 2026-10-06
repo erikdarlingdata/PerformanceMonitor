@@ -4,6 +4,7 @@ using System.Globalization;
 using System.Linq;
 using System.Text.RegularExpressions;
 using System.Text.Json;
+using System.Threading.Tasks;
 using PerformanceMonitor.Notifications;
 using PerformanceMonitorLite.Services;
 using Xunit;
@@ -136,21 +137,41 @@ public class PagerDutyWebhookTests
         Assert.Equal(root1.GetProperty("dedup_key").GetString(), root2.GetProperty("dedup_key").GetString());
     }
 
-    /* ---------------- Edge-pair dedup (one incident identity per pair) ---------------- */
+    /* ---------------- Edge-pair dedup is gated on the opt-in ---------------- */
 
     [Fact]
-    public void BuildPagerDutyPayload_ConnectionEdges_ShareOneDedupKey_NamedByTheFiring()
+    public void BuildPagerDutyPayload_EdgePair_DefaultOff_KeepsShippedStateNamedKeys()
     {
-        /* "Server Unreachable" and "Server Restored" are two halves of one incident. Keying on the
-           metric name minted a distinct dedup_key per edge, so PagerDuty showed two incidents for one
-           outage, and a closing edge could never resolve the open one. Both edges now rename to the
-           pair's canonical FIRING name. */
+        /* The review's paired-lifecycle merge risk, stated as a pin: with the default off, the two halves
+           of a pair keep their own state-named keys — byte-identical to the shipped behavior — so a
+           manually-resolved outage and a later restore never share a key. Correlation is an opt-in behaviour
+           change, scoped entirely to the operator who switched it on. */
         var unreachable = WebhookAlertService.BuildPagerDutyPayload(
             "Server Unreachable", "SRV1", "Login timeout expired", "Online",
             Branding, "key", serverId: "261742202");
         var restored = WebhookAlertService.BuildPagerDutyPayload(
             "Server Restored", "SRV1", "Online", "Online",
             Branding, "key", serverId: "261742202");
+
+        Assert.Equal("261742202:Server Unreachable",
+            JsonDocument.Parse(unreachable).RootElement.GetProperty("dedup_key").GetString());
+        Assert.Equal("261742202:Server Restored",
+            JsonDocument.Parse(restored).RootElement.GetProperty("dedup_key").GetString());
+    }
+
+    [Fact]
+    public void BuildPagerDutyPayload_ConnectionEdges_WithOptIn_ShareOneDedupKey_NamedByTheFiring()
+    {
+        /* With the opt-in on, "Server Unreachable" and "Server Restored" are one incident: keying on the
+           metric name minted a distinct dedup_key per edge, so PagerDuty showed two incidents for one
+           outage, and a closing edge could never resolve the open one. Both edges rename to the pair's
+           canonical FIRING name. */
+        var unreachable = WebhookAlertService.BuildPagerDutyPayload(
+            "Server Unreachable", "SRV1", "Login timeout expired", "Online",
+            Branding, "key", serverId: "261742202", autoResolve: true);
+        var restored = WebhookAlertService.BuildPagerDutyPayload(
+            "Server Restored", "SRV1", "Online", "Online",
+            Branding, "key", serverId: "261742202", autoResolve: true);
 
         var unreachableKey = JsonDocument.Parse(unreachable).RootElement.GetProperty("dedup_key").GetString();
         var restoredKey = JsonDocument.Parse(restored).RootElement.GetProperty("dedup_key").GetString();
@@ -160,20 +181,47 @@ public class PagerDutyWebhookTests
     }
 
     [Fact]
-    public void BuildPagerDutyPayload_ReplicationEdges_ShareOneDedupKey_NamedByTheFiring()
+    public void BuildPagerDutyPayload_ReplicationEdges_WithOptIn_ShareOneDedupKey_ScopedPerReplica()
     {
+        /* The same per-incident identity for the AG pair — AND per replica: without the replica scope
+           there is still one key per server for the whole group, so one replica's reconnect would resolve
+           the incident a still-disconnected sibling holds open. Each edge's own context carries the twin
+           "AG:replica" identity its fire site set, and both sides of the same replica converge on it. */
+        var first = AgAlertContexts.ForReplica("OrdersAG", "REPLICA-A");
+        var second = AgAlertContexts.ForReplica("OrdersAG", "REPLICA-A");
+        var other = AgAlertContexts.ForReplica("OrdersAG", "REPLICA-B");
+
         var disconnected = WebhookAlertService.BuildPagerDutyPayload(
             "AG Replica Disconnected", "SRV1", "DISCONNECTED", "CONNECTED",
-            Branding, "key", serverId: "261742202");
+            Branding, "key", serverId: "261742202", context: first, autoResolve: true);
         var reconnected = WebhookAlertService.BuildPagerDutyPayload(
             "AG Replica Reconnected", "SRV1", "CONNECTED", "CONNECTED",
-            Branding, "key", serverId: "261742202");
+            Branding, "key", serverId: "261742202", context: second, autoResolve: true);
+        var sibling = WebhookAlertService.BuildPagerDutyPayload(
+            "AG Replica Disconnected", "SRV1", "DISCONNECTED", "CONNECTED",
+            Branding, "key", serverId: "261742202", context: other, autoResolve: true);
 
         var disconnectedKey = JsonDocument.Parse(disconnected).RootElement.GetProperty("dedup_key").GetString();
         var reconnectedKey = JsonDocument.Parse(reconnected).RootElement.GetProperty("dedup_key").GetString();
+        var siblingKey = JsonDocument.Parse(sibling).RootElement.GetProperty("dedup_key").GetString();
 
-        Assert.Equal("261742202:AG Replica Disconnected", disconnectedKey);
+        Assert.Equal("261742202:AG Replica Disconnected:OrdersAG:REPLICA-A", disconnectedKey);
         Assert.Equal(disconnectedKey, reconnectedKey);
+        Assert.NotEqual(disconnectedKey, siblingKey);
+    }
+
+    [Fact]
+    public void BuildPagerDutyPayload_ReplicationEdge_WithoutIdentity_KeepsPerServerKey()
+    {
+        /* The per-replica key is the better incident, not a contract: a pair that arrives without the
+           identity (a build that predates the new fire sites, a test that never set one) keeps the old
+           per-server key rather than failing the render. */
+        var reconnected = WebhookAlertService.BuildPagerDutyPayload(
+            "AG Replica Reconnected", "SRV1", "CONNECTED", "CONNECTED",
+            Branding, "key", serverId: "261742202", autoResolve: true);
+
+        Assert.Equal("261742202:AG Replica Disconnected",
+            JsonDocument.Parse(reconnected).RootElement.GetProperty("dedup_key").GetString());
     }
 
     [Fact]
@@ -201,6 +249,8 @@ public class PagerDutyWebhookTests
 
         Assert.Equal("trigger", root.GetProperty("event_action").GetString());
         Assert.Equal("info", root.GetProperty("payload").GetProperty("severity").GetString());
+        /* ...and keeps the shipped state-named key: correlation is opt-in, not smuggled in the default. */
+        Assert.Equal("261742202:Server Restored", root.GetProperty("dedup_key").GetString());
     }
 
     [Fact]
@@ -221,13 +271,20 @@ public class PagerDutyWebhookTests
     {
         var edge = WebhookAlertService.BuildPagerDutyPayload(
             "AG Replica Disconnected", "SRV1", "DISCONNECTED", "CONNECTED",
-            Branding, "key", serverId: "261742202", autoResolve: true);
+            Branding, "key", serverId: "261742202", context: AgAlertContexts.ForReplica("OrdersAG", "REPLICA-A"), autoResolve: true);
         var closing = WebhookAlertService.BuildPagerDutyPayload(
             "AG Replica Reconnected", "SRV1", "CONNECTED", "CONNECTED",
-            Branding, "key", serverId: "261742202", autoResolve: true);
+            Branding, "key", serverId: "261742202", context: AgAlertContexts.ForReplica("OrdersAG", "REPLICA-A"), autoResolve: true);
 
         Assert.Equal("trigger", JsonDocument.Parse(edge).RootElement.GetProperty("event_action").GetString());
         Assert.Equal("resolve", JsonDocument.Parse(closing).RootElement.GetProperty("event_action").GetString());
+        /* ...on the same per-replica key: closing only ITS incident, not the sibling's. */
+        Assert.Equal(
+            "261742202:AG Replica Disconnected:OrdersAG:REPLICA-A",
+            JsonDocument.Parse(edge).RootElement.GetProperty("dedup_key").GetString());
+        Assert.Equal(
+            JsonDocument.Parse(edge).RootElement.GetProperty("dedup_key").GetString(),
+            JsonDocument.Parse(closing).RootElement.GetProperty("dedup_key").GetString());
     }
 
     [Fact]
@@ -251,6 +308,193 @@ public class PagerDutyWebhookTests
             Branding, "key", isTest: true, dedupKey: "test-" + Guid.NewGuid(), autoResolve: true);
 
         Assert.Equal("trigger", JsonDocument.Parse(payload).RootElement.GetProperty("event_action").GetString());
+    }
+
+    /* ---------------- The send path with a flag-on/f flag-off settings seam ---------------- */
+
+    /// <summary>
+    /// The review's coverage gap, stated as a pin: the builder-level tests above still pass with the live
+    /// wiring removed — so this one goes THROUGH <see cref="WebhookAlertService.TrySendWebhookAlertsAsync"/>
+    /// and asserts the ACTION the wire actually saw, for both settings of the flag. The PagerDuty destination
+    /// carries the loopback endpoint (a fake routing key is enough: the content never reaches PagerDuty), so
+    /// no network calls the fixed production endpoint.
+    /// </summary>
+    [Fact]
+    public async Task SendPath_PagerDutySend_RestoredEdge_ResolvesOnlyWhenTheSettingIsOn()
+    {
+        var restoring = new CapturingPagerDuty();
+        var resolving = new CapturingPagerDuty();
+
+        var off = new WebhookSettings
+        {
+            PagerDutyRoutingKey = "rk-test",
+            Capture = restoring,
+        };
+        var on = new WebhookSettings
+        {
+            PagerDutyRoutingKey = "rk-test",
+            PagerDutyAutoResolve = true,
+            Capture = resolving,
+        };
+
+        await SendSingleAlertAsync(ServiceFor(off, restoring), "Server Restored");
+        await SendSingleAlertAsync(ServiceFor(on, resolving), "Server Restored");
+
+        Assert.Equal("trigger", WireAction(Assert.Single(restoring.Bodies)));
+        Assert.Equal("resolve", WireAction(Assert.Single(resolving.Bodies)));
+
+        /* The resolve lands on the same per-replica incident identity the opt-in trigger opened: */
+        Assert.Equal(
+            WebhookAlertService.DerivePagerDutyDedupKey("261742202", "Server Unreachable", null, autoResolve: true),
+            WireDedupKey(Assert.Single(resolving.Bodies)));
+    }
+
+    [Fact]
+    public async Task SendPath_PagerDutySend_Reconnect_ClosesOnlyItsOwnReplicaIncident()
+    {
+        /* The review's A/B disconnect case: both replicas down (flag on), A reconnects. Asserting on the
+           wire bodies that the resolve carries A's replica-scoped incident — and that B's disconnect key is
+           a DIFFERENT incident, so B's outage outlives A's resolve. */
+        var endpoint = new CapturingPagerDuty();
+
+        var settings = new WebhookSettings
+        {
+            PagerDutyRoutingKey = "rk-test",
+            PagerDutyAutoResolve = true,
+            Capture = endpoint,
+        };
+
+        var service = ServiceFor(settings, endpoint);
+
+        await SendSingleAlertAsync(service, "AG Replica Disconnected", "261742202", AgAlertContexts.ForReplica("OrdersAG", "REPLICA-B"));
+        await SendSingleAlertAsync(service, "AG Replica Reconnected", "261742202", AgAlertContexts.ForReplica("OrdersAG", "REPLICA-A"));
+
+        Assert.Equal(2, endpoint.Bodies.Count);
+        var downKey = WireDedupKey(endpoint.Bodies[0]);
+        var resolveRoot = JsonDocument.Parse(endpoint.Bodies[1]).RootElement;
+
+        Assert.Equal("resolve", resolveRoot.GetProperty("event_action").GetString());
+        Assert.Equal("261742202:AG Replica Disconnected:OrdersAG:REPLICA-A",
+            resolveRoot.GetProperty("dedup_key").GetString());
+        Assert.NotEqual(downKey, resolveRoot.GetProperty("dedup_key").GetString());
+    }
+
+    [Fact]
+    public async Task SendPath_WebhookCooldown_AutoResolveRecovery_RearmsItsFiring()
+    {
+        /* The review's down-back-down case: with the flag on, a delivered close clears the cooldown entry
+           its firing left behind, so the next "Server Unreachable" posts instead of meeting the old window.
+           Asserted on the wire bodies: unreachable, restored, unreachable again delivers THREE posts. */
+        var endpoint = new CapturingPagerDuty();
+
+        var settings = new WebhookSettings { PagerDutyRoutingKey = "rk-test", PagerDutyAutoResolve = true, Capture = endpoint };
+
+        var service = ServiceFor(settings, endpoint);
+
+        Assert.Equal(AlertChannelOutcome.Delivered, await SendSingleAlertAsync(service, "Server Unreachable"));
+        Assert.Equal(AlertChannelOutcome.Delivered, await SendSingleAlertAsync(service, "Server Restored"));
+        var second = await SendSingleAlertAsync(service, "Server Unreachable");
+
+        Assert.Equal(AlertChannelOutcome.Delivered, second);
+        Assert.Equal(3, endpoint.Bodies.Count);
+        Assert.Equal("trigger", WireAction(endpoint.Bodies[2]));
+    }
+
+    /// <summary>
+    /// One alert through the real <see cref="WebhookAlertService"/> fan-out with the PagerDuty post
+    /// captured. Each <see cref="WebhookAlertService"/> is constructed per send (no shared state leaks
+    /// between the sends an A/B case sequences); the shared per-test cooldown is the POINT of the
+    /// re-arm test, so the same service instance is REUSED where the cooldown must persist across sends.
+    /// </summary>
+    private async Task<AlertChannelOutcome> SendSingleAlertAsync(
+        WebhookAlertService service, string metricName, string serverId = "261742202",
+        AlertContext? context = null)
+    {
+        var result = await service.TrySendWebhookAlertsAsync(
+            metricName, "SRV1", "current", "threshold", serverId, context);
+        return result.Outcome;
+    }
+
+    private WebhookAlertService ServiceFor(WebhookSettings settings, CapturingPagerDuty capture)
+    {
+        var service = new WebhookAlertService(
+            settings,
+            Branding,
+            Microsoft.Extensions.Logging.Abstractions.NullLogger<WebhookAlertService>.Instance,
+            historyStore: null);
+        service.PostPagerDutyAsyncOverride = async (endpoint, payload) =>
+        {
+            Assert.Equal("https://events.pagerduty.com/v2/enqueue", endpoint);
+            capture.Bodies.Add(payload);
+            return await Task.FromResult<string?>(null);
+        };
+        return service;
+    }
+
+    private static string WireAction(string body) =>
+        JsonDocument.Parse(body).RootElement.GetProperty("event_action").GetString()!;
+
+    private static string WireDedupKey(string body) =>
+        JsonDocument.Parse(body).RootElement.GetProperty("dedup_key").GetString()!;
+
+    /// <summary>
+    /// The payloads one test's PagerDuty sends captured, in send order. Plain list, no socket: the
+    /// service's post override answers the send and hands the payload here, so nothing leaves the
+    /// process and the assertions read the exact JSON the wire would have seen. One instance per
+    /// settings, so a flag-on capture can never leak bodies into a flag-off one.
+    /// </summary>
+    private sealed class CapturingPagerDuty
+    {
+        public List<string> Bodies { get; } = new();
+    }
+
+    private sealed class WebhookSettings : IAlertSettings
+    {
+        public string PagerDutyRoutingKey { get; set; } = "";
+        public bool PagerDutyAutoResolve { get; set; }
+        public CapturingPagerDuty? Capture { get; set; }
+
+        public bool PagerDutyEnabled => !string.IsNullOrWhiteSpace(PagerDutyRoutingKey);
+        public bool PagerDutyUseEuRegion => false;
+
+        /* The proxy is unused on this fake (the capture rides the service's post override instead), kept
+           defaulted to the shipped "direct" shape. */
+        string IAlertSettings.PagerDutyProxyAddress => "";
+
+        public bool TeamsWebhookEnabled => false;
+        public string TeamsWebhookUrl => "";
+        public string TeamsProxyAddress => "";
+        public bool SlackWebhookEnabled => false;
+        public string SlackWebhookUrl => "";
+        public string SlackProxyAddress => "";
+        public bool GenericWebhookEnabled => false;
+        public string GenericWebhookUrl => "";
+        public string GenericWebhookHeadersJson => "";
+        public string GenericWebhookBodyTemplate => "";
+        public string GenericWebhookProxyAddress => "";
+        public bool SmtpEnabled => false;
+        public string SmtpServer => "";
+        public int SmtpPort => 25;
+        public bool SmtpUseSsl => false;
+        public string SmtpUsername => "";
+        public string SmtpFromAddress => "";
+        public string SmtpRecipients => "";
+        public string? GetSmtpPassword() => null;
+        public string EmailSmtpHost => "";
+        public int EmailSmtpPort => 25;
+        public bool EmailSmtpUseSsl => false;
+        public string EmailSmtpUsername => "";
+        public string EmailSmtpPassword => "";
+        public string EmailFromAddress => "";
+        public string EmailRecipients => "";
+        public int EmailCooldownMinutes => 60;
+        public int AnalysisPageCap => 10;
+        public string TriageBaseUrl => "";
+        public double AnalysisNotifySeverity => 0;
+        public int AnalysisNotifyCooldownMinutes => 0;
+        public int UncorroboratedFindingPageCap => 0;
+        public string UncorroboratedFindingRoute => "";
+        public System.Collections.Generic.IReadOnlyList<NotificationRoute> NotificationRoutes => System.Array.Empty<NotificationRoute>();
     }
 
     /* ---------------- Custom details (T-SQL hint) ---------------- */

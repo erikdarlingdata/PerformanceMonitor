@@ -92,8 +92,10 @@ public interface IAlertSettings
     /// "AG Replica Reconnected") is sent as a <c>resolve</c> event on the SAME dedup_key its firing edge's
     /// trigger opened, closing the PagerDuty incident as part of the tool's own incident lifecycle. Default
     /// false — the tool does not auto-resolve incidents with third parties unless the operator asks it to,
-    /// and the closing edge is delivered as an info-severity <c>trigger</c> on that dedup_key (correlated
-    /// into the open incident, not resolving it). No other channel, and no other alert type, is affected.
+    /// and the closing edge is delivered as an info-severity <c>trigger</c> on ITS OWN key (correlated
+    /// into the open incident ONLY when the flag is on — the paired keying below is part of the opt-in,
+    /// not the default: see <see cref="WebhookAlertService.DerivePagerDutyDedupKey"/>). No other channel,
+    /// and no other alert type, is affected.
     ///
     /// <para>Defaulted on the interface rather than declared abstract, on
     /// <see cref="UncorroboratedFindingRoute"/>'s precedent and for the same reason: the default IS the

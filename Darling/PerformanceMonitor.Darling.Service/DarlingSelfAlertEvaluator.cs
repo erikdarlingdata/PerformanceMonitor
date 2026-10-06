@@ -4096,7 +4096,12 @@ internal sealed class DarlingSelfAlertEvaluator
                             : $"{replica.ReplicaServerName} in AG {replica.AgName} is disconnected from the primary",
                         /* Connected-state descs both sides ("DISCONNECTED" against "CONNECTED"). */
                         numericCurrentValue: StateOnlyValue, numericThresholdValue: StateOnlyValue,
-                        cancellationToken);
+                        cancellationToken,
+                        /* The pair's incident identity rides BOTH edges, so a PagerDuty resolve lands on the
+                           same per-replica key the firing's trigger opened: a single "AG:replica" member (not
+                           two) so it can't be set half-way. Trailing optional, so every other FireAsync call
+                           site (and the tests that pin them) stays untouched. */
+                        context: new AlertContext { AgReplicaIdentity = $"{replica.AgName}:{replica.ReplicaServerName}" });
 
                     /* Stamped on DELIVERY, never on the decision: an alert suppressed by the master switch
                        must not consume the re-fire window (the #1659 discipline). #4795: nor one no channel
@@ -4119,7 +4124,9 @@ internal sealed class DarlingSelfAlertEvaluator
                         severity: null,
                         shortMessage: $"{replica.ReplicaServerName} in AG {replica.AgName} reconnected",
                         numericCurrentValue: StateOnlyValue, numericThresholdValue: StateOnlyValue,
-                        cancellationToken);
+                        cancellationToken,
+                        /* Same incident identity as the firing, on both edges: the pair is one incident. */
+                        context: new AlertContext { AgReplicaIdentity = $"{replica.AgName}:{replica.ReplicaServerName}" });
                     _lastAgDisconnectAlert.TryRemove(key, out _);
 
                     /* #4795: the notice is not retried, and the outage it closes has nothing left to retry. */

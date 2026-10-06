@@ -95,6 +95,20 @@ public class AlertContext
     /// other alert and on any row written before this member existed.
     /// </summary>
     public string? CollectorName { get; set; }
+
+    /// <summary>
+    /// The availability group and replica this firing is ABOUT, for edge alerts that need a per-replica
+    /// incident identity (the AG disconnect/reconnect pair — one server can host many replicas of many
+    /// groups). Set by both engines' AG fire sites to the replica grain the row itself is keyed on, so
+    /// <see cref="WebhookAlertService.DerivePagerDutyDedupKey"/> can scope that pair's dedup key per
+    /// replica instead of per server: with auto-resolve on, one replica's reconnect must close only ITS
+    /// incident, not the one a still-disconnected sibling is still holding open. Read only by that helper,
+    /// only for that pair — no renderer, budget or cooldown reads it. Null on every other alert and on any
+    /// row written before this member existed. Unpersisted: like <see cref="AttachmentXml"/> this is
+    /// live-render data, not row data. The pairing name is the literal "AG:replica", because that is
+    /// exactly the shape consumers can reason about — see the helper for why.
+    /// </summary>
+    public string? AgReplicaIdentity { get; set; }
 }
 
 /// <summary>

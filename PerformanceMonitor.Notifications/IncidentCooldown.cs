@@ -127,6 +127,20 @@ public sealed class IncidentCooldown
             _cooldowns[key] = decision.EvaluatedAtUtc;
     }
 
+    /// <summary>
+    /// Forgets the metric-level fallback entry for (<paramref name="serverId"/>, <paramref name="metricName"/>)
+    /// on THIS cooldown's key space. The PagerDuty auto-resolve recovery calls this for its pair's FIRING
+    /// metric after a delivered close: the stamp sitting on that key is a relic of an incident that no longer
+    /// exists, and without the clear the next firing of the same metric meets the old window and never
+    /// announces. Call only on a DELIVERED close — evaluating (not sending) a recovery must not re-arm
+    /// anything. Does not touch the history store, so a restart can still re-seed the key from the last send
+    /// row; that is the restart class the seed deliberately accepts, not a reopened window.
+    /// </summary>
+    public void ClearMetric(string serverId, string metricName)
+    {
+        _cooldowns.TryRemove($"{_keyPrefix}{serverId}:{metricName}", out _);
+    }
+
     // Distinct non-blank fingerprints -> one "{prefix}{server}:{metric}:{dedupKey}" key each; no
     // fingerprint -> the single "{prefix}{server}:{metric}" fallback key (pre-#1154 behavior). A blank
     // DedupKey can't occur (AlertFingerprint returns null incidents, filtered upstream) but is excluded

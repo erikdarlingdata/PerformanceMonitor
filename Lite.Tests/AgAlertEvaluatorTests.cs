@@ -93,12 +93,15 @@ public class AgAlertEvaluatorTests
         var lost = Assert.Single(e.EvaluateReplicas(ServerId, new[] { Replica(connected: "DISCONNECTED") }));
         Assert.Equal(AgAlertPolicy.ReplicaDisconnectedMetric, lost.MetricName);
         Assert.False(lost.IsResolution);
+        Assert.Equal("AG1:NODE2", lost.Context?.AgReplicaIdentity);
 
         Assert.Empty(e.EvaluateReplicas(ServerId, new[] { Replica(connected: "DISCONNECTED") }));
 
         var back = Assert.Single(e.EvaluateReplicas(ServerId, new[] { Replica(connected: "CONNECTED") }));
         Assert.Equal(AgAlertPolicy.ReplicaReconnectedMetric, back.MetricName);
         Assert.True(back.IsResolution);
+        /* Same incident identity as the firing, on both edges: the pair is one incident. */
+        Assert.Equal("AG1:NODE2", back.Context?.AgReplicaIdentity);
     }
 
     /* ---------------- #2426: the disconnect re-fire ---------------- */

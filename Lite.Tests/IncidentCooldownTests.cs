@@ -151,6 +151,36 @@ public class IncidentCooldownTests
         Assert.True((await cd.EvaluateAsync("1", "Deadlocks Detected", Incidents("A"), Window)).ShouldSend);
     }
 
+    /// <summary>
+    /// The auto-resolve paired lifecycle, at the cooldown seam: a recovery the webhook actually DELIVERED
+    /// clears the metric-level entry its firing left behind, so a down-back-down soberly re-arms. Without
+    /// the clear the second "Server Unreachable" meets the first incident's window and never posts — the
+    /// exact outage the resolve was meant to close ends up silenced.
+    /// </summary>
+    [Fact]
+    public async Task ClearMetric_ForgetsTheFiringEntry_LeavingSiblingsAlone()
+    {
+        var cd = NoSeed();
+
+        var down = await cd.EvaluateAsync("1", "Server Unreachable", null, Window);
+        Assert.True(down.ShouldSend);
+        cd.Stamp(down);
+        Assert.False((await cd.EvaluateAsync("1", "Server Unreachable", null, Window)).ShouldSend);
+
+        // A delivered close clears the pair's FIRING — the metric under which the outage posted — and the
+        // next outage of the same pair on the same server posts again:
+        cd.ClearMetric("1", "Server Unreachable");
+        Assert.True((await cd.EvaluateAsync("1", "Server Unreachable", null, Window)).ShouldSend);
+
+        // ...while a different metric and a different server keep their own entries.
+        var cpu = await cd.EvaluateAsync("1", "High CPU", null, Window);
+        cd.Stamp(cpu);
+        Assert.False((await cd.EvaluateAsync("1", "High CPU", null, Window)).ShouldSend);
+
+        cd.ClearMetric("1", "Server Unreachable");
+        Assert.False((await cd.EvaluateAsync("1", "High CPU", null, Window)).ShouldSend);
+    }
+
     /* ─────────────── #3313: the per-fingerprint verdicts, not only their reduction ─────────────── */
 
     /// <summary>

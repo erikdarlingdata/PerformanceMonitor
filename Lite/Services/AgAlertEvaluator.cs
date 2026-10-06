@@ -233,6 +233,10 @@ public sealed class AgAlertEvaluator
                         "partner. Check the replica's SQL Server service, the availability endpoint (TCP 5022 by " +
                         "default) and its firewall rule, the WSFC quorum, and the network between the nodes.",
                         IsResolution: false,
+                        /* The pair's incident identity rides the alert, so a PagerDuty resolve lands on it: a
+                           single "AG:replica" member (not two) so it can't be set half-way. Only this pair
+                           carries it — every other grain's incidents answer through fingerprints already. */
+                        Context: AgAlertContexts.ForReplica(replica.AgName, replica.ReplicaServerName),
                         RefireStampKey: key,
                         RetryKey: disconnectRetryKey));
                 }
@@ -251,7 +255,9 @@ public sealed class AgAlertEvaluator
                         $"Availability Group '{replica.AgName}': replica {replica.ReplicaServerName} is connected to " +
                         "the primary again. It is still behind by whatever accumulated while it was gone — watch the " +
                         "send and redo queues until they drain before you count it as a failover target again.",
-                        IsResolution: true));
+                        IsResolution: true,
+                        /* Same incident identity as the firing, on both edges: the pair is one incident. */
+                        Context: AgAlertContexts.ForReplica(replica.AgName, replica.ReplicaServerName)));
                 }
             }
         }

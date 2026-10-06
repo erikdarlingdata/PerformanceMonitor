@@ -270,9 +270,9 @@ public sealed class NotificationRow
             && string.Equals(GenericHeaders, other.GenericHeaders, StringComparison.Ordinal)
             && string.Equals(GenericBodyTemplate, other.GenericBodyTemplate, StringComparison.Ordinal)
             && string.Equals(GenericProxy, other.GenericProxy, StringComparison.Ordinal)
-        && string.Equals(PagerDutyRoutingKey, other.PagerDutyRoutingKey, StringComparison.Ordinal)
-        && PagerDutyUseEuRegion == other.PagerDutyUseEuRegion
-        && PagerDutyProxy == other.PagerDutyProxy
-        && PagerDutyAutoResolve == other.PagerDutyAutoResolve;
-}
+            && string.Equals(PagerDutyRoutingKey, other.PagerDutyRoutingKey, StringComparison.Ordinal)
+            && PagerDutyUseEuRegion == other.PagerDutyUseEuRegion
+            && PagerDutyProxy == other.PagerDutyProxy
+            && PagerDutyAutoResolve == other.PagerDutyAutoResolve;
+    }
 }

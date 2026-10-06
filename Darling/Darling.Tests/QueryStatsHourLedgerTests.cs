@@ -184,12 +184,11 @@ public sealed class QueryStatsHourLedgerTests
         var arm = "to_regclass('collect.query_stats_hour_ledger') IS NOT NULL";
         Assert.Contains(arm, probe, StringComparison.Ordinal);
 
-        /* Not "the probe's last EXISTS" any more: that asserted this rung is the NEWEST sentinel, which
-           stopped being true when V165 appended its COLUMN-existence sentinel after it. The sentinel stays
-           where it was appended, so its ordinal is unchanged. */
+        /* The probe is a comma-separated EXISTS list walked in order, so the arm is present mid-list: it is
+           preceded by earlier arms (the `before` slice above) and followed by V165's COLUMN-existence
+           sentinel, which stopped this rung being the newest. Its ordinal is unchanged. */
         var before = probe[..probe.IndexOf(arm, StringComparison.Ordinal)];
-        Assert.True(before.LastIndexOf("EXISTS", StringComparison.Ordinal) >= 0,
-            "the rung's sentinel exists as a probe arm");
+        Assert.Contains("EXISTS", before, StringComparison.Ordinal);
 
         var viewer = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.cs");
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal})", viewer, StringComparison.Ordinal);

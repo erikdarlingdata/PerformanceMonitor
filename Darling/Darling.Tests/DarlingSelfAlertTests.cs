@@ -4608,17 +4608,20 @@ public sealed class DarlingSelfAlertTests
         var lost = Assert.Single(h.Deliverer.Outcomes);
         Assert.Equal("AG Replica Disconnected", lost.MetricName);
         Assert.Equal(AlertSeverityLevel.Critical, lost.Severity);
+        Assert.Equal("AG1:NODE2", lost.Context?.AgReplicaIdentity);
 
         /* Still disconnected: edge-triggered, so no re-fire. */
         await e.ApplyAgReplicaHealthAsync(ServerId, Name, new[] { ReplicaRow(connected: "DISCONNECTED") }, Ct);
         Assert.Single(h.Deliverer.Outcomes);
 
         /* Back to CONNECTED: the informational reconnect, severity null so the shared severity map renders
-           it green/RESOLVED like "Server Restored". */
+           it green/RESOLVED like "Server Restored". Same per-replica identity as the firing: the pair is
+           one incident. */
         await e.ApplyAgReplicaHealthAsync(ServerId, Name, new[] { ReplicaRow(connected: "CONNECTED") }, Ct);
         Assert.Equal(2, h.Deliverer.Outcomes.Count);
         Assert.Equal("AG Replica Reconnected", h.Deliverer.Outcomes[1].MetricName);
         Assert.Null(h.Deliverer.Outcomes[1].Severity);
+        Assert.Equal("AG1:NODE2", h.Deliverer.Outcomes[1].Context?.AgReplicaIdentity);
     }
 
     [Fact]

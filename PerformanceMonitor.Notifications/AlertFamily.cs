@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 
 namespace PerformanceMonitor.Notifications;
 
@@ -156,12 +157,25 @@ public static class AlertFamily
     /// The recoveries the product DELIVERS as alerts, each paired with the firing it clears. Only these two
     /// reach a channel under a name other than their firing's; every other recovery is a history row
     /// (<c>AlertResolution</c>, never routed). An exact-metric route on the firing catches the recovery.
+    /// <para>The VALUE side is the incident's name, which is also the whole grain the pair is keyed on
+    /// everywhere the lifecycle is named: the PagerDuty dedup key reads the value for the firing edge
+    /// too (the firing's own name must equal the closing edge's, or the pair is two incidents again).</para>
     /// </summary>
     public static readonly IReadOnlyDictionary<string, string> RecoveryPairs = new Dictionary<string, string>(StringComparer.Ordinal)
     {
         ["Server Restored"] = "Server Unreachable",
         ["AG Replica Reconnected"] = "AG Replica Disconnected",
     };
+
+    /// <summary>
+    /// Whether <paramref name="metricName"/> belongs to the paired lifecycle on EITHER side: a closing edge
+    /// (<see cref="RecoveryPairs"/> key) or a firing whose close re-keys onto it (a value). A future pair
+    /// joins the checks that read this by naming its value — no second census, so the two directions of
+    /// one pair cannot drift apart.
+    /// </summary>
+    public static bool IsPairedEdge(string metricName) =>
+        RecoveryPairs.ContainsKey(metricName)
+        || RecoveryPairs.Values.Any(value => string.Equals(value, metricName, StringComparison.Ordinal));
 
     /// <summary>The metric-name prefixes of the two dynamic alert shapes, each with its family.</summary>
     public static readonly IReadOnlyList<(string Prefix, string Family)> PrefixFamilies = new[]
