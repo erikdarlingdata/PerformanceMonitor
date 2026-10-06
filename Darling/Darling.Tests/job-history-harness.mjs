@@ -115,16 +115,11 @@ const historyCalls = () =>
 
 const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "job-history-"));
 try {
-  fs.mkdirSync(path.join(scratch, "pages"), { recursive: true });
+  /* Copy the whole js tree (js/, js/pages/ and every subdirectory) rather than a hand-kept list (#5279): a page module that
+     another PR adds then needs no edit here. Only imported files load, so the rest are inert; charts.js is replaced by the
+     stub below, which is written AFTER the copy. */
+  fs.cpSync(jsDir, scratch, { recursive: true });
   fs.writeFileSync(path.join(scratch, "package.json"), '{ "type": "module" }');
-  /* Copy every module under js/ and js/pages/ rather than a hand-kept list: a new page module that server-tabs.js
-     imports (another PR's pages/*.js) then needs no edit here. Only imported files load, so the rest are inert;
-     charts.js is replaced by the stub below. */
-  for (const dir of ["", "pages"]) {
-    for (const f of fs.readdirSync(path.join(jsDir, dir))) {
-      if (f.endsWith(".js")) fs.copyFileSync(path.join(jsDir, dir, f), path.join(scratch, dir, f));
-    }
-  }
   fs.writeFileSync(
     path.join(scratch, "charts.js"),
     'import { el } from "./util.js";\nexport const SERIES_COLORS = [];\nexport function normalizeColor(c) { return c; }\nexport function renderLineChart() { return el("div", {}); }\n' +

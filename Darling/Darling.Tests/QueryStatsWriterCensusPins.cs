@@ -22,12 +22,17 @@ namespace Darling.Tests;
 /// #4605: the census of everything that writes <c>collect.query_stats</c>. The hourly row-count ledger
 /// (<c>collect.query_stats_hour_ledger</c>, <see cref="QueryStatsHourLedger"/>) counts rows at ONE write: the collector
 /// runner's COPY, <c>DarlingCollectorRunner.CopyBatchOnceAsync</c>, adds each batch's non-restart count in the COPY's own
-/// transaction. The long-window count guard then proves a rollup complete by comparing the ledger with it. A second
-/// writer would put rows into raw, and so into the hourly rollup, that no ledger entry accounts for. If those rows are
-/// late (below the rollup's watermark, before the next refresh) the rollup and the ledger both lack them, the guard
-/// passes, and a panel serves a rollup that is missing rows as exact. That is the one unsafe case the guard cannot see
-/// for itself, so this census is the defence: the expected writer set is exactly <c>{CopyBatchOnceAsync}</c>, and a
-/// second writer fails here with the reason.
+/// transaction. The long-window count guard then compares the ledger with the rollup, per (server, hour), and takes a
+/// rollup that agrees as complete. A second writer would put rows into raw, and so into the hourly rollup, that no
+/// ledger entry accounts for. If those rows are late (below the rollup's watermark, before the next refresh) the rollup
+/// and the ledger both lack them, the guard passes, and a panel serves a rollup that is missing rows as exact. That is
+/// the unsafe case, a writer the ledger does not count whose rows the rollup also lacks, and the guard cannot see it for
+/// itself, so this census guards it for this build's code: the expected writer set is exactly
+/// <c>{CopyBatchOnceAsync}</c>, and a second writer fails here with the reason. The census reads this build's source
+/// only. It cannot see an older service that still writes raw rows into a V164 store (a rolling upgrade, or a
+/// downgrade): the guard catches those rows wherever the rollup holds them and misses them in one known case, an hour
+/// the rollup never materialized whose raw rows all came from the older service
+/// (<see cref="IntervalRollupCountGuard"/> names it).
 ///
 /// <para>Three arms. (1) A literal scan of every non-test source in the service's <c>ProjectReference</c> closure (see
 /// below) for a DML verb aimed at the table. (2) Every
@@ -58,8 +63,9 @@ namespace Darling.Tests;
 /// 3's verb list does not flag. A COPY reached through a method group (<c>Func&lt;...&gt; f = conn.BeginBinaryImportAsync;</c>)
 /// has no <c>(</c> after the name, so arm 2 does not see it. An UPDATE in place is invisible to the ledger as it is to
 /// the guard it feeds, so arm 1 lists UPDATE to make a new one a decision rather than an accident. Retention's DELETE is
-/// deliberately not a writer here: a row removed from raw can only make raw smaller than the ledger, which fails the
-/// guard safe.</para>
+/// deliberately not a writer here: the guard reads no raw rows, so a row-by-row DELETE of raw shows only after the
+/// rollup refreshes over it, as a ledger above the rollup, which fails safe; retention never deletes inside a window the
+/// route takes (its window starts inside raw's retention).</para>
 /// </summary>
 public sealed class QueryStatsWriterCensusPins
 {

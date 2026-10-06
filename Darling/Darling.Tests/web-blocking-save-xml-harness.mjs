@@ -92,17 +92,10 @@ process.on("unhandledRejection", (e) => rejections.push(String(e && e.stack ? e.
 const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "blocking-save-xml-"));
 let modules;
 try {
-  fs.mkdirSync(path.join(scratch, "pages"));
+  /* Copy the whole js tree (js/, js/pages/ and every subdirectory) rather than a hand-kept list (#5279): a page module that
+     another PR adds then needs no edit here. Only imported files load, so the rest are inert. */
+  fs.cpSync(jsDir, scratch, { recursive: true });
   fs.writeFileSync(path.join(scratch, "package.json"), '{ "type": "module" }');
-  for (const f of ["util.js", "panels.js", "charts.js", "read-fields.js"]) fs.copyFileSync(path.join(jsDir, f), path.join(scratch, f));
-  fs.copyFileSync(path.join(jsDir, "pages", "server-tabs.js"), path.join(scratch, "pages", "server-tabs.js"));
-  /* Modules that server-tabs.js and panels.js import: copied when present, so the harness works whichever PR lands first. */
-  for (const f of ["grid-tools.js", "multi-picker.js", path.join("pages", "analysis-findings.js"), path.join("pages", "plan-viewer.js"), path.join("pages", "pg-plan-viewer.js"), path.join("pages", "query-store-history.js")]) {
-    if (fs.existsSync(path.join(jsDir, f))) fs.copyFileSync(path.join(jsDir, f), path.join(scratch, f));
-  }
-  /* #5246: the Graph cell of the Deadlock Graphs grid. */
-  fs.mkdirSync(path.join(scratch, "pages"), { recursive: true });
-  fs.copyFileSync(path.join(jsDir, "pages", "deadlock-graph.js"), path.join(scratch, "pages", "deadlock-graph.js"));
   const load = (rel) => import(pathToFileURL(path.join(scratch, rel)).href);
   modules = { util: await load("util.js"), tabs: await load(path.join("pages", "server-tabs.js")) };
 } finally {

@@ -136,7 +136,11 @@ ORDER BY 4 DESC NULLS LAST";
 
     /// <summary>The ranked statements. <c>$1</c> the role key or null for every role, <c>$2</c> the fetch size
     /// (the caller's cap plus one, so truncation is observed rather than inferred). <paramref name="orderColumn"/>
-    /// comes from <see cref="OrderColumns"/> and nowhere else.</summary>
+    /// comes from <see cref="OrderColumns"/> and nowhere else. The text is wrapped in the shared sensitive-statement
+    /// predicate (#4348), a second layer on top of the reader function's own filter for a store whose function body is
+    /// older than the pattern; <see cref="ShownText"/> reads what it withholds as <see cref="StoreStatementStats.WithheldText"/>.
+    /// The diagnostics bundle lists these statements whole (#5097), next to the ones <c>get_store_query_history</c> reads
+    /// through the same layer.</summary>
     public static string BuildStatementsSql(string orderColumn) => $@"
 SELECT
     ranked.role_key,
@@ -149,7 +153,7 @@ SELECT
     ranked.shared_blks_hit,
     ranked.shared_blks_read,
     ranked.temp_blks_written,
-    ranked.query
+    {PgSensitiveStatementFilter.SqlPredicate("ranked.query")} AS query
 FROM
 (
     SELECT
@@ -427,11 +431,26 @@ LIMIT $2";
     /// execution on a busy store, or reset between a protocol Parse and its Execute (<c>pgss_store</c> with no
     /// jumble state, PostgreSQL 18's pg_stat_statements.c). Such a text passes the reader's allowlist like any
     /// SELECT. A caller of the reader function in SQL still reads it unmasked.
+    ///
+    /// <para>A text the shared sensitive-statement filter withheld in SQL arrives as
+    /// <see cref="PgSensitiveStatementFilter.PlaceholderText"/>. Both text reads wrap the reader function's text in
+    /// <see cref="PgSensitiveStatementFilter.SqlPredicate"/> (<see cref="BuildStatementsSql"/> and
+    /// <see cref="DarlingMcpStoreQueryHistoryTools.TextSql"/>), a second layer for a store whose reader function is older
+    /// than the pattern. The placeholder is a SQL line comment, which the lexer strips, so left to it the statement
+    /// would read as an empty string: neither its text nor a withheld marker. It reads as
+    /// <see cref="StoreStatementStats.WithheldText"/> instead, before the lexer runs.</para>
     /// </summary>
-    internal static string ShownText(string text) =>
-        text.Length == 0 || text == InsufficientPrivilegeText || text == StoreStatementStats.WithheldText
+    internal static string ShownText(string text)
+    {
+        if (text == PgSensitiveStatementFilter.PlaceholderText)
+        {
+            return StoreStatementStats.WithheldText;
+        }
+
+        return text.Length == 0 || text == InsufficientPrivilegeText || text == StoreStatementStats.WithheldText
             ? text
             : PgLogTextRedactor.RedactStoredStatement(text) ?? StoreStatementStats.WithheldText;
+    }
 
     private sealed record StatementRow(
         string Role,

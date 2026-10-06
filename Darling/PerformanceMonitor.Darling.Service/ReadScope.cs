@@ -21,8 +21,15 @@ internal enum ReadFallback
     FallbackRaw,
 
     /// <summary>The source decision itself (or the connection / transaction it needs) faulted, so raw answered
-    /// without a decision. Outranks <see cref="FallbackRaw"/> when both were noted in one call.</summary>
+    /// without a decision. Outranks <see cref="FallbackRaw"/> and <see cref="LedgerUncovered"/> when more than one was
+    /// noted in one call.</summary>
     GateFailed,
+
+    /// <summary>The hourly-edges count guard found the hour ledger does not cover the window yet (#4605), so the
+    /// route was not taken and raw answered. An expected state, not a fault: it is noted with
+    /// <see cref="ReadScope.Note"/> (no log line) and shows as <c>fallback_raw</c> in <c>get_read_latency</c>. Ranks below
+    /// <see cref="GateFailed"/> and <see cref="FallbackRaw"/>, which are the bigger facts when noted in the same call.</summary>
+    LedgerUncovered,
 }
 
 /// <summary>
@@ -149,7 +156,7 @@ internal sealed class ReadScope
     internal ILogger? Logger { get; }
 
     /// <summary>The strongest fallback noted so far (<see cref="ReadFallback.GateFailed"/> outranks
-    /// <see cref="ReadFallback.FallbackRaw"/>), or null.</summary>
+    /// <see cref="ReadFallback.FallbackRaw"/>, which outranks <see cref="ReadFallback.LedgerUncovered"/>), or null.</summary>
     internal ReadFallback? Fallback
     {
         get
@@ -179,10 +186,7 @@ internal sealed class ReadScope
         {
             lock (scope._gate)
             {
-                if (scope._fallback is not ReadFallback.GateFailed)
-                {
-                    scope._fallback = kind;
-                }
+                scope.Keep(kind);
             }
         }
 
@@ -198,7 +202,8 @@ internal sealed class ReadScope
         }
     }
 
-    /// <summary>Notes a fallback with no log line, for a caller whose callee already logged the fault.</summary>
+    /// <summary>Notes a fallback with no log line: for a caller whose callee already logged the fault, or for an expected
+    /// state that is not a fault (<see cref="ReadFallback.LedgerUncovered"/>, a store before V164).</summary>
     internal static void Note(ReadFallback kind)
     {
         var scope = s_current.Value;
@@ -209,10 +214,27 @@ internal sealed class ReadScope
 
         lock (scope._gate)
         {
-            if (scope._fallback is not ReadFallback.GateFailed)
-            {
-                scope._fallback = kind;
-            }
+            scope.Keep(kind);
+        }
+    }
+
+    /// <summary>The order the reasons rank in: a bigger number is the bigger fact. Written out, not taken from the enum's
+    /// declaration order, so adding a reason cannot quietly reorder them.</summary>
+    private static int Rank(ReadFallback kind) => kind switch
+    {
+        ReadFallback.GateFailed => 3,
+        ReadFallback.FallbackRaw => 2,
+        ReadFallback.LedgerUncovered => 1,
+        _ => 0,
+    };
+
+    /// <summary>Holds <paramref name="kind"/> unless a stronger reason is already held; an equal one is replaced by the later
+    /// note, as it always was. Call under <c>_gate</c>.</summary>
+    private void Keep(ReadFallback kind)
+    {
+        if (_fallback is not { } held || Rank(kind) >= Rank(held))
+        {
+            _fallback = kind;
         }
     }
 
@@ -230,7 +252,9 @@ internal sealed class ReadScope
     }
 
     /// <summary>The recorded outcome: a noted fallback replaces ONLY <see cref="ReadOutcome.Ok"/>; a timeout,
-    /// cancel, error or limit is the bigger fact and wins.</summary>
+    /// cancel, error or limit is the bigger fact and wins. <see cref="ReadFallback.GateFailed"/> becomes
+    /// <see cref="ReadOutcome.GateFailed"/>; every other reason, <see cref="ReadFallback.LedgerUncovered"/> included,
+    /// becomes <see cref="ReadOutcome.FallbackRaw"/>.</summary>
     internal static ReadOutcome Resolve(ReadOutcome measured, ReadFallback? noted)
     {
         if (measured != ReadOutcome.Ok || noted is null)
