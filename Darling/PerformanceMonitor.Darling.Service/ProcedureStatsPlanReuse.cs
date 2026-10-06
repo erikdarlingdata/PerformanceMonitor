@@ -68,6 +68,22 @@ internal static class ProcedureStatsPlanReuse
         public int FalseHit { get; set; }
 
         /// <summary>
+        /// Shadow: the part of <see cref="FalseHit"/> where both shapes were known and differ, a real shape change.
+        /// The four <c>FalseHit*</c> causes always sum to <see cref="FalseHit"/>; the other three are plans no shape
+        /// was compared for, so a field read can tell a shape change from an uncompared plan (#5158).
+        /// </summary>
+        public int FalseHitShape { get; set; }
+
+        /// <summary>Shadow: the part of <see cref="FalseHit"/> where the cached entry had no shape yet.</summary>
+        public int FalseHitNoShape { get; set; }
+
+        /// <summary>Shadow: the part of <see cref="FalseHit"/> where the render was over the size cap and was compared by byte size only.</summary>
+        public int FalseHitOverCap { get; set; }
+
+        /// <summary>Shadow: the part of <see cref="FalseHit"/> where the render's XML did not parse.</summary>
+        public int FalseHitUnparsed { get; set; }
+
+        /// <summary>
         /// Shadow: would-hits whose rendered plan differs in bytes from the cached one but whose shape held. In the field
         /// only the memory grant moved: grant feedback adjusted the cached plan in place. The hash key proves the shape
         /// held, not that nothing else did. That is a minor mutation of a plan the store already holds, so it is not
@@ -235,8 +251,7 @@ internal static class ProcedureStatsPlanReuse
     /// Shadow: the rows already carry their inline plans. Looks each identity up, compares a would-hit with the
     /// plan just rendered, and warms the cache from the inline render. Changes no row.
     /// </summary>
-    /// <param name="onFalseHit">Called with the identity of each would-hit counted as a false hit.</param>
-    /// <param name="onFalseHitCause">Called beside <paramref name="onFalseHit"/> with the identity and which case it was (#5158):
+    /// <param name="onFalseHit">Called with the identity of each would-hit counted as a false hit and which case it was (#5158):
     /// a shape that changed, or a case where no two shapes were compared.</param>
     internal static Outcome ApplyShadow(
         int serverId,
@@ -244,8 +259,7 @@ internal static class ProcedureStatsPlanReuse
         IReadOnlyList<ProcedureStatsCollector.Row> rows,
         long captureOrdinal,
         DateTime nowUtc,
-        Action<ProcedureStatsPlanKey>? onFalseHit,
-        Action<ProcedureStatsPlanKey, FalseHitCause>? onFalseHitCause = null)
+        Action<ProcedureStatsPlanKey, FalseHitCause>? onFalseHit)
     {
         var outcome = new Outcome();
         foreach (var row in rows)
@@ -293,11 +307,19 @@ internal static class ProcedureStatsPlanReuse
                 else
                 {
                     outcome.FalseHit++;
-                    onFalseHit?.Invoke(key);
-                    onFalseHitCause?.Invoke(key, row.QueryPlanXml is null ? FalseHitCause.OverCapRender
+                    var cause = row.QueryPlanXml is null ? FalseHitCause.OverCapRender
                         : shape is null ? FalseHitCause.RenderUnparseable
                         : entry.Shape is null ? FalseHitCause.EntryHasNoShape
-                        : FalseHitCause.ShapeChanged);
+                        : FalseHitCause.ShapeChanged;
+                    switch (cause)
+                    {
+                        case FalseHitCause.OverCapRender: outcome.FalseHitOverCap++; break;
+                        case FalseHitCause.RenderUnparseable: outcome.FalseHitUnparsed++; break;
+                        case FalseHitCause.EntryHasNoShape: outcome.FalseHitNoShape++; break;
+                        default: outcome.FalseHitShape++; break;
+                    }
+
+                    onFalseHit?.Invoke(key, cause);
                 }
             }
             else

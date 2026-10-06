@@ -379,7 +379,7 @@ public sealed class ProcedureStatsPlanReuseTests
         var cache = ConfirmedCache(new[] { RowFor(1, "<plan one/>") });
         var rows = new List<ProcedureStatsCollector.Row> { RowFor(1, "<plan one/>") };
 
-        var outcome = ProcedureStatsPlanReuse.ApplyShadow(1, cache, rows, 2, s_now, _ => Assert.Fail("no false hit expected"));
+        var outcome = ProcedureStatsPlanReuse.ApplyShadow(1, cache, rows, 2, s_now, (_, _) => Assert.Fail("no false hit expected"));
 
         Assert.Equal(1, outcome.WouldHit);
         Assert.Equal(0, outcome.FalseHit);
@@ -394,7 +394,7 @@ public sealed class ProcedureStatsPlanReuseTests
         var rows = new List<ProcedureStatsCollector.Row> { RowFor(1, "<current plan/>") };
         var reported = new List<ProcedureStatsPlanKey>();
 
-        var outcome = ProcedureStatsPlanReuse.ApplyShadow(1, cache, rows, 2, s_now, reported.Add);
+        var outcome = ProcedureStatsPlanReuse.ApplyShadow(1, cache, rows, 2, s_now, (k, _) => reported.Add(k));
 
         Assert.Equal(1, outcome.WouldHit);
         Assert.Equal(1, outcome.FalseHit);
@@ -402,7 +402,7 @@ public sealed class ProcedureStatsPlanReuseTests
 
         /* shadow warms the cache from the inline render: once it is confirmed, the same render is a true hit */
         cache.ConfirmPending(outcome.Pending, s_now);
-        var again = ProcedureStatsPlanReuse.ApplyShadow(1, cache, rows, 3, s_now, _ => Assert.Fail("healed"));
+        var again = ProcedureStatsPlanReuse.ApplyShadow(1, cache, rows, 3, s_now, (_, _) => Assert.Fail("healed"));
         Assert.Equal(1, again.WouldHit);
         Assert.Equal(0, again.FalseHit);
     }
@@ -436,6 +436,7 @@ public sealed class ProcedureStatsPlanReuseTests
         + "<StmtSimple StatementId=\"4\" StatementType=\"RETURN\" RetrievedFromCache=\"true\" />"
         + "</Statements></Batch></BatchSequence></ShowPlanXML>";
 
+    /// <summary>Warms a cache through shadow (so each entry keeps its shape) and confirms it.</summary>
     private static PlanDigestCache<ProcedureStatsPlanKey> WarmedWith(string plan)
     {
         var cache = new PlanDigestCache<ProcedureStatsPlanKey>();
@@ -454,7 +455,7 @@ public sealed class ProcedureStatsPlanReuseTests
 
         var cache = WarmedWith(cached);
         var outcome = ProcedureStatsPlanReuse.ApplyShadow(
-            1, cache, new List<ProcedureStatsCollector.Row> { RowFor(1, rendered) }, 2, s_now, _ => Assert.Fail("a grant change is not a false hit"));
+            1, cache, new List<ProcedureStatsCollector.Row> { RowFor(1, rendered) }, 2, s_now, (_, _) => Assert.Fail("a grant change is not a false hit"));
 
         Assert.Equal(1, outcome.WouldHit);
         Assert.Equal(1, outcome.SameShape);
@@ -474,7 +475,7 @@ public sealed class ProcedureStatsPlanReuseTests
         var reported = new List<ProcedureStatsPlanKey>();
 
         var outcome = ProcedureStatsPlanReuse.ApplyShadow(
-            1, cache, new List<ProcedureStatsCollector.Row> { RowFor(1, WithoutPlanlessStatements(ProcedurePlan("2048", "0.25", "0xC2", "0xAA"))) }, 2, s_now, reported.Add);
+            1, cache, new List<ProcedureStatsCollector.Row> { RowFor(1, WithoutPlanlessStatements(ProcedurePlan("2048", "0.25", "0xC2", "0xAA"))) }, 2, s_now, (k, _) => reported.Add(k));
 
         Assert.Equal(1, outcome.FalseHit);
         Assert.Equal(0, outcome.SameShape);
@@ -493,7 +494,7 @@ public sealed class ProcedureStatsPlanReuseTests
         cache.ConfirmPending(first.Pending, s_now);
 
         var rows = new List<ProcedureStatsCollector.Row> { RowFor(1, rendered) };
-        var outcome = ProcedureStatsPlanReuse.ApplyShadow(1, cache, rows, 2, s_now, _ => Assert.Fail("a grant change is not a false hit"));
+        var outcome = ProcedureStatsPlanReuse.ApplyShadow(1, cache, rows, 2, s_now, (_, _) => Assert.Fail("a grant change is not a false hit"));
 
         Assert.Equal(1, outcome.WouldHit);
         Assert.Equal(1, outcome.SameShape);
@@ -503,7 +504,7 @@ public sealed class ProcedureStatsPlanReuseTests
 
         /* the cache now holds the new bytes, so the same render is an exact hit, not a second same-shape */
         cache.ConfirmPending(outcome.Pending, s_now);
-        var again = ProcedureStatsPlanReuse.ApplyShadow(1, cache, rows, 3, s_now, _ => Assert.Fail("healed"));
+        var again = ProcedureStatsPlanReuse.ApplyShadow(1, cache, rows, 3, s_now, (_, _) => Assert.Fail("healed"));
         Assert.Equal(1, again.WouldHit);
         Assert.Equal(0, again.SameShape);
         Assert.Equal(0, again.FalseHit);
@@ -519,7 +520,7 @@ public sealed class ProcedureStatsPlanReuseTests
 
         var reported = new List<ProcedureStatsPlanKey>();
         var rows = new List<ProcedureStatsCollector.Row> { RowFor(1, PlanWithGrant("1024", "0.5", "0xAA", "0xCC")) };
-        var outcome = ProcedureStatsPlanReuse.ApplyShadow(1, cache, rows, 2, s_now, reported.Add);
+        var outcome = ProcedureStatsPlanReuse.ApplyShadow(1, cache, rows, 2, s_now, (k, _) => reported.Add(k));
 
         Assert.Equal(1, outcome.WouldHit);
         Assert.Equal(1, outcome.FalseHit);
@@ -560,7 +561,7 @@ public sealed class ProcedureStatsPlanReuseTests
 
         var grant = ProcedureStatsPlanReuse.ApplyShadow(
             1, cache, new List<ProcedureStatsCollector.Row> { RowFor(1, PlanWithGrant("2048", "0.25", "0xAA", null)) }, 2, s_now,
-            _ => Assert.Fail("grant only"));
+            (_, _) => Assert.Fail("grant only"));
         Assert.Equal(1, grant.SameShape);
         Assert.Equal(0, grant.FalseHit);
         cache.ConfirmPending(grant.Pending, s_now);
@@ -590,7 +591,7 @@ public sealed class ProcedureStatsPlanReuseTests
         cache.ConfirmPending(first.Pending, s_now);
         var second = ProcedureStatsPlanReuse.ApplyShadow(
             1, cache, new List<ProcedureStatsCollector.Row> { RowFor(1, ProcedurePlan("4096", "0.1", "0xC1", "0xAA")) }, 3, s_now,
-            _ => Assert.Fail("the entry has a shape now"));
+            (_, _) => Assert.Fail("the entry has a shape now"));
         Assert.Equal(1, second.SameShape);
         Assert.Equal(0, second.FalseHit);
     }
@@ -673,17 +674,15 @@ public sealed class ProcedureStatsPlanReuseTests
         Assert.Equal(1, second.Measurements.First(m => m.Label == "deferred_false_hit").Value);
         Assert.Equal(2, second.Measurements.First(m => m.Label == "deferred_would_hit").Value);
         Assert.Contains("deferred_same_shape=1", Note(), StringComparison.Ordinal);
+
+        /* the false hit is split by cause in the note: this one was a shape change, so the others stay 0 */
+        Assert.Equal(1, second.Measurements.First(m => m.Label == "deferred_false_hit_shape").Value);
+        Assert.Contains("deferred_false_hit_shape=1", Note(), StringComparison.Ordinal);
+        Assert.Contains("deferred_false_hit_no_shape=0", Note(), StringComparison.Ordinal);
+        Assert.Contains("deferred_false_hit_over_cap=0", Note(), StringComparison.Ordinal);
+        Assert.Contains("deferred_false_hit_unparsed=0", Note(), StringComparison.Ordinal);
         Assert.Contains("deferred_false_hit=1", Note(), StringComparison.Ordinal);
         Assert.Equal(1, flipper.Log.CountAtLevel(LogLevel.Warning)); /* the same-shape row did not warn */
-    }
-
-    /// <summary>Warms a cache through shadow (so each entry keeps its shape) and confirms it.</summary>
-    private static PlanDigestCache<ProcedureStatsPlanKey> ShapedCache(string plan)
-    {
-        var cache = new PlanDigestCache<ProcedureStatsPlanKey>();
-        var first = ProcedureStatsPlanReuse.ApplyShadow(1, cache, new List<ProcedureStatsCollector.Row> { RowFor(1, plan) }, 1, s_now, null);
-        cache.ConfirmPending(first.Pending, s_now);
-        return cache;
     }
 
     private static List<ProcedureStatsPlanReuse.FalseHitCause> CausesOf(
@@ -691,7 +690,7 @@ public sealed class ProcedureStatsPlanReuseTests
     {
         var causes = new List<ProcedureStatsPlanReuse.FalseHitCause>();
         var outcome = ProcedureStatsPlanReuse.ApplyShadow(
-            1, cache, new List<ProcedureStatsCollector.Row> { row }, 2, s_now, null, (_, cause) => causes.Add(cause));
+            1, cache, new List<ProcedureStatsCollector.Row> { row }, 2, s_now, (_, cause) => causes.Add(cause));
         Assert.Equal(1, outcome.FalseHit);
         return causes;
     }
@@ -699,7 +698,7 @@ public sealed class ProcedureStatsPlanReuseTests
     [Fact]
     public void Shadow_FalseHitCause_ShapeChanged_WhenBothShapesWereComparedAndDiffer()
     {
-        var cache = ShapedCache(PlanWithGrant("1024", "0.5", "0xAA"));
+        var cache = WarmedWith(PlanWithGrant("1024", "0.5", "0xAA"));
         Assert.Equal(
             ProcedureStatsPlanReuse.FalseHitCause.ShapeChanged,
             Assert.Single(CausesOf(cache, RowFor(1, PlanWithGrant("1024", "0.5", "0xBB")))));
@@ -717,7 +716,7 @@ public sealed class ProcedureStatsPlanReuseTests
     [Fact]
     public void Shadow_FalseHitCause_OverCapRender_WhenTheRenderHasNoText()
     {
-        var cache = ShapedCache(PlanWithGrant("1024", "0.5", "0xAA"));
+        var cache = WarmedWith(PlanWithGrant("1024", "0.5", "0xAA"));
         var over = QueryPlanXmlCaptureLimits.MaxCapturedPlanXmlBytes + 5L;
         Assert.Equal(
             ProcedureStatsPlanReuse.FalseHitCause.OverCapRender,
@@ -727,10 +726,43 @@ public sealed class ProcedureStatsPlanReuseTests
     [Fact]
     public void Shadow_FalseHitCause_RenderUnparseable_WhenTheXmlDoesNotParse()
     {
-        var cache = ShapedCache(PlanWithGrant("1024", "0.5", "0xAA"));
+        var cache = WarmedWith(PlanWithGrant("1024", "0.5", "0xAA"));
         Assert.Equal(
             ProcedureStatsPlanReuse.FalseHitCause.RenderUnparseable,
             Assert.Single(CausesOf(cache, RowFor(1, "<ShowPlanXML><unclosed"))));
+    }
+
+    [Fact]
+    public void Shadow_EachFalseHitCause_LandsInItsOwnPart_AndThePartsSumToTheFalseHits()
+    {
+        /* rows 1, 2, 3, 5 are cached with a shape; row 4 is cached the way "on" does it, with none */
+        var plan = PlanWithGrant("1024", "0.5", "0xAA");
+        var cache = new PlanDigestCache<ProcedureStatsPlanKey>();
+        var warm = ProcedureStatsPlanReuse.ApplyShadow(
+            1, cache, new[] { 1, 2, 3, 5 }.Select(h => RowFor(h, plan)).ToList(), 1, s_now, null);
+        cache.ConfirmPending(warm.Pending, s_now);
+        var key4 = ProcedureStatsPlanKey.TryCreate(1, RowFor(4, plan))!.Value;
+        cache.AddPending(key4, ProcedureStatsPlanReuse.DigestOf(plan), null, s_now, 1);
+        cache.ConfirmPending(new[] { key4 }, s_now);
+
+        var rows = new List<ProcedureStatsCollector.Row>
+        {
+            RowFor(1, PlanWithGrant("1024", "0.5", "0xBB")),                                        /* a statement recompiled */
+            RowFor(5, PlanWithGrant("1024", "0.5", "0xCC")),                                        /* another */
+            RowFor(2, null, QueryPlanXmlCaptureLimits.MaxCapturedPlanXmlBytes + 5L),                /* over the cap */
+            RowFor(3, "<ShowPlanXML><unclosed"),                                                    /* did not parse */
+            RowFor(4, PlanWithGrant("2048", "0.5", "0xAA")),                                        /* the entry has no shape */
+        };
+        var outcome = ProcedureStatsPlanReuse.ApplyShadow(1, cache, rows, 2, s_now, null);
+
+        Assert.Equal(5, outcome.FalseHit);
+        Assert.Equal(2, outcome.FalseHitShape);
+        Assert.Equal(1, outcome.FalseHitOverCap);
+        Assert.Equal(1, outcome.FalseHitUnparsed);
+        Assert.Equal(1, outcome.FalseHitNoShape);
+        Assert.Equal(
+            outcome.FalseHit,
+            outcome.FalseHitShape + outcome.FalseHitNoShape + outcome.FalseHitOverCap + outcome.FalseHitUnparsed);
     }
 
     [Fact]
@@ -803,7 +835,7 @@ public sealed class ProcedureStatsPlanReuseTests
         var cache = ConfirmedCache(new[] { RowFor(1, null, over) });
         var rows = new List<ProcedureStatsCollector.Row> { RowFor(1, null, over) };
 
-        var outcome = ProcedureStatsPlanReuse.ApplyShadow(1, cache, rows, 2, s_now, _ => Assert.Fail("same size"));
+        var outcome = ProcedureStatsPlanReuse.ApplyShadow(1, cache, rows, 2, s_now, (_, _) => Assert.Fail("same size"));
 
         Assert.Equal(1, outcome.WouldHit);
         Assert.Equal(0, outcome.FalseHit);

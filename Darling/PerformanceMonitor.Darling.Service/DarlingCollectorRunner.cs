@@ -7284,7 +7284,8 @@ RETURNING s.state_key";
     /// connection, inside the same wall-clock budget, at most <see cref="ProcedureStatsPlanReuse.MaxMissesPerRun"/>.
     ///
     /// <para>What this pass counts goes into the run's collection-log note beside <c>plans_rendered</c>:
-    /// <c>deferred_would_hit</c>, <c>deferred_false_hit</c> (the plan's shape changed), <c>deferred_same_shape</c> (the shape held; in the field
+    /// <c>deferred_would_hit</c>, <c>deferred_false_hit</c> (the plan's shape changed, or could not be compared; split into <c>deferred_false_hit_shape</c>,
+    /// <c>_no_shape</c>, <c>_over_cap</c> and <c>_unparsed</c>, which sum to it), <c>deferred_same_shape</c> (the shape held; in the field
     /// only the memory grant moved) and <c>deferred_miss</c> in shadow, <c>deferred_hit</c> and
     /// <c>deferred_miss</c> in on. A failed second query ships the rows it covered without plans, caches nothing, and does
     /// not fail the run. Returns the keys to confirm after the batch commits, or discard.</para>
@@ -7314,7 +7315,6 @@ RETURNING s.state_key";
         {
             outcome = ProcedureStatsPlanReuse.ApplyShadow(
                 server.ServerId, cache, rows, captureOrdinal, now,
-                null,
                 (key, cause) => _logger?.LogWarning(
                     "procedure_stats on server {ServerId}: a plan identity the cache recognized rendered a different plan this run (a false hit): {Key}. Why: {Reason} (#5158).",
                     server.ServerId, key, ProcedureStatsPlanReuse.DescribeFalseHit(cause)));
@@ -7356,6 +7356,10 @@ RETURNING s.state_key";
         {
             context.Measure("deferred_would_hit", outcome.WouldHit);
             context.Measure("deferred_false_hit", outcome.FalseHit);
+            context.Measure("deferred_false_hit_shape", outcome.FalseHitShape);
+            context.Measure("deferred_false_hit_no_shape", outcome.FalseHitNoShape);
+            context.Measure("deferred_false_hit_over_cap", outcome.FalseHitOverCap);
+            context.Measure("deferred_false_hit_unparsed", outcome.FalseHitUnparsed);
             context.Measure("deferred_same_shape", outcome.SameShape);
         }
         else
@@ -7372,7 +7376,7 @@ RETURNING s.state_key";
             shadow ? "shadow" : "on",
             context.CapturePlanXml ? "capture" : "gated",
             shadow
-                ? $"would_hit={outcome.WouldHit} false_hit={outcome.FalseHit} same_shape={outcome.SameShape} miss={outcome.Miss}"
+                ? $"would_hit={outcome.WouldHit} false_hit={outcome.FalseHit} (shape={outcome.FalseHitShape} no_shape={outcome.FalseHitNoShape} over_cap={outcome.FalseHitOverCap} unparsed={outcome.FalseHitUnparsed}) same_shape={outcome.SameShape} miss={outcome.Miss}"
                 : $"hit={outcome.Hit} miss={outcome.Miss} over_cap={outcome.OverCap}",
             outcome.Rendered);
 
