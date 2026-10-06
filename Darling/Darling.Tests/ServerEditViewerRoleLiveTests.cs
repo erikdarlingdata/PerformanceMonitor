@@ -336,4 +336,54 @@ public sealed class ServerEditViewerRoleLiveTests : IDisposable
             await LiveStoreCleanup.RunOwnedAsync(ok, () => ExecAsync(owner, $"DROP OWNED BY {roleName}; DROP ROLE IF EXISTS {roleName};", CancellationToken.None));
         }
     }
+
+    /// <summary>
+    /// A field an edit cannot change is refused by the real core on the way through the web route: 400, a message that
+    /// names the key (any <c>remediation_</c> key is named <c>remediation_*</c>), and the row is untouched. The refused key
+    /// comes FIRST in the body because the core names the first refused key in body order, and <c>is_enabled</c> is itself
+    /// refused. The row's id is negative, as about half of all ids are, so this also runs the live read and write routes on one.
+    /// </summary>
+    [Fact]
+    public async Task AsTheViewerRole_ARefusedField_Is400ThroughTheRealCore_NamesTheKey_AndLeavesTheRowAlone()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var roleName = "srv_ref_" + Guid.NewGuid().ToString("N")[..8];
+        var (scratch, owner, ownerString) = await ServerAddViewerRoleLiveTests.OpenAsync(ct);
+        await using var _ = scratch;
+        await using var __ = owner;
+        await using var viewer = await ServerAddViewerRoleLiveTests.ProvisionAsync(owner, ownerString, roleName, null, ct);
+        var ok = false;
+        try
+        {
+            await ExecAsync(owner, "INSERT INTO config_service (id) VALUES (1) ON CONFLICT DO NOTHING", ct);
+            await ExecAsync(owner, "INSERT INTO config_monitored_servers (server_id, name, host) VALUES (-5206, 'foxtrot', 'foxtrot.example.test')", ct);
+            var (app, client) = await HostAsync(viewer, null, ct);
+            await using var __app = app;
+            using var ___client = client;
+
+            var token = JsonNode.Parse(await client.GetStringAsync("/api/admin/servers/-5206", ct))!["modified_at"]!.GetValue<string>();
+            var before = await ScalarAsync(owner, "SELECT modified_at::text FROM config_monitored_servers WHERE server_id = -5206", ct);
+
+            foreach (var (key, value, named) in new[]
+            {
+                ("server_id", "7", "server_id"),
+                ("remediation_username", "\"someone\"", "remediation_*"),
+            })
+            {
+                var body = $"{{\"{key}\":{value},\"is_enabled\":false,\"expected_modified_at\":\"{token}\"}}";
+                var (status, answer) = await PatchAsync(client, -5206, body, ct);
+
+                Assert.Equal(HttpStatusCode.BadRequest, status);
+                Assert.Contains($"'{named}' cannot be changed here", JsonNode.Parse(answer)!["message"]!.GetValue<string>(), StringComparison.Ordinal);
+                Assert.Equal(before, await ScalarAsync(owner, "SELECT modified_at::text FROM config_monitored_servers WHERE server_id = -5206", ct));
+                Assert.Equal("foxtrot", await ScalarAsync(owner, "SELECT name FROM config_monitored_servers WHERE server_id = -5206", ct));
+            }
+
+            ok = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunOwnedAsync(ok, () => ExecAsync(owner, $"DROP OWNED BY {roleName}; DROP ROLE IF EXISTS {roleName};", CancellationToken.None));
+        }
+    }
 }
