@@ -143,8 +143,12 @@ internal static class OversizedPlanBacklogSweep
     /// 150 seconds of fetch; the fleet pass is serial too, so 42 servers all timing out at the cap is 105 minutes of
     /// fetch. The statement filter's judging is the service's own work, not the monitored server's, and adds to that:
     /// a row never tried shares one 15-second judging budget with the rest of its batch, and a row tried before
-    /// judges on a budget of its own (<see cref="SessionFor"/>, #5367), so the worst pass is ten tried rows that each
-    /// overrun it: ten times (15 s fetch plus 15 s judging), 300 seconds, against 165 seconds with one shared budget.
+    /// judges on a budget of its own (<see cref="SessionFor"/>, #5367). A claim takes at most
+    /// <c>OversizedPlanBacklog.TriedRowsPerClaim</c> tried rows while never-tried rows are waiting (five of ten), so the
+    /// worst pass is five tried rows that each overrun their own budget plus five never-tried rows that share one:
+    /// five times (15 s fetch plus 15 s judging) plus five times 15 s fetch plus one 15 s budget, 240 seconds. With no
+    /// never-tried rows waiting the tried rows fill the claim, ten times (15 s fetch plus 15 s judging), 300 seconds;
+    /// that pass spends no time on new rows because there are none.
     /// Two passes never overlap whatever the interval — <c>DarlingWorker</c> tracks the pass and its gate
     /// will not launch on top of an incomplete one — so a pass that outruns <see cref="SweepInterval"/> runs
     /// back-to-back with its successor at the SAME one-plan-at-a-time load rather than at two passes' worth
@@ -160,7 +164,8 @@ internal static class OversizedPlanBacklogSweep
     /// trickles never trips it. Fifteen seconds is the top of the issue's range, and a plan that cannot be
     /// read in fifteen seconds on the collector's own same-region path is one this pass should abandon and
     /// re-attempt on a later pass rather than hold a connection for — later rather than next, because the
-    /// claim sends an attempted row to the back of the queue so nothing can starve.
+    /// claim orders the tried rows by attempt age, so a row just tried waits behind the other tried rows, and takes
+    /// at most half of a claim's slots so it cannot keep a never-tried row out.
     /// </summary>
     internal static readonly TimeSpan PerPlanBudget = TimeSpan.FromSeconds(15);
 

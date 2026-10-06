@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
@@ -172,6 +173,99 @@ VALUES (4101, 'query_stats', '0xOVERRUN', '0xSQL', 0, 400, 'fixture_db', '0xHASH
         Assert.Contains(StatementScrubCanary.PlainStatement, clean, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// #5367 review round 2, N2: ten rows whose fetch always fails do not stop the backlog. A failed fetch is not
+    /// counted and never retires, and the claim used to put tried rows first, so those ten filled every claim and a
+    /// new row was never claimed. Now a claim takes at most half its slots for tried rows: with a steady supply of
+    /// new rows, a new row is claimed and settled in every pass, and the failing rows are still retried (five a
+    /// pass, oldest attempt first). With fewer new rows than their half, the tried rows fill the rest.
+    /// </summary>
+    [Fact]
+    public async Task TenRowsWhoseFetchAlwaysFails_DoNotKeepANewRowOutOfTheClaim()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live oversized-plan judging-retire test (it mints its own scratch database).");
+
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, null, ct);
+        await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        await ExecuteAsync(connection, "INSERT INTO collect.servers (server_id, server_name, is_enabled) VALUES (4101, 'fixture-server', TRUE);", ct);
+
+        var plain = "<ShowPlanXML xmlns=\"http://schemas.microsoft.com/sqlserver/2004/07/showplan\"><BatchSequence><Batch><Statements>"
+            + "<StmtSimple StatementText=\"" + StatementScrubCanary.PlainStatement + "\" /></Statements></Batch></BatchSequence></ShowPlanXML>";
+
+        /* No plan is registered for the failing rows, so every fetch of them fails. Ten rows, the whole claim. */
+        var plans = new Dictionary<string, string>(StringComparer.Ordinal);
+        for (var i = 0; i < 10; i++)
+        {
+            await InsertRowAsync(connection, "0xFAIL-" + i, 5000000 + i, ct);
+        }
+
+        var setup = await RunPassAsync(dataSource, connection, plans, ct);
+        Assert.Equal(10, setup.Count);
+        Assert.All(setup, p => Assert.False(p.Tried));
+
+        /* Three new rows a pass, smaller than the failing ones: each pass claims and settles all three. */
+        var retried = new HashSet<string>(StringComparer.Ordinal);
+        for (var pass = 1; pass <= 4; pass++)
+        {
+            var handles = new List<string>();
+            for (var i = 0; i < 3; i++)
+            {
+                var handle = "0xNEW-" + pass + "-" + i;
+                await InsertRowAsync(connection, handle, 1000 + i, ct);
+                plans[handle] = plain;
+                handles.Add(handle);
+            }
+
+            var claimed = await RunPassAsync(dataSource, connection, plans, ct);
+
+            foreach (var handle in handles)
+            {
+                Assert.True((await StateAsync(connection, handle, ct)).Captured,
+                    handle + " was not claimed and settled in its own pass, so the failing rows are filling the claim");
+            }
+
+            /* The failing rows are still retried, in the slots the three new rows leave: seven of them. */
+            Assert.Equal(10, claimed.Count);
+            Assert.Equal(7, claimed.Count(p => p.Tried));
+
+            /* Oldest attempt first, so the failing rows rotate: all ten are retried within two passes. */
+            if (pass <= 2)
+            {
+                retried.UnionWith(claimed.Where(p => p.Tried).Select(p => p.Observation.PlanHandle));
+            }
+        }
+
+        Assert.Equal(10, retried.Count);
+
+        /* More new rows than their half: the tried rows hold five slots, the largest five new rows take the rest. */
+        for (var i = 0; i < 8; i++)
+        {
+            var handle = "0xBURST-" + i;
+            await InsertRowAsync(connection, handle, 2000 + i, ct);
+            plans[handle] = plain;
+        }
+
+        var burst = await RunPassAsync(dataSource, connection, plans, ct);
+        Assert.Equal(10, burst.Count);
+        Assert.Equal(5, burst.Count(p => p.Tried));
+        Assert.Equal(5, burst.Count(p => !p.Tried));
+        Assert.Equal(
+            new[] { "0xBURST-7", "0xBURST-6", "0xBURST-5", "0xBURST-4", "0xBURST-3" },
+            burst.Where(p => !p.Tried).Select(p => p.Observation.PlanHandle).ToArray());
+
+        /* Tried rows come back first in the claim's order. */
+        Assert.True(burst.Take(5).All(p => p.Tried) && burst.Skip(5).All(p => !p.Tried));
+    }
+
     /// <summary>Passes after the one that tried a row on a shared budget: the first counts the judge timeout, the
     /// second stores the marker. A plan that fits a whole budget settles in the first.</summary>
     private const int PassesToSettle = 2;
@@ -192,16 +286,22 @@ VALUES (4101, 'query_stats', '0xOVERRUN', '0xSQL', 0, 400, 'fixture_db', '0xHASH
 
     /// <summary>One sweep pass for the fixture server without the target fetch: the real claim, the real session
     /// choice, the real judge step and the real outcome statements.</summary>
-    private static async Task RunPassAsync(
+    private static async Task<List<OversizedPlanBacklog.PendingPlan>> RunPassAsync(
         NpgsqlDataSource dataSource, NpgsqlConnection connection, Dictionary<string, string> plans, CancellationToken ct)
     {
         var claimed = await OversizedPlanBacklogSweep.ClaimAsync(dataSource, ServerId, ct);
         var batch = FakeSession();
         foreach (var plan in claimed)
         {
-            var session = OversizedPlanBacklogSweep.SessionFor(plan, batch, FakeSession);
-            var (verdict, content, _) = OversizedPlanBacklogSweep.JudgeFetchedPlan(
-                session, plans[plan.Observation.PlanHandle], plan.AttemptCount);
+            /* A handle with no plan in the map is a fetch that fails (timeout, driver fault): the row is stamped
+               Failed, which is not counted and never retires it. */
+            var verdict = OversizedPlanBacklogSweep.PlanFetchVerdict.Failed;
+            string? content = null;
+            if (plans.TryGetValue(plan.Observation.PlanHandle, out var planXml))
+            {
+                var session = OversizedPlanBacklogSweep.SessionFor(plan, batch, FakeSession);
+                (verdict, content, _) = OversizedPlanBacklogSweep.JudgeFetchedPlan(session, planXml, plan.AttemptCount);
+            }
 
             await using var command = new NpgsqlCommand(OversizedPlanBacklogSweep.OutcomeSql(verdict), connection);
             command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = ServerId });
@@ -225,6 +325,8 @@ VALUES (4101, 'query_stats', '0xOVERRUN', '0xSQL', 0, 400, 'fixture_db', '0xHASH
             /* Distinct attempt stamps, in claim order, as the real pass produces. */
             await Task.Delay(5, ct);
         }
+
+        return claimed;
     }
 
     private static Task InsertRowAsync(NpgsqlConnection connection, string handle, long bytes, CancellationToken ct) =>
