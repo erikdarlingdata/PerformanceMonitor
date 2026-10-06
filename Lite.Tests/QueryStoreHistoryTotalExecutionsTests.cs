@@ -212,6 +212,28 @@ public sealed class QueryStoreHistoryTotalExecutionsTests
     }
 
     [Fact]
+    public void RowsWithNeitherAnIntervalIdNorAFirstExecution_AreOneInterval_ThatCountsOnce()
+    {
+        /* The oldest legacy rows hold neither identity column: no #1841 tier 2 id, and no first_execution_time to
+           stand in for it. The key's NULL parts match each other, as they do in the aggregate reads' PARTITION BY,
+           so the helper reads these rows as ONE interval and counts its newest snapshot once: 8, not 4 + 8. If such
+           rows were really two intervals the total would under-count them. The aggregate reads carry the same
+           limit, because nothing left on the rows can tell them apart. A different plan is still its own interval. */
+        var rows = new List<QueryStoreHistoryRow>
+        {
+            Snapshot(5, 4, interval: null, legacyNoFirstExecution: true),
+            Snapshot(10, 8, interval: null, legacyNoFirstExecution: true),
+        };
+
+        Assert.Equal(8, QueryStoreHistoryRow.TotalExecutions(rows));
+        Assert.Equal(T0.AddMinutes(10), Assert.Single(QueryStoreHistoryRow.LatestPerInterval(rows)).CollectionTime);
+
+        rows.Add(Snapshot(10, 3, interval: null, plan: 22, legacyNoFirstExecution: true));
+
+        Assert.Equal(8 + 3, QueryStoreHistoryRow.TotalExecutions(rows));
+    }
+
+    [Fact]
     public void LatestPerInterval_KeepsOneRowPerInterval_AndLeavesTheGridsListAlone()
     {
         /* The window binds this same list to its grid, which shows every snapshot by design. */

@@ -847,6 +847,14 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
         Assert.All(rows, r => Assert.Null(r.ReplicaRole));
 
         Assert.Equal(45, QueryStoreHistoryRow.TotalExecutions(rows));
+
+        /* The helper's key lives in C# and the aggregate reads' PARTITION BY lives in SQL, so nothing but a
+           comparison on one seed fails when only one of them changes. The grid's top read, over the same rows,
+           reports the same count for the query as the window's Total Executions does. */
+        var top = Assert.Single(
+            await new LocalDataService(_duckDb).GetQueryStoreTopQueriesAsync(ServerId, hoursBack: 24),
+            r => r.QueryId == QueryId);
+        Assert.Equal(QueryStoreHistoryRow.TotalExecutions(rows), top.TotalExecutions);
     }
 
     [Fact]
@@ -874,6 +882,15 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
         Assert.Equal(1, rows.Count(r => r.ReplicaRole == "SECONDARY"));
         Assert.Equal(17, rows.Sum(r => r.ExecutionCount));
         Assert.Equal(9 + 2, QueryStoreHistoryRow.TotalExecutions(rows));
+
+        /* The grid's top read splits the query into one row per replica role (PRIMARY 9, SECONDARY 2), so the
+           window's total is those two rows added up, which is the comparison that pins the helper's replica_role
+           key to the SQL's. */
+        var top = (await new LocalDataService(_duckDb).GetQueryStoreTopQueriesAsync(ServerId, hoursBack: 24))
+            .Where(r => r.QueryId == QueryId)
+            .ToList();
+        Assert.Equal(2, top.Count);
+        Assert.Equal(QueryStoreHistoryRow.TotalExecutions(rows), top.Sum(r => r.TotalExecutions));
     }
 
     /// <summary>
