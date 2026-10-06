@@ -428,6 +428,14 @@ ORDER BY COALESCE(s.display_name, c.name)";
     /// first, reads every other definition's address again under it, and writes only when the address is still
     /// free. A claimed address throws <see cref="MonitoredServerAddressClaimedException"/> and nothing is written; the
     /// dialog's save handler catches that type on its own and shows its message as it is.</para>
+    ///
+    /// <para><b>A move never carries the stored password along (#5240).</b> The upsert rewrites
+    /// <c>encrypted_password</c> from the row it is given, so a row handed in with the blob it was read with would
+    /// send the stored password to a new address. Under the same lock, the write therefore reads the stored host, port
+    /// and blob, and when a SQL or service-principal row's host or port differs, it writes only a row that carries a
+    /// newly protected password: a missing blob, or the stored one, throws <see cref="MonitoredServerPasswordNeededException"/>
+    /// and nothing is written. The rule is the web and MCP edit's (<c>DarlingMcpServerAdminTools.PlanEdit</c> and the
+    /// store's edit function), with the same sentence; every other change keeps the stored password as before.</para>
     /// </summary>
     public async Task UpsertMonitoredServerAsync(MonitoredServerRow row, CancellationToken cancellationToken = default)
     {
@@ -444,11 +452,86 @@ ORDER BY COALESCE(s.display_name, c.name)";
             throw new MonitoredServerAddressClaimedException(claimant);
         }
 
+        await RefuseStoredPasswordOnMovedReachAsync(connection, transaction, row, cancellationToken);
+
         await using var command = new NpgsqlCommand(MonitoredServerUpsertSql, connection, transaction);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         BindMonitoredServer(command, row);
         await ExecuteWriteAsync(command, cancellationToken);
         await transaction.CommitAsync(cancellationToken);
+    }
+
+    /// <summary>The sentence a refused move gives: the same text the web and MCP edit answer with
+    /// (<c>DarlingMcpServerAdminTools.EditPasswordNeededText</c>), because this project cannot reference the service.
+    /// <c>ServerEditPasswordRulePinTests</c> fails when the two texts differ.</summary>
+    public const string EditPasswordNeededText =
+        "Changing how this server is reached needs its password again: it is stored encrypted and this surface cannot read it back.";
+
+    /// <summary>The stored host, port, and whether the stored blob is the one a row carries, for one server id ($1 id,
+    /// $2 the row's blob). Reads <c>encrypted_password</c> only to compare it, in the write's own transaction: an
+    /// <c>admin</c>-role write, like the upsert it guards.</summary>
+    public const string MonitoredServerStoredReachSql = @"
+SELECT host, COALESCE(port, 0), COALESCE(encrypted_password = $2, false)
+FROM config_monitored_servers
+WHERE server_id = $1";
+
+    /// <summary>
+    /// True when the row's connection moved off the stored one the way the web and MCP edit count a move: the host
+    /// (trimmed of spaces, compared exactly, the instance being part of it) or the port differs. Mirrors
+    /// <c>DarlingMcpServerAdminTools.PlanEdit</c> and the store's edit function (<c>btrim(host)</c>, then
+    /// <c>IS DISTINCT FROM</c>); the stored values are compared as they are stored.
+    /// </summary>
+    internal static bool ReachMoved(string storedHost, int storedPort, string newHost, int newPort) =>
+        !string.Equals(newHost.Trim(' '), storedHost, StringComparison.Ordinal) || newPort != storedPort;
+
+    /// <summary>
+    /// Refuses (throws <see cref="MonitoredServerPasswordNeededException"/>) a write that moves a SQL or
+    /// service-principal server's host or port while carrying no newly entered password: the row's blob is missing, or
+    /// is the stored one. A Windows or managed-identity row stores no secret and is never refused; a row that is not in
+    /// the store yet has nothing to reuse. Runs inside the caller's transaction, after the identity lock.
+    /// </summary>
+    private async Task RefuseStoredPasswordOnMovedReachAsync(
+        NpgsqlConnection connection, NpgsqlTransaction transaction, MonitoredServerRow row, CancellationToken cancellationToken)
+    {
+        if (!string.Equals(row.Auth, ServerStoreCredential.Sql, StringComparison.OrdinalIgnoreCase)
+            && !string.Equals(row.Auth, ServerStoreCredential.ServicePrincipal, StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        string storedHost;
+        int storedPort;
+        bool carriesStoredBlob;
+        try
+        {
+            await using var command = new NpgsqlCommand(MonitoredServerStoredReachSql, connection, transaction);
+            command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
+            command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = row.ServerId });
+            AddNullableText(command, row.EncryptedPassword);
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            if (!await reader.ReadAsync(cancellationToken))
+            {
+                return;
+            }
+
+            storedHost = reader.GetString(0);
+            storedPort = reader.GetInt32(1);
+            carriesStoredBlob = reader.GetBoolean(2);
+        }
+        catch (PostgresException ex) when (ex.SqlState == InsufficientPrivilegeSqlState)
+        {
+            throw new ViewerReadOnlyException(ex);
+        }
+        catch (PostgresException ex) when (ex.SqlState is UndefinedColumnSqlState or UndefinedTableSqlState)
+        {
+            throw new ViewerSchemaSkewException(ex);
+        }
+
+        if (ReachMoved(storedHost, storedPort, row.Host, row.Port)
+            && (string.IsNullOrEmpty(row.EncryptedPassword) || carriesStoredBlob))
+        {
+            throw new MonitoredServerPasswordNeededException();
+        }
     }
 
     /// <summary>The address (storage key) a definition is stored under: the same five columns, folded the same way,
@@ -862,6 +945,20 @@ public enum MonitoredServerAddOutcome
 /// taken, the secret-free row that holds it (the server to name in the refusal). <see cref="Occupant"/> is null
 /// for <see cref="MonitoredServerAddOutcome.Added"/> and <see cref="MonitoredServerAddOutcome.NotSaved"/>.</summary>
 public sealed record MonitoredServerAddResult(MonitoredServerAddOutcome Outcome, MonitoredServerRow? Occupant);
+
+/// <summary>
+/// <see cref="ViewerDataService.UpsertMonitoredServerAsync"/> refused an edit (#5240): it moves a SQL or
+/// service-principal server's host or port and carries no newly entered password, so the stored one would have been
+/// sent to the new address. The message is <see cref="ViewerDataService.EditPasswordNeededText"/>; the dialog's save
+/// handler shows it as it is, as it does a claimed address.
+/// </summary>
+public sealed class MonitoredServerPasswordNeededException : InvalidOperationException
+{
+    public MonitoredServerPasswordNeededException()
+        : base(ViewerDataService.EditPasswordNeededText)
+    {
+    }
+}
 
 /// <summary>
 /// <see cref="ViewerDataService.UpsertMonitoredServerAsync"/> refused an edit (#5240): under the identity lock,
