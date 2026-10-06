@@ -333,6 +333,31 @@ public sealed class SensitiveStatementsTests
         Assert.Equal(SensitiveStatements.Verdict.Clean, judge("--w--"));
     }
 
+    /// <summary>The production judge is the split judge (#5320 N2), pinned without a stopwatch. A fake clock says the
+    /// first part used 240 ms of the 250 ms budget, so the second part has too little time left and the value is
+    /// TimedOut. <c>x_pwd = HASHBYTES(1)</c> reaches the full judge (the pre-check's superset matches it) and no
+    /// part names it, so a judge that has gone back to one regex answers Clean here and fails this test.</summary>
+    [Fact]
+    public void TheProductionJudgeRunsItsSecondPartInsideWhatTheFirstLeft()
+    {
+        var calls = 0;
+        var judge = SensitiveStatements.CreateProductionJudge(
+            clock: () => TimeSpan.FromMilliseconds(calls++ == 0 ? 0 : 240));
+
+        Assert.Equal(SensitiveStatements.Verdict.TimedOut, judge("x_pwd = HASHBYTES(1)"));
+    }
+
+    /// <summary>The warm-up builds the shared judge, can run again, and does not throw (#5320 N1).</summary>
+    [Fact]
+    public void WarmUpBuildsTheSharedJudgeAndCanRunAgain()
+    {
+        SensitiveStatements.WarmUp();
+        SensitiveStatements.WarmUp();
+
+        Assert.True(SensitiveStatements.JudgeIsBuilt);
+        Assert.Equal(SensitiveStatements.Verdict.Clean, SensitiveStatements.Judge("SELECT 1"));
+    }
+
     /// <summary>1 MB of ordinary SQL with a trailing near miss that only the pre-check's superset hits (#5320 M1).
     /// <c>x_pwd = HASHBYTES(1)</c> has no word start, so the pre-check matches it (T4 without its assertion) and the
     /// full judge must run and answer Clean. With the whole pattern as one compiled regex that took about 226 ms

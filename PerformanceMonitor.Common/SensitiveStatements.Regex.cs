@@ -39,7 +39,34 @@ public static partial class SensitiveStatements
 
     // Lazily built, once. Null after a failed guard: every value is then named (fail closed).
     private static readonly Lazy<Func<string, Verdict>> s_judge =
-        new(() => CreateJudge(Pattern, MatchTimeout, headAlternatives: JudgeHeadAlternatives));
+        new(() => CreateProductionJudge());
+
+    /// <summary>The judge every production caller shares (#5320 N2), with its pattern, timeout and split. Internal
+    /// so a test can build it with a fake <paramref name="clock"/> and pin that it really is the split judge: a
+    /// one-regex judge answers differently once the clock says the first part used most of the budget.</summary>
+    internal static Func<string, Verdict> CreateProductionJudge(Func<TimeSpan>? clock = null) =>
+        CreateJudge(Pattern, MatchTimeout, headAlternatives: JudgeHeadAlternatives, clock: clock);
+
+    /// <summary>True once the shared judge is built. Exposed so a test can pin <see cref="WarmUp"/>.</summary>
+    internal static bool JudgeIsBuilt => s_judge.IsValueCreated;
+
+    /// <summary>Builds the shared judge now (#5320 N1). The build takes about 250-310 ms on a quiet machine
+    /// and 570-880 ms under load, and the first non-empty value pays it, so a host that judges on a UI thread
+    /// or on a request a user waits on starts this on a background thread at startup
+    /// (<c>_ = Task.Run(SensitiveStatements.WarmUp)</c>). Safe to call again and from any thread; never throws.
+    /// A build that fails is cached by the <see cref="Lazy{T}"/>, and the callers already fail closed on it.</summary>
+    public static void WarmUp()
+    {
+        try
+        {
+            _ = s_judge.Value;
+        }
+#pragma warning disable CA1031 // a failed warm-up only costs the first caller its time; callers fail closed
+        catch (Exception)
+#pragma warning restore CA1031
+        {
+        }
+    }
 
     /// <summary>The pattern as .NET reads it, or null when a guard failed. Exposed so a test can pin the
     /// translation as a literal.</summary>
