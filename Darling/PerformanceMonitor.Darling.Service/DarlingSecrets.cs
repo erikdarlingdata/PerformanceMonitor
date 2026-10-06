@@ -98,10 +98,34 @@ public static class DarlingSecrets
     }
 
     /// <summary>
+    /// Dereferences an <c>env:</c>/<c>file:</c> reference held in a server's stored secret slot (#5240), after asking
+    /// whether it names one of this service's own configuration files or secrets
+    /// (<see cref="DarlingOwnedSecrets.ReferenceRefusal(string?)"/>), the question the app asks before it saves a
+    /// reference. Asking it again here, where the reference is read, makes the rule hold for a slot however it was
+    /// written, not only for a reference that came through the app.
+    ///
+    /// <para>A refused reference fails the way an unresolvable one does: an <see cref="InvalidOperationException"/>
+    /// that names the setting, so the worker's connect path logs it, backs off and retries that one server, and
+    /// nothing else stops. The text is the refusal's own sentence, which names no path and no variable, and the
+    /// referenced value is never read.</para>
+    /// </summary>
+    private static string ResolveStoredReference(string reference, string settingName)
+    {
+        if (DarlingOwnedSecrets.ReferenceRefusal(reference) is { } refusal)
+        {
+            throw new InvalidOperationException($"{settingName}: {refusal}");
+        }
+
+        return DarlingSecretSource.Resolve(reference, settingName);
+    }
+
+    /// <summary>
     /// Resolves a monitored server's SQL-auth password: DPAPI blob preferred, then the <c>password</c>
     /// slot — which since #1804 may be an <c>env:</c>/<c>file:</c> REFERENCE
     /// (<see cref="DarlingSecretSource"/>) rather than a literal. <paramref name="usedPlaintext"/> is true
     /// only for a LITERAL (a reference is not plaintext-in-config, so callers do not warn on it).
+    /// A reference held in the stored <c>encryptedPassword</c> slot that names one of this service's own
+    /// secrets is refused before it resolves (<see cref="ResolveStoredReference"/>).
     /// </summary>
     public static string ResolvePassword(MonitoredServer server, out bool usedPlaintext)
     {
@@ -119,7 +143,7 @@ public static class DarlingSecrets
                blobs are base64 and contain no ':' prefix match. */
             if (DarlingSecretSource.IsReference(server.EncryptedPassword))
             {
-                return DarlingSecretSource.Resolve(server.EncryptedPassword, $"servers['{server.DisplayName}'].encryptedPassword");
+                return ResolveStoredReference(server.EncryptedPassword, $"servers['{server.DisplayName}'].encryptedPassword");
             }
 
             /* #2255: the raw CryptographicException ("Key not valid for use in specified state") reached the
@@ -164,7 +188,8 @@ public static class DarlingSecrets
     /// remediation counterpart: a wrong monitoring password fails a read, and a wrong remediation password
     /// fails a write against a production server, so the convenience is not worth the same money. An
     /// <c>env:</c>/<c>file:</c> reference is still accepted — a pointer is not a secret, and it is the only
-    /// way to arm an install with no DPAPI (the #2087 reasoning).</para>
+    /// way to arm an install with no DPAPI (the #2087 reasoning). One that names this service's own
+    /// configuration files or secrets is refused before it resolves, as in <see cref="ResolvePassword"/>.</para>
     ///
     /// <para>A DPAPI failure DOES throw, through the same <see cref="DescribeDecryptFailure"/> text the
     /// other monitored-server surfaces use: an armed server whose blob will not decrypt is a real fault, and it is
@@ -189,7 +214,7 @@ public static class DarlingSecrets
 
         if (DarlingSecretSource.IsReference(blob))
         {
-            return DarlingSecretSource.Resolve(
+            return ResolveStoredReference(
                 blob, $"servers['{server.DisplayName}'].remediationEncryptedPassword");
         }
 
