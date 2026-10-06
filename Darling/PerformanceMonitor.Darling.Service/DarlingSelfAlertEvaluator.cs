@@ -7899,7 +7899,7 @@ ORDER BY ag_name, database_name, replica_server_name", connection) { CommandTime
         CurrentValueText: "resolved", ThresholdValueText: "",
         NumericCurrentValue: null, NumericThresholdValue: null,
         Delivery: AlertDelivery.NoChannelApplies(),
-        Muted: false, DetailText: resolution.Message, ContextJson: null);
+        Muted: false, DetailText: SensitiveStatements.Text(resolution.Message), ContextJson: null);
 
     /// <summary>
     /// The explicit "this metric has no measurement" value for the history stores' NOT NULL
