@@ -104,7 +104,10 @@ public static class ActualPlanExecutor
     {
         /* #4348: a collector that withheld a statement stored the marker in its place. Re-running that would send
            the marker as a comment, capture no plan, and look like the query ran; say what happened instead. */
-        if (queryText.Trim() == SensitiveStatements.PlaceholderText)
+        /* An old stored statement the filter would withhold today (a row written before the filter was on) is
+           judged the same way and refused with the same sentence: Text returns the same instance for clean text. */
+        if (queryText.Trim() == SensitiveStatements.PlaceholderText
+            || !ReferenceEquals(SensitiveStatements.Text(queryText), queryText))
         {
             throw new InvalidOperationException(
                 "This statement's text was withheld (#4348), so it cannot be run to capture an actual plan.");

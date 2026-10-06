@@ -97,6 +97,24 @@ public sealed class StatementMarkerReaderTests
             refusal.Message);
     }
 
+    [Fact]
+    public async Task TheExecutorRefusesAnOldStoredStatementTheFilterWithholds_AndSendsNothing()
+    {
+        /* B-L1: a row stored before the filter was on holds raw text, not the marker. */
+        const string old = "CREATE LOGIN [a] WITH PASSWORD = 'p'";
+        Assert.NotEqual(Marker, old);
+        Assert.Equal(Marker, SensitiveStatements.Text(old));
+
+        var (plan, scripts, error) = await RunExecutorAsync(old);
+
+        Assert.Empty(scripts);
+        Assert.Null(plan);
+        var refusal = Assert.IsType<InvalidOperationException>(error);
+        Assert.Equal(
+            "This statement's text was withheld (#4348), so it cannot be run to capture an actual plan.",
+            refusal.Message);
+    }
+
     // ---- "Mute this alert" -------------------------------------------------------------------------------
 
     [Fact]
@@ -179,6 +197,31 @@ public sealed class StatementMarkerReaderTests
                 "the marker was seeded as a query-text pattern");
             Assert.Equal("LCK_M_X", marker.GetProperty("wait_type_pattern").GetString());
             Assert.Equal(Plain, doc.RootElement.GetProperty("plain").GetProperty("query_text_pattern").GetString());
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void TheWebMuteContextReadsAPaddedMarkerAsTheMarker()
+    {
+        /* B-L3: the C# check (WithheldStatementMarker.IsMarker) trims before it compares; the page script must too. */
+        var dir = Path.Combine(Path.GetTempPath(), "statement-marker-reader-pad-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        try
+        {
+            var copy = Path.Combine(dir, "mute-context.mjs");
+            File.Copy(PathTo("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "mute-context.js"), copy);
+            var script =
+                "import { isWithheldMarker } from " + JsonSerializer.Serialize(new Uri(copy).AbsoluteUri) + ";"
+                + "console.log(JSON.stringify([isWithheldMarker(" + JsonSerializer.Serialize(Marker) + "),"
+                + " isWithheldMarker(" + JsonSerializer.Serialize("  " + Marker + "\r\n") + "),"
+                + " isWithheldMarker(" + JsonSerializer.Serialize(Plain) + "), isWithheldMarker(null)]));";
+            using var doc = JsonDocument.Parse(RunNode(script));
+
+            Assert.Equal([true, true, false, false], doc.RootElement.EnumerateArray().Select(e => e.GetBoolean()).ToArray());
         }
         finally
         {

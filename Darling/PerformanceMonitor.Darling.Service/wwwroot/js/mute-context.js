@@ -26,6 +26,12 @@ const QUERY_MAX = 200;
  * it would match every withheld statement and nothing else, so no query pattern is seeded from it. */
 const WITHHELD_MARKER = "-- statement text withheld (#4348)";
 
+/** True when the text is the withheld marker, ignoring surrounding whitespace the way the C# check does
+ *  (WithheldStatementMarker.IsMarker and AlertMuteContext.SeedQueryTextPattern trim before comparing). */
+export function isWithheldMarker(text) {
+  return typeof text === "string" && text.trim() === WITHHELD_MARKER;
+}
+
 /** Parses an alert's detail text into the mute-context dimensions. Mirrors AlertMuteContext.PopulateFromDetailText:
  *  indented "Label: value" lines, a multi-line query value, and no parse at all for a custom alert. */
 export function parseDetailContext(detailText, metricName) {
@@ -73,7 +79,7 @@ export function mutePrefillParams(a) {
     metric_name: a.metric_name,
     database_pattern: d.database,
     wait_type_pattern: d.waitType,
-    query_text_pattern: d.queryText === WITHHELD_MARKER ? null
+    query_text_pattern: isWithheldMarker(d.queryText) ? null
       : d.queryText && d.queryText.length > QUERY_MAX ? d.queryText.substring(0, QUERY_MAX) : d.queryText,
     job_name_pattern: d.jobName,
   };
