@@ -161,8 +161,22 @@ internal static class DarlingStoredPlanReader
     /// <see cref="EventWindowFloor"/> for the event_time, a partition-column bound with no upper limit, so a
     /// late-collected report is still found while the chunks older than the event are never opened.
     /// </para>
+    /// <para>
+    /// The answer is per EVENT, while the list's presence flag is per stored copy. Two copies of one event can carry
+    /// different plans (a recompile between the two collections), and then both rows show a button and both open the
+    /// earlier copy's plan, where the desktop viewer shows each row its own copy's plan. The web page gives those rows
+    /// one panel key, so opening one opens both. That is accepted: the earlier copy is the one whose plan was most likely
+    /// still cached when the event ran, and nothing here tells the two copies apart.
+    /// </para>
+    /// <para>
+    /// An Azure master target collects several databases under one server_id, and each database numbers its own
+    /// sessions, so two databases' reports can share every other part of the key. The optional $8 narrows the read to the
+    /// row's own database, in the same NULL-or-equal form as the other optional database filters in this class; a caller
+    /// that sends none gets the answer it got before the filter existed.
+    /// </para>
     /// $1 server_id, $2 event_time (naive UTC, microsecond-exact), $3 blocked_spid, $4 blocked_ecid, $5 blocking_spid,
-    /// $6 blocking_ecid, $7 collection_time floor. Byte-equal to <see cref="BlockingPlanSql"/> except for the column.
+    /// $6 blocking_ecid, $7 collection_time floor, $8 database_name (NULL = no database filter). Byte-equal to
+    /// <see cref="BlockingPlanSql"/> except for the column.
     /// </summary>
     public const string BlockedPlanSql = """
         SELECT blocked_query_plan_xml
@@ -174,6 +188,7 @@ internal static class DarlingStoredPlanReader
         AND   blocking_spid = $5
         AND   blocking_ecid = $6
         AND   collection_time >= $7
+        AND   ($8::text IS NULL OR database_name = $8)
         AND   blocked_query_plan_xml IS NOT NULL
         AND   blocked_query_plan_xml <> ''
         ORDER BY collection_time, blocked_report_id
@@ -192,6 +207,7 @@ internal static class DarlingStoredPlanReader
         AND   blocking_spid = $5
         AND   blocking_ecid = $6
         AND   collection_time >= $7
+        AND   ($8::text IS NULL OR database_name = $8)
         AND   blocking_query_plan_xml IS NOT NULL
         AND   blocking_query_plan_xml <> ''
         ORDER BY collection_time, blocked_report_id
@@ -202,22 +218,32 @@ internal static class DarlingStoredPlanReader
     /// The victim's plan for one deadlock (#5236), by the row's own (collection_time, deadlock_time) as get_deadlocks
     /// lists them. That pair is NOT unique (no key enforces it, and one monitor pass can report two deadlocks whose
     /// stamps are equal to the millisecond), so the optional <c>victim_process_id</c> narrows it to the one the row
-    /// names; <c>deadlock_id</c> breaks any tie left. The presence predicate matches the list's <c>has_victim_plan</c>
-    /// flag (see <see cref="BlockedPlanSql"/>). A NULL deadlock_time never lists, so it is never asked for here.
+    /// names, and the optional <c>database_name</c> to the row's own database (the same reason, and the same
+    /// NULL-or-equal form, as <see cref="BlockedPlanSql"/>'s $8). The presence predicate matches the list's
+    /// <c>has_victim_plan</c> flag (see <see cref="BlockedPlanSql"/>). A NULL deadlock_time never lists, so it is never
+    /// asked for here.
+    /// <para>
+    /// It reads up to TWO rows, <c>deadlock_id</c> first, and selects <c>victim_process_id</c> beside the plan so the
+    /// caller can tell whether the one it takes was the only candidate. When no victim is sent and the two rows name
+    /// different victims, the stamps do not say which deadlock was meant, and the plan of the wrong deadlock is worse
+    /// than none, so <see cref="GetDeadlockVictimPlanXmlAsync"/> reports the read as ambiguous and takes neither. Two
+    /// rows that name the same victim are copies of one deadlock, and the lower <c>deadlock_id</c> answers.
+    /// </para>
     /// $1 server_id, $2 collection_time, $3 deadlock_time (both naive UTC, microsecond-exact), $4 victim_process_id
-    /// (NULL = no victim filter).
+    /// (NULL = no victim filter), $5 database_name (NULL = no database filter).
     /// </summary>
     public const string DeadlockVictimPlanSql = """
-        SELECT victim_query_plan_xml
+        SELECT victim_query_plan_xml, victim_process_id
         FROM deadlocks
         WHERE server_id = $1
         AND   collection_time = $2
         AND   deadlock_time = $3
         AND   ($4::text IS NULL OR victim_process_id = $4)
+        AND   ($5::text IS NULL OR database_name = $5)
         AND   victim_query_plan_xml IS NOT NULL
         AND   victim_query_plan_xml <> ''
         ORDER BY deadlock_id
-        LIMIT 1
+        LIMIT 2
         """;
 
     /// <summary>
@@ -521,11 +547,11 @@ internal static class DarlingStoredPlanReader
     /// <paramref name="eventTimeUtc"/> must be the row's event_time exactly — naive UTC, with the microseconds the
     /// store keeps — and is relabelled <c>Unspecified</c> by the binder so it is a <c>timestamp</c> and not a
     /// <c>timestamptz</c> (the #1969 trap). The ecids and spids are the row's own: both sides of the key, whichever
-    /// plan is asked for.
+    /// plan is asked for. A null or empty <paramref name="databaseName"/> adds no database filter.
     /// </summary>
     public static async Task<string?> GetBlockingPlanXmlAsync(
         NpgsqlDataSource postgres, int serverId, DateTime eventTimeUtc, int blockedSpid, int blockedEcid,
-        int blockingSpid, int blockingEcid, bool blockingSide, CancellationToken cancellationToken = default)
+        int blockingSpid, int blockingEcid, bool blockingSide, string? databaseName = null, CancellationToken cancellationToken = default)
     {
         await using var command = postgres.CreateCommand(blockingSide ? BlockingPlanSql : BlockedPlanSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
@@ -536,18 +562,21 @@ internal static class DarlingStoredPlanReader
         DarlingMcpReadParameters.AddInt(command, blockingSpid);
         DarlingMcpReadParameters.AddInt(command, blockingEcid);
         DarlingMcpReadParameters.AddTimestamp(command, EventWindowFloor.For(eventTimeUtc));
+        DarlingMcpReadParameters.AddNullableText(command, string.IsNullOrEmpty(databaseName) ? null : databaseName);
         var result = await command.ExecuteScalarAsync(cancellationToken);
         return result is string s ? s : null;
     }
 
     /// <summary>
-    /// The stored victim plan of one deadlock (<see cref="DeadlockVictimPlanSql"/>), or null when that deadlock captured
-    /// none. Both times are the row's own, exactly: naive UTC with the store's microseconds. A null or empty
-    /// <paramref name="victimProcessId"/> adds no victim filter.
+    /// The stored victim plan of one deadlock (<see cref="DeadlockVictimPlanSql"/>), with a null plan when that deadlock
+    /// captured none, or <see cref="DeadlockVictimPlanRead.Ambiguous"/> when no victim was named and the two deadlocks the
+    /// stamps match name different victims. Both times are the row's own, exactly: naive UTC with the store's
+    /// microseconds. A null or empty <paramref name="victimProcessId"/> adds no victim filter, and a null or empty
+    /// <paramref name="databaseName"/> no database filter.
     /// </summary>
-    public static async Task<string?> GetDeadlockVictimPlanXmlAsync(
+    public static async Task<DeadlockVictimPlanRead> GetDeadlockVictimPlanXmlAsync(
         NpgsqlDataSource postgres, int serverId, DateTime collectionTimeUtc, DateTime deadlockTimeUtc, string? victimProcessId,
-        CancellationToken cancellationToken = default)
+        string? databaseName = null, CancellationToken cancellationToken = default)
     {
         await using var command = postgres.CreateCommand(DeadlockVictimPlanSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
@@ -555,8 +584,28 @@ internal static class DarlingStoredPlanReader
         DarlingMcpReadParameters.AddTimestamp(command, collectionTimeUtc);
         DarlingMcpReadParameters.AddTimestamp(command, deadlockTimeUtc);
         DarlingMcpReadParameters.AddNullableText(command, string.IsNullOrEmpty(victimProcessId) ? null : victimProcessId);
-        var result = await command.ExecuteScalarAsync(cancellationToken);
-        return result is string s ? s : null;
+        DarlingMcpReadParameters.AddNullableText(command, string.IsNullOrEmpty(databaseName) ? null : databaseName);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken))
+        {
+            return new DeadlockVictimPlanRead(null, false);
+        }
+
+        var plan = reader.GetString(0);
+        var victim = reader.IsDBNull(1) ? null : reader.GetString(1);
+        if (await reader.ReadAsync(cancellationToken))
+        {
+            /* A second candidate. Two copies of one deadlock name the same victim and the lower deadlock_id answers; two
+               different victims are two deadlocks the stamps cannot tell apart (only reachable when no victim was sent,
+               since a sent victim is in the WHERE), so neither plan is taken. */
+            var other = reader.IsDBNull(1) ? null : reader.GetString(1);
+            if (!string.Equals(victim, other, StringComparison.Ordinal))
+            {
+                return new DeadlockVictimPlanRead(null, true);
+            }
+        }
+
+        return new DeadlockVictimPlanRead(plan, false);
     }
 
     /// <summary>
@@ -590,3 +639,8 @@ internal static class DarlingStoredPlanReader
 
 /// <summary>A Query Store plan and the plan_id it was stored under.</summary>
 internal sealed record QueryStorePlanRead(string PlanXml, long PlanId);
+
+/// <summary>The victim-plan read's answer (#5236): the plan, or null when no deadlock the key matches captured one.
+/// <see cref="Ambiguous"/> is true, with no plan, when no victim was named and two deadlocks that share both stamps name
+/// different victims, so the stamps do not say which one was meant.</summary>
+internal sealed record DeadlockVictimPlanRead(string? PlanXml, bool Ambiguous);

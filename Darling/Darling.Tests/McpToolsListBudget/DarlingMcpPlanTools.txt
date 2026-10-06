@@ -29,12 +29,14 @@ param get_blocking_plan_xml.blocked_ecid 35
 param get_blocking_plan_xml.blocked_spid 23
 param get_blocking_plan_xml.blocking_ecid 36
 param get_blocking_plan_xml.blocking_spid 24
+param get_blocking_plan_xml.database_name 52
 param get_blocking_plan_xml.event_time 58
 param get_blocking_plan_xml.server_name 28
 param get_blocking_plan_xml.side 77
 
 tool get_deadlock_plan_xml 130
 param get_deadlock_plan_xml.collection_time 64
+param get_deadlock_plan_xml.database_name 52
 param get_deadlock_plan_xml.deadlock_time 62
 param get_deadlock_plan_xml.server_name 28
 param get_deadlock_plan_xml.victim_process_id 80

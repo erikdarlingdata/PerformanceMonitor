@@ -194,6 +194,8 @@ public sealed class PlanViewerBehaviourTests
         Assert.Equal("?server=srv-a&event_time=2026-03-04T05%3A06%3A07.1234567&blocked_spid=57&blocked_ecid=1&blocking_spid=61&blocking_ecid=2&side=blocking", Str(r, "blockingSearch"));
         /* The fraction keeps all seven digits, trailing zero included: the store matches the stamp for equality. */
         Assert.Equal("?server=srv-a&event_time=2026-03-04T05%3A06%3A07.1234560&blocked_spid=57&blocked_ecid=0&blocking_spid=61&blocking_ecid=0", Str(r, "blockedNoEcidSearch"));
+        /* The row's database_name is sent last when the row has one; the searches above, from rows without one, carry none. */
+        Assert.Equal("?server=srv-a&event_time=2026-03-04T05%3A06%3A07.1234567&blocked_spid=57&blocked_ecid=1&blocking_spid=61&blocking_ecid=2&database_name=Orders", Str(r, "blockedDbSearch"));
 
         // Deadlocks (#5236): the victim's plan by the two stamps, with the victim's process id when the row has one.
         Assert.Equal("has_victim_plan", Str(r, "deadlockKey"));
@@ -202,6 +204,7 @@ public sealed class PlanViewerBehaviourTests
         Assert.Equal("/api/read/get_deadlock_plan_xml", Str(r, "deadlockPath"));
         Assert.Equal("?server=srv-a&collection_time=2026-03-04T05%3A06%3A08.5000000&deadlock_time=2026-03-04T05%3A06%3A07.1230000&victim_process_id=process1a2b", Str(r, "deadlockSearch"));
         Assert.Equal("?server=srv-a&collection_time=2026-03-04T05%3A06%3A08.5000000&deadlock_time=2026-03-04T05%3A06%3A07.1230000", Str(r, "deadlockNoVictimSearch"));
+        Assert.Equal("?server=srv-a&collection_time=2026-03-04T05%3A06%3A08.5000000&deadlock_time=2026-03-04T05%3A06%3A07.1230000&victim_process_id=process1a2b&database_name=Orders", Str(r, "deadlockDbSearch"));
 
         Assert.True(r.GetProperty("keysUnique").GetBoolean());
     }
@@ -220,10 +223,17 @@ public sealed class PlanViewerBehaviourTests
         // the same stamps and different victims are two panels as well.
         Assert.False(r.GetProperty("blockingOpenAfterBlocked").GetBoolean());
         Assert.True(r.GetProperty("bothSidesOpen").GetBoolean());
-        Assert.Equal(new[] { "srv-a|@blocking|T|1|0|2|0|blocked", "srv-a|@blocking|T|1|0|2|0|blocking" }, Strs(r, "sideKeys"));
+        Assert.Equal(new[] { "srv-a|@blocking||T|1|0|2|0|blocked", "srv-a|@blocking||T|1|0|2|0|blocking" }, Strs(r, "sideKeys"));
         Assert.False(r.GetProperty("victim2OpenAfterVictim1").GetBoolean());
         Assert.True(r.GetProperty("bothVictimsOpen").GetBoolean());
-        Assert.Equal(new[] { "srv-a|@deadlock_victim|C|D|process1", "srv-a|@deadlock_victim|C|D|process2" }, Strs(r, "victimKeys"));
+        Assert.Equal(new[] { "srv-a|@deadlock_victim||C|D|process1", "srv-a|@deadlock_victim||C|D|process2" }, Strs(r, "victimKeys"));
+
+        // The row's database is in the key too: the same report key (and the same deadlock stamps and victim) in two databases are
+        // two panels, never one.
+        Assert.False(r.GetProperty("dbTwoOpenAfterDbOne").GetBoolean());
+        Assert.True(r.GetProperty("bothDatabasesOpen").GetBoolean());
+        Assert.Equal(new[] { "srv-a|@blocking|DbOne|T|1|0|2|0|blocked", "srv-a|@blocking|DbTwo|T|1|0|2|0|blocked" }, Strs(r, "databaseKeys"));
+        Assert.False(r.GetProperty("victimDbTwoOpenAfterDbOne").GetBoolean());
     }
 
     [Fact]
@@ -239,7 +249,7 @@ public sealed class PlanViewerBehaviourTests
         // #5236: the blocked and the blocking side of one report download under their own names, then the deadlock victim.
         Assert.Equal("blocked-57-2026-03-04T05_06_07.1234567.sqlplan", names[3]);
         Assert.Equal("blocking-61-2026-03-04T05_06_07.1234567.sqlplan", names[4]);
-        Assert.Equal("deadlock-victim-2026-03-04T05_06_07.1230000.sqlplan", names[5]);
+        Assert.Equal("deadlock-victim-2026-03-04T05_06_07.1230000-process1a2b.sqlplan", names[5]);
     }
 
     [Fact]

@@ -359,6 +359,7 @@ public sealed class DarlingMcpPlanTools
         [Description("The row's blocked_ecid; omit for 0.")] int blocked_ecid = 0,
         [Description("The row's blocking_ecid; omit for 0.")] int blocking_ecid = 0,
         [Description("blocked (default) for the blocked session's plan; blocking for the blocker's.")] string? side = BlockedSide,
+        [Description("The row's database_name; omit to match any database.")] string? database_name = null,
         CancellationToken cancellationToken = default)
     {
         /* #5236: an absent side is the default, and only a value that is neither side is refused — the plan of the
@@ -378,12 +379,12 @@ public sealed class DarlingMcpPlanTools
         try
         {
             var xml = await DarlingStoredPlanReader.GetBlockingPlanXmlAsync(
-                postgres, resolved.ServerId, eventTimeUtc, blocked_spid, blocked_ecid, blocking_spid, blocking_ecid, blockingSide, cancellationToken);
+                postgres, resolved.ServerId, eventTimeUtc, blocked_spid, blocked_ecid, blocking_spid, blocking_ecid, blockingSide, database_name, cancellationToken);
             if (string.IsNullOrEmpty(xml))
                 return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "blocked_process_report", cancellationToken)
                     ?? McpHelpers.Status(
                         "unavailable",
-                        $"No stored {(blockingSide ? BlockingSide : BlockedSide)} plan found for blocked_spid {blocked_spid} and blocking_spid {blocking_spid} at event_time '{event_time}'. " +
+                        $"No stored {(blockingSide ? BlockingSide : BlockedSide)} plan found for blocked_spid {blocked_spid} and blocking_spid {blocking_spid} at event_time '{event_time}'{DbSuffix(database_name)}. " +
                         "The collector captures these plans best-effort, only while the statement is still in the plan cache, so many reports have none.");
 
             return McpHelpers.Truncate(xml, 512_000) ?? "No plan XML available.";
@@ -402,6 +403,7 @@ public sealed class DarlingMcpPlanTools
         [Description("The row's deadlock_time, exactly as get_deadlocks returned it.")] string deadlock_time,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("The row's victim_process_id; picks the right deadlock when two share both times.")] string? victim_process_id = null,
+        [Description("The row's database_name; omit to match any database.")] string? database_name = null,
         CancellationToken cancellationToken = default)
     {
         /* Both stamps are the row's own and compared for equality, so each is parsed as an exact instant, never rounded. */
@@ -415,13 +417,21 @@ public sealed class DarlingMcpPlanTools
 
         try
         {
-            var xml = await DarlingStoredPlanReader.GetDeadlockVictimPlanXmlAsync(
-                postgres, resolved.ServerId, collectionTimeUtc, deadlockTimeUtc, victim_process_id, cancellationToken);
+            var read = await DarlingStoredPlanReader.GetDeadlockVictimPlanXmlAsync(
+                postgres, resolved.ServerId, collectionTimeUtc, deadlockTimeUtc, victim_process_id, database_name, cancellationToken);
+
+            /* Two deadlocks with the same stamps and different victims, and no victim named: the plan of the wrong
+               deadlock is worse than none (as with side above), so neither is returned and the caller is told what picks one. */
+            if (read.Ambiguous)
+                return McpHelpers.Refusal("victim_process_id",
+                    "Two deadlocks share this collection_time and deadlock_time and name different victims. Pass the row's victim_process_id to pick one.");
+
+            var xml = read.PlanXml;
             if (string.IsNullOrEmpty(xml))
                 return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "deadlocks", cancellationToken)
                     ?? McpHelpers.Status(
                         "unavailable",
-                        $"No stored victim plan found for the deadlock at deadlock_time '{deadlock_time}' (collection_time '{collection_time}'). " +
+                        $"No stored victim plan found for the deadlock at deadlock_time '{deadlock_time}' (collection_time '{collection_time}'){DbSuffix(database_name)}. " +
                         "The collector captures the victim's plan best-effort, only while the statement is still in the plan cache, so many deadlocks have none.");
 
             return McpHelpers.Truncate(xml, 512_000) ?? "No plan XML available.";

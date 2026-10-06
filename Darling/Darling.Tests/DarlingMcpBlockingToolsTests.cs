@@ -536,6 +536,33 @@ public sealed class DarlingMcpBlockingToolsSurfaceAndSqlTests
         Assert.Contains("ORDER BY collection_time, blocked_report_id", DarlingStoredPlanReader.BlockedPlanSql, StringComparison.Ordinal);
         Assert.DoesNotContain("DESC", DarlingStoredPlanReader.BlockedPlanSql, StringComparison.Ordinal);
     }
+
+    /// <summary>#5236: every plan read is bound to ONE server and takes its database as the optional NULL-or-equal filter. The live
+    /// cross-server and cross-database tests prove the behaviour; this pins the predicates a later edit could drop without a build error.</summary>
+    [Fact]
+    public void EveryRowPlanSql_IsBoundToItsServer_AndTakesTheOptionalDatabaseFilter()
+    {
+        foreach (var sql in new[] { DarlingStoredPlanReader.BlockedPlanSql, DarlingStoredPlanReader.BlockingPlanSql, DarlingStoredPlanReader.DeadlockVictimPlanSql })
+        {
+            Assert.Contains("WHERE server_id = $1", sql, StringComparison.Ordinal);
+        }
+
+        Assert.Contains("AND   ($8::text IS NULL OR database_name = $8)", DarlingStoredPlanReader.BlockedPlanSql, StringComparison.Ordinal);
+        Assert.Contains("AND   ($8::text IS NULL OR database_name = $8)", DarlingStoredPlanReader.BlockingPlanSql, StringComparison.Ordinal);
+        Assert.Contains("AND   ($5::text IS NULL OR database_name = $5)", DarlingStoredPlanReader.DeadlockVictimPlanSql, StringComparison.Ordinal);
+    }
+
+    /// <summary>#5236: the victim read looks at up to TWO rows and returns the victim beside the plan, so two deadlocks that share
+    /// both stamps and name different victims can be told from two copies of one (a one-row read could not).</summary>
+    [Fact]
+    public void TheDeadlockVictimPlanSql_ReadsTwoRows_WithTheirVictims_InDeadlockIdOrder()
+    {
+        var sql = DarlingStoredPlanReader.DeadlockVictimPlanSql;
+        Assert.Contains("SELECT victim_query_plan_xml, victim_process_id", sql, StringComparison.Ordinal);
+        Assert.Contains("ORDER BY deadlock_id", sql, StringComparison.Ordinal);
+        Assert.Contains("LIMIT 2", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("LIMIT 1", sql, StringComparison.Ordinal);
+    }
 }
 
 /// <summary>
