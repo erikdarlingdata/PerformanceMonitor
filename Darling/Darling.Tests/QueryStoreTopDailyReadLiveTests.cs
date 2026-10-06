@@ -47,10 +47,12 @@ public sealed class QueryStoreTopDailyReadLiveTests
 
     private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
 
-    /// <summary>SHA-256 of each pre-split statement, line endings normalized, taken from the source before
-    /// <c>QueryStoreTopSuffix</c> was divided into its ranked head and its tail.</summary>
-    private const string RawSqlHash = "03D5BDDC31B30371CC683DD025FCBE3F62F3374BCAC4DA88111FC244867B26BE";
-    private const string TableSqlHash = "AD0855103894947DCFAE5F7754F307AEDC3EE989DD57C570C839CC44F4F3FED1";
+    /// <summary>SHA-256 of each statement, line endings normalized. They were taken from the pre-split text, before
+    /// <c>QueryStoreTopSuffix</c> was divided into its ranked head and its tail, and re-taken once for #5313, which
+    /// deliberately changed both statements: the over-fetch <c>LIMIT $4 + 5</c> became the round's candidate limit and
+    /// the tail gained the page / count-row wrapper. The split pin is the tail-sharing assert below.</summary>
+    private const string RawSqlHash = "5B4F2ADADCA32633D527C92950D60FFCD1B506F3180F9A916E3DAB9A128E9FE6";
+    private const string TableSqlHash = "4CADE9961E06CA09CBE6967A726ADC1DC7E81BAE4C3CE546E7AD5631BB8C4C7F";
 
     private static string Hash(string sql) =>
         Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(sql.ReplaceLineEndings("\n"))));
@@ -70,7 +72,7 @@ public sealed class QueryStoreTopDailyReadLiveTests
         var tail = table[table.IndexOf("SELECT\n    r.database_name,", StringComparison.Ordinal)..];
         Assert.EndsWith(tail, daily, StringComparison.Ordinal);
         Assert.Contains("$7::text IS NULL OR module_name = $7", daily, StringComparison.Ordinal);
-        Assert.Contains("LIMIT $4 + 5", daily, StringComparison.Ordinal);
+        Assert.Contains("LIMIT $10", daily, StringComparison.Ordinal);   /* #5313: the candidate limit, bound after the two dates */
     }
 
     [Fact]
@@ -227,6 +229,8 @@ VALUES (@ct, 1, 'db0', @q, @q, 'Regular', COALESCE(@fet, @ct - interval '10 minu
             command.Parameters.Add(new NpgsqlParameter<DateOnly> { TypedValue = s, NpgsqlDbType = NpgsqlDbType.Date });
             command.Parameters.Add(new NpgsqlParameter<DateOnly> { TypedValue = e, NpgsqlDbType = NpgsqlDbType.Date });
         }
+
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = PerformanceMonitor.Darling.Storage.TopFill.FirstCandidates(Top) });  /* #5313: the round's candidate limit, bound last */
 
         var rows = new List<object?[]>();
         await using var reader = await command.ExecuteReaderAsync(ct);

@@ -714,7 +714,7 @@ public sealed class DarlingMcpDataToolsSurfaceAndSqlTests
         var rankedCte = sql.IndexOf("ranked AS", StringComparison.Ordinal);
         var dedupSurvivor = sql.IndexOf("WHERE rn = 1", rankedCte, StringComparison.Ordinal);
         var moduleFilter = sql.IndexOf("$7::text IS NULL OR module_name = $7", StringComparison.Ordinal);
-        var firstLimit = sql.IndexOf("LIMIT $4 + 5", StringComparison.Ordinal);
+        var firstLimit = sql.IndexOf("LIMIT $8", StringComparison.Ordinal);   /* #5313: the round's candidate limit, no longer top + 5 */
 
         Assert.True(dedupSurvivor > rankedCte && moduleFilter > dedupSurvivor,
             "module_name must filter only the latest cumulative interval snapshots");

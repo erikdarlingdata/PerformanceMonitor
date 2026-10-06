@@ -280,7 +280,8 @@ public sealed partial class ViewerDataService
                 AND   sql_handle <> ''
             ) AS ranked_modules
             WHERE rn = 1
-        )
+        ),
+        page AS (
         SELECT
             r.database_name,
             r.query_hash,
@@ -330,7 +331,7 @@ public sealed partial class ViewerDataService
             r.host_object_name,
             /* #5313: candidates the ranking produced (last column), so the caller can tell a short page that
                has more candidates behind it from one that has run out. Every earlier ordinal is unchanged. */
-            (SELECT COUNT(*) FROM ranked) AS candidate_count
+            ROW_NUMBER() OVER (ORDER BY r.total_elapsed_us DESC) AS page_ord
         FROM ranked AS r
         LEFT JOIN latest_text AS t
             ON  t.database_name IS NOT DISTINCT FROM r.database_name
@@ -340,6 +341,14 @@ public sealed partial class ViewerDataService
         WHERE t.query_text IS NULL OR t.query_text NOT LIKE 'WAITFOR%'
         ORDER BY r.total_elapsed_us DESC
         LIMIT $4
+        )
+        /* The candidate count rides on its own row, joined to the page, so a round whose candidates were
+           ALL trimmed still reports it (an empty page used to read as exhausted). page_ord is NULL on that
+           row, which is how the caller tells it from a page row. */
+        SELECT p.*, c.candidate_count
+        FROM (SELECT COUNT(*) AS candidate_count FROM ranked) AS c
+        LEFT JOIN page AS p ON TRUE
+        ORDER BY p.page_ord
         """;
 
     /// <summary>Grid cell preview cap for query/SQL text (single line).</summary>
@@ -510,7 +519,13 @@ public sealed partial class ViewerDataService
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
-            candidateCount = reader.IsDBNull(46) ? 0 : Convert.ToInt32(reader.GetValue(46), System.Globalization.CultureInfo.InvariantCulture);
+            /* #5313: the count rides on a row of its own too; page_ord (46) is NULL on that one, so it is not a page row. */
+            candidateCount = reader.IsDBNull(47) ? 0 : Convert.ToInt32(reader.GetValue(47), System.Globalization.CultureInfo.InvariantCulture);
+            if (reader.IsDBNull(46))
+            {
+                continue;
+            }
+
             rows.Add(new ViewerQueryStatsRow
             {
                 DatabaseName = reader.IsDBNull(0) ? "" : reader.GetString(0),

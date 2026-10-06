@@ -8,6 +8,9 @@
 
 using System;
 using System.Collections.Generic;
+using System.Data.Common;
+using System.Globalization;
+using System.Threading;
 using System.Threading.Tasks;
 
 namespace PerformanceMonitor.Darling.Storage;
@@ -24,8 +27,12 @@ namespace PerformanceMonitor.Darling.Storage;
 /// read that was already full costs what it did; the fill only adds rounds when a page came back short while the
 /// candidates had not run out, and the worst case is three runs of the old shape.</para>
 /// <para><b>Exhaustion.</b> Each round reports how many candidates pass 1 produced. Fewer than asked for means
-/// the window has no more, so the short page is the whole answer. A round that returned no row at all carries no
-/// count (the count rides on the rows), and is treated as exhausted.</para>
+/// the window has no more, so the short page is the whole answer. The count rides on its own row, not on the page
+/// rows (<see cref="ReadPageAsync{T}"/>): a round whose candidates were ALL trimmed (every one a WAITFOR statement)
+/// returns no page row, and used to read as exhausted, so the list came back empty although more candidates existed.
+/// Each statement now ends <c>SELECT p.*, c.candidate_count FROM (count) AS c LEFT JOIN page AS p ON TRUE</c>, so
+/// there is always one row; <c>page_ord</c> (the page's last column, before <c>candidate_count</c>) is NULL on the
+/// row that carries only the count.</para>
 /// </summary>
 public static class TopFill
 {
@@ -53,7 +60,7 @@ public static class TopFill
     /// <param name="round">The round just run, 1-based.</param>
     /// <param name="candidates">The candidate limit that round ran with.</param>
     /// <param name="returned">Rows that round returned after the WAITFOR trim.</param>
-    /// <param name="candidateCount">How many candidates pass 1 produced; 0 when no row came back.</param>
+    /// <param name="candidateCount">How many candidates pass 1 produced, as the round reported it (0 when it found none).</param>
     public static int? NextCandidates(int top, int round, int candidates, int returned, int candidateCount)
     {
         if (returned >= top || round >= MaxRounds || candidateCount < candidates)
@@ -85,6 +92,32 @@ public static class TopFill
 
             candidates = next.Value;
         }
+    }
+
+    /// <summary>
+    /// Reads one round's result: every row whose <paramref name="pageOrdinal"/> column (<c>page_ord</c>) is not NULL
+    /// is a page row, mapped by <paramref name="map"/>; the column right after it is <c>candidate_count</c>, which
+    /// every row carries, the count-only row included (so a round whose page was trimmed to nothing still reports it).
+    /// </summary>
+    public static async Task<(List<T> Rows, int CandidateCount)> ReadPageAsync<T>(
+        DbDataReader reader, int pageOrdinal, Func<DbDataReader, T> map, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(reader);
+        ArgumentNullException.ThrowIfNull(map);
+        var rows = new List<T>();
+        var candidateCount = 0;
+        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            candidateCount = reader.IsDBNull(pageOrdinal + 1)
+                ? 0
+                : Convert.ToInt32(reader.GetValue(pageOrdinal + 1), CultureInfo.InvariantCulture);
+            if (!reader.IsDBNull(pageOrdinal))
+            {
+                rows.Add(map(reader));
+            }
+        }
+
+        return (rows, candidateCount);
     }
 
     private static int Clamp(long value) => (int)Math.Min(value, int.MaxValue);

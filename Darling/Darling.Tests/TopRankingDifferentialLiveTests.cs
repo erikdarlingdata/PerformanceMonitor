@@ -429,6 +429,17 @@ public sealed class TopRankingDifferentialLiveTests
     private static async Task<List<string>> ReadOldQueriesAsync(
         NpgsqlDataSource postgres, string sql, DateTime start, DateTime end, int top, string? database, int minMaxDop, CancellationToken ct)
     {
+        /* #5313: the shipped read refills past the WAITFOR trim (TopFill), so a page is full whenever the window has enough
+           real groups. The one-pass reference gets the same answer by over-fetching deep enough up front. */
+        Assert.Contains("LIMIT $4 + 5", sql, StringComparison.Ordinal);
+        sql = sql.Replace("LIMIT $4 + 5", "LIMIT $4 + 200", StringComparison.Ordinal);
+        /* #5309 matches the latest-text lookup NULL-safe on every key column, so a group with a NULL database or hash gets
+           its text (the old strict equality gave it none). The reference takes the same rule: a stated, deliberate change. */
+        sql = System.Text.RegularExpressions.Regex.Replace(sql, @"\b(query_hash|database_name) = r\.\1\b", "$1 IS NOT DISTINCT FROM r.$1");
+        /* #5309 also reads the newest text INSIDE the window (the old lookup had no time bound, so a row after the window could
+           supply a group's text). Same stated change, same treatment. */
+        sql = System.Text.RegularExpressions.Regex.Replace(sql, @"(SELECT query_text\s+FROM v_query_stats\s+WHERE server_id = \$1)",
+            "$1 AND collection_time >= $2 AND collection_time <= $3");
         await using var command = postgres.CreateCommand(sql);
         AddCommonParameters(command, start, end, top, database);
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = minMaxDop });

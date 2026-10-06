@@ -1207,7 +1207,8 @@ internal static class DarlingDataReader
                 ORDER BY q.database_name, q.query_hash, q.host_object_name, q.collection_time DESC
             ) AS l
             LEFT JOIN query_text_dim AS d ON d.digest = l.query_text_digest
-        )
+        ),
+        page AS (
         SELECT
             r.database_name,
             r.query_hash,
@@ -1255,7 +1256,7 @@ internal static class DarlingDataReader
             r.worker_time_per_second,
             /* #5313: how many candidates pass 1 produced, so the caller can tell a short page that has more
                candidates behind it from one that has run out. Last column: every earlier ordinal is unchanged. */
-            (SELECT COUNT(*) FROM winners) AS candidate_count
+            ROW_NUMBER() OVER (ORDER BY r.rank_metric DESC NULLS LAST, r.rank_cpu DESC NULLS LAST, r.database_name, r.query_hash, r.host_object_name) AS page_ord
         FROM ranked AS r
         LEFT JOIN latest_text AS t
             ON  t.database_name IS NOT DISTINCT FROM r.database_name
@@ -1264,6 +1265,14 @@ internal static class DarlingDataReader
         WHERE t.query_text IS NULL OR t.query_text NOT LIKE 'WAITFOR%'
         ORDER BY r.rank_metric DESC NULLS LAST, r.rank_cpu DESC NULLS LAST, r.database_name, r.query_hash, r.host_object_name
         LIMIT $4
+        )
+        /* The candidate count rides on its own row, joined to the page, so a round whose candidates were
+           ALL trimmed still reports it (an empty page used to read as exhausted). page_ord is NULL on that
+           row, which is how the caller tells it from a page row. */
+        SELECT p.*, c.candidate_count
+        FROM (SELECT COUNT(*) AS candidate_count FROM winners) AS c
+        LEFT JOIN page AS p ON TRUE
+        ORDER BY p.page_ord
         """;
 
     /// <summary>
@@ -1431,7 +1440,8 @@ internal static class DarlingDataReader
                 ORDER BY q.database_name, q.host_object_name, CASE WHEN q.host_object_name IS NULL THEN q.query_hash END, q.collection_time DESC
             ) AS l
             LEFT JOIN query_text_dim AS d ON d.digest = l.query_text_digest
-        )
+        ),
+        page AS (
         SELECT
             r.database_name,
             r.query_hash,
@@ -1478,7 +1488,7 @@ internal static class DarlingDataReader
             r.plan_generation_num,
             r.worker_time_per_second,
             /* #5313: candidates pass 1 produced (last column) - see TopQueriesSql. */
-            (SELECT COUNT(*) FROM winners) AS candidate_count
+            ROW_NUMBER() OVER (ORDER BY r.rank_metric DESC NULLS LAST, r.rank_cpu DESC NULLS LAST, r.database_name, r.host_object_name, r.query_hash) AS page_ord
         FROM ranked AS r
         LEFT JOIN latest_text AS t
             ON  t.database_name IS NOT DISTINCT FROM r.database_name
@@ -1487,6 +1497,14 @@ internal static class DarlingDataReader
         WHERE t.query_text IS NULL OR t.query_text NOT LIKE 'WAITFOR%'
         ORDER BY r.rank_metric DESC NULLS LAST, r.rank_cpu DESC NULLS LAST, r.database_name, r.host_object_name, r.query_hash
         LIMIT $4
+        )
+        /* The candidate count rides on its own row, joined to the page, so a round whose candidates were
+           ALL trimmed still reports it (an empty page used to read as exhausted). page_ord is NULL on that
+           row, which is how the caller tells it from a page row. */
+        SELECT p.*, c.candidate_count
+        FROM (SELECT COUNT(*) AS candidate_count FROM winners) AS c
+        LEFT JOIN page AS p ON TRUE
+        ORDER BY p.page_ord
         """;
 
     /// <summary>The FROM-clause placeholder <see cref="TopQueriesHourlySql"/> carries — replaced with
@@ -1611,7 +1629,8 @@ internal static class DarlingDataReader
                 ORDER BY q.database_name, q.query_hash, q.collection_time DESC
             ) AS l
             LEFT JOIN query_text_dim AS d ON d.digest = l.query_text_digest
-        )
+        ),
+        page AS (
         SELECT
             r.database_name,
             r.query_hash,
@@ -1621,7 +1640,7 @@ internal static class DarlingDataReader
             r.sql_handle,
             COALESCE(w.query_text, a.query_text) AS query_text,
             /* #5313: candidates pass 1 produced (last column) - see TopQueriesSql. */
-            (SELECT COUNT(*) FROM ranked) AS candidate_count
+            ROW_NUMBER() OVER (ORDER BY r.rank_metric DESC NULLS LAST, r.rank_cpu DESC NULLS LAST, r.database_name, r.query_hash) AS page_ord
         FROM ranked AS r
         LEFT JOIN latest_in_window AS w
             ON  w.database_name IS NOT DISTINCT FROM r.database_name
@@ -1632,6 +1651,14 @@ internal static class DarlingDataReader
         WHERE COALESCE(w.query_text, a.query_text) IS NULL OR COALESCE(w.query_text, a.query_text) NOT LIKE 'WAITFOR%'
         ORDER BY r.rank_metric DESC NULLS LAST, r.rank_cpu DESC NULLS LAST, r.database_name, r.query_hash
         LIMIT $4
+        )
+        /* The candidate count rides on its own row, joined to the page, so a round whose candidates were
+           ALL trimmed still reports it (an empty page used to read as exhausted). page_ord is NULL on that
+           row, which is how the caller tells it from a page row. */
+        SELECT p.*, c.candidate_count
+        FROM (SELECT COUNT(*) AS candidate_count FROM ranked) AS c
+        LEFT JOIN page AS p ON TRUE
+        ORDER BY p.page_ord
         """;
 
     /// <summary>
@@ -1846,7 +1873,13 @@ internal static class DarlingDataReader
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
-            candidateCount = reader.IsDBNull(44) ? 0 : Convert.ToInt32(reader.GetValue(44), CultureInfo.InvariantCulture);
+            /* #5313: the count rides on a row of its own too; page_ord (44) is NULL on that one, so it is not a page row. */
+            candidateCount = reader.IsDBNull(45) ? 0 : Convert.ToInt32(reader.GetValue(45), CultureInfo.InvariantCulture);
+            if (reader.IsDBNull(44))
+            {
+                continue;
+            }
+
             page.Add(new TopQueryRow(
                 reader.IsDBNull(0) ? "" : reader.GetString(0),
                 reader.IsDBNull(1) ? "" : reader.GetString(1),
@@ -1939,7 +1972,12 @@ internal static class DarlingDataReader
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             while (await reader.ReadAsync(cancellationToken))
             {
-                candidateCount = reader.IsDBNull(7) ? 0 : Convert.ToInt32(reader.GetValue(7), CultureInfo.InvariantCulture);
+                candidateCount = reader.IsDBNull(8) ? 0 : Convert.ToInt32(reader.GetValue(8), CultureInfo.InvariantCulture);
+                if (reader.IsDBNull(7))
+                {
+                    continue;
+                }
+
                 page.Add(new TopQueryRow(
                     reader.IsDBNull(0) ? "" : reader.GetString(0),
                     reader.IsDBNull(1) ? "" : reader.GetString(1),
@@ -2434,7 +2472,7 @@ internal static class DarlingDataReader
     /// column deduped's dedupe/the table's own upsert already kept" shape, so this aggregates either one
     /// identically. $7 (module_name) lives here, unchanged from the pre-split statement's own position
     /// (<c>QueryStoreSql_AppliesModuleFilterAfterDedupAndBeforeRankingLimit</c> pins it: after <c>WHERE rn = 1</c>,
-    /// before <c>LIMIT $4 + 5</c>) — module_name is not a GROUP BY key here (<c>MAX(module_name)</c> is the
+    /// before <c>LIMIT $8</c>, the round's candidate limit) — module_name is not a GROUP BY key here (<c>MAX(module_name)</c> is the
     /// aggregate), so it has to filter the deduplicated rows before the GROUP BY rather than after it, and
     /// living in the shared suffix means both the raw and the table CTE inherit that same placement.</summary>
     private const string QueryStoreTopRankedHead = """
@@ -2468,8 +2506,8 @@ internal static class DarlingDataReader
             AND   ($7::text IS NULL OR module_name = $7)
             GROUP BY database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role
             ORDER BY SUM(execution_count) * AVG(CAST(avg_duration_us AS double precision)) DESC
-            LIMIT $4 + 5
-        )
+            LIMIT $8
+        ),
 
         """;
 
@@ -2478,6 +2516,7 @@ internal static class DarlingDataReader
     /// <see cref="QueryStoreTopSuffix"/> (the raw and the interval-table reads) and <see cref="QueryStoreTopDailyTableSql"/>
     /// (the daily-summary read) share this one text and cannot drift apart below <c>ranked</c>.</summary>
     private const string QueryStoreTopTail = """
+        page AS (
         SELECT
             r.database_name,
             r.query_id,
@@ -2495,7 +2534,8 @@ internal static class DarlingDataReader
             r.avg_rowcount,
             r.last_execution_time,
             t.query_text,
-            r.replica_role
+            r.replica_role,
+            ROW_NUMBER() OVER (ORDER BY r.total_executions * r.avg_duration_ms DESC) AS page_ord
         FROM ranked AS r
         /* #2150: resolve the text inside the lateral so the projection and the WAITFOR self-exclusion below
            both keep reading one t.query_text. First arm is collect.query_store_text (one row per
@@ -2524,8 +2564,16 @@ internal static class DarlingDataReader
                    ) AS query_text
         ) AS t ON TRUE
         WHERE t.query_text IS NULL OR t.query_text NOT LIKE 'WAITFOR%'
-        ORDER BY r.total_executions * r.avg_duration_ms DESC
+        ORDER BY page_ord
         LIMIT $4
+        )
+        /* #5313: the candidate count rides on its own row, joined to the page, so a round whose candidates were
+           ALL trimmed (every one a WAITFOR statement) still reports it; an empty page used to read as
+           exhausted. page_ord is NULL on that row, which is how the caller tells it from a page row. */
+        SELECT p.*, c.candidate_count
+        FROM (SELECT COUNT(*) AS candidate_count FROM ranked) AS c
+        LEFT JOIN page AS p ON TRUE
+        ORDER BY p.page_ord
         """;
 
     /// <summary><see cref="QueryStoreTopRankedHead"/> + <see cref="QueryStoreTopTail"/>: byte-identical to the single
@@ -2633,8 +2681,8 @@ internal static class DarlingDataReader
             WHERE ($7::text IS NULL OR module_name = $7)
             GROUP BY database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role
             ORDER BY SUM(ec) * (CAST(SUM(duration_sum) AS double precision) / NULLIF(SUM(duration_n), 0)) DESC
-            LIMIT $4 + 5
-        )
+            LIMIT $10
+        ),
 
         """ + QueryStoreTopTail;
 
@@ -2772,19 +2820,21 @@ internal static class DarlingDataReader
             }
         }
 
-        var rows = new List<QueryStoreRow>();
-        await using var command = postgres.CreateCommand(QueryStoreTopSql);
-        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
-        AddWindow(command, serverId, startUtc, endUtc);
-        AddInt(command, top);
-        AddNullableText(command, databaseName);
-        AddNullableText(command, executionType);
-        AddNullableText(command, moduleName);
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        while (await reader.ReadAsync(cancellationToken))
+        /* #5313: the WAITFOR trim can leave the page short; TopFill asks again with a larger candidate limit ($8)
+           while more candidates exist, under its bound (page_ord is column 17, candidate_count 18). */
+        var rows = await TopFill.RunAsync(top, async candidates =>
         {
-            rows.Add(ReadQueryStoreTopRow(reader));
-        }
+            await using var command = postgres.CreateCommand(QueryStoreTopSql);
+            command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+            AddWindow(command, serverId, startUtc, endUtc);
+            AddInt(command, top);
+            AddNullableText(command, databaseName);
+            AddNullableText(command, executionType);
+            AddNullableText(command, moduleName);
+            AddInt(command, candidates);
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            return await TopFill.ReadPageAsync(reader, QueryStorePageOrdinal, ReadQueryStoreTopRow, cancellationToken);
+        });
 
         ReadScope.NoteSource(ReadScope.SourceRaw);
         ReadScope.NoteRows(rows.Count);
@@ -2869,27 +2919,29 @@ internal static class DarlingDataReader
                 dailySpan = LongestBuiltRun(builtDays);
             }
 
-            var rows = new List<QueryStoreRow>();
             var topSql = dailySpan is null ? QueryStoreTopTableSql : QueryStoreTopDailyTableSql;
-            await using var command = new NpgsqlCommand(topSql, connection) { Transaction = transaction, CommandTimeout = McpCommandDeadlines.ReadSeconds };
-            AddInt(command, serverId);
-            AddTimestamp(command, plan.ReadStart);
-            AddTimestamp(command, endUtc);
-            AddInt(command, top);
-            AddNullableText(command, databaseName);
-            AddNullableText(command, executionType);
-            AddNullableText(command, moduleName);
-            if (dailySpan is var (spanStart, spanEnd))
+            /* #5313: the same fill rounds as the raw read. The candidate limit is bound LAST ($8 on the interval
+               table read, $10 on the daily read, after its two dates). */
+            var rows = await TopFill.RunAsync(top, async candidates =>
             {
-                command.Parameters.Add(new NpgsqlParameter<DateOnly> { TypedValue = spanStart, NpgsqlDbType = NpgsqlDbType.Date });
-                command.Parameters.Add(new NpgsqlParameter<DateOnly> { TypedValue = spanEnd, NpgsqlDbType = NpgsqlDbType.Date });
-            }
+                await using var command = new NpgsqlCommand(topSql, connection) { Transaction = transaction, CommandTimeout = McpCommandDeadlines.ReadSeconds };
+                AddInt(command, serverId);
+                AddTimestamp(command, plan.ReadStart);
+                AddTimestamp(command, endUtc);
+                AddInt(command, top);
+                AddNullableText(command, databaseName);
+                AddNullableText(command, executionType);
+                AddNullableText(command, moduleName);
+                if (dailySpan is var (spanStart, spanEnd))
+                {
+                    command.Parameters.Add(new NpgsqlParameter<DateOnly> { TypedValue = spanStart, NpgsqlDbType = NpgsqlDbType.Date });
+                    command.Parameters.Add(new NpgsqlParameter<DateOnly> { TypedValue = spanEnd, NpgsqlDbType = NpgsqlDbType.Date });
+                }
 
-            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-            while (await reader.ReadAsync(cancellationToken))
-            {
-                rows.Add(ReadQueryStoreTopRow(reader));
-            }
+                AddInt(command, candidates);
+                await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+                return await TopFill.ReadPageAsync(reader, QueryStorePageOrdinal, ReadQueryStoreTopRow, cancellationToken);
+            });
 
             return (rows, plan, dailySpan is var (ds, de) ? de.DayNumber - ds.DayNumber : 0, dailySpan);
         }
@@ -2899,6 +2951,10 @@ internal static class DarlingDataReader
             return null;
         }
     }
+
+    /// <summary>The ordinal of <c>page_ord</c>, the column after <c>replica_role</c> (#5313): <c>candidate_count</c>
+    /// follows it. <see cref="TopFill.ReadPageAsync{T}"/> reads both.</summary>
+    private const int QueryStorePageOrdinal = 17;
 
     /// <summary>Shared by <see cref="GetQueryStoreTopAsync(NpgsqlDataSource,int,DateTime,DateTime,int,string,string,string,CancellationToken)"/>'s
     /// raw and table paths: both <see cref="QueryStoreTopSql"/> and <see cref="QueryStoreTopTableSql"/> project

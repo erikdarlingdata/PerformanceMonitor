@@ -196,9 +196,10 @@ public sealed class ViewerQueriesSqlTests
            reason: Regular, Aborted and Exception executions of one plan are separate runtime-stats rows. */
         Assert.Contains("GROUP BY database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("MAX(execution_type_desc)", sql, StringComparison.Ordinal);
-        /* Rank by total duration = executions * avg duration, over-fetch 5, cap at top (Lite's shape). */
+        /* Rank by total duration = executions * avg duration, candidate limit (top + 5 on the first round, #5313), cap at top (Lite's shape). */
         Assert.Contains("ORDER BY SUM(execution_count) * AVG(CAST(avg_duration_us AS double precision)) DESC", sql, StringComparison.Ordinal);
-        Assert.Contains("LIMIT $4 + 5", sql, StringComparison.Ordinal);
+        Assert.Contains("LIMIT $6", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("+ 5", sql, StringComparison.Ordinal);
         Assert.Contains("ORDER BY r.total_executions * r.avg_duration_ms DESC", sql, StringComparison.Ordinal);
         Assert.Contains("LIMIT $4", sql, StringComparison.Ordinal);
         Assert.Contains("NOT LIKE 'WAITFOR%'", sql, StringComparison.Ordinal);

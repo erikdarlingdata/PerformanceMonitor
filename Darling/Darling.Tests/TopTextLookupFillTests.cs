@@ -125,17 +125,23 @@ public sealed class TopTextLookupFillTests
         var limit = name is "TopQueriesHourlySql" or "ViewerTopQueriesSql" ? "LIMIT $6" : "LIMIT $7";
         Assert.Single(Regex.Matches(sql, Regex.Escape(limit) + @"\s*$", RegexOptions.Multiline));
         Assert.Single(Regex.Matches(sql, @"LIMIT \$4\s*$", RegexOptions.Multiline));   /* the final cap stays top */
-        Assert.Matches(@"\(SELECT COUNT\(\*\) FROM (winners|ranked)\) AS candidate_count", sql);
-        Assert.Single(Regex.Matches(sql, "candidate_count"));
+        /* The count rides on a row of its own, joined to the page, so a round whose candidates were ALL trimmed still
+           reports it (an empty page used to read as exhausted). page_ord is the page's last column and is NULL on that row. */
+        Assert.Matches(@"FROM \(SELECT COUNT\(\*\) AS candidate_count FROM (winners|ranked)\) AS c\s+LEFT JOIN page AS p ON TRUE", sql);
+        Assert.Single(Regex.Matches(sql, @"SELECT p\.\*, c\.candidate_count"));
+        Assert.Single(Regex.Matches(sql, @"AS page_ord"));
+        Assert.Matches(@"ORDER BY p\.page_ord\s*$", sql);
     }
 
     [Fact]
     public void TheCallersRunTheStatementsThroughTopFill()
     {
         var reader = System.IO.File.ReadAllText(FindSource("PerformanceMonitor.Darling.Service/Mcp/DarlingDataReader.cs"));
-        Assert.Equal(2, Regex.Matches(reader, @"TopFill\.RunAsync\(top,").Count);   /* the raw route and the hourly route */
+        Assert.Equal(4, Regex.Matches(reader, @"TopFill\.RunAsync\(top,").Count);   /* raw and hourly Top Queries, then the Query Store raw read and its table read (daily shares the table call site) */
         var viewer = System.IO.File.ReadAllText(FindSource("PerformanceMonitor.Darling.Viewer/ViewerDataService.QueryStats.cs"));
         Assert.Single(Regex.Matches(viewer, @"TopFill\.RunAsync\(top,"));
+        var viewerQs = System.IO.File.ReadAllText(FindSource("PerformanceMonitor.Darling.Viewer/ViewerDataService.QueryStore.cs"));
+        Assert.Equal(2, Regex.Matches(viewerQs, @"TopFill\.RunAsync\(top,").Count);   /* raw and interval table */
     }
 
     private static string FindSource(string relative)
@@ -171,7 +177,7 @@ public sealed class TopTextLookupFillTests
     [Theory]
     [InlineData(25, 1, 30, 25, 30)]    /* a full page stops */
     [InlineData(25, 1, 30, 20, 12)]    /* short, but the candidates ran out (12 < 30): nothing more to fetch */
-    [InlineData(25, 1, 30, 0, 0)]      /* no row, so no count: treated as exhausted */
+    [InlineData(25, 1, 30, 0, 0)]      /* the round found no candidates at all: exhausted */
     [InlineData(25, 3, 225, 10, 225)]  /* the round bound */
     public void NoRefill_WhenFull_Exhausted_OrAtTheBound(int top, int round, int candidates, int returned, int candidateCount)
     {

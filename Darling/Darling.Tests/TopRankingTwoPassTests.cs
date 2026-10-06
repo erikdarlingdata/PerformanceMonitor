@@ -90,7 +90,8 @@ public sealed class TopRankingTwoPassTests
     /// <summary>Every ORDER BY that decides which groups survive or in what order (the latest-text lookup's is not one).</summary>
     private static List<string> RankingOrderBys(string sql) =>
         Regex.Matches(sql, @"(?m)^\s*ORDER BY ([^\r\n]+)").Select(m => m.Groups[1].Value.Trim())
-            .Where(o => !o.StartsWith("collection_time", StringComparison.Ordinal) && !o.StartsWith("q.", StringComparison.Ordinal)).ToList();
+            .Where(o => !o.StartsWith("collection_time", StringComparison.Ordinal) && !o.StartsWith("q.", StringComparison.Ordinal)
+                && !o.StartsWith("p.page_ord", StringComparison.Ordinal)).ToList();   /* #5313: the count-row join re-sorts the page by its position */
 
     [Theory]
     [MemberData(nameof(AllFive))]
