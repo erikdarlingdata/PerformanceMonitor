@@ -224,7 +224,10 @@ public sealed class McpToolsListBudgetTests
        measured on the tree merged with dev c1679bcdd and the raw-plan reads: 191,056 -> 191,824 (+768), 177 -> 178 tools. The ceiling
        now covers all 178 served tools. Re-measured after merging dev 9a089ff8e (#5260 landed there squashed): 191,814 bytes, 178 tools,
        so the ceiling is 191,814. */
-    private const int TotalCeilingBytes = 191_814;
+    // get_active_queries gains its wait_type parameter (#5235, a 190-character description; the served head is unchanged). Constant set to the
+    // value McpToolsListBudgetTests itself measured on this tree: +227 bytes. Merged with dev's #5234 (the per-plan Query Store history tool), as
+    // the test measured the merged tree: 192,050, against dev's previous ceiling of 191,814.
+    private const int TotalCeilingBytes = 192_050;
 
 
 
