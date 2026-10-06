@@ -300,11 +300,38 @@ public sealed class DarlingAnalysisPipelineTests
         Assert.Contains("monitor_loop", sql, StringComparison.Ordinal);
         Assert.Contains("contentious_object", sql, StringComparison.Ordinal);
 
-        /* #5320: the read returns both SQL texts whole; the drill-down payload judges them with the statement filter and
-           cuts them to 500 in C# (a cut made in SQL first would hand the filter a prefix). */
+        /* #5320: the drill-down payload judges each statement whole with the statement filter and cuts it to 500 in C#
+           (a cut made in SQL first would hand the filter a prefix). #5361: the 5,000-row pair read carries NO text, an
+           empty string in each text column, and the whole text of only the levels shown is read afterwards by event key
+           (BprChainLevelTextSql, DmvChainLevelTextSql): the whole text of every pair was 131 times the bytes. */
         Assert.DoesNotContain("LEFT(", sql, StringComparison.Ordinal);
-        Assert.Contains("blocked_sql_text AS blocked_sql", sql, StringComparison.Ordinal);
-        Assert.Contains("blocking_sql_text AS blocking_sql", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("blocked_sql_text", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("blocking_sql_text", sql, StringComparison.Ordinal);
+        Assert.Contains("''::text AS blocked_sql", sql, StringComparison.Ordinal);
+        Assert.Contains("''::text AS blocking_sql", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("LEFT(", PgBlockingPairRowQuery.DmvSnapshotTextFreeSql, StringComparison.Ordinal);
+        Assert.DoesNotContain("blocked_sql_text, blocking_sql_text", PgBlockingPairRowQuery.DmvSnapshotTextFreeSql, StringComparison.Ordinal);
+        Assert.Contains("''::text AS blocked_sql_text", PgBlockingPairRowQuery.DmvSnapshotTextFreeSql, StringComparison.Ordinal);
+        var withTextRestored = PgBlockingPairRowQuery.DmvSnapshotTextFreeSql.Replace(
+            "''::text AS blocked_sql_text, ''::text AS blocking_sql_text", "blocked_sql_text, blocking_sql_text", StringComparison.Ordinal);
+        Assert.Equal(PgBlockingPairRowQuery.DmvSnapshotSql, withTextRestored);
+
+        /* The level text reads: by event key (five parallel arrays, a missing spid or ecid read as 0 as Read maps it),
+           the row with the longest wait kept when a key repeats; the blocked-process-report one carries the pair read's
+           collection_time floor, the DMV one has none. */
+        foreach (var textSql in new[] { PgBlockingPairRowQuery.BprChainLevelTextSql, PgBlockingPairRowQuery.DmvChainLevelTextSql })
+        {
+            Assert.Contains("unnest($2::timestamp[], $3::int[], $4::int[], $5::int[], $6::int[])", textSql, StringComparison.Ordinal);
+            Assert.Contains("v.wait_time_ms DESC", textSql, StringComparison.Ordinal);
+            Assert.Contains("v.blocked_sql_text", textSql, StringComparison.Ordinal);
+            Assert.DoesNotContain("LEFT(", textSql, StringComparison.Ordinal);
+            Assert.DoesNotContain("LIMIT", textSql, StringComparison.Ordinal);
+        }
+
+        Assert.Contains("FROM v_blocked_process_reports AS v", PgBlockingPairRowQuery.BprChainLevelTextSql, StringComparison.Ordinal);
+        Assert.Contains("v.collection_time >= $7", PgBlockingPairRowQuery.BprChainLevelTextSql, StringComparison.Ordinal);
+        Assert.Contains("FROM v_dmv_blocking_snapshots AS v", PgBlockingPairRowQuery.DmvChainLevelTextSql, StringComparison.Ordinal);
+        Assert.DoesNotContain("$7", PgBlockingPairRowQuery.DmvChainLevelTextSql, StringComparison.Ordinal);
     }
 
     /* ---------------- ungated: worker cadence + notification adapter pins ---------------- */

@@ -72,15 +72,37 @@ public sealed class PlanRegressionReadShapeTests
         /* Since #4821 the cap of five is the reader's (the compiled-before-the-window test runs on the converted time
            before it), so this read carries no LIMIT and every plan that passes the rough filter comes back. A join to
            the text dimension here, however late in the statement, resolves text for all of them to print five (#3902).
-           So the read names no dimension at all: it hands back the inline legacy text, and the digest rides last for
-           the reader's second read, which resolves the plans the reader keeps. */
+           So the read names no dimension at all: it hands back only WHETHER the row has inline legacy text (#5361: the
+           whole text of every ranked row was 131 times the bytes of the cut it replaced, to print five), and the digest
+           rides last for the reader's text reads, which resolve the plans the reader keeps. */
         Assert.DoesNotContain("LIMIT 5", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("query_text_dim", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("LEFT(o.query_text", sql, StringComparison.Ordinal); /* #5320: whole text, judged then cut in C# */
-        Assert.Contains("    o.query_text,", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("o.query_text,", sql, StringComparison.Ordinal); /* #5361: the ranking read carries no text */
+        Assert.DoesNotContain("        query_text,", sql, StringComparison.Ordinal); /* ... and neither does its window sort */
+        Assert.Contains("query_text IS NOT NULL AS has_inline_text", sql, StringComparison.Ordinal);
+        Assert.Contains("    o.has_inline_text,", sql, StringComparison.Ordinal);
         Assert.Matches(
             new Regex(@"o\.time_zone_id,\s+o\.query_text_digest\s+FROM offenders AS o\s+ORDER BY", RegexOptions.Singleline),
             sql);
+    }
+
+    [Fact]
+    public void TheParameterSensitivityInlineTextRead_FetchesTheKeptPlansNewestRowByKey_AndNothingElse()
+    {
+        var sql = StripComments(PgDrillDownCollector.ParameterSensitiveInlineTextSql);
+
+        /* #5361: the whole inline text of the kept plans only. The row is the ranking's rn = 1 row: the newest row of the
+           window with delta_execution_count > 0, one per (database, query hash, plan hash), a NULL part matching a NULL
+           part as the ranking's PARTITION BY groups it. The plans arrive as parallel arrays, never a parameter per plan. */
+        Assert.Contains("SELECT DISTINCT ON (q.database_name, q.query_hash, q.query_plan_hash)", sql, StringComparison.Ordinal);
+        Assert.Contains("FROM query_stats AS q", sql, StringComparison.Ordinal);
+        Assert.Contains("q.delta_execution_count > 0", sql, StringComparison.Ordinal);
+        Assert.Contains("q.collection_time DESC", sql, StringComparison.Ordinal);
+        Assert.Contains("unnest($4::text[], $5::text[], $6::text[])", sql, StringComparison.Ordinal);
+        Assert.Equal(3, Regex.Matches(sql, @"IS NOT DISTINCT FROM").Count);
+        Assert.DoesNotContain("$7", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("query_text_dim", sql, StringComparison.Ordinal);
     }
 
     [Fact]
