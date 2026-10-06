@@ -76,9 +76,9 @@ public sealed class StatementColumnCensusTests
         ["query_store.query_plan_text"] = Null("the main Query Store query writes a typed NULL here (QueryStoreCollector.cs:738); plan text reaches the store only through the separate by-ids fetch and the plan writer (6.7 row 7, R3)"),
 
         /* Row 8: the live snapshot of running requests (R6). */
-        ["query_snapshots.query_text"] = Hooked("8", "R6"),
-        ["query_snapshots.query_plan"] = Hooked("8", "R6"),
-        ["query_snapshots.live_query_plan"] = Hooked("8", "R6"),
+        ["query_snapshots.query_text"] = Hooked("8", "R6", pending: false),
+        ["query_snapshots.query_plan"] = Hooked("8", "R6", pending: false),
+        ["query_snapshots.live_query_plan"] = Hooked("8", "R6", pending: false),
 
         /* Rows 9-11: blocked process reports (R4). */
         ["blocked_process_report.blocked_sql_text"] = Hooked("9", "R4"),
@@ -106,8 +106,8 @@ public sealed class StatementColumnCensusTests
         ["index_object_stats.filter_definition"] = Exempt("an index filter predicate over bracketed column names (IndexObjectStatsCollector.cs), not a statement"),
 
         /* Row 19: plan correction (R6). */
-        ["plan_correction.query_text"] = Hooked("19", "R6"),
-        ["plan_correction.implementation_script"] = Hooked("19", "R6"),
+        ["plan_correction.query_text"] = Hooked("19", "R6", pending: false),
+        ["plan_correction.implementation_script"] = Hooked("19", "R6", pending: false),
     };
 
     /// <summary>
@@ -426,7 +426,7 @@ public sealed class StatementColumnCensusTests
             ("Darling/PerformanceMonitor.Darling.Storage/QueryStoreTextWriter.cs", "QueryStoreTextWriter", "WriteAsync")),
 
         // 6.7 row 20: the oversized-plan sweep fetches one plan and records it in the backlog.
-        new("oversized plan sweep", "6.7 row 20", "R6", true,
+        new("oversized plan sweep", "6.7 row 20", "R6", false,
             ("Darling/PerformanceMonitor.Darling.Service/OversizedPlanBacklogSweep.cs", "OversizedPlanBacklogSweep", "FetchOnePlanAsync")),
 
         // The slow-read log stores up to 4 KB of a slow call's arguments (a plan or a statement a caller passed).

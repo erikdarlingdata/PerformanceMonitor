@@ -16,6 +16,7 @@ using Microsoft.Extensions.Logging;
 using Npgsql;
 using NpgsqlTypes;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Darling.Service.Targets;
 
@@ -452,6 +453,10 @@ WHERE tqp.query_plan IS NOT NULL;";
         var pending = await ClaimAsync(postgres, server.ServerId, cancellationToken).ConfigureAwait(false);
         tally.PlansClaimed += pending.Count;
 
+        /* #4348: one standalone scrub session per batch (a pass over one server's claimed plans), so the 15-second
+           judging budget is shared across the batch and a plan the budget cannot cover stays claimable. */
+        var scrub = new SensitiveStatements.Session();
+
         if (pending.Count == 0)
         {
             return;
@@ -462,6 +467,7 @@ WHERE tqp.query_plan IS NOT NULL;";
             if (cancellationToken.IsCancellationRequested)
             {
                 tally.Interrupted = true;
+                LogScrub(scrub, server, logger);
                 return;
             }
 
@@ -470,7 +476,7 @@ WHERE tqp.query_plan IS NOT NULL;";
                outcome write fall to the storage phase where they belong. */
             var fetchStart = Stopwatch.GetTimestamp();
 
-            var (verdict, planXml, error) = await FetchOnePlanAsync(server, plan, logger, cancellationToken)
+            var (verdict, planXml, error) = await FetchOnePlanAsync(server, plan, scrub, logger, cancellationToken)
                 .ConfigureAwait(false);
 
             tally.TargetMs += (long)Stopwatch.GetElapsedTime(fetchStart).TotalMilliseconds;
@@ -502,6 +508,22 @@ WHERE tqp.query_plan IS NOT NULL;";
                     break;
             }
         }
+
+        LogScrub(scrub, server, logger);
+    }
+
+    /// <summary>#4348: the batch's statement-filter counters, once per batch and only when the batch judged
+    /// something it withheld or could not judge.</summary>
+    private static void LogScrub(SensitiveStatements.Session scrub, ServerRuntime server, ILogger? logger)
+    {
+        if (scrub.Named == 0 && scrub.TimedOut == 0 && scrub.Unjudged == 0)
+        {
+            return;
+        }
+
+        logger?.LogInformation(
+            "Oversized-plan backlog: statement filter on '{Server}': {Named} withheld, {TimedOut} timed out, {Unjudged} unjudged, {Ms} ms",
+            server.Config.DisplayName, scrub.Named, scrub.TimedOut, scrub.Unjudged, scrub.ElapsedMs);
     }
 
     /// <summary>
@@ -551,6 +573,7 @@ WHERE tqp.query_plan IS NOT NULL;";
     private static async Task<(PlanFetchVerdict Verdict, string? PlanXml, string? Error)> FetchOnePlanAsync(
         ServerRuntime server,
         OversizedPlanBacklog.PendingPlan plan,
+        SensitiveStatements.Session scrub,
         ILogger? logger,
         CancellationToken cancellationToken)
     {
@@ -590,7 +613,7 @@ WHERE tqp.query_plan IS NOT NULL;";
                a cycle's drain, not one of them. */
             var planXml = reader.GetString(0);
 
-            return (PlanFetchVerdict.Captured, planXml, null);
+            return JudgeFetchedPlan(scrub, planXml);
         }
         catch (Exception ex) when (ex is not OperationCanceledException || budget.IsCancellationRequested)
         {
@@ -609,6 +632,22 @@ WHERE tqp.query_plan IS NOT NULL;";
 
             return (PlanFetchVerdict.Failed, null, ex.Message);
         }
+    }
+
+    /// <summary>
+    /// #4348: the statement filter on a fetched plan, where the value first lands and before it is stored. A plan
+    /// the judging budget could not cover is NOT stored as the marker: the verdict is <see cref="PlanFetchVerdict.Failed"/>,
+    /// so the backlog row stays claimable and the next pass, with a fresh budget, fetches it again.
+    /// </summary>
+    internal static (PlanFetchVerdict Verdict, string? PlanXml, string? Error) JudgeFetchedPlan(
+        SensitiveStatements.Session scrub, string planXml)
+    {
+        if (!scrub.TryXml(planXml, out var judged))
+        {
+            return (PlanFetchVerdict.Failed, null, "the statement filter's judging budget was spent before this plan");
+        }
+
+        return (PlanFetchVerdict.Captured, judged, null);
     }
 
     /// <summary>
