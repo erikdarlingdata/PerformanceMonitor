@@ -17,7 +17,7 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// <summary>
 /// The password key this viewer has seen for each store it connects to (#5366): the full SHA-256 of the key's public
 /// part, saved once per store connection and compared at every save of a password. A file that cannot be read counts
-/// as no saved keys, and <see cref="Find"/> says so, so the next connect can tell the operator. Every read and write is
+/// as no saved keys, is kept as <c>.bad</c> when the next key is saved, and <see cref="Find"/> says so, so the connect can tell the operator. Every read and write is
 /// guarded: a failure never stops the viewer.
 /// </summary>
 public sealed class ViewerPasswordKeyPins
@@ -47,23 +47,51 @@ public sealed class ViewerPasswordKeyPins
 
     /// <summary>
     /// The saved fingerprint (64 lowercase hex characters) for <paramref name="store"/>, or null when there is none.
-    /// <paramref name="unreadable"/> is true when the file exists but could not be read or holds no usable list, in which
-    /// case the answer is null as well.
+    /// <paramref name="unreadable"/> is true when the answer is null because the file could not be read or holds no usable
+    /// list, because the entry for this store is not a 64-character hex fingerprint, or because an earlier unreadable file
+    /// was set aside as <c>.bad</c> and this store has no entry since.
     /// </summary>
     public string? Find(string store, out bool unreadable)
     {
         var entries = ReadAll(out unreadable);
-        var match = entries.FirstOrDefault(e => string.Equals(e.Store, store, StringComparison.Ordinal) && IsFingerprint(e.Fingerprint));
-        return match?.Fingerprint;
+        var entry = entries.FirstOrDefault(e => string.Equals(e.Store, store, StringComparison.Ordinal));
+        if (entry is not null)
+        {
+            if (IsFingerprint(entry.Fingerprint))
+            {
+                unreadable = false;
+                return entry.Fingerprint;
+            }
+
+            unreadable = true;
+            return null;
+        }
+
+        unreadable |= File.Exists(BadPath);
+        return null;
     }
 
     /// <summary>Saves (or replaces) the fingerprint for <paramref name="store"/>. Returns false when the file could not be
-    /// written. An unreadable file is replaced by a list holding only this entry.</summary>
+    /// written. A file that cannot be read is renamed to <c>.bad</c> (replacing an older one) before the new list, which
+    /// holds only this entry, is written.</summary>
     public bool Save(string store, byte[] fingerprint, string keyId)
     {
         try
         {
-            var entries = ReadAll(out _).Where(e => !string.Equals(e.Store, store, StringComparison.Ordinal)).ToList();
+            var all = ReadAll(out var unreadable);
+            var entries = all.Where(e => !string.Equals(e.Store, store, StringComparison.Ordinal)).ToList();
+            var current = all.FirstOrDefault(e => string.Equals(e.Store, store, StringComparison.Ordinal));
+            var directory = Path.GetDirectoryName(_path);
+            if (!string.IsNullOrEmpty(directory))
+            {
+                Directory.CreateDirectory(directory);
+            }
+
+            if ((unreadable || (current is not null && !IsFingerprint(current.Fingerprint))) && File.Exists(_path))
+            {
+                File.Move(_path, BadPath, overwrite: true);
+            }
+
             entries.Add(new PinEntry
             {
                 Store = store,
@@ -71,12 +99,6 @@ public sealed class ViewerPasswordKeyPins
                 KeyId = keyId,
                 PinnedAtUtc = DateTime.UtcNow,
             });
-
-            var directory = Path.GetDirectoryName(_path);
-            if (!string.IsNullOrEmpty(directory))
-            {
-                Directory.CreateDirectory(directory);
-            }
 
             var temp = _path + ".tmp";
             File.WriteAllText(temp, JsonSerializer.Serialize(entries, s_json));
@@ -89,6 +111,8 @@ public sealed class ViewerPasswordKeyPins
             return false;
         }
     }
+
+    private string BadPath => _path + ".bad";
 
     private static bool IsFingerprint(string? text) =>
         text is { Length: 64 } && text.All(c => c is (>= '0' and <= '9') or (>= 'a' and <= 'f'));

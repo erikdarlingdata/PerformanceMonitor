@@ -55,6 +55,20 @@ public partial class AddMultipleServersDialog : Window
     private HashSet<string> _existingKeys = new(StringComparer.OrdinalIgnoreCase);
 
     private bool _testRunning;
+
+    /// <summary>One sealed value per row, so the test of a row and its save store the same text (#5366).</summary>
+    private readonly Dictionary<int, ViewerSealCache> _sealCaches = [];
+
+    private ViewerSealCache SealCacheFor(BulkServerParseLine line)
+    {
+        if (!_sealCaches.TryGetValue(line.LineNumber, out var cache))
+        {
+            cache = new ViewerSealCache();
+            _sealCaches[line.LineNumber] = cache;
+        }
+
+        return cache;
+    }
     private bool _cancelTest;
 
     /// <summary>Number of servers actually written (the caller reloads when &gt; 0).</summary>
@@ -235,11 +249,16 @@ public partial class AddMultipleServersDialog : Window
             return;
         }
 
-        var (sealer, sealError) = await ResolveSealerAsync(shared);
+        var (sealer, sealError, sealNotice) = await ResolveSealerAsync(shared);
         if (sealError is not null)
         {
             StatusText.Text = sealError;
             return;
+        }
+
+        if (sealNotice is not null)
+        {
+            StatusText.Text = sealNotice;
         }
 
         _testRunning = true;
@@ -266,7 +285,7 @@ public partial class AddMultipleServersDialog : Window
                 }
                 if (row.ParsedLine is null) continue;
 
-                var (testServer, buildError) = BuildTestConnectServer(row.ParsedLine, shared, sealer);
+                var (testServer, buildError) = BuildTestConnectServer(row.ParsedLine, shared, sealer, SealCacheFor(row.ParsedLine));
                 if (testServer is null)
                 {
                     row.Status = "Failed: " + buildError;
@@ -300,7 +319,8 @@ public partial class AddMultipleServersDialog : Window
             AddButton.IsEnabled = writable;
             TestAllButton.IsEnabled = writable;
             CancelTestButton.Visibility = Visibility.Collapsed;
-            StatusText.Text = _cancelTest ? "Connection test canceled." : "Connection test complete.";
+            StatusText.Text = (_cancelTest ? "Connection test canceled." : "Connection test complete.")
+                + (sealNotice is null ? "" : " " + sealNotice);
         }
     }
 
@@ -327,11 +347,16 @@ public partial class AddMultipleServersDialog : Window
             return;
         }
 
-        var (sealer, sealError) = await ResolveSealerAsync(shared);
+        var (sealer, sealError, sealNotice) = await ResolveSealerAsync(shared);
         if (sealError is not null)
         {
             StatusText.Text = sealError;
             return;
+        }
+
+        if (sealNotice is not null)
+        {
+            StatusText.Text = sealNotice;
         }
 
         try
@@ -357,7 +382,7 @@ public partial class AddMultipleServersDialog : Window
 
             foreach (var line in result.Servers)
             {
-                var (row, buildError) = BuildMonitoredServerRow(line, shared, sealer);
+                var (row, buildError) = BuildMonitoredServerRow(line, shared, sealer, SealCacheFor(line));
                 if (row is null)
                 {
                     failed++;
@@ -605,7 +630,7 @@ public partial class AddMultipleServersDialog : Window
     /// (the belt — the trimmed radios never offer Azure, but a profile could resolve to one). A blank/whitespace
     /// database maps to NULL, NEVER "master" (coercing would mint a mismatched server_id and split collected data).</summary>
     internal static (MonitoredServerRow? Row, string? Error) BuildMonitoredServerRow(
-        BulkServerParseLine line, BulkSharedSettings shared, ViewerPasswordSealer? sealer = null)
+        BulkServerParseLine line, BulkSharedSettings shared, ViewerPasswordSealer? sealer = null, ViewerSealCache? cache = null)
     {
         var mapped = ServerStoreCredential.MapAuth(shared.AuthType);
         if (mapped is null)
@@ -642,7 +667,7 @@ public partial class AddMultipleServersDialog : Window
 
             try
             {
-                row.EncryptedPassword = sealer.Seal(shared.Secret, row);
+                row.EncryptedPassword = cache is null ? sealer.Seal(shared.Secret, row) : cache.GetOrSeal(sealer, shared.Secret, row);
             }
             catch (ViewerPasswordRefusedException ex)
             {
@@ -655,23 +680,23 @@ public partial class AddMultipleServersDialog : Window
 
     /// <summary>Reads the key the shared password is sealed with, once for the whole batch. No key is read when the
     /// shared credential carries no password.</summary>
-    private async Task<(ViewerPasswordSealer? Sealer, string? Error)> ResolveSealerAsync(BulkSharedSettings shared)
+    private async Task<(ViewerPasswordSealer? Sealer, string? Error, string? Notice)> ResolveSealerAsync(BulkSharedSettings shared)
     {
         if (string.IsNullOrEmpty(shared.Secret) || _dataService is null)
         {
-            return (null, null);
+            return (null, null, null);
         }
 
         var key = await ViewerPasswordKey.GetSealKeyAsync(_dataService, this);
-        return key.Sealer is null ? (null, key.Refusal) : (key.Sealer, null);
+        return key.Sealer is null ? (null, key.Refusal, null) : (key.Sealer, null, key.Notice);
     }
 
     /// <summary>Maps one parsed row + the shared settings into a <see cref="TestConnectServer"/> for the probe —
     /// the same fields as the store row (single source of truth via <see cref="BuildMonitoredServerRow"/>).</summary>
     internal static (TestConnectServer? Server, string? Error) BuildTestConnectServer(
-        BulkServerParseLine line, BulkSharedSettings shared, ViewerPasswordSealer? sealer = null)
+        BulkServerParseLine line, BulkSharedSettings shared, ViewerPasswordSealer? sealer = null, ViewerSealCache? cache = null)
     {
-        var (row, error) = BuildMonitoredServerRow(line, shared, sealer);
+        var (row, error) = BuildMonitoredServerRow(line, shared, sealer, cache);
         if (row is null)
         {
             return (null, error);

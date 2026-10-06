@@ -53,12 +53,17 @@ public partial class SettingsWindow : Window
     private readonly ViewerDataService? _dataService;
     private readonly IReadOnlyList<DarlingServer> _servers;
 
-    /// <summary>The store's current SMTP blob, held so an unchanged (or undecryptable) password survives a Save
-    /// without being wiped — mirrors the server dialog's DPAPI "re-enter to change" handling.</summary>
-    private string? _loadedSmtpBlob;
+    /// <summary>The notification row as the window loaded it: its stored SMTP password survives a Save that leaves the
+    /// box blank, and its host, port, SSL flag and user name say whether a blank box is allowed (#5366).</summary>
+    private NotificationRow _loadedNotification = NotificationRow.Defaults();
 
-    /// <summary>The notification row as last read, for the sealed webhook values a blank box keeps (#5366).</summary>
-    private NotificationRow? _loadedNotification;
+    /// <summary>The password the box was pre-filled with: a value saved before passwords were sealed that this machine
+    /// could read. Null when the box was left blank (nothing saved, or a sealed value nobody here can read).</summary>
+    private string? _loadedSmtpPlain;
+
+    /// <summary>The password typed for a save that seals it, held between reading the controls and the async key read.</summary>
+    private string? _smtpPasswordToSeal;
+
 
     /// <summary>The service's paused state as last read from <c>config_service</c>, reflected on the button.</summary>
     private bool _paused;
@@ -1288,13 +1293,16 @@ public partial class SettingsWindow : Window
         SmtpRecipientsBox.Text = r.SmtpRecipients;
         EmailCooldownBox.Text = r.EmailCooldownMinutes.ToString(CultureInfo.InvariantCulture);
 
-        _loadedSmtpBlob = r.SmtpEncryptedPassword;
-        SmtpPasswordBox.Password = OperatingSystem.IsWindows()
-            ? ViewerServerSecret.TryUnprotect(r.SmtpEncryptedPassword) ?? ""
+        /* A sealed value opens only in the service, so the box stays blank and says the password is saved (#5366). A value
+           saved before sealing is still pre-filled where this machine can read it. */
+        _loadedNotification = r;
+        _loadedSmtpPlain = OperatingSystem.IsWindows() ? ViewerServerSecret.TryUnprotect(r.SmtpEncryptedPassword) : null;
+        SmtpPasswordBox.Password = _loadedSmtpPlain ?? "";
+        SmtpStatusText.Text = !string.IsNullOrEmpty(r.SmtpEncryptedPassword) && _loadedSmtpPlain is null
+            ? ViewerSmtpSeal.SavedText
             : "";
 
         TeamsWebhookEnabledCheckBox.IsChecked = !string.IsNullOrWhiteSpace(r.TeamsUrl);
-        _loadedNotification = r;
         TeamsWebhookUrlBox.Text = ViewerWebhookSealing.ShownText(r.TeamsUrl);
         TeamsStatusText.Text = ViewerWebhookSealing.IsSaved(r.TeamsUrl) ? ViewerWebhookSealing.KeepHint : "";
         TeamsProxyAddressBox.Text = r.TeamsProxy;
@@ -1335,6 +1343,7 @@ public partial class SettingsWindow : Window
     private NotificationRow BuildNotificationRowFromControls(List<string> errors)
     {
         var row = new NotificationRow();
+        _smtpPasswordToSeal = null;
 
         if (int.TryParse(EmailCooldownBox.Text, out var emailCooldown) && emailCooldown is >= 1 and <= 120)
             row.EmailCooldownMinutes = emailCooldown;
@@ -1351,7 +1360,7 @@ public partial class SettingsWindow : Window
             row.SmtpUsername = string.IsNullOrWhiteSpace(username) ? null : username;
             row.SmtpFromAddress = SmtpFromBox.Text?.Trim() ?? "";
             row.SmtpRecipients = SmtpRecipientsBox.Text?.Trim() ?? "";
-            row.SmtpEncryptedPassword = ResolveSmtpBlob();
+            ResolveSmtpPassword(row, errors);
         }
 
         if (TeamsWebhookEnabledCheckBox.IsChecked == true)
@@ -1421,17 +1430,76 @@ public partial class SettingsWindow : Window
         ViewerWebhookSealing.ResolveSettingsRow(row, _loadedNotification, sealer, refusal);
     }
 
-    /// <summary>The SMTP blob to persist: seal the typed password when the box holds one; otherwise keep the
-    /// store's existing blob (so an unchanged — or another-machine, undecryptable — password survives Save).</summary>
-    private string? ResolveSmtpBlob()
+    /// <summary>
+    /// Decides the SMTP password for a save (#5366). A blank box keeps the stored value, and is refused when the host, port,
+    /// SSL flag or user name changed (the stored password only opens for the settings it was sealed for). A typed password
+    /// is sealed later, in <see cref="SealSmtpPasswordAsync"/>, once the service's key has been read; its text is checked here.
+    /// </summary>
+    private void ResolveSmtpPassword(NotificationRow row, List<string> errors)
     {
+        _smtpPasswordToSeal = null;
+        row.SmtpEncryptedPassword = _loadedNotification.SmtpEncryptedPassword;
+
         var typed = SmtpPasswordBox.Password;
-        if (!string.IsNullOrEmpty(typed) && OperatingSystem.IsWindows())
+        switch (ViewerSmtpSeal.Decide(_loadedNotification, _loadedSmtpPlain, row, typed))
         {
-            return ViewerServerSecret.Protect(typed);
+            case ViewerSmtpPasswordAction.Refuse:
+                errors.Add(ViewerSmtpSeal.ReenterText);
+                break;
+            case ViewerSmtpPasswordAction.Seal:
+                if (!ViewerSmtpSeal.IsValidText(typed))
+                {
+                    errors.Add(ViewerPasswordSealer.PasswordCharactersText);
+                }
+                else if (ViewerSmtpSeal.FirstInvalidBoundField(row.SmtpHost, row.SmtpUsername) is { } field)
+                {
+                    errors.Add(ViewerPasswordSealer.FieldCharactersText(field));
+                }
+                else
+                {
+                    _smtpPasswordToSeal = typed;
+                    row.SmtpEncryptedPassword = null;
+                }
+
+                break;
+        }
+    }
+
+    /// <summary>
+    /// Seals the typed SMTP password to the service's published key for the row's host, port, SSL flag and user name
+    /// (#5366). Returns the sentence that says why not when it cannot; it never carries the password.
+    /// </summary>
+    private async Task<string?> SealSmtpPasswordAsync(NotificationRow row)
+    {
+        if (_smtpPasswordToSeal is null)
+        {
+            return null;
         }
 
-        return string.IsNullOrEmpty(typed) ? _loadedSmtpBlob : null;
+        var key = await ViewerPasswordKey.GetSealKeyAsync(_dataService!, this);
+        if (key.Notice is not null)
+        {
+            /* The window closes when the save succeeds, so the status line alone would never be seen. */
+            SmtpStatusText.Text = key.Notice;
+            MessageBox.Show(key.Notice, "SMTP password", MessageBoxButton.OK, MessageBoxImage.Information);
+        }
+
+        if (key.Sealer is null)
+        {
+            return key.Refusal;
+        }
+
+        try
+        {
+            row.SmtpEncryptedPassword = key.Sealer.SealSmtp(_smtpPasswordToSeal, row.SmtpHost, row.SmtpPort, row.SmtpUseSsl, row.SmtpUsername);
+        }
+        catch (ViewerPasswordRefusedException ex)
+        {
+            return ex.Message;
+        }
+
+        _smtpPasswordToSeal = null;
+        return null;
     }
 
     private void SmtpEnabledCheckBox_Changed(object sender, RoutedEventArgs e) => UpdateSmtpControlStates();
@@ -1488,6 +1556,14 @@ public partial class SettingsWindow : Window
             /* Build the test settings straight from the live UI (test before save), so the user verifies
                exactly what they typed. The shared EmailSendCore renders + sends — no store/service needed. */
             var settings = TestAlertSettings.FromUi(this);
+            if (SmtpPasswordBox.Password.Length == 0 && !string.IsNullOrEmpty(_loadedNotification.SmtpEncryptedPassword)
+                && _loadedSmtpPlain is null)
+            {
+                /* The saved password is sealed for the service: nothing here can read it to send with. */
+                MessageBox.Show(ViewerSmtpSeal.SavedCannotTestText, "Test Email", MessageBoxButton.OK, MessageBoxImage.Information);
+                return;
+            }
+
             var error = await EmailSendCore.SendTestEmailAsync(settings, s_branding);
             if (error == null)
             {
@@ -1791,6 +1867,14 @@ public partial class SettingsWindow : Window
         {
             try
             {
+                var sealRefusal = await SealSmtpPasswordAsync(notifyRow);
+                if (sealRefusal is not null)
+                {
+                    SmtpStatusText.Text = sealRefusal;
+                    MessageBox.Show(sealRefusal, "SMTP password not saved", MessageBoxButton.OK, MessageBoxImage.Warning);
+                    return;
+                }
+
                 await SealWebhookValuesAsync(notifyRow);
                 await _dataService.UpsertAlertSettingsAsync(alertRow);
                 await _dataService.UpsertNotificationAsync(notifyRow);

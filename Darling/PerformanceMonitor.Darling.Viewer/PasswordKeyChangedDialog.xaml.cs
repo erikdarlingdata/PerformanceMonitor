@@ -17,12 +17,15 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// </summary>
 public partial class PasswordKeyChangedDialog : Window
 {
-    public PasswordKeyChangedDialog(string savedDisplay, string newDisplay)
+    public PasswordKeyChangedDialog(ViewerPasswordKeyChange change)
     {
         InitializeComponent();
-        SavedLabel.Text = "Saved key: " + savedDisplay;
-        NewLabel.Text = "New key: " + newDisplay;
+        SavedLabel.Text = "Saved key: " + change.SavedDisplay + FingerprintLine(change.SavedFingerprint);
+        NewLabel.Text = "New key: " + change.NewDisplay + FingerprintLine(change.NewFingerprint);
     }
+
+    private static string FingerprintLine(string fingerprint) =>
+        fingerprint.Length == 0 ? "" : "\nFull fingerprint: " + fingerprint;
 
     private void CheckedBox_Changed(object sender, RoutedEventArgs e) =>
         TrustButton.IsEnabled = CheckedBox.IsChecked == true;
