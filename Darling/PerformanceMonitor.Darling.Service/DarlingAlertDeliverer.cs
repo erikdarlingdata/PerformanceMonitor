@@ -107,6 +107,12 @@ public sealed class DarlingAlertDeliverer : IAlertDeliverer
             throw new ArgumentNullException(nameof(outcome));
         }
 
+        /* #5320 (part of #4348): the statement filter runs at this choke point, so a caller that hands an outcome
+           straight here (the PostgreSQL families, the self alerts, the custom alert rules) is filtered like an
+           engine alert. An outcome AlertEngine.FireAsync already filtered carries StatementFiltered and passes
+           through untouched, so nothing is judged twice. Never throws. */
+        outcome = AlertStatementFilter.Apply(outcome);
+
         try
         {
             /* #1236/#1141: a per-server override wins over the global mode; Per-event splits an

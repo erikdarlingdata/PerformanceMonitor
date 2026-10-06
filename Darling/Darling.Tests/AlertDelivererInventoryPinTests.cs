@@ -17,11 +17,13 @@ using static Darling.Tests.RepoFile;
 namespace Darling.Tests;
 
 /// <summary>
-/// #5320 (part of #4348): the statement filter sits at two seams, <c>AlertEngine.FireAsync</c> (every engine alert)
-/// and the finding senders (every analysis finding). This pin lists every type in the two apps that implements a
-/// deliverer or a finding sender, and every call site that hands an outcome to a deliverer without going through
-/// <c>FireAsync</c>. A new implementer or a new direct caller fails here until someone has decided whether its
-/// text can carry a statement, and adds it to the list below with the answer.
+/// #5320 (part of #4348): the statement filter sits at the delivery choke point. Both deliverers run
+/// <c>AlertStatementFilter.Apply</c> at their entry, so every caller that hands an outcome to one (the engine's
+/// <c>FireAsync</c>, the PostgreSQL families, the self alerts, the custom alert rules, and any caller added later) is
+/// filtered with no list to keep; <c>AlertOutcome.StatementFiltered</c> stops an engine alert being judged twice. The
+/// finding senders filter their own entry points. This pin lists every type that implements a deliverer or a finding
+/// sender, requires the filter at each entry, and lists every file that reaches a notifier or writes an alert history
+/// row, so a new path that skips the deliverer fails here until someone has put the filter on it.
 /// </summary>
 public sealed class AlertDelivererInventoryPinTests
 {
@@ -41,18 +43,18 @@ public sealed class AlertDelivererInventoryPinTests
     private static readonly string[] FindingSenders = ["DarlingFindingAlertSender", "EmailAlertService"];
 
     /// <summary>
-    /// Every file that hands an outcome to a deliverer, with the reason it is reviewed. <c>AlertEngine</c> is the
-    /// filtered seam. The others build their own outcomes: PostgreSQL alert families (their statement text is
-    /// withheld by the PostgreSQL statement filter where it is read), the Darling self alerts (collector and
-    /// store health prose, no captured statement), and custom alert rules (a rule's measure and dimension labels,
-    /// which the catalog census keeps free of statement-text columns).
+    /// Every file that reaches a notification channel or writes a fired alert's history row without a deliverer
+    /// between. The two deliverers filter at entry; the finding senders filter their own entry points; the two
+    /// Lite sends in <c>MainWindow.AlertEngine.cs</c> (connection alerts and Availability Group alerts) build an
+    /// outcome and run the filter themselves, which the test below requires.
     /// </summary>
-    private static readonly string[] OutcomeCallers =
+    private static readonly string[] NotifierPaths =
     [
-        "PerformanceMonitor.Alerting/AlertEngine.cs",
-        "Darling/PerformanceMonitor.Darling.Service/CustomAlertEvaluator.cs",
-        "Darling/PerformanceMonitor.Darling.Service/DarlingSelfAlertEvaluator.cs",
-        "Darling/PerformanceMonitor.Darling.Service/DarlingWorker.cs",
+        "Darling/PerformanceMonitor.Darling.Service/DarlingAlertDeliverer.cs",
+        "Darling/PerformanceMonitor.Darling.Service/DarlingFindingAlertSender.cs",
+        "Lite/MainWindow.AlertEngine.cs",
+        "Lite/Services/EmailAlertService.cs",
+        "Lite/Services/LiteAlertDeliverer.cs",
     ];
 
     private static IEnumerable<(string Relative, string Text)> Sources()
@@ -105,17 +107,56 @@ public sealed class AlertDelivererInventoryPinTests
         Assert.Equal(FindingSenders.OrderBy(n => n, StringComparer.Ordinal), Implementers("IFindingAlertSender"));
     }
 
-    [Fact]
-    public void EveryDirectHandOffToADelivererIsReviewed()
+    [Theory]
+    [InlineData("Darling/PerformanceMonitor.Darling.Service/DarlingAlertDeliverer.cs")]
+    [InlineData("Lite/Services/LiteAlertDeliverer.cs")]
+    public void EveryDelivererFiltersBeforeItReadsTheOutcome(string relative)
     {
-        var call = new Regex(@"[.]\s*(?:DeliverAndReportAsync|DeliverAsync)\s*\(", RegexOptions.CultureInvariant, TimeSpan.FromSeconds(5));
-        var callers = Sources()
-            .Where(s => call.IsMatch(s.Text))
+        var text = CSharpSourceWalker.StripCommentsAndStrings(ReadRepoFile(relative.Split('/')));
+        var start = text.IndexOf("Task<AlertDelivery?> DeliverAndReportAsync(AlertOutcome outcome", StringComparison.Ordinal);
+        Assert.True(start > 0, "DeliverAndReportAsync not found in " + relative);
+        var body = CSharpSourceWalker.BraceBalanced(text, text.IndexOf('{', start));
+
+        var filter = body.IndexOf("outcome = AlertStatementFilter.Apply(outcome);", StringComparison.Ordinal);
+        Assert.True(filter >= 0, relative + " does not run the statement filter at its delivery entry");
+        Assert.True(filter < body.IndexOf("try", StringComparison.Ordinal), "the filter must run before the delivery body");
+        Assert.True(filter < body.IndexOf("outcome.", StringComparison.Ordinal), "the filter must run before any field of the outcome is read");
+    }
+
+    [Fact]
+    public void NoPathToANotifierOrTheAlertHistorySkipsTheDeliverer()
+    {
+        var channel = new Regex(
+            @"[.]\s*(?:TrySendAlertEmailAsync|TrySendAsync|RecordAlertAsync)\s*\(\s*(?!(?:DarlingSelfAlertEvaluator[.])?BuildResolutionRecord)",
+            RegexOptions.CultureInvariant, TimeSpan.FromSeconds(5));
+        var files = Sources()
+            .Where(s => channel.IsMatch(s.Text))
             .Select(s => s.Relative)
             .OrderBy(n => n, StringComparer.Ordinal)
             .ToList();
 
-        Assert.Equal(OutcomeCallers.OrderBy(n => n, StringComparer.Ordinal), callers);
+        Assert.Equal(NotifierPaths.OrderBy(n => n, StringComparer.Ordinal), files);
+    }
+
+    [Fact]
+    public void TheTwoLiteDirectSendsFilterTheirOwnText()
+    {
+        var text = CSharpSourceWalker.StripCommentsAndStrings(ReadRepoFile("Lite", "MainWindow.AlertEngine.cs"));
+        var sends = Regex.Matches(text, @"_emailAlertService[.]TrySendAlertEmailAsync\(", RegexOptions.CultureInvariant, TimeSpan.FromSeconds(5)).Count;
+        var filters = Regex.Matches(text, @"AlertStatementFilter[.]Apply\(", RegexOptions.CultureInvariant, TimeSpan.FromSeconds(5)).Count;
+        Assert.Equal(2, sends);
+        Assert.Equal(sends, filters);
+    }
+
+    [Fact]
+    public void EveryResolutionRowIsBuiltThroughTheFilteredRecordBuilder()
+    {
+        var evaluator = CSharpSourceWalker.StripCommentsAndStrings(
+            ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingSelfAlertEvaluator.cs"));
+        var start = evaluator.IndexOf("AlertHistoryRecord BuildResolutionRecord(AlertResolution resolution)", StringComparison.Ordinal);
+        Assert.True(start > 0, "BuildResolutionRecord not found");
+        var end = evaluator.IndexOf(';', start);
+        Assert.Contains("SensitiveStatements.Text(resolution.Message)", evaluator[start..end], StringComparison.Ordinal);
     }
 
     [Fact]

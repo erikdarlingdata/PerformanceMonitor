@@ -155,6 +155,12 @@ public sealed class LiteAlertDeliverer : IAlertDeliverer
             throw new ArgumentNullException(nameof(outcome));
         }
 
+        /* #5320 (part of #4348): the statement filter runs at this choke point, so a caller that hands an outcome
+           straight here (any direct caller) is filtered like an
+           engine alert. An outcome AlertEngine.FireAsync already filtered carries StatementFiltered and passes
+           through untouched, so nothing is judged twice. Never throws. */
+        outcome = AlertStatementFilter.Apply(outcome);
+
         try
         {
             var serverId = int.Parse(outcome.ServerKey, CultureInfo.InvariantCulture);
