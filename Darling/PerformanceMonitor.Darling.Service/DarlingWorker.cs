@@ -2989,7 +2989,7 @@ LIMIT 1";
            are hoisted here because the AN3 analysis-notification path below shares them. The mute
            service is hoisted too so a reload can re-LoadAsync() it (closes F16 — the engine holds
            its IsAlertMuted delegate, so refreshing the same instance's cache mutes the next sweep). */
-        var alertSettings = new DarlingAlertSettings(config);
+        var alertSettings = new DarlingAlertSettings(config, _logger);
         var historyStore = new PgAlertHistoryStore(postgres, _logger);
         var webhookAlertService = new WebhookAlertService(
             alertSettings, DarlingAlertDeliverer.Branding,
@@ -7382,7 +7382,7 @@ LIMIT 1";
             return;
         }
 
-        var alertSettings = new DarlingAlertSettings(config);
+        var alertSettings = new DarlingAlertSettings(config, _logger);
 
         if (!alertSettings.CpuEnabled)
         {
@@ -7699,7 +7699,7 @@ LIMIT 1";
             return;
         }
 
-        var alertSettings = new DarlingAlertSettings(config);
+        var alertSettings = new DarlingAlertSettings(config, _logger);
 
         if (!alertSettings.DeadlockEnabled)
         {
@@ -7907,7 +7907,7 @@ LIMIT 1";
             return;
         }
 
-        var alertSettings = new DarlingAlertSettings(config);
+        var alertSettings = new DarlingAlertSettings(config, _logger);
 
         if (!alertSettings.BlockingEnabled)
         {
@@ -8134,7 +8134,7 @@ LIMIT 1";
             return;
         }
 
-        var alertSettings = new DarlingAlertSettings(config);
+        var alertSettings = new DarlingAlertSettings(config, _logger);
 
         if (!alertSettings.LongRunningQueryEnabled)
         {
@@ -8358,7 +8358,7 @@ LIMIT 1";
             return;
         }
 
-        var alertSettings = new DarlingAlertSettings(config);
+        var alertSettings = new DarlingAlertSettings(config, _logger);
         if (!alertSettings.PoisonWaitEnabled)
         {
             return;
