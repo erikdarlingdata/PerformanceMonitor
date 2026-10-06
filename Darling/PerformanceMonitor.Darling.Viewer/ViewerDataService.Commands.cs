@@ -321,7 +321,7 @@ public sealed class TestConnectServer
     [JsonPropertyName("username")]
     public string? Username { get; set; }
 
-    /// <summary>DPAPI-LocalMachine blob (<see cref="ViewerServerSecret.Protect"/>) — the service decrypts it on its host.</summary>
+    /// <summary>The sealed password (<see cref="ViewerPasswordSealer.Seal"/>), sealed for this request's connection settings; the service opens it on its host.</summary>
     [JsonPropertyName("encryptedPassword")]
     public string? EncryptedPassword { get; set; }
 

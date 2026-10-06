@@ -1680,6 +1680,22 @@ jobs:
         if: github.event_name != 'release' && steps.filter.outputs.darling == 'true'
         run: docker build -f Darling/Dockerfile -t performancemonitor-darling:pr .
 
+      # #5366: the test project runs on Windows, so the Unix file checks behind the password key (owner, link count, file
+      # identity) and the Linux crypto path run here instead, inside the image the service ships in. The hidden verb runs
+      # the real code in a fresh temporary directory and opens a committed, labelled test vector made on Windows. Any
+      # failure exits non-zero and fails the job. The vector is mounted read-only.
+      - name: Check the password key on Linux (self-check verb in the built image)
+        if: github.event_name != 'release' && steps.filter.outputs.darling == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          vector="${GITHUB_WORKSPACE}/Darling/Darling.Tests/Fixtures/PasswordSeal/linux-self-check-vector.json"
+          test -f "${vector}"
+          docker run --rm \
+            -v "${vector}:/vector/linux-self-check-vector.json:ro" \
+            performancemonitor-darling:pr \
+            --self-check-password-key /vector/linux-self-check-vector.json
+
       # ── Release-only publishing (mirrors nightly.yml's linux job, versioned instead of :nightly) ──
 
       - name: Get version
