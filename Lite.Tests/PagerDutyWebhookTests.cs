@@ -136,6 +136,123 @@ public class PagerDutyWebhookTests
         Assert.Equal(root1.GetProperty("dedup_key").GetString(), root2.GetProperty("dedup_key").GetString());
     }
 
+    /* ---------------- Edge-pair dedup (one incident identity per pair) ---------------- */
+
+    [Fact]
+    public void BuildPagerDutyPayload_ConnectionEdges_ShareOneDedupKey_NamedByTheFiring()
+    {
+        /* "Server Unreachable" and "Server Restored" are two halves of one incident. Keying on the
+           metric name minted a distinct dedup_key per edge, so PagerDuty showed two incidents for one
+           outage, and a closing edge could never resolve the open one. Both edges now rename to the
+           pair's canonical FIRING name. */
+        var unreachable = WebhookAlertService.BuildPagerDutyPayload(
+            "Server Unreachable", "SRV1", "Login timeout expired", "Online",
+            Branding, "key", serverId: "261742202");
+        var restored = WebhookAlertService.BuildPagerDutyPayload(
+            "Server Restored", "SRV1", "Online", "Online",
+            Branding, "key", serverId: "261742202");
+
+        var unreachableKey = JsonDocument.Parse(unreachable).RootElement.GetProperty("dedup_key").GetString();
+        var restoredKey = JsonDocument.Parse(restored).RootElement.GetProperty("dedup_key").GetString();
+
+        Assert.Equal("261742202:Server Unreachable", unreachableKey);
+        Assert.Equal(unreachableKey, restoredKey);
+    }
+
+    [Fact]
+    public void BuildPagerDutyPayload_ReplicationEdges_ShareOneDedupKey_NamedByTheFiring()
+    {
+        var disconnected = WebhookAlertService.BuildPagerDutyPayload(
+            "AG Replica Disconnected", "SRV1", "DISCONNECTED", "CONNECTED",
+            Branding, "key", serverId: "261742202");
+        var reconnected = WebhookAlertService.BuildPagerDutyPayload(
+            "AG Replica Reconnected", "SRV1", "CONNECTED", "CONNECTED",
+            Branding, "key", serverId: "261742202");
+
+        var disconnectedKey = JsonDocument.Parse(disconnected).RootElement.GetProperty("dedup_key").GetString();
+        var reconnectedKey = JsonDocument.Parse(reconnected).RootElement.GetProperty("dedup_key").GetString();
+
+        Assert.Equal("261742202:AG Replica Disconnected", disconnectedKey);
+        Assert.Equal(disconnectedKey, reconnectedKey);
+    }
+
+    [Fact]
+    public void BuildPagerDutyPayload_NonEdgeMetric_StillKeysOnTheMetricName()
+    {
+        var payload = WebhookAlertService.BuildPagerDutyPayload(
+            "High CPU", "SRV1", "95%", "90%", Branding, "key", serverId: "261742202");
+
+        var root = JsonDocument.Parse(payload).RootElement;
+
+        Assert.Equal("trigger", root.GetProperty("event_action").GetString());
+        Assert.Equal("261742202:High CPU", root.GetProperty("dedup_key").GetString());
+    }
+
+    /* ---------------- The auto-resolve opt-in ---------------- */
+
+    [Fact]
+    public void BuildPagerDutyPayload_EdgeClosingEdge_DefaultsToInfoLevelTrigger_LeavingTheIncidentOpen()
+    {
+        var payload = WebhookAlertService.BuildPagerDutyPayload(
+            "Server Restored", "SRV1", "Online", "Online",
+            Branding, "key", serverId: "261742202");
+
+        var root = JsonDocument.Parse(payload).RootElement;
+
+        Assert.Equal("trigger", root.GetProperty("event_action").GetString());
+        Assert.Equal("info", root.GetProperty("payload").GetProperty("severity").GetString());
+    }
+
+    [Fact]
+    public void BuildPagerDutyPayload_AutoResolve_SendsTheResolveEvent_OnTheFiringEdgeDedupKey()
+    {
+        var payload = WebhookAlertService.BuildPagerDutyPayload(
+            "Server Restored", "SRV1", "Online", "Online",
+            Branding, "key", serverId: "261742202", autoResolve: true);
+
+        var root = JsonDocument.Parse(payload).RootElement;
+
+        Assert.Equal("resolve", root.GetProperty("event_action").GetString());
+        Assert.Equal("261742202:Server Unreachable", root.GetProperty("dedup_key").GetString());
+    }
+
+    [Fact]
+    public void BuildPagerDutyPayload_AutoResolve_ReplicaReconnect_AlsoResolves_TheFiringEdgeNeverDoes()
+    {
+        var edge = WebhookAlertService.BuildPagerDutyPayload(
+            "AG Replica Disconnected", "SRV1", "DISCONNECTED", "CONNECTED",
+            Branding, "key", serverId: "261742202", autoResolve: true);
+        var closing = WebhookAlertService.BuildPagerDutyPayload(
+            "AG Replica Reconnected", "SRV1", "CONNECTED", "CONNECTED",
+            Branding, "key", serverId: "261742202", autoResolve: true);
+
+        Assert.Equal("trigger", JsonDocument.Parse(edge).RootElement.GetProperty("event_action").GetString());
+        Assert.Equal("resolve", JsonDocument.Parse(closing).RootElement.GetProperty("event_action").GetString());
+    }
+
+    [Fact]
+    public void BuildPagerDutyPayload_AutoResolve_OnAFiringMetric_OrAnyNonEdgeAlert_StillTriggers()
+    {
+        var unreachable = WebhookAlertService.BuildPagerDutyPayload(
+            "Server Unreachable", "SRV1", "Login timeout expired", "Online",
+            Branding, "key", serverId: "261742202", autoResolve: true);
+        var cpu = WebhookAlertService.BuildPagerDutyPayload(
+            "High CPU", "SRV1", "95%", "90%", Branding, "key", serverId: "261742202", autoResolve: true);
+
+        Assert.Equal("trigger", JsonDocument.Parse(unreachable).RootElement.GetProperty("event_action").GetString());
+        Assert.Equal("trigger", JsonDocument.Parse(cpu).RootElement.GetProperty("event_action").GetString());
+    }
+
+    [Fact]
+    public void BuildPagerDutyPayload_TestMode_AlwaysTriggers_EvenWithAutoResolve()
+    {
+        var payload = WebhookAlertService.BuildPagerDutyPayload(
+            "Server Restored", "", "Webhook configuration verified", "",
+            Branding, "key", isTest: true, dedupKey: "test-" + Guid.NewGuid(), autoResolve: true);
+
+        Assert.Equal("trigger", JsonDocument.Parse(payload).RootElement.GetProperty("event_action").GetString());
+    }
+
     /* ---------------- Custom details (T-SQL hint) ---------------- */
 
     [Fact]

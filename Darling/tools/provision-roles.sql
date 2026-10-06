@@ -232,7 +232,10 @@ GRANT SELECT (command_id, created_at, requested_by, command_type, target_server_
 REVOKE SELECT ON config.config_notification FROM viewer;
 GRANT SELECT (id, smtp_host, smtp_port, smtp_use_ssl, smtp_from_address, smtp_recipients,
               email_cooldown_minutes, teams_proxy, slack_proxy, modified_at,
-              generic_body_template, generic_proxy, pagerduty_use_eu_region, pagerduty_proxy)
+              generic_body_template, generic_proxy, pagerduty_use_eu_region, pagerduty_proxy,
+              -- V165: pagerduty_auto_resolve. Non-secret (a behaviour toggle, like the EU-region flag
+              -- beside it), so it stays granted.
+              pagerduty_auto_resolve)
     ON config.config_notification TO viewer;
 -- V131 (#3598): the sparse notification-routes table mirrors the parent row's destination columns under the
 -- same names, so the same carve applies: the webhook URLs and the PagerDuty routing key are bearer secrets and
@@ -260,7 +263,10 @@ GRANT SELECT (command_id, created_at, requested_by, command_type, target_server_
 REVOKE SELECT ON config.config_notification FROM mcp;
 GRANT SELECT (id, smtp_host, smtp_port, smtp_use_ssl, smtp_from_address, smtp_recipients,
               email_cooldown_minutes, teams_proxy, slack_proxy, modified_at,
-              generic_body_template, generic_proxy, pagerduty_use_eu_region, pagerduty_proxy)
+              generic_body_template, generic_proxy, pagerduty_use_eu_region, pagerduty_proxy,
+              -- V165: pagerduty_auto_resolve. Non-secret (a behaviour toggle, like the EU-region flag
+              -- beside it), so it stays granted.
+              pagerduty_auto_resolve)
     ON config.config_notification TO mcp;
 REVOKE SELECT ON config.config_notification_routes FROM mcp;
 GRANT SELECT (route_id, metric_match, smtp_recipients, configured_channels, enabled, modified_at)

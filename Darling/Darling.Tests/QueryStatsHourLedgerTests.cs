@@ -75,7 +75,7 @@ public sealed class QueryStatsHourLedgerTests
     }
 
     [Fact]
-    public void TheRungIsRegisteredOnce_InADenseLadder_AsTheTopRung()
+    public void TheRungIsRegisteredOnce_InADenseLadder()
     {
         var versions = PgMigrations.Scripts.Select(s => s.Version).ToList();
 
@@ -83,6 +83,12 @@ public sealed class QueryStatsHourLedgerTests
         Assert.Equal(QueryStatsHourLedger.RungVersion, Rung.Version); // the runner's below-the-rung check reads this constant
         Assert.Single(PgMigrations.Scripts, m => m.Name == RungName);
         Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
+
+        /* Not `Rung.Version == StorageVersion.SchemaVersion` any more: that asserted this rung is the
+           newest, which stopped being true when V165 landed above it. The invariant that outlives the
+           handoff (the top and the declared version agree) is the line above. */
+        Assert.True(Rung.Version < StorageVersion.SchemaVersion);
+
         Assert.Equal(versions.Distinct().OrderBy(v => v), versions);
         Assert.Contains(Rung.Version - 1, versions);
     }
@@ -172,28 +178,39 @@ public sealed class QueryStatsHourLedgerTests
     }
 
     [Fact]
-    public void TheProbeCarriesTheLedgerTable_AsTheTopArm_AndMapsFullyMigratedToThisRung()
+    public void TheProbeCarriesTheLedgerTable_AndAStoreThatStoppedHereMapsToThisRung()
     {
         var probe = ViewerDataService.StoreSchemaProbeSql.Replace("\r\n", "\n", StringComparison.Ordinal);
         var arm = "to_regclass('collect.query_stats_hour_ledger') IS NOT NULL";
         Assert.Contains(arm, probe, StringComparison.Ordinal);
-        Assert.True(probe.LastIndexOf("EXISTS", StringComparison.Ordinal) < probe.IndexOf(arm, StringComparison.Ordinal),
-            "the new arm is the probe's last EXISTS, so it reads at the next ordinal");
+
+        /* Not "the probe's last EXISTS" any more: that asserted this rung is the NEWEST sentinel, which
+           stopped being true when V165 appended its COLUMN-existence sentinel after it. The sentinel stays
+           where it was appended, so its ordinal is unchanged. */
+        var before = probe[..probe.IndexOf(arm, StringComparison.Ordinal)];
+        Assert.True(before.LastIndexOf("EXISTS", StringComparison.Ordinal) >= 0,
+            "the rung's sentinel exists as a probe arm");
 
         var viewer = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.cs");
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal})", viewer, StringComparison.Ordinal);
-        Assert.DoesNotContain($"reader.GetBoolean({ProbeOrdinal + 1})", viewer, StringComparison.Ordinal);
 
         var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
         var parameters = method.GetParameters();
-        Assert.Equal(ProbeOrdinal, parameters.Length - 1);
+
+        /* A position within the signature, not its end: `ProbeOrdinal == parameters.Length - 1` asserted
+           this rung is the newest sentinel, which stopped being true the moment V165 appended its own. */
+        Assert.True(ProbeOrdinal < parameters.Length - 1);
         Assert.Equal("hasQueryStatsHourLedger", parameters[ProbeOrdinal].Name);
 
         var all = Enumerable.Repeat((object)true, parameters.Length).ToArray();
-        Assert.Equal(Rung.Version, (int)method.Invoke(null, all)!);
+        Assert.Equal(StorageVersion.SchemaVersion, (int)method.Invoke(null, all)!);
         Assert.Equal(StorageVersion.SchemaVersion, ViewerDataService.RequiredStoreSchemaVersion);
 
-        var behind = (object[])all.Clone();
+        /* A store that stopped here maps to exactly this rung, not to the top that now sits above it. */
+        var atThisRung = Enumerable.Range(0, parameters.Length).Select(i => (object)(i <= ProbeOrdinal)).ToArray();
+        Assert.Equal(Rung.Version, (int)method.Invoke(null, atThisRung)!);
+
+        var behind = (object[])atThisRung.Clone();
         behind[ProbeOrdinal] = false;
         Assert.Equal(Rung.Version - 1, (int)method.Invoke(null, behind)!);
 

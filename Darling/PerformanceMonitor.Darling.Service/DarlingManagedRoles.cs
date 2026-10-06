@@ -188,6 +188,12 @@ public static class DarlingManagedRoles
                 "id", "smtp_host", "smtp_port", "smtp_use_ssl", "smtp_from_address", "smtp_recipients",
                 "email_cooldown_minutes", "teams_proxy", "slack_proxy", "modified_at",
                 "generic_body_template", "generic_proxy", "pagerduty_use_eu_region", "pagerduty_proxy",
+                /* V165. Non-secret: which lifecycle a PagerDuty recovery rides — the shipped info-trigger or
+                   the opt-in close — is behaviour, exactly as sensitive as pagerduty_use_eu_region beside
+                   it. The fail-closed design is why it must be named at all: unclassified stays invisible
+                   to the read roles and the live security gate fails until someone decides which side it
+                   is on. */
+                "pagerduty_auto_resolve",
             },
             /* generic_headers carries the Authorization bearer token itself, and generic_url is a bearer
                secret like the sibling webhook URLs (#1506 / V26). pagerduty_routing_key is the Events API v2

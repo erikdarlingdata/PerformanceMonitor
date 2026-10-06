@@ -655,6 +655,24 @@ CREATE TABLE IF NOT EXISTS config.store_statement_baseline
     /// </summary>
     private const string V164Sql = QueryStatsHourLedger.CreateSql;
 
+    /// <summary>
+    /// V165 — the PagerDuty auto-resolve opt-in. Adds <c>pagerduty_auto_resolve</c> to
+    /// <c>config.config_notification</c>: non-null with a FALSE default, so every existing row keeps the
+    /// shipped behaviour of NOT auto-resolving incidents with PagerDuty (the closing edge of an edge-type
+    /// pair stays an info-severity trigger; with the toggle on it becomes a <c>resolve</c> — see
+    /// <c>WebhookAlertService.BuildPagerDutyPayload</c>, which reads the column through
+    /// <c>IAlertSettings.PagerDutyAutoResolve</c>). Non-secret (a behaviour toggle, not a credential), so
+    /// unlike the routing key beside it, it stays in the read-only roles' SELECT grants —
+    /// <c>DarlingManagedRoles.ViewerRestrictedConfigTables</c> and <c>Darling/tools/provision-roles.sql</c>.
+    ///
+    /// <para><b>Numbered 165, the ladder's next free version</b> (the top was 164): the migration ladder is
+    /// applied and stamped in version order, so ANY free number >= 165 would apply on every store — but the
+    /// convention is dense, consecutive versions, and a gap would trip the ladder-density census.</para>
+    /// </summary>
+    private const string V165Sql = @"
+ALTER TABLE config.config_notification
+    ADD COLUMN IF NOT EXISTS pagerduty_auto_resolve boolean NOT NULL DEFAULT FALSE;";
+
     public static IReadOnlyList<Migration> Scripts { get; } = new[]
     {
         new Migration(1, "collector-tables", PgSchemaGenerator.GenerateFullSchema()),
@@ -857,6 +875,7 @@ CREATE TABLE IF NOT EXISTS config.store_statement_baseline
         new Migration(162, "slow-reads", V162Sql),
         new Migration(163, "store-statement-history", V163Sql),
         new Migration(164, "query-stats-hour-ledger", V164Sql),
+        new Migration(165, "pagerduty-auto-resolve", V165Sql),
     };
 
     /// <summary>

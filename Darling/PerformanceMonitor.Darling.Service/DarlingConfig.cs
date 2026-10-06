@@ -2135,6 +2135,16 @@ public sealed class WebhooksConfig
 
     [JsonPropertyName("pagerDutyProxy")]
     public string PagerDutyProxy { get; set; } = "";
+
+    /// <summary>
+    /// Opt-in (V165, <c>config_notification.pagerduty_auto_resolve</c>): the closing edge of an edge-type
+    /// alert pair is delivered to PagerDuty as a <c>resolve</c> event that CLOSES the incident its firing
+    /// edge's trigger opened, instead of the shipped info-severity trigger that leaves it open. Stored on
+    /// the singleton notification row (authoritative in the store; the Viewer's Settings window authors it),
+    /// so a store reload applies the operator's choice live like the sibling knobs on this row.
+    /// </summary>
+    [JsonPropertyName("pagerDutyAutoResolve")]
+    public bool PagerDutyAutoResolve { get; set; } = false;
 }
 
 public sealed class MonitoredServer
