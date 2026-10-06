@@ -51,8 +51,8 @@ public sealed class QueryStoreTopDailyReadLiveTests
     /// <c>QueryStoreTopSuffix</c> was divided into its ranked head and its tail, and re-taken once for #5313, which
     /// deliberately changed both statements: the over-fetch <c>LIMIT $4 + 5</c> became the round's candidate limit and
     /// the tail gained the page / count-row wrapper. The split pin is the tail-sharing assert below.</summary>
-    private const string RawSqlHash = "95ED4C5E7A74B204E2CFAA1B8DF30C2778A242CDC07AA587B411BD11B28C9CCF";
-    private const string TableSqlHash = "50A5FA33016B5D5B32FF068B2A50B69591D69F6AF1437D527A70F94AB03D8E2B";
+    private const string RawSqlHash = "82452A8DE4520B3A10759D096C3FF9040DF66B43B938687294F9A7FA28860D32";
+    private const string TableSqlHash = "FCA3351A98FD812C1FAFACCE9C74E5014EB3AF428845EAA33E81D0C371EAACC5";
 
     private static string Hash(string sql) =>
         Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(sql.ReplaceLineEndings("\n"))));
@@ -221,7 +221,7 @@ VALUES (@ct, 1, 'db0', @q, @q, 'Regular', COALESCE(@fet, @ct - interval '10 minu
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = readStart });
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = end });
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = Top });
-        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = (object?)db ?? DBNull.Value });
+        command.Parameters.Add(PerformanceMonitor.Darling.Storage.DatabaseFilter.One(db).Parameter());  /* #5245: the list predicate binds one text[] */
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = (object?)outcome ?? DBNull.Value });
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = (object?)module ?? DBNull.Value });
         if (span is var (s, e))
