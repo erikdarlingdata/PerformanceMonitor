@@ -205,6 +205,83 @@ public sealed class SensitiveStatementOutputFilterTests
         Assert.Equal(s_plainRow, resource.Text);
     }
 
+    // A URI or a MIME type that carries a named statement is useless once the statement is replaced, so the
+    // whole result becomes the fixed refusal (the block keeps a valid shape that way).
+
+    [Fact]
+    public async Task ACanaryInAnEmbeddedTextResourcesUriBecomesTheFixedRefusal()
+    {
+        var original = new CallToolResult
+        {
+            Content = new List<ContentBlock>
+            {
+                new EmbeddedResourceBlock
+                {
+                    Resource = new TextResourceContents
+                    {
+                        Uri = "x:" + StatementScrubCanary.CanaryStatement,
+                        MimeType = "text/plain",
+                        Text = "plain row",
+                    },
+                },
+            },
+        };
+
+        var result = await ThroughFilterAsync(original);
+
+        AssertTheFixedRefusal(result);
+        Assert.DoesNotContain("S3cret-canary-ssf", TextOf(result));
+    }
+
+    [Fact]
+    public async Task ACanaryInAnEmbeddedTextResourcesMimeTypeBecomesTheFixedRefusal()
+    {
+        var original = new CallToolResult
+        {
+            Content = new List<ContentBlock>
+            {
+                new EmbeddedResourceBlock
+                {
+                    Resource = new TextResourceContents
+                    {
+                        Uri = "file:///x",
+                        MimeType = StatementScrubCanary.CanaryStatement,
+                        Text = "plain row",
+                    },
+                },
+            },
+        };
+
+        var result = await ThroughFilterAsync(original);
+
+        AssertTheFixedRefusal(result);
+        Assert.DoesNotContain("S3cret-canary-ssf", TextOf(result));
+    }
+
+    [Fact]
+    public async Task AnEmbeddedTextResourceWithAPlainUriAndMimeTypeKeepsTheResultAsTheSameInstance()
+    {
+        var original = new CallToolResult
+        {
+            Content = new List<ContentBlock>
+            {
+                new EmbeddedResourceBlock
+                {
+                    Resource = new TextResourceContents
+                    {
+                        Uri = "file:///x",
+                        MimeType = "text/plain",
+                        Text = "plain row",
+                    },
+                },
+            },
+        };
+
+        var result = await ThroughFilterAsync(original);
+
+        Assert.Same(original, result);
+    }
+
     [Fact]
     public async Task AMetaThatNamesNothingKeepsTheResultAsTheSameInstance()
     {

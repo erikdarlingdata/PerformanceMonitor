@@ -11,8 +11,9 @@ namespace Darling.Tests;
 /// in a collector's input, runs the read and the write, and asserts that no written value holds a secret needle
 /// (<c>StatementScrubRecordingWriter</c> is the harness). Each lane that hooks a column through the statement filter
 /// adds one line here, naming the test that proves it: the key is "definition.column", exactly as
-/// <c>StatementColumnCensusTests.Listed</c> spells it, and the value is "TestClass.TestMethod" (a <c>[Fact]</c> or
-/// <c>[Theory]</c> in this assembly).
+/// <c>StatementColumnCensusTests.Listed</c> spells it, and the value is "StatementCollectionCensusTests.TestMethod": a
+/// <c>[Fact]</c> or <c>[Theory]</c> with no skip, in the class <c>StatementCollectionCensusTests</c> (partial, so each
+/// lane can add its file), whose source drives <c>StatementScrubRecordingWriter</c> and names the column.
 /// <c>StatementColumnCensusTests.EveryNonPendingHookedColumn_HasACollectionCase</c> reads this registry: a Hooked
 /// entry cannot be flipped to non-pending without a case here, and a case here that names a missing test or a column
 /// that is not a Hooked entry fails too.
@@ -23,6 +24,6 @@ internal static class StatementCollectionCensusCases
         new Dictionary<string, string>(StringComparer.Ordinal)
         {
             // Filled by the lanes that hook a column, one line each, for example:
-            // ["query_stats.query_text"] = "QueryStatsStatementFilterCensusTests.QueryText_IsWithheld",
+            // ["query_stats.query_text"] = "StatementCollectionCensusTests.QueryStats_QueryText_IsWithheld",
         };
 }
