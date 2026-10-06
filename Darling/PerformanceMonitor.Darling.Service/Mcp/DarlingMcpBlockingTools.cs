@@ -240,14 +240,14 @@ public sealed class DarlingMcpBlockingTools
                 blocked_client_app = r.BlockedClientApp,
                 blocked_host_name = r.BlockedHostName,
                 blocked_login_name = r.BlockedLoginName,
-                blocked_sql_text = showFullText ? r.BlockedSqlText : McpHelpers.Truncate(r.BlockedSqlText, sqlTextPreviewLength),
+                blocked_sql_text = showFullText ? r.BlockedSqlText : McpHelpers.TruncateStatement(r.BlockedSqlText, sqlTextPreviewLength),
                 blocked_sql_text_truncated = !showFullText && r.BlockedSqlText != null && r.BlockedSqlText.Length > sqlTextPreviewLength,
                 blocking_status = r.BlockingStatus,
                 blocking_isolation_level = r.BlockingIsolationLevel,
                 blocking_client_app = r.BlockingClientApp,
                 blocking_host_name = r.BlockingHostName,
                 blocking_login_name = r.BlockingLoginName,
-                blocking_sql_text = showFullText ? r.BlockingSqlText : McpHelpers.Truncate(r.BlockingSqlText, sqlTextPreviewLength),
+                blocking_sql_text = showFullText ? r.BlockingSqlText : McpHelpers.TruncateStatement(r.BlockingSqlText, sqlTextPreviewLength),
                 blocking_sql_text_truncated = !showFullText && r.BlockingSqlText != null && r.BlockingSqlText.Length > sqlTextPreviewLength,
                 blocked_transaction_name = r.BlockedTransactionName,
                 blocking_transaction_name = r.BlockingTransactionName,
@@ -431,7 +431,7 @@ public sealed class DarlingMcpBlockingTools
                 deadlock_time = r.DeadlockTime?.ToString("o"),
                 database_name = r.DatabaseName,
                 victim_process_id = r.VictimProcessId,
-                victim_sql_text = McpHelpers.Truncate(r.VictimSqlText, 2000),
+                victim_sql_text = McpHelpers.TruncateStatement(r.VictimSqlText, 2000),
                 process_summary = r.ProcessSummary,
                 has_deadlock_xml = r.HasDeadlockXml,
                 /* #5236: whether the victim's plan is stored, for the web grid's plan button (the XML is
@@ -606,6 +606,14 @@ public sealed class DarlingMcpBlockingTools
                 var (processes, processesTruncated) = DarlingDeadlockProcessRows.Build(
                     r.DeadlockGraphXml, r.DeadlockTime, showFullGraph ? int.MaxValue : rowBudget, statementLength);
                 if (!showFullGraph) rowBudget -= processes.Count;
+                /* #5320: the graph is judged WHOLE before the preview cuts it, as Lite's get_deadlock_detail does (#4348). A cut
+                   graph may end inside a statement's text, and the truncated flag is read off the FILTERED text: a graph withheld
+                   whole is a short placeholder (not truncated), and one the filter re-serialised past the cut is truncated,
+                   whatever its raw length was. The judge is told the cut so a long graph stops being read once nothing before
+                   it can change. */
+                var filteredGraph = showFullGraph || string.IsNullOrEmpty(r.DeadlockGraphXml)
+                    ? r.DeadlockGraphXml
+                    : SensitiveStatements.Xml(r.DeadlockGraphXml, DeadlockGraphPreviewLength) ?? SensitiveStatements.PlaceholderText;
                 return new
             {
                 collection_time = r.CollectionTime.ToString("o"),
@@ -614,8 +622,8 @@ public sealed class DarlingMcpBlockingTools
                 dedup_key = keys[i],
                 processes,
                 processes_truncated = processesTruncated,
-                deadlock_graph_xml = showFullGraph ? r.DeadlockGraphXml : McpHelpers.Truncate(r.DeadlockGraphXml, DeadlockGraphPreviewLength),
-                deadlock_graph_xml_truncated = !showFullGraph && r.DeadlockGraphXml.Length > DeadlockGraphPreviewLength
+                deadlock_graph_xml = showFullGraph ? filteredGraph : McpHelpers.Truncate(filteredGraph, DeadlockGraphPreviewLength),
+                deadlock_graph_xml_truncated = !showFullGraph && filteredGraph!.Length > DeadlockGraphPreviewLength
             };
             });
 

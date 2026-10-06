@@ -24,6 +24,7 @@ using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
+using ModelContextProtocol;
 using ModelContextProtocol.Protocol;
 using ModelContextProtocol.Server;
 using Npgsql;
@@ -77,6 +78,19 @@ internal static class StatementFilterCensus
         }
     }
 
+    /// <summary>Test-only: a tool that THROWS an <c>McpException</c> carrying <c>message</c>, the way a tool that
+    /// reports a failure through the SDK's exception does. Its text reaches the client through the SDK's own error
+    /// result, so a filter has to see the exception to sweep it.</summary>
+    [McpServerToolType]
+    public sealed class ThrowProbeTools
+    {
+        [McpServerTool(Name = ThrowProbeName), Description("Test-only: throws an McpException with the given message.")]
+        public static CallToolResult Throw([Description("The exception message.")] string message) =>
+            throw new McpException(message);
+    }
+
+    public const string ThrowProbeName = "ssf_census_throw";
+
     /// <summary>A real host: the production tool and filter registration plus the probe tool, behind an in-memory
     /// server. Dispose it with the test.</summary>
     public static async Task<TestServer> BuildHostAsync()
@@ -99,7 +113,7 @@ internal static class StatementFilterCensus
             Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance, null);
 
         // Chains onto the SAME builder ConfigureMcpServices created, so every real tool and every real filter stays.
-        builder.Services.AddMcpServer().WithTools<ProbeTools>();
+        builder.Services.AddMcpServer().WithTools<ProbeTools>().WithTools<ThrowProbeTools>();
 
         var app = builder.Build();
         var host = new DarlingMcpHostService(

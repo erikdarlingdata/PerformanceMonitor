@@ -184,9 +184,13 @@ public sealed class McpHostService : BackgroundService
                    fact: it would make a tool's own truncated/*_returned fields wrong, cut calls that
                    explicitly asked for more rows, and drop the newest rows of anything sorted
                    oldest-first. Each tool sizes its own defaults to fit instead — see
-                   McpResponseBudget.DefaultBytes, the one shared size target both SKUs read. */
-                .WithRequestFilters(filters => filters
-                    .AddCallToolFilter(McpUnknownArgumentGuard.Instance));
+                   McpResponseBudget.DefaultBytes, the one shared size target both SKUs read.
+
+                   The statement filter (#4348, SensitiveStatementOutputFilter) is registered LAST, as Darling's
+                   host does: the first filter added is the outermost, so the last one sits next to the tool and
+                   reads each result as the tool's own JSON. It covers every tool with no per-tool change, error
+                   results included. The list lives in AddCallToolFilters so a test runs the REAL registration. */
+                .WithRequestFilters(AddCallToolFilters);
 
             _app = builder.Build();
 
@@ -225,6 +229,15 @@ public sealed class McpHostService : BackgroundService
             AppLogger.Error("MCP", $"MCP server failed: {ex.Message}");
         }
     }
+
+    /// <summary>
+    /// The call-tool filters, in registration order: the unknown-argument guard (#3870), then the statement filter
+    /// (#4348). The same two objects Darling's host registers, from <c>PerformanceMonitor.Common</c>, so the two SKUs
+    /// cannot answer differently. Registered through this one method so a test can start a server with the REAL list.
+    /// </summary>
+    internal static void AddCallToolFilters(IMcpRequestFilterBuilder filters) => filters
+        .AddCallToolFilter(McpUnknownArgumentGuard.Instance)
+        .AddCallToolFilter(SensitiveStatementOutputFilter.Instance);
 
     public override async Task StopAsync(CancellationToken cancellationToken)
     {
