@@ -472,6 +472,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
            read-only notebook definition. Same reach as the triage page it sits beside - everything it
            serves is already reachable through /api/read/*. */
         AlertNotebookEndpoint.Map(app, postgres, analysis, logger);
+        DarlingServerDatabasesEndpoint.Map(app, postgres, logger); // #5245: the database picker's list
     }
 
     /* ─────────────────────────── #1563 custom views: session, catalog, CRUD ─────────────────────────── */
