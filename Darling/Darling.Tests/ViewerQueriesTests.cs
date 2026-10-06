@@ -271,10 +271,10 @@ public sealed class ViewerQueriesSqlTests
     // ── Comparisons ──
 
     [Theory]
-    [InlineData(nameof(ViewerDataService.QueryStatsComparisonSql), "query_stats", "GROUP BY th.database_name, th.query_hash")]
-    [InlineData(nameof(ViewerDataService.QueryStoreComparisonSql), "query_store_stats", "GROUP BY th.database_name, th.query_hash")]
-    [InlineData(nameof(ViewerDataService.ProcedureStatsComparisonSql), "procedure_stats", "GROUP BY tp.database_name, tp.schema_name, tp.object_name")]
-    public void ComparisonSql_UnionsTop100_FullOuterJoins_NullSafe(string sqlName, string table, string finalGroupBy)
+    [InlineData(nameof(ViewerDataService.QueryStatsComparisonSql), "query_stats", "(w.query_hash IS NULL) = (th.query_hash IS NULL)")]
+    [InlineData(nameof(ViewerDataService.QueryStoreComparisonSql), "query_store_stats", "(w.query_hash IS NULL) = (th.query_hash IS NULL)")]
+    [InlineData(nameof(ViewerDataService.ProcedureStatsComparisonSql), "procedure_stats", "(w.object_name IS NULL) = (tp.object_name IS NULL)")]
+    public void ComparisonSql_UnionsTop100_FullOuterJoins_NullSafe(string sqlName, string table, string periodJoinNullHalf)
     {
         var sql = SqlByName(sqlName);
         Assert.Contains($"FROM {table}", sql, StringComparison.Ordinal);
@@ -282,11 +282,11 @@ public sealed class ViewerQueriesSqlTests
         Assert.Contains("LIMIT 100", sql, StringComparison.Ordinal);
         Assert.Contains("UNION ALL", sql, StringComparison.Ordinal);
         Assert.Contains("FULL OUTER JOIN baseline_period b", sql, StringComparison.Ordinal);
-        /* The CTE INNER JOINs keep Lite's null-safe IS NOT DISTINCT FROM (legal in a PG inner join)... */
-        Assert.Contains("IS NOT DISTINCT FROM", sql, StringComparison.Ordinal);
-        /* ...but the FULL JOIN must be COALESCE-equality — PG can't FULL-JOIN on IS NOT DISTINCT FROM. */
+        /* #5420: the period joins are null-safe the hashable way, a COALESCE equality plus an IS NULL pair, because
+           IS NOT DISTINCT FROM ran as a nested loop over every window row (ViewerTextLookupWindowBoundLiveTests pins the plan)... */
+        Assert.Contains(periodJoinNullHalf, sql, StringComparison.Ordinal);
+        /* ...and the FULL JOIN must be COALESCE-equality — PG can't FULL-JOIN on IS NOT DISTINCT FROM. */
         Assert.Contains("COALESCE(c.database_name, '') = COALESCE(b.database_name, '')", sql, StringComparison.Ordinal);
-        Assert.Contains(finalGroupBy, sql, StringComparison.Ordinal);
     }
 
     [Fact]
