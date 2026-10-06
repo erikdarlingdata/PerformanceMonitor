@@ -17,7 +17,9 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 public static class GcfOutput
 {
     // True when GCF output is requested. Read from the environment on each call so it can
-    // be toggled per process (or per test) without a restart.
+    // be toggled per process (or per test) without a restart. This is the production source:
+    // GcfCallToolFilter asks an IGcfOutputFormat registered in the host's services first (#5320)
+    // and falls back to this property when the host registers none, as the real service does.
     public static bool Enabled =>
         string.Equals(
             Environment.GetEnvironmentVariable("DARLING_OUTPUT_FORMAT")?.Trim(),
