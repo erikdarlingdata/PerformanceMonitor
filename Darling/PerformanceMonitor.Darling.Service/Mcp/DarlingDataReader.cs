@@ -1630,26 +1630,46 @@ internal static class DarlingDataReader
                 AND   lw.query_hash IS NOT DISTINCT FROM rk.query_hash
             )
         ),
-        latest_any AS (
+        latest_any AS MATERIALIZED (
+            /* #5299 round 2 (N1): the same per-key probe as latest_in_window, with no window bound - the newest row
+               of the key that has a text, wherever it lies. This used to be one scan of every raw row of the
+               server, joined to the missing keys, which no index can serve (1,440,000 rows at 168 h to find a few
+               texts, once per round, and the refill rounds of #5313 make a missing key near-certain on a window past
+               raw retention). Now each missing key is one probe of idx_query_stats_server_hash_time, so the rows read
+               are bounded by the missing keys, not by the table. MATERIALIZED for the reason latest_text is: the
+               NULL-safe join to the ranked rows cannot hash, and an inlined lookup re-runs once per ranked row. */
             SELECT
-                l.database_name,
-                l.query_hash,
+                m.database_name,
+                m.query_hash,
                 COALESCE(l.query_text, d.query_text) AS query_text
-            FROM
+            FROM missing AS m
+            CROSS JOIN LATERAL
             (
-                SELECT DISTINCT ON (q.database_name, q.query_hash)
-                    q.database_name,
-                    q.query_hash,
-                    q.query_text,
-                    q.query_text_digest
-                FROM query_stats AS q
-                JOIN missing AS m
-                    ON  COALESCE(q.query_hash, '') = COALESCE(m.query_hash, '')
-                    AND q.database_name IS NOT DISTINCT FROM m.database_name
-                    AND q.query_hash IS NOT DISTINCT FROM m.query_hash
-                WHERE q.server_id = $1
-                AND   (q.query_text IS NOT NULL OR EXISTS (SELECT 1 FROM query_text_dim AS d0 WHERE d0.digest = q.query_text_digest))
-                ORDER BY q.database_name, q.query_hash, q.collection_time DESC
+                (
+                    SELECT q.query_text, q.query_text_digest, q.collection_time
+                    FROM query_stats AS q
+                    WHERE m.query_hash IS NOT NULL
+                    AND   q.server_id = $1
+                    AND   q.query_hash = m.query_hash
+                    AND   q.database_name IS NOT DISTINCT FROM m.database_name
+                    AND   (q.query_text IS NOT NULL OR EXISTS (SELECT 1 FROM query_text_dim AS d0 WHERE d0.digest = q.query_text_digest))
+                    ORDER BY q.collection_time DESC
+                    LIMIT 1
+                )
+                UNION ALL
+                (
+                    SELECT q.query_text, q.query_text_digest, q.collection_time
+                    FROM query_stats AS q
+                    WHERE m.query_hash IS NULL
+                    AND   q.server_id = $1
+                    AND   q.query_hash IS NULL
+                    AND   q.database_name IS NOT DISTINCT FROM m.database_name
+                    AND   (q.query_text IS NOT NULL OR EXISTS (SELECT 1 FROM query_text_dim AS d0 WHERE d0.digest = q.query_text_digest))
+                    ORDER BY q.collection_time DESC
+                    LIMIT 1
+                )
+                ORDER BY collection_time DESC
+                LIMIT 1
             ) AS l
             LEFT JOIN query_text_dim AS d ON d.digest = l.query_text_digest
         ),

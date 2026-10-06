@@ -179,6 +179,73 @@ public sealed class TopTextLookupPlanLiveTests
             Assert.Equal("text outside the window", texts["D3/0xH3"]);
         }, "a5299-hourly-keys", bulk: false);
 
+    [Fact]
+    public Task TheHourlyFallback_ProbesEachMissingKey_NotTheWholeRawTable() =>
+        WithSeedAsync(async (connection, serverId, now, ct) =>
+        {
+            /* #5299 round 2, N1: a ranked key whose only text lies outside the window (a window past raw retention) lands in
+               latest_any. It used to scan every raw row of the server and join them to the missing keys; it must probe
+               idx_query_stats_server_hash_time once per missing key instead. 125 keys each have one textless row in the
+               window and 20 rows with a text ten days back, and 5,000 rows of other keys sit beside them, so a whole-table
+               read is about 7,600 rows and a per-key probe is a handful per key. */
+            const string indexName = "idx_query_stats_server_hash_time";
+            await using var probe = new NpgsqlCommand(
+                "SELECT count(*) FROM pg_indexes WHERE schemaname = 'collect' AND indexname = '" + indexName + "'", connection);
+            var created = (long)(await probe.ExecuteScalarAsync(ct))! == 0;
+            await DarlingMcpTestData.ExecAsync(connection, ct,
+                "CREATE INDEX IF NOT EXISTS " + indexName + " ON collect.query_stats (server_id, query_hash, collection_time DESC)");
+            try
+            {
+                const string columns = @"(collection_id, collection_time, server_id, server_name, database_name, query_hash, query_plan_hash, sql_handle, plan_handle,
+                           query_text, delta_execution_count, delta_worker_time, delta_elapsed_time, delta_logical_reads,
+                           delta_logical_writes, delta_physical_reads, min_worker_time, max_worker_time, min_elapsed_time, max_elapsed_time,
+                           min_dop, max_dop, sample_interval_seconds)";
+                await DarlingMcpTestData.ExecAsync(connection, ct,
+                    "INSERT INTO query_stats " + columns + @"
+                      SELECT $1 + g, $2, $3, $4, 'PlanDb', '0xK' || g, '0xP', '0xS', '0xL', NULL, 10, 1000000 - g, 100, 100, 0, 0, 1, 100, 1, 100, 1, 1, 3600
+                      FROM generate_series(1, $5) AS g",
+                    CollectionIdGenerator.Next(), now.AddHours(-1), serverId, ServerName, Candidates);
+                await DarlingMcpTestData.ExecAsync(connection, ct,
+                    "INSERT INTO query_stats " + columns + @"
+                      SELECT $1 + g * 100 + r, $2 - (r * interval '1 minute'), $3, $4, 'PlanDb', '0xK' || g, '0xP', '0xS', '0xL', 'a5299-plan old text ' || g, 10, 100, 100, 100, 0, 0, 1, 100, 1, 100, 1, 1, 3600
+                      FROM generate_series(1, $5) AS g CROSS JOIN generate_series(1, 20) AS r",
+                    CollectionIdGenerator.Next() + 1_000_000, now.AddDays(-10), serverId, ServerName, Candidates);
+                await DarlingMcpTestData.ExecAsync(connection, ct,
+                    "INSERT INTO query_stats " + columns + @"
+                      SELECT $1 + g, $2 - (g * interval '1 second'), $3, $4, 'PlanDb', '0xF' || g, '0xP', '0xS', '0xL', 'a5299-plan filler ' || g, 10, 100, 100, 100, 0, 0, 1, 100, 1, 100, 1, 1, 3600
+                      FROM generate_series(1, 5000) AS g",
+                    CollectionIdGenerator.Next() + 2_000_000, now.AddDays(-9), serverId, ServerName);
+                await DarlingMcpTestData.ExecAsync(connection, ct, "ANALYZE collect.query_stats");
+
+                /* The stand-in keeps the window rows only (the rollup outlives raw), so the ranked keys are the 125 textless
+                   keys and every text has to come from the fallback. */
+                var standIn = "(SELECT server_id, collection_time AS bucket, database_name, query_hash, sql_handle, " +
+                    "delta_execution_count AS execution_count_sum, delta_worker_time AS worker_time_sum, " +
+                    "delta_elapsed_time AS elapsed_time_sum FROM collect.query_stats WHERE collection_time >= '" +
+                    now.AddDays(-2).ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture) + "') AS f";
+                var sql = TopRankings.Apply(DarlingDataReader.TopQueriesHourlySql, TopRanking.Cpu, hourly: true)
+                    .Replace("$FROM$", standIn, StringComparison.Ordinal)
+                    .Replace("$CEIL$", "", StringComparison.Ordinal);
+                var plan = await ExplainAsync(connection, sql, ct, serverId, now.AddHours(-24), now.AddMinutes(5),
+                    P(NpgsqlDbType.Integer, Top), P(NpgsqlDbType.Text, null), P(NpgsqlDbType.Integer, Candidates));
+
+                /* Every raw read that is neither the ranking nor the in-window lookup is the fallback (the old shape was inlined into the join, so no CTE name). */
+                var lookup = Nodes(plan.Root, null).Where(n => n.Relation == "query_stats" && n.Cte != "ranked" && n.Cte != "latest_in_window").ToList();
+                Assert.NotEmpty(lookup);
+                var read = lookup.Sum(n => (n.Rows + n.Removed) * n.Loops);
+                Assert.True(read <= Candidates * 4,
+                    $"the hourly fallback read {read} raw rows [{string.Join("; ", lookup.Select(n => $"{n.NodeType} loops={n.Loops} rows={n.Rows} removed={n.Removed}"))}] for {Candidates} missing keys; " +
+                    "it must probe the index about once per key, not read the raw table");
+            }
+            finally
+            {
+                if (created)
+                {
+                    await DarlingMcpTestData.ExecAsync(connection, ct, "DROP INDEX IF EXISTS collect." + indexName);
+                }
+            }
+        }, "a5299-hourly-fallback", bulk: false);
+
     // ------------------------------------------------------------------ plan reading
 
     private static void AssertLookupRanOnce(string name, Plan plan)

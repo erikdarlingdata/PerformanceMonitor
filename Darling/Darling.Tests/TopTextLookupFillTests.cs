@@ -126,7 +126,7 @@ public sealed class TopTextLookupFillTests
         var sql = DarlingDataReader.TopQueriesHourlySql;
         var window = sql.IndexOf("latest_in_window AS (", StringComparison.Ordinal);
         var missing = sql.IndexOf("missing AS MATERIALIZED (", StringComparison.Ordinal);
-        var any = sql.IndexOf("latest_any AS (", StringComparison.Ordinal);
+        var any = sql.IndexOf("latest_any AS MATERIALIZED (", StringComparison.Ordinal);
         var final = sql.IndexOf("COALESCE(w.query_text, a.query_text) AS query_text", StringComparison.Ordinal);
         Assert.True(window > 0 && window < missing && missing < any && any < final);
         var windowPass = sql[window..missing];
@@ -135,7 +135,12 @@ public sealed class TopTextLookupFillTests
         /* The fallback has no window bound (the rollup outlives raw), but it joins only the missing keys. */
         var anyPass = sql[any..final];
         Assert.DoesNotContain("collection_time >=", anyPass, StringComparison.Ordinal);
-        Assert.Contains("JOIN missing AS m", anyPass, StringComparison.Ordinal);
+        /* #5299 round 2 (N1): a per-key lateral probe of the hash index (two arms, so a NULL-hash key still finds its text),
+           not one DISTINCT ON over every raw row of the server joined to the missing keys. */
+        Assert.Contains("FROM missing AS m", anyPass, StringComparison.Ordinal);
+        Assert.Contains("CROSS JOIN LATERAL", anyPass, StringComparison.Ordinal);
+        Assert.DoesNotContain("DISTINCT ON", anyPass, StringComparison.Ordinal);
+        Assert.Equal(3, Regex.Matches(anyPass, @"LIMIT 1\s*$", RegexOptions.Multiline).Count);
         Assert.Contains("NOT EXISTS", sql[missing..any], StringComparison.Ordinal);
     }
 
