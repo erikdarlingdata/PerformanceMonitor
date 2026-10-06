@@ -162,18 +162,21 @@ cd "C:\Program Files\PerformanceMonitorDarling"
 It prints `Password: ` and waits. Type the password, press Enter, and it prints one line of base64 (it starts
 `AQAAA`) — paste that into `"encryptedPassword"`.
 
-> **`--encrypt-password` writes its prompt and its confirmation to stderr; only the blob goes to stdout.**
-> That is deliberate (`… --encrypt-password > blob.txt` captures exactly the blob and nothing else) but it is
-> fatal under `$ErrorActionPreference = 'Stop'`: PowerShell treats the stderr write as a terminating error,
-> and then echoes the offending source line — which, if you piped the password in, leaks it into your
-> scrollback. In a script, do this instead:
+> **`--encrypt-password` is quiet when a script drives it.** The `Password: ` prompt goes to stderr only when
+> stdin is a console, and the "Paste the line above" hint goes to stderr only when stdout is a console. With the
+> password piped in and the output captured, a successful run writes nothing to stderr and one line of base64 to
+> stdout, so it works under `$ErrorActionPreference = 'Stop'` with no workaround:
 >
 > ```powershell
-> $ErrorActionPreference = 'Continue'
+> $ErrorActionPreference = 'Stop'
 > $blob = Read-Host -Prompt 'password' |
->     & "C:\Program Files\PerformanceMonitorDarling\PerformanceMonitor.Darling.Service.exe" --encrypt-password 2>$null |
->     Select-String -Pattern '^AQAAA' | ForEach-Object { $_.Line }
+>     & "C:\Program Files\PerformanceMonitorDarling\PerformanceMonitor.Darling.Service.exe" --encrypt-password
 > ```
+>
+> A failure still writes its error line to stderr and exits 1, and the guidance for a console that gave it no
+> input goes to stdout. (Older builds wrote the prompt and the hint to stderr unconditionally, which stopped a
+> `'Stop'` script and echoed the piped-in password in the error text; on one of those, wrap the call with
+> `$ErrorActionPreference = 'Continue'` and add `2>$null`.)
 
 The blob is DPAPI at **LocalMachine** scope with a fixed entropy string, so it decrypts **only on the machine
 that produced it**. Run `--encrypt-password` on the service host, and re-run it if you ever move `darling.json`
@@ -891,9 +894,9 @@ Every one of these has cost somebody real time.
    documentation. Edit it as text. ([Part 0](#darlingjson-is-jsonc-not-json))
 2. **First start takes about two minutes** and looks like a hang. It is unpacking PostgreSQL and running
    `initdb`. Do not kill it. ([1.7](#17-wait-about-two-minutes))
-3. **`--encrypt-password` prompts on stderr**, which is a terminating error under
+3. **Older builds of `--encrypt-password` prompt on stderr**, which is a terminating error under
    `$ErrorActionPreference = 'Stop'` — and PowerShell then echoes the source line, leaking a piped-in password.
-   ([1.4](#14-write-darlingjson))
+   Current builds stay quiet when stdin or stdout is redirected. ([1.4](#14-write-darlingjson))
 4. **Every DPAPI blob is LocalMachine-scoped** — SQL passwords, the MCP token, the web token. They decrypt only
    on the machine that encrypted them. Copying `darling.json` to another box gives you an undecryptable file,
    not a portable config.
