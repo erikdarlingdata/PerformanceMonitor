@@ -33,23 +33,25 @@ public sealed class ViewerProcedureStatsRow
     public long TotalExecutions { get; set; }
     public long TotalCpuUs { get; set; }
     public long TotalElapsedUs { get; set; }
-    public long TotalLogicalReads { get; set; }
-    public long TotalLogicalWrites { get; set; }
-    public long TotalPhysicalReads { get; set; }
-    public long MinWorkerTimeUs { get; set; }
-    public long MaxWorkerTimeUs { get; set; }
-    public long MinElapsedTimeUs { get; set; }
-    public long MaxElapsedTimeUs { get; set; }
-    public long MinLogicalReads { get; set; }
-    public long MaxLogicalReads { get; set; }
-    public long MinPhysicalReads { get; set; }
-    public long MaxPhysicalReads { get; set; }
-    public long MinLogicalWrites { get; set; }
-    public long MaxLogicalWrites { get; set; }
-    public long TotalSpills { get; set; }
-    public double AvgSpills { get; set; }
-    public long MinSpills { get; set; }
-    public long MaxSpills { get; set; }
+    public long? TotalLogicalReads { get; set; }
+    public long? TotalLogicalWrites { get; set; }
+    public long? TotalPhysicalReads { get; set; }
+    /* #5329: null on the hourly route. The rollup keeps min/max of per-collection deltas (sums over many
+       executions), not the per-execution extremes the raw route reads, so showing them would be a wrong number. */
+    public long? MinWorkerTimeUs { get; set; }
+    public long? MaxWorkerTimeUs { get; set; }
+    public long? MinElapsedTimeUs { get; set; }
+    public long? MaxElapsedTimeUs { get; set; }
+    public long? MinLogicalReads { get; set; }
+    public long? MaxLogicalReads { get; set; }
+    public long? MinPhysicalReads { get; set; }
+    public long? MaxPhysicalReads { get; set; }
+    public long? MinLogicalWrites { get; set; }
+    public long? MaxLogicalWrites { get; set; }
+    public long? TotalSpills { get; set; }
+    public double? AvgSpills { get; set; }
+    public long? MinSpills { get; set; }
+    public long? MaxSpills { get; set; }
     public DateTime? CachedTime { get; set; }
     public DateTime? LastExecutionTime { get; set; }
     public string SqlHandle { get; set; } = "";
@@ -65,11 +67,11 @@ public sealed class ViewerProcedureStatsRow
     public double TotalElapsedMs => TotalElapsedUs / 1000.0;
     public double AvgCpuMs => TotalExecutions > 0 ? TotalCpuMs / TotalExecutions : 0;
     public double AvgElapsedMs => TotalExecutions > 0 ? TotalElapsedMs / TotalExecutions : 0;
-    public double AvgReads => TotalExecutions > 0 ? (double)TotalLogicalReads / TotalExecutions : 0;
-    public double MinCpuMs => MinWorkerTimeUs / 1000.0;
-    public double MaxCpuMs => MaxWorkerTimeUs / 1000.0;
-    public double MinElapsedMs => MinElapsedTimeUs / 1000.0;
-    public double MaxElapsedMs => MaxElapsedTimeUs / 1000.0;
+    public double? AvgReads => TotalLogicalReads is null ? null : TotalExecutions > 0 ? (double)TotalLogicalReads.Value / TotalExecutions : 0;
+    public double? MinCpuMs => MinWorkerTimeUs is null ? null : MinWorkerTimeUs / 1000.0;
+    public double? MaxCpuMs => MaxWorkerTimeUs is null ? null : MaxWorkerTimeUs / 1000.0;
+    public double? MinElapsedMs => MinElapsedTimeUs is null ? null : MinElapsedTimeUs / 1000.0;
+    public double? MaxElapsedMs => MaxElapsedTimeUs is null ? null : MaxElapsedTimeUs / 1000.0;
     public string CachedTimeFormatted => ViewerDataService.FormatServerClock(CachedTime);
     public string LastExecutionTimeLocal => ViewerDataService.FormatServerClock(LastExecutionTime);
 }
@@ -146,8 +148,9 @@ public sealed partial class ViewerDataService
     /// <c>DarlingDataReader.GetTopProceduresByCpuRoutedAsync</c> does — the tier decided over
     /// <see cref="RollupCoverage.For"/>'s legacy pair, Daily clamped to Hourly (#4231).
     /// An hourly-routed page carries only what the rollup has: <c>object_type</c>/<c>sql_handle</c>/
-    /// <c>plan_handle</c>/reads/writes/spills columns are unavailable and read as their defaults, exactly the
-    /// same disclosure the MCP payload's <c>tier_used</c>/<c>precision_note</c> make. An hourly-routed page
+    /// <c>plan_handle</c> are empty, and the reads/writes/physical-reads/spills columns the rollup keeps no copy of are
+    /// NULL on the row (#5329), so the grid shows them blank instead of a false 0 — the same disclosure the MCP
+    /// payload's <c>tier_used</c>/<c>precision_note</c> make (null, never 0). An hourly-routed page
     /// also stops BEFORE <paramref name="endUtc"/> (a bucket is stamped at its start, so an end on the hour
     /// does not add the hour that begins there). Use
     /// <see cref="GetTopProceduresByCpuTierAsync"/> to also learn which tier answered.</para>
@@ -214,10 +217,7 @@ public sealed partial class ViewerDataService
                 TotalExecutions = reader.IsDBNull(3) ? 0 : reader.GetInt64(3),
                 TotalCpuUs = reader.IsDBNull(4) ? 0 : reader.GetInt64(4),
                 TotalElapsedUs = reader.IsDBNull(5) ? 0 : reader.GetInt64(5),
-                MinWorkerTimeUs = reader.IsDBNull(6) ? 0 : reader.GetInt64(6),
-                MaxWorkerTimeUs = reader.IsDBNull(7) ? 0 : reader.GetInt64(7),
-                MinElapsedTimeUs = reader.IsDBNull(8) ? 0 : reader.GetInt64(8),
-                MaxElapsedTimeUs = reader.IsDBNull(9) ? 0 : reader.GetInt64(9),
+                /* #5329: the four min/max time fields stay null here. */
             });
         }
 
@@ -236,11 +236,7 @@ public sealed partial class ViewerDataService
             object_name,
             CAST(SUM(execution_count_sum) AS bigint) AS total_executions,
             CAST(SUM(worker_time_sum) AS bigint) AS total_cpu_us,
-            CAST(SUM(elapsed_time_sum) AS bigint) AS total_elapsed_us,
-            MIN(worker_time_min) AS min_worker_time,
-            MAX(worker_time_max) AS max_worker_time,
-            MIN(elapsed_time_min) AS min_elapsed_time,
-            MAX(elapsed_time_max) AS max_elapsed_time
+            CAST(SUM(elapsed_time_sum) AS bigint) AS total_elapsed_us
         FROM {fromClause}
         WHERE server_id = $1
         AND   bucket >= $2
