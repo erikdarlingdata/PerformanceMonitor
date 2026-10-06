@@ -79,7 +79,7 @@ public sealed class StragglerCommandTimeoutTests
         ("PgPlanForceActionStore.cs", Hop.Store, 4,
             nameof(ServiceCommandDeadlines.PostAnalysisForcePlanSeconds),
             Assigns(@"ServiceCommandDeadlines\.PostAnalysisForcePlanSeconds")),
-        ("DarlingCliCommands.cs", Hop.Store, 7,   /* 7 since #4938: the collector run-time read-back is a store read of its own */
+        ("DarlingCliCommands.cs", Hop.Store, 8,   /* 7 since #4938: the collector run-time read-back is a store read of its own; 8 since #5366: the old-format password pin-table check */
             "ServiceCommandDeadlines.Cli{StoreRead,BudgetBackstop}Seconds",
             Assigns(@"ServiceCommandDeadlines\.Cli(?:StoreRead|BudgetBackstop)Seconds")),
     };
