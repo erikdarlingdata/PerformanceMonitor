@@ -42,13 +42,15 @@ public static class PasswordKeyTables
     /// <summary>
     /// The four tables, the one-row marker, the owner-only trigger function and its two triggers per table, as the V165
     /// rung runs them. Idempotent: tables and the unique index are guarded, the marker row is inserted once
-    /// (<c>ON CONFLICT DO NOTHING</c>), and the function and triggers are replaced. The rung embeds this text, so editing
-    /// it edits a shipped rung: add a new rung instead; <c>PasswordKeyRungTests</c> pins the shape.
+    /// (<c>ON CONFLICT DO NOTHING</c>), and the function is replaced and each trigger is dropped and created again. The rung embeds this text, so once V165 has
+    /// shipped, editing it edits a shipped rung: add a new rung instead; <c>PasswordKeyRungTests</c> pins the shape.
     ///
     /// <para>The function names the owner by <c>session_user</c> against the owner of the table it fires on, with every
     /// catalog relation schema-qualified and <c>pg_temp</c> last in the function's search path, so a session's own
     /// temporary objects are never consulted. It is not <c>SECURITY DEFINER</c>, and no other function may write these
-    /// tables on a caller's behalf.</para>
+    /// tables on a caller's behalf. A session user whose membership in the owner role cannot be told (a NULL answer)
+    /// is refused. Every trigger is <c>ENABLE ALWAYS</c>, so it also fires when <c>session_replication_role</c> is
+    /// <c>replica</c>.</para>
     /// </summary>
     public const string CreateSql = @"
 CREATE TABLE IF NOT EXISTS config.password_key
@@ -63,7 +65,12 @@ CREATE TABLE IF NOT EXISTS config.password_key
     CONSTRAINT pk_password_key PRIMARY KEY (key_id),
     CONSTRAINT ck_password_key_id CHECK (key_id ~ '^[0-9a-f]{16}$'),
     CONSTRAINT ck_password_key_state CHECK (state IN ('current', 'replaced')),
-    CONSTRAINT ck_password_key_replaced_reason CHECK (replaced_reason IS NULL OR replaced_reason IN ('reset', 'rotated'))
+    CONSTRAINT ck_password_key_replaced_reason CHECK (replaced_reason IS NULL OR replaced_reason IN ('reset', 'rotated')),
+    CONSTRAINT ck_password_key_algorithm CHECK (algorithm IN ('RSA3072-OAEP-SHA256/A256GCM')),
+    CONSTRAINT ck_password_key_public_key_size CHECK (octet_length(public_key) BETWEEN 256 AND 2048),
+    CONSTRAINT ck_password_key_replaced_columns CHECK (
+        (state = 'current' AND replaced_reason IS NULL AND replaced_at IS NULL)
+        OR (state = 'replaced' AND replaced_at IS NOT NULL))
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS ux_password_key_current ON config.password_key ((true)) WHERE state = 'current';
@@ -109,10 +116,10 @@ LANGUAGE plpgsql
 SET search_path = pg_catalog, pg_temp
 AS $fn$
 BEGIN
-    IF NOT pg_catalog.pg_has_role(
+    IF pg_catalog.pg_has_role(
                session_user,
                (SELECT c.relowner FROM pg_catalog.pg_class AS c WHERE c.oid = TG_RELID),
-               'USAGE') THEN
+               'USAGE') IS NOT TRUE THEN
         RAISE EXCEPTION 'Only the store owner can change the password key tables.' USING ERRCODE = 'PW010';
     END IF;
 
@@ -130,33 +137,50 @@ $fn$;
 
 REVOKE ALL ON FUNCTION config.password_key_owner_only() FROM PUBLIC;
 
-CREATE OR REPLACE TRIGGER trg_password_key_owner_only_row
+DROP TRIGGER IF EXISTS trg_password_key_owner_only_row ON config.password_key;
+CREATE TRIGGER trg_password_key_owner_only_row
     BEFORE INSERT OR UPDATE OR DELETE ON config.password_key
     FOR EACH ROW EXECUTE FUNCTION config.password_key_owner_only();
-CREATE OR REPLACE TRIGGER trg_password_key_owner_only_truncate
+DROP TRIGGER IF EXISTS trg_password_key_owner_only_truncate ON config.password_key;
+CREATE TRIGGER trg_password_key_owner_only_truncate
     BEFORE TRUNCATE ON config.password_key
     FOR EACH STATEMENT EXECUTE FUNCTION config.password_key_owner_only();
 
-CREATE OR REPLACE TRIGGER trg_password_key_service_owner_only_row
+DROP TRIGGER IF EXISTS trg_password_key_service_owner_only_row ON config.password_key_service;
+CREATE TRIGGER trg_password_key_service_owner_only_row
     BEFORE INSERT OR UPDATE OR DELETE ON config.password_key_service
     FOR EACH ROW EXECUTE FUNCTION config.password_key_owner_only();
-CREATE OR REPLACE TRIGGER trg_password_key_service_owner_only_truncate
+DROP TRIGGER IF EXISTS trg_password_key_service_owner_only_truncate ON config.password_key_service;
+CREATE TRIGGER trg_password_key_service_owner_only_truncate
     BEFORE TRUNCATE ON config.password_key_service
     FOR EACH STATEMENT EXECUTE FUNCTION config.password_key_owner_only();
 
-CREATE OR REPLACE TRIGGER trg_legacy_secret_pin_owner_only_row
+DROP TRIGGER IF EXISTS trg_legacy_secret_pin_owner_only_row ON config.legacy_secret_pin;
+CREATE TRIGGER trg_legacy_secret_pin_owner_only_row
     BEFORE INSERT OR UPDATE OR DELETE ON config.legacy_secret_pin
     FOR EACH ROW EXECUTE FUNCTION config.password_key_owner_only();
-CREATE OR REPLACE TRIGGER trg_legacy_secret_pin_owner_only_truncate
+DROP TRIGGER IF EXISTS trg_legacy_secret_pin_owner_only_truncate ON config.legacy_secret_pin;
+CREATE TRIGGER trg_legacy_secret_pin_owner_only_truncate
     BEFORE TRUNCATE ON config.legacy_secret_pin
     FOR EACH STATEMENT EXECUTE FUNCTION config.password_key_owner_only();
 
-CREATE OR REPLACE TRIGGER trg_legacy_secret_pin_marker_owner_only_row
+DROP TRIGGER IF EXISTS trg_legacy_secret_pin_marker_owner_only_row ON config.legacy_secret_pin_marker;
+CREATE TRIGGER trg_legacy_secret_pin_marker_owner_only_row
     BEFORE INSERT OR UPDATE OR DELETE ON config.legacy_secret_pin_marker
     FOR EACH ROW EXECUTE FUNCTION config.password_key_owner_only();
-CREATE OR REPLACE TRIGGER trg_legacy_secret_pin_marker_owner_only_truncate
+DROP TRIGGER IF EXISTS trg_legacy_secret_pin_marker_owner_only_truncate ON config.legacy_secret_pin_marker;
+CREATE TRIGGER trg_legacy_secret_pin_marker_owner_only_truncate
     BEFORE TRUNCATE ON config.legacy_secret_pin_marker
-    FOR EACH STATEMENT EXECUTE FUNCTION config.password_key_owner_only();";
+    FOR EACH STATEMENT EXECUTE FUNCTION config.password_key_owner_only();
+
+ALTER TABLE config.password_key ENABLE ALWAYS TRIGGER trg_password_key_owner_only_row;
+ALTER TABLE config.password_key ENABLE ALWAYS TRIGGER trg_password_key_owner_only_truncate;
+ALTER TABLE config.password_key_service ENABLE ALWAYS TRIGGER trg_password_key_service_owner_only_row;
+ALTER TABLE config.password_key_service ENABLE ALWAYS TRIGGER trg_password_key_service_owner_only_truncate;
+ALTER TABLE config.legacy_secret_pin ENABLE ALWAYS TRIGGER trg_legacy_secret_pin_owner_only_row;
+ALTER TABLE config.legacy_secret_pin ENABLE ALWAYS TRIGGER trg_legacy_secret_pin_owner_only_truncate;
+ALTER TABLE config.legacy_secret_pin_marker ENABLE ALWAYS TRIGGER trg_legacy_secret_pin_marker_owner_only_row;
+ALTER TABLE config.legacy_secret_pin_marker ENABLE ALWAYS TRIGGER trg_legacy_secret_pin_marker_owner_only_truncate;";
 
     /// <summary>The one key whose state is <c>current</c>; the unique index allows at most one such row.</summary>
     public const string ReadCurrentSql = @"

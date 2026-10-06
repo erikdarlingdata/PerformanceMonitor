@@ -73,9 +73,15 @@ public sealed class PasswordKeyRungTests
         Assert.Contains("INSERT INTO config.legacy_secret_pin_marker (id, state)\nVALUES (1, 'pending')\nON CONFLICT (id) DO NOTHING;", sql, StringComparison.Ordinal);
 
         /* No statement of the rung starts with one of these: the rung creates and seeds, and moves no data. */
-        foreach (var verb in new[] { "ALTER", "UPDATE", "DELETE", "GRANT", "DROP", "TRUNCATE" })
+        foreach (var verb in new[] { "UPDATE", "DELETE", "GRANT", "TRUNCATE" })
         {
             Assert.DoesNotMatch(@"(?m)^\s*" + verb + @"\b", sql);
+        }
+
+        /* The only ALTER and DROP statements are the trigger ones: enable it always, and drop it before it is created again. */
+        foreach (var line in sql.Split('\n').Select(l => l.Trim()).Where(l => l.StartsWith("ALTER", StringComparison.Ordinal) || l.StartsWith("DROP", StringComparison.Ordinal)))
+        {
+            Assert.Matches(@"^(ALTER TABLE config\.\w+ ENABLE ALWAYS TRIGGER \w+|DROP TRIGGER IF EXISTS \w+ ON config\.\w+);$", line);
         }
     }
 
@@ -91,6 +97,9 @@ public sealed class PasswordKeyRungTests
         Assert.Contains("SET search_path = pg_catalog, pg_temp", function, StringComparison.Ordinal);
         Assert.DoesNotContain("SECURITY DEFINER", function, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("pg_catalog.pg_has_role(", function, StringComparison.Ordinal);
+        /* A NULL answer (a session user whose membership cannot be told) refuses too: the test is IS NOT TRUE, never NOT. */
+        Assert.Contains("'USAGE') IS NOT TRUE THEN", function, StringComparison.Ordinal);
+        Assert.DoesNotContain("IF NOT pg_catalog.pg_has_role", function, StringComparison.Ordinal);
         Assert.Contains("session_user", function, StringComparison.Ordinal);
         Assert.DoesNotContain("current_user", function, StringComparison.Ordinal);
         Assert.Contains("'USAGE'", function, StringComparison.Ordinal);
@@ -112,11 +121,27 @@ public sealed class PasswordKeyRungTests
         var sql = Statements();
         foreach (var table in new[] { "password_key", "password_key_service", "legacy_secret_pin", "legacy_secret_pin_marker" })
         {
-            Assert.Contains($"CREATE OR REPLACE TRIGGER trg_{table}_owner_only_row\n    BEFORE INSERT OR UPDATE OR DELETE ON config.{table}\n    FOR EACH ROW EXECUTE FUNCTION config.password_key_owner_only();", sql, StringComparison.Ordinal);
-            Assert.Contains($"CREATE OR REPLACE TRIGGER trg_{table}_owner_only_truncate\n    BEFORE TRUNCATE ON config.{table}\n    FOR EACH STATEMENT EXECUTE FUNCTION config.password_key_owner_only();", sql, StringComparison.Ordinal);
+            Assert.Contains($"DROP TRIGGER IF EXISTS trg_{table}_owner_only_row ON config.{table};\nCREATE TRIGGER trg_{table}_owner_only_row\n    BEFORE INSERT OR UPDATE OR DELETE ON config.{table}\n    FOR EACH ROW EXECUTE FUNCTION config.password_key_owner_only();", sql, StringComparison.Ordinal);
+            Assert.Contains($"DROP TRIGGER IF EXISTS trg_{table}_owner_only_truncate ON config.{table};\nCREATE TRIGGER trg_{table}_owner_only_truncate\n    BEFORE TRUNCATE ON config.{table}\n    FOR EACH STATEMENT EXECUTE FUNCTION config.password_key_owner_only();", sql, StringComparison.Ordinal);
+            /* Enabled always, so a session_replication_role of replica does not skip them. */
+            Assert.Contains($"ALTER TABLE config.{table} ENABLE ALWAYS TRIGGER trg_{table}_owner_only_row;", sql, StringComparison.Ordinal);
+            Assert.Contains($"ALTER TABLE config.{table} ENABLE ALWAYS TRIGGER trg_{table}_owner_only_truncate;", sql, StringComparison.Ordinal);
         }
 
-        Assert.Equal(8, Regex.Matches(sql, @"CREATE OR REPLACE TRIGGER").Count);
+        Assert.Equal(8, Regex.Matches(sql, @"(?m)^CREATE TRIGGER ").Count);
+        Assert.Equal(8, Regex.Matches(sql, @"(?m)^DROP TRIGGER IF EXISTS ").Count);
+        Assert.Equal(8, Regex.Matches(sql, @"ENABLE ALWAYS TRIGGER").Count);
+        Assert.DoesNotContain("CREATE OR REPLACE TRIGGER", sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ThePasswordKeyTable_CarriesTheAlgorithmSizeAndReplacedColumnChecks()
+    {
+        var sql = Statements();
+        Assert.Contains("CONSTRAINT ck_password_key_algorithm CHECK (algorithm IN ('RSA3072-OAEP-SHA256/A256GCM'))", sql, StringComparison.Ordinal);
+        Assert.Contains("CONSTRAINT ck_password_key_public_key_size CHECK (octet_length(public_key) BETWEEN 256 AND 2048)", sql, StringComparison.Ordinal);
+        Assert.Contains("(state = 'current' AND replaced_reason IS NULL AND replaced_at IS NULL)", sql, StringComparison.Ordinal);
+        Assert.Contains("OR (state = 'replaced' AND replaced_at IS NOT NULL)", sql, StringComparison.Ordinal);
     }
 
     [Fact]

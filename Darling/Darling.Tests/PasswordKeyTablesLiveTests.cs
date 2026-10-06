@@ -22,7 +22,7 @@ namespace Darling.Tests;
 /// The live half of the V165 pins (#5366), over a scratch store provisioned by the product's own batch: the owner-only
 /// trigger on each of the four tables, with and without grants, the temporary-table lookalike a caller can create, the
 /// unique <c>current</c> key, the one <c>pending</c> marker row and the two reads. The roles carry fixed cluster-wide
-/// names, so a rig that already has them skips these facts (the same rule the security-split facts follow).
+/// names, so a cluster that already has them skips these facts (the same rule the security-split facts follow).
 /// </summary>
 [Collection("live-postgres")]
 public sealed class PasswordKeyTablesLiveTests
@@ -32,8 +32,8 @@ public sealed class PasswordKeyTablesLiveTests
     {
         ["config.password_key"] =
         [
-            "INSERT INTO config.password_key (key_id, public_key, algorithm, state) VALUES ('00112233445566ff', '\\x01'::bytea, 'RSA-OAEP-SHA256', 'replaced')",
-            "UPDATE config.password_key SET algorithm = 'RSA-OAEP-SHA256-x'",
+            "INSERT INTO config.password_key (key_id, public_key, algorithm, state, replaced_at) VALUES ('00112233445566ff', decode(repeat('01', 400), 'hex'), 'RSA3072-OAEP-SHA256/A256GCM', 'replaced', now() AT TIME ZONE 'UTC')",
+            "UPDATE config.password_key SET created_at = created_at",
             "DELETE FROM config.password_key",
             "TRUNCATE config.password_key",
         ],
@@ -74,7 +74,7 @@ public sealed class PasswordKeyTablesLiveTests
         await PgMigrations.MigrateAsync(owner, ct);
         Assert.SkipWhen(
             await ScalarAsync(owner, "SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname IN ('admin', 'viewer', 'mcp'))", ct) is true,
-            "A cluster-wide admin/viewer/mcp role already exists on this rig; the provisioning batch would adopt it.");
+            "A cluster-wide admin/viewer/mcp role already exists on this cluster; the provisioning batch would adopt it.");
 
         var bodySucceeded = false;
         try
@@ -120,10 +120,10 @@ public sealed class PasswordKeyTablesLiveTests
             Assert.Equal("pending", await ScalarAsync(owner, "SELECT state FROM config.legacy_secret_pin_marker", ct));
 
             /* The owner's own writes pass, whatever the other roles hold. */
-            await ExecAsync(owner, "UPDATE config.password_key SET algorithm = 'RSA-OAEP-SHA256-x'", ct);
+            await ExecAsync(owner, "UPDATE config.password_key SET created_at = created_at", ct);
             await ExecAsync(owner, "UPDATE config.legacy_secret_pin_marker SET state = 'done'", ct);
             await ExecAsync(owner, "UPDATE config.legacy_secret_pin_marker SET state = 'pending'", ct);
-            await ExecAsync(owner, "INSERT INTO config.password_key (key_id, public_key, algorithm, state, replaced_reason) VALUES ('00112233445566ff', '\\x01'::bytea, 'RSA-OAEP-SHA256', 'replaced', 'reset')", ct);
+            await ExecAsync(owner, "INSERT INTO config.password_key (key_id, public_key, algorithm, state, replaced_at, replaced_reason) VALUES ('00112233445566ff', decode(repeat('01', 400), 'hex'), 'RSA3072-OAEP-SHA256/A256GCM', 'replaced', now() AT TIME ZONE 'UTC', 'reset')", ct);
             await ExecAsync(owner, "DELETE FROM config.password_key WHERE key_id = '00112233445566ff'", ct);
             await ExecAsync(owner, "TRUNCATE config.password_key_service", ct);
             Assert.Equal(0L, await ScalarAsync(owner, "SELECT count(*) FROM config.password_key_service", ct));
@@ -150,7 +150,7 @@ public sealed class PasswordKeyTablesLiveTests
         await PgMigrations.MigrateAsync(owner, ct);
         Assert.SkipWhen(
             await ScalarAsync(owner, "SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname IN ('admin', 'viewer', 'mcp'))", ct) is true,
-            "A cluster-wide admin/viewer/mcp role already exists on this rig; the provisioning batch would adopt it.");
+            "A cluster-wide admin/viewer/mcp role already exists on this cluster; the provisioning batch would adopt it.");
 
         var bodySucceeded = false;
         try
@@ -160,7 +160,7 @@ public sealed class PasswordKeyTablesLiveTests
                 15, PasswordReassert.All, ProvisioningTarget.ComposeStore(OwnerRoleOf(owner), scratch.DatabaseName)), ct);
             await SeedRowsAsync(owner, ct);
 
-            /* The viewer keeps TEMPORARY through PUBLIC on this store. Give it every write privilege so the trigger is the only
+            /* Roles here can create temporary tables. Give it every write privilege so the trigger is the only
                check left, then let it create a temporary table that is shaped like pg_class and names the viewer as the owner of
                every relation. */
             await ExecAsync(owner,
@@ -175,11 +175,12 @@ public sealed class PasswordKeyTablesLiveTests
                 Assert.Equal(PasswordKeyTables.OwnerOnlySqlState, await SqlStateOfAsync(viewer, statement, ct));
             }
 
-            /* The control: the same lookup written the other way (an unqualified catalog name, and a path that leaves pg_temp
-               to be searched first) is passed by the same temporary table, so the facts above can fail. */
+            /* The control. PostgreSQL searches a session's temporary relations first unless pg_temp is listed last in the search
+               path, so an unqualified catalog name under a path without pg_temp last finds the temporary table. The same lookup
+               written that way is passed by the same temporary table, which shows the facts above can fail. */
             await ExecAsync(owner, @"
-CREATE TABLE public.shadow_control (n integer);
-CREATE FUNCTION public.shadow_control_guard() RETURNS trigger LANGUAGE plpgsql SET search_path = pg_catalog AS $fn$
+CREATE TABLE public.temp_name_control (n integer);
+CREATE FUNCTION public.temp_name_control_guard() RETURNS trigger LANGUAGE plpgsql SET search_path = pg_catalog AS $fn$
 BEGIN
     IF NOT pg_has_role(session_user, (SELECT c.relowner FROM pg_class AS c WHERE c.oid = TG_RELID), 'USAGE') THEN
         RAISE EXCEPTION 'refused' USING ERRCODE = 'PW010';
@@ -187,9 +188,9 @@ BEGIN
     RETURN NEW;
 END;
 $fn$;
-CREATE TRIGGER shadow_control_trg BEFORE INSERT ON public.shadow_control FOR EACH ROW EXECUTE FUNCTION public.shadow_control_guard();
-GRANT INSERT ON public.shadow_control TO viewer;", ct);
-            Assert.Null(await SqlStateOfAsync(viewer, "INSERT INTO public.shadow_control VALUES (1)", ct));
+CREATE TRIGGER temp_name_control_trg BEFORE INSERT ON public.temp_name_control FOR EACH ROW EXECUTE FUNCTION public.temp_name_control_guard();
+GRANT INSERT ON public.temp_name_control TO viewer;", ct);
+            Assert.Null(await SqlStateOfAsync(viewer, "INSERT INTO public.temp_name_control VALUES (1)", ct));
 
             bodySucceeded = true;
         }
@@ -218,21 +219,32 @@ GRANT INSERT ON public.shadow_control TO viewer;", ct);
             Assert.Null(await PasswordKeyTables.ReadCurrentAsync(connection, ct));
             Assert.Null(await PasswordKeyTables.ReadNewestServiceStateAsync(connection, ct));
 
-            await ExecAsync(connection, "INSERT INTO config.password_key (key_id, public_key, algorithm, state) VALUES ('aaaaaaaaaaaaaaaa', '\\x0102'::bytea, 'RSA-OAEP-SHA256', 'current')", ct);
+            await ExecAsync(connection, "INSERT INTO config.password_key (key_id, public_key, algorithm, state) VALUES ('aaaaaaaaaaaaaaaa', decode(repeat('01', 400), 'hex'), 'RSA3072-OAEP-SHA256/A256GCM', 'current')", ct);
             Assert.Equal("23505", await SqlStateOfAsync(connection,
-                "INSERT INTO config.password_key (key_id, public_key, algorithm, state) VALUES ('bbbbbbbbbbbbbbbb', '\\x0304'::bytea, 'RSA-OAEP-SHA256', 'current')", ct));
+                "INSERT INTO config.password_key (key_id, public_key, algorithm, state) VALUES ('bbbbbbbbbbbbbbbb', decode(repeat('03', 400), 'hex'), 'RSA3072-OAEP-SHA256/A256GCM', 'current')", ct));
             Assert.Equal("23514", await SqlStateOfAsync(connection,
-                "INSERT INTO config.password_key (key_id, public_key, algorithm, state) VALUES ('NOT-A-KEY-ID', '\\x0304'::bytea, 'RSA-OAEP-SHA256', 'replaced')", ct));
+                "INSERT INTO config.password_key (key_id, public_key, algorithm, state, replaced_at) VALUES ('NOT-A-KEY-ID', decode(repeat('03', 400), 'hex'), 'RSA3072-OAEP-SHA256/A256GCM', 'replaced', now() AT TIME ZONE 'UTC')", ct));
+
+            /* The row checks: the one algorithm name, a public key of a plausible size, and the replaced columns that go with the state. */
+            const string Columns = "INSERT INTO config.password_key (key_id, public_key, algorithm, state, replaced_reason, replaced_at) VALUES ";
+            Assert.Equal("23514", await SqlStateOfAsync(connection, Columns + "('cccccccccccccccc', decode(repeat('05', 400), 'hex'), 'RSA-OAEP-SHA256', 'replaced', NULL, now() AT TIME ZONE 'UTC')", ct));
+            Assert.Equal("23514", await SqlStateOfAsync(connection, Columns + "('cccccccccccccccc', decode(repeat('05', 255), 'hex'), 'RSA3072-OAEP-SHA256/A256GCM', 'replaced', NULL, now() AT TIME ZONE 'UTC')", ct));
+            Assert.Equal("23514", await SqlStateOfAsync(connection, Columns + "('cccccccccccccccc', decode(repeat('05', 2049), 'hex'), 'RSA3072-OAEP-SHA256/A256GCM', 'replaced', NULL, now() AT TIME ZONE 'UTC')", ct));
+            Assert.Equal("23514", await SqlStateOfAsync(connection, Columns + "('cccccccccccccccc', decode(repeat('05', 400), 'hex'), 'RSA3072-OAEP-SHA256/A256GCM', 'replaced', NULL, NULL)", ct));
+            Assert.Equal("23514", await SqlStateOfAsync(connection, "UPDATE config.password_key SET replaced_at = now() AT TIME ZONE 'UTC' WHERE state = 'current'", ct));
+            Assert.Equal("23514", await SqlStateOfAsync(connection, "UPDATE config.password_key SET replaced_reason = 'reset' WHERE state = 'current'", ct));
+            Assert.Null(await SqlStateOfAsync(connection, Columns + "('cccccccccccccccc', decode(repeat('05', 256), 'hex'), 'RSA3072-OAEP-SHA256/A256GCM', 'replaced', 'reset', now() AT TIME ZONE 'UTC')", ct));
+            Assert.Null(await SqlStateOfAsync(connection, "DELETE FROM config.password_key WHERE key_id = 'cccccccccccccccc'", ct));
 
             /* Replacing the current key frees the slot for the next one. */
             await ExecAsync(connection, "UPDATE config.password_key SET state = 'replaced', replaced_reason = 'rotated', replaced_at = now() AT TIME ZONE 'UTC' WHERE key_id = 'aaaaaaaaaaaaaaaa'", ct);
-            await ExecAsync(connection, "INSERT INTO config.password_key (key_id, public_key, algorithm, state) VALUES ('bbbbbbbbbbbbbbbb', '\\x0304'::bytea, 'RSA-OAEP-SHA256', 'current')", ct);
+            await ExecAsync(connection, "INSERT INTO config.password_key (key_id, public_key, algorithm, state) VALUES ('bbbbbbbbbbbbbbbb', decode(repeat('03', 400), 'hex'), 'RSA3072-OAEP-SHA256/A256GCM', 'current')", ct);
 
             var key = await PasswordKeyTables.ReadCurrentAsync(connection, ct);
             Assert.NotNull(key);
             Assert.Equal("bbbbbbbbbbbbbbbb", key.KeyId);
-            Assert.Equal(new byte[] { 0x03, 0x04 }, key.Spki);
-            Assert.Equal("RSA-OAEP-SHA256", key.Algorithm);
+            Assert.Equal(Enumerable.Repeat((byte)0x03, 400).ToArray(), key.Spki);
+            Assert.Equal("RSA3072-OAEP-SHA256/A256GCM", key.Algorithm);
 
             await ExecAsync(connection, "INSERT INTO config.password_key_service (service_host, key_id, state, note, updated_at) VALUES ('example-sql-01', 'aaaaaaaaaaaaaaaa', 'loading', NULL, '2026-01-05 10:00:00')", ct);
             await ExecAsync(connection, "INSERT INTO config.password_key_service (service_host, key_id, state, note, updated_at) VALUES ('example-sql-02', NULL, 'mismatch', 'a note', '2026-01-05 11:00:00')", ct);
@@ -256,9 +268,148 @@ GRANT INSERT ON public.shadow_control TO viewer;", ct);
         }
     }
 
+    private static readonly string[] KeyTables =
+    [
+        "config.password_key",
+        "config.password_key_service",
+        "config.legacy_secret_pin",
+        "config.legacy_secret_pin_marker",
+    ];
+
+    private static ProvisioningTarget TargetFor(bool managed, NpgsqlConnection owner, ScratchPostgres scratch) =>
+        managed ? ProvisioningTarget.Managed : ProvisioningTarget.ComposeStore(OwnerRoleOf(owner), scratch.DatabaseName);
+
+    private static string ProvisioningBatch(bool managed, NpgsqlConnection owner, ScratchPostgres scratch) =>
+        DarlingManagedRoles.BuildProvisioningSql(
+            ProvisioningTestSecrets.Admin, ProvisioningTestSecrets.Viewer, ProvisioningTestSecrets.Mcp,
+            15, PasswordReassert.All, TargetFor(managed, owner, scratch));
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task Provisioning_LeavesNoReadOfThePinTables_AndNoTriggerOrReferencesGrant_AfterAGrantAllRerun(bool managed)
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), "Set DARLING_TEST_PG to run the password key table live pins (each mints its own scratch database).");
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct);
+        await using var owner = new NpgsqlConnection(scratch.ConnectionString);
+        await owner.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(owner, ct);
+        Assert.SkipWhen(
+            await ScalarAsync(owner, "SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname IN ('admin', 'viewer', 'mcp'))", ct) is true,
+            "A cluster-wide admin/viewer/mcp role already exists on this cluster; the provisioning batch would adopt it.");
+        Assert.SkipWhen(
+            managed && (OwnerRoleOf(owner) != DarlingManagedPostgres.UserName
+                        || await ScalarAsync(owner, "SELECT NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = 'darling')", ct) is true),
+            "The managed shape names the owner and database 'darling', which this connection does not have.");
+
+        var bodySucceeded = false;
+        try
+        {
+            await ExecAsync(owner, ProvisioningBatch(managed, owner, scratch), ct);
+            await SeedRowsAsync(owner, ct);
+
+            /* The pin tables are read by the store owner only; the key and service-state tables are readable. */
+            foreach (var (role, password) in new[]
+                     {
+                         ("admin", ProvisioningTestSecrets.AdminPassword),
+                         ("viewer", ProvisioningTestSecrets.ViewerPassword),
+                         ("mcp", ProvisioningTestSecrets.McpPassword),
+                     })
+            {
+                await using var connection = await OpenAsAsync(scratch, role, password, ct);
+                Assert.Equal("42501", await SqlStateOfAsync(connection, "SELECT count(*) FROM config.legacy_secret_pin", ct));
+                Assert.Equal("42501", await SqlStateOfAsync(connection, "SELECT count(*) FROM config.legacy_secret_pin_marker", ct));
+                Assert.Null(await SqlStateOfAsync(connection, "SELECT count(*) FROM config.password_key", ct));
+                Assert.Null(await SqlStateOfAsync(connection, "SELECT count(*) FROM config.password_key_service", ct));
+            }
+
+            /* A blanket grant to the three roles, as a later grant-all would make. Control: before the batch runs again, admin can
+               add its own trigger to every table, so the refusal below is the batch's doing. */
+            await ExecAsync(owner, "GRANT ALL ON ALL TABLES IN SCHEMA config TO admin, viewer, mcp;", ct);
+            await using var admin = await OpenAsAsync(scratch, "admin", ProvisioningTestSecrets.AdminPassword, ct);
+            for (var i = 0; i < KeyTables.Length; i++)
+            {
+                Assert.Null(await SqlStateOfAsync(admin, CreateTriggerSql(KeyTables[i], i), ct));
+                await ExecAsync(owner, $"DROP TRIGGER temp_name_control_trg_{i} ON {KeyTables[i]}", ct);
+            }
+
+            await ExecAsync(owner, ProvisioningBatch(managed, owner, scratch), ct);
+            for (var i = 0; i < KeyTables.Length; i++)
+            {
+                /* No TRIGGER privilege any more: refused for the missing privilege, not by the owner-only trigger. */
+                Assert.Equal("42501", await SqlStateOfAsync(admin, CreateTriggerSql(KeyTables[i], i), ct));
+                foreach (var role in new[] { "admin", "viewer", "mcp" })
+                {
+                    Assert.Equal(false, await ScalarAsync(owner, $"SELECT has_table_privilege('{role}', '{KeyTables[i]}', 'TRIGGER') OR has_table_privilege('{role}', '{KeyTables[i]}', 'REFERENCES')", ct));
+                }
+            }
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (cleanup, cleanupCt) =>
+                await ExecAsync(cleanup,
+                    "DROP OWNED BY admin, viewer, mcp; DROP ROLE IF EXISTS admin; DROP ROLE IF EXISTS viewer; DROP ROLE IF EXISTS mcp", cleanupCt));
+        }
+    }
+
+    private static string CreateTriggerSql(string table, int index) =>
+        $"CREATE TRIGGER temp_name_control_trg_{index} BEFORE UPDATE ON {table} FOR EACH ROW EXECUTE FUNCTION pg_catalog.suppress_redundant_updates_trigger()";
+
+    [Fact]
+    public async Task AWriteUnderReplicaReplicationRole_IsStillRefused_ForANonOwner_AndANonOwnerNeedsAGrantToSetIt()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), "Set DARLING_TEST_PG to run the password key table live pins (each mints its own scratch database).");
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct);
+        await using var owner = new NpgsqlConnection(scratch.ConnectionString);
+        await owner.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(owner, ct);
+        Assert.SkipWhen(
+            await ScalarAsync(owner, "SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname IN ('admin', 'viewer', 'mcp'))", ct) is true,
+            "A cluster-wide admin/viewer/mcp role already exists on this cluster; the provisioning batch would adopt it.");
+
+        var bodySucceeded = false;
+        try
+        {
+            await ExecAsync(owner, ProvisioningBatch(false, owner, scratch), ct);
+            await SeedRowsAsync(owner, ct);
+            await using var viewer = await OpenAsAsync(scratch, "viewer", ProvisioningTestSecrets.ViewerPassword, ct);
+
+            /* Without a grant the role cannot set it at all. */
+            Assert.Equal("42501", await SqlStateOfAsync(viewer, "SET session_replication_role = replica", ct));
+
+            /* With the setting granted and every write privilege, the triggers still fire: they are enabled always. */
+            await ExecAsync(owner, "GRANT SET ON PARAMETER session_replication_role TO viewer;", ct);
+            await ExecAsync(owner,
+                "GRANT INSERT, UPDATE, DELETE, TRUNCATE ON config.password_key, config.password_key_service, config.legacy_secret_pin, config.legacy_secret_pin_marker TO viewer;", ct);
+            await ExecAsync(viewer, "SET session_replication_role = replica", ct);
+            Assert.Equal("replica", await ScalarAsync(viewer, "SHOW session_replication_role", ct));
+            foreach (var statement in Writes.Values.SelectMany(v => v))
+            {
+                Assert.Equal(PasswordKeyTables.OwnerOnlySqlState, await SqlStateOfAsync(viewer, statement, ct));
+            }
+
+            Assert.Equal(1L, await ScalarAsync(owner, "SELECT count(*) FROM config.password_key", ct));
+            Assert.Equal("pending", await ScalarAsync(owner, "SELECT state FROM config.legacy_secret_pin_marker", ct));
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (cleanup, cleanupCt) =>
+                await ExecAsync(cleanup,
+                    "REVOKE SET ON PARAMETER session_replication_role FROM viewer; DROP OWNED BY admin, viewer, mcp; DROP ROLE IF EXISTS admin; DROP ROLE IF EXISTS viewer; DROP ROLE IF EXISTS mcp", cleanupCt));
+        }
+    }
+
     private static async Task SeedRowsAsync(NpgsqlConnection owner, CancellationToken ct)
     {
-        await ExecAsync(owner, "INSERT INTO config.password_key (key_id, public_key, algorithm, state) VALUES ('aaaaaaaaaaaaaaaa', '\\x01'::bytea, 'RSA-OAEP-SHA256', 'current')", ct);
+        await ExecAsync(owner, "INSERT INTO config.password_key (key_id, public_key, algorithm, state) VALUES ('aaaaaaaaaaaaaaaa', decode(repeat('01', 400), 'hex'), 'RSA3072-OAEP-SHA256/A256GCM', 'current')", ct);
         await ExecAsync(owner, "INSERT INTO config.password_key_service (service_host, key_id, state, updated_at) VALUES ('example-sql-01', 'aaaaaaaaaaaaaaaa', 'ok', now() AT TIME ZONE 'UTC')", ct);
         await ExecAsync(owner, "INSERT INTO config.legacy_secret_pin (server_id, slot, value_sha256, binding_sha256) VALUES (1, 'server', '\\x01'::bytea, '\\x02'::bytea)", ct);
     }

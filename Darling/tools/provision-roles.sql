@@ -54,7 +54,7 @@
 -- re-running blindly are the single-table grants in steps 3b-3f: each names a table (or, for the
 -- beacon columns, a trigger dependency) a specific migration creates -- custom_views is V31,
 -- database_state_expected is V49, custom_alert_rules is V116, the mute-rule reload-beacon trigger is
--- V117, config_notification_routes is V131 and config_collector_run_times is V160 -- so re-run this script after upgrading past each.
+-- V117, config_notification_routes is V131 and config_collector_run_times is V160 and the password key tables (step 3g) are V165 -- so re-run this script after upgrading past each.
 --
 -- BEFORE RUNNING:
 --   1. Replace CHANGE_ME_ADMIN_PASSWORD, CHANGE_ME_VIEWER_PASSWORD and CHANGE_ME_MCP_PASSWORD with strong
@@ -272,15 +272,6 @@ GRANT SELECT ON config.config_collector_run_times TO mcp;
 
 -- 3. config writes -- admin gets the whole schema.
 GRANT INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA config TO admin;
-
--- 3a. The password key tables (V165, #5366): written only by the store owner (the service, its command line and the
---     migration runner); a trigger on each table enforces that. This is the grant side of the same rule, so admin's
---     blanket config write above does not reach them. The pin table is read by the owner only: viewer and mcp lose
---     SELECT on it. A store below V165 has no such tables, so this runs after the migrations like the grants around it.
-REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON config.password_key, config.password_key_service,
-   config.legacy_secret_pin, config.legacy_secret_pin_marker FROM admin, viewer, mcp;
-REVOKE SELECT ON config.legacy_secret_pin FROM viewer, mcp;
-GRANT SELECT ON config.password_key, config.password_key_service TO admin;
 
 -- 3b. Custom views (#1563): the web dashboard's custom-view composer writes exactly this one config table
 --     (non-secret dashboard JSON) as viewer, and the MCP custom-view tools as mcp. Editing is any
@@ -504,6 +495,28 @@ GRANT UPDATE ON config.config_alert_settings TO mcp;
 GRANT UPDATE (email_cooldown_minutes) ON config.config_notification TO mcp;
 GRANT UPDATE (enabled, modified_at), DELETE ON config.config_notification_routes TO mcp;
 GRANT INSERT, UPDATE, DELETE ON config.config_monitored_servers TO mcp;
+
+-- 3g. The password key tables (V165, #5366): written only by the store owner (the service, its command line and the
+--     migration runner); a trigger on each table refuses every other writer. This is the grant side of the same rule,
+--     and it comes after EVERY grant above, so none of them can put a privilege back. REVOKE ALL takes every
+--     privilege on the four tables from PUBLIC and the three roles, TRIGGER and REFERENCES included, so a re-run after
+--     a GRANT ALL leaves no role able to add its own trigger. Then only SELECT on the key and service-state tables is
+--     granted back, because the Viewer reads them; the pin tables are read by the owner only. The tables are created by
+--     V165: on a store below it the block is skipped, so the rest of the script (the PUBLIC revoke below included)
+--     still runs; re-run the script once the service has migrated the store to V165.
+DO $do$
+BEGIN
+    IF to_regclass('config.password_key') IS NOT NULL
+       AND to_regclass('config.password_key_service') IS NOT NULL
+       AND to_regclass('config.legacy_secret_pin') IS NOT NULL
+       AND to_regclass('config.legacy_secret_pin_marker') IS NOT NULL THEN
+        REVOKE ALL ON config.password_key, config.password_key_service,
+           config.legacy_secret_pin, config.legacy_secret_pin_marker FROM PUBLIC, admin, viewer, mcp;
+        GRANT SELECT ON config.password_key, config.password_key_service TO admin, viewer;
+        GRANT SELECT ON config.password_key, config.password_key_service TO mcp;
+    END IF;
+END
+$do$;
 
 -- 4. Default privileges so NEW tables/views (future collectors, created bare into collect via
 --    search_path) auto-inherit SELECT. FOR ROLE <owner> must name the role that creates them.

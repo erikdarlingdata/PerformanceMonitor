@@ -662,7 +662,8 @@ CREATE TABLE IF NOT EXISTS config.store_statement_baseline
     /// text and the reasoning are on <see cref="PasswordKeyTables"/>, which the rung embeds.
     ///
     /// <para><b>Only the store owner writes them,</b> by a trigger created here on each table (a row trigger and a
-    /// TRUNCATE trigger), so no grant, now or later, opens them. The provisioning scripts add the grant side.</para>
+    /// TRUNCATE trigger, both enabled always), which refuses a write from any session that is not the owner. The
+    /// provisioning scripts also remove TRIGGER and REFERENCES from every other role.</para>
     ///
     /// <para><b>No Lite twin.</b> Lite keeps its secrets in its own local store.</para>
     /// </summary>
