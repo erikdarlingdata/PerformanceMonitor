@@ -1895,6 +1895,15 @@ public class WebhookAlertService
                 return headerError;
             }
 
+            /* #5366: the configured headers go only to the endpoint they were set up for. A route can redirect the
+               POST to another URL; that URL gets the body but not the parent's headers, which can carry a
+               credential for the parent endpoint. */
+            if (headers.Count > 0 && !SameOrigin(webhookUrl, _settings.GenericWebhookUrl))
+            {
+                headers = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                _logger.LogInformation("Generic webhook headers were not sent: the routed endpoint is not the configured generic endpoint");
+            }
+
             var payload = BuildGenericPayload(
                 metricName, serverName, currentValue, thresholdValue, _branding,
                 context: context, bodyTemplate: _settings.GenericWebhookBodyTemplate, serverId: serverId,
@@ -1937,6 +1946,20 @@ public class WebhookAlertService
             _logger.LogError($"Generic webhook error: {ex.Message}");
             return ex.Message;
         }
+    }
+
+    /// <summary>Whether two endpoint URLs have the same scheme, host and port (#5366). Text that is not an absolute
+    /// URL matches nothing, not even itself.</summary>
+    internal static bool SameOrigin(string? left, string? right)
+    {
+        if (!Uri.TryCreate(left?.Trim(), UriKind.Absolute, out var a) || !Uri.TryCreate(right?.Trim(), UriKind.Absolute, out var b))
+        {
+            return false;
+        }
+
+        return string.Equals(a.Scheme, b.Scheme, StringComparison.OrdinalIgnoreCase)
+            && string.Equals(a.IdnHost, b.IdnHost, StringComparison.OrdinalIgnoreCase)
+            && a.Port == b.Port;
     }
 
     /* The Teams/Slack log-throttle shape (loud for the first 3, then every 50th) — factored out only
