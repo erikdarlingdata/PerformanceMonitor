@@ -27,7 +27,7 @@ namespace PerformanceMonitor.Alerting;
 ///
 /// <para><b>What is judged.</b> Every detail item's heading, field values, record summaries and texts, and body
 /// (through <see cref="SensitiveStatements.Text"/>); the alert-level attachment and each incident's attachment
-/// (through <see cref="SensitiveStatements.Xml(string?, int)"/>); each incident's forensic field values. A value
+/// (through <see cref="SensitiveStatements.Xml(string?, int)"/>); each incident's involved objects and forensic field values. A value
 /// that is not named comes back as the SAME instance, and an alert with nothing named comes back as the same
 /// object, so the common case allocates nothing.</para>
 ///
@@ -36,7 +36,7 @@ namespace PerformanceMonitor.Alerting;
 /// budget across the list.</para>
 ///
 /// <para><b>Failure.</b> Never throws and never lets the input through after a failure: the alert is delivered
-/// with its detail items cleared, its attachments dropped, each incident's forensic fields and attachment
+/// with its detail items cleared, its attachments dropped, each incident's objects, forensic fields and attachment
 /// dropped (the dedup keys stay, so cooldown and per-event splitting still work), and its detail text and short
 /// message set to <see cref="SensitiveStatements.PlaceholderText"/>.</para>
 /// </summary>
@@ -94,10 +94,14 @@ public static class AlertStatementFilter
         catch (Exception)
 #pragma warning restore CA1031
         {
+            /* #5320 L2: an alert with no detail text (a per-event PostgreSQL deadlock or blocking alert) would
+               otherwise be delivered cleared with no reason, so its context carries the neutral sentence as a
+               detail item, and a context-less one carries it as its detail text. */
+            var noDetailText = string.IsNullOrEmpty(outcome.DetailText);
             return outcome with
             {
-                Context = Cleared(outcome.Context),
-                DetailText = string.IsNullOrEmpty(outcome.DetailText) ? outcome.DetailText : SensitiveStatements.PlaceholderText,
+                Context = Cleared(outcome.Context, withReason: noDetailText),
+                DetailText = noDetailText && outcome.Context is not null ? outcome.DetailText : SensitiveStatements.PlaceholderText,
                 ShortMessage = string.IsNullOrEmpty(outcome.ShortMessage) ? outcome.ShortMessage : SensitiveStatements.PlaceholderText,
                 DisplayName = string.IsNullOrEmpty(outcome.DisplayName) ? outcome.DisplayName : SensitiveStatements.PlaceholderText,
                 StatementFiltered = true,
@@ -136,7 +140,7 @@ public static class AlertStatementFilter
         catch (Exception)
 #pragma warning restore CA1031
         {
-            return Cleared(context);
+            return Cleared(context, withReason: true);
         }
     }
 
@@ -188,7 +192,7 @@ public static class AlertStatementFilter
         {
             return alert with
             {
-                Context = Cleared(alert.Context) ?? alert.Context,
+                Context = Cleared(alert.Context, withReason: string.IsNullOrEmpty(alert.DetailText)) ?? alert.Context,
                 DetailText = string.IsNullOrEmpty(alert.DetailText) ? alert.DetailText : SensitiveStatements.PlaceholderText,
             };
         }
@@ -279,6 +283,33 @@ public static class AlertStatementFilter
 
     private static AlertIncident ApplyIncident(AlertIncident incident, SensitiveStatements.JudgeBudget budget)
     {
+        /* #5320 L1: a null element has nothing to judge; it must not make the judge throw (and then the
+           failure path throw again). */
+        if (incident is null)
+        {
+            return incident!;
+        }
+
+        /* #5320 M1: the objects an incident is about are text too. The PostgreSQL blocking and deadlock builders
+           put the root query and the victim statement there, and the objects reach the email table, the webhook
+           payload and the history row's context JSON. The dedup key is an identity or a hash and is not judged. */
+        List<string>? objects = null;
+        var involved = incident.InvolvedObjects;
+        if (involved is { Count: > 0 })
+        {
+            for (var i = 0; i < involved.Count; i++)
+            {
+                var judged = SensitiveStatements.TextUnder(budget, involved[i]) ?? involved[i];
+                if (ReferenceEquals(judged, involved[i]))
+                {
+                    continue;
+                }
+
+                objects ??= new List<string>(involved);
+                objects[i] = judged;
+            }
+        }
+
         List<AlertIncidentField>? fields = null;
         if (incident.DetailFields is { Count: > 0 } source)
         {
@@ -305,9 +336,14 @@ public static class AlertStatementFilter
             }
         }
 
-        return fields is null && ReferenceEquals(attachment, incident.Attachment)
+        return objects is null && fields is null && ReferenceEquals(attachment, incident.Attachment)
             ? incident
-            : incident with { DetailFields = fields ?? incident.DetailFields, Attachment = attachment };
+            : incident with
+            {
+                InvolvedObjects = (IReadOnlyList<string>?)objects ?? incident.InvolvedObjects,
+                DetailFields = fields ?? incident.DetailFields,
+                Attachment = attachment,
+            };
     }
 
     /// <summary>A list with each element rewritten, or the SAME list when no element changed.</summary>
@@ -337,9 +373,11 @@ public static class AlertStatementFilter
 
     /// <summary>
     /// The failure shape: a copy with no detail items, no attachment, and every incident reduced to its identity
-    /// (dedup key, objects, counts) without forensic fields or an attachment.
+    /// (dedup key, counts) without its objects, forensic fields or an attachment. With <paramref name="withReason"/>
+    /// the copy carries one detail item holding <see cref="SensitiveStatements.PlaceholderText"/>, so a cleared alert
+    /// that has no detail text of its own still says why it has no detail.
     /// </summary>
-    private static AlertContext? Cleared(AlertContext? context)
+    private static AlertContext? Cleared(AlertContext? context, bool withReason)
     {
         if (context is null)
         {
@@ -348,6 +386,11 @@ public static class AlertStatementFilter
 
         var copy = context.ShallowCopy();
         copy.Details = new List<AlertDetailItem>();
+        if (withReason)
+        {
+            copy.Details.Add(new AlertDetailItem { Heading = SensitiveStatements.PlaceholderText });
+        }
+
         copy.AttachmentXml = null;
         copy.AttachmentFileName = null;
         if (context.Incidents is { } incidents)
@@ -355,7 +398,8 @@ public static class AlertStatementFilter
             var stripped = new List<AlertIncident>(incidents.Count);
             foreach (var incident in incidents)
             {
-                stripped.Add(incident with { DetailFields = null, Attachment = null });
+                /* A null element (#5320 L1) stays as it is: there is nothing in it to leak. */
+                stripped.Add(incident is null ? incident! : incident with { InvolvedObjects = Array.Empty<string>(), DetailFields = null, Attachment = null });
             }
 
             copy.Incidents = stripped;

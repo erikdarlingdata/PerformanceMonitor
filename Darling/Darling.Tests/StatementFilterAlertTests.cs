@@ -72,8 +72,13 @@ public sealed class StatementFilterAlertTests
             }
         }
 
-        foreach (var incident in context.Incidents ?? new List<AlertIncident>())
+        foreach (var incident in (context.Incidents ?? new List<AlertIncident>()).Where(i => i is not null))
         {
+            foreach (var involved in incident.InvolvedObjects)
+            {
+                yield return involved;
+            }
+
             yield return incident.Attachment?.Xml;
             foreach (var field in incident.DetailFields ?? Array.Empty<AlertIncidentField>())
             {
@@ -305,7 +310,7 @@ public sealed class StatementFilterAlertTests
     }
 
     [Fact]
-    public void Apply_AnAdversarialQuerySetFinishesInsideTheBudget()
+    public void Apply_AQuerySetThatSlowsTheJudge_FinishesInsideTheBudget()
     {
         /* Many long values built to make the judge work: nested gaps and unterminated comments. Past the 1.5 s
            budget a value is withheld unjudged, so the call is bounded however many arrive. */
