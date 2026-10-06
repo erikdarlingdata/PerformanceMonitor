@@ -290,6 +290,102 @@ public class SensitiveStatementAutoParamTests
         Assert.Contains(PText, result);
     }
 
+    // ── L2c review fixes (H1, M1, L3) ──
+
+    private static bool CanaryOrStandIn(string s) => StandIn(s) || s.Contains("CANARY", StringComparison.Ordinal);
+
+    [Fact]
+    public void WithAMaxOutput_ValuesPastPassOnesStop_AreWithheldEvenWhenTheOutputIsShorter_LongNamedStatementFirst()
+    {
+        // statement 1 is named and long: its text becomes the short placeholder, so pass 2 reaches input that pass 1
+        // (which stops by INPUT offset) never read
+        string xml = Plan(
+            Stmt("StmtSimple", "CANARY " + new string('x', 3000)),
+            Stmt("StmtSimple", "(@1 nvarchar(4000),@2 tinyint)UPDATE [dbo].[u] set [password] = @1  WHERE [id]=@2",
+                Col("@1", "N'S3cret-drift'"), Col("@2", "(7)")));
+        const int max = 2000;
+
+        string? cut = Run(xml, CanaryOrStandIn, max);
+        string? whole = Run(xml, CanaryOrStandIn);
+
+        Assert.NotNull(cut);
+        Assert.NotNull(whole);
+        Assert.DoesNotContain("S3cret-drift", whole);
+        Assert.DoesNotContain("S3cret-drift", cut![..Math.Min(max, cut.Length)]);
+    }
+
+    [Fact]
+    public void WithAMaxOutput_ValuesPastPassOnesStop_AreWithheldEvenWhenTheOutputIsShorter_LargeInList()
+    {
+        // &apos; is five characters in the input and one in the output, so pass 2 outruns pass 1 on a long IN-list
+        var sb = new StringBuilder();
+        sb.Append("<ShowPlanXML xmlns=\"http://schemas.microsoft.com/sqlserver/2004/07/showplan\"><BatchSequence><Batch><Statements>");
+        sb.Append("<StmtSimple StatementId=\"1\" StatementText=\"(@0 nvarchar(50)");
+        for (int i = 1; i <= 119; i++) sb.Append(",@").Append(i).Append(" nvarchar(50)");
+        sb.Append(")INSERT [dbo].[cfg] VALUES (@0");
+        for (int i = 1; i <= 119; i++) sb.Append(",@").Append(i);
+        sb.Append(")\"><QueryPlan><ScalarOperator ScalarString=\"CANARY\"/><ParameterList>");
+        for (int i = 0; i < 119; i++)
+            sb.Append("<ColumnReference Column=\"@").Append(i).Append("\" ParameterCompiledValue=\"N&apos;aaaaaaaa&apos;\"/>");
+        sb.Append("<ColumnReference Column=\"@119\" ParameterCompiledValue=\"N&apos;Server=h;PWD=drift2&apos;\"/>");
+        sb.Append("</ParameterList></QueryPlan></StmtSimple>");
+        sb.Append("</Statements></Batch></BatchSequence></ShowPlanXML>");
+        string xml = sb.ToString();
+        int last = xml.IndexOf("PWD=drift2", StringComparison.Ordinal);
+        int max = last - 200;
+        Assert.True(max > 1000, "fixture shape");
+
+        string? cut = Run(xml, CanaryOrStandIn, max);
+
+        Assert.NotNull(cut);
+        Assert.DoesNotContain("drift2", cut![..Math.Min(max, cut.Length)]);
+    }
+
+    [Fact]
+    public void RuntimeValueThatDiffersFromTheCompiledValue_IsJudgedToo()
+    {
+        // an actual plan: the compiled value is whichever run compiled the cached plan, the runtime value is this run's
+        const string text = "(@1 nvarchar(50))INSERT [dbo].[cfg] VALUES (@1)";
+        string xml = Plan(Stmt("StmtSimple", text, Col("@1", "N'benign'", "N'Server=h;PWD=rt3'")));
+
+        string? result = Run(xml);
+
+        Assert.NotNull(result);
+        Assert.NotSame(xml, result);
+        Assert.DoesNotContain("rt3", result);
+        Assert.Equal(new[] { P }, Attrs(result!, "ParameterCompiledValue"));
+        Assert.Equal(new[] { P }, Attrs(result!, "ParameterRuntimeValue"));
+        Assert.Equal(text, OnlyStatementText(result!));
+
+        // both benign (equal, then different): nothing is named and the same instance comes back
+        string same = Plan(Stmt("StmtSimple", text, Col("@1", "N'benign'", "N'benign'")));
+        string differ = Plan(Stmt("StmtSimple", text, Col("@1", "N'benign'", "N'other'")));
+        Assert.Same(same, Run(same));
+        Assert.Same(differ, Run(differ));
+    }
+
+    [Fact]
+    public void AValueWhoseTokenIsNotInTheStatementText_IsJudgedOnItsOwn()
+    {
+        // the stored text is shorter than the statement, so no token puts the value back into the probe
+        const string text = "INSERT [dbo].[cfg] VALUES (";
+        string xml = Plan(Stmt("StmtSimple", text, Col("@1", "N'Server=h;PWD=s7'")));
+
+        string? result = Run(xml);
+
+        Assert.NotNull(result);
+        Assert.DoesNotContain("s7", result);
+        Assert.Equal(new[] { P }, Attrs(result!, "ParameterCompiledValue"));
+        Assert.Equal(text, OnlyStatementText(result!));
+
+        // a plain value, and an application-named parameter, name nothing
+        string plain = Plan(Stmt("StmtSimple", text, Col("@1", "N'plain'")));
+        string appNamed = Plan(Stmt("StmtSimple", text, Col("@pwd", "N'Server=h;PWD=s7'")));
+        Assert.Same(plain, Run(plain));
+        Assert.Same(appNamed, Run(appNamed));
+    }
+
+
     [Fact]
     public void ElementFormParameterizedText_NamedStatementIsWithheld_EvenAfterAnEarlierHit()
     {
