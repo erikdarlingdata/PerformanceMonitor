@@ -578,11 +578,16 @@ public sealed class DarlingMcpTrendToolsSurfaceAndSqlTests
            Since #3653 (Q12) only the RAW alias is passed: the hourly text is built inside the routed read from
            the route's resolved relation (the interval-honest successor where it reaches as far as the legacy),
            so the hourly constants stay as the pinned legacy text and are no longer the routed read's argument. */
-        Assert.Contains("QueryDurationTrendSql, postgres, serverId, startUtc, endUtc, route, bucketMinutes, cancellationToken", reader, StringComparison.Ordinal);
-        Assert.Contains("ProcedureDurationTrendSql, postgres, serverId, startUtc, endUtc, route, bucketMinutes, cancellationToken", reader, StringComparison.Ordinal);
+        /* #5244: the routed read runs the FILTERED alias (the same builder with withDatabaseFilter: true, $4 the
+           database set, $5 the width) and binds the caller's set, DatabaseFilter.All being SQL NULL, so the
+           statement never changes with the selection; the unfiltered alias stays as the pinned legacy text. */
+        Assert.Contains("QueryDurationTrendFilteredSql, postgres, serverId, startUtc, endUtc, route, bucketMinutes, databases, cancellationToken", reader, StringComparison.Ordinal);
+        Assert.Contains("ProcedureDurationTrendFilteredSql, postgres, serverId, startUtc, endUtc, route, bucketMinutes, databases, cancellationToken", reader, StringComparison.Ordinal);
+        Assert.Contains("public static readonly string QueryDurationTrendFilteredSql =\n        DurationTrendRouting.BuildBucketedRawTrendSql(\"query_stats\", withDatabaseFilter: true);", reader, StringComparison.Ordinal);
+        Assert.Contains("public static readonly string ProcedureDurationTrendFilteredSql =\n        DurationTrendRouting.BuildBucketedRawTrendSql(\"procedure_stats\", withDatabaseFilter: true);", reader, StringComparison.Ordinal);
         // LA-4a routed the builder call off the stitched from-clause instead of the bare view name, so the pin
-        // follows the builder call site, not the old constant.
-        Assert.Contains("DurationTrendRouting.BuildBucketedHourlyTrendSql(route.HourlyFromClauseOrDefault)", reader, StringComparison.Ordinal);
+        // follows the builder call site, not the old constant. #5244 adds the filter to that call.
+        Assert.Contains("DurationTrendRouting.BuildBucketedHourlyTrendSql(route.HourlyFromClauseOrDefault, withDatabaseFilter: true)", reader, StringComparison.Ordinal);
     }
 
     private static string Lf(string s) => s.Replace("\r\n", "\n", StringComparison.Ordinal);

@@ -344,11 +344,19 @@ public static class DurationTrendRouting
     /// so the peak on this tier is the bucket's busiest HOUR — the finest grain the rollup holds, and at 60 minutes
     /// the point's own rate; nor is any hour unrated, because its denominator is known. $1 server_id, $2/$3 window
     /// (naive UTC; $3 is EXCLUSIVE — a bucket is stamped at its START, so the hour that begins at $3 lies after
-    /// the window and is not read), $4 the bucket width in minutes.
+    /// the window and is not read), $4 the bucket width in minutes. With <paramref name="withDatabaseFilter"/> (#5244:
+    /// every hourly rollup and the interval successors group by <c>database_name</c>), $4 is the guarded
+    /// <c>text[]</c> database filter (<see cref="DatabaseFilter.Clause"/>'s shape) and the width moves to $5, as
+    /// <see cref="BuildBucketedRawTrendSql"/> does; off, the text is the one the MCP reader's constants pin.
     /// </summary>
-    public static string BuildBucketedHourlyTrendSql(string hourlyView)
+    public static string BuildBucketedHourlyTrendSql(string hourlyView, bool withDatabaseFilter = false)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(hourlyView);
+
+        var filter = withDatabaseFilter
+            ? "\n                AND   ($4::text[] IS NULL OR database_name = ANY($4))"
+            : "";
+        var widthParam = withDatabaseFilter ? "$5" : "$4";
 
         return $"""
             WITH hourly AS
@@ -360,11 +368,11 @@ public static class DurationTrendRouting
                 FROM {hourlyView}
                 WHERE server_id = $1
                 AND   bucket >= $2
-                AND   bucket < $3
+                AND   bucket < $3{filter}
                 GROUP BY bucket
             )
             SELECT
-                GREATEST(date_bin(CAST($4 AS integer) * INTERVAL '1 minute', bucket, {TrendBucketSql.OriginSql}), $2) AS bucket_start,
+                GREATEST(date_bin(CAST({widthParam} AS integer) * INTERVAL '1 minute', bucket, {TrendBucketSql.OriginSql}), $2) AS bucket_start,
                 SUM(elapsed_ms) / (COUNT(*) * {HourlyBucketSecondsSql}) AS elapsed_ms_per_second,
                 CAST(SUM(executions) AS DOUBLE PRECISION) / (COUNT(*) * {HourlyBucketSecondsSql}) AS executions_per_second,
                 MAX(elapsed_ms / {HourlyBucketSecondsSql}) AS peak_elapsed_ms_per_second,
