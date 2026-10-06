@@ -129,6 +129,9 @@ bodies.spread = {
   ],
 };
 
+/* #5244 L1: the page row budget cut two rows of this deadlock before the browser filter ran; the one row sent is in C. */
+bodies.cut = { server: "SRV1", deadlocks: [{ ...WITH_GRAPH("t1", [PROC(1, "C")]), processes_truncated: 2 }] };
+
 const all = (node, tag, found = []) => {
   if (!node || typeof node !== "object") return found;
   if (node.tag === tag) found.push(node);
@@ -199,14 +202,14 @@ if (scenario === "closed") {
 } else if (scenario === "capped") {
   const panel = await buildPanel(bodies.capped);
   Object.assign(out, state(panel));
-} else if (scenario.startsWith("spread:") || scenario.startsWith("clean:")) {
+} else if (scenario.startsWith("spread:") || scenario.startsWith("clean:") || scenario.startsWith("cut:")) {
   /* spread:<names split on |>, or spread:none for no filter; clean: is the same over the two deadlocks whose processes are all in A or B. */
   const names = scenario.slice(scenario.indexOf(":") + 1);
   if (names !== "none") {
     globalThis.location = { hash: "#/server/SRV1/blocking" };
     modules.util.setActiveDatabaseFilter({ server: "SRV1", databases: names.split("|") });
   }
-  const panel = await buildPanel(scenario.startsWith("clean:") ? { server: "SRV1", deadlocks: [bodies.spread.deadlocks[1], WITH_GRAPH("c1", [PROC(1, "A"), PROC(2, "B")])] } : bodies.spread);
+  const panel = await buildPanel(scenario.startsWith("clean:") ? { server: "SRV1", deadlocks: [bodies.spread.deadlocks[1], WITH_GRAPH("c1", [PROC(1, "A"), PROC(2, "B")])] } : scenario.startsWith("cut:") ? bodies.cut : bodies.spread);
   const procs = processDetails(panel).filter((d) => !/^Graph/.test(d.children[0].textContent));
   const st = {
     summaries: procs.map((d) => d.children[0].textContent),

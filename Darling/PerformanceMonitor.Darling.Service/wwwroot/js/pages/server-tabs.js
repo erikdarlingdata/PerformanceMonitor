@@ -3729,8 +3729,10 @@ function deadlockProcessesCell(server, row, scope = null) {
   const filter = deadlockRowFilter(server);
   const rows = filter ? processRowsInDatabases(all, filter.databases) : all;
   if (scope) scope.set(key, all.length - rows.length);
-  if (!rows.length) return document.createTextNode(all.length + (all.length === 1 ? " process" : " processes") + " hidden by the database filter");
+  /* The page row budget runs before this filter, so the chosen database's rows may be the ones cut: the suffix shows in the
+     all-hidden cell too, and a cut row (its database unknown) is not counted as hidden. */
   const more = row.processes_truncated > 0 ? " (+" + row.processes_truncated + " more in the graph)" : "";
+  if (!rows.length) return document.createTextNode(all.length + (all.length === 1 ? " process" : " processes") + " hidden by the database filter" + more);
   const node = disclosure(rows.length + (rows.length === 1 ? " process" : " processes") + more, [
     VIZ.table({ processes: rows }, { id: "deadlock-processes", rowsKey: "processes", columns: DEADLOCK_PROCESS_COLUMNS }),
   ]);
