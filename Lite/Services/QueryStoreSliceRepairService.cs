@@ -832,10 +832,13 @@ COPY (
     /// it back on restores normal behavior, verified including that a later connection reads the promoted file
     /// and the setting is left enabled.</para>
     ///
-    /// <para><b>Deliberately NOT applied to the monthly archive cycle, and that is not an oversight.</b> That
-    /// path only ever writes NEW file names and deletes old ones — it never replaces the bytes behind a path
-    /// that has been read — so it was never exposed to this and adding the eviction there would be defensive
-    /// noise that implies a hazard it does not have.</para>
+    /// <para><b>Not applied to the monthly archive cycle, though compaction does replace a path (#5377).</b> It
+    /// writes the merged month over an existing <c>YYYYMM_table.parquet</c> or part file, so it is a swap of the
+    /// same kind. Measured on DuckDB 1.5.5 the trap above did not reproduce for it (or for this helper's own
+    /// delete-and-move) in 54 swap variants, with <c>parquet_metadata_cache</c> off and on:
+    /// <c>validate_external_file_cache</c> defaults to <c>VALIDATE_ALL</c>, so an entry whose file changed is
+    /// dropped on its next read. <c>ArchiveCompactionLowDiskTests.ACompactedMonthFile_ReadsItsNewBytes_OnTheSameInstanceThatReadItBefore</c>
+    /// pins it on one instance; if it fails after a DuckDB upgrade, compaction's swap needs the eviction too.</para>
     /// </summary>
     private async Task PromoteRewrittenFileAsync(
         DuckDBConnection connection, string originalPath, string tempPath, CancellationToken cancellationToken)

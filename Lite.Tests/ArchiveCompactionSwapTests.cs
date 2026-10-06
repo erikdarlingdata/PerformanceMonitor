@@ -151,13 +151,17 @@ public sealed class ArchiveCompactionSwapTests : IDisposable
     [Fact]
     public void FailedPromote_KeepsEveryRow_ForPartFiles()
     {
+        /* Since #5377 a part file that sits alone in its batch is left where it is (rewriting it would change
+           nothing), so a swap with more than one output needs two batches that each have a per-cycle file in
+           them. The per-cycle files are bigger than the parts here for that: smallest first, the budget fits
+           pt001 with the first per-cycle file, pt002 gets a batch to itself and stays, and the second per-cycle
+           file merges alone. The outputs are then pt001 (replacing the existing part) and pt003 (fresh). */
         MakeParquet("202609_t_pt001.parquet", 0, 60_000);
+        MakeParquet("20260928_1400_t.parquet", 5_000_000, 5_070_000);
         MakeParquet("202609_t_pt002.parquet", 1_000_000, 1_080_000);
-        MakeParquet("20260928_1400_t.parquet", 5_000_000, 5_000_100);
+        MakeParquet("20260928_1500_t.parquet", 6_000_000, 6_090_000);
 
         var service = NewService();
-        /* A budget that fits the per-cycle file and the smaller part but not the larger one: the merge
-           splits into two batches, so both output names are the existing part files. */
         service.CompactionBatchInputBytes =
             new FileInfo(P("202609_t_pt001.parquet").Replace("/", "\\")).Length
             + new FileInfo(P("20260928_1400_t.parquet").Replace("/", "\\")).Length;
@@ -180,23 +184,30 @@ public sealed class ArchiveCompactionSwapTests : IDisposable
         }
 
         Assert.Equal(2, temps.Count);
+        Assert.Equal([P("202609_t_pt001.parquet.tmp"), P("202609_t_pt003.parquet.tmp")], temps);
 
         var (rows, distinct) = Visible("t");
-        Assert.Equal(140_100, rows);
-        Assert.Equal(140_100, distinct);
+        Assert.Equal(300_000, rows);
+        Assert.Equal(300_000, distinct);
         Assert.Equal(60_000, Scalar($"SELECT count(*) FROM read_parquet('{P("202609_t_pt001.parquet")}') WHERE id < 60000"));
         Assert.Equal(80_000, Scalar($"SELECT count(*) FROM read_parquet('{P("202609_t_pt002.parquet")}') WHERE id >= 1000000"));
         Assert.True(File.Exists(P("20260928_1400_t.parquet")));
+        Assert.True(File.Exists(P("20260928_1500_t.parquet")));
         Assert.DoesNotContain(ArchiveFileNames(), f => f.EndsWith(".replaced", StringComparison.Ordinal) || f.EndsWith(".swap", StringComparison.Ordinal));
 
-        /* Next cycle: the same inputs merge into two fresh parts, every row exactly once. */
+        /* Next cycle: the same inputs merge into pt001 and a fresh pt003, every row exactly once, and pt002,
+           which stayed throughout, is untouched. */
         service.OnCompactionTempsReadyForTests = null;
         service.CompactParquetFiles();
 
         (rows, distinct) = Visible("t");
-        Assert.Equal(140_100, rows);
-        Assert.Equal(140_100, distinct);
+        Assert.Equal(300_000, rows);
+        Assert.Equal(300_000, distinct);
         Assert.False(File.Exists(P("20260928_1400_t.parquet")), "the per-cycle input survived a successful merge");
+        Assert.False(File.Exists(P("20260928_1500_t.parquet")), "the per-cycle input survived a successful merge");
+        Assert.Equal(["202609_t_pt001.parquet", "202609_t_pt002.parquet", "202609_t_pt003.parquet"], ArchiveFileNames());
+        Assert.Equal(130_000, Scalar($"SELECT count(*) FROM read_parquet('{P("202609_t_pt001.parquet")}')"));
+        Assert.Equal(90_000, Scalar($"SELECT count(*) FROM read_parquet('{P("202609_t_pt003.parquet")}')"));
     }
 
     /// <summary>
