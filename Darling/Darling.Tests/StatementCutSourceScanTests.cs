@@ -404,6 +404,8 @@ public sealed class StatementCutSourceScanTests
     [InlineData("var p = McpHelpers.Truncate(row.QueryText, 400);", "C# Truncate")]
     [InlineData("var p = McpHelpers.Truncate(sqlText, 400);", "C# Truncate")]
     [InlineData("var p = AlertContextBuilders.TruncateText(row.QueryText);", "C# Truncate")]
+    [InlineData("var p = McpHelpers.Truncate(query, 400);", "C# Truncate")]
+    [InlineData("var p = McpHelpers.Truncate(row.blocking_query, 400);", "C# Truncate")]
     [InlineData("var p = TruncateText(g.BlockedQuery, 300);", "C# Truncate")]
     [InlineData("var p = TruncateText(g.QueryText, 300);", "C# Truncate")]
     [InlineData("var p = TruncateText(blockedQuery, 300);", "C# Truncate")]
@@ -530,6 +532,7 @@ public sealed class StatementCutSourceScanTests
     [InlineData("var judged = AnalysisStatementText.Preview(raw, 900); var p = judged.Substring(0, 5);")]
     [InlineData("var filteredGraph = full ? r.Graph : SensitiveStatements.Xml(r.Graph, 400) ?? \"x\"; var p = full ? filteredGraph : McpHelpers.Truncate(filteredGraph, 400);")]
     [InlineData("var fetchedText = SensitiveStatements.Text(reader.GetString(4)) ?? \"\"; var p = fetchedText[..McpHelpers.TextElementCutLength(fetchedText, 9)];")]
+    [InlineData("var queryText = SensitiveStatements.Text(raw) ?? \"\"; var p = AlertContextBuilders.TruncateText(queryText, 80);")]
     public void TheScanner_LeavesALocalThatWasJudgedBeforeItsCut(string body)
     {
         Assert.Empty(ScanBody(body));
