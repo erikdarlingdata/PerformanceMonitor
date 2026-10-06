@@ -470,11 +470,13 @@ public sealed class ServerTimeHelperClockTests : IDisposable
         }
 
         var refresh = File.ReadAllText(Path.Combine(controls, "ServerTab.Refresh.cs"));
-        var body = refresh[refresh.IndexOf("private async System.Threading.Tasks.Task RefreshAllDataAsync()", StringComparison.Ordinal)..];
+        /* #5371 moved the full pass's body out of RefreshAllDataAsync (now a one-line request to the refresh coordinator)
+           into RefreshEverythingAsync; the clock-before-window order the pin is about is unchanged. */
+        var body = refresh[refresh.IndexOf("private async Task RefreshEverythingAsync(", StringComparison.Ordinal)..];
         var readClock = body.IndexOf("await RefreshServerClockAsync();", StringComparison.Ordinal);
         var window = body.IndexOf("GetCurrentWindowUtc(", StringComparison.Ordinal);
         Assert.True(readClock >= 0 && window > readClock,
-            "RefreshAllDataAsync has to read the server clock again before it derives the window (#4766).");
+            "The full refresh pass has to read the server clock again before it derives the window (#4766).");
 
         var selected = File.ReadAllText(Path.Combine(controls, "..", "MainWindow.xaml.cs"));
         Assert.Contains("ServerTimeHelper.ActiveServerClock = serverTab.ServerClock;", selected, StringComparison.Ordinal);

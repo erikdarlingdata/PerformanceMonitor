@@ -87,11 +87,11 @@ public partial class ServerTab : UserControl
        grid gets its own generation instead, which compares identity rather than range.
 
        Only the comparison loaders take this. ServerTab's main-tab Refresh*Async loaders are deliberately
-       NOT here: their races all route through the bail-only _isRefreshing, where the user-visible half is
-       the DROPPED trigger (a time-range change mid-pass leaves the charts on the old window while the
-       combo shows the new one), and a generation cannot fix a load that never started. That wants the
-       viewer's coalescing replay, which needs _isRefreshing split from the event-suppression duty it also
-       serves in TimeDisplayMode_SelectionChanged, ServerTab.DrillDown.cs and ServerTab.Grids.cs. */
+       NOT here: their races used to route through the bail-only _isRefreshing, where the user-visible half
+       was the DROPPED trigger (a time-range change mid-pass left the charts on the old window while the
+       combo showed the new one), and a generation cannot fix a load that never started. #5371 gave them
+       the viewer's coalescing replay instead (RefreshCoordinator, ServerTab.Refresh.cs), with the
+       event-suppression duty split off into _suppressRangeRefresh. */
     private readonly PerformanceMonitor.Ui.ScopedLoadGenerations _loads = new();
 
     /* #4284: tests the combo directly rather than through GetComparisonRange, which now needs the caller's
