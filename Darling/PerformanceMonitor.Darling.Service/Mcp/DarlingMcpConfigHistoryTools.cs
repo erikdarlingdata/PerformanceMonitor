@@ -17,6 +17,7 @@ using Microsoft.Extensions.Logging;
 using ModelContextProtocol.Server;
 using Npgsql;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Storage;
 
 #pragma warning disable CA1707 // MCP tools use snake_case naming convention
 
@@ -114,13 +115,29 @@ public sealed class DarlingMcpConfigHistoryTools
     }
 
     [McpServerTool(Name = "get_database_config_changes"), Description("Gets database configuration change history by diffing sys.databases snapshots. Shows which database settings changed (recovery model, RCSI, compatibility level, etc.) with old and new values; setting_name is the underlying column name. NOTE: this edition captures config on server connect (not on a fixed schedule), so changes are detected between connect snapshots and need at least two; the setting category/description narrative is not collected and is omitted.")]
-    public static async Task<string> GetDatabaseConfigChanges(
+    public static Task<string> GetDatabaseConfigChanges(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history to retrieve. Default 168 (7 days).")] int hours_back = 168,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
         ILogger? logger = null,
         CancellationToken cancellationToken = default)
+        => GetDatabaseConfigChanges(postgres, server_name, hours_back, DatabaseFilter.All, as_of, logger, cancellationToken);
+
+    /// <summary>
+    /// #5245: the get_database_config_changes read over a LIST of databases. The MCP tool takes no database parameter yet and
+    /// passes <see cref="DatabaseFilter.All"/>; a later lane wires one. The snapshots are filtered in SQL, so the diff, the
+    /// window notice and the not_collected check are unchanged, and the only one-name consumer is the empty answer, which
+    /// says which databases it looked at (<see cref="DatabaseScopeText"/>) instead of claiming the SERVER has too few captures.
+    /// </summary>
+    internal static async Task<string> GetDatabaseConfigChanges(
+        NpgsqlDataSource postgres,
+        string? server_name,
+        int hours_back,
+        DatabaseFilter databases,
+        string? as_of,
+        ILogger? logger,
+        CancellationToken cancellationToken)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
@@ -132,7 +149,7 @@ public sealed class DarlingMcpConfigHistoryTools
         {
             var windowEndNaive = NaiveUtc(windowEnd);
             var windowStart = windowEndNaive.AddHours(-hours_back);
-            var snapshots = await DarlingConfigHistoryReader.GetDatabaseConfigSnapshotsAsync(postgres, resolved.ServerId, cancellationToken);
+            var snapshots = await DarlingConfigHistoryReader.GetDatabaseConfigSnapshotsAsync(postgres, resolved.ServerId, databases, cancellationToken);
             var changes = ConfigChangeDiff.DiffDatabaseConfigChanges(snapshots, windowStart, UpperEdge(as_of, windowEndNaive));
             if (changes.Count == 0)
             {
@@ -144,7 +161,7 @@ public sealed class DarlingMcpConfigHistoryTools
                 }
 
                 var emptyNotice = await ReadNoticeAsync(postgres, "database_config", resolved.ServerName, windowStart, windowEndNaive, emptyAnswer: true, logger, cancellationToken);
-                return NoChanges(resolved.ServerName, hours_back, DistinctCaptures(snapshots.Select(s => s.CaptureTime)), emptyNotice);
+                return NoChanges(resolved.ServerName, hours_back, DistinctCaptures(snapshots.Select(s => s.CaptureTime)), emptyNotice, DatabaseScopeText(databases));
             }
 
             var notice = await ReadNoticeAsync(postgres, "database_config", resolved.ServerName, windowStart, windowEndNaive, emptyAnswer: false, logger, cancellationToken);
@@ -247,11 +264,25 @@ public sealed class DarlingMcpConfigHistoryTools
     }
 
     [McpServerTool(Name = "get_database_scoped_config"), Description("Gets database-scoped configuration settings (sys.database_scoped_configurations). Shows MAXDOP, legacy CE, parameter sniffing, and other per-database settings. LATEST IS A TIME: captured when the collector connects, not on a schedule - captured_at is the instant these settings are as of.")]
-    public static async Task<string> GetDatabaseScopedConfig(
+    public static Task<string> GetDatabaseScopedConfig(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Filter to a specific database. Omit for all databases.")] string? database_name = null,
         CancellationToken cancellationToken = default)
+        => GetDatabaseScopedConfig(postgres, server_name, DatabaseFilter.One(database_name), cancellationToken);
+
+    /// <summary>
+    /// #5245: the GetDatabaseScopedConfig read over a LIST of databases. The MCP tool passes <see cref="DatabaseFilter.One"/> of its one
+    /// <c>database_name</c> (a blank or whitespace-only name is every database); a later lane wires the parameter to a list.
+    /// The read stays a latest-snapshot read of the whole server filtered in memory (so an empty store still answers
+    /// unavailable / not_collected for the server, never "no such database"), and the in-memory match is list-aware
+    /// (<see cref="MatchesDatabases"/>, case-insensitive as it always was). The payload names no database beyond each row's own.
+    /// </summary>
+    internal static async Task<string> GetDatabaseScopedConfig(
+        NpgsqlDataSource postgres,
+        string? server_name,
+        DatabaseFilter databases,
+        CancellationToken cancellationToken)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
@@ -266,8 +297,7 @@ public sealed class DarlingMcpConfigHistoryTools
                         "No database-scoped configuration data available. The config collector may not have run yet.");
 
             IEnumerable<DarlingConfigHistoryReader.DatabaseScopedConfigReadRow> filtered = snapshot.Rows;
-            if (!string.IsNullOrEmpty(database_name))
-                filtered = filtered.Where(r => r.DatabaseName.Equals(database_name, StringComparison.OrdinalIgnoreCase));
+            filtered = MatchesDatabases(filtered, databases, r => r.DatabaseName);
 
             var grouped = filtered
                 .GroupBy(r => r.DatabaseName)
@@ -298,11 +328,25 @@ public sealed class DarlingMcpConfigHistoryTools
     }
 
     [McpServerTool(Name = "get_query_store_health"), Description("Per-database Query Store health: actual/desired state (desired READ_WRITE, actual READ_ONLY = the storage-cap failure). query_capture_mode (churn knob): ALL (2016/17 default) churns most; AUTO (2019+ default) skips minor ones; CUSTOM tunes AUTO; NONE stops new capture. wait_stats_capture_mode: ON default, OFF empties per-query waits. null on either: pre-rung row, or pre-2017 engine for wait_stats - never OFF. No verdict rendered. No rows = unavailable or not_collected; an unmatched database_name gives database_count 0. LATEST IS A TIME: captured_at is the newest hourly capture. <<GUIDE>> Gets per-database Query Store health (sys.database_query_store_options): actual vs desired state, readonly_reason (decoded), storage used vs cap, cleanup mode and thresholds, the runtime-stats interval length, and — the two trailing fields on every row since V137 / Lite v64 — query_capture_mode and wait_stats_capture_mode. The classic silent failure is desired READ_WRITE with actual READ_ONLY after the storage cap hit — check this when Query Store data looks stale or missing. CAPTURE MODE IS THE PLAN-CHURN KNOB: query_capture_mode is the one option on this row that names a plan-churn factory. ALL captures every query the engine compiles, one-off ad hoc statements included — on an ad hoc workload each distinct text is a new query with a new plan, so the store fills toward max_storage_size_mb, size-based cleanup cycles, and the READ_ONLY cap hit that readonly_reason decodes follows; ALL was the engine default on SQL Server 2016 and 2017. AUTO skips insignificant queries (the engine's own thresholds over a day: fewer than 30 executions, under 1 s of compile CPU and under 100 ms of execution CPU) and has been the default since SQL Server 2019 and on Azure SQL Database. CUSTOM (2019+) is AUTO with operator-set thresholds — the capture_policy_* knobs, which this row does not collect, so CUSTOM here says the thresholds were tuned, not to what. NONE stops capturing NEW queries while the store keeps collecting compile and runtime statistics for the ones it already holds. wait_stats_capture_mode ON (the default) records per-plan wait statistics into every runtime-stats interval, at a per-execution bookkeeping cost and more store bytes per interval; OFF saves both and leaves the store's per-query wait view empty. Both are the DMV's *_desc spelling verbatim. null means the row predates the V137 rung or, for wait_stats_capture_mode, the engine is older than SQL Server 2017 (the column does not exist there) — never OFF. Consumed by the Viewer's Query Store grid and, next, by get_query_store_clutter as its churn × ALL 'switch to AUTO' arm; this tool reports the modes and renders no verdict on them. Collected hourly; OFF is recorded as OFF (an absent database means not collected, never off). LATEST IS A TIME: this is the newest hourly capture, and captured_at is its instant.")]
-    public static async Task<string> GetQueryStoreHealth(
+    public static Task<string> GetQueryStoreHealth(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Filter to a specific database. Omit for all databases.")] string? database_name = null,
         CancellationToken cancellationToken = default)
+        => GetQueryStoreHealth(postgres, server_name, DatabaseFilter.One(database_name), cancellationToken);
+
+    /// <summary>
+    /// #5245: the GetQueryStoreHealth read over a LIST of databases. The MCP tool passes <see cref="DatabaseFilter.One"/> of its one
+    /// <c>database_name</c> (a blank or whitespace-only name is every database); a later lane wires the parameter to a list.
+    /// The read stays a latest-snapshot read of the whole server filtered in memory (so an empty store still answers
+    /// unavailable / not_collected for the server, never "no such database"), and the in-memory match is list-aware
+    /// (<see cref="MatchesDatabases"/>, case-insensitive as it always was). The payload names no database beyond each row's own.
+    /// </summary>
+    internal static async Task<string> GetQueryStoreHealth(
+        NpgsqlDataSource postgres,
+        string? server_name,
+        DatabaseFilter databases,
+        CancellationToken cancellationToken)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
@@ -317,8 +361,7 @@ public sealed class DarlingMcpConfigHistoryTools
                         "No Query Store health data available. The query_store_health collector runs hourly (SQL Server 2016+); a server with no rows either predates Query Store or has not completed a cycle yet.");
 
             IEnumerable<DarlingConfigHistoryReader.QueryStoreHealthReadRow> filtered = snapshot.Rows;
-            if (!string.IsNullOrEmpty(database_name))
-                filtered = filtered.Where(r => r.DatabaseName.Equals(database_name, StringComparison.OrdinalIgnoreCase));
+            filtered = MatchesDatabases(filtered, databases, r => r.DatabaseName);
 
             var result = filtered.Select(r => new
             {
@@ -367,15 +410,35 @@ public sealed class DarlingMcpConfigHistoryTools
 
     /// <summary>The "empty" miss for a change tool — distinguishes "no snapshots collected yet" from "snapshots
     /// exist but nothing changed", so a caller understands why the history is empty (the on-connect cadence).</summary>
-    private static string NoChanges(string serverName, int hoursBack, int snapshotCount, McpWindowNotice notice) =>
+    private static string NoChanges(string serverName, int hoursBack, int snapshotCount, McpWindowNotice notice, string? databaseScope = null) =>
         McpHelpers.Status(
             "empty",
             snapshotCount <= 1
-                ? "No configuration change history yet: fewer than two config snapshots have been captured for this server. Config is captured when the service connects to the server, so changes appear once a second connect snapshot exists."
-                : $"No configuration changes detected in the last {hoursBack}h across the captured snapshots.",
+                ? (databaseScope is null
+                    ? "No configuration change history yet: fewer than two config snapshots have been captured for this server."
+                    : $"No configuration change history yet: fewer than two config snapshots have been captured for {databaseScope} on this server.")
+                  + " Config is captured when the service connects to the server, so changes appear once a second connect snapshot exists."
+                : $"No configuration changes detected in the last {hoursBack}h across the captured snapshots{(databaseScope is null ? "" : " for " + databaseScope)}.",
             notice.IsUnavailable
                 ? (object)new { server = serverName, snapshot_count = snapshotCount }
                 : (object)new { server = serverName, snapshot_count = snapshotCount, effective_start = notice.EffectiveStart, window_truncated = notice.WindowTruncated, truncation_note = notice.TruncationNote });
+
+    /// <summary>#5245: keeps the rows whose database is one of the chosen ones (ordinal, ignoring case: the match these two
+    /// reads always made against one name); every row for <see cref="DatabaseFilter.All"/>.</summary>
+    internal static IEnumerable<T> MatchesDatabases<T>(IEnumerable<T> rows, DatabaseFilter databases, Func<T, string> database)
+    {
+        if (databases.IsAll)
+            return rows;
+        var names = databases.Names;
+        return rows.Where(r => names.Any(n => n.Equals(database(r), StringComparison.OrdinalIgnoreCase)));
+    }
+
+    /// <summary>How a filtered empty answer names the databases it looked at: null for every database (the text is then
+    /// the one it always was), "database X" for one name, "the chosen databases" for two or more.</summary>
+    internal static string? DatabaseScopeText(DatabaseFilter databases) =>
+        databases.IsAll ? null
+        : databases.Names.Count == 1 ? "database " + databases.Names[0]
+        : DatabaseFilter.ManyDatabasesDescription;
 
     /// <summary>
     /// The window-floor notice for one change tool, from the collector's own table. The rule matches the viewer's and the web's
