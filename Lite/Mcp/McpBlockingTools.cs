@@ -203,7 +203,8 @@ public sealed class McpBlockingTools
         [Description("Hours of history. Default 24.")] int hours_back = 24,
         [Description("Maximum rows to return, newest first. Default 15. This is what bounds the page — read truncated to know whether the window held more.")] int limit = 15,
         [Description("Return each row's full blocked_sql_text/blocking_sql_text instead of a 150-character preview. Default false.")] bool full_text = false,
-        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        [Description("Limit to one database. Omit for all databases.")] string? database_name = null)
     {
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
         if (error != null) return error;
@@ -215,6 +216,11 @@ public sealed class McpBlockingTools
 
             var limitError = McpHelpers.ValidateTop(limit);
             if (limitError != null) return limitError;
+
+            /* #5244: database_name appended LAST (H1), as get_blocked_process_xml has it: the one name rides the reader's
+               database list into the SQL (both arms, the XE reports and the DMV fallback) before the limit + 1 fetch, so
+               limit counts the CHOSEN database's reports. A blank or whitespace name is "no filter". */
+            var database = string.IsNullOrWhiteSpace(database_name) ? null : database_name;
 
             /* The stamps below are THIS server's local wall clock in the store, so putting them in the
                naive-UTC frame every other field on this payload uses needs THIS server's clock, not the
@@ -229,11 +235,11 @@ public sealed class McpBlockingTools
             /* #3541 A3: the caller's limit + 1 as the fetch, the extra row as the OBSERVED truncation
                signal. The reader capped at 200 newest-first whatever `limit` said, so a 24-hour request on a
                server blocking steadily was answered from its newest few minutes with nothing saying so. */
-            var rows = await dataService.GetRecentBlockedProcessReportsAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd, limit: limit + 1);
+            var rows = await dataService.GetRecentBlockedProcessReportsAsync(resolved.ServerId, hours_back, databaseNames: database == null ? null : new[] { database }, asOfUtc: windowEnd, limit: limit + 1);
             if (rows.Count == 0)
             {
                 return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "blocked_process_report")
-                    ?? McpHelpers.Status("empty", "No blocked process reports found in the specified time range.",
+                    ?? McpHelpers.Status("empty", $"No blocked process reports found in the specified time range{ForChosenDatabase(database)}.",
                         (await McpQueryTools.EventWindowNoticeAsync(
                             () => dataService.GetQueryWindowFloorAsync(QueryWindowRelation.BlockedProcessReports, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd),
                             null, windowEnd.AddHours(-hours_back), windowEnd, "blocked_process_report", emptyAnswer: true)).AsHints());
