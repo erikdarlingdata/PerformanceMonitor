@@ -282,6 +282,10 @@ AND   collection_time = (SELECT MAX(collection_time) FROM v_index_object_stats W
         // Build the optional DB filter as literal SQL so a NULL parameter never has to be typed by DuckDB.
         var dbFilter = databaseName == null ? "" : " AND ios.database_name = $2";
 
+        /* #5372 L1: the ORDER BY ends in a total order (promotions, then the four-part name, as get_index_usage does), so
+           two runs over a set that ties at the cap return the same rows; the rows listed only for a lock promotion all
+           sum to 0 and tie. */
+
         command.CommandText = $@"
 SELECT
     ios.collection_time,
@@ -315,7 +319,9 @@ AND (
 )
 ORDER BY
     COALESCE(ios.row_lock_wait_in_ms, 0) + COALESCE(ios.page_lock_wait_in_ms, 0)
-    + COALESCE(ios.page_latch_wait_in_ms, 0) + COALESCE(ios.page_io_latch_wait_in_ms, 0) DESC
+    + COALESCE(ios.page_latch_wait_in_ms, 0) + COALESCE(ios.page_io_latch_wait_in_ms, 0) DESC,
+    COALESCE(ios.index_lock_promotion_count, 0) DESC,
+    ios.database_name, ios.schema_name, ios.table_name, ios.index_name NULLS LAST
 LIMIT {topN}";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
@@ -357,17 +363,24 @@ LIMIT {topN}";
     /// The shared optimized-locking note when any database's newest stored <c>is_optimized_locking_on</c> is true;
     /// null otherwise (false and unknown both show no note).
     /// </summary>
-    public async Task<string?> GetOptimizedLockingNoteAsync(int serverId)
+    public async Task<string?> GetOptimizedLockingNoteAsync(int serverId, string? databaseName = null)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        command.CommandText = @"
+        /* #5372 M2: with a database chosen only that database's flag counts, so the note never warns about a database
+           the page does not show (Darling's twin does the same). The anchor stays the server's newest capture. Literal
+           SQL, the way GetIndexLockingAsync builds its filter, so a NULL parameter is never typed. */
+        var dbFilter = databaseName == null ? "" : " AND database_name = $2";
+
+        command.CommandText = $@"
 SELECT is_optimized_locking_on
 FROM v_database_config
 WHERE server_id = $1
-AND   capture_time = (SELECT MAX(capture_time) FROM v_database_config WHERE server_id = $1)";
+AND   capture_time = (SELECT MAX(capture_time) FROM v_database_config WHERE server_id = $1){dbFilter}";
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        if (databaseName != null)
+            command.Parameters.Add(new DuckDBParameter { Value = databaseName });
 
         var flags = new List<bool?>();
         using var reader = await command.ExecuteReaderAsync();
