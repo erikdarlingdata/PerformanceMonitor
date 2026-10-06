@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.ObjectModel;
+using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
@@ -76,12 +77,42 @@ public partial class NotificationRoutesWindow : Window
 
         try
         {
-            await _dataService.InsertNotificationRouteAsync(dialog.Route);
+            await SaveRouteAsync(dialog.Route, null);
             await LoadRoutesAsync();
         }
         catch (Exception ex)
         {
             ShowError("Could not save the route", ex);
+        }
+    }
+
+    /// <summary>
+    /// Saves a route with its webhook destinations sealed (#5366). The key is asked for only when a destination was typed; a
+    /// route that keeps its saved values needs none. A key notice is shown once.
+    /// </summary>
+    private async Task SaveRouteAsync(NotificationRouteRow route, NotificationRouteRow? stored)
+    {
+        var parent = await _dataService.GetNotificationAsync() ?? NotificationRow.Defaults();
+        ViewerPasswordSealer? sealer = null;
+        string? refusal = null;
+        if (ViewerWebhookSealing.NeedsKey(route, stored))
+        {
+            var key = await ViewerPasswordKey.GetSealKeyAsync(_dataService, this);
+            sealer = key.Sealer;
+            refusal = key.Refusal;
+            if (key.Notice is { } notice)
+            {
+                MessageBox.Show(notice, "Notification Routes", MessageBoxButton.OK, MessageBoxImage.Information);
+            }
+        }
+
+        try
+        {
+            await _dataService.SaveNotificationRouteSealedAsync(route, stored, parent, sealer, refusal);
+        }
+        catch (ViewerPasswordRefusedException ex)
+        {
+            throw new InvalidOperationException(ex.Message, ex);
         }
     }
 
@@ -100,7 +131,7 @@ public partial class NotificationRoutesWindow : Window
 
         try
         {
-            await _dataService.UpdateNotificationRouteAsync(dialog.Route);
+            await SaveRouteAsync(dialog.Route, selected);
             await LoadRoutesAsync();
         }
         catch (Exception ex)

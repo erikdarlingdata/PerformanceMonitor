@@ -432,6 +432,15 @@ public partial class MainWindow : Window
             return;
         }
 
+        /* #5366: save the store's password key the first time it is seen and say so once. A read-only connection and a
+           store without a healthy key show nothing; a changed key is asked about when a password is saved. */
+        var passwordKeyNotice = await ViewerPasswordKey.CheckOnConnectAsync(_dataService);
+        if (passwordKeyNotice is not null)
+        {
+            StatusText.Text = passwordKeyNotice;
+            ViewerLogger.Info("App", passwordKeyNotice);
+        }
+
         /* #4957: measure the rollup floors in the background now that the store has answered, so the first tab that
            routes by them does not wait on the cold sort. Fire and forget: the warm never throws and changes nothing
            else when it fails. */

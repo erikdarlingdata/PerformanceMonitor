@@ -217,10 +217,11 @@ SELECT to_regclass('collect.store_statement_history') IS NOT NULL AND to_regclas
         Exception? storeError,
         string? storeReason,
         CancellationToken cancellationToken,
-        NameSourceSql? nameSources = null)
+        NameSourceSql? nameSources = null,
+        IPasswordKeyRing? keyRing = null)
     {
         var aliaser = new BundleAliaser();
-        var warnings = new List<string>(DiagnosticsBundle.SeedFromConfig(aliaser, config, connectionString));
+        var warnings = new List<string>(DiagnosticsBundle.SeedFromConfig(aliaser, config, connectionString, keyRing));
         var sections = new List<BundleSection>();
         string scope = "fleet";
 
@@ -467,7 +468,30 @@ SELECT to_regclass('collect.store_statement_history') IS NOT NULL AND to_regclas
             ["schema_version_stored"] = stored,
             ["schema_version_compiled"] = StorageVersion.SchemaVersion,
             ["host"] = host,
+            ["password_key"] = await PasswordKeyInfoAsync(postgres, ct),
         };
+    }
+
+    /// <summary>The published password key's id and the service's key state (#5366), read from the store. A store without the
+    /// tables reads <c>not_present</c>; any other failure reads <c>unavailable</c> with the error's class only, so this
+    /// member never fails the store section.</summary>
+    private static async Task<JsonNode?> PasswordKeyInfoAsync(NpgsqlDataSource postgres, CancellationToken ct)
+    {
+        try
+        {
+            await using var connection = await postgres.OpenConnectionAsync(ct);
+            var published = await PasswordKeyTables.ReadCurrentAsync(connection, ct);
+            var state = await PasswordKeyTables.ReadNewestServiceStateAsync(connection, ct);
+            return DiagnosticsBundle.BuildPasswordKeyInfo(published, state);
+        }
+        catch (PostgresException ex) when (ex.SqlState == "42P01")
+        {
+            return new JsonObject { ["status"] = "not_present" };
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return new JsonObject { ["status"] = "unavailable", ["error_class"] = SlowReadLog.ErrorClassOf(ex) };
+        }
     }
 
     private static async Task<JsonNode?> CollectionSectionAsync(NpgsqlDataSource postgres, string? serverName, int hours, int days, CancellationToken ct)
