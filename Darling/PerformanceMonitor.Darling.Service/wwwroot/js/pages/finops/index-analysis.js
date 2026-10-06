@@ -13,11 +13,12 @@
    read cut the list it names the limit and how many are not shown, and points at the Database box. Differences from the desktop grid:
    the overall row has no workload figures, so those cells show "—", and its Collected cell shows "—" too (the desktop leaves it blank); an average wait of none shows 0.00; script and
    definition text is cut by the read unless the "Full script and definition text" box is ticked; analyzer notes sit in a
-   collapsed block; there are no tooltips. A Database box (any name; the list suggests the databases shown by the last
-   unfiltered read) and that box re-read the view; the controls stay put and only the content below them is remounted.
+   collapsed block; there are no tooltips. A Database box (database-box.js: any name, sent as one name; the list suggests the databases shown by the last
+   unfiltered read, and a typed name that matches one ignoring case is sent in its stored spelling) and that box re-read the view; the controls stay put and only the content below them is remounted.
    The choice is kept per server in module state, so it survives the page's poll rebuilds while the page stays open. */
 
 import { VIZ } from "../../panels.js";
+import { databaseBox, newBoxChoice } from "./database-box.js";
 import { el, mount, loadingStrip, emptyStrip, noticeStrip, readErrorStrip, errorStrip, readTool, fmtInt, fmtNum } from "../../util.js";
 
 // The most recommendations the view lists (#5238). The desktop grid shows every finding, so the tab asks for the ceiling, as the
@@ -87,19 +88,18 @@ function recommendationRow(r, captured) {
   return { ...r, index_size_gb_text: fmtNum(r.index_size_gb, 3), captured_at: captured.get(r.database_name) ?? null };
 }
 
-// The latest choice per server: { db, full, names } where names are the databases of the last unfiltered read.
+// The latest choice per server: the Database box's fields (db, draft, caret, focused; names are the databases of the last unfiltered
+// read) plus `full`.
 const choices = new Map();
 
 function choiceFor(server) {
   let c = choices.get(server);
   if (!c) {
-    c = { db: "", full: false, names: [] };
+    c = { ...newBoxChoice(), full: false };
     choices.set(server, c);
   }
   return c;
 }
-
-let listCounter = 0;
 
 function noticeText(data, n, db) {
   // The read says when rows were cut (truncated, with the count of every finding), so the notice never guesses: a list of exactly
@@ -125,17 +125,11 @@ export const tab = {
   build(server, ctx) {
     const choice = choiceFor(server);
     const content = el("div", {}, [loadingStrip()]);
-    const listId = "index-analysis-databases-" + (++listCounter);
-    const datalist = el("datalist", { id: listId });
-    const fillNames = () => mount(datalist, choice.names.map((n) => el("option", { value: n })));
-    fillNames();
-    const dbInput = el("input", { type: "text", list: listId, class: "sort-select", autocomplete: "off", placeholder: "All databases" });
-    dbInput.value = choice.draft ?? choice.db;
+    const box = databaseBox(choice, { onCommit: () => reread() });
     const fullBox = el("input", { type: "checkbox" });
     fullBox.checked = choice.full;
     const controls = el("div", { class: "sort-control" }, [
-      el("label", { class: "sort-control" }, [el("span", { text: "Database" }), dbInput]),
-      datalist,
+      ...box.nodes,
       el("label", { class: "sort-control" }, [fullBox, el("span", { text: "Full script and definition text" })]),
     ]);
     let generation = 0;
@@ -154,7 +148,7 @@ export const tab = {
         const data = res.data || {};
         if (!choice.db) {
           choice.names = (data.databases || []).map((d) => d.database_name).filter(Boolean);
-          fillNames();
+          box.setNames(choice.names);
         }
         const captured = capturedByName(data.databases || []);
         const recs = (data.recommendations || []).map((r) => recommendationRow(r, captured));
@@ -186,39 +180,11 @@ export const tab = {
       load();
     }
 
-    // The panel is rebuilt on every poll. Keep the uncommitted text, the caret and the focus on the per-server
-    // choice so the new box can take them back. A blur caused by the old panel leaving the page must not clear focus.
-    // Chrome fires that blur DURING the removal, while the box is still connected, so the check waits a turn.
-    dbInput.addEventListener("input", () => {
-      choice.draft = dbInput.value;
-      choice.caret = [dbInput.selectionStart, dbInput.selectionEnd];
-    });
-    dbInput.addEventListener("focus", () => {
-      choice.focused = true;
-    });
-    dbInput.addEventListener("blur", () => {
-      setTimeout(() => {
-        if (dbInput.isConnected) choice.focused = false;
-      }, 0);
-    });
-    dbInput.addEventListener("change", () => {
-      choice.db = dbInput.value.trim();
-      choice.draft = undefined;
-      reread();
-    });
     fullBox.addEventListener("change", () => {
       choice.full = fullBox.checked;
       reread();
     });
     load();
-    if (choice.focused) {
-      setTimeout(() => {
-        if (dbInput.isConnected) {
-          dbInput.focus();
-          if (choice.caret) dbInput.setSelectionRange(choice.caret[0], choice.caret[1]);
-        }
-      }, 0);
-    }
     return el("div", {}, [controls, content]);
   },
 };
