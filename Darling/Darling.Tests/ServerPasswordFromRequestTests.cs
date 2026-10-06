@@ -155,7 +155,7 @@ public sealed class ServerPasswordFromRequestTests : IDisposable
     {
         foreach (var isWindows in new[] { true, false })
         {
-            var (entries, invalid, whole) = Core.ParseRequest(AddBody("file:C:\\x"), isWindows);
+            var (entries, invalid, whole) = Core.ParseRequest(AddBody("file:C:\\x"), isWindows ? TestKeyRings.Healthy.Status : TestKeyRings.NotReady.Status);
 
             Assert.Null(whole);
             Assert.Empty(entries);
@@ -166,7 +166,7 @@ public sealed class ServerPasswordFromRequestTests : IDisposable
     [Fact]
     public void McpAdd_AcceptsAPassword_ThatOnlyContainsAPrefixInTheMiddle()
     {
-        var (entries, invalid, _) = Core.ParseRequest(AddBody("pa-env:-ss"), isWindows: true);
+        var (entries, invalid, _) = Core.ParseRequest(AddBody("pa-env:-ss"), TestKeyRings.Healthy.Status);
 
         Assert.Empty(invalid);
         Assert.Equal("pa-env:-ss", Assert.Single(entries).PlaintextPassword);
@@ -175,19 +175,20 @@ public sealed class ServerPasswordFromRequestTests : IDisposable
     [Fact]
     public void TheHostCommandLineAdd_StillAcceptsAReference_ThatIsNotDarlingsOwn()
     {
-        var (entries, invalid, _) = Core.ParseRequest(AddBody("env:SOME_OTHER_VAR"), isWindows: false, allowSecretReferences: true);
+        var (entries, invalid, _) = Core.ParseRequest(AddBody("env:SOME_OTHER_VAR"), TestKeyRings.NotReady.Status, allowSecretReferences: true);
 
         Assert.Empty(invalid);
         Assert.Equal("env:SOME_OTHER_VAR", Assert.Single(entries).PlaintextPassword);
     }
 
     [Fact]
-    public void ARequestAdd_OfALiteral_OffWindows_PointsAtTheConfigurationFile_NotAtAReference()
+    public void ARequestAdd_OfALiteral_WhileTheKeyIsNotReady_GivesTheKeysReason_NotAReference()
     {
-        var (_, invalid, _) = Core.ParseRequest(AddBody(Typed), isWindows: false);
+        var (_, invalid, _) = Core.ParseRequest(AddBody(Typed), TestKeyRings.NotReady.Status);
 
         var detail = Assert.Single(invalid).Detail;
-        Assert.Contains("configuration file", detail, StringComparison.Ordinal);
+        Assert.Contains(DarlingPasswordKey.NotReadyReason, detail, StringComparison.Ordinal);
+        Assert.DoesNotContain("env:", detail, StringComparison.Ordinal);
         Assert.DoesNotContain(Typed, detail, StringComparison.Ordinal);
     }
 
@@ -226,7 +227,7 @@ public sealed class ServerPasswordFromRequestTests : IDisposable
     }
 
     private static Task<string> Edit(StoreHoldingAReference store, string changes, CountingProbe probe) =>
-        Core.EditServerCoreAsync(store, 41, changes, probe.Probe, isWindows: true, logger: null, CancellationToken.None);
+        Core.EditServerCoreAsync(store, 41, changes, probe.Probe, TestKeyRings.Healthy, logger: null, CancellationToken.None);
 
     private static string Status(string answer) => JsonNode.Parse(answer)!["status"]!.GetValue<string>();
 
@@ -293,7 +294,11 @@ public sealed class ServerPasswordFromRequestTests : IDisposable
 
         Assert.Equal("updated", Status(answer));
         Assert.NotEqual(StoredReference, store.StoredSecret);
-        Assert.Equal(Typed, DarlingSecrets.Unprotect(store.StoredSecret!));
+        var row = store.Row;
+        var binding = PasswordBinding.ForServer(ServerConnectionIdentity.FromStoredColumns(
+            row.Host, row.Port, row.Engine, row.Database, row.ReadOnlyIntent, row.Auth, row.Username, row.EncryptMode,
+            row.TrustServerCertificate, row.MultiSubnetFailover));
+        Assert.Equal(Typed, TestKeyRings.Healthy.Open(store.StoredSecret!, binding));
         Assert.Equal(Typed, probe.Last!.Password);
         Assert.DoesNotContain(Typed, answer, StringComparison.Ordinal);
     }
@@ -360,7 +365,7 @@ public sealed class ServerPasswordFromRequestTests : IDisposable
         DarlingWebEndpoints.MapServers(
             app, source, new CapturingTestLogger(),
             addServers: body => Core.AddServersAsync(new UntouchedDefinitions(), body, probe.Probe, CancellationToken.None),
-            editServer: (id, body) => Core.EditServerCoreAsync(store, id, body, probe.Probe, isWindows: true, logger: null, CancellationToken.None));
+            editServer: (id, body) => Core.EditServerCoreAsync(store, id, body, probe.Probe, TestKeyRings.Healthy, logger: null, CancellationToken.None));
         await app.StartAsync(TestContext.Current.CancellationToken);
         return new Web { App = app, Client = app.GetTestClient(), Source = source, Probe = probe, Store = store };
     }
@@ -427,19 +432,19 @@ public sealed class ServerPasswordFromRequestTests : IDisposable
     };
 
     /// <summary>The stored row the tested server (<see cref="Tested"/>) matches on every setting.</summary>
-    private static ServerConnectionSettings StoredRow(string host, int port = 0) =>
-        new(host, port, "sqlserver", null, false, "sql", "monitor", "Mandatory", false, false);
+    private static ServerConnectionIdentity StoredRow(string host, int port = 0) =>
+        ServerConnectionIdentity.FromStoredColumns(host, port, "sqlserver", null, false, "sql", "monitor", "Mandatory", false, false);
 
     private sealed class StoredAddresses
     {
-        public List<ServerConnectionSettings> Rows { get; } = [];
+        public List<ServerConnectionIdentity> Rows { get; } = [];
 
         public List<string> Asked { get; } = [];
 
-        public Task<IReadOnlyList<ServerConnectionSettings>> ReadAsync(string reference, CancellationToken cancellationToken)
+        public Task<IReadOnlyList<ServerConnectionIdentity>> ReadAsync(string reference, CancellationToken cancellationToken)
         {
             Asked.Add(reference);
-            return Task.FromResult<IReadOnlyList<ServerConnectionSettings>>(Rows.ToList());
+            return Task.FromResult<IReadOnlyList<ServerConnectionIdentity>>(Rows.ToList());
         }
     }
 

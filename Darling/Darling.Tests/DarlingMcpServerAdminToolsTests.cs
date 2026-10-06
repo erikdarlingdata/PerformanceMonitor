@@ -323,7 +323,7 @@ public sealed class DarlingMcpServerAdminToolsSurfaceTests
             var json = accepted == "ManagedIdentity"
                 ? "[{\"host\":\"x\",\"auth\":\"ManagedIdentity\"}]"
                 : "[{\"host\":\"x\",\"auth\":\"ServicePrincipal\",\"username\":\"app\",\"password\":\"s\"}]";
-            var (entries, invalid, wholeError) = DarlingMcpServerAdminTools.ParseRequest(json);
+            var (entries, invalid, wholeError) = DarlingMcpServerAdminTools.ParseRequest(json, HealthyKey);
             Assert.Null(wholeError);
             Assert.Empty(invalid);
             Assert.Single(entries);
@@ -682,7 +682,7 @@ public sealed class DarlingMcpServerAdminToolsSurfaceTests
         var (entries, invalid, wholeError) = DarlingMcpServerAdminTools.ParseRequest(
             "[{\"host\":\"sql02\",\"display_name\":\"Prod\",\"database\":\"AppDb\",\"auth\":\"SQL\",\"username\":\"monitor\"," +
             "\"password\":\"p@ss\",\"encrypt_mode\":\"Strict\",\"trust_server_certificate\":true,\"read_only_intent\":true}]",
-            isWindows: true);
+            TestKeyRings.Healthy.Status);
 
         Assert.Null(wholeError);
         Assert.Empty(invalid);
@@ -707,7 +707,7 @@ public sealed class DarlingMcpServerAdminToolsSurfaceTests
         var (entries, invalid, wholeError) = DarlingMcpServerAdminTools.ParseRequest(
             "[{\"host\":\"azuredb.database.windows.net\",\"database\":\"AppDb\",\"auth\":\"ServicePrincipal\"," +
             "\"username\":\"11111111-2222-3333-4444-555555555555\",\"password\":\"the-client-secret\"}]",
-            isWindows: true);
+            TestKeyRings.Healthy.Status);
 
         Assert.Null(wholeError);
         Assert.Empty(invalid);
@@ -893,17 +893,21 @@ public sealed class DarlingMcpServerAdminToolsSurfaceTests
         }
     }
 
+    private static readonly PasswordKeyStatus HealthyKey = new(true, null, "0123456789abcdef", null);
+
+    private static readonly PasswordKeyStatus NotReadyKey = new(false, DarlingPasswordKey.NotReadyReason, null, null);
+
     [Fact]
-    public void LiteralSecretRefusal_OffWindows_RefusesALiteral_AndNamesTheReferenceForms()
+    public void LiteralSecretRefusal_WhileTheKeyIsNotReady_RefusesALiteral_WithTheKeysReason()
     {
-        var password = DarlingMcpServerAdminTools.LiteralSecretRefusal("p@ss", isWindows: false, isServicePrincipal: false);
+        var password = DarlingMcpServerAdminTools.LiteralSecretRefusal("p@ss", NotReadyKey, isServicePrincipal: false);
         Assert.NotNull(password);
         Assert.Contains("password", password, StringComparison.Ordinal);
-        Assert.Contains("env:NAME", password, StringComparison.Ordinal);
-        Assert.Contains("file:/run/secrets/", password, StringComparison.Ordinal);
+        Assert.Contains(DarlingPasswordKey.NotReadyReason, password, StringComparison.Ordinal);
         Assert.DoesNotContain("p@ss", password, StringComparison.Ordinal);
+        Assert.DoesNotContain("DPAPI", password, StringComparison.Ordinal);
 
-        var clientSecret = DarlingMcpServerAdminTools.LiteralSecretRefusal("s3cret", isWindows: false, isServicePrincipal: true);
+        var clientSecret = DarlingMcpServerAdminTools.LiteralSecretRefusal("s3cret", NotReadyKey, isServicePrincipal: true);
         Assert.NotNull(clientSecret);
         Assert.Contains("client secret", clientSecret, StringComparison.Ordinal);
         Assert.DoesNotContain("s3cret", clientSecret, StringComparison.Ordinal);
@@ -912,54 +916,89 @@ public sealed class DarlingMcpServerAdminToolsSurfaceTests
     [Theory]
     [InlineData("env:SQL_PW")]
     [InlineData("file:/run/secrets/sql_password")]
-    public void LiteralSecretRefusal_AReferenceIsAcceptedOnEveryPlatform(string reference)
+    public void LiteralSecretRefusal_AReferenceIsAcceptedWhateverTheKeyStatus(string reference)
     {
-        Assert.Null(DarlingMcpServerAdminTools.LiteralSecretRefusal(reference, isWindows: false, isServicePrincipal: false));
-        Assert.Null(DarlingMcpServerAdminTools.LiteralSecretRefusal(reference, isWindows: true, isServicePrincipal: false));
+        Assert.Null(DarlingMcpServerAdminTools.LiteralSecretRefusal(reference, NotReadyKey, isServicePrincipal: false));
+        Assert.Null(DarlingMcpServerAdminTools.LiteralSecretRefusal(reference, HealthyKey, isServicePrincipal: false));
     }
 
     [Fact]
-    public void LiteralSecretRefusal_OnWindows_AcceptsALiteral()
+    public void LiteralSecretRefusal_WithAHealthyKey_AcceptsALiteral_OnAnyPlatform()
     {
-        Assert.Null(DarlingMcpServerAdminTools.LiteralSecretRefusal("p@ss", isWindows: true, isServicePrincipal: false));
+        Assert.Null(DarlingMcpServerAdminTools.LiteralSecretRefusal("p@ss", HealthyKey, isServicePrincipal: false));
     }
 
     private const string LiteralSqlPasswordRequest =
-        "[{\"host\":\"sql01\",\"auth\":\"SQL\",\"username\":\"monitor\",\"password\":\"p@ss\"}]";
+        "[{\"host\":\"sql-example\",\"auth\":\"SQL\",\"username\":\"monitor\",\"password\":\"p@ss-not-real\"}]";
 
     [Fact]
-    public void ParseRequest_ALiteralPassword_IsInvalidOffWindows_AndAcceptedOnWindows()
+    public void ParseRequest_ALiteralPassword_IsAcceptedWithAHealthyKey_AndRefusedWithTheReasonWhenNotReady()
     {
-        var (offEntries, offInvalid, offWholeError) = DarlingMcpServerAdminTools.ParseRequest(LiteralSqlPasswordRequest, isWindows: false);
-        Assert.Null(offWholeError);
-        Assert.Empty(offEntries);
-        var refused = Assert.Single(offInvalid);
-        Assert.Equal("invalid", refused.Status);
-        Assert.Equal("sql01", refused.Server);
-        Assert.Contains("file:/run/secrets/", refused.Detail, StringComparison.Ordinal);
+        var (entries, invalid, wholeError) = DarlingMcpServerAdminTools.ParseRequest(LiteralSqlPasswordRequest, HealthyKey);
+        Assert.Null(wholeError);
+        Assert.Single(entries);
+        Assert.Empty(invalid);
 
-        var (onEntries, onInvalid, _) = DarlingMcpServerAdminTools.ParseRequest(LiteralSqlPasswordRequest, isWindows: true);
-        Assert.Single(onEntries);
-        Assert.Empty(onInvalid);
+        var (notReadyEntries, notReadyInvalid, _) = DarlingMcpServerAdminTools.ParseRequest(LiteralSqlPasswordRequest, NotReadyKey);
+        Assert.Empty(notReadyEntries);
+        var refused = Assert.Single(notReadyInvalid);
+        Assert.Equal("invalid", refused.Status);
+        Assert.Equal("sql-example", refused.Server);
+        Assert.Contains(DarlingPasswordKey.NotReadyReason, refused.Detail, StringComparison.Ordinal);
+        Assert.DoesNotContain("p@ss-not-real", refused.Detail, StringComparison.Ordinal);
     }
 
-    /// <summary>The overload every caller uses reads the platform it runs on, so on a non-Windows host it is the
-    /// request itself that refuses the literal, before any probe or write.</summary>
+    /// <summary>The overload every caller uses reads the service's key ring, which refuses until the service has loaded
+    /// its key, so the request itself refuses the literal before any probe or write.</summary>
     [Fact]
-    public void ParseRequest_ALiteralPassword_FollowsThePlatformTheTestRunsOn()
+    public void ParseRequest_ALiteralPassword_FollowsTheServicesKeyRing()
     {
         var (entries, invalid, _) = DarlingMcpServerAdminTools.ParseRequest(LiteralSqlPasswordRequest);
 
-        if (OperatingSystem.IsWindows())
+        Assert.Equal(DarlingPasswordKey.Current.Status.CanSeal ? 1 : 0, entries.Count);
+        Assert.Equal(DarlingPasswordKey.Current.Status.CanSeal ? 0 : 1, invalid.Count);
+    }
+
+    /* A lone surrogate cannot arrive through the JSON parser (it is replaced or rejected there), but it can through the
+       host command line and any other caller, so the text check is asked directly. */
+    [Fact]
+    public void SealableTextRefusal_APasswordThatIsNotValidText_IsRefusedBeforeSealing_WithoutEchoingIt()
+    {
+        foreach (var password in new[] { "\ud800", "abc\udc00def" })
         {
-            Assert.Single(entries);
-            Assert.Empty(invalid);
+            var refusal = DarlingMcpServerAdminTools.SealableTextRefusal(password, "sql-example", null, "monitor");
+
+            Assert.Equal(DarlingMcpServerAdminTools.PasswordCharactersText, refusal);
+            Assert.DoesNotContain(password, refusal, StringComparison.Ordinal);
         }
-        else
+    }
+
+    [Fact]
+    public void SealableTextRefusal_AConnectionFieldThatIsNotValidText_IsRefusedBeforeSealing_NamingTheField()
+    {
+        Assert.Equal(
+            DarlingMcpServerAdminTools.FieldCharactersText("username"),
+            DarlingMcpServerAdminTools.SealableTextRefusal("p@ss-not-real", "sql-example", null, "mon\ud800itor"));
+        Assert.Equal(
+            DarlingMcpServerAdminTools.FieldCharactersText("host"),
+            DarlingMcpServerAdminTools.SealableTextRefusal("p@ss-not-real", "sql\udc00-example", null, "monitor"));
+        Assert.Null(DarlingMcpServerAdminTools.SealableTextRefusal("p@ss-not-real", "sql-example", "master", "monitor"));
+    }
+
+    [Fact]
+    public void ParseRequest_APasswordLongerThanASealedValueCanHold_IsRefused()
+    {
+        var json = System.Text.Json.JsonSerializer.Serialize(new[]
         {
-            Assert.Empty(entries);
-            Assert.Equal("invalid", Assert.Single(invalid).Status);
-        }
+            new Dictionary<string, string>
+            {
+                ["host"] = "sql-example", ["auth"] = "SQL", ["username"] = "monitor", ["password"] = new string('x', PasswordSeal.MaxPlaintextBytes + 1),
+            },
+        });
+        var (entries, invalid, _) = DarlingMcpServerAdminTools.ParseRequest(json, HealthyKey);
+
+        Assert.Empty(entries);
+        Assert.Equal(DarlingMcpServerAdminTools.PasswordTooLongText, Assert.Single(invalid).Detail);
     }
 
     /// <summary>Sets <see cref="DarlingOwnedSecrets"/> for one test and puts the previous value back on dispose.</summary>
@@ -982,7 +1021,7 @@ public sealed class DarlingMcpServerAdminToolsSurfaceTests
             "{\"host\":\"sql2\",\"auth\":\"SQL\",\"username\":\"u\",\"password\":\"file:/run/secrets/sql_password\"}," +
             "{\"host\":\"az1\",\"auth\":\"ServicePrincipal\",\"username\":\"app\",\"password\":\"literal-secret\"}," +
             "{\"host\":\"az2\",\"auth\":\"ServicePrincipal\",\"username\":\"app\",\"password\":\"env:CLIENT_SECRET\"}]",
-            isWindows: false, allowSecretReferences: true);
+            NotReadyKey, allowSecretReferences: true);
 
         Assert.Equal(new[] { 0, 2, 4 }, entries.Select(e => e.Order).ToArray());
         Assert.Equal(new[] { 1, 3 }, invalid.Select(r => r.Order).ToArray());
@@ -1000,7 +1039,7 @@ public sealed class DarlingMcpServerAdminToolsSurfaceTests
             "[{\"host\":\"win1\"}," +
             "{\"host\":\"sql2\",\"auth\":\"SQL\",\"username\":\"u\",\"password\":\"file:/run/secrets/sql_password\"}," +
             "{\"host\":\"sql3\",\"auth\":\"SQL\",\"username\":\"u\",\"password\":\"env:SQL_PASSWORD\"}]",
-            isWindows: false, allowSecretReferences: true);
+            NotReadyKey, allowSecretReferences: true);
 
         Assert.Equal(new[] { 0 }, entries.Select(e => e.Order).ToArray());
         Assert.Equal(new[] { 1, 2 }, invalid.Select(r => r.Order).ToArray());
