@@ -19,7 +19,7 @@ namespace PerformanceMonitor.Common;
 /// <see cref="JsonCore"/> holds the mechanics only. The two judges and the refusal sentence come in as
 /// arguments, so the walk is tested with fake judges and the filter wires the real ones in.
 /// </summary>
-internal static partial class SensitiveStatements
+public static partial class SensitiveStatements
 {
     /// <summary>A string value shorter than this cannot name a statement, so it is not handed to the text judge.</summary>
     private const int MinTextChars = 5;

@@ -25,6 +25,10 @@ namespace Darling.Tests;
 /// </summary>
 public sealed class SensitiveStatementJsonTests
 {
+    private readonly ITestOutputHelper _output;
+
+    public SensitiveStatementJsonTests(ITestOutputHelper output) => _output = output;
+
     private const string Marker = "[withheld]";
     private const string Refusal = "Output withheld: test refusal.";
 
@@ -274,7 +278,6 @@ public sealed class SensitiveStatementJsonTests
         times.Sort();
         double median = (times[9] + times[10]) / 2;
         string line = $"JsonCore identity walk, {Encoding.UTF8.GetByteCount(output)} bytes, 200 rows, 20 runs: median {median:F2} ms, min {times[0]:F2} ms, max {times[19]:F2} ms";
-        Console.WriteLine(line);
-        System.IO.File.WriteAllText(System.IO.Path.Combine(System.IO.Path.GetTempPath(), "ssf-L3-walk-measure.txt"), line);
+        _output.WriteLine(line);
     }
 }
