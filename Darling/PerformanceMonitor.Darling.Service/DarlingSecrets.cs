@@ -109,9 +109,12 @@ public static class DarlingSecrets
     /// nothing else stops. The text is the refusal's own sentence, which names no path and no variable, and the
     /// referenced value is never read.</para>
     /// </summary>
-    private static string ResolveStoredReference(string reference, string settingName)
+    private static string ResolveStoredReference(string reference, string settingName, bool declaredByFile)
     {
-        if (DarlingOwnedSecrets.ReferenceRefusal(reference) is { } refusal)
+        /* One exception to the refusal: darling.json itself declares this same reference, in this same slot, for this same
+           server id (MonitoredServer.EncryptedPasswordDeclaredByFile). The mark is set where the server is built, from the
+           file, and never from a stored value, so a reference that is only in the store is still asked about. */
+        if (!declaredByFile && DarlingOwnedSecrets.ReferenceRefusal(reference) is { } refusal)
         {
             throw new InvalidOperationException($"{settingName}: {refusal}");
         }
@@ -143,7 +146,8 @@ public static class DarlingSecrets
                blobs are base64 and contain no ':' prefix match. */
             if (DarlingSecretSource.IsReference(server.EncryptedPassword))
             {
-                return ResolveStoredReference(server.EncryptedPassword, $"servers['{server.DisplayName}'].encryptedPassword");
+                return ResolveStoredReference(
+                    server.EncryptedPassword, $"servers['{server.DisplayName}'].encryptedPassword", server.EncryptedPasswordDeclaredByFile);
             }
 
             /* #2255: the raw CryptographicException ("Key not valid for use in specified state") reached the
@@ -215,7 +219,7 @@ public static class DarlingSecrets
         if (DarlingSecretSource.IsReference(blob))
         {
             return ResolveStoredReference(
-                blob, $"servers['{server.DisplayName}'].remediationEncryptedPassword");
+                blob, $"servers['{server.DisplayName}'].remediationEncryptedPassword", server.RemediationEncryptedPasswordDeclaredByFile);
         }
 
         try

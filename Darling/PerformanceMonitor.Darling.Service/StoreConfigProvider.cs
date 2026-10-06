@@ -1772,7 +1772,40 @@ ORDER BY name", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoo
             }
         }
 
+        MarkSlotsTheFileDeclares(server, bootstrap);
         return server;
+    }
+
+    /// <summary>
+    /// #5240: marks a secret slot of a server built from a store row when darling.json itself declares that same
+    /// reference, in that same slot, for the same server id, which is the one case where an owned reference may resolve
+    /// (<see cref="DarlingSecrets.ResolvePassword"/>). Nothing in the row can set a mark: it takes a file entry (itself
+    /// marked when the file was read) with this server's id and exactly this text. A store row for another server id, or a
+    /// row whose slot was changed to another reference, finds no such entry and is left unmarked.
+    /// </summary>
+    internal static void MarkSlotsTheFileDeclares(MonitoredServer server, DarlingConfig bootstrap)
+    {
+        foreach (var declared in bootstrap.Servers)
+        {
+            if (declared.ServerId != server.ServerId)
+            {
+                continue;
+            }
+
+            if (declared.EncryptedPasswordDeclaredByFile
+                && DarlingSecretSource.IsReference(server.EncryptedPassword)
+                && string.Equals(declared.EncryptedPassword, server.EncryptedPassword, StringComparison.Ordinal))
+            {
+                server.EncryptedPasswordDeclaredByFile = true;
+            }
+
+            if (declared.RemediationEncryptedPasswordDeclaredByFile
+                && DarlingSecretSource.IsReference(server.RemediationEncryptedPassword)
+                && string.Equals(declared.RemediationEncryptedPassword, server.RemediationEncryptedPassword, StringComparison.Ordinal))
+            {
+                server.RemediationEncryptedPasswordDeclaredByFile = true;
+            }
+        }
     }
 
     /// <summary>The routes SELECT, public-const so the viewer's writer and the tests can pin column parity
