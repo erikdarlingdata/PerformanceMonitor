@@ -42,7 +42,7 @@ public sealed class QueryStatsTextAfterRankingTests : IDisposable
     private const int KeysPerFile = 500;
     private const int SnapshotsPerKey = 2;
     private const int TextChars = 16000;
-    private const string LowMemoryLimit = "128MB";
+    private const string LowMemoryLimit = "144MB";
     private static readonly DateTime FirstArchiveDay = new(2026, 9, 1, 0, 0, 0, DateTimeKind.Unspecified);
 
     private readonly string _tempDir;
@@ -357,8 +357,9 @@ LEFT JOIN LATERAL (
         await ExecAsync($"SET memory_limit='{LowMemoryLimit}'");
         await ExecAsync("SET threads=4");
         var seen = (await RunRawAsync("SELECT current_setting('memory_limit')::VARCHAR")).Rows[0][0]?.ToString() ?? string.Empty;
-        /* 128MB reads back as 122.0 MiB: the limit really is on the instance the reads share. */
-        Assert.StartsWith("122", seen, StringComparison.Ordinal);
+        /* 144MB reads back as 137.3 MiB: the limit really is on the instance the reads share. 144 leaves 48 MB each side of the
+           old statement's edge (out of memory through 192 MB) and the new one's (fits from 112 MB at 8 threads). */
+        Assert.StartsWith("137", seen, StringComparison.Ordinal);
     }
 
     private static void AssertSameRows((string[] Names, List<object?[]> Rows) expected, (string[] Names, List<object?[]> Rows) actual, string what)
@@ -440,6 +441,9 @@ VALUES ($1, $2, $3, 'TestSrv', $4, $5, $6, 'P', $7, $8, $9, $9, 5)",
         await InsertQueryStatsAsync(old1, "Db3", "0xG7", null, "0xH7", "g7 older text", 700, plan: "<plan>g7 older</plan>");
         /* g8: another server's rows of the same keys are not this server's text. */
         await InsertQueryStatsAsync(old1.AddMinutes(5), "Db1", "0xG1", null, "0xH1", "g1 OTHER SERVER text", 1, server: OtherServerId);
+        /* g9 (#5381 G1): an older row has a plan; the newest row (below, hot) has the text and a NULL plan. The plan must come
+           from the newest row (blank), the same row as the text, not from the older one. */
+        await InsertQueryStatsAsync(old1, "Db3", "0xG9", null, "0xH9", "g9 text", 650, plan: "<plan>g9 older</plan>");
         await ArchiveHotRowsAsync($"{Day(old1)}_2300_query_stats.parquet");
 
         await InsertQueryStatsAsync(old2, "Db1", "0xG1", null, "0xH1", "g1 middle text", 1_000);
@@ -463,6 +467,7 @@ VALUES ($1, $2, $3, 'TestSrv', $4, $5, $6, 'P', $7, $8, $9, $9, 5)",
         await InsertQueryStatsAsync(hot, "Db3", "0xG5", null, "0xH5", "g5 tie text B (higher collection id)", 1_500);
         await InsertQueryStatsAsync(hot, "Db3", "0xG7", null, "0xH7", "g7 newest text", 700, plan: "<plan>g7 newest</plan>");
         await InsertQueryStatsAsync(hot, "Db2", "0xG4", null, "0xH4", null, 2_500);
+        await InsertQueryStatsAsync(hot.AddMinutes(1), "Db3", "0xG9", null, "0xH9", "g9 text", 650, plan: null);
     }
 
     /* A wide, high-entropy archive of ArchiveFiles daily files, written straight to parquet (the columns the reads need; the hot
@@ -546,6 +551,9 @@ COPY (
         Assert.DoesNotContain(rows, r => r.QueryHash == "0xG6");
         Assert.Equal("g7 newest text", TextOf("0xG7"));
         Assert.Equal("<plan>g7 newest</plan>", rows.Single(r => r.QueryHash == "0xG7").QueryPlan);
+        /* G1: the newest row has the text and no plan; the older row's plan is not borrowed. */
+        Assert.Equal("g9 text", TextOf("0xG9"));
+        Assert.True(string.IsNullOrEmpty(rows.Single(r => r.QueryHash == "0xG9").QueryPlan), "the plan must come from the same row as the text");
     }
 
     /// <summary>
@@ -567,6 +575,29 @@ COPY (
 
         var oldRows = await RunRawAsync(LegacyTopQueriesByCpuSql(string.Empty, 100), ServerId, from, to, 5, 0, 0);
         Assert.Equal("text captured after the window", oldRows.Rows.Single(r => r[0] is not null)[42]);
+    }
+
+    /// <summary>
+    /// #5381 G2: the same difference, the other way round. A group whose rows INSIDE the window all have no text shows blank text
+    /// and plan, even when a row before the window has one; the old lateral reached back through the whole archive for it. Exact
+    /// parity there is a per-key read of all history, which is the cost this read removes.
+    /// </summary>
+    [Fact]
+    public async Task TopQueriesByCpu_AGroupWithNoTextInsideTheWindowShowsBlank()
+    {
+        var inWindow = new DateTime(2026, 9, 10, 12, 0, 0, DateTimeKind.Unspecified);
+        var before = inWindow.AddDays(-3);
+        await InsertQueryStatsAsync(before, "Db1", "0xBLK", null, "0xHB", "text three days before the window", 1_000, plan: "<plan>before</plan>");
+        await InsertQueryStatsAsync(inWindow, "Db1", "0xBLK", null, "0xHB", null, 1_000);
+
+        var from = inWindow.AddHours(-1);
+        var to = inWindow.AddHours(1);
+        var row = Assert.Single(await new LocalDataService(_duckDb).GetTopQueriesByCpuAsync(ServerId, hoursBack: 24, top: 5, fromDate: from, toDate: to));
+        Assert.True(string.IsNullOrEmpty(row.QueryText), "no text inside the window: blank");
+        Assert.True(string.IsNullOrEmpty(row.QueryPlan), "no plan inside the window: blank");
+
+        var oldRows = await RunRawAsync(LegacyTopQueriesByCpuSql(string.Empty, 100), ServerId, from, to, 5, 0, 0);
+        Assert.Equal("text three days before the window", oldRows.Rows.Single(r => r[0] is not null)[42]);
     }
 
     [Fact]

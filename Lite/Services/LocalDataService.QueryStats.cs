@@ -198,24 +198,36 @@ texts AS (
        the parquet files outside the window are pruned by collection_time.
        The pick is the one the lateral made: the newest row of the group's OWN key (#2012 stage 2: the host
        constraint, NOT DISTINCT FROM so ad-hoc NULL hosts still match ad-hoc rows) that carries a text, a tie on the
-       time broken on the row collected last (#5299 round 2 N3). The plan comes from that same row.
+       time broken on the row collected last (#5299 round 2 N3). The plan comes from that same row, even when it is NULL.
        Difference from the lateral, on purpose: the text comes from the window, so a window that ends in the past
        shows the window's newest statement rather than the newest one ever captured. */
     SELECT
-        q.database_name,
-        q.query_hash,
-        q.host_object_name,
-        arg_max(q.query_text, (q.collection_time, q.collection_id)) FILTER (WHERE q.query_text IS NOT NULL) AS query_text,
-        arg_max(q.query_plan_xml, (q.collection_time, q.collection_id)) FILTER (WHERE q.query_text IS NOT NULL) AS query_plan_xml
-    FROM v_query_stats q
-    JOIN ranked r
-      ON  r.query_hash = q.query_hash
-      AND r.database_name = q.database_name
-      AND r.host_object_name IS NOT DISTINCT FROM q.host_object_name
-    WHERE q.server_id = $1
-    AND   q.collection_time >= $2
-    AND   q.collection_time <= $3
-    GROUP BY q.database_name, q.query_hash, q.host_object_name
+        w_pick.database_name,
+        w_pick.query_hash,
+        w_pick.host_object_name,
+        w_pick.w.t AS query_text,
+        w_pick.w.p AS query_plan_xml
+    FROM
+    (
+        /* #5381 G1: text and plan are packed into ONE struct and picked together. Two separate arg_max calls
+           would each skip rows whose OWN argument is NULL, so a newest row with text but a NULL plan would
+           take the plan from an older row; the lateral this replaces read both from the one row. */
+        SELECT
+            q.database_name,
+            q.query_hash,
+            q.host_object_name,
+            arg_max(struct_pack(t := q.query_text, p := q.query_plan_xml), (q.collection_time, q.collection_id))
+                FILTER (WHERE q.query_text IS NOT NULL) AS w
+        FROM v_query_stats q
+        JOIN ranked r
+          ON  r.query_hash = q.query_hash
+          AND r.database_name = q.database_name
+          AND r.host_object_name IS NOT DISTINCT FROM q.host_object_name
+        WHERE q.server_id = $1
+        AND   q.collection_time >= $2
+        AND   q.collection_time <= $3
+        GROUP BY q.database_name, q.query_hash, q.host_object_name
+    ) w_pick
 ),
 page AS (
 SELECT
