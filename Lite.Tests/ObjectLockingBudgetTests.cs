@@ -163,6 +163,26 @@ public sealed class ObjectLockingBudgetTests : IClassFixture<SharedDuckDbFixture
         Assert.NotEqual("empty", doc.RootElement.GetProperty("status").GetString());
     }
 
+    /// <summary>
+    /// #5372 (r2 Low): a latest snapshot that holds an index with no contention anywhere is a true negative, so the word is
+    /// <c>empty</c> (the collector looked and found nothing), with or without a database chosen, in the sentence shape
+    /// Darling's twin uses. A server with no snapshot at all stays <c>unavailable</c> (the test above).
+    /// </summary>
+    [Fact]
+    public async Task ASnapshotWithNoContendedIndex_IsEmpty_NotUnavailable()
+    {
+        await SeedQuietAsync();
+
+        using var all = JsonDocument.Parse(await McpObjectStatsTools.GetObjectLocking(_dataService, _serverManager, ServerName));
+        Assert.Equal("empty", all.RootElement.GetProperty("status").GetString());
+        Assert.Equal($"No lock/latch contention on {ServerName} at the latest snapshot.", all.RootElement.GetProperty("message").GetString());
+
+        using var one = JsonDocument.Parse(await McpObjectStatsTools.GetObjectLocking(_dataService, _serverManager, ServerName, database_name: "QuietDb"));
+        Assert.Equal("empty", one.RootElement.GetProperty("status").GetString());
+        Assert.Equal($"No lock/latch contention in database 'QuietDb' or in any other database on {ServerName} at the latest snapshot.",
+            one.RootElement.GetProperty("message").GetString());
+    }
+
     /// <summary>#5372 M2: the TRUNCATED and Complete sentences name the chosen database, as Darling's twin does.</summary>
     [Fact]
     public async Task DatabaseName_IsNamedInTheTruncatedAndCompleteSentences()
@@ -194,6 +214,25 @@ public sealed class ObjectLockingBudgetTests : IClassFixture<SharedDuckDbFixture
         var second = await _dataService.GetIndexLockingAsync(_serverId, 3);
         Assert.Equal(["Tied00", "Tied01", "Tied02"], first.Select(r => r.TableName));
         Assert.Equal(first.Select(r => r.TableName), second.Select(r => r.TableName));
+    }
+
+    private async Task SeedQuietAsync()
+    {
+        var capture = DateTime.UtcNow;
+        var seedConn = await SeedConnectionAsync();
+        using var batch = new SeedBatch(_duckDb, seedConn);
+        using var readLock = _duckDb.AcquireReadLock();
+        using var cmd = seedConn.CreateCommand();
+        cmd.CommandText = @"INSERT INTO index_object_stats
+            (collection_id, collection_time, server_id, server_name, sqlserver_start_time, database_name, database_id,
+             schema_name, object_id, table_name, index_id, index_name, index_type_desc, reserved_mb, used_mb, total_rows,
+             row_lock_wait_count, row_lock_wait_in_ms, page_lock_wait_count, page_lock_wait_in_ms,
+             index_lock_promotion_count, page_latch_wait_in_ms, page_io_latch_wait_in_ms)
+            VALUES ($1,$2,$3,$4,$5,'QuietDb',7,'dbo',6000,'Quiet',1,'PK_Quiet','CLUSTERED',1,1,100,0,0,0,0,0,0,0)";
+        void P(object v) => cmd.Parameters.Add(new DuckDBParameter { Value = v });
+        P(_nextId--); P(capture); P(_serverId); P(ServerName); P(capture.AddDays(-10));
+        await cmd.ExecuteNonQueryAsync();
+        batch.Commit();
     }
 
     private async Task SeedTiedAsync()

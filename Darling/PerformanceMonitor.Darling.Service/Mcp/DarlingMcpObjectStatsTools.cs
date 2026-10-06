@@ -366,7 +366,8 @@ public sealed class DarlingMcpObjectStatsTools
     /// flags count); the Azure master "separately monitored" note (kept only when a chosen database is one of them);
     /// the truncation and complete notes and the unavailable envelope (each names the filter). A filtered call that
     /// finds nothing probes the whole server once: contention elsewhere makes it <c>empty</c> ("the chosen databases
-    /// have none"), no contention anywhere keeps the <c>unavailable</c> / not-collected answer an unfiltered call gives.</para>
+    /// have none"). #5372: no contention anywhere is <c>empty</c> too when the latest snapshot holds index rows (the
+    /// collector looked), and <c>unavailable</c> / not-collected only when it holds none.</para>
     /// </summary>
     internal static async Task<string> GetObjectLockingCoreAsync(
         NpgsqlDataSource postgres, string? server_name, int limit, MonitoredServerRegistryState? registryState,
@@ -409,8 +410,25 @@ public sealed class DarlingMcpObjectStatsTools
                             : new { optimized_locking_note = optimizedLockingNote, separately_monitored_note = separatelyMonitoredNote });
                 }
 
-                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "index_object_stats", cancellationToken)
-                    ?? McpHelpers.Status("unavailable",
+                var notCollected = await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "index_object_stats", cancellationToken);
+                if (notCollected is not null) return notCollected;
+
+                /* #5372 (r2 Low): a latest snapshot that holds index rows, none of them contended, is a TRUE negative: the
+                   collector looked and found nothing, so the word is `empty` (the server instructions' "looked, found
+                   nothing"). `unavailable` is kept for a server with no snapshot at all, data it could have and does not
+                   have now. The same sentence shape as Lite's twin. */
+                if (await DarlingObjectStatsReader.GetIndexUsageMatchCountAsync(postgres, resolved.ServerId, DatabaseFilter.All, cancellationToken) > 0)
+                {
+                    return McpHelpers.Status("empty",
+                        "No lock/latch contention" + (scope is null ? "" : $"{inScope} or in any other database")
+                        + $" on {resolved.ServerName} at the latest snapshot."
+                        + (optimizedLockingNote is null ? "" : " " + optimizedLockingNote),
+                        optimizedLockingNote is null && separatelyMonitoredNote is null
+                            ? null
+                            : new { optimized_locking_note = optimizedLockingNote, separately_monitored_note = separatelyMonitoredNote });
+                }
+
+                return McpHelpers.Status("unavailable",
                         "No locking/contention data recorded" + (scope is null ? "" : $" for {scope}, or for any other database on this server") + ". Index/object stats are collected daily."
                         + (optimizedLockingNote is null ? "" : " " + optimizedLockingNote),
                         optimizedLockingNote is null && separatelyMonitoredNote is null

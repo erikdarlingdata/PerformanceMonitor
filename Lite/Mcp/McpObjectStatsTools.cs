@@ -282,8 +282,24 @@ public sealed class McpObjectStatsTools
                         optimizedLockingNote is null ? null : new { optimized_locking_note = optimizedLockingNote });
                 }
 
-                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "index_object_stats")
-                    ?? McpHelpers.Status("unavailable",
+                var notCollected = await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "index_object_stats");
+                if (notCollected is not null) return notCollected;
+
+                /* #5372 (r2 Low): a latest snapshot that holds index rows, none of them contended, is a TRUE negative:
+                   the collector looked and found nothing, so the word is `empty` (the server instructions' "looked,
+                   found nothing"). `unavailable` is kept for a server with no snapshot at all, data it could have
+                   and does not have now. The same sentence shape as Darling's twin. */
+                if ((await dataService.GetIndexUsageMatchCountAsync(resolved.ServerId)) > 0)
+                {
+                    return McpHelpers.Status("empty",
+                        "No lock/latch contention"
+                        + (database is null ? "" : $"{inScope} or in any other database")
+                        + $" on {resolved.ServerName} at the latest snapshot."
+                        + (optimizedLockingNote is null ? "" : " " + optimizedLockingNote),
+                        optimizedLockingNote is null ? null : new { optimized_locking_note = optimizedLockingNote });
+                }
+
+                return McpHelpers.Status("unavailable",
                         (database is null
                             ? "No locking/contention data recorded."
                             : $"No locking/contention data recorded for database '{database}', or for any other database on this server.")
