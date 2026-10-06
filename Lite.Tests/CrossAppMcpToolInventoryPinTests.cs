@@ -244,6 +244,17 @@ public sealed class CrossAppMcpToolInventoryPinTests
         "get_query_store_plan_xml",
         "get_procedure_plan_xml",
         "get_active_query_plan_xml",
+        /* #5233: the repro script behind the web plan panel's Repro button. Lite builds repro scripts in the desktop grid, not over MCP. */
+        "get_query_repro_script",
+
+        /* #5236: the blocking and deadlock plan reads behind the web grids' plan buttons - get_blocking_plan_xml and
+           get_deadlock_plan_xml. Darling-ONLY, and for a plainer reason than the three above: Lite never captures a
+           blocked-process or deadlock plan (its collectors never set CapturePlanXml, so the plan columns are written
+           NULL) and it has no UI that opens one. The /api/read mirror of these two is the web
+           seat's, which Lite has none of. If Lite ever captures these plans and serves them over MCP, port these and
+           delete the entries; the ratchet only shrinks. */
+        "get_blocking_plan_xml",
+        "get_deadlock_plan_xml",
 
         /* #5234: get_query_store_query_history, the per-plan history behind the web Query Store grid's History
            button. Darling-ONLY: Lite's history window reads DuckDB directly and has no MCP twin. */
