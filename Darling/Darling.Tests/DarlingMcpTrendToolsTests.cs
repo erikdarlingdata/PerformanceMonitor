@@ -83,9 +83,9 @@ public sealed class DarlingMcpTrendToolsSurfaceAndSqlTests
     [InlineData("get_perfmon_trend", "counter_name,server_name,hours_back,as_of,bucket_minutes")]
     [InlineData("get_file_io_trend", "server_name,hours_back,as_of,bucket_minutes,database_name")]
     [InlineData("get_query_trend", "query_hash,database_name,server_name,hours_back,as_of")]
-    [InlineData("get_query_duration_trend", "server_name,hours_back,as_of,bucket_minutes")]
-    [InlineData("get_procedure_duration_trend", "server_name,hours_back,as_of,bucket_minutes")]
-    [InlineData("get_query_store_duration_trend", "server_name,hours_back,as_of")]
+    [InlineData("get_query_duration_trend", "server_name,hours_back,as_of,bucket_minutes,database_name")]
+    [InlineData("get_procedure_duration_trend", "server_name,hours_back,as_of,bucket_minutes,database_name")]
+    [InlineData("get_query_store_duration_trend", "server_name,hours_back,as_of,database_name")]
     public void ParamContract_MatchesLite(string toolName, string expectedCsv)
     {
         Assert.Equal(expectedCsv.Split(','), McpParams(toolName).Select(p => p.Name).ToArray());

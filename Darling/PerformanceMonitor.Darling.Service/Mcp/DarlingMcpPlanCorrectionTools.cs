@@ -52,16 +52,17 @@ public sealed class DarlingMcpPlanCorrectionTools
         [Description("Maximum recommendation rows to return, newest capture first. Default 25. This is what bounds the page - read truncated to know whether the window held more.")] int limit = 25,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
         [Description("Return each row's full query_text instead of a 150-character preview. Default false.")] bool full_text = false,
+        [Description("Limit to one database. Omit for all databases.")] string? database_name = null,
         ILogger? logger = null,
         CancellationToken cancellationToken = default)
-        => GetPlanCorrections(postgres, server_name, hours_back, limit, as_of, full_text, DatabaseFilter.All, logger, cancellationToken);
+        => GetPlanCorrections(postgres, server_name, hours_back, limit, as_of, full_text, DatabaseFilter.One(database_name), logger, cancellationToken);
 
     /// <summary>
-    /// #5244: the get_plan_corrections read over a LIST of databases. The MCP tool passes <see cref="DatabaseFilter.All"/>
-    /// until a later lane wires its <c>database_name</c>. BOTH layers narrow to the chosen databases: the recommendation
+    /// #5244: the get_plan_corrections read over a LIST of databases. The MCP tool passes <c>DatabaseFilter.One(database_name)</c>
+    /// and the web dispatch passes the repeated keys. BOTH layers narrow to the chosen databases: the recommendation
     /// rows (before the cap) and the automatic-tuning snapshot (its rows only; the newest-capture anchor stays the
-    /// server's). The one-name consumer on the empty path (its message) is list-aware: with a filter it says "for the
-    /// chosen databases" and gives no verdict about the server's collection.
+    /// server's). The one-name consumer on the empty path (its message) is list-aware: with a filter it says "for the database X"
+    /// (one name) or "for the chosen databases" (two or more) and gives no verdict about the server's collection.
     /// </summary>
     internal static async Task<string> GetPlanCorrections(
         NpgsqlDataSource postgres,
@@ -109,7 +110,7 @@ public sealed class DarlingMcpPlanCorrectionTools
                 return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "plan_correction", cancellationToken)
                     ?? McpHelpers.Status("empty",
                         !databaseFilter.IsAll
-                            ? "No plan correction data found for the chosen databases."
+                            ? $"No plan correction data found{DarlingMcpBlockingTools.ForChosenDatabases(databaseFilter)}."
                             : "No plan correction data collected for this server. The collector runs against SQL Server 2017+ " +
                         "(sys.dm_db_tuning_recommendations); a server that has never produced a row here either predates " +
                         "that or has no databases with Query Store on.",
@@ -154,6 +155,8 @@ public sealed class DarlingMcpPlanCorrectionTools
                 effective_start = notice.EffectiveStart,
                 window_truncated = notice.WindowTruncated,
                 truncation_note = notice.TruncationNote,
+                /* #5244: which databases the page is limited to: the name for one, "the chosen databases" for two or more, null for all. */
+                database_name = databaseFilter.Describe(),
                 automatic_tuning = tuning.Select(t => new
                 {
                     database_name = t.DatabaseName,

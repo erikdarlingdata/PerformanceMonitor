@@ -25,7 +25,7 @@ namespace PerformanceMonitorLite.Tests;
 /// of Darling's list-taking readers. Each gets a DuckDB fixture with three databases where the filter returns only the
 /// chosen database's rows, a blank name returns all of them, the row cap counts only the chosen database's rows (the
 /// predicate sits on the raw rows, before the ranking and the limit), and a filtered empty answer keeps the
-/// <c>empty</c> status word and says "for the chosen databases" the way Darling's tools do.
+/// <c>empty</c> status word and says "for the database X" (the chosen databases for two or more) the way Darling's tools do.
 /// </summary>
 public sealed class EventListDatabaseFilterToolTests : IClassFixture<SharedDuckDbFixture>, IDisposable
 {
@@ -120,6 +120,7 @@ VALUES ($1, $2, $3, $4, $5, 'rpc_completed', $6, 'SELECT 1', $7)",
             _service, _serverManager, ServerName, 24, 30, database_name: "DbB"));
 
         Assert.Equal(new[] { "DbB" }, Databases(root, "completions"));
+        Assert.Equal("DbB", root.GetProperty("database_name").GetString());
     }
 
     [Theory]
@@ -135,6 +136,7 @@ VALUES ($1, $2, $3, $4, $5, 'rpc_completed', $6, 'SELECT 1', $7)",
 
         Assert.Equal(5, root.GetProperty("completions_returned").GetInt32());
         Assert.Equal(new[] { "DbA", "DbA", "DbA", "DbC", "DbB" }, Databases(root, "completions"));
+        Assert.Equal(JsonValueKind.Null, root.GetProperty("database_name").ValueKind);
     }
 
     [Fact]
@@ -165,7 +167,8 @@ VALUES ($1, $2, $3, $4, $5, 'rpc_completed', $6, 'SELECT 1', $7)",
             _service, _serverManager, ServerName, 24, 30, database_name: "NoSuchDb"));
 
         Assert.Equal("empty", root.GetProperty("status").GetString());
-        Assert.Contains("for the chosen databases", root.GetProperty("message").GetString());
+        Assert.Contains(" for the database ", root.GetProperty("message").GetString());
+        Assert.DoesNotContain("chosen databases", root.GetProperty("message").GetString());
     }
 
     [Fact]
@@ -217,6 +220,7 @@ VALUES ($1, $2, $3, $4, $5, 'Enabled', 'Enabled', 'ok', $6, 'Active', $7, $8, 'S
 
         Assert.Equal(new[] { "DbB" }, Databases(root, "recommendations"));
         Assert.Equal(new[] { "DbB" }, Databases(root, "automatic_tuning"));
+        Assert.Equal("DbB", root.GetProperty("database_name").GetString());
     }
 
     [Theory]
@@ -232,6 +236,7 @@ VALUES ($1, $2, $3, $4, $5, 'Enabled', 'Enabled', 'ok', $6, 'Active', $7, $8, 'S
 
         Assert.Equal(5, root.GetProperty("recommendations_returned").GetInt32());
         Assert.Equal(new[] { "DbA", "DbB", "DbC" }, Databases(root, "automatic_tuning").OrderBy(d => d).ToArray());
+        Assert.Equal(JsonValueKind.Null, root.GetProperty("database_name").ValueKind);
     }
 
     [Fact]
@@ -262,6 +267,6 @@ VALUES ($1, $2, $3, $4, $5, 'Enabled', 'Enabled', 'ok', $6, 'Active', $7, $8, 'S
             _service, _serverManager, ServerName, 24, 25, database_name: "NoSuchDb"));
 
         Assert.Equal("empty", root.GetProperty("status").GetString());
-        Assert.Equal("No plan correction data found for the chosen databases.", root.GetProperty("message").GetString());
+        Assert.Equal("No plan correction data found for the database NoSuchDb.", root.GetProperty("message").GetString());
     }
 }

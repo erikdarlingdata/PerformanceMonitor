@@ -58,7 +58,7 @@ public sealed class McpLongQueryTools
                        is missing. The precondition answer names that state instead of quietly blaming a knob
                        that is already switched on. */
                     ?? await McpRuntimePrecondition.StatusAsync(dataService, resolved.ServerId, resolved.ServerName, "long_query_completions")
-                    ?? McpHelpers.Status("empty", "No long-running query completions found in the specified time range" + (database == null ? "" : " for the chosen databases") + ". The long_query_completions collector is opt-in (default OFF) — enable it in the collector schedule to capture data.",
+                    ?? McpHelpers.Status("empty", "No long-running query completions found in the specified time range" + McpBlockingTools.ForChosenDatabase(database) + ". The long_query_completions collector is opt-in (default OFF) — enable it in the collector schedule to capture data.",
                         (await McpQueryTools.EventWindowNoticeAsync(
                             () => dataService.GetQueryWindowFloorAsync(QueryWindowRelation.LongQueryCompletions, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd),
                             null, windowEnd.AddHours(-hours_back), windowEnd, "long_query_completions", emptyAnswer: true)).AsHints());
@@ -110,6 +110,8 @@ public sealed class McpLongQueryTools
                 effective_start = notice.EffectiveStart,
                 window_truncated = notice.WindowTruncated,
                 truncation_note = notice.TruncationNote,
+                /* #5244: which database the page is limited to: the name for one, null for all (the twin of Darling's database_name echo). */
+                database_name = database,
                 /* #3541 A3: the page described as a page, on Darling's names. Under a duration RANKING the
                    two stamps bound the slowest runs, not the reach — the description says so. */
                 completions_returned = page.Count,

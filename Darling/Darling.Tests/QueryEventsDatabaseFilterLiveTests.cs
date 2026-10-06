@@ -31,11 +31,11 @@ namespace Darling.Tests;
 [Collection("live-postgres")]
 public sealed class QueryEventsDatabaseFilterLiveTests
 {
-    private const string ServerName = "darling-query-events-dbfilter-e2e";
+    internal const string ServerName = "darling-query-events-dbfilter-e2e";
     private static readonly int ServerId = ServerIdHelper.GetDeterministicHashCode(ServerName);
-    private const string DbA = "FilterDbA";
-    private const string DbB = "FilterDbB";
-    private const string DbC = "FilterDbC";
+    internal const string DbA = "FilterDbA";
+    internal const string DbB = "FilterDbB";
+    internal const string DbC = "FilterDbC";
     private const string Skip = "Set DARLING_TEST_PG to a Postgres connection string to run the live query-events database-filter test.";
     private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
 
@@ -93,7 +93,7 @@ public sealed class QueryEventsDatabaseFilterLiveTests
             Assert.Equal("empty", miss.GetProperty("status").GetString());
             Assert.Contains("for the chosen databases", miss.GetProperty("message").GetString(), StringComparison.Ordinal);
             var publicMiss = JsonDocument.Parse(await DarlingMcpLongQueryTools.GetLongQueryCompletions(
-                postgres, ServerName, 1, 100, DateTime.UtcNow.AddDays(-30).ToString("o"), null, ct)).RootElement;
+                postgres, ServerName, 1, 100, DateTime.UtcNow.AddDays(-30).ToString("o"), null, null, ct)).RootElement;
             Assert.DoesNotContain("for the chosen databases", publicMiss.GetProperty("message").GetString(), StringComparison.Ordinal);
 
             bodySucceeded = true;
@@ -230,7 +230,7 @@ public sealed class QueryEventsDatabaseFilterLiveTests
     /// fan-out runs were slowest on A (3 runs), B (1) and C (2); one query_store_stats plan row per database; one health row per
     /// database, B being a readable secondary (readonly_reason bit 8) and A and C recording.
     /// </summary>
-    private static async Task<DateTime> SeedAsync(string cs, CancellationToken ct)
+    internal static async Task<DateTime> SeedAsync(string cs, CancellationToken ct)
     {
         using var connection = new NpgsqlConnection(cs);
         await connection.OpenAsync(ct);
@@ -291,7 +291,7 @@ VALUES ($1, $2, $3, $4, $5, $6, 'READ_WRITE', $7, 100, 8192, 'AUTO', 21, 200, 60
         return end;
     }
 
-    private static async Task DeleteRowsAsync(NpgsqlConnection connection, CancellationToken ct)
+    internal static async Task DeleteRowsAsync(NpgsqlConnection connection, CancellationToken ct)
     {
         using var cleanup = new NpgsqlCommand(
             $"DELETE FROM long_query_completions WHERE server_id = {ServerId}; DELETE FROM plan_correction WHERE server_id = {ServerId}; "

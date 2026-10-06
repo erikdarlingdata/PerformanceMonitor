@@ -39,15 +39,16 @@ public sealed class DarlingMcpLongQueryTools
         [Description("Hours of history. Default 24.")] int hours_back = 24,
         [Description("Maximum rows to return, slowest first. Default 30. This is what bounds the page — read truncated to know whether the window held more.")] int limit = 30,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        [Description("Limit to one database. Omit for all databases.")] string? database_name = null,
         ILogger? logger = null,
         CancellationToken cancellationToken = default)
-        => GetLongQueryCompletions(postgres, server_name, hours_back, limit, as_of, DatabaseFilter.All, logger, cancellationToken);
+        => GetLongQueryCompletions(postgres, server_name, hours_back, limit, as_of, DatabaseFilter.One(database_name), logger, cancellationToken);
 
     /// <summary>
     /// #5244: the get_long_query_completions read over a LIST of databases. The MCP tool passes
-    /// <see cref="DatabaseFilter.All"/> until a later lane wires its <c>database_name</c>. The cap applies after the
-    /// filter, so the page is the slowest N of the chosen databases, and the one-name consumer on the empty path (its
-    /// message) says "for the chosen databases" when a filter is active, never a verdict on a database it did not read.
+    /// <c>DatabaseFilter.One(database_name)</c> and the web dispatch passes the repeated keys. The cap applies after the
+    /// filter, so the page is the slowest N of the chosen databases, and the empty path says "for the database X" (one name) or
+    /// "for the chosen databases" (two or more), never a verdict on a database it did not read.
     /// </summary>
     internal static async Task<string> GetLongQueryCompletions(
         NpgsqlDataSource postgres,
@@ -85,7 +86,7 @@ public sealed class DarlingMcpLongQueryTools
                        that is already switched on. */
                     ?? await DarlingRuntimePrecondition.StatusAsync(postgres, resolved.ServerId, resolved.ServerName, "long_query_completions", cancellationToken)
                     /* #4966: the window keys ride on an empty answer under hints; not_collected and the precondition stay bare. */
-                    ?? McpHelpers.Status("empty", "No long-running query completions found in the specified time range" + (databaseFilter.IsAll ? "" : " for the chosen databases") + ". The long_query_completions collector is opt-in (default OFF) — enable it in the collector schedule to capture data.",
+                    ?? McpHelpers.Status("empty", "No long-running query completions found in the specified time range" + DarlingMcpBlockingTools.ForChosenDatabases(databaseFilter) + ". The long_query_completions collector is opt-in (default OFF) — enable it in the collector schedule to capture data.",
                         (await DarlingMcpWindowNotice.ReadEventAsync(
                             () => DarlingMcpWindowNotice.Probe(postgres, "long_query_completions", resolved.ServerName, windowStart, now, cancellationToken),
                             null, windowStart, now, "long_query_completions", emptyAnswer: true, logger: logger, cancellationToken: cancellationToken)).AsHints());
@@ -133,6 +134,8 @@ public sealed class DarlingMcpLongQueryTools
                 effective_start = notice.EffectiveStart,
                 window_truncated = notice.WindowTruncated,
                 truncation_note = notice.TruncationNote,
+                /* #5244: which databases the page is limited to: the name for one, "the chosen databases" for two or more, null for all. */
+                database_name = databaseFilter.Describe(),
                 /* #3541 A3: the page described as a page. Under a duration RANKING the two stamps bound the
                    slowest runs, not the reach — the description says so, and QueryStoreTopWindowTests states
                    the general trap for cost-ranked pages. */

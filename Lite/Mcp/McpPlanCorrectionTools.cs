@@ -73,7 +73,7 @@ public sealed class McpPlanCorrectionTools
                     ?? McpHelpers.Status("empty",
                         /* #5244: a filtered empty is a verdict about the chosen database only, the same words as Darling's twin. */
                         database != null
-                            ? "No plan correction data found for the chosen databases."
+                            ? $"No plan correction data found{McpBlockingTools.ForChosenDatabase(database)}."
                             : "No plan correction data collected for this server. The collector runs against SQL Server 2017+ " +
                         "(sys.dm_db_tuning_recommendations); a server that has never produced a row here either predates " +
                         "that or has no databases with Query Store on.",
@@ -136,6 +136,8 @@ public sealed class McpPlanCorrectionTools
                 effective_start = notice.EffectiveStart,
                 window_truncated = notice.WindowTruncated,
                 truncation_note = notice.TruncationNote,
+                /* #5244: which database the page is limited to: the name for one, null for all (the twin of Darling's database_name echo). */
+                database_name = database,
                 automatic_tuning = tuning.Select(t => new
                 {
                     database_name = t.DatabaseName,

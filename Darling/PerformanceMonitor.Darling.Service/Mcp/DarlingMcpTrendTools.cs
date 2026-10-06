@@ -478,8 +478,9 @@ public sealed class DarlingMcpTrendTools
         [Description("Hours of history. Default 24.")] int hours_back = 24,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
         [Description(TrendBuckets.BucketMinutesDescription)] int? bucket_minutes = null,
+        [Description("Limit to one database. Omit for all databases.")] string? database_name = null,
         CancellationToken cancellationToken = default) =>
-        GetQueryDurationTrend(postgres, server_name, hours_back, as_of, bucket_minutes, TrendBudget.Mcp(TrendBuckets.DurationMaxPoints), cancellationToken);
+        GetQueryDurationTrend(postgres, server_name, hours_back, as_of, bucket_minutes, DatabaseFilter.One(database_name), TrendBudget.Mcp(TrendBuckets.DurationMaxPoints), cancellationToken);
 
     /// <summary>get_query_duration_trend under an explicit <paramref name="budget"/> (#3897): the MCP tool passes
     /// its own, the web viewer's <c>/api/read</c> mirror <see cref="TrendBudget.Chart"/>.</summary>
@@ -489,8 +490,8 @@ public sealed class DarlingMcpTrendTools
         GetQueryDurationTrend(postgres, server_name, hours_back, as_of, bucket_minutes, DatabaseFilter.All, budget, cancellationToken);
 
     /// <summary>
-    /// get_query_duration_trend over a SET of databases (#5244). The MCP tool and the web mirror pass
-    /// <see cref="DatabaseFilter.All"/> until the database_name parameter is wired; the predicate is on both tiers the
+    /// get_query_duration_trend over a SET of databases (#5244). The MCP tool passes
+    /// <c>DatabaseFilter.One(database_name)</c> and the web mirror the repeated keys; the predicate is on both tiers the
     /// route reads (raw <c>query_stats</c> and the hourly rollup). Every consumer that said something about "the
     /// server" on an empty answer now says which databases it looked at.
     /// </summary>
@@ -561,7 +562,7 @@ public sealed class DarlingMcpTrendTools
                reads cannot advertise three different field sets for one shape. */
             return SerializeTrend(resolved.ServerName, hours_back, result.Points,
                 DescribeRoute(result, now, new BucketChoice(bucketMinutes, bucket_minutes is not null, budget.AutoPoints)),
-                await DarlingTrendReader.GetBaselineDiscontinuitiesAsync(postgres, resolved.ServerId, startUtc, now, cancellationToken));
+                await DarlingTrendReader.GetBaselineDiscontinuitiesAsync(postgres, resolved.ServerId, startUtc, now, cancellationToken), databases);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -576,8 +577,9 @@ public sealed class DarlingMcpTrendTools
         [Description("Hours of history. Default 24.")] int hours_back = 24,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
         [Description(TrendBuckets.BucketMinutesDescription)] int? bucket_minutes = null,
+        [Description("Limit to one database. Omit for all databases.")] string? database_name = null,
         CancellationToken cancellationToken = default) =>
-        GetProcedureDurationTrend(postgres, server_name, hours_back, as_of, bucket_minutes, TrendBudget.Mcp(TrendBuckets.DurationMaxPoints), cancellationToken);
+        GetProcedureDurationTrend(postgres, server_name, hours_back, as_of, bucket_minutes, DatabaseFilter.One(database_name), TrendBudget.Mcp(TrendBuckets.DurationMaxPoints), cancellationToken);
 
     /// <summary>get_procedure_duration_trend under an explicit <paramref name="budget"/> (#3897) — the query
     /// trend's twin, over the procedure pair.</summary>
@@ -636,7 +638,7 @@ public sealed class DarlingMcpTrendTools
 
             return SerializeTrend(resolved.ServerName, hours_back, result.Points,
                 DescribeRoute(result, now, new BucketChoice(bucketMinutes, bucket_minutes is not null, budget.AutoPoints)),
-                await DarlingTrendReader.GetBaselineDiscontinuitiesAsync(postgres, resolved.ServerId, startUtc, now, cancellationToken));
+                await DarlingTrendReader.GetBaselineDiscontinuitiesAsync(postgres, resolved.ServerId, startUtc, now, cancellationToken), databases);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -650,8 +652,9 @@ public sealed class DarlingMcpTrendTools
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history. Default 24.")] int hours_back = 24,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        [Description("Limit to one database. Omit for all databases.")] string? database_name = null,
         CancellationToken cancellationToken = default) =>
-        GetQueryStoreDurationTrend(postgres, server_name, hours_back, as_of, DatabaseFilter.All, cancellationToken);
+        GetQueryStoreDurationTrend(postgres, server_name, hours_back, as_of, DatabaseFilter.One(database_name), cancellationToken);
 
     /// <summary>
     /// get_query_store_duration_trend over a SET of databases (#5244). The predicate is on the rollup arm and both
@@ -749,7 +752,7 @@ public sealed class DarlingMcpTrendTools
             }
 
             return SerializeTrend(resolved.ServerName, hours_back, points, disclosure,
-                await DarlingTrendReader.GetBaselineDiscontinuitiesAsync(postgres, resolved.ServerId, startUtc, now, cancellationToken));
+                await DarlingTrendReader.GetBaselineDiscontinuitiesAsync(postgres, resolved.ServerId, startUtc, now, cancellationToken), databases);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -898,12 +901,14 @@ public sealed class DarlingMcpTrendTools
     /// </summary>
     private static string SerializeTrend(
         string serverName, int hours_back, List<DarlingTrendReader.QueryDurationTrendPoint> points,
-        TrendDisclosure disclosure, IReadOnlyList<BaselineDiscontinuity> discontinuities)
+        TrendDisclosure disclosure, IReadOnlyList<BaselineDiscontinuity> discontinuities, DatabaseFilter databases)
     {
         var envelope = new Dictionary<string, object?>
         {
             ["server"] = serverName,
             ["hours_back"] = hours_back,
+            /* #5244: which databases the series is limited to: the name for one, "the chosen databases" for two or more, null for all. */
+            ["database_name"] = databases.Describe(),
         };
         disclosure.WriteTo(envelope);
         /* #3541 A12: a point with no rate is published as null, never as 0, and the envelope says how many
@@ -1025,11 +1030,7 @@ public sealed class DarlingMcpTrendTools
     /// answer stays on the bare name, because its probe is server-wide and its verdict is too.
     /// </summary>
     private static string ScopedServer(string serverName, DatabaseFilter databases) =>
-        databases.IsAll
-            ? serverName
-            : databases.Names.Count == 1
-                ? $"{serverName} (database_name '{databases.Names[0]}')"
-                : $"{serverName} ({DatabaseFilter.ManyDatabasesDescription})";
+        serverName + DarlingMcpBlockingTools.ForChosenDatabases(databases);
 
     /// <summary>The two-state sentence pair the trio shares with Lite's twins, word for word (#2484, #2485).</summary>
     private static string QuietWindowMessage(string serverName, int hours_back, string what) =>
