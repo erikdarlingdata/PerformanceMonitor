@@ -1,0 +1,95 @@
+name: EXPERIMENT 5208 GC sample
+
+# EXPERIMENT (#5208, never merged). This workflow exists only on the exp/5208-gc-sample branch and
+# runs only when that branch is pushed. build.yml runs on pushes to main and dev only, so a push to
+# this branch starts this workflow alone.
+#
+# It runs the unsharded Lite suite the way the nightly does, on the nightly's runner image, while an
+# in-process sampler (Lite.Tests/Gc5208Sampler.cs) appends one CSV row every 30 seconds: the GC heap,
+# GC pause time, gen-2 counts, private bytes, handles, threads, live DuckDB databases and connections,
+# tests finished, and the whole machine's free memory and committed percent. The CSV is uploaded even
+# when the run fails or times out.
+#
+# Nothing here publishes, releases, writes a cache or uses a token beyond the checkout's read-only
+# clone. The nightly's build job declares no concurrency group (only its publish job does), so this
+# job declares none either.
+on:
+  push:
+    branches: ['exp/5208-gc-sample']
+
+permissions:
+  contents: read
+
+jobs:
+  gc-sample:
+    runs-on: windows-latest
+    # The nightly's own cap for this run (#5208).
+    timeout-minutes: 150
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      # No `cache: true` here: that is a cache write in the action's post step.
+      - name: Setup .NET 10.0
+        uses: actions/setup-dotnet@v6
+        with:
+          global-json-file: global.json
+
+      # Same restore the nightly runs for the Lite suite, with the same errexit (#3143).
+      - name: Restore dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          dotnet restore Lite/PerformanceMonitorLite.csproj --locked-mode
+          dotnet restore Lite.Tests/Lite.Tests.csproj --locked-mode
+
+      # The nightly's unsharded run command, unchanged. The step cap sits under the job cap so the
+      # upload below always has time to run if the suite hangs or runs long.
+      - name: Run tests
+        timeout-minutes: 135
+        env:
+          PM_5208_SAMPLE_CSV: ${{ github.workspace }}/TestResults/lite-gc-sample.csv
+        run: dotnet run --project Lite.Tests/Lite.Tests.csproj -c Release -- -xml TestResults/lite-timing-nightly.xml
+
+      # Informational: a readable sample of the CSV in the log and the run summary. A problem here must
+      # never turn the job red.
+      - name: Summarize the sample
+        if: always()
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $csv = 'TestResults/lite-gc-sample.csv'
+          if (-not (Test-Path $csv)) { Write-Host 'No sample CSV was written.'; exit 0 }
+          $rows = @(Import-Csv $csv)
+          $cols = 'elapsed_s','tests_finished','gc_heap_bytes','gc_total_memory','gc_committed_bytes','private_bytes','working_set','handles','threads','duckdb_dbs','duckdb_conns','gc2','gc_pause_total_ms','mach_free_mb','mach_committed_pct'
+          $step = [Math]::Max(1, [int][Math]::Floor($rows.Count / 30))
+          $idx = @(for ($i = 0; $i -lt $rows.Count; $i += $step) { $i }) + ($rows.Count - 1) | Sort-Object -Unique
+          $pick = @($idx | ForEach-Object { $rows[$_] })
+          $table = ($pick | Select-Object -Property $cols | Format-Table -AutoSize | Out-String -Width 300)
+          Write-Host "rows: $($rows.Count)"
+          Write-Host $table
+          $open = 'TestResults/lite-gc-sample-open-dbs.txt'
+          $openHead = if (Test-Path $open) { (Get-Content $open -TotalCount 12) -join "`n" } else { 'no open-database snapshot' }
+          Write-Host $openHead
+          if ($env:GITHUB_STEP_SUMMARY) {
+            Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value '### Lite GC sample (#5208)'
+            Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "rows: $($rows.Count)"
+            Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value '```'
+            Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value $table
+            Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value $openHead
+            Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value '```'
+          }
+
+      - name: Upload the GC sample
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: lite-gc-sample
+          path: |
+            TestResults/lite-gc-sample*
+            TestResults/lite-timing-*.xml
+          retention-days: 7
+          if-no-files-found: warn
