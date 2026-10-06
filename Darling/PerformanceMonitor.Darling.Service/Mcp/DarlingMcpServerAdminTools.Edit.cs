@@ -289,6 +289,9 @@ public sealed partial class DarlingMcpServerAdminTools
         }
 
         var tested = false;
+        ParsedServerEntry? probedEntry = null;
+        string? connectedDatabase = null;
+        string? actualStorageKey = null;
         if (plan.NeedsProbe)
         {
             var probeResult = await probe(plan.ProbeConfig, cancellationToken);
@@ -299,12 +302,18 @@ public sealed partial class DarlingMcpServerAdminTools
             }
 
             tested = true;
-            var entry = new ParsedServerEntry(0, plan.ProbeConfig.Name, plan.NewStorageKey, plan.ProbeConfig, null);
-            var collision = ActualIdentityCollision(entry, probeResult.ConnectedDatabase, otherKeys);
+            probedEntry = new ParsedServerEntry(0, plan.ProbeConfig.Name, plan.NewStorageKey, plan.ProbeConfig, null);
+            connectedDatabase = probeResult.ConnectedDatabase;
+            var collision = ActualIdentityCollision(probedEntry, connectedDatabase, otherKeys);
             if (collision is not null)
             {
-                return Outcome(EditStatus.Collides, RedactEditSecret(collision.Replace("Not added:", "Not saved:", StringComparison.Ordinal), plan.PlaintextSecret));
+                return ActualCollisionOutcome(collision, plan.PlaintextSecret);
             }
+
+            /* #5240: the key the check above compared, handed to the write so the write compares it again under the
+               identity lock: another definition may have taken it during the probe, after otherKeys was read. Null when
+               the probe named nothing new (a connected database equal to the declared one, or none reported). */
+            actualStorageKey = ActualStorageKeyOf(probedEntry, connectedDatabase);
         }
 
         var sets = plan.Sets;
@@ -315,13 +324,22 @@ public sealed partial class DarlingMcpServerAdminTools
                 : s).ToList();
         }
 
-        var write = await store.WriteAsync(serverId, row.ModifiedAt, sets, plan.AddressChanged ? plan.NewStorageKey : null, cancellationToken);
+        var write = await store.WriteAsync(serverId, row.ModifiedAt, sets, plan.AddressChanged ? plan.NewStorageKey : null, actualStorageKey, cancellationToken);
         switch (write.Kind)
         {
             case ServerEditWriteKind.NotFound:
                 return Outcome(EditStatus.NotFound, "This server's definition was removed while the edit ran; nothing was changed.");
             case ServerEditWriteKind.Occupied:
                 return OccupiedAnswer(plan.NewStorageKey);
+            case ServerEditWriteKind.ActualOccupied:
+                /* The same refusal the check after the probe gives, reached under the lock: the database the probe reached
+                   was claimed by another definition while the probe ran. Only a write handed an actual key answers this. */
+                if (probedEntry is null || connectedDatabase is null)
+                {
+                    throw new InvalidOperationException("The store refused an actual database key that this edit never handed it.");
+                }
+
+                return ActualCollisionOutcome(ActualIdentityCollisionText(probedEntry, connectedDatabase), plan.PlaintextSecret);
             case ServerEditWriteKind.PasswordNeeded:
                 /* The store's own check: a move of host or port that keeps the stored secret. The plan refuses it first, so
                    this is the answer when the two ever read the row differently, and it is the same sentence. */
@@ -352,6 +370,12 @@ public sealed partial class DarlingMcpServerAdminTools
             note = plan.AddressChanged ? EditNoteSweep + " " + EditNoteAddress : EditNoteSweep,
         }, McpHelpers.JsonOptions);
     }
+
+    /// <summary>The answer for an edit whose connected database another definition already covers: the add refusal's text
+    /// with "Not added" turned into "Not saved", the secret redacted. One shape for the check before the write and the
+    /// check under the lock.</summary>
+    private static string ActualCollisionOutcome(string collisionText, string? plaintextSecret) =>
+        Outcome(EditStatus.Collides, RedactEditSecret(collisionText.Replace("Not added:", "Not saved:", StringComparison.Ordinal), plaintextSecret));
 
     private static string OccupiedAnswer(string storageKey) =>
         JsonSerializer.Serialize(new
@@ -844,7 +868,10 @@ public sealed partial class DarlingMcpServerAdminTools
         string? Username, string EncryptMode, bool TrustServerCertificate, bool MultiSubnetFailover, decimal MonthlyCostUsd,
         DateTime ModifiedAt);
 
-    internal enum ServerEditWriteKind { Written, NotFound, Conflict, Occupied, PasswordNeeded }
+    /// <summary><c>Occupied</c>: another definition holds the address the edit moves to. <c>ActualOccupied</c>: another
+    /// definition holds the storage key the probe's connected database gives (#5240), the refusal
+    /// <see cref="ActualIdentityCollision"/> gives before the write. Neither commits.</summary>
+    internal enum ServerEditWriteKind { Written, NotFound, Conflict, Occupied, PasswordNeeded, ActualOccupied }
 
     internal sealed record ServerEditWrite(ServerEditWriteKind Kind, DateTime ModifiedAt);
 
@@ -862,10 +889,13 @@ public sealed partial class DarlingMcpServerAdminTools
         /// <summary>Re-checks and writes in one transaction: the identity lock (<see cref="IdentityLockSql"/>), then
         /// <c>config.edit_monitored_server</c>, which locks the row, compares <c>modified_at</c> with
         /// <paramref name="expectedModifiedAt"/>, refuses a move of host or port that keeps the stored secret, and writes
-        /// the listed columns; then, when <paramref name="newStorageKey"/> is given, the other rows' keys, read under the
-        /// lock. An address another row holds undoes the write: the transaction is never committed.</summary>
+        /// the listed columns; then, when <paramref name="newStorageKey"/> or <paramref name="actualStorageKey"/> is given,
+        /// the other rows' keys, read under the lock. An address another row holds undoes the write: the transaction is
+        /// never committed. <paramref name="actualStorageKey"/> is the key the probe's connected database gives when it
+        /// differs from the edit's own key (<see cref="ActualStorageKeyOf"/>), else null; a row holding it answers
+        /// <see cref="ServerEditWriteKind.ActualOccupied"/>, judged after <paramref name="newStorageKey"/>.</summary>
         Task<ServerEditWrite> WriteAsync(
-            int serverId, DateTime expectedModifiedAt, IReadOnlyList<EditColumnValue> sets, string? newStorageKey, CancellationToken cancellationToken);
+            int serverId, DateTime expectedModifiedAt, IReadOnlyList<EditColumnValue> sets, string? newStorageKey, string? actualStorageKey, CancellationToken cancellationToken);
     }
 
     /// <summary>The columns <see cref="ReadEditRowSql"/> reads, and the only ones an edit may name in a SET list.</summary>
@@ -973,7 +1003,7 @@ FROM config_monitored_servers WHERE server_id = $1";
         }
 
         public async Task<ServerEditWrite> WriteAsync(
-            int serverId, DateTime expectedModifiedAt, IReadOnlyList<EditColumnValue> sets, string? newStorageKey, CancellationToken cancellationToken)
+            int serverId, DateTime expectedModifiedAt, IReadOnlyList<EditColumnValue> sets, string? newStorageKey, string? actualStorageKey, CancellationToken cancellationToken)
         {
             var parameters = BuildEditFunctionParameters(serverId, expectedModifiedAt, sets);
             var postgres = _postgres;
@@ -1037,20 +1067,31 @@ FROM config_monitored_servers WHERE server_id = $1";
                     throw new InvalidOperationException("The edit function answered an outcome this build does not know.");
             }
 
-            if (newStorageKey is not null)
+            if (newStorageKey is not null || actualStorageKey is not null)
             {
                 /* After the function, in the same transaction: an occupied address returns here WITHOUT a commit, which
-                   undoes the function's write (and its reload beacon), so the order of the answers is unchanged. */
+                   undoes the function's write (and its reload beacon), so the order of the answers is unchanged. The same
+                   read judges the key the probe's connected database gives (actualStorageKey): a row that took it during
+                   the probe is a second definition collecting one database, refused after the address check. */
+                var actualKeyHeld = false;
                 await using var others = new NpgsqlCommand(OtherServersSql, connection) { Transaction = transaction };
                 others.CommandTimeout = McpCommandDeadlines.ReadSeconds;
                 others.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId }); // $1
                 await using var reader = await others.ExecuteReaderAsync(cancellationToken);
                 while (await reader.ReadAsync(cancellationToken))
                 {
-                    if (string.Equals(StorageKeyOf(reader), newStorageKey, StringComparison.OrdinalIgnoreCase))
+                    var held = StorageKeyOf(reader);
+                    if (newStorageKey is not null && string.Equals(held, newStorageKey, StringComparison.OrdinalIgnoreCase))
                     {
                         return new ServerEditWrite(ServerEditWriteKind.Occupied, expectedModifiedAt);
                     }
+
+                    actualKeyHeld |= actualStorageKey is not null && string.Equals(held, actualStorageKey, StringComparison.OrdinalIgnoreCase);
+                }
+
+                if (actualKeyHeld)
+                {
+                    return new ServerEditWrite(ServerEditWriteKind.ActualOccupied, expectedModifiedAt);
                 }
             }
 

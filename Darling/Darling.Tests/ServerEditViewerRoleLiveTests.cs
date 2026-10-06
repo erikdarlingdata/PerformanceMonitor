@@ -264,7 +264,7 @@ public sealed class ServerEditViewerRoleLiveTests : IDisposable
 
             /* The write: the credential column in the SET list, under the modified_at the edit read. */
             var write = await store.WriteAsync(
-                5204, row!.ModifiedAt, [new DarlingMcpServerAdminTools.EditColumnValue("password", "encrypted_password", NpgsqlDbType.Text, "blob-2")], null, ct);
+                5204, row!.ModifiedAt, [new DarlingMcpServerAdminTools.EditColumnValue("password", "encrypted_password", NpgsqlDbType.Text, "blob-2")], null, null, ct);
             Assert.Equal(DarlingMcpServerAdminTools.ServerEditWriteKind.Written, write.Kind);
             Assert.True(write.ModifiedAt > row.ModifiedAt, "RETURNING modified_at did not move past the token the edit read");
 
@@ -281,7 +281,7 @@ public sealed class ServerEditViewerRoleLiveTests : IDisposable
 
             /* The token just spent is stale: the same write is a conflict and changes nothing (the blob, the token, the beacon). */
             var stale = await store.WriteAsync(
-                5204, row.ModifiedAt, [new DarlingMcpServerAdminTools.EditColumnValue("password", "encrypted_password", NpgsqlDbType.Text, "blob-3")], null, ct);
+                5204, row.ModifiedAt, [new DarlingMcpServerAdminTools.EditColumnValue("password", "encrypted_password", NpgsqlDbType.Text, "blob-3")], null, null, ct);
             Assert.Equal(DarlingMcpServerAdminTools.ServerEditWriteKind.Conflict, stale.Kind);
             Assert.Equal("blob-2", await ScalarAsync(owner, "SELECT encrypted_password FROM config_monitored_servers WHERE server_id = 5204", ct));
             Assert.Equal(versionBefore + 1, long.Parse(await ScalarAsync(owner, "SELECT config_version FROM config_service", ct), System.Globalization.CultureInfo.InvariantCulture));

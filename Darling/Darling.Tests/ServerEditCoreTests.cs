@@ -63,6 +63,7 @@ public sealed class ServerEditCoreTests : IDisposable
         public int Writes { get; private set; }
         public List<Edit.EditColumnValue> LastSets { get; private set; } = [];
         public string? LastNewKey { get; private set; }
+        public string? LastActualKey { get; private set; }
         public Edit.ServerEditWriteKind WriteResult { get; set; } = Edit.ServerEditWriteKind.Written;
 
         public Task<Edit.ServerEditRow?> ReadRowAsync(int serverId, CancellationToken cancellationToken)
@@ -75,11 +76,12 @@ public sealed class ServerEditCoreTests : IDisposable
             Task.FromResult(OtherKeys.ToList());
 
         public Task<Edit.ServerEditWrite> WriteAsync(
-            int serverId, DateTime expectedModifiedAt, IReadOnlyList<Edit.EditColumnValue> sets, string? newStorageKey, CancellationToken cancellationToken)
+            int serverId, DateTime expectedModifiedAt, IReadOnlyList<Edit.EditColumnValue> sets, string? newStorageKey, string? actualStorageKey, CancellationToken cancellationToken)
         {
             Writes++;
             LastSets = sets.ToList();
             LastNewKey = newStorageKey;
+            LastActualKey = actualStorageKey;
             return Task.FromResult(new Edit.ServerEditWrite(WriteResult, Stamp.AddSeconds(1)));
         }
     }

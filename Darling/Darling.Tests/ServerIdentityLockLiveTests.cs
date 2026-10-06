@@ -667,4 +667,108 @@ public sealed class ServerIdentityLockLiveTests
             });
         }
     }
+
+    /* ---------------- the database the probe reached (#5240, round 1) ----------------
+       An edit or add that names no database is probed, and the probe says which database the connection reached. The
+       check before the write compares that database's key with the keys read BEFORE the probe; a definition committed
+       DURING the probe was invisible to it. The write is handed the same key and compares it under the lock. */
+
+    private const string AddressH = "race-h.example.test";
+
+    private static ConnectionProbeResult ReachedDatabase(string database) => Reached with { ConnectedDatabase = database };
+
+    private static string KeyOfHostAndDatabase(string host, string database) =>
+        Edit.ParseRequest("[{\"host\":\"" + host + "\",\"database\":\"" + database + "\"}]").Entries.Single().StorageKey;
+
+    /// <summary>
+    /// An edit whose probe lands in database X while a second writer (a real add) commits H/X during that probe is
+    /// refused under the lock with the same <c>collides</c> answer the check before the write gives, and the table is
+    /// left as the second writer made it. The edit that keeps its address (a changed certificate setting) is the case
+    /// the address re-check never covered: it handed the write no key at all.
+    /// </summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task AnEditWhoseProbeLandsInADatabaseASecondWriterTookMeanwhile_IsRefusedUnderTheLock_AndSavesNothing(bool movesTheAddress)
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var rig = await OpenAsync(ct);
+        var originalHost = movesTheAddress ? "race-h-old.example.test" : AddressH;
+        await SeedServerAsync(rig.Owner, 7401, "race-a", originalHost, ct);
+
+        var secondWriter = "";
+        Edit.ServerProbe probe = async (_, probeToken) =>
+        {
+            secondWriter = await Edit.AddServersAsync(
+                rig.Owner, "[{\"host\":\"" + AddressH + "\",\"database\":\"X\"}]", ReachedAtOnce, probeToken);
+            return ReachedDatabase("X");
+        };
+
+        var changes = movesTheAddress ? "{\"host\":\"" + AddressH + "\"}" : "{\"trust_server_certificate\":true}";
+        var answer = Parse(await Edit.EditServerByNameAsync(rig.Owner, "race-a", changes, probe, true, null, ct));
+
+        Assert.Equal("added", AddStatusOf(secondWriter));
+        Assert.Equal("collides", answer["status"]!.GetValue<string>());
+        var message = answer["message"]!.GetValue<string>();
+        Assert.StartsWith("Not saved:", message, StringComparison.Ordinal);
+        Assert.Contains("lands in 'X'", message, StringComparison.Ordinal);
+
+        var keys = await StorageKeysAsync(rig.Owner, ct);
+        Assert.Equal(2, keys.Count);
+        Assert.Single(keys, key => string.Equals(key, KeyOfHostAndDatabase(AddressH, "X"), StringComparison.OrdinalIgnoreCase));
+        Assert.Equal(1, await CountAsync(rig.Owner,
+            "SELECT count(*) FROM config_monitored_servers WHERE server_id = 7401 AND host = '" + originalHost + "' AND database IS NULL AND trust_server_certificate = FALSE", ct));
+        Assert.Equal(0, await AdvisoryLocksAsync(rig.Owner, true, ct) + await AdvisoryLocksAsync(rig.Owner, false, ct));
+    }
+
+    /// <summary>The add's twin of the edit fact above: the add names no database, its probe lands in X, and a second
+    /// writer commits H/X during the probe. The add is refused under the lock as <c>collides</c> and writes nothing; only
+    /// the second writer's definition collects X.</summary>
+    [Fact]
+    public async Task AnAddWhoseProbeLandsInADatabaseASecondWriterTookMeanwhile_IsRefusedUnderTheLock_AndSavesNothing()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var rig = await OpenAsync(ct);
+
+        var secondWriter = "";
+        Edit.ServerProbe probe = async (_, probeToken) =>
+        {
+            secondWriter = await Edit.AddServersAsync(
+                rig.Owner, "[{\"host\":\"" + AddressH + "\",\"database\":\"X\"}]", ReachedAtOnce, probeToken);
+            return ReachedDatabase("X");
+        };
+
+        var answer = await Edit.AddServersAsync(rig.Owner, AddJson(AddressH), probe, ct);
+
+        Assert.Equal("added", AddStatusOf(secondWriter));
+        Assert.Equal("collides", AddStatusOf(answer));
+        var detail = Parse(answer)["results"]![0]!["detail"]!.GetValue<string>();
+        Assert.StartsWith("Not added:", detail, StringComparison.Ordinal);
+        Assert.Contains("lands in 'X'", detail, StringComparison.Ordinal);
+
+        var keys = await StorageKeysAsync(rig.Owner, ct);
+        Assert.Single(keys);
+        Assert.Equal(KeyOfHostAndDatabase(AddressH, "X"), keys[0], StringComparer.OrdinalIgnoreCase);
+        Assert.Equal(0, await AdvisoryLocksAsync(rig.Owner, true, ct) + await AdvisoryLocksAsync(rig.Owner, false, ct));
+    }
+
+    /// <summary>The control for the two refusals above: a probe that lands in a database nobody holds is saved, for an
+    /// add (stored under its declared key) and for an edit, so the re-check under the lock refuses only a database that
+    /// another definition really took.</summary>
+    [Fact]
+    public async Task AProbeThatLandsInADatabaseNobodyHolds_IsNotRefused_ForAnAddOrAnEdit()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var rig = await OpenAsync(ct);
+        Edit.ServerProbe probe = (_, _) => Task.FromResult(ReachedDatabase("X"));
+
+        Assert.Equal("added", AddStatusOf(await Edit.AddServersAsync(rig.Owner, AddJson(AddressH), probe, ct)));
+        var edit = Parse(await Edit.EditServerByNameAsync(rig.Owner, AddressH, "{\"trust_server_certificate\":true}", probe, true, null, ct));
+        Assert.Equal("updated", edit["status"]!.GetValue<string>());
+
+        var keys = await StorageKeysAsync(rig.Owner, ct);
+        Assert.Single(keys);
+        Assert.Equal(1, await CountAsync(rig.Owner,
+            "SELECT count(*) FROM config_monitored_servers WHERE host = '" + AddressH + "' AND database IS NULL AND trust_server_certificate = TRUE", ct));
+    }
 }
