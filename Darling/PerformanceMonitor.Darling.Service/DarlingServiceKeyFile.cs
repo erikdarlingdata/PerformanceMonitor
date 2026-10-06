@@ -19,12 +19,20 @@ namespace PerformanceMonitor.Darling.Service;
 /// may run to on the Windows read, and how its text becomes the key.</summary>
 /// <typeparam name="TKey">The key as the caller holds it.</typeparam>
 /// <param name="FileName">The file's name in the credentials directory.</param>
-/// <param name="MaxBytes">The most the file may hold, enforced on the Windows read, which is the one that goes through a
-/// held handle.</param>
+/// <param name="MaxBytes">The most the file may hold: a larger file is refused before it is read, and the read itself is
+/// bounded to it plus one byte.</param>
 /// <param name="Parse">Turns the file's text (base64, after the DPAPI layer is removed on Windows) into the key.</param>
 /// <param name="TakesDiscardRecord">Whether this key is the one the directory check discards when it finds the directory
 /// open (<see cref="ComposeCredentialDirectoryGuard.TakeDiscardedKey"/>), so its load takes that record.</param>
-internal sealed record ServiceKeyFileSpec<TKey>(string FileName, int MaxBytes, ServiceKeyParser<TKey> Parse, bool TakesDiscardRecord = false)
+/// <param name="CheckOwner">Whether, on Unix, the file must be owned by the user the service runs as and have one name only
+/// (#5366): for a key that cannot be generated again.</param>
+/// <param name="CheckDirectoryAccess">Whether, on Windows, an existing directory is refused for a first write when
+/// accounts beyond SYSTEM, Administrators and the service account can write to it or change what is in it (#5366).</param>
+/// <param name="UniqueTemporary">Whether the file is written through a temporary file with a name of its own each time
+/// (<see cref="DarlingServiceKeyFile.UniqueTemporaryInfix"/>), so two writers never share one (#5366).</param>
+internal sealed record ServiceKeyFileSpec<TKey>(
+    string FileName, int MaxBytes, ServiceKeyParser<TKey> Parse, bool TakesDiscardRecord = false,
+    bool CheckOwner = false, bool CheckDirectoryAccess = false, bool UniqueTemporary = false)
     where TKey : class;
 
 /// <summary>Turns a key file's text into the key, or says why it cannot.</summary>
@@ -93,6 +101,9 @@ internal sealed record ServiceKeyFileResult<TKey>(
 /// </summary>
 internal static class DarlingServiceKeyFile
 {
+    /// <summary>What follows the key file's name in a unique temporary file's name, before the random part (#5366).</summary>
+    internal const string UniqueTemporaryInfix = ".tmp-";
+
     /// <summary>
     /// Looks at <paramref name="spec"/>'s file in <paramref name="directory"/>. With <paramref name="generate"/> null
     /// nothing is ever written (and a missing <paramref name="directory"/> is not created unless
@@ -117,7 +128,7 @@ internal static class DarlingServiceKeyFile
             var trust = DarlingManagedRoles.PrepareComposeCredentialDirectory(directory, createDirectory, logger);
             var exists = AnythingAt(path);
 
-            /* Taken whichever way this load goes, so it describes this process's discard only once (#4004 review,
+            /* Taken whichever way this load goes, so it describes this process's discard only once (#4004,
                round 3): the check that removed the key may have been another caller's, earlier this start. */
             var discarded = spec.TakesDiscardRecord ? ComposeCredentialDirectoryGuard.Current.TakeDiscardedKey(directory) : null;
 
@@ -134,6 +145,12 @@ internal static class DarlingServiceKeyFile
                     return Refuse<TKey>(path, untrusted, untrusted: true, discarded);
                 }
 
+                /* #5366: Unix only in effect: Windows has no Unix mode calls, so there is no owner to read there. */
+                if (spec.CheckOwner && UnexpectedOwnerReason(path) is { } owner)
+                {
+                    return Refuse<TKey>(path, owner, untrusted: true, discarded);
+                }
+
                 if (!OperatingSystem.IsWindows())
                 {
                     return Read(path, spec, held: null, discarded);
@@ -142,7 +159,7 @@ internal static class DarlingServiceKeyFile
                 /* #4028: the shared check above only refuses a file Users, Authenticated Users or Everyone can read.
                    A key is read by the service alone, so on Windows it is held to an allowlist: an account beyond
                    SYSTEM, Administrators and the service account that can read it has the key, and one that can write
-                   it or re-permission it can make that so (#4044 review). Judged and read through ONE handle that
+                   it or re-permission it can make that so (#4044). Judged and read through ONE handle that
                    nobody can rename, replace or write while it is open, so the key read is the key judged, whoever
                    controls the directory. */
                 using var held = DarlingFileSecurity.OpenForServiceOnlyRead(path, out var refusal);
@@ -156,11 +173,11 @@ internal static class DarlingServiceKeyFile
                 return new ServiceKeyFileResult<TKey>(ServiceKeyFileState.Absent, null, path, null, Exists: false, Untrusted: false, discarded);
             }
 
-            return Write(path, generate, discarded);
+            return Write(path, generate, discarded, spec.UniqueTemporary, logger);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            return Refuse<TKey>(path, $"it could not be checked ({ex.Message})", untrusted: false, discarded: null);
+            return Refuse<TKey>(path, $"it could not be checked ({ex.Message})", untrusted: false, discarded: null, exists: AnythingAtOrFalse(path));
         }
     }
 
@@ -183,6 +200,7 @@ internal static class DarlingServiceKeyFile
         var path = Path.Combine(directory, spec.FileName);
         try
         {
+            var existed = Directory.Exists(directory);
             var trust = DarlingManagedRoles.PrepareComposeCredentialDirectory(directory, create: true, logger);
             var exists = AnythingAt(path);
             var discarded = spec.TakesDiscardRecord ? ComposeCredentialDirectoryGuard.Current.TakeDiscardedKey(directory) : null;
@@ -191,16 +209,59 @@ internal static class DarlingServiceKeyFile
                 return RefuseDirectory<TKey>(path, directory, distrust, exists);
             }
 
+            /* #5366: a directory that was there before this write is an operator's: an account that can write to it can
+               swap the temporary file for another between its close and the move, or rename the key away. The service
+               does not re-permission it; it says what to change. A directory the service just made was hardened as it
+               was made. */
+            if (spec.CheckDirectoryAccess && existed && OperatingSystem.IsWindows()
+                && ComposeCredentialDirectoryGuard.Current.UnixModes is null
+                && DarlingFileSecurity.WriteAccessBeyondTrusted(directory) is { } writers)
+            {
+                return RefuseDirectory<TKey>(
+                    path, directory, $"accounts beyond SYSTEM, Administrators and the service account can write to it or change what is in it: {writers}; remove their access and restart", exists);
+            }
+
             if (exists)
             {
                 return Refuse<TKey>(path, "a file is already there, and a key is never written over one", untrusted: false, discarded);
             }
 
-            return Write(path, generate, discarded);
+            return Write(path, generate, discarded, spec.UniqueTemporary, logger);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            return Refuse<TKey>(path, $"it could not be checked ({ex.Message})", untrusted: false, discarded: null);
+            return Refuse<TKey>(path, $"it could not be checked ({ex.Message})", untrusted: false, discarded: null, exists: AnythingAtOrFalse(path));
+        }
+    }
+
+    /// <summary>The reason the Unix file at <paramref name="path"/> is not the service's own (#5366): another user owns
+    /// it, or it has more than one name. Null when it is the service's, or when this platform cannot say.</summary>
+    private static string? UnexpectedOwnerReason(string path)
+    {
+        if (ComposeCredentialDirectoryGuard.Current.UnixModes is not { } modes || modes.OwnerOf(path) is not { } owner)
+        {
+            return null;
+        }
+
+        if (owner.UserId != modes.EffectiveUserId)
+        {
+            return "it is owned by another user than the one the service runs as";
+        }
+
+        return owner.Links == 1
+            ? null
+            : $"it has {owner.Links.ToString(CultureInfo.InvariantCulture)} names, not one";
+    }
+
+    private static bool AnythingAtOrFalse(string path)
+    {
+        try
+        {
+            return AnythingAt(path);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException)
+        {
+            return false;
         }
     }
 
@@ -212,40 +273,56 @@ internal static class DarlingServiceKeyFile
         return info.LinkTarget is not null || info.Exists || Directory.Exists(path);
     }
 
+    private static string TooLarge<TKey>(ServiceKeyFileSpec<TKey> spec)
+        where TKey : class =>
+        $"it is larger than {spec.MaxBytes.ToString(CultureInfo.InvariantCulture)} bytes, which no key this service writes is";
+
     /// <summary>Reads the key from <paramref name="held"/>, the stream <see cref="Load{TKey}"/> judged the file through,
     /// or from the path when there is none (Unix, where mode and owner are the shared check's).</summary>
     private static ServiceKeyFileResult<TKey> Read<TKey>(string path, ServiceKeyFileSpec<TKey> spec, FileStream? held, string? discarded)
         where TKey : class
     {
         string text;
+        FileStream? opened = null;
+        byte[]? buffer = null;
         try
         {
-            if (held is null)
+            /* One bounded read for both platforms (#5366): a file larger than MaxBytes is refused before any of it is
+               read, and what is read is never more than MaxBytes plus one byte, whatever the file grows to meanwhile. */
+            var stream = held ?? (opened = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, bufferSize: 1));
+            if (stream.Length > spec.MaxBytes)
             {
-                text = File.ReadAllText(path).Trim();
+                return Refuse<TKey>(path, TooLarge(spec), untrusted: false, discarded);
             }
-            else
+
+            buffer = new byte[spec.MaxBytes + 1];
+            var length = 0;
+            int read;
+            while (length < buffer.Length && (read = stream.Read(buffer, length, buffer.Length - length)) > 0)
             {
-                var buffer = new byte[spec.MaxBytes + 1];
-                var length = 0;
-                int read;
-                while (length < buffer.Length && (read = held.Read(buffer, length, buffer.Length - length)) > 0)
-                {
-                    length += read;
-                }
-
-                if (length > spec.MaxBytes)
-                {
-                    return Refuse<TKey>(path, $"it is larger than {spec.MaxBytes.ToString(CultureInfo.InvariantCulture)} bytes, which no key this service writes is", untrusted: false, discarded);
-                }
-
-                using var reader = new StreamReader(new MemoryStream(buffer, 0, length), Encoding.UTF8, detectEncodingFromByteOrderMarks: true);
-                text = reader.ReadToEnd().Trim();
+                length += read;
             }
+
+            if (length > spec.MaxBytes)
+            {
+                return Refuse<TKey>(path, TooLarge(spec), untrusted: false, discarded);
+            }
+
+            using var reader = new StreamReader(new MemoryStream(buffer, 0, length), Encoding.UTF8, detectEncodingFromByteOrderMarks: true);
+            text = reader.ReadToEnd().Trim();
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
             return Refuse<TKey>(path, $"it could not be read ({ex.Message})", untrusted: false, discarded);
+        }
+        finally
+        {
+            if (buffer is not null)
+            {
+                CryptographicOperations.ZeroMemory(buffer);
+            }
+
+            opened?.Dispose();
         }
 
         string encoded;
@@ -278,11 +355,16 @@ internal static class DarlingServiceKeyFile
     /// zero-length key that every later start refuses), then moved into place WITHOUT overwrite, so a file that
     /// appeared meanwhile is never replaced.
     /// </summary>
-    private static ServiceKeyFileResult<TKey> Write<TKey>(string path, Func<ServiceKeyGeneration<TKey>> generate, string? discarded)
+    private static ServiceKeyFileResult<TKey> Write<TKey>(
+        string path, Func<ServiceKeyGeneration<TKey>> generate, string? discarded, bool uniqueTemporary, ILogger logger)
         where TKey : class
     {
-        var temporary = path + ".tmp";
-        if (ClearStaleTemporary(temporary) is { } stale)
+        /* A unique temporary (#5366) is created with CreateNew and never deleted first, so a second writer cannot remove
+           the first's file and put its own in its place. The fixed name is the log-hash key's, as it was. */
+        var temporary = uniqueTemporary
+            ? path + UniqueTemporaryInfix + Convert.ToHexString(RandomNumberGenerator.GetBytes(8))
+            : path + ".tmp";
+        if (!uniqueTemporary && ClearStaleTemporary(temporary) is { } stale)
         {
             return Refuse<TKey>(path, stale, untrusted: false, discarded);
         }
@@ -292,7 +374,11 @@ internal static class DarlingServiceKeyFile
         {
             generation = generate();
             var encoded = Convert.ToBase64String(generation.Material);
-            File.Delete(temporary);
+            if (!uniqueTemporary)
+            {
+                File.Delete(temporary);
+            }
+
             if (OperatingSystem.IsWindows())
             {
                 using (var stream = DarlingFileSecurity.CreateHardenedFile(temporary, allowInteractiveRead: false))
@@ -333,7 +419,7 @@ internal static class DarlingServiceKeyFile
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            TryDelete(temporary);
+            TryDelete(temporary, logger);
             return Refuse<TKey>(path, $"there was no key, and a new one could not be written ({ex.Message})", untrusted: false, discarded);
         }
         finally
@@ -346,7 +432,7 @@ internal static class DarlingServiceKeyFile
     }
 
     /// <summary>
-    /// A directory where the new key's temporary file goes (#4004 review): File.Delete cannot remove it, so the write
+    /// A directory where the new key's temporary file goes (#4004): File.Delete cannot remove it, so the write
     /// failed on every start with a reason that named only the key ("it did not exist"). An empty one is removed, which
     /// is safe (a non-recursive delete removes nothing inside, and a symbolic link is not a directory here); one with
     /// anything in it is someone's tree, left alone, and named as the reason. Null when the path is clear.
@@ -369,7 +455,7 @@ internal static class DarlingServiceKeyFile
         }
     }
 
-    private static void TryDelete(string path)
+    private static void TryDelete(string path, ILogger logger)
     {
         try
         {
@@ -378,12 +464,13 @@ internal static class DarlingServiceKeyFile
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
             /* best effort: the next write clears a leftover temporary itself */
+            logger.LogDebug("Could not remove {File}: {Message}", path, ex.Message);
         }
     }
 
-    private static ServiceKeyFileResult<TKey> Refuse<TKey>(string path, string reason, bool untrusted, string? discarded)
+    private static ServiceKeyFileResult<TKey> Refuse<TKey>(string path, string reason, bool untrusted, string? discarded, bool exists = true)
         where TKey : class =>
-        new(ServiceKeyFileState.Refused, null, path, reason, Exists: true, untrusted, discarded);
+        new(ServiceKeyFileState.Refused, null, path, reason, exists, untrusted, discarded);
 
     private static ServiceKeyFileResult<TKey> RefuseDirectory<TKey>(string path, string directory, string distrust, bool exists)
         where TKey : class =>

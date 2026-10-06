@@ -474,14 +474,38 @@ public static class DarlingFileSecurity
         }
     }
 
-    private static string? AccessBeyondTrusted(FileSystemSecurity security)
+    /// <summary>
+    /// The accounts beyond SYSTEM, Administrators and the service account that are allowed to write to
+    /// <paramref name="directory"/>, delete from it or change who may (#5366), comma-separated; null when there are
+    /// none. Read access is not counted: a directory others may list is not one they can change. A DACL that cannot be
+    /// read is reported, not passed.
+    /// </summary>
+    public static string? WriteAccessBeyondTrusted(string directory)
+    {
+        try
+        {
+            return AccessBeyondTrusted(new DirectoryInfo(directory).GetAccessControl(), DirectoryChangeRights);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidOperationException or PlatformNotSupportedException)
+        {
+            return $"its permissions could not be read ({ex.Message})";
+        }
+    }
+
+    private const FileSystemRights DirectoryChangeRights =
+        FileSystemRights.WriteData | FileSystemRights.AppendData | FileSystemRights.WriteExtendedAttributes
+        | FileSystemRights.WriteAttributes | FileSystemRights.Delete | FileSystemRights.DeleteSubdirectoriesAndFiles
+        | FileSystemRights.ChangePermissions | FileSystemRights.TakeOwnership;
+
+    private static string? AccessBeyondTrusted(FileSystemSecurity security, FileSystemRights? onlyRights = null)
     {
         var accounts = new List<string>();
         foreach (FileSystemAccessRule rule in security.GetAccessRules(true, true, typeof(SecurityIdentifier)))
         {
             if (rule.AccessControlType != AccessControlType.Allow
                 || rule.IdentityReference is not SecurityIdentifier sid
-                || IsTrusted(sid))
+                || IsTrusted(sid)
+                || (onlyRights is { } mask && (rule.FileSystemRights & mask) == 0))
             {
                 continue;
             }

@@ -576,6 +576,71 @@ internal static class FileIdentity
         return new FileId(dev, BitConverter.ToUInt64(buffer, 8));
     }
 
+    /// <summary>Where <c>st_nlink</c> and <c>st_uid</c> sit in <c>struct stat</c> on each 64-bit layout (#5366).</summary>
+    internal enum UnixStatLayout
+    {
+        /// <summary>x86-64 Linux: <c>st_nlink</c> is 8 bytes at 16, <c>st_uid</c> 4 bytes at 28.</summary>
+        LinuxX64,
+
+        /// <summary>arm64 Linux (the generic layout): <c>st_nlink</c> is 4 bytes at 20, <c>st_uid</c> 4 bytes at 24.</summary>
+        LinuxArm64,
+
+        /// <summary>macOS with 64-bit inodes: <c>st_nlink</c> is 2 bytes at 6, <c>st_uid</c> 4 bytes at 16.</summary>
+        MacOs,
+    }
+
+    /// <summary>The owner and link count in a <c>stat</c> buffer, read at <paramref name="layout"/>'s offsets.</summary>
+    internal static UnixFileOwner DecodeUnixOwner(byte[] buffer, UnixStatLayout layout) => layout switch
+    {
+        UnixStatLayout.LinuxX64 => new UnixFileOwner(BitConverter.ToUInt32(buffer, 28), BitConverter.ToUInt64(buffer, 16)),
+        UnixStatLayout.LinuxArm64 => new UnixFileOwner(BitConverter.ToUInt32(buffer, 24), BitConverter.ToUInt32(buffer, 20)),
+        UnixStatLayout.MacOs => new UnixFileOwner(BitConverter.ToUInt32(buffer, 16), BitConverter.ToUInt16(buffer, 6)),
+        _ => throw new ArgumentOutOfRangeException(nameof(layout)),
+    };
+
+    private static UnixStatLayout? CurrentUnixLayout() =>
+        OperatingSystem.IsWindows() || IntPtr.Size != 8 ? null
+        : OperatingSystem.IsMacOS() ? UnixStatLayout.MacOs
+        : OperatingSystem.IsLinux() && RuntimeInformation.ProcessArchitecture == Architecture.X64 ? UnixStatLayout.LinuxX64
+        : OperatingSystem.IsLinux() && RuntimeInformation.ProcessArchitecture == Architecture.Arm64 ? UnixStatLayout.LinuxArm64
+        : null;
+
+    /// <summary>
+    /// The owner and link count of the file at <paramref name="path"/>, from the same <c>stat</c> call the file identity
+    /// uses (#5366); null when nothing is there or the platform's layout is not one this knows. A link is followed, as
+    /// the file check's own read does. Throws like <see cref="Of"/> when the file cannot be examined.
+    /// </summary>
+    internal static UnixFileOwner? UnixOwnerOf(string path)
+    {
+        if (CurrentUnixLayout() is not { } layout)
+        {
+            return null;
+        }
+
+        var buffer = new byte[512];
+        var result = OperatingSystem.IsMacOS() && RuntimeInformation.ProcessArchitecture == Architecture.X64
+            ? StatMacIntel(path, buffer)
+            : Stat(path, buffer);
+        if (result != 0)
+        {
+            var errno = Marshal.GetLastPInvokeError();
+            return errno switch
+            {
+                Enoent or Enotdir => null,
+                Eacces => throw new UnauthorizedAccessException("Access to the path was denied (errno 13)."),
+                _ => throw new IOException("The path could not be examined (errno " + errno + ")."),
+            };
+        }
+
+        return DecodeUnixOwner(buffer, layout);
+    }
+
+    /// <summary>The user id this process runs as. Only called on a platform that has one.</summary>
+    internal static uint EffectiveUserId() => GetEffectiveUserId();
+
+    [DllImport("libc", EntryPoint = "geteuid")]
+    private static extern uint GetEffectiveUserId();
+
     /* CA2101 wants CharSet.Unicode on a P/Invoke that takes a string, but libc's stat takes a UTF-8 path:
        CharSet.Unicode would marshal UTF-16 and the call would fail on every non-ASCII path. LPUTF8Str is the
        correct marshaling here, so the rule is suppressed for these two declarations only. */

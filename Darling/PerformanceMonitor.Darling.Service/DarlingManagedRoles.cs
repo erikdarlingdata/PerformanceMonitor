@@ -1900,9 +1900,9 @@ WHERE u.rolname = current_user";
 
     /// <summary>
     /// Every file the service reads from a credentials directory, and the temporary file each is written through
-    /// (#4004 review, round 2): the three role passwords and the log-hash key, under both platforms' names. The
-    /// password key's own two names are not here, because an open directory keeps that file
-    /// (<see cref="PasswordKeyNames"/>); only the temporary file it is written through is.
+    /// (#4004, round 2): the three role passwords and the log-hash key, under both platforms' names. The
+    /// password key's own two names are not here, because an open directory keeps that file, renamed
+    /// (<see cref="PasswordKeyNames"/>); only the temporary files it is written through are.
     /// </summary>
     internal static IReadOnlyList<string> CredentialDirectoryFileNames { get; } = BuildCredentialDirectoryFileNames();
 
@@ -1921,19 +1921,23 @@ WHERE u.rolname = current_user";
             .ToArray();
     }
 
-    /// <summary>The password key's file name on each platform (#5366). The directory check keeps these when it finds the
-    /// directory open, and records that it did (<see cref="ComposeCredentialDirectoryGuard.PasswordKeyKeptAfterOpenDirectory"/>),
-    /// so the key's load can say so and the caller can check the key against what it published.</summary>
+    /// <summary>The password key's file name on each platform (#5366). The directory check does not remove these when it
+    /// finds the directory open: it renames what is at them to the quarantine name
+    /// (<see cref="DarlingPasswordKeyFile.QuarantineSuffix"/>), so the key's load can say so, on this start and every
+    /// later one, and the caller can check the key against what it published.</summary>
     internal static IReadOnlyList<string> PasswordKeyNames =>
         [DarlingPasswordKeyFile.UnixFileName, DarlingPasswordKeyFile.WindowsFileName];
 
     /// <summary>
-    /// The directory was open to other users until this call set it owner-only (#4004 review, round 2), so any file
-    /// in it could have been planted, and the file check cannot tell (it cannot see a Unix owner). Every entry at a
-    /// name the service reads is removed NOW, before anything reads it, so the discard does not depend on this start
-    /// living long enough to reach whichever step would have replaced that file: the chmod is permanent, and the
-    /// next start, finding the directory owner-only, trusts what is left. Removed, the directory holds only what the
-    /// service writes from here on, so it is trusted.
+    /// The directory was open to other users until this call set it owner-only (#4004, round 2), so any file
+    /// in it could have been planted. Every entry at a name the service reads, except the password key, is removed NOW,
+    /// before anything reads it, so the discard does not depend on this start living long enough to reach whichever
+    /// step would have replaced that file: the chmod is permanent, and the next start, finding the directory
+    /// owner-only, trusts what is left. Removed, the directory holds only what the service writes from here on, so it
+    /// is trusted. The password key is the one file that cannot be regenerated, so it is renamed, not removed
+    /// (<see cref="SetPasswordKeyAside"/>): the live name is empty before the directory lock is released, the kept file
+    /// stays on disk under its quarantine name, and every later start finds it there until the key's owner accepts or
+    /// retires it (<see cref="DarlingPasswordKeyFile.Accept"/>, <see cref="DarlingPasswordKeyFile.Retire"/>).
     ///
     /// <para><b>Every name is tried, and the directory stays owner-only whatever is left</b> (#4004 review, round 3).
     /// Round 2 stopped at the first entry it could not remove and set the directory back to the mode it was found
@@ -1958,18 +1962,31 @@ WHERE u.rolname = current_user";
         var removed = new List<string>();
         var left = new List<string>();
 
-        /* #5366: the password key is kept, not removed. Anything at its name is noted for the key's load; the load's own
-           checks then read it, or refuse a link or a directory there. */
+        /* #5366: the password key is kept, not removed: whatever is at its name is renamed (never overwritten) to a name
+           that says it was found while the directory was open, so the record is on disk and survives a restart. The live
+           name is empty before the lock is released, and the key's load reads the kept file under its usual checks. */
         foreach (var name in PasswordKeyNames)
         {
-            var keyInfo = new FileInfo(Path.Combine(directory, name));
-            if (keyInfo.LinkTarget is not null || keyInfo.Exists)
+            SetPasswordKeyAside(directory, name, guard, left, logger);
+        }
+
+        /* The password key is written through a temporary file with a name of its own each time (#5366): the ones a
+           crashed write left are removed with the rest. */
+        var names = new List<string>(CredentialDirectoryFileNames);
+        foreach (var keyName in PasswordKeyNames)
+        {
+            try
             {
-                guard.RecordPasswordKeyKept(directory);
+                names.AddRange(Directory.EnumerateFileSystemEntries(directory, keyName + DarlingServiceKeyFile.UniqueTemporaryInfix + "*")
+                    .Select(Path.GetFileName)!);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                left.Add($"{Path.Combine(directory, keyName + DarlingServiceKeyFile.UniqueTemporaryInfix)}* (they could not be listed: {ex.Message})");
             }
         }
 
-        foreach (var name in CredentialDirectoryFileNames)
+        foreach (var name in names)
         {
             var path = Path.Combine(directory, name);
             var info = new FileInfo(path);
@@ -2023,6 +2040,64 @@ WHERE u.rolname = current_user";
 
         guard.RecordLeftBehind(directory, null);
         return new ComposeCredentialDirectoryTrust(null, MayWrite: true);
+    }
+
+    /// <summary>
+    /// Renames whatever is at <paramref name="name"/> in <paramref name="directory"/> to the password key's quarantine name
+    /// (<see cref="DarlingPasswordKeyFile.QuarantineSuffix"/>), with no overwrite (#5366). A file already at the
+    /// quarantine name is never replaced and never trusted: this one goes to the next free
+    /// <c>name.discarded-N</c> instead. Nothing is deleted. A directory or a link at the name is moved as it is, never
+    /// followed. On Unix a regular file that is kept is set to 0600 afterwards (a mount's group setting can add group
+    /// bits back); when that fails the load reports the file untrusted. An entry that cannot be moved is added to
+    /// <paramref name="left"/>, which refuses the directory this start.
+    /// </summary>
+    private static void SetPasswordKeyAside(string directory, string name, ComposeCredentialDirectoryGuard guard, List<string> left, ILogger logger)
+    {
+        var path = Path.Combine(directory, name);
+        if (!DarlingServiceKeyFile.AnythingAt(path))
+        {
+            return;
+        }
+
+        var quarantine = path + DarlingPasswordKeyFile.QuarantineSuffix;
+        var target = quarantine;
+        for (var attempt = 1; DarlingServiceKeyFile.AnythingAt(target) && attempt < 1000; attempt++)
+        {
+            target = path + ".discarded-" + attempt.ToString(CultureInfo.InvariantCulture);
+        }
+
+        try
+        {
+            var regularFile = new FileInfo(path).LinkTarget is null && File.Exists(path);
+            if (!regularFile && Directory.Exists(path) && new FileInfo(path).LinkTarget is null)
+            {
+                Directory.Move(path, target);
+            }
+            else
+            {
+                File.Move(path, target, overwrite: false);
+            }
+
+            if (regularFile && guard.UnixModes is { } modes)
+            {
+                try
+                {
+                    modes.Set(target, OwnerOnlyFile);
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                {
+                    logger.LogDebug("Could not set {File} to owner-only: {Message}", target, ex.Message);
+                }
+            }
+
+            logger.LogWarning(
+                "The password key at {Path} was found while the credentials directory {Directory} was open to other users, and is kept as {Kept} (#5366). It is not deleted, and the key's load checks it against the store before it is used.",
+                path, directory, target);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            left.Add($"{path} (it could not be set aside as {Path.GetFileName(target)}: {ex.Message})");
+        }
     }
 
     private const UnixFileMode GroupOrOtherAccess =
@@ -2377,20 +2452,6 @@ internal sealed class ComposeCredentialDirectoryGuard
     /// </summary>
     internal string? TakeDiscardedKey(string directory) => _discardedKeys.TryRemove(Key(directory), out var reason) ? reason : null;
 
-    private readonly ConcurrentDictionary<string, bool> _keptPasswordKeys = new(StringComparer.Ordinal);
-
-    /// <summary>
-    /// Records that the discard found the password key in <paramref name="directory"/> while the directory was open and
-    /// kept it (#5366), where it removed every other credential file there.
-    /// </summary>
-    internal void RecordPasswordKeyKept(string directory) => _keptPasswordKeys[Key(directory)] = true;
-
-    /// <summary>
-    /// Whether the password key in <paramref name="directory"/> was found while the directory was open, in this process.
-    /// Not cleared by reading it: every load this start reports it, because the key was found open for the whole start.
-    /// </summary>
-    internal bool PasswordKeyKeptAfterOpenDirectory(string directory) => _keptPasswordKeys.ContainsKey(Key(directory));
-
     private static string Key(string directory) => Path.TrimEndingDirectorySeparator(Path.GetFullPath(directory));
 
     /// <summary>
@@ -2424,7 +2485,17 @@ internal interface IUnixDirectoryModes
     UnixFileMode Get(string directory);
 
     void Set(string directory, UnixFileMode mode);
+
+    /// <summary>The owner's user id and the link count of the file at <paramref name="path"/> (#5366), or null when they
+    /// cannot be read here (Windows, a platform whose stat layout is not known, a stand-in that does not model them).</summary>
+    UnixFileOwner? OwnerOf(string path) => null;
+
+    /// <summary>The user id this process runs as, for comparing with <see cref="UnixFileOwner.UserId"/>.</summary>
+    uint EffectiveUserId => 0;
 }
+
+/// <summary>Who owns a file and how many names it has (#5366).</summary>
+internal readonly record struct UnixFileOwner(uint UserId, ulong Links);
 
 /// <summary>The platform's own <see cref="IUnixDirectoryModes"/>, on every platform but Windows.</summary>
 [UnsupportedOSPlatform("windows")]
@@ -2435,4 +2506,8 @@ internal sealed class PlatformUnixDirectoryModes : IUnixDirectoryModes
     public UnixFileMode Get(string directory) => File.GetUnixFileMode(directory);
 
     public void Set(string directory, UnixFileMode mode) => File.SetUnixFileMode(directory, mode);
+
+    public UnixFileOwner? OwnerOf(string path) => FileIdentity.UnixOwnerOf(path);
+
+    public uint EffectiveUserId => FileIdentity.EffectiveUserId();
 }
