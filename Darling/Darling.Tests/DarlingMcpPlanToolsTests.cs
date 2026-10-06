@@ -444,7 +444,7 @@ public sealed class DarlingMcpPlanToolsSurfaceAndSqlTests
         /* #5236: the two orders, key first, then the server, then the optional refinements. */
         var blocking = McpParams("get_blocking_plan_xml");
         Assert.Equal(
-            new[] { "event_time", "blocked_spid", "blocking_spid", "server_name", "blocked_ecid", "blocking_ecid", "side" },
+            new[] { "event_time", "blocked_spid", "blocking_spid", "server_name", "blocked_ecid", "blocking_ecid", "side", "database_name" },
             blocking.Select(x => x.Name).ToArray());
         Assert.False(Optional(blocking, "event_time"));
         Assert.False(Optional(blocking, "blocked_spid"));
@@ -452,13 +452,15 @@ public sealed class DarlingMcpPlanToolsSurfaceAndSqlTests
         Assert.True(Optional(blocking, "blocked_ecid"));
         Assert.True(Optional(blocking, "blocking_ecid"));
         Assert.True(Optional(blocking, "side"));
+        Assert.True(Optional(blocking, "database_name"));
         var deadlock = McpParams("get_deadlock_plan_xml");
         Assert.Equal(
-            new[] { "collection_time", "deadlock_time", "server_name", "victim_process_id" },
+            new[] { "collection_time", "deadlock_time", "server_name", "victim_process_id", "database_name" },
             deadlock.Select(x => x.Name).ToArray());
         Assert.False(Optional(deadlock, "collection_time"));
         Assert.False(Optional(deadlock, "deadlock_time"));
         Assert.True(Optional(deadlock, "victim_process_id"));
+        Assert.True(Optional(deadlock, "database_name"));
     }
 
     /// <summary>

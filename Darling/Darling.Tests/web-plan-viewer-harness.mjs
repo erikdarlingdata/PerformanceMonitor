@@ -224,6 +224,10 @@ const scenarios = {
     bp[0].render({ ...brow, blocked_ecid: null, blocking_ecid: undefined, event_time: "2026-03-04T05:06:07.1234560" }).byText("Blocked plan").click();
     await flush();
     out.blockedNoEcidSearch = params().search;
+    /* The row's database_name goes along when it has one (last), and a row without one sends none (the searches above). */
+    bp[0].render({ ...brow, database_name: "Orders" }).byText("Blocked plan").click();
+    await flush();
+    out.blockedDbSearch = params().search;
 
     /* Deadlocks (#5236): the victim's plan, by the two stamps and the victim's process id; a row with no victim id
        leaves it off. */
@@ -240,6 +244,9 @@ const scenarios = {
     dp.render({ ...drow, victim_process_id: "" }).byText("Victim plan").click();
     await flush();
     out.deadlockNoVictimSearch = params().search;
+    dp.render({ ...drow, database_name: "Orders" }).byText("Victim plan").click();
+    await flush();
+    out.deadlockDbSearch = params().search;
 
     out.keys = viewer.openPlanKeys();
     out.keysUnique = new Set(out.keys).size === out.keys.length;
@@ -281,6 +288,24 @@ const scenarios = {
     out.bothVictimsOpen = victim1.byText("Hide plan") !== null && victim2.byText("Hide plan") !== null;
     await flush();
     out.victimKeys = viewer.openPlanKeys().filter((k) => k.includes("@deadlock_victim"));
+    /* #5236: the database is part of the key. The same report key, and the same deadlock stamps and victim, in two databases are
+       two panels, and the row's own database is the one in each key. */
+    const reportKey = { kind: "blocking", event_time: "T", blocked_spid: 1, blocked_ecid: 0, blocking_spid: 2, blocking_ecid: 0, side: "blocked" };
+    const inOne = viewer.planSourceCell("srv-a", { ...reportKey, database_name: "DbOne" });
+    const inTwo = viewer.planSourceCell("srv-a", { ...reportKey, database_name: "DbTwo" });
+    inOne.byText("Plan").click();
+    out.dbTwoOpenAfterDbOne = inTwo.byText("Hide plan") !== null;
+    await flush();
+    inTwo.byText("Plan").click();
+    out.bothDatabasesOpen = inOne.byText("Hide plan") !== null && inTwo.byText("Hide plan") !== null;
+    await flush();
+    out.databaseKeys = viewer.openPlanKeys().filter((k) => k.includes("DbOne") || k.includes("DbTwo"));
+    const sameVictim = { kind: "deadlock_victim", collection_time: "C", deadlock_time: "D", victim_process_id: "process1" };
+    const victimInOne = viewer.planSourceCell("srv-a", { ...sameVictim, database_name: "DbOne" });
+    const victimInTwo = viewer.planSourceCell("srv-a", { ...sameVictim, database_name: "DbTwo" });
+    victimInOne.byText("Plan").click();
+    out.victimDbTwoOpenAfterDbOne = victimInTwo.byText("Hide plan") !== null;
+    await flush();
     out.hashKey = (() => { viewer.resetPlanViewer(); viewer.openStoredPlan("srv-a", "0xABC", "Orders"); return viewer.openPlanKeys()[0]; })();
   },
   async stems() {

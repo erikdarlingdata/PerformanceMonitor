@@ -222,7 +222,9 @@ public sealed class McpToolsListBudgetTests
     // merged with dev c1679bcdd: 188,119 -> 191,056 (= 188,119 + 1,052 + 1,885), 173 -> 177 tools. The ceiling now covers all 177 served tools.
     /* #5236: get_blocking_plan_xml and get_deadlock_plan_xml (the Blocking and Deadlocks grids' plan reads), measured on this tree:
        191,056 -> 192,755 (+1,699), 177 -> 179 tools. Each head is under 160 characters. */
-    private const int TotalCeilingBytes = 192_755;
+    /* #5236 (the plan reads' optional database_name, so two databases under one server_id each read their own plan): both reads gain one
+       parameter with a 52-byte description (108 bytes each with its schema entry), measured on this tree: 192,755 -> 192,971 (+216), 179 tools. */
+    private const int TotalCeilingBytes = 192_971;
 
 
 
