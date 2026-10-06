@@ -654,23 +654,88 @@ public sealed class CollectionHealthCancellationLogTests : IDisposable
         Assert.DoesNotContain("SLOW METHOD", line, StringComparison.Ordinal);
     }
 
-    /// <summary>The outer <c>MethodProfiler.TimeAsync</c> the tab wraps each read in must not write its own SLOW METHOD block for a read a newer request stopped.</summary>
+    /// <summary>
+    /// A cancelled profiled operation (#5371) leaves ONE "cancelled after N ms (superseded)" line, at or past the threshold, and
+    /// never a SLOW METHOD block. A superseded read that ran long before the cancel is the contention signal.
+    /// </summary>
     [Fact]
-    public async Task TheProfilersTimeAsync_WritesNoSlowMethodBlock_ForACancelledOperation_ButStillDoesForAFailedOne()
+    public async Task TheProfilersTimeAsync_WritesOneCancelledLine_AndNoBlock_ForASlowCancelledOperation()
     {
-        PerformanceMonitorLite.Helpers.MethodProfiler.Initialize(_dir);
-        PerformanceMonitorLite.Helpers.MethodProfiler.SetThresholdMs(0);
-        PerformanceMonitorLite.Helpers.MethodProfiler.SetEnabled(true);
-        var logFile = PerformanceMonitorLite.Helpers.MethodProfiler.GetCurrentLogFile();
+        var logFile = ArmProfiler(thresholdMs: 30);
+        AppLogger.DrainBufferedLines();
 
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => PerformanceMonitorLite.Helpers.MethodProfiler.TimeAsync<int>(
-            "cancelled-context", async () => { await Task.Delay(5); throw new OperationCanceledException(); }));
-        var afterCancelled = System.IO.File.Exists(logFile) ? System.IO.File.ReadAllText(logFile) : "";
-        Assert.DoesNotContain("cancelled-context", afterCancelled, StringComparison.Ordinal);
+            "slow-cancelled-context", async () => { await Task.Delay(120); throw new OperationCanceledException(); }));
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => PerformanceMonitorLite.Helpers.MethodProfiler.TimeAsync(
+            "slow-cancelled-void-context", async () => { await Task.Delay(120); throw new OperationCanceledException(); }));
+
+        var lines = AppLogger.DrainBufferedLines();
+        var line = Assert.Single(lines, l => l.Contains("slow-cancelled-context", StringComparison.Ordinal));
+        Assert.Contains("slow-cancelled-context cancelled after ", line, StringComparison.Ordinal);
+        Assert.Contains(" ms (superseded)", line, StringComparison.Ordinal);
+        Assert.DoesNotContain("SLOW METHOD", line, StringComparison.Ordinal);
+        Assert.Single(lines, l => l.Contains("slow-cancelled-void-context cancelled after ", StringComparison.Ordinal));
+        var profile = System.IO.File.Exists(logFile) ? System.IO.File.ReadAllText(logFile) : "";
+        Assert.DoesNotContain("slow-cancelled", profile, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task TheProfilersTimeAsync_WritesNothing_ForAFastCancelledOperation()
+    {
+        var logFile = ArmProfiler(thresholdMs: 60_000);
+        AppLogger.DrainBufferedLines();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => PerformanceMonitorLite.Helpers.MethodProfiler.TimeAsync<int>(
+            "fast-cancelled-context", async () => { await Task.Delay(5); throw new OperationCanceledException(); }));
+
+        Assert.DoesNotContain(AppLogger.DrainBufferedLines(), l => l.Contains("fast-cancelled-context", StringComparison.Ordinal));
+        var profile = System.IO.File.Exists(logFile) ? System.IO.File.ReadAllText(logFile) : "";
+        Assert.DoesNotContain("fast-cancelled-context", profile, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task TheProfilersTimeAsync_StillWritesTheBlock_ForASlowCompletedOperation_AndNoCancelledLine()
+    {
+        var logFile = ArmProfiler(thresholdMs: 30);
+        AppLogger.DrainBufferedLines();
+
+        await PerformanceMonitorLite.Helpers.MethodProfiler.TimeAsync<int>("slow-completed-context", async () => { await Task.Delay(120); return 1; });
+
+        var profile = System.IO.File.ReadAllText(logFile);
+        Assert.Contains("SLOW METHOD", profile, StringComparison.Ordinal);
+        Assert.Contains("slow-completed-context", profile, StringComparison.Ordinal);
+        Assert.DoesNotContain(AppLogger.DrainBufferedLines(), l => l.Contains("slow-completed-context", StringComparison.Ordinal));
+    }
+
+    /// <summary>The Health and Log reads write their own cancelled line with their phases, so the profiler around them stays quiet: one line, not two.</summary>
+    [Fact]
+    public async Task TheProfilersTimeAsync_WritesNoCancelledLine_ForAReadThatLogsItsOwnCancellation()
+    {
+        ArmProfiler(thresholdMs: 30);
+        AppLogger.DrainBufferedLines();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => PerformanceMonitorLite.Helpers.MethodProfiler.TimeAsync<int>(
+            "own-line-context", () => Task.Delay(120).ContinueWith<int>(_ => throw new OperationCanceledException()), readLogsOwnCancellation: true));
+
+        Assert.DoesNotContain(AppLogger.DrainBufferedLines(), l => l.Contains("own-line-context", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task TheProfilersTimeAsync_StillWritesTheBlock_ForAFailedOperation()
+    {
+        var logFile = ArmProfiler(thresholdMs: 0);
 
         await Assert.ThrowsAsync<InvalidOperationException>(() => PerformanceMonitorLite.Helpers.MethodProfiler.TimeAsync<int>(
             "failed-context", async () => { await Task.Delay(5); throw new InvalidOperationException(); }));
         Assert.Contains("failed-context", System.IO.File.ReadAllText(logFile), StringComparison.Ordinal);
+    }
+
+    private string ArmProfiler(double thresholdMs)
+    {
+        PerformanceMonitorLite.Helpers.MethodProfiler.Initialize(_dir);
+        PerformanceMonitorLite.Helpers.MethodProfiler.SetThresholdMs(thresholdMs);
+        PerformanceMonitorLite.Helpers.MethodProfiler.SetEnabled(true);
+        return PerformanceMonitorLite.Helpers.MethodProfiler.GetCurrentLogFile();
     }
 
     [Fact]

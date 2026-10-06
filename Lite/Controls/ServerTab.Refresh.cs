@@ -1209,8 +1209,8 @@ public partial class ServerTab : UserControl
     {
         try
         {
-            var collectionHealthTask = Helpers.MethodProfiler.TimeAsync("CollectionHealth.Health", () => Task.Run(() => SafeQueryAsync(() => _dataService.GetCollectionHealthAsync(_serverId, allowMemo: true, memoLifetime: TimeSpan.FromSeconds(App.AutoRefreshIntervalSeconds), cancellationToken: ct), ct)));
-            var collectionLogTask = Helpers.MethodProfiler.TimeAsync("CollectionHealth.Log", () => Task.Run(() => SafeQueryAsync(() => _dataService.GetRecentCollectionLogAsync(_serverId, hoursBack, fromDate, toDate, cancellationToken: ct), ct)));
+            var collectionHealthTask = Helpers.MethodProfiler.TimeAsync("CollectionHealth.Health", readLogsOwnCancellation: true, operation: () => Task.Run(() => SafeQueryAsync(() => _dataService.GetCollectionHealthAsync(_serverId, allowMemo: true, memoLifetime: TimeSpan.FromSeconds(App.AutoRefreshIntervalSeconds), cancellationToken: ct), ct)));
+            var collectionLogTask = Helpers.MethodProfiler.TimeAsync("CollectionHealth.Log", readLogsOwnCancellation: true, operation: () => Task.Run(() => SafeQueryAsync(() => _dataService.GetRecentCollectionLogAsync(_serverId, hoursBack, fromDate, toDate, cancellationToken: ct), ct)));
             /* #4989: the Duration Trends chart reads its own buckets over the whole range, beside the grid's read. The grid's
                page is the newest CollectionLogGridCap runs, a sliver of a long range, so the chart is not fed from it. */
             var collectorDurationTask = Helpers.MethodProfiler.TimeAsync("CollectionHealth.DurationTrends", () => Task.Run(() => SafeQueryAsync(() => _dataService.GetCollectorDurationTrendAsync(_serverId, hoursBack, fromDate, toDate, cancellationToken: ct), ct)));
