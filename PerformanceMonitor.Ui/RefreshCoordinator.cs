@@ -98,7 +98,7 @@ internal sealed class RefreshCoordinator
     /// </summary>
     internal Task PollAsync() => _running ? _drained!.Task : RunAsync(RefreshScope.Full);
 
-    private static RefreshScope Widest(RefreshScope? a, RefreshScope b) => a is { } x && x > b ? x : b;
+    private static RefreshScope Widest(RefreshScope? a, RefreshScope b) => a.HasValue && a.Value > b ? a.Value : b;
 
     private async Task RunAsync(RefreshScope first)
     {
