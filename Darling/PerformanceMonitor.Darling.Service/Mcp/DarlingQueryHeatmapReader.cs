@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
@@ -33,8 +34,8 @@ public enum HeatmapMetric
 /// heatmap. Copied VERBATIM apart from the things a desktop chart does not need and an MCP read does:
 /// the bin width is a bound parameter instead of the literal <c>INTERVAL '5 minutes'</c> (defaulting to
 /// that same 5), the tail carries <c>ORDER BY time_bin DESC</c> + <c>LIMIT</c> so a capped call keeps
-/// the most RECENT bins rather than the oldest ones, and the <c>LEFT(query_text, 120)</c> preview width is
-/// itself a bound parameter rather than a literal 120 (#4198: at 500 cells the FIXED per-cell fields alone —
+/// the most RECENT bins rather than the oldest ones, and the preview width is
+/// a caller-side cut rather than a literal 120 (#4198: at 500 cells the FIXED per-cell fields alone —
 /// before one byte of query text — already ran well past the shared response budget, so the cell cap had to
 /// fall regardless of the text width chosen). Every other clause — the magnitude CASE, the
 /// <c>delta_execution_count &gt; 0</c> and <c>metric IS NOT NULL</c> filters, the top-1 window that replaced
@@ -65,8 +66,8 @@ public enum HeatmapMetric
 /// payload-resolving view), so no row pays for the <c>query_text_dim</c> join or a truncation it will
 /// never be shown - the raw inline <c>query_text</c> (pre-#1767 rows only) and the digest ride the
 /// window sorts in its place. The outer rn = 1 filter runs before the SELECT list, so
-/// <c>LEFT(COALESCE(query_text, (SELECT ... FROM query_text_dim ...)), $7)</c> - the same resolution
-/// <c>v_query_stats</c> would have performed, at the same #4198 bound width - executes only for the
+/// <c>COALESCE(query_text, (SELECT ... FROM query_text_dim ...))</c> - the same resolution
+/// <c>v_query_stats</c> would have performed - executes only for the
 /// one row per cell the caller sees.</para>
 ///
 /// <para>The SQL is built by a public method so the tests can pin the dialect and the shape without a live
@@ -173,10 +174,10 @@ internal static class DarlingQueryHeatmapReader
 
     /// <summary>
     /// The viewer's heatmap read for one metric. $1 server_id, $2 window start, $3 window end, $4 database
-    /// filter (text[] or NULL), $5 bin width in minutes, $6 cell cap, $7 preview width in characters
-    /// (#4198's <c>GetQueryHeatmapAsync</c> binds this to one more than the caller's preview length, the
-    /// same over-fetch-by-one idiom the cell cap already uses, so the extra character IS the truncation
-    /// signal instead of a second round trip or a computed <c>LENGTH(query_text)</c> column).
+    /// filter (text[] or NULL), $5 bin width in minutes, $6 cell cap. The top statement comes back
+    /// WHOLE (#5320): the statement filter must judge the whole text before the preview is cut, so no cut can
+    /// end inside a value whose naming text lies past it. The truncation signal (#4198) is the judged text
+    /// running past the caller's preview length.
     /// <para>Ordered newest bin first ONLY so the cap keeps the recent end of the window; the tool re-sorts
     /// chronologically before returning. The viewer needs no cap and orders ascending.</para>
     /// </summary>
@@ -234,7 +235,7 @@ internal static class DarlingQueryHeatmapReader
                 bucket_index,
                 query_count,
                 query_hash AS top_query_hash,
-                LEFT(COALESCE(query_text, (SELECT d.query_text FROM query_text_dim d WHERE d.digest = ranked.query_text_digest)), $7) AS top_query_text
+                COALESCE(query_text, (SELECT d.query_text FROM query_text_dim d WHERE d.digest = ranked.query_text_digest)) AS top_query_text
             FROM ranked
             WHERE rn = 1
             ORDER BY time_bin DESC, bucket_index
@@ -271,10 +272,9 @@ internal static class DarlingQueryHeatmapReader
             ) AS has_in_window
         """;
 
-    /// <summary>Runs <see cref="BuildQueryHeatmapSql"/>. Rows come back newest bin first. Fetches
-    /// <paramref name="previewLength"/> + 1 characters of query text so the extra character — present only
-    /// when the stored statement ran past the preview — is the truncation signal (#4198); trimmed back to
-    /// <paramref name="previewLength"/> before it reaches <see cref="HeatmapCellRow.TopQueryText"/>.</summary>
+    /// <summary>Runs <see cref="BuildQueryHeatmapSql"/>. Rows come back newest bin first. Judges
+    /// each cell's whole query text (#5320), then cuts it to <paramref name="previewLength"/> before it reaches
+    /// <see cref="HeatmapCellRow.TopQueryText"/>; the truncation signal (#4198) is the judged text running past it.</summary>
     public static async Task<List<HeatmapCellRow>> GetQueryHeatmapAsync(
         NpgsqlDataSource postgres, int serverId, HeatmapMetric metric, DateTime startUtc, DateTime endUtc,
         DatabaseFilter databases, int bucketMinutes, int limit, int previewLength, CancellationToken cancellationToken = default)
@@ -286,19 +286,20 @@ internal static class DarlingQueryHeatmapReader
         command.Parameters.Add(databases.Parameter());
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = bucketMinutes });
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = limit });
-        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = previewLength + 1 });
 
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
-            var fetchedText = reader.IsDBNull(4) ? "" : reader.GetString(4);
+            /* #5320: the top statement comes back WHOLE and the statement filter judges it before the preview is cut, so
+               no cut ends inside a value whose naming text lies past it. A named statement is the placeholder (no cut). */
+            var fetchedText = SensitiveStatements.Text(reader.IsDBNull(4) ? "" : reader.GetString(4)) ?? "";
             var truncated = fetchedText.Length > previewLength;
             rows.Add(new HeatmapCellRow(
                 reader.GetDateTime(0),
                 reader.IsDBNull(1) ? 0 : Convert.ToInt32(reader.GetValue(1)),
                 reader.IsDBNull(2) ? 0 : Convert.ToInt64(reader.GetValue(2)),
                 reader.IsDBNull(3) ? "" : reader.GetString(3),
-                truncated ? fetchedText[..previewLength] : fetchedText,
+                truncated ? fetchedText[..McpHelpers.TextElementCutLength(fetchedText, previewLength)] : fetchedText,
                 truncated));
         }
 

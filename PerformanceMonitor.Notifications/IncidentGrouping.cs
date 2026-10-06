@@ -242,7 +242,12 @@ public static class BlockingIncidentGrouper
     /// Collapses the events into one group per distinct incident, preserving input order of first
     /// appearance, with the highest occurrence count first. Empty input returns an empty list.
     /// </summary>
-    public static List<BlockingGroup> Group(string serverName, IEnumerable<BlockedEvent> events)
+    /// <param name="cutStatement">How the per-event card cuts a blocked or blocking statement (#5320). A caller
+    /// whose events carry raw statement text passes a judge-then-cut (this project cannot reference the statement
+    /// filter); null keeps the plain cut, for events whose text is already judged. The group's identity never
+    /// reads it.</param>
+    public static List<BlockingGroup> Group(
+        string serverName, IEnumerable<BlockedEvent> events, Func<string, string>? cutStatement = null)
     {
         var order = new List<string>();
         var buckets = new Dictionary<string, List<BlockedEvent>>(StringComparer.Ordinal);
@@ -312,7 +317,7 @@ public static class BlockingIncidentGrouper
                the DMV fallback gets null rather than a neighbouring incident's report. */
             var enriched = incident with
             {
-                DetailFields = BlockingDetail(representative),
+                DetailFields = BlockingDetail(representative, cutStatement ?? Truncate),
                 Database = IncidentDatabaseHelpers.NormalizeDatabase(representative.Database),
                 Attachment = rows.Select(r => r.Attachment).FirstOrDefault(a => a is { IsComplete: true }),
             };
@@ -360,13 +365,13 @@ public static class BlockingIncidentGrouper
 
     // Forensic detail for a blocking incident's per-event card (#1141): the representative chain's
     // database, contentious object, the blocked/blocking query pair (truncated), and lock mode.
-    private static List<AlertIncidentField> BlockingDetail(BlockedEvent e)
+    private static List<AlertIncidentField> BlockingDetail(BlockedEvent e, Func<string, string> cut)
     {
         var f = new List<AlertIncidentField>();
         if (!string.IsNullOrWhiteSpace(e.Database)) f.Add(new AlertIncidentField("Database", e.Database!));
         if (!string.IsNullOrWhiteSpace(e.ContentiousObject)) f.Add(new AlertIncidentField("Contentious Object", e.ContentiousObject!));
-        if (!string.IsNullOrWhiteSpace(e.BlockedQuery)) f.Add(new AlertIncidentField("Blocked Query", Truncate(e.BlockedQuery!)));
-        if (!string.IsNullOrWhiteSpace(e.BlockingQuery)) f.Add(new AlertIncidentField("Blocking Query", Truncate(e.BlockingQuery!)));
+        if (!string.IsNullOrWhiteSpace(e.BlockedQuery)) f.Add(new AlertIncidentField("Blocked Query", cut(e.BlockedQuery!)));
+        if (!string.IsNullOrWhiteSpace(e.BlockingQuery)) f.Add(new AlertIncidentField("Blocking Query", cut(e.BlockingQuery!)));
         if (!string.IsNullOrWhiteSpace(e.LockMode)) f.Add(new AlertIncidentField("Lock Mode", e.LockMode!));
         return f;
     }
