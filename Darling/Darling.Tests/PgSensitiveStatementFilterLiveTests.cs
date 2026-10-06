@@ -39,69 +39,6 @@ namespace Darling.Tests;
 public sealed class PgSensitiveStatementFilterLiveTests
 {
     /// <summary>
-    /// Each of the five statement forms the pattern exists to catch, each also with a leading comment and in
-    /// lower case, plus statements that must NOT match: normalized DML, a non-credential setting, a bare
-    /// SELECT, and DDL merely naming a table "passwords".
-    /// </summary>
-    [Fact]
-    public async Task ThePatternMatchesTheFiveCredentialFormsAndNothingElse()
-    {
-        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
-        Assert.SkipWhen(string.IsNullOrWhiteSpace(connectionString),
-            "Set DARLING_TEST_PG to a connection string to judge the #4348 pattern in PostgreSQL's regex engine.");
-
-        var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(connectionString!, ct);
-        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
-        await connection.OpenAsync(ct);
-
-        var cases = new (string Text, bool Sensitive)[]
-        {
-            ("ALTER ROLE app PASSWORD 'secret-x'", true),
-            ("/* c */ ALTER ROLE app PASSWORD 'secret-x'", true),
-            ("alter role app password 'secret-x'", true),
-
-            ("CREATE ROLE r LOGIN PASSWORD 'secret-x'", true),
-            ("/* c */ CREATE ROLE r LOGIN PASSWORD 'secret-x'", true),
-            ("create role r login password 'secret-x'", true),
-
-            ("CREATE USER MAPPING FOR u SERVER s OPTIONS (user 'u', password 'secret-x')", true),
-            ("/* c */ CREATE USER MAPPING FOR u SERVER s OPTIONS (user 'u', password 'secret-x')", true),
-            ("create user mapping for u server s options (user 'u', password 'secret-x')", true),
-
-            ("ALTER SYSTEM SET primary_conninfo = 'host=h password=secret-x'", true),
-            ("/* c */ ALTER SYSTEM SET primary_conninfo = 'host=h password=secret-x'", true),
-            ("alter system set primary_conninfo = 'host=h password=secret-x'", true),
-
-            ("CREATE SUBSCRIPTION sub CONNECTION 'host=h password=secret-x' PUBLICATION p", true),
-            ("/* c */ CREATE SUBSCRIPTION sub CONNECTION 'host=h password=secret-x' PUBLICATION p", true),
-            ("create subscription sub connection 'host=h password=secret-x' publication p", true),
-
-            // role/user/group/subscription/server DDL is withheld whole, whatever it sets
-            ("ALTER ROLE app SET work_mem = '64MB'", true),
-
-            ("CREATE USER MAPPING FOR u SERVER s OPTIONS (user 'u', secret_access_key 'secret-x')", true),
-            ("ALTER SERVER s OPTIONS (ADD token 'secret-x')", true),
-            ("CREATE SERVER s FOREIGN DATA WRAPPER w OPTIONS (api_key 'secret-x')", true),
-
-            ("SELECT * FROM t WHERE password_changed_at > $1", false),
-            ("SET work_mem = '64MB'", false),
-            ("SELECT rolname FROM pg_roles", false),
-            ("SELECT 1", false),
-            ("CREATE TABLE passwords (id int)", false),
-        };
-
-        foreach (var (text, sensitive) in cases)
-        {
-            await using var command = new NpgsqlCommand("SELECT $1 ~* $2", connection);
-            command.Parameters.AddWithValue(text);
-            command.Parameters.AddWithValue(PgSensitiveStatementFilter.SensitiveStatementPattern);
-            var actual = (bool)(await command.ExecuteScalarAsync(ct))!;
-            Assert.True(sensitive == actual, $"sensitive({text}) should be {sensitive}, was {actual}");
-        }
-    }
-
-    /// <summary>
     /// The T-SQL corpus (#4348): every statement the shared pattern must name, each also lower-cased and with
     /// a leading block comment, and the statements it must leave alone, judged in PostgreSQL's own regex
     /// engine (the engine that decides every stored PostgreSQL statement). The adversarial strings the
@@ -119,63 +56,10 @@ public sealed class PgSensitiveStatementFilterLiveTests
         await using var connection = new NpgsqlConnection(scratch.ConnectionString);
         await connection.OpenAsync(ct);
 
-        var named = new[]
-        {
-            "CREATE LOGIN [app] WITH PASSWORD = N'S3cret'",
-            "ALTER LOGIN [app] WITH PASSWORD = 0x0200AB HASHED",
-            "ALTER LOGIN [app] DISABLE",
-            "CREATE/* x */LOGIN [a] WITH PASSWORD = 'p'",
-            "CREATE\r\nLOGIN [a] FROM WINDOWS",
-            "EXEC sp_addlogin 'app', 'S3cret'",
-            "EXEC master..sp_password NULL, 'S3cret', 'app'",
-            "EXEC sp_addlinkedsrvlogin 'SRV', 'false', NULL, 'u', 'S3cret'",
-            "EXEC sp_setapprole 'r', 'S3cret'",
-            "OPEN SYMMETRIC KEY k DECRYPTION BY PASSWORD = 'S3cret'",
-            "OPEN MASTER KEY DECRYPTION BY PASSWORD = N'S3cret'",
-            "CREATE MASTER KEY ENCRYPTION BY PASSWORD = N'S3cret'",
-            "CREATE CREDENTIAL c WITH IDENTITY = 'u', SECRET = 'S3cret'",
-            "CREATE DATABASE SCOPED CREDENTIAL c WITH IDENTITY = 'SHARED ACCESS SIGNATURE', SECRET = 'sv=1&sig=x'",
-            "BACKUP CERTIFICATE c TO FILE = 'f' WITH PRIVATE KEY (FILE = 'k', ENCRYPTION BY PASSWORD = 'S3cret')",
-            "RESTORE DATABASE d FROM DISK = 'f' WITH MEDIAPASSWORD = 'S3cret'",
-            "CREATE SYMMETRIC KEY k WITH KEY_SOURCE = 'phrase', ALGORITHM = AES_256 ENCRYPTION BY CERTIFICATE c",
-            "SELECT * FROM OPENROWSET('MSOLEDBSQL', 'Server=h;UID=u;PWD=S3cret;', 'SELECT 1')",
-            "SELECT * FROM OPENDATASOURCE('MSOLEDBSQL', 'Data Source=h;User ID=u;Pwd=S3cret').db.dbo.t",
-            "EXEC sp_addlinkedserver @server = 'S', @provider = 'MSOLEDBSQL', @provstr = 'UID=u;PWD=S3cret'",
-            "EXEC sp_addpushsubscription_agent @publication = N'p', @job_password = N'S3cret'",
-            "ALTER SERVICE MASTER KEY WITH OLD_ACCOUNT = 'a', OLD_PASSWORD = 'S3cret'",
-            "ALTER APPLICATION ROLE r WITH PASSWORD = N'S3cret'",
-            "SELECT DECRYPTBYPASSPHRASE('phrase', @c)",
-            "exec sp_executesql N'UPDATE dbo.t SET c = @pwd', N'@pwd nvarchar(50)', @pwd = N'S3cret'",
-            "UPDATE dbo.Creds SET [password] = N'S3cret'",
-            "UPDATE t SET \"password\" = 'S3cret'",
-            "UPDATE dbo.Users SET pwd = N'S3cret' WHERE id = 7",
-            "UPDATE dbo.Users SET password = @p",
-            // the widening the version-2 re-scrub applies to stored PostgreSQL text
-            "SELECT 1 WHERE client_secret = 'S3cret'",
-        };
-
-        var notNamed = new[]
-        {
-            "SELECT name FROM sys.sql_logins",
-            "EXECUTE AS LOGIN = N'app'",
-            "SELECT * FROM dbo.Users WHERE PasswordHash = @h",
-            "UPDATE dbo.Users SET PasswordHash = HASHBYTES('SHA2_256', @p)",
-            "SELECT * FROM OPENROWSET(BULK N'f.json', SINGLE_CLOB) AS j",
-            "EXEC sp_helplogins",
-            "SELECT secret_id FROM dbo.t WHERE secret_id = 5",
-            "SELECT * FROM t WHERE pwd = @p",
-            "SELECT * FROM t WHERE pwd = $1",
-            "SELECT [password] FROM t",
-            "SET password_encryption = 'scram-sha-256'",
-            "ALTER INDEX ix ON dbo.t REBUILD",
-            "BACKUP DATABASE d TO URL = 'https://storage.example/c/d.bak' WITH CREDENTIAL = 'cred'",
-            "ALTER AVAILABILITY GROUP ag FAILOVER",
-        };
-
         var failures = new List<string>();
-        foreach (var text in named)
+        foreach (var text in SensitiveStatementCorpus.Named)
         {
-            foreach (var variant in new[] { text, text.ToLowerInvariant(), "/* c */ " + text })
+            foreach (var variant in SensitiveStatementCorpus.Variants(text))
             {
                 if (!await IsNamedAsync(connection, variant, ct))
                 {
@@ -184,7 +68,7 @@ public sealed class PgSensitiveStatementFilterLiveTests
             }
         }
 
-        foreach (var text in notNamed)
+        foreach (var text in SensitiveStatementCorpus.NotNamed)
         {
             if (await IsNamedAsync(connection, text, ct))
             {
@@ -228,11 +112,7 @@ public sealed class PgSensitiveStatementFilterLiveTests
         Assert.False(bigNamed);
         Assert.True(watch.ElapsedMilliseconds < 5000, $"1,000,000-char statement took {watch.ElapsedMilliseconds} ms");
 
-        var adversarial = new[]
-        {
-            "create" + string.Concat(Enumerable.Repeat(" --", 40)) + "x",
-            "password" + string.Concat(Enumerable.Repeat(" --", 40)) + "x",
-        };
+        var adversarial = SensitiveStatementCorpus.Adversarial;
         foreach (var text in adversarial)
         {
             watch.Restart();
