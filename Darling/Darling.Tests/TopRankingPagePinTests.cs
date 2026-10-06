@@ -94,7 +94,7 @@ public sealed class TopRankingPagePinTests
     {
         var js = Tab();
         Assert.Contains(
-            "const READS_RAW_SENTENCE = \"Reads are ranked from the raw collections because the hourly rollups keep no reads.\";",
+            "const READS_RAW_SENTENCE = \"Reads are ranked from the raw collections because the per-query hourly rollups keep no reads.\";",
             js, StringComparison.Ordinal);
         Assert.Contains("...(ranking === \"reads\" ? [el(\"span\", { class: \"muted\" }, [READS_RAW_SENTENCE])] : [])", js, StringComparison.Ordinal);
         Assert.Equal(1, js.Split("[READS_RAW_SENTENCE]").Length - 1);

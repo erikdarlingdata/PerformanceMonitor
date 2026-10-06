@@ -96,6 +96,11 @@ public sealed class ViewerHourlyRouteBlankColumnsLiveTests
                 Assert.Equal(30L, q.TotalPhysicalReads);
                 Assert.Equal(90L, q.TotalRows);
                 Assert.Equal(60L, q.TotalSpills);
+                Assert.Equal(MinWorkerUs, q.MinCpuUs);
+                Assert.Equal(MaxWorkerUs, q.MaxCpuUs);
+                Assert.Equal(MinElapsedUs, q.MinElapsedUs);
+                Assert.Equal(MaxElapsedUs, q.MaxElapsedUs);
+                Assert.Equal(0.85, q.MinElapsedMs);
 
                 var (procedures, proceduresTier) = await rawViewer.GetTopProceduresByCpuTierAsync(ServerId, WindowStart, end, cancellationToken: ct);
                 Assert.Equal("raw", proceduresTier);
@@ -106,6 +111,10 @@ public sealed class ViewerHourlyRouteBlankColumnsLiveTests
                 Assert.Equal(30L, p.TotalPhysicalReads);
                 Assert.Equal(60L, p.TotalSpills);
                 Assert.Equal(100.0, p.AvgReads);
+                Assert.Equal(MinWorkerUs, p.MinWorkerTimeUs);
+                Assert.Equal(MaxWorkerUs, p.MaxWorkerTimeUs);
+                Assert.Equal(MinElapsedUs, p.MinElapsedTimeUs);
+                Assert.Equal(MaxElapsedUs, p.MaxElapsedTimeUs);
             }
 
             /* Refresh the hourly rollups over the window BEFORE deleting raw (the product's own refresh path), then purge raw. */
@@ -131,8 +140,17 @@ public sealed class ViewerHourlyRouteBlankColumnsLiveTests
             Assert.Equal(30L, hq.TotalExecutions);
             Assert.Equal(30_000L, hq.TotalCpuUs);
             Assert.Equal(27_000L, hq.TotalElapsedUs);
-            Assert.True(hq.MinElapsedUs > 0 && hq.MaxElapsedUs >= hq.MinElapsedUs, "the rollup keeps elapsed min/max, so the row shows them rather than 0");
-            /* What it does not keep reads as blank, never 0. */
+            /* What it does not keep reads as blank, never 0. The rollup holds min/max of per-collection deltas (sums over many
+               executions), not per-execution extremes, so Min/Max CPU and elapsed are blank too: the planted executions all ran 850 to
+               950 us, and the rollup would have shown 9,000 and 18,000. */
+            Assert.Null(hq.MinCpuUs);
+            Assert.Null(hq.MaxCpuUs);
+            Assert.Null(hq.MinElapsedUs);
+            Assert.Null(hq.MaxElapsedUs);
+            Assert.Null(hq.MinCpuMs);
+            Assert.Null(hq.MaxCpuMs);
+            Assert.Null(hq.MinElapsedMs);
+            Assert.Null(hq.MaxElapsedMs);
             Assert.Null(hq.TotalLogicalReads);
             Assert.Null(hq.AvgReads);
             Assert.Null(hq.TotalLogicalWrites);
@@ -167,6 +185,14 @@ public sealed class ViewerHourlyRouteBlankColumnsLiveTests
             var hp = Assert.Single(hourlyProcedures);
             Assert.Equal(30L, hp.TotalExecutions);
             Assert.Equal(30_000L, hp.TotalCpuUs);
+            Assert.Null(hp.MinWorkerTimeUs);
+            Assert.Null(hp.MaxWorkerTimeUs);
+            Assert.Null(hp.MinElapsedTimeUs);
+            Assert.Null(hp.MaxElapsedTimeUs);
+            Assert.Null(hp.MinCpuMs);
+            Assert.Null(hp.MaxCpuMs);
+            Assert.Null(hp.MinElapsedMs);
+            Assert.Null(hp.MaxElapsedMs);
             Assert.Null(hp.TotalLogicalReads);
             Assert.Null(hp.AvgReads);
             Assert.Null(hp.TotalLogicalWrites);
@@ -204,8 +230,9 @@ public sealed class ViewerHourlyRouteBlankColumnsLiveTests
 INSERT INTO collect.query_stats
     (collection_id, collection_time, server_id, server_name, database_name, query_hash, sql_handle,
      delta_worker_time, delta_elapsed_time, delta_execution_count, sample_interval_seconds,
-     delta_logical_reads, delta_logical_writes, delta_physical_reads, delta_rows, delta_spills)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)", connection);
+     delta_logical_reads, delta_logical_writes, delta_physical_reads, delta_rows, delta_spills,
+     min_worker_time, max_worker_time, min_elapsed_time, max_elapsed_time)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)", connection);
         insert.Parameters.AddWithValue(CollectionIdGenerator.Next());
         insert.Parameters.AddWithValue(DarlingMcpTestData.TruncateToSeconds(at));
         insert.Parameters.AddWithValue(ServerId);
@@ -222,6 +249,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)",
         insert.Parameters.AddWithValue(executions);
         insert.Parameters.AddWithValue(executions * 3L);
         insert.Parameters.AddWithValue(executions * 2L);
+        AddPerExecutionExtremes(insert);
         await insert.ExecuteNonQueryAsync(ct);
     }
 
@@ -232,8 +260,9 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)",
 INSERT INTO collect.procedure_stats
     (collection_id, collection_time, server_id, server_name, database_name, schema_name, object_name, sql_handle,
      delta_worker_time, delta_elapsed_time, delta_execution_count, sample_interval_seconds,
-     delta_logical_reads, delta_logical_writes, delta_physical_reads, delta_spills)
-VALUES ($1, $2, $3, $4, $5, 'dbo', $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)", connection);
+     delta_logical_reads, delta_logical_writes, delta_physical_reads, delta_spills,
+     min_worker_time, max_worker_time, min_elapsed_time, max_elapsed_time)
+VALUES ($1, $2, $3, $4, $5, 'dbo', $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)", connection);
         insert.Parameters.AddWithValue(CollectionIdGenerator.Next());
         insert.Parameters.AddWithValue(DarlingMcpTestData.TruncateToSeconds(at));
         insert.Parameters.AddWithValue(ServerId);
@@ -249,7 +278,20 @@ VALUES ($1, $2, $3, $4, $5, 'dbo', $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
         insert.Parameters.AddWithValue(executions * 10L);
         insert.Parameters.AddWithValue(executions);
         insert.Parameters.AddWithValue(executions * 2L);
+        AddPerExecutionExtremes(insert);
         await insert.ExecuteNonQueryAsync(ct);
+    }
+
+    /* #5329: the DMV's per-execution extremes, the numbers the raw route shows. They are the same on every planted row, so they
+       never equal a per-collection sum (executions * 900 is 9,000 or 18,000), which is what the rollup would hand back. */
+    private const long MinWorkerUs = 800L, MaxWorkerUs = 1_200L, MinElapsedUs = 850L, MaxElapsedUs = 950L;
+
+    private static void AddPerExecutionExtremes(NpgsqlCommand insert)
+    {
+        insert.Parameters.AddWithValue(MinWorkerUs);
+        insert.Parameters.AddWithValue(MaxWorkerUs);
+        insert.Parameters.AddWithValue(MinElapsedUs);
+        insert.Parameters.AddWithValue(MaxElapsedUs);
     }
 
     private static async Task RefreshAsync(NpgsqlConnection connection, string view, DateTime from, DateTime to, CancellationToken ct)

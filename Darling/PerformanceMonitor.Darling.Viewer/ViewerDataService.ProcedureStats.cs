@@ -36,10 +36,12 @@ public sealed class ViewerProcedureStatsRow
     public long? TotalLogicalReads { get; set; }
     public long? TotalLogicalWrites { get; set; }
     public long? TotalPhysicalReads { get; set; }
-    public long MinWorkerTimeUs { get; set; }
-    public long MaxWorkerTimeUs { get; set; }
-    public long MinElapsedTimeUs { get; set; }
-    public long MaxElapsedTimeUs { get; set; }
+    /* #5329: null on the hourly route. The rollup keeps min/max of per-collection deltas (sums over many
+       executions), not the per-execution extremes the raw route reads, so showing them would be a wrong number. */
+    public long? MinWorkerTimeUs { get; set; }
+    public long? MaxWorkerTimeUs { get; set; }
+    public long? MinElapsedTimeUs { get; set; }
+    public long? MaxElapsedTimeUs { get; set; }
     public long? MinLogicalReads { get; set; }
     public long? MaxLogicalReads { get; set; }
     public long? MinPhysicalReads { get; set; }
@@ -66,10 +68,10 @@ public sealed class ViewerProcedureStatsRow
     public double AvgCpuMs => TotalExecutions > 0 ? TotalCpuMs / TotalExecutions : 0;
     public double AvgElapsedMs => TotalExecutions > 0 ? TotalElapsedMs / TotalExecutions : 0;
     public double? AvgReads => TotalLogicalReads is null ? null : TotalExecutions > 0 ? (double)TotalLogicalReads.Value / TotalExecutions : 0;
-    public double MinCpuMs => MinWorkerTimeUs / 1000.0;
-    public double MaxCpuMs => MaxWorkerTimeUs / 1000.0;
-    public double MinElapsedMs => MinElapsedTimeUs / 1000.0;
-    public double MaxElapsedMs => MaxElapsedTimeUs / 1000.0;
+    public double? MinCpuMs => MinWorkerTimeUs is null ? null : MinWorkerTimeUs / 1000.0;
+    public double? MaxCpuMs => MaxWorkerTimeUs is null ? null : MaxWorkerTimeUs / 1000.0;
+    public double? MinElapsedMs => MinElapsedTimeUs is null ? null : MinElapsedTimeUs / 1000.0;
+    public double? MaxElapsedMs => MaxElapsedTimeUs is null ? null : MaxElapsedTimeUs / 1000.0;
     public string CachedTimeFormatted => ViewerDataService.FormatServerClock(CachedTime);
     public string LastExecutionTimeLocal => ViewerDataService.FormatServerClock(LastExecutionTime);
 }
@@ -215,10 +217,7 @@ public sealed partial class ViewerDataService
                 TotalExecutions = reader.IsDBNull(3) ? 0 : reader.GetInt64(3),
                 TotalCpuUs = reader.IsDBNull(4) ? 0 : reader.GetInt64(4),
                 TotalElapsedUs = reader.IsDBNull(5) ? 0 : reader.GetInt64(5),
-                MinWorkerTimeUs = reader.IsDBNull(6) ? 0 : reader.GetInt64(6),
-                MaxWorkerTimeUs = reader.IsDBNull(7) ? 0 : reader.GetInt64(7),
-                MinElapsedTimeUs = reader.IsDBNull(8) ? 0 : reader.GetInt64(8),
-                MaxElapsedTimeUs = reader.IsDBNull(9) ? 0 : reader.GetInt64(9),
+                /* #5329: the four min/max time fields stay null here. */
             });
         }
 
@@ -237,11 +236,7 @@ public sealed partial class ViewerDataService
             object_name,
             CAST(SUM(execution_count_sum) AS bigint) AS total_executions,
             CAST(SUM(worker_time_sum) AS bigint) AS total_cpu_us,
-            CAST(SUM(elapsed_time_sum) AS bigint) AS total_elapsed_us,
-            MIN(worker_time_min) AS min_worker_time,
-            MAX(worker_time_max) AS max_worker_time,
-            MIN(elapsed_time_min) AS min_elapsed_time,
-            MAX(elapsed_time_max) AS max_elapsed_time
+            CAST(SUM(elapsed_time_sum) AS bigint) AS total_elapsed_us
         FROM {fromClause}
         WHERE server_id = $1
         AND   bucket >= $2

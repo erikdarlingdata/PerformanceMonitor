@@ -47,10 +47,12 @@ public sealed class ViewerQueryStatsRow
     public long? TotalSpills { get; set; }
     public int? MinDop { get; set; }
     public int? MaxDop { get; set; }
-    public long MinCpuUs { get; set; }
-    public long MaxCpuUs { get; set; }
-    public long MinElapsedUs { get; set; }
-    public long MaxElapsedUs { get; set; }
+    /* #5329: null on the hourly route. The rollup keeps min/max of per-collection deltas (sums over many
+       executions), not the per-execution extremes the raw route reads, so showing them would be a wrong number. */
+    public long? MinCpuUs { get; set; }
+    public long? MaxCpuUs { get; set; }
+    public long? MinElapsedUs { get; set; }
+    public long? MaxElapsedUs { get; set; }
     public long? MinPhysicalReads { get; set; }
     public long? MaxPhysicalReads { get; set; }
     public long? MinRows { get; set; }
@@ -114,10 +116,10 @@ public sealed class ViewerQueryStatsRow
     public double AvgCpuMs => TotalExecutions > 0 ? TotalCpuMs / TotalExecutions : 0;
     public double AvgElapsedMs => TotalExecutions > 0 ? TotalElapsedMs / TotalExecutions : 0;
     public double? AvgReads => TotalLogicalReads is null ? null : TotalExecutions > 0 ? (double)TotalLogicalReads.Value / TotalExecutions : 0;
-    public double MinCpuMs => MinCpuUs / 1000.0;
-    public double MaxCpuMs => MaxCpuUs / 1000.0;
-    public double MinElapsedMs => MinElapsedUs / 1000.0;
-    public double MaxElapsedMs => MaxElapsedUs / 1000.0;
+    public double? MinCpuMs => MinCpuUs is null ? null : MinCpuUs / 1000.0;
+    public double? MaxCpuMs => MaxCpuUs is null ? null : MaxCpuUs / 1000.0;
+    public double? MinElapsedMs => MinElapsedUs is null ? null : MinElapsedUs / 1000.0;
+    public double? MaxElapsedMs => MaxElapsedUs is null ? null : MaxElapsedUs / 1000.0;
     // total_clr_time is stored in microseconds (like worker/elapsed time)
     public double? TotalClrMs => TotalClrUs / 1000.0;
 }
@@ -417,7 +419,7 @@ public sealed partial class ViewerDataService
             TimescaleSupport.QueryStatsHourlyView, "f", startUtc, RollupCoverage.StitchTier.Hourly);
         var sql = BuildTopQueriesHourlySql(fromClause);
 
-        var ranked = new List<(string Database, string QueryHash, long TotalExecutions, long TotalCpuUs, long TotalElapsedUs, long MinWorkerTime, long MaxWorkerTime, long MinElapsedTime, long MaxElapsedTime)>();
+        var ranked = new List<(string Database, string QueryHash, long TotalExecutions, long TotalCpuUs, long TotalElapsedUs)>();
         await using (var command = _dataSource.CreateCommand(sql))
         {
             command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
@@ -432,11 +434,7 @@ public sealed partial class ViewerDataService
                     reader.IsDBNull(1) ? "" : reader.GetString(1),
                     reader.IsDBNull(2) ? 0 : reader.GetInt64(2),
                     reader.IsDBNull(3) ? 0 : reader.GetInt64(3),
-                    reader.IsDBNull(4) ? 0 : reader.GetInt64(4),
-                    reader.IsDBNull(5) ? 0 : reader.GetInt64(5),
-                    reader.IsDBNull(6) ? 0 : reader.GetInt64(6),
-                    reader.IsDBNull(7) ? 0 : reader.GetInt64(7),
-                    reader.IsDBNull(8) ? 0 : reader.GetInt64(8)));
+                    reader.IsDBNull(4) ? 0 : reader.GetInt64(4)));
             }
         }
 
@@ -465,10 +463,7 @@ public sealed partial class ViewerDataService
                 TotalExecutions = r.TotalExecutions,
                 TotalCpuUs = r.TotalCpuUs,
                 TotalElapsedUs = r.TotalElapsedUs,
-                MinCpuUs = r.MinWorkerTime,
-                MaxCpuUs = r.MaxWorkerTime,
-                MinElapsedUs = r.MinElapsedTime,
-                MaxElapsedUs = r.MaxElapsedTime,
+                /* #5329: MinCpuUs, MaxCpuUs, MinElapsedUs and MaxElapsedUs stay null here. */
                 QueryText = queryText,
                 /* #4231 stage 3: the rollup has no host_object_name column. */
                 HostObjectName = null,
@@ -489,11 +484,7 @@ public sealed partial class ViewerDataService
             query_hash,
             CAST(SUM(execution_count_sum) AS bigint) AS total_executions,
             CAST(SUM(worker_time_sum) AS bigint) AS total_cpu_us,
-            CAST(SUM(elapsed_time_sum) AS bigint) AS total_elapsed_us,
-            MIN(worker_time_min) AS min_worker_time,
-            MAX(worker_time_max) AS max_worker_time,
-            MIN(elapsed_time_min) AS min_elapsed_time,
-            MAX(elapsed_time_max) AS max_elapsed_time
+            CAST(SUM(elapsed_time_sum) AS bigint) AS total_elapsed_us
         FROM {fromClause}
         WHERE server_id = $1
         AND   bucket >= $2

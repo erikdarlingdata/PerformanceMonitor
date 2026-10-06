@@ -37,6 +37,8 @@ public sealed class ViewerStatsRowBlankCellTests
         "MinGrantKb", "MaxGrantKb", "MinUsedGrantKb", "MaxUsedGrantKb", "MinIdealGrantKb", "MaxIdealGrantKb",
         "MinReservedThreads", "MaxReservedThreads", "MinUsedThreads", "MaxUsedThreads", "TotalClrMs",
         "PlanGenerationNum", "WorkerTimePerSecond",
+        /* #5329: the rollup keeps min/max of per-collection deltas, not per-execution extremes. */
+        "MinCpuMs", "MaxCpuMs", "MinElapsedMs", "MaxElapsedMs",
     };
 
     private static readonly string[] ProcedureBlankColumns =
@@ -44,6 +46,7 @@ public sealed class ViewerStatsRowBlankCellTests
         "TotalLogicalReads", "AvgReads", "TotalLogicalWrites", "TotalPhysicalReads", "TotalSpills", "AvgSpills",
         "MinLogicalReads", "MaxLogicalReads", "MinPhysicalReads", "MaxPhysicalReads", "MinLogicalWrites", "MaxLogicalWrites",
         "MinSpills", "MaxSpills",
+        "MinCpuMs", "MaxCpuMs", "MinElapsedMs", "MaxElapsedMs",
     };
 
     [Fact]

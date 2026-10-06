@@ -756,7 +756,7 @@ const topRankingPick = { queries: "cpu", procedures: "cpu" };
 
 /* #5329: why a Reads ranking reads the raw collections. The per-query and per-procedure hourly rollups keep CPU, duration and execution
    counts but no reads, so the ranking cannot come from them; rankedCard shows this sentence beside the picker when Reads is picked. */
-const READS_RAW_SENTENCE = "Reads are ranked from the raw collections because the hourly rollups keep no reads.";
+const READS_RAW_SENTENCE = "Reads are ranked from the raw collections because the per-query hourly rollups keep no reads.";
 
 function topRankingLabel(ranking) {
   return (TOP_RANKINGS.find((r) => r.value === ranking) || TOP_RANKINGS[0]).label;
