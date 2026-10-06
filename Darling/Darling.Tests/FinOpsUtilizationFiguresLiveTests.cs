@@ -75,7 +75,7 @@ VALUES ($1, $2, $2, TRUE, $3, $4, $4)",
             {
                 foreach (var id in new[] { idA, idB, idC })
                 {
-                    var rows = await viewer.GetDatabaseSizeLatestAsync(id, ct);
+                    var rows = await viewer.GetDatabaseSizeLatestAsync(id, cancellationToken: ct);
                     var totals = await FinOpsUtilizationFigures.GetLatestStorageTotalsAsync(source, id, 30, ct);
                     Assert.Equal(rows.Count > 0, totals is not null);
                     if (totals is { } t)

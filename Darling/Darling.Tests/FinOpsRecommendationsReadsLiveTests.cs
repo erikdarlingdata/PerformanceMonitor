@@ -237,7 +237,7 @@ public sealed class FinOpsRecommendationsReadsLiveTests
 
             /* Allocated total and its decimal scale. */
             var storedTotal = (await FinOpsUtilizationFigures.GetLatestStorageTotalsAsync(dataSource, id, TimeoutSeconds, ct))?.AllocatedMb ?? 0m;
-            var viewedTotal = DatabaseSizeRow.AllocatedTotalMb(await viewer.GetDatabaseSizeLatestAsync(id, ct));
+            var viewedTotal = DatabaseSizeRow.AllocatedTotalMb(await viewer.GetDatabaseSizeLatestAsync(id, cancellationToken: ct));
             Assert.Equal(viewedTotal, storedTotal);
             Assert.Equal((decimal.GetBits(viewedTotal)[3] >> 16) & 0xFF, (decimal.GetBits(storedTotal)[3] >> 16) & 0xFF);
         }

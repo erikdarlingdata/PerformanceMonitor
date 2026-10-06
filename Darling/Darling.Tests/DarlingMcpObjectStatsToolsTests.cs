@@ -496,19 +496,19 @@ public sealed class DarlingIndexLockingRenamedDatabaseLivePostgresTests
             }
 
             /* 2. The Viewer's all-databases grid. */
-            var gridRows = await viewer.GetIndexLockingAsync(ServerId, 200, null, ct);
+            var gridRows = await viewer.GetIndexLockingAsync(ServerId, 200, null, cancellationToken: ct);
             Assert.Contains(gridRows, r => r.DatabaseName == NewName && r.RowLockWaitInMs == 70_000);
             Assert.DoesNotContain(gridRows, r => r.DatabaseName == OldName);
 
             /* 3. The DB selector: a name it does not offer cannot be picked. */
-            var selector = await viewer.GetIndexLockingDatabasesAsync(ServerId, ct);
+            var selector = await viewer.GetIndexLockingDatabasesAsync(ServerId, cancellationToken: ct);
             Assert.Contains(NewName, selector);
             Assert.DoesNotContain(OldName, selector);
 
             /* 4. The filtered arm, asked for the dead name directly — the one a stale bookmark or a
                hand-typed filter would still reach. */
-            Assert.Empty(await viewer.GetIndexLockingAsync(ServerId, 200, OldName, ct));
-            Assert.NotEmpty(await viewer.GetIndexLockingAsync(ServerId, 200, NewName, ct));
+            Assert.Empty(await viewer.GetIndexLockingAsync(ServerId, 200, OldName, cancellationToken: ct));
+            Assert.NotEmpty(await viewer.GetIndexLockingAsync(ServerId, 200, NewName, cancellationToken: ct));
 
             /* History is intact: the pre-rename rows are still there, at the capture that saw them. */
             using var history = new NpgsqlCommand(
