@@ -175,6 +175,66 @@ public sealed class SystemEventsReaderTests : IClassFixture<SharedDuckDbFixture>
     }
 
     [Fact]
+    public async Task SevereErrors_AnIdAbsentFromTheFloorSnapshot_KeepsItsLastEarlierName_5373()
+    {
+        var service = new LocalDataService(_duckDb);
+        var now = Truncate(DateTime.UtcNow);
+
+        /* The floor snapshot is server-wide: database 5 went offline (not collected), so its last snapshot is before
+           the whole error range and it is in no snapshot of the range. */
+        foreach (var h in new[] { 40, 30, 20, 10, 2 }) await SeedDatabaseSizeAsync(1, "master", now.AddHours(-h));
+        foreach (var h in new[] { 40, 30 }) await SeedDatabaseSizeAsync(5, "Offline1", now.AddHours(-h));
+        await SeedHealthEventAsync(SystemHealthParser.ErrorReportedEvent, ErrorReportedAt(now.AddHours(-10), 5, 50101), now.AddHours(-10));
+        await SeedHealthEventAsync(SystemHealthParser.ErrorReportedEvent, ErrorReportedAt(now.AddHours(-3), 5, 50102), now.AddHours(-3));
+        await SeedHealthEventAsync(SystemHealthParser.ErrorReportedEvent, ErrorReportedAt(now.AddHours(-3), 1, 50103), now.AddHours(-3));
+
+        var names = (await service.GetSevereErrorsAsync(ServerId, hoursBack: 200)).ToDictionary(r => r.ErrorNumber ?? 0, r => r.DatabaseName);
+        Assert.Equal("Offline1", names[50101]);
+        Assert.Equal("Offline1", names[50102]);
+        Assert.Equal("master", names[50103]);
+    }
+
+    [Fact]
+    public async Task SevereErrors_AReusedIdWhoseFirstOwnerWentOfflineBeforeTheRange_StillNamesBothOwners_5373()
+    {
+        var service = new LocalDataService(_duckDb);
+        var now = Truncate(DateTime.UtcNow);
+
+        /* A has id 7 until 5 days ago, then goes offline and is dropped. B gets id 7 10 hours ago. */
+        foreach (var h in new[] { 130, 120, 100, 50, 30, 10, 4 }) await SeedDatabaseSizeAsync(1, "master", now.AddHours(-h));
+        foreach (var h in new[] { 130, 125, 120 }) await SeedDatabaseSizeAsync(7, "A", now.AddHours(-h));
+        foreach (var h in new[] { 10, 4 }) await SeedDatabaseSizeAsync(7, "B", now.AddHours(-h));
+        await SeedHealthEventAsync(SystemHealthParser.ErrorReportedEvent, ErrorReportedAt(now.AddHours(-26), 7, 50111), now.AddHours(-26));
+        await SeedHealthEventAsync(SystemHealthParser.ErrorReportedEvent, ErrorReportedAt(now.AddHours(-5), 7, 50112), now.AddHours(-5));
+
+        var names = (await service.GetSevereErrorsAsync(ServerId, hoursBack: 200)).ToDictionary(r => r.ErrorNumber ?? 0, r => r.DatabaseName);
+        Assert.Equal("A", names[50111]);
+        Assert.Equal("B", names[50112]);
+    }
+
+    [Fact]
+    public async Task SevereErrors_AnErrorWithNoTime_ShowsTheNewestNameOfItsId_NotTheRawId_5373()
+    {
+        var service = new LocalDataService(_duckDb);
+        var now = Truncate(DateTime.UtcNow);
+
+        foreach (var h in new[] { 20, 16 }) await SeedDatabaseSizeAsync(7, "A", now.AddHours(-h));
+        foreach (var h in new[] { 12, 2 }) await SeedDatabaseSizeAsync(7, "B", now.AddHours(-h));
+        await SeedHealthEventAsync(SystemHealthParser.ErrorReportedEvent, ErrorReportedAt(now.AddHours(-14), 7, 50121), now.AddHours(-14));
+        /* The row's event_time is set, but its XML carries no timestamp: the parsed error has no time. */
+        await SeedHealthEventAsync(SystemHealthParser.ErrorReportedEvent, WithoutTimestamp(ErrorReportedAt(now.AddHours(-3), 7, 50122)), now.AddHours(-3));
+
+        var names = (await service.GetSevereErrorsAsync(ServerId, hoursBack: 200)).ToDictionary(r => r.ErrorNumber ?? 0, r => r.DatabaseName);
+        Assert.Equal("A", names[50121]);
+        Assert.Equal("B", names[50122]);
+
+        /* Only the untimed error is in the window: there is no time range at all, and the newest name is still found. */
+        var onlyUntimed = Assert.Single(await service.GetSevereErrorsAsync(ServerId, hoursBack: 4));
+        Assert.Equal(50122, onlyUntimed.ErrorNumber);
+        Assert.Equal("B", onlyUntimed.DatabaseName);
+    }
+
+    [Fact]
     public async Task SevereErrors_UnmappedDatabaseId_SurfacesTheRawId()
     {
         var service = new LocalDataService(_duckDb);
@@ -336,6 +396,9 @@ public sealed class SystemEventsReaderTests : IClassFixture<SharedDuckDbFixture>
                 xml, "(<data name=\"error_number\"><value>)[^<]*(</value>)", "${1}" + number + "${2}", none, limit);
         return xml;
     }
+
+    private static string WithoutTimestamp(string xml) => System.Text.RegularExpressions.Regex.Replace(
+        xml, " timestamp=\"[^\"]*\"", "", System.Text.RegularExpressions.RegexOptions.None, TimeSpan.FromSeconds(5));
 
     private async Task SeedHealthEventAsync(string eventType, string eventXml, DateTime eventTimeUtc)
     {

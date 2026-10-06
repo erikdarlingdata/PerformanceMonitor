@@ -162,7 +162,7 @@ public sealed class DarlingMcpHealthParserTools
                Only the errors shown are resolved, so the history read covers just their time range. */
             var shown = rows.Take(limit).ToList();
             var names = await DatabaseNameHistoryReader.ReadAsync(
-                postgres, resolved.ServerId, shown.Where(r => r.DatabaseId.HasValue).Select(r => r.DatabaseId!.Value), shown.Select(r => r.EventTime),
+                postgres, resolved.ServerId, shown.Select(r => (r.DatabaseId, r.EventTime)),
                 McpCommandDeadlines.ReadSeconds, cancellationToken);
             if (rows.Count == 0)
                 return await EmptyAsync(

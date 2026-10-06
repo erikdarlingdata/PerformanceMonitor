@@ -405,7 +405,7 @@ public sealed partial class ViewerDataService
            database-size snapshots), not by the server's latest name for the id: SQL Server reuses a dropped
            database's id. */
         var names = await DatabaseNameHistoryReader.ReadAsync(
-            _dataSource, serverId, records.Where(r => r.DatabaseId.HasValue).Select(r => r.DatabaseId!.Value), records.Select(r => r.EventTime),
+            _dataSource, serverId, records.Select(r => (r.DatabaseId, r.EventTime)),
             ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
 
         /* #1319 database filter: severe_errors has no database_name column (the DB is resolved in C# from the

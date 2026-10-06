@@ -49,7 +49,7 @@ public sealed class DatabaseNameHistory
             .GroupBy(c => c.DatabaseId)
             .ToDictionary(
                 g => g.Key,
-                g => g.Select(c => c with { StartedAt = ToUtc(c.StartedAt) }).OrderBy(c => c.StartedAt).ToArray());
+                g => g.Select(c => c with { StartedAt = ToUtc(c.StartedAt) }).OrderBy(c => c.StartedAt).ThenBy(c => c.DatabaseName, StringComparer.Ordinal).ToArray());
     }
 
     /// <summary>The name <paramref name="databaseId"/> carried at <paramref name="eventTime"/>; see the class remarks.
@@ -70,6 +70,22 @@ public sealed class DatabaseNameHistory
             found = i;
         /* No snapshot at or before t has the id: the oldest one after it is the first change. */
         return changes[found < 0 ? 0 : found].DatabaseName;
+    }
+
+    /// <summary>What a history read has to cover for a set of errors (#5373): the real database ids, the range of the
+    /// times of the errors that carry one, and whether any of those errors has no time (it resolves to its id's
+    /// newest name, so the newest row per id is read too).</summary>
+    public readonly record struct ReadPlan(int[] Ids, (DateTime Min, DateTime Max)? Range, bool NeedsNewest);
+
+    /// <summary>Plans the read for the errors' (database id, time) pairs. An error with no database context (null or
+    /// 0 id) needs nothing, whatever its time.</summary>
+    public static ReadPlan Plan(IEnumerable<(int? DatabaseId, DateTime? EventTime)> errors)
+    {
+        var withId = errors.Where(e => e.DatabaseId is { } id && id != 0).ToList();
+        return new ReadPlan(
+            withId.Select(e => e.DatabaseId!.Value).Distinct().ToArray(),
+            RangeOf(withId.Select(e => e.EventTime)),
+            withId.Any(e => e.EventTime is null));
     }
 
     /// <summary>The earliest and latest of the given times, or null when none has a value. The history read

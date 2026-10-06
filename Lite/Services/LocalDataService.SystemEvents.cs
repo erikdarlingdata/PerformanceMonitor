@@ -387,7 +387,7 @@ ORDER BY event_time DESC";
         /* #5373: each error is named by what its database_id carried at the error's own time (the collected
            database-size snapshots), not by the server's latest name for the id. */
         var names = await GetDatabaseNameHistoryAsync(
-            serverId, records.Where(r => r.DatabaseId.HasValue).Select(r => r.DatabaseId!.Value), records.Select(r => r.EventTime));
+            serverId, records.Select(r => (r.DatabaseId, r.EventTime)));
 
         var filter = databaseNames is { Count: > 0 } ? new HashSet<string>(databaseNames, StringComparer.OrdinalIgnoreCase) : null;
 
@@ -664,23 +664,30 @@ FROM " + StoredEventCopies.SystemHealthEvents("server_id = $1 AND event_time >= 
     /// (database_size_stats is the only collected table carrying BOTH database_id and database_name for every online
     /// DB), limited to the errors' time range, in one query. Darling twin: <c>DatabaseNameHistoryReader.Sql</c>.
     /// <para><c>floor_snap</c> is the newest snapshot at or before the first error, <c>snap</c> every snapshot from
-    /// there to the last error, and <c>runs</c> keeps the rows where an id's name differs from its previous snapshot.
-    /// The last arm covers an id with no snapshot in that range: its oldest snapshot after the last error. The ids
-    /// are ints and go in as literals, because DuckDB takes no array parameter through this driver.</para>
+    /// there to the last error, and <c>runs</c> keeps the rows where an id's name differs from its previous snapshot
+    /// (ties on one instant break by name, so the result is fixed). The floor snapshot is server-wide, so an id missing
+    /// from it (an offline, suspect or excluded database is not collected) gets <c>before_floor</c>: its newest row
+    /// before the floor, one pass for every such id. The last arm covers an id with no row up to the last error: its
+    /// oldest row after it, also one pass. An error with no time is named by its id's newest name, one more
+    /// read made only when such an error is shown. The ids are ints and go in as literals, because DuckDB takes no
+    /// array parameter through this driver.</para>
     /// </summary>
     public async Task<DatabaseNameHistory> GetDatabaseNameHistoryAsync(
-        int serverId, IEnumerable<int> databaseIds, IEnumerable<DateTime?> times)
+        int serverId, IEnumerable<(int? DatabaseId, DateTime? EventTime)> errors)
     {
-        var ids = databaseIds.Where(id => id != 0).Distinct().ToArray();
-        if (ids.Length == 0 || DatabaseNameHistory.RangeOf(times) is not { } range)
+        var plan = DatabaseNameHistory.Plan(errors);
+        if (plan.Ids.Length == 0)
             return DatabaseNameHistory.Empty;
 
-        var idList = string.Join(", ", ids.Select(id => id.ToString(System.Globalization.CultureInfo.InvariantCulture)));
+        var idList = string.Join(", ", plan.Ids.Select(id => id.ToString(System.Globalization.CultureInfo.InvariantCulture)));
 
         using var connection = await OpenConnectionAsync();
-        using var command = connection.CreateCommand();
+        var changes = new List<DatabaseNameHistory.Change>();
 
-        command.CommandText = $@"
+        if (plan.Range is { } range)
+        {
+            using var command = connection.CreateCommand();
+            command.CommandText = $@"
 WITH floor_snap AS (
     SELECT COALESCE(MAX(collection_time), CAST($2 AS TIMESTAMP)) AS floor_time
     FROM v_database_size_stats
@@ -701,31 +708,63 @@ runs AS (
         database_id,
         database_name,
         collection_time,
-        LAG(database_name) OVER (PARTITION BY database_id ORDER BY collection_time) AS previous_name
+        LAG(database_name) OVER (PARTITION BY database_id ORDER BY collection_time, database_name) AS previous_name
     FROM snap
-)
-SELECT database_id, database_name, collection_time
-FROM runs
-WHERE previous_name IS DISTINCT FROM database_name
-UNION ALL
-SELECT database_id, database_name, collection_time
-FROM
-(
+),
+before_floor AS (
+    SELECT database_id, database_name, collection_time
+    FROM v_database_size_stats
+    WHERE server_id = $1
+    AND   collection_time < (SELECT floor_time FROM floor_snap)
+    AND   database_id IN ({idList})
+    AND   database_name IS NOT NULL
+    AND   database_id NOT IN (SELECT database_id FROM snap WHERE collection_time = (SELECT floor_time FROM floor_snap))
+    QUALIFY ROW_NUMBER() OVER (PARTITION BY database_id ORDER BY collection_time DESC) = 1
+),
+after_range AS (
     SELECT database_id, database_name, collection_time
     FROM v_database_size_stats
     WHERE server_id = $1
     AND   collection_time > $3
     AND   database_id IN ({idList})
     AND   database_name IS NOT NULL
+    AND   database_id NOT IN (SELECT database_id FROM snap)
+    AND   database_id NOT IN (SELECT database_id FROM before_floor)
     QUALIFY ROW_NUMBER() OVER (PARTITION BY database_id ORDER BY collection_time) = 1
-) AS after_range
-WHERE database_id NOT IN (SELECT database_id FROM snap)";
+)
+SELECT database_id, database_name, collection_time
+FROM runs
+WHERE previous_name IS DISTINCT FROM database_name
+UNION ALL
+SELECT database_id, database_name, collection_time FROM before_floor
+UNION ALL
+SELECT database_id, database_name, collection_time FROM after_range";
 
-        command.Parameters.Add(new DuckDBParameter { Value = serverId });
-        command.Parameters.Add(new DuckDBParameter { Value = range.Min });
-        command.Parameters.Add(new DuckDBParameter { Value = range.Max });
+            command.Parameters.Add(new DuckDBParameter { Value = serverId });
+            command.Parameters.Add(new DuckDBParameter { Value = range.Min });
+            command.Parameters.Add(new DuckDBParameter { Value = range.Max });
+            await ReadDatabaseNameChangesAsync(command, changes);
+        }
 
-        var changes = new List<DatabaseNameHistory.Change>();
+        if (plan.NeedsNewest)
+        {
+            using var newest = connection.CreateCommand();
+            newest.CommandText = $@"
+SELECT database_id, database_name, collection_time
+FROM v_database_size_stats
+WHERE server_id = $1
+AND   database_id IN ({idList})
+AND   database_name IS NOT NULL
+QUALIFY ROW_NUMBER() OVER (PARTITION BY database_id ORDER BY collection_time DESC, database_name DESC) = 1";
+            newest.Parameters.Add(new DuckDBParameter { Value = serverId });
+            await ReadDatabaseNameChangesAsync(newest, changes);
+        }
+
+        return new DatabaseNameHistory(changes);
+    }
+
+    private static async Task ReadDatabaseNameChangesAsync(DuckDBCommand command, List<DatabaseNameHistory.Change> changes)
+    {
         using var reader = await command.ExecuteReaderAsync();
         while (await reader.ReadAsync())
         {
@@ -733,7 +772,6 @@ WHERE database_id NOT IN (SELECT database_id FROM snap)";
                 continue;
             changes.Add(new DatabaseNameHistory.Change(reader.GetInt32(0), reader.GetString(1), reader.GetDateTime(2)));
         }
-        return new DatabaseNameHistory(changes);
     }
 
     // ── Default Trace (always-on server events; the Default Trace sub-tab) ──

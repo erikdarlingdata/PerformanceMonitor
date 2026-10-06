@@ -102,6 +102,38 @@ public sealed class DatabaseNameHistoryTests
     }
 
     [Fact]
+    public void TwoNamesForOneIdAtOneInstant_ResolveTheSameWhicheverOrderTheyArriveIn_5373()
+    {
+        /* The same id, the same collection_time, two names (a rename caught between two files of one collection): the
+           result must not depend on row order, so the later name in ordinal order wins. */
+        var x = new DatabaseNameHistory.Change(7, "X", T1);
+        var y = new DatabaseNameHistory.Change(7, "Y", T1);
+        Assert.Equal("Y", new DatabaseNameHistory(new[] { x, y }).Resolve(7, T2));
+        Assert.Equal("Y", new DatabaseNameHistory(new[] { y, x }).Resolve(7, T2));
+        Assert.Equal("Y", new DatabaseNameHistory(new[] { y, x }).Resolve(7, null));
+        Assert.Equal("Y", new DatabaseNameHistory(new[] { x, y }).Resolve(7, null));
+    }
+
+    [Fact]
+    public void Plan_NamesTheRealIds_TheirTimeRange_AndWhetherAnErrorHasNoTime_5373()
+    {
+        var plan = DatabaseNameHistory.Plan(new (int?, DateTime?)[] { (7, T2), (7, null), (0, null), (null, null), (1, T1) });
+        Assert.Equal(new[] { 1, 7 }, plan.Ids.OrderBy(i => i).ToArray());
+        Assert.Equal((T1, T2), plan.Range);
+        Assert.True(plan.NeedsNewest);
+
+        /* An error with no database context needs nothing, even with no time. */
+        var none = DatabaseNameHistory.Plan(new (int?, DateTime?)[] { (0, null), (null, T1) });
+        Assert.Empty(none.Ids);
+        Assert.Null(none.Range);
+        Assert.False(none.NeedsNewest);
+
+        var allUntimed = DatabaseNameHistory.Plan(new (int?, DateTime?)[] { (7, null) });
+        Assert.Null(allUntimed.Range);
+        Assert.True(allUntimed.NeedsNewest);
+    }
+
+    [Fact]
     public void TheHistoryQuery_IsOneQueryOnTheServerTimeIndex_WithPositionalParameters()
     {
         var sql = DatabaseNameHistoryReader.Sql;
@@ -110,6 +142,14 @@ public sealed class DatabaseNameHistoryTests
         Assert.Contains("collection_time <= $2", sql, StringComparison.Ordinal);
         Assert.Contains("collection_time <= $3", sql, StringComparison.Ordinal);
         Assert.Contains("database_id = ANY($4)", sql, StringComparison.Ordinal);
+        /* #5373: each of the two extra arms is ONE pass over all its ids (DISTINCT ON), never a per-id LATERAL probe, and
+           a tie on one instant breaks by name. */
+        Assert.Contains("before_floor AS", sql, StringComparison.Ordinal);
+        Assert.Equal(2, System.Text.RegularExpressions.Regex.Matches(sql, "SELECT DISTINCT ON \\(d\\.database_id\\)").Count);
+        Assert.DoesNotContain("LATERAL", sql, StringComparison.Ordinal);
+        Assert.Contains("ORDER BY collection_time, database_name", sql, StringComparison.Ordinal);
+        Assert.Contains("SELECT DISTINCT ON (database_id)", DatabaseNameHistoryReader.NewestSql, StringComparison.Ordinal);
+        Assert.DoesNotContain("LATERAL", DatabaseNameHistoryReader.NewestSql, StringComparison.Ordinal);
         Assert.DoesNotContain("@", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("now(", sql.ToLowerInvariant());
     }
@@ -208,6 +248,125 @@ VALUES ($1,$2,$3,$4,$5,$6,$7)",
             await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
                 await DeleteRowsAsync(cleanup, cleanupCt));
         }
+    }
+
+    private static async Task SnapshotAsync(NpgsqlConnection connection, DateTime at, int id, string name, System.Threading.CancellationToken ct) =>
+        await DarlingMcpTestData.ExecAsync(connection, ct,
+            @"INSERT INTO database_size_stats (collection_id, collection_time, server_id, server_name, database_name, database_id)
+VALUES ($1,$2,$3,$4,$5,$6)", CollectionIdGenerator.Next(), at, ServerId, ServerName, name, id);
+
+    private static async Task ErrorAtAsync(NpgsqlConnection connection, DateTime at, int id, int number, bool xmlHasTime, System.Threading.CancellationToken ct)
+    {
+        var xml = ErrorXml(at, id, number);
+        if (!xmlHasTime)
+            xml = System.Text.RegularExpressions.Regex.Replace(xml, " timestamp=\"[^\"]*\"", "", System.Text.RegularExpressions.RegexOptions.None, TimeSpan.FromSeconds(5));
+        await DarlingMcpTestData.ExecAsync(connection, ct,
+            @"INSERT INTO system_health_events (system_health_event_id, collection_time, server_id, server_name, event_time, event_type, event_xml)
+VALUES ($1,$2,$3,$4,$5,$6,$7)",
+            CollectionIdGenerator.Next(), at, ServerId, ServerName, at, SystemHealthParser.ErrorReportedEvent, xml);
+    }
+
+    /// <summary>Seeds a fresh store with <paramref name="seed"/> and returns the names the MCP tool gave, keyed by error
+    /// number, after checking the viewer's Severe Errors read gives the same.</summary>
+    private static async Task<Dictionary<int, string>> NamesAsync(
+        string cs, Func<NpgsqlConnection, DateTime, System.Threading.CancellationToken, Task> seed)
+    {
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+        await using var postgres = NpgsqlDataSource.Create(cs);
+
+        var bodySucceeded = false;
+        try
+        {
+            await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+            var now = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow);
+            await seed(connection, now, ct);
+
+            var json = JsonDocument.Parse(await DarlingMcpHealthParserTools.GetSevereErrors(postgres, ServerName, hours_back: 168, limit: 50)).RootElement;
+            Assert.True(json.TryGetProperty("errors", out var errors), json.ToString());
+            var names = errors.EnumerateArray()
+                .ToDictionary(e => e.GetProperty("error_number").GetInt32(), e => e.GetProperty("database_name").GetString()!);
+
+            await using var viewer = new ViewerDataService(cs);
+            var rows = await viewer.GetSevereErrorsAsync(ServerId, now.AddHours(-200), now, cancellationToken: ct);
+            Assert.Equal(names, rows.ToDictionary(r => r.ErrorNumber ?? 0, r => r.DatabaseName));
+            bodySucceeded = true;
+            return names;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
+    [Fact]
+    public async Task AnIdAbsentFromTheFloorSnapshot_KeepsItsLastEarlierName_5373()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live database-name-history test.");
+
+        /* The floor snapshot is server-wide. Database 5 went offline (offline, suspect and excluded databases are not
+           collected): its last snapshot is before the whole error range, so it is in no snapshot of the range at all. */
+        var names = await NamesAsync(cs!, async (c, now, ct) =>
+        {
+            foreach (var h in new[] { 40.0, 30.0, 20.0, 10.0, 2.0 }) await SnapshotAsync(c, now.AddHours(-h), 1, "master", ct);
+            foreach (var h in new[] { 40.0, 30.0 }) await SnapshotAsync(c, now.AddHours(-h), 5, "Offline1", ct);
+            await ErrorAtAsync(c, now.AddHours(-10), 5, 50101, true, ct);   /* the last name it had: Offline1, not "database_id 5" */
+            await ErrorAtAsync(c, now.AddHours(-3), 5, 50102, true, ct);
+            await ErrorAtAsync(c, now.AddHours(-3), 1, 50103, true, ct);
+        });
+        Assert.Equal("Offline1", names[50101]);
+        Assert.Equal("Offline1", names[50102]);
+        Assert.Equal("master", names[50103]);
+    }
+
+    [Fact]
+    public async Task AReusedIdWhoseFirstOwnerWentOfflineBeforeTheRange_StillNamesBothOwners_5373()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live database-name-history test.");
+
+        /* A has id 7 until 5 days ago, then goes offline (no more rows) and is dropped. B gets id 7 10 hours ago. */
+        var names = await NamesAsync(cs!, async (c, now, ct) =>
+        {
+            foreach (var h in new[] { 130.0, 120.0, 100.0, 50.0, 30.0, 10.0, 4.0 }) await SnapshotAsync(c, now.AddHours(-h), 1, "master", ct);
+            foreach (var h in new[] { 130.0, 125.0, 120.0 }) await SnapshotAsync(c, now.AddHours(-h), 7, "A", ct);
+            foreach (var h in new[] { 10.0, 4.0 }) await SnapshotAsync(c, now.AddHours(-h), 7, "B", ct);
+            await ErrorAtAsync(c, now.AddHours(-26), 7, 50111, true, ct);   /* day -1: A */
+            await ErrorAtAsync(c, now.AddHours(-5), 7, 50112, true, ct);    /* hour -5: B */
+        });
+        Assert.Equal("A", names[50111]);
+        Assert.Equal("B", names[50112]);
+    }
+
+    [Fact]
+    public async Task AnErrorWithNoTime_ShowsTheNewestNameOfItsId_NotTheRawId_5373()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live database-name-history test.");
+
+        var names = await NamesAsync(cs!, async (c, now, ct) =>
+        {
+            foreach (var h in new[] { 20.0, 16.0 }) await SnapshotAsync(c, now.AddHours(-h), 7, "A", ct);
+            foreach (var h in new[] { 12.0, 2.0 }) await SnapshotAsync(c, now.AddHours(-h), 7, "B", ct);
+            await ErrorAtAsync(c, now.AddHours(-14), 7, 50121, true, ct);    /* timed: A */
+            await ErrorAtAsync(c, now.AddHours(-3), 7, 50122, false, ct);    /* no time in its XML: the newest name, B */
+        });
+        Assert.Equal("A", names[50121]);
+        Assert.Equal("B", names[50122]);
+
+        /* Every shown error has no time: there is no time range at all, and the newest name is still found. */
+        var onlyUntimed = await NamesAsync(cs!, async (c, now, ct) =>
+        {
+            await SnapshotAsync(c, now.AddHours(-20), 7, "A", ct);
+            await SnapshotAsync(c, now.AddHours(-2), 7, "B", ct);
+            await ErrorAtAsync(c, now.AddHours(-3), 7, 50123, false, ct);
+        });
+        Assert.Equal("B", onlyUntimed[50123]);
     }
 
     private static async Task DeleteRowsAsync(NpgsqlConnection connection, System.Threading.CancellationToken ct)
