@@ -7314,9 +7314,10 @@ RETURNING s.state_key";
         {
             outcome = ProcedureStatsPlanReuse.ApplyShadow(
                 server.ServerId, cache, rows, captureOrdinal, now,
-                key => _logger?.LogWarning(
-                    "procedure_stats on server {ServerId}: a plan identity the cache recognized rendered a plan of a different shape this run (a false hit): {Key} (#5158).",
-                    server.ServerId, key));
+                null,
+                (key, cause) => _logger?.LogWarning(
+                    "procedure_stats on server {ServerId}: a plan identity the cache recognized rendered a different plan this run (a false hit): {Key}. Why: {Reason} (#5158).",
+                    server.ServerId, key, ProcedureStatsPlanReuse.DescribeFalseHit(cause)));
         }
         else
         {
