@@ -122,6 +122,12 @@ public static partial class SensitiveStatements
 
         /// <summary>Ordinals of the statements whose probe (or element-form <c>ParameterizedText</c>) is named.</summary>
         private readonly HashSet<int> _probeNamed = new();
+        // #5320: pass 1 stops by INPUT offset and pass 2 by OUTPUT length, and pass 2 can write input that lies past
+        // pass 1's stop (a withheld long text and every &apos; write back shorter than they were read). Those nodes
+        // were never probed, so the values the filter exempts outside a scope are withheld from the stop on.
+        private int[]? _lineStarts;
+        private long _passOneStop = long.MaxValue;
+        private bool _pastVetted;
 
         public XmlRun(Func<string, bool> isNamed, Func<bool> budgetSpent, string placeholder, Action<TimeSpan>? chargeParse)
         {
@@ -320,6 +326,8 @@ public static partial class SensitiveStatements
         public XmlPassOutcome PassOne(string xml, long cut)
         {
             int[]? lineStarts = cut == long.MaxValue ? null : LineStarts(xml);
+            _lineStarts = lineStarts;
+            _passOneStop = long.MaxValue;
             bool readOn = MayNeedProbe(xml);
             bool hit = false;
             _mark = Stopwatch.GetTimestamp();
@@ -341,7 +349,10 @@ public static partial class SensitiveStatements
                     // L-I: stop when the START of this node is past the cut (logical position, never characters
                     // handed out: the reader reads ahead). Everything after it is cut by the caller.
                     if (lineStarts is not null && NodeStart(lineInfo, lineStarts, type) > cut)
+                    {
+                        _passOneStop = NodeStart(lineInfo, lineStarts, type);
                         break;
+                    }
 
                     switch (type)
                     {
@@ -480,12 +491,16 @@ public static partial class SensitiveStatements
             var open = new Stack<string>();
             int scopeDepth = -1;
             using var reader = XmlReader.Create(new StringReader(xml), ReaderSettings());
+            var info2 = (IXmlLineInfo)reader;
+            _pastVetted = false;
             try
             {
                 while (reader.Read())
                 {
                     if (BudgetSpent())
                         return _placeholder;
+                    if (!_pastVetted && _lineStarts is not null && NodeStart(info2, _lineStarts, reader.NodeType) >= _passOneStop)
+                        _pastVetted = true;
                     bool scoped = scopeDepth >= 0;
                     switch (reader.NodeType)
                     {
@@ -616,7 +631,7 @@ public static partial class SensitiveStatements
             if (!inScope)
             {
                 if (IsExempt(name))
-                    return value;
+                    return _pastVetted ? _placeholder : value;
                 return (knownVerdict ?? Judge(value)) ? _placeholder : value;
             }
             if (IsScopeList(name) || value.Contains('\''))

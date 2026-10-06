@@ -290,6 +290,57 @@ public class SensitiveStatementAutoParamTests
         Assert.Contains(PText, result);
     }
 
+    // ── L2c review fixes (H1, M1, L3) ──
+
+    private static bool CanaryOrStandIn(string s) => StandIn(s) || s.Contains("CANARY", StringComparison.Ordinal);
+
+    [Fact]
+    public void WithAMaxOutput_ValuesPastPassOnesStop_AreWithheldEvenWhenTheOutputIsShorter_LongNamedStatementFirst()
+    {
+        // statement 1 is named and long: its text becomes the short placeholder, so pass 2 reaches input that pass 1
+        // (which stops by INPUT offset) never read
+        string xml = Plan(
+            Stmt("StmtSimple", "CANARY " + new string('x', 3000)),
+            Stmt("StmtSimple", "(@1 nvarchar(4000),@2 tinyint)UPDATE [dbo].[u] set [password] = @1  WHERE [id]=@2",
+                Col("@1", "N'S3cret-drift'"), Col("@2", "(7)")));
+        const int max = 2000;
+
+        string? cut = Run(xml, CanaryOrStandIn, max);
+        string? whole = Run(xml, CanaryOrStandIn);
+
+        Assert.NotNull(cut);
+        Assert.NotNull(whole);
+        Assert.DoesNotContain("S3cret-drift", whole);
+        Assert.DoesNotContain("S3cret-drift", cut![..Math.Min(max, cut.Length)]);
+    }
+
+    [Fact]
+    public void WithAMaxOutput_ValuesPastPassOnesStop_AreWithheldEvenWhenTheOutputIsShorter_LargeInList()
+    {
+        // &apos; is five characters in the input and one in the output, so pass 2 outruns pass 1 on a long IN-list
+        var sb = new StringBuilder();
+        sb.Append("<ShowPlanXML xmlns=\"http://schemas.microsoft.com/sqlserver/2004/07/showplan\"><BatchSequence><Batch><Statements>");
+        sb.Append("<StmtSimple StatementId=\"1\" StatementText=\"(@0 nvarchar(50)");
+        for (int i = 1; i <= 119; i++) sb.Append(",@").Append(i).Append(" nvarchar(50)");
+        sb.Append(")INSERT [dbo].[cfg] VALUES (@0");
+        for (int i = 1; i <= 119; i++) sb.Append(",@").Append(i);
+        sb.Append(")\"><QueryPlan><ScalarOperator ScalarString=\"CANARY\"/><ParameterList>");
+        for (int i = 0; i < 119; i++)
+            sb.Append("<ColumnReference Column=\"@").Append(i).Append("\" ParameterCompiledValue=\"N&apos;aaaaaaaa&apos;\"/>");
+        sb.Append("<ColumnReference Column=\"@119\" ParameterCompiledValue=\"N&apos;Server=h;PWD=drift2&apos;\"/>");
+        sb.Append("</ParameterList></QueryPlan></StmtSimple>");
+        sb.Append("</Statements></Batch></BatchSequence></ShowPlanXML>");
+        string xml = sb.ToString();
+        int last = xml.IndexOf("PWD=drift2", StringComparison.Ordinal);
+        int max = last - 200;
+        Assert.True(max > 1000, "fixture shape");
+
+        string? cut = Run(xml, CanaryOrStandIn, max);
+
+        Assert.NotNull(cut);
+        Assert.DoesNotContain("drift2", cut![..Math.Min(max, cut.Length)]);
+    }
+
     [Fact]
     public void ElementFormParameterizedText_NamedStatementIsWithheld_EvenAfterAnEarlierHit()
     {
