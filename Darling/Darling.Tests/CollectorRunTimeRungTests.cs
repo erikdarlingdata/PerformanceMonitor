@@ -574,7 +574,9 @@ public sealed class CollectorRunTimeRungLiveTests
         (string?)await ScalarAsync(connection,
             "SELECT COALESCE(string_agg(COALESCE(server_id::text, 'fleet') || '/' || collector_name || '=' || run_at_minute, ',' ORDER BY server_id NULLS FIRST, collector_name), '') FROM config.config_collector_run_times", ct);
 
-    private static async Task<StoreConfigProvider> SeededProviderAsync(NpgsqlDataSource dataSource, CapturingTestLogger logger, System.Threading.CancellationToken ct)
+    private static async Task<StoreConfigProvider> SeededProviderAsync(
+        NpgsqlDataSource dataSource, CapturingTestLogger logger, System.Threading.CancellationToken ct,
+        string storedPassword = "env:RUNTIME_ALPHA_PASSWORD_NOT_SET")
     {
         var provider = new StoreConfigProvider(dataSource, logger);
         var config = new DarlingConfig();
@@ -584,9 +586,9 @@ public sealed class CollectorRunTimeRungLiveTests
             Host = "runtime-alpha-host",
             Auth = "sql",
             Username = "runtime-user",
-            /* A reference, not a stored old-format password: the load warns that an old-format password needs to be entered again (#5366),
-               and these tests count the warnings that belong to the run times. */
-            EncryptedPassword = "env:RUNTIME_ALPHA_PASSWORD_NOT_SET",
+            /* A reference by default, not a stored old-format password: the load warns that an old-format password needs to be entered
+               again (#5366), and the run-time tests count the warnings that belong to the run times. */
+            EncryptedPassword = storedPassword,
             EncryptMode = "Strict",
             TrustServerCertificate = true,
         });
@@ -990,6 +992,39 @@ public sealed class CollectorRunTimeRungLiveTests
             Assert.Contains("index_object_stats", line, StringComparison.Ordinal);
             Assert.Contains("fleet-wide", line, StringComparison.Ordinal);
             Assert.Contains("1440", line, StringComparison.Ordinal);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (_, _) => { });
+        }
+    }
+
+    /// <summary>A stored old-format password the service cannot open is reported by the load as one warning, and only once: the
+    /// next load of the same store, with the same count, says nothing more (#5366).</summary>
+    [Fact]
+    public async Task LoadViewAsync_WarnsOnce_AboutAnOldFormatPasswordItCannotOpen_NotOnEveryReload()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), SkipText);
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct);
+        await using var connection = await MigratedAsync(scratch, ct);
+
+        var bodySucceeded = false;
+        try
+        {
+            await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
+            var logger = new CapturingTestLogger();
+            var provider = await SeededProviderAsync(dataSource, logger, ct, storedPassword: "not-a-real-blob");
+
+            Assert.NotNull(await provider.LoadViewAsync(new DarlingConfig(), ct));
+            var line = Assert.Single(logger.Lines, l => l.StartsWith("Warning", StringComparison.Ordinal));
+            Assert.Contains("needs to be entered again", line, StringComparison.Ordinal);
+
+            Assert.NotNull(await provider.LoadViewAsync(new DarlingConfig(), ct));
+            Assert.Equal(1, logger.CountAtLevel(LogLevel.Warning));
 
             bodySucceeded = true;
         }
