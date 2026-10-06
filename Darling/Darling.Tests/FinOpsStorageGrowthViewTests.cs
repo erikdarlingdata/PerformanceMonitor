@@ -73,6 +73,57 @@ public sealed class FinOpsStorageGrowthViewTests
     public void ViewsAllowList_ContainsTheView() =>
         Assert.Contains("storage_growth", DarlingMcpFinOpsTools.Views);
 
+    /* #5238: a limit sets the databases level's row count. The default means the top 50 (the response sized to the 32 KB target), and a
+       count of 500 lists every database of a large server. */
+    [Fact]
+    public void DatabasesPayload_CutsAtTheRowCap_AndTheDefaultLimitMeansFifty()
+    {
+        var sixty = Enumerable.Range(1, 60).Select(i => Db("db" + i.ToString("D2"), i, i)).ToList();
+        Assert.Equal(50, DarlingMcpFinOpsTools.StorageGrowthDatabaseCap(10));
+        Assert.Equal(2, DarlingMcpFinOpsTools.StorageGrowthDatabaseCap(2));
+        Assert.Equal(500, DarlingMcpFinOpsTools.StorageGrowthDatabaseCap(500));
+
+        using var byDefault = JsonDocument.Parse(DarlingMcpFinOpsTools.BuildStorageGrowthDatabasesPayload("srv", 24, sixty));
+        var cut = byDefault.RootElement.GetProperty("databases");
+        Assert.Equal(60, cut.GetProperty("database_count").GetInt32());
+        Assert.True(cut.GetProperty("truncated").GetBoolean());
+        Assert.Equal(50, cut.GetProperty("rows").GetArrayLength());
+
+        using var all = JsonDocument.Parse(DarlingMcpFinOpsTools.BuildStorageGrowthDatabasesPayload("srv", 24, sixty, DarlingMcpFinOpsTools.StorageGrowthDatabaseCap(500)));
+        var whole = all.RootElement.GetProperty("databases");
+        Assert.False(whole.GetProperty("truncated").GetBoolean());
+        Assert.Equal(60, whole.GetProperty("rows").GetArrayLength());
+    }
+
+    /* #5238: the default 10 means 50, and any other limit is the count, on both sides of 10: a limit of 1 keeps one database and a limit of 11 keeps
+       eleven, not fifty. So the count is not monotonic (9 is 9 rows, 10 is 50, 11 is 11), as database_sizes reads 10 as 70 and 11 as 11. */
+    [Fact]
+    public void DatabasesPayload_ALimitEitherSideOfTheDefault_IsTheCount_NotFifty()
+    {
+        var sixty = Enumerable.Range(1, 60).Select(i => Db("db" + i.ToString("D2"), i, i)).ToList();
+        Assert.Equal(1, DarlingMcpFinOpsTools.StorageGrowthDatabaseCap(1));
+        Assert.Equal(9, DarlingMcpFinOpsTools.StorageGrowthDatabaseCap(9));
+        Assert.Equal(11, DarlingMcpFinOpsTools.StorageGrowthDatabaseCap(11));
+        foreach (var asked in new[] { 1, 11 })
+        {
+            using var counted = JsonDocument.Parse(DarlingMcpFinOpsTools.BuildStorageGrowthDatabasesPayload("srv", 24, sixty, DarlingMcpFinOpsTools.StorageGrowthDatabaseCap(asked)));
+            var section = counted.RootElement.GetProperty("databases");
+            Assert.Equal(60, section.GetProperty("database_count").GetInt32());
+            Assert.True(section.GetProperty("truncated").GetBoolean(), $"limit {asked}");
+            Assert.Equal(asked, section.GetProperty("rows").GetArrayLength());
+        }
+    }
+
+    /* #5238: the three views the web lists in full take a limit up to 500; the top-N views keep their 50. */
+    [Fact]
+    public void LimitCeilings_AreFiveHundredForTheListsTheWebShowsInFull_AndFiftyForTheTopNViews()
+    {
+        foreach (var view in new[] { "database_sizes", "index_analysis", "storage_growth" })
+            Assert.Equal(500, DarlingMcpFinOpsTools.MaxLimitFor(view));
+        foreach (var view in new[] { "utilization", "high_impact", "database_resources", "application_connections", "optimization" })
+            Assert.Equal(50, DarlingMcpFinOpsTools.MaxLimitFor(view));
+    }
+
     [Fact]
     public void OrderDatabases_NullsLast_InBothGrowthKeys_ThenName_FromAReversedInput()
     {
@@ -336,6 +387,47 @@ public sealed class FinOpsStorageGrowthViewLiveTests
         Assert.Equal(AzureSiblingDatabaseSize.LogNote, rows[2].GetProperty("note").GetString());
     }
 
+    /* #5238: the databases level reads limit as its row count (the default 10 means the top 50), so the web tab can ask for 500 and list
+       every database. Three databases are seeded: a limit of 2 cuts one and says so, 500 lists all three, and the default lists all three too. */
+    [Fact]
+    public async Task DatabasesLevel_ReadsLimitAsTheRowCount_AndTheDefaultStillMeansTheTopFifty()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await SeedAsync(Cs()!, ct);
+        await using var ds = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        static string[] Names(JsonElement section) => section.GetProperty("rows").EnumerateArray().Select(r => r.GetProperty("database_name").GetString()!).ToArray();
+
+        using var two = Parse(await DarlingMcpFinOpsTools.GetFinOps(ds, "storage_growth", ServerName, 24, 2, cancellationToken: ct));
+        var cut = two.RootElement.GetProperty("databases");
+        Assert.Equal(3, cut.GetProperty("database_count").GetInt32());
+        Assert.True(cut.GetProperty("truncated").GetBoolean());
+        Assert.Equal(new[] { "Alpha", "Beta" }, Names(cut));
+
+        using var all = Parse(await DarlingMcpFinOpsTools.GetFinOps(ds, "storage_growth", ServerName, 24, 500, cancellationToken: ct));
+        var whole = all.RootElement.GetProperty("databases");
+        Assert.Equal(3, whole.GetProperty("database_count").GetInt32());
+        Assert.False(whole.GetProperty("truncated").GetBoolean());
+        Assert.Equal(new[] { "Alpha", "Beta", "Sib" }, Names(whole));
+
+        using var byDefault = Parse(await DarlingMcpFinOpsTools.GetFinOps(ds, "storage_growth", ServerName, 24, 10, cancellationToken: ct));
+        Assert.Equal(new[] { "Alpha", "Beta", "Sib" }, Names(byDefault.RootElement.GetProperty("databases")));
+
+        /* Either side of the default: a limit of 1 cuts two and says so, and an 11 is no more refused than a 500 is;
+           the 11 lists all three because only three are seeded (the 60-database payload test pins that 11 keeps eleven, not fifty). */
+        using var one = Parse(await DarlingMcpFinOpsTools.GetFinOps(ds, "storage_growth", ServerName, 24, 1, cancellationToken: ct));
+        var single = one.RootElement.GetProperty("databases");
+        Assert.Equal(3, single.GetProperty("database_count").GetInt32());
+        Assert.True(single.GetProperty("truncated").GetBoolean());
+        Assert.Equal(new[] { "Alpha" }, Names(single));
+
+        using var eleven = Parse(await DarlingMcpFinOpsTools.GetFinOps(ds, "storage_growth", ServerName, 24, 11, cancellationToken: ct));
+        var most = eleven.RootElement.GetProperty("databases");
+        Assert.Equal(3, most.GetProperty("database_count").GetInt32());
+        Assert.False(most.GetProperty("truncated").GetBoolean());
+        Assert.Equal(new[] { "Alpha", "Beta", "Sib" }, Names(most));
+    }
+
     [Fact]
     public async Task ObjectsLevel_ReadsFieldByField_AgainstLiteralValues_AndTheTieOrdersByKey()
     {
@@ -495,9 +587,16 @@ public sealed class FinOpsStorageGrowthViewLiveTests
         Assert.Equal(
             McpHelpers.Refusal("limit", "Invalid limit value '21': the objects level of view storage_growth returns at most 20 objects."),
             await DarlingMcpFinOpsTools.GetFinOps(ds, "storage_growth", ServerName, 24, 21, "Alpha", cancellationToken: ct));
+        // #5238: the databases level takes a limit now (its row count); the indexes level still refuses one, and the objects level a limit over 20.
         Assert.Equal(
-            McpHelpers.Refusal("limit", "limit applies only to the objects level (database_name without object_name) of view storage_growth; omit it for the databases level."),
-            await DarlingMcpFinOpsTools.GetFinOps(ds, "storage_growth", ServerName, 24, 5, cancellationToken: ct));
+            McpHelpers.Refusal("limit", "limit applies only to the databases and objects levels of view storage_growth; omit it for the indexes level (database_name with object_name)."),
+            await DarlingMcpFinOpsTools.GetFinOps(ds, "storage_growth", ServerName, 24, 5, "Alpha", object_name: "dbo.Big", cancellationToken: ct));
+        Assert.Equal(
+            McpHelpers.Refusal("limit", "Invalid limit value '501'. Must be an integer from 1 to 500."),
+            await DarlingMcpFinOpsTools.GetFinOps(ds, "storage_growth", ServerName, 24, 501, cancellationToken: ct));
+        Assert.Equal(
+            McpHelpers.Refusal("limit", "Invalid limit value '300': the objects level of view storage_growth returns at most 20 objects."),
+            await DarlingMcpFinOpsTools.GetFinOps(ds, "storage_growth", ServerName, 24, 300, "Alpha", cancellationToken: ct));
     }
 
     [Fact]

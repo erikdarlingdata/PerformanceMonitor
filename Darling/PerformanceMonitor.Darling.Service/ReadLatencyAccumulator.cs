@@ -32,7 +32,8 @@ public enum ReadSurface
 /// success; <c>Timeout</c> is a caught 57014 whose message names the store's own statement_timeout;
 /// <c>Cancelled</c> is the caller's own token going away, or a 57014 this process cannot attribute to the
 /// store's timeout (a user cancel); <c>FallbackRaw</c> (#5097) is a read whose interval-table path was chosen
-/// and then faulted, so it was answered from raw; <c>GateFailed</c> (#5097) is a read whose source decision
+/// and then faulted, or whose hourly-edges route was skipped because the hour ledger did not yet cover the window
+/// (<see cref="ReadFallback.LedgerUncovered"/>, #4605), so it was answered from raw; <c>GateFailed</c> (#5097) is a read whose source decision
 /// (or the connection and transaction it needs) faulted, so it read raw without a decision — both are noted by
 /// the reader through <see cref="ReadScope"/> and only replace an otherwise-<c>Ok</c> outcome; <c>Limit</c> (#4605) is a caught 53400 <c>configuration_limit_exceeded</c>
 /// — the viewer/mcp role's <c>temp_file_limit</c> refusing a read's on-disk spill, a distinct "the store
