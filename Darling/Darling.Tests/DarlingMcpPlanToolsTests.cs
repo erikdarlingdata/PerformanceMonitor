@@ -64,6 +64,7 @@ public sealed class DarlingMcpPlanToolsSurfaceAndSqlTests
         "get_blocking_plan_xml",
         "get_deadlock_plan_xml",
         "get_procedure_plan_xml",
+        "get_query_repro_script",
         "get_query_store_plan_xml"
     };
 
@@ -422,6 +423,7 @@ public sealed class DarlingMcpPlanToolsSurfaceAndSqlTests
         Assert.Equal(new[] { "database_name", "query_id" }, RequiredOf(tools["get_query_store_plan_xml"]));
         Assert.Equal(new[] { "sql_handle" }, RequiredOf(tools["get_procedure_plan_xml"]));
         Assert.Equal(new[] { "collection_time", "session_id" }, RequiredOf(tools["get_active_query_plan_xml"]));
+        Assert.Equal(new[] { "kind" }, RequiredOf(tools["get_query_repro_script"]));
 
         /* #5236: the blocking read requires the row's event_time and both spids (the ecids and side are optional); the deadlock
            read requires its two stamps (the victim is the optional tiebreak). */
@@ -440,6 +442,12 @@ public sealed class DarlingMcpPlanToolsSurfaceAndSqlTests
         Assert.Equal(new[] { "collection_time", "session_id", "server_name", "request_id", "live" }, active.Select(x => x.Name).ToArray());
         Assert.True(Optional(active, "request_id"));
         Assert.True(Optional(active, "live"));
+        var repro = McpParams("get_query_repro_script");
+        Assert.Equal(
+            new[] { "kind", "server_name", "database_name", "query_hash", "query_id", "plan_id", "collection_time", "session_id", "request_id" },
+            repro.Select(x => x.Name).ToArray());
+        Assert.False(Optional(repro, "kind"));
+        Assert.True(Optional(repro, "request_id"));
 
         /* #5236: the two orders, key first, then the server, then the optional refinements. */
         var blocking = McpParams("get_blocking_plan_xml");
