@@ -15,6 +15,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using PerformanceMonitor.Darling.Service;
 using Xunit;
+using Edit = PerformanceMonitor.Darling.Service.Mcp.DarlingMcpServerAdminTools;
 
 namespace Darling.Tests;
 
@@ -333,5 +334,101 @@ public sealed class DarlingSecretsOwnedReferenceTests : IDisposable
         Assert.Contains(DarlingOwnedSecrets.ReferenceRefusalText, refusedAlpha.Message, StringComparison.Ordinal);
         Assert.DoesNotContain(SecondOwnedVariableValue, refusedAlpha.Message, StringComparison.Ordinal);
         Assert.Equal(SecondOwnedVariableValue, Resolve(afterChange.Single(s => s.Name == "beta")));
+    }
+
+    /* ═══════════ a file-declared reference resolves only at the address darling.json declares (#5240) ═══════════ */
+
+    /// <summary>A file server's row that the edit core moved to another host, with the file's own reference text still in
+    /// its slot (and, for the password slot, typed as the new password), is refused where it resolves: the file declares
+    /// that reference for its own address, not for the new one. Password slot.</summary>
+    [Fact]
+    public Task TheEncryptedSlot_ResolvesOnlyAtTheAddressTheFileDeclares() => RunMovedAddressScenarioAsync(remediationSlot: false);
+
+    /// <summary>The same outcomes for the remediation password slot.</summary>
+    [Fact]
+    public Task TheRemediationSlot_ResolvesOnlyAtTheAddressTheFileDeclares() => RunMovedAddressScenarioAsync(remediationSlot: true);
+
+    private async Task RunMovedAddressScenarioAsync(bool remediationSlot)
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var setting = remediationSlot ? "remediationEncryptedPassword" : "encryptedPassword";
+
+        static object Entry(bool remediation, string name, string host, string reference) => remediation
+            ? new { name, host, auth = "sql", username = "monitor", remediationUsername = "remediator", remediationEncryptedPassword = reference }
+            : new { name, host, auth = "sql", username = "monitor", encryptedPassword = reference };
+        var references = new[] { "env:" + OwnedVariable, "env:" + SecondOwnedVariable, "file:" + _ownedFile, "env:" + OwnedVariable };
+        var config = DarlingConfig.Parse(DarlingJson(
+            Entry(remediationSlot, "alpha", "alpha.example.test", references[0]),
+            Entry(remediationSlot, "beta", "beta.example.test", references[1]),
+            Entry(remediationSlot, "gamma", "gamma.example.test", references[2]),
+            Entry(remediationSlot, "delta", "  delta.example.test  ", references[3]),
+            Entry(remediationSlot, "epsilon", "epsilon.example.test", references[3])));
+
+        var (scratchStore, owner, _) = await ServerAddViewerRoleLiveTests.OpenAsync(ct);
+        await using var scratchHolder = scratchStore;
+        await using var ownerHolder = owner;
+        await new StoreConfigProvider(owner).SeedIfEmptyAsync(config, ct);
+
+        /* The edit goes through the store's edit function (the real one, from the shared builder). */
+        await using (var function = owner.CreateCommand(DarlingManagedRoles.BuildEditMonitoredServerFunctionSql("config")))
+        {
+            await function.ExecuteNonQueryAsync(ct);
+        }
+
+        string? Resolve(MonitoredServer server) =>
+            remediationSlot ? DarlingSecrets.ResolveRemediationPassword(server) : DarlingSecrets.ResolvePassword(server, out _);
+
+        async Task<IReadOnlyList<MonitoredServer>> ReadStoreAsync()
+        {
+            await using var connection = await owner.OpenConnectionAsync(ct);
+            return await StoreConfigProvider.ReadMonitoredServersAsync(connection, config, ct);
+        }
+
+        void AssertRefused(MonitoredServer server)
+        {
+            var refused = Assert.Throws<InvalidOperationException>(() => Resolve(server));
+            Assert.Contains($"servers['{server.Name}'].{setting}", refused.Message, StringComparison.Ordinal);
+            Assert.Contains(DarlingOwnedSecrets.ReferenceRefusalText, refused.Message, StringComparison.Ordinal);
+        }
+
+        /* An edit made by a process that holds no owned set (the viewer's own process does not read darling.json) stores
+           the typed text as it is; the service then owns what the file writes. */
+        DarlingOwnedSecrets.Set(DarlingOwnedSet.Empty);
+        var seededRows = await ReadStoreAsync();
+        var alphaId = seededRows.Single(s => s.Name == "alpha").ServerId;
+        var body = remediationSlot
+            ? "{\"host\":\"moved.example.test\",\"password\":\"typed-secret-Q7\"}"
+            : $"{{\"host\":\"moved.example.test\",\"password\":\"{references[0]}\"}}";
+        var answer = await Edit.EditServerCoreAsync(
+            new Edit.PostgresServerEditStore(owner), alphaId, body,
+            (_, _) => Task.FromResult(new ConnectionProbeResult(true, 15, 3, "Enterprise", false, false, false, true, null)),
+            isWindows: true, logger: null, ct);
+        Assert.Equal("updated", System.Text.Json.Nodes.JsonNode.Parse(answer)!["status"]!.GetValue<string>());
+
+        /* A direct write that moves only the port of another file server. */
+        await using (var update = owner.CreateCommand("UPDATE config_monitored_servers SET port = 1434 WHERE name = 'beta'"))
+        {
+            Assert.Equal(1, await update.ExecuteNonQueryAsync(ct));
+        }
+
+        /* The core's rule is exact text, so a host that differs only in letter case is a different address. */
+        await using (var recase = owner.CreateCommand("UPDATE config_monitored_servers SET host = upper(host) WHERE name = 'epsilon'"))
+        {
+            Assert.Equal(1, await recase.ExecuteNonQueryAsync(ct));
+        }
+
+        OwnWhatTheFileWrites(config);
+        var rows = await ReadStoreAsync();
+
+        AssertRefused(rows.Single(s => s.Name == "alpha"));
+        AssertRefused(rows.Single(s => s.Name == "epsilon"));
+        Assert.Equal("moved.example.test", rows.Single(s => s.Name == "alpha").Host);
+        AssertRefused(rows.Single(s => s.Name == "beta"));
+
+        /* The server left where the file declares it still resolves. */
+        Assert.Equal(OwnedFileValue, Resolve(rows.Single(s => s.Name == "gamma")));
+
+        /* A file host spelled with padding, stored as the file spells it, is the same address under the core's exact-text rule. */
+        Assert.Equal(OwnedVariableValue, Resolve(rows.Single(s => s.Name == "delta")));
     }
 }

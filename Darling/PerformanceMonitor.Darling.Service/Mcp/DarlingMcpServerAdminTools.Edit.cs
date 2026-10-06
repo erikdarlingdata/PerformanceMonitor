@@ -690,6 +690,15 @@ public sealed partial class DarlingMcpServerAdminTools
         || string.Equals(storeAuth, ServerStoreAuth.ServicePrincipal, StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
+    /// The edit core's own rule for "the server is at the same address": the host text is equal ordinally (a request's host
+    /// is trimmed when it is read; the text is compared exactly as stored, and case counts) and the port is equal. An edit that fails it
+    /// has moved the server, so the stored password is not reused. <c>StoreConfigProvider</c> applies the same rule to
+    /// decide whether a row still sits at the address darling.json declares.
+    /// </summary>
+    internal static bool SameAddress(string host, int port, string otherHost, int otherPort) =>
+        string.Equals(host, otherHost, StringComparison.Ordinal) && port == otherPort;
+
+    /// <summary>
     /// The merged definition (the stored row plus the request) checked as add checks an entry, and the columns that
     /// differ. The credential rules: a password is required when a SQL or service-principal row's connection changes
     /// (probe rule b) or when the row switches INTO one of those modes, and it is never reused across modes; a
@@ -750,8 +759,7 @@ public sealed partial class DarlingMcpServerAdminTools
         }
 
         var connectionChanged =
-            !string.Equals(host, row.Host, StringComparison.Ordinal)
-            || port != row.Port
+            !SameAddress(host, port, row.Host, row.Port)
             || !string.Equals(database, row.Database, StringComparison.Ordinal)
             || readOnly != row.ReadOnlyIntent
             || authSwitched
