@@ -130,6 +130,74 @@ VALUES ($1, $2, $3, $4, $2, $5, $6)", _nextId++, Naive(DateTime.UtcNow.AddMinute
     }
 
     [Fact]
+    public async Task GetDeadlockDetail_PreviewTruncatedFlag_IsReadOffTheFilteredGraph_NotTheRawOne()
+    {
+        /* L3, shrink: a raw graph past the 2000-character preview whose long statement the filter replaces by the marker comes
+           back SHORT, so nothing was cut and the flag is false (the raw length said true). */
+        string longSecret = "CREATE LOGIN [shrink_ssf] WITH PASSWORD = N'" + new string('s', 1500) + "'";
+        string shrinking = Graph(longSecret + new string(' ', 400));
+        Assert.True(shrinking.Length > 2000);
+        var shrunk = await PreviewOfAsync(shrinking);
+        Assert.False(shrunk.Truncated);
+        Assert.DoesNotContain("PASSWORD", shrunk.Xml, StringComparison.OrdinalIgnoreCase);
+        Assert.True(shrunk.Xml.Length < 2000);
+
+        /* L3, growth: a raw graph of exactly 2000 characters whose 32-character statement becomes the 34-character marker
+           is over 2000 filtered, so the preview cuts it and the flag is true (the raw length said false). The padding sits in an attribute: the filter
+           replaces the statement's whole text, so padding after it would be dropped with it. */
+        string shortSecret = "CREATE LOGIN a WITH PASSWORD='x'";
+        string padded = Graph(shortSecret, pad: 2000 - Graph(shortSecret).Length - " note=\"\"".Length);
+        Assert.Equal(2000, padded.Length);
+        string? judged = SensitiveStatements.Xml(padded);
+        Assert.True(judged!.Length > 2000, "the filtered graph should be longer than the raw one: " + judged.Length);
+        var grown = await PreviewOfAsync(padded);
+        Assert.True(grown.Truncated);
+        Assert.EndsWith("... (truncated)", grown.Xml);
+        Assert.DoesNotContain("PASSWORD", grown.Xml, StringComparison.OrdinalIgnoreCase);
+
+        /* the plain graph is cut once and flagged once, on both lengths */
+        var plain = await PreviewOfAsync(Graph(new string('p', 2500)));
+        Assert.True(plain.Truncated);
+        var small = await PreviewOfAsync(Graph("SELECT 1"));
+        Assert.False(small.Truncated);
+    }
+
+    private static string Graph(string inputBuffer, int pad = 0) =>
+        "<deadlock" + (pad > 0 ? " note=\"" + new string('n', pad) + "\"" : "") + "><victim-list><victimProcess id=\"p1\"/></victim-list><process-list><process id=\"p1\"><inputbuf>"
+        + inputBuffer + "</inputbuf></process></process-list></deadlock>";
+
+    private async Task<(string Xml, bool Truncated)> PreviewOfAsync(string graph)
+    {
+        await ExecAsync("DELETE FROM deadlocks");
+        await ExecAsync(@"
+INSERT INTO deadlocks (deadlock_id, collection_time, server_id, server_name, deadlock_time, deadlock_graph_xml, victim_sql_text)
+VALUES ($1, $2, $3, $4, $2, $5, $6)", _nextId++, Naive(DateTime.UtcNow.AddMinutes(-5)), _serverId, ServerName, graph, "x");
+        string json = await McpBlockingTools.GetDeadlockDetail(_service, _serverManager, ServerName, full_graph: false);
+        var row = System.Text.Json.Nodes.JsonNode.Parse(json)!["deadlocks"]![0]!;
+        return ((string)row["deadlock_graph_xml"]!, (bool)row["deadlock_graph_xml_truncated"]!);
+    }
+
+    [Fact]
+    public async Task AnMcpExceptionThatNamesAStatement_ReachesTheClientSwept_ThroughLitesRealFilterList()
+    {
+        /* L1: the SDK builds an error result from a thrown McpException's message outside the result sweep. */
+        string filtered = await CallFilteredAsync("ssf_throw_probe", ("message", StatementScrubCanary.CanaryStatement));
+        foreach (string needle in StatementScrubCanary.SecretNeedles) Assert.DoesNotContain(needle, filtered);
+        Assert.Contains(SensitiveStatements.PlaceholderText, filtered);
+
+        string kept = await CallFilteredAsync("ssf_throw_probe", ("message", "server_name is required"));
+        Assert.Contains("server_name is required", kept);
+    }
+
+    [ModelContextProtocol.Server.McpServerToolType]
+    private sealed class ThrowProbeTools
+    {
+        [ModelContextProtocol.Server.McpServerTool(Name = "ssf_throw_probe"), System.ComponentModel.Description("Test-only: throws an McpException.")]
+        public static string Throw([System.ComponentModel.Description("The message.")] string message) =>
+            throw new ModelContextProtocol.McpException(message);
+    }
+
+    [Fact]
     public async Task GetPlanXml_WithholdsTheCanaryStatement_AndKeepsTheRestOfThePlan()
     {
         string plan = StatementScrubCanary.CanaryPlan();
@@ -265,7 +333,8 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, 'SsfDb', 10, 1000, 1000, 0, 0, 0, 10, 1000, 
                 .WithTools<McpQueryTools>()
                 .WithTools<McpBlockingTools>()
                 .WithTools<McpPlanTools>()
-                .WithTools<McpAlertTools>();
+                .WithTools<McpAlertTools>()
+                .WithTools<ThrowProbeTools>();
             builder.WithRequestFilters(McpHostService.AddCallToolFilters);
 
             var provider = services.BuildServiceProvider();
