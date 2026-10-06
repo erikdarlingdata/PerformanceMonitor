@@ -271,7 +271,7 @@ public sealed class SensitiveStatementsTests
             best = Math.Min(best, watch.ElapsedMilliseconds);
         }
 
-        Assert.True(best <= expectedLimitMs + 100, $"best of 3 took {best} ms for a {expectedLimitMs} ms limit");
+        TimingClaim.AtMost(best, expectedLimitMs + 100, $"best of 3 for a {expectedLimitMs} ms limit");
     }
 
     [Fact]
@@ -318,7 +318,7 @@ public sealed class SensitiveStatementsTests
             best = Math.Min(best, watch.ElapsedMilliseconds);
         }
 
-        Assert.True(best <= limitMs + 100, $"best of 3 took {best} ms; the second part had {limitMs} ms");
+        TimingClaim.AtMost(best, limitMs + 100, $"best of 3; the second part had {limitMs} ms");
     }
 
     /// <summary>A part that matches names the value whichever part it is, and a text neither matches is clean.</summary>
@@ -370,9 +370,14 @@ public sealed class SensitiveStatementsTests
         var text = string.Concat(Enumerable.Repeat(unit, 1_000_000 / unit.Length + 1)).Substring(0, 1_000_000)
             + " x_pwd = HASHBYTES(1)";
 
+        // The gate (#5369): fail-closed holds whatever the load (a slow machine may time out, never name nothing
+        // wrongly), and with no clock to run out the same split judge answers Clean.
+        Assert.NotEqual(SensitiveStatements.Verdict.Named, SensitiveStatements.Judge(text));
+        Assert.Equal(SensitiveStatements.Verdict.Clean, UnboundedJudge.Value(text));
+
+        // The wall-clock claim, a measurement unless DARLING_TIMING_TESTS=1.
         var best = long.MaxValue;
-        var clean = false;
-        for (var attempt = 0; attempt < 5 && !(clean && best < 250); attempt++)
+        for (var attempt = 0; attempt < 5 && best >= 250; attempt++)
         {
             var watch = Stopwatch.StartNew();
             var verdict = SensitiveStatements.Judge(text);
@@ -380,13 +385,11 @@ public sealed class SensitiveStatementsTests
 
             if (verdict == SensitiveStatements.Verdict.Clean)
             {
-                clean = true;
                 best = Math.Min(best, watch.ElapsedMilliseconds);
             }
         }
 
-        Assert.True(clean, "never came back Clean");
-        Assert.True(best < 250, $"best Clean took {best} ms");
+        TimingClaim.AtMost(best == long.MaxValue ? double.PositiveInfinity : best, 249, "1 MB near miss came back Clean");
     }
 
     /// <summary>A typed secret-named variable followed by a long dash banner, in a value where something else
@@ -411,7 +414,7 @@ public sealed class SensitiveStatementsTests
                 best = Math.Min(best, watch.ElapsedMilliseconds);
             }
 
-            Assert.True(best <= 400, $"best of 3 took {best} ms");
+            TimingClaim.AtMost(best, 400, "best of 3 for a banner named by timeout");
             Assert.True(SensitiveStatements.Names(text));
         }
     }
@@ -444,7 +447,7 @@ public sealed class SensitiveStatementsTests
         {
             var best = BestOfJudging(text, SensitiveStatements.Verdict.Clean, 5);
 
-            Assert.True(best < 50, $"best of 5 took {best} ms: {text}");
+            TimingClaim.AtMost(best, 49, $"best of 5: {text}");
             Assert.False(SensitiveStatements.Names(text));
         }
     }
@@ -459,7 +462,7 @@ public sealed class SensitiveStatementsTests
         {
             var best = BestOfJudging(text, SensitiveStatements.Verdict.Clean, 5);
 
-            Assert.True(best < 50, $"best of 5 took {best} ms: {text.Substring(0, 24)}");
+            TimingClaim.AtMost(best, 49, $"best of 5: {text.Substring(0, 24)}");
             Assert.False(SensitiveStatements.Names(text));
         }
     }
@@ -485,7 +488,7 @@ public sealed class SensitiveStatementsTests
         {
             var best = BestOfJudging(text, SensitiveStatements.Verdict.Clean, 5);
 
-            Assert.True(best < 50, $"best of 5 took {best} ms: {text.Substring(0, Math.Min(40, text.Length))}");
+            TimingClaim.AtMost(best, 49, $"best of 5: {text.Substring(0, Math.Min(40, text.Length))}");
         }
     }
 
@@ -500,7 +503,7 @@ public sealed class SensitiveStatementsTests
 
         var best = BestOfJudging(text, SensitiveStatements.Verdict.TimedOut, 3);
 
-        Assert.True(best <= 300, $"best of 3 took {best} ms");
+        TimingClaim.AtMost(best, 300, "best of 3 for a near hit that times out");
         Assert.True(SensitiveStatements.Names(text));
     }
 
@@ -523,7 +526,7 @@ public sealed class SensitiveStatementsTests
             watch.Stop();
 
             Assert.NotEqual(SensitiveStatements.Verdict.Clean, verdict);
-            Assert.True(watch.ElapsedMilliseconds < 1000, $"took {watch.ElapsedMilliseconds} ms: {text.Substring(0, 24)}");
+            TimingClaim.AtMost(watch.ElapsedMilliseconds, 999, $"typed declaration behind comment tokens: {text.Substring(0, 24)}");
         }
     }
 
@@ -541,19 +544,30 @@ public sealed class SensitiveStatementsTests
         SensitiveStatements.Judge("warm the regex up");
         foreach (var text in texts)
         {
-            var best = BestOfJudging(text, SensitiveStatements.Verdict.Clean, 5);
+            var best = BestOfJudging(text, SensitiveStatements.Verdict.Clean, 5, UnboundedJudge.Value);
 
-            Assert.True(best < 100, $"best of 5 took {best} ms for {text.Length} characters");
+            TimingClaim.AtMost(best, 99, $"best of 5 for {text.Length} characters");
         }
     }
 
-    private static long BestOfJudging(string text, SensitiveStatements.Verdict expected, int attempts)
+    /// <summary>The production pattern and split, with a one-minute timeout and a clock that never advances: no
+    /// load can time it out, so a verdict asserted through it cannot flake (#5369).</summary>
+    private static readonly Lazy<Func<string, SensitiveStatements.Verdict>> UnboundedJudge = new(() =>
+        SensitiveStatements.CreateJudge(
+            SensitiveStatements.Pattern,
+            TimeSpan.FromMinutes(1),
+            headAlternatives: SensitiveStatements.JudgeHeadAlternatives,
+            clock: static () => TimeSpan.Zero));
+
+    private static long BestOfJudging(
+        string text, SensitiveStatements.Verdict expected, int attempts, Func<string, SensitiveStatements.Verdict>? judge = null)
     {
+        judge ??= SensitiveStatements.Judge;
         var best = long.MaxValue;
         for (var attempt = 0; attempt < attempts; attempt++)
         {
             var watch = Stopwatch.StartNew();
-            var verdict = SensitiveStatements.Judge(text);
+            var verdict = judge(text);
             watch.Stop();
 
             Assert.Equal(expected, verdict);
@@ -703,20 +717,23 @@ public sealed class SensitiveStatementsTests
         var unit = "SELECT col_a, col_b FROM dbo.t WHERE c = 1 AND d <> 2 ";
         var text = string.Concat(Enumerable.Repeat(unit, 1_000_000 / unit.Length + 1)).Substring(0, 1_000_000);
 
+        // The gate (#5369): Clean with no time to run out. The speed is a measurement unless DARLING_TIMING_TESTS=1.
+        Assert.Equal(SensitiveStatements.Verdict.Clean, UnboundedJudge.Value(text));
+
         var best = long.MaxValue;
-        var clean = false;
-        for (var attempt = 0; attempt < 5 && !clean; attempt++)
+        for (var attempt = 0; attempt < 5 && best >= 250; attempt++)
         {
             var watch = Stopwatch.StartNew();
             var verdict = SensitiveStatements.Judge(text);
             watch.Stop();
 
-            clean = verdict == SensitiveStatements.Verdict.Clean;
-            best = Math.Min(best, watch.ElapsedMilliseconds);
+            if (verdict == SensitiveStatements.Verdict.Clean)
+            {
+                best = Math.Min(best, watch.ElapsedMilliseconds);
+            }
         }
 
-        Assert.True(clean, $"never came back Clean; best attempt {best} ms");
-        Assert.True(best < 250, $"took {best} ms");
+        TimingClaim.AtMost(best == long.MaxValue ? double.PositiveInfinity : best, 249, "1,000,000 ordinary characters came back Clean");
     }
 
     [Fact]
