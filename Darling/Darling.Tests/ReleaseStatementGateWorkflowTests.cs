@@ -28,7 +28,12 @@ public sealed class ReleaseStatementGateWorkflowTests
 {
     private const string ReleaseWorkflow = ".github/workflows/build.yml";
     private const string NightlyWorkflow = ".github/workflows/nightly.yml";
-    private const string GateTest = "StatementCensus_PendingEntries_BlockARelease";
+    // Bound to the test with nameof (via StatementColumnCensusTests.ReleaseGateTestName), so renaming the test fails the
+    // workflow pin below rather than leaving the gate filtering on a name that matches nothing (review of #5367, B-M1).
+    private const string GateTest = StatementColumnCensusTests.ReleaseGateTestName;
+
+    // The one summary line the runner prints for exactly one passing test. The gate step must demand this whole line.
+    private const string ExactGateSummary = "Total: 1, Errors: 0, Failed: 0, Skipped: 0, Not Run: 0";
 
     private sealed record Step(string Job, string Name, string Text);
 
@@ -111,6 +116,13 @@ public sealed class ReleaseStatementGateWorkflowTests
 
         // The gate runs the one test: with no filter the runner executes the whole suite a second time.
         Assert.Matches(@"-method\s+""?\*?" + GateTest, gate.Text);
+
+        // A -method filter that matches nothing exits 0 with "Total: 0", so a zero-test run would pass. The step must read the
+        // runner's summary and fail unless it shows exactly the one passing test, and must also fail on the runner's own exit code.
+        Assert.Contains(ExactGateSummary, gate.Text, StringComparison.Ordinal);
+        Assert.Matches(@"-not\s*\(\s*Select-String[^\r\n]*" + Regex.Escape(ExactGateSummary) + @"[^\r\n]*\)\s*\)\s*\{", gate.Text);
+        Assert.Matches(@"\$LASTEXITCODE\s+-ne\s+0", gate.Text);
+        Assert.Matches(@"Tee-Object\s+-FilePath\s+(\S+)[\s\S]*Select-String\s+-Path\s+\1\s", gate.Text);
 
         var jobSteps = steps.Where(s => s.Job == gate.Job).ToList();
         var firstPackaging = jobSteps.FindIndex(s => s.Name != gate.Name && IsPackaging(s));

@@ -626,6 +626,18 @@ public sealed class StatementColumnCensusTests
         return false;
     }
 
+    /// <summary>
+    /// Whether <paramref name="body"/> (of a method on <paramref name="ownType"/>) calls the site
+    /// <paramref name="target"/>: an unqualified call when it is on the same type, <c>Type.Method(</c> otherwise.
+    /// </summary>
+    private static bool CallsSite(string body, string ownType, (string Type, string Method) target)
+    {
+        var pattern = target.Type == ownType
+            ? @"(?<![\w.])" + Regex.Escape(target.Method) + @"\s*\("
+            : @"(?<![\w])" + Regex.Escape(target.Type) + @"\s*\.\s*" + Regex.Escape(target.Method) + @"\s*\(";
+        return Regex.IsMatch(body, pattern, RegexOptions.CultureInvariant);
+    }
+
     /// <summary>The problems with a watched list, reading each site's file through <paramref name="read"/>.</summary>
     private static string[] WatchedProblems(IEnumerable<Watched> writers, Func<string, string?> read)
     {
@@ -637,7 +649,12 @@ public sealed class StatementColumnCensusTests
                 problems.Add(w.Name + " needs a plan row and an owning lane");
             }
 
-            var hooked = false;
+            // Per method (review of #5367, A-L2): every site is a method that returns or hands on plan or statement
+            // text, and each one must filter. It filters when it judges directly, judges through a session it
+            // received, or calls another site of the same writer that does (the runner's fetch methods hand a session
+            // to the store writer; the sweep's fetch returns what its judging step returns). A second method that
+            // does none of these fails even when a sibling is hooked, so one hooked method cannot vouch for the rest.
+            var sites = new List<(string File, string Type, string Method, List<(string Parameters, string Body)> Bodies)>();
             foreach (var (file, type, method) in w.Sites)
             {
                 var source = read(file);
@@ -648,12 +665,39 @@ public sealed class StatementColumnCensusTests
                     continue;
                 }
 
-                hooked |= bodies.Any(d => HasSessionCall(d.Body) || JudgesThroughAReceivedSession(d));
+                sites.Add((file, type, method, bodies));
             }
 
-            if (!w.Pending && !hooked)
+            var filtering = new HashSet<(string Type, string Method)>();
+            foreach (var site in sites)
             {
-                problems.Add(w.Name + " is not pending but none of its sites calls SensitiveStatements");
+                if (site.Bodies.Any(d => HasSessionCall(d.Body) || JudgesThroughAReceivedSession(d)))
+                {
+                    filtering.Add((site.Type, site.Method));
+                }
+            }
+
+            bool changed;
+            do
+            {
+                changed = false;
+                foreach (var site in sites.Where(x => !filtering.Contains((x.Type, x.Method))))
+                {
+                    if (filtering.Any(f => site.Bodies.Any(d => CallsSite(d.Body, site.Type, f))))
+                    {
+                        filtering.Add((site.Type, site.Method));
+                        changed = true;
+                    }
+                }
+            }
+            while (changed);
+
+            if (!w.Pending)
+            {
+                foreach (var site in sites.Where(x => !filtering.Contains((x.Type, x.Method))))
+                {
+                    problems.Add(w.Name + ": " + site.Type + "." + site.Method + " is not pending but neither calls SensitiveStatements nor hands the text to a method that does");
+                }
             }
         }
 
@@ -759,6 +803,72 @@ namespace N
     }
 
     [Fact]
+    public void TheWatchedScan_JudgesEveryMethodOfAWriter_NotJustTheOnesThatFilter()
+    {
+        // Review of #5367 (A-L2): the scan passed a writer when any one of its methods filtered, so a method added
+        // beside a hooked one (a second fetch that returns plan text) went unseen.
+        const string Source = @"
+namespace N
+{
+    internal static class Sweep
+    {
+        internal static async Task<(int, string)> Fetch(SensitiveStatements.Session scrub, string xml)
+        {
+            return Judge(scrub, xml);
+        }
+
+        internal static async Task<(int, string)> FetchAnother(SensitiveStatements.Session scrub, string xml)
+        {
+            return (1, xml);
+        }
+
+        internal static (int, string) Judge(SensitiveStatements.Session scrub, string xml)
+        {
+            scrub.TryXml(xml, out var judged);
+            return (1, judged);
+        }
+
+        internal static void Mentions(string xml)
+        {
+            // Judge(scrub, xml) in a comment is not a call
+            Use(xml);
+        }
+    }
+
+    internal static class Runner
+    {
+        internal static void Hands(string xml)
+        {
+            Sweep.Judge(null, xml);
+        }
+
+        internal static void Skips(string xml)
+        {
+            Other.Judge(null, xml);
+        }
+    }
+}";
+        Watched Writer(params (string Type, string Method)[] sites) =>
+            new("planted", "6.7 row 0", "R0", false, sites.Select(s => ("f.cs", s.Type, s.Method)).ToArray());
+
+        // A method that hands the text on to a hooked sibling filters through it (the sweep's fetch, the runner's fetches).
+        Assert.Empty(WatchedProblems(new[] { Writer(("Sweep", "Fetch"), ("Sweep", "Judge")) }, _ => Source));
+        Assert.Empty(WatchedProblems(new[] { Writer(("Runner", "Hands"), ("Sweep", "Judge")) }, _ => Source));
+
+        // RED on the any-method rule: a second method that does not filter fails although a sibling is hooked.
+        var unfiltered = WatchedProblems(new[] { Writer(("Sweep", "Fetch"), ("Sweep", "Judge"), ("Sweep", "FetchAnother")) }, _ => Source);
+        Assert.Single(unfiltered);
+        Assert.Contains("Sweep.FetchAnother", unfiltered[0], StringComparison.Ordinal);
+
+        // A comment naming a hooked sibling, or a call to another type's method of the same name, is not delegation.
+        Assert.Single(WatchedProblems(new[] { Writer(("Sweep", "Mentions"), ("Sweep", "Judge")) }, _ => Source));
+        Assert.Single(WatchedProblems(new[] { Writer(("Runner", "Skips"), ("Sweep", "Judge")) }, _ => Source));
+
+        // A pending writer is not judged, as before.
+        Assert.Empty(WatchedProblems(new[] { Writer(("Sweep", "FetchAnother")) with { Pending = true } }, _ => Source));
+    }
+
+    [Fact]
     public void TheOversizedSweepWatchedWriter_IsHookedThroughTheSessionItReceives()
     {
         var source = ReadSiteFile("Darling/PerformanceMonitor.Darling.Service/OversizedPlanBacklogSweep.cs");
@@ -778,6 +888,13 @@ namespace N
             .Concat(WatchedWriters.Where(w => w.Pending).Select(w => "writer " + w.Name + " (" + w.Lane + ")"))
             .OrderBy(k => k, StringComparer.Ordinal)
             .ToArray();
+
+    /// <summary>
+    /// The gate test's name, bound with <c>nameof</c> so a rename moves it. The release workflow's gate step filters on this
+    /// name, and <c>ReleaseStatementGateWorkflowTests</c> reads this constant, so a rename that leaves the workflow behind
+    /// fails a pin instead of leaving the gate matching zero tests (#5320, review of #5367).
+    /// </summary>
+    public const string ReleaseGateTestName = nameof(StatementCensus_PendingEntries_BlockARelease);
 
     /// <summary>
     /// The release-cut gate (see the release-checklist skill). Run by name; with <c>DARLING_RELEASE_CUT=1</c> it
