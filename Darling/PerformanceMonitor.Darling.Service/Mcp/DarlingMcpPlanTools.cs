@@ -391,25 +391,22 @@ public sealed class DarlingMcpPlanTools
 
         try
         {
-            string? text, db, planXml, isolation = null, collector;
+            string? text, db, planXml, isolation = null;
             switch (kind)
             {
                 case DarlingReproScript.KindQueryHash:
-                    collector = "query_stats";
                     db = database_name;
                     text = await DarlingReproScript.ReadQueryStatsTextAsync(postgres, resolved.ServerId, query_hash!, database_name, cancellationToken);
                     planXml = text == null ? null : await DarlingStoredPlanReader.GetQueryStatsPlanXmlByHashAsync(
                         postgres, resolved.ServerId, query_hash!, database_name, cancellationToken);
                     break;
                 case DarlingReproScript.KindQueryStore:
-                    collector = "query_store";
                     db = database_name;
                     text = await DarlingReproScript.ReadQueryStoreTextAsync(postgres, resolved.ServerId, database_name!, query_id!.Value, cancellationToken);
                     planXml = text == null ? null : await DarlingStoredPlanReader.GetQueryStorePlanTextAsync(
                         postgres, resolved.ServerId, database_name!, query_id.Value, plan_id, cancellationToken: cancellationToken);
                     break;
                 default:
-                    collector = "query_snapshots";
                     (text, isolation, db) = await DarlingReproScript.ReadSnapshotTextAsync(
                         postgres, resolved.ServerId, snapshotTime, session_id!.Value, request_id, cancellationToken);
                     planXml = text == null ? null : await DarlingStoredPlanReader.GetQuerySnapshotPlanXmlAsync(
@@ -419,8 +416,19 @@ public sealed class DarlingMcpPlanTools
 
             var script = DarlingReproScript.Build(kind, text, db, planXml, isolation);
             if (script == null)
-                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, collector, cancellationToken)
+            {
+                /* #5233: each kind names its own collector as a literal, so the capability wiring guard (and a
+                   reader) can see which collector's miss each answer reports; a variable here read as an unknown
+                   name, which answers "supported" and restores the generic message. */
+                var notCollected = kind switch
+                {
+                    DarlingReproScript.KindQueryHash => await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "query_stats", cancellationToken),
+                    DarlingReproScript.KindQueryStore => await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "query_store", cancellationToken),
+                    _ => await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "query_snapshots", cancellationToken),
+                };
+                return notCollected
                     ?? McpHelpers.Status("unavailable", $"No stored query text found for this {kind} key, so no repro script can be built.");
+            }
 
             return JsonSerializer.Serialize(new
             {
