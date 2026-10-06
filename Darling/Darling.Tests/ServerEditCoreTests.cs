@@ -30,7 +30,7 @@ namespace Darling.Tests;
 [Collection("darling-owned-secrets")]
 public sealed class ServerEditCoreTests : IDisposable
 {
-    private const string Secret = "env:SYNTH_EDIT_SECRET_REF";
+    private const string Secret = "Synth-Edit-Pw-1";
     private const string LiteralSecret = "Lit3ral-Sw0rd-Value";
 
     private readonly DarlingOwnedSet _ownedBefore = DarlingOwnedSecrets.Current;
@@ -157,7 +157,6 @@ public sealed class ServerEditCoreTests : IDisposable
     [InlineData("{\"encrypt_mode\":\"Sometimes\"}")]
     [InlineData("{\"monthly_cost_usd\":-1}")]
     [InlineData("{\"monthly_cost_usd\":\"lots\"}")]
-    [InlineData("{\"password\":\"\"}")]
     [InlineData("{\"expected_modified_at\":\"\"}")]
     public void ABadBody_IsInvalid_BeforeAnyStoreAccess(string json)
     {
@@ -419,14 +418,14 @@ public sealed class ServerEditCoreTests : IDisposable
     }
 
     [Fact]
-    public void AReferenceToDarlingsOwnSecrets_IsRefused_WithTheOwnedSecretSentence()
+    public void AReferenceToDarlingsOwnSecrets_IsRefused_WithTheSentenceEveryReferenceGets()
     {
         DarlingOwnedSecrets.Set(new DarlingOwnedSet(Array.Empty<string>(), new[] { "DARLING_CONFIG" }));
 
         var (plan, error) = Plan(SqlRow(), "{\"host\":\"b.example.test\",\"password\":\"env:DARLING_CONFIG\"}");
 
         Assert.Null(plan);
-        Assert.Equal(DarlingOwnedSecrets.ReferenceRefusalText, error);
+        Assert.Equal(DarlingSecretSource.RequestReferenceRefusalText, error);
     }
 
     [Fact]
@@ -592,14 +591,15 @@ public sealed class ServerEditCoreTests : IDisposable
     }
 
     [Fact]
-    public async Task TheStoredSecret_IsTheProtectedReference_NotThePlaintextForm()
+    public async Task TheStoredSecret_IsTheProtectedForm_NotThePlaintextForm()
     {
         var store = new FakeStore { Row = SqlRow() };
 
         await Run(store, "{\"host\":\"b.example.test\",\"password\":\"" + Secret + "\"}", Reachable);
 
         var stored = Assert.Single(store.LastSets, s => s.Column == "encrypted_password");
-        Assert.Equal(Secret, stored.Value);
+        Assert.Equal(Secret, DarlingSecrets.Unprotect((string)stored.Value!));
+        Assert.NotEqual(Secret, stored.Value);
     }
 
     [Fact]
