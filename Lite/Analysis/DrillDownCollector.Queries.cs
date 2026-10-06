@@ -335,7 +335,9 @@ latest AS
         max_grant_kb,
         min_spills,
         max_spills,
-        query_text,
+        -- #5361: no text here. This window sort would carry every row's whole text (up to 64 KB each) to keep five
+        -- plans, and even a test of the column for NULL reads it, so the text of the plans that print is read afterwards
+        -- (ParameterSensitiveTextSql); a plan whose newest row has no text prints empty text, as before.
         ROW_NUMBER() OVER
         (
             PARTITION BY database_name, query_hash, query_plan_hash
@@ -357,7 +359,6 @@ SELECT
     max_worker_time::DOUBLE PRECISION / NULLIF(min_worker_time, 0) AS worker_ratio,
     max_grant_kb::DOUBLE PRECISION / NULLIF(min_grant_kb, 0) AS grant_ratio,
     CASE WHEN max_spills > 0 AND min_spills = 0 THEN 1 ELSE 0 END AS spill_divergence,
-    query_text,
     creation_time,
     server_offset_minutes,
     server_time_zone_id
@@ -376,41 +377,134 @@ ORDER BY worker_ratio DESC";
         /* $4: the first filter's bound, opened by an hour (#4821). The exact test is made below, per row. */
         cmd.Parameters.Add(new DuckDBParameter { Value = PlanCreationClock.RoughBound(context.TimeRangeStart) });
 
-        var items = new List<object>();
+        var kept = new List<ParameterSensitivePlan>();
+        /* Closed before the text read below: a connection runs one reader at a time. */
+        using (var reader = await cmd.ExecuteReaderAsync(context.CancellationToken))
+        {
+            while (await reader.ReadAsync(context.CancellationToken))
+            {
+                /* The exact compiled-before-the-window test with the offset in force when the plan was compiled
+                   (#4821); the five-row cap is applied after it, not in SQL. */
+                if (reader.IsDBNull(9)
+                    || !PlanCreationClock.CompiledBeforeWindow(
+                        PlanCreationClock.ClockFrom(reader, 10, 11), reader.GetDateTime(9), context.TimeRangeStart))
+                {
+                    continue;
+                }
+
+                if (kept.Count >= ParameterSensitiveQueryCap)
+                {
+                    break;
+                }
+
+                kept.Add(new ParameterSensitivePlan(
+                    Key: new PlanKey(
+                        reader.IsDBNull(0) ? null : reader.GetString(0),
+                        reader.IsDBNull(1) ? null : reader.GetString(1),
+                        reader.IsDBNull(2) ? null : reader.GetString(2)),
+                    ExecutionCount: reader.IsDBNull(3) ? 0L : Convert.ToInt64(reader.GetValue(3)),
+                    MinWorkerTimeUs: reader.IsDBNull(4) ? 0L : Convert.ToInt64(reader.GetValue(4)),
+                    MaxWorkerTimeUs: reader.IsDBNull(5) ? 0L : Convert.ToInt64(reader.GetValue(5)),
+                    WorkerRatio: reader.IsDBNull(6) ? 0.0 : Convert.ToDouble(reader.GetValue(6)),
+                    GrantRatio: reader.IsDBNull(7) ? 0.0 : Convert.ToDouble(reader.GetValue(7)),
+                    SpillsOnSomeInputs: !reader.IsDBNull(8) && Convert.ToInt32(reader.GetValue(8)) == 1));
+            }
+        }
+
+        if (kept.Count == 0)
+            return;
+
+        /* #5361: the whole text of the plans that print, not of every plan the read above ranked. One read; a plan whose
+           newest row has no text, or whose row is gone by now, prints empty text, as a row with no text did. */
+        var text = await ReadParameterSensitiveTextAsync(connection, kept.Select(p => p.Key).Distinct().ToList(), context);
+
+        finding.DrillDown!["parameter_sensitive_queries"] = kept.Select(p => (object)new
+        {
+            database = p.Key.Database ?? "",
+            query_hash = p.Key.QueryHash ?? "",
+            query_plan_hash = p.Key.QueryPlanHash ?? "",
+            execution_count = p.ExecutionCount,
+            min_worker_time_us = p.MinWorkerTimeUs,
+            max_worker_time_us = p.MaxWorkerTimeUs,
+            worker_ratio = p.WorkerRatio,
+            grant_ratio = p.GrantRatio,
+            spills_on_some_inputs = p.SpillsOnSomeInputs,
+            query_text = text.TryGetValue(p.Key, out var queryText)
+                ? McpHelpers.StatementPreview(queryText, 500)
+                : ""
+        }).ToList();
+    }
+
+    /// <summary>A parameter-sensitive plan the reader kept, before its text is read (#5361).</summary>
+    private sealed record ParameterSensitivePlan(
+        PlanKey Key,
+        long ExecutionCount,
+        long MinWorkerTimeUs,
+        long MaxWorkerTimeUs,
+        double WorkerRatio,
+        double GrantRatio,
+        bool SpillsOnSomeInputs);
+
+    /// <summary>A plan's identity in <see cref="ParameterSensitiveTextSql"/>: the three raw column values, NULL kept
+    /// as NULL (the printed fields map it to empty text), compared ordinally.</summary>
+    private readonly record struct PlanKey(string? Database, string? QueryHash, string? QueryPlanHash);
+
+    /// <summary>
+    /// The whole text of the parameter-sensitive plans the reader keeps (#5361): each plan's newest row of the window
+    /// with <c>delta_execution_count &gt; 0</c>, the row the ranking read called <c>rn = 1</c>, so a kept plan prints
+    /// the text it printed when the ranking read carried it. <c>$1</c> to <c>$3</c> are the server and the window; the
+    /// plans follow as <c>$4</c> upward, three to a plan, and a NULL part matches a NULL part (as the ranking's
+    /// <c>PARTITION BY</c> groups it). <c>{KEYS}</c> is replaced with that plan list.
+    /// </summary>
+    private const string ParameterSensitiveTextSql = @"
+SELECT database_name, query_hash, query_plan_hash, query_text
+FROM v_query_stats
+WHERE server_id = $1
+AND   collection_time >= $2
+AND   collection_time <= $3
+AND   delta_execution_count > 0
+AND   ({KEYS})
+QUALIFY ROW_NUMBER() OVER
+(
+    PARTITION BY database_name, query_hash, query_plan_hash
+    ORDER BY collection_time DESC
+) = 1";
+
+    private async Task<Dictionary<PlanKey, string>> ReadParameterSensitiveTextAsync(
+        DuckDBConnection connection, IReadOnlyList<PlanKey> plans, AnalysisContext context)
+    {
+        using var cmd = connection.CreateCommand();
+        var keys = new List<string>();
+        cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
+        cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart });
+        cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
+        var next = 4;
+        foreach (var plan in plans)
+        {
+            keys.Add($"(database_name IS NOT DISTINCT FROM ${next} AND query_hash IS NOT DISTINCT FROM ${next + 1} "
+                + $"AND query_plan_hash IS NOT DISTINCT FROM ${next + 2})");
+            next += 3;
+            cmd.Parameters.Add(new DuckDBParameter { Value = (object?)plan.Database ?? DBNull.Value });
+            cmd.Parameters.Add(new DuckDBParameter { Value = (object?)plan.QueryHash ?? DBNull.Value });
+            cmd.Parameters.Add(new DuckDBParameter { Value = (object?)plan.QueryPlanHash ?? DBNull.Value });
+        }
+
+        cmd.CommandText = ParameterSensitiveTextSql.Replace("{KEYS}", string.Join(" OR ", keys));
+
+        var text = new Dictionary<PlanKey, string>();
         using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
         while (await reader.ReadAsync(context.CancellationToken))
         {
-            /* The exact compiled-before-the-window test with the offset in force when the plan was compiled
-               (#4821); the five-row cap is applied after it, not in SQL. */
-            if (reader.IsDBNull(10)
-                || !PlanCreationClock.CompiledBeforeWindow(
-                    PlanCreationClock.ClockFrom(reader, 11, 12), reader.GetDateTime(10), context.TimeRangeStart))
+            if (!reader.IsDBNull(3))
             {
-                continue;
+                text[new PlanKey(
+                    reader.IsDBNull(0) ? null : reader.GetString(0),
+                    reader.IsDBNull(1) ? null : reader.GetString(1),
+                    reader.IsDBNull(2) ? null : reader.GetString(2))] = reader.GetString(3);
             }
-
-            if (items.Count >= ParameterSensitiveQueryCap)
-            {
-                break;
-            }
-
-            items.Add(new
-            {
-                database = reader.IsDBNull(0) ? "" : reader.GetString(0),
-                query_hash = reader.IsDBNull(1) ? "" : reader.GetString(1),
-                query_plan_hash = reader.IsDBNull(2) ? "" : reader.GetString(2),
-                execution_count = reader.IsDBNull(3) ? 0L : Convert.ToInt64(reader.GetValue(3)),
-                min_worker_time_us = reader.IsDBNull(4) ? 0L : Convert.ToInt64(reader.GetValue(4)),
-                max_worker_time_us = reader.IsDBNull(5) ? 0L : Convert.ToInt64(reader.GetValue(5)),
-                worker_ratio = reader.IsDBNull(6) ? 0.0 : Convert.ToDouble(reader.GetValue(6)),
-                grant_ratio = reader.IsDBNull(7) ? 0.0 : Convert.ToDouble(reader.GetValue(7)),
-                spills_on_some_inputs = !reader.IsDBNull(8) && Convert.ToInt32(reader.GetValue(8)) == 1,
-                query_text = reader.IsDBNull(9) ? "" : McpHelpers.StatementPreview(reader.GetString(9), 500)
-            });
         }
 
-        if (items.Count > 0)
-            finding.DrillDown!["parameter_sensitive_queries"] = items;
+        return text;
     }
 
     /// <summary>
