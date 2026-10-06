@@ -625,13 +625,15 @@ jobs:
         if: steps.filter.outputs.darling == 'true' || steps.filter.outputs.core == 'true' || steps.filter.outputs.root == 'true' || github.event_name == 'release'
         run: dotnet run --project Darling/Darling.Tests/Darling.Tests.csproj -c Release --no-build
 
-      # #5320: the statement-filter release gate. StatementCensus_PendingEntries_BlockARelease passes
-      # without the variable (nightly and pull-request CI run while columns are still pending) and
-      # fails with it while any statement-column census entry or watched writer is pending, so a
-      # release cannot ship an unhooked column. It runs here, ahead of every publish and package
-      # step below, and only on the release event; ReleaseStatementGateWorkflowTests pins both
-      # halves, and that no other workflow sets the variable. Darling.Tests is already built
-      # (Release) by the build step above, so this runs the one test by name and nothing else.
+      # #5320: the statement-filter release gate. StatementCensus_PendingEntries_BlockARelease fails
+      # while any statement-column census entry or watched writer is pending, in every normal Darling
+      # test run (the step above), so a pull request that adds an unjudged column fails on its own.
+      # This step stays as the release-time backstop: it sets DARLING_RELEASE_CUT=1 and runs the one
+      # test by name, ahead of every publish and package step below, and only on the release event,
+      # so a release cannot ship an unhooked column even if the step above was skipped.
+      # ReleaseStatementGateWorkflowTests pins both halves, and that no other workflow sets the
+      # variable. Darling.Tests is already built (Release) by the build step above, so this runs
+      # the one test by name and nothing else.
       - name: Statement filter release gate
         if: github.event_name == 'release'
         env:

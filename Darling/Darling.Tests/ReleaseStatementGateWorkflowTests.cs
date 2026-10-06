@@ -19,10 +19,12 @@ namespace Darling.Tests;
 /// The statement-filter release gate runs inside the release job, before the job packages anything (#5320, N4).
 ///
 /// <para><b>The defect this closes was a gate nobody ran.</b> <c>StatementColumnCensusTests.StatementCensus_PendingEntries_BlockARelease</c>
-/// fails while any statement-column census entry is pending, but only when <c>DARLING_RELEASE_CUT=1</c>, and the only
+/// once failed while a statement-column census entry was pending only when <c>DARLING_RELEASE_CUT=1</c>, and the only
 /// place that said to set it was a checklist step. A release that skipped the step shipped with a column still
-/// unhooked and every check green. The ruling (Erik, 2026-10-06) is that the release job runs the gate itself, and that
-/// no other workflow does: nightly and pull-request CI must keep flowing while columns are pending.</para>
+/// unhooked and every check green. The first ruling (Erik, 2026-10-06) is that the release job runs the gate itself, and
+/// that no other workflow sets the variable. Nothing is pending now, so the test fails on ANY pending entry whether or not
+/// the variable is set (#5320): a pull request that adds an unjudged column fails in its own Darling test run, and the
+/// release step is the backstop, not the only place the gate bites.</para>
 /// </summary>
 public sealed class ReleaseStatementGateWorkflowTests
 {
@@ -135,12 +137,32 @@ public sealed class ReleaseStatementGateWorkflowTests
             + "the job's first packaging step, so a release cannot publish while a statement column is pending (#5320)");
     }
 
+    [Fact]
+    public void TheGateTest_FailsOnAnyPendingEntry_WhetherOrNotTheReleaseCutIsSet()
+    {
+        // #5320: the ratchet is part of every Darling test run, so the test must not branch on the variable. A copy of the
+        // old "only when DARLING_RELEASE_CUT=1" shape would let a pull request add an unjudged column and pass.
+        var source = ReadRepoFileLf("Darling/Darling.Tests/StatementColumnCensusTests.cs");
+        var start = source.IndexOf("public void " + GateTest + "()", StringComparison.Ordinal);
+        Assert.True(start >= 0, "the gate test method was not found in StatementColumnCensusTests.cs");
+
+        var end = source.IndexOf("\n    }\n", start, StringComparison.Ordinal);
+        Assert.True(end > start, "the end of the gate test method was not found");
+
+        var body = source[start..end];
+        Assert.DoesNotContain("GetEnvironmentVariable", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("DARLING_RELEASE_CUT", body, StringComparison.Ordinal);
+        Assert.Contains("Assert.True(", body, StringComparison.Ordinal);
+        Assert.Contains("pending.Length == 0", body, StringComparison.Ordinal);
+    }
+
     [Theory]
     [InlineData(NightlyWorkflow)]
     [InlineData(ReleaseWorkflow)]
     public void OnlyTheReleaseStep_SetsTheReleaseCut(string workflow)
     {
-        // Nightly and pull-request CI run while columns are pending, so none may set the variable outside the release-only step.
+        // The test no longer reads the variable, so setting it elsewhere is redundant; the release-only step stays the one place that
+        // names it, so the release backstop is a single pinned step rather than a variable scattered over workflows.
         var offending = Steps(workflow)
             .Where(s => s.Text.Contains("DARLING_RELEASE_CUT", StringComparison.Ordinal))
             .Where(s => !(workflow == ReleaseWorkflow
