@@ -72,7 +72,7 @@ public class StatusBarSizeReadLockTests
 
         try
         {
-            var initializer = new DuckDbInitializer(Path.Combine(tempDir, "test.duckdb"));
+            using var initializer = new DuckDbInitializer(Path.Combine(tempDir, "test.duckdb"));
 
             var lockHeld = new ManualResetEventSlim(false);
             var release = new ManualResetEventSlim(false);

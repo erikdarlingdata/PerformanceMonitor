@@ -70,7 +70,7 @@ public sealed class OverviewNewestReadsHotFirstTests : IDisposable
     public async Task ANewestHotRow_IsReadWithoutOpeningTheArchive_AndAnArchiveOnlyServer_StillReadsItsNewestArchivedRow()
     {
         var ct = TestContext.Current.CancellationToken;
-        var initializer = new DuckDbInitializer(_dbPath);
+        using var initializer = new DuckDbInitializer(_dbPath);
         await initializer.InitializeAsync();
 
         var hotNewest = new DateTime(2026, 9, 22, 21, 0, 0);

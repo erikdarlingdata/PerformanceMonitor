@@ -42,7 +42,7 @@ public class DismissReliabilityTests : IDisposable
 
     private async Task<DuckDBConnection> InitializeDatabaseAsync()
     {
-        var initializer = new DuckDbInitializer(_dbPath);
+        using var initializer = new DuckDbInitializer(_dbPath);
         await initializer.InitializeAsync();
 
         var connection = new DuckDBConnection($"Data Source={_dbPath}");
@@ -206,7 +206,7 @@ AND    dismissed = FALSE";
     [Fact]
     public async Task WriteLock_BlocksReadersDuringDismiss()
     {
-        var initializer = new DuckDbInitializer(_dbPath);
+        using var initializer = new DuckDbInitializer(_dbPath);
         await initializer.InitializeAsync();
 
         // Acquire write lock on this thread
@@ -236,7 +236,7 @@ AND    dismissed = FALSE";
     [Fact]
     public async Task WriteLock_Timeout_ThrowsTimeoutException()
     {
-        var initializer = new DuckDbInitializer(_dbPath);
+        using var initializer = new DuckDbInitializer(_dbPath);
         await initializer.InitializeAsync();
 
         // Simulate archival holding the write lock on a background thread

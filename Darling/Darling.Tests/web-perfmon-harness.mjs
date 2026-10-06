@@ -84,25 +84,12 @@ process.on("unhandledRejection", (e) => rejections.push(String(e && e.stack ? e.
 const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "perfmon-grid-"));
 let modules;
 try {
-  fs.mkdirSync(path.join(scratch, "pages"));
+  /* Copy the whole js tree (js/, js/pages/ and every subdirectory) rather than a hand-kept list (#5279): a page module that
+     another PR adds then needs no edit here. Only imported files load, so the rest are inert; every stand-in below is
+     written AFTER the copy, so it still replaces the real file. */
+  fs.cpSync(jsDir, scratch, { recursive: true });
   fs.writeFileSync(path.join(scratch, "package.json"), '{ "type": "module" }');
-  fs.copyFileSync(path.join(jsDir, "util.js"), path.join(scratch, "util.js"));
-  fs.copyFileSync(path.join(jsDir, "panels.js"), path.join(scratch, "panels.js"));
-  fs.copyFileSync(path.join(jsDir, "grid-tools.js"), path.join(scratch, "grid-tools.js"));
-  fs.copyFileSync(path.join(jsDir, "pages", "server-tabs.js"), path.join(scratch, "pages", "server-tabs.js"));
-  const findings = path.join("pages", "analysis-findings.js");
-  if (fs.existsSync(path.join(jsDir, findings))) fs.copyFileSync(path.join(jsDir, findings), path.join(scratch, findings));
-  fs.copyFileSync(path.join(jsDir, "read-fields.js"), path.join(scratch, "read-fields.js"));
-  for (const rel of ["grid-tools.js", "multi-picker.js", path.join("pages", "analysis-findings.js"), path.join("pages", "plan-viewer.js"), path.join("pages", "pg-plan-viewer.js")]) {
-    const from = path.join(jsDir, rel);
-    if (!fs.existsSync(from)) continue;
-    fs.mkdirSync(path.dirname(path.join(scratch, rel)), { recursive: true });
-    fs.copyFileSync(from, path.join(scratch, rel));
-  }
-  /* #5246: the Graph cell of the Deadlock Graphs grid. */
-  fs.mkdirSync(path.join(scratch, "pages"), { recursive: true });
-  fs.copyFileSync(path.join(jsDir, "pages", "deadlock-graph.js"), path.join(scratch, "pages", "deadlock-graph.js"));
-  fs.copyFileSync(path.join(jsDir, "charts.js"), path.join(scratch, "charts-real.js"));
+  fs.copyFileSync(path.join(scratch, "charts.js"), path.join(scratch, "charts-real.js"));
   fs.writeFileSync(
     path.join(scratch, "charts.js"),
     'import { renderLineChart as drawLineChart } from "./charts-real.js";\n' +

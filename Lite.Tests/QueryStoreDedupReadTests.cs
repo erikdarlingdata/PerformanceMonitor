@@ -104,7 +104,8 @@ public sealed class QueryStoreDedupReadTests : IClassFixture<SharedDuckDbFixture
         long avgWrites = 0,
         long avgPhysicalReads = 0,
         string executionType = "Regular",
-        string? moduleName = null)
+        string? moduleName = null,
+        string? replicaRole = null)
     {
         using var readLock = _duckDb.AcquireReadLock();
         var connection = await SeedConnectionAsync();
@@ -116,8 +117,8 @@ INSERT INTO query_store_stats
      module_name, query_text, query_hash, execution_count, avg_cpu_time_us, avg_duration_us,
      avg_logical_io_reads, avg_logical_io_writes, avg_physical_io_reads,
      query_plan_hash, is_forced_plan, force_failure_count,
-     runtime_stats_interval_id, interval_start_time_utc, interval_end_time_utc)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25)";
+     runtime_stats_interval_id, interval_start_time_utc, interval_end_time_utc, replica_role)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26)";
         cmd.Parameters.Add(new DuckDBParameter { Value = _nextId++ });
         cmd.Parameters.Add(new DuckDBParameter { Value = collectionTime });
         cmd.Parameters.Add(new DuckDBParameter { Value = ServerId });
@@ -143,6 +144,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
         cmd.Parameters.Add(new DuckDBParameter { Value = (object?)intervalId ?? DBNull.Value });
         cmd.Parameters.Add(new DuckDBParameter { Value = (object?)intervalStart ?? DBNull.Value });
         cmd.Parameters.Add(new DuckDBParameter { Value = (object?)intervalEnd ?? DBNull.Value });
+        cmd.Parameters.Add(new DuckDBParameter { Value = (object?)replicaRole ?? DBNull.Value });
         await cmd.ExecuteNonQueryAsync();
     }
 
@@ -806,6 +808,89 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
         var bucket = Assert.Single(await service.GetQueryStoreSlicerDataAsync(ServerId, hoursBack: 24));
         Assert.Equal(bucket.BucketTime, point.PointTime);
         Assert.Equal(bucket.TotalCpu, point.CpuMs, precision: 6);
+    }
+
+    /// <summary>
+    /// #5306: the history window's read keeps listing EVERY snapshot (the "show me every snapshot" surface that
+    /// #1841 left raw on purpose), and the window's Total Executions counts each interval once, at its latest
+    /// snapshot, from the identity the read carries.
+    ///
+    /// <para>The seed is this class's cumulative shape plus a second interval: interval one collected three times
+    /// (10, 25, 40) and interval two collected once (5). The grid's four rows add up to 80, which is what the window
+    /// showed; the interval-aware total is 45.</para>
+    /// </summary>
+    [Fact]
+    public async Task HistoryRead_ListsEverySnapshot_WhileTheSummaryTotalCountsEachIntervalOnce()
+    {
+        const long QueryId = 7;
+        const long PlanId = 77;
+
+        foreach (var (minute, execs) in new[] { (5, 10L), (10, 25L), (15, 40L) })
+        {
+            await SeedAsync(BucketStart.AddMinutes(minute), QueryId, PlanId, FirstExecA,
+                executionCount: execs, avgCpuUs: 100, avgDurationUs: 100, avgReads: 1, queryHash: "0xHASH_H",
+                intervalId: 9301, intervalStart: BucketStart);
+        }
+        await SeedAsync(BucketStart.AddMinutes(20), QueryId, PlanId, FirstExecB,
+            executionCount: 5, avgCpuUs: 100, avgDurationUs: 100, avgReads: 1, queryHash: "0xHASH_H",
+            intervalId: 9302, intervalStart: BucketStart.AddMinutes(15));
+
+        var rows = await new LocalDataService(_duckDb).GetQueryStoreHistoryAsync(ServerId, Db, QueryId, hoursBack: 24);
+
+        /* The grid is unchanged: every snapshot, oldest first. */
+        Assert.Equal(4, rows.Count);
+        Assert.Equal(new long[] { 10, 25, 40, 5 }, rows.Select(r => r.ExecutionCount).ToArray());
+        Assert.Equal(80, rows.Sum(r => r.ExecutionCount));
+
+        /* The read carries the interval identity the total keys on. */
+        Assert.Equal(new long?[] { 9301, 9301, 9301, 9302 }, rows.Select(r => r.RuntimeStatsIntervalId).ToArray());
+        Assert.All(rows, r => Assert.Null(r.ReplicaRole));
+
+        Assert.Equal(45, QueryStoreHistoryRow.TotalExecutions(rows));
+
+        /* The helper's key lives in C# and the aggregate reads' PARTITION BY lives in SQL, so nothing but a
+           comparison on one seed fails when only one of them changes. The grid's top read, over the same rows,
+           reports the same count for the query as the window's Total Executions does. */
+        var top = Assert.Single(
+            await new LocalDataService(_duckDb).GetQueryStoreTopQueriesAsync(ServerId, hoursBack: 24),
+            r => r.QueryId == QueryId);
+        Assert.Equal(QueryStoreHistoryRow.TotalExecutions(rows), top.TotalExecutions);
+    }
+
+    [Fact]
+    public async Task HistoryRead_CarriesTheReplicaRole_SoTheTotalCountsEachReplicasWork()
+    {
+        const long QueryId = 8;
+        const long PlanId = 88;
+
+        /* One interval, stored for the primary (6 then 9) and a readable secondary (2): the primary's latest and
+           the secondary's only snapshot both count, and the primary's first one does not. */
+        await SeedAsync(BucketStart.AddMinutes(5), QueryId, PlanId, FirstExecA,
+            executionCount: 6, avgCpuUs: 100, avgDurationUs: 100, avgReads: 1, queryHash: "0xHASH_R",
+            intervalId: 9311, intervalStart: BucketStart, replicaRole: "PRIMARY");
+        await SeedAsync(BucketStart.AddMinutes(10), QueryId, PlanId, FirstExecA,
+            executionCount: 9, avgCpuUs: 100, avgDurationUs: 100, avgReads: 1, queryHash: "0xHASH_R",
+            intervalId: 9311, intervalStart: BucketStart, replicaRole: "PRIMARY");
+        await SeedAsync(BucketStart.AddMinutes(10), QueryId, PlanId, FirstExecA,
+            executionCount: 2, avgCpuUs: 100, avgDurationUs: 100, avgReads: 1, queryHash: "0xHASH_R",
+            intervalId: 9311, intervalStart: BucketStart, replicaRole: "SECONDARY");
+
+        var rows = await new LocalDataService(_duckDb).GetQueryStoreHistoryAsync(ServerId, Db, QueryId, hoursBack: 24);
+
+        Assert.Equal(3, rows.Count);
+        Assert.Equal(2, rows.Count(r => r.ReplicaRole == "PRIMARY"));
+        Assert.Equal(1, rows.Count(r => r.ReplicaRole == "SECONDARY"));
+        Assert.Equal(17, rows.Sum(r => r.ExecutionCount));
+        Assert.Equal(9 + 2, QueryStoreHistoryRow.TotalExecutions(rows));
+
+        /* The grid's top read splits the query into one row per replica role (PRIMARY 9, SECONDARY 2), so the
+           window's total is those two rows added up, which is the comparison that pins the helper's replica_role
+           key to the SQL's. */
+        var top = (await new LocalDataService(_duckDb).GetQueryStoreTopQueriesAsync(ServerId, hoursBack: 24))
+            .Where(r => r.QueryId == QueryId)
+            .ToList();
+        Assert.Equal(2, top.Count);
+        Assert.Equal(QueryStoreHistoryRow.TotalExecutions(rows), top.Sum(r => r.TotalExecutions));
     }
 
     /// <summary>

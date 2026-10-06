@@ -55,7 +55,7 @@ public class FinOpsFleetReadParityTests : IDisposable
     [Fact]
     public async Task TopResourceConsumers_KeepsEachGridsOwnFilter()
     {
-        var initializer = new DuckDbInitializer(_dbPath);
+        using var initializer = new DuckDbInitializer(_dbPath);
         await initializer.InitializeAsync();
 
         const int serverId = 1;
@@ -112,7 +112,7 @@ public class FinOpsFleetReadParityTests : IDisposable
     [Fact]
     public async Task ServerMetrics_FleetStatement_CoversEveryServer_AndFlagsIdleDatabases()
     {
-        var initializer = new DuckDbInitializer(_dbPath);
+        using var initializer = new DuckDbInitializer(_dbPath);
         await initializer.InitializeAsync();
 
         const int busyServerId = 10;
@@ -171,7 +171,7 @@ public class FinOpsFleetReadParityTests : IDisposable
     [Fact]
     public async Task ServerMetrics_AreReadWithNoServersRow_FromCollectedServerProperties()
     {
-        var initializer = new DuckDbInitializer(_dbPath);
+        using var initializer = new DuckDbInitializer(_dbPath);
         await initializer.InitializeAsync();
 
         const int liveServerId = 30;
@@ -218,7 +218,7 @@ public class FinOpsFleetReadParityTests : IDisposable
     [Fact]
     public async Task ServerMetrics_ServerWithNoCpuSampleInTheWindow_GetsNoVerdict_ALowCpuServerStillGetsOverProvisioned()
     {
-        var initializer = new DuckDbInitializer(_dbPath);
+        using var initializer = new DuckDbInitializer(_dbPath);
         await initializer.InitializeAsync();
 
         const int quietServerId = 50;
@@ -269,7 +269,7 @@ public class FinOpsFleetReadParityTests : IDisposable
     [Fact]
     public async Task UtilizationEfficiency_ServerWithNoCpuSampleInTheWindow_GetsNoVerdict_ALowCpuServerStillGetsOverProvisioned()
     {
-        var initializer = new DuckDbInitializer(_dbPath);
+        using var initializer = new DuckDbInitializer(_dbPath);
         await initializer.InitializeAsync();
 
         const int quietServerId = 70;

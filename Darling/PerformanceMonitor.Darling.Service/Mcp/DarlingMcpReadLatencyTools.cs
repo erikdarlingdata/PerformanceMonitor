@@ -66,7 +66,7 @@ public sealed class DarlingMcpReadLatencyTools
         + "the last finite bucket. timeouts is the run_count of samples whose outcome was a caught statement "
         + "timeout (57014) for that route — a route that answers fast most of the time but times out on a heavy "
         + "case shows both figures side by side. Sorted by p95 descending, then by count, then surface and route, so the worst tail "
-        + "leads. fallbacks is the run_count of reads whose interval-table path faulted "
+        + "leads. fallbacks is the run_count of reads whose interval-table path faulted, or whose hour ledger did not yet cover the window, "
         + "and were answered from raw (outcome fallback_raw); gate_failures is the run_count of reads whose "
         + "source decision itself faulted, so they read raw without one (outcome gate_failed). Both are counted "
         + "inside count and the percentiles, and a fallback that then timed out counts as a timeout, not a "

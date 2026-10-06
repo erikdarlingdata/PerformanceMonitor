@@ -33,6 +33,8 @@ namespace Lite.Tests;
 /// </summary>
 public sealed class EmptyDatabaseListNoteLiteTests : IDisposable
 {
+    private readonly List<DuckDbInitializer> _initializers = [];
+
     private readonly string _tempDir;
     private readonly string _dbPath;
     private readonly string _configDir;
@@ -47,6 +49,11 @@ public sealed class EmptyDatabaseListNoteLiteTests : IDisposable
 
     public void Dispose()
     {
+        foreach (var initializer in _initializers)
+        {
+            initializer.Dispose();
+        }
+
         try
         {
             if (Directory.Exists(_tempDir))
@@ -278,6 +285,7 @@ public sealed class EmptyDatabaseListNoteLiteTests : IDisposable
     private async Task<Fixture> BuildFixtureAsync(string[] registeredDatabases, string[] excludedDatabases)
     {
         var duckDb = new DuckDbInitializer(_dbPath);
+        _initializers.Add(duckDb);
         await duckDb.InitializeAsync();
 
         var serverManager = new ServerManager(_configDir);

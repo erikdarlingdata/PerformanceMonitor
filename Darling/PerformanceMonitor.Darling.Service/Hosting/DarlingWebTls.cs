@@ -18,11 +18,17 @@ namespace PerformanceMonitor.Darling.Service.Hosting;
 /// the segment in the clear; this is the surface's own TLS rather than the reverse proxy that used to be the
 /// only named MITM control.
 ///
-/// <para><b>Web only, deliberately not MCP.</b> The MCP endpoint stays plain HTTP on the older rationale that
-/// a self-signed certificate breaks real MCP clients. That rationale is about MCP clients, not about the
-/// wire, and it does not transfer: a browser is the web dashboard's only client, browsers have a
-/// well-understood story for an internal CA, and the operator here supplies a certificate rather than the
-/// product minting one. If MCP ever gets TLS it is a separate decision with a separate blast radius.</para>
+/// <para><b>One resolver, two listeners (#5288).</b> The web dashboard (<c>web.network.tls</c>) and the MCP
+/// endpoint (<c>mcp.network.tls</c>) each have their own <c>tls</c> block, both of type
+/// <see cref="WebTlsConfig"/>, and each listener keeps its own fail-closed decision. There is no shared block
+/// and no precedence rule between them, for the reason <see cref="Describe"/> refuses both forms: a precedence
+/// rule hides which certificate a listener actually serves. <see cref="Describe"/>, <see cref="Load"/> and
+/// <see cref="WebTlsConfig.ResolvePfxPassword"/> take a <c>section</c> (<c>"web"</c> by default, or
+/// <c>"mcp"</c>) so every message names the setting the operator has to edit, and with the web section every
+/// rendered text is exactly what it was before MCP gained TLS. MCP used to stay plain HTTP on the rationale that
+/// a self-signed certificate breaks real MCP clients. That rationale is about a certificate the product mints
+/// itself, and this feature mints none: the operator supplies the certificate for either listener, and an
+/// internal CA is the normal answer on the LAN it is for.</para>
 ///
 /// <para><b>Split on purpose.</b> <see cref="Describe"/>, <see cref="CheckLifetime"/> and
 /// <see cref="ExpiryWarning"/> are PURE — they decide shape and validity with no file, no clock, and no
@@ -40,10 +46,12 @@ internal static class DarlingWebTls
     /// <summary>How far ahead of expiry the startup log begins warning.</summary>
     internal const int ExpiryWarningDays = 30;
 
-    /// <summary>What the <c>web.network.tls</c> block asks for, decided before any file is opened.</summary>
+    /// <summary>What a <c>tls</c> block (<c>web.network.tls</c> or <c>mcp.network.tls</c>) asks for, decided before
+    /// any file is opened.</summary>
     internal enum TlsShape
     {
-        /// <summary>No <c>tls</c> block, or one whose every field is blank — plain HTTP (the caller warns when exposed).</summary>
+        /// <summary>No <c>tls</c> block — plain HTTP (the caller warns when exposed). A block that is present but
+        /// sets none of <c>pfxPath</c>, <c>certPath</c> or <c>keyPath</c> is <see cref="Invalid"/>, not this.</summary>
         NotConfigured,
 
         /// <summary>A PKCS#12 bundle: <c>pfxPath</c>, optionally with a password.</summary>
@@ -89,8 +97,14 @@ internal static class DarlingWebTls
     /// <para>Both forms configured is <see cref="TlsShape.Invalid"/>, not a precedence rule. A precedence rule
     /// would silently serve one certificate while the operator watched the other one expire — and picking the
     /// wrong one is indistinguishable from working until the day it is not.</para>
+    ///
+    /// <para>A block that is present but sets none of the three paths is <see cref="TlsShape.Invalid"/> too (#5288):
+    /// only an ABSENT block (null) means plain HTTP.</para>
     /// </summary>
-    internal static TlsPlan Describe(WebTlsConfig? tls)
+    /// <param name="tls">The block, or null when the listener has none.</param>
+    /// <param name="section">Which listener's block this is, <c>"web"</c> (the default) or <c>"mcp"</c>. It only
+    /// names the setting in the messages (<c>{section}.network.tls</c>); it never changes the decision.</param>
+    internal static TlsPlan Describe(WebTlsConfig? tls, string section = "web")
     {
         if (tls is null)
         {
@@ -107,7 +121,7 @@ internal static class DarlingWebTls
         {
             return new TlsPlan(
                 TlsShape.Invalid,
-                "web.network.tls names BOTH a PKCS#12 bundle (pfxPath) and a PEM pair (certPath/keyPath) — "
+                $"{section}.network.tls names BOTH a PKCS#12 bundle (pfxPath) and a PEM pair (certPath/keyPath) — "
                 + "set one form or the other, never both, so the certificate actually served is the one you meant.");
         }
 
@@ -129,7 +143,7 @@ internal static class DarlingWebTls
                 TlsShape.Pem,
                 null,
                 hasPassword
-                    ? "web.network.tls sets a PKCS#12 password alongside a PEM pair — the PEM pair is being served "
+                    ? $"{section}.network.tls sets a PKCS#12 password alongside a PEM pair — the PEM pair is being served "
                       + "and the password is ignored. Remove it, or finish setting pfxPath if the bundle was the one you meant."
                     : null);
         }
@@ -141,8 +155,8 @@ internal static class DarlingWebTls
             return new TlsPlan(
                 TlsShape.Invalid,
                 hasCert
-                    ? "web.network.tls sets certPath with no keyPath — a PEM certificate cannot serve TLS without its private key."
-                    : "web.network.tls sets keyPath with no certPath — name the PEM certificate that key belongs to.");
+                    ? $"{section}.network.tls sets certPath with no keyPath — a PEM certificate cannot serve TLS without its private key."
+                    : $"{section}.network.tls sets keyPath with no certPath — name the PEM certificate that key belongs to.");
         }
 
         if (hasPassword)
@@ -151,10 +165,18 @@ internal static class DarlingWebTls
                wrote it believes TLS is on. Refusing is louder than ignoring it. */
             return new TlsPlan(
                 TlsShape.Invalid,
-                "web.network.tls sets a PKCS#12 password but no pfxPath — there is no bundle for it to open.");
+                $"{section}.network.tls sets a PKCS#12 password but no pfxPath — there is no bundle for it to open.");
         }
 
-        return new TlsPlan(TlsShape.NotConfigured, null);
+        /* Every flag above is false, which is exactly !tls.IsConfigured: the block is present and sets none of
+           the keys this loader reads. The config reader skips a key it does not know, so a block whose key names
+           are spelled differently arrives here looking just like a block of blank values. Whoever wrote a tls
+           block expects TLS, and reading it as "no TLS" would serve plain HTTP, so it is refused like the lone
+           password above. Only an ABSENT block (null, handled first) means plain HTTP. */
+        return new TlsPlan(
+            TlsShape.Invalid,
+            $"{section}.network.tls is present but sets none of pfxPath, certPath or keyPath. "
+            + "Check the key names, or remove the block for plain HTTP.");
     }
 
     /// <summary>The lifetime gate's three answers. Kept as a kind rather than only the rendered refusal
@@ -242,35 +264,38 @@ internal static class DarlingWebTls
     /// </summary>
     /// <param name="tls">The block, already classified by <see cref="Describe"/>.</param>
     /// <param name="shape">The classification, so this never re-decides what the config meant.</param>
-    internal static LoadedCertificate Load(WebTlsConfig tls, TlsShape shape)
+    /// <param name="section">Which listener's block this is, <c>"web"</c> (the default) or <c>"mcp"</c>, threaded
+    /// to every message so it names the setting the operator has to edit. Pass the SAME value given to
+    /// <see cref="Describe"/>.</param>
+    internal static LoadedCertificate Load(WebTlsConfig tls, TlsShape shape, string section = "web")
     {
         ArgumentNullException.ThrowIfNull(tls);
 
         return shape switch
         {
-            TlsShape.Pfx => LoadPfx(tls),
-            TlsShape.Pem => LoadPem(tls),
+            TlsShape.Pfx => LoadPfx(tls, section),
+            TlsShape.Pem => LoadPem(tls, section),
             _ => throw new InvalidOperationException(
-                $"web.network.tls cannot be loaded in shape {shape} — Describe() must be consulted first."),
+                $"{section}.network.tls cannot be loaded in shape {shape} — Describe() must be consulted first."),
         };
     }
 
-    private static LoadedCertificate LoadPfx(WebTlsConfig tls)
+    private static LoadedCertificate LoadPfx(WebTlsConfig tls, string section)
     {
         var path = tls.PfxPath!.Trim();
-        RequireFile(path, "web.network.tls.pfxPath");
+        RequireFile(path, $"{section}.network.tls.pfxPath");
 
         string? password;
         try
         {
-            password = tls.ResolvePfxPassword(out _);
+            password = tls.ResolvePfxPassword(out _, section);
         }
         catch (Exception ex)
         {
             /* An env:/file: reference that does not resolve, or a DPAPI blob from another machine. Naming the
                setting matters more than the exception type: the operator has three password slots. */
             throw new InvalidOperationException(
-                $"web.network.tls: the PKCS#12 password could not be resolved ({ex.Message})", ex);
+                $"{section}.network.tls: the PKCS#12 password could not be resolved ({ex.Message})", ex);
         }
 
         X509Certificate2Collection bundle;
@@ -284,7 +309,7 @@ internal static class DarlingWebTls
         catch (Exception ex)
         {
             throw new InvalidOperationException(
-                $"web.network.tls.pfxPath '{path}' could not be loaded ({ex.Message}) — "
+                $"{section}.network.tls.pfxPath '{path}' could not be loaded ({ex.Message}) — "
                 + "check the password slot too: Windows reports a wrong PKCS#12 password as unreadable data "
                 + "rather than as a bad password.",
                 ex);
@@ -299,19 +324,19 @@ internal static class DarlingWebTls
             }
 
             throw new InvalidOperationException(
-                $"web.network.tls.pfxPath '{path}' contains no certificate with a private key — a TLS server "
+                $"{section}.network.tls.pfxPath '{path}' contains no certificate with a private key — a TLS server "
                 + "certificate must carry its key (export the bundle with the key included).");
         }
 
         return new LoadedCertificate(leaf, IntermediatesOf(bundle, leaf));
     }
 
-    private static LoadedCertificate LoadPem(WebTlsConfig tls)
+    private static LoadedCertificate LoadPem(WebTlsConfig tls, string section)
     {
         var certPath = tls.CertPath!.Trim();
         var keyPath = tls.KeyPath!.Trim();
-        RequireFile(certPath, "web.network.tls.certPath");
-        RequireFile(keyPath, "web.network.tls.keyPath");
+        RequireFile(certPath, $"{section}.network.tls.certPath");
+        RequireFile(keyPath, $"{section}.network.tls.keyPath");
 
         /* Read the WHOLE file, not just the leaf. CreateFromPemFile below materializes only the FIRST
            certificate, so on its own it drops every intermediate the operator appended — which is exactly what
@@ -333,7 +358,7 @@ internal static class DarlingWebTls
             }
 
             throw new InvalidOperationException(
-                $"web.network.tls: the PEM pair '{certPath}' / '{keyPath}' could not be loaded ({ex.Message})", ex);
+                $"{section}.network.tls: the PEM pair '{certPath}' / '{keyPath}' could not be loaded ({ex.Message})", ex);
         }
 
         /* FOOTGUN (load-bearing): a certificate built from PEM carries an EPHEMERAL private key, and Windows'
@@ -357,7 +382,7 @@ internal static class DarlingWebTls
                 }
 
                 throw new InvalidOperationException(
-                    $"web.network.tls: the PEM pair '{certPath}' / '{keyPath}' loaded but could not be prepared "
+                    $"{section}.network.tls: the PEM pair '{certPath}' / '{keyPath}' loaded but could not be prepared "
                     + $"for the TLS listener ({ex.Message})",
                     ex);
             }

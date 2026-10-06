@@ -253,6 +253,36 @@ public sealed class FinOpsIndexAnalysisViewLiveTests
         Assert.Equal(total, sum);
     }
 
+    /* #5238: the web Index Analysis tab asks for 500 recommendations, as the Database Sizes tab asks for its 500 files, so this view takes
+       a limit up to 500 where the other top-N views stop at 50, and refuses one past it with the new ceiling in the message. */
+    [Fact]
+    public async Task Limit_TakesUpToFiveHundred_AndRefusesAnythingPastIt()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(Cs), "Set DARLING_TEST_PG to run the live index_analysis view test.");
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await SeedAsync(Cs!, ct);
+        await using var pg = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        var atCeiling = await DarlingMcpFinOpsTools.GetFinOps(pg, "index_analysis", ServerNameC, 24, 500, cancellationToken: ct);
+        Assert.False(McpHelpers.IsRefusalEnvelope(atCeiling), atCeiling);
+        using var doc = JsonDocument.Parse(atCeiling);
+        var root = doc.RootElement;
+        Assert.Equal(500, root.GetProperty("limit").GetInt32());
+        Assert.False(root.GetProperty("truncated").GetBoolean());
+        Assert.Equal(root.GetProperty("recommendation_count").GetInt32(), root.GetProperty("recommendations").GetArrayLength());
+
+        Assert.Equal(
+            McpHelpers.Refusal("limit", "Invalid limit value '501'. Must be an integer from 1 to 500."),
+            await DarlingMcpFinOpsTools.GetFinOps(pg, "index_analysis", ServerNameC, 24, 501, cancellationToken: ct));
+        Assert.Equal(
+            McpHelpers.Refusal("limit", "Invalid limit value '0'. Must be an integer from 1 to 500."),
+            await DarlingMcpFinOpsTools.GetFinOps(pg, "index_analysis", ServerNameC, 24, 0, cancellationToken: ct));
+        // The views that keep a top-N list of 50 still refuse 51.
+        Assert.Equal(
+            McpHelpers.Refusal("limit", "Invalid limit value '51'. Must be an integer from 1 to 50."),
+            await DarlingMcpFinOpsTools.GetFinOps(pg, "high_impact", ServerNameC, 24, 51, cancellationToken: ct));
+    }
+
     [Fact]
     public async Task FullText_FalseCutsAtThreeHundredCharacters_TrueReturnsWholeText()
     {

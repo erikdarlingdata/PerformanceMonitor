@@ -17,6 +17,9 @@ import { el, mount, loadingStrip, emptyStrip, noticeStrip, readErrorStrip, error
 
 const HOURS = 24;
 const OBJECT_LIMIT = 20;
+// The most databases the databases level lists (#5238). The desktop grid shows every database, so the tab asks for the ceiling, as the
+// Database Sizes tab asks for its 500 files; the service's own default is the top 50 by 30-day growth.
+const DATABASE_LIMIT = 500;
 
 // The objects window, in days: the desktop's 7 / 30 / 90 picker. The service reads it as hours_back (days * 24); 30 days is its default.
 const WINDOWS = [
@@ -228,6 +231,7 @@ export const tab = {
       const mine = ++seq;
       mount(body, [loadingStrip()]);
       const params = { server, view: "storage_growth", hours: HOURS };
+      if (state.level === "databases") params.limit = DATABASE_LIMIT;
       if (state.level === "objects") Object.assign(params, { database_name: state.database, limit: OBJECT_LIMIT, hours: state.days * 24 });
       // The same window at the indexes level, so the table is looked up among the same fastest growers the reader just saw.
       if (state.level === "indexes") Object.assign(params, { database_name: state.database, object_name: state.object, hours: state.days * 24 });
