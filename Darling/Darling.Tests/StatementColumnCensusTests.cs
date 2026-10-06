@@ -97,10 +97,10 @@ public sealed class StatementColumnCensusTests
         ["dmv_blocking_snapshot.blocking_sql_text"] = Hooked("15", "R4"),
 
         /* Rows 16-18 and 21: the event and history collectors (R5). */
-        ["long_query_completions.statement_text"] = Hooked("16", "R5"),
-        ["default_trace_events.text_data"] = Hooked("17", "R5"),
-        ["system_health_events.event_xml"] = Hooked("18", "R5"),
-        ["job_history.message"] = Hooked("21", "R5"),
+        ["long_query_completions.statement_text"] = Hooked("16", "R5", pending: false),
+        ["default_trace_events.text_data"] = Hooked("17", "R5", pending: false),
+        ["system_health_events.event_xml"] = Hooked("18", "R5", pending: false),
+        ["job_history.message"] = Hooked("21", "R5", pending: false),
 
         /* The widened pattern (input_buffer, batch_text, command, definition) found one more column. Plan 6.7 names it. */
         ["index_object_stats.filter_definition"] = Exempt("an index filter predicate over bracketed column names (IndexObjectStatsCollector.cs), not a statement"),
