@@ -273,7 +273,7 @@ public sealed class StatementFilterWebTests
                 var error = proc.StandardError.ReadToEndAsync();
                 string output = proc.StandardOutput.ReadToEnd().Trim();
                 Assert.True(proc.WaitForExit(20000), "the plan viewer harness did not finish in 20 s");
-                Assert.True(proc.ExitCode == 0, "the plan viewer harness failed: " + error.Result);
+                Assert.True(proc.ExitCode == 0, "the plan viewer harness failed: " + await error);
                 using var doc = JsonDocument.Parse(output.Split('\n').First(l => l.StartsWith('{')));
                 string shown = doc.RootElement.GetProperty("pre").GetString()!;
 
