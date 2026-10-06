@@ -154,6 +154,71 @@ public sealed class ViewerLocalStateBehaviourTests
         Assert.Equal(1, r.GetProperty("countAfterFailedRead").GetInt32());
     }
 
+    private static string[] Strings(JsonElement node) => node.EnumerateArray().Select(e => e.GetString()!).ToArray();
+
+    /// <summary>The six awkward names a database filter must keep as six single names: a comma, a bracket, a leading space, a
+    /// quote, a percent sign with a plus, and markup. None is split, trimmed, decoded or interpreted.</summary>
+    internal static readonly string[] AwkwardDatabaseNames =
+        { "A,B", "x]", " SalesDb", "O'Brien", "50%+off", "<img src=x onerror=alert(1)>" };
+
+    [Fact]
+    public void TheDatabaseFilter_IsSavedPerServerId_AndSurvivesARebuild_WithTheAwkwardNamesWhole()
+    {
+        if (!TryRun("dbFilter", out var r)) return;
+
+        Assert.Empty(r.GetProperty("none").EnumerateArray());
+        Assert.True(r.GetProperty("setSix").GetBoolean());
+        var perId = r.GetProperty("perId");
+        Assert.Equal(AwkwardDatabaseNames, Strings(perId[0]));
+        Assert.Equal(new[] { "Other" }, Strings(perId[1]));
+        Assert.Empty(perId[2].EnumerateArray());
+        Assert.Equal(AwkwardDatabaseNames, Strings(r.GetProperty("afterReload")));
+        var stored = r.GetProperty("stored");
+        Assert.Equal(1, stored.GetProperty("v").GetInt32());
+        Assert.Equal(AwkwardDatabaseNames, Strings(stored.GetProperty("servers").GetProperty("3")));
+        Assert.Equal(6, r.GetProperty("noCopyLeak").GetInt32());
+
+        var cleared = r.GetProperty("afterClear");
+        Assert.Empty(cleared[0].EnumerateArray());
+        Assert.Equal(new[] { "Other" }, Strings(cleared[1]));
+        // Exactly the names given: a duplicate goes, case and spaces stay.
+        Assert.Equal(new[] { "b", "B", " b" }, Strings(r.GetProperty("exact")));
+    }
+
+    [Fact]
+    public void TheDatabaseFilter_ReadsASetOverTheCapOrTheByteBudgetAsNone_NeverATruncatedSet()
+    {
+        if (!TryRun("dbFilter", out var r)) return;
+
+        Assert.True(r.GetProperty("set50").GetBoolean());
+        Assert.Equal(50, r.GetProperty("len50").GetInt32());
+        Assert.False(r.GetProperty("set51").GetBoolean());
+        Assert.Equal(50, r.GetProperty("len51Kept").GetInt32());
+        Assert.Empty(r.GetProperty("stored51").EnumerateArray());
+
+        // 60 CJK characters encode to 540 bytes, so 7 such names fit 4,096 and 50 do not.
+        Assert.Equal(557, r.GetProperty("longBytes").GetInt32());
+        Assert.True(r.GetProperty("fitsBytes").GetInt32() <= 4096);
+        Assert.True(r.GetProperty("fitSet").GetBoolean());
+        Assert.Empty(r.GetProperty("storedOverBudget").EnumerateArray());
+        Assert.False(r.GetProperty("setOverBudget").GetBoolean());
+        Assert.Empty(r.GetProperty("overBudgetKept").EnumerateArray()); // the refused set changed nothing
+    }
+
+    [Fact]
+    public void TheDatabaseFilter_AForeignVersionOrCorruptOrHandEditedValue_ReadsAsNone_WithoutThrowing()
+    {
+        if (!TryRun("dbFilter", out var r)) return;
+
+        Assert.Empty(r.GetProperty("foreignVersion").EnumerateArray());
+        Assert.Empty(r.GetProperty("garbage").EnumerateArray());
+        foreach (var w in r.GetProperty("wrongTypes").EnumerateArray()) Assert.Empty(w.EnumerateArray());
+        foreach (var b in r.GetProperty("badId").EnumerateArray()) Assert.False(b.GetBoolean());
+        // With private mode or a full quota the choice holds for the page load only.
+        Assert.True(r.GetProperty("setNoStorage").GetBoolean());
+        Assert.Equal(new[] { "A" }, Strings(r.GetProperty("heldNoStorage")));
+    }
+
     [Fact]
     public void TheShell_WiresTheControlsInAtModuleScope_WithoutTouchingPanelsOrTheApi()
     {

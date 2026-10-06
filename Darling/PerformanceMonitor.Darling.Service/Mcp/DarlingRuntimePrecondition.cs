@@ -13,6 +13,7 @@ using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
 
@@ -132,7 +133,7 @@ SELECT database_name, actual_state, capture_time
 FROM v_query_store_health
 WHERE server_id = $1
 AND   capture_time = (SELECT MAX(capture_time) FROM v_query_store_health WHERE server_id = $1)
-AND   ($2::text IS NULL OR database_name = $2)
+AND   ($2::text[] IS NULL OR database_name = ANY($2))
 ORDER BY database_name";
 
     /// <summary>
@@ -217,11 +218,26 @@ ORDER BY database_name";
     /// databases the read covered are not recording runtime statistics, or <c>null</c> when it says nothing
     /// of the kind (no snapshot yet, or at least one database in scope is READ_WRITE).
     /// </summary>
-    public static async Task<string?> QueryStoreStatusAsync(
+    public static Task<string?> QueryStoreStatusAsync(
         NpgsqlDataSource postgres,
         int serverId,
         string serverName,
         string? databaseName,
+        CancellationToken cancellationToken = default) =>
+        QueryStoreStatusAsync(postgres, serverId, serverName, DatabaseFilter.One(databaseName), cancellationToken);
+
+    /// <summary>
+    /// #5245: <see cref="QueryStoreStatusAsync(NpgsqlDataSource,int,string,string,CancellationToken)"/> over a SET of
+    /// databases. The existing rule is kept as it was, not turned into a per-database verdict: the answer is silent
+    /// (<c>null</c>) when at least one database in scope is READ_WRITE (Query Store is collecting somewhere the read could
+    /// have looked, so the emptiness has another cause), and the precondition envelope when every database in scope
+    /// reports not collecting. <see cref="DatabaseFilter.All"/> reads every database's state, as a null name did.
+    /// </summary>
+    public static async Task<string?> QueryStoreStatusAsync(
+        NpgsqlDataSource postgres,
+        int serverId,
+        string serverName,
+        DatabaseFilter databases,
         CancellationToken cancellationToken = default)
     {
         List<CollectorRuntimePrecondition.QueryStoreDatabaseState> states;
@@ -230,7 +246,7 @@ ORDER BY database_name";
         try
         {
             (states, observedUtc) =
-                await ReadQueryStoreStatesAsync(postgres, serverId, databaseName, cancellationToken);
+                await ReadQueryStoreStatesAsync(postgres, serverId, databases, cancellationToken);
         }
         catch (Exception)
         {
@@ -292,7 +308,7 @@ ORDER BY database_name";
         ReadQueryStoreStatesAsync(
             NpgsqlDataSource postgres,
             int serverId,
-            string? databaseName,
+            DatabaseFilter databases,
             CancellationToken cancellationToken)
     {
         var states = new List<CollectorRuntimePrecondition.QueryStoreDatabaseState>();
@@ -301,7 +317,7 @@ ORDER BY database_name";
         await using var command = postgres.CreateCommand(LatestQueryStoreStatesSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddInt(command, serverId);
-        DarlingMcpReadParameters.AddNullableText(command, string.IsNullOrWhiteSpace(databaseName) ? null : databaseName);
+        command.Parameters.Add(databases.Parameter());
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
 
         while (await reader.ReadAsync(cancellationToken))

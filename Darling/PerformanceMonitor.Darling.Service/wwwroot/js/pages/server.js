@@ -45,9 +45,11 @@
  * subtitle rather than inheriting a label that would misdescribe them.
  */
 
-import { el, mount, apiGetFleet, bandClass, loadingStrip, setActiveRange, localTime } from "../util.js";
+import { el, mount, apiGetFleet, bandClass, loadingStrip, setActiveRange, setActiveDatabaseFilter, localTime } from "../util.js";
+import { getDatabaseFilter } from "../viewer-local.js";
+import { databaseFilterControl, databaseFilterUnavailable } from "./database-filter.js";
 import { setPanelSignal } from "../panels.js";
-import { serverTabsFor, findServerTab, tabNote } from "./server-tabs.js";
+import { serverTabsFor, isPostgresTarget, findServerTab, tabNote } from "./server-tabs.js";
 import { metricBands } from "./fleet.js";
 
 /** The page time range: the desktop viewers' presets, which stop at 7 days. All but three ranged reads on these
@@ -190,6 +192,9 @@ export function renderServer(main, server, tabId, opts) {
   const badgeSlot = el("span", { class: "server-band" });
   const engineSlot = el("span", { class: "server-engine" });
   const whySlot = el("div", { class: "server-why" });
+  /* The database filter's button (#5245): placed once the card is known, because the card says which engine this is and which
+     id the choice is stored under. */
+  const dbSlot = el("span", { class: "db-filter-slot" });
   const head = el("div", { class: "page-head" }, [
     el("a", { href: "#/fleet", text: "← Fleet" }),
     el("span", { class: "server-title" }, [dot, title]),
@@ -197,6 +202,7 @@ export function renderServer(main, server, tabId, opts) {
     engineSlot,
     el("div", { class: "spacer" }),
     rangeControl(),
+    dbSlot,
   ]);
 
   /* The bar and the note share one slot because both are decided by the same card. */
@@ -211,6 +217,7 @@ export function renderServer(main, server, tabId, opts) {
   let painted = null;
   if (remembered) {
     fillServerHead(title, dot, badgeSlot, engineSlot, whySlot, remembered.card, remembered.reason);
+    fillDatabaseFilter(dbSlot, server, remembered.card);
     painted = paintTabsKeeping(keep, tabsSlot, server, tabId, remembered.card);
   }
 
@@ -227,6 +234,7 @@ export function renderServer(main, server, tabId, opts) {
 
       if (card) lastCard.set(server, { card, reason });
       fillServerHead(title, dot, badgeSlot, engineSlot, whySlot, card, reason);
+      fillDatabaseFilter(dbSlot, server, card);
 
       /* Repaint only when there is nothing painted yet, or when the fresh card chooses a DIFFERENT registry —
          the two registries are module constants, so that comparison is exact. A null card never repaints over a
@@ -280,7 +288,31 @@ function redrawPanels() {
   panelAbort = new AbortController();
   setPanelSignal(panelAbort.signal);
 
+  applyDatabaseFilter();
   mount(gridNode, current.tab.build(current.server, rangeContext()));
+}
+
+/* The page's database filter (#5245), set before every panel redraw the way the custom range is: the chosen names for the card's
+   id, or none for a PostgreSQL server (no filter there), a server whose card is not known yet, and a server with no choice. The
+   card's id keys the choice, not the route's name, so a rename keeps it. */
+function applyDatabaseFilter() {
+  const card = current.server ? (lastCard.get(current.server) || {}).card : null;
+  const databases = card && !isPostgresTarget(card) && card.server_id ? getDatabaseFilter(card.server_id) : [];
+  setActiveDatabaseFilter({ server: current.server, databases });
+}
+
+/* The database filter's button in the page head: none for a PostgreSQL card; for no card (a fleet read that failed on the first
+   paint) a disabled "Databases: unavailable" and no filter. A poll whose fleet read failed keeps the control it has. */
+function fillDatabaseFilter(slot, server, card) {
+  if (isPostgresTarget(card)) {
+    mount(slot, []);
+    return;
+  }
+  if (!card || !card.server_id) {
+    if (!lastCard.has(server)) mount(slot, databaseFilterUnavailable());
+    return;
+  }
+  mount(slot, databaseFilterControl({ serverId: card.server_id, server, onApply: redrawPanels }).node);
 }
 
 /* The sub-tab bar — the web port of ViewerServerTab.xaml's TabControl. Real <a href> links, not click handlers,
