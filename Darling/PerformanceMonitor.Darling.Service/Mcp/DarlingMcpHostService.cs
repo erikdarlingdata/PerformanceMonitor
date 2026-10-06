@@ -1379,6 +1379,16 @@ public sealed class DarlingMcpHostService : BackgroundService
         => networkMode ? networkListenIp : null;
 
     /// <summary>
+    /// The end of the log line the Host guard writes for a refused name (#5288): it names the settings that decide the
+    /// names the guard admits, the way the web dashboard's line names <c>web.publicBaseUrl</c>'s host. The listen
+    /// address and <c>mcp.network.hostName</c> are admitted in network mode only, so the line says "when LAN-exposed"
+    /// of both. Internal so the live-pipeline test and the diagnostics bundle's alias test build their line from this
+    /// text instead of a copy of it.
+    /// </summary>
+    internal const string HostRefusalAdmits =
+        " (a loopback name/IP, mcp.network.listen when LAN-exposed, or mcp.network.hostName when LAN-exposed)";
+
+    /// <summary>
     /// Everything AFTER <c>builder.Build()</c>: the Host-allowlist/DNS-rebinding guard (both modes), the
     /// network-mode CIDR check, the bearer token (network mode, and a loopback-only server that kept it, see
     /// <paramref name="requireTokenWhenLoopbackOnly"/>), then <c>MapMcp()</c> and <c>MapMcp("/core")</c>.
@@ -1463,7 +1473,7 @@ public sealed class DarlingMcpHostService : BackgroundService
                     _logger, "MCP", DarlingRefusalGate.HostAllowlist, StatusCodes.Status400BadRequest,
                     context.Connection.RemoteIpAddress,
                     $"the Host header '{DarlingHttpRefusalLog.Sanitize(context.Request.Host.Host)}' is not an address this endpoint binds"
-                    + " (a loopback name/IP, or mcp.network.listen when LAN-exposed)",
+                    + HostRefusalAdmits,
                     DateTime.UtcNow);
                 context.Response.StatusCode = StatusCodes.Status400BadRequest;
                 return;

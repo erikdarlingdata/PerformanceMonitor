@@ -438,7 +438,7 @@ public sealed class DiagnosticsBundleHardeningTests
         Assert.Contains(configured, warning, StringComparison.Ordinal);
 
         /* The value is refused, so a client that connects by the real name is refused too, and the log names that Host alone. */
-        var refusal = "the Host header 'gate.kappacorp.example.test' is not an address this endpoint binds (a loopback name/IP, or mcp.network.listen when LAN-exposed)";
+        var refusal = "the Host header 'gate.kappacorp.example.test' is not an address this endpoint binds" + DarlingMcpHostService.HostRefusalAdmits;
         var text = BundleOfServiceLogMessages(aliaser, warning, refusal);
         Assert.DoesNotContain("kappacorp", text, StringComparison.OrdinalIgnoreCase);
     }
@@ -462,9 +462,12 @@ public sealed class DiagnosticsBundleHardeningTests
             aliaser,
             DarlingListenerTls.CleartextWarning(ListenerTlsLabels.Mcp),
             DarlingListenerTls.CleartextWarning(ListenerTlsLabels.Web),
-            "clients connect to " + hostName);
+            "clients connect to " + hostName,
+            "the Host header '" + hostName + "' is not an address this endpoint binds" + DarlingMcpHostService.HostRefusalAdmits);
 
         Assert.Contains("MCP server is LAN-exposed WITHOUT TLS", text, StringComparison.Ordinal);
+        /* The Host-refusal line names mcp.network.listen and mcp.network.hostName: the settings stay readable, the Host header named beside them is aliased. */
+        Assert.Contains("mcp.network.listen when LAN-exposed, or mcp.network.hostName when LAN-exposed", text, StringComparison.Ordinal);
         Assert.Contains("mcp.network.allowFrom bounds only who can route to the port", text, StringComparison.Ordinal);
         Assert.Contains("Web dashboard is LAN-exposed WITHOUT TLS", text, StringComparison.Ordinal);
         Assert.Contains("web.network.allowFrom bounds only who can route to the port", text, StringComparison.Ordinal);
