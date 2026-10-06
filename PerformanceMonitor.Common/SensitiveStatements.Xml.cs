@@ -33,9 +33,12 @@ public static partial class SensitiveStatements
     /// Judges every attribute value and every text or CDATA node of <paramref name="xml"/> with
     /// <paramref name="isNamed"/> and returns the SAME instance when nothing is named. When something is named the
     /// document is rewritten with the named values replaced by <paramref name="placeholder"/>, and a statement
-    /// element (<c>Stmt*</c>) whose <c>StatementText</c> or <c>ParameterizedText</c> attribute is named is withheld
-    /// whole: the parameter and literal values inside it are the placeholder too (H2). Outside such a statement
-    /// <c>ParameterCompiledValue</c> and <c>ParameterRuntimeValue</c> are never judged and are kept.
+    /// element (a <c>Stmt*</c> element, or any element that carries a <c>StatementText</c> or
+    /// <c>ParameterizedText</c> attribute) whose text, or whose auto-parameter probe, is named is withheld whole: the
+    /// parameter and literal values inside it are the placeholder too (H2). Outside such a statement a
+    /// <c>ParameterCompiledValue</c> or <c>ParameterRuntimeValue</c> is not judged on its own, with two exceptions:
+    /// an auto-parameter (<c>@N</c>) value is judged inside its statement, and a value past the point where pass 1
+    /// stopped reading is withheld. All other such values are kept.
     /// Fails closed: a document that does not parse is judged as decoded text and withheld whole when named; any
     /// other failure, and a spent budget, withhold the whole document.
     /// </summary>
@@ -192,7 +195,8 @@ public static partial class SensitiveStatements
         /// <summary>The H2 list: withheld whatever the pattern says, inside a withheld statement.</summary>
         private static bool IsScopeList(string localName) =>
             localName == "ParameterCompiledValue" || localName == "ParameterRuntimeValue"
-            || localName == "ScalarString" || localName == "ConstValue" || localName == "ParameterizedText";
+            || localName == "ScalarString" || localName == "ConstValue" || localName == "ParameterizedText"
+            || localName == "EdcShowplanXml";
 
         private static bool IsNamespaceDeclaration(XmlReader reader) =>
             reader.Prefix == "xmlns" || (reader.Prefix.Length == 0 && reader.LocalName == "xmlns");
@@ -216,6 +220,24 @@ public static partial class SensitiveStatements
             ChargeParse();
             return _budgetSpent();
         }
+
+        /// <summary>The nested plan an <c>EdcShowplanXml</c> attribute holds, as a document of its own: its quotes
+        /// stay encoded in the attribute text, so the value is judged as a plan, like the whole document.</summary>
+        private static bool HoldsNestedPlan(string name) => name == "EdcShowplanXml";
+
+        /// <summary>The nested plan of <paramref name="value"/> run through the same judge and placeholder; the SAME
+        /// instance when nothing in it is named.</summary>
+        private string JudgeNested(string value)
+        {
+            ChargeParse();
+            string? nested = XmlCore(value, _isNamed, _budgetSpent, _placeholder);
+            if (_chargeParse is not null)
+                _mark = Stopwatch.GetTimestamp();
+            return nested ?? value;
+        }
+
+        private bool JudgeAttribute(string name, string value) =>
+            Judge(value) || (HoldsNestedPlan(name) && !ReferenceEquals(JudgeNested(value), value));
 
         private bool Judge(string value)
         {
@@ -247,8 +269,9 @@ public static partial class SensitiveStatements
             public StmtFrame? Stmt { get; }
         }
 
-        /// <summary>A statement open in pass 1. <see cref="Text"/> and <see cref="Values"/> exist only when its
-        /// <c>StatementText</c> holds an auto-parameter token: they are what the probe is made from.</summary>
+        /// <summary>A statement open in pass 1. <see cref="Text"/> exists only when its <c>StatementText</c> holds an
+        /// auto-parameter token; <see cref="Values"/> exists once the statement has a parameter value. They are what
+        /// the probe is made from.</summary>
         private sealed class StmtFrame
         {
             public StmtFrame(int ordinal, string? text, bool takesValues)
@@ -526,7 +549,7 @@ public static partial class SensitiveStatements
                                     }
                                     if (hit || IsExempt(name))
                                         continue;
-                                    if (Judge(reader.Value))
+                                    if (JudgeAttribute(name, reader.Value))
                                     {
                                         if (!readOn)
                                             return XmlPassOutcome.Hit;
@@ -777,11 +800,20 @@ public static partial class SensitiveStatements
             {
                 if (IsExempt(name))
                     return _pastVetted ? _placeholder : value;
-                return (knownVerdict ?? Judge(value)) ? _placeholder : value;
+                return JudgedValue(name, value, knownVerdict);
             }
             if (IsScopeList(name) || WithheldInScope(name, value))
                 return _placeholder;
-            return (knownVerdict ?? Judge(value)) ? _placeholder : value;
+            return JudgedValue(name, value, knownVerdict);
+        }
+
+        /// <summary>An attribute value outside the H2 list: the placeholder when named, else a nested plan as its own
+        /// judged rewrite, else the value.</summary>
+        private string JudgedValue(string name, string value, bool? knownVerdict)
+        {
+            if (knownVerdict ?? Judge(value))
+                return _placeholder;
+            return HoldsNestedPlan(name) ? JudgeNested(value) : value;
         }
 
         /// <summary>What a text or CDATA node is written as; <paramref name="parent"/> is its element's local name.</summary>
