@@ -193,6 +193,9 @@ VALUES ($1,$2,$3,$4,$5,$6,'UPDATE t SET c = 1','<deadlock/>',$7,'PlanFlagsDb')",
             DarlingMcpReadParameters.AddWindow(explain, ServerId, now.AddHours(-24), now);
             DarlingMcpReadParameters.AddInt(explain, 21);
             DarlingMcpReadParameters.AddTimestamp(explain, EventWindowFloor.For(now.AddHours(-24)));
+            /* #5244: the blocked-process reads carry the database filter at $6 (the deadlock reads have none). */
+            if (sql.Contains("$6", StringComparison.Ordinal))
+                explain.Parameters.Add(DatabaseFilter.All.Parameter());
             var lines = new List<string>();
             await using (var reader = await explain.ExecuteReaderAsync(ct))
             {

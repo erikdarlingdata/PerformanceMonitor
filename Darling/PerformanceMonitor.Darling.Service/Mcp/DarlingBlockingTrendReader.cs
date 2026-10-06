@@ -39,17 +39,23 @@ internal static class DarlingBlockingTrendReader
     /// (<c>v_blocked_process_reports</c>) are the primary source, bucketed on <c>event_time</c>; the always-on
     /// DMV snapshot (<c>v_dmv_blocking_snapshots</c>) is appended only when the XE source has no rows in the
     /// window (<c>WHERE NOT EXISTS</c>), so a server with both sources never double-counts. $1 server_id,
-    /// $2 window start, $3 window end (naive UTC). $4 is the <see cref="EventWindowFloor"/> for $2 — both
+    /// $2 window start, $3 window end (naive UTC). $4 is the <see cref="EventWindowFloor"/> for $2, and $5 the
+    /// database filter (<c>text[]</c>, NULL = all; #5244) — both
     /// tables are hypertables partitioned on <c>collection_time</c>, which this event-time window alone gives
     /// the planner nothing to exclude a chunk on (#4229); the floor lets it skip every chunk older than the
     /// window, without being able to drop a row (an event is collected after it happens).
+    ///
+    /// <para><b>The database predicate is the list form (#5244), on BOTH arms</b>, as the desktop's <c>BlockingTrendSql</c> has it.
+    /// The DMV arm's <c>NOT EXISTS (SELECT 1 FROM bpr)</c> therefore asks whether the XE source has rows for the CHOSEN databases:
+    /// a database with only DMV-captured blocking still charts, whatever other databases' XE reports hold.</para>
     /// </summary>
-    public const string BlockingTrendSql = """
+    public static readonly string BlockingTrendSql = $$"""
         WITH bpr AS (
             SELECT DATE_TRUNC('minute', event_time) AS bucket, COUNT(*) AS incident_count
             FROM v_blocked_process_reports
             WHERE server_id = $1 AND event_time >= $2 AND event_time <= $3
             AND   collection_time >= $4
+            {{DatabaseFilter.All.Clause("database_name", 5)}}
             GROUP BY DATE_TRUNC('minute', event_time)
         ),
         dmv AS (
@@ -57,6 +63,7 @@ internal static class DarlingBlockingTrendReader
             FROM v_dmv_blocking_snapshots
             WHERE server_id = $1 AND event_time >= $2 AND event_time <= $3
             AND   collection_time >= $4
+            {{DatabaseFilter.All.Clause("database_name", 5)}}
             GROUP BY DATE_TRUNC('minute', event_time)
         )
         SELECT bucket, incident_count FROM bpr
@@ -185,12 +192,18 @@ internal static class DarlingBlockingTrendReader
     /// <summary>Blocking-incident-per-minute buckets for one server over the window.</summary>
     public static Task<List<BlockingTrendReadPoint>> GetBlockingTrendAsync(
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default)
-        => ReadCountTrendAsync(postgres, BlockingTrendSql, serverId, startUtc, endUtc, boundEventWindow: true, cancellationToken);
+        => GetBlockingTrendAsync(postgres, serverId, startUtc, endUtc, DatabaseFilter.All, cancellationToken);
+
+    /// <summary>The same trend over a SET of databases (#5244): <see cref="DatabaseFilter.All"/> is every database, otherwise both
+    /// arms count only the named databases' blocking.</summary>
+    public static Task<List<BlockingTrendReadPoint>> GetBlockingTrendAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, DatabaseFilter databases, CancellationToken cancellationToken = default)
+        => ReadCountTrendAsync(postgres, BlockingTrendSql, serverId, startUtc, endUtc, boundEventWindow: true, databases, cancellationToken);
 
     /// <summary>Deadlock-per-minute buckets for one server over the window.</summary>
     public static Task<List<BlockingTrendReadPoint>> GetDeadlockTrendAsync(
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default)
-        => ReadCountTrendAsync(postgres, DeadlockTrendSql, serverId, startUtc, endUtc, boundEventWindow: true, cancellationToken);
+        => ReadCountTrendAsync(postgres, DeadlockTrendSql, serverId, startUtc, endUtc, boundEventWindow: true, null, cancellationToken);
 
     /// <summary>
     /// The lock-wait family for one server over the window, one point per bucket of <paramref name="bucketMinutes"/>
@@ -243,7 +256,7 @@ internal static class DarlingBlockingTrendReader
     /// maps both. COUNT(*) is bigint in Postgres, read via GetInt64 and narrowed to the point's int.</summary>
     private static async Task<List<BlockingTrendReadPoint>> ReadCountTrendAsync(
         NpgsqlDataSource postgres, string sql, int serverId, DateTime startUtc, DateTime endUtc,
-        bool boundEventWindow, CancellationToken cancellationToken)
+        bool boundEventWindow, DatabaseFilter? databases, CancellationToken cancellationToken)
     {
         var items = new List<BlockingTrendReadPoint>();
         await using var command = postgres.CreateCommand(sql);
@@ -251,6 +264,8 @@ internal static class DarlingBlockingTrendReader
         DarlingMcpReadParameters.AddWindow(command, serverId, startUtc, endUtc);
         if (boundEventWindow)
             DarlingMcpReadParameters.AddTimestamp(command, EventWindowFloor.For(startUtc));
+        if (databases is { } filter)
+            command.Parameters.Add(filter.Parameter());
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
