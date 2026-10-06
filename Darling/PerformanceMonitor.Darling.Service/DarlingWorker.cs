@@ -1609,7 +1609,25 @@ LIMIT 1";
 
            Both reset with the latch on every (re)connect, and both written only by the per-server body on
            the pool thread (INV-2), like the latch itself. */
-        public string? LongQueryTraceFault { get; set; }
+        public string? LongQueryTraceFault
+        {
+            get => _longQueryTraceFault;
+            set
+            {
+                _longQueryTraceFault = value;
+                if (value is null)
+                {
+                    LongQueryTraceFaultIsPermission = false;
+                }
+            }
+        }
+
+        private string? _longQueryTraceFault;
+
+        /* #5378: the kept fault above is a permission denial (the login lacks ALTER ANY EVENT SESSION, error 15247 and its
+           kin), so the run records PERMISSIONS rather than SESSION_MISSING, and the reconcile does not repeat the create DDL
+           on every sweep. Cleared with the fault. */
+        public bool LongQueryTraceFaultIsPermission { get; set; }
 
         public string? LongQueryTracePartialNote { get; set; }
 
@@ -4486,6 +4504,10 @@ LIMIT 1";
                or the server reconnects. */
             /* #4961: a read-only database's refusal was already logged where it happened, with why and what to change. */
             var readOnlyRefusal = enabled && DarlingXeSessions.IsReadOnlyDatabaseRefusal(ex);
+            /* #5378: a login that was told no (error 15247, the other denial numbers) stays told no until it is granted
+               something, so the create is not re-run on every sweep: it backs off exactly like the read-only refusal above,
+               to the hourly create pass, and a reconnect or a change of the state key tries again at once. */
+            var permissionDenied = enabled && DarlingXeSessions.ErrorNumbersOf(ex).Any(SqlServerPermissionErrors.IsPermissionDenied);
             logger.Log(createFailureWarned || readOnlyRefusal ? LogLevel.Debug : LogLevel.Warning,
                 "[{Server}] Failed to reconcile the long-query completion XE session: {Message}",
                 server.Config.DisplayName, AlwaysOnXeSessions.DescribeFailure(ex));
@@ -4495,7 +4517,7 @@ LIMIT 1";
                refused is not tried again on every sweep. The latch counts the reconcile as applied for this state: the next
                attempt is the hourly create pass, logged at Debug, and a reconnect or a change of the state key runs the
                whole reconcile again. The fault below stays set, so every run still records it. */
-            if (readOnlyRefusal)
+            if (readOnlyRefusal || permissionDenied)
             {
                 server.LongQueryTraceApplied = enabled;
                 server.LongQueryTraceAppliedKey = stateKey;
@@ -4536,9 +4558,11 @@ LIMIT 1";
 
                 /* #4961: the sentence about Azure SQL Database's caps rides on a failed create or start there, and on nothing else. */
                 var refusal = AlwaysOnXeSessions.DescribeFailure(ex);
-                server.LongQueryTraceFault = refusedIn is null
-                    ? $"XE session {sessionLabel} could not be created, so no completions can be captured until it is: {refusal}"
-                    : $"XE session {sessionLabel} could not be created in any monitored database (first refusal in [{refusedIn}]), so no completions can be captured until it is: {refusal}";
+                var where = refusedIn is null ? string.Empty : $" in any monitored database (first refusal in [{refusedIn}])";
+                server.LongQueryTraceFault = permissionDenied
+                    ? $"XE session {sessionLabel} could not be created{where} because the monitoring login lacks the permission to create Extended Events sessions (ALTER ANY EVENT SESSION on-premises, CREATE ANY DATABASE EVENT SESSION on Azure SQL Database), so no completions can be captured until it is granted: {refusal}"
+                    : $"XE session {sessionLabel} could not be created{where}, so no completions can be captured until it is: {refusal}";
+                server.LongQueryTraceFaultIsPermission = permissionDenied;
                 server.LongQueryTracePartialNote = null;
             }
         }
@@ -14011,6 +14035,12 @@ LIMIT 1";
                are the ones an operator already knows from the deadlock and blocked-process collectors. */
             if (IsLongQueryCompletionsCollector(collectorName) && server.LongQueryTraceFault is { } traceFault)
             {
+                /* #5378: a denied create is a permission state, not a capture that broke: PERMISSIONS, as in Lite. */
+                if (server.LongQueryTraceFaultIsPermission)
+                {
+                    throw new DarlingXeSessionDeniedException(traceFault);
+                }
+
                 throw new DarlingXeSessionMissingException(traceFault);
             }
 
@@ -14214,6 +14244,20 @@ LIMIT 1";
         catch (OperationCanceledException)
         {
             throw;
+        }
+        catch (DarlingXeSessionDeniedException ex)
+        {
+            /* #5378: the long-query session's create was denied (the login lacks ALTER ANY EVENT SESSION). A least-privilege
+               choice an operator is entitled to make (#1823), so PERMISSIONS, the status every other denied source records,
+               and not the SESSION_MISSING of a session that broke. The row is written on every sweep, so collection health
+               keeps reading it; the line logs at Warning once and at Debug after, like the missing-session line (#4964). */
+            _logger.Log(server.XeSessionMissingWarnings.TryMarkWarned(collectorName) ? LogLevel.Warning : LogLevel.Debug,
+                "  [{Server}] {Collector} => insufficient permissions: {Message}",
+                server.Config.DisplayName, collectorName, ex.Message);
+
+            await DarlingObservability.LogCollectionAsync(
+                _postgres!, runtime, collectorName, "PERMISSIONS", 0, runClock.ElapsedMilliseconds, 0, ex.Message, fanout: null, phases: null, drain: null, fetchPhases: null, sweepPeerMaxMs: peerMaxAtDispatchMs, _logger, cancellationToken);
+            return 0;
         }
         catch (DarlingXeSessionMissingException ex)
         {
@@ -14926,6 +14970,15 @@ LIMIT 1";
         /// there is no inner exception to carry - and the arm that catches this reads the message alone.
         /// </summary>
         public DarlingXeSessionMissingException(string message) : base(message) { }
+    }
+
+    /// <summary>
+    /// #5378: the reconcile's kept failure to create the long-query session was a permission denial. Only its message
+    /// survives to the run, like <see cref="DarlingXeSessionMissingException"/>; the run records PERMISSIONS for it.
+    /// </summary>
+    private sealed class DarlingXeSessionDeniedException : Exception
+    {
+        public DarlingXeSessionDeniedException(string message) : base(message) { }
     }
 
     private static async Task<CollectorRunResult> RunXeTolerantAsync<TRow>(
