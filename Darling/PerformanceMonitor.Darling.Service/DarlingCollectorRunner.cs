@@ -3027,7 +3027,9 @@ public sealed class DarlingCollectorRunner
         }
         else
         {
-            using var targetConnection = CreateTargetConnection(server);
+            /* #5320: the provider resolved at the top of this method (the test override when one is set, TargetProviders.For
+               otherwise), so the server-wide path has the same fake-reader seam the per-database path has. */
+            using var targetConnection = CreateTargetConnection(server, targetProvider);
             await targetConnection.OpenAsync(cancellationToken);
 
             /* #5132: the target's own session id, resolved right after the open and BEFORE any reader
@@ -7401,11 +7403,11 @@ RETURNING s.state_key";
     /// A test that opens nothing and only checks the returned TYPE is enough to catch it, which is why it is
     /// worth having.</para>
     /// </summary>
-    internal static DbConnection CreateTargetConnection(ServerRuntime server)
+    internal static DbConnection CreateTargetConnection(ServerRuntime server, ITargetProvider? provider = null)
     {
         ArgumentNullException.ThrowIfNull(server);
 
-        return TargetProviders.For(server.Target).CreateConnection(server.ConnectionString);
+        return (provider ?? TargetProviders.For(server.Target)).CreateConnection(server.ConnectionString);
     }
 
     /// <summary>

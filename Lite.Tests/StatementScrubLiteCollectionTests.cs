@@ -164,6 +164,28 @@ public sealed class StatementScrubLiteCollectionTests : IClassFixture<SharedDuck
         AssertNoSecret(await WholeTableTextAsync("query_snapshots"));
     }
 
+    [Fact]
+    public async Task QuerySnapshots_TheCanaryThroughTheRunnersServerWidePath_IsStoredAsTheMarker_AndBothPlansAreFiltered()
+    {
+        /* #5320: the runner's server-wide single-query path, driven through its reader seam (the twin of the Azure
+           per-database seam the two tests above use). */
+        _collector.ServerReaderOverrideForTests = _ => SnapshotsReader();
+
+        await _collector.RunCollectorDefinitionAsync(QuerySnapshotsCollector.Instance, _server, CancellationToken.None);
+
+        var rows = await QueryAsync("SELECT CAST(session_id AS VARCHAR) || '|' || COALESCE(query_text, '<null>') FROM query_snapshots WHERE server_id = " + _serverId + " ORDER BY session_id");
+        Assert.Equal(new[] { "81|" + SensitiveStatements.PlaceholderText, "82|" + StatementScrubCanary.PlainStatement }, rows);
+
+        foreach (string column in new[] { "query_plan", "live_query_plan" })
+        {
+            var plans = await QueryAsync("SELECT " + column + " FROM query_snapshots WHERE server_id = " + _serverId + " AND session_id = 81 AND " + column + " IS NOT NULL");
+            string plan = Assert.Single(plans);
+            AssertPlanFilteredKeepsTheRest(plan);
+        }
+
+        AssertNoSecret(await WholeTableTextAsync("query_snapshots"));
+    }
+
     // ── read ──
 
     [Fact]

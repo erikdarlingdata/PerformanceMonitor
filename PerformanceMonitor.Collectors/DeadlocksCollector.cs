@@ -515,7 +515,7 @@ OUTER APPLY
 
     /// <summary>The separator inside the identity text of a whole-marker graph (see <see cref="GetIdentity"/>). An
     /// XML graph cannot hold it, so no real graph can equal a whole-marker identity.</summary>
-    public const char WholeMarkerIdentitySeparator = '';
+    public const char WholeMarkerIdentitySeparator = '\u0001';
 
     /// <summary>
     /// The SQL expression (PostgreSQL and DuckDB both run it) that gives a stored row the same identity text
