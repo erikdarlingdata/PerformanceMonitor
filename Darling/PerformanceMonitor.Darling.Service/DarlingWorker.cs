@@ -5667,6 +5667,7 @@ LIMIT 1";
             return;
         }
 
+        var fetchClock = Stopwatch.StartNew();
         try
         {
             var now = PgStatementText.Naive(DateTime.UtcNow);
@@ -5715,6 +5716,14 @@ LIMIT 1";
             _logger.LogWarning(
                 "  [{Server}] pg_statement_text refresh failed, statistics are unaffected: {Message} (#2219)",
                 runtime.Config.DisplayName, ex.Message);
+
+            /* #5320: the failure is also an ERROR row in the collection log under the text fetch's own name, so a
+               fetch that keeps timing out on the target shows in collection health instead of only in the service
+               log. The statistics run's own row stays as it was written: its data was collected. */
+            await DarlingObservability.LogCollectionAsync(
+                _postgres!, runtime, PgStatementText.CollectorName, "ERROR", 0, fetchClock.ElapsedMilliseconds, 0,
+                PgStatementText.DescribeFailure(ex),
+                fanout: null, phases: null, drain: null, fetchPhases: null, sweepPeerMaxMs: null, _logger, cancellationToken);
         }
     }
 
@@ -5749,7 +5758,7 @@ LIMIT 1";
         await connection.OpenAsync(cancellationToken);
         await using var command = new Npgsql.NpgsqlCommand(
             PgStatementText.FetchSqlFor(runtime.Target.IsAurora, runtime.Target.PostgresMajorVersion),
-            connection) { CommandTimeout = 60 };
+            connection) { CommandTimeout = PgStatementText.FetchCommandTimeoutSeconds };
         command.Parameters.AddWithValue(PgStatementTextRowCap);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
