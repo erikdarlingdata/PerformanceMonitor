@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using ModelContextProtocol.Protocol;
 using ModelContextProtocol.Server;
 
@@ -73,6 +74,9 @@ public static class SensitiveStatementOutputFilter
                 }
             }
 
+            JsonObject? meta = SweepMeta(result.Meta, budget);
+            if (!ReferenceEquals(meta, result.Meta)) changed = true;
+
             if (!changed) return result;
 
             return new CallToolResult
@@ -80,7 +84,7 @@ public static class SensitiveStatementOutputFilter
                 Content = content ?? result.Content,
                 StructuredContent = structured,
                 IsError = result.IsError,
-                Meta = result.Meta,
+                Meta = meta,
             };
         }
 #pragma warning disable CA1031 // fail closed: the sweep never lets the input through after a failure
@@ -91,22 +95,36 @@ public static class SensitiveStatementOutputFilter
         }
     }
 
+    /// <summary>Sweeps one block. A block type this filter does not know (an image, audio, a blob resource, a
+    /// resource link, anything a later SDK adds) cannot be read, so it is not passed through: it throws, and the
+    /// caller turns the whole result into the fixed refusal.</summary>
     private static ContentBlock? SweepBlock(ContentBlock block, SensitiveStatements.JudgeBudget budget)
     {
         switch (block)
         {
             case TextContentBlock text:
             {
-                if (string.IsNullOrEmpty(text.Text)) return block;
+                JsonObject? meta = SweepMeta(text.Meta, budget);
+                if (string.IsNullOrEmpty(text.Text))
+                    return ReferenceEquals(meta, text.Meta)
+                        ? block
+                        : new TextContentBlock { Text = text.Text, Annotations = text.Annotations, Meta = meta };
                 string judged = Judge(text.Text, budget);
-                if (ReferenceEquals(judged, text.Text)) return block;
-                return new TextContentBlock { Text = judged, Annotations = text.Annotations, Meta = text.Meta };
+                if (ReferenceEquals(judged, text.Text) && ReferenceEquals(meta, text.Meta)) return block;
+                return new TextContentBlock { Text = judged, Annotations = text.Annotations, Meta = meta };
             }
             case EmbeddedResourceBlock { Resource: TextResourceContents resource } embedded:
             {
-                if (string.IsNullOrEmpty(resource.Text)) return block;
-                string judged = Judge(resource.Text, budget);
-                if (ReferenceEquals(judged, resource.Text)) return block;
+                JsonObject? blockMeta = SweepMeta(embedded.Meta, budget);
+                JsonObject? resourceMeta = SweepMeta(resource.Meta, budget);
+                string judged = string.IsNullOrEmpty(resource.Text) ? resource.Text : Judge(resource.Text, budget);
+                if (ReferenceEquals(judged, resource.Text)
+                    && ReferenceEquals(blockMeta, embedded.Meta)
+                    && ReferenceEquals(resourceMeta, resource.Meta))
+                {
+                    return block;
+                }
+
                 return new EmbeddedResourceBlock
                 {
                     Resource = new TextResourceContents
@@ -114,15 +132,26 @@ public static class SensitiveStatementOutputFilter
                         Uri = resource.Uri,
                         MimeType = resource.MimeType,
                         Text = judged,
-                        Meta = resource.Meta,
+                        Meta = resourceMeta,
                     },
                     Annotations = embedded.Annotations,
-                    Meta = embedded.Meta,
+                    Meta = blockMeta,
                 };
             }
             default:
-                return block;
+                throw new InvalidOperationException(SensitiveStatements.JsonRefusal);
         }
+    }
+
+    /// <summary>Sweeps a <c>_meta</c> object under the shared budget: it is judged as the JSON it is, so a named
+    /// string inside it becomes the marker. The same instance comes back when nothing in it is named.</summary>
+    private static JsonObject? SweepMeta(JsonObject? meta, SensitiveStatements.JudgeBudget budget)
+    {
+        if (meta is null) return null;
+        string json = meta.ToJsonString();
+        string judged = Judge(json, budget);
+        if (ReferenceEquals(judged, json)) return meta;
+        return JsonNode.Parse(judged) as JsonObject ?? throw new InvalidOperationException(SensitiveStatements.JsonRefusal);
     }
 
     /// <summary>Sweeps one string. A refusal from the walk is thrown, so the whole result becomes the refusal
