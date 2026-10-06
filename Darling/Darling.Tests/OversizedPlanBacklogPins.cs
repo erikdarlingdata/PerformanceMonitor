@@ -860,9 +860,8 @@ public sealed class OversizedPlanBacklogPins
         Assert.Contains("captured_at IS NULL", claim, StringComparison.Ordinal);
         Assert.Contains("expired_at IS NULL", claim, StringComparison.Ordinal);
 
-        /* Oldest ATTEMPT first is what makes head-of-line starvation impossible: one plan that can never be
-           fetched cannot occupy a slot every tick forever. Largest plan first only breaks ties among rows
-           never attempted — those are the plans the cap cost the most visibility on. */
+        /* Tried rows rank oldest ATTEMPT first, so a failing plan goes to the back of the tried rows. Largest plan
+           first ranks the rows never attempted — those are the plans the cap cost the most visibility on. */
         Assert.Contains("last_attempt_at ASC", claim, StringComparison.Ordinal);
         Assert.Contains("observed_bytes DESC", claim, StringComparison.Ordinal);
         Assert.True(
@@ -870,14 +869,23 @@ public sealed class OversizedPlanBacklogPins
                 < claim.IndexOf("observed_bytes DESC", StringComparison.Ordinal),
             "size overtook attempt age in the claim order — an unfetchable large plan would then starve the rest");
 
-        /* #5367: a row tried once is claimed before every row never tried (it used to sort behind them, so new rows
-           arriving each pass could keep it waiting without end), and is judged on a session of its own. */
-        Assert.Contains("(last_attempt_at IS NOT NULL) DESC", claim, StringComparison.Ordinal);
-        Assert.True(
-            claim.IndexOf("(last_attempt_at IS NOT NULL) DESC", StringComparison.Ordinal)
-                < claim.IndexOf("last_attempt_at ASC", StringComparison.Ordinal),
-            "the tried-first key must lead the claim order");
+        /* #5367: a row tried once is claimed ahead of the rows never tried (it used to sort behind them, so new rows
+           arriving each pass could keep it waiting without end), and is judged on a session of its own. The returned
+           order is tried first. */
         Assert.DoesNotContain("NULLS FIRST", claim, StringComparison.Ordinal);
+        var outer = claim[(claim.LastIndexOf(") AS claimed", StringComparison.Ordinal))..];
+        Assert.True(outer.IndexOf("tried DESC", StringComparison.Ordinal) >= 0
+            && outer.IndexOf("tried DESC", StringComparison.Ordinal) < outer.IndexOf("last_attempt_at ASC", StringComparison.Ordinal),
+            "the tried-first key must lead the order the claim returns");
+
+        /* #5367 review round 2, N2: the tried rows hold at most half of a claim, because a fetch that keeps failing is
+           not counted and never retires, so ten of them used to fill every claim and no new row was ever claimed. The
+           other half goes to never-tried rows, and a side that is short leaves its slots to the other. */
+        Assert.Equal(5, OversizedPlanBacklog.TriedRowsPerClaim(OversizedPlanBacklogSweep.MaxPlansPerServerPerTick));
+        Assert.Equal(0, OversizedPlanBacklog.TriedRowsPerClaim(1));
+        Assert.Contains("PARTITION BY (last_attempt_at IS NOT NULL)", claim, StringComparison.Ordinal);
+        Assert.Contains("share_rank <= CASE WHEN tried THEN 5 ELSE 5 END", claim, StringComparison.Ordinal);
+        Assert.Contains("LIMIT 10", claim, StringComparison.Ordinal);
         Assert.Contains("last_attempt_at IS NOT NULL AS tried", claim, StringComparison.Ordinal);
     }
 

@@ -406,7 +406,9 @@ public sealed class StatementColumnCensusTests
     /// <summary>
     /// A writer that can put statement text, a plan or a caller's arguments into a store without going through a
     /// collector definition's payload columns. <c>Sites</c> are the (file, type, method) places the hook may live;
-    /// every site must still exist, and a non-pending entry needs a <c>SensitiveStatements</c> call in at least one.
+    /// every site must still exist, and in a non-pending entry EACH site must filter, not just one of them (#5367
+    /// review, A-L2): it judges directly through a <c>SensitiveStatements</c> call, judges through a session it
+    /// received, or calls another site of the same entry that does.
     /// </summary>
     private sealed record Watched(
         string Name, string Row, string Lane, bool Pending, params (string File, string Type, string Method)[] Sites);

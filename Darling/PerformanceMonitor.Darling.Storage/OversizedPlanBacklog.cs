@@ -95,9 +95,11 @@ public static class OversizedPlanBacklog
     /// concatenates this constant into its rung, the V38 idiom, so the shape the store gets and the shape the
     /// statements below address cannot drift.
     ///
-    /// <para><c>attempt_count</c> and <c>last_attempt_at</c> are not bookkeeping. Ordering the claim by
-    /// <c>last_attempt_at</c> is what makes head-of-line starvation impossible: a row that was just tried
-    /// goes to the back, so one plan that can never be fetched cannot occupy a slot every tick forever. The
+    /// <para><c>attempt_count</c> and <c>last_attempt_at</c> are not bookkeeping. Ranking the claim by
+    /// <c>last_attempt_at</c> makes the tried rows a round-robin: a row that was just tried goes to the back of
+    /// the tried rows, and the tried rows hold at most <see cref="TriedRowsPerClaim"/> of a claim's slots, so
+    /// one plan that can never be fetched cannot keep every never-tried row out (it does keep a slot's turn,
+    /// every <c>ceil(tried rows / share)</c> passes, for as long as it fails: a failure is not counted). The
     /// count is the sweep's retirement limit: it grows only when a plan that had the whole judging budget to
     /// itself overran it (#5367 review, A-M1), so a connect failure or an expiry does not move it.</para>
     /// </summary>
@@ -169,21 +171,39 @@ ON CONFLICT ON CONSTRAINT pk_oversized_plan_backlog DO UPDATE SET
     expired_at = NULL;";
 
     /// <summary>
-    /// The sweep's claim for one server: the rows with no content yet and no standing expiry. Rows already tried
-    /// come first, oldest ATTEMPT first, so nothing can starve; then the rows never attempted, largest plan first —
+    /// How many already-tried rows one claim of <paramref name="limit"/> rows may take while there are never-tried
+    /// rows to take instead: half, rounded down (5 of 10). The other half is reserved for never-tried rows, so a
+    /// backlog of tried rows whose fetch keeps failing cannot fill every claim and keep a new row out for good
+    /// (#5367 review round 2, N2). When one side has fewer rows than its share, the other side takes the rest.
+    /// </summary>
+    public static int TriedRowsPerClaim(int limit) => limit / 2;
+
+    /// <summary>
+    /// The sweep's claim for one server: the rows with no content yet and no standing expiry, at most
+    /// <paramref name="limit"/> of them, in the order the sweep works them: rows already tried first, oldest ATTEMPT
+    /// first, then the rows never attempted, largest plan first. A never-tried row's size is what ranks it, because
     /// those are the plans the cap cost the most visibility on, which is the whole reason to go back for them.
     ///
-    /// <para><b>Tried rows first (#5367).</b> A row tried once sat behind every row never tried, so with new rows
+    /// <para><b>Which rows make the cut (#5367).</b> Tried rows get at most <see cref="TriedRowsPerClaim"/> of the
+    /// slots (oldest attempt first) and never-tried rows get the rest (largest first); a side that is short leaves
+    /// its unused slots to the other. A row tried once used to sit behind every row never tried, so with new rows
     /// arriving each pass it could wait without end, and the sweep judges a tried row on a session of its own
-    /// (<c>OversizedPlanBacklogSweep.SessionFor</c>) so that each claim of it makes progress. Each tried row
-    /// leaves in at most two claims after the one that tried it: judged, or a judge timeout counted and then the
-    /// marker. The tried rows ahead of the never-tried ones are therefore a queue that drains.</para>
+    /// (<c>OversizedPlanBacklogSweep.SessionFor</c>) so that each claim of it makes progress. Each tried row whose
+    /// fetch succeeds leaves in at most two claims after the one that tried it: judged, or a judge timeout counted
+    /// and then the marker. A tried row whose fetch FAILS is not counted and never retires, so it stays in the
+    /// tried queue: that queue is served round-robin by attempt age, <see cref="TriedRowsPerClaim"/> rows a pass,
+    /// and the cap is what stops it from taking every slot.</para>
     ///
     /// <para>The limit is interpolated from the caller's own constant rather than written here, so the
     /// statement and the policy cannot disagree about how many plans one tick may fetch. It is never user
     /// input.</para>
     /// </summary>
-    public static string ClaimSql(int limit) => @"
+    public static string ClaimSql(int limit)
+    {
+        var triedShare = TriedRowsPerClaim(limit).ToString(CultureInfo.InvariantCulture);
+        var newShare = (limit - TriedRowsPerClaim(limit)).ToString(CultureInfo.InvariantCulture);
+        var all = limit.ToString(CultureInfo.InvariantCulture);
+        return @"
 SELECT
     collector_name,
     plan_handle,
@@ -193,16 +213,55 @@ SELECT
     database_name,
     observed_bytes,
     attempt_count,
-    last_attempt_at IS NOT NULL AS tried
-FROM collect.oversized_plan_backlog
-WHERE server_id = $1
-AND   captured_at IS NULL
-AND   expired_at IS NULL
+    tried
+FROM
+(
+    SELECT
+        collector_name,
+        plan_handle,
+        sql_handle,
+        statement_start_offset,
+        statement_end_offset,
+        database_name,
+        observed_bytes,
+        attempt_count,
+        last_attempt_at,
+        tried
+    FROM
+    (
+        SELECT
+            collector_name,
+            plan_handle,
+            sql_handle,
+            statement_start_offset,
+            statement_end_offset,
+            database_name,
+            observed_bytes,
+            attempt_count,
+            last_attempt_at,
+            last_attempt_at IS NOT NULL AS tried,
+            row_number() OVER
+            (
+                PARTITION BY (last_attempt_at IS NOT NULL)
+                ORDER BY last_attempt_at ASC, observed_bytes DESC
+            ) AS share_rank
+        FROM collect.oversized_plan_backlog
+        WHERE server_id = $1
+        AND   captured_at IS NULL
+        AND   expired_at IS NULL
+    ) AS ranked
+    ORDER BY
+        (share_rank <= CASE WHEN tried THEN " + triedShare + " ELSE " + newShare + @" END) DESC,
+        tried DESC,
+        last_attempt_at ASC,
+        observed_bytes DESC
+    LIMIT " + all + @"
+) AS claimed
 ORDER BY
-    (last_attempt_at IS NOT NULL) DESC,
+    tried DESC,
     last_attempt_at ASC,
-    observed_bytes DESC
-LIMIT " + limit.ToString(CultureInfo.InvariantCulture) + ";";
+    observed_bytes DESC;";
+    }
 
     /// <summary>A fetch that returned the plan: store it, and retire any standing expiry.</summary>
     public const string RecordCaptureSql = @"
@@ -226,7 +285,7 @@ SET expired_at = $7,
     /// <summary>
     /// A fetch that could not complete — connect failure, driver fault, its own budget, or a judging budget an
     /// earlier plan had already used. NOT an expiry: nothing was learned about the handle, so the row stays
-    /// claimable and simply goes to the back of the queue. Not counted in <c>attempt_count</c>, which is the
+    /// claimable and simply goes to the back of the tried rows. Not counted in <c>attempt_count</c>, which is the
     /// retirement limit's count of judge timeouts and nothing else (#5367 review, A-M1).
     /// </summary>
     public const string RecordFailureSql = @"
@@ -235,7 +294,7 @@ SET last_attempt_at = $7" + KeyPredicate + ";";
 
     /// <summary>
     /// A plan that had the whole judging budget to itself and overran it: the one outcome that adds to
-    /// <c>attempt_count</c>. The row stays claimable and goes to the back of the queue, until the count reaches
+    /// <c>attempt_count</c>. The row stays claimable and goes to the back of the tried rows, until the count reaches
     /// the sweep's limit and the whole-plan marker is stored as the capture.
     /// </summary>
     public const string RecordAttemptSql = @"
