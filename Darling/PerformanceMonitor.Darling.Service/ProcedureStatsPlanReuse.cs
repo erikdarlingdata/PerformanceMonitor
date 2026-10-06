@@ -217,7 +217,9 @@ internal static class ProcedureStatsPlanReuse
                 outcome.RenderedBytes += result.Bytes ?? 0;
                 rows[rowIndex] = rows[rowIndex] with { QueryPlanXml = result.PlanXml, QueryPlanXmlBytes = result.Bytes };
 
-                if (key is { } cacheKey)
+                /* #4348: a plan the filter withheld whole (its budget ran out) is stored as the marker for this cycle but
+                   never cached, so the next cycle fetches and filters it again. */
+                if (key is { } cacheKey && !QueryStatsCollector.IsWithheldWhole(result.PlanXml))
                 {
                     cache.AddPending(
                         cacheKey, result.PlanXml is null ? null : DigestOf(result.PlanXml), result.Bytes, nowUtc, captureOrdinal);
