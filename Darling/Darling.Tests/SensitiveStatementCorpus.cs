@@ -89,8 +89,9 @@ internal static class SensitiveStatementCorpus
         "CREATE TABLE passwords (id int)",
     };
 
-    /// <summary>The .NET-only adversarial strings: many comment tokens after a keyword. They are not part of
-    /// the parity set, because the .NET engine backtracks on them and PostgreSQL's does not.</summary>
+    /// <summary>The strings the plan once expected the .NET judge to time out on: many comment tokens after a
+    /// keyword. The linear-time pre-check (#5320) now answers Clean for them, as PostgreSQL does. They are not
+    /// part of the parity set, because the full .NET judge alone still backtracks on them.</summary>
     public static readonly string[] Adversarial =
     {
         "create" + string.Concat(Enumerable.Repeat(" --", 40)) + "x",

@@ -48,7 +48,17 @@ public static partial class SensitiveStatements
     /// the source has no backslash and no <c>^</c> or <c>$</c> outside a bracket expression (a <c>]</c> that
     /// closes no open bracket is a literal), and no <c>[:</c> remains after translating.
     /// </summary>
-    internal static bool TryTranslate(string source, out string translated)
+    internal static bool TryTranslate(string source, out string translated) =>
+        TryTranslate(source, factor: true, dropAssertions: false, out translated);
+
+    /// <summary>
+    /// The translation with two switches for the pre-check and the offline pins. <paramref name="factor"/> false
+    /// leaves the word-start assertion on every alternative (the unfactored form a test compares against).
+    /// <paramref name="dropAssertions"/> true removes every word-boundary assertion instead of translating it, so
+    /// the result matches a superset of what the full translation matches and uses no lookaround, which lets
+    /// <see cref="RegexOptions.NonBacktracking"/> run it in linear time.
+    /// </summary>
+    internal static bool TryTranslate(string source, bool factor, bool dropAssertions, out string translated)
     {
         translated = string.Empty;
         if (source.Length == 0 || source.Contains('\\', StringComparison.Ordinal) || !AnchorsOnlyInBrackets(source))
@@ -57,18 +67,20 @@ public static partial class SensitiveStatements
         }
 
         // The word-boundary tokens first, then the classes (a class sits inside a bracket expression).
+        var wordStart = dropAssertions ? string.Empty : "(?<!" + WordChars + ")(?=" + WordChars + ")";
+        var wordEnd = dropAssertions ? string.Empty : "(?<=" + WordChars + ")(?!" + WordChars + ")";
         var result = source
-            .Replace("[[:<:]]", "(?<!" + WordChars + ")(?=" + WordChars + ")", StringComparison.Ordinal)
-            .Replace("[[:>:]]", "(?<=" + WordChars + ")(?!" + WordChars + ")", StringComparison.Ordinal)
-            .Replace("[:space:]", "\\s", StringComparison.Ordinal)
-            .Replace("[:cntrl:]", "\\p{Cc}", StringComparison.Ordinal);
+            .Replace("[[:<:]]", wordStart, StringComparison.Ordinal)
+            .Replace("[[:>:]]", wordEnd, StringComparison.Ordinal)
+            .Replace("[:space:]", "\\s",StringComparison.Ordinal)
+            .Replace("[:cntrl:]", "\\p{Cc}",StringComparison.Ordinal);
 
         if (result.Contains("[:", StringComparison.Ordinal))
         {
             return false;
         }
 
-        translated = FactorWordStart(result);
+        translated = factor && !dropAssertions ? FactorWordStart(result) : result;
         return true;
     }
 
@@ -210,11 +222,41 @@ public static partial class SensitiveStatements
         return true;
     }
 
-    /// <summary>Builds a judge for a pattern source. A failed guard, or a translation .NET cannot compile,
-    /// gives a judge that names every value.</summary>
-    internal static Func<string, Verdict> CreateJudge(string source, TimeSpan timeout)
+    /// <summary>
+    /// Builds the linear-time pre-check for a pattern source: the same translation with every word-boundary
+    /// assertion removed, run with <see cref="RegexOptions.NonBacktracking"/>. It matches a superset of the
+    /// full judge, so no hit means the full judge cannot match either; a hit proves nothing and the full judge
+    /// decides. Null when the guards or the build fail, and the caller then always runs the full judge (fail
+    /// closed: a missing pre-check only costs time).
+    /// </summary>
+    internal static Regex? CreatePrefilter(string source, TimeSpan timeout)
     {
-        if (!TryTranslate(source, out var translated))
+        if (!TryTranslate(source, factor: false, dropAssertions: true, out var superset))
+        {
+            return null;
+        }
+
+        try
+        {
+            return new Regex(
+                superset,
+                RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Singleline | RegexOptions.NonBacktracking,
+                timeout);
+        }
+#pragma warning disable CA1031 // fail closed: no pre-check means the full judge runs on every value
+        catch (Exception)
+#pragma warning restore CA1031
+        {
+            return null;
+        }
+    }
+
+    /// <summary>Builds a judge for a pattern source. A failed guard, or a translation .NET cannot compile,
+    /// gives a judge that names every value. <paramref name="factor"/> and <paramref name="prefilter"/> exist so
+    /// a test can build the unfactored form and the judge without the pre-check.</summary>
+    internal static Func<string, Verdict> CreateJudge(string source, TimeSpan timeout, bool factor = true, bool prefilter = true)
+    {
+        if (!TryTranslate(source, factor, dropAssertions: false, out var translated))
         {
             return static _ => Verdict.Named;
         }
@@ -232,10 +274,18 @@ public static partial class SensitiveStatements
             return static _ => Verdict.Named;
         }
 
+        var precheck = prefilter ? CreatePrefilter(source, timeout) : null;
+
         return text =>
         {
             try
             {
+                // #5320 M1: no hit in the linear-time superset means the exact pattern cannot match either.
+                if (precheck is not null && !precheck.IsMatch(text))
+                {
+                    return Verdict.Clean;
+                }
+
                 return regex.IsMatch(text) ? Verdict.Named : Verdict.Clean;
             }
             catch (RegexMatchTimeoutException)
