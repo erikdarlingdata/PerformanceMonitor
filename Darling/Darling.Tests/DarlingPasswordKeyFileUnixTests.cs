@@ -166,6 +166,106 @@ public sealed class DarlingPasswordKeyFileUnixTests
         }
     }
 
+    [Fact]
+    public void AFileAndItsSecondName_HaveTheSameFileId()
+    {
+        Assert.SkipUnless(!OperatingSystem.IsWindows(), UnixOnly);
+        var directory = NewDirectory();
+        try
+        {
+            var path = WriteFile(directory, "example-content");
+            var second = Path.Combine(directory, "example-second-name");
+            LinkTo(path, second);
+
+            var first = FileIdentity.Of(path);
+
+            Assert.NotNull(first);
+            Assert.Equal(first, FileIdentity.Of(second));
+        }
+        finally
+        {
+            Remove(directory);
+        }
+    }
+
+    [Fact]
+    public void TwoDifferentFiles_HaveDifferentFileIds()
+    {
+        Assert.SkipUnless(!OperatingSystem.IsWindows(), UnixOnly);
+        var directory = NewDirectory();
+        try
+        {
+            var path = WriteFile(directory, "example-content");
+            var other = Path.Combine(directory, "example-other-file");
+            File.WriteAllText(other, "example-content");
+
+            var first = FileIdentity.Of(path);
+            var second = FileIdentity.Of(other);
+
+            Assert.NotNull(first);
+            Assert.NotNull(second);
+            Assert.NotEqual(first, second);
+        }
+        finally
+        {
+            Remove(directory);
+        }
+    }
+
+    [Fact]
+    public void ASymbolicLink_HasTheFileIdOfTheFileItNames()
+    {
+        Assert.SkipUnless(!OperatingSystem.IsWindows(), UnixOnly);
+        var directory = NewDirectory();
+        try
+        {
+            var path = WriteFile(directory, "example-content");
+            var link = Path.Combine(directory, "example-symbolic-name");
+            File.CreateSymbolicLink(link, path);
+
+            Assert.Equal(FileIdentity.Of(path), FileIdentity.Of(link));
+        }
+        finally
+        {
+            Remove(directory);
+        }
+    }
+
+    [Fact]
+    public void AMissingPath_HasNoFileId()
+    {
+        Assert.SkipUnless(!OperatingSystem.IsWindows(), UnixOnly);
+        var directory = NewDirectory();
+        try
+        {
+            var path = WriteFile(directory, "example-content");
+
+            Assert.Null(FileIdentity.Of(Path.Combine(directory, "example-missing-file")));
+            Assert.Null(FileIdentity.Of(Path.Combine(path, "example-under-a-file")));
+        }
+        finally
+        {
+            Remove(directory);
+        }
+    }
+
+    /// <summary>Pure decode, so it runs on every platform: the offsets the Linux file number read uses.</summary>
+    [Fact]
+    public void TheStatxBuffer_IsReadForTheFileIdAtItsOffsets()
+    {
+        var statx = new byte[512];
+        BitConverter.GetBytes(0x100u).CopyTo(statx, 0);
+        BitConverter.GetBytes(0x1122334455667788UL).CopyTo(statx, 32);
+        BitConverter.GetBytes(8u).CopyTo(statx, 136);
+        BitConverter.GetBytes(17u).CopyTo(statx, 140);
+
+        Assert.True(FileIdentity.StatxFilledInode(statx));
+        Assert.Equal(new FileId((8UL << 32) | 17UL, 0x1122334455667788UL), FileIdentity.DecodeStatxFileId(statx));
+
+        BitConverter.GetBytes(0xEFFu).CopyTo(statx, 0);
+        Assert.False(FileIdentity.StatxFilledInode(statx));
+    }
+
     private static string NewDirectory() =>
         Path.Combine(Path.GetTempPath(), "darling-5366-unix-" + Guid.NewGuid().ToString("N"), "keys");
 

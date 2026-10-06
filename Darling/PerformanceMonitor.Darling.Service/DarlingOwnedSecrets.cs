@@ -546,8 +546,13 @@ internal static class FileIdentity
         return new FileId(info.VolumeSerialNumber, ((ulong)info.FileIndexHigh << 32) | info.FileIndexLow);
     }
 
-    /* st_dev is at offset 0 and st_ino at offset 8 in struct stat on 64-bit Linux (x86-64 and arm64) and on macOS with
-       64-bit inodes; st_dev is 8 bytes on Linux and 4 on macOS. A buffer larger than any of those structs is used. */
+    /* Linux asks statx, which has one layout on every architecture and is in every glibc from 2.28; plain stat is
+       exported only from glibc 2.33 on, so a call to it fails with a missing entry point on older systems (#5366).
+       statx follows a symbolic link, as stat does. stx_ino is 8 bytes at offset 32, and stx_dev_major and stx_dev_minor
+       are 4 bytes each at 136 and 140 (the kernel always fills the device). The device is folded into one value as
+       (major << 32) | minor: every FileId comes from this one function, so the encoding only has to be consistent.
+       macOS reads stat (stat$INODE64 on x64): st_dev is at offset 0 (4 bytes) and st_ino at offset 8 (64-bit inodes).
+       A buffer larger than either struct is used. */
     private static FileId? OfUnix(string path)
     {
         var buffer = new byte[512];
@@ -556,11 +561,15 @@ internal static class FileIdentity
             throw new PlatformNotSupportedException("The stat layout is only known for 64-bit processes.");
         }
 
+        var linux = OperatingSystem.IsLinux();
+
         /* DllNotFoundException / EntryPointNotFoundException propagate: the native call being unavailable is a failure
            to look, not absence. */
-        var result = OperatingSystem.IsMacOS() && RuntimeInformation.ProcessArchitecture == Architecture.X64
-            ? StatMacIntel(path, buffer)
-            : Stat(path, buffer);
+        var result = linux
+            ? Statx(AtFdcwd, path, 0, StatxIno, buffer)
+            : OperatingSystem.IsMacOS() && RuntimeInformation.ProcessArchitecture == Architecture.X64
+                ? StatMacIntel(path, buffer)
+                : Stat(path, buffer);
         if (result != 0)
         {
             var errno = Marshal.GetLastPInvokeError();
@@ -572,9 +581,30 @@ internal static class FileIdentity
             };
         }
 
+        if (linux)
+        {
+            if (!StatxFilledInode(buffer))
+            {
+                throw new IOException("The path could not be examined: the file system did not report a file number.");
+            }
+
+            return DecodeStatxFileId(buffer);
+        }
+
         var dev = OperatingSystem.IsMacOS() ? (ulong)BitConverter.ToUInt32(buffer, 0) : BitConverter.ToUInt64(buffer, 0);
         return new FileId(dev, BitConverter.ToUInt64(buffer, 8));
     }
+
+    private const uint StatxIno = 0x100;
+
+    /// <summary>True when a <c>statx</c> buffer's mask says the file number was filled in.</summary>
+    internal static bool StatxFilledInode(byte[] buffer) =>
+        (BitConverter.ToUInt32(buffer, 0) & StatxIno) == StatxIno;
+
+    /// <summary>The device and file number in a <c>statx</c> buffer: <c>stx_ino</c> at 32, <c>stx_dev_major</c> at 136 and
+    /// <c>stx_dev_minor</c> at 140, the device as <c>(major &lt;&lt; 32) | minor</c>.</summary>
+    internal static FileId DecodeStatxFileId(byte[] buffer) =>
+        new(((ulong)BitConverter.ToUInt32(buffer, 136) << 32) | BitConverter.ToUInt32(buffer, 140), BitConverter.ToUInt64(buffer, 32));
 
     /// <summary>Where the owner and link count sit in the buffer each platform's call fills (#5366).</summary>
     internal enum UnixStatLayout
