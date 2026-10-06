@@ -87,6 +87,8 @@ dotnet build PerformanceMonitor.sln -c Debug -t:Rebuild
 ```
 All projects must succeed with **0 Warning(s) / 0 Error(s)** — the repo's bar is zero-warning, test projects included (they sit outside the WarningsAsErrors gate, so a warm incremental build can hide a warning a Rebuild surfaces).
 
+A release cut fails while any statement-column census entry is pending. Run `DARLING_RELEASE_CUT=1 Darling/Darling.Tests/bin/Debug/net10.0-windows/Darling.Tests.exe -method "*StatementCensus_PendingEntries_BlockARelease*"` (without the variable it only prints the pending count); the cut proceeds only when it passes.
+
 (The deprecated Installer/Dashboard test suites run in CI on the release event with the CI's own filter; they are no longer run from this checklist.)
 
 ### 5. Cloud Platform Testing (shared collector layer — test via DARLING)

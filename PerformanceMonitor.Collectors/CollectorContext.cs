@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Text;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Collectors;
 
@@ -202,7 +203,14 @@ public sealed class CollectorContext
     /// operator acts on it, which is the failure <c>CollectorRuntimePrecondition</c> (#2546) exists to
     /// prevent; a stored count stays true and lets the read derive the verdict fresh on every call.</para>
     /// </summary>
-    public IReadOnlyList<CollectorMeasurement> Measurements => _measurements;
+    public IReadOnlyList<CollectorMeasurement> Measurements
+    {
+        get
+        {
+            FoldStatementScrub();
+            return _measurements;
+        }
+    }
 
     private readonly List<CollectorMeasurement> _measurements = new();
 
@@ -257,6 +265,91 @@ public sealed class CollectorContext
         }
 
         _measurements.Add(new CollectorMeasurement(label, value));
+    }
+
+    /// <summary>Values the statement filter withheld this cycle because they were named or their match timed out
+    /// (#4348).</summary>
+    public const string StatementScrubNamedMeasurement = "statement_scrub_named";
+
+    /// <summary>Regex matches that timed out this cycle (#4348).</summary>
+    public const string StatementScrubTimeoutsMeasurement = "statement_scrub_timeouts";
+
+    /// <summary>Values withheld unjudged this cycle because the scrub budget was spent. Above 0 means the budget ran
+    /// out; in the field it should be 0 (#4348).</summary>
+    public const string StatementScrubUnjudgedMeasurement = "statement_scrub_unjudged";
+
+    /// <summary>Milliseconds the statement filter spent this cycle (#4348).</summary>
+    public const string StatementScrubMsMeasurement = "statement_scrub_ms";
+
+    private readonly List<ScrubTally> _scrubSessions = new();
+    private readonly object _scrubGate = new();
+
+    /// <summary>
+    /// Starts the statement filter's session for ONE read call (#4348). A collector wraps each statement or plan
+    /// string with the session at the line where the string first enters a row; the session judges under its own
+    /// 15-second budget. The context adds every session's counters into the four <c>statement_scrub_*</c>
+    /// measurements, written only when the cycle judged a value (a cycle that read no statement text carries none).
+    /// </summary>
+    public SensitiveStatements.Session BeginStatementScrub()
+    {
+        var session = new SensitiveStatements.Session();
+        lock (_scrubGate)
+        {
+            _scrubSessions.Add(new ScrubTally(session));
+        }
+
+        return session;
+    }
+
+    /// <summary>One session and what has already been added to the measurements for it, so a second read of
+    /// <see cref="Measurements"/> adds only what the session did since.</summary>
+    private sealed class ScrubTally(SensitiveStatements.Session session)
+    {
+        public SensitiveStatements.Session Session { get; } = session;
+        public long Named { get; set; }
+        public long TimedOut { get; set; }
+        public long Unjudged { get; set; }
+        public long Ms { get; set; }
+    }
+
+    private bool _scrubMeasured;
+
+    private void FoldStatementScrub()
+    {
+        lock (_scrubGate)
+        {
+            if (_scrubSessions.Count == 0)
+            {
+                return;
+            }
+
+            long named = 0, timedOut = 0, unjudged = 0, ms = 0;
+            var judged = false;
+            foreach (var tally in _scrubSessions)
+            {
+                var s = tally.Session;
+                judged |= s.Values > 0;
+                named += s.Named - tally.Named;
+                timedOut += s.TimedOut - tally.TimedOut;
+                unjudged += s.Unjudged - tally.Unjudged;
+                ms += s.ElapsedMs - tally.Ms;
+                tally.Named = s.Named;
+                tally.TimedOut = s.TimedOut;
+                tally.Unjudged = s.Unjudged;
+                tally.Ms = s.ElapsedMs;
+            }
+
+            if (!judged && !_scrubMeasured)
+            {
+                return;
+            }
+
+            _scrubMeasured = true;
+            this.Measure(StatementScrubNamedMeasurement, named);
+            this.Measure(StatementScrubTimeoutsMeasurement, timedOut);
+            this.Measure(StatementScrubUnjudgedMeasurement, unjudged);
+            this.Measure(StatementScrubMsMeasurement, ms);
+        }
     }
 
     /// <summary>Wait types excluded from collection (Lite: ignored_wait_types.json — #1240).</summary>
