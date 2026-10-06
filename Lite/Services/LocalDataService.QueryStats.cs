@@ -1173,8 +1173,8 @@ LEFT JOIN LATERAL (
     /// unknowable), <c>NULLIF(…, 0)</c> so the restart collection is UNRATED, and the LAG only for a
     /// pre-v61 collection (NULL) that never recorded one, so history renders exactly as it did.
     /// <c>COALESCE(NULLIF(sample_interval_seconds, 0), LAG)</c> would be the wrong spelling — it falls back
-    /// to a fabricated interval on precisely the restart row. Darling's twin is
-    /// <c>DurationTrendRouting.BuildRawTrendSql</c>.</para>
+    /// to a fabricated interval on precisely the restart row. Darling's twin is the per-collection CTE
+    /// <c>DurationTrendRouting.BuildBucketedRawTrendSql</c> builds.</para>
     /// <para><b>An unrated collection is a point with no rate, not a missing point (#3541 A12, #3540 A8).</b>
     /// The first collection of a pre-v61 stretch has a NULL LAG, a restart collection a NULL interval; either
     /// way the <c>CASE ... ELSE 0 END</c> this replaced published that unknowable as a measured 0.0, and every
@@ -1281,7 +1281,7 @@ LEFT JOIN LATERAL (
     /// partial bucket does not render before it. No <c>HAVING</c> on the rate: a bucket with no rated collection still gets a
     /// row, its rate NULL — the per-collection contract above, applied per bucket. With a database filter the filter sits
     /// INSIDE the aggregates (#5414 M1: a collection the chosen databases had no rows in still counts its seconds) and
-    /// a bucket with no matching row at all is dropped by <c>HAVING SUM(matched_rows) &gt; 0</c>. <paramref name="dbClause"/> is
+    /// whether the chosen databases had any row at all is one window-level <c>WHERE EXISTS</c> (the empty chart), never a per-bucket test, so a bucket they were quiet in reads 0 and is not missing (#5414 round 2). <paramref name="dbClause"/> is
     /// <see cref="LocalDataService.BuildDbInClause"/>'s own <c>$4..</c> numbering, unchanged by bucketing; the
     /// width is appended as its OWN trailing parameter at <paramref name="widthParamIndex"/> so that numbering
     /// never shifts, mirroring the wait/perfmon trend reads' own width parameter.
@@ -1322,8 +1322,8 @@ SELECT
     CAST(SUM(rated_executions) AS DOUBLE PRECISION) / SUM(rated_seconds) AS executions_per_second,
     MIN(collection_time) AS first_collection_time,
     COUNT(*) AS collection_count
-FROM rated
-GROUP BY 1{(dbClause.Length == 0 ? "" : "\nHAVING SUM(matched_rows) > 0")}
+FROM rated{(dbClause.Length == 0 ? "" : "\nWHERE EXISTS (SELECT 1 FROM rated WHERE matched_rows > 0)")}
+GROUP BY 1
 ORDER BY 1";
 
     /// <summary>
@@ -1468,8 +1468,8 @@ SELECT
     CAST(SUM(rated_executions) AS DOUBLE PRECISION) / SUM(rated_seconds) AS executions_per_second,
     MIN(collection_time) AS first_collection_time,
     COUNT(*) AS collection_count
-FROM rated
-GROUP BY 1{(dbClause.Length == 0 ? "" : "\nHAVING SUM(matched_rows) > 0")}
+FROM rated{(dbClause.Length == 0 ? "" : "\nWHERE EXISTS (SELECT 1 FROM rated WHERE matched_rows > 0)")}
+GROUP BY 1
 ORDER BY 1";
 
     /// <summary>The same probe over <c>v_procedure_stats</c>, the source

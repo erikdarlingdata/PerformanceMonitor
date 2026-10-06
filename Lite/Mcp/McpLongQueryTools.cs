@@ -52,20 +52,32 @@ public sealed class McpLongQueryTools
                 databaseNames: database == null ? null : new[] { database });
             if (rows.Count == 0)
             {
-                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "long_query_completions")
+                /* #5244 round 2 (L2): not_collected and precondition echo database_name like every other shape. */
+                var unmet = McpHelpers.WithDatabase(
+                    await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "long_query_completions"), database)
                     /* #2546: this collector is opt-in, so the fall-through below already sends the reader to
-                       the schedule — which is the wrong place when the collector IS enabled and its session
+                       the schedule, which is the wrong place when the collector IS enabled and its session
                        is missing. The precondition answer names that state instead of quietly blaming a knob
                        that is already switched on. */
-                    ?? await McpRuntimePrecondition.StatusAsync(dataService, resolved.ServerId, resolved.ServerName, "long_query_completions")
-                    ?? McpHelpers.StatusForDatabase("empty",
-                        /* #5244 review L3: the twin of Darling's: under a filter the answer ends after the database clause. */
-                        "No long-running query completions found in the specified time range" + McpBlockingTools.ForChosenDatabase(database)
-                            + (database == null ? ". The long_query_completions collector is opt-in (default OFF) — enable it in the collector schedule to capture data." : "."),
-                        database, /* #5244 review L2: the echo rides on an empty answer too */
-                        (await McpQueryTools.EventWindowNoticeAsync(
-                            () => dataService.GetQueryWindowFloorAsync(QueryWindowRelation.LongQueryCompletions, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd),
-                            null, windowEnd.AddHours(-hours_back), windowEnd, "long_query_completions", emptyAnswer: true)).AsHints());
+                    ?? McpHelpers.WithDatabase(
+                        await McpRuntimePrecondition.StatusAsync(dataService, resolved.ServerId, resolved.ServerName, "long_query_completions"), database);
+                if (unmet != null)
+                {
+                    return unmet;
+                }
+
+                var emptyNotice = await McpQueryTools.EventWindowNoticeAsync(
+                    () => dataService.GetQueryWindowFloorAsync(QueryWindowRelation.LongQueryCompletions, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd),
+                    null, windowEnd.AddHours(-hours_back), windowEnd, "long_query_completions", emptyAnswer: true);
+                /* #5244 round 2 (L3): the twin of Darling's. The floor probe is not database-filtered, so a null floor (no effective_start)
+                   means the store holds no long-query row for this server in the window, and only then does the answer send the reader to
+                   the opt-in switch; with rows for other databases the collector is on. */
+                var collectorMayBeOff = database == null || emptyNotice.EffectiveStart is null;
+                return McpHelpers.StatusForDatabase("empty",
+                    "No long-running query completions found in the specified time range" + McpBlockingTools.ForChosenDatabase(database)
+                        + (collectorMayBeOff ? ". The long_query_completions collector is opt-in (default OFF) — enable it in the collector schedule to capture data." : "."),
+                    database, /* #5244 review L2: the echo rides on an empty answer too */
+                    emptyNotice.AsHints());
             }
 
             var truncated = rows.Count > limit;

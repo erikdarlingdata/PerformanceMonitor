@@ -69,7 +69,7 @@ public sealed class McpPlanCorrectionTools
 
             if (tuning.Count == 0 && rows.Count == 0)
             {
-                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "plan_correction")
+                return McpHelpers.WithDatabase(await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "plan_correction"), database)
                     ?? McpHelpers.StatusForDatabase("empty",
                         /* #5244: a filtered empty is a verdict about the chosen database only, the same words as Darling's twin. */
                         database != null

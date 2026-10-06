@@ -79,23 +79,38 @@ public sealed class DarlingMcpLongQueryTools
             var rows = await DarlingLongQueryReader.GetRecentLongQueryCompletionsAsync(
                 postgres, resolved.ServerId, now.AddHours(-hours_back), now, limit + 1, databaseFilter, cancellationToken);
             if (rows.Count == 0)
-                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "long_query_completions", cancellationToken)
+            {
+                /* #5244 round 2 (L2): not_collected and precondition echo database_name like every other shape. */
+                var unmet = McpHelpers.WithDatabase(
+                    await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "long_query_completions", cancellationToken),
+                    databaseFilter.Describe())
                     /* #2546: this collector is opt-in, so the fall-through below already sends the reader to
-                       the schedule — which is the wrong place when the collector IS enabled and its session
+                       the schedule, which is the wrong place when the collector IS enabled and its session
                        is missing. The precondition answer names that state instead of quietly blaming a knob
                        that is already switched on. */
-                    ?? await DarlingRuntimePrecondition.StatusAsync(postgres, resolved.ServerId, resolved.ServerName, "long_query_completions", cancellationToken)
-                    /* #4966: the window keys ride on an empty answer under hints; not_collected and the precondition stay bare. */
-                    ?? McpHelpers.StatusForDatabase("empty",
-                        /* #5244 review L3: the precondition answer above already named a collector that is on but broken, so
-                           under a filter the likelier cause is the filter itself: the answer ends after the database clause,
-                           as get_plan_corrections does, rather than sending the reader to a switch that may already be on. */
-                        "No long-running query completions found in the specified time range" + DarlingMcpBlockingTools.ForChosenDatabases(databaseFilter)
-                            + (databaseFilter.IsAll ? ". The long_query_completions collector is opt-in (default OFF) — enable it in the collector schedule to capture data." : "."),
-                        databaseFilter.Describe(), /* #5244 review L2: the echo rides on an empty answer too */
-                        (await DarlingMcpWindowNotice.ReadEventAsync(
-                            () => DarlingMcpWindowNotice.Probe(postgres, "long_query_completions", resolved.ServerName, windowStart, now, cancellationToken),
-                            null, windowStart, now, "long_query_completions", emptyAnswer: true, logger: logger, cancellationToken: cancellationToken)).AsHints());
+                    ?? McpHelpers.WithDatabase(
+                        await DarlingRuntimePrecondition.StatusAsync(postgres, resolved.ServerId, resolved.ServerName, "long_query_completions", cancellationToken),
+                        databaseFilter.Describe());
+                if (unmet != null)
+                {
+                    return unmet;
+                }
+
+                /* #4966: the window keys ride on an empty answer under hints; not_collected and the precondition stay bare. */
+                var emptyNotice = await DarlingMcpWindowNotice.ReadEventAsync(
+                    () => DarlingMcpWindowNotice.Probe(postgres, "long_query_completions", resolved.ServerName, windowStart, now, cancellationToken),
+                    null, windowStart, now, "long_query_completions", emptyAnswer: true, logger: logger, cancellationToken: cancellationToken);
+                /* #5244 round 2 (L3): the probe is not database-filtered, so a null floor means the store holds no long-query row for
+                   this server in the window, and only then does the answer send the reader to the opt-in switch. With rows for other
+                   databases the collector is on, and the answer is about the chosen databases. A failed probe gives no verdict, so a
+                   filtered answer leaves the sentence off. */
+                var collectorMayBeOff = databaseFilter.IsAll || (!emptyNotice.IsUnavailable && emptyNotice.EffectiveStart is null);
+                return McpHelpers.StatusForDatabase("empty",
+                    "No long-running query completions found in the specified time range" + DarlingMcpBlockingTools.ForChosenDatabases(databaseFilter)
+                        + (collectorMayBeOff ? ". The long_query_completions collector is opt-in (default OFF) — enable it in the collector schedule to capture data." : "."),
+                    databaseFilter.Describe(), /* #5244 review L2: the echo rides on an empty answer too */
+                    emptyNotice.AsHints());
+            }
 
             var truncated = rows.Count > limit;
             var page = truncated ? rows.Take(limit).ToList() : rows;

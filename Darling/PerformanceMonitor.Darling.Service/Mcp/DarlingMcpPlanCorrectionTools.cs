@@ -107,7 +107,7 @@ public sealed class DarlingMcpPlanCorrectionTools
 
             if (tuning.Count == 0 && rows.Count == 0)
             {
-                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "plan_correction", cancellationToken)
+                return McpHelpers.WithDatabase(await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "plan_correction", cancellationToken), databaseFilter.Describe())
                     ?? McpHelpers.StatusForDatabase("empty",
                         !databaseFilter.IsAll
                             ? $"No plan correction data found{DarlingMcpBlockingTools.ForChosenDatabases(databaseFilter)}."

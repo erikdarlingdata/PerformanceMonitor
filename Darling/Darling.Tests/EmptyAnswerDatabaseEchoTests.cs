@@ -90,7 +90,8 @@ public sealed class EmptyAnswerDatabaseEchoTests
     {
         var source = Tool("DarlingMcpLongQueryTools.cs");
 
-        Assert.Contains("+ (databaseFilter.IsAll ? \". The long_query_completions collector is opt-in (default OFF)", source, StringComparison.Ordinal);
-        Assert.Contains("capture data.\" : \".\")", source, StringComparison.Ordinal);
+        /* Round 2: the sentence follows the (unfiltered) window-notice probe, so a filtered answer keeps it only when the store holds no row. */
+        Assert.Contains("var collectorMayBeOff = databaseFilter.IsAll || (!emptyNotice.IsUnavailable && emptyNotice.EffectiveStart is null);", source, StringComparison.Ordinal);
+        Assert.Contains("(collectorMayBeOff ? \". The long_query_completions collector is opt-in (default OFF)", source, StringComparison.Ordinal);
     }
 }

@@ -450,8 +450,8 @@ public sealed partial class ViewerDataService
             MIN(collection_time) AS first_collection_time,
             COUNT(*) AS collection_count
         FROM rated
+        WHERE EXISTS (SELECT 1 FROM rated WHERE matched_rows > 0)
         GROUP BY 1
-        HAVING SUM(matched_rows) > 0
         ORDER BY 1
         """;
 

@@ -12,7 +12,7 @@ namespace PerformanceMonitor.Darling.Storage;
 
 /// <summary>
 /// Where an unkeyed duration trend (query-stats, procedure-stats) reads from, and what it says about what it
-/// served — the tier decision, the hourly-tier SQL, the raw-tier SQL (<see cref="BuildRawTrendSql"/>, #3653
+/// served — the tier decision, the hourly-tier SQL, the raw-tier SQL (<see cref="BuildBucketedRawTrendSql"/>, #3653
 /// A11), and the coverage description that the MCP reader
 /// (<c>DarlingTrendReader</c>, #3590) and the desktop viewer's Performance Trends tab
 /// (<c>ViewerDataService.QueryTrends</c>, #3653) share, so the two apps cannot disagree about which relation
@@ -165,9 +165,36 @@ public static class DurationTrendRouting
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(hourlyView);
 
-        var filter = withDatabaseFilter
-            ? "\nAND   ($4::text[] IS NULL OR database_name = ANY($4))"
-            : "";
+        if (withDatabaseFilter)
+        {
+            /* #5414 round 2: the same rule as the bucketed read. The filter sits inside the sums, so an hour the chosen
+               databases had no rollup row in is a measured 0 (the store held the hour), not a missing point, and the
+               chart's data-start banner is not pushed to the databases' first hour. Whether they had any row in the
+               window is one window-level test, which keeps the answer empty when they had none. */
+            const string match = "$4::text[] IS NULL OR database_name = ANY($4)";
+            return $"""
+                WITH hourly AS
+                (
+                    SELECT
+                        bucket,
+                        COALESCE(SUM(elapsed_time_sum) FILTER (WHERE {match}), 0) AS elapsed_time_sum,
+                        COALESCE(SUM(execution_count_sum) FILTER (WHERE {match}), 0) AS execution_count_sum,
+                        COUNT(*) FILTER (WHERE {match}) AS matched_rows
+                    FROM {hourlyView}
+                    WHERE server_id = $1
+                    AND   bucket >= $2
+                    AND   bucket < $3
+                    GROUP BY bucket
+                )
+                SELECT
+                    bucket AS collection_time,
+                    elapsed_time_sum / 1000.0 / {HourlyBucketSecondsSql} AS elapsed_ms_per_second,
+                    CAST(execution_count_sum AS DOUBLE PRECISION) / {HourlyBucketSecondsSql} AS executions_per_second
+                FROM hourly
+                WHERE EXISTS (SELECT 1 FROM hourly WHERE matched_rows > 0)
+                ORDER BY bucket
+                """;
+        }
 
         return $"""
             SELECT
@@ -177,7 +204,7 @@ public static class DurationTrendRouting
             FROM {hourlyView}
             WHERE server_id = $1
             AND   bucket >= $2
-            AND   bucket < $3{filter}
+            AND   bucket < $3
             GROUP BY bucket
             ORDER BY bucket
             """;
@@ -189,77 +216,40 @@ public static class DurationTrendRouting
         => BuildHourlyTrendSql(TimescaleSupport.QueryStatsHourlyView, withDatabaseFilter);
 
     /// <summary>
-    /// The raw-tier (per-collection) duration trend over <paramref name="rawTable"/> — <c>query_stats</c> or
-    /// <c>procedure_stats</c>, the two plan-cache delta families — with the interval the store HAS (#3653,
-    /// measurement A11): per collection, the summed <c>delta_elapsed_time</c> (→ ms) and
-    /// <c>delta_execution_count</c> divided by that collection's <c>sample_interval_seconds</c>, and the
-    /// gap-to-previous-collection LAG only where the store never recorded one. Projects the same three
-    /// columns under the same aliases as <see cref="BuildHourlyTrendSql"/> so one mapper serves both tiers.
+    /// The per-collection CTE both raw-tier bucketed statements read (<see cref="BuildBucketedRawTrendSql"/>: the MCP
+    /// tools, #3897, and the viewer's and desktop's charts, #4234): per collection, the summed
+    /// <c>delta_elapsed_time</c> (to ms) and <c>delta_execution_count</c> and the interval the store HAS (#3653,
+    /// measurement A11), the gap-to-previous-collection LAG only where the store never recorded one. (The per-collection
+    /// builder this CTE was factored out of had no production caller after #4234 and is gone; its rate rule is stated here.)
     ///
     /// <para><b>The interval is read, not recomputed.</b> Both tables have carried <c>sample_interval_seconds</c>
-    /// since their first rung (the #3540 keystone's own words: "perfmon/query_stats already have the column"),
-    /// stamped per row by the shared delta calculator from the SAME two collection instants a LAG over
-    /// <c>collection_time</c> re-derives — so on a steady series the two agree to the second, and the
-    /// difference is exactly the rows where they must not: a row the calculator could not difference (first
-    /// sighting, counter reset, a gap past the delta policy — in practice a restart) stores <c>0</c> beside a
-    /// <c>0</c> delta, and the LAG happily divided that fabricated 0 by the real elapsed seconds into a confident
-    /// <c>0.00 ms/sec</c> at exactly the instant nothing was knowable. The query-stats copies of this read
-    /// (the MCP reader's raw const, the viewer's, Lite's two) kept the LAG-only shape after the procedure
-    /// copies moved to the stored interval in V128 — the A11 residual #3540 reported rather than rewrote —
-    /// and this builder is where it is rewritten once for both apps.</para>
+    /// since their first rung, stamped per row by the shared delta calculator from the SAME two collection instants a
+    /// LAG over <c>collection_time</c> would see; reading it keeps a restart honest. A restart zeroes the delta, and
+    /// a LAG divides that fabricated 0 by the real elapsed seconds into a confident <c>0.00 ms/sec</c> at exactly the
+    /// instant nothing was knowable.</para>
     ///
     /// <para><b>Three states per collection, read distinctly</b> (the #2234 / #3540 contract): <c>MAX</c> over
     /// the collection's rows, because a plan first seen in an otherwise steady pass (a TOP (150) readmission)
     /// stores 0 beside its siblings' real interval and contributes 0 to the sums, so MAX is the collection's
     /// measured interval and is 0 only when EVERY row was unknowable (a restart). That 0 becomes NULL through
-    /// <c>NULLIF</c>, so the rates are NULL — an UNRATED point, never <c>0.00</c>. A NULL MAX is a pre-V128
+    /// <c>NULLIF</c>, so the rates are NULL: an UNRATED collection, never <c>0.00</c>. A NULL MAX is a pre-V128
     /// collection that never recorded an interval, and only there does the LAG stand in, so history renders
     /// exactly as it did. <c>COALESCE(NULLIF(sample_interval_seconds, 0), LAG)</c> would be the WRONG spelling:
-    /// it falls back to a fabricated interval on precisely the restart row the marker exists to flag.</para>
+    /// it falls back to a fabricated interval on precisely the restart row the marker exists to flag. No
+    /// <c>ELSE 0</c> anywhere: a collection with no rate keeps its row with NULL rate columns (#3541 A12: the
+    /// collection happened, and <c>effective_start</c> is truthfully its instant).</para>
     ///
-    /// <para>No <c>ELSE 0</c>: the first collection of a pre-V128 stretch has a NULL LAG and no rate, and a
-    /// restart collection has no rate — both rows are KEPT with NULL rate columns (#3541 A12: the collection
-    /// happened, <c>effective_start</c> is truthfully its instant, and a lone collection is "no rate yet", not
-    /// an empty window). The MCP reader publishes such a point as null with the reason; the viewer's chart
-    /// reader skips it. With <paramref name="withDatabaseFilter"/>, $4 is the viewer's guarded <c>text[]</c>
-    /// database filter (#1319); without it the text is what the MCP reader runs. $1 server_id, $2/$3 window
-    /// (naive UTC). Reads the BASE table (no text columns are projected, so the payload-resolving
-    /// <c>v_*</c> view is not needed).</para>
-    /// </summary>
-    public static string BuildRawTrendSql(string rawTable, bool withDatabaseFilter)
-    {
-        ArgumentException.ThrowIfNullOrWhiteSpace(rawTable);
-
-        /* #5414 M1: the filtered point set is the collections where the chosen databases had rows (the chart's
-           points are per collection, so a collection the database was absent from is simply not a point of it);
-           the collection's INTERVAL is still read over every row of the collection. */
-        var matchedOnly = withDatabaseFilter
-            ? "\n            WHERE matched_rows > 0"
-            : "";
-
-        return $"""
-            WITH {RawCollectionsCte(rawTable, withDatabaseFilter)}
-            SELECT
-                collection_time,
-                CASE WHEN interval_seconds > 0 THEN total_elapsed_ms / interval_seconds END AS elapsed_ms_per_second,
-                CASE WHEN interval_seconds > 0 THEN CAST(total_executions AS DOUBLE PRECISION) / interval_seconds END AS executions_per_second
-            FROM raw{matchedOnly}
-            ORDER BY collection_time
-            """;
-    }
-
-    /// <summary>
-    /// The per-collection CTE both raw-tier statements read - <see cref="BuildRawTrendSql"/> (the viewer's chart
-    /// and, with its filter, the desktop's Performance Trends) and <see cref="BuildBucketedRawTrendSql"/> (the MCP
-    /// tools, #3897) - one text, so the chart's points and the tool's buckets are built from the same collections
-    /// with the same three-state interval. With <paramref name="withDatabaseFilter"/>, $4 is the viewer's database
-    /// clause, applied INSIDE the aggregates (#5414 M1) and not in the WHERE: the collection's interval is the
-    /// collection's, whichever databases were asked about, so a collection where the chosen database had no rows
-    /// (the query-stats collector keeps only plans that ran in the last ten minutes, so a quiet database is absent
-    /// from most collections) stays in the bucket as zero work over its real seconds instead of vanishing from the
-    /// denominator and reading the rate high. <c>matched_rows</c> counts the rows that passed the filter; it is
-    /// what the point set (and the tool's <c>empty</c> status) is decided on. Unfiltered, the text carries no
-    /// FILTER and no <c>matched_rows</c>, byte for byte what the MCP reader's pin asserts.
+    /// <para>With <paramref name="withDatabaseFilter"/>, $4 is the viewer's database clause, applied INSIDE the
+    /// aggregates (#5414 M1) and not in the WHERE: the collection's interval is the collection's, whichever databases
+    /// were asked about, so a collection where the chosen database had no rows (the query-stats collector keeps only
+    /// plans that ran in the last ten minutes, so a quiet database is absent from most collections) stays in the bucket
+    /// as zero work over its real seconds instead of vanishing from the denominator and reading the rate high.
+    /// <c>matched_rows</c> counts the rows that passed the filter; it decides ONE thing, whether the chosen databases had
+    /// any row in the WHOLE window (the tool's <c>empty</c>), never which buckets exist (#5414 round 2: a per-bucket test
+    /// dropped the buckets the databases were quiet in, so they read missing instead of 0 and the window read
+    /// truncated). Unfiltered, the text carries no FILTER and no <c>matched_rows</c>. Reads the BASE table (no text
+    /// columns are projected, so the payload-resolving <c>v_*</c> view is not needed). $1 server_id, $2/$3 window
+    /// (naive UTC).</para>
     /// </summary>
     private static string RawCollectionsCte(string rawTable, bool withDatabaseFilter)
     {
@@ -291,9 +281,9 @@ public static class DurationTrendRouting
     }
 
     /// <summary>
-    /// The raw-tier duration trend BUCKETED (#3897): <see cref="BuildRawTrendSql"/>'s per-collection read — the same
-    /// CTE, the same three-state interval, the same no-ELSE rate arms — with every collection then counted in the
-    /// bucket of <c>$4</c> minutes its collection time falls in.
+    /// The raw-tier duration trend BUCKETED (#3897): the per-collection CTE (see <c>RawCollectionsCte</c>: the same
+    /// three-state interval, the same no-ELSE rate arms), with every collection then counted in the bucket of <c>$4</c>
+    /// minutes its collection time falls in.
     ///
     /// <para><b>A bucket's rate is its summed work over its summed seconds</b> — time-weighted, never an average of
     /// the per-collection rates, which would weight a 30-second collection the same as a 300-second one (fleet
@@ -308,7 +298,7 @@ public static class DurationTrendRouting
     /// <para><c>first_collection_time</c> is the bucket's first collection, rated or not, which is what
     /// <c>effective_start</c> reports: the point is stamped at its bucket's start (the first at the window's start,
     /// <c>GREATEST</c>), and a bucket start is not a collection the store held. With <paramref name="withDatabaseFilter"/>,
-    /// $4 is the viewer's guarded <c>text[]</c> database filter (#1319), mirroring <see cref="BuildRawTrendSql"/>, and
+    /// $4 is the viewer's guarded <c>text[]</c> database filter (#1319), and
     /// the bucket width moves to $5 so the filter's own numbering never shifts; every MCP caller passes <c>false</c>,
     /// so the text and its $4 width are exactly what #3897 always ran. <c>collection_count</c> (#4234) is
     /// <c>COUNT(*)</c> over the same population as <c>first_collection_time</c> — every collection in the bucket,
@@ -322,11 +312,13 @@ public static class DurationTrendRouting
         ArgumentException.ThrowIfNullOrWhiteSpace(rawTable);
 
         var widthParam = withDatabaseFilter ? "$5" : "$4";
-        /* #5414 M1: a bucket where the chosen databases had no rows at all is no point of theirs (and an answer
-           with no such bucket is the tool's empty); a bucket with any is read over EVERY collection in it. */
+        /* #5414 M1: every bucket is read over EVERY collection in it. Round 2: whether the chosen databases had any
+           row at all is decided once, for the whole window (the tool's empty), and never per bucket: a bucket the
+           databases were quiet in is a measured 0 and a bucket the store covered, and dropping it made it read missing
+           and the window read truncated. */
         var matchedColumn = withDatabaseFilter ? ",\n                    matched_rows" : "";
-        var having = withDatabaseFilter
-            ? "\n            HAVING SUM(matched_rows) > 0"
+        var windowHasRows = withDatabaseFilter
+            ? "\n            WHERE EXISTS (SELECT 1 FROM rated WHERE matched_rows > 0)"
             : "";
 
         return $"""
@@ -350,8 +342,8 @@ public static class DurationTrendRouting
                 MIN(collection_time) AS first_collection_time,
                 COUNT(*) - COUNT(rated_seconds) AS unrated_collections,
                 COUNT(*) AS collection_count
-            FROM rated
-            GROUP BY 1{having}
+            FROM rated{windowHasRows}
+            GROUP BY 1
             ORDER BY 1
             """;
     }
@@ -377,7 +369,8 @@ public static class DurationTrendRouting
         ArgumentException.ThrowIfNullOrWhiteSpace(hourlyView);
 
         /* #5414 M1: the filter goes inside the aggregates, so an hour where the chosen databases had no rollup row
-           still counts (zero work) in the bucket's hour count; matched_rows decides the point set and empty. */
+           still counts (zero work) in the bucket's hour count; matched_rows decides empty, once for the whole window
+           (round 2: never per bucket, so a quiet bucket reads 0 and not missing). */
         const string match = "$4::text[] IS NULL OR database_name = ANY($4)";
         var sums = withDatabaseFilter
             ? $"COALESCE(SUM(elapsed_time_sum) FILTER (WHERE {match}), 0) / 1000.0 AS elapsed_ms,\n"
@@ -385,8 +378,8 @@ public static class DurationTrendRouting
               + $"                    COUNT(*) FILTER (WHERE {match}) AS matched_rows"
             : "SUM(elapsed_time_sum) / 1000.0 AS elapsed_ms,\n"
               + "                    SUM(execution_count_sum) AS executions";
-        var having = withDatabaseFilter
-            ? "\n            HAVING SUM(matched_rows) > 0"
+        var windowHasRows = withDatabaseFilter
+            ? "\n            WHERE EXISTS (SELECT 1 FROM hourly WHERE matched_rows > 0)"
             : "";
         var widthParam = withDatabaseFilter ? "$5" : "$4";
 
@@ -409,25 +402,11 @@ public static class DurationTrendRouting
                 MAX(elapsed_ms / {HourlyBucketSecondsSql}) AS peak_elapsed_ms_per_second,
                 MIN(bucket) AS first_collection_time,
                 0 AS unrated_collections
-            FROM hourly
-            GROUP BY 1{having}
+            FROM hourly{windowHasRows}
+            GROUP BY 1
             ORDER BY 1
             """;
     }
-
-    /// <summary>The query-stats raw trend — <see cref="BuildRawTrendSql"/> over <c>query_stats</c>. The
-    /// viewer's <c>QueryDurationTrendSql</c> is this text with the filter; the MCP reader's
-    /// <c>DarlingTrendReader.QueryDurationTrendSql</c> is this text without it, by alias since #3653 (it was
-    /// the LAG-only copy between #3695 and that alias; see the builder remarks).</summary>
-    public static string QueryDurationTrendRawSql(bool withDatabaseFilter)
-        => BuildRawTrendSql("query_stats", withDatabaseFilter);
-
-    /// <summary>The procedure-stats raw trend — <see cref="BuildRawTrendSql"/> over <c>procedure_stats</c>:
-    /// the V128 idiom the two procedure consts carried by hand, produced by the builder so a test could pin
-    /// that the builder IS that idiom before both consts became its aliases (#3653; the viewer's with the
-    /// filter, the MCP reader's without) — a provable no-op, because the pin passed first.</summary>
-    public static string ProcedureDurationTrendRawSql(bool withDatabaseFilter)
-        => BuildRawTrendSql("procedure_stats", withDatabaseFilter);
 
     /// <summary>The procedure-stats hourly trend — <see cref="BuildHourlyTrendSql"/> over
     /// <see cref="TimescaleSupport.ProcedureStatsHourlyView"/>.</summary>

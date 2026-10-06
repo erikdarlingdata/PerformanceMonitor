@@ -12,6 +12,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Darling.Viewer;
@@ -134,8 +135,8 @@ public sealed class DeltaFamilyIntervalCompletionLivePostgresTests
     }
 
     /// <summary>
-    /// #3653 (A11): the query-stats duration and execution-count trends, both viewer copies and the Storage
-    /// builder the viewer's duration copy IS (<see cref="DurationTrendRouting.QueryDurationTrendRawSql"/>) — the
+    /// #3653 (A11): the query-stats duration and execution-count trends, both viewer copies and the MCP reader's
+    /// bucketed read (the same Storage builder, <see cref="DurationTrendRouting.BuildBucketedRawTrendSql"/>) — the
     /// same four collections as the procedure test above, now on <c>query_stats</c>, which has carried
     /// <c>sample_interval_seconds</c> from its first rung and whose trend reads LAG-recomputed the interval
     /// anyway. t1/t2 pre-V128 (NULL) — t1 no prior, no rate; t2 the LAG's 300 s. t3 a restart — every row 0
@@ -187,31 +188,22 @@ public sealed class DeltaFamilyIntervalCompletionLivePostgresTests
             Assert.Equal(0.1, executions.Points[0].Value, precision: 6);
             Assert.Equal(0.2, executions.Points[1].Value, precision: 6);
 
-            /* The builder's text without the viewer's filter — the statement the MCP reader's raw const is the
-               alias-in-waiting of — run as the tool would run it: all four collections come back, t1 and t3 with
-               NULL rates (the MCP reader keeps them as unrated points, #3541 A12). */
-            await using (var command = postgres.CreateCommand(DurationTrendRouting.QueryDurationTrendRawSql(withDatabaseFilter: false)))
-            {
-                command.Parameters.AddWithValue(ServerId);
-                command.Parameters.AddWithValue(t1.AddMinutes(-1));
-                command.Parameters.AddWithValue(t4.AddMinutes(1));
-                var rows = new List<(DateTime At, double? Rate, double? Executions)>();
-                await using var reader = await command.ExecuteReaderAsync(ct);
-                while (await reader.ReadAsync(ct))
-                {
-                    rows.Add((reader.GetDateTime(0),
-                        reader.IsDBNull(1) ? null : Convert.ToDouble(reader.GetValue(1)),
-                        reader.IsDBNull(2) ? null : Convert.ToDouble(reader.GetValue(2))));
-                }
+            /* The MCP reader's bucketed read of the same rows (one-minute buckets, so each collection is its own
+               bucket), all databases: all four collections come back, t1 and t3 with NULL rates (the MCP reader keeps
+               them as unrated points, #3541 A12). */
+            var rollups = await ComposeStoreAvailability.GetRollupsAsync(postgres, ct);
+            var route = DarlingTrendReader.ResolveQueryDurationTrendRoute(t1.AddMinutes(-1), rollups.Item1, rollups.Item2, windowEndUtc: t4.AddMinutes(1));
+            Assert.Equal(RetentionTier.Raw, route.Tier);
+            var rows = (await DarlingTrendReader.GetQueryDurationTrendAsync(
+                postgres, ServerId, t1.AddMinutes(-1), t4.AddMinutes(1), route, 1, DatabaseFilter.All, ct)).Points;
 
-                Assert.Equal(new[] { t1, t2, t3, t4 }, rows.Select(r => r.At).ToArray());
-                Assert.Null(rows[0].Rate);
-                Assert.Equal(2.0, rows[1].Rate!.Value, precision: 6);
-                Assert.Null(rows[2].Rate);
-                Assert.Null(rows[2].Executions);
-                Assert.Equal(10.0, rows[3].Rate!.Value, precision: 6);
-                Assert.Equal(0.2, rows[3].Executions!.Value, precision: 6);
-            }
+            Assert.Equal(4, rows.Count);
+            Assert.Null(rows[0].Value);
+            Assert.Equal(2.0, rows[1].Value!.Value, precision: 6);
+            Assert.Null(rows[2].Value);
+            Assert.Null(rows[2].ExecutionsPerSecond);
+            Assert.Equal(10.0, rows[3].Value!.Value, precision: 6);
+            Assert.Equal(0.2, rows[3].ExecutionsPerSecond!.Value, precision: 6);
 
             bodySucceeded = true;
         }

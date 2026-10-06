@@ -145,9 +145,9 @@ public sealed class DarlingMcpQueryStoreClutterTools
                    collector's own last run recorded a precondition; and only then the plain miss. Waits and
                    the clerk are not consulted here — a server with QDS waits and no Query Store rows is a
                    server whose Query Store this tool cannot see, which is what the miss says. */
-                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, DarlingQueryStoreClutterReader.CollectorName, cancellationToken)
-                    ?? await DarlingRuntimePrecondition.QueryStoreStatusAsync(postgres, resolved.ServerId, resolved.ServerName, databaseFilter, cancellationToken)
-                    ?? await DarlingRuntimePrecondition.StatusAsync(postgres, resolved.ServerId, resolved.ServerName, DarlingQueryStoreClutterReader.CollectorName, cancellationToken)
+                return McpHelpers.WithDatabase(await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, DarlingQueryStoreClutterReader.CollectorName, cancellationToken), databaseFilter.Describe())
+                    ?? McpHelpers.WithDatabase(await DarlingRuntimePrecondition.QueryStoreStatusAsync(postgres, resolved.ServerId, resolved.ServerName, databaseFilter, cancellationToken), databaseFilter.Describe())
+                    ?? McpHelpers.WithDatabase(await DarlingRuntimePrecondition.StatusAsync(postgres, resolved.ServerId, resolved.ServerName, DarlingQueryStoreClutterReader.CollectorName, cancellationToken), databaseFilter.Describe())
                     ?? (!databaseFilter.IsAll
                         ? McpHelpers.StatusForDatabase(
                             "empty",

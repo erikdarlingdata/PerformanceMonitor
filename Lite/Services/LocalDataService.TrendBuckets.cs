@@ -358,7 +358,8 @@ ORDER BY 1";
     /// place Darling's <c>BuildBucketedRawTrendSql(..., withDatabaseFilter: true)</c> puts its predicate (#5414 M1):
     /// a collection where the chosen databases had no rows still counts its seconds, as zero work, so a quiet
     /// database's rate is its true rate over the bucket and [A] + [B] = [A, B]. A bucket with no matching row at
-    /// all is dropped (the tool's empty). Null or empty reads every database, the answer this read always gave.</para>
+    /// all in the window is the tool's empty, decided once for the window and never per bucket (a quiet
+    /// bucket is a measured 0). Null or empty reads every database, the answer this read always gave.</para>
     /// </summary>
     private async Task<List<QueryTrendPoint>> ReadBucketedDurationTrendAsync(
         string relation, int serverId, int hoursBack, DateTime asOfUtc, int bucketMinutes,
@@ -374,7 +375,10 @@ ORDER BY 1";
             ? ""
             : $",\n        COUNT(*) FILTER (WHERE {DbInPredicate(dbClause)}) AS matched_rows";
         var matchedCarry = dbClause.Length == 0 ? "" : ",\n        matched_rows";
-        var having = dbClause.Length == 0 ? "" : "\nHAVING SUM(matched_rows) > 0";
+        /* #5414 round 2: whether the chosen databases had any row is decided once for the whole window (the tool's
+           empty), never per bucket: a bucket they were quiet in is a measured 0, and dropping it made it read missing and
+           the window read truncated. */
+        var windowHasRows = dbClause.Length == 0 ? "" : "\nWHERE EXISTS (SELECT 1 FROM rated WHERE matched_rows > 0)";
 
         command.CommandText = $@"
 WITH raw AS
@@ -411,8 +415,8 @@ SELECT
     MAX(elapsed_ms_per_second) AS peak_elapsed_ms_per_second,
     MIN(collection_time) AS first_collection_time,
     COUNT(*) - COUNT(rated_seconds) AS unrated_collections
-FROM rated
-GROUP BY 1{having}
+FROM rated{windowHasRows}
+GROUP BY 1
 ORDER BY 1";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });

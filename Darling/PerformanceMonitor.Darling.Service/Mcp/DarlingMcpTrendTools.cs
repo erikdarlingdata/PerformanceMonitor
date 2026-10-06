@@ -540,7 +540,7 @@ public sealed class DarlingMcpTrendTools
 
             if (result.Points.Count == 0)
             {
-                var gated = await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "query_stats", cancellationToken);
+                var gated = McpHelpers.WithDatabase(await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "query_stats", cancellationToken), databases.Describe());
                 if (gated != null)
                 {
                     return gated;
@@ -623,7 +623,7 @@ public sealed class DarlingMcpTrendTools
 
             if (result.Points.Count == 0)
             {
-                var gated = await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "procedure_stats", cancellationToken);
+                var gated = McpHelpers.WithDatabase(await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "procedure_stats", cancellationToken), databases.Describe());
                 if (gated != null)
                 {
                     return gated;
@@ -704,7 +704,7 @@ public sealed class DarlingMcpTrendTools
                     every database on the instance. A server with no Query Store data is not a server with
                     no slow queries, so the message names that cause first.
                 */
-                var gated = await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "query_store", cancellationToken);
+                var gated = McpHelpers.WithDatabase(await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "query_store", cancellationToken), databases.Describe());
                 if (gated != null)
                 {
                     return gated;

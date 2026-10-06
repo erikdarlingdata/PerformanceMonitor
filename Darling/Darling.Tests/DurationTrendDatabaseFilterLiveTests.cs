@@ -198,6 +198,67 @@ public sealed class DurationTrendDatabaseFilterLiveTests
             Assert.Equal(60 / bucketSeconds, await ViewerExecutions(), 9);
         }, Cleanup);
 
+    /// <summary>
+    /// [#5414 round 2, per-bucket HAVING] A bucket the chosen databases had no rows in is a measured 0, not a missing
+    /// bucket, and it is as much a bucket the store covered as any other. Collections every 15 minutes for four hours, C in
+    /// every one, A in the third hour's first collection only. The window starts at the store's first collection, which
+    /// is two hours before A's first row: [A] returns every hour bucket (zero before and after its one busy hour), the
+    /// answer does not claim the window was cut short, and effective_start is the store's own first collection. A
+    /// database with no row anywhere in the window is still the empty answer. The viewer's duration and execution-count
+    /// charts read the same rule.
+    /// </summary>
+    [Fact]
+    public Task TheRawTier_AFilteredWindow_KeepsEveryBucketTheStoreCovered_AsZero_AndDoesNotClaimTruncation() =>
+        WithSharedStoreAsync("trend-filter-zero-buckets", async (connection, postgres, serverId, serverName, now, ct) =>
+        {
+            var first = new DateTime(now.Year, now.Month, now.Day, now.Hour, 0, 0, DateTimeKind.Unspecified).AddHours(-6);
+            for (var i = 0; i < 16; i++)
+            {
+                var at = first.AddMinutes(15 * i);
+                if (i == 8) { await PlantWithIntervalAsync(connection, ct, serverId, serverName, at, A, 6_000_000); }
+                await PlantWithIntervalAsync(connection, ct, serverId, serverName, at, C, 1_000);
+            }
+
+            const double bucketSeconds = 4 * 900;
+            var end = now.AddMinutes(5);
+            var rollups = await ComposeStoreAvailability.GetRollupsAsync(postgres, ct);
+            var route = DarlingTrendReader.ResolveQueryDurationTrendRoute(first, rollups.Item1, rollups.Item2, windowEndUtc: end);
+            Assert.Equal(RetentionTier.Raw, route.Tier);
+
+            var a = await DarlingTrendReader.GetQueryDurationTrendAsync(postgres, serverId, first, end, route, 60, DatabaseFilter.One(A), ct);
+            Assert.Equal(4, a.Points.Count);
+            var expected = new[] { 0.0, 0.0, 6_000 / bucketSeconds, 0.0 };
+            for (var i = 0; i < expected.Length; i++) { Assert.Equal(expected[i], a.Points[i].Value!.Value, 9); }
+            Assert.False(a.Truncated);
+            Assert.Equal(first, a.EffectiveStartUtc);
+
+            var all = await DarlingTrendReader.GetQueryDurationTrendAsync(postgres, serverId, first, end, route, 60, DatabaseFilter.All, ct);
+            Assert.Equal(4, all.Points.Count);
+            Assert.False(all.Truncated);
+            Assert.Equal(first, all.EffectiveStartUtc);
+
+            var none = await DarlingTrendReader.GetQueryDurationTrendAsync(postgres, serverId, first, end, route, 60, DatabaseFilter.One("NoSuchDatabase"), ct);
+            Assert.Empty(none.Points);
+
+            /* The viewer's two charts: the window's bucket width is the viewer's own, so every collection is a point (a
+               window of a few hours is under the chart's point budget at the finest width). */
+            await using var viewer = new PerformanceMonitor.Darling.Viewer.ViewerDataService(Environment.GetEnvironmentVariable("DARLING_TEST_PG")!);
+            foreach (var executions in new[] { false, true })
+            {
+                var series = executions
+                    ? await viewer.GetExecutionCountTrendAsync(serverId, first, end, new[] { A }, nowUtc: first.AddHours(1), cancellationToken: ct)
+                    : await viewer.GetQueryDurationTrendAsync(serverId, first, end, new[] { A }, nowUtc: first.AddHours(1), cancellationToken: ct);
+                Assert.False(series.Truncated, executions ? "executions" : "duration");
+                Assert.Equal(first, series.EffectiveStartUtc);
+                Assert.Equal(first, series.Points.First().CollectionTime);
+                Assert.Contains(series.Points, p => p.Value == 0.0 && p.CollectionTime < first.AddHours(2));
+                var viewerNone = executions
+                    ? await viewer.GetExecutionCountTrendAsync(serverId, first, end, new[] { "NoSuchDatabase" }, nowUtc: first.AddHours(1), cancellationToken: ct)
+                    : await viewer.GetQueryDurationTrendAsync(serverId, first, end, new[] { "NoSuchDatabase" }, nowUtc: first.AddHours(1), cancellationToken: ct);
+                Assert.Empty(viewerNone.Points);
+            }
+        }, Cleanup);
+
     /// <summary>One <c>query_stats</c> row with the collector's stored interval (the bucket-denominator tests need 900 s collections).</summary>
     private static Task PlantWithIntervalAsync(
         NpgsqlConnection connection, CancellationToken ct, int serverId, string serverName, DateTime at, string db, long weight) =>
@@ -304,13 +365,17 @@ public sealed class DurationTrendDatabaseFilterLiveTests
         Assert.Equal(3, Count(DarlingTrendReader.ProcedureDurationTrendFilteredSql, filterPredicate4));
         Assert.Equal(0, Count(DarlingTrendReader.QueryDurationTrendFilteredSql, predicate4));
         Assert.Equal(0, Count(DarlingTrendReader.ProcedureDurationTrendFilteredSql, predicate4));
-        Assert.Contains("HAVING SUM(matched_rows) > 0", DarlingTrendReader.QueryDurationTrendFilteredSql, StringComparison.Ordinal);
+        /* #5414 round 2: empty is decided once for the whole window, never per bucket (a per-bucket HAVING dropped the
+           buckets the chosen databases were quiet in, so they read missing and the window read truncated). */
+        Assert.DoesNotContain("HAVING", DarlingTrendReader.QueryDurationTrendFilteredSql, StringComparison.Ordinal);
+        Assert.Contains("WHERE EXISTS (SELECT 1 FROM rated WHERE matched_rows > 0)", DarlingTrendReader.QueryDurationTrendFilteredSql, StringComparison.Ordinal);
         Assert.Contains("CAST($5 AS integer)", DarlingTrendReader.QueryDurationTrendFilteredSql, StringComparison.Ordinal);
         /* Hourly: the rollup CTE, same numbering. */
         var hourly = DurationTrendRouting.BuildBucketedHourlyTrendSql("collect.query_stats_interval_hourly AS h", withDatabaseFilter: true);
         Assert.Equal(3, Count(hourly, filterPredicate4));
         Assert.Equal(0, Count(hourly, predicate4));
-        Assert.Contains("HAVING SUM(matched_rows) > 0", hourly, StringComparison.Ordinal);
+        Assert.DoesNotContain("HAVING", hourly, StringComparison.Ordinal);
+        Assert.Contains("WHERE EXISTS (SELECT 1 FROM hourly WHERE matched_rows > 0)", hourly, StringComparison.Ordinal);
         Assert.Contains("CAST($5 AS integer)", hourly, StringComparison.Ordinal);
         /* Unfiltered text is untouched: no predicate, the width at $4, so the pinned constants keep their text. */
         var unfiltered = DurationTrendRouting.BuildBucketedHourlyTrendSql("collect.query_stats_interval_hourly AS h");
@@ -494,14 +559,16 @@ public sealed class DurationTrendDatabaseFilterHourlyLiveTests
                 Assert.Equal(5_000 * perSecond, two[hourOne], 9);
                 Assert.Equal(1_000 * perSecond, two[hourFive], 9);
 
-                /* C alone: it has no row in hour 5, so the series is one point, and A's survivor is not in it. */
+                /* C alone: it has no row in hour 5, but the rollup holds that hour (A's survivor), so it is a measured zero
+                   of C's and not a missing point (#5414 round 2: the filter is inside the sums, not a per-bucket HAVING). A's
+                   survivor's work is not in it. */
                 var onlyC = Series(await Read(DatabaseFilter.One(C)));
                 Assert.Equal(9_000 * perSecond, onlyC[hourOne], 9);
-                Assert.DoesNotContain(hourFive, onlyC.Keys);
+                Assert.Equal(0.0, onlyC[hourFive], 9);
 
                 var oneByName = Series(await Read(DatabaseFilter.One(B)));
                 Assert.Equal(2_000 * perSecond, oneByName[hourOne], 9);
-                Assert.DoesNotContain(hourFive, oneByName.Keys);
+                Assert.Equal(0.0, oneByName[hourFive], 9);
 
                 /* [#5414 M1] A 240-minute bucket is its hours' work over the hours the rollup HOLDS in it (hours 1 and 2,
                    so 2 * 3600 s), whichever databases were asked about: A, active in hour 1 only, is half its hour-1

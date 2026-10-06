@@ -483,9 +483,9 @@ public sealed class DarlingMcpTrendToolsSurfaceAndSqlTests
     /// — the A11a residual is reported, not silently rewritten") is retired: the shape is now the three-state
     /// read the procedure trends have carried since V128 — <c>MAX(sample_interval_seconds)</c> per collection,
     /// <c>0 → NULL</c> (unrated), <c>NULL →</c> the LAG — built ONCE in Storage
-    /// (<see cref="DurationTrendRouting.BuildRawTrendSql"/>, and since #4234 its bucketed twin
-    /// <see cref="DurationTrendRouting.BuildBucketedRawTrendSql"/>, which the viewer's <c>QueryDurationTrendSql</c>
-    /// now reads with its database filter). The wrong spelling is pinned by absence:
+    /// (<see cref="DurationTrendRouting.BuildBucketedRawTrendSql"/>, which the viewer's <c>QueryDurationTrendSql</c>
+    /// reads with its database filter; the per-collection builder it was factored from had no production caller after
+    /// #4234 and is gone). The wrong spelling is pinned by absence:
     /// <c>COALESCE(NULLIF(sample_interval_seconds, 0), LAG)</c> would fall back to a fabricated interval on
     /// exactly the restart row the marker flags.
     ///
@@ -511,8 +511,8 @@ public sealed class DarlingMcpTrendToolsSurfaceAndSqlTests
     {
         foreach (var sql in new[]
         {
-            DurationTrendRouting.QueryDurationTrendRawSql(withDatabaseFilter: false),
-            DurationTrendRouting.QueryDurationTrendRawSql(withDatabaseFilter: true),
+            DurationTrendRouting.BuildBucketedRawTrendSql("query_stats", withDatabaseFilter: false),
+            DurationTrendRouting.BuildBucketedRawTrendSql("query_stats", withDatabaseFilter: true),
             DarlingTrendReader.QueryDurationTrendFilteredSql,
             ViewerDataService.QueryDurationTrendSql,
             ViewerDataService.ExecutionCountTrendSql,
@@ -527,21 +527,21 @@ public sealed class DarlingMcpTrendToolsSurfaceAndSqlTests
                a measurement) and say so, so only the interval spellings are refused. */
             Assert.DoesNotContain("COALESCE(NULLIF(", sql, StringComparison.Ordinal);
             Assert.DoesNotContain("COALESCE(sample_interval_seconds", sql, StringComparison.Ordinal);
+            Assert.DoesNotContain("COALESCE(MAX(", sql, StringComparison.Ordinal);
             Assert.DoesNotContain("ELSE 0", sql, StringComparison.Ordinal);
             Assert.Contains("CASE WHEN interval_seconds > 0 THEN CAST(total_executions AS DOUBLE PRECISION) / interval_seconds END AS executions_per_second", sql, StringComparison.Ordinal);
         }
 
-        /* #4234: the viewer's duration pair moved onto the BUCKETED builder (the MCP shape since #3897), so
-           they are now compared against that builder rather than the per-collection BuildRawTrendSql; the
-           filter is still the ONLY difference between the viewer's call and the MCP reader's. */
+        /* #4234: the viewer's duration pair moved onto the BUCKETED builder (the MCP shape since #3897); the filter
+           is the ONLY difference between the viewer's call and the MCP reader's. */
         Assert.Equal(DurationTrendRouting.BuildBucketedRawTrendSql("query_stats", withDatabaseFilter: true), ViewerDataService.QueryDurationTrendSql);
-        /* #5414 M1: the filtered per-collection read carries the filter in its aggregates and a matched-rows point set;
-           minus those lines it is the unfiltered text. */
+        /* #5414 M1: the filtered per-collection CTE carries the filter in its aggregates and a matched-rows count; minus
+           those lines it is the unfiltered text. */
         Assert.Equal(
-            Lines(DurationTrendRouting.QueryDurationTrendRawSql(withDatabaseFilter: true))
+            Lines(Cte(Lf(DurationTrendRouting.BuildBucketedRawTrendSql("query_stats", withDatabaseFilter: true)), "raw AS\n("))
                 .Where(l => !l.Contains("delta_elapsed_time", StringComparison.Ordinal) && !l.Contains("delta_execution_count", StringComparison.Ordinal)
                             && !l.Contains("matched_rows", StringComparison.Ordinal)).ToArray(),
-            Lines(DurationTrendRouting.QueryDurationTrendRawSql(withDatabaseFilter: false))
+            Lines(Cte(Lf(DurationTrendRouting.BuildBucketedRawTrendSql("query_stats", withDatabaseFilter: false)), "raw AS\n("))
                 .Where(l => !l.Contains("delta_elapsed_time", StringComparison.Ordinal) && !l.Contains("delta_execution_count", StringComparison.Ordinal)).ToArray());
 
         /* The alias's ARGUMENT, by value: since #3897 the MCP reader's two raw texts are the BUCKETED builder's
@@ -554,8 +554,6 @@ public sealed class DarlingMcpTrendToolsSurfaceAndSqlTests
         Assert.Equal(Lf(DurationTrendRouting.BuildBucketedRawTrendSql("query_stats", withDatabaseFilter: true)), Lf(DarlingTrendReader.QueryDurationTrendFilteredSql));
         Assert.Equal(Lf(DurationTrendRouting.BuildBucketedRawTrendSql("procedure_stats", withDatabaseFilter: true)), Lf(DarlingTrendReader.ProcedureDurationTrendFilteredSql));
         Assert.Equal(Lf(DurationTrendRouting.BuildBucketedRawTrendSql("procedure_stats", withDatabaseFilter: true)), Lf(ViewerDataService.ProcedureDurationTrendSql));
-        Assert.Equal(Cte(Lf(DurationTrendRouting.QueryDurationTrendRawSql(withDatabaseFilter: true)), "raw AS\n("), Cte(Lf(DarlingTrendReader.QueryDurationTrendFilteredSql), "raw AS\n("));
-        Assert.Equal(Cte(Lf(DurationTrendRouting.ProcedureDurationTrendRawSql(withDatabaseFilter: true)), "raw AS\n("), Cte(Lf(DarlingTrendReader.ProcedureDurationTrendFilteredSql), "raw AS\n("));
         /* The MCP text carries the database filter at $4 (#5244), so the bucket width is $5. */
         Assert.Contains("$4::text[]", DarlingTrendReader.QueryDurationTrendFilteredSql, StringComparison.Ordinal);
         Assert.Contains("$4::text[]", DarlingTrendReader.ProcedureDurationTrendFilteredSql, StringComparison.Ordinal);

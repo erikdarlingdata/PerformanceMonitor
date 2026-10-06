@@ -127,6 +127,41 @@ public sealed class DurationTrendFilteredDenominatorTests : IClassFixture<Shared
         Assert.Equal(4 / BucketSeconds, (await Read("DbC")).Elapsed, 9);
     }
 
+    /// <summary>
+    /// [#5414 round 2, per-bucket HAVING] A bucket the chosen databases had no rows in is a measured 0 and a bucket the
+    /// store covered, not a missing one. Collections every 15 minutes for four hours, DbC in every one, DbA in the third
+    /// hour's first collection only. [DbA] returns all four hour buckets (zero before and after its one busy hour), and
+    /// the first one's first_collection_time is the store's own first collection, so the window is not read as cut short
+    /// (Darling's DescribeCoverage and Lite's window notice both read that instant). The chart reads follow the rule.
+    /// </summary>
+    [Fact]
+    public async Task AFilteredWindow_KeepsEveryBucketTheStoreCovered_AsZero()
+    {
+        var first = _hour.AddHours(-3);
+        for (var i = 0; i < 16; i++)
+        {
+            var at = first.AddMinutes(15 * i);
+            if (i == 8) { await InsertAsync(procedure: false, at, "DbA", 6_000_000); }
+            await InsertAsync(procedure: false, at, "DbC", 1_000);
+        }
+
+        var asOf = DateTime.UtcNow;
+        var points = await _service.GetBucketedQueryDurationTrendAsync(_serverId, 24, asOf, 60, new[] { "DbA" });
+        Assert.Equal(4, points.Count);
+        var expected = new[] { 0.0, 0.0, 6_000 / BucketSeconds, 0.0 };
+        for (var i = 0; i < expected.Length; i++) { Assert.Equal(expected[i], points[i].Value!.Value, 9); }
+        Assert.Equal(DateTime.SpecifyKind(first, DateTimeKind.Unspecified), DateTime.SpecifyKind(points[0].FirstCollectionTime!.Value, DateTimeKind.Unspecified));
+
+        var chart = await _service.GetQueryDurationTrendAsync(_serverId, 12, null, null, new[] { "DbA" }, asOf);
+        Assert.Contains(chart, p => p.Value == 0.0 && p.CollectionTime < first.AddHours(2));
+        var executions = await _service.GetExecutionCountTrendAsync(_serverId, 12, null, null, new[] { "DbA" });
+        Assert.Contains(executions, p => p.Value == 0.0 && p.CollectionTime < first.AddHours(2));
+
+        Assert.Empty(await _service.GetBucketedQueryDurationTrendAsync(_serverId, 24, asOf, 60, new[] { "NoSuchDb" }));
+        Assert.Empty(await _service.GetQueryDurationTrendAsync(_serverId, 12, null, null, new[] { "NoSuchDb" }, asOf));
+        Assert.Empty(await _service.GetExecutionCountTrendAsync(_serverId, 12, null, null, new[] { "NoSuchDb" }));
+    }
+
     [Fact]
     public async Task McpBucket_AListThatMatchesNothing_IsEmpty_NotAZeroSeries()
     {

@@ -825,7 +825,7 @@ internal static class DarlingTrendReader
     /// outside that lane's boundary, so between #3695 and this alias the tool's raw route and the viewer's chart
     /// disagreed about exactly one row class: a restart collection, which the LAG divided into a confident
     /// <c>0.00 ms/sec</c> while the viewer skipped it. The mechanism is documented once, on
-    /// <see cref="DurationTrendRouting.BuildRawTrendSql"/>; DarlingMcpTrendToolsTests pins the declaration
+    /// the per-collection CTE <see cref="DurationTrendRouting.BuildBucketedRawTrendSql"/> builds; DarlingMcpTrendToolsTests pins the declaration
     /// as an alias and the file as free of the retired LAG-only text, so there is one definition and nothing
     /// to drift. A static readonly rather than a const because the Storage side is a builder, as for the
     /// hourly twin below.</para>
