@@ -849,6 +849,15 @@ internal static class DarlingTrendReader
     public static readonly string QueryDurationTrendSql =
         DurationTrendRouting.BuildBucketedRawTrendSql("query_stats", withDatabaseFilter: false);
 
+    /// <summary>
+    /// <see cref="QueryDurationTrendSql"/> with the database filter (#5244): the viewer's own text
+    /// (<c>DurationTrendRouting.BuildBucketedRawTrendSql(..., withDatabaseFilter: true)</c>), $4 the guarded
+    /// <c>text[]</c> and $5 the bucket width. The tool reads this one with <see cref="DatabaseFilter.All"/> too, so
+    /// the statement never changes with the selection.
+    /// </summary>
+    public static readonly string QueryDurationTrendFilteredSql =
+        DurationTrendRouting.BuildBucketedRawTrendSql("query_stats", withDatabaseFilter: true);
+
     /* ───────────── the tier ladder and the hourly-tier SQL: aliases of DurationTrendRouting (#3653) ─────────────
 
        Everything in this block used to be DEFINED here. #3666 moved the definitions to Storage
@@ -1065,8 +1074,19 @@ internal static class DarlingTrendReader
     public static Task<DurationTrendResult> GetQueryDurationTrendAsync(
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, DurationTrendRoute route,
         int bucketMinutes, CancellationToken cancellationToken = default)
+        => GetQueryDurationTrendAsync(
+            postgres, serverId, startUtc, endUtc, route, bucketMinutes, DatabaseFilter.All, cancellationToken);
+
+    /// <summary>
+    /// The same read over a SET of databases (#5244). The predicate is in the raw statement and in the hourly one,
+    /// so whichever tier the route picks reads only the chosen databases; <see cref="DatabaseFilter.All"/> binds SQL
+    /// NULL and reads every database, the answer the overload above has always given.
+    /// </summary>
+    public static Task<DurationTrendResult> GetQueryDurationTrendAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, DurationTrendRoute route,
+        int bucketMinutes, DatabaseFilter databases, CancellationToken cancellationToken = default)
         => ReadRoutedDurationTrendAsync(
-            QueryDurationTrendSql, postgres, serverId, startUtc, endUtc, route, bucketMinutes, cancellationToken);
+            QueryDurationTrendFilteredSql, postgres, serverId, startUtc, endUtc, route, bucketMinutes, databases, cancellationToken);
 
     /* --------------------- procedure + Query Store duration trends (#2484) --------------------- */
 
@@ -1093,6 +1113,10 @@ internal static class DarlingTrendReader
     /// </summary>
     public static readonly string ProcedureDurationTrendSql =
         DurationTrendRouting.BuildBucketedRawTrendSql("procedure_stats", withDatabaseFilter: false);
+
+    /// <summary>The procedure-stats twin of <see cref="QueryDurationTrendFilteredSql"/> (#5244).</summary>
+    public static readonly string ProcedureDurationTrendFilteredSql =
+        DurationTrendRouting.BuildBucketedRawTrendSql("procedure_stats", withDatabaseFilter: true);
 
     /// <summary>
     /// The Query Store duration trend - the viewer's <c>QueryStoreDurationTrendSql</c>, verbatim apart from
@@ -1121,7 +1145,26 @@ internal static class DarlingTrendReader
     /// (no rollup: plain PostgreSQL, or nothing materialized yet). Its ±slab stays untouched on purpose —
     /// see <see cref="QueryStoreTrendRouting"/>.</para>
     /// </summary>
-    public const string QueryStoreDurationTrendSql = """
+    public static readonly string QueryStoreDurationTrendSql = BuildQueryStoreDurationTrendSql(withDatabaseFilter: false);
+
+    /// <summary>
+    /// <see cref="QueryStoreDurationTrendSql"/> with the database filter (#5244) on both arms: $4 is the guarded
+    /// <c>text[]</c> (<see cref="DatabaseFilter.Parameter"/>), the same two predicate lines the viewer's twin
+    /// carries. Both arms read <c>query_store_stats</c>, which carries <c>database_name</c>, and the filter sits inside
+    /// the dedup's WHERE so the ranking sees only the chosen databases' rows.
+    /// </summary>
+    public static readonly string QueryStoreDurationTrendFilteredSql = BuildQueryStoreDurationTrendSql(withDatabaseFilter: true);
+
+    private static string BuildQueryStoreDurationTrendSql(bool withDatabaseFilter)
+    {
+        var armOneFilter = withDatabaseFilter
+            ? "\n                AND   ($4::text[] IS NULL OR database_name = ANY($4))"
+            : "";
+        var armTwoFilter = withDatabaseFilter
+            ? "\n            AND   ($4::text[] IS NULL OR database_name = ANY($4))"
+            : "";
+
+        return $"""
         WITH placed AS
         (
             /* Arm 1 (#1841 tier 2) - rows carrying the interval identity. Dedup to the interval's FINAL
@@ -1154,7 +1197,7 @@ internal static class DarlingTrendReader
                 /* Chunk-exclusion bounds only. */
                 AND   collection_time >= $2 - interval '1 day'
                 AND   collection_time <= $3 + interval '30 days'
-                AND   interval_start_time_utc IS NOT NULL
+                AND   interval_start_time_utc IS NOT NULL{armOneFilter}
             ) AS identified
             WHERE rn = 1
 
@@ -1173,7 +1216,7 @@ internal static class DarlingTrendReader
             WHERE server_id = $1
             AND   collection_time >= $2
             AND   collection_time <= $3
-            AND   interval_start_time_utc IS NULL
+            AND   interval_start_time_utc IS NULL{armTwoFilter}
         ),
         raw AS
         (
@@ -1199,6 +1242,7 @@ internal static class DarlingTrendReader
         FROM raw
         ORDER BY point_time
         """;
+    }
 
     /// <summary>
     /// The rollup-routed Query Store duration trend (#2736): the materialized window portion served from
@@ -1213,13 +1257,25 @@ internal static class DarlingTrendReader
     public static readonly string QueryStoreDurationTrendRollupSql =
         QueryStoreTrendRouting.BuildRollupTrendSql(withDatabaseFilter: false);
 
+    /// <summary><see cref="QueryStoreDurationTrendRollupSql"/> with the database filter (#5244): $5 the guarded
+    /// <c>text[]</c> after the raw boundary, on the rollup arm and both raw arms (the builder's own text).</summary>
+    public static readonly string QueryStoreDurationTrendRollupFilteredSql =
+        QueryStoreTrendRouting.BuildRollupTrendSql(withDatabaseFilter: true);
+
     /// <summary>Runs the procedure-stats duration trend down <paramref name="route"/> (#3541 A2) — the
     /// procedure twin of <see cref="GetQueryDurationTrendAsync"/>.</summary>
     public static Task<DurationTrendResult> GetProcedureDurationTrendAsync(
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, DurationTrendRoute route,
         int bucketMinutes, CancellationToken cancellationToken = default)
+        => GetProcedureDurationTrendAsync(
+            postgres, serverId, startUtc, endUtc, route, bucketMinutes, DatabaseFilter.All, cancellationToken);
+
+    /// <summary>The procedure-stats twin of the database-set overload of <see cref="GetQueryDurationTrendAsync(NpgsqlDataSource, int, DateTime, DateTime, DurationTrendRoute, int, DatabaseFilter, CancellationToken)"/> (#5244).</summary>
+    public static Task<DurationTrendResult> GetProcedureDurationTrendAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, DurationTrendRoute route,
+        int bucketMinutes, DatabaseFilter databases, CancellationToken cancellationToken = default)
         => ReadRoutedDurationTrendAsync(
-            ProcedureDurationTrendSql, postgres, serverId, startUtc, endUtc, route, bucketMinutes, cancellationToken);
+            ProcedureDurationTrendFilteredSql, postgres, serverId, startUtc, endUtc, route, bucketMinutes, databases, cancellationToken);
 
     /// <summary>
     /// The shared body of the two routed reads: pick the tier's SQL, read the three-column point shape, and
@@ -1228,7 +1284,7 @@ internal static class DarlingTrendReader
     /// </summary>
     private static async Task<DurationTrendResult> ReadRoutedDurationTrendAsync(
         string rawSql, NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc,
-        DurationTrendRoute route, int bucketMinutes, CancellationToken cancellationToken)
+        DurationTrendRoute route, int bucketMinutes, DatabaseFilter databases, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(route);
 
@@ -1244,9 +1300,11 @@ internal static class DarlingTrendReader
         await using var command = postgres.CreateCommand(
             route.Tier == RetentionTier.Raw
                 ? rawSql
-                : DurationTrendRouting.BuildBucketedHourlyTrendSql(route.HourlyFromClauseOrDefault));
+                : DurationTrendRouting.BuildBucketedHourlyTrendSql(route.HourlyFromClauseOrDefault, withDatabaseFilter: true));
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddWindow(command, serverId, startUtc, endUtc);
+        /* #5244: $4 the database set (SQL NULL for every database), then $5 the bucket width, on both tiers. */
+        command.Parameters.Add(databases.Parameter());
         DarlingMcpReadParameters.AddInt(command, bucketMinutes);
         var points = await ReadBucketedDurationPointsAsync(command, cancellationToken);
 
@@ -1300,19 +1358,35 @@ internal static class DarlingTrendReader
     /// otherwise. Callers resolve the route with <see cref="QueryStoreTrendRouting.ResolveAsync"/> so they
     /// can also disclose the routing in their payload.
     /// </summary>
-    public static async Task<List<QueryDurationTrendPoint>> GetQueryStoreDurationTrendAsync(
+    public static Task<List<QueryDurationTrendPoint>> GetQueryStoreDurationTrendAsync(
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc,
         QueryStoreTrendRouting.QueryStoreTrendRoute route, CancellationToken cancellationToken = default)
+        => GetQueryStoreDurationTrendAsync(
+            postgres, serverId, startUtc, endUtc, route, DatabaseFilter.All, cancellationToken);
+
+    /// <summary>
+    /// The same read over a SET of databases (#5244). The raw-only statement carries the guarded <c>text[]</c> at $4
+    /// on both arms; the rollup-routed one at $5, after the raw boundary, on the rollup arm and both raw arms.
+    /// <see cref="DatabaseFilter.All"/> binds SQL NULL and reads every database.
+    /// </summary>
+    public static async Task<List<QueryDurationTrendPoint>> GetQueryStoreDurationTrendAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc,
+        QueryStoreTrendRouting.QueryStoreTrendRoute route, DatabaseFilter databases, CancellationToken cancellationToken = default)
     {
         if (!route.UseRollup)
         {
-            return await ReadDurationTrendAsync(QueryStoreDurationTrendSql, postgres, serverId, startUtc, endUtc, cancellationToken);
+            await using var rawCommand = postgres.CreateCommand(QueryStoreDurationTrendFilteredSql);
+            rawCommand.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+            DarlingMcpReadParameters.AddWindow(rawCommand, serverId, startUtc, endUtc);
+            rawCommand.Parameters.Add(databases.Parameter());
+            return await ReadDurationPointsAsync(rawCommand, cancellationToken);
         }
 
-        await using var command = postgres.CreateCommand(QueryStoreDurationTrendRollupSql);
+        await using var command = postgres.CreateCommand(QueryStoreDurationTrendRollupFilteredSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddWindow(command, serverId, startUtc, endUtc);
         DarlingMcpReadParameters.AddTimestamp(command, route.RawStartUtc);
+        command.Parameters.Add(databases.Parameter());
         return await ReadDurationPointsAsync(command, cancellationToken);
     }
 
