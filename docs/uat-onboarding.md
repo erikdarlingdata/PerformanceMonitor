@@ -70,15 +70,18 @@ will not override it. When the two disagree the service says so, once per start,
   lifetime are all Windows-only. (There is a Linux path — see
   [Run on Linux](../Darling/README.md#run-on-linux-docker-compose-or-systemd-1804) — but it is not this
   procedure, and the WPF viewer is Windows either way.)
-- **Two .NET 10 runtimes**, from <https://dotnet.microsoft.com/download/dotnet/10.0>:
-  - **ASP.NET Core Runtime 10.0** — the service needs it whether or not you ever enable MCP or the web
-    dashboard, because the host framework is referenced unconditionally.
+- **.NET 10 runtimes**, from <https://dotnet.microsoft.com/download/dotnet/10.0>:
+  - **.NET Runtime 10.0 and ASP.NET Core Runtime 10.0** — the service needs both. The **ASP.NET Core
+    Hosting Bundle 10.0** installs the two together; the standalone ASP.NET Core Runtime installer does
+    **not** include the base .NET Runtime, so with that installer alone you also need the .NET Runtime
+    10.0. The service needs ASP.NET Core whether or not you ever enable MCP or the web dashboard, because
+    the host framework is referenced unconditionally.
   - **.NET Desktop Runtime 10.0** — the WPF viewer.
 
-  A stock Windows Server image has neither. `install-darling.ps1` now checks: it **refuses** the install if
-  the ASP.NET Core Runtime is missing, and **warns** if the .NET Desktop Runtime is. The asymmetry is
-  deliberate — without ASP.NET Core the service cannot start at all, whereas without the Desktop Runtime the
-  service runs fine and only the viewer will not open. Install both first anyway and skip the round trip.
+  A stock Windows Server image has none of them. `install-darling.ps1` now checks: it **refuses** the install
+  if the .NET Runtime or the ASP.NET Core Runtime is missing, and **warns** if the .NET Desktop Runtime is.
+  The asymmetry is deliberate — without those two the service cannot start at all, whereas without the Desktop Runtime the
+  service runs fine and only the viewer will not open. Install them all first anyway and skip the round trip.
 - **A monitored SQL Server** (2016 SP2–2025 with 2017 at CU3 or later, Azure SQL MI, AWS RDS, or Azure SQL DB) and a login on it with
   `VIEW SERVER STATE` and the rest of the [monitoring grants](../Darling/README.md#permissions-on-monitored-servers).
 - **Nothing else.** In the shipped default (`postgres.managed = true`) the service runs its own bundled
