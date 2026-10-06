@@ -464,7 +464,7 @@ public static class PgTargetFactKeys
     /// the slope implies. Unsized databases (NULL <c>size_bytes</c> — the role may not size them) are excluded and
     /// COUNTED, never read as zero growth; fewer than three samples is <c>insufficient_samples</c>, not a trend. Named
     /// by the worst database through <see cref="Fact.ObjectName"/> / <see cref="Fact.DatabaseName"/>; the top three by
-    /// growth ride in metadata by name. Every bar unmeasured (the table is a day old) — <c>threshold_lineage = 0</c> on
+    /// growth ride in metadata by name. Every bar measured over 14 days of the dogfood fleet, 2026-10-06 (#4404) — <c>threshold_lineage = 1</c> on
     /// every fact. Lane 38.</summary>
     public const string DatabaseGrowth = "PG_DATABASE_GROWTH";
     /// <summary>The instance total's growth rate against its own baseline (<c>pg_database_growth_bytes_per_day</c>:

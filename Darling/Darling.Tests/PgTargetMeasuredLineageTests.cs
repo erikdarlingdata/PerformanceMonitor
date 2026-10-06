@@ -52,6 +52,8 @@ public sealed class PgTargetMeasuredLineageTests
     private const string SecondCalibrationDate = "2026-09-20";
     /// <summary>The fourth read (#4404, batch D re-fire): host-memory reclaimable share and the configured overcommit ratio, 7 d.</summary>
     private const string FourthCalibrationDate = "2026-09-29";
+    /// <summary>The fifth read (#4404, D4/D4B): 14 days of <c>pg_database_size_stats</c> over 393 databases, the six growth bars confirmed as written.</summary>
+    private const string FifthCalibrationDate = "2026-10-06";
     private const string Population = "Aurora PostgreSQL clusters";
 
     private static readonly Regex s_constDeclaration = new(
@@ -80,6 +82,8 @@ public sealed class PgTargetMeasuredLineageTests
         ("Baselines/AnomalyThresholds.cs", SecondCalibrationDate, new[] { "PgRatioAnomalyThreshold" }),
         /* Round 4 (#4404, D1/D2 re-fire): the memory bars, measured as the empty interval. */
         ("PgTargetScorer.Memory.cs", FourthCalibrationDate, new[] { "OvercommitCriticalRatio", "HostMemoryReclaimableWarningShare", "HostMemoryReclaimableCriticalShare", "HostMemoryPressureSustainSamples" }),
+        /* Round 5 (#4404, D4/D4B): the six growth bars, graded over the full 14 days and confirmed as written. */
+        ("PgTargetScorer.Growth.cs", FifthCalibrationDate, new[] { "GrowthLookbackDays", "GrowthConcerningBytes", "GrowthConcerningFraction", "GrowthCriticalBytes", "GrowthCriticalFraction", "GrowthMinimumSamples" }),
     };
 
     /// <summary>The bars the calibrations did NOT measure, which must still say so.</summary>
@@ -101,9 +105,9 @@ public sealed class PgTargetMeasuredLineageTests
         ("Baselines/AnomalyThresholds.cs", new[] { "PgStatementMeanMsFloor", "PgStatementMeanMsFallback" }),
         /* #3691: the memory family's boosts — severity lifts, not bars; round 4 (2026-09-29) measured the bars, not these. */
         ("PgTargetScorer.Memory.cs", new[] { "OvercommitCriticalBandBoost", "HostMemoryCauseBoost" }),
-        /* Lane 38 (#3691): the object-growth family — pg_database_size_stats (V136) is one day old at the family's birth; the
-           2026-09-19 calibration ran before it existed, so every bar is chosen and the family stamps threshold_lineage = 0. */
-        ("PgTargetScorer.Growth.cs", new[] { "GrowthLookbackDays", "GrowthConcerningBytes", "GrowthConcerningFraction", "GrowthCriticalBytes", "GrowthCriticalFraction", "GrowthMinimumSamples", "GrowthBloatCoFireBoost", "GrowthAnomalyCoFireBoost" }),
+        /* Lane 38 (#3691): the object-growth family's co-fire boosts are severity lifts, not bars; the 2026-10-06 read (#4404)
+           measured the six bars, not these. The anomaly pair below was not graded by that read either. */
+        ("PgTargetScorer.Growth.cs", new[] { "GrowthBloatCoFireBoost", "GrowthAnomalyCoFireBoost" }),
         ("Baselines/AnomalyThresholds.cs", new[] { "PgDatabaseGrowthFloorBytesPerDay", "PgDatabaseGrowthFallbackBytesPerDay" }),
         /* The ratio families' ramp spans: the 2026-09-20 read placed the firing multiple, not where a ramp should top out. */
         ("PgTargetScorer.Anomaly.cs", new[] { "RatioAnomalySaturation", "WaitProfileModifiedZSpan" }),
@@ -178,7 +182,7 @@ public sealed class PgTargetMeasuredLineageTests
     [Fact]
     public void TheMetadataFlag_AgreesWithTheCommentsFileByFile()
     {
-        foreach (var file in new[] { "PgTargetScorer.Temp.cs", "PgTargetScorer.Vacuum.cs", "PgTargetScorer.Database.cs", "PgTargetScorer.Cpu.cs", "PgTargetScorer.Sessions.cs", "PgTargetScorer.Memory.cs" })
+        foreach (var file in new[] { "PgTargetScorer.Temp.cs", "PgTargetScorer.Vacuum.cs", "PgTargetScorer.Database.cs", "PgTargetScorer.Cpu.cs", "PgTargetScorer.Sessions.cs", "PgTargetScorer.Memory.cs", "PgTargetScorer.Growth.cs" })
         {
             var source = string.Join("\n", Source(file));
             Assert.Contains("[\"threshold_lineage\"] = 1;", source, StringComparison.Ordinal);
