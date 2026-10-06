@@ -70,6 +70,50 @@ const SOURCES = {
     key: (s) => [s.sql_handle],
     stem: (s) => s.sql_handle,
   },
+  /* A blocked process report row (#5236) names the plan of one of its two sides by the report's event time (the XE
+     stamp, as the row holds it), both sessions' ids and ecids, and `side`. The blocked side is the read's default, so
+     it sends no `side`; a row's blocked and blocking plans are two panels. A missing ecid reads as 0, as the tool does.
+     The row's database goes with it: a server that collects several databases (an Azure master target) numbers sessions
+     per database, so two databases' reports can share every other part of the key. The database is in the panel key too,
+     so their rows never share a panel; a row without one sends none and keys with an empty slot. */
+  blocking: {
+    read: "get_blocking_plan_xml",
+    params: (s) => ({
+      event_time: s.event_time,
+      blocked_spid: s.blocked_spid,
+      blocked_ecid: s.blocked_ecid == null ? 0 : s.blocked_ecid,
+      blocking_spid: s.blocking_spid,
+      blocking_ecid: s.blocking_ecid == null ? 0 : s.blocking_ecid,
+      side: s.side === "blocking" ? "blocking" : null,
+      database_name: s.database_name || null,
+    }),
+    key: (s) => [
+      s.database_name || "",
+      s.event_time,
+      s.blocked_spid,
+      s.blocked_ecid == null ? 0 : s.blocked_ecid,
+      s.blocking_spid,
+      s.blocking_ecid == null ? 0 : s.blocking_ecid,
+      s.side === "blocking" ? "blocking" : "blocked",
+    ],
+    stem: (s) => (s.side === "blocking" ? "blocking-" + s.blocking_spid : "blocked-" + s.blocked_spid) + "-" + s.event_time,
+  },
+  /* A deadlock row's victim plan (#5236), by the row's collection and deadlock times. Neither stamp is unique on its own
+     (one monitor pass can report two deadlocks with the same millisecond), so the victim's process id narrows it; a row
+     without one reads by the two times alone, and the read refuses to pick when two deadlocks that name different victims
+     match. The row's database narrows it too, and keys the panel, for the same reason as a blocking row's. The download
+     name carries the victim, so two deadlocks with the same stamps do not download under one file name. */
+  deadlock_victim: {
+    read: "get_deadlock_plan_xml",
+    params: (s) => ({
+      collection_time: s.collection_time,
+      deadlock_time: s.deadlock_time,
+      victim_process_id: s.victim_process_id || null,
+      database_name: s.database_name || null,
+    }),
+    key: (s) => [s.database_name || "", s.collection_time, s.deadlock_time, s.victim_process_id || ""],
+    stem: (s) => "deadlock-victim-" + s.deadlock_time + (s.victim_process_id ? "-" + s.victim_process_id : ""),
+  },
 };
 
 /* A panel's key: server, then the kind (left out for query_hash, whose key never had one), then the kind's own parts, then
@@ -391,6 +435,79 @@ export function procedurePlanColumn(server) {
     label: "Plan",
     render: (row) =>
       planSourceCell(server, row && row.sql_handle ? { kind: "procedure", sql_handle: row.sql_handle } : null, "Plan", "Show the stored plan for this procedure"),
+    hideWhenEmpty: true,
+    sortable: false,
+    filter: false,
+    csv: false,
+    copy: false,
+  };
+}
+
+/** Blocking (#5236): a "Blocked plan" and a "Blocking plan" column, each gated on the row's own presence flag. The flags
+ *  arrive only when true (a report keeps a plan only when the statement was still in the plan cache, and a DMV row has
+ *  none), so a row without one gets a dash and a grid with none drops the column. A row also needs the event time and both
+ *  session ids the read keys on; without them there is nothing to read by, so it is a dash too. The row's database_name
+ *  goes along when it has one, so a server that collects several databases reads each row's own. */
+export function blockingPlanColumns(server) {
+  const source = (row, side) => ({
+    kind: "blocking",
+    event_time: row.event_time,
+    blocked_spid: row.blocked_spid,
+    blocked_ecid: row.blocked_ecid == null ? 0 : row.blocked_ecid,
+    blocking_spid: row.blocking_spid,
+    blocking_ecid: row.blocking_ecid == null ? 0 : row.blocking_ecid,
+    database_name: row.database_name || null,
+    side,
+  });
+  const keyed = (row) => row.event_time != null && row.event_time !== "" && row.blocked_spid != null && row.blocking_spid != null;
+  return [
+    {
+      key: "has_blocked_plan",
+      label: "Blocked plan",
+      render: (row) =>
+        planSourceCell(server, row && row.has_blocked_plan === true && keyed(row) ? source(row, "blocked") : null, "Blocked plan", "Show the plan captured for the blocked statement"),
+      hideWhenEmpty: true,
+      sortable: false,
+      filter: false,
+      csv: false,
+      copy: false,
+    },
+    {
+      key: "has_blocking_plan",
+      label: "Blocking plan",
+      render: (row) =>
+        planSourceCell(server, row && row.has_blocking_plan === true && keyed(row) ? source(row, "blocking") : null, "Blocking plan", "Show the plan captured for the blocking statement"),
+      hideWhenEmpty: true,
+      sortable: false,
+      filter: false,
+      csv: false,
+      copy: false,
+    },
+  ];
+}
+
+/** Deadlocks (#5236): a "Victim plan" column gated on the row's presence flag (sent only when true, like the blocking
+ *  flags). The read keys on the row's collection and deadlock times, with the victim's process id and the database_name
+ *  when the row has them; a row missing either time is a dash. */
+export function deadlockPlanColumn(server) {
+  return {
+    key: "has_victim_plan",
+    label: "Victim plan",
+    render: (row) =>
+      planSourceCell(
+        server,
+        row && row.has_victim_plan === true && row.collection_time != null && row.collection_time !== "" && row.deadlock_time != null && row.deadlock_time !== ""
+          ? {
+              kind: "deadlock_victim",
+              collection_time: row.collection_time,
+              deadlock_time: row.deadlock_time,
+              victim_process_id: row.victim_process_id || null,
+              database_name: row.database_name || null,
+            }
+          : null,
+        "Victim plan",
+        "Show the plan captured for the deadlock victim"
+      ),
     hideWhenEmpty: true,
     sortable: false,
     filter: false,
