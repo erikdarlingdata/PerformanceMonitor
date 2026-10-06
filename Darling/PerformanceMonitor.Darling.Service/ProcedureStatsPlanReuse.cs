@@ -350,6 +350,8 @@ internal static class ProcedureStatsPlanReuse
     /// and on a cycle the cadence gate skips they ship no plan, as before. A row that cannot be keyed is rendered
     /// like a miss but never cached.
     /// </summary>
+    /// <param name="unjudgedOrdinals">Filled by <paramref name="fetch"/> with the position of each plan the statement
+    /// filter's budget could not cover: those are not cached.</param>
     internal static async Task<Outcome> ApplyOnAsync(
         int serverId,
         PlanDigestCache<ProcedureStatsPlanKey> cache,
@@ -358,7 +360,8 @@ internal static class ProcedureStatsPlanReuse
         long captureOrdinal,
         DateTime nowUtc,
         PlanFetch fetch,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        ISet<int>? unjudgedOrdinals = null)
     {
         var outcome = new Outcome();
         var candidates = new List<(int RowIndex, ProcedureStatsPlanKey? Key, byte[] Handle)>();
@@ -413,7 +416,10 @@ internal static class ProcedureStatsPlanReuse
                 outcome.RenderedBytes += result.Bytes ?? 0;
                 rows[rowIndex] = rows[rowIndex] with { QueryPlanXml = result.PlanXml, QueryPlanXmlBytes = result.Bytes };
 
-                if (key is { } cacheKey)
+                /* #4348: a plan the filter's budget could not cover is stored as the marker for this cycle but never cached,
+                   so the next cycle fetches and filters it again. A plan withheld whole for its own sake (its judge threw,
+                   it cannot be parsed) is a settled outcome and is cached like any fetched plan (A-L4). */
+                if (key is { } cacheKey && unjudgedOrdinals?.Contains(ord) != true)
                 {
                     cache.AddPending(
                         cacheKey, result.PlanXml is null ? null : DigestOf(result.PlanXml), result.Bytes, nowUtc, captureOrdinal);

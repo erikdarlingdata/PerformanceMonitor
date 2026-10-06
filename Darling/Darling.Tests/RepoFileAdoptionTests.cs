@@ -217,6 +217,9 @@ public sealed class RepoFileAdoptionTests
            stores' sources and asserts them equal up to one token, and its wiring pin slices each pass method by
            call sites that sit on their own lines — anchors spanning line breaks on every arm. */
         "RecurrenceLabelStoreReadTests.cs",
+        /* #5320: its gate pins split build.yml into steps by line and anchor the gate step's PowerShell check (the
+           Tee-Object line through the Select-String line that reads the same log) across the lines between them. */
+        "ReleaseStatementGateWorkflowTests.cs",
         /* #5374: its start pin slices the provisioning chain of DarlingWorker.cs, comments removed, and matches the rules call
            inside each branch of it, across line breaks. */
         "SelfManagedStoreRulesStartPinTests.cs",

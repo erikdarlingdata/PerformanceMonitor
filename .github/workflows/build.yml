@@ -625,6 +625,30 @@ jobs:
         if: steps.filter.outputs.darling == 'true' || steps.filter.outputs.core == 'true' || steps.filter.outputs.root == 'true' || github.event_name == 'release'
         run: dotnet run --project Darling/Darling.Tests/Darling.Tests.csproj -c Release --no-build
 
+      # #5320: the statement-filter release gate. StatementCensus_PendingEntries_BlockARelease fails
+      # while any statement-column census entry or watched writer is pending, in every normal Darling
+      # test run (the step above), so a pull request that adds an unjudged column fails on its own.
+      # This step stays as the release-time backstop: it sets DARLING_RELEASE_CUT=1 and runs the one
+      # test by name, ahead of every publish and package step below, and only on the release event,
+      # so a release cannot ship an unhooked column even if the step above was skipped.
+      # ReleaseStatementGateWorkflowTests pins both halves, and that no other workflow sets the
+      # variable. Darling.Tests is already built (Release) by the build step above, so this runs
+      # the one test by name and nothing else.
+      - name: Statement filter release gate
+        if: github.event_name == 'release'
+        env:
+          DARLING_RELEASE_CUT: '1'
+        shell: pwsh
+        run: |
+          # A -method filter that matches nothing exits 0 with "Total: 0", so a renamed test would pass this gate
+          # without running. Fail unless the runner's own summary shows exactly the one test, with nothing failed,
+          # errored, skipped or not run. ReleaseStatementGateWorkflowTests binds the name to the test with nameof.
+          dotnet run --project Darling/Darling.Tests/Darling.Tests.csproj -c Release --no-build -- -method "*StatementCensus_PendingEntries_BlockARelease*" 2>&1 | Tee-Object -FilePath statement-gate.log
+          if ($LASTEXITCODE -ne 0) { throw "The statement filter release gate failed (exit $LASTEXITCODE)." }
+          if (-not (Select-String -Path statement-gate.log -Pattern 'Total: 1, Errors: 0, Failed: 0, Skipped: 0, Not Run: 0' -SimpleMatch -Quiet)) {
+            throw "The statement filter release gate did not run exactly one passing test; the summary above is not 'Total: 1, Errors: 0, Failed: 0, Skipped: 0, Not Run: 0'."
+          }
+
       - name: Get version
         if: steps.fastpath.outputs.engaged != 'true'
         id: version

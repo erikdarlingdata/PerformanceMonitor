@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using System.Text.RegularExpressions;
+using PerformanceMonitor.Analysis;
 
 namespace PerformanceMonitor.Notifications;
 
@@ -296,7 +297,7 @@ public static class BlockingIncidentGrouper
                     new[] { representative.ContentiousObject! }, rows.Count, waitRange)
                 : AlertFingerprint.ForKey(
                     serverName, AlertFingerprint.Blocking,
-                    QueryPairKey(representative),
+                    FingerprintKey(identity, representative),
                     DatabaseDisplay(representative.Database), rows.Count, waitRange);
 
             // ForObjects/ForKey only return null on empty identity, which IdentityKey already excludes,
@@ -335,7 +336,33 @@ public static class BlockingIncidentGrouper
     private static string IdentityKey(BlockedEvent e) =>
         !string.IsNullOrWhiteSpace(e.ContentiousObject)
             ? "obj|" + Norm(e.Database) + "|" + Norm(e.ContentiousObject)
-            : "qp|" + QueryPairKey(e);
+            : HasWithheldQuery(e)
+                /* #4348: a withheld statement has no text to group on, and every one reads as the same marker, so a
+                   text key would fold different statements into one incident. Key on everything that is NOT
+                   withheld: the database, the visible side's literal-stripped text (the marker stands in for the
+                   withheld side, so which side is withheld still matters) and the lock mode.
+                   Nothing in the sample's position goes in the key: an ordinal would change when sample order
+                   shifts between cycles, and the same incident would get a new dedup key and alert again.
+                   The limit: two withheld chains that differ in nothing visible (same database, same visible
+                   partner statement, same lock mode) are ONE incident, because BlockedEvent carries no
+                   non-text identity to tell them apart. */
+                ? "withheld|" + Norm(e.Database)
+                    + "|" + (IsWithheld(e.BlockedQuery) ? "<withheld>" : NormalizeQuery(e.BlockedQuery))
+                    + "|" + (IsWithheld(e.BlockingQuery) ? "<withheld>" : NormalizeQuery(e.BlockingQuery))
+                    + "|" + Norm(e.LockMode)
+                : "qp|" + QueryPairKey(e);
+
+    /// <summary>The text the incident fingerprint is keyed on: the query pair for a text-keyed incident, the
+    /// withheld-chain key for one whose text was withheld (database, visible side, lock mode; see
+    /// <see cref="IdentityKey"/>).</summary>
+    private static string FingerprintKey(string identity, BlockedEvent representative) =>
+        identity.StartsWith("withheld|", StringComparison.Ordinal) ? identity : QueryPairKey(representative);
+
+    private static bool HasWithheldQuery(BlockedEvent e) =>
+        IsWithheld(e.BlockedQuery) || IsWithheld(e.BlockingQuery);
+
+    private static bool IsWithheld(string? query) =>
+        WithheldStatementMarker.IsMarker(query);
 
     private static string QueryPairKey(BlockedEvent e) =>
         Norm(e.Database) + "|" + NormalizeQuery(e.BlockedQuery) + "|" + NormalizeQuery(e.BlockingQuery);
