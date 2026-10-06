@@ -224,13 +224,49 @@ public sealed class StatementColumnCensusTests
 
     // ── non-pending Hooked entries need a collection-time case ──
 
-    private static bool IsRunnableTest(MethodInfo method) => method.IsDefined(typeof(FactAttribute), inherit: true);
+    /// <summary>
+    /// The one class a registered collection case must sit in: the collection census, the tests that plant the canary
+    /// in a collector's input and read what <c>StatementScrubRecordingWriter</c> recorded. It may be a partial class
+    /// spread over several files.
+    /// </summary>
+    internal const string CollectionCensusClass = "StatementCollectionCensusTests";
 
-    /// <summary>The problems with a registry: a key that is not a Hooked entry, or a case that names no runnable test.</summary>
-    private static string[] RegistryProblems(IReadOnlyDictionary<string, string> cases)
+    /// <summary>A real test: a <c>[Fact]</c> or <c>[Theory]</c> that is not skipped, conditionally skipped or explicit.</summary>
+    private static bool IsRunnableTest(MethodInfo method)
+    {
+        var facts = method.GetCustomAttributes<FactAttribute>(inherit: true).ToArray();
+        return facts.Length > 0
+            && facts.All(f => string.IsNullOrEmpty(f.Skip)
+                && string.IsNullOrEmpty(f.SkipUnless)
+                && string.IsNullOrEmpty(f.SkipWhen)
+                && !f.Explicit);
+    }
+
+    /// <summary>The source of every file that declares <paramref name="type"/>, joined (empty when none is found).</summary>
+    private static string CensusClassSource(Type type)
+    {
+        var dir = Path.GetDirectoryName(RepoFile.PathTo("Darling", "Darling.Tests", "StatementColumnCensusTests.cs"))!;
+        var declaration = new Regex(@"\bclass\s+" + Regex.Escape(type.Name) + @"\b");
+        return string.Join("\n", Directory.EnumerateFiles(dir, "*.cs", SearchOption.AllDirectories)
+            .Where(f => !f.Contains(Path.DirectorySeparatorChar + "obj" + Path.DirectorySeparatorChar, StringComparison.Ordinal)
+                && !f.Contains(Path.DirectorySeparatorChar + "bin" + Path.DirectorySeparatorChar, StringComparison.Ordinal))
+            .Select(File.ReadAllText)
+            .Where(t => declaration.IsMatch(t)));
+    }
+
+    /// <summary>
+    /// The problems with a registry: a key that is not a Hooked entry, or a case that does not name a runnable test
+    /// (a method that exists, carries <c>[Fact]</c>/<c>[Theory]</c> with no skip) in the collection census class whose
+    /// source drives <c>StatementScrubRecordingWriter</c>, names the column, and does not skip at run time.
+    /// </summary>
+    private static string[] RegistryProblems(IReadOnlyDictionary<string, string> cases) =>
+        RegistryProblems(cases, typeof(StatementColumnCensusTests).Assembly.GetTypes(), CollectionCensusClass, CensusClassSource);
+
+    private static string[] RegistryProblems(
+        IReadOnlyDictionary<string, string> cases, IEnumerable<Type> types, string censusClass, Func<Type, string> sourceOf)
     {
         var problems = new List<string>();
-        var types = typeof(StatementColumnCensusTests).Assembly.GetTypes();
+        var typeList = types.ToArray();
 
         foreach (var (key, test) in cases.OrderBy(c => c.Key, StringComparer.Ordinal))
         {
@@ -241,14 +277,30 @@ public sealed class StatementColumnCensusTests
             }
 
             var parts = test.Split('.');
-            var method = parts.Length == 2
-                ? types.Where(t => t.Name == parts[0])
-                    .SelectMany(t => t.GetMethods(BindingFlags.Public | BindingFlags.Instance | BindingFlags.Static))
-                    .FirstOrDefault(m => m.Name == parts[1] && IsRunnableTest(m))
-                : null;
-            if (method is null)
+            if (parts.Length != 2 || parts[0] != censusClass)
             {
-                problems.Add(key + " names " + test + ", which is not a [Fact] or [Theory] in this assembly");
+                problems.Add(key + " names " + test + ", which is not a test in " + censusClass);
+                continue;
+            }
+
+            var type = typeList.FirstOrDefault(t => t.Name == censusClass);
+            var method = type?
+                .GetMethods(BindingFlags.Public | BindingFlags.Instance | BindingFlags.Static)
+                .FirstOrDefault(m => m.Name == parts[1] && IsRunnableTest(m));
+            if (type is null || method is null)
+            {
+                problems.Add(key + " names " + test + ", which is not a runnable [Fact] or [Theory] (none, skipped, or explicit)");
+                continue;
+            }
+
+            var source = sourceOf(type);
+            var column = key[(key.IndexOf('.') + 1)..];
+            if (!source.Contains("StatementScrubRecordingWriter", StringComparison.Ordinal)
+                || !source.Contains(column, StringComparison.Ordinal)
+                || source.Contains("Assert.Skip", StringComparison.Ordinal))
+            {
+                problems.Add(key + " names " + test + ", but " + censusClass + " does not drive StatementScrubRecordingWriter " +
+                    "for " + column + " (or it skips at run time)");
             }
         }
 
@@ -282,6 +334,33 @@ public sealed class StatementColumnCensusTests
         Assert.True(problems.Length == 0, string.Join("; ", problems));
     }
 
+    // Fixtures for the registry self-test. Not public, so xunit does not run them (xUnit1000 asks for public).
+#pragma warning disable xUnit1000
+    private sealed class FixtureCensus
+    {
+        [Fact]
+        public void Runs() { }
+
+        [Fact(Skip = "fixture")]
+        public void Skipped() { }
+
+        [Fact(Explicit = true)]
+        public void NotRunByDefault() { }
+
+        [Theory(Skip = "fixture")]
+        [InlineData(1)]
+        public void SkippedTheory(int x) => _ = x;
+
+        public void NoAttribute() { }
+    }
+
+    private sealed class FixtureOtherClass
+    {
+        [Fact]
+        public void Runs() { }
+    }
+#pragma warning restore xUnit1000
+
     [Fact]
     public void TheRegistryChecks_CatchABrokenCaseAndAnUncoveredEntry()
     {
@@ -291,7 +370,8 @@ public sealed class StatementColumnCensusTests
             Listed.Count(e => e.Value.Kind == Kind.Hooked && !e.Value.Pending),
             NonPendingWithoutACase(empty).Length);
 
-        // Cases that name a missing test, and a column that is not Hooked.
+        // The real registry check: a missing class, a column that is not Hooked, and a runnable test in a class that is
+        // not the collection census, each fail.
         var broken = new Dictionary<string, string>(StringComparer.Ordinal)
         {
             ["query_stats.query_text"] = "NoSuchClass.NoSuchMethod",
@@ -299,12 +379,26 @@ public sealed class StatementColumnCensusTests
         };
         Assert.Equal(2, RegistryProblems(broken).Length);
 
-        // A real [Fact] on a Hooked column is accepted.
-        var good = new Dictionary<string, string>(StringComparer.Ordinal)
-        {
-            ["query_stats.query_text"] = "StatementColumnCensusTests.EveryEntry_CarriesItsReasonRowAndLane",
-        };
-        Assert.Empty(RegistryProblems(good));
+        // Over the fixture census class (named FixtureCensus here): only a runnable test whose source drives the
+        // recording writer for the column is accepted.
+        var types = new[] { typeof(FixtureCensus), typeof(FixtureOtherClass) };
+        string Driving(Type _) => "var w = new StatementScrubRecordingWriter(); // query_text";
+        string Unrelated(Type _) => "plain test with no harness";
+
+        string[] Check(string test, Func<Type, string> source) =>
+            RegistryProblems(
+                new Dictionary<string, string>(StringComparer.Ordinal) { ["query_stats.query_text"] = test },
+                types, nameof(FixtureCensus), source);
+
+        Assert.Empty(Check("FixtureCensus.Runs", Driving));
+        Assert.Single(Check("FixtureCensus.Skipped", Driving));
+        Assert.Single(Check("FixtureCensus.NotRunByDefault", Driving));
+        Assert.Single(Check("FixtureCensus.SkippedTheory", Driving));
+        Assert.Single(Check("FixtureCensus.NoAttribute", Driving));
+        Assert.Single(Check("FixtureCensus.Missing", Driving));
+        Assert.Single(Check("FixtureOtherClass.Runs", Driving));
+        Assert.Single(Check("FixtureCensus.Runs", Unrelated));
+        Assert.Single(Check("FixtureCensus.Runs", _ => "new StatementScrubRecordingWriter(); query_text; Assert.SkipWhen(x, y);"));
     }
 
     // ── writers outside the definitions ──

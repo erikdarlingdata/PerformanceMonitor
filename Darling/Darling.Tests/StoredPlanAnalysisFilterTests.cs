@@ -7,7 +7,9 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Runtime.CompilerServices;
 using System.Security;
 using System.Text.Json;
@@ -77,16 +79,93 @@ public sealed class StoredPlanAnalysisFilterTests
         Assert.DoesNotContain("could not be read", result);
     }
 
+    /// <summary>
+    /// Every product <c>.cs</c> file under <paramref name="appRoot"/> (not <c>bin</c>, <c>obj</c> or
+    /// <c>deprecated</c>, and not comment lines) is read. The formatter's <c>BuildAnalysisResult</c> may appear exactly
+    /// once, qualified, in <paramref name="helperRelativePath"/>: a direct call in any other file, a call through
+    /// <c>using static</c> or an alias, and a method group all name it again and so fail.
+    /// </summary>
+    private static List<string> FormatterCallProblems(string appRoot, string helperRelativePath)
+    {
+        var problems = new List<string>();
+        string helper = Path.GetFullPath(Path.Combine(appRoot, helperRelativePath));
+        int mentions = 0;
+        foreach (string file in Directory.EnumerateFiles(appRoot, "*.cs", SearchOption.AllDirectories))
+        {
+            string relative = Path.GetRelativePath(appRoot, file);
+            string[] parts = relative.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            if (parts.Take(parts.Length - 1).Any(p => p is "bin" or "obj" or "deprecated")) continue;
+
+            bool isHelper = string.Equals(Path.GetFullPath(file), helper, StringComparison.OrdinalIgnoreCase);
+            foreach (string line in File.ReadLines(file))
+            {
+                string trimmed = line.TrimStart();
+                if (trimmed.StartsWith("//", StringComparison.Ordinal) || trimmed.StartsWith("*", StringComparison.Ordinal)
+                    || trimmed.StartsWith("/*", StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                if (Regex.IsMatch(line, @"\busing\s+static\s+[\w.]*McpPlanAnalysisFormatter\b"))
+                    problems.Add(relative + ": using static of the formatter");
+
+                int here = Regex.Matches(line, @"\bBuildAnalysisResult\b").Count;
+                if (here == 0) continue;
+                mentions += here;
+                bool qualified = Regex.IsMatch(line, @"\bMcpPlanAnalysisFormatter\s*\.\s*BuildAnalysisResult\s*\(");
+                if (!isHelper || !qualified || here != 1)
+                    problems.Add(relative + ": a call to BuildAnalysisResult outside the filtered helper");
+            }
+        }
+
+        if (mentions != 1) problems.Add("expected exactly one call to BuildAnalysisResult in the helper, found " + mentions);
+        return problems;
+    }
+
     [Fact]
     public void EveryAnalysisToolHere_ReachesTheAnalyzerOnlyThroughTheFilteredHelper()
     {
-        string source = File.ReadAllText(Path.Combine(RepoRoot(),
-            "Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpPlanTools.cs"));
+        string appRoot = Path.Combine(RepoRoot(), "Darling", "PerformanceMonitor.Darling.Service");
+        string helperRelativePath = Path.Combine("Mcp", "DarlingMcpPlanTools.cs");
+        string source = File.ReadAllText(Path.Combine(appRoot, helperRelativePath));
 
-        // One direct call to the formatter: the helper's own. The four tools call the helper.
-        Assert.Single(Regex.Matches(source, @"McpPlanAnalysisFormatter\.BuildAnalysisResult\("));
+        // One direct call to the formatter across the whole app: the helper's own. The four tools call the helper.
+        Assert.Empty(FormatterCallProblems(appRoot, helperRelativePath));
         Assert.Equal(4, Regex.Matches(source, @"return AnalyzeFilteredPlan\(").Count);
         Assert.Contains("xml = SensitiveStatements.Xml(xml) ?? SensitiveStatements.PlaceholderText;", source);
+    }
+
+    [Fact]
+    public void TheFormatterCallScan_FlagsADirectCallInAnotherFile_AUsingStaticCall_AndIgnoresBinObjAndDeprecated()
+    {
+        string root = Path.Combine(Path.GetTempPath(), "spaf-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            Directory.CreateDirectory(root);
+            string helperLine = "return McpPlanAnalysisFormatter.BuildAnalysisResult(xml);";
+            File.WriteAllText(Path.Combine(root, "Helper.cs"),
+                "// McpPlanAnalysisFormatter.BuildAnalysisResult( is named here\n" + helperLine);
+            Assert.Empty(FormatterCallProblems(root, "Helper.cs"));
+
+            foreach (string ignored in new[] { "bin", "obj", "deprecated" })
+            {
+                Directory.CreateDirectory(Path.Combine(root, ignored));
+                File.WriteAllText(Path.Combine(root, ignored, "Skipped.cs"), helperLine);
+            }
+            Assert.Empty(FormatterCallProblems(root, "Helper.cs"));
+
+            string other = Path.Combine(root, "Other.cs");
+            File.WriteAllText(other, "class T { string M() { " + helperLine + " } }");
+            Assert.NotEmpty(FormatterCallProblems(root, "Helper.cs"));
+
+            File.WriteAllText(other,
+                "using static PerformanceMonitor.PlanAnalysis.McpPlanAnalysisFormatter;\nclass T { string M() { return BuildAnalysisResult(xml); } }");
+            Assert.True(FormatterCallProblems(root, "Helper.cs").Count >= 2);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
     }
 
     private static string RepoRoot([CallerFilePath] string thisFile = "")

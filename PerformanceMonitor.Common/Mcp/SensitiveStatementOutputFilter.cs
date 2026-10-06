@@ -117,6 +117,10 @@ public static class SensitiveStatementOutputFilter
             {
                 JsonObject? blockMeta = SweepMeta(embedded.Meta, budget);
                 JsonObject? resourceMeta = SweepMeta(resource.Meta, budget);
+                // A URI or MIME type with a named statement in it is useless with the statement replaced, so it
+                // refuses the whole result (the block keeps a valid shape) instead of rewriting the value.
+                RefuseIfNamed(resource.Uri, budget);
+                RefuseIfNamed(resource.MimeType, budget);
                 string judged = string.IsNullOrEmpty(resource.Text) ? resource.Text : Judge(resource.Text, budget);
                 if (ReferenceEquals(judged, resource.Text)
                     && ReferenceEquals(blockMeta, embedded.Meta)
@@ -152,6 +156,15 @@ public static class SensitiveStatementOutputFilter
         string judged = Judge(json, budget);
         if (ReferenceEquals(judged, json)) return meta;
         return JsonNode.Parse(judged) as JsonObject ?? throw new InvalidOperationException(SensitiveStatements.JsonRefusal);
+    }
+
+    /// <summary>Judges a value that cannot be rewritten (a resource URI or MIME type) under the shared budget and
+    /// throws the refusal when anything in it is named.</summary>
+    private static void RefuseIfNamed(string? value, SensitiveStatements.JudgeBudget budget)
+    {
+        if (string.IsNullOrEmpty(value)) return;
+        if (!ReferenceEquals(Judge(value, budget), value))
+            throw new InvalidOperationException(SensitiveStatements.JsonRefusal);
     }
 
     /// <summary>Sweeps one string. A refusal from the walk is thrown, so the whole result becomes the refusal
