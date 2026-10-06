@@ -175,7 +175,9 @@ WITH ranked AS (
        and the cap — see the method's note. $6 = 0 admits every group; NULL max_dop (never captured) reads
        as 0 and stays out of a filtered page, as the C# arm it replaces did. */
     AND   COALESCE(MAX(max_dop), 0) >= $6
-    ORDER BY SUM(delta_worker_time) DESC
+    /* #5299 round 3 (O16): the ranking ends on the whole group key, so a tie at the candidate cut picks the same keys in every
+       refill round, as the Darling and Viewer twins do. */
+    ORDER BY SUM(delta_worker_time) DESC, database_name, query_hash, host_object_name
     LIMIT " + candidates + @"
 ),
 module AS (
@@ -195,7 +197,7 @@ module AS (
             object_name,
             schema_name,
             database_name,
-            ROW_NUMBER() OVER (PARTITION BY sql_handle ORDER BY collection_time DESC) AS rn
+            ROW_NUMBER() OVER (PARTITION BY sql_handle ORDER BY collection_time DESC, collection_id DESC) AS rn
         FROM v_procedure_stats
         WHERE server_id = $1
         AND   sql_handle IS NOT NULL
@@ -211,7 +213,7 @@ SELECT
     m.object_name AS module_object_name,
     m.schema_name AS module_schema_name,
     m.database_name AS module_database_name,
-    ROW_NUMBER() OVER (ORDER BY r.total_cpu_us DESC) AS page_ord
+    ROW_NUMBER() OVER (ORDER BY r.total_cpu_us DESC, r.database_name, r.query_hash, r.host_object_name) AS page_ord
 FROM ranked r
 LEFT JOIN LATERAL (
     SELECT query_text, query_plan_xml
@@ -231,7 +233,7 @@ LEFT JOIN LATERAL (
 ) t ON TRUE
 LEFT JOIN module m ON m.sql_handle = r.sql_handle
 WHERE t.query_text IS NULL OR t.query_text NOT LIKE 'WAITFOR%'
-ORDER BY r.total_cpu_us DESC
+ORDER BY r.total_cpu_us DESC, r.database_name, r.query_hash, r.host_object_name
 LIMIT $4
 )
 /* #5313: the count row rides beside the page so a round trimmed to nothing still reports whether more candidates exist. */

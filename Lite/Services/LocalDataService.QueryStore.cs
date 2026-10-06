@@ -278,7 +278,8 @@ ranked AS (
     FROM deduped
     WHERE rn = 1" + moduleClause + @"
     GROUP BY database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role
-    ORDER BY SUM(execution_count) * AVG(CAST(avg_duration_us AS DOUBLE PRECISION)) DESC
+    /* #5299 round 3 (O16): the ranking ends on the whole group key - see GetTopQueriesByCpuAsync. */
+    ORDER BY SUM(execution_count) * AVG(CAST(avg_duration_us AS DOUBLE PRECISION)) DESC, database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role
     LIMIT " + candidates + @"
 ),
 page AS (
@@ -337,7 +338,7 @@ SELECT
     r.min_num_physical_io_reads,
     r.max_num_physical_io_reads,
     r.replica_role,
-    ROW_NUMBER() OVER (ORDER BY r.total_executions * r.avg_duration_ms DESC) AS page_ord
+    ROW_NUMBER() OVER (ORDER BY r.total_executions * r.avg_duration_ms DESC, r.database_name, r.query_id, r.plan_id, r.query_hash, r.execution_type_desc, r.replica_role) AS page_ord
 FROM ranked r
 LEFT JOIN LATERAL (
     SELECT query_text
@@ -351,7 +352,7 @@ LEFT JOIN LATERAL (
     LIMIT 1
 ) t ON TRUE
 WHERE t.query_text IS NULL OR t.query_text NOT LIKE 'WAITFOR%'
-ORDER BY r.total_executions * r.avg_duration_ms DESC
+ORDER BY r.total_executions * r.avg_duration_ms DESC, r.database_name, r.query_id, r.plan_id, r.query_hash, r.execution_type_desc, r.replica_role
 LIMIT $4
 )
 /* #5313: the count row rides beside the page so a round trimmed to nothing still reports whether more candidates exist. */
