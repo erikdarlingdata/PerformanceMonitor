@@ -658,7 +658,7 @@ public sealed class DarlingMcpDataToolsSurfaceAndSqlTests
         Assert.Contains("FROM procedure_stats", sql, StringComparison.Ordinal);
         Assert.Contains("GROUP BY database_name, schema_name, object_name, object_type", sql, StringComparison.Ordinal);
         Assert.Contains("$5::text IS NULL OR database_name = $5", sql, StringComparison.Ordinal);
-        Assert.Contains("SUM(delta_worker_time) DESC", sql, StringComparison.Ordinal);
+        Assert.Contains("SUM(delta_worker_time) AS rank_metric", TopRankings.Apply(sql, TopRanking.Cpu, hourly: false), StringComparison.Ordinal);
     }
 
     /* #3523: every by-CPU read RANKED by summed elapsed time — on a wait-bound server the real CPU
@@ -672,13 +672,16 @@ public sealed class DarlingMcpDataToolsSurfaceAndSqlTests
     [InlineData(nameof(DarlingDataReader.TopProceduresSql))]
     public void ByCpuReads_RankByWorkerTime_NeverElapsed(string sqlName)
     {
-        var sql = SqlByName(sqlName);
-        Assert.Contains("ORDER BY SUM(delta_worker_time) DESC", sql, StringComparison.Ordinal);
+        /* #5226: the const spells the ranking as the anchor; the CPU default is the const expanded to worker time. */
+        var sql = TopRankings.Apply(SqlByName(sqlName), TopRanking.Cpu, hourly: false);
+        Assert.Contains("SUM(delta_worker_time) AS rank_metric", sql, StringComparison.Ordinal);
+        Assert.Contains("ORDER BY rank_metric DESC NULLS LAST, rank_cpu DESC NULLS LAST", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("SUM(delta_elapsed_time) AS rank_metric", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("SUM(delta_elapsed_time) DESC", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("total_elapsed_us DESC", sql, StringComparison.Ordinal);
         if (sqlName != nameof(DarlingDataReader.TopProceduresSql))
         {
-            Assert.Contains("ORDER BY r.total_cpu_us DESC", sql, StringComparison.Ordinal);
+            Assert.Contains("ORDER BY r.rank_metric DESC NULLS LAST, r.rank_cpu DESC NULLS LAST", sql, StringComparison.Ordinal);
         }
     }
 

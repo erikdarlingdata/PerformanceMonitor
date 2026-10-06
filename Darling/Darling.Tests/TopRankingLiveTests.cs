@@ -151,7 +151,7 @@ public sealed class TopRankingLiveTests
     /// huge cumulative total and a small delta; QDELTA the reverse. The ask is for ONE row (the statement over-fetches
     /// five more than that, then re-ranks the page by the summed delta), so six fillers whose cumulative totals beat
     /// QDELTA's fill that page when the inner sort reads the cumulative column: with it QDELTA never reaches the outer
-    /// re-rank at all. This is the test shown RED by pointing <c>TopRankings.RawOrder</c>'s reads at <c>total_logical_reads</c>.
+    /// re-rank at all. This is the test shown RED by pointing <c>TopRankings.Apply</c>'s reads metric at <c>total_logical_reads</c>.
     /// </summary>
     [Fact]
     public Task Queries_Reads_SumsTheWindowsDeltas_NotTheCumulativeLifetimeTotal() =>

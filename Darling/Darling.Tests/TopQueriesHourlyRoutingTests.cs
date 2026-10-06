@@ -36,7 +36,9 @@ public sealed class TopQueriesHourlyRoutingTests
 
         Assert.Contains("GROUP BY database_name, query_hash", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("host_object_name", sql, StringComparison.Ordinal);
-        Assert.Contains("ORDER BY SUM(worker_time_sum) DESC", sql, StringComparison.Ordinal);
+        /* The ranking is the const's anchor; the CPU read is the const expanded to the worker-time sum (#5226). */
+        Assert.Contains("ORDER BY rank_metric DESC NULLS LAST", sql, StringComparison.Ordinal);
+        Assert.Contains("SUM(worker_time_sum) AS rank_metric", TopRankings.Apply(sql, TopRanking.Cpu, hourly: true), StringComparison.Ordinal);
         Assert.Contains(DarlingDataReader.TopQueriesHourlyFromPlaceholder, sql, StringComparison.Ordinal);
     }
 

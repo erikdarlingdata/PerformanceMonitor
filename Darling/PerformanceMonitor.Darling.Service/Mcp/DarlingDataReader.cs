@@ -1049,7 +1049,59 @@ internal static class DarlingDataReader
     /// $6 lifetime max_dop floor (0 = no parallelism filter; #3541 A13).
     /// </summary>
     public const string TopQueriesSql = $"""
-        WITH ranked AS (
+        WITH winners AS MATERIALIZED (
+            /* #5226 pass 1 of 2: rank every group of the window on NARROW columns. The wide row (forty
+               aggregates and the distinct-text count) forces a sort of wide rows when it shares the
+               GROUP BY that ranks, so the ranking runs here without it and pass 2 builds the wide row for the
+               winners only. Everything that decides which groups exist or survive is repeated from the shipped
+               statement unchanged: the window, the database filter and the interval filter, the grouping key,
+               both HAVING predicates and the parallelism floor below. The rank anchor below is the chosen ranking's sum (the
+               anchor TopRankings.Apply replaces, exactly once), rank_cpu the CPU tie-break. Both sort NULLS LAST
+               (PostgreSQL leads a DESC sort with NULL), and the group key ends the ORDER BY so the order is
+               total: ties no longer fall to plan order. */
+            SELECT
+                database_name AS win_database_name,
+                query_hash AS win_query_hash,
+                host_object_name AS win_host_object_name,
+                $RANK$ AS rank_metric,
+                SUM(delta_worker_time) AS rank_cpu
+            FROM query_stats
+            WHERE server_id = $1
+            AND   collection_time >= $2
+            AND   collection_time <= $3
+            AND   ($5::text IS NULL OR database_name = $5)
+            /* #4394: excludes zero-interval rows (sample_interval_seconds = 0) through
+               TimescaleSupport.IntervalHonestSourceFilter, the same filter the hourly successors
+               bake into their CREATE, so a raw-served and an hourly-served read of the same window
+               agree by construction. The collector writes a zero-interval row with zero deltas
+               (CollectorDeltaCalculator's first-sighting, reset and gap cases), so this changes no
+               total in practice. It keeps the two tiers from disagreeing if that ever stops holding. */
+            AND   {TimescaleSupport.IntervalHonestSourceFilter}
+            /* #2012 stage 2: host_object_name splits INSERT...EXEC callers that share a query_hash
+               (each proc-hosted statement groups under its own host object), while ad-hoc rows carry
+               NULL and keep collapsing into one group per hash exactly as before. */
+            GROUP BY database_name, query_hash, host_object_name
+            HAVING (SUM(delta_execution_count) > 0 OR SUM(delta_elapsed_time) > 0)
+            /* #3541 A13: the parallelism filter is part of the QUERY, applied to the grouped population
+               BEFORE the CPU ranking and the cap. It used to run in C# over the returned top-N page, so
+               parallel_only=true on a box whose twenty hottest plans were serial answered an empty page while
+               the window held parallel plans further down — and the engine's own CXPACKET advice sends agents
+               to exactly that call. $6 is the group's lifetime max_dop floor: 0 admits every group (the
+               unfiltered read, byte-identical in result to before), 2 is parallel_only, min_dop is itself. The
+               COALESCE keeps a group whose max_dop was never captured (NULL) out of a filtered page, which is
+               what the C# arm did too (null read as 0, and 0 > 1 is false). */
+            AND COALESCE(MAX(max_dop), 0) >= $6
+            ORDER BY rank_metric DESC NULLS LAST, rank_cpu DESC NULLS LAST, win_database_name, win_query_hash, win_host_object_name
+            LIMIT $4 + 5
+        ),
+        ranked AS (
+            /* #5226 pass 2 of 2: the wide row, built only for pass 1's winners. It re-scans the SAME window
+               with the SAME server, database and interval filters, or the distinct counts, the MAX handles and
+               the min/max extremes would change. The key match is NULL-safe: host_object_name is NULL on every
+               ad-hoc row (the majority), and a plain equality or IN would silently drop those groups. The
+               COALESCE equality is only a hashable pre-filter (PostgreSQL cannot hash or merge an IS NOT
+               DISTINCT FROM, so alone it would nested-loop every window row against every winner); the IS NOT
+               DISTINCT FROM terms make the match exact. A winner is unique per key, so no row repeats. */
             SELECT
                 database_name,
                 query_hash,
@@ -1099,35 +1151,21 @@ internal static class DarlingDataReader
                    the statement. Counted over the #1767 content digest already on every row (~free);
                    COUNT(DISTINCT) skips NULLs, so 0 means only pre-dimension legacy rows, which age
                    out with raw retention. */
-                COUNT(DISTINCT query_text_digest) AS distinct_texts
+                COUNT(DISTINCT query_text_digest) AS distinct_texts,
+                MAX(w.rank_metric) AS rank_metric,
+                MAX(w.rank_cpu) AS rank_cpu
             FROM query_stats
+            JOIN winners AS w
+                ON  COALESCE(query_hash, '') = COALESCE(w.win_query_hash, '')
+                AND database_name IS NOT DISTINCT FROM w.win_database_name
+                AND query_hash IS NOT DISTINCT FROM w.win_query_hash
+                AND host_object_name IS NOT DISTINCT FROM w.win_host_object_name
             WHERE server_id = $1
             AND   collection_time >= $2
             AND   collection_time <= $3
             AND   ($5::text IS NULL OR database_name = $5)
-            /* #4394: excludes zero-interval rows (sample_interval_seconds = 0) through
-               TimescaleSupport.IntervalHonestSourceFilter, the same filter the hourly successors
-               bake into their CREATE, so a raw-served and an hourly-served read of the same window
-               agree by construction. The collector writes a zero-interval row with zero deltas
-               (CollectorDeltaCalculator's first-sighting, reset and gap cases), so this changes no
-               total in practice. It keeps the two tiers from disagreeing if that ever stops holding. */
             AND   {TimescaleSupport.IntervalHonestSourceFilter}
-            /* #2012 stage 2: host_object_name splits INSERT...EXEC callers that share a query_hash
-               (each proc-hosted statement groups under its own host object), while ad-hoc rows carry
-               NULL and keep collapsing into one group per hash exactly as before. */
             GROUP BY database_name, query_hash, host_object_name
-            HAVING (SUM(delta_execution_count) > 0 OR SUM(delta_elapsed_time) > 0)
-            /* #3541 A13: the parallelism filter is part of the QUERY, applied to the grouped population
-               BEFORE the CPU ranking and the cap. It used to run in C# over the returned top-N page, so
-               parallel_only=true on a box whose twenty hottest plans were serial answered an empty page while
-               the window held parallel plans further down — and the engine's own CXPACKET advice sends agents
-               to exactly that call. $6 is the group's lifetime max_dop floor: 0 admits every group (the
-               unfiltered read, byte-identical in result to before), 2 is parallel_only, min_dop is itself. The
-               COALESCE keeps a group whose max_dop was never captured (NULL) out of a filtered page, which is
-               what the C# arm did too (null read as 0, and 0 > 1 is false). */
-            AND COALESCE(MAX(max_dop), 0) >= $6
-            ORDER BY SUM(delta_worker_time) DESC
-            LIMIT $4 + 5
         )
         SELECT
             r.database_name,
@@ -1190,7 +1228,7 @@ internal static class DarlingDataReader
             LIMIT 1
         ) AS t ON TRUE
         WHERE t.query_text IS NULL OR t.query_text NOT LIKE 'WAITFOR%'
-        ORDER BY r.total_cpu_us DESC
+        ORDER BY r.rank_metric DESC NULLS LAST, r.rank_cpu DESC NULLS LAST, r.database_name, r.query_hash, r.host_object_name
         LIMIT $4
         """;
 
@@ -1222,7 +1260,49 @@ internal static class DarlingDataReader
     /// is when <c>distinct_texts &gt; 1</c> — <c>distinct_query_hashes</c> is what says so.</para>
     /// </summary>
     public const string TopQueriesByHostObjectSql = $"""
-        WITH ranked AS (
+        WITH winners AS MATERIALIZED (
+            /* #5226 pass 1 of 2: rank every group of the window on NARROW columns. The wide row (forty
+               aggregates and the distinct-text count) forces a sort of wide rows when it shares the
+               GROUP BY that ranks, so the ranking runs here without it and pass 2 builds the wide row for the
+               winners only. Everything that decides which groups exist or survive is repeated from the shipped
+               statement unchanged: the window, the database filter and the interval filter, the grouping key,
+               both HAVING predicates and the parallelism floor below. The rank anchor below is the chosen ranking's sum (the
+               anchor TopRankings.Apply replaces, exactly once), rank_cpu the CPU tie-break. Both sort NULLS LAST
+               (PostgreSQL leads a DESC sort with NULL), and the group key (database, host object, then the CASE key below) ends the ORDER BY so the order is
+               total: ties no longer fall to plan order. */
+            SELECT
+                database_name AS win_database_name,
+                host_object_name AS win_host_object_name,
+                CASE WHEN host_object_name IS NULL THEN query_hash END AS win_group_hash,
+                $RANK$ AS rank_metric,
+                SUM(delta_worker_time) AS rank_cpu
+            FROM query_stats
+            WHERE server_id = $1
+            AND   collection_time >= $2
+            AND   collection_time <= $3
+            AND   ($5::text IS NULL OR database_name = $5)
+            /* #4394: same first-collection exclusion as TopQueriesSql — see its note. */
+            AND   {TimescaleSupport.IntervalHonestSourceFilter}
+            /* #2235: proc-hosted rows collapse to one row per (database, host object) — every literal
+               fragment of one statement lands together. Ad-hoc rows (host_object_name NULL) fall to the
+               CASE and stay keyed on their OWN query_hash, so they group exactly as the default read does;
+               without that arm every unrelated ad-hoc statement in a database would pool into one row. */
+            GROUP BY database_name, host_object_name,
+                     CASE WHEN host_object_name IS NULL THEN query_hash END
+            HAVING (SUM(delta_execution_count) > 0 OR SUM(delta_elapsed_time) > 0)
+            /* #3541 A13: same in-query parallelism floor as TopQueriesSql — see its note. Under the rollup
+               the group's max_dop is the max across every fragment, so a procedure whose dynamic SQL went
+               parallel in ANY fragment passes parallel_only, which is the question being asked. */
+            AND COALESCE(MAX(max_dop), 0) >= $6
+            ORDER BY rank_metric DESC NULLS LAST, rank_cpu DESC NULLS LAST, win_database_name, win_host_object_name, win_group_hash
+            LIMIT $4 + 5
+        ),
+        ranked AS (
+            /* #5226 pass 2 of 2: the wide row for pass 1's winners, over the same window and filters. The match
+               is on the grouping key, NULL-safe, with the CASE key computed the way pass 1 grouped it: a proc-hosted
+               group matches on (database, host object) and EVERY fragment hash, an ad-hoc group on its own hash
+               (NULL host object and NULL hash included). The COALESCE equalities are only the hashable pre-filter
+               (see TopQueriesSql); the IS NOT DISTINCT FROM terms make the match exact. */
             SELECT
                 database_name,
                 MAX(query_hash) AS query_hash,
@@ -1267,27 +1347,23 @@ internal static class DarlingDataReader
                 MAX(CAST(delta_worker_time AS double precision) / NULLIF(sample_interval_seconds, 0) / 1000.0) AS worker_time_per_second,
                 COUNT(DISTINCT query_text_digest) AS distinct_texts,
                 /* #2235: the fragment count IS the finding — 21 here is why a per-hash ranking missed it. */
-                COUNT(DISTINCT query_hash) AS distinct_query_hashes
+                COUNT(DISTINCT query_hash) AS distinct_query_hashes,
+                MAX(w.rank_metric) AS rank_metric,
+                MAX(w.rank_cpu) AS rank_cpu
             FROM query_stats
+            JOIN winners AS w
+                ON  COALESCE(host_object_name, '') = COALESCE(w.win_host_object_name, '')
+                AND COALESCE(CASE WHEN host_object_name IS NULL THEN query_hash END, '') = COALESCE(w.win_group_hash, '')
+                AND database_name IS NOT DISTINCT FROM w.win_database_name
+                AND host_object_name IS NOT DISTINCT FROM w.win_host_object_name
+                AND CASE WHEN host_object_name IS NULL THEN query_hash END IS NOT DISTINCT FROM w.win_group_hash
             WHERE server_id = $1
             AND   collection_time >= $2
             AND   collection_time <= $3
             AND   ($5::text IS NULL OR database_name = $5)
-            /* #4394: same first-collection exclusion as TopQueriesSql — see its note. */
             AND   {TimescaleSupport.IntervalHonestSourceFilter}
-            /* #2235: proc-hosted rows collapse to one row per (database, host object) — every literal
-               fragment of one statement lands together. Ad-hoc rows (host_object_name NULL) fall to the
-               CASE and stay keyed on their OWN query_hash, so they group exactly as the default read does;
-               without that arm every unrelated ad-hoc statement in a database would pool into one row. */
             GROUP BY database_name, host_object_name,
                      CASE WHEN host_object_name IS NULL THEN query_hash END
-            HAVING (SUM(delta_execution_count) > 0 OR SUM(delta_elapsed_time) > 0)
-            /* #3541 A13: same in-query parallelism floor as TopQueriesSql — see its note. Under the rollup
-               the group's max_dop is the max across every fragment, so a procedure whose dynamic SQL went
-               parallel in ANY fragment passes parallel_only, which is the question being asked. */
-            AND COALESCE(MAX(max_dop), 0) >= $6
-            ORDER BY SUM(delta_worker_time) DESC
-            LIMIT $4 + 5
         )
         SELECT
             r.database_name,
@@ -1350,7 +1426,7 @@ internal static class DarlingDataReader
             LIMIT 1
         ) AS t ON TRUE
         WHERE t.query_text IS NULL OR t.query_text NOT LIKE 'WAITFOR%'
-        ORDER BY r.total_cpu_us DESC
+        ORDER BY r.rank_metric DESC NULLS LAST, r.rank_cpu DESC NULLS LAST, r.database_name, r.host_object_name, r.query_hash
         LIMIT $4
         """;
 
@@ -1391,7 +1467,9 @@ internal static class DarlingDataReader
                 CAST(SUM(execution_count_sum) AS bigint) AS total_executions,
                 CAST(SUM(worker_time_sum) AS bigint) AS total_cpu_us,
                 CAST(SUM(elapsed_time_sum) AS bigint) AS total_elapsed_us,
-                MAX(sql_handle) AS sql_handle
+                MAX(sql_handle) AS sql_handle,
+                $RANK$ AS rank_metric,
+                SUM(worker_time_sum) AS rank_cpu
             FROM $FROM$
             WHERE server_id = $1
             AND   bucket >= $2
@@ -1399,7 +1477,7 @@ internal static class DarlingDataReader
             AND   ($5::text IS NULL OR database_name = $5)
             GROUP BY database_name, query_hash
             HAVING (SUM(execution_count_sum) > 0 OR SUM(elapsed_time_sum) > 0)
-            ORDER BY SUM(worker_time_sum) DESC
+            ORDER BY rank_metric DESC NULLS LAST, rank_cpu DESC NULLS LAST, database_name, query_hash
             LIMIT $4 + 5
         )
         SELECT
@@ -1422,7 +1500,7 @@ internal static class DarlingDataReader
             LIMIT 1
         ) AS t ON TRUE
         WHERE t.query_text IS NULL OR t.query_text NOT LIKE 'WAITFOR%'
-        ORDER BY r.total_cpu_us DESC
+        ORDER BY r.rank_metric DESC NULLS LAST, r.rank_cpu DESC NULLS LAST, r.database_name, r.query_hash
         LIMIT $4
         """;
 
@@ -1754,6 +1832,39 @@ internal static class DarlingDataReader
     /// (no v_ view). $1 server_id, $2/$3 window (naive UTC), $4 top.
     /// </summary>
     public const string TopProceduresSql = $"""
+        WITH winners AS MATERIALIZED (
+            /* #5226 pass 1 of 2: rank every group of the window on NARROW columns. The wide row (forty
+               aggregates and the distinct-text count) forces a sort of wide rows when it shares the
+               GROUP BY that ranks, so the ranking runs here without it and pass 2 builds the wide row for the
+               winners only. Everything that decides which groups exist or survive is repeated from the shipped
+               statement unchanged: the window, the database filter and the interval filter, the grouping key,
+               and the HAVING predicate. The rank anchor below is the chosen ranking's sum (the
+               anchor TopRankings.Apply replaces, exactly once), rank_cpu the CPU tie-break. Both sort NULLS LAST
+               (PostgreSQL leads a DESC sort with NULL), and the group key ends the ORDER BY so the order is
+               total: ties no longer fall to plan order. */
+            SELECT
+                database_name AS win_database_name,
+                schema_name AS win_schema_name,
+                object_name AS win_object_name,
+                object_type AS win_object_type,
+                $RANK$ AS rank_metric,
+                SUM(delta_worker_time) AS rank_cpu
+            FROM procedure_stats
+            WHERE server_id = $1
+            AND   collection_time >= $2
+            AND   collection_time <= $3
+            AND   ($5::text IS NULL OR database_name = $5)
+            /* #4394: same first-collection exclusion as TopQueriesSql — see its note. */
+            AND   {TimescaleSupport.IntervalHonestSourceFilter}
+            GROUP BY database_name, schema_name, object_name, object_type
+            HAVING SUM(delta_execution_count) > 0 OR SUM(delta_elapsed_time) > 0
+            ORDER BY rank_metric DESC NULLS LAST, rank_cpu DESC NULLS LAST, win_database_name, win_schema_name, win_object_name, win_object_type
+            LIMIT $4
+        )
+        /* #5226 pass 2 of 2: the wide row for pass 1's winners, over the same window and filters, matched on the
+           full key NULL-safely (any of the four can be NULL; a plain equality would drop that group). The
+           COALESCE equality is only the hashable pre-filter (see TopQueriesSql); IS NOT DISTINCT FROM makes the
+           match exact. This ORDER BY is the page's final order: the same keys as pass 1, group key last. */
         SELECT
             database_name,
             schema_name,
@@ -1783,16 +1894,19 @@ internal static class DarlingDataReader
             MIN(min_spills) AS min_spills,
             MAX(max_spills) AS max_spills
         FROM procedure_stats
+        JOIN winners AS w
+            ON  COALESCE(object_name, '') = COALESCE(w.win_object_name, '')
+            AND database_name IS NOT DISTINCT FROM w.win_database_name
+            AND schema_name IS NOT DISTINCT FROM w.win_schema_name
+            AND object_name IS NOT DISTINCT FROM w.win_object_name
+            AND object_type IS NOT DISTINCT FROM w.win_object_type
         WHERE server_id = $1
         AND   collection_time >= $2
         AND   collection_time <= $3
         AND   ($5::text IS NULL OR database_name = $5)
-        /* #4394: same first-collection exclusion as TopQueriesSql — see its note. */
         AND   {TimescaleSupport.IntervalHonestSourceFilter}
         GROUP BY database_name, schema_name, object_name, object_type
-        HAVING SUM(delta_execution_count) > 0 OR SUM(delta_elapsed_time) > 0
-        ORDER BY SUM(delta_worker_time) DESC
-        LIMIT $4
+        ORDER BY MAX(w.rank_metric) DESC NULLS LAST, MAX(w.rank_cpu) DESC NULLS LAST, database_name, schema_name, object_name, object_type
         """;
 
     /// <summary>The FROM-clause placeholder <see cref="TopProceduresHourlySql"/> carries — replaced with
@@ -1824,7 +1938,9 @@ internal static class DarlingDataReader
                 object_name,
                 CAST(SUM(execution_count_sum) AS bigint) AS total_executions,
                 CAST(SUM(worker_time_sum) AS bigint) AS total_cpu_us,
-                CAST(SUM(elapsed_time_sum) AS bigint) AS total_elapsed_us
+                CAST(SUM(elapsed_time_sum) AS bigint) AS total_elapsed_us,
+                $RANK$ AS rank_metric,
+                SUM(worker_time_sum) AS rank_cpu
             FROM $FROM$
             WHERE server_id = $1
             AND   bucket >= $2
@@ -1832,7 +1948,7 @@ internal static class DarlingDataReader
             AND   ($5::text IS NULL OR database_name = $5)
             GROUP BY database_name, schema_name, object_name
             HAVING (SUM(execution_count_sum) > 0 OR SUM(elapsed_time_sum) > 0)
-            ORDER BY SUM(worker_time_sum) DESC
+            ORDER BY rank_metric DESC NULLS LAST, rank_cpu DESC NULLS LAST, database_name, schema_name, object_name
             LIMIT $4
         )
         SELECT
@@ -1843,7 +1959,7 @@ internal static class DarlingDataReader
             r.total_cpu_us,
             r.total_elapsed_us
         FROM ranked AS r
-        ORDER BY r.total_cpu_us DESC
+        ORDER BY r.rank_metric DESC NULLS LAST, r.rank_cpu DESC NULLS LAST, r.database_name, r.schema_name, r.object_name
         """;
 
     /// <summary>

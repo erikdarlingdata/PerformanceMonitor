@@ -14,7 +14,8 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// <summary>
 /// #5226: what the web's Top Queries and Top Procedures lists rank by. The desktop ranks both by duration; the
 /// web ranked by CPU only, so a long query that used little CPU (blocked, or waiting on I/O) never appeared in
-/// the browser. <see cref="Cpu"/> is the default and is today's behaviour, byte for byte.
+/// the browser. <see cref="Cpu"/> is the default and is today's ranking: the same metric, with ties and NULL sums
+/// now put in a fixed order (see <see cref="TopRankings"/>).
 /// </summary>
 public enum TopRanking
 {
@@ -32,25 +33,32 @@ public enum TopRanking
 }
 
 /// <summary>
-/// The whitelist behind <see cref="TopRanking"/>: the wire spelling, and the FIXED <c>ORDER BY</c> text each choice
-/// maps to for each of the five top-N statements. PostgreSQL cannot parameterize <c>ORDER BY</c>, so the choice is
-/// spliced as text, and the text comes from this file only: a request value is parsed to the enum by
+/// The whitelist behind <see cref="TopRanking"/>: the wire spelling, and the FIXED metric each choice maps to for
+/// each of the five top-N statements. PostgreSQL cannot parameterize a sort expression, so the choice is spliced
+/// as text, and the text comes from this file only: a request value is parsed to the enum by
 /// <see cref="TryParse"/> (an unknown spelling is refused, never carried along) and the enum picks a literal here.
 /// Request text never reaches SQL.
 ///
-/// <para>The five statements stay public consts, so the suite can still pin their dialect and columns without a
-/// live store, and each const still spells the CPU ranking. <see cref="Apply"/> swaps that CPU <c>ORDER BY</c> for
-/// the chosen one, and throws when the text it expects is not exactly where it expects it, so a future edit to a
-/// const cannot turn a ranking choice into a silent no-op.</para>
+/// <para>The five statements stay public consts, so the suite can pin their dialect and columns without a live
+/// store. Each carries the anchor <see cref="RankAnchor"/> exactly once, in its ranking pass's select list as
+/// <c>$RANK$ AS rank_metric</c>; every <c>ORDER BY</c> in the statement sorts on the <c>rank_metric</c> and
+/// <c>rank_cpu</c> aliases and is written out in the const, with <c>NULLS LAST</c> and the group key at its end. So
+/// the ranking choice is the ONE thing <see cref="Apply"/> varies, and the ordering rules (NULLs last, a total
+/// order) are the same text for every choice and cannot be forgotten by one of them. <see cref="Apply"/> throws
+/// when the anchor is missing or appears more than once, so a future edit to a const cannot turn a ranking choice
+/// into a silent no-op, and it also expands the CPU default: a const is never run as it stands.</para>
 /// </summary>
 public static class TopRankings
 {
     /// <summary>The accepted spellings, for the refusal message.</summary>
     public const string Accepted = "cpu, duration, reads or executions";
 
-    private const string CpuRawOrder = "ORDER BY SUM(delta_worker_time) DESC";
-    private const string CpuHourlyOrder = "ORDER BY SUM(worker_time_sum) DESC";
-    private const string CpuOuterOrder = "ORDER BY r.total_cpu_us DESC";
+    /// <summary>
+    /// The one anchor each top-N const carries, replaced by the chosen ranking's sum (<c>SUM(delta_logical_reads)</c>,
+    /// <c>SUM(elapsed_time_sum)</c>, and so on). It sits in the select list of the pass that ranks, as
+    /// <c>$RANK$ AS rank_metric</c>, and nowhere else.
+    /// </summary>
+    public const string RankAnchor = "$RANK$";
 
     /// <summary>
     /// Parses the wire value. Absent or blank is the default (<see cref="TopRanking.Cpu"/>); the match is
@@ -99,52 +107,36 @@ public static class TopRankings
     public static bool HourlyCarries(TopRanking ranking) => ranking != TopRanking.Reads;
 
     /// <summary>
-    /// Swaps the CPU <c>ORDER BY</c> in one of the top-N consts for the chosen ranking's. <paramref name="hourly"/>
-    /// names the shape: the raw tables sum <c>delta_*</c> columns, the hourly rollups sum <c>*_sum</c> ones. Ties on
-    /// the chosen metric fall back to CPU so the page is stable; <see cref="TopRanking.Cpu"/> returns the const
-    /// unchanged, so the default read is byte-identical to before.
+    /// Expands one of the top-N consts for the chosen ranking: replaces its single <see cref="RankAnchor"/> with
+    /// the ranking's sum. <paramref name="hourly"/> names the shape: the raw tables sum <c>delta_*</c> columns, the
+    /// hourly rollups sum <c>*_sum</c> ones. The CPU choice is expanded too (to the worker-time sum), so every read
+    /// goes through here and no const is run unexpanded. Throws <see cref="InvalidOperationException"/> when the
+    /// anchor is absent or present more than once, and for a reads ranking on the hourly shape (it has no column).
     /// </summary>
-    public static string Apply(string cpuSql, TopRanking ranking, bool hourly)
+    public static string Apply(string statement, TopRanking ranking, bool hourly)
     {
-        if (ranking == TopRanking.Cpu)
-        {
-            return cpuSql;
-        }
-
         if (hourly && !HourlyCarries(ranking))
         {
             throw new InvalidOperationException($"The hourly rollups carry no column to rank by {WireName(ranking)}; the caller must read raw.");
         }
 
-        var inner = hourly ? HourlyOrder(ranking) : RawOrder(ranking);
-        var sql = ReplaceOnce(cpuSql, hourly ? CpuHourlyOrder : CpuRawOrder, inner);
-        /* The statements that re-rank an over-fetched page (the queries) carry a second, outer ORDER BY on the
-           output column; the single-level procedures statement does not. */
-        return cpuSql.Contains(CpuOuterOrder, StringComparison.Ordinal)
-            ? ReplaceOnce(sql, CpuOuterOrder, OuterOrder(ranking))
-            : sql;
+        return ReplaceOnce(statement, RankAnchor, hourly ? HourlyMetric(ranking) : RawMetric(ranking));
     }
 
-    private static string RawOrder(TopRanking ranking) => ranking switch
+    private static string RawMetric(TopRanking ranking) => ranking switch
     {
-        TopRanking.Duration => "ORDER BY SUM(delta_elapsed_time) DESC, SUM(delta_worker_time) DESC",
-        TopRanking.Reads => "ORDER BY SUM(delta_logical_reads) DESC, SUM(delta_worker_time) DESC",
-        TopRanking.Executions => "ORDER BY SUM(delta_execution_count) DESC, SUM(delta_worker_time) DESC",
+        TopRanking.Cpu => "SUM(delta_worker_time)",
+        TopRanking.Duration => "SUM(delta_elapsed_time)",
+        TopRanking.Reads => "SUM(delta_logical_reads)",
+        TopRanking.Executions => "SUM(delta_execution_count)",
         _ => throw new ArgumentOutOfRangeException(nameof(ranking)),
     };
 
-    private static string HourlyOrder(TopRanking ranking) => ranking switch
+    private static string HourlyMetric(TopRanking ranking) => ranking switch
     {
-        TopRanking.Duration => "ORDER BY SUM(elapsed_time_sum) DESC, SUM(worker_time_sum) DESC",
-        TopRanking.Executions => "ORDER BY SUM(execution_count_sum) DESC, SUM(worker_time_sum) DESC",
-        _ => throw new ArgumentOutOfRangeException(nameof(ranking)),
-    };
-
-    private static string OuterOrder(TopRanking ranking) => ranking switch
-    {
-        TopRanking.Duration => "ORDER BY r.total_elapsed_us DESC, r.total_cpu_us DESC",
-        TopRanking.Reads => "ORDER BY r.total_reads DESC, r.total_cpu_us DESC",
-        TopRanking.Executions => "ORDER BY r.total_executions DESC, r.total_cpu_us DESC",
+        TopRanking.Cpu => "SUM(worker_time_sum)",
+        TopRanking.Duration => "SUM(elapsed_time_sum)",
+        TopRanking.Executions => "SUM(execution_count_sum)",
         _ => throw new ArgumentOutOfRangeException(nameof(ranking)),
     };
 
