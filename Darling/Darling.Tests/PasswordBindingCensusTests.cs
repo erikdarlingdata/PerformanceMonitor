@@ -280,4 +280,29 @@ public sealed class PasswordBindingCensusTests
         Assert.Equal("smtp", smtp.Purpose);
         Assert.Equal(new string?[] { "omega-01", "587", "0", "example_mail_user" }, smtp.Fields.ToArray());
     }
+
+    [Fact]
+    public void The_webhook_purpose_binds_slot_row_proxy_and_bound_url_and_names_only_known_slots()
+    {
+        const string KeyId = "0123456789abcdef";
+        var teams = PasswordBinding.ForWebhook("teams", PasswordBinding.WebhookSettingsRow, "http://proxy.example:8080", null);
+        var headers = PasswordBinding.ForWebhook("generic_headers", PasswordBinding.WebhookRouteRow(7), "", "sealed:v1:example");
+
+        Assert.Equal("webhook", teams.Purpose);
+        Assert.Equal(new string?[] { "teams", "notification", "http://proxy.example:8080", null }, teams.Fields.ToArray());
+        Assert.Equal(new string?[] { "generic_headers", "route:7", "", "sealed:v1:example" }, headers.Fields.ToArray());
+        Assert.Equal(
+            PasswordBinding.ForWebhook("slack", "notification", null, null).EncodeAad(KeyId),
+            PasswordBinding.ForWebhook("slack", "notification", "", "").EncodeAad(KeyId));
+        Assert.Equal(
+            new[] { "teams", "slack", "generic", "pagerduty", "generic_headers" }, PasswordBinding.WebhookSlots.ToArray());
+        Assert.Throws<ArgumentException>(() => PasswordBinding.ForWebhook("smtp", "notification", "", ""));
+
+        /* Every field is part of what the value belongs to. */
+        var baseAad = teams.EncodeAad(KeyId);
+        Assert.NotEqual(baseAad, PasswordBinding.ForWebhook("slack", "notification", "http://proxy.example:8080", null).EncodeAad(KeyId));
+        Assert.NotEqual(baseAad, PasswordBinding.ForWebhook("teams", "route:1", "http://proxy.example:8080", null).EncodeAad(KeyId));
+        Assert.NotEqual(baseAad, PasswordBinding.ForWebhook("teams", "notification", "", null).EncodeAad(KeyId));
+        Assert.NotEqual(baseAad, PasswordBinding.ForWebhook("teams", "notification", "http://proxy.example:8080", "x").EncodeAad(KeyId));
+    }
 }

@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using Microsoft.Extensions.Logging;
 using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
@@ -29,10 +30,73 @@ namespace PerformanceMonitor.Darling.Service;
 public sealed class DarlingAlertSettings : IAlertEngineSettings, IAlertSettings
 {
     private readonly DarlingConfig _config;
+    private readonly IPasswordKeyRing? _ring;
+    private readonly ILogger? _logger;
+    private readonly object _openedLock = new();
+    private string? _openedSignature;
+    private OpenedWebhooks? _opened;
+    private HashSet<string> _reportedFailures = new(StringComparer.Ordinal);
 
-    public DarlingAlertSettings(DarlingConfig config)
+    public DarlingAlertSettings(DarlingConfig config, ILogger? logger = null, IPasswordKeyRing? ring = null)
     {
         _config = config ?? throw new ArgumentNullException(nameof(config));
+        _logger = logger;
+        _ring = ring;
+    }
+
+    /// <summary>
+    /// The webhook settings and routes with their sealed values opened (#5366). Opened on the first read and again only
+    /// when a stored value, a route or the password key's state changes, so a sealed value is not opened for every read.
+    /// A value that will not open turns its channel off and is reported once per change.
+    /// </summary>
+    private OpenedWebhooks Opened
+    {
+        get
+        {
+            var ring = _ring ?? DarlingPasswordKey.Current;
+            var webhooks = _config.Webhooks;
+            var routes = _config.NotificationRoutes;
+            var signature = DarlingWebhookSecrets.Signature(webhooks, routes, ring.Status);
+            lock (_openedLock)
+            {
+                if (_opened is not null && string.Equals(_openedSignature, signature, StringComparison.Ordinal))
+                {
+                    return _opened;
+                }
+
+                var opened = DarlingWebhookSecrets.Open(webhooks, routes, ring);
+                var now = new HashSet<string>(StringComparer.Ordinal);
+                foreach (var failure in opened.Failures)
+                {
+                    now.Add(failure.Text);
+                    if (!_reportedFailures.Contains(failure.Text))
+                    {
+                        _logger?.LogError("{Failure}", failure.Text);
+                    }
+                }
+
+                _reportedFailures = now;
+                _opened = opened;
+                _openedSignature = signature;
+                return opened;
+            }
+        }
+    }
+
+    /// <summary>The health text of each webhook channel whose saved value will not open, one entry per value. Empty when
+    /// every saved value opens or is not sealed.</summary>
+    public IReadOnlyList<string> WebhookChannelProblems
+    {
+        get
+        {
+            var texts = new List<string>();
+            foreach (var failure in Opened.Failures)
+            {
+                texts.Add(failure.Text);
+            }
+
+            return texts;
+        }
     }
 
     /* ---------------- IAlertEngineSettings (thresholds) ---------------- */
@@ -313,25 +377,25 @@ public sealed class DarlingAlertSettings : IAlertEngineSettings, IAlertSettings
 
     public int EmailCooldownMinutes => Math.Clamp(_config.Smtp.EmailCooldownMinutes, 1, 120);
 
-    public bool TeamsWebhookEnabled => !string.IsNullOrWhiteSpace(_config.Webhooks.TeamsUrl);
-    public string TeamsWebhookUrl => _config.Webhooks.TeamsUrl;
+    public bool TeamsWebhookEnabled => !string.IsNullOrWhiteSpace(Opened.Webhooks.TeamsUrl);
+    public string TeamsWebhookUrl => Opened.Webhooks.TeamsUrl;
     public string TeamsProxyAddress => _config.Webhooks.TeamsProxy;
 
-    public bool SlackWebhookEnabled => !string.IsNullOrWhiteSpace(_config.Webhooks.SlackUrl);
-    public string SlackWebhookUrl => _config.Webhooks.SlackUrl;
+    public bool SlackWebhookEnabled => !string.IsNullOrWhiteSpace(Opened.Webhooks.SlackUrl);
+    public string SlackWebhookUrl => Opened.Webhooks.SlackUrl;
     public string SlackProxyAddress => _config.Webhooks.SlackProxy;
 
     /* Generic webhook (#1506) — enabled by a non-empty URL, the same no-speculative-enable-flag derivation
        the sibling channels use. */
-    public bool GenericWebhookEnabled => !string.IsNullOrWhiteSpace(_config.Webhooks.GenericUrl);
-    public string GenericWebhookUrl => _config.Webhooks.GenericUrl;
-    public string GenericWebhookHeadersJson => _config.Webhooks.GenericHeaders;
+    public bool GenericWebhookEnabled => !string.IsNullOrWhiteSpace(Opened.Webhooks.GenericUrl);
+    public string GenericWebhookUrl => Opened.Webhooks.GenericUrl;
+    public string GenericWebhookHeadersJson => Opened.Webhooks.GenericHeaders;
     public string GenericWebhookBodyTemplate => _config.Webhooks.GenericBodyTemplate;
     public string GenericWebhookProxyAddress => _config.Webhooks.GenericProxy;
 
     /* PagerDuty webhook — enabled by a non-empty routing key, like the sibling channels. */
-    public bool PagerDutyEnabled => !string.IsNullOrWhiteSpace(_config.Webhooks.PagerDutyRoutingKey);
-    public string PagerDutyRoutingKey => _config.Webhooks.PagerDutyRoutingKey;
+    public bool PagerDutyEnabled => !string.IsNullOrWhiteSpace(Opened.Webhooks.PagerDutyRoutingKey);
+    public string PagerDutyRoutingKey => Opened.Webhooks.PagerDutyRoutingKey;
     public bool PagerDutyUseEuRegion => _config.Webhooks.PagerDutyUseEuRegion;
     public string PagerDutyProxyAddress => _config.Webhooks.PagerDutyProxy;
 
@@ -340,7 +404,7 @@ public sealed class DarlingAlertSettings : IAlertEngineSettings, IAlertSettings
     /// which the routes table's own trigger bumps, so a route authored in the Viewer lands on the next firing
     /// with no restart. The ONLY adapter that overrides the interface's empty default: Lite has no routes
     /// table and resolves every firing to its parent channels.</summary>
-    public IReadOnlyList<NotificationRoute> NotificationRoutes => _config.NotificationRoutes;
+    public IReadOnlyList<NotificationRoute> NotificationRoutes => Opened.Routes;
 
     /* Scheduled-analysis notifications (AN3): the shared AnalysisNotificationService's severity floor
        + per-finding re-notify cooldown. The severity floor is now a control-plane knob (config Stage
