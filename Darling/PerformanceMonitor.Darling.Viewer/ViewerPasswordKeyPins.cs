@@ -114,8 +114,23 @@ public sealed class ViewerPasswordKeyPins
 
     private string BadPath => _path + ".bad";
 
-    private static bool IsFingerprint(string? text) =>
-        text is { Length: 64 } && text.All(c => c is (>= '0' and <= '9') or (>= 'a' and <= 'f'));
+    private static bool IsFingerprint(string? text)
+    {
+        if (text is null || text.Length != 64)
+        {
+            return false;
+        }
+
+        foreach (var ch in text)
+        {
+            if (!char.IsAsciiHexDigitLower(ch))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
 
     private List<PinEntry> ReadAll(out bool unreadable)
     {
