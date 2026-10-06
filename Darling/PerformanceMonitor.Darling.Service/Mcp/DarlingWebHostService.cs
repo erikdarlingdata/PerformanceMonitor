@@ -627,6 +627,11 @@ public sealed class DarlingWebHostService : BackgroundService
                 EnvironmentName = Environments.Production,
             });
 
+            /* #5288: the same kind of pin for the framework's forwarded-headers switch, on the very next line so no
+               service is registered between the builder and the pin. The helper lives with the MCP host, which
+               pins its own builder with it; see DarlingMcpHostService.PinForwardedHeadersOff. */
+            DarlingMcpHostService.PinForwardedHeadersOff(builder.Services);
+
             var listenerCertificate = serverCertificate;
             builder.WebHost.ConfigureKestrel(options =>
             {

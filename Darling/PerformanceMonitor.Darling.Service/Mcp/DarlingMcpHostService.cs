@@ -16,6 +16,7 @@ using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Server.Kestrel.Core;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -584,6 +585,10 @@ public sealed class DarlingMcpHostService : BackgroundService
                 EnvironmentName = Environments.Production,
             });
 
+            /* #5288: the same kind of pin for the framework's forwarded-headers switch, on the very next line so no
+               service is registered between the builder and the pin. See PinForwardedHeadersOff. */
+            PinForwardedHeadersOff(builder.Services);
+
             /* The listener layout lives in ConfigureListeners (#5288), so a live-HTTP test binds the SAME listeners
                production does: the network listener carries the certificate, the loopback ones stay plain. */
             builder.WebHost.ConfigureKestrel(options =>
@@ -754,6 +759,25 @@ public sealed class DarlingMcpHostService : BackgroundService
             await DisposeFailedStartAsync();
             return false;
         }
+    }
+
+    /// <summary>
+    /// Pins forwarded-header handling OFF on a host's builder (#5288), so the peer address the gates judge is always the
+    /// connection's own and never one a request header names. The framework registers its forwarded-headers
+    /// middleware and options setup while <c>WebApplication.CreateBuilder</c> runs, and turns them on from the
+    /// <c>ForwardedHeaders_Enabled</c> configuration value (the <c>ASPNETCORE_FORWARDEDHEADERS_ENABLED</c> environment
+    /// variable sets it), which neither host ever asks for: the service environment is not this code's to trust. This
+    /// post-configures the options after that setup, to <c>ForwardedHeaders.None</c>, so the middleware reads no
+    /// header whatever the switch says. Both hosts call it on the line after their <c>CreateBuilder</c>, and the gate
+    /// tests call it on their own builders, so a test exercises the production line.
+    /// </summary>
+    /// <param name="services">The builder's service collection.</param>
+    internal static void PinForwardedHeadersOff(IServiceCollection services)
+    {
+        ArgumentNullException.ThrowIfNull(services);
+
+        services.PostConfigure<ForwardedHeadersOptions>(
+            options => options.ForwardedHeaders = Microsoft.AspNetCore.HttpOverrides.ForwardedHeaders.None);
     }
 
     /// <summary>

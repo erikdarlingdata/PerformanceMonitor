@@ -18,6 +18,7 @@ using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Options;
 using Npgsql;
 using PerformanceMonitor.Darling.Analysis;
 using PerformanceMonitor.Darling.Service;
@@ -82,11 +83,30 @@ public sealed class DarlingAllowFromListGateTests
     private static void AssertStatus(int expected, int actual, IPAddress remote)
         => Assert.True(expected == actual, $"a request from {remote} should answer {expected}, not {actual}");
 
+    /// <summary>
+    /// The builder both hosts start from. <paramref name="frameworkSwitchOn"/> turns the framework's forwarded-headers
+    /// switch on THROUGH the builder's own configuration, as a command-line argument, which the framework reads the way
+    /// it reads the <c>ASPNETCORE_FORWARDEDHEADERS_ENABLED</c> environment variable. It never goes through the process
+    /// environment: a process-wide variable would reach every test class running in parallel with this one.
+    /// </summary>
+    private static WebApplicationBuilder CreateBuilder(bool frameworkSwitchOn)
+        => WebApplication.CreateBuilder(new WebApplicationOptions
+        {
+            Args = frameworkSwitchOn ? new[] { "--ForwardedHeaders_Enabled=true" } : Array.Empty<string>(),
+        });
+
+    /// <summary>The one value a forwarded-header request names that is not the peer's own address.</summary>
+    private const string NamedByTheHeader = "203.0.113.77";
+
     /* ---- MCP ---- */
 
-    private static async Task<TestServer> BuildMcpServer(CidrAllowList allowedCidr)
+    private static async Task<TestServer> BuildMcpServer(CidrAllowList allowedCidr, bool frameworkSwitchOn = false)
     {
-        var builder = WebApplication.CreateBuilder();
+        var builder = CreateBuilder(frameworkSwitchOn);
+
+        // The production line, on the line after the builder exists, exactly where both hosts run it.
+        DarlingMcpHostService.PinForwardedHeadersOff(builder.Services);
+
         builder.WebHost.UseTestServer();
         builder.Logging.ClearProviders();
 
@@ -119,7 +139,7 @@ public sealed class DarlingAllowFromListGateTests
 
     /// <summary>A <c>tools/list</c> JSON-RPC POST on <c>/</c> with the RIGHT bearer token from <paramref name="remote"/>:
     /// 200 means the request got past every gate, 403 means the CIDR gate refused it.</summary>
-    private static async Task<int> McpToolsListAsync(TestServer server, IPAddress remote)
+    private static async Task<int> McpToolsListAsync(TestServer server, IPAddress remote, string? forwardedFor = null)
     {
         const string requestBody = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\",\"params\":{}}";
         var ctx = await server.SendAsync(c =>
@@ -134,6 +154,10 @@ public sealed class DarlingAllowFromListGateTests
             c.Request.ContentLength = bytes.Length;
             c.Connection.RemoteIpAddress = remote;
             c.Request.Headers.Authorization = $"Bearer {McpToken}";
+            if (forwardedFor is not null)
+            {
+                c.Request.Headers["X-Forwarded-For"] = forwardedFor;
+            }
         });
 
         using var reader = new StreamReader(ctx.Response.Body);
@@ -164,11 +188,36 @@ public sealed class DarlingAllowFromListGateTests
         }
     }
 
+    /// <summary>
+    /// #5288: the allowFrom check judges the connection's own peer address, never an address a request header names,
+    /// even with the framework's forwarded-headers switch turned ON in the host's configuration (the host pins the
+    /// handling off, <see cref="DarlingMcpHostService.PinForwardedHeadersOff"/>). A peer outside the list that names an
+    /// in-list address, or loopback, in <c>X-Forwarded-For</c> is still answered 403; and an in-list peer that names an
+    /// outside address still gets through, because the header is not read in either direction.
+    /// </summary>
+    [Theory]
+    [InlineData("192.168.1.50")]
+    [InlineData("127.0.0.1")]
+    public async Task Mcp_ForwardedFor_IsIgnored_EvenWithTheFrameworkSwitchOn(string forwardedFor)
+    {
+        using var server = await BuildMcpServer(CidrAllowList.Parse("192.168.1.0/24,10.8.0.0/16"), frameworkSwitchOn: true);
+
+        var outside = IPAddress.Parse("203.0.113.50");
+        AssertStatus(StatusCodes.Status403Forbidden, await McpToolsListAsync(server, outside, forwardedFor), outside);
+
+        var inList = IPAddress.Parse("192.168.1.50");
+        AssertStatus(StatusCodes.Status200OK, await McpToolsListAsync(server, inList, NamedByTheHeader), inList);
+    }
+
     /* ---- web ---- */
 
-    private static async Task<TestServer> BuildWebServer(CidrAllowList allowedCidr)
+    private static async Task<TestServer> BuildWebServer(CidrAllowList allowedCidr, bool frameworkSwitchOn = false)
     {
-        var builder = WebApplication.CreateBuilder();
+        var builder = CreateBuilder(frameworkSwitchOn);
+
+        // The production line, on the line after the builder exists, exactly where both hosts run it.
+        DarlingMcpHostService.PinForwardedHeadersOff(builder.Services);
+
         builder.WebHost.UseTestServer();
         builder.Logging.ClearProviders();
 
@@ -203,7 +252,7 @@ public sealed class DarlingAllowFromListGateTests
 
     /// <summary>A <c>GET /?token=</c> with the RIGHT token from <paramref name="remote"/>: 302 means the gate
     /// exchanged the token for a session cookie (past every gate), 403 means the CIDR gate refused it first.</summary>
-    private static async Task<int> WebTokenRequestAsync(TestServer server, IPAddress remote)
+    private static async Task<int> WebTokenRequestAsync(TestServer server, IPAddress remote, string? forwardedFor = null)
     {
         var ctx = await server.SendAsync(c =>
         {
@@ -212,6 +261,10 @@ public sealed class DarlingAllowFromListGateTests
             c.Request.QueryString = new QueryString("?token=" + Uri.EscapeDataString(WebToken));
             c.Request.Headers.Host = ListenIp;
             c.Connection.RemoteIpAddress = remote;
+            if (forwardedFor is not null)
+            {
+                c.Request.Headers["X-Forwarded-For"] = forwardedFor;
+            }
         });
 
         return ctx.Response.StatusCode;
@@ -238,5 +291,49 @@ public sealed class DarlingAllowFromListGateTests
         {
             AssertStatus(StatusCodes.Status403Forbidden, await WebTokenRequestAsync(server, remote), remote);
         }
+    }
+
+    /// <summary>
+    /// #5288: the web twin of <see cref="Mcp_ForwardedFor_IsIgnored_EvenWithTheFrameworkSwitchOn"/>. The allowFrom
+    /// check judges the connection's own peer address, never one a request header names, with the framework's
+    /// forwarded-headers switch turned ON: an outside peer that names an in-list address, or loopback, is still
+    /// answered 403, and an in-list peer that names an outside address still has its token exchanged for a cookie.
+    /// </summary>
+    [Theory]
+    [InlineData("192.168.1.50")]
+    [InlineData("127.0.0.1")]
+    public async Task Web_ForwardedFor_IsIgnored_EvenWithTheFrameworkSwitchOn(string forwardedFor)
+    {
+        using var server = await BuildWebServer(CidrAllowList.Parse("192.168.1.0/24,10.8.0.0/16"), frameworkSwitchOn: true);
+
+        var outside = IPAddress.Parse("203.0.113.50");
+        AssertStatus(StatusCodes.Status403Forbidden, await WebTokenRequestAsync(server, outside, forwardedFor), outside);
+
+        var inList = IPAddress.Parse("192.168.1.50");
+        AssertStatus(StatusCodes.Status302Found, await WebTokenRequestAsync(server, inList, NamedByTheHeader), inList);
+    }
+
+    /// <summary>
+    /// The premise of the two tests above, pinned so they cannot pass for the wrong reason: on the very builder they
+    /// use, the framework's switch really does turn forwarded-header handling on, and
+    /// <see cref="DarlingMcpHostService.PinForwardedHeadersOff"/> is what turns it back off. If a framework change
+    /// ever stopped the switch from taking effect, the first assertion fails here instead of the tests above going
+    /// quietly green.
+    /// </summary>
+    [Fact]
+    public void FrameworkSwitch_TurnsForwardedHeadersOn_AndThePinTurnsThemOffAgain()
+    {
+        var unpinned = CreateBuilder(frameworkSwitchOn: true);
+        using var unpinnedApp = unpinned.Build();
+        Assert.NotEqual(
+            Microsoft.AspNetCore.HttpOverrides.ForwardedHeaders.None,
+            unpinnedApp.Services.GetRequiredService<IOptions<ForwardedHeadersOptions>>().Value.ForwardedHeaders);
+
+        var pinned = CreateBuilder(frameworkSwitchOn: true);
+        DarlingMcpHostService.PinForwardedHeadersOff(pinned.Services);
+        using var pinnedApp = pinned.Build();
+        Assert.Equal(
+            Microsoft.AspNetCore.HttpOverrides.ForwardedHeaders.None,
+            pinnedApp.Services.GetRequiredService<IOptions<ForwardedHeadersOptions>>().Value.ForwardedHeaders);
     }
 }
