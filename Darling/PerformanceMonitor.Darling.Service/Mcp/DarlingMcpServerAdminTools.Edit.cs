@@ -122,7 +122,7 @@ public sealed partial class DarlingMcpServerAdminTools
         "expected_modified_at. The values mean what they mean in add_servers. Naming engine, is_enabled, " +
         "excluded_databases or any other key is status \"invalid\". The server keeps its id: tags, history and " +
         "settings stay attached, even when the address changes; the old address then cannot be added as a new " +
-        "server under the same spelling. PASSWORD: omit it to keep the stored one. The stored secret cannot be " +
+        "server under the same spelling. PASSWORD: omit it, or leave it blank, to keep the stored one; a typed one replaces it and is the password itself (a value starting with env: or file: is refused, references are set in the configuration file). The stored secret cannot be " +
         "read back, so changing the host, port, database, read_only_intent, auth, username, encrypt_mode, " +
         "trust_server_certificate or multi_subnet_failover of a SQL or ServicePrincipal server REQUIRES password " +
         "again, and so does switching into either mode; a name or cost change, and a Windows or ManagedIdentity " +
@@ -597,12 +597,19 @@ public sealed partial class DarlingMcpServerAdminTools
                     changes.Username = node is null || string.IsNullOrWhiteSpace(TryGetString(body, "username")) ? null : TryGetString(body, "username")!.Trim();
                     break;
                 case "password":
-                    if (!TryEditString(node, out var password) || string.IsNullOrEmpty(password))
+                    if (!TryEditString(node, out var password))
                     {
-                        return (null, "password must be non-empty text. Omit password to keep the stored one.");
+                        return (null, "password must be text. Omit password, or leave it blank, to keep the stored one.");
                     }
 
-                    changes.Password = password;
+                    /* A blank field keeps the stored secret, exactly as an absent one does (a form sends the field blank
+                       when nothing was typed). Whatever is stored, a reference included, is left byte for byte as it is:
+                       the secret column is not in the write unless a password was typed. */
+                    if (!string.IsNullOrEmpty(password))
+                    {
+                        changes.Password = password;
+                    }
+
                     break;
                 case "encrypt_mode":
                     var (encryptMode, encryptError) = ResolveEncryptMode(TryGetString(body, "encrypt_mode"));

@@ -127,8 +127,9 @@ public sealed partial class DarlingMcpServerAdminTools
         "status \"collides\" — adding it would store one database's history under two identities and alert twice. " +
         "So is a server whose id is already held by a different server (two identities that hash to one id). " +
         "A SQL password or service-principal client secret is encrypted at rest (DPAPI, the service identity) and " +
-        "is never returned. Where DPAPI is not available (Linux) a literal password or client secret is rejected as " +
-        "\"invalid\": give an env:NAME or file:/run/secrets/<name> reference instead. " +
+        "is never returned. password is the password itself: a value that starts with env: or file: is rejected as " +
+        "\"invalid\", because references are set in the configuration file. Where DPAPI is not available (Linux) a " +
+        "literal password or client secret is rejected as \"invalid\" too; use --add-server on the service host. " +
         "Returns {requested:N, added:N, skipped:N, collided:N, failed:N, results:[{server, " +
         "status:\"added\"|\"duplicate\"|\"collides\"|\"connection_failed\"|\"not_saved\"|\"invalid\", detail}]}. requested is " +
         "the number of entries you sent and the four counters SUM to it — every entry lands in exactly one: " +
@@ -155,14 +156,25 @@ public sealed partial class DarlingMcpServerAdminTools
         NpgsqlDataSource postgres, string servers_json, ServerProbe probe, CancellationToken cancellationToken) =>
         AddServersAsync(new PostgresServerDefinitions(postgres), servers_json, probe, cancellationToken);
 
+    /// <summary>
+    /// The add the <c>--add-server</c> verb runs: the same core with the one difference that a password may be an
+    /// <c>env:</c>/<c>file:</c> reference. The verb is typed at the service host's own command line by the person who
+    /// can edit the configuration file, which is where references are set; it is not a request, and off Windows it is
+    /// the only way to register a server whose password cannot be encrypted. A reference to Darling's own configuration
+    /// or secrets is still refused (<see cref="ValidateSecret"/>).
+    /// </summary>
+    internal static Task<string> AddServersFromHostCommandLineAsync(NpgsqlDataSource postgres, string servers_json) =>
+        AddServersAsync(new PostgresServerDefinitions(postgres), servers_json, DefaultProbeAsync, CancellationToken.None, allowSecretReferences: true);
+
     /// <summary>The same flow over an injected <see cref="IServerDefinitions"/>, so a test can stand in a
     /// definitions table that faults on a chosen write or swallows one without a live database.</summary>
     internal static async Task<string> AddServersAsync(
-        IServerDefinitions definitions, string servers_json, ServerProbe probe, CancellationToken cancellationToken)
+        IServerDefinitions definitions, string servers_json, ServerProbe probe, CancellationToken cancellationToken,
+        bool allowSecretReferences = false)
     {
         try
         {
-            var (entries, invalidResults, wholeError) = ParseRequest(servers_json);
+            var (entries, invalidResults, wholeError) = ParseRequest(servers_json, OperatingSystem.IsWindows(), allowSecretReferences);
             if (wholeError != null)
             {
                 return Outcome("invalid", wholeError);
@@ -707,7 +719,7 @@ ORDER BY d.host, d.database";
     /// <summary><see cref="ParseRequest(string)"/> with the platform named, so a test can ask what either platform
     /// answers for a literal password without running on it.</summary>
     internal static (List<ParsedServerEntry> Entries, List<ServerResult> Invalid, string? WholeError) ParseRequest(
-        string servers_json, bool isWindows)
+        string servers_json, bool isWindows, bool allowSecretReferences = false)
     {
         var entries = new List<ParsedServerEntry>();
         var invalid = new List<ServerResult>();
@@ -734,7 +746,7 @@ ORDER BY d.host, d.database";
 
         for (var i = 0; i < array.Count; i++)
         {
-            var (entry, result) = ParseEntry(i, array[i], isWindows);
+            var (entry, result) = ParseEntry(i, array[i], isWindows, allowSecretReferences);
             if (entry != null)
             {
                 entries.Add(entry);
@@ -752,7 +764,7 @@ ORDER BY d.host, d.database";
     /// problem. The service honors Windows, SQL, and the two non-interactive Entra modes (ServicePrincipal,
     /// ManagedIdentity); the interactive Entra modes (MFA/device-code/default-credential) are rejected — they
     /// cannot run headless (#3484).</summary>
-    private static (ParsedServerEntry? Entry, ServerResult? Result) ParseEntry(int index, JsonNode? node, bool isWindows)
+    private static (ParsedServerEntry? Entry, ServerResult? Result) ParseEntry(int index, JsonNode? node, bool isWindows, bool allowSecretReferences)
     {
         if (node is not JsonObject obj)
         {
@@ -809,11 +821,11 @@ ORDER BY d.host, d.database";
                     : "password is required for SQL authentication."));
             }
 
-            /* #4734: refuse a literal where it cannot be encrypted, HERE, before the probe and the write. Left to
-               ProtectPasswordForStorage it threw after the probe, in the middle of the batch. Then the owner's one
-               rule on references: never at Darling's own configuration or secrets. Add and edit share the helper,
-               so the two cannot disagree. */
-            var secretRefusal = ValidateSecret(plaintextPassword, isWindows, isSp);
+            /* The password a request carries is the password itself: a reference is refused HERE, before the probe
+               resolves anything and before the write (ValidateSecret). Then #4734: a literal where it cannot be
+               encrypted, before the probe and the write; left to ProtectPasswordForStorage it threw after the probe, in
+               the middle of the batch. Add and edit share the helper, so the two cannot disagree. */
+            var secretRefusal = ValidateSecret(plaintextPassword, isWindows, isSp, allowSecretReferences);
             if (secretRefusal != null)
             {
                 return (null, Invalid(secretRefusal));
@@ -1298,13 +1310,18 @@ ON CONFLICT (server_id) DO NOTHING";
     }
 
     /// <summary>
-    /// The refusals every SQL password or service-principal client secret meets before it is probed or stored, in
-    /// the order add always asked them: a literal where DPAPI is not available (<see cref="LiteralSecretRefusal"/>),
-    /// then a reference to Darling's own configuration or secrets (<see cref="DarlingOwnedSecrets.ReferenceRefusal(string?)"/>).
+    /// The refusals every SQL password or service-principal client secret meets before it is probed or stored: a
+    /// reference when it came in a request (<see cref="DarlingSecretSource.RequestReferenceRefusal"/>, the one place
+    /// web add, web edit, <c>add_servers</c> and <c>edit_server</c> all ask it), then a literal where DPAPI is not
+    /// available (<see cref="LiteralSecretRefusal"/>), then a reference to Darling's own configuration or secrets
+    /// (<see cref="DarlingOwnedSecrets.ReferenceRefusal(string?)"/>), which only the host command line can reach
+    /// (<paramref name="allowSecretReferences"/>, set by <see cref="AddServersFromHostCommandLineAsync"/> alone).
     /// Null when the secret may be used. Add and edit both call it.
     /// </summary>
-    internal static string? ValidateSecret(string? secret, bool isWindows, bool isServicePrincipal) =>
-        LiteralSecretRefusal(secret, isWindows, isServicePrincipal) ?? DarlingOwnedSecrets.ReferenceRefusal(secret);
+    internal static string? ValidateSecret(string? secret, bool isWindows, bool isServicePrincipal, bool allowSecretReferences = false) =>
+        (allowSecretReferences ? null : DarlingSecretSource.RequestReferenceRefusal(secret))
+        ?? LiteralSecretRefusal(secret, isWindows, isServicePrincipal)
+        ?? DarlingOwnedSecrets.ReferenceRefusal(secret);
 
     /// <summary>
     /// PURE platform check for a SQL password or service-principal client secret (#4734): null when the value can be
@@ -1322,9 +1339,9 @@ ON CONFLICT (server_id) DO NOTHING";
         }
 
         var noun = isServicePrincipal ? "client secret" : "password";
-        return $"A literal {noun} cannot be saved on this platform: encrypting it needs Windows DPAPI. Give the " +
-               $"{noun} as an env:NAME or file:/run/secrets/<name> reference instead (for example " +
-               "file:/run/secrets/sql_password).";
+        return $"A literal {noun} cannot be saved on this platform: encrypting it needs Windows DPAPI. A reference " +
+               "(env:NAME or file:/run/secrets/<name>) can be set in the configuration file, or with --add-server on " +
+               "the service host.";
     }
 
     /// <summary>Prepares a SQL password for storage: an <c>env:</c>/<c>file:</c> secret REFERENCE (#1804) is

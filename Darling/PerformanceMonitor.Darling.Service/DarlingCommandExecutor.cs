@@ -265,6 +265,14 @@ WHERE status = 'in_progress'
                     return new CommandOutcome(false, "invalid args_json", ErrorJson("test_connect args_json did not deserialize to a server definition"));
                 }
 
+                /* The test resolves a reference only for the server that already stores it, at the address it stores it
+                   for. Asked BEFORE the probe, so a refused test resolves nothing and connects to nothing. */
+                if (await TestConnectReferenceRefusalAsync(server, StoredAddressesOfReferenceAsync, cancellationToken) is { } refusal)
+                {
+                    _logger?.LogInformation("Command {Id} (test_connect '{Server}') => refused", command.CommandId, server.DisplayName);
+                    return new CommandOutcome(false, "refused", ErrorJson(refusal));
+                }
+
                 var probe = await DarlingServerConnector.ProbeAsync(server, _logger, cancellationToken);
                 var (resultStatus, resultJson) = MapProbeResult(probe);
                 _logger?.LogInformation("Command {Id} (test_connect '{Server}') => {Result}", command.CommandId, server.DisplayName, resultStatus);
@@ -682,6 +690,61 @@ WHERE status = 'in_progress'
                in_progress and a later reader can see it never terminated. */
             _logger?.LogWarning("Could not write result for command {Id}: {Message}", commandId, ex.Message);
         }
+    }
+
+    /// <summary>What a <c>test_connect</c> answers when its password is a reference to a server that is not at the
+    /// address that stored it: the plain ask for the password, with no value in it.</summary>
+    internal const string TestConnectPasswordNeededText =
+        "Enter the password again to test this server at a different address: its stored password is only used at the address it was saved for.";
+
+    /// <summary>
+    /// PURE over the one store read it is given: null when a <c>test_connect</c> may go on to resolve its credential,
+    /// otherwise the sentence to answer with, before anything is resolved. A password typed as itself is not asked
+    /// about. A reference (<see cref="DarlingSecretSource.IsReference"/>, the resolver's own question) is let through only
+    /// when a stored server holds that exact text AND sits at the test's host and port (the host text carries the
+    /// instance), so the stored password is never sent to an address it was not saved for. The plain
+    /// <c>password</c> slot never carries a reference from a command; no stored server has one.
+    /// </summary>
+    internal static async Task<string?> TestConnectReferenceRefusalAsync(
+        MonitoredServer server,
+        Func<string, CancellationToken, Task<IReadOnlyList<(string Host, int Port)>>> storedAddressesOfReference,
+        CancellationToken cancellationToken)
+    {
+        if (DarlingSecretSource.RequestReferenceRefusal(server.Password) is { } plainSlotRefusal)
+        {
+            return plainSlotRefusal;
+        }
+
+        var reference = server.EncryptedPassword;
+        if (!DarlingSecretSource.IsReference(reference))
+        {
+            return null;
+        }
+
+        foreach (var (host, port) in await storedAddressesOfReference(reference!, cancellationToken))
+        {
+            if (PerformanceMonitor.Darling.Service.Mcp.DarlingMcpServerAdminTools.SameAddress(server.Host, server.Port, host, port))
+            {
+                return null;
+            }
+        }
+
+        return TestConnectPasswordNeededText;
+    }
+
+    /// <summary>Every address a stored server holds exactly this reference text for.</summary>
+    private async Task<IReadOnlyList<(string Host, int Port)>> StoredAddressesOfReferenceAsync(string reference, CancellationToken cancellationToken)
+    {
+        var found = new List<(string Host, int Port)>();
+        await using var command = _postgres.CreateCommand("SELECT host, port FROM config.config_monitored_servers WHERE encrypted_password = $1");
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = reference });
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            found.Add((reader.GetString(0), reader.IsDBNull(1) ? 0 : reader.GetInt32(1)));
+        }
+
+        return found;
     }
 
     private static MonitoredServer? DeserializeServer(string argsJson)
