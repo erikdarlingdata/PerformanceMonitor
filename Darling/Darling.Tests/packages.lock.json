@@ -783,6 +783,7 @@
         "dependencies": {
           "AWSSDK.PI": "[4.0.100.15, )",
           "AWSSDK.RDS": "[4.0.106.1, )",
+          "AWSSDK.SecurityToken": "[4.0.101.1, )",
           "BlackwellSystems.Gcf": "[1.1.0, )",
           "Microsoft.Data.SqlClient": "[7.1.1, )",
           "Microsoft.Data.SqlClient.Extensions.Azure": "[7.1.1, )",
@@ -865,6 +866,15 @@
         "requested": "[4.0.106.1, )",
         "resolved": "4.0.106.1",
         "contentHash": "ok3d6CrjA4jS6u6gZC46AHPPStSzjfzp2y/TF19GJRrIvK1eRgkay0xVJaXYrqbmn65W0u6ziMSsFhXlwCfWtw==",
+        "dependencies": {
+          "AWSSDK.Core": "[4.0.102.8, 5.0.0)"
+        }
+      },
+      "AWSSDK.SecurityToken": {
+        "type": "CentralTransitive",
+        "requested": "[4.0.101.1, )",
+        "resolved": "4.0.101.1",
+        "contentHash": "rZnMaqiYwDzbvTqeO7dWhqxEn96RleyR9KN6GYeWispPt9NQPRDUcfYZarvG7Eba5NvDNomhpcQJSNO+VoteGQ==",
         "dependencies": {
           "AWSSDK.Core": "[4.0.102.8, 5.0.0)"
         }
