@@ -97,7 +97,7 @@ public sealed class ServerEditPasswordRuleViewerTests
         var (changes, parseError) = Edit.ParseEditChanges("{\"auth\":\"" + (newAuth == "sql" ? "SQL" : "ServicePrincipal") + "\",\"username\":\"app-user\"}");
         Assert.Null(parseError);
 
-        var (plan, error) = Edit.PlanEdit(row, changes!, isWindows: true);
+        var (plan, error) = Edit.PlanEdit(row, changes!, TestKeyRings.Healthy.Status);
 
         Assert.Null(plan);
         Assert.Equal(

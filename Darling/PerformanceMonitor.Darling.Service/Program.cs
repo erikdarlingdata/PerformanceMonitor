@@ -320,6 +320,14 @@ if (args.Length > 0 && DarlingCliCommands.IsResetPasswordKeyVerb(args[0]))
     return await DarlingCliCommands.ResetPasswordKeyAsync(args[1..], Console.Out, Console.Error, CancellationToken.None);
 }
 
+/* CLI verb: --self-check-password-key <vector-path> (#5366) - hidden: not in the usage text. Runs the real password key file,
+   file identity and sealed-value code in a fresh temporary directory and exits non-zero on any failure. The Linux build job
+   runs it inside the built image, because the test project runs on Windows. It reads no configuration and opens no store. */
+if (args.Length > 0 && DarlingCliCommands.IsSelfCheckPasswordKeyVerb(args[0]))
+{
+    return DarlingPasswordKeySelfCheck.Run(args[1..], Console.Out, Console.Error);
+}
+
 /* CLI verb: --set-collector-run-at <collector> <HH:MM|none|default> [--server <name>] [--config <path>] (#4938) — set,
    stop or clear the time of day a collector that runs once a day starts, fleet-wide or for one server, and print the
    rows read back from the store. A heavy daily collector otherwise starts whenever the service happened to start, which
