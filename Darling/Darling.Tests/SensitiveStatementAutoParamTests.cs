@@ -342,6 +342,51 @@ public class SensitiveStatementAutoParamTests
     }
 
     [Fact]
+    public void RuntimeValueThatDiffersFromTheCompiledValue_IsJudgedToo()
+    {
+        // an actual plan: the compiled value is whichever run compiled the cached plan, the runtime value is this run's
+        const string text = "(@1 nvarchar(50))INSERT [dbo].[cfg] VALUES (@1)";
+        string xml = Plan(Stmt("StmtSimple", text, Col("@1", "N'benign'", "N'Server=h;PWD=rt3'")));
+
+        string? result = Run(xml);
+
+        Assert.NotNull(result);
+        Assert.NotSame(xml, result);
+        Assert.DoesNotContain("rt3", result);
+        Assert.Equal(new[] { P }, Attrs(result!, "ParameterCompiledValue"));
+        Assert.Equal(new[] { P }, Attrs(result!, "ParameterRuntimeValue"));
+        Assert.Equal(text, OnlyStatementText(result!));
+
+        // both benign (equal, then different): nothing is named and the same instance comes back
+        string same = Plan(Stmt("StmtSimple", text, Col("@1", "N'benign'", "N'benign'")));
+        string differ = Plan(Stmt("StmtSimple", text, Col("@1", "N'benign'", "N'other'")));
+        Assert.Same(same, Run(same));
+        Assert.Same(differ, Run(differ));
+    }
+
+    [Fact]
+    public void AValueWhoseTokenIsNotInTheStatementText_IsJudgedOnItsOwn()
+    {
+        // the stored text is shorter than the statement, so no token puts the value back into the probe
+        const string text = "INSERT [dbo].[cfg] VALUES (";
+        string xml = Plan(Stmt("StmtSimple", text, Col("@1", "N'Server=h;PWD=s7'")));
+
+        string? result = Run(xml);
+
+        Assert.NotNull(result);
+        Assert.DoesNotContain("s7", result);
+        Assert.Equal(new[] { P }, Attrs(result!, "ParameterCompiledValue"));
+        Assert.Equal(text, OnlyStatementText(result!));
+
+        // a plain value, and an application-named parameter, name nothing
+        string plain = Plan(Stmt("StmtSimple", text, Col("@1", "N'plain'")));
+        string appNamed = Plan(Stmt("StmtSimple", text, Col("@pwd", "N'Server=h;PWD=s7'")));
+        Assert.Same(plain, Run(plain));
+        Assert.Same(appNamed, Run(appNamed));
+    }
+
+
+    [Fact]
     public void ElementFormParameterizedText_NamedStatementIsWithheld_EvenAfterAnEarlierHit()
     {
         // Statement 1 is named by its own text (the first hit); statement 2 only by an element-form ParameterizedText,

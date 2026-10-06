@@ -207,17 +207,26 @@ public static partial class SensitiveStatements
         /// <c>StatementText</c> holds an auto-parameter token: they are what the probe is made from.</summary>
         private sealed class StmtFrame
         {
-            public StmtFrame(int ordinal, string? text)
+            public StmtFrame(int ordinal, string? text, bool takesValues)
             {
                 Ordinal = ordinal;
                 Text = text;
-                if (text is not null)
-                    Values = new Dictionary<string, (string? Compiled, string? Runtime)>(StringComparer.Ordinal);
+                TakesValues = takesValues;
             }
 
             public int Ordinal { get; }
             public string? Text { get; }
-            public Dictionary<string, (string? Compiled, string? Runtime)>? Values { get; }
+
+            /// <summary>The statement has a <c>StatementText</c> (with a token or without): its parameter values are
+            /// kept so each can be judged, even when no token in the text puts one back (#5320).</summary>
+            public bool TakesValues { get; }
+            public Dictionary<string, (string? Compiled, string? Runtime)>? Values { get; private set; }
+
+            public void SetValue(string column, string? compiled, string? runtime)
+            {
+                Values ??= new Dictionary<string, (string? Compiled, string? Runtime)>(StringComparer.Ordinal);
+                Values[column] = (compiled, runtime);
+            }
         }
 
         /// <summary>Whether the raw text could hold an auto-parameter token or an element-form
@@ -279,8 +288,10 @@ public static partial class SensitiveStatements
 
         /// <summary>The statement as SQL Server would have run it ad hoc: <c>StatementText</c> with every token
         /// replaced by that statement's compiled value, else its runtime value, else <c>N'?'</c> (also a value
-        /// past the cut, which pass 1 never reached).</summary>
-        private static string ProbeOf(StmtFrame frame)
+        /// past the cut, which pass 1 never reached). With <paramref name="preferRuntime"/> the runtime value
+        /// comes first: an actual plan's runtime value is the literal of the run that executed (#5320).
+        /// <paramref name="used"/> collects the tokens the text holds.</summary>
+        private static string ProbeOf(StmtFrame frame, bool preferRuntime, HashSet<string>? used = null)
         {
             string text = frame.Text!;
             var sb = new StringBuilder(text.Length + 16);
@@ -290,8 +301,10 @@ public static partial class SensitiveStatements
             {
                 sb.Append(text, copied, start - copied);
                 string value = "N'?'";
-                if (frame.Values!.TryGetValue(text.Substring(start, end - start), out var v))
-                    value = v.Compiled ?? v.Runtime ?? "N'?'";
+                string token = text.Substring(start, end - start);
+                used?.Add(token);
+                if (frame.Values is not null && frame.Values.TryGetValue(token, out var v))
+                    value = (preferRuntime ? v.Runtime ?? v.Compiled : v.Compiled ?? v.Runtime) ?? "N'?'";
                 sb.Append(value);
                 copied = end;
             }
@@ -299,13 +312,65 @@ public static partial class SensitiveStatements
             return sb.ToString();
         }
 
-        /// <summary>Judges one finished (or cut) statement's probe; a named one is recorded by ordinal.</summary>
+        private static bool IsAutoToken(string name)
+        {
+            if (name.Length < 2 || name[0] != '@')
+                return false;
+            for (int i = 1; i < name.Length; i++)
+            {
+                if (name[i] < '0' || name[i] > '9')
+                    return false;
+            }
+            return true;
+        }
+
+        /// <summary>Judges one finished (or cut) statement's probe; a named one is recorded by ordinal. Three
+        /// readings, any of which names the statement (#5320): the compiled-first probe; a runtime-first probe,
+        /// built only when some value's runtime differs from its compiled one (an actual plan); and each
+        /// auto-parameter value whose token the stored text does not hold (text shorter than the statement),
+        /// judged on its own as text. Application-named parameters stay out.</summary>
         private bool JudgeProbe(StmtFrame frame)
         {
-            if (frame.Text is null || !Judge(ProbeOf(frame)))
+            if (frame.Text is null && frame.Values is null)
+                return false;
+            var used = new HashSet<string>(StringComparer.Ordinal);
+            bool named = false;
+            if (frame.Text is not null)
+            {
+                named = Judge(ProbeOf(frame, preferRuntime: false, used));
+                if (!named && AnyRuntimeDiffers(frame))
+                    named = Judge(ProbeOf(frame, preferRuntime: true));
+            }
+            if (!named && frame.Values is not null)
+            {
+                foreach (var entry in frame.Values)
+                {
+                    if (used.Contains(entry.Key) || !IsAutoToken(entry.Key))
+                        continue;
+                    if ((entry.Value.Compiled is not null && Judge(entry.Value.Compiled))
+                        || (entry.Value.Runtime is not null && Judge(entry.Value.Runtime)))
+                    {
+                        named = true;
+                        break;
+                    }
+                }
+            }
+            if (!named)
                 return false;
             _probeNamed.Add(frame.Ordinal);
             return true;
+        }
+
+        private static bool AnyRuntimeDiffers(StmtFrame frame)
+        {
+            if (frame.Values is null)
+                return false;
+            foreach (var v in frame.Values.Values)
+            {
+                if (v.Compiled is not null && v.Runtime is not null && !string.Equals(v.Compiled, v.Runtime, StringComparison.Ordinal))
+                    return true;
+            }
+            return false;
         }
 
         private static StmtFrame? InnermostStmt(Stack<OpenElement> open)
@@ -397,13 +462,14 @@ public static partial class SensitiveStatements
                             {
                                 _stmtOrdinal++;
                                 frame = new StmtFrame(_stmtOrdinal,
-                                    statementText is not null && HasToken(statementText) ? statementText : null);
+                                    statementText is not null && HasToken(statementText) ? statementText : null,
+                                    statementText is not null);
                             }
                             else if (isColumn && column is not null)
                             {
                                 var owner = InnermostStmt(open);
-                                if (owner?.Values is not null)
-                                    owner.Values[column] = (compiled, runtime);
+                                if (owner is not null && owner.TakesValues)
+                                    owner.SetValue(column, compiled, runtime);
                             }
 
                             if (reader.IsEmptyElement)
