@@ -332,6 +332,27 @@ try {
       out.listedEnd = boxes(popover).map((b) => b.attrs["aria-label"]);
       out.searchUrls = searchUrls();
     },
+    /* #5314: the route matched the text itself (PostgreSQL ILIKE), so its answer is listed as sent. "İstanbul" is the real case:
+       JS lowercases it to "i" + a combining dot, so a second local filter on "ist" would hide a name the route returned. While a newer
+       keystroke's answer is still in flight, the last answer is narrowed locally as before, and the newest answer replaces it. */
+    async cutSearchServerFold() {
+      inventory = names(40);
+      inventoryCut = true;
+      searchHandler = (q) => (q === "ist" ? { names: ["İstanbul", "istanbul2"], cut: false }
+        : q === "ista" ? { names: ["İstanbul", "istanbul2"], cut: false, delay: 300 } : { names: [], cut: false });
+      const { page } = await open();
+      const popover = page.byClass("db-filter-popover")[0];
+      page.byClass("db-filter-button")[0].fire("click");
+      await settle();
+      type(popover, "ist");
+      await sleep(450);
+      out.listedAnswered = boxes(popover).map((b) => b.attrs["aria-label"]);
+      type(popover, "ista");
+      await sleep(300); // the ask for "ista" is in flight (250 ms pause): the last answer is narrowed here
+      out.listedInFlight = boxes(popover).map((b) => b.attrs["aria-label"]);
+      await sleep(400);
+      out.listedNewest = boxes(popover).map((b) => b.attrs["aria-label"]);
+    },
     /* A search that is itself cut says so, and says to type more of the name. */
     async cutSearchCutAndFails() {
       inventory = names(40);

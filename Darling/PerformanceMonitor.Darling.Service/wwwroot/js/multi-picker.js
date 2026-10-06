@@ -88,10 +88,14 @@ export function mergeSeriesRows(series, xKey, valueKey) {
  * return a sentence that refuses checking `value` (a bound other than the count, such as the database filter's byte budget):
  * the box is disabled and the sentence shows as the hint. `onSearch(text)` (default none) runs after each keystroke in the search
  * box, once the list is filtered, for a caller whose options are only part of a longer list and so asks its source for the match (#5314).
+ * `answeredFor` (default null) is the search text (trimmed) that `options` are the source's answer for: while the box holds exactly
+ * that text, the options are listed as the source sent them, with no second filter here, because the source's own matching (a
+ * database's case folding) can differ from this file's `toLowerCase()`. A different text, such as a newer keystroke whose answer is
+ * still in flight, filters the options here as usual (#5314).
  * Returns { node, checked(), metric(), restoreFocus() }: call restoreFocus() once node is in the page.
  */
 export function multiPicker(opts) {
-  const { key, label, options, max, metrics = null, onChange, noun = "wait", defaultsLabel = "Top waits", defaults: defaultSet = topWaitDefaults, selectAll: withSelectAll = true, refuse = null, onSearch = null } = opts;
+  const { key, label, options, max, metrics = null, onChange, noun = "wait", defaultsLabel = "Top waits", defaults: defaultSet = topWaitDefaults, selectAll: withSelectAll = true, refuse = null, onSearch = null, answeredFor = null } = opts;
   const state = pickerState(key);
   const defaults = () => defaultSet(options, max);
   state.checked = state.checked ? new Set(state.checked) : new Set(defaults());
@@ -107,7 +111,13 @@ export function multiPicker(opts) {
   const list = el("div", { class: "mp-list", role: "group", "aria-label": label });
 
   const visible = () => {
-    const q = state.search.trim().toLowerCase();
+    const text = state.search.trim();
+    const q = text.toLowerCase();
+    if (q && answeredFor !== null && text === answeredFor) {
+      /* The options are the source's answer for this very text: list them as sent. A checked value the answer does not
+         hold is still listed after them only when it matches here. */
+      return listedValues.filter((o) => known.has(o) || o.toLowerCase().includes(q));
+    }
     return q ? listedValues.filter((o) => o.toLowerCase().includes(q)) : listedValues;
   };
   const changed = () => {

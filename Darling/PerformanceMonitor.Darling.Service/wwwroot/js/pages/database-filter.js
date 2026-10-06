@@ -126,6 +126,8 @@ export function databaseFilterControl({ serverId, server, onApply }) {
       defaults: () => [],
       refuse: byteRefusal,
       onSearch: (text) => searchTyped(text),
+      /* The route matched this text itself, so its answer is listed as sent while the box still holds the text (#5314). */
+      answeredFor: answer ? answer.query : null,
       onChange: () => {
         message.textContent = "";
       },

@@ -235,6 +235,18 @@ public sealed class WebDatabaseFilterPickerBehaviourTests
     }
 
     [Fact]
+    public void ACutLists_ServerAnswer_IsListedAsSent_NotFilteredAgainByJavaScriptCaseFolding()
+    {
+        var r = Run("cutSearchServerFold");
+
+        // "İstanbul" does not lowercase to text that contains "ist" in JavaScript, but the route returned it for "ist".
+        Assert.Equal(new[] { "İstanbul", "istanbul2" }, Strings(r.GetProperty("listedAnswered")));
+        // While the newer text's answer is in flight, the last answer is narrowed locally; the newest answer then replaces it.
+        Assert.Equal(new[] { "istanbul2" }, Strings(r.GetProperty("listedInFlight")));
+        Assert.Equal(new[] { "İstanbul", "istanbul2" }, Strings(r.GetProperty("listedNewest")));
+    }
+
+    [Fact]
     public void ASearchThatIsItselfCut_SaysSo()
     {
         var r = Run("cutSearchCutAndFails");
@@ -291,6 +303,8 @@ public sealed class WebDatabaseFilterPickerBehaviourTests
         // The search callback is optional: a picker that passes none (the wait pickers) behaves as it did.
         Assert.Contains("onSearch = null", multi);
         Assert.Contains("if (onSearch) onSearch(state.search);", multi);
+        // A picker with no `answeredFor` (the wait and perfmon pickers) filters locally, exactly as before.
+        Assert.Contains("answeredFor = null", multi);
         Assert.Contains("setActiveDatabaseFilter({ server: current.server, databases })", server);
         Assert.Contains("onApply: redrawPanels", server);
         Assert.Contains("isPostgresTarget(card)", server);
