@@ -322,8 +322,9 @@ public sealed class DarlingMcpHostService : BackgroundService
         _runningPort = 0;
     }
 
-    /// <summary>Failed-start cleanup: a partially built app / data source / certificate must not leak between attempts.</summary>
-    private async Task DisposeFailedStartAsync()
+    /// <summary>Failed-start cleanup: a partially built app / data source / certificate must not leak between attempts.
+    /// Internal so a test drives the real cleanup against the published certificate state.</summary>
+    internal async Task DisposeFailedStartAsync()
     {
         if (_app is not null)
         {
@@ -339,20 +340,30 @@ public sealed class DarlingMcpHostService : BackgroundService
 
         /* #5288: a start that adopted its certificate (before the port-in-use / credential bails after it) but never
            served TLS must not hold the key until the next full stop, nor leave the worker alerting on a certificate
-           nothing serves. */
-        ReleaseServerCertificate();
+           nothing serves. A refusal or an expired certificate is the exception: the listener is loopback-only on
+           that verdict whether or not the start failed, so it stays published until a successful load replaces it. */
+        ReleaseServerCertificate(failedStart: true);
     }
 
     /// <summary>
     /// Disposes the served certificate, forgets it, and withdraws its published expiry facts (#5288). Best-effort,
     /// so a throw from releasing a key cannot stop the rest of a stop or a failed-start cleanup. Safe to call when
-    /// there is no certificate.
+    /// there is no certificate. <paramref name="failedStart"/> keeps the published verdict when it is a refusal or an
+    /// expired certificate (<see cref="ListenerTlsCertificateState.ClearUnlessRefusal"/>); a stop clears it whatever
+    /// it is.
     /// </summary>
-    private void ReleaseServerCertificate()
+    private void ReleaseServerCertificate(bool failedStart = false)
     {
         try { _serverCertificate?.Dispose(); } catch { /* best-effort */ }
         _serverCertificate = null;
-        _mcpTlsCertState.Clear();
+        if (failedStart)
+        {
+            _mcpTlsCertState.ClearUnlessRefusal(DateTimeOffset.UtcNow);
+        }
+        else
+        {
+            _mcpTlsCertState.Clear();
+        }
     }
 
     /// <summary>

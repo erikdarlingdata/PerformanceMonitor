@@ -326,8 +326,9 @@ public sealed class DarlingWebHostService : BackgroundService
         _runningPort = 0;
     }
 
-    /// <summary>Failed-start cleanup: a partially built app / data source must not leak between attempts.</summary>
-    private async Task DisposeFailedStartAsync()
+    /// <summary>Failed-start cleanup: a partially built app / data source must not leak between attempts.
+    /// Internal so a test drives the real cleanup against the published certificate state.</summary>
+    internal async Task DisposeFailedStartAsync()
     {
         if (_app is not null)
         {
@@ -345,8 +346,10 @@ public sealed class DarlingWebHostService : BackgroundService
         _serverCertificate = null;
 
         /* #3514 follow-up: a start that published its certificate (before the port-in-use / credential
-           bail below it) but never served TLS must not leave the worker alerting on a non-served cert. */
-        _certState.Clear();
+           bail below it) but never served TLS must not leave the worker alerting on a non-served cert.
+           #5288: a refusal or an expired certificate is the exception - the listener is loopback-only on that
+           verdict whether or not the start failed, so it stays published until a successful load replaces it. */
+        _certState.ClearUnlessRefusal(DateTimeOffset.UtcNow);
 
         try { _oidcClient?.Dispose(); } catch { /* best-effort */ }
         _oidcClient = null;

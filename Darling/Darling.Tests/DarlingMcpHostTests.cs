@@ -488,16 +488,20 @@ public sealed class DarlingMcpHostTests
                 "await DisposeFailedStartAsync();", tryStart[..bail.Index].TrimEnd(), StringComparison.Ordinal);
         }
 
-        /* The cleanup itself, and the one release both exits share: dispose, forget, withdraw the published facts. */
-        var release = BodyOf(source, "private void ReleaseServerCertificate()");
+        /* The cleanup itself, and the one release both exits share: dispose, forget, withdraw the published facts.
+           A stop withdraws whatever is published; a failed start keeps a refusal or an expired certificate and
+           withdraws any other (ListenerTlsFailedStartTests drives the behavior). */
+        var release = BodyOf(source, "private void ReleaseServerCertificate(bool failedStart = false)");
         Assert.Contains("_serverCertificate?.Dispose();", release, StringComparison.Ordinal);
         Assert.Contains("_serverCertificate = null;", release, StringComparison.Ordinal);
         Assert.Contains("_mcpTlsCertState.Clear();", release, StringComparison.Ordinal);
-        Assert.Contains("ReleaseServerCertificate();", BodyOf(source, "private async Task DisposeFailedStartAsync()"), StringComparison.Ordinal);
+        Assert.Contains("_mcpTlsCertState.ClearUnlessRefusal(DateTimeOffset.UtcNow);", release, StringComparison.Ordinal);
+        Assert.Contains("ReleaseServerCertificate(failedStart: true);", BodyOf(source, "internal async Task DisposeFailedStartAsync()"), StringComparison.Ordinal);
 
         /* StopServerAsync releases BEFORE its early _app-is-null return, so no path skips it, and again after the
            app has stopped, so a handshake never reaches a key that was already removed. */
         var stop = BodyOf(source, "private async Task StopServerAsync(CancellationToken cancellationToken)");
+        Assert.DoesNotContain("failedStart: true", stop, StringComparison.Ordinal);
         var nullGuard = stop.IndexOf("if (_app is null)", StringComparison.Ordinal);
         var earlyRelease = stop.IndexOf("ReleaseServerCertificate();", StringComparison.Ordinal);
         var earlyReturn = stop.IndexOf("return;", StringComparison.Ordinal);

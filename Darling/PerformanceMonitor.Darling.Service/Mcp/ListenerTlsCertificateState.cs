@@ -91,14 +91,34 @@ public abstract class ListenerTlsCertificateState
         _current = new Snapshot(default, default, string.Empty, string.Empty, RefusedNotYetValid: false, reason ?? string.Empty);
 
     /// <summary>Clears the published snapshot back to "nothing to watch" (the owning host only) - called when the
-    /// host STOPS serving TLS: a runtime disable of the listener, or a failed start after the certificate was
-    /// adopted. A certificate that cannot be loaded is not a clear: see <see cref="PublishLoadRefusal"/>. Without
+    /// host STOPS serving TLS: a runtime disable of the listener. A failed start clears through
+    /// <see cref="ClearUnlessRefusal"/> instead. A certificate that cannot be loaded is not a clear: see
+    /// <see cref="PublishLoadRefusal"/>. Without
     /// this the snapshot is write-once and the worker keeps re-firing the expiry alert about a certificate the
     /// process is no longer serving, with no resolution short of a full restart (#3514 follow-up). The
     /// certificate is published again on the next successful start, so a port-change rebind - where Stop and
     /// Start run back-to-back in one supervisor tick - re-publishes before the worker's next sweep observes
     /// the null, and does not flicker a resolution.</summary>
     public void Clear() => _current = null;
+
+    /// <summary>The failed start's counterpart of <see cref="Clear"/> (the owning host only), for a start that
+    /// adopted a certificate and then stopped short of serving it (port in use, store credential not ready). It
+    /// withdraws the facts of a certificate that was usable, as <see cref="Clear"/> does, so the worker stops
+    /// alerting about a certificate nothing serves. It KEEPS a refusal: a load refusal, a not-yet-valid refusal or an
+    /// expired certificate (<see cref="Snapshot.NotAfterUtc"/> at or before <paramref name="nowUtc"/>). The listener
+    /// is loopback-only on that verdict whether or not the start went on to fail, and a cleared state reads to the
+    /// worker as the healthy "no certificate to watch", which would resolve the Critical alert about it. The verdict
+    /// stays until a successful load publishes over it or the listener is stopped (<see cref="Clear"/>).</summary>
+    public void ClearUnlessRefusal(DateTimeOffset nowUtc)
+    {
+        var current = _current;
+        if (current is null || current.LoadRefusal is not null || current.RefusedNotYetValid || current.NotAfterUtc <= nowUtc)
+        {
+            return;
+        }
+
+        _current = null;
+    }
 
     /// <summary>The latest published snapshot, or null when the host has no TLS certificate to report
     /// (loopback-only, no <c>tls</c> block, a misconfigured one, or after a stop) - read by the worker as
