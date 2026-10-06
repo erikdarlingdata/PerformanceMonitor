@@ -33,23 +33,23 @@ public sealed class ViewerProcedureStatsRow
     public long TotalExecutions { get; set; }
     public long TotalCpuUs { get; set; }
     public long TotalElapsedUs { get; set; }
-    public long TotalLogicalReads { get; set; }
-    public long TotalLogicalWrites { get; set; }
-    public long TotalPhysicalReads { get; set; }
+    public long? TotalLogicalReads { get; set; }
+    public long? TotalLogicalWrites { get; set; }
+    public long? TotalPhysicalReads { get; set; }
     public long MinWorkerTimeUs { get; set; }
     public long MaxWorkerTimeUs { get; set; }
     public long MinElapsedTimeUs { get; set; }
     public long MaxElapsedTimeUs { get; set; }
-    public long MinLogicalReads { get; set; }
-    public long MaxLogicalReads { get; set; }
-    public long MinPhysicalReads { get; set; }
-    public long MaxPhysicalReads { get; set; }
-    public long MinLogicalWrites { get; set; }
-    public long MaxLogicalWrites { get; set; }
-    public long TotalSpills { get; set; }
-    public double AvgSpills { get; set; }
-    public long MinSpills { get; set; }
-    public long MaxSpills { get; set; }
+    public long? MinLogicalReads { get; set; }
+    public long? MaxLogicalReads { get; set; }
+    public long? MinPhysicalReads { get; set; }
+    public long? MaxPhysicalReads { get; set; }
+    public long? MinLogicalWrites { get; set; }
+    public long? MaxLogicalWrites { get; set; }
+    public long? TotalSpills { get; set; }
+    public double? AvgSpills { get; set; }
+    public long? MinSpills { get; set; }
+    public long? MaxSpills { get; set; }
     public DateTime? CachedTime { get; set; }
     public DateTime? LastExecutionTime { get; set; }
     public string SqlHandle { get; set; } = "";
@@ -65,7 +65,7 @@ public sealed class ViewerProcedureStatsRow
     public double TotalElapsedMs => TotalElapsedUs / 1000.0;
     public double AvgCpuMs => TotalExecutions > 0 ? TotalCpuMs / TotalExecutions : 0;
     public double AvgElapsedMs => TotalExecutions > 0 ? TotalElapsedMs / TotalExecutions : 0;
-    public double AvgReads => TotalExecutions > 0 ? (double)TotalLogicalReads / TotalExecutions : 0;
+    public double? AvgReads => TotalLogicalReads is null ? null : TotalExecutions > 0 ? (double)TotalLogicalReads.Value / TotalExecutions : 0;
     public double MinCpuMs => MinWorkerTimeUs / 1000.0;
     public double MaxCpuMs => MaxWorkerTimeUs / 1000.0;
     public double MinElapsedMs => MinElapsedTimeUs / 1000.0;
@@ -146,8 +146,9 @@ public sealed partial class ViewerDataService
     /// <c>DarlingDataReader.GetTopProceduresByCpuRoutedAsync</c> does — the tier decided over
     /// <see cref="RollupCoverage.For"/>'s legacy pair, Daily clamped to Hourly (#4231).
     /// An hourly-routed page carries only what the rollup has: <c>object_type</c>/<c>sql_handle</c>/
-    /// <c>plan_handle</c>/reads/writes/spills columns are unavailable and read as their defaults, exactly the
-    /// same disclosure the MCP payload's <c>tier_used</c>/<c>precision_note</c> make. An hourly-routed page
+    /// <c>plan_handle</c> are empty, and the reads/writes/physical-reads/spills columns the rollup keeps no copy of are
+    /// NULL on the row (#5329), so the grid shows them blank instead of a false 0 — the same disclosure the MCP
+    /// payload's <c>tier_used</c>/<c>precision_note</c> make (null, never 0). An hourly-routed page
     /// also stops BEFORE <paramref name="endUtc"/> (a bucket is stamped at its start, so an end on the hour
     /// does not add the hour that begins there). Use
     /// <see cref="GetTopProceduresByCpuTierAsync"/> to also learn which tier answered.</para>
