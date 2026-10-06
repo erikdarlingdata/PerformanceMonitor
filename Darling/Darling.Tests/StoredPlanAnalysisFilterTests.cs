@@ -81,7 +81,7 @@ public sealed class StoredPlanAnalysisFilterTests
 
     /// <summary>
     /// Every product <c>.cs</c> file under <paramref name="appRoot"/> (not <c>bin</c>, <c>obj</c> or
-    /// <c>deprecated</c>, and not comment lines) is read. The formatter's <c>BuildAnalysisResult</c> may appear exactly
+    /// <c>deprecated</c>) is read with comments and string contents blanked by <c>CSharpSourceWalker</c> is read. The formatter's <c>BuildAnalysisResult</c> may appear exactly
     /// once, qualified, in <paramref name="helperRelativePath"/>: a direct call in any other file, a call through
     /// <c>using static</c> or an alias, and a method group all name it again and so fail.
     /// </summary>
@@ -97,15 +97,11 @@ public sealed class StoredPlanAnalysisFilterTests
             if (parts.Take(parts.Length - 1).Any(p => p is "bin" or "obj" or "deprecated")) continue;
 
             bool isHelper = string.Equals(Path.GetFullPath(file), helper, StringComparison.OrdinalIgnoreCase);
-            foreach (string line in File.ReadLines(file))
+            // Read as code, not by line prefix (#3052): the walker blanks line, block and doc comments and string
+            // contents wherever they sit, so a mention inside a block comment's continuation lines or after code on a
+            // line is judged correctly, and code that follows a closing block comment on its line is still read.
+            foreach (string line in CSharpSourceWalker.StripCommentsAndStrings(File.ReadAllText(file)).Split('\n'))
             {
-                string trimmed = line.TrimStart();
-                if (trimmed.StartsWith("//", StringComparison.Ordinal) || trimmed.StartsWith("*", StringComparison.Ordinal)
-                    || trimmed.StartsWith("/*", StringComparison.Ordinal))
-                {
-                    continue;
-                }
-
                 if (Regex.IsMatch(line, @"\busing\s+static\s+[\w.]*McpPlanAnalysisFormatter\b"))
                     problems.Add(relative + ": using static of the formatter");
 
@@ -146,6 +142,19 @@ public sealed class StoredPlanAnalysisFilterTests
             File.WriteAllText(Path.Combine(root, "Helper.cs"),
                 "// McpPlanAnalysisFormatter.BuildAnalysisResult( is named here\n" + helperLine);
             Assert.Empty(FormatterCallProblems(root, "Helper.cs"));
+
+            // Comments are not code wherever they sit: a block comment's unprefixed continuation lines, a trailing
+            // comment after code, and a string that spells the name are all ignored.
+            File.WriteAllText(Path.Combine(root, "Prose.cs"),
+                "/* McpPlanAnalysisFormatter.BuildAnalysisResult(xml) is the old shape,\n"
+                + "   and this line was once read as code */\n"
+                + "class P { int x = 1; // BuildAnalysisResult( here\n"
+                + "string s = \"BuildAnalysisResult(\"; }");
+            Assert.Empty(FormatterCallProblems(root, "Helper.cs"));
+            // ...but code after a closing block comment on the same line is still code.
+            File.WriteAllText(Path.Combine(root, "Prose.cs"), "/* note */ class P { object o = BuildAnalysisResult(x); }");
+            Assert.NotEmpty(FormatterCallProblems(root, "Helper.cs"));
+            File.Delete(Path.Combine(root, "Prose.cs"));
 
             foreach (string ignored in new[] { "bin", "obj", "deprecated" })
             {
