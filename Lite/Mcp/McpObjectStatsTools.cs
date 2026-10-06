@@ -260,15 +260,33 @@ public sealed class McpObjectStatsTools
             var fetched = await dataService.GetIndexLockingAsync(resolved.ServerId, limit + 1, database);
             var (rows, truncated) = McpHelpers.BoundPage(fetched, limit);
 
-            var optimizedLockingNote = await dataService.GetOptimizedLockingNoteAsync(resolved.ServerId);
+            /* #5372 M2: with a database chosen the optimized-locking note covers only that database, as Darling's
+               twin does, so the same call carries the note in both apps or in neither. */
+            var optimizedLockingNote = await dataService.GetOptimizedLockingNoteAsync(resolved.ServerId, database);
+            var inScope = database is null ? "" : $" in database '{database}'";
 
             if (rows.Count == 0)
             {
+                /* #5372 M2: a chosen database with no contention is a DIFFERENT answer from a server with none (the
+                   server instructions: `empty` is "looked, found nothing", `unavailable` is "could have it, does
+                   not"), so a filtered empty read looks at the whole server once (limit 1, the same anchor), the
+                   probe get_index_usage runs above and Darling's twin runs. */
+                if (database is not null
+                    && (await dataService.GetIndexLockingAsync(resolved.ServerId, 1)).Count > 0)
+                {
+                    return McpHelpers.Status("empty",
+                        $"No lock/latch contention{inScope} on {resolved.ServerName} at the latest snapshot, though other databases on "
+                        + "the server have some. Check the database name against get_database_sizes "
+                        + "— the filter matches exactly, and an excluded or renamed database looks identical to one with no contention."
+                        + (optimizedLockingNote is null ? "" : " " + optimizedLockingNote),
+                        optimizedLockingNote is null ? null : new { optimized_locking_note = optimizedLockingNote });
+                }
+
                 return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "index_object_stats")
                     ?? McpHelpers.Status("unavailable",
                         (database is null
                             ? "No locking/contention data recorded."
-                            : $"No locking/contention data recorded for database '{database}'.")
+                            : $"No locking/contention data recorded for database '{database}', or for any other database on this server.")
                         + " Index/object stats are collected daily."
                         + (optimizedLockingNote is null ? "" : " " + optimizedLockingNote),
                         optimizedLockingNote is null ? null : new { optimized_locking_note = optimizedLockingNote });
@@ -307,13 +325,11 @@ public sealed class McpObjectStatsTools
                 /* #4198: no separate match-count query (unlike get_index_usage) -- BoundPage's over-fetch
                    only OBSERVES "more than limit", not how many more, so the note says that and no more. */
                 note = truncated
-                    ? $"TRUNCATED: more than {rows.Count:N0} indexes have lock/latch contention at the latest "
+                    ? $"TRUNCATED: more than {rows.Count:N0} indexes have lock/latch contention{inScope} at the latest "
                       + "snapshot. Rows are ordered by total wait time (row lock + page lock + page latch + "
                       + "page I/O latch) descending, so the highest-contention indexes are returned first; "
                       + "raise limit to see more."
-                    : database is null
-                        ? "Complete: every index with lock/latch contention at the latest snapshot is included."
-                        : "Complete: every index in this database with lock/latch contention at the latest snapshot is included.",
+                    : $"Complete: every index with lock/latch contention{inScope} at the latest snapshot is included.",
                 optimized_locking_note = optimizedLockingNote,
                 separately_monitored_note = PerformanceMonitorLite.Analysis.SeparatelyMonitoredScope.ListNote(resolved.ServerId),
                 objects = result

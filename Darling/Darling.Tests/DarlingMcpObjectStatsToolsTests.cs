@@ -183,6 +183,23 @@ public sealed class DarlingMcpObjectStatsToolsSurfaceAndSqlTests
     }
 
     /// <summary>
+    /// #5372 L1: the locking list's ORDER BY ends in a total order, lock promotions and then the four-part name, as
+    /// <c>get_index_usage</c> does, so a filtered page capped at the limit is the same rows on every poll. The rows listed
+    /// only for a lock promotion all sum to 0 and tie, which is the case the tiebreaker is for. Lite's twin pins the same
+    /// order by running it (<c>TiedRows_AtTheCap_ComeBackInAFixedOrder</c>).
+    /// </summary>
+    [Fact]
+    public void IndexLockingSql_OrderEndsInATotalOrder_SoATiedCappedPageIsStable()
+    {
+        var sql = DarlingObjectStatsReader.IndexLockingSql;
+        var order = sql[sql.LastIndexOf("ORDER BY", StringComparison.Ordinal)..];
+        SqlTextPin.AssertExpresses(
+            "DESC, COALESCE(ios.index_lock_promotion_count, 0) DESC, ios.database_name, ios.schema_name, ios.table_name, ios.index_name NULLS LAST LIMIT $3",
+            order,
+            "the locking list's order has no tiebreaker: tied rows at the cap can change between two polls");
+    }
+
+    /// <summary>
     /// #3880, Erik's ruling on the call #3878/#3879 recorded: the read PROJECTS its anchor column, so
     /// <c>get_object_locking</c> can stamp the snapshot it answered from. The always-runs half of the live
     /// assertion in <c>DarlingIndexLockingRenamedDatabaseLivePostgresTests</c>: the column is on the row

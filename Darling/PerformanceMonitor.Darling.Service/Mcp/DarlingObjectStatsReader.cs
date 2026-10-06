@@ -459,6 +459,9 @@ internal static class DarlingObjectStatsReader
     /// <c>get_object_locking</c> publishes <c>captured_at</c>. A second <c>MAX(collection_time)</c> read to
     /// fetch the stamp would have been the dishonest alternative: it can resolve to the NEXT capture landing
     /// between the two queries, which is the rule <c>McpLatestSnapshotStampTests</c> pins per read.</para>
+    /// <para>#5372 L1: the order ends in a total one (lock promotions, then database, schema, table and index name, as
+    /// <c>get_index_usage</c> does), so two runs over a set that ties at the cap return the same rows. The rows listed
+    /// only for a lock promotion all sum to 0 and tie.</para>
     /// </summary>
     public const string IndexLockingSql = """
         SELECT
@@ -490,7 +493,9 @@ internal static class DarlingObjectStatsReader
         AND   ($2::text[] IS NULL OR ios.database_name = ANY($2))
         ORDER BY
             COALESCE(ios.row_lock_wait_in_ms, 0) + COALESCE(ios.page_lock_wait_in_ms, 0)
-            + COALESCE(ios.page_latch_wait_in_ms, 0) + COALESCE(ios.page_io_latch_wait_in_ms, 0) DESC
+            + COALESCE(ios.page_latch_wait_in_ms, 0) + COALESCE(ios.page_io_latch_wait_in_ms, 0) DESC,
+            COALESCE(ios.index_lock_promotion_count, 0) DESC,
+            ios.database_name, ios.schema_name, ios.table_name, ios.index_name NULLS LAST
         LIMIT $3
         """;
 

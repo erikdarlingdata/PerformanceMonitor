@@ -115,4 +115,26 @@ public sealed class FinOpsLockingDetailBehaviourTests
         Assert.Equal("Close", Text("closeLabel"));
         Assert.Equal("", Text("afterClose"));
     }
+
+    /* #5372 review M1: renderFinops rebuilds the active tab on every page poll. */
+    [Fact]
+    public void APagePoll_ReopensTheOpenRow_AndLeavesExactlyOneEscapeListener()
+    {
+        Assert.Contains("Db.dbo.one.IX_one", Text("pollBefore"));
+        Assert.Contains("Db.dbo.one.IX_one", Text("pollAfter"));
+        Assert.Equal(["10", "11", "12", "13"], List("pollValues"));
+        Assert.Equal(1, Result.Value.GetProperty("pollListeners").GetInt32());
+        Assert.Equal(1, Result.Value.GetProperty("pollListenersAfterSecond").GetInt32());
+        Assert.Contains("Db.dbo.one.IX_one", Text("pollAfterSecond"));
+    }
+
+    [Fact]
+    public void APagePoll_AbortsTheDetailReadStillRunning_AndRemovesTheOldListener()
+    {
+        Assert.True(Result.Value.GetProperty("slowReadAbortedByRebuild").GetBoolean());
+        Assert.Equal(0, Result.Value.GetProperty("pollListenersAfterAbort").GetInt32());
+    }
+
+    [Fact]
+    public void ARowTheReaderClosed_IsNotReopenedByTheNextPoll() => Assert.Equal("", Text("afterChosenClose"));
 }

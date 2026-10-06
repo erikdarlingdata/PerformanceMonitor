@@ -98,7 +98,8 @@ export const tab = {
       if (e && e.key === "Escape") closeDetail();
     };
 
-    function closeDetail() {
+    /* Stops this build's pane: drops the pending answer, aborts its read, removes its Escape listener. */
+    function stopDetail() {
       generation++;
       if (inflight) inflight.abort();
       inflight = null;
@@ -106,7 +107,19 @@ export const tab = {
         document.removeEventListener("keydown", onKey);
         listening = false;
       }
+    }
+
+    function closeDetail() {
+      stopDetail();
+      choice.detailRow = null;
       mount(pane, []);
+    }
+
+    /* The page poll rebuilds this whole tab (#5372) and aborts the render's signal: the old build is then a dead pane,
+       so its Escape listener and its detail read must not outlive it. The open row stays on the per-server choice
+       (detailRow) and the new build reopens it, so a poll does not close the pane the reader is looking at. */
+    if (ctx && ctx.signal && typeof ctx.signal.addEventListener === "function") {
+      ctx.signal.addEventListener("abort", stopDetail, { once: true });
     }
 
     function paneFrame(row, body) {
@@ -122,6 +135,7 @@ export const tab = {
 
     async function openDetail(row) {
       const mine = ++generation;
+      choice.detailRow = row;
       if (inflight) inflight.abort();
       const controller = new AbortController();
       inflight = controller;
@@ -188,7 +202,9 @@ export const tab = {
       ]);
     }
 
+    const reopen = choice.detailRow;
     show();
+    if (reopen) openDetail(reopen);
     return el("div", {}, [controls, pane, content]);
   },
 };

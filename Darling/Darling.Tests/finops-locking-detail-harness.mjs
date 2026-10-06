@@ -59,12 +59,18 @@ class FakeNode {
 
 globalThis.Node = FakeNode;
 const docHandlers = {};
+/* Every keydown listener still registered on the document: docHandlers keeps only the newest, which hides a leaked older one. */
+const keydownListeners = new Set();
 globalThis.document = {
   createElement: (tag) => new FakeNode(tag),
   createElementNS: (ns, tag) => new FakeNode(tag),
   createTextNode: (text) => new FakeNode("#text", text),
-  addEventListener: (type, fn) => (docHandlers[type] = fn),
+  addEventListener: (type, fn) => {
+    docHandlers[type] = fn;
+    if (type === "keydown") keydownListeners.add(fn);
+  },
   removeEventListener: (type, fn) => {
+    if (type === "keydown") keydownListeners.delete(fn);
     if (docHandlers[type] === fn) delete docHandlers[type];
   },
 };
@@ -91,7 +97,8 @@ const objects = [row("one"), row("slow"), row("fast"), row("bad"), row("gone"), 
 const detailCalls = [];
 let listCalls = 0;
 const counters = (n) => ({ server: "x", detail: { row_lock_count: n, page_lock_count: n + 1, page_latch_wait_count: n + 2, page_io_latch_wait_count: n + 3 } });
-globalThis.fetch = async (url) => {
+let slowSignal = null;
+globalThis.fetch = async (url, init) => {
   const u = String(url);
   const respond = (status, payload) => ({ status, ok: status < 400, text: async () => JSON.stringify(payload) });
   if (u.startsWith("/api/server-databases")) return respond(200, { server: "x", databases: [], truncated: false });
@@ -102,6 +109,7 @@ globalThis.fetch = async (url) => {
   detailCalls.push(u);
   const table = new URLSearchParams(u.split("?")[1]).get("detail_table");
   if (table === "slow") {
+    slowSignal = init && init.signal;
     await new Promise((r) => setTimeout(r, 150));
     return respond(200, counters(1000));
   }
@@ -181,6 +189,46 @@ try {
   close.handlers.click({ type: "click" });
   out.afterClose = pane.textContent;
   out.listCalls = listCalls;
+
+  /* The page poll (#5372): renderFinops builds the tab again and aborts the previous render's signal. The open row survives the
+     rebuild, the old build's Escape listener goes with its signal, and a detail read still running is aborted. */
+  const rowsOf = (r) => findAll(r, (n) => n.tag === "tr").filter((tr) => tr.children.length && tr.children.every((c) => c.tag === "td"));
+  const clickIn = (r, table) => rowsOf(r).find((tr) => tr.children[2].textContent === table).handlers.click({ type: "click" });
+  const c1 = new AbortController();
+  const root1 = tab.build("srv-b", { signal: c1.signal });
+  await wait(60);
+  clickIn(root1, "one");
+  await wait(60);
+  out.pollBefore = root1.children[1].textContent;
+  const c2 = new AbortController();
+  c1.abort();
+  const root2 = tab.build("srv-b", { signal: c2.signal });
+  await wait(60);
+  out.pollAfter = root2.children[1].textContent;
+  out.pollValues = findAll(root2.children[1], (n) => n.tag === "dd").map((n) => n.textContent);
+  out.pollListeners = keydownListeners.size;
+  const c3 = new AbortController();
+  c2.abort();
+  const root3 = tab.build("srv-b", { signal: c3.signal });
+  await wait(60);
+  out.pollListenersAfterSecond = keydownListeners.size;
+  out.pollAfterSecond = root3.children[1].textContent;
+  slowSignal = null;
+  clickIn(root3, "slow");
+  await wait(20);
+  const slowWasLive = slowSignal != null && !slowSignal.aborted;
+  c3.abort();
+  out.slowReadAbortedByRebuild = slowWasLive && slowSignal.aborted;
+  out.pollListenersAfterAbort = keydownListeners.size;
+  // A close the reader chose is forgotten: the next build opens nothing.
+  const c4 = new AbortController();
+  const root4 = tab.build("srv-b", { signal: c4.signal });
+  await wait(260);
+  docHandlers.keydown({ key: "Escape" });
+  c4.abort();
+  const root5 = tab.build("srv-b", { signal: new AbortController().signal });
+  await wait(60);
+  out.afterChosenClose = root5.children[1].textContent;
   console.log(JSON.stringify(out));
 } finally {
   fs.rmSync(scratch, { recursive: true, force: true });
