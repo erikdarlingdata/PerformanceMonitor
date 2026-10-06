@@ -1145,6 +1145,11 @@ GRANT EXECUTE ON FUNCTION {config}.record_custom_alert_resolution(integer, text,
 --     tools/provision-roles.sql, and is told to re-run it when the function is missing.
 {BuildEditMonitoredServerFunctionSql(config)}
 GRANT EXECUTE ON FUNCTION {config}.edit_monitored_server({EditMonitoredServerSignature}) TO {viewer}, {mcp};
+-- The store's own password rules for every role but the owner (see BuildServerPasswordRulesSql): a trigger on
+--     config_monitored_servers that refuses a password reference (env: or file:) and a move that keeps the stored
+--     password. Created here, not in a migration: CREATE OR REPLACE is idempotent and owner-run every start. A
+--     self-managed store gets the same function and trigger from tools/provision-roles.sql.
+{BuildServerPasswordRulesSql(config)}
 
 -- 11. Role memberships (#3914): the three roles hold none. Nothing above grants one, so every membership in which
 --     admin, viewer or mcp is the MEMBER was given by someone else, and each outranks the grants above -- a
@@ -1306,6 +1311,14 @@ BEGIN
    v_secret_auth := lower(v_auth) IN ('sql', 'serviceprincipal');
    v_new_secret := 'encrypted_password' = ANY (p_columns) AND COALESCE(p_secret, '') <> '';
 
+   -- The store takes the password itself from these roles: a secret that starts with env: or file: (a reference,
+   -- compared as the service reads one, case-sensitive and at the start of the text) is refused. References are set
+   -- in the configuration file.
+   IF v_new_secret AND (left(p_secret, 4) = 'env:' OR left(p_secret, 5) = 'file:') THEN
+      RETURN QUERY SELECT 'reference_refused'::text, NULL::timestamp;
+      RETURN;
+   END IF;
+
    -- Any change to how the row connects (host, port, database, read-only intent, authentication mode, username,
    -- encryption, certificate trust, multi-subnet failover) never keeps the stored secret on a row that has one:
    -- the same set the route refuses (#5240). The caller's word is not taken: the change is worked out from the row.
@@ -1357,6 +1370,93 @@ BEGIN
 END;
 $fn$;
 REVOKE ALL ON FUNCTION {config}.edit_monitored_server(integer, timestamp, text[], text, text, integer, text, boolean, text, text, text, text, boolean, boolean, numeric) FROM PUBLIC;";
+
+    /// <summary>
+    /// The store's own password rules for every role but the owner: a <c>BEFORE INSERT OR UPDATE</c> trigger on
+    /// <c>config_monitored_servers</c> and its function. A password that starts with <c>env:</c> or <c>file:</c> (a
+    /// reference, read as <see cref="DarlingSecretSource.IsReference"/> reads it) is refused on insert and on change, and an
+    /// update that changes how the row connects while it keeps a stored password is refused. The owner (the table's
+    /// owner or a superuser: the service, <c>--add-server</c>, the configuration-file seed and the body of
+    /// <c>edit_monitored_server</c>) is not held to either rule, and no existing row is touched. The same text is
+    /// in <c>tools/provision-roles.sql</c> for a self-managed store.
+    /// </summary>
+    internal static string BuildServerPasswordRulesSql(string config) => $@"
+CREATE OR REPLACE FUNCTION {config}.monitored_server_password_rules()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog
+AS $rules$
+DECLARE
+   v_reference_main boolean;
+   v_reference_remediation boolean;
+   v_held boolean;
+BEGIN
+   -- The store owner (the role that owns the table, and a superuser) writes what it writes: the service, the
+   -- --add-server verb, the configuration-file seed, and the body of edit_monitored_server, which runs as the
+   -- function's owner. Every other role is held to the two rules below.
+   IF pg_has_role(current_user, (SELECT c.relowner FROM pg_class AS c WHERE c.oid = TG_RELID), 'USAGE') THEN
+      RETURN NEW;
+   END IF;
+
+   v_reference_main := COALESCE(left(NEW.encrypted_password, 4) = 'env:' OR left(NEW.encrypted_password, 5) = 'file:', false);
+   v_reference_remediation := COALESCE(left(NEW.remediation_encrypted_password, 4) = 'env:' OR left(NEW.remediation_encrypted_password, 5) = 'file:', false);
+
+   IF TG_OP = 'INSERT' THEN
+      -- A new row never holds a reference. The one pass: an upsert's proposed row for a server whose stored value is
+      -- already that exact reference (the row is locked, so it cannot go away before the write), which then meets the
+      -- UPDATE rules below. A role that cannot read or lock the row (viewer, mcp) gets the refusal.
+      IF v_reference_main OR v_reference_remediation THEN
+         v_held := false;
+         BEGIN
+            PERFORM 1
+            FROM {config}.config_monitored_servers AS s
+            WHERE s.server_id = NEW.server_id
+              AND (NOT v_reference_main OR s.encrypted_password = NEW.encrypted_password)
+              AND (NOT v_reference_remediation OR s.remediation_encrypted_password = NEW.remediation_encrypted_password)
+            FOR UPDATE OF s;
+            v_held := FOUND;
+         EXCEPTION WHEN insufficient_privilege THEN
+            v_held := false;
+         END;
+
+         IF NOT v_held THEN
+            RAISE EXCEPTION '%', 'Enter the password itself. References (env: or file:) can only be set in the configuration file.' USING ERRCODE = 'PW001';
+         END IF;
+      END IF;
+
+      RETURN NEW;
+   END IF;
+
+   -- An update never sets a reference.
+   IF (v_reference_main AND NEW.encrypted_password IS DISTINCT FROM OLD.encrypted_password)
+      OR (v_reference_remediation AND NEW.remediation_encrypted_password IS DISTINCT FROM OLD.remediation_encrypted_password) THEN
+      RAISE EXCEPTION '%', 'Enter the password itself. References (env: or file:) can only be set in the configuration file.' USING ERRCODE = 'PW001';
+   END IF;
+
+   -- An update that changes how the row connects (the set edit_monitored_server counts, plus the engine) never keeps
+   -- a stored secret that is still there: the password is typed again with the change.
+   IF (NEW.host IS DISTINCT FROM OLD.host
+       OR NEW.port IS DISTINCT FROM OLD.port
+       OR NEW.engine IS DISTINCT FROM OLD.engine
+       OR NEW.database IS DISTINCT FROM OLD.database
+       OR NEW.read_only_intent IS DISTINCT FROM OLD.read_only_intent
+       OR lower(NEW.auth) IS DISTINCT FROM lower(OLD.auth)
+       OR NEW.username IS DISTINCT FROM OLD.username
+       OR lower(NEW.encrypt_mode) IS DISTINCT FROM lower(OLD.encrypt_mode)
+       OR NEW.trust_server_certificate IS DISTINCT FROM OLD.trust_server_certificate
+       OR NEW.multi_subnet_failover IS DISTINCT FROM OLD.multi_subnet_failover)
+      AND ((COALESCE(OLD.encrypted_password, '') <> '' AND NEW.encrypted_password IS NOT DISTINCT FROM OLD.encrypted_password)
+           OR (COALESCE(OLD.remediation_encrypted_password, '') <> '' AND NEW.remediation_encrypted_password IS NOT DISTINCT FROM OLD.remediation_encrypted_password)) THEN
+      RAISE EXCEPTION '%', 'Changing how this server is reached needs its password again: it is stored encrypted and this surface cannot read it back.' USING ERRCODE = 'PW002';
+   END IF;
+
+   RETURN NEW;
+END;
+$rules$;
+REVOKE ALL ON FUNCTION {config}.monitored_server_password_rules() FROM PUBLIC;
+CREATE OR REPLACE TRIGGER trg_monitored_server_password_rules
+   BEFORE INSERT OR UPDATE ON {config}.config_monitored_servers
+   FOR EACH ROW EXECUTE FUNCTION {config}.monitored_server_password_rules();";
 
     /// <summary>
     /// Fails closed unless <paramref name="secret"/> is a SCRAM-SHA-256 verifier (#3910). This refuses a plain

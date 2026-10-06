@@ -706,4 +706,16 @@ public sealed class ServerEditCoreTests : IDisposable
         Assert.Equal("invalid", answer["status"]!.GetValue<string>());
         Assert.Equal(Edit.EditPasswordNeededText, answer["message"]!.GetValue<string>());
     }
+
+    [Fact]
+    public async Task AStoreThatRefusesAReferenceAsThePassword_GivesTheOneSentenceForIt()
+    {
+        var store = new FakeStore { Row = SqlRow(), WriteResult = Edit.ServerEditWriteKind.ReferenceRefused };
+
+        var answer = JsonNode.Parse(await Run(store, "{\"monthly_cost_usd\":5}"))!;
+
+        Assert.Equal("invalid", answer["status"]!.GetValue<string>());
+        Assert.Equal("Enter the password itself. References (env: or file:) can only be set in the configuration file.", answer["message"]!.GetValue<string>());
+        Assert.Equal(Edit.EditReferenceRefusedText, answer["message"]!.GetValue<string>());
+    }
 }

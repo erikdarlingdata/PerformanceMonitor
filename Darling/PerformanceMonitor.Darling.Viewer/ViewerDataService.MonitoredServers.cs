@@ -457,9 +457,23 @@ ORDER BY COALESCE(s.display_name, c.name)";
         await using var command = new NpgsqlCommand(MonitoredServerUpsertSql, connection, transaction);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         BindMonitoredServer(command, row);
-        await ExecuteWriteAsync(command, cancellationToken);
+        try
+        {
+            await ExecuteWriteAsync(command, cancellationToken);
+        }
+        catch (PostgresException ex) when (ex.SqlState == StoreMovedKeepingPasswordSqlState)
+        {
+            /* The store's own rule (a trigger on the table) refused a change of how the server is reached that keeps the
+               stored password: the same answer as the check above, for the connection fields it does not look at. */
+            throw new MonitoredServerPasswordNeededException();
+        }
+
         await transaction.CommitAsync(cancellationToken);
     }
+
+    /// <summary>The SQLSTATE the store's trigger on <c>config_monitored_servers</c> raises for a change of how a server is
+    /// reached that keeps its stored password.</summary>
+    internal const string StoreMovedKeepingPasswordSqlState = "PW002";
 
     /// <summary>The sentence a refused move gives: the same text the web and MCP edit answer with
     /// (<c>DarlingMcpServerAdminTools.EditPasswordNeededText</c>), because this project cannot reference the service.

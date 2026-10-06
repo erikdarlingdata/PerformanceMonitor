@@ -102,6 +102,11 @@ public sealed partial class DarlingMcpServerAdminTools
     internal const string EditPasswordNeededText =
         "Changing how this server is reached needs its password again: it is stored encrypted and this surface cannot read it back.";
 
+    /// <summary>The answer when the store refuses a password that is a reference (env: or file:): the store takes the
+    /// password itself from the viewer, admin and MCP roles. The same words in the store's own trigger and edit function.</summary>
+    internal const string EditReferenceRefusedText =
+        "Enter the password itself. References (env: or file:) can only be set in the configuration file.";
+
     /// <summary>The fixed answer when the store has no edit function the calling role may run (#5240): a self-managed store
     /// whose roles were provisioned before the function existed. Never PostgreSQL's own text.</summary>
     internal const string EditStoreNeedsRolesText =
@@ -344,6 +349,9 @@ public sealed partial class DarlingMcpServerAdminTools
                 /* The store's own check: a move of host or port that keeps the stored secret. The plan refuses it first, so
                    this is the answer when the two ever read the row differently, and it is the same sentence. */
                 return Outcome(EditStatus.Invalid, EditPasswordNeededText);
+            case ServerEditWriteKind.ReferenceRefused:
+                /* The store's own check of a new password: it never takes a reference from this role. */
+                return Outcome(EditStatus.Invalid, EditReferenceRefusedText);
             case ServerEditWriteKind.Conflict:
                 /* Same shape as the pre-probe conflict: the current non-secret values, so the caller can retry. */
                 if (await store.ReadRowAsync(serverId, cancellationToken) is { } currentRow)
@@ -879,7 +887,7 @@ public sealed partial class DarlingMcpServerAdminTools
     /// <summary><c>Occupied</c>: another definition holds the address the edit moves to. <c>ActualOccupied</c>: another
     /// definition holds the storage key the probe's connected database gives (#5240), the refusal
     /// <see cref="ActualIdentityCollision"/> gives before the write. Neither commits.</summary>
-    internal enum ServerEditWriteKind { Written, NotFound, Conflict, Occupied, PasswordNeeded, ActualOccupied }
+    internal enum ServerEditWriteKind { Written, NotFound, Conflict, Occupied, PasswordNeeded, ActualOccupied, ReferenceRefused }
 
     internal sealed record ServerEditWrite(ServerEditWriteKind Kind, DateTime ModifiedAt);
 
@@ -1069,6 +1077,8 @@ FROM config_monitored_servers WHERE server_id = $1";
                     return new ServerEditWrite(ServerEditWriteKind.Conflict, expectedModifiedAt);
                 case "password_needed":
                     return new ServerEditWrite(ServerEditWriteKind.PasswordNeeded, expectedModifiedAt);
+                case "reference_refused":
+                    return new ServerEditWrite(ServerEditWriteKind.ReferenceRefused, expectedModifiedAt);
                 case "saved":
                     break;
                 default:

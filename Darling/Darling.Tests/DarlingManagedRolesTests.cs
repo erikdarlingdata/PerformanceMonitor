@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Text.RegularExpressions;
 using PerformanceMonitor.Darling.Service;
+using PerformanceMonitor.Darling.Storage;
 using Xunit;
 
 namespace Darling.Tests;
@@ -98,6 +99,31 @@ public sealed class DarlingManagedRolesTests
         Assert.DoesNotMatch(@"GRANT[^;]*\bUPDATE\b[^;]*ON config\.config_monitored_servers TO [^;]*viewer", byo);
         Assert.Single(Regex.Matches(byo, @"REVOKE UPDATE ON config\.config_monitored_servers FROM [^;]*viewer[^;]*;"));
         Assert.Contains(EditRevoke, byo, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The store's password rules (a trigger on <c>config_monitored_servers</c> and its function) are provisioning, not a
+    /// migration, so a managed store gets them from the batch on every start and a self-managed store from the script: the
+    /// same text in both, created idempotently, and nothing in the migrations that would move the schema version.
+    /// </summary>
+    [Fact]
+    public void TheByoScript_CarriesTheSamePasswordRules_AsTheManagedBatch()
+    {
+        var byo = Regex.Replace(RepoFile.ReadRepoFile("Darling", "tools", "provision-roles.sql"), @"(?m)^\s*--.*$", "");
+        var rules = DarlingManagedRoles.BuildServerPasswordRulesSql("config");
+        var batch = DarlingManagedRoles.BuildProvisioningSql(ProvisioningTestSecrets.Admin, ProvisioningTestSecrets.Viewer, ProvisioningTestSecrets.Mcp);
+
+        Assert.Contains(NormalizeSql(rules), NormalizeSql(byo), StringComparison.Ordinal);
+        Assert.Contains(rules, batch, StringComparison.Ordinal);
+        Assert.Contains("CREATE OR REPLACE FUNCTION config.monitored_server_password_rules()", rules, StringComparison.Ordinal);
+        Assert.Contains("CREATE OR REPLACE TRIGGER trg_monitored_server_password_rules", rules, StringComparison.Ordinal);
+        Assert.Contains("BEFORE INSERT OR UPDATE ON config.config_monitored_servers", rules, StringComparison.Ordinal);
+        Assert.DoesNotContain("monitored_server_password_rules", PgMigrations.Scripts.Aggregate("", (all, script) => all + script.Sql), StringComparison.Ordinal);
+
+        /* The edit function refuses a reference in the same two spellings the service reads. */
+        var function = DarlingManagedRoles.BuildEditMonitoredServerFunctionSql("config");
+        Assert.Contains("left(p_secret, 4) = 'env:' OR left(p_secret, 5) = 'file:'", function, StringComparison.Ordinal);
+        Assert.Contains("'reference_refused'", function, StringComparison.Ordinal);
     }
 
     [Fact]
