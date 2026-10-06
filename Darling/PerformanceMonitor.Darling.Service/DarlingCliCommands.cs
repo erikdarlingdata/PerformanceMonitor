@@ -498,6 +498,21 @@ public static class DarlingCliCommands
             return config.Servers;
         }
 
+        /* #5366: the pins that let an old-format saved password open are readable only as the store owner (row security
+           hides them from any other role). On a connection that is not the owner those servers cannot be checked, which is
+           not the same as their password needing to be entered again, so they are left out and the note says so. */
+        if (!await CanReadLegacyPinsAsync(connection, cancellationToken))
+        {
+            var notChecked = registryServers
+                .Where(s => s.RequiresResolvedSecret && DarlingSecrets.IsLegacyDpapi(s.EncryptedPassword) && !s.EncryptedPasswordDeclaredByFile)
+                .ToList();
+            if (notChecked.Count > 0)
+            {
+                output.WriteLine(OldFormatPasswordsNotCheckedText(notChecked.Count));
+                registryServers = registryServers.Where(s => !notChecked.Contains(s)).ToList();
+            }
+        }
+
         var registryNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var server in registryServers)
         {
@@ -516,6 +531,31 @@ public static class DarlingCliCommands
         }
 
         return registryServers;
+    }
+
+    /// <summary>The note <c>--validate-config</c> prints when its store connection is not the store owner, so the saved
+    /// passwords in the old format of <paramref name="count"/> server(s) were not checked (#5366).</summary>
+    internal static string OldFormatPasswordsNotCheckedText(int count) =>
+        $"NOTE: this connection is not the store owner, so the saved passwords of {count.ToString(System.Globalization.CultureInfo.InvariantCulture)} "
+        + "server(s) in the old format could not be checked and those server(s) were not tested. Run the verb with the service's own store connection to check them.";
+
+    /// <summary>True when this session may read the pins that old-format saved passwords are matched to: it is the owner of the
+    /// pin table, or the store has no such table yet. Never throws for a store answer.</summary>
+    internal static async Task<bool> CanReadLegacyPinsAsync(NpgsqlConnection connection, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await using var command = new NpgsqlCommand(
+                "SELECT pg_has_role(session_user, c.relowner, 'MEMBER') FROM pg_catalog.pg_class c " +
+                "WHERE c.oid = pg_catalog.to_regclass('config.legacy_secret_pin')", connection)
+            { CommandTimeout = ServiceCommandDeadlines.SerialLoopSeconds };
+            var answer = await command.ExecuteScalarAsync(cancellationToken);
+            return answer is null or DBNull || (answer is bool owner && owner);
+        }
+        catch (PostgresException)
+        {
+            return false;
+        }
     }
 
     /// <summary>What <see cref="ResolveValidationTargetsAsync"/> tells the operator about the list it settled on, worded for the
@@ -5696,14 +5736,22 @@ public static class DarlingCliCommands
         output.WriteLine();
 
         string resultJson;
+        string? sealNotice = null;
         try
         {
             await using var dataSource = NpgsqlDataSource.Create(
                 DarlingStoreConnection.PinSessionTimeZoneUtc(
                     DarlingStoreConnection.WithApplicationName(connectionString, DarlingManagedPostgres.CliApplicationName)));
-            /* Typed at the host's own command line, not a request: a password here may be an env:/file: reference, the
-               way the configuration file's is (DarlingMcpServerAdminTools.AddServersFromHostCommandLineAsync). */
-            resultJson = await DarlingMcpServerAdminTools.AddServersFromHostCommandLineAsync(dataSource, json);
+            /* #5366: a literal password is sealed with the key the service keeps (DarlingCliSealKey: the key file read
+               only, else the key the store publishes). Typed at the host's own command line, not a request: a password
+               here may be an env:/file: reference, the way the configuration file's is
+               (DarlingMcpServerAdminTools.AddServersFromHostCommandLineAsync). */
+            var sealKey = await DarlingCliSealKey.ResolveAsync(config, DarlingConfig.ResolveConfigPath(configPath), dataSource, null, cancellationToken);
+            resultJson = await DarlingMcpServerAdminTools.AddServersFromHostCommandLineAsync(dataSource, json, sealKey.Ring);
+            if (sealKey.Ring is DarlingCliSealKey.PublishedKeyRing { SealedCount: > 0 } && sealKey.Notice is not null)
+            {
+                sealNotice = sealKey.Notice;
+            }
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -5715,6 +5763,12 @@ public static class DarlingCliCommands
         foreach (var line in lines)
         {
             output.WriteLine(line);
+        }
+
+        if (sealNotice is not null)
+        {
+            output.WriteLine();
+            output.WriteLine(sealNotice);
         }
 
         return exitCode;

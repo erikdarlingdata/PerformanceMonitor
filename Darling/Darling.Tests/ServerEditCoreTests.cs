@@ -16,6 +16,7 @@ using Microsoft.Extensions.Logging;
 using NpgsqlTypes;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Service;
+using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Darling.Service.Mcp;
 using Xunit;
 using Edit = PerformanceMonitor.Darling.Service.Mcp.DarlingMcpServerAdminTools;
@@ -98,8 +99,8 @@ public sealed class ServerEditCoreTests : IDisposable
             Lines.Add(formatter(state, exception));
     }
 
-    private static Task<string> Run(FakeStore store, string changes, Edit.ServerProbe? probe = null, bool isWindows = true, ILogger? logger = null) =>
-        Edit.EditServerCoreAsync(store, 41, changes, probe ?? ThrowingProbe, isWindows, logger, CancellationToken.None);
+    private static Task<string> Run(FakeStore store, string changes, Edit.ServerProbe? probe = null, IPasswordKeyRing? ring = null, ILogger? logger = null) =>
+        Edit.EditServerCoreAsync(store, 41, changes, probe ?? ThrowingProbe, ring ?? TestKeyRings.Healthy, logger, CancellationToken.None);
 
     private static string Status(string answer) => JsonNode.Parse(answer)!["status"]!.GetValue<string>();
 
@@ -239,11 +240,11 @@ public sealed class ServerEditCoreTests : IDisposable
 
     /* ---------------- plan: the credential rules ---------------- */
 
-    private static (Edit.ServerEditPlan? Plan, string? Error) Plan(Edit.ServerEditRow row, string json, bool isWindows = true)
+    private static (Edit.ServerEditPlan? Plan, string? Error) Plan(Edit.ServerEditRow row, string json, PasswordKeyStatus? key = null)
     {
         var (changes, error) = Edit.ParseEditChanges(json);
         Assert.Null(error);
-        return Edit.PlanEdit(row, changes!, isWindows);
+        return Edit.PlanEdit(row, changes!, key ?? TestKeyRings.Healthy.Status);
     }
 
     [Fact]
@@ -408,12 +409,12 @@ public sealed class ServerEditCoreTests : IDisposable
     }
 
     [Fact]
-    public void ALiteralSecret_OffWindows_IsRefused_AsAddRefusesIt_AndTheTextNeverHoldsIt()
+    public void ALiteralSecret_WhileTheKeyIsNotReady_IsRefused_AsAddRefusesIt_AndTheTextNeverHoldsIt()
     {
-        var (plan, error) = Plan(SqlRow(), "{\"host\":\"b.example.test\",\"password\":\"" + LiteralSecret + "\"}", isWindows: false);
+        var (plan, error) = Plan(SqlRow(), "{\"host\":\"b.example.test\",\"password\":\"" + LiteralSecret + "\"}", TestKeyRings.NotReady.Status);
 
         Assert.Null(plan);
-        Assert.Equal(Edit.LiteralSecretRefusal(LiteralSecret, isWindows: false, isServicePrincipal: false), error);
+        Assert.Equal(Edit.LiteralSecretRefusal(LiteralSecret, TestKeyRings.NotReady.Status, isServicePrincipal: false), error);
         Assert.DoesNotContain(LiteralSecret, error, StringComparison.Ordinal);
     }
 
@@ -598,8 +599,17 @@ public sealed class ServerEditCoreTests : IDisposable
         await Run(store, "{\"host\":\"b.example.test\",\"password\":\"" + Secret + "\"}", Reachable);
 
         var stored = Assert.Single(store.LastSets, s => s.Column == "encrypted_password");
-        Assert.Equal(Secret, DarlingSecrets.Unprotect((string)stored.Value!));
+        /* Sealed for the connection the row has after the edit: the new host, everything else as the row held it. */
+        var row = SqlRow();
+        var binding = PasswordBinding.ForServer(ServerConnectionIdentity.FromStoredColumns(
+            "b.example.test", row.Port, row.Engine, row.Database, row.ReadOnlyIntent, row.Auth, row.Username, row.EncryptMode,
+            row.TrustServerCertificate, row.MultiSubnetFailover));
+        Assert.Equal(Secret, TestKeyRings.Healthy.Open((string)stored.Value!, binding));
         Assert.NotEqual(Secret, stored.Value);
+        var movedAgain = PasswordBinding.ForServer(ServerConnectionIdentity.FromStoredColumns(
+            row.Host, row.Port, row.Engine, row.Database, row.ReadOnlyIntent, row.Auth, row.Username, row.EncryptMode,
+            row.TrustServerCertificate, row.MultiSubnetFailover));
+        Assert.Throws<PasswordSealException>(() => { _ = TestKeyRings.Healthy.Open((string)stored.Value!, movedAgain); });
     }
 
     [Fact]
@@ -617,7 +627,7 @@ public sealed class ServerEditCoreTests : IDisposable
         answers.Add(await Run(new FakeStore { Row = SqlRow() }, "{\"engine\":\"postgres\"," + secretBody + "}", Reachable, logger: logger));
         answers.Add(await Run(new FakeStore { Row = SqlRow() }, "{\"passwrd\":\"" + Secret + "\"}", Reachable, logger: logger));
         answers.Add(await Run(new FakeStore { Row = SqlRow(), WriteResult = Edit.ServerEditWriteKind.Conflict }, "{\"host\":\"b.example.test\"," + secretBody + "}", Reachable, logger: logger));
-        answers.Add(await Run(new FakeStore { Row = SqlRow() }, "{\"host\":\"b.example.test\",\"password\":\"" + LiteralSecret + "\"}", Reachable, isWindows: false, logger: logger));
+        answers.Add(await Run(new FakeStore { Row = SqlRow() }, "{\"host\":\"b.example.test\",\"password\":\"" + LiteralSecret + "\"}", Reachable, ring: TestKeyRings.NotReady, logger: logger));
 
         Assert.Equal(9, answers.Count);
         Assert.All(answers, a =>

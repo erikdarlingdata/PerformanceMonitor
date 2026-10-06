@@ -183,35 +183,64 @@ public sealed class PasswordBindingCensusTests
     }
 
     [Fact]
-    public void Identity_Differ_answers_as_the_edit_and_connection_test_rule_does_for_every_field()
+    public void Identity_Differ_compares_each_field_by_its_rule()
     {
-        var pairs = new List<(ServerConnectionIdentity A, ServerConnectionIdentity B)> { (Base, Base) };
-        pairs.AddRange(OneFieldChanged().Values.Select(c => (Base, c)));
-        pairs.Add((Base, Base with { Host = "EXAMPLE-SQL-01" }));
-        pairs.Add((Base, Base with { Username = "EXAMPLE_LOGIN" }));
-        pairs.Add((Base, Base with { Database = "EXAMPLE_DB" }));
-        pairs.Add((Base, Base with { Database = null }));
-        pairs.Add((Base with { Database = null }, Base with { Database = "" }));
-        pairs.Add((Base, Base with { Auth = "SQL" }));
-        pairs.Add((Base, Base with { EncryptMode = "MANDATORY" }));
-        pairs.Add((Base, Base with { Engine = "SQLSERVER" }));
-        pairs.Add((Base, Base with { Host = "example-sql-01 " }));
-
-        foreach (var (a, b) in pairs)
+        Assert.False(ServerConnectionIdentity.Differ(Base, Base));
+        foreach (var (field, changed) in OneFieldChanged())
         {
-            var settingsDiffer = DarlingMcpServerAdminTools.ConnectionSettingsDiffer(Settings(a), Settings(b));
-
-            Assert.Equal(settingsDiffer, ServerConnectionIdentity.Differ(a, b));
-            Assert.Equal(settingsDiffer, ServerConnectionIdentity.Differ(b, a));
+            Assert.True(ServerConnectionIdentity.Differ(Base, changed), field + " does not make two connections differ");
+            Assert.True(ServerConnectionIdentity.Differ(changed, Base), field + " is not symmetric");
         }
 
-        Assert.False(ServerConnectionIdentity.Differ(Base, Base with { Auth = "SQL", EncryptMode = "MANDATORY", Engine = "SQLSERVER" }));
+        /* Host, username and database are ordinal. */
         Assert.True(ServerConnectionIdentity.Differ(Base, Base with { Host = "EXAMPLE-SQL-01" }));
+        Assert.True(ServerConnectionIdentity.Differ(Base, Base with { Host = "example-sql-01 " }));
+        Assert.True(ServerConnectionIdentity.Differ(Base, Base with { Username = "EXAMPLE_LOGIN" }));
+        Assert.True(ServerConnectionIdentity.Differ(Base, Base with { Database = "EXAMPLE_DB" }));
+        Assert.True(ServerConnectionIdentity.Differ(Base, Base with { Database = null }));
+
+        /* Authentication, encrypt mode and engine ignore case. */
+        Assert.False(ServerConnectionIdentity.Differ(Base, Base with { Auth = "SQL", EncryptMode = "MANDATORY", Engine = "SQLSERVER" }));
     }
 
-    private static ServerConnectionSettings Settings(ServerConnectionIdentity c) =>
-        new(c.Host, c.Port, c.Engine, c.Database, c.ReadOnlyIntent, c.Auth, c.Username, c.EncryptMode,
-            c.TrustServerCertificate, c.MultiSubnetFailover);
+    /// <summary>
+    /// "Two connections differ" is <see cref="ServerConnectionIdentity.Differ"/> and nothing else (#5366): the edit core,
+    /// the connection test, the file matching and the Viewer all use it. This reads every source file under Darling
+    /// (tests and build output left out) and finds no other comparison of the trust or multi-subnet flags, and none of the
+    /// deleted types or helper names. The worker's own reconnect check compares the whole definition, secrets and display
+    /// name included, so it is the one allowed exception.
+    /// </summary>
+    [Fact]
+    public void No_other_connection_predicate_remains_under_Darling()
+    {
+        var darling = Path.GetFullPath(Path.Combine(Path.GetDirectoryName(ThisFile())!, ".."));
+        var allowed = new HashSet<string>(StringComparer.Ordinal) { "ServerConnectionIdentity.cs", "DarlingWorker.cs" };
+        var flagCompare = new Regex(@"\b(TrustServerCertificate|MultiSubnetFailover)\s*(!=|==)", RegexOptions.CultureInvariant);
+        var offenders = new List<string>();
+        foreach (var file in Directory.EnumerateFiles(darling, "*.cs", SearchOption.AllDirectories))
+        {
+            var relative = Path.GetRelativePath(darling, file).Replace('\\', '/');
+            if (relative.StartsWith("Darling.Tests/", StringComparison.Ordinal)
+                || relative.Contains("/obj/", StringComparison.Ordinal) || relative.Contains("/bin/", StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            var text = File.ReadAllText(file);
+            if (text.Contains("ConnectionSettingsDiffer", StringComparison.Ordinal)
+                || Regex.IsMatch(text, @"\bServerConnectionSettings\b")
+                || (!allowed.Contains(Path.GetFileName(file)) && flagCompare.IsMatch(text)))
+            {
+                offenders.Add(relative);
+            }
+        }
+
+        Assert.True(
+            offenders.Count == 0,
+            "Another connection comparison exists besides ServerConnectionIdentity.Differ: " + string.Join(", ", offenders));
+    }
+
+    private static string ThisFile([CallerFilePath] string thisFile = "") => thisFile;
 
     [Fact]
     public void The_associated_data_is_the_label_key_id_purpose_and_fields_each_with_a_four_byte_length()
