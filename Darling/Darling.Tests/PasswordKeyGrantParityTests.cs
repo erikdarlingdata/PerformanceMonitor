@@ -23,9 +23,9 @@ public sealed class PasswordKeyGrantParityTests
 {
     private static readonly string[] Placeholders = { "admin", "viewer", "mcp", "config" };
 
-    private static string Managed => RepoFile.ReadRepoFileLf("Darling", "PerformanceMonitor.Darling.Service", "DarlingManagedRoles.cs");
+    private static string Managed => RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingManagedRoles.cs");
 
-    private static string Script => RepoFile.ReadRepoFileLf("Darling", "tools", "provision-roles.sql");
+    private static string Script => RepoFile.ReadRepoFile("Darling", "tools", "provision-roles.sql");
 
     /// <summary>The statement starting at <paramref name="start"/> up to its semicolon, placeholders spelled as the script spells them, whitespace folded.</summary>
     private static string Normalise(string text, int start)

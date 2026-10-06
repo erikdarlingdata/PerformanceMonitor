@@ -555,7 +555,7 @@ public static class DarlingCliCommands
             await using var command = new NpgsqlCommand(
                 "SELECT pg_has_role(session_user, c.relowner, 'MEMBER') FROM pg_catalog.pg_class c " +
                 "WHERE c.oid = pg_catalog.to_regclass('config.legacy_secret_pin')", connection)
-            { CommandTimeout = ServiceCommandDeadlines.SerialLoopSeconds };
+            { CommandTimeout = ServiceCommandDeadlines.CliStoreReadSeconds };
             var answer = await command.ExecuteScalarAsync(cancellationToken);
             return answer is null or DBNull || (answer is bool owner && owner);
         }

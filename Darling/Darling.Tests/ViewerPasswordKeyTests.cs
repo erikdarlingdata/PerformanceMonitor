@@ -220,11 +220,11 @@ public sealed class ViewerPasswordKeyTests : IDisposable
         var sealer = new ViewerPasswordSealer(_key.PublicKey);
         var cache = new ViewerSealCache();
         var one = Row("alpha-sql");
-        one.Username = "monitormandatory";
+        one.Username = "monitor\u001Fmandatory";
         one.EncryptMode = "optional";
         var other = Row("alpha-sql");
         other.Username = "monitor";
-        other.EncryptMode = "mandatoryoptional";
+        other.EncryptMode = "mandatory\u001Foptional";
 
         var first = cache.GetOrSeal(sealer, "p@ss-not-real", one);
         var second = cache.GetOrSeal(sealer, "p@ss-not-real", other);
