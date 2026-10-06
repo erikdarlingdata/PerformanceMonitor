@@ -311,6 +311,13 @@ public sealed partial class ViewerDataService
     /// already projected so a reader can tell those rows apart. Collapsing them would change what this
     /// drilldown displays, which is a product call rather than an arithmetic fix — left to #1841 tier 2 along
     /// with storing the real interval identity. Mirrors Lite's GetQueryStoreHistoryAsync.</para>
+    ///
+    /// <para>The window that shows it did add these rows up, though: its summary's Total Executions summed
+    /// execution_count over the list, which counts an interval collected N times about N times (#5306). A
+    /// total over this list takes <see cref="ViewerQueryStoreHistoryRow.TotalExecutions"/>, which keeps the
+    /// latest snapshot of each interval first. That is why the projection ends with runtime_stats_interval_id and
+    /// replica_role: they are the rest of the identity the aggregate reads dedup on, and are not shown in the grid.
+    /// The grid itself still lists every snapshot.</para>
     /// </summary>
     public const string QueryStoreHistorySql = """
         SELECT
@@ -363,7 +370,9 @@ public sealed partial class ViewerDataService
             plan_forcing_type,
             compatibility_level,
             query_hash,
-            query_plan_hash
+            query_plan_hash,
+            runtime_stats_interval_id,
+            replica_role
         FROM query_store_stats
         WHERE server_id = $1
         AND   database_name = $2
@@ -443,6 +452,8 @@ public sealed partial class ViewerDataService
                 CompatibilityLevel = ReadInt(reader, 47),
                 QueryHash = reader.IsDBNull(48) ? "" : reader.GetString(48),
                 QueryPlanHash = reader.IsDBNull(49) ? "" : reader.GetString(49),
+                RuntimeStatsIntervalId = reader.IsDBNull(50) ? null : ReadLong(reader, 50),
+                ReplicaRole = reader.IsDBNull(51) ? null : reader.GetString(51),
             });
         }
 
