@@ -1,0 +1,156 @@
+/*
+ * Copyright (c) 2026 Erik Darling, Darling Data LLC
+ *
+ * This file is part of the SQL Server Performance Monitor.
+ *
+ * Licensed under the MIT License. See LICENSE file in the project root for full license information.
+ */
+
+/*
+ * The server page's database filter (#5245, part of #5244): a toolbar button ("Databases: All", "Databases: 2 of 37") and a
+ * popover on multi-picker.js, the web twin of the desktop viewer's database picker. The choice is per browser and per server
+ * (viewer-local.js); the page applies it to every read that can take it (util.js, database-filter-reads.js).
+ *
+ * Apply stores EXACTLY the checked set (desktop parity). A checked set is never turned into "All" because every offered name is
+ * checked: the offered list leaves out master, model, msdb and tempdb, so "all offered" is not "all". Only the "All databases"
+ * button, or an Apply with nothing checked, clears the filter. A stored name the inventory no longer offers stays checked and
+ * listed (multi-picker.js lists a checked value after the options), so a database that was dropped can still be unchecked. A
+ * check past 50 names or past the encoded byte budget is refused with a sentence. Every name reaches the DOM through el's text
+ * path or a property setter, never as HTML.
+ *
+ * The inventory comes from /api/server-databases when the popover opens. The label reads "Databases: 2" until an inventory
+ * has loaded and "Databases: 2 of 37" after (the desktop sets its total only when its popup opens, so before the first open
+ * it would read "2 of 2").
+ *
+ * The 60 s poll rebuilds the page head, so the open flag, the loaded inventories and the picker's draft live at module scope,
+ * and a rebuilt control opens where the old one was.
+ */
+
+import { el, mount, apiGet } from "../util.js";
+import { multiPicker, pickerState } from "../multi-picker.js";
+import { getDatabaseFilter, setDatabaseFilter, MAX_DB_NAMES, MAX_DB_QUERY_BYTES, databaseQueryBytes } from "../viewer-local.js";
+
+const inventories = new Map(); // server_id -> the database names the store offers
+let openFor = null; // the server_id whose popover is open
+let loadFailed = ""; // the sentence for the last failed inventory load of the open popover
+
+const pickerKey = (serverId) => "database-filter:" + serverId;
+
+/** The button's text: "Databases: All", "Databases: 2" (no inventory yet) or "Databases: 2 of 37". */
+export function databaseFilterLabel(chosen, offered) {
+  if (!chosen) return "Databases: All";
+  return offered == null ? "Databases: " + chosen : "Databases: " + chosen + " of " + offered;
+}
+
+/** The control for a server whose card is not known (the first paint's fleet read failed): disabled, and no filter is active. */
+export function databaseFilterUnavailable() {
+  return el("span", { class: "db-filter" }, [
+    el("button", { type: "button", class: "btn db-filter-button", disabled: true, text: "Databases: unavailable" }),
+  ]);
+}
+
+/** The refusal sentence for checking `value` on top of `checked` when the encoded query part would pass its budget, else null. */
+function byteRefusal(value, checked) {
+  let bytes = databaseQueryBytes(value);
+  for (const n of checked) bytes += databaseQueryBytes(n);
+  return bytes > MAX_DB_QUERY_BYTES ? "These names would make the request too long: uncheck a database to pick another." : null;
+}
+
+/**
+ * The button and its popover for one server. `serverId` keys the stored choice and `server` is the route's key the inventory
+ * route takes. `onApply` runs once per Apply or "All databases", after the choice is stored.
+ */
+export function databaseFilterControl({ serverId, server, onApply }) {
+  const key = pickerKey(serverId);
+  const button = el("button", { type: "button", class: "btn db-filter-button", "aria-haspopup": "dialog", "aria-expanded": "false" });
+  const popover = el("div", { class: "db-filter-popover", role: "dialog", "aria-label": "Databases" });
+  popover.hidden = true;
+  const node = el("span", { class: "db-filter" }, [button, popover]);
+
+  const paintLabel = () => {
+    const inv = inventories.get(serverId);
+    button.textContent = databaseFilterLabel(getDatabaseFilter(serverId).length, inv ? inv.length : null);
+  };
+
+  let picker = null;
+  const paintPopover = () => {
+    const isOpen = openFor === serverId;
+    popover.hidden = !isOpen;
+    button.setAttribute("aria-expanded", isOpen ? "true" : "false");
+    if (!isOpen) return;
+    const inv = inventories.get(serverId);
+    if (!inv && !loadFailed) {
+      mount(popover, el("div", { class: "db-filter-loading", text: "Loading databases..." }));
+      return;
+    }
+    const message = el("div", { class: "db-filter-message", role: "alert", text: loadFailed });
+    picker = multiPicker({
+      key,
+      label: "Databases",
+      options: inv || [],
+      max: MAX_DB_NAMES,
+      noun: "database",
+      selectAll: false,
+      defaultsLabel: null,
+      defaults: () => [],
+      refuse: byteRefusal,
+      onChange: () => {
+        message.textContent = "";
+      },
+    });
+    const finish = (names) => {
+      if (!setDatabaseFilter(serverId, names)) {
+        message.textContent = "That set of databases is too large to keep. Uncheck some and apply again.";
+        return;
+      }
+      openFor = null;
+      paintLabel();
+      paintPopover();
+      onApply();
+    };
+    const all = el("button", { type: "button", class: "btn db-filter-all", text: "All databases", onClick: () => finish([]) });
+    const apply = el("button", { type: "button", class: "btn db-filter-apply", text: "Apply", onClick: () => finish(picker.checked()) });
+    mount(popover, [picker.node, message, el("div", { class: "db-filter-actions" }, [all, apply])]);
+    picker.restoreFocus();
+  };
+
+  const load = async () => {
+    loadFailed = "";
+    const res = await apiGet("/api/server-databases?server=" + encodeURIComponent(server));
+    if (res.kind === "data" && res.data && Array.isArray(res.data.databases)) {
+      inventories.set(serverId, res.data.databases.filter((d) => typeof d === "string"));
+    } else if (res.kind !== "aborted") {
+      loadFailed = "The list of databases could not be loaded" + (res.message ? ": " + res.message : ".");
+    }
+    paintLabel();
+    paintPopover();
+  };
+
+  button.addEventListener("click", () => {
+    if (openFor === serverId) {
+      openFor = null;
+      paintPopover();
+      return;
+    }
+    openFor = serverId;
+    /* Opening starts from the stored choice: an earlier unapplied draft is dropped, as closing the desktop's popup drops it. */
+    const state = pickerState(key);
+    state.checked = new Set(getDatabaseFilter(serverId));
+    state.search = "";
+    paintPopover();
+    load();
+  });
+
+  paintLabel();
+  paintPopover();
+  /* A rebuild (the 60 s poll) while the popover is open and no inventory is held asks for it again. */
+  if (openFor === serverId && !inventories.has(serverId) && !loadFailed) load();
+  return { node, label: () => button.textContent };
+}
+
+/** Forgets the held inventories and the open flag. For tests. */
+export function resetDatabaseFilterState() {
+  inventories.clear();
+  openFor = null;
+  loadFailed = "";
+}

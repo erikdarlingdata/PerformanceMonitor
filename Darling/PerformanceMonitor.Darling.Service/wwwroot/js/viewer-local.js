@@ -9,14 +9,16 @@
 /*
  * The desktop viewer's per-machine conveniences (#4843), kept per BROWSER in localStorage: favourite servers,
  * alert acknowledgements, the alert-count badge that respects them, the per-severity colours and the collapsed
- * sidebar and the sidebar's tag grouping. Nothing here reaches the store: like the desktop's own per-PC files, a favourite or an acknowledgement
+ * sidebar and the sidebar's tag grouping, and the server page's database filter (#5245). Nothing here reaches the store: like the desktop's own per-PC files, a favourite or an acknowledgement
  * does not follow a user to another browser or machine, and an acknowledgement quiets only this browser's badge
  * (alert delivery is untouched).
  *
  * Storage discipline: every key is namespaced under "darling.local." and carries a version, so a later shape can
  * change without misreading an old value. A stored value that is absent, corrupt, from another version or hand-edited
  * reads as the default and never throws; the page still works. Only server ids, instants, booleans and #rrggbb
- * literals are stored - never a name, a connection string or a token.
+ * literals are stored - never a name, a connection string or a token. The one exception is the database filter: it IS a
+ * set of database names per server (the reads filter by name, and the store has no stable database id). They are names the
+ * page already shows, and they leave the browser only as the reads' own `database_name` parameter.
  *
  * The live state is held at module scope (the 60 s poll rebuilds the sidebar and the fleet page); localStorage is
  * the durable copy, read once at load and rewritten on every change.
@@ -28,8 +30,16 @@ export const KEY_FAVORITES = "darling.local.favorites.v1";
 export const KEY_ACKS = "darling.local.acks.v1";
 export const KEY_SEVERITY_COLORS = "darling.local.severityColors.v1";
 export const KEY_SIDEBAR = "darling.local.sidebar.v1";
+export const KEY_DB_FILTER = "darling.local.dbFilter.v1";
 const VERSION = 1;
 const MAX_IDS = 5000;
+
+/** The database filter's bounds (#5245): the web route refuses more than 50 names, a name over 128 characters (sysname), or an
+ *  encoded `database_name` query part over 4,096 bytes, so the page never stores or sends a set it would refuse. */
+export const MAX_DB_NAMES = 50;
+export const MAX_DB_NAME_LENGTH = 128;
+export const MAX_DB_QUERY_BYTES = 4096;
+const DB_PAIR_OVERHEAD = "&database_name=".length;
 
 /** The severities with a colour choice, in the order the settings list them, and the palette each falls back to. */
 export const SEVERITIES = ["critical", "warning", "info"];
@@ -48,6 +58,7 @@ let acks = new Map(); // server_id -> epoch ms of the acknowledgement
 let colors = {}; // severity -> "#rrggbb" (only valid choices)
 let sidebarCollapsed = false;
 let sidebarGrouped = false;
+let dbFilters = new Map(); // server_id -> the chosen database names (1 to MAX_DB_NAMES, kept exactly as chosen)
 let sidebarGroups = new Set(); // collapsed sidebar groups: tag ids, plus the fixed ids "favourites" and "untagged"
 let attention = new Map(); // server_id -> { count, critical, latestMs } from the last alert read
 const listeners = new Set();
@@ -105,6 +116,16 @@ export function reload() {
     }
   }
 
+  dbFilters = new Map();
+  const d = readJson(KEY_DB_FILTER);
+  if (d && d.servers && typeof d.servers === "object" && !Array.isArray(d.servers)) {
+    for (const [k, names] of Object.entries(d.servers)) {
+      const id = /^\d{1,9}$/.test(k) ? Number(k) : NaN;
+      const kept = isServerId(id) && dbFilters.size < MAX_IDS ? cleanDatabaseNames(names) : null;
+      if (kept) dbFilters.set(id, kept);
+    }
+  }
+
   const s = readJson(KEY_SIDEBAR);
   sidebarCollapsed = !!(s && s.collapsed === true);
   sidebarGrouped = !!(s && s.grouped === true);
@@ -150,6 +171,66 @@ export function toggleFavorite(serverId) {
 /** Wraps a card comparator so favourites sort ahead of everything else, the comparator ordering each side. */
 export function favoritesFirst(cmp) {
   return (a, b) => (isFavorite(b.server_id) ? 1 : 0) - (isFavorite(a.server_id) ? 1 : 0) || cmp(a, b);
+}
+
+/* ─────────────────────────── database filter ─────────────────────────── */
+
+/** The bytes one chosen database adds to the query string: `&database_name=` plus the encoded name. */
+export function databaseQueryBytes(name) {
+  return DB_PAIR_OVERHEAD + encodeURIComponent(name).length;
+}
+
+/** A name the filter can hold: text, not blank, at most 128 characters. It is never trimmed or case-folded. */
+export function isDatabaseName(name) {
+  return typeof name === "string" && name.trim() !== "" && name.length <= MAX_DB_NAME_LENGTH;
+}
+
+/** Whether `names` (de-duplicated, valid) fits both bounds: at most 50 names and at most 4,096 encoded query bytes. */
+export function databaseSetFits(names) {
+  if (names.length > MAX_DB_NAMES) return false;
+  let bytes = 0;
+  for (const n of names) bytes += databaseQueryBytes(n);
+  return bytes <= MAX_DB_QUERY_BYTES;
+}
+
+/** A stored or offered list as a clean set: valid names only, de-duplicated (ordinal, order kept). A list over a bound is
+ *  null, never a truncated set (a truncated filter would quietly show other databases than the reader chose). */
+function cleanDatabaseNames(names) {
+  if (!Array.isArray(names) || names.length > MAX_DB_NAMES * 2) return null;
+  const seen = new Set();
+  const out = [];
+  for (const n of names) {
+    if (isDatabaseName(n) && !seen.has(n)) {
+      seen.add(n);
+      out.push(n);
+    }
+  }
+  return out.length > 0 && databaseSetFits(out) ? out : null;
+}
+
+/** The databases chosen for a server, as a new array, or [] for none (all databases). */
+export function getDatabaseFilter(serverId) {
+  const names = dbFilters.get(serverId);
+  return names ? names.slice() : [];
+}
+
+/** Stores the exact set chosen for a server. An empty (or absent) list clears it. A set over a bound is refused (returns
+ *  false) and changes nothing. Returns true when the set was taken. */
+export function setDatabaseFilter(serverId, names) {
+  if (!isServerId(serverId)) return false;
+  const empty = !Array.isArray(names) || names.length === 0;
+  const kept = empty ? null : cleanDatabaseNames(names);
+  if (!empty && !kept) return false;
+  if (kept) {
+    if (!dbFilters.has(serverId) && dbFilters.size >= MAX_IDS) return false;
+    dbFilters.set(serverId, kept);
+  } else {
+    dbFilters.delete(serverId);
+  }
+  const servers = {};
+  for (const [id, list] of dbFilters) servers[id] = list;
+  writeJson(KEY_DB_FILTER, { servers });
+  return true;
 }
 
 /* ─────────────────────────── alert count and acknowledgement ─────────────────────────── */

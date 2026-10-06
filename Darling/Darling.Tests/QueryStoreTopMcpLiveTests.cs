@@ -348,7 +348,7 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE;", connection);
             raw.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(windowStart, DateTimeKind.Unspecified) });
             raw.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(WindowEnd, DateTimeKind.Unspecified) });
             raw.Parameters.Add(new NpgsqlParameter<int> { TypedValue = TestTop });
-            AddNullableText(raw, null);
+            raw.Parameters.Add(PerformanceMonitor.Darling.Storage.DatabaseFilter.All.Parameter());
             AddNullableText(raw, executionType);
             AddNullableText(raw, moduleName);
             raw.Parameters.Add(new NpgsqlParameter<int> { TypedValue = PerformanceMonitor.Darling.Storage.TopFill.FirstCandidates(TestTop) });  /* #5313: the round's candidate limit, bound last */
@@ -361,7 +361,7 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE;", connection);
             table.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(tableStart, DateTimeKind.Unspecified) });
             table.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(WindowEnd, DateTimeKind.Unspecified) });
             table.Parameters.Add(new NpgsqlParameter<int> { TypedValue = TestTop });
-            AddNullableText(table, null);
+            table.Parameters.Add(PerformanceMonitor.Darling.Storage.DatabaseFilter.All.Parameter());
             AddNullableText(table, executionType);
             AddNullableText(table, moduleName);
             table.Parameters.Add(new NpgsqlParameter<int> { TypedValue = PerformanceMonitor.Darling.Storage.TopFill.FirstCandidates(TestTop) });  /* #5313: the round's candidate limit, bound last */
@@ -389,7 +389,7 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE;", connection);
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(windowStart, DateTimeKind.Unspecified) });
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(windowEnd, DateTimeKind.Unspecified) });
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = TestTop });
-        AddNullableText(command, null);
+        command.Parameters.Add(PerformanceMonitor.Darling.Storage.DatabaseFilter.All.Parameter());
         AddNullableText(command, executionType);
         AddNullableText(command, moduleName);
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = PerformanceMonitor.Darling.Storage.TopFill.FirstCandidates(TestTop) });  /* #5313: the round's candidate limit, bound last */

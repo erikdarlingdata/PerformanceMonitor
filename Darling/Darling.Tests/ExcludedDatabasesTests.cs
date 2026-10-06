@@ -84,7 +84,7 @@ public sealed class ExcludedDatabasesPickerTests
     [Fact]
     public void CollectedDatabaseNamesSql_UnionsBothStores_ExcludesSystemDatabases_PgDialect()
     {
-        var sql = ViewerDataService.CollectedDatabaseNamesSql;
+        var sql = CollectedDatabases.NamesSql;
 
         Assert.Contains("FROM v_database_config", sql, StringComparison.Ordinal);
         Assert.Contains("FROM v_database_size_stats", sql, StringComparison.Ordinal);

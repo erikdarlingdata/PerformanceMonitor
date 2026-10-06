@@ -1091,8 +1091,10 @@ public sealed class DarlingWebHostService : BackgroundService
                     seat = DarlingWebSeat.SharedToken;
                 }
 
-                var presentedToken = context.Request.Query["token"].ToString();
-                var hasValidToken = DarlingHostBinding.FixedTimeTokenEquals(presentedToken, token);
+                /* A token sent twice is not a token (#5245): joined into "a,b" it is a value nobody sent, and
+                   the gate answers as it would a wrong token rather than reading the first copy. */
+                var hasValidToken = DarlingWebEndpoints.TrySingleQueryValue(context.Request.Query, "token", out var presentedToken)
+                    && DarlingHostBinding.FixedTimeTokenEquals(presentedToken, token);
                 var isAuthFlowRoute = IsAuthFlowPath(context.Request.Path.Value ?? "/", oidcClient is not null);
 
                 switch (DecideWebRequest(remote, cidr, isAuthFlowRoute, hasValidCookie, hasValidToken))
@@ -1662,6 +1664,14 @@ public sealed class DarlingWebHostService : BackgroundService
 
         if (string.Equals(path, OidcLoginPath, StringComparison.OrdinalIgnoreCase))
         {
+            /* A repeated ?return= is refused (#5245), before the discovery fetch: the joined "a,b" is not a path
+               anyone asked to land on. */
+            if (!DarlingWebEndpoints.TrySingleQueryValue(context.Request.Query, "return", out var requestedReturn))
+            {
+                await RefuseRepeatedSignInKeyAsync(context, refusals, remote);
+                return;
+            }
+
             var discovery = await oidcClient.GetDiscoveryAsync(context.RequestAborted);
             if (discovery is null)
             {
@@ -1683,7 +1693,7 @@ public sealed class DarlingWebHostService : BackgroundService
 
             /* Where to land after the sign-in — the SPA path the login page was covering, run through the
                same open-redirect guard as the token-strip 302. */
-            var returnPath = SanitizeRedirectPath(context.Request.Query["return"].ToString());
+            var returnPath = SanitizeRedirectPath(requestedReturn);
 
             /* The redirect URI is derived from THIS request's scheme+Host (which the allowlist has already
                vetted), then FROZEN into the transaction: the token endpoint requires the exact value the
@@ -1722,7 +1732,18 @@ public sealed class DarlingWebHostService : BackgroundService
 
         /* ------- the callback: the IdP sent the browser back with ?code=&state= (or ?error=). ------- */
 
-        var providerError = context.Request.Query["error"].ToString();
+        /* Each callback parameter is single-valued (RFC 6749 section 3.1; #5245): a key sent twice is refused
+           as a malformed callback, and the transaction is spent like any other failed callback. */
+        if (!DarlingWebEndpoints.TrySingleQueryValue(context.Request.Query, "error", out var providerError)
+            || !DarlingWebEndpoints.TrySingleQueryValue(context.Request.Query, "error_description", out var providerErrorDescription)
+            || !DarlingWebEndpoints.TrySingleQueryValue(context.Request.Query, "code", out var code)
+            || !DarlingWebEndpoints.TrySingleQueryValue(context.Request.Query, "state", out var presentedState))
+        {
+            context.Response.Cookies.Delete(DarlingWebOidc.TransactionCookieName, new CookieOptions { Path = "/auth/oidc" });
+            await RefuseRepeatedSignInKeyAsync(context, refusals, remote);
+            return;
+        }
+
         if (!string.IsNullOrEmpty(providerError))
         {
             /* IdP-authored in the honest case, but it rode a browser querystring here — anyone can put an
@@ -1731,15 +1752,13 @@ public sealed class DarlingWebHostService : BackgroundService
             refusals.Report(
                 _logger, "Web dashboard", DarlingRefusalGate.SignIn, StatusCodes.Status403Forbidden, remote,
                 $"the provider (or the querystring) reported '{DarlingHttpRefusalLog.Sanitize(providerError)}"
-                + $" {DarlingHttpRefusalLog.Sanitize(context.Request.Query["error_description"].ToString())}'",
+                + $" {DarlingHttpRefusalLog.Sanitize(providerErrorDescription)}'",
                 DateTime.UtcNow);
             await WriteSignInErrorAsync(context, StatusCodes.Status403Forbidden,
                 "The identity provider refused the sign-in. Ask your administrator, or use the access token.");
             return;
         }
 
-        var code = context.Request.Query["code"].ToString();
-        var presentedState = context.Request.Query["state"].ToString();
         var hasTransaction = DarlingWebOidc.TryValidateTransactionCookie(
             context.Request.Cookies[DarlingWebOidc.TransactionCookieName], transactionKey, DateTimeOffset.UtcNow,
             out var transaction);
@@ -1886,6 +1905,16 @@ public sealed class DarlingWebHostService : BackgroundService
             + $"<p>Signed in — continuing to <a style='color:#2eaef1' href='{linkTarget}'>the dashboard</a>…</p>"
             + $"<script>location.replace({scriptTarget});</script>"
             + "</body></html>");
+    }
+
+    /// <summary>The sign-in flow's answer to a single-valued query key sent more than once (#5245): the same
+    /// rate-limited refusal log and error page every other failed sign-in uses, status 400.</summary>
+    private async Task RefuseRepeatedSignInKeyAsync(HttpContext context, DarlingHttpRefusalLog refusals, IPAddress? remote)
+    {
+        ReportSignInRefusal(refusals, remote, StatusCodes.Status400BadRequest,
+            "a sign-in query parameter (return, error, error_description, code or state) was sent more than once");
+        await WriteSignInErrorAsync(context, StatusCodes.Status400BadRequest,
+            "The sign-in request repeated a parameter. Start again from the login page.");
     }
 
     /// <summary>A minimal self-contained sign-in error page — same reasoning as the login form: it renders

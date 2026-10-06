@@ -41,6 +41,7 @@ import {
   bandClass,
   sevClass,
   windowFromHours,
+  dbScopeChip,
 } from "./util.js";
 import { zoomableLineChart, chartZoomScope, SERIES_COLORS } from "./charts.js";
 import { toTsv, toCsv, isListValue, csvFileName, copyText, downloadCsv } from "./grid-tools.js";
@@ -73,7 +74,9 @@ export function renderPanel(desc, onSettled) {
   const signal = panelSignal;
   const body = el("div", { class: "panel-body" }, [loadingStrip()]);
   const panel = el("div", { class: "panel card" + (desc.span === 2 ? " span-2" : "") }, [
-    el("h3", {}, [desc.title, desc.subtitle ? el("span", { class: "panel-sub", text: " " + desc.subtitle }) : null]),
+    /* The database-scope chip (#5245): while the page's database filter is active it says whether this panel's read took it
+       (dbScopeChip in util.js; `desc.dbScope` overrides the read's own class for a panel fed by a shared read). */
+    el("h3", {}, [desc.title, desc.subtitle ? el("span", { class: "panel-sub", text: " " + desc.subtitle }) : null, dbScopeChip(desc.read, desc.dbScope)]),
     /* #5226: an optional control node under the title (the Top Queries / Top Procedures ranking selector), drawn before the body so a
        load that replaces the body never replaces it. Absent on every other panel. */
     desc.control || null,
