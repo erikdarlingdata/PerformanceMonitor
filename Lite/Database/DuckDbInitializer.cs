@@ -173,6 +173,10 @@ public partial class DuckDbInitializer : IDisposable
        from inside the code under test (see OnArchiveViewRebuildForTests), not from a thread of its own. */
     internal static bool IsWriteLockHeldForTests => s_dbLock.IsWriteLockHeld;
 
+    /* Test seam (#5371): how many threads are parked waiting for a read lock right now. A test that holds the write lock reads it
+       to know a read has reached the lock wait, instead of sleeping and hoping the pool started it. */
+    internal static int WaitingReadCountForTests => s_dbLock.WaitingReadCount;
+
     /* Fires in ResetDatabaseCoreAsync after the database and WAL files are deleted and before the schema is
        recreated: a test throws from it to stand in for a process kill with no database file on disk. */
     internal static Action? AfterDatabaseFilesDeletedForTests { get; set; }
@@ -622,7 +626,7 @@ public partial class DuckDbInitializer : IDisposable
 
     /// <summary>
     /// The <c>memory_limit</c> the trim cycle restores after trimming — parsed out of
-    /// <see cref="ConnectionString"/> rather than repeated as a second "1GB" literal, so the two can never
+    /// <see cref="ConnectionString"/> rather than repeated as a second literal, so the two can never
     /// drift apart (#4262 round 1 finding 1).
     /// </summary>
     private string ConfiguredMemoryLimit
@@ -635,7 +639,7 @@ public partial class DuckDbInitializer : IDisposable
                 if (eq > 0 && part[..eq].Trim().Equals("memory_limit", StringComparison.OrdinalIgnoreCase))
                     return part[(eq + 1)..].Trim();
             }
-            return "1GB"; // unreachable — ConnectionString always sets memory_limit
+            return MainConnectionMemoryLimit; // unreachable — ConnectionString always sets memory_limit
         }
     }
 
@@ -832,12 +836,13 @@ public partial class DuckDbInitializer : IDisposable
     /// - checkpoint_threshold=1GB: disables automatic WAL checkpoints to prevent
     ///   2-3s stop-the-world stalls during collector writes. Manual CHECKPOINT
     ///   runs between collection cycles instead.
-    /// - memory_limit=1GB: caps the resting buffer pool so it doesn't grow
+    /// - memory_limit=<see cref="MainConnectionMemoryLimit"/> (2GB, #5381; was 1GB): caps the resting buffer pool so it doesn't grow
     ///   unbounded as the archive directory fills with parquet files (the
     ///   ".tmp dir caching" path is the actual driver of #933's titled
     ///   complaint — uncapped, buffer pool grows toward 80% of system RAM).
     ///   ArchiveService raises this temporarily for parquet COPY operations,
     ///   which need more headroom due to a DuckDB pre-reservation behavior.
+    /// - threads=<see cref="MainConnectionThreads"/> (min(8, processors), #5381): bounds the per-thread buffers of a wide read.
     /// - parquet_metadata_cache is deliberately left at DuckDB's default, off (#5377). Measured on DuckDB
     ///   1.5.5, turning it on cut the bind of a 518-file union_by_name read from about 140 ms to about 45 ms,
     ///   and a file replaced at the same path (compaction's swap, the Query Store repair) still read its new
@@ -847,7 +852,26 @@ public partial class DuckDbInitializer : IDisposable
     ///   `SET memory_limit` fails with "could not free up enough memory" and the trim stops working. The file
     ///   count is the real cost of a bind, and compaction (this issue) is what keeps that count down.
     /// </summary>
-    public string ConnectionString => $"Data Source={_databasePath};memory_limit=1GB;checkpoint_threshold=1GB";
+    public string ConnectionString =>
+        $"Data Source={_databasePath};memory_limit={MainConnectionMemoryLimit};threads={MainConnectionThreads};checkpoint_threshold=1GB";
+
+    /// <summary>
+    /// The main connection's resting <c>memory_limit</c> (#5381, owner ruling 2026-10-06). It was 1 GB, which
+    /// failed five measured wide reads (Query Store and query stats text over a multi-day archive) with
+    /// out-of-memory; at 2 GB and <see cref="MainConnectionThreads"/> threads every measured read passes and the
+    /// worst peak is 1,100 MB. Every place that puts the limit back after lowering or raising it (the trim
+    /// cycle, <c>ArchiveService.WithRaisedCopyMemoryLimit</c>) restores to THIS constant, never a literal.
+    /// Compaction's own in-memory 4 GB instance and the data importer's plain connection are separate DuckDB
+    /// instances and do not use it.
+    /// </summary>
+    internal const string MainConnectionMemoryLimit = "2GB";
+
+    /// <summary>
+    /// The main connection's <c>threads</c> (#5381): min(8, logical processors), at least 1. Unset, DuckDB used
+    /// every core, and on a 32-core machine five reads that pass at 8 threads ran out of memory at 1 GB because
+    /// each thread holds its own buffers. Measured at 2 GB: 8 threads, all reads pass, worst peak 1,100 MB.
+    /// </summary>
+    internal static readonly int MainConnectionThreads = Math.Max(1, Math.Min(8, Environment.ProcessorCount));
 
     /// <summary>
     /// Ensures the database exists and all tables are created, then opens the sentinel (#4262).

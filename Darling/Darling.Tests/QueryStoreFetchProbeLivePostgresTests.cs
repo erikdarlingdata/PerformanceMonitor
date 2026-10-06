@@ -85,7 +85,7 @@ public sealed class QueryStoreFetchProbeLivePostgresTests
                     new FetchedPlan(1, PlanOne, "0xAAAA"),
                     new FetchedPlan(2, PlanXml: null, PlanHash: "0xBBBB"),
                 },
-                landedAt, TestTimeoutSeconds, ct);
+                landedAt, TestTimeoutSeconds, cancellationToken: ct);
             Assert.Equal(new long[] { 1, 2 }, landed);
 
             using (var marker = new NpgsqlCommand(
@@ -141,7 +141,7 @@ SELECT
                reset detector firing. */
             await QueryStoreTextWriter.WriteAsync(
                 connection, ServerId, Db,
-                new[] { new FetchedQueryText(10, "SELECT 1", QueryHash: null) }, landedAt, TestTimeoutSeconds, ct);
+                new[] { new FetchedQueryText(10, "SELECT 1", QueryHash: null) }, landedAt, TestTimeoutSeconds, cancellationToken: ct);
 
             var adopt = await QueryStoreFetchProbe.TouchAndProbeTextsAsync(
                 connection, ServerId, Db, new[] { (10L, (string?)"0x1111"), (11L, (string?)"0x2222") }, now, TestTimeoutSeconds, ct);
@@ -192,11 +192,11 @@ SELECT
             await QueryStorePlanWriter.WriteAsync(
                 connection, ServerId, Db,
                 new[] { new FetchedPlan(201, PlanRestart, "0xR1") },
-                landedAt, TestTimeoutSeconds, ct);
+                landedAt, TestTimeoutSeconds, cancellationToken: ct);
             await QueryStoreTextWriter.WriteAsync(
                 connection, ServerId, Db,
                 new[] { new FetchedQueryText(202, "SELECT 'restart'", "0xR2") },
-                landedAt, TestTimeoutSeconds, ct);
+                landedAt, TestTimeoutSeconds, cancellationToken: ct);
 
             async Task<(long Map, long Dim, long Text)> FreshnessCountsAsync(DateTime stamp)
             {
@@ -325,11 +325,11 @@ SELECT
                     new FetchedPlan(302, PlanShared, "0xC2"),
                     new FetchedPlan(303, PlanOutsideOurs, "0xC3"),
                 },
-                landedAt, TestTimeoutSeconds, ct);
+                landedAt, TestTimeoutSeconds, cancellationToken: ct);
             await QueryStorePlanWriter.WriteAsync(
                 connection, otherServerId, Db,
                 new[] { new FetchedPlan(401, PlanOutsideOther, "0xC4") },
-                landedAt, TestTimeoutSeconds, ct);
+                landedAt, TestTimeoutSeconds, cancellationToken: ct);
 
             /* A fact row referencing each outside plan: the references the old map-only check could not see. */
             foreach (var referenced in new[] { outsideOurs, outsideOther })

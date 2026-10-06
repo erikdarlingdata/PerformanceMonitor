@@ -138,9 +138,6 @@ public sealed class StatementCutSourceScanTests
             "SampleQueryText: the desktop grid cell; the same row carries FullQueryText whole and no Lite MCP tool reads SampleQueryText"),
         new("Lite/Services/LocalDataService.QueryStats.cs", "left(query_text,120)", 1,
             "the desktop heatmap hover (GetQueryHeatmapAsync); the get_query_heatmap tool reads LocalDataService.QueryHeatmap.cs, which fetches whole text and cuts after the filter"),
-        new("Darling/PerformanceMonitor.Darling.Service/DarlingWebDeadlockGraph.cs", "p.sqltext", 1,
-            "PR C judges it whole; drop at C's dev merge. Until then the web viewer's side panel cuts one process's text out of deadlock_graph_xml for display, and web responses carry no statement judge",
-            Ceiling: true),
         new("Darling/PerformanceMonitor.Darling.Service/DarlingWorker.cs", "row.victimstatement!", 1,
             "BuildPgDeadlockIncident cuts a PostgreSQL victim statement the collector already judged whole: PgDeadlockLogParser redacts the whole report (PgLogTextRedactor.RedactDetail) before it takes the victim's statement out of it, and PgDeadlockLogParser.NormalizeStatement re-reads a stored one. Nothing here sees raw text"),
         new("Darling/PerformanceMonitor.Darling.Service/DarlingWorker.cs", "row.rootquery!", 1,
@@ -873,6 +870,5 @@ public sealed class StatementCutSourceScanTests
         Assert.DoesNotContain("string? PreviewText = null", detector, StringComparison.Ordinal);
         Assert.Contains(Exceptions, e => e.File == "Lite/Analysis/PileupSnapshotReader.cs" && !e.Ceiling);
         Assert.Contains(Exceptions, e => e.File.EndsWith("/PgPileupSnapshotReader.cs", StringComparison.Ordinal) && !e.Ceiling);
-        Assert.Contains(Exceptions, e => e.File.EndsWith("/DarlingWebDeadlockGraph.cs", StringComparison.Ordinal) && e.Ceiling);
     }
 }

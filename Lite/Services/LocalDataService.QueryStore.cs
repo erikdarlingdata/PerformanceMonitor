@@ -167,8 +167,9 @@ ORDER BY bucket";
         using var connection = await OpenConnectionAsync();
 
         var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
-        var dbClause = BuildDbInClause(databaseNames, "database_name", 5, out var dbValues);
-        var executionTypeParameterIndex = 5 + dbValues.Count;
+        /* #5381: $4 used to be the page limit; the limit is applied after the text lookup now, so the filter parameters start at $4. */
+        var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
+        var executionTypeParameterIndex = 4 + dbValues.Count;
         var executionTypeClause = string.IsNullOrWhiteSpace(executionType)
             ? ""
             : $" AND execution_type_desc = ${executionTypeParameterIndex}";
@@ -183,14 +184,15 @@ ORDER BY bucket";
         {
         using var command = connection.CreateCommand();
         command.CommandText = @"
-WITH deduped AS (
+WITH latest AS (
     /* LOAD-BEARING (correctness, not just perf) — #1841. query_store_stats rows are CUMULATIVE
        per-Query-Store-interval snapshots, and the collector re-fetches the OPEN interval every cycle
        as its last_execution_time advances, so the SAME interval is stored repeatedly with a growing
        execution_count. SUM(execution_count) over the raw rows reports 10 + 25 + 40 for an interval that
        reached 40, and AVG(avg_*) becomes an avg-of-avgs weighted by how many times each interval happened
-       to be re-collected. Keep the LATEST snapshot per interval. SELECT * because the aggregate below
-       projects nearly every payload column.
+       to be re-collected. Keep the LATEST snapshot per interval. The aggregate below projects nearly every
+       payload column, so they are listed in `deduped`; #5381: query_text and query_plan_text are NOT among them.
+       The text is read after the ranking, for the page's rows only (below).
 
        runtime_stats_interval_id is the REAL interval identity (tier 2), with first_execution_time kept
        beside it as the tier-1 proxy for rows collected before it existed — see the slicer above for why
@@ -198,15 +200,46 @@ WITH deduped AS (
 
        replica_role and execution_type_desc are in the partition because the aggregate below is grouped
        (or MAXed) on them: the dedup key must be at least as fine as the read's own row identity, or
-       dedup would silently drop a row the grid is supposed to show rather than de-duplicate one. */
+       dedup would silently drop a row the grid is supposed to show rather than de-duplicate one.
+
+       #5381: the window runs over the NARROW columns only (the row's id and time), and the payload comes back by a
+       join on those two for the winning rows. Running the window over the payload sorted every column of every row
+       in the window, which is the part of this read that grows with the window, and DuckDB keeps a copy of it per
+       thread. The join's build side is one narrow row per interval. */
+    SELECT collection_id AS latest_id, collection_time AS latest_time
+    FROM
+    (
+        SELECT
+            collection_id,
+            collection_time,
+            ROW_NUMBER() OVER
+            (
+                PARTITION BY database_name, query_id, plan_id, runtime_stats_interval_id, first_execution_time, execution_type_desc, replica_role
+                ORDER BY collection_time DESC, execution_count DESC
+            ) AS rn
+        FROM v_query_store_stats
+        WHERE server_id = $1
+        AND   collection_time >= $2
+        AND   collection_time <= $3" + dbClause + executionTypeClause + @"
+    ) w
+    WHERE rn = 1
+),
+deduped AS (
     SELECT
-        *,
-        ROW_NUMBER() OVER
-        (
-            PARTITION BY database_name, query_id, plan_id, runtime_stats_interval_id, first_execution_time, execution_type_desc, replica_role
-            ORDER BY collection_time DESC, execution_count DESC
-        ) AS rn
+        database_name, query_id, plan_id, query_hash, replica_role, module_name, execution_type_desc,
+        runtime_stats_interval_id, first_execution_time, last_execution_time, collection_time,
+        execution_count, avg_duration_us, avg_cpu_time_us, avg_logical_io_reads, avg_logical_io_writes,
+        avg_physical_io_reads, avg_rowcount, min_dop, max_dop, query_plan_hash, is_forced_plan,
+        plan_forcing_type, avg_clr_time_us, avg_tempdb_space_used, avg_log_bytes_used, plan_type,
+        force_failure_count, last_force_failure_reason, compatibility_level, min_duration_us,
+        max_duration_us, min_cpu_time_us, max_cpu_time_us, min_logical_io_reads, max_logical_io_reads,
+        min_logical_io_writes, max_logical_io_writes, min_physical_io_reads, max_physical_io_reads,
+        min_clr_time_us, max_clr_time_us, min_rowcount, max_rowcount, min_log_bytes_used,
+        max_log_bytes_used, min_tempdb_space_used, max_tempdb_space_used, avg_query_max_used_memory,
+        min_query_max_used_memory, max_query_max_used_memory, avg_num_physical_io_reads,
+        min_num_physical_io_reads, max_num_physical_io_reads
     FROM v_query_store_stats
+    INNER JOIN latest ON latest.latest_id = collection_id AND latest.latest_time = collection_time
     WHERE server_id = $1
     AND   collection_time >= $2
     AND   collection_time <= $3" + dbClause + executionTypeClause + @"
@@ -277,19 +310,24 @@ ranked AS (
         MIN(CAST(min_num_physical_io_reads AS DOUBLE PRECISION)) AS min_num_physical_io_reads,
         MAX(CAST(max_num_physical_io_reads AS DOUBLE PRECISION)) AS max_num_physical_io_reads
     FROM deduped
-    WHERE rn = 1" + moduleClause + @"
+    WHERE 1 = 1" + moduleClause + @"
     GROUP BY database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role
     /* #5299 round 3 (O16): the ranking ends on the whole group key - see GetTopQueriesByCpuAsync. */
     ORDER BY SUM(execution_count) * AVG(CAST(avg_duration_us AS DOUBLE PRECISION)) DESC, database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role
     LIMIT " + candidates + @"
 ),
+/* #5381: `ranked` is read ONCE, here. Referencing it a second time (for a candidate count, or to find each candidate's
+   text row) makes DuckDB materialise it and hold a second copy of its window and aggregate state, which doubled this
+   read's peak memory (753 MB against the old read's 726 MB over a 7 day window at 1 GB). The count is the number of
+   rows this statement returns, and each candidate's latest text row is found by a second statement over the
+   candidates' keys (ReadQueryStoreLatestRowsAsync), so nothing here looks at the whole archive. */
 page AS (
 SELECT
     r.database_name,
     r.query_id,
     r.plan_id,
     r.query_hash,
-    t.query_text,
+    CAST(NULL AS VARCHAR) AS query_text,
     r.module_name,
     r.total_executions,
     r.avg_duration_ms,
@@ -341,37 +379,18 @@ SELECT
     r.replica_role,
     ROW_NUMBER() OVER (ORDER BY r.total_executions * r.avg_duration_ms DESC, r.database_name, r.query_id, r.plan_id, r.query_hash, r.execution_type_desc, r.replica_role) AS page_ord
 FROM ranked r
-LEFT JOIN LATERAL (
-    SELECT query_text
-    FROM v_query_store_stats
-    WHERE server_id = $1
-    AND   query_id = r.query_id
-    AND   database_name = r.database_name
-    AND   query_text IS NOT NULL
-    /* #5420: bounded to the read's own window ($2 through $3, the bound the ranked rows were read with), as the
-       Top Queries and procedure comparison text picks were in #5381. Without it the lateral ran over every archived
-       row of v_query_store_stats. A query whose only text is older than the window now reads blank, as one with no
-       text at all already did. Twins the Darling viewer's and MCP reader's inline-text fallback. */
-    AND   collection_time >= $2
-    AND   collection_time <= $3
-    /* #5299 round 2 (N3): a tie on the time breaks on the row collected last - see GetTopQueriesByCpuAsync. */
-    ORDER BY collection_time DESC, collection_id DESC
-    LIMIT 1
-) t ON TRUE
-WHERE t.query_text IS NULL OR t.query_text NOT LIKE 'WAITFOR%'
-ORDER BY r.total_executions * r.avg_duration_ms DESC, r.database_name, r.query_id, r.plan_id, r.query_hash, r.execution_type_desc, r.replica_role
-LIMIT $4
 )
-/* #5313: the count row rides beside the page so a round trimmed to nothing still reports whether more candidates exist. */
-SELECT p.*, c.candidate_count
-FROM (SELECT COUNT(*) AS candidate_count FROM ranked) c
-LEFT JOIN page p ON TRUE
+/* #5313: a round reports how many candidates its ranking produced, so TopFill knows whether more exist.
+   #5381: that count is the number of rows returned here (the page is not trimmed in SQL any more), and the WAITFOR
+   filter and the page limit need the text, so they run in code after the text read, over the candidates in page_ord
+   order - the same rows in the same order the old statement's WHERE and LIMIT $4 kept. */
+SELECT p.*
+FROM page p
 ORDER BY p.page_ord";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = startTime });
         command.Parameters.Add(new DuckDBParameter { Value = endTime });
-        command.Parameters.Add(new DuckDBParameter { Value = top });
         foreach (var db in dbValues)
             command.Parameters.Add(new DuckDBParameter { Value = db });
         if (!string.IsNullOrWhiteSpace(executionType))
@@ -379,18 +398,12 @@ ORDER BY p.page_ord";
         if (!string.IsNullOrWhiteSpace(moduleName))
             command.Parameters.Add(new DuckDBParameter { Value = moduleName });
 
-        var items = new List<QueryStoreRow>();
-        var candidateCount = 0;
-        using var reader = await command.ExecuteReaderAsync();
+        var candidateRows = new List<QueryStoreRow>();
+        using (var reader = await command.ExecuteReaderAsync())
+        {
         while (await reader.ReadAsync())
         {
-            candidateCount = reader.IsDBNull(55) ? 0 : Convert.ToInt32(reader.GetValue(55));
-            if (reader.IsDBNull(54))
-            {
-                continue;
-            }
-
-            items.Add(new QueryStoreRow
+            var candidate = new QueryStoreRow
             {
                 DatabaseName = reader.IsDBNull(0) ? "" : reader.GetString(0),
                 QueryId = reader.IsDBNull(1) ? 0 : reader.GetInt64(1),
@@ -446,10 +459,42 @@ ORDER BY p.page_ord";
                 MinNumPhysicalIoReads = reader.IsDBNull(51) ? 0 : ToDouble(reader.GetValue(51)),
                 MaxNumPhysicalIoReads = reader.IsDBNull(52) ? 0 : ToDouble(reader.GetValue(52)),
                 ReplicaRole = reader.IsDBNull(53) ? null : reader.GetString(53)
-            });
+            };
+            candidateRows.Add(candidate);
+        }
         }
 
-        return (items, candidateCount);
+        /* #5381: the row that holds each candidate's text (the latest row of its database and query_id over ALL history,
+           as the old lateral picked), then the text of those rows, both by key and for the candidates only. */
+        var latestRows = await ReadQueryStoreLatestRowsAsync(connection, serverId, candidateRows.Select(r => (r.DatabaseName, r.QueryId)));
+        var texts = await ReadQueryStoreTextByRowAsync(connection, serverId, latestRows.Values);
+        var items = new List<QueryStoreRow>();
+        foreach (var row in candidateRows)
+        {
+            string? text = null;
+            if (latestRows.TryGetValue((row.DatabaseName, row.QueryId), out var textRow))
+            {
+                texts.TryGetValue(textRow, out text);
+                /* The old lateral skipped NULL texts: a latest row with no text resolves to the latest row WITH one. */
+                text ??= await ReadQueryStoreLatestNonNullTextAsync(connection, serverId, row.DatabaseName, row.QueryId);
+            }
+
+            /* The old statement's WHERE (NOT LIKE is case sensitive, a prefix test) and LIMIT $4, in page_ord order. */
+            if (text is not null && text.StartsWith("WAITFOR", StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            if (items.Count >= top)
+            {
+                break;
+            }
+
+            row.QueryText = text ?? "";
+            items.Add(row);
+        }
+
+        return (items, candidateRows.Count);
         }
 
         return await TopFill.RunAsync(top, RunRoundAsync);
@@ -484,9 +529,11 @@ WITH deduped_current AS (
        delta this comparison exists to compute. One deduped CTE per window, so both arms are treated
        identically. */
     SELECT
+        collection_id,
+        collection_time,
         database_name,
+        query_id,
         query_hash,
-        query_text,
         execution_count,
         avg_duration_us,
         avg_cpu_time_us,
@@ -502,9 +549,11 @@ WITH deduped_current AS (
 ),
 deduped_baseline AS (
     SELECT
+        collection_id,
+        collection_time,
         database_name,
+        query_id,
         query_hash,
-        query_text,
         execution_count,
         avg_duration_us,
         avg_cpu_time_us,
@@ -549,8 +598,7 @@ current_period AS (
            SUM(qs.execution_count) AS exec_count,
            SUM(qs.execution_count * qs.avg_duration_us::DOUBLE PRECISION) / NULLIF(SUM(qs.execution_count), 0) / 1000.0 AS avg_duration_ms,
            SUM(qs.execution_count * qs.avg_cpu_time_us::DOUBLE PRECISION) / NULLIF(SUM(qs.execution_count), 0) / 1000.0 AS avg_cpu_ms,
-           SUM(qs.execution_count * qs.avg_logical_io_reads::DOUBLE PRECISION) / NULLIF(SUM(qs.execution_count), 0) AS avg_reads,
-           MAX(qs.query_text) AS query_text
+           SUM(qs.execution_count * qs.avg_logical_io_reads::DOUBLE PRECISION) / NULLIF(SUM(qs.execution_count), 0) AS avg_reads
     FROM top_hashes th
     INNER JOIN deduped_current qs
       ON  qs.query_hash IS NOT DISTINCT FROM th.query_hash
@@ -564,8 +612,7 @@ baseline_period AS (
            SUM(qs.execution_count) AS exec_count,
            SUM(qs.execution_count * qs.avg_duration_us::DOUBLE PRECISION) / NULLIF(SUM(qs.execution_count), 0) / 1000.0 AS avg_duration_ms,
            SUM(qs.execution_count * qs.avg_cpu_time_us::DOUBLE PRECISION) / NULLIF(SUM(qs.execution_count), 0) / 1000.0 AS avg_cpu_ms,
-           SUM(qs.execution_count * qs.avg_logical_io_reads::DOUBLE PRECISION) / NULLIF(SUM(qs.execution_count), 0) AS avg_reads,
-           MAX(qs.query_text) AS query_text
+           SUM(qs.execution_count * qs.avg_logical_io_reads::DOUBLE PRECISION) / NULLIF(SUM(qs.execution_count), 0) AS avg_reads
     FROM top_hashes th
     INNER JOIN deduped_baseline qs
       ON  qs.query_hash IS NOT DISTINCT FROM th.query_hash
@@ -573,19 +620,77 @@ baseline_period AS (
     WHERE qs.rn = 1
     AND   qs.execution_count > 0
     GROUP BY th.database_name, th.query_hash
+),
+/* #5381: query_text is not carried through the window above; it is read afterwards for the rows asked for here.
+   Each period's text used to be MAX(query_text) over that period's kept rows for the (database, hash) pair. The rows
+   to read are the latest kept row of each query_id inside the pair: a query_id has one text for life in Query Store,
+   so the MAX over those rows is the MAX over every kept row, and the lookup touches one row per query instead of
+   one per collected interval. kind 1 = current period's rows, kind 2 = baseline's, kind 0 = the comparison rows. */
+current_winner AS (
+    SELECT database_name, query_hash, query_id, collection_id, collection_time
+    FROM
+    (
+        SELECT
+            th.database_name,
+            th.query_hash,
+            qs.query_id,
+            qs.collection_id,
+            qs.collection_time,
+            ROW_NUMBER() OVER (PARTITION BY th.database_name, th.query_hash, qs.query_id ORDER BY qs.collection_time DESC, qs.collection_id DESC) AS wr
+        FROM top_hashes th
+        INNER JOIN deduped_current qs
+          ON  qs.query_hash IS NOT DISTINCT FROM th.query_hash
+          AND qs.database_name IS NOT DISTINCT FROM th.database_name
+        WHERE qs.rn = 1
+        AND   qs.execution_count > 0
+    ) x
+    WHERE wr = 1
+),
+baseline_winner AS (
+    SELECT database_name, query_hash, query_id, collection_id, collection_time
+    FROM
+    (
+        SELECT
+            th.database_name,
+            th.query_hash,
+            qs.query_id,
+            qs.collection_id,
+            qs.collection_time,
+            ROW_NUMBER() OVER (PARTITION BY th.database_name, th.query_hash, qs.query_id ORDER BY qs.collection_time DESC, qs.collection_id DESC) AS wr
+        FROM top_hashes th
+        INNER JOIN deduped_baseline qs
+          ON  qs.query_hash IS NOT DISTINCT FROM th.query_hash
+          AND qs.database_name IS NOT DISTINCT FROM th.database_name
+        WHERE qs.rn = 1
+        AND   qs.execution_count > 0
+    ) x
+    WHERE wr = 1
 )
-SELECT COALESCE(c.database_name, b.database_name) AS database_name,
+SELECT 0 AS kind,
+       COALESCE(c.database_name, b.database_name) AS database_name,
        COALESCE(c.query_hash, b.query_hash) AS query_hash,
-       COALESCE(c.query_text, b.query_text) AS query_text,
        c.exec_count, c.avg_duration_ms, c.avg_cpu_ms, c.avg_reads,
        b.exec_count AS baseline_exec_count,
        b.avg_duration_ms AS baseline_avg_duration_ms,
        b.avg_cpu_ms AS baseline_avg_cpu_ms,
-       b.avg_reads AS baseline_avg_reads
+       b.avg_reads AS baseline_avg_reads,
+       CAST(NULL AS BIGINT) AS text_collection_id,
+       CAST(NULL AS TIMESTAMP) AS text_collection_time,
+       CAST(NULL AS BIGINT) AS text_query_id
 FROM current_period c
 FULL OUTER JOIN baseline_period b
   ON  c.database_name IS NOT DISTINCT FROM b.database_name
-  AND c.query_hash IS NOT DISTINCT FROM b.query_hash;";
+  AND c.query_hash IS NOT DISTINCT FROM b.query_hash
+UNION ALL
+SELECT 1, database_name, query_hash,
+       NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+       collection_id, collection_time, query_id
+FROM current_winner
+UNION ALL
+SELECT 2, database_name, query_hash,
+       NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+       collection_id, collection_time, query_id
+FROM baseline_winner;";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = currentStart });
@@ -596,23 +701,60 @@ FULL OUTER JOIN baseline_period b
             command.Parameters.Add(new DuckDBParameter { Value = db });
 
         var items = new List<QueryStatsComparisonItem>();
-        using var reader = await command.ExecuteReaderAsync();
-        while (await reader.ReadAsync())
+        var currentKeys = new Dictionary<(string?, string?), List<(long, DateTime)>>();
+        var baselineKeys = new Dictionary<(string?, string?), List<(long, DateTime)>>();
+        var currentWinners = new List<(string? DatabaseName, string? QueryHash, long QueryId, long CollectionId, DateTime CollectionTime)>();
+        var baselineWinners = new List<(string? DatabaseName, string? QueryHash, long QueryId, long CollectionId, DateTime CollectionTime)>();
+        var itemKeys = new List<(string?, string?)>();
+        using (var reader = await command.ExecuteReaderAsync())
         {
-            items.Add(new QueryStatsComparisonItem
+            while (await reader.ReadAsync())
             {
-                DatabaseName = reader.IsDBNull(0) ? "" : reader.GetString(0),
-                QueryHash = reader.IsDBNull(1) ? "" : reader.GetString(1),
-                QueryText = reader.IsDBNull(2) ? "" : reader.GetString(2),
-                ExecutionCount = reader.IsDBNull(3) ? 0 : ToInt64(reader.GetValue(3)),
-                AvgDurationMs = reader.IsDBNull(4) ? 0 : ToDouble(reader.GetValue(4)),
-                AvgCpuMs = reader.IsDBNull(5) ? 0 : ToDouble(reader.GetValue(5)),
-                AvgReads = reader.IsDBNull(6) ? 0 : ToDouble(reader.GetValue(6)),
-                BaselineExecutionCount = reader.IsDBNull(7) ? 0 : ToInt64(reader.GetValue(7)),
-                BaselineAvgDurationMs = reader.IsDBNull(8) ? 0 : ToDouble(reader.GetValue(8)),
-                BaselineAvgCpuMs = reader.IsDBNull(9) ? 0 : ToDouble(reader.GetValue(9)),
-                BaselineAvgReads = reader.IsDBNull(10) ? 0 : ToDouble(reader.GetValue(10)),
-            });
+                var kind = reader.GetInt32(0);
+                var key = (reader.IsDBNull(1) ? null : reader.GetString(1), reader.IsDBNull(2) ? null : reader.GetString(2));
+                if (kind != 0)
+                {
+                    var keys = kind == 1 ? currentKeys : baselineKeys;
+                    if (!keys.TryGetValue(key, out var list))
+                    {
+                        keys[key] = list = [];
+                    }
+                    list.Add((reader.GetInt64(11), reader.GetDateTime(12)));
+                    (kind == 1 ? currentWinners : baselineWinners).Add((key.Item1, key.Item2, reader.GetInt64(13), reader.GetInt64(11), reader.GetDateTime(12)));
+                    continue;
+                }
+
+                itemKeys.Add(key);
+                items.Add(new QueryStatsComparisonItem
+                {
+                    DatabaseName = key.Item1 ?? "",
+                    QueryHash = key.Item2 ?? "",
+                    QueryText = "",
+                    ExecutionCount = reader.IsDBNull(3) ? 0 : ToInt64(reader.GetValue(3)),
+                    AvgDurationMs = reader.IsDBNull(4) ? 0 : ToDouble(reader.GetValue(4)),
+                    AvgCpuMs = reader.IsDBNull(5) ? 0 : ToDouble(reader.GetValue(5)),
+                    AvgReads = reader.IsDBNull(6) ? 0 : ToDouble(reader.GetValue(6)),
+                    BaselineExecutionCount = reader.IsDBNull(7) ? 0 : ToInt64(reader.GetValue(7)),
+                    BaselineAvgDurationMs = reader.IsDBNull(8) ? 0 : ToDouble(reader.GetValue(8)),
+                    BaselineAvgCpuMs = reader.IsDBNull(9) ? 0 : ToDouble(reader.GetValue(9)),
+                    BaselineAvgReads = reader.IsDBNull(10) ? 0 : ToDouble(reader.GetValue(10)),
+                });
+            }
+        }
+
+        /* #5381: the text, read by key after the ranking. COALESCE(current text, baseline text), each a MAX in UTF-8 order. */
+        var texts = await ReadQueryStoreTextByRowAsync(
+            connection, serverId,
+            currentKeys.Values.Concat(baselineKeys.Values).SelectMany(v => v).Select(v => (v.Item1, v.Item2)));
+        /* A query_id whose latest kept row in the period carries no text: the old MAX skipped NULLs, so it still showed
+           an older kept row's text from the same period (the review of #5396). Read only those queries' other kept rows,
+           newest UTC day first, until each has a text. */
+        await ReadQueryStoreFallbackTextsAsync(connection, serverId, currentWinners, currentStart, currentEnd, currentKeys, texts);
+        await ReadQueryStoreFallbackTextsAsync(connection, serverId, baselineWinners, baselineStart, baselineEnd, baselineKeys, texts);
+        for (var i = 0; i < items.Count; i++)
+        {
+            var text = MaxUtf8Text(currentKeys, itemKeys[i], texts) ?? MaxUtf8Text(baselineKeys, itemKeys[i], texts);
+            items[i].QueryText = text ?? "";
         }
 
         return items;

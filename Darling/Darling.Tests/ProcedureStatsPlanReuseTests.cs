@@ -348,6 +348,57 @@ public sealed class ProcedureStatsPlanReuseTests
     }
 
     [Fact]
+    public async Task ASwitchFromShadowToOn_NeverAnswersFromAnEntryTheShadowPassCached()
+    {
+        /* #5367 review, A-L1: a shadow pass digests the plans its rows carry inline, and that can be the whole-plan
+           marker. After the knob flips to on, a hit on that entry would give the row the marker's digest and the row
+           would store the marker until the entry expired. A switch clears the cache. */
+        var flipper = new FlippableRunner("shadow");
+        var shadowContext = StampedContext(flipper.Runner, capture: true);
+        var shadowRows = new List<ProcedureStatsCollector.Row> { RowFor(1, PerformanceMonitor.Common.SensitiveStatements.PlaceholderText) };
+
+        var pending = await flipper.Runner.ApplyProcedureStatsPlanReuseAsync(
+            null!, null!, ServerFor(), shadowContext, shadowRows, ProcedureStatsPlanFetchModes.OfRun(shadowContext), CancellationToken.None);
+        var cache = flipper.Runner.ProcedureStatsPlanCacheForTests(42)!;
+        cache.ConfirmPending(pending, DateTime.UtcNow);
+        Assert.Equal(1, cache.Count);
+
+        flipper.Knob = "on";
+        var onContext = StampedContext(flipper.Runner, capture: false);   /* gated: nothing renders, so no second query */
+        var onRows = new List<ProcedureStatsCollector.Row> { RowFor(1) };
+
+        await flipper.Runner.ApplyProcedureStatsPlanReuseAsync(
+            null!, null!, ServerFor(), onContext, onRows, ProcedureStatsPlanFetchModes.OfRun(onContext), CancellationToken.None);
+
+        Assert.Null(onRows[0].KnownPlanDigest);
+        Assert.Equal(0, onContext.Measurements.First(m => m.Label == "deferred_hit").Value);
+        Assert.Equal(1, onContext.Measurements.First(m => m.Label == "deferred_miss").Value);
+    }
+
+    [Fact]
+    public async Task TwoRunsInTheSameMode_StillShareTheCache()
+    {
+        /* The switch rule must not turn the cache off: two on runs in a row hit what the first one confirmed. */
+        var flipper = new FlippableRunner("on");
+        var first = StampedContext(flipper.Runner, capture: false);
+        await flipper.Runner.ApplyProcedureStatsPlanReuseAsync(
+            null!, null!, ServerFor(), first, new List<ProcedureStatsCollector.Row> { RowFor(1) },
+            ProcedureStatsPlanFetchModes.OfRun(first), CancellationToken.None);
+        var cache = flipper.Runner.ProcedureStatsPlanCacheForTests(42)!;
+        var key = ProcedureStatsPlanKey.TryCreate(42, RowFor(1))!.Value;
+        cache.AddPending(key, "ABCD", 4, DateTime.UtcNow, 0);
+        cache.ConfirmPending(new[] { key }, DateTime.UtcNow);
+
+        var second = StampedContext(flipper.Runner, capture: false);
+        var rows = new List<ProcedureStatsCollector.Row> { RowFor(1) };
+        await flipper.Runner.ApplyProcedureStatsPlanReuseAsync(
+            null!, null!, ServerFor(), second, rows, ProcedureStatsPlanFetchModes.OfRun(second), CancellationToken.None);
+
+        Assert.Equal("ABCD", rows[0].KnownPlanDigest);
+        Assert.Equal(1, second.Measurements.First(m => m.Label == "deferred_hit").Value);
+    }
+
+    [Fact]
     public void TheStampSeam_CountsTheFetchTimeBesideTheRenderedPlans()
     {
         var context = StampedContext(new FlippableRunner("on").Runner, capture: true);

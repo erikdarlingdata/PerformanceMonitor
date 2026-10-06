@@ -1563,6 +1563,11 @@ EXECUTE [{escapedDbName}].sys.sp_executesql
             ?? int.MaxValue;
         long textBytes = 0;
 
+        /* #4348: one statement-filter session for this read call (Lite's live read and Darling's backfill both
+           run here). It judges each shipped statement's text below, after the self-exclusion and the boundary
+           break, so a row that never ships is never judged. */
+        var scrub = context.BeginStatementScrub();
+
         /* #1960 boundary-group completion: once the budget trips, rows TIED at the trip row's
            last_execution_time still ship (they are adjacent under the query's ASC order), and the first
            row past the tie ends the cycle. The derived watermark — MAX(last_execution_time) over stored
@@ -1658,6 +1663,13 @@ EXECUTE [{escapedDbName}].sys.sp_executesql
                 break;
             }
 
+            /* #4348: the budget below counts the RAW text, so measure it before the filter swaps in the
+               shorter marker; the cut points then land where they did before the filter existed. Judged here,
+               at the line the text joins the batch, and never again downstream. A Lite or backfill row has no
+               refresh path, so an unjudged text (budget spent) is the marker, the same as a named one. */
+            var rawTextChars = (long)(row.QueryText?.Length ?? 0);
+            row.QueryText = scrub.Text(row.QueryText);
+
             rows.Add(row);
 
             /* char count × 2 for UTF-16. The plan XML is deduped server-side (NULL on all but the newest
@@ -1667,7 +1679,7 @@ EXECUTE [{escapedDbName}].sys.sp_executesql
                OLDEST-first (#1960) and the per-database watermark derives from the newest STORED row, so
                everything past the cut stays ahead of the watermark and next cycle resumes exactly there:
                a bounded cycle costs latency, never data. */
-            textBytes += ((long)(row.QueryText?.Length ?? 0) + (row.QueryPlanText?.Length ?? 0)) * 2L;
+            textBytes += (rawTextChars + (row.QueryPlanText?.Length ?? 0)) * 2L;
 
             if (!budgetSpent && textBytes >= budget)
             {

@@ -189,8 +189,8 @@ ORDER BY
     /// server and the two handles are long hex strings — a fleet listing would be mostly identifiers for
     /// servers the caller did not ask about.</para>
     ///
-    /// <para><b>Largest first, which is deliberately NOT the claim's order.</b> The claim takes oldest
-    /// attempt first so nothing starves, and only breaks ties by size; ordering this listing the same way
+    /// <para><b>Largest first, which is deliberately NOT the claim's order.</b> The claim takes tried rows
+    /// oldest attempt first, at most half its slots, and the never-tried rows by size; ordering this listing the same way
     /// would make it look like a prediction of the sweep's next three picks while omitting the rows it
     /// will skip. Size descending answers the question a reader actually has — which plans the cap cost
     /// the most visibility on — and the key columns in the tiebreak keep the page stable.</para>
