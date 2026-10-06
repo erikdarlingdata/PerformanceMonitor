@@ -720,7 +720,11 @@ public sealed class DarlingWebHostService : BackgroundService
                tokenless as before. */
             var requireTokenWhenLoopbackOnly = !networkMode && accessToken.Length > 0;
 
-            ConfigurePipeline(_app, postgres, networkMode, networkListenIp, allowedCidr, accessToken, oidcClient, publicBaseUrlHost, storeHostPostgresConfig, config.Analyzer, requireTokenWhenLoopbackOnly);
+            /* #5288: the Host guard admits the listen address only while the server is exposed on it. networkListenIp
+               was parsed before any degrade and still holds it afterwards, so it goes through the MCP host's
+               ResolveHostGuardListenIp (the one rule both hosts share) with the final mode: a start that fell back to
+               loopback-only admits loopback names only, whatever it parsed. */
+            ConfigurePipeline(_app, postgres, networkMode, DarlingMcpHostService.ResolveHostGuardListenIp(networkMode, networkListenIp), allowedCidr, accessToken, oidcClient, publicBaseUrlHost, storeHostPostgresConfig, config.Analyzer, requireTokenWhenLoopbackOnly);
 
             /* #2389: name the authority for each half of what is being started — enabled/port from whichever
                plane the supervisor resolved, listen/allowFrom/token always from darling.json. */

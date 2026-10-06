@@ -84,7 +84,12 @@ public sealed class DarlingWebHostGateLiveTests
             app,
             postgres,
             networkMode: networkMode,
-            networkListenIp: networkMode ? IPAddress.Parse(ListenIp) : null,
+            // #5288: the Host guard's listen address is decided exactly as TryStartServerAsync decides it, through
+            // ResolveHostGuardListenIp from the FINAL mode. The host parses the configured address before any degrade,
+            // so a start that degraded out of network mode (requireTokenWhenLoopbackOnly) still has it in hand and the
+            // resolver is what drops it; a start that never had a network block has none to hand over.
+            networkListenIp: DarlingMcpHostService.ResolveHostGuardListenIp(
+                networkMode, networkMode || requireTokenWhenLoopbackOnly ? IPAddress.Parse(ListenIp) : null),
             allowedCidr: IPNetwork.Parse(AllowedCidr),
             accessToken: Token,
             oidcClient: oidcClient,
@@ -354,6 +359,25 @@ public sealed class DarlingWebHostGateLiveTests
         var ctx = await Send(server, "/", "evil.com", IPAddress.Loopback, token: Token);
 
         Assert.Equal(StatusCodes.Status400BadRequest, ctx.Response.StatusCode);
+    }
+
+    /// <summary>
+    /// #5288: the degraded loopback-only server listens on loopback only, so its Host guard admits loopback names
+    /// only. A request that names the configured listen address is answered 400 even with the right token, because
+    /// nothing is listening there any more, while a loopback name with the same token is exchanged for a session
+    /// cookie (past every gate). The server is built through <c>ResolveHostGuardListenIp</c> with the final mode, the
+    /// way the host builds it.
+    /// </summary>
+    [Fact]
+    public async Task TlsRefusal_DegradedLoopbackServer_AdmitsLoopbackNamesOnly_NotTheListenAddress()
+    {
+        using var server = await BuildServer(networkMode: false, requireTokenWhenLoopbackOnly: true);
+
+        var named = await Send(server, "/", ListenIp, IPAddress.Loopback, token: Token);
+        Assert.Equal(StatusCodes.Status400BadRequest, named.Response.StatusCode);
+
+        var loopbackName = await Send(server, "/", "localhost", IPAddress.Loopback, token: Token);
+        Assert.Equal(StatusCodes.Status302Found, loopbackName.Response.StatusCode);
     }
 
     /// <summary>
