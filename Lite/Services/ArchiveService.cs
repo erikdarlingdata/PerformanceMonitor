@@ -664,7 +664,7 @@ COPY (
        newly-opened connections start at the resting cap; the COPY value is
        applied transiently around parquet COPY operations and restored after.
        See WithRaisedCopyMemoryLimit and the comment block on ConnectionString. */
-    private const string MainConnectionRestingMemoryLimit = "1GB";
+    private const string MainConnectionRestingMemoryLimit = DuckDbInitializer.MainConnectionMemoryLimit;
     private const string MainConnectionCopyMemoryLimit = "4GB";
 
     /// <summary>
