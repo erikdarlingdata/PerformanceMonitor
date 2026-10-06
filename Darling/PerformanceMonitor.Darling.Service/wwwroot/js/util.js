@@ -273,14 +273,28 @@ export function windowNoteText(data) {
   return sent;
 }
 
+/* The retention notice a Top Queries or Top Procedures answer carries for the Reads ranking (#5226), or null. Reads can only be ranked from
+   raw (the hourly rollups keep no logical reads), so over a window past what raw keeps the answer says so in `retention_notice`: the raw
+   route's partial-window sentence, with the store's measured raw reach. It says what the answer's `truncation_note` says (the older part of
+   the window was not read), and it carries the figures. */
+function retentionNoticeOf(data) {
+  if (!data || typeof data !== "object" || Array.isArray(data)) return null;
+  const sent = data.retention_notice;
+  return typeof sent === "string" && sent.trim() ? sent : null;
+}
+
 /* A read's answer with its window note composed in the browser's zone (windowNoteText), so every strip that draws
    `truncation_note` (the grids' floor note, the Queries tab's noteKey notes, the hand-built composites) shows one
    clock. An empty envelope carries the note too, in its `data` (#4966: a grid that looked and found nothing says where its
    data starts, so a new server's empty week does not read as a quiet one). Anything but a data or empty answer, and an answer
-   whose note is already as it should be, comes back as it is. */
+   whose note is already as it should be, comes back as it is.
+
+   #5299: an answer that carries a `retention_notice` (the Reads ranking past raw's reach) has ONE window note, and it is that sentence:
+   it stands in the `truncation_note`'s place, so the grid draws it once instead of two near-identical lines (the floor sentence and the
+   retention notice both said the older part of the window was not read). Whoever draws `truncation_note` draws it, as text. */
 function localizeWindowNote(res) {
   if (!res || (res.kind !== "data" && res.kind !== "empty")) return res;
-  const note = windowNoteText(res.data);
+  const note = retentionNoticeOf(res.data) ?? windowNoteText(res.data);
   return note === null || note === res.data.truncation_note ? res : { ...res, data: { ...res.data, truncation_note: note } };
 }
 

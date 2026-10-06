@@ -145,6 +145,7 @@ ANALYZE collect.query_store_interval_wide;", ct);
                     top.Parameters.Add(Text());
                     top.Parameters.Add(Text());
                     top.Parameters.Add(Text());
+                    top.Parameters.Add(new NpgsqlParameter<int> { TypedValue = PerformanceMonitor.Darling.Storage.TopFill.FirstCandidates(500) });  /* #5313: the round's candidate limit, bound last */
                     var rows = await RowsAsync(top, ct);
                     results.Add($"mcp top|server {serverId}|{hours}h|{rows.Count} rows");
                     results.AddRange(rows.Select(r => $"  {r}"));
@@ -158,6 +159,7 @@ ANALYZE collect.query_store_interval_wide;", ct);
                     viewerTop.Parameters.Add(openEnd ? NullTs() : Ts(end));
                     viewerTop.Parameters.Add(new NpgsqlParameter<int> { TypedValue = 500 });
                     viewerTop.Parameters.Add(ViewerDataService.DatabaseFilterParameter(null));
+                    viewerTop.Parameters.Add(new NpgsqlParameter<int> { TypedValue = PerformanceMonitor.Darling.Storage.TopFill.FirstCandidates(500) });  /* #5313: the round's candidate limit, bound last */
                     var rows = await RowsAsync(viewerTop, ct);
                     results.Add($"viewer top|server {serverId}|{hours}h|{(openEnd ? "open end" : "closed end")}|{rows.Count} rows");
                     results.AddRange(rows.Select(r => $"  {r}"));

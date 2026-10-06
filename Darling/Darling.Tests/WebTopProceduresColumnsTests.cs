@@ -45,7 +45,8 @@ public sealed class WebTopProceduresColumnsTests
     private static HashSet<string> ReadFields()
     {
         var src = Tools();
-        var start = src.IndexOf("public static async Task<string> GetTopProceduresByCpu(", StringComparison.Ordinal);
+        /* #5226: the row projection lives in the ranked sibling the web dispatch calls; the MCP tool delegates to it. */
+        var start = src.IndexOf("internal static async Task<string> GetTopProceduresRanked(", StringComparison.Ordinal);
         var seg = src[start..];
         var sel = seg.IndexOf("rows.Select(r =>", StringComparison.Ordinal);
         var close = seg.IndexOf("}, r.Detail,", sel, StringComparison.Ordinal);
@@ -109,8 +110,9 @@ public sealed class WebTopProceduresColumnsTests
     {
         var js = Tab();
         Assert.Equal(2, Regex.Matches(js,
-            @"""get_top_procedures_by_cpu"",\s*\{ server, hours: ctx\.hours, top: 20, detail: ""full"" \},\s*""procedures"",\s*\[\.\.\.TOP_PROC_COLUMNS, procedurePlanColumn\(server\)\],").Count);
-        Assert.Equal(2, Regex.Matches(js, @"""truncation_note"",\s*null,\s*TOP_PROC_GROUPS\s*\)").Count);
+            @"""get_top_procedures_by_cpu"",\s*rankedParams\(\{ server, hours: ctx\.hours, top: 20, detail: ""full"" \}, ranking\),\s*""procedures"",\s*\[\.\.\.TOP_PROC_COLUMNS, procedurePlanColumn\(server\)\],").Count);
+        /* #5226: the selector is the last argument. #5299: the ranking's retention notice rides the window note, so the grid has no further note key. */
+        Assert.Equal(2, Regex.Matches(js, @"""truncation_note"",\s*null,\s*TOP_PROC_GROUPS,\s*picker\s*\)").Count);
     }
 
     [Fact]
@@ -121,7 +123,8 @@ public sealed class WebTopProceduresColumnsTests
             src, StringComparison.Ordinal);
         var web = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingWebEndpoints.cs");
         Assert.Matches(@"\[""get_top_procedures_by_cpu""\] = R\([^\n]*PAsOf\(\), PTextDefault\(""detail"", ""summary""\)\)", web);
-        Assert.Matches(@"GetTopProceduresByCpu\([^\n]*detail: Str\(c, ""detail""\) \?\? ""summary""", web);
+        /* #5226: the web dispatch calls the ranked sibling, so the MCP tool keeps its own signature. */
+        Assert.Matches(@"GetTopProceduresRanked\([^\n]*detail: Str\(c, ""detail""\) \?\? ""summary""", web);
     }
 
     [Fact]

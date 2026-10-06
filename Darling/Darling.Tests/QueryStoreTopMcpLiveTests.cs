@@ -351,6 +351,7 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE;", connection);
             AddNullableText(raw, null);
             AddNullableText(raw, executionType);
             AddNullableText(raw, moduleName);
+            raw.Parameters.Add(new NpgsqlParameter<int> { TypedValue = PerformanceMonitor.Darling.Storage.TopFill.FirstCandidates(TestTop) });  /* #5313: the round's candidate limit, bound last */
             await raw.ExecuteNonQueryAsync(ct);
         }
 
@@ -363,6 +364,7 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE;", connection);
             AddNullableText(table, null);
             AddNullableText(table, executionType);
             AddNullableText(table, moduleName);
+            table.Parameters.Add(new NpgsqlParameter<int> { TypedValue = PerformanceMonitor.Darling.Storage.TopFill.FirstCandidates(TestTop) });  /* #5313: the round's candidate limit, bound last */
             await table.ExecuteNonQueryAsync(ct);
         }
 
@@ -390,6 +392,7 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE;", connection);
         AddNullableText(command, null);
         AddNullableText(command, executionType);
         AddNullableText(command, moduleName);
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = PerformanceMonitor.Darling.Storage.TopFill.FirstCandidates(TestTop) });  /* #5313: the round's candidate limit, bound last */
         await using var reader = await command.ExecuteReaderAsync(ct);
         while (await reader.ReadAsync(ct))
         {

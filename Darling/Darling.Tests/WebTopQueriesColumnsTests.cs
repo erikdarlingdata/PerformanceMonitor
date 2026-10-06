@@ -111,10 +111,12 @@ public sealed class WebTopQueriesColumnsTests
     public void BothTopQueriesGridsPassTheGroupsAndTheFullDetailRead()
     {
         var js = Tab();
-        Assert.Equal(2, Regex.Matches(js, @"""get_top_queries_by_cpu"",\s*\{ server, hours: ctx\.hours, top: 20, detail: ""full"" \}").Count);
-        Assert.Equal(2, Regex.Matches(js, @"get_top_queries_by_cpu"",\s*\{ server, hours: ctx\.hours, top: 20, detail").Count);
+        /* #5226: both grids send their params through rankedParams, which adds order_by only for a non-default pick, so the
+           default read's params are still exactly { server, hours, top: 20, detail: "full" }. */
+        Assert.Equal(2, Regex.Matches(js, @"""get_top_queries_by_cpu"",\s*rankedParams\(\{ server, hours: ctx\.hours, top: 20, detail: ""full"" \}, ranking\)").Count);
+        Assert.Equal(2, Regex.Matches(js, @"get_top_queries_by_cpu"",\s*rankedParams\(\{ server, hours: ctx\.hours, top: 20, detail").Count);
         Assert.Contains("groups: TOP_QUERY_GROUPS.groups", js, StringComparison.Ordinal);
-        Assert.Matches(@"TOP_QUERY_COLUMNS,[^;]*?TOP_QUERY_GROUPS\s*\)", js);
+        Assert.Matches(@"TOP_QUERY_COLUMNS,[^;]*?TOP_QUERY_GROUPS,\s*picker\s*\)", js);
     }
 
     [Fact]
@@ -133,7 +135,8 @@ public sealed class WebTopQueriesColumnsTests
     public void BothAggregatesSelectTheDetailColumnsTheReaderMapsByPosition(string which)
     {
         var sql = which == "TopQueriesSql" ? DarlingDataReader.TopQueriesSql : DarlingDataReader.TopQueriesByHostObjectSql;
-        var outer = sql[sql.LastIndexOf("r.database_name,", StringComparison.Ordinal)..];
+        /* The outer SELECT list starts at r.database_name; the final ORDER BY repeats that text, so LastIndexOf no longer finds it. */
+        var outer = sql[Regex.Match(sql, @"SELECT\s+r\.database_name,").Index..];
         var select = outer[..outer.IndexOf("FROM ranked", StringComparison.Ordinal)];
         var cols = Regex.Matches(select, @"^\s+(?:r\.|t\.|CAST\()([a-z_0-9]+)", RegexOptions.Multiline).Select(m => m.Groups[1].Value).ToList();
         Assert.Equal(new[]
