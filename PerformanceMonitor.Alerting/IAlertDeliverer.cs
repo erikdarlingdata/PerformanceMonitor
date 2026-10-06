@@ -53,12 +53,6 @@ namespace PerformanceMonitor.Alerting;
 /// render site falls back to <paramref name="MetricName"/> whenever this is null or empty; the metric name
 /// stays the severity / cooldown / dedup key everywhere.
 /// </param>
-/// <param name="StatementFiltered">
-/// True once <see cref="AlertStatementFilter"/> has judged this outcome's statement-bearing text (#5320, part of
-/// #4348). <see cref="AlertStatementFilter.Apply(AlertOutcome)"/> sets it on the copy it returns and returns an
-/// outcome that already carries it untouched, so an alert the engine's <c>FireAsync</c> filtered is not judged a
-/// second time when the deliverer filters at its own choke point. Callers never set it by hand.
-/// </param>
 public sealed record AlertOutcome(
     string ServerKey,
     string ServerName,
@@ -72,8 +66,7 @@ public sealed record AlertOutcome(
     bool Muted,
     AlertSeverityLevel? Severity,
     string? ShortMessage = null,
-    string? DisplayName = null,
-    bool StatementFiltered = false);
+    string? DisplayName = null);
 
 /// <summary>
 /// The record-and-send seam for the Phase-5 shared alert engine: the engine evaluates conditions

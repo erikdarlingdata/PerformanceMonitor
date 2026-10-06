@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Runtime.CompilerServices;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Notifications;
 
@@ -21,7 +22,7 @@ namespace PerformanceMonitor.Alerting;
 /// <para><b>Where it runs.</b> <c>AlertEngine.FireAsync</c> applies it to every <see cref="AlertOutcome"/> before
 /// the firing is logged or delivered, and both deliverers apply it again at their own entry (#5320), so a caller that
 /// hands an outcome straight to a deliverer (the PostgreSQL families, the self alerts, the custom alert rules) is
-/// covered too; <see cref="AlertOutcome.StatementFiltered"/> keeps an engine alert from being judged twice. The two finding senders apply it to a <see cref="FindingAlert"/>
+/// covered too; the filter remembers the instances it judged, so an engine alert is not judged twice (see "Already judged"). The two finding senders apply it to a <see cref="FindingAlert"/>
 /// before they compose a message or a history row. Mute rules are evaluated BEFORE the fire, on the raw
 /// text, so a rule keyed on a statement still matches; only what leaves the process is filtered.</para>
 ///
@@ -30,6 +31,18 @@ namespace PerformanceMonitor.Alerting;
 /// (through <see cref="SensitiveStatements.Xml(string?, int)"/>); each incident's involved objects and forensic field values. A value
 /// that is not named comes back as the SAME instance, and an alert with nothing named comes back as the same
 /// object, so the common case allocates nothing.</para>
+///
+/// <para><b>Already judged.</b> The filter keeps the outcome instances it judged in a private
+/// <see cref="ConditionalWeakTable{TKey, TValue}"/>; there is no flag on <see cref="AlertOutcome"/> a caller could set. An
+/// instance in the table passes through <see cref="Apply(AlertOutcome)"/> untouched. A <c>with</c> copy is a NEW
+/// instance, so text added to a judged outcome after the fact is judged again, and an outcome a caller builds is always
+/// judged. Only <c>AlertEngine</c> (same assembly) and the test projects can mark an instance without judging it
+/// (<see cref="MarkJudged(AlertOutcome)"/> is internal).</para>
+///
+/// <para><b>Names.</b> A custom alert rule's display name is judged (it rides subjects and titles), and so is the
+/// name on the resolution rows the rule's evaluator writes (<c>CustomAlertEvaluator.JudgedRuleName</c>), because those
+/// rows go out to the history store. The server name and the metric name are routing and pairing keys and stay as
+/// typed, and local log lines (which never leave the machine) are not filtered.</para>
 ///
 /// <para><b>Budget.</b> One 1.5 s <c>JudgeBudget</c> per <see cref="Apply(AlertOutcome)"/> call, shared by every value
 /// it judges. Past it a value is withheld unjudged (the marker), never passed. A list of finding alerts shares one
@@ -54,9 +67,10 @@ public static class AlertStatementFilter
     {
         ArgumentNullException.ThrowIfNull(outcome);
 
-        /* #5320: an outcome that already went through the filter (the engine's FireAsync marks its own) is
-           not judged again at the deliverer's choke point. */
-        if (outcome.StatementFiltered)
+        /* #5320: an outcome this filter already judged (the engine's FireAsync marks its own) is not judged again
+           at the deliverer's choke point. Only instances in the table count: a `with` copy or a caller-built
+           outcome is judged. */
+        if (Judged.TryGetValue(outcome, out _))
         {
             return outcome;
         }
@@ -85,10 +99,10 @@ public static class AlertStatementFilter
                 && ReferenceEquals(detailText, outcome.DetailText)
                 && ReferenceEquals(shortMessage, outcome.ShortMessage))
             {
-                return outcome;
+                return Remember(outcome);
             }
 
-            return outcome with { Context = context, DetailText = detailText, ShortMessage = shortMessage, DisplayName = displayName, StatementFiltered = true };
+            return Remember(outcome with { Context = context, DetailText = detailText, ShortMessage = shortMessage, DisplayName = displayName });
         }
 #pragma warning disable CA1031 // fail closed: the filter never lets the input through after a failure
         catch (Exception)
@@ -98,27 +112,36 @@ public static class AlertStatementFilter
                otherwise be delivered cleared with no reason, so its context carries the neutral sentence as a
                detail item, and a context-less one carries it as its detail text. */
             var noDetailText = string.IsNullOrEmpty(outcome.DetailText);
-            return outcome with
+            return Remember(outcome with
             {
                 Context = Cleared(outcome.Context, withReason: noDetailText),
                 DetailText = noDetailText && outcome.Context is not null ? outcome.DetailText : SensitiveStatements.PlaceholderText,
                 ShortMessage = string.IsNullOrEmpty(outcome.ShortMessage) ? outcome.ShortMessage : SensitiveStatements.PlaceholderText,
                 DisplayName = string.IsNullOrEmpty(outcome.DisplayName) ? outcome.DisplayName : SensitiveStatements.PlaceholderText,
-                StatementFiltered = true,
-            };
+            });
         }
     }
 
     /// <summary>
     /// The outcome <see cref="Apply(AlertOutcome)"/> returns, marked as judged (#5320). <c>AlertEngine.FireAsync</c>
-    /// calls this after <see cref="Apply(AlertOutcome)"/> so a plain alert (one with nothing named, which
-    /// <c>Apply</c> hands back as the same instance) also reaches the deliverer marked, and the deliverer's own
-    /// filter does not judge it a second time. An already marked outcome comes back as the same instance.
+    /// calls this after <see cref="Apply(AlertOutcome)"/> (which already remembers what it returns, so this is a
+    /// belt for the engine's own call site). Always the SAME instance. Internal: marking without judging is for the
+    /// engine and the test projects only, and a caller outside the assembly cannot fake "already filtered" (M2, #5360).
     /// </summary>
-    public static AlertOutcome MarkJudged(AlertOutcome outcome)
+    internal static AlertOutcome MarkJudged(AlertOutcome outcome)
     {
         ArgumentNullException.ThrowIfNull(outcome);
-        return outcome.StatementFiltered ? outcome : outcome with { StatementFiltered = true };
+        return Remember(outcome);
+    }
+
+    /* The instances this filter judged. Weak keys: an outcome nobody holds is collected, and the table never grows. */
+    private static readonly ConditionalWeakTable<AlertOutcome, object> Judged = new();
+    private static readonly object Mark = new();
+
+    private static AlertOutcome Remember(AlertOutcome outcome)
+    {
+        Judged.TryAdd(outcome, Mark);
+        return outcome;
     }
 
     /// <summary>

@@ -157,7 +157,7 @@ public sealed class LiteAlertDeliverer : IAlertDeliverer
 
         /* #5320 (part of #4348): the statement filter runs at this choke point, so a caller that hands an outcome
            straight here (any direct caller) is filtered like an
-           engine alert. An outcome AlertEngine.FireAsync already filtered carries StatementFiltered and passes
+           engine alert. An outcome AlertEngine.FireAsync already filtered is remembered by the filter and passes
            through untouched, so nothing is judged twice. Never throws. */
         outcome = AlertStatementFilter.Apply(outcome);
 
