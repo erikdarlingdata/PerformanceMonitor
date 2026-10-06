@@ -641,15 +641,36 @@ public sealed class StatementColumnCensusTests
     /// <summary>
     /// Whether <paramref name="body"/> (of a method on <paramref name="ownType"/>) calls the site
     /// <paramref name="target"/>: an unqualified call when it is on the same type, <c>Type.Method(</c> otherwise, or a
-    /// call on a private instance field (<c>_field.Method(</c>) of another type: the MCP filter hands a slow call's
-    /// arguments to the slow-read log through its <c>_slowReads</c> field (#5320, dev's #5362 merged into #5367).
+    /// call on a private instance field (<c>_field.Method(</c>) that <paramref name="fileSource"/> declares with the
+    /// target's type: the MCP filter hands a slow call's arguments to the slow-read log through its
+    /// <c>_slowReads</c> field (#5320, dev's #5362 merged into #5367). A field of any other type does not count
+    /// (#5367 review: a writer calling <c>_queue.Offer(</c> on an unrelated queue is not hooked).
     /// </summary>
-    private static bool CallsSite(string body, string ownType, (string Type, string Method) target)
+    private static bool CallsSite(string body, string ownType, (string Type, string Method) target, string fileSource)
     {
-        var pattern = target.Type == ownType
-            ? @"(?<![\w.])" + Regex.Escape(target.Method) + @"\s*\("
-            : @"(?<![\w])(?:" + Regex.Escape(target.Type) + @"|_\w+)\s*\.\s*" + Regex.Escape(target.Method) + @"\s*\(";
-        return Regex.IsMatch(body, pattern, RegexOptions.CultureInvariant);
+        if (target.Type == ownType)
+        {
+            return Regex.IsMatch(body, @"(?<![\w.])" + Regex.Escape(target.Method) + @"\s*\(", RegexOptions.CultureInvariant);
+        }
+
+        if (Regex.IsMatch(body, @"(?<![\w])" + Regex.Escape(target.Type) + @"\s*\.\s*" + Regex.Escape(target.Method) + @"\s*\(",
+            RegexOptions.CultureInvariant))
+        {
+            return true;
+        }
+
+        foreach (Match call in Regex.Matches(body, @"(?<![\w.])(?<field>_\w+)\s*\.\s*" + Regex.Escape(target.Method) + @"\s*\(",
+            RegexOptions.CultureInvariant))
+        {
+            // The field must be declared in this file with the target's type, readonly or not, nullable or not.
+            var declared = @"\b" + Regex.Escape(target.Type) + @"\??\s+" + Regex.Escape(call.Groups["field"].Value) + @"\b";
+            if (Regex.IsMatch(fileSource, declared, RegexOptions.CultureInvariant))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /// <summary>The problems with a watched list, reading each site's file through <paramref name="read"/>.</summary>
@@ -697,7 +718,7 @@ public sealed class StatementColumnCensusTests
                 changed = false;
                 foreach (var site in sites.Where(x => !filtering.Contains((x.Type, x.Method))))
                 {
-                    if (filtering.Any(f => site.Bodies.Any(d => CallsSite(d.Body, site.Type, f))))
+                    if (filtering.Any(f => site.Bodies.Any(d => CallsSite(d.Body, site.Type, f, read(site.File) ?? ""))))
                     {
                         filtering.Add((site.Type, site.Method));
                         changed = true;
@@ -771,11 +792,16 @@ namespace N
     public void TheWatchedScan_SeesACallOnAPrivateFieldOfAnotherType_ButNotOnALocalOrAnUnrelatedMethod()
     {
         var target = ("SlowReadLog", "Offer");
-        Assert.True(CallsSite("_slowReads.Offer(a, b);", "McpToolLatencyFilter", target));
-        Assert.True(CallsSite("SlowReadLog.Offer(a);", "McpToolLatencyFilter", target));
-        Assert.False(CallsSite("local.Offer(a);", "McpToolLatencyFilter", target));
-        Assert.False(CallsSite("_slowReads.ShouldRecord(a);", "McpToolLatencyFilter", target));
-        Assert.False(CallsSite("Offer(a);", "McpToolLatencyFilter", target));
+        const string declares = "private readonly SlowReadLog _slowReads = new();\nprivate SlowReadLog? _optional;";
+        Assert.True(CallsSite("_slowReads.Offer(a, b);", "McpToolLatencyFilter", target, declares));
+        Assert.True(CallsSite("_optional.Offer(a);", "McpToolLatencyFilter", target, declares));
+        Assert.True(CallsSite("SlowReadLog.Offer(a);", "McpToolLatencyFilter", target, ""));
+        Assert.False(CallsSite("local.Offer(a);", "McpToolLatencyFilter", target, declares));
+        Assert.False(CallsSite("_slowReads.ShouldRecord(a);", "McpToolLatencyFilter", target, declares));
+        // A private field of any OTHER type is not the site (#5367 review): the queue is not the slow-read log.
+        Assert.False(CallsSite("_queue.Offer(a);", "McpToolLatencyFilter", target, "private readonly Queue<string> _queue = new();"));
+        Assert.False(CallsSite("_queue.Offer(a);", "McpToolLatencyFilter", target, declares));
+        Assert.False(CallsSite("Offer(a);", "McpToolLatencyFilter", target, declares));
     }
 
     [Fact]
