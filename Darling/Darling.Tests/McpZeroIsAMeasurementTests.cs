@@ -211,15 +211,15 @@ public sealed class McpZeroIsAMeasurementTests
 
     private static IEnumerable<(string Name, string Sql)> DifferencedTrendSql()
     {
-        yield return (nameof(DarlingTrendReader.QueryDurationTrendSql), DarlingTrendReader.QueryDurationTrendSql);
-        yield return (nameof(DarlingTrendReader.ProcedureDurationTrendSql), DarlingTrendReader.ProcedureDurationTrendSql);
-        yield return (nameof(DarlingTrendReader.QueryStoreDurationTrendSql), DarlingTrendReader.QueryStoreDurationTrendSql);
+        yield return (nameof(DarlingTrendReader.QueryDurationTrendFilteredSql), DarlingTrendReader.QueryDurationTrendFilteredSql);
+        yield return (nameof(DarlingTrendReader.ProcedureDurationTrendFilteredSql), DarlingTrendReader.ProcedureDurationTrendFilteredSql);
+        yield return (nameof(DarlingTrendReader.QueryStoreDurationTrendFilteredSql), DarlingTrendReader.QueryStoreDurationTrendFilteredSql);
         yield return ("BuildRollupTrendSql(false)", QueryStoreTrendRouting.BuildRollupTrendSql(withDatabaseFilter: false));
         yield return ("BuildRollupTrendSql(true)", QueryStoreTrendRouting.BuildRollupTrendSql(withDatabaseFilter: true));
-        /* #3653 A11: the raw query-stats trend the viewer runs (and the MCP raw const's alias-in-waiting) — its
-           LAG is the pre-V128 fallback arm of the three-state interval, and the rule below still holds. */
-        yield return ("QueryDurationTrendRawSql(false)", DurationTrendRouting.QueryDurationTrendRawSql(withDatabaseFilter: false));
-        yield return ("QueryDurationTrendRawSql(true)", DurationTrendRouting.QueryDurationTrendRawSql(withDatabaseFilter: true));
+        /* #3653 A11: the bucketed raw query-stats trend, with and without the viewer's filter — its LAG is the pre-V128
+           fallback arm of the three-state interval, and the rule below still holds. */
+        yield return ("BuildBucketedRawTrendSql(false)", DurationTrendRouting.BuildBucketedRawTrendSql("query_stats", withDatabaseFilter: false));
+        yield return ("BuildBucketedRawTrendSql(true)", DurationTrendRouting.BuildBucketedRawTrendSql("query_stats", withDatabaseFilter: true));
     }
 
     [Fact]

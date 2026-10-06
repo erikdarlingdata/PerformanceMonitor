@@ -16,6 +16,7 @@ using Microsoft.Extensions.Logging;
 using ModelContextProtocol.Server;
 using Npgsql;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Storage;
 
 #pragma warning disable CA1707 // MCP tools use snake_case naming convention
 
@@ -32,14 +33,32 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 public sealed class DarlingMcpLongQueryTools
 {
     [McpServerTool(Name = "get_long_query_completions"), Description("Gets the SLOWEST long-running query completions in the window: rpc/batch completions over the trace's duration threshold, plus attentions (cancels/timeouts), ranked duration DESC, attentions (no duration) last. THE PAGE IS THE window's limit SLOWEST, NOT ITS NEWEST: truncated means the window held more, none slower than the page; oldest/newest_returned_event_time bound the slowest runs' ages, NOT how far the read reached. Collector is opt-in, OFF by default: empty can mean none in the window, or the collector was off — enable 'long_query_completions' in the schedule. <<GUIDE>> Gets the SLOWEST long-running query completions in the window, captured by the opt-in long-query trace: rpc/batch completions whose duration exceeded the trace threshold, plus attentions (client cancels / query timeouts), ranked by duration DESC with attentions (no duration) last. Shows duration, CPU, reads/writes, row count, result (OK/Error/Abort — Abort means the long query was cancelled), the statement text, and the calling session/app/login. THE PAGE IS THE window's limit SLOWEST, NOT ITS NEWEST: completions_returned is how many rows you got and truncated says the window held more than limit. Because the page is duration-RANKED, oldest_returned_event_time / newest_returned_event_time tell you how old the slowest runs are and say NOTHING about how far back the read reached — every row in the window was a candidate, so a truncated page still holds the window's slowest. Both SKUs keep the same population. The collector is OFF by default; if it returns empty, enable the 'long_query_completions' collector in the schedule.")]
-    public static async Task<string> GetLongQueryCompletions(
+    public static Task<string> GetLongQueryCompletions(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history. Default 24.")] int hours_back = 24,
         [Description("Maximum rows to return, slowest first. Default 30. This is what bounds the page — read truncated to know whether the window held more.")] int limit = 30,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        [Description("Limit to one database. Omit for all databases.")] string? database_name = null,
         ILogger? logger = null,
         CancellationToken cancellationToken = default)
+        => GetLongQueryCompletions(postgres, server_name, hours_back, limit, as_of, DatabaseFilter.One(database_name), logger, cancellationToken);
+
+    /// <summary>
+    /// #5244: the get_long_query_completions read over a LIST of databases. The MCP tool passes
+    /// <c>DatabaseFilter.One(database_name)</c> and the web dispatch passes the repeated keys. The cap applies after the
+    /// filter, so the page is the slowest N of the chosen databases, and the empty path says "for the database X" (one name) or
+    /// "for the chosen databases" (two or more), never a verdict on a database it did not read.
+    /// </summary>
+    internal static async Task<string> GetLongQueryCompletions(
+        NpgsqlDataSource postgres,
+        string? server_name,
+        int hours_back,
+        int limit,
+        string? as_of,
+        DatabaseFilter databaseFilter,
+        ILogger? logger,
+        CancellationToken cancellationToken)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
@@ -58,19 +77,40 @@ public sealed class DarlingMcpLongQueryTools
                The reader's own LIMIT 200 was invisible to the caller, and `total_completions` published it as
                the window's count. */
             var rows = await DarlingLongQueryReader.GetRecentLongQueryCompletionsAsync(
-                postgres, resolved.ServerId, now.AddHours(-hours_back), now, limit + 1, cancellationToken);
+                postgres, resolved.ServerId, now.AddHours(-hours_back), now, limit + 1, databaseFilter, cancellationToken);
             if (rows.Count == 0)
-                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "long_query_completions", cancellationToken)
+            {
+                /* #5244 round 2 (L2): not_collected and precondition echo database_name like every other shape. */
+                var unmet = McpHelpers.WithDatabase(
+                    await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "long_query_completions", cancellationToken),
+                    databaseFilter.Describe())
                     /* #2546: this collector is opt-in, so the fall-through below already sends the reader to
-                       the schedule — which is the wrong place when the collector IS enabled and its session
+                       the schedule, which is the wrong place when the collector IS enabled and its session
                        is missing. The precondition answer names that state instead of quietly blaming a knob
                        that is already switched on. */
-                    ?? await DarlingRuntimePrecondition.StatusAsync(postgres, resolved.ServerId, resolved.ServerName, "long_query_completions", cancellationToken)
-                    /* #4966: the window keys ride on an empty answer under hints; not_collected and the precondition stay bare. */
-                    ?? McpHelpers.Status("empty", "No long-running query completions found in the specified time range. The long_query_completions collector is opt-in (default OFF) — enable it in the collector schedule to capture data.",
-                        (await DarlingMcpWindowNotice.ReadEventAsync(
-                            () => DarlingMcpWindowNotice.Probe(postgres, "long_query_completions", resolved.ServerName, windowStart, now, cancellationToken),
-                            null, windowStart, now, "long_query_completions", emptyAnswer: true, logger: logger, cancellationToken: cancellationToken)).AsHints());
+                    ?? McpHelpers.WithDatabase(
+                        await DarlingRuntimePrecondition.StatusAsync(postgres, resolved.ServerId, resolved.ServerName, "long_query_completions", cancellationToken),
+                        databaseFilter.Describe());
+                if (unmet != null)
+                {
+                    return unmet;
+                }
+
+                /* #4966: the window keys ride on an empty answer under hints; not_collected and the precondition stay bare. */
+                var emptyNotice = await DarlingMcpWindowNotice.ReadEventAsync(
+                    () => DarlingMcpWindowNotice.Probe(postgres, "long_query_completions", resolved.ServerName, windowStart, now, cancellationToken),
+                    null, windowStart, now, "long_query_completions", emptyAnswer: true, logger: logger, cancellationToken: cancellationToken);
+                /* #5244 round 2 (L3): the probe is not database-filtered, so a null floor means the store holds no long-query row for
+                   this server in the window, and only then does the answer send the reader to the opt-in switch. With rows for other
+                   databases the collector is on, and the answer is about the chosen databases. A failed probe gives no verdict, so a
+                   filtered answer leaves the sentence off. */
+                var collectorMayBeOff = databaseFilter.IsAll || (!emptyNotice.IsUnavailable && emptyNotice.EffectiveStart is null);
+                return McpHelpers.StatusForDatabase("empty",
+                    "No long-running query completions found in the specified time range" + DarlingMcpBlockingTools.ForChosenDatabases(databaseFilter)
+                        + (collectorMayBeOff ? ". The long_query_completions collector is opt-in (default OFF) — enable it in the collector schedule to capture data." : "."),
+                    databaseFilter.Describe(), /* #5244 review L2: the echo rides on an empty answer too */
+                    emptyNotice.AsHints());
+            }
 
             var truncated = rows.Count > limit;
             var page = truncated ? rows.Take(limit).ToList() : rows;
@@ -115,6 +155,8 @@ public sealed class DarlingMcpLongQueryTools
                 effective_start = notice.EffectiveStart,
                 window_truncated = notice.WindowTruncated,
                 truncation_note = notice.TruncationNote,
+                /* #5244: which databases the page is limited to: the name for one, "the chosen databases" for two or more, null for all. */
+                database_name = databaseFilter.Describe(),
                 /* #3541 A3: the page described as a page. Under a duration RANKING the two stamps bound the
                    slowest runs, not the reach — the description says so, and QueryStoreTopWindowTests states
                    the general trap for cost-ranked pages. */
