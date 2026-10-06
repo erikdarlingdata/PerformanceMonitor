@@ -459,22 +459,25 @@ public sealed class SensitiveStatementsTests
     [Fact]
     public void ABudgetStopsRunningTheJudgeOnceSpent_AndCountsTheRestUnjudged()
     {
+        // A fake clock, not a sleep: each judge call advances it 30 ms, so a 100 ms budget is spent after
+        // exactly four calls (0, 30, 60 and 90 ms elapsed all leave it unspent; 120 ms spends it) (#5320).
         var calls = 0;
+        var now = TimeSpan.Zero;
         var budget = new SensitiveStatements.JudgeBudget(TimeSpan.FromMilliseconds(100), _ =>
         {
             calls++;
-            Thread.Sleep(30);
+            now += TimeSpan.FromMilliseconds(30);
             return SensitiveStatements.Verdict.Clean;
-        });
+        }, clock: () => now);
 
         var verdicts = Enumerable.Range(0, 20).Select(i => budget.Judge("v" + i.ToString(CultureInfo.InvariantCulture))).ToList();
 
         Assert.True(budget.Spent);
-        Assert.InRange(calls, 3, 5);
+        Assert.Equal(4, calls);
         Assert.Equal(20 - calls, budget.Unjudged);
         Assert.All(verdicts.Skip(calls), v => Assert.Equal(SensitiveStatements.Verdict.Named, v));
         Assert.All(verdicts.Take(calls), v => Assert.Equal(SensitiveStatements.Verdict.Clean, v));
-        Assert.True(budget.Elapsed >= TimeSpan.FromMilliseconds(100));
+        Assert.Equal(TimeSpan.FromMilliseconds(120), budget.Elapsed);
 
         var before = calls;
         budget.Judge("one more");
