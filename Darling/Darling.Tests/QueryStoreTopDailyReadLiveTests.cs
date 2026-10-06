@@ -51,8 +51,8 @@ public sealed class QueryStoreTopDailyReadLiveTests
     /// <c>QueryStoreTopSuffix</c> was divided into its ranked head and its tail, and re-taken once for #5313, which
     /// deliberately changed both statements: the over-fetch <c>LIMIT $4 + 5</c> became the round's candidate limit and
     /// the tail gained the page / count-row wrapper. The split pin is the tail-sharing assert below.</summary>
-    private const string RawSqlHash = "5B4F2ADADCA32633D527C92950D60FFCD1B506F3180F9A916E3DAB9A128E9FE6";
-    private const string TableSqlHash = "4CADE9961E06CA09CBE6967A726ADC1DC7E81BAE4C3CE546E7AD5631BB8C4C7F";
+    private const string RawSqlHash = "95ED4C5E7A74B204E2CFAA1B8DF30C2778A242CDC07AA587B411BD11B28C9CCF";
+    private const string TableSqlHash = "50A5FA33016B5D5B32FF068B2A50B69591D69F6AF1437D527A70F94AB03D8E2B";
 
     private static string Hash(string sql) =>
         Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(sql.ReplaceLineEndings("\n"))));

@@ -296,7 +296,7 @@ public sealed partial class ViewerDataService
             FROM deduped
             WHERE rn = 1
             GROUP BY database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role
-            ORDER BY SUM(execution_count) * AVG(CAST(avg_duration_us AS double precision)) DESC
+            ORDER BY SUM(execution_count) * AVG(CAST(avg_duration_us AS double precision)) DESC, database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role
             LIMIT $6
         ),
         page AS (
@@ -354,7 +354,7 @@ public sealed partial class ViewerDataService
             r.min_num_physical_io_reads,
             r.max_num_physical_io_reads,
             r.replica_role,
-            ROW_NUMBER() OVER (ORDER BY r.total_executions * r.avg_duration_ms DESC) AS page_ord
+            ROW_NUMBER() OVER (ORDER BY r.total_executions * r.avg_duration_ms DESC, r.database_name, r.query_id, r.plan_id, r.query_hash, r.execution_type_desc, r.replica_role) AS page_ord
         FROM ranked AS r
         /* #2150: resolve the text ONCE, inside the lateral, so everything downstream still reads a single
            t.query_text — the projection above and the WAITFOR self-exclusion below both get the resolved
@@ -379,7 +379,7 @@ public sealed partial class ViewerDataService
                            AND   s.query_id = r.query_id
                            AND   s.database_name = r.database_name
                            AND   s.query_text IS NOT NULL
-                           ORDER BY s.collection_time DESC
+                           ORDER BY s.collection_time DESC, s.collection_id DESC
                            LIMIT 1
                        )
                    ) AS query_text

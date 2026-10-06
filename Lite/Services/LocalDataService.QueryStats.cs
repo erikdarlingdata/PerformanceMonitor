@@ -219,7 +219,9 @@ LEFT JOIN LATERAL (
        another caller's text (NOT DISTINCT FROM so ad-hoc NULL hosts still match ad-hoc rows). */
     AND   host_object_name IS NOT DISTINCT FROM r.host_object_name
     AND   query_text IS NOT NULL
-    ORDER BY collection_time DESC
+    /* #5299 round 2 (N3): two rows of one key at one collection_time (two plans, one collection) must give the
+       same text on every read, so a tie on the time breaks on the row collected last. */
+    ORDER BY collection_time DESC, collection_id DESC
     LIMIT 1
 ) t ON TRUE
 LEFT JOIN module m ON m.sql_handle = r.sql_handle

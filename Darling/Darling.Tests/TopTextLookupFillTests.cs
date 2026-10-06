@@ -110,7 +110,7 @@ public sealed class TopTextLookupFillTests
         Assert.DoesNotContain("DISTINCT ON", lookup, StringComparison.Ordinal);
         Assert.DoesNotContain("JOIN ranked", lookup, StringComparison.Ordinal);
         Assert.Contains("q.query_hash = rk.query_hash", lookup, StringComparison.Ordinal);
-        Assert.Equal(2, Regex.Matches(lookup, @"ORDER BY q\.collection_time DESC\s+LIMIT 1").Count);
+        Assert.Equal(2, Regex.Matches(lookup, @"ORDER BY q\.collection_time DESC, q\.collection_id DESC\s+LIMIT 1").Count);   /* N3: a tie on the time breaks on the row collected last */
         /* NULL-safe on every key column: the database by IS NOT DISTINCT FROM, the hash by its own NULL arm. */
         Assert.Contains("q.database_name IS NOT DISTINCT FROM rk.database_name", lookup, StringComparison.Ordinal);
         Assert.Contains("q.query_hash IS NULL", lookup, StringComparison.Ordinal);
@@ -142,6 +142,50 @@ public sealed class TopTextLookupFillTests
         Assert.DoesNotContain("DISTINCT ON", anyPass, StringComparison.Ordinal);
         Assert.Equal(3, Regex.Matches(anyPass, @"LIMIT 1\s*$", RegexOptions.Multiline).Count);
         Assert.Contains("NOT EXISTS", sql[missing..any], StringComparison.Ordinal);
+    }
+
+    // ------------------------------------------------------------------ #5299 round 2: N3 and N6, a total order
+
+    [Fact]
+    public void EveryNewestTextPick_BreaksATieOnTheTimeOnTheRowCollectedLast()
+    {
+        /* Two rows of one key at one collection_time (one shape hash, two plans, one collection) must give the same text every
+           run, because the text also decides the WAITFOR trim. collection_id is unique per row, so it is a total tie-break. */
+        foreach (var (name, sql) in new[]
+        {
+            ("TopQueriesSql", DarlingDataReader.TopQueriesSql),
+            ("TopQueriesByHostObjectSql", DarlingDataReader.TopQueriesByHostObjectSql),
+            ("TopQueriesHourlySql", DarlingDataReader.TopQueriesHourlySql),
+            ("QueryStoreTopSql", DarlingDataReader.QueryStoreTopSql),
+            ("QueryStoreTopTableSql", DarlingDataReader.QueryStoreTopTableSql),
+            ("QueryStoreTopDailyTableSql", DarlingDataReader.QueryStoreTopDailyTableSql),
+            ("ViewerTopQueriesSql", ViewerDataService.TopQueriesSql),
+            ("ViewerQueryStoreTopSql", ViewerDataService.QueryStoreTopSql),
+        })
+        {
+            var picks = Regex.Matches(sql, @"ORDER BY[^\n]*\b[qs]\.collection_time DESC[^\n]*").Select(m => m.Value).ToList();
+            Assert.NotEmpty(picks);
+            Assert.All(picks, pick => Assert.True(pick.Contains("collection_id DESC", StringComparison.Ordinal),
+                $"{name}: the newest-text pick '{pick.Trim()}' has no tie-break after collection_time"));
+        }
+    }
+
+    [Fact]
+    public void TheQueryStoreAndViewerTopStatements_RankOnATotalOrder()
+    {
+        /* Ranking value, then the whole group key: an exact tie at the candidate boundary must not pick different members in a
+           refill round. The page order uses the same columns the ranking did. */
+        const string queryStoreKey = "database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role";
+        foreach (var sql in new[] { DarlingDataReader.QueryStoreTopSql, DarlingDataReader.QueryStoreTopTableSql, DarlingDataReader.QueryStoreTopDailyTableSql, ViewerDataService.QueryStoreTopSql })
+        {
+            Assert.Contains("DESC, " + queryStoreKey + "\n", sql.ReplaceLineEndings("\n"), StringComparison.Ordinal);
+            Assert.Contains("DESC, r.database_name, r.query_id, r.plan_id, r.query_hash, r.execution_type_desc, r.replica_role) AS page_ord", sql, StringComparison.Ordinal);
+        }
+
+        var viewer = ViewerDataService.TopQueriesSql.ReplaceLineEndings("\n");
+        Assert.Contains("ORDER BY SUM(delta_elapsed_time) DESC, database_name, query_hash, host_object_name\n", viewer, StringComparison.Ordinal);
+        Assert.Contains("ROW_NUMBER() OVER (ORDER BY r.total_elapsed_us DESC, r.database_name, r.query_hash, r.host_object_name) AS page_ord", viewer, StringComparison.Ordinal);
+        Assert.Contains("ORDER BY r.total_elapsed_us DESC, r.database_name, r.query_hash, r.host_object_name\n", viewer, StringComparison.Ordinal);
     }
 
     [Fact]

@@ -341,7 +341,8 @@ LEFT JOIN LATERAL (
     AND   query_id = r.query_id
     AND   database_name = r.database_name
     AND   query_text IS NOT NULL
-    ORDER BY collection_time DESC
+    /* #5299 round 2 (N3): a tie on the time breaks on the row collected last - see GetTopQueriesByCpuAsync. */
+    ORDER BY collection_time DESC, collection_id DESC
     LIMIT 1
 ) t ON TRUE
 WHERE t.query_text IS NULL OR t.query_text NOT LIKE 'WAITFOR%'

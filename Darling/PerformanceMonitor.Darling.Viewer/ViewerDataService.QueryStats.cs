@@ -213,7 +213,7 @@ public sealed partial class ViewerDataService
             AND   ($5::text[] IS NULL OR database_name = ANY($5))
             GROUP BY database_name, query_hash, host_object_name
             HAVING SUM(delta_execution_count) > 0 OR SUM(delta_elapsed_time) > 0
-            ORDER BY SUM(delta_elapsed_time) DESC
+            ORDER BY SUM(delta_elapsed_time) DESC, database_name, query_hash, host_object_name
             /* #5313: $6 is the candidate limit, not a fixed over-fetch of five. The caller starts at top plus five and, when the
                WAITFOR trim below leaves fewer than top rows while more candidates exist, asks again with a
                larger $6 (TopFill, at most three rounds). The final LIMIT stays $4. */
@@ -251,7 +251,7 @@ public sealed partial class ViewerDataService
                 AND   q.collection_time >= $2
                 AND   q.collection_time <= $3
                 AND   (q.query_text IS NOT NULL OR EXISTS (SELECT 1 FROM query_text_dim AS d0 WHERE d0.digest = q.query_text_digest))
-                ORDER BY q.database_name, q.query_hash, q.host_object_name, q.collection_time DESC
+                ORDER BY q.database_name, q.query_hash, q.host_object_name, q.collection_time DESC, q.collection_id DESC
             ) AS l
             LEFT JOIN query_text_dim AS d ON d.digest = l.query_text_digest
         ),
@@ -331,7 +331,7 @@ public sealed partial class ViewerDataService
             r.host_object_name,
             /* #5313: candidates the ranking produced (last column), so the caller can tell a short page that
                has more candidates behind it from one that has run out. Every earlier ordinal is unchanged. */
-            ROW_NUMBER() OVER (ORDER BY r.total_elapsed_us DESC) AS page_ord
+            ROW_NUMBER() OVER (ORDER BY r.total_elapsed_us DESC, r.database_name, r.query_hash, r.host_object_name) AS page_ord
         FROM ranked AS r
         LEFT JOIN latest_text AS t
             ON  t.database_name IS NOT DISTINCT FROM r.database_name
@@ -339,7 +339,7 @@ public sealed partial class ViewerDataService
             AND t.host_object_name IS NOT DISTINCT FROM r.host_object_name
         LEFT JOIN module AS m ON m.sql_handle = r.sql_handle
         WHERE t.query_text IS NULL OR t.query_text NOT LIKE 'WAITFOR%'
-        ORDER BY r.total_elapsed_us DESC
+        ORDER BY r.total_elapsed_us DESC, r.database_name, r.query_hash, r.host_object_name
         LIMIT $4
         )
         /* The candidate count rides on its own row, joined to the page, so a round whose candidates were

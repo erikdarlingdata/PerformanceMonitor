@@ -1208,7 +1208,7 @@ internal static class DarlingDataReader
                 AND   q.collection_time >= $2
                 AND   q.collection_time <= $3
                 AND   (q.query_text IS NOT NULL OR EXISTS (SELECT 1 FROM query_text_dim AS d0 WHERE d0.digest = q.query_text_digest))
-                ORDER BY q.database_name, q.query_hash, q.host_object_name, q.collection_time DESC
+                ORDER BY q.database_name, q.query_hash, q.host_object_name, q.collection_time DESC, q.collection_id DESC
             ) AS l
             LEFT JOIN query_text_dim AS d ON d.digest = l.query_text_digest
         ),
@@ -1441,7 +1441,7 @@ internal static class DarlingDataReader
                 AND   q.collection_time >= $2
                 AND   q.collection_time <= $3
                 AND   (q.query_text IS NOT NULL OR EXISTS (SELECT 1 FROM query_text_dim AS d0 WHERE d0.digest = q.query_text_digest))
-                ORDER BY q.database_name, q.host_object_name, CASE WHEN q.host_object_name IS NULL THEN q.query_hash END, q.collection_time DESC
+                ORDER BY q.database_name, q.host_object_name, CASE WHEN q.host_object_name IS NULL THEN q.query_hash END, q.collection_time DESC, q.collection_id DESC
             ) AS l
             LEFT JOIN query_text_dim AS d ON d.digest = l.query_text_digest
         ),
@@ -1539,8 +1539,8 @@ internal static class DarlingDataReader
     /// $4 top, $5 database
     /// filter (NULL = all), $6 the candidate limit (#5313: top + 5 first, larger on a refill round), $7 the materialization
     /// ceiling (naive UTC), bound only when the ceiling is known.
-    /// <c>$CEIL$</c> becomes <c>AND f.bucket &lt; $6</c> or nothing. <c>min_dop</c> and host-object grouping need columns only raw carries, so
-    /// a read that sets either never reaches this const (it is forced to raw) and it takes no $6.
+    /// <c>$CEIL$</c> becomes <c>AND f.bucket &lt; $7</c> or nothing. <c>min_dop</c> and host-object grouping need columns only raw carries, so
+    /// a read that sets either never reaches this const (it is forced to raw) and it takes no $6 or $7.
     /// </summary>
     public const string TopQueriesHourlySql = """
         WITH ranked AS MATERIALIZED (
@@ -1584,7 +1584,7 @@ internal static class DarlingDataReader
             CROSS JOIN LATERAL
             (
                 (
-                    SELECT q.query_text, q.query_text_digest, q.collection_time
+                    SELECT q.query_text, q.query_text_digest, q.collection_time, q.collection_id
                     FROM query_stats AS q
                     WHERE rk.query_hash IS NOT NULL
                     AND   q.server_id = $1
@@ -1593,12 +1593,12 @@ internal static class DarlingDataReader
                     AND   q.collection_time >= $2
                     AND   q.collection_time < $3
                     AND   (q.query_text IS NOT NULL OR EXISTS (SELECT 1 FROM query_text_dim AS d0 WHERE d0.digest = q.query_text_digest))
-                    ORDER BY q.collection_time DESC
+                    ORDER BY q.collection_time DESC, q.collection_id DESC
                     LIMIT 1
                 )
                 UNION ALL
                 (
-                    SELECT q.query_text, q.query_text_digest, q.collection_time
+                    SELECT q.query_text, q.query_text_digest, q.collection_time, q.collection_id
                     FROM query_stats AS q
                     WHERE rk.query_hash IS NULL
                     AND   q.server_id = $1
@@ -1607,10 +1607,10 @@ internal static class DarlingDataReader
                     AND   q.collection_time >= $2
                     AND   q.collection_time < $3
                     AND   (q.query_text IS NOT NULL OR EXISTS (SELECT 1 FROM query_text_dim AS d0 WHERE d0.digest = q.query_text_digest))
-                    ORDER BY q.collection_time DESC
+                    ORDER BY q.collection_time DESC, q.collection_id DESC
                     LIMIT 1
                 )
-                ORDER BY collection_time DESC
+                ORDER BY collection_time DESC, collection_id DESC
                 LIMIT 1
             ) AS l
             LEFT JOIN query_text_dim AS d ON d.digest = l.query_text_digest
@@ -1646,29 +1646,29 @@ internal static class DarlingDataReader
             CROSS JOIN LATERAL
             (
                 (
-                    SELECT q.query_text, q.query_text_digest, q.collection_time
+                    SELECT q.query_text, q.query_text_digest, q.collection_time, q.collection_id
                     FROM query_stats AS q
                     WHERE m.query_hash IS NOT NULL
                     AND   q.server_id = $1
                     AND   q.query_hash = m.query_hash
                     AND   q.database_name IS NOT DISTINCT FROM m.database_name
                     AND   (q.query_text IS NOT NULL OR EXISTS (SELECT 1 FROM query_text_dim AS d0 WHERE d0.digest = q.query_text_digest))
-                    ORDER BY q.collection_time DESC
+                    ORDER BY q.collection_time DESC, q.collection_id DESC
                     LIMIT 1
                 )
                 UNION ALL
                 (
-                    SELECT q.query_text, q.query_text_digest, q.collection_time
+                    SELECT q.query_text, q.query_text_digest, q.collection_time, q.collection_id
                     FROM query_stats AS q
                     WHERE m.query_hash IS NULL
                     AND   q.server_id = $1
                     AND   q.query_hash IS NULL
                     AND   q.database_name IS NOT DISTINCT FROM m.database_name
                     AND   (q.query_text IS NOT NULL OR EXISTS (SELECT 1 FROM query_text_dim AS d0 WHERE d0.digest = q.query_text_digest))
-                    ORDER BY q.collection_time DESC
+                    ORDER BY q.collection_time DESC, q.collection_id DESC
                     LIMIT 1
                 )
-                ORDER BY collection_time DESC
+                ORDER BY collection_time DESC, collection_id DESC
                 LIMIT 1
             ) AS l
             LEFT JOIN query_text_dim AS d ON d.digest = l.query_text_digest
@@ -2548,7 +2548,7 @@ internal static class DarlingDataReader
             WHERE rn = 1
             AND   ($7::text IS NULL OR module_name = $7)
             GROUP BY database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role
-            ORDER BY SUM(execution_count) * AVG(CAST(avg_duration_us AS double precision)) DESC
+            ORDER BY SUM(execution_count) * AVG(CAST(avg_duration_us AS double precision)) DESC, database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role
             LIMIT $8
         ),
 
@@ -2578,7 +2578,7 @@ internal static class DarlingDataReader
             r.last_execution_time,
             t.query_text,
             r.replica_role,
-            ROW_NUMBER() OVER (ORDER BY r.total_executions * r.avg_duration_ms DESC) AS page_ord
+            ROW_NUMBER() OVER (ORDER BY r.total_executions * r.avg_duration_ms DESC, r.database_name, r.query_id, r.plan_id, r.query_hash, r.execution_type_desc, r.replica_role) AS page_ord
         FROM ranked AS r
         /* #2150: resolve the text inside the lateral so the projection and the WAITFOR self-exclusion below
            both keep reading one t.query_text. First arm is collect.query_store_text (one row per
@@ -2601,7 +2601,7 @@ internal static class DarlingDataReader
                            AND   s.query_id = r.query_id
                            AND   s.database_name = r.database_name
                            AND   s.query_text IS NOT NULL
-                           ORDER BY s.collection_time DESC
+                           ORDER BY s.collection_time DESC, s.collection_id DESC
                            LIMIT 1
                        )
                    ) AS query_text
@@ -2723,7 +2723,7 @@ internal static class DarlingDataReader
             FROM parts
             WHERE ($7::text IS NULL OR module_name = $7)
             GROUP BY database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role
-            ORDER BY SUM(ec) * (CAST(SUM(duration_sum) AS double precision) / NULLIF(SUM(duration_n), 0)) DESC
+            ORDER BY SUM(ec) * (CAST(SUM(duration_sum) AS double precision) / NULLIF(SUM(duration_n), 0)) DESC, database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role
             LIMIT $10
         ),
 
