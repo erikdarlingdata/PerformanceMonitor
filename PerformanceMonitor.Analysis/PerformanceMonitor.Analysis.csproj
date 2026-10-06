@@ -13,11 +13,6 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <!-- #4348: the readers here (SameStatementPileupDetector) must know the withheld-statement marker, which lives in Common. -->
-    <ProjectReference Include="..\PerformanceMonitor.Common\PerformanceMonitor.Common.csproj" />
-  </ItemGroup>
-
-  <ItemGroup>
     <InternalsVisibleTo Include="PerformanceMonitorLite" />
     <InternalsVisibleTo Include="PerformanceMonitorDashboard" />
     <InternalsVisibleTo Include="Lite.Tests" />

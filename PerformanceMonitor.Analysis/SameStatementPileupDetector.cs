@@ -11,7 +11,6 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Security.Cryptography;
 using System.Text;
-using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Analysis;
 
@@ -457,7 +456,7 @@ public static class SameStatementPileupDetector
             return row.QueryHash.Trim().ToLowerInvariant();
         }
 
-        if (row.QueryText is not null && row.QueryText.Trim() == SensitiveStatements.PlaceholderText)
+        if (WithheldStatementMarker.IsMarker(row.QueryText))
         {
             return null;
         }
