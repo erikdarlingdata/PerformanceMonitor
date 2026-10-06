@@ -63,8 +63,15 @@ VALUES (4101, 'query_stats', '0xOVERRUN', '0xSQL', 0, 400, 'fixture_db', '0xHASH
         Assert.Equal(0, Assert.Single(first));
 
         var (firstVerdict, _, _) = OversizedPlanBacklogSweep.JudgeFetchedPlan(OverrunningSession(), plan, first[0]);
-        Assert.Equal(OversizedPlanBacklogSweep.PlanFetchVerdict.Failed, firstVerdict);
-        await RecordAsync(connection, OversizedPlanBacklog.RecordAttemptSql, null, ct);
+        Assert.Equal(OversizedPlanBacklogSweep.PlanFetchVerdict.JudgeTimedOut, firstVerdict);
+        await RecordAsync(connection, OversizedPlanBacklogSweep.OutcomeSql(firstVerdict), null, ct);
+
+        /* A connect failure between the passes, and an expiry that a re-sighting then clears, add no attempt (#5367
+           review, A-M1): the row still has one judge timeout against it, so the next overrun is the terminal one. */
+        await RecordAsync(connection, OversizedPlanBacklogSweep.OutcomeSql(OversizedPlanBacklogSweep.PlanFetchVerdict.Failed), null, ct);
+        Assert.Equal(1, Assert.Single(await ClaimAsync(connection, ct)));
+        await RecordAsync(connection, OversizedPlanBacklogSweep.OutcomeSql(OversizedPlanBacklogSweep.PlanFetchVerdict.Expired), null, ct);
+        await ExecuteAsync(connection, "UPDATE collect.oversized_plan_backlog SET expired_at = NULL WHERE plan_handle = '0xOVERRUN';", ct);
 
         /* Pass 2: the claim hands the row back with its attempt count, and the second overrun is terminal. */
         var second = await ClaimAsync(connection, ct);

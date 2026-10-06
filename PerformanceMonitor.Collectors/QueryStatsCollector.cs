@@ -414,9 +414,14 @@ OPTION(RECOMPILE);";
     /// Reads <see cref="BuildPlanFetchQuery"/>'s result into <c>ord</c> -> (plan, size), each plan through the
     /// caller's statement filter session (#4348), so a caller digests and caches the filtered plan. A key whose plan
     /// aged out maps to (null, null); a plan over the cap maps to (null, size).
+    ///
+    /// <para><paramref name="unjudged"/> receives the <c>ord</c> of each plan the session's budget could not cover.
+    /// Its result is the whole-plan marker, but a caller must not cache it: the next cycle, with a fresh budget, can
+    /// judge the plan. Any other plan, including one withheld whole because its judge failed, is a settled outcome.</para>
     /// </summary>
     public static async ValueTask<Dictionary<int, (string? PlanXml, long? Bytes)>> ReadPlanFetchAsync(
-        DbDataReader reader, SensitiveStatements.Session scrub, CancellationToken cancellationToken)
+        DbDataReader reader, SensitiveStatements.Session scrub, CancellationToken cancellationToken,
+        ISet<int>? unjudged = null)
     {
         ArgumentNullException.ThrowIfNull(reader);
         ArgumentNullException.ThrowIfNull(scrub);
@@ -426,8 +431,18 @@ OPTION(RECOMPILE);";
         {
             var ord = Convert.ToInt32(reader.GetValue(0), CultureInfo.InvariantCulture);
             /* Convert, not GetInt64: the same DATALENGTH-width reasoning as the inline read of this column. */
+            string? plan = null;
+            if (!reader.IsDBNull(1) && !scrub.TryXml(reader.GetString(1), out plan))
+            {
+                /* The budget ran out before or during this plan (the marker is the result): not a verdict on the
+                   plan, so the caller must not remember it. A plan withheld whole for its own sake (a judge that
+                   threw, a plan that cannot be parsed) returns true above and IS a verdict: it fails the same way
+                   next cycle, so the caller records it like any fetched plan (#5367 review, A-L4). */
+                unjudged?.Add(ord);
+            }
+
             results[ord] = (
-                reader.IsDBNull(1) ? null : scrub.Xml(reader.GetString(1)),
+                plan,
                 reader.IsDBNull(2) ? null : Convert.ToInt64(reader.GetValue(2), CultureInfo.InvariantCulture));
         }
 
@@ -435,10 +450,10 @@ OPTION(RECOMPILE);";
     }
 
     /// <summary>
-    /// #4348: true for a plan the statement filter withheld whole (<see cref="SensitiveStatements.PlaceholderText"/>:
-    /// the session's budget ran out, or its judge failed). The row stores the marker for this cycle, but a host must
-    /// NOT cache the plan's digest: the next cycle should fetch and filter the plan again, and a cached marker digest
-    /// would answer every cycle after this one with the marker.
+    /// #4348: true for a plan that is the whole-plan marker (<see cref="SensitiveStatements.PlaceholderText"/>: the
+    /// session's budget ran out, or its judge failed). It says nothing about WHICH: a host that must tell a plan the
+    /// budget could not cover (not cached, so the next cycle judges it again) from one withheld for its own sake
+    /// (cached like any plan) reads the <c>unjudged</c> set of <see cref="ReadPlanFetchAsync"/>.
     /// </summary>
     public static bool IsWithheldWhole(string? planXml) =>
         string.Equals(planXml, SensitiveStatements.PlaceholderText, StringComparison.Ordinal);

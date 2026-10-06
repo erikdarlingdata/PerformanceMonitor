@@ -305,6 +305,7 @@ public sealed partial class StatementCollectionCensusTests
             PlanGenerationSum = 7,
         };
 
+        var unjudged = new HashSet<int>();
         ProcedureStatsPlanReuse.PlanFetch FetchThrough(SensitiveStatements.Session session) => async (handles, token) =>
         {
             using var table = new DataTable();
@@ -313,19 +314,20 @@ public sealed partial class StatementCollectionCensusTests
             table.Columns.Add("query_plan_xml_bytes", typeof(long));
             table.Rows.Add(0, plan, (long)plan.Length);
             await using var reader = table.CreateDataReader();
-            return await QueryStatsCollector.ReadPlanFetchAsync(reader, session, token);
+            return await QueryStatsCollector.ReadPlanFetchAsync(reader, session, token, unjudged);
         };
 
         var spent = SpentSession();
         var rows1 = new List<ProcedureStatsCollector.Row> { row };
-        var first = await ProcedureStatsPlanReuse.ApplyOnAsync(1, cache, rows1, true, 1, s_now, FetchThrough(spent), CancellationToken.None);
+        var first = await ProcedureStatsPlanReuse.ApplyOnAsync(1, cache, rows1, true, 1, s_now, FetchThrough(spent), CancellationToken.None, unjudged);
         cache.ConfirmPending(first.Pending, s_now);
 
         Assert.Equal(SensitiveStatements.PlaceholderText, rows1[0].QueryPlanXml);
         Assert.Empty(first.Pending);
 
         var rows2 = new List<ProcedureStatsCollector.Row> { row };
-        var second = await ProcedureStatsPlanReuse.ApplyOnAsync(1, cache, rows2, true, 2, s_now, FetchThrough(new SensitiveStatements.Session()), CancellationToken.None);
+        unjudged.Clear();
+        var second = await ProcedureStatsPlanReuse.ApplyOnAsync(1, cache, rows2, true, 2, s_now, FetchThrough(new SensitiveStatements.Session()), CancellationToken.None, unjudged);
         cache.ConfirmPending(second.Pending, s_now);
 
         Assert.Equal(0, second.Hit);
@@ -333,8 +335,110 @@ public sealed partial class StatementCollectionCensusTests
         Assert.Single(second.Pending);
 
         var rows3 = new List<ProcedureStatsCollector.Row> { row };
-        var third = await ProcedureStatsPlanReuse.ApplyOnAsync(1, cache, rows3, true, 3, s_now, FetchThrough(new SensitiveStatements.Session()), CancellationToken.None);
+        var third = await ProcedureStatsPlanReuse.ApplyOnAsync(1, cache, rows3, true, 3, s_now, FetchThrough(new SensitiveStatements.Session()), CancellationToken.None, unjudged);
         Assert.Equal(1, third.Hit);
         Assert.Equal(ProcedureStatsPlanReuse.DigestOf(rows2[0].QueryPlanXml!), rows3[0].KnownPlanDigest);
+    }
+
+    /// <summary>A prepared plan cut inside its parameter list: it does not parse, and the auto-parameter probe could have
+    /// mattered, so the filter withholds the whole plan without a budget being involved (the same plan every cycle).</summary>
+    private const string CutPreparedPlan = "<ShowPlanXML><BatchSequence><Batch><Statements><StmtSimple StatementText=\"UPDATE t SET p = @1\">"
+        + "<QueryPlan><ParameterList><ColumnReference Column=\"@1\" ParameterCompiledValue=\"N&apos;S3";
+
+    /// <summary>#5367 review, A-L4: a plan the filter withheld whole for its OWN sake (it cannot be parsed) is not a
+    /// budget skip. It fails the same way every cycle, so it is recorded like any fetched plan: the second cycle
+    /// answers from the cache instead of fetching and rendering the plan on the target again.</summary>
+    [Fact]
+    public async Task ProcedureStats_QueryPlanXml_APlanWithheldWholeForItsOwnSakeIsCached_SoTheNextCycleDoesNotFetchItAgain()
+    {
+        var cache = new PlanDigestCache<ProcedureStatsPlanKey>();
+        var plan = CutPreparedPlan;
+        var row = default(ProcedureStatsCollector.Row) with
+        {
+            DatabaseName = "db1",
+            SchemaName = "dbo",
+            ObjectName = "p1",
+            ObjectType = "P",
+            CachedTime = s_now.AddHours(-4),
+            SqlHandle = "0x0301",
+            PlanHandle = "0x0501",
+            PlanStatementCount = 3,
+            PlanLastStatementCompile = s_now.AddHours(-3),
+            PlanGenerationSum = 7,
+        };
+
+        var fetches = 0;
+        var unjudged = new HashSet<int>();
+        ProcedureStatsPlanReuse.PlanFetch FetchThrough(SensitiveStatements.Session session) => async (handles, token) =>
+        {
+            fetches++;
+            using var table = new DataTable();
+            table.Columns.Add("ord", typeof(int));
+            table.Columns.Add("query_plan_xml", typeof(string));
+            table.Columns.Add("query_plan_xml_bytes", typeof(long));
+            table.Rows.Add(0, plan, (long)plan.Length);
+            await using var reader = table.CreateDataReader();
+            return await QueryStatsCollector.ReadPlanFetchAsync(reader, session, token, unjudged);
+        };
+
+        SensitiveStatements.Session Ordinary() => new();
+
+        var rows1 = new List<ProcedureStatsCollector.Row> { row };
+        var first = await ProcedureStatsPlanReuse.ApplyOnAsync(1, cache, rows1, true, 1, s_now, FetchThrough(Ordinary()), CancellationToken.None, unjudged);
+        cache.ConfirmPending(first.Pending, s_now);
+
+        Assert.Equal(SensitiveStatements.PlaceholderText, rows1[0].QueryPlanXml);
+        Assert.Empty(unjudged);
+        Assert.Single(first.Pending);
+
+        var rows2 = new List<ProcedureStatsCollector.Row> { row };
+        var second = await ProcedureStatsPlanReuse.ApplyOnAsync(1, cache, rows2, true, 2, s_now, FetchThrough(Ordinary()), CancellationToken.None, unjudged);
+
+        Assert.Equal(1, second.Hit);
+        Assert.Equal(1, fetches);
+        Assert.Equal(ProcedureStatsPlanReuse.DigestOf(SensitiveStatements.PlaceholderText), rows2[0].KnownPlanDigest);
+    }
+
+    [Fact]
+    public async Task ReadPlanFetchAsync_ReportsOnlyTheBudgetSkippedPlansAsUnjudged()
+    {
+        var plan = StatementScrubCanary.CanaryPlan();
+        using var table = new DataTable();
+        table.Columns.Add("ord", typeof(int));
+        table.Columns.Add("query_plan_xml", typeof(string));
+        table.Columns.Add("query_plan_xml_bytes", typeof(long));
+        table.Rows.Add(0, plan, (long)plan.Length);
+        using var cutTable = new DataTable();
+        cutTable.Columns.Add("ord", typeof(int));
+        cutTable.Columns.Add("query_plan_xml", typeof(string));
+        cutTable.Columns.Add("query_plan_xml_bytes", typeof(long));
+        cutTable.Rows.Add(0, CutPreparedPlan, (long)CutPreparedPlan.Length);
+
+        var spentSet = new HashSet<int>();
+        await using (var reader = table.CreateDataReader())
+        {
+            await QueryStatsCollector.ReadPlanFetchAsync(reader, SpentSession(), CancellationToken.None, spentSet);
+        }
+
+        var ownSakeSet = new HashSet<int>();
+        await using (var reader = cutTable.CreateDataReader())
+        {
+            var fetched = await QueryStatsCollector.ReadPlanFetchAsync(reader, new SensitiveStatements.Session(), CancellationToken.None, ownSakeSet);
+            Assert.Equal(SensitiveStatements.PlaceholderText, fetched[0].PlanXml);
+        }
+
+        Assert.Equal(new[] { 0 }, spentSet);
+        Assert.Empty(ownSakeSet);
+    }
+
+    [Fact]
+    public void QueryStats_TheDeferredFetch_CachesAWholeMarkerPlanUnlessTheBudgetSkippedIt()
+    {
+        var source = System.IO.File.ReadAllText(RepoFile.PathTo("Darling/PerformanceMonitor.Darling.Service/DarlingCollectorRunner.cs"));
+        var bodies = StatementColumnCensusTests.BodiesOf(source, "DarlingCollectorRunner", "FetchDeferredQueryStatsPlansAsync");
+
+        Assert.Single(bodies);
+        Assert.Contains("unjudged.Contains(ord)", bodies[0], StringComparison.Ordinal);
+        Assert.DoesNotContain("IsWithheldWhole", bodies[0], StringComparison.Ordinal);
     }
 }

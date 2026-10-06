@@ -408,6 +408,11 @@ public sealed class DarlingCollectorRunner
     /* #5158: what this host knows of the module plans it has committed, per server; empty after a restart. */
     private readonly ConcurrentDictionary<int, PlanDigestCache<ProcedureStatsPlanKey>> _procedureStatsPlanCaches = new();
 
+    /* #5367 review, A-L1: the mode each server's procedure_stats cache was last filled under. A shadow pass digests the
+       plans its rows carry inline, which can be the whole-plan marker; an on pass would answer a hit on that entry with the
+       marker's digest, and the row would store the marker until the entry expired. A switch clears the cache. */
+    private readonly ConcurrentDictionary<int, ProcedureStatsPlanFetchMode> _procedureStatsPlanCacheModes = new();
+
     /* #5158: how many capture cycles each server has run with the knob on or shadow. The cache's age limit counts these,
        so a cycle the cadence gate skips does not age an entry. */
     private readonly ConcurrentDictionary<int, long> _procedureStatsCaptureOrdinals = new();
@@ -7214,11 +7219,12 @@ RETURNING s.state_key";
                 var query = QueryStatsCollector.BuildPlanFetchQuery(context, chunk.ConvertAll(m => m.Key.ToFetchKey()));
 
                 Dictionary<int, (string? PlanXml, long? Bytes)> fetched;
+                var unjudged = new HashSet<int>();
                 using (var command = CreateCollectorCommand(provider, query, targetConnection, CommandTimeoutSeconds))
                 using (var planReader = await command.ExecuteReaderAsync(cancellationToken))
                 {
                     /* #4348: one filter session per fetch call; the digest below is taken from the FILTERED plan. */
-                    fetched = await QueryStatsCollector.ReadPlanFetchAsync(planReader, context.BeginStatementScrub(), cancellationToken);
+                    fetched = await QueryStatsCollector.ReadPlanFetchAsync(planReader, context.BeginStatementScrub(), cancellationToken, unjudged);
                 }
 
                 foreach (var (ord, result) in fetched)
@@ -7239,11 +7245,13 @@ RETURNING s.state_key";
                         /* Over the cap: the size, a NULL plan, and an entry that stops the next run rendering it again. */
                         cache.AddPending(key, null, result.Bytes, now);
                     }
-                    else if (QueryStatsCollector.IsWithheldWhole(result.PlanXml))
+                    else if (unjudged.Contains(ord))
                     {
-                        /* #4348: the filter withheld the whole plan (its budget ran out). This row stores the marker;
-                           nothing is cached and nothing is pending, so the next cycle fetches and filters the plan
-                           again instead of answering from a cached marker digest. */
+                        /* #4348: the filter's budget ran out before or during this plan. This row stores the marker; nothing
+                           is cached and nothing is pending, so the next cycle fetches and filters the plan again with a
+                           fresh budget instead of answering from a cached marker digest. A plan withheld whole for its own
+                           sake (its judge threw, it cannot be parsed) is not in this set: it fails the same way every
+                           cycle, so it is recorded like any fetched plan and the next cycle's dedup sees it (A-L4). */
                         row.QueryPlanXml = result.PlanXml;
                         continue;
                     }
@@ -7291,6 +7299,10 @@ RETURNING s.state_key";
         context.Measure("plan_fetch_ms", context.PerItemPlanFetchMs);
     }
 
+    /// <summary>The cache a server's procedure_stats runs have filled so far, for a test to confirm and inspect.</summary>
+    internal PlanDigestCache<ProcedureStatsPlanKey>? ProcedureStatsPlanCacheForTests(int serverId) =>
+        _procedureStatsPlanCaches.TryGetValue(serverId, out var cache) ? cache : null;
+
     /// <summary>
     /// #5158: procedure_stats' plan reuse, after the main read. In shadow the rows already carry their inline plans, and
     /// this only measures whether each module plan's identity (<see cref="ProcedureStatsPlanKey"/>) would have been
@@ -7313,6 +7325,13 @@ RETURNING s.state_key";
         CancellationToken cancellationToken)
     {
         var cache = _procedureStatsPlanCaches.GetOrAdd(server.ServerId, static _ => new PlanDigestCache<ProcedureStatsPlanKey>());
+        if (_procedureStatsPlanCacheModes.TryGetValue(server.ServerId, out var cachedUnderMode) && cachedUnderMode != mode)
+        {
+            cache.Clear();
+        }
+
+        _procedureStatsPlanCacheModes[server.ServerId] = mode;
+
         var now = DateTime.UtcNow;
         cache.Prune(now - ProcedureStatsPlanCacheMaxAge);
 
@@ -7340,6 +7359,7 @@ RETURNING s.state_key";
             }
 
             var fetchWatch = Stopwatch.StartNew();
+            var unjudgedOrdinals = new HashSet<int>();
             outcome = await ProcedureStatsPlanReuse.ApplyOnAsync(
                 server.ServerId, cache, rows, context.CapturePlanXml, captureOrdinal, now,
                 async (handles, token) =>
@@ -7347,9 +7367,10 @@ RETURNING s.state_key";
                     var query = ProcedureStatsCollector.BuildPlanFetchQuery(context, handles);
                     using var command = CreateCollectorCommand(provider, query, targetConnection, CommandTimeoutSeconds);
                     using var planReader = await command.ExecuteReaderAsync(token);
-                    return await QueryStatsCollector.ReadPlanFetchAsync(planReader, context.BeginStatementScrub(), token);
+                    return await QueryStatsCollector.ReadPlanFetchAsync(planReader, context.BeginStatementScrub(), token, unjudgedOrdinals);
                 },
-                cancellationToken);
+                cancellationToken,
+                unjudgedOrdinals);
             fetchWatch.Stop();
             fetchMs = fetchWatch.ElapsedMilliseconds;
 

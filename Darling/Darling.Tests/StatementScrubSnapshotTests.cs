@@ -16,6 +16,7 @@ using System.Threading.Tasks;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service;
+using PerformanceMonitor.Darling.Storage;
 using Xunit;
 
 namespace Darling.Tests;
@@ -298,10 +299,50 @@ public sealed partial class StatementCollectionCensusTests
 
         var (verdict, stored, error) = OversizedPlanBacklogSweep.JudgeFetchedPlan(session, StatementScrubCanary.CanaryPlan(), 0);
 
-        Assert.Equal(OversizedPlanBacklogSweep.PlanFetchVerdict.Failed, verdict);
+        Assert.Equal(OversizedPlanBacklogSweep.PlanFetchVerdict.JudgeTimedOut, verdict);
         Assert.Null(stored);
         Assert.False(string.IsNullOrEmpty(error));
         Assert.True(session.Spent);
+    }
+
+    private const string OnePlainValuePlan = "<ShowPlanXML xmlns=\"http://schemas.microsoft.com/sqlserver/2004/07/showplan\"><BatchSequence><Batch><Statements>"
+        + "<StmtSimple StatementText=\"SELECT 1\" /></Statements></Batch></BatchSequence></ShowPlanXML>";
+
+    [Fact]
+    public void OversizedPlanSweep_APlanThatOverrunsAPartlySpentBudget_StaysClaimable_EvenOnItsLastAttempt()
+    {
+        /* #5367 review, A-M1: an earlier plan in the batch used part of the budget (it is not spent), and this plan
+           overruns what is left. Alone it might judge in a second, so it says nothing about the plan: it must not be
+           retired as the marker, however many attempts the row has. */
+        var session = SessionThePlanOverruns();
+        Assert.True(OversizedPlanBacklogSweep.JudgeFetchedPlan(session, OnePlainValuePlan, 0).Verdict
+            == OversizedPlanBacklogSweep.PlanFetchVerdict.Captured);
+        Assert.False(session.Spent);
+        Assert.True(session.Values > 0);
+
+        var (verdict, stored, error) = OversizedPlanBacklogSweep.JudgeFetchedPlan(
+            session, StatementScrubCanary.CanaryPlan(), OversizedPlanBacklogSweep.MaxJudgeAttempts - 1);
+
+        Assert.True(session.Spent, "the plan must have overrun the budget the earlier plan left");
+        Assert.Equal(OversizedPlanBacklogSweep.PlanFetchVerdict.Failed, verdict);
+        Assert.Null(stored);
+        Assert.False(string.IsNullOrEmpty(error));
+    }
+
+    [Fact]
+    public void OversizedPlanSweep_OnlyAJudgeTimeoutAddsAnAttempt()
+    {
+        /* #5367 review, A-M1: attempt_count is the retirement limit's count of judge timeouts, so a connect failure,
+           a budget skip and an expiry stamp the attempt time and leave the count alone. */
+        Assert.Equal(OversizedPlanBacklog.RecordAttemptSql, OversizedPlanBacklogSweep.OutcomeSql(OversizedPlanBacklogSweep.PlanFetchVerdict.JudgeTimedOut));
+        Assert.Equal(OversizedPlanBacklog.RecordFailureSql, OversizedPlanBacklogSweep.OutcomeSql(OversizedPlanBacklogSweep.PlanFetchVerdict.Failed));
+        Assert.Equal(OversizedPlanBacklog.RecordExpirySql, OversizedPlanBacklogSweep.OutcomeSql(OversizedPlanBacklogSweep.PlanFetchVerdict.Expired));
+        Assert.Equal(OversizedPlanBacklog.RecordCaptureSql, OversizedPlanBacklogSweep.OutcomeSql(OversizedPlanBacklogSweep.PlanFetchVerdict.Captured));
+
+        Assert.Contains("attempt_count = attempt_count + 1", OversizedPlanBacklog.RecordAttemptSql, StringComparison.Ordinal);
+        Assert.DoesNotContain("attempt_count", OversizedPlanBacklog.RecordFailureSql, StringComparison.Ordinal);
+        Assert.DoesNotContain("attempt_count", OversizedPlanBacklog.RecordExpirySql, StringComparison.Ordinal);
+        Assert.Contains("last_attempt_at = $7", OversizedPlanBacklog.RecordFailureSql, StringComparison.Ordinal);
     }
 
     [Fact]

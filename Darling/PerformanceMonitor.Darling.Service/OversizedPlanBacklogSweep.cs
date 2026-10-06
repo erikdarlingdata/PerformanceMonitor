@@ -210,8 +210,14 @@ WHERE tqp.query_plan IS NOT NULL;";
         /// <summary>The handle no longer renders a plan — a benign, expected end state.</summary>
         Expired,
 
-        /// <summary>The fetch could not complete. Nothing was learned; the row stays claimable.</summary>
+        /// <summary>The fetch could not complete (a connect failure, a driver fault, its own budget, or a judging
+        /// budget an earlier plan had already used). Nothing was learned; the row stays claimable and the attempt is
+        /// NOT counted toward <see cref="MaxJudgeAttempts"/>.</summary>
         Failed,
+
+        /// <summary>The plan had the whole judging budget to itself and overran it. The row stays claimable and the
+        /// attempt IS counted: this is the only outcome that counts toward <see cref="MaxJudgeAttempts"/> (#5367 review, A-M1).</summary>
+        JudgeTimedOut,
     }
 
     /// <summary>
@@ -636,11 +642,14 @@ WHERE tqp.query_plan IS NOT NULL;";
     }
 
     /// <summary>
-    /// How many attempts a row gets before a plan the judging budget keeps failing to cover is retired as the
+    /// How many judge timeouts a row gets before a plan the judging budget keeps failing to cover is retired as the
     /// whole-plan marker (#5320). The backlog table had no cap on attempts (the claim orders by the last attempt
     /// and nothing else), so without this a plan that always needs more than the session budget would be fetched
-    /// and judged again on every pass with no end. Two: the first budget failure leaves the row claimable, in case
-    /// the budget was only short that once; the second is the plan, not the pass.
+    /// and judged again on every pass with no end. Two: the first timeout leaves the row claimable, in case the
+    /// budget was only short that once; the second is the plan, not the pass. Only a timeout on a plan that had the
+    /// WHOLE budget to itself counts (<see cref="PlanFetchVerdict.JudgeTimedOut"/> is the one verdict that adds to
+    /// <c>attempt_count</c>); a connect failure, an expiry, or a plan that met a budget an earlier plan had partly
+    /// used says nothing about the plan (#5367 review, A-M1).
     /// </summary>
     internal const int MaxJudgeAttempts = 2;
 
@@ -649,12 +658,14 @@ WHERE tqp.query_plan IS NOT NULL;";
     /// <paramref name="scrub"/> is the batch's session, passed in; the sweep never makes one of its own here.
     ///
     /// <para>A plan the judging budget could not cover is normally NOT stored as the marker: the verdict is
-    /// <see cref="PlanFetchVerdict.Failed"/>, so the backlog row stays claimable and the next pass, with a fresh
-    /// budget, fetches it again. Two cases end that. A session that was already spent before this plan was judged
-    /// says nothing about the plan (an earlier plan in the batch used the budget), so it stays Failed however many
-    /// attempts the row has. A plan that overran a budget that still had room when it started, on a row already
-    /// attempted <see cref="MaxJudgeAttempts"/> minus one times, is terminal: the whole-plan marker is stored as
-    /// the capture, which sets <c>captured_at</c>, so the claim never returns the row again.</para>
+    /// <see cref="PlanFetchVerdict.Failed"/> or <see cref="PlanFetchVerdict.JudgeTimedOut"/>, so the backlog row
+    /// stays claimable and the next pass, with a fresh budget, fetches it again. Only a plan that had the WHOLE
+    /// budget to itself (nothing judged on the session before it) can say anything about itself. If it overruns,
+    /// it is <see cref="PlanFetchVerdict.JudgeTimedOut"/>, which counts one attempt; on a row already timed out
+    /// <see cref="MaxJudgeAttempts"/> minus one times that is terminal: the whole-plan marker is stored as the
+    /// capture, which sets <c>captured_at</c>, so the claim never returns the row again. A plan that met a budget
+    /// an earlier plan in the batch had partly or wholly used stays Failed, which is not counted, however many
+    /// attempts the row has.</para>
     /// </summary>
     /// <param name="scrub">The batch's statement-filter session.</param>
     /// <param name="planXml">The fetched plan.</param>
@@ -662,20 +673,40 @@ WHERE tqp.query_plan IS NOT NULL;";
     internal static (PlanFetchVerdict Verdict, string? PlanXml, string? Error) JudgeFetchedPlan(
         SensitiveStatements.Session scrub, string planXml, int priorAttempts)
     {
-        var spentBefore = scrub.Spent;
+        /* Whole budget: nothing was presented to this session before this plan, so the 15 seconds are this plan's
+           alone. Values counts every non-empty value, which is what charges the budget, and a spent session has
+           had values presented, so the one test covers the partly spent and the fully spent. */
+        var wholeBudget = scrub.Values == 0 && !scrub.Spent;
 
         if (!scrub.TryXml(planXml, out var judged))
         {
-            if (!spentBefore && priorAttempts + 1 >= MaxJudgeAttempts)
+            if (!wholeBudget)
+            {
+                return (PlanFetchVerdict.Failed, null, "the statement filter's judging budget was spent before this plan");
+            }
+
+            if (priorAttempts + 1 >= MaxJudgeAttempts)
             {
                 return (PlanFetchVerdict.Captured, judged, null);
             }
 
-            return (PlanFetchVerdict.Failed, null, "the statement filter's judging budget was spent before this plan");
+            return (PlanFetchVerdict.JudgeTimedOut, null, "the plan overran the statement filter's judging budget");
         }
 
         return (PlanFetchVerdict.Captured, judged, null);
     }
+
+    /// <summary>
+    /// The statement that records a verdict. Only a judge timeout adds to <c>attempt_count</c> (and a capture, which
+    /// retires the row): a connect failure, an expiry or a budget skip stamps the attempt time and nothing else.
+    /// </summary>
+    internal static string OutcomeSql(PlanFetchVerdict verdict) => verdict switch
+    {
+        PlanFetchVerdict.Captured => OversizedPlanBacklog.RecordCaptureSql,
+        PlanFetchVerdict.Expired => OversizedPlanBacklog.RecordExpirySql,
+        PlanFetchVerdict.JudgeTimedOut => OversizedPlanBacklog.RecordAttemptSql,
+        _ => OversizedPlanBacklog.RecordFailureSql,
+    };
 
     /// <summary>
     /// Stamps one row's outcome. Runs on <see cref="CancellationToken.None"/> for the reason the stall probe's
@@ -690,12 +721,7 @@ WHERE tqp.query_plan IS NOT NULL;";
         string? planXml,
         ILogger? logger)
     {
-        var sql = verdict switch
-        {
-            PlanFetchVerdict.Captured => OversizedPlanBacklog.RecordCaptureSql,
-            PlanFetchVerdict.Expired => OversizedPlanBacklog.RecordExpirySql,
-            _ => OversizedPlanBacklog.RecordAttemptSql,
-        };
+        var sql = OutcomeSql(verdict);
 
         try
         {
