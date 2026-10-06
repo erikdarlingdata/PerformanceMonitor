@@ -10,6 +10,11 @@ import { pathToFileURL } from "node:url";
 
 const jsDir = process.argv[process.argv.length - 1];
 
+/* The keys whose default action a bubbled event's handler claimed (called preventDefault on), in order. Enter and Space
+   are claimed so the page does not scroll on Space; every other key is left alone. A scenario clears it with
+   `prevented.length = 0`, as it does `drilled`, then emits a copy beside what it drew. */
+const prevented = [];
+
 class FakeNode {
   constructor(tag, text) {
     this.tag = tag;
@@ -26,6 +31,7 @@ class FakeNode {
     return this.children[0] || null;
   }
   appendChild(child) {
+    child.parent = this;
     this.children.push(child);
     return child;
   }
@@ -49,6 +55,12 @@ class FakeNode {
   get offsetHeight() { return 0; }
   dispatch(type, ev) {
     (this.listeners[type] || []).forEach((l) => l(ev || {}));
+  }
+  /* The browser's bubbling: the node's own listeners, then each ancestor's, until one calls stopPropagation. The event's
+     preventDefault records its key in `prevented`, so a scenario can tell a claimed key from one left alone. */
+  bubble(type, ev) {
+    const e = { preventDefault() { prevented.push(this.key); }, stopPropagation() { this.stopped = true; }, ...(ev || {}) };
+    for (let n = this; n && !e.stopped; n = n.parent) (n.listeners[type] || []).forEach((l) => l(e));
   }
   getBoundingClientRect() {
     return { left: 0, top: 0, width: 1000, height: 320 };
@@ -226,6 +238,85 @@ out.composedOtherPanel = state(await drawComposed("Waits two", 1));
 globalThis.location.hash = "#/server/B/waits";
 out.composedOtherServer = state(await drawComposed("Waits one", 0));
 globalThis.location.hash = "#/server/A/waits";
+
+// 10. an entry that drills keeps its drill beside the switch: the label drills (click, Enter, Space), the swatch hides or shows
+const drilled = [];
+const drillSeries = () => specFor().series.map((x) => ({ ...x, drill: [{ dimension: "wait", value: x.label }] }));
+const drillSpec = () => ({ ...specFor(), series: drillSeries(), onSelect: (d) => drilled.push(d[0].value) });
+const key = (k, extra) => ({ key: k, ...extra });
+const swatchOf = (host, label) => entry(host, label).children[0];
+const labelOf = (host, label) => entry(host, label).children[1];
+const dr = charts.zoomableLineChart(drillSpec(), "c5", scope);
+out.drillInitial = {
+  ...state(dr),
+  itemClass: cls(entry(dr, "BIG")),
+  swatchRole: swatchOf(dr, "BIG").attrs.role,
+  swatchPressed: swatchOf(dr, "BIG").attrs["aria-pressed"],
+  labelRole: labelOf(dr, "BIG").attrs.role,
+  labelTab: labelOf(dr, "BIG").attrs.tabindex,
+  itemTitle: entry(dr, "BIG").attrs.title,
+};
+labelOf(dr, "BIG").bubble("click");
+out.drillAfterLabelClick = { drilled: [...drilled], ...state(dr) };
+swatchOf(dr, "BIG").bubble("click");
+out.drillAfterSwatchClick = { drilled: [...drilled], ...state(dr), swatchPressed: swatchOf(dr, "BIG").attrs["aria-pressed"] };
+labelOf(dr, "BIG").bubble("click"); // a hidden series' label still drills, and drilling does not bring it back
+out.drillWhileHidden = { drilled: [...drilled], ...state(dr) };
+swatchOf(dr, "BIG").bubble("click");
+drilled.length = 0;
+prevented.length = 0;
+labelOf(dr, "SMALL").bubble("keydown", key("Enter"));
+labelOf(dr, "MID").bubble("keydown", key(" "));
+labelOf(dr, "MID").bubble("keydown", key("Tab"));
+out.drillAfterKeys = { drilled: [...drilled], prevented: [...prevented], ...state(dr) };
+drilled.length = 0; // from here on, nothing the swatch does may drill
+prevented.length = 0;
+swatchOf(dr, "SMALL").bubble("keydown", key("Enter"));
+out.drillSwatchEnter = { drilled: [...drilled], prevented: [...prevented], ...state(dr) };
+swatchOf(dr, "SMALL").bubble("keydown", key("Enter", { shiftKey: true }));
+out.drillSwatchShiftEnter = { drilled: [...drilled], prevented: [...prevented], ...state(dr) };
+swatchOf(dr, "SMALL").bubble("dblclick");
+out.drillSwatchDblClick = { drilled: [...drilled], prevented: [...prevented], ...state(dr) };
+
+// 11. an entry that drills but has no switch (no onLegend): the whole entry drills, by click or key, once per click
+const noSwitchDrilled = [];
+const noSwitch = charts.renderLineChart({ ...specFor(), series: drillSeries(), onSelect: (d) => noSwitchDrilled.push(d[0].value) });
+const drillEntry = (label) => find(noSwitch, (n) => n.tag === "span" && /\bitem\b/.test(cls(n)) && n.children.length === 2 && n.children[1].textContent === label)[0];
+prevented.length = 0;
+const nsState = () => ({ drilled: [...noSwitchDrilled], prevented: [...prevented], lines: lines(noSwitch), switchable: legendItems(noSwitch).length, showAll: !!showAll(noSwitch) });
+out.noSwitchInitial = { ...nsState(), itemClass: cls(drillEntry("BIG")), itemRole: drillEntry("BIG").attrs.role, itemTab: drillEntry("BIG").attrs.tabindex, labelRole: drillEntry("BIG").children[1].attrs.role ?? null };
+drillEntry("BIG").children[0].bubble("click"); // the swatch
+out.noSwitchSwatchClick = nsState();
+drillEntry("SMALL").children[1].bubble("click"); // the label: one drill, not two
+out.noSwitchLabelClick = nsState();
+drillEntry("MID").bubble("keydown", key(" "));
+drillEntry("MID").bubble("keydown", key("Enter"));
+out.noSwitchKeys = nsState();
+
+// 12. the keyboard on an entry with no drill: Enter or Space toggles, Shift+Enter or Shift+click isolates, other keys do nothing
+const kb = charts.zoomableLineChart(specFor(), "c6", scope);
+const kbPrevented = [];
+const keyP = (k, extra) => ({ key: k, preventDefault: () => kbPrevented.push(k), ...extra });
+target(kb, "BIG").dispatch("keydown", keyP("Enter"));
+out.kbEnterHides = state(kb);
+target(kb, "BIG").dispatch("keydown", keyP(" "));
+out.kbSpaceShows = state(kb);
+target(kb, "BIG").dispatch("keydown", keyP("a"));
+out.kbOtherKey = state(kb);
+target(kb, "MID").dispatch("keydown", keyP("Enter", { shiftKey: true }));
+out.kbShiftEnterIsolates = state(kb);
+click(kb, "MID", { shiftKey: true });
+out.kbShiftClickRestores = state(kb);
+out.kbPrevented = kbPrevented;
+out.kbRoles = { role: target(kb, "BIG").attrs.role, tab: target(kb, "BIG").attrs.tabindex };
+
+// 13. a held hidden set that would hide every series of a refreshed chart (the others left the data) draws them all, not an empty plot
+const shrinkHeld = charts.zoomableLineChart(specFor(), "c7", scope);
+click(shrinkHeld, "BIG");
+click(shrinkHeld, "SMALL");
+const shrunk = specFor();
+shrunk.series = shrunk.series.filter((x) => x.key !== "mid");
+out.shrunk = state(charts.zoomableLineChart(shrunk, "c7", scope));
 
 fs.rmSync(scratch, { recursive: true, force: true });
 console.log(JSON.stringify(out));

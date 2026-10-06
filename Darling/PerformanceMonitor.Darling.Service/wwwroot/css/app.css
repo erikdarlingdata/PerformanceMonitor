@@ -639,7 +639,11 @@ td.cell-picked { outline: 1px solid var(--accent); outline-offset: -1px; }
 .chart-legend .item.switchable { cursor: pointer; border-radius: var(--radius-sm); user-select: none; }
 .chart-legend .item.switchable:hover { color: var(--fg); }
 .chart-legend .item.switchable:focus-visible, .chart-legend .item [role="button"]:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-.chart-legend .item .swatch[role="button"] { cursor: pointer; }
+.chart-legend .item .swatch[role="button"] { cursor: pointer; position: relative; }
+/* On an entry that drills the label drills and the 12 x 3 px swatch is the switch (#5247): a transparent pad around it
+   makes a 20 x 25 px target, with no layout change and no overlap with the label (a 4.9 px gap: 0.35rem on the 14 px
+   root, and the pad reaches 4 px of it) or another row (10.5 px: 0.75rem). WebChartLegendIsolateBehaviourTests pins it. */
+.chart-legend .item .swatch[role="button"]::after { content: ""; position: absolute; top: -11px; bottom: -11px; left: -4px; right: -4px; }
 /* A hidden series stays in the legend, struck through with a hollow swatch, so it reads as hidden and not as absent. */
 .chart-legend .item.legend-off { opacity: 0.55; text-decoration: line-through; }
 .chart-legend .item.legend-off .swatch { background: transparent !important; box-shadow: inset 0 0 0 1px var(--dim); }
