@@ -75,15 +75,18 @@ public static class DarlingWebDeadlockGraph
             Put(node, "isolation_level", p.IsolationLevel);
             Put(node, "proc_name", p.ProcName);
             Put(node, "status", p.Status);
-            if (p.SqlText.Length > SqlTextCap)
+            /* #4348: judged WHOLE, before the cut. The web sweep after this sees only the first SqlTextCap
+               characters, and a statement named by what follows them would pass as an innocent prefix. */
+            var sqlText = SensitiveStatements.Text(p.SqlText) ?? "";
+            if (sqlText.Length > SqlTextCap)
             {
-                var cut = McpHelpers.TextElementCutLength(p.SqlText, SqlTextCap);
-                node["sql_text"] = p.SqlText[..cut];
+                var cut = McpHelpers.TextElementCutLength(sqlText, SqlTextCap);
+                node["sql_text"] = sqlText[..cut];
                 node["sql_text_cut"] = true;
             }
             else
             {
-                Put(node, "sql_text", p.SqlText);
+                Put(node, "sql_text", sqlText);
             }
             return node;
         }).ToList();
