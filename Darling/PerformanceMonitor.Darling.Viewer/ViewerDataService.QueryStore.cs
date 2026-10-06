@@ -227,7 +227,7 @@ public sealed partial class ViewerDataService
     /// <summary>Everything from <c>ranked</c> down, shared by <see cref="QueryStoreTopSql"/> and
     /// <see cref="QueryStoreTopTableSql"/> — both prefixes above produce the same "one row per identity, every
     /// column deduped's dedupe/the table's own upsert already kept" shape, so this aggregates either one
-    /// identically. References only $1 and $4 (the prefixes alone bind $2/$3/$5), so both share it unchanged.</summary>
+    /// identically. References $1, $4 and $6, plus $2/$3 (#5420: the inline-text fallback's window bound, the same $2/$3 both prefixes bind), so both share it unchanged.</summary>
     private const string QueryStoreTopSuffix = """
         ranked AS (
             SELECT
@@ -378,6 +378,13 @@ public sealed partial class ViewerDataService
                            WHERE s.server_id = $1
                            AND   s.query_id = r.query_id
                            AND   s.database_name = r.database_name
+                           /* #5420: bounded to the read's own window ($2 through $3, the same bound the fact rows
+                              above were read with). Without it a query with no inline text anywhere walked every
+                              retained chunk of query_store_stats on the time index looking for one. A query whose
+                              only inline text is older than the window now shows none, as a query with no text
+                              at all already did. Twins the other copy of this tail; keep them matching. */
+                           AND   s.collection_time >= $2
+                           AND   ($3::timestamp IS NULL OR s.collection_time <= $3)
                            AND   s.query_text IS NOT NULL
                            ORDER BY s.collection_time DESC, s.collection_id DESC
                            LIMIT 1

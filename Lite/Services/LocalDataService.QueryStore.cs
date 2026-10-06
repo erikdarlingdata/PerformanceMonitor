@@ -348,6 +348,12 @@ LEFT JOIN LATERAL (
     AND   query_id = r.query_id
     AND   database_name = r.database_name
     AND   query_text IS NOT NULL
+    /* #5420: bounded to the read's own window ($2 through $3, the bound the ranked rows were read with), as the
+       Top Queries and procedure comparison text picks were in #5381. Without it the lateral ran over every archived
+       row of v_query_store_stats. A query whose only text is older than the window now reads blank, as one with no
+       text at all already did. Twins the Darling viewer's and MCP reader's inline-text fallback. */
+    AND   collection_time >= $2
+    AND   collection_time <= $3
     /* #5299 round 2 (N3): a tie on the time breaks on the row collected last - see GetTopQueriesByCpuAsync. */
     ORDER BY collection_time DESC, collection_id DESC
     LIMIT 1

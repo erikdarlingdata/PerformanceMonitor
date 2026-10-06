@@ -366,37 +366,72 @@ public sealed partial class ViewerDataService
         ),
         current_period AS (
             SELECT tp.database_name, tp.schema_name, tp.object_name,
-                   SUM(ps.delta_execution_count) AS exec_count,
-                   SUM(ps.delta_elapsed_time)::double precision / NULLIF(SUM(ps.delta_execution_count), 0) / 1000.0 AS avg_duration_ms,
-                   SUM(ps.delta_worker_time)::double precision / NULLIF(SUM(ps.delta_execution_count), 0) / 1000.0 AS avg_cpu_ms,
-                   SUM(ps.delta_physical_reads)::double precision / NULLIF(SUM(ps.delta_execution_count), 0) AS avg_reads,
-                   MAX(ps.sql_handle) AS sql_handle
+                   w.exec_count, w.avg_duration_ms, w.avg_cpu_ms, w.avg_reads, w.sql_handle
             FROM top_procs tp
-            INNER JOIN procedure_stats ps
-              ON  ps.database_name IS NOT DISTINCT FROM tp.database_name
-              AND ps.schema_name IS NOT DISTINCT FROM tp.schema_name
-              AND ps.object_name IS NOT DISTINCT FROM tp.object_name
-            WHERE ps.server_id = $1
-            AND   ps.collection_time >= $2 AND ps.collection_time <= $3
-            AND   ps.delta_execution_count > 0
-            GROUP BY tp.database_name, tp.schema_name, tp.object_name
+            INNER JOIN (
+                SELECT ps.database_name, ps.schema_name, ps.object_name,
+                       SUM(ps.delta_execution_count) AS exec_count,
+                       SUM(ps.delta_elapsed_time)::double precision / NULLIF(SUM(ps.delta_execution_count), 0) / 1000.0 AS avg_duration_ms,
+                       SUM(ps.delta_worker_time)::double precision / NULLIF(SUM(ps.delta_execution_count), 0) / 1000.0 AS avg_cpu_ms,
+                       SUM(ps.delta_physical_reads)::double precision / NULLIF(SUM(ps.delta_execution_count), 0) AS avg_reads,
+                       MAX(ps.sql_handle) AS sql_handle
+                FROM procedure_stats ps
+                WHERE ps.server_id = $1
+                AND   ps.collection_time >= $2 AND ps.collection_time <= $3
+                AND   ps.delta_execution_count > 0
+                GROUP BY ps.database_name, ps.schema_name, ps.object_name
+            ) w
+              ON  COALESCE(w.database_name, '') = COALESCE(tp.database_name, '')
+              AND (w.database_name IS NULL) = (tp.database_name IS NULL)
+              AND COALESCE(w.schema_name, '') = COALESCE(tp.schema_name, '')
+              AND (w.schema_name IS NULL) = (tp.schema_name IS NULL)
+              AND COALESCE(w.object_name, '') = COALESCE(tp.object_name, '')
+              AND (w.object_name IS NULL) = (tp.object_name IS NULL)
         ),
         baseline_period AS (
             SELECT tp.database_name, tp.schema_name, tp.object_name,
-                   SUM(ps.delta_execution_count) AS exec_count,
-                   SUM(ps.delta_elapsed_time)::double precision / NULLIF(SUM(ps.delta_execution_count), 0) / 1000.0 AS avg_duration_ms,
-                   SUM(ps.delta_worker_time)::double precision / NULLIF(SUM(ps.delta_execution_count), 0) / 1000.0 AS avg_cpu_ms,
-                   SUM(ps.delta_physical_reads)::double precision / NULLIF(SUM(ps.delta_execution_count), 0) AS avg_reads,
-                   MAX(ps.sql_handle) AS sql_handle
+                   w.exec_count, w.avg_duration_ms, w.avg_cpu_ms, w.avg_reads, w.sql_handle
             FROM top_procs tp
-            INNER JOIN procedure_stats ps
-              ON  ps.database_name IS NOT DISTINCT FROM tp.database_name
-              AND ps.schema_name IS NOT DISTINCT FROM tp.schema_name
-              AND ps.object_name IS NOT DISTINCT FROM tp.object_name
-            WHERE ps.server_id = $1
-            AND   ps.collection_time >= $4 AND ps.collection_time <= $5
-            AND   ps.delta_execution_count > 0
-            GROUP BY tp.database_name, tp.schema_name, tp.object_name
+            INNER JOIN (
+                SELECT ps.database_name, ps.schema_name, ps.object_name,
+                       SUM(ps.delta_execution_count) AS exec_count,
+                       SUM(ps.delta_elapsed_time)::double precision / NULLIF(SUM(ps.delta_execution_count), 0) / 1000.0 AS avg_duration_ms,
+                       SUM(ps.delta_worker_time)::double precision / NULLIF(SUM(ps.delta_execution_count), 0) / 1000.0 AS avg_cpu_ms,
+                       SUM(ps.delta_physical_reads)::double precision / NULLIF(SUM(ps.delta_execution_count), 0) AS avg_reads,
+                       MAX(ps.sql_handle) AS sql_handle
+                FROM procedure_stats ps
+                WHERE ps.server_id = $1
+                AND   ps.collection_time >= $4 AND ps.collection_time <= $5
+                AND   ps.delta_execution_count > 0
+                GROUP BY ps.database_name, ps.schema_name, ps.object_name
+            ) w
+              ON  COALESCE(w.database_name, '') = COALESCE(tp.database_name, '')
+              AND (w.database_name IS NULL) = (tp.database_name IS NULL)
+              AND COALESCE(w.schema_name, '') = COALESCE(tp.schema_name, '')
+              AND (w.schema_name IS NULL) = (tp.schema_name IS NULL)
+              AND COALESCE(w.object_name, '') = COALESCE(tp.object_name, '')
+              AND (w.object_name IS NULL) = (tp.object_name IS NULL)
+        ),
+        /* #5420: the representative text, found ONCE for every compared handle, from this read's own window
+           (baseline start through current end). It was a LEFT JOIN LATERAL per procedure ("newest query_stats
+           row with this sql_handle"): no index covers sql_handle, so each lookup walked the time index newest
+           first until a row matched, and a procedure with no text anywhere (about 1 in 5 on a large store) walked
+           every retained chunk. On a large store that was 105 lookups at 167 ms, 17.6 s of a 25.7 s read, and a
+           bound on the lateral alone still scanned the whole window once per such procedure (the rig's 7-day read
+           stayed at 12 s). One window scan, narrowed to the compared handles by a hash semi-join, with DISTINCT
+           ON picking the newest row that carries a text, costs the same however many procedures have none.
+           The pick is the lateral's, ORDER BY collection_time DESC (a tie on the time stays arbitrary, as it
+           was). Difference, on purpose: a procedure whose text exists only before the window now shows no
+           text, as a procedure with no text at all already did. Twins Lite's #5381 text pick. */
+        texts AS (
+            SELECT DISTINCT ON (qs.sql_handle) qs.sql_handle, qs.query_text
+            FROM v_query_stats qs
+            WHERE qs.server_id = $1
+            AND   qs.collection_time >= LEAST($2, $4)
+            AND   qs.collection_time <= GREATEST($3, $5)
+            AND   qs.sql_handle IN (SELECT sql_handle FROM current_period UNION SELECT sql_handle FROM baseline_period)
+            AND   qs.query_text IS NOT NULL
+            ORDER BY qs.sql_handle, qs.collection_time DESC
         )
         SELECT COALESCE(c.database_name, b.database_name) AS database_name,
                COALESCE(c.schema_name, b.schema_name) AS schema_name,
@@ -416,17 +451,11 @@ public sealed partial class ViewerDataService
            join #1568's module attribution relies on (both stores persist the identical
            CONVERT(varchar(130), ..., 1) text). procedure_stats captures no text of its own, so
            this is the latest captured statement from inside the module — parity with the other
-           two comparison grids, labeled a statement rather than the definition. v_query_stats
-           resolves the #1767 payload dimension. */
-        LEFT JOIN LATERAL (
-            SELECT qs.query_text
-            FROM v_query_stats qs
-            WHERE qs.server_id = $1
-            AND   qs.sql_handle = COALESCE(c.sql_handle, b.sql_handle)
-            AND   qs.query_text IS NOT NULL
-            ORDER BY qs.collection_time DESC
-            LIMIT 1
-        ) t ON TRUE
+           two comparison grids, labeled a statement rather than the definition. texts reads
+           v_query_stats, which resolves the #1767 payload dimension (COALESCE(f.query_text,
+           qtd.query_text) through query_text_dim). */
+        LEFT JOIN texts t
+          ON t.sql_handle = COALESCE(c.sql_handle, b.sql_handle)
         """;
 
     /// <summary>Top-Procedures current-vs-baseline comparison rows (shared .Ui item; delta % + NEW/GONE badges).</summary>
