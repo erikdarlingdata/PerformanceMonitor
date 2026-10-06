@@ -45,10 +45,10 @@ public static partial class SensitiveStatements
     /// parameter. T5: system procedures that take a secret positionally. T6: built-ins that take a pass phrase
     /// or a key password. T7: <c>OPENDATASOURCE</c>. T8: <c>OPENROWSET</c>'s provider form (not
     /// <c>OPENROWSET(BULK ...)</c>). T9: a bracketed or double-quoted name ending in password, passwd, pwd or
-    /// secret assigned a literal. T10: a typed declaration of such a name, so the type sits between the name and
-    /// the literal (<c>DECLARE @x nvarchar(20) = N'...'</c>, <c>x text := '...'</c>): the name, an optional
-    /// <c>AS</c> or <c>CONSTANT</c>, one type name (plain, dotted or bracketed) with an optional length of up to
-    /// 20 characters in parentheses, then <c>=</c>, <c>:=</c> or <c>DEFAULT</c> and a literal.</para>
+    /// secret assigned a literal. T10: a typed declaration of such a name (T3's name set, <c>key_source</c>
+    /// included), so the type sits between the name and the literal (<c>DECLARE @x nvarchar(20) = N'...'</c>,
+    /// <c>x text := '...'</c>): the name, an optional <c>AS</c> or <c>CONSTANT</c>, one type name (plain, dotted
+    /// or bracketed) with an optional length of up to 20 characters in parentheses, then <c>=</c>, <c>:=</c> or <c>DEFAULT</c> and a literal.</para>
     ///
     /// <para><b>No backslash, on purpose.</b> <c>[[:&lt;:]]</c>, <c>[[:&gt;:]]</c>, <c>[[:space:]]</c>,
     /// <c>[*]</c> and <c>[$]</c> spell what a first version wrote with backslash escapes. A normalized
@@ -74,9 +74,22 @@ public static partial class SensitiveStatements
         + "|[[:<:]]openrowset" + TokenGap + "*[(]" + TokenGap + "*n?'"                                         // T8
         + "|[[:<:]][a-z0-9_]*(password|passwd|pwd|secret)(]|\")" + TokenGap + "*=" + TokenGap
             + "*(n?'|e'|u&'|0x)"                                                                              // T9
-        + "|[[:<:]][a-z0-9_]*(password|passwd|pwd|secret)" + TokenGap + "+((as|constant)" + TokenGap + "+)?"
+        + "|[[:<:]]([a-z0-9_]*(password|passwd|pwd|secret)|key_source)" + TokenGap + "+((as|constant)" + TokenGap + "+)?"
             + "[[]?[a-z_][a-z0-9_.]*]?([[:space:]]*[(][[:space:]0-9a-z,]{0,20}[)])?" + TokenGap
             + "*(:?=|default[[:>:]])" + TokenGap + "*(n?'|e'|u&'|0x|[$][^0-9])";                              // T10
+
+    /// <summary>
+    /// How many top-level alternatives at the head of <see cref="Pattern"/> (A1-A4 and T1-T9: thirteen) the .NET
+    /// judge compiles as its first regex. The alternatives after them (T10, and anything appended later) are its
+    /// second regex, and a value is named when either matches (#5320). The split is only about speed: past a size
+    /// the runtime stops optimizing the compiled matcher, and one regex for the whole alternation ran about three
+    /// times slower on a long value than the two halves together. PostgreSQL still reads the one
+    /// <see cref="Pattern"/>. The two parts are cut from that constant when the judge is built, never copied, and
+    /// a test pins that they put back together make exactly <see cref="Pattern"/>. New alternatives are appended
+    /// after T10 (the pattern is append-only), so this number stays 13; if the second part itself grows large
+    /// enough to slow down the same way, cut it again.
+    /// </summary>
+    internal const int JudgeHeadAlternatives = 13;
 
     /// <summary>What a collector or reader stores or returns in place of a statement <see cref="Pattern"/>
     /// names. Fixed, so a reader never has to distinguish "withheld" from "not captured yet" by anything other

@@ -180,7 +180,7 @@ public sealed class PgSensitiveStatementFilterTests
             "|[[:<:]]opendatasource[[:>:]]" +
             "|[[:<:]]openrowset" + gap + "*[(]" + gap + "*n?''" +
             "|[[:<:]][a-z0-9_]*(password|passwd|pwd|secret)(]|\")" + gap + "*=" + gap + "*(n?''|e''|u&''|0x)" +
-            "|[[:<:]][a-z0-9_]*(password|passwd|pwd|secret)" + gap + "+((as|constant)" + gap + "+)?" +
+            "|[[:<:]]([a-z0-9_]*(password|passwd|pwd|secret)|key_source)" + gap + "+((as|constant)" + gap + "+)?" +
             "[[]?[a-z_][a-z0-9_.]*]?([[:space:]]*[(][[:space:]0-9a-z,]{0,20}[)])?" + gap +
             "*(:?=|default[[:>:]])" + gap + "*(n?''|e''|u&''|0x|[$][^0-9])' " +
             "THEN '-- statement text withheld (#4348)' ELSE c END";
