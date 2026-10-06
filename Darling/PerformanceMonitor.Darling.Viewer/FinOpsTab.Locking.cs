@@ -65,7 +65,7 @@ public partial class FinOpsTab
         FinOpsIndexLockingCountIndicator.Text = data.Count > 0 ? $"{data.Count} index(es)" : "";
 
         /* Writers on an optimized-locking database wait on transaction-ID locks the grid's counters do not count. */
-        var optimizedLockingNote = await _dataService.GetOptimizedLockingNoteAsync(_server.ServerId);
+        var optimizedLockingNote = await _dataService.GetOptimizedLockingNoteAsync(_server.ServerId, SelectedDatabaseFilter);
         FinOpsOptimizedLockingNote.Text = optimizedLockingNote ?? "";
         FinOpsOptimizedLockingNote.Visibility = optimizedLockingNote is null ? Visibility.Collapsed : Visibility.Visible;
 

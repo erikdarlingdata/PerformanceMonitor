@@ -194,19 +194,21 @@ AND (
 )
 ORDER BY ios.database_name";
 
-    /// <summary>The newest stored <c>is_optimized_locking_on</c> flag per database on the server. $1 server_id.</summary>
+    /// <summary>The newest stored <c>is_optimized_locking_on</c> flag per database on the server. $1 server_id, $2 the saved database filter (#5312, a text[], NULL = every database): only the chosen databases' flags count, as in get_object_locking.</summary>
     public const string OptimizedLockingFlagsSql = @"
 SELECT is_optimized_locking_on
 FROM database_config
 WHERE server_id = $1
-AND   capture_time = (SELECT MAX(capture_time) FROM database_config WHERE server_id = $1)";
+AND   capture_time = (SELECT MAX(capture_time) FROM database_config WHERE server_id = $1)
+AND   ($2::text[] IS NULL OR database_name = ANY($2))";
 
     /// <summary>The shared optimized-locking note when any database's newest flag is true; null otherwise.</summary>
-    public async Task<string?> GetOptimizedLockingNoteAsync(int serverId, CancellationToken cancellationToken = default)
+    public async Task<string?> GetOptimizedLockingNoteAsync(int serverId, IReadOnlyList<string>? databaseNames = null, CancellationToken cancellationToken = default)
     {
         await using var command = _dataSource.CreateCommand(OptimizedLockingFlagsSql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
+        command.Parameters.Add(DatabaseFilterParameter(databaseNames));
 
         var flags = new List<bool?>();
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);

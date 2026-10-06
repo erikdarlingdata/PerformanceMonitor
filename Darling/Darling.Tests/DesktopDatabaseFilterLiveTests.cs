@@ -330,6 +330,7 @@ public sealed class DesktopDatabaseFilterSourcePinTests
         var locking = ViewerFile("FinOpsTab.Locking.cs");
         Assert.Contains("GetIndexLockingDatabasesAsync(_server.ServerId, SelectedDatabaseFilter)", locking, StringComparison.Ordinal);
         Assert.Contains("GetIndexLockingAsync(_server.ServerId, 200, db, SelectedDatabaseFilter)", locking, StringComparison.Ordinal);
+        Assert.Contains("GetOptimizedLockingNoteAsync(_server.ServerId, SelectedDatabaseFilter)", locking, StringComparison.Ordinal);
 
         Assert.Contains("GetStorageGrowthAsync(_server.ServerId, SelectedDatabaseFilter)", ViewerFile("FinOpsTab.ObjectHeatmap.cs"), StringComparison.Ordinal);
 
@@ -345,6 +346,7 @@ public sealed class DesktopDatabaseFilterSourcePinTests
         Assert.Contains("$3::text[] " + P + " ios.database_name = ANY($3)", ViewerDataService.IndexLockingAllSql, StringComparison.Ordinal);
         Assert.Contains("$4::text[] " + P + " ios.database_name = ANY($4)", ViewerDataService.IndexLockingByDbSql, StringComparison.Ordinal);
         Assert.Contains("$2::text[] " + P + " ios.database_name = ANY($2)", ViewerDataService.IndexLockingDatabasesSql, StringComparison.Ordinal);
+        Assert.Contains("$2::text[] " + P + " database_name = ANY($2)", ViewerDataService.OptimizedLockingFlagsSql, StringComparison.Ordinal);
         Assert.Contains("$3::text[] " + P + " database_name = ANY($3)", ViewerDataService.DatabaseSizeLatestSql, StringComparison.Ordinal);
         Assert.Contains("$4::text[] " + P + " database_name = ANY($4)", ViewerDataService.DatabaseSizeSummarySql, StringComparison.Ordinal);
         Assert.Contains("$2::text[] " + P + " database_name = ANY($2)", ViewerDataService.PvsStatsLatestSql, StringComparison.Ordinal);
