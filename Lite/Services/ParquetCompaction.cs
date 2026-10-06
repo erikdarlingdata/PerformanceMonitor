@@ -24,7 +24,49 @@ public static class ParquetCompaction
        defaults below. */
     public const string DefaultMemoryLimit = "4GB";
     public const int DefaultThreads = 2;
-    public const int DefaultRowGroupSize = 8192;
+    public const int DefaultRowGroupSize = ArchiveRowGroupSize;
+
+    /* Row-group size for every parquet COPY that writes a file the archive views read (#5381).
+
+       DuckDB decodes about a row group's whole column chunk for any read that touches the
+       column, whatever the filter. query_text is the wide one: a file written at the default
+       122,880 rows is ONE row group, so even a 1 h window read decoded the whole file's text
+       (measured on a 68,000-row/day Query Store archive: 335 MB of query_text for a 1 h window,
+       against 73 MB at the 8,192 rows compaction used before this change and 17 MB at 2,048).
+
+       Which files this reaches: the archiver runs hourly and writes one file per pass, and every pass ends
+       by compacting the month's files, so in steady state the archive is month files that compaction wrote
+       (8,192-row groups before this change) plus the newest hourly file. Only files written from now on
+       get 2,048-row groups. Compaction rewrites a month only when that month receives a new hourly file, so
+       past months keep their 8,192-row groups until retention removes them.
+
+       Time pruning is weaker than the writer's shape suggests. The archiver's COPY keeps rows in
+       collection_time order, so each of its groups covers a narrow span. Compaction output does not:
+       it merges with preserve_insertion_order = false on 2 threads, so one group can span several hours
+       (simulated over 168 hourly merges: 190 of 206 groups wider than 3 h). A 1 h window then touches about
+       7% of a compacted file at 2,048 rows against about 27% at 8,192, a gain of about 4x in decoded text,
+       not the near-exact pruning of a time-sorted file. Sorting compaction output by collection_time would
+       tighten that, at the price of a sort (memory and temp disk) per merge (follow-up issue #5410).
+       DuckDB 1.5.5's parallel writer can also place whole row groups in a different order from the source
+       (seen from 4,096-row groups up; one group never moves relative to its own rows). Nothing in Lite reads by file
+       position: the archive views dedup with an explicit ORDER BY collection_time, and pruning is by
+       footer stats.
+
+       2,048 is DuckDB's vector size: it flushes row groups on vector boundaries, so 1,024 writes
+       the same 2,048-row groups. File size grew 1 to 3 percent against the default (measured 1.0 to 2.8% on
+       the Query Store and query_stats shapes) and write time did not change measurably. ROW_GROUP_SIZE_BYTES
+       was rejected: DuckDB 1.5.5 only accepts it with preserve_insertion_order = false (a global setting on
+       the shared connection), the rows then come out of order across the scan's row groups (the views' dedup
+       and pruning rely on time order), and with an ORDER BY inside the COPY the bound is not honoured at all
+       (one 68,708-row group). */
+    public const int ArchiveRowGroupSize = 2048;
+
+    /* The one option list for archive COPYs; Lite.Tests' ArchiveCopyOptionsPinTests scans Lite/ so a
+       new COPY cannot skip it. */
+    public static string BuildArchiveCopyOptions(int rowGroupSize = ArchiveRowGroupSize) =>
+        $"FORMAT PARQUET, COMPRESSION ZSTD, ROW_GROUP_SIZE {rowGroupSize}";
+
+    public static readonly string ArchiveCopyOptions = BuildArchiveCopyOptions();
 
     /* On-disk parquet bytes per compaction merge batch. A group whose files
        exceed this budget is merged in multiple passes, each producing a
@@ -140,7 +182,7 @@ public static class ParquetCompaction
         var pathList = string.Join(", ", sourcePaths.Select(p => $"'{EscapeSqlPath(p)}'"));
         using var cmd = con.CreateCommand();
         cmd.CommandText = $"COPY (SELECT {selectClause} FROM read_parquet([{pathList}], union_by_name=true)) " +
-                          $"TO '{EscapeSqlPath(outputPath)}' (FORMAT PARQUET, COMPRESSION ZSTD, ROW_GROUP_SIZE {rowGroupSize})";
+                          $"TO '{EscapeSqlPath(outputPath)}' ({BuildArchiveCopyOptions(rowGroupSize)})";
         cmd.ExecuteNonQuery();
     }
 
