@@ -717,52 +717,68 @@ public sealed partial class ViewerDataService
                 SELECT * FROM top_baseline
             ) AS combined
         ),
+        /* #5420: each period aggregates its deduped rows ONCE (the derived table w) and the top list joins to that, on the
+           null-safe pair COALESCE(x,'') = COALESCE(y,'') AND (x IS NULL) = (y IS NULL). The old form joined the top list
+           (at most 200 hashes) to the window's rows with IS NOT DISTINCT FROM, which PostgreSQL can only run as a
+           nested loop that filters every window row against every hash: seconds on a 24 hour window, 18 to 24 s on 7 days. */
         current_period AS (
             SELECT th.database_name, th.query_hash,
-                   SUM(qs.execution_count) AS exec_count,
-                   SUM(qs.execution_count * qs.avg_duration_us::double precision) / NULLIF(SUM(qs.execution_count), 0) / 1000.0 AS avg_duration_ms,
-                   SUM(qs.execution_count * qs.avg_cpu_time_us::double precision) / NULLIF(SUM(qs.execution_count), 0) / 1000.0 AS avg_cpu_ms,
-                   SUM(qs.execution_count * qs.avg_logical_io_reads::double precision) / NULLIF(SUM(qs.execution_count), 0) AS avg_reads,
-                   /* #2150: this comparison groups by query_hash, but text is stored per query_id, so the
-                      side table is joined on the finer key and MAX still picks one member's text for the
-                      group — the same arbitrary-but-deterministic choice MAX(qs.query_text) made before.
-                      The join cannot fan out (query_store_text is one row per server/database/query_id, by
-                      primary key), so the execution-count SUMs above are unaffected. The COALESCE keeps
-                      pre-cutover rows, whose text is still inline, reading exactly as they used to. */
-                   MAX(COALESCE(x.query_sql_text, qs.query_text)) AS query_text
+                   w.exec_count, w.avg_duration_ms, w.avg_cpu_ms, w.avg_reads, w.query_text
             FROM top_hashes th
-            INNER JOIN deduped_current qs
-              ON  qs.query_hash IS NOT DISTINCT FROM th.query_hash
-              AND qs.database_name IS NOT DISTINCT FROM th.database_name
-            LEFT JOIN query_store_text AS x
-              ON  x.server_id = $1
-              AND x.database_name = qs.database_name
-              AND x.query_id = qs.query_id
-            WHERE qs.rn = 1
-            AND   qs.execution_count > 0
-            GROUP BY th.database_name, th.query_hash
+            INNER JOIN (
+                SELECT qs.database_name, qs.query_hash,
+                       SUM(qs.execution_count) AS exec_count,
+                       SUM(qs.execution_count * qs.avg_duration_us::double precision) / NULLIF(SUM(qs.execution_count), 0) / 1000.0 AS avg_duration_ms,
+                       SUM(qs.execution_count * qs.avg_cpu_time_us::double precision) / NULLIF(SUM(qs.execution_count), 0) / 1000.0 AS avg_cpu_ms,
+                       SUM(qs.execution_count * qs.avg_logical_io_reads::double precision) / NULLIF(SUM(qs.execution_count), 0) AS avg_reads,
+                       /* #2150: this comparison groups by query_hash, but text is stored per query_id, so the
+                          side table is joined on the finer key and MAX still picks one member's text for the
+                          group — the same arbitrary-but-deterministic choice MAX(qs.query_text) made before.
+                          The join cannot fan out (query_store_text is one row per server/database/query_id, by
+                          primary key), so the execution-count SUMs above are unaffected. The COALESCE keeps
+                          pre-cutover rows, whose text is still inline, reading exactly as they used to. */
+                       MAX(COALESCE(x.query_sql_text, qs.query_text)) AS query_text
+                FROM deduped_current qs
+                LEFT JOIN query_store_text AS x
+                  ON  x.server_id = $1
+                  AND x.database_name = qs.database_name
+                  AND x.query_id = qs.query_id
+                WHERE qs.rn = 1
+                AND   qs.execution_count > 0
+                GROUP BY qs.database_name, qs.query_hash
+            ) w
+              ON  COALESCE(w.query_hash, '') = COALESCE(th.query_hash, '')
+              AND (w.query_hash IS NULL) = (th.query_hash IS NULL)
+              AND COALESCE(w.database_name, '') = COALESCE(th.database_name, '')
+              AND (w.database_name IS NULL) = (th.database_name IS NULL)
         ),
         baseline_period AS (
             SELECT th.database_name, th.query_hash,
-                   SUM(qs.execution_count) AS exec_count,
-                   SUM(qs.execution_count * qs.avg_duration_us::double precision) / NULLIF(SUM(qs.execution_count), 0) / 1000.0 AS avg_duration_ms,
-                   SUM(qs.execution_count * qs.avg_cpu_time_us::double precision) / NULLIF(SUM(qs.execution_count), 0) / 1000.0 AS avg_cpu_ms,
-                   SUM(qs.execution_count * qs.avg_logical_io_reads::double precision) / NULLIF(SUM(qs.execution_count), 0) AS avg_reads,
-                   /* #2150 — same resolution as current_period above. Both arms need it because the final
-                      projection takes COALESCE(c.query_text, b.query_text): converting only one arm would
-                      leave a GONE row (present in baseline only) with no text to fall back to. */
-                   MAX(COALESCE(x.query_sql_text, qs.query_text)) AS query_text
+                   w.exec_count, w.avg_duration_ms, w.avg_cpu_ms, w.avg_reads, w.query_text
             FROM top_hashes th
-            INNER JOIN deduped_baseline qs
-              ON  qs.query_hash IS NOT DISTINCT FROM th.query_hash
-              AND qs.database_name IS NOT DISTINCT FROM th.database_name
-            LEFT JOIN query_store_text AS x
-              ON  x.server_id = $1
-              AND x.database_name = qs.database_name
-              AND x.query_id = qs.query_id
-            WHERE qs.rn = 1
-            AND   qs.execution_count > 0
-            GROUP BY th.database_name, th.query_hash
+            INNER JOIN (
+                SELECT qs.database_name, qs.query_hash,
+                       SUM(qs.execution_count) AS exec_count,
+                       SUM(qs.execution_count * qs.avg_duration_us::double precision) / NULLIF(SUM(qs.execution_count), 0) / 1000.0 AS avg_duration_ms,
+                       SUM(qs.execution_count * qs.avg_cpu_time_us::double precision) / NULLIF(SUM(qs.execution_count), 0) / 1000.0 AS avg_cpu_ms,
+                       SUM(qs.execution_count * qs.avg_logical_io_reads::double precision) / NULLIF(SUM(qs.execution_count), 0) AS avg_reads,
+                       /* #2150 — same resolution as current_period above. Both arms need it because the final
+                          projection takes COALESCE(c.query_text, b.query_text): converting only one arm would
+                          leave a GONE row (present in baseline only) with no text to fall back to. */
+                       MAX(COALESCE(x.query_sql_text, qs.query_text)) AS query_text
+                FROM deduped_baseline qs
+                LEFT JOIN query_store_text AS x
+                  ON  x.server_id = $1
+                  AND x.database_name = qs.database_name
+                  AND x.query_id = qs.query_id
+                WHERE qs.rn = 1
+                AND   qs.execution_count > 0
+                GROUP BY qs.database_name, qs.query_hash
+            ) w
+              ON  COALESCE(w.query_hash, '') = COALESCE(th.query_hash, '')
+              AND (w.query_hash IS NULL) = (th.query_hash IS NULL)
+              AND COALESCE(w.database_name, '') = COALESCE(th.database_name, '')
+              AND (w.database_name IS NULL) = (th.database_name IS NULL)
         )
         SELECT COALESCE(c.database_name, b.database_name) AS database_name,
                COALESCE(c.query_hash, b.query_hash) AS query_hash,

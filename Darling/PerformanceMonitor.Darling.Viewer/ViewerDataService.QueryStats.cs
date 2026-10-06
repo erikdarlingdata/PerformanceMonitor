@@ -612,10 +612,12 @@ public sealed partial class ViewerDataService
     /// per-execution averages, and FULL OUTER JOINs the two so NEW / GONE queries surface. Returns the
     /// shared <see cref="QueryStatsComparisonItem"/> the .Ui comparison grid binds (delta % + badges).
     /// PG dialect deviations from Lite's DuckDB: <c>::double precision</c> casts on the summed bigints
-    /// before the per-execution division; the CTE INNER JOINs keep Lite's null-safe
-    /// <c>IS NOT DISTINCT FROM</c>, but the outer FULL JOIN uses <c>COALESCE(key,'')</c> equality —
-    /// Postgres only FULL-JOINs on merge/hash-joinable conditions and <c>IS NOT DISTINCT FROM</c> is
-    /// neither (query_hash / database_name are never the empty string, so the sentinel is collision-free).
+    /// before the per-execution division; the period joins are null-safe like Lite's
+    /// <c>IS NOT DISTINCT FROM</c> but written as <c>COALESCE(key,'') = COALESCE(key,'')</c> plus an
+    /// <c>IS NULL</c> pair (#5420), and the outer FULL JOIN uses <c>COALESCE(key,'')</c> equality —
+    /// Postgres only joins on merge/hash-joinable conditions and <c>IS NOT DISTINCT FROM</c> is
+    /// neither, so it ran as a nested loop over every window row (query_hash / database_name are never
+    /// the empty string, so the sentinel is collision-free in the outer join).
     /// $1 server_id, $2/$3 current window, $4/$5 baseline window (naive UTC).
     /// </summary>
     public const string QueryStatsComparisonSql = """
@@ -649,37 +651,55 @@ public sealed partial class ViewerDataService
                 SELECT * FROM top_baseline
             ) AS combined
         ),
+        /* #5420: each period aggregates its window ONCE (the derived table w) and the top list joins to that, on the
+           null-safe pair COALESCE(x,'') = COALESCE(y,'') AND (x IS NULL) = (y IS NULL). The old form joined the top list
+           (at most 200 hashes) to the window's rows with IS NOT DISTINCT FROM, which PostgreSQL can only run as a
+           nested loop that filters every window row against every hash: seconds on a 24 hour window, 10 to 24 s on 7 days. */
         current_period AS (
             SELECT th.database_name, th.query_hash,
-                   SUM(qs.delta_execution_count) AS exec_count,
-                   SUM(qs.delta_elapsed_time)::double precision / NULLIF(SUM(qs.delta_execution_count), 0) / 1000.0 AS avg_duration_ms,
-                   SUM(qs.delta_worker_time)::double precision / NULLIF(SUM(qs.delta_execution_count), 0) / 1000.0 AS avg_cpu_ms,
-                   SUM(qs.delta_physical_reads)::double precision / NULLIF(SUM(qs.delta_execution_count), 0) AS avg_reads,
-                   MAX(qs.query_text) AS query_text
+                   w.exec_count, w.avg_duration_ms, w.avg_cpu_ms, w.avg_reads, w.query_text
             FROM top_hashes th
-            INNER JOIN v_query_stats qs
-              ON  qs.query_hash IS NOT DISTINCT FROM th.query_hash
-              AND qs.database_name IS NOT DISTINCT FROM th.database_name
-            WHERE qs.server_id = $1
-            AND   qs.collection_time >= $2 AND qs.collection_time <= $3
-            AND   qs.delta_execution_count > 0
-            GROUP BY th.database_name, th.query_hash
+            INNER JOIN (
+                SELECT qs.database_name, qs.query_hash,
+                       SUM(qs.delta_execution_count) AS exec_count,
+                       SUM(qs.delta_elapsed_time)::double precision / NULLIF(SUM(qs.delta_execution_count), 0) / 1000.0 AS avg_duration_ms,
+                       SUM(qs.delta_worker_time)::double precision / NULLIF(SUM(qs.delta_execution_count), 0) / 1000.0 AS avg_cpu_ms,
+                       SUM(qs.delta_physical_reads)::double precision / NULLIF(SUM(qs.delta_execution_count), 0) AS avg_reads,
+                       MAX(qs.query_text) AS query_text
+                FROM v_query_stats qs
+                WHERE qs.server_id = $1
+                AND   qs.collection_time >= $2 AND qs.collection_time <= $3
+                AND   ($6::text[] IS NULL OR qs.database_name = ANY($6))
+                AND   qs.delta_execution_count > 0
+                GROUP BY qs.database_name, qs.query_hash
+            ) w
+              ON  COALESCE(w.query_hash, '') = COALESCE(th.query_hash, '')
+              AND (w.query_hash IS NULL) = (th.query_hash IS NULL)
+              AND COALESCE(w.database_name, '') = COALESCE(th.database_name, '')
+              AND (w.database_name IS NULL) = (th.database_name IS NULL)
         ),
         baseline_period AS (
             SELECT th.database_name, th.query_hash,
-                   SUM(qs.delta_execution_count) AS exec_count,
-                   SUM(qs.delta_elapsed_time)::double precision / NULLIF(SUM(qs.delta_execution_count), 0) / 1000.0 AS avg_duration_ms,
-                   SUM(qs.delta_worker_time)::double precision / NULLIF(SUM(qs.delta_execution_count), 0) / 1000.0 AS avg_cpu_ms,
-                   SUM(qs.delta_physical_reads)::double precision / NULLIF(SUM(qs.delta_execution_count), 0) AS avg_reads,
-                   MAX(qs.query_text) AS query_text
+                   w.exec_count, w.avg_duration_ms, w.avg_cpu_ms, w.avg_reads, w.query_text
             FROM top_hashes th
-            INNER JOIN v_query_stats qs
-              ON  qs.query_hash IS NOT DISTINCT FROM th.query_hash
-              AND qs.database_name IS NOT DISTINCT FROM th.database_name
-            WHERE qs.server_id = $1
-            AND   qs.collection_time >= $4 AND qs.collection_time <= $5
-            AND   qs.delta_execution_count > 0
-            GROUP BY th.database_name, th.query_hash
+            INNER JOIN (
+                SELECT qs.database_name, qs.query_hash,
+                       SUM(qs.delta_execution_count) AS exec_count,
+                       SUM(qs.delta_elapsed_time)::double precision / NULLIF(SUM(qs.delta_execution_count), 0) / 1000.0 AS avg_duration_ms,
+                       SUM(qs.delta_worker_time)::double precision / NULLIF(SUM(qs.delta_execution_count), 0) / 1000.0 AS avg_cpu_ms,
+                       SUM(qs.delta_physical_reads)::double precision / NULLIF(SUM(qs.delta_execution_count), 0) AS avg_reads,
+                       MAX(qs.query_text) AS query_text
+                FROM v_query_stats qs
+                WHERE qs.server_id = $1
+                AND   qs.collection_time >= $4 AND qs.collection_time <= $5
+                AND   ($6::text[] IS NULL OR qs.database_name = ANY($6))
+                AND   qs.delta_execution_count > 0
+                GROUP BY qs.database_name, qs.query_hash
+            ) w
+              ON  COALESCE(w.query_hash, '') = COALESCE(th.query_hash, '')
+              AND (w.query_hash IS NULL) = (th.query_hash IS NULL)
+              AND COALESCE(w.database_name, '') = COALESCE(th.database_name, '')
+              AND (w.database_name IS NULL) = (th.database_name IS NULL)
         )
         SELECT COALESCE(c.database_name, b.database_name) AS database_name,
                COALESCE(c.query_hash, b.query_hash) AS query_hash,

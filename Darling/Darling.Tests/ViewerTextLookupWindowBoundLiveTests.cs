@@ -158,6 +158,307 @@ public sealed class ViewerTextLookupWindowBoundLiveTests
     /* ───────────────────────────── seeds ───────────────────────────── */
 
     /// <summary>
+    /// <see cref="ViewerDataService.QueryStatsComparisonSql"/> as it stood before the #5420 review round, verbatim: the oracle the
+    /// derived-table statement is compared with. Do not edit it to follow the live statement.
+    /// </summary>
+    private const string OldQueryStatsComparisonSql = """
+            WITH top_current AS (
+                SELECT query_hash, database_name
+                FROM query_stats
+                WHERE server_id = $1
+                AND   collection_time >= $2 AND collection_time <= $3
+                AND   ($6::text[] IS NULL OR database_name = ANY($6))
+                AND   delta_execution_count > 0
+                GROUP BY query_hash, database_name
+                ORDER BY SUM(delta_execution_count) DESC
+                LIMIT 100
+            ),
+            top_baseline AS (
+                SELECT query_hash, database_name
+                FROM query_stats
+                WHERE server_id = $1
+                AND   collection_time >= $4 AND collection_time <= $5
+                AND   ($6::text[] IS NULL OR database_name = ANY($6))
+                AND   delta_execution_count > 0
+                GROUP BY query_hash, database_name
+                ORDER BY SUM(delta_execution_count) DESC
+                LIMIT 100
+            ),
+            top_hashes AS (
+                SELECT DISTINCT query_hash, database_name
+                FROM (
+                    SELECT * FROM top_current
+                    UNION ALL
+                    SELECT * FROM top_baseline
+                ) AS combined
+            ),
+            current_period AS (
+                SELECT th.database_name, th.query_hash,
+                       SUM(qs.delta_execution_count) AS exec_count,
+                       SUM(qs.delta_elapsed_time)::double precision / NULLIF(SUM(qs.delta_execution_count), 0) / 1000.0 AS avg_duration_ms,
+                       SUM(qs.delta_worker_time)::double precision / NULLIF(SUM(qs.delta_execution_count), 0) / 1000.0 AS avg_cpu_ms,
+                       SUM(qs.delta_physical_reads)::double precision / NULLIF(SUM(qs.delta_execution_count), 0) AS avg_reads,
+                       MAX(qs.query_text) AS query_text
+                FROM top_hashes th
+                INNER JOIN v_query_stats qs
+                  ON  qs.query_hash IS NOT DISTINCT FROM th.query_hash
+                  AND qs.database_name IS NOT DISTINCT FROM th.database_name
+                WHERE qs.server_id = $1
+                AND   qs.collection_time >= $2 AND qs.collection_time <= $3
+                AND   qs.delta_execution_count > 0
+                GROUP BY th.database_name, th.query_hash
+            ),
+            baseline_period AS (
+                SELECT th.database_name, th.query_hash,
+                       SUM(qs.delta_execution_count) AS exec_count,
+                       SUM(qs.delta_elapsed_time)::double precision / NULLIF(SUM(qs.delta_execution_count), 0) / 1000.0 AS avg_duration_ms,
+                       SUM(qs.delta_worker_time)::double precision / NULLIF(SUM(qs.delta_execution_count), 0) / 1000.0 AS avg_cpu_ms,
+                       SUM(qs.delta_physical_reads)::double precision / NULLIF(SUM(qs.delta_execution_count), 0) AS avg_reads,
+                       MAX(qs.query_text) AS query_text
+                FROM top_hashes th
+                INNER JOIN v_query_stats qs
+                  ON  qs.query_hash IS NOT DISTINCT FROM th.query_hash
+                  AND qs.database_name IS NOT DISTINCT FROM th.database_name
+                WHERE qs.server_id = $1
+                AND   qs.collection_time >= $4 AND qs.collection_time <= $5
+                AND   qs.delta_execution_count > 0
+                GROUP BY th.database_name, th.query_hash
+            )
+            SELECT COALESCE(c.database_name, b.database_name) AS database_name,
+                   COALESCE(c.query_hash, b.query_hash) AS query_hash,
+                   COALESCE(c.query_text, b.query_text) AS query_text,
+                   c.exec_count, c.avg_duration_ms, c.avg_cpu_ms, c.avg_reads,
+                   b.exec_count AS baseline_exec_count,
+                   b.avg_duration_ms AS baseline_avg_duration_ms,
+                   b.avg_cpu_ms AS baseline_avg_cpu_ms,
+                   b.avg_reads AS baseline_avg_reads
+            FROM current_period c
+            FULL OUTER JOIN baseline_period b
+              ON  COALESCE(c.database_name, '') = COALESCE(b.database_name, '')
+              AND COALESCE(c.query_hash, '') = COALESCE(b.query_hash, '')
+            """;
+
+    /// <summary>
+    /// <see cref="ViewerDataService.QueryStoreComparisonSql"/> as it stood before the #5420 review round, verbatim (oracle).
+    /// </summary>
+    private const string OldQueryStoreComparisonSql = """
+            WITH deduped_current AS (
+                /* LOAD-BEARING (correctness, not just perf) — #1841. The rows are CUMULATIVE per-interval
+                   snapshots and the collector re-fetches the OPEN interval every cycle, so the SAME interval
+                   (same first_execution_time) is stored repeatedly with a growing execution_count. Keep the
+                   LATEST snapshot per interval before aggregating.
+
+                   The execution-count weighting below does NOT rescue this on its own: the repeated snapshots
+                   of one interval carry DIFFERENT (growing) weights AND different avg_* values, so an open
+                   interval is weighted by the triangular sum of its own growth. That bias is stronger in the
+                   recent window than in the baseline window (recent windows hold more still-open intervals),
+                   which skews the very delta this comparison exists to compute. One deduped CTE per window,
+                   so both arms are treated identically. */
+                SELECT
+                    database_name,
+                    /* #2150: query_id is projected (it was already a partition key) so the period CTEs can
+                       resolve text from collect.query_store_text, which is keyed on it. */
+                    query_id,
+                    query_hash,
+                    query_text,
+                    execution_count,
+                    avg_duration_us,
+                    avg_cpu_time_us,
+                    avg_logical_io_reads,
+                    ROW_NUMBER() OVER
+                    (
+                        PARTITION BY database_name, query_id, plan_id, runtime_stats_interval_id, first_execution_time, execution_type_desc, replica_role
+                        ORDER BY collection_time DESC, execution_count DESC
+                    ) AS rn
+                FROM query_store_stats
+                WHERE server_id = $1
+                AND   collection_time >= $2 AND collection_time <= $3
+                AND   ($6::text[] IS NULL OR database_name = ANY($6))
+            ),
+            deduped_baseline AS (
+                SELECT
+                    database_name,
+                    /* #2150: query_id is projected (it was already a partition key) so the period CTEs can
+                       resolve text from collect.query_store_text, which is keyed on it. */
+                    query_id,
+                    query_hash,
+                    query_text,
+                    execution_count,
+                    avg_duration_us,
+                    avg_cpu_time_us,
+                    avg_logical_io_reads,
+                    ROW_NUMBER() OVER
+                    (
+                        PARTITION BY database_name, query_id, plan_id, runtime_stats_interval_id, first_execution_time, execution_type_desc, replica_role
+                        ORDER BY collection_time DESC, execution_count DESC
+                    ) AS rn
+                FROM query_store_stats
+                WHERE server_id = $1
+                AND   collection_time >= $4 AND collection_time <= $5
+                AND   ($6::text[] IS NULL OR database_name = ANY($6))
+            ),
+            top_current AS (
+                SELECT database_name, query_hash
+                FROM deduped_current
+                WHERE rn = 1
+                AND   execution_count > 0
+                GROUP BY database_name, query_hash
+                ORDER BY SUM(execution_count) DESC
+                LIMIT 100
+            ),
+            top_baseline AS (
+                SELECT database_name, query_hash
+                FROM deduped_baseline
+                WHERE rn = 1
+                AND   execution_count > 0
+                GROUP BY database_name, query_hash
+                ORDER BY SUM(execution_count) DESC
+                LIMIT 100
+            ),
+            top_hashes AS (
+                SELECT DISTINCT database_name, query_hash
+                FROM (
+                    SELECT * FROM top_current
+                    UNION ALL
+                    SELECT * FROM top_baseline
+                ) AS combined
+            ),
+            current_period AS (
+                SELECT th.database_name, th.query_hash,
+                       SUM(qs.execution_count) AS exec_count,
+                       SUM(qs.execution_count * qs.avg_duration_us::double precision) / NULLIF(SUM(qs.execution_count), 0) / 1000.0 AS avg_duration_ms,
+                       SUM(qs.execution_count * qs.avg_cpu_time_us::double precision) / NULLIF(SUM(qs.execution_count), 0) / 1000.0 AS avg_cpu_ms,
+                       SUM(qs.execution_count * qs.avg_logical_io_reads::double precision) / NULLIF(SUM(qs.execution_count), 0) AS avg_reads,
+                       /* #2150: this comparison groups by query_hash, but text is stored per query_id, so the
+                          side table is joined on the finer key and MAX still picks one member's text for the
+                          group — the same arbitrary-but-deterministic choice MAX(qs.query_text) made before.
+                          The join cannot fan out (query_store_text is one row per server/database/query_id, by
+                          primary key), so the execution-count SUMs above are unaffected. The COALESCE keeps
+                          pre-cutover rows, whose text is still inline, reading exactly as they used to. */
+                       MAX(COALESCE(x.query_sql_text, qs.query_text)) AS query_text
+                FROM top_hashes th
+                INNER JOIN deduped_current qs
+                  ON  qs.query_hash IS NOT DISTINCT FROM th.query_hash
+                  AND qs.database_name IS NOT DISTINCT FROM th.database_name
+                LEFT JOIN query_store_text AS x
+                  ON  x.server_id = $1
+                  AND x.database_name = qs.database_name
+                  AND x.query_id = qs.query_id
+                WHERE qs.rn = 1
+                AND   qs.execution_count > 0
+                GROUP BY th.database_name, th.query_hash
+            ),
+            baseline_period AS (
+                SELECT th.database_name, th.query_hash,
+                       SUM(qs.execution_count) AS exec_count,
+                       SUM(qs.execution_count * qs.avg_duration_us::double precision) / NULLIF(SUM(qs.execution_count), 0) / 1000.0 AS avg_duration_ms,
+                       SUM(qs.execution_count * qs.avg_cpu_time_us::double precision) / NULLIF(SUM(qs.execution_count), 0) / 1000.0 AS avg_cpu_ms,
+                       SUM(qs.execution_count * qs.avg_logical_io_reads::double precision) / NULLIF(SUM(qs.execution_count), 0) AS avg_reads,
+                       /* #2150 — same resolution as current_period above. Both arms need it because the final
+                          projection takes COALESCE(c.query_text, b.query_text): converting only one arm would
+                          leave a GONE row (present in baseline only) with no text to fall back to. */
+                       MAX(COALESCE(x.query_sql_text, qs.query_text)) AS query_text
+                FROM top_hashes th
+                INNER JOIN deduped_baseline qs
+                  ON  qs.query_hash IS NOT DISTINCT FROM th.query_hash
+                  AND qs.database_name IS NOT DISTINCT FROM th.database_name
+                LEFT JOIN query_store_text AS x
+                  ON  x.server_id = $1
+                  AND x.database_name = qs.database_name
+                  AND x.query_id = qs.query_id
+                WHERE qs.rn = 1
+                AND   qs.execution_count > 0
+                GROUP BY th.database_name, th.query_hash
+            )
+            SELECT COALESCE(c.database_name, b.database_name) AS database_name,
+                   COALESCE(c.query_hash, b.query_hash) AS query_hash,
+                   COALESCE(c.query_text, b.query_text) AS query_text,
+                   c.exec_count, c.avg_duration_ms, c.avg_cpu_ms, c.avg_reads,
+                   b.exec_count AS baseline_exec_count,
+                   b.avg_duration_ms AS baseline_avg_duration_ms,
+                   b.avg_cpu_ms AS baseline_avg_cpu_ms,
+                   b.avg_reads AS baseline_avg_reads
+            FROM current_period c
+            FULL OUTER JOIN baseline_period b
+              ON  COALESCE(c.database_name, '') = COALESCE(b.database_name, '')
+              AND COALESCE(c.query_hash, '') = COALESCE(b.query_hash, '')
+            """;
+
+    /// <summary>
+    /// <c>query_stats</c> for the Top Queries comparison twin: 130 hashes, one row every 2 hours for 12 days, with every delta
+    /// column set so the averages are real numbers. NULL parts: the database of every 25th, the hash of every 40th and of 125
+    /// (so 125 is NULL on both keys, and 40, 80 and 120 merge into one NULL-hash group); 100-109 only before the current window
+    /// (GONE) and 110-119 only inside it (NEW). 100 hashes cannot hold all of them, so the top-100 cut trims each period.
+    /// </summary>
+    private const string QueryStatsTwinSeedSql = @"
+INSERT INTO collect.query_stats
+(collection_id, collection_time, server_id, server_name, database_name, query_hash, sql_handle, query_text,
+ delta_execution_count, delta_worker_time, delta_elapsed_time, delta_physical_reads)
+SELECT 3000000 + row_number() OVER ()::bigint, g.t, 5420, 'srv',
+       CASE WHEN p % 25 = 0 THEN NULL ELSE 'db' || (p % 4) END,
+       CASE WHEN p % 40 = 0 OR p = 125 THEN NULL ELSE '0xQ' || p END,
+       '0xT' || p, 'SELECT ' || p || ' /* ' || to_char(g.t, 'YYYY-MM-DD HH24:MI') || ' */',
+       CASE WHEN (p + extract(epoch FROM g.t)::bigint / 7200) % 7 = 0 THEN 0
+            ELSE (CASE WHEN p <= 10 OR p % 25 = 0 OR p % 40 = 0 OR p >= 100 THEN 1000 ELSE 1 END)
+                 * (1 + (p * 31 + extract(epoch FROM g.t)::bigint / 7200) % 50) END,
+       1000 + (p * 7919) % 90000 + (extract(epoch FROM g.t)::bigint / 7200) % 13,
+       2000 + (p * 104729) % 90000 + (extract(epoch FROM g.t)::bigint / 7200) % 17,
+       (p * 3 + extract(epoch FROM g.t)::bigint / 7200) % 97
+FROM generate_series(1, 130) AS p
+CROSS JOIN generate_series(TIMESTAMP '2026-02-08 12:00:00', TIMESTAMP '2026-02-20 12:00:00', INTERVAL '2 hours') AS g(t)
+WHERE NOT (p BETWEEN 100 AND 109 AND g.t >= TIMESTAMP '2026-02-19 12:00:00')
+AND   NOT (p BETWEEN 110 AND 119 AND g.t <= TIMESTAMP '2026-02-19 12:00:00');";
+
+    /// <summary>
+    /// <c>query_store_stats</c> for the Query Store comparison twin: 130 queries, one snapshot an hour with two snapshots per
+    /// 2-hour interval (so the dedupe keeps the later one), the same NULL and GONE/NEW shapes as the Top Queries seed, and a
+    /// <c>query_store_text</c> row for every query whose inline text is NULL (q divisible by 3, outside the NULL-database ones).
+    /// </summary>
+    private const string QueryStoreTwinSeedSql = @"
+INSERT INTO collect.query_store_text (server_id, database_name, query_id, query_sql_text, last_seen)
+SELECT 5420, 'db' || (q % 3), q, 'SELECT ' || q || ' /* side table */', TIMESTAMP '2026-02-20 12:00:00'
+FROM generate_series(1, 130) AS q
+WHERE q % 3 = 0 AND q % 25 <> 0;
+INSERT INTO collect.query_store_stats
+(collection_id, collection_time, server_id, server_name, database_name, query_id, plan_id, execution_type_desc, first_execution_time,
+ last_execution_time, query_text, query_hash, execution_count, avg_duration_us, avg_cpu_time_us, avg_logical_io_reads,
+ avg_logical_io_writes, avg_physical_io_reads, avg_rowcount, query_plan_hash, runtime_stats_interval_id)
+SELECT 4000000 + row_number() OVER ()::bigint, g.t, 5420, 'srv',
+       CASE WHEN q % 25 = 0 THEN NULL ELSE 'db' || (q % 3) END, q, q, 'Regular',
+       date_bin(INTERVAL '2 hours', g.t, TIMESTAMP '2026-02-08 12:00:00'), g.t,
+       CASE WHEN q % 3 = 0 THEN NULL ELSE 'SELECT ' || q || ' /* inline */' END,
+       CASE WHEN q % 40 = 0 OR q = 125 THEN NULL ELSE 'h' || q END,
+       CASE WHEN (q + extract(epoch FROM g.t)::bigint / 3600) % 7 = 0 THEN 0
+            ELSE (CASE WHEN q <= 10 OR q % 25 = 0 OR q % 40 = 0 OR q >= 100 THEN 1000 ELSE 1 END)
+                 * (1 + (q * 31 + extract(epoch FROM g.t)::bigint / 3600) % 50) END,
+       1000 + (q * 7919) % 90000 + (extract(epoch FROM g.t)::bigint / 3600) % 13,
+       2000 + (q * 104729) % 90000 + (extract(epoch FROM g.t)::bigint / 3600) % 17,
+       (q * 3 + extract(epoch FROM g.t)::bigint / 3600) % 97, 5, 5, 5, 'ph' || q,
+       q * 100000 + (extract(epoch FROM g.t)::bigint / 7200)
+FROM generate_series(1, 130) AS q
+CROSS JOIN generate_series(TIMESTAMP '2026-02-08 12:00:00', TIMESTAMP '2026-02-20 12:00:00', INTERVAL '1 hour') AS g(t)
+WHERE NOT (q BETWEEN 100 AND 109 AND g.t >= TIMESTAMP '2026-02-19 12:00:00')
+AND   NOT (q BETWEEN 110 AND 119 AND g.t <= TIMESTAMP '2026-02-19 12:00:00');";
+
+    /// <summary>
+    /// Two procedures whose statements share one instant: each handle has two <c>query_stats</c> rows at 11:00 on the last day
+    /// with different collection ids and texts. The first procedure's rows go in lower id first, the second's higher id first,
+    /// so no heap order picks the higher id for both.
+    /// </summary>
+    private const string TieSeedSql = @"
+INSERT INTO collect.procedure_stats
+(collection_id, collection_time, server_id, server_name, database_name, schema_name, object_name, sql_handle,
+ delta_execution_count, delta_worker_time, delta_elapsed_time, delta_physical_reads)
+VALUES (9000001, TIMESTAMP '2026-02-20 11:00:00', 5420, 'srv', 'db1', 'dbo', 'proc_tie_a', '0xHTIEA', 500000, 1, 1, 1),
+       (9000002, TIMESTAMP '2026-02-20 11:00:00', 5420, 'srv', 'db1', 'dbo', 'proc_tie_b', '0xHTIEB', 500000, 1, 1, 1);
+INSERT INTO collect.query_stats
+(collection_id, collection_time, server_id, server_name, database_name, query_hash, sql_handle, query_text, delta_execution_count)
+VALUES (9100001, TIMESTAMP '2026-02-20 11:00:00', 5420, 'srv', 'db1', '0xQTIEA1', '0xHTIEA', 'tie A: the lower collection id', 1),
+       (9100002, TIMESTAMP '2026-02-20 11:00:00', 5420, 'srv', 'db1', '0xQTIEA2', '0xHTIEA', 'tie A: the higher collection id', 1),
+       (9100004, TIMESTAMP '2026-02-20 11:00:00', 5420, 'srv', 'db1', '0xQTIEB2', '0xHTIEB', 'tie B: the higher collection id', 1),
+       (9100003, TIMESTAMP '2026-02-20 11:00:00', 5420, 'srv', 'db1', '0xQTIEB1', '0xHTIEB', 'tie B: the lower collection id', 1);";
+
+    /// <summary>
     /// 202 procedures, one row per hour for 12 days. Keys with NULL parts (database NULL for every 50th, schema for every
     /// 40th, object for every 60th), two keys that differ only by an empty-string versus NULL object (201, 202), procedures
     /// 150-159 present only before the current window (GONE) and 160-169 only inside it (NEW). The ones the facts care about
@@ -269,14 +570,19 @@ CROSS JOIN generate_series(TIMESTAMP '2026-02-08 12:00:00', TIMESTAMP '2026-02-2
     private static NpgsqlParameter Timestamp(DateTime value) =>
         new NpgsqlParameter<DateTime> { TypedValue = value, NpgsqlDbType = NpgsqlDbType.Timestamp };
 
-    private static void AddComparisonParameters(NpgsqlCommand command)
+    private static void AddComparisonParameters(NpgsqlCommand command) =>
+        BindComparison(command, BaselineStart, CurrentStart, DatabaseFilter.All);
+
+    /// <summary>The comparison's six parameters: the last 24 h as the current window, <paramref name="baselineStart"/> to
+    /// <paramref name="baselineEnd"/> as the baseline, and <paramref name="filter"/> as the database filter.</summary>
+    private static void BindComparison(NpgsqlCommand command, DateTime baselineStart, DateTime baselineEnd, DatabaseFilter filter)
     {
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = ServerId });
         command.Parameters.Add(Timestamp(CurrentStart));
         command.Parameters.Add(Timestamp(End));
-        command.Parameters.Add(Timestamp(BaselineStart));
-        command.Parameters.Add(Timestamp(CurrentStart));
-        command.Parameters.Add(DatabaseFilter.All.Parameter());
+        command.Parameters.Add(Timestamp(baselineStart));
+        command.Parameters.Add(Timestamp(baselineEnd));
+        command.Parameters.Add(filter.Parameter());
     }
 
     /// <summary>EXPLAIN (ANALYZE, FORMAT JSON) of <paramref name="sql"/> with the parameters <paramref name="bind"/> adds.</summary>
@@ -334,10 +640,16 @@ CROSS JOIN generate_series(TIMESTAMP '2026-02-08 12:00:00', TIMESTAMP '2026-02-2
 
     /* ───────────────────────────── the procedure comparison ───────────────────────────── */
 
-    private static async Task<SortedDictionary<string, string[]>> RunComparisonAsync(NpgsqlConnection connection, string sql, CancellationToken ct)
+    private static Task<SortedDictionary<string, string[]>> RunComparisonAsync(NpgsqlConnection connection, string sql, CancellationToken ct) =>
+        RunKeyedAsync(connection, sql, AddComparisonParameters, 3, ct);
+
+    /// <summary>Every row of <paramref name="sql"/> as text cells (doubles by their exact bits), keyed on the first
+    /// <paramref name="keyColumns"/> columns.</summary>
+    private static async Task<SortedDictionary<string, string[]>> RunKeyedAsync(
+        NpgsqlConnection connection, string sql, Action<NpgsqlCommand> bind, int keyColumns, CancellationToken ct)
     {
         await using var command = new NpgsqlCommand(sql, connection) { CommandTimeout = 120 };
-        AddComparisonParameters(command);
+        bind(command);
         var rows = new SortedDictionary<string, string[]>(StringComparer.Ordinal);
         await using var reader = await command.ExecuteReaderAsync(ct);
         while (await reader.ReadAsync(ct))
@@ -350,7 +662,7 @@ CROSS JOIN generate_series(TIMESTAMP '2026-02-08 12:00:00', TIMESTAMP '2026-02-2
                     : Convert.ToString(reader.GetValue(i), CultureInfo.InvariantCulture)!;
             }
 
-            rows.Add(string.Join('|', cells[0], cells[1], cells[2]), cells);
+            rows.Add(string.Join('|', cells.Take(keyColumns)), cells);
         }
 
         return rows;
@@ -538,5 +850,131 @@ CROSS JOIN generate_series(TIMESTAMP '2026-02-08 12:00:00', TIMESTAMP '2026-02-2
             Assert.Contains("s.collection_time >= $2", fallback, StringComparison.Ordinal);
             Assert.Contains("s.collection_time <= $3", fallback, StringComparison.Ordinal);
         }
+    }
+
+    /* ───────────────────────────── review round 1 (#5420): the gap, the tie, the twins, the filter ───────────────────────────── */
+
+    /// <summary>Two 24 h windows that each touch at most 2 one-day chunks.</summary>
+    private const int TwoWindowChunkCeiling = 4;
+
+    [Fact]
+    public async Task TheComparison_WithABaselineAWeekBack_ReadsTheTwoWindowsChunksAndNotTheGapBetweenThem()
+    {
+        await RunLiveAsync(new[] { ProcedureSeedSql, QueryStatsSeedSql }, async (connection, ct) =>
+        {
+            var baselineStart = End.AddDays(-8);
+            var baselineEnd = End.AddDays(-7);
+            void Bind(NpgsqlCommand c) => BindComparison(c, baselineStart, baselineEnd, DatabaseFilter.All);
+
+            /* the baseline must hold procedures, or a read that skips it proves nothing. */
+            var rows = await RunKeyedAsync(connection, ViewerDataService.ProcedureStatsComparisonSql, Bind, 3, ct);
+            Assert.Contains(rows.Values, r => r[7] != "<null>" && r[3] != "<null>");
+
+            var plan = await ExplainAsync(connection, ViewerDataService.ProcedureStatsComparisonSql, Bind, ct);
+            var (scanned, total) = await ChunksReadAsync(connection, plan, "query_stats", ct);
+            Assert.True(total >= 12, $"the seed must span many chunks (found {total}) or this proves nothing.");
+            Assert.True(scanned is > 0 and <= TwoWindowChunkCeiling,
+                $"the text lookup read {scanned} of {total} query_stats chunks; two 24 h windows touch at most {TwoWindowChunkCeiling}, and the span between them 9.");
+        });
+    }
+
+    [Fact]
+    public async Task WhenOneProceduresStatementsShareAnInstant_TheRowCollectedLastSuppliesTheText()
+    {
+        await RunLiveAsync(new[] { ProcedureSeedSql, QueryStatsSeedSql, TieSeedSql }, async (connection, ct) =>
+        {
+            var rows = await RunComparisonAsync(connection, ViewerDataService.ProcedureStatsComparisonSql, ct);
+            Assert.Equal("tie A: the higher collection id", rows["db1|dbo|proc_tie_a"][11]);
+            Assert.Equal("tie B: the higher collection id", rows["db1|dbo|proc_tie_b"][11]);
+        });
+    }
+
+    [Fact]
+    public async Task TheComparison_UnderADatabaseFilter_AnswersTheOldStatementsAnswer_ExceptTheDocumentedTextChange()
+    {
+        await RunLiveAsync(new[] { ProcedureSeedSql, QueryStatsSeedSql }, async (connection, ct) =>
+        {
+            var filter = DatabaseFilter.One("db1");
+            void Bind(NpgsqlCommand c) => BindComparison(c, BaselineStart, CurrentStart, filter);
+            var old = await RunKeyedAsync(connection, OldProcedureStatsComparisonSql, Bind, 3, ct);
+            var current = await RunKeyedAsync(connection, ViewerDataService.ProcedureStatsComparisonSql, Bind, 3, ct);
+
+            Assert.True(old.Count >= 20, $"the filtered old statement returned {old.Count} rows.");
+            Assert.All(old.Keys, k => Assert.StartsWith("db1|", k, StringComparison.Ordinal));
+            Assert.Equal(old.Keys, current.Keys);
+            foreach (var (key, oldRow) in old)
+            {
+                for (var i = 0; i < 11; i++)
+                {
+                    Assert.True(oldRow[i] == current[key][i], $"{key}: column {i} was {oldRow[i]}, is now {current[key][i]}.");
+                }
+
+                if (oldRow[11] != current[key][11])
+                {
+                    Assert.Equal("<null>", current[key][11]);                                            /* only ever text -> none */
+                    Assert.Contains("only before the window", oldRow[11], StringComparison.Ordinal);
+                }
+            }
+        });
+    }
+
+    /// <summary>Hash or merge joins (any join type) whose condition names <paramref name="key"/>.</summary>
+    private static int KeyedJoins(JsonElement plan, string key) =>
+        Nodes(plan).Count(n => Text(n, "Node Type") is "Hash Join" or "Merge Join"
+            && (Text(n, "Hash Cond") + Text(n, "Merge Cond")).Contains(key, StringComparison.Ordinal));
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task TheTwinComparison_JoinsItsPeriodsOnPlainEqualities_NotANullSafeJoinFilter(bool queryStats)
+    {
+        await RunLiveAsync(new[] { queryStats ? QueryStatsTwinSeedSql : QueryStoreTwinSeedSql }, async (connection, ct) =>
+        {
+            var sql = queryStats ? ViewerDataService.QueryStatsComparisonSql : ViewerDataService.QueryStoreComparisonSql;
+            var plan = await ExplainAsync(connection, sql, AddComparisonParameters, ct);
+            Assert.DoesNotContain(Nodes(plan), n => Text(n, "Join Filter").Contains("DISTINCT FROM", StringComparison.Ordinal));
+            var keyedJoins = KeyedJoins(plan, "query_hash");
+            Assert.True(keyedJoins >= 2, $"expected both period joins as hash or merge joins on query_hash, found {keyedJoins}.");
+
+            /* the oracle's own shape, so the assertions above cannot pass vacuously on this seed. */
+            var oldPlan = await ExplainAsync(connection, queryStats ? OldQueryStatsComparisonSql : OldQueryStoreComparisonSql, AddComparisonParameters, ct);
+            Assert.Contains(Nodes(oldPlan), n => Text(n, "Join Filter").Contains("DISTINCT FROM", StringComparison.Ordinal));
+        });
+    }
+
+    [Theory]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    public async Task TheTwinComparison_AnswersTheOldStatementsAnswer_OnEveryColumn_NullKeysIncluded(bool queryStats, bool filtered)
+    {
+        await RunLiveAsync(new[] { queryStats ? QueryStatsTwinSeedSql : QueryStoreTwinSeedSql }, async (connection, ct) =>
+        {
+            var filter = filtered ? DatabaseFilter.One("db1") : DatabaseFilter.All;
+            void Bind(NpgsqlCommand c) => BindComparison(c, BaselineStart, CurrentStart, filter);
+            var old = await RunKeyedAsync(connection, queryStats ? OldQueryStatsComparisonSql : OldQueryStoreComparisonSql, Bind, 2, ct);
+            var current = await RunKeyedAsync(connection, queryStats ? ViewerDataService.QueryStatsComparisonSql : ViewerDataService.QueryStoreComparisonSql, Bind, 2, ct);
+
+            /* the seed has to hold what the facts claim, or equality proves nothing. */
+            Assert.True(old.Count >= (filtered ? 20 : 100), $"the old statement returned {old.Count} rows.");
+            Assert.Contains(old.Values, r => r[3] == "<null>" && r[7] != "<null>");                       /* GONE */
+            Assert.Contains(old.Values, r => r[3] != "<null>" && r[7] == "<null>");                       /* NEW */
+            if (!filtered)
+            {
+                Assert.Contains(old.Keys, k => k.StartsWith("<null>|", StringComparison.Ordinal));        /* a NULL database */
+                Assert.Contains(old.Keys, k => k.EndsWith("|<null>", StringComparison.Ordinal));          /* a NULL hash */
+                Assert.Contains(old.Keys, k => k == "<null>|<null>");                                     /* both NULL */
+            }
+
+            Assert.Equal(old.Keys, current.Keys);
+            foreach (var (key, oldRow) in old)
+            {
+                for (var i = 0; i < oldRow.Length; i++)
+                {
+                    Assert.True(oldRow[i] == current[key][i], $"{key}: column {i} was {oldRow[i]}, is now {current[key][i]}.");
+                }
+            }
+        });
     }
 }

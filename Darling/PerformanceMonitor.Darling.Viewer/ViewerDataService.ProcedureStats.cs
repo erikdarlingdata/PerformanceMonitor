@@ -378,6 +378,7 @@ public sealed partial class ViewerDataService
                 FROM procedure_stats ps
                 WHERE ps.server_id = $1
                 AND   ps.collection_time >= $2 AND ps.collection_time <= $3
+                AND   ($6::text[] IS NULL OR ps.database_name = ANY($6))
                 AND   ps.delta_execution_count > 0
                 GROUP BY ps.database_name, ps.schema_name, ps.object_name
             ) w
@@ -402,6 +403,7 @@ public sealed partial class ViewerDataService
                 FROM procedure_stats ps
                 WHERE ps.server_id = $1
                 AND   ps.collection_time >= $4 AND ps.collection_time <= $5
+                AND   ($6::text[] IS NULL OR ps.database_name = ANY($6))
                 AND   ps.delta_execution_count > 0
                 GROUP BY ps.database_name, ps.schema_name, ps.object_name
             ) w
@@ -412,26 +414,28 @@ public sealed partial class ViewerDataService
               AND COALESCE(w.object_name, '') = COALESCE(tp.object_name, '')
               AND (w.object_name IS NULL) = (tp.object_name IS NULL)
         ),
-        /* #5420: the representative text, found ONCE for every compared handle, from this read's own window
-           (baseline start through current end). It was a LEFT JOIN LATERAL per procedure ("newest query_stats
+        /* #5420: the representative text, found ONCE for every compared handle, from this read's own two windows
+           (the current range and the baseline range, not the span between them: a "Last week" baseline with a short
+           window would otherwise read every chunk in the gap, and Lite's #5381 pick uses the two ranges too). It was a LEFT JOIN LATERAL per procedure ("newest query_stats
            row with this sql_handle"): no index covers sql_handle, so each lookup walked the time index newest
            first until a row matched, and a procedure with no text anywhere (about 1 in 5 on a large store) walked
            every retained chunk. On a large store that was 105 lookups at 167 ms, 17.6 s of a 25.7 s read, and a
            bound on the lateral alone still scanned the whole window once per such procedure (the rig's 7-day read
            stayed at 12 s). One window scan, narrowed to the compared handles by a hash semi-join, with DISTINCT
            ON picking the newest row that carries a text, costs the same however many procedures have none.
-           The pick is the lateral's, ORDER BY collection_time DESC (a tie on the time stays arbitrary, as it
-           was). Difference, on purpose: a procedure whose text exists only before the window now shows no
+           The pick is the lateral's, ORDER BY collection_time DESC, with the row collected last winning a tie on
+           the time (collection_id DESC, as the Query Store tail and Lite do; the lateral left the tie arbitrary,
+           and one procedure's statements normally share an instant). Difference, on purpose: a procedure whose text exists only before the window now shows no
            text, as a procedure with no text at all already did. Twins Lite's #5381 text pick. */
         texts AS (
             SELECT DISTINCT ON (qs.sql_handle) qs.sql_handle, qs.query_text
             FROM v_query_stats qs
             WHERE qs.server_id = $1
-            AND   qs.collection_time >= LEAST($2, $4)
-            AND   qs.collection_time <= GREATEST($3, $5)
+            AND   ((qs.collection_time >= $2 AND qs.collection_time <= $3)
+               OR  (qs.collection_time >= $4 AND qs.collection_time <= $5))
             AND   qs.sql_handle IN (SELECT sql_handle FROM current_period UNION SELECT sql_handle FROM baseline_period)
             AND   qs.query_text IS NOT NULL
-            ORDER BY qs.sql_handle, qs.collection_time DESC
+            ORDER BY qs.sql_handle, qs.collection_time DESC, qs.collection_id DESC
         )
         SELECT COALESCE(c.database_name, b.database_name) AS database_name,
                COALESCE(c.schema_name, b.schema_name) AS schema_name,

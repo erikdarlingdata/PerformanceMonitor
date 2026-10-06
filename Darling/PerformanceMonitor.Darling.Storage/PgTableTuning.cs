@@ -234,12 +234,14 @@ public static class PgTableTuning
         GuardedDrop("idx_procedure_stats_server_handle_time"),
         /* #4247 DROP (was CREATE): idx_query_stats_server_handle_time (server_id, sql_handle,
            collection_time DESC) — the #1981 ProcStats comparison's representative-statement LATERAL twin of
-           the procedure_stats handle index above. 0-13 scans/store, 8.7-11.3% of WAL. Reader: the LEFT JOIN
-           LATERAL in ViewerDataService.ProcedureStats.GetProcedureStatsComparisonAsync (qs.server_id,
+           the procedure_stats handle index above. 0-13 scans/store, 8.7-11.3% of WAL. Reader at the time: the
+           LEFT JOIN LATERAL in ViewerDataService.ProcedureStats.GetProcedureStatsComparisonAsync (qs.server_id,
            qs.sql_handle) -> ORDER BY collection_time DESC LIMIT 1, ViewerCommandDeadlines base
-           InteractiveReadSeconds = 15 s deadline. Rig-measured, fresh/stale handle: 3.951 ms / 6.462 ms with
-           the index vs. 68.200 ms / 565.808 ms without it (idx_query_stats_time, Index Scan Backward filtered
-           by sql_handle) — worst case 13x under the 7.5 s half-deadline. */
+           InteractiveReadSeconds = 15 s deadline. #5420 removed that lateral: the comparison now finds every
+           handle's text with one time-bounded window scan (its texts CTE), not a handle lookup, so no reader
+           is left for this index. Rig-measured then, fresh/stale handle: 3.951 ms / 6.462 ms with the index
+           vs. 68.200 ms / 565.808 ms without it (idx_query_stats_time, Index Scan Backward filtered by
+           sql_handle) — worst case 13x under the 7.5 s half-deadline. */
         GuardedDrop("idx_query_stats_server_handle_time"),
         /* #4247 DROP (was CREATE): idx_query_stats_query_hash (query_hash, collection_time) INCLUDE
            (database_name, delta_worker_time, delta_elapsed_time, delta_execution_count) — 0-1 scans/store,
