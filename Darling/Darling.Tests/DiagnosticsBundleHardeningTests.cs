@@ -476,6 +476,27 @@ public sealed class DiagnosticsBundleHardeningTests
         Assert.Matches(@"clients connect to host-\d+", text);
     }
 
+    /* A webhook proxy goes through the same first-label registration: a proxy host name that starts with "proxy" is
+       aliased whole, with its domain, and the log's "reverse proxy" words stay readable. */
+    [Fact]
+    public void AProxyHostNameThatStartsWithProxy_KeepsTheReverseProxyWordsAndAliasesTheHost()
+    {
+        var config = new DarlingConfig();
+        config.Webhooks.TeamsProxy = "http://proxy.corp.example.test:3128";
+        var aliaser = new BundleAliaser();
+        DiagnosticsBundle.SeedFromConfig(aliaser, config, null);
+
+        var text = BundleOfServiceLogMessages(
+            aliaser,
+            DarlingListenerTls.CleartextWarning(ListenerTlsLabels.Mcp),
+            "webhooks go out through proxy.corp.example.test:3128");
+
+        Assert.Contains("or front the port with a TLS-terminating reverse proxy", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("proxy.corp.example", text, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("corp.example", text, StringComparison.OrdinalIgnoreCase);
+        Assert.Matches(@"webhooks go out through host-\d+", text);
+    }
+
     [Theory]
     [InlineData(null)]
     [InlineData("")]
