@@ -135,7 +135,8 @@ public sealed class WebTopQueriesColumnsTests
     public void BothAggregatesSelectTheDetailColumnsTheReaderMapsByPosition(string which)
     {
         var sql = which == "TopQueriesSql" ? DarlingDataReader.TopQueriesSql : DarlingDataReader.TopQueriesByHostObjectSql;
-        var outer = sql[sql.LastIndexOf("r.database_name,", StringComparison.Ordinal)..];
+        /* The outer SELECT list starts at r.database_name; the final ORDER BY repeats that text, so LastIndexOf no longer finds it. */
+        var outer = sql[Regex.Match(sql, @"SELECT\s+r\.database_name,").Index..];
         var select = outer[..outer.IndexOf("FROM ranked", StringComparison.Ordinal)];
         var cols = Regex.Matches(select, @"^\s+(?:r\.|t\.|CAST\()([a-z_0-9]+)", RegexOptions.Multiline).Select(m => m.Groups[1].Value).ToList();
         Assert.Equal(new[]
