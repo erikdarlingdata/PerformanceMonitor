@@ -640,8 +640,11 @@ WHERE tqp.query_plan IS NOT NULL;";
     /// so the backlog row stays claimable and the next pass, with a fresh budget, fetches it again.
     /// </summary>
     internal static (PlanFetchVerdict Verdict, string? PlanXml, string? Error) JudgeFetchedPlan(
-        SensitiveStatements.Session scrub, string planXml)
+        SensitiveStatements.Session? scrub, string planXml)
     {
+        /* The sweep passes its batch's session; a caller without one gets a standalone session of its own. */
+        scrub ??= new SensitiveStatements.Session();
+
         if (!scrub.TryXml(planXml, out var judged))
         {
             return (PlanFetchVerdict.Failed, null, "the statement filter's judging budget was spent before this plan");

@@ -427,7 +427,8 @@ public sealed class StatementColumnCensusTests
 
         // 6.7 row 20: the oversized-plan sweep fetches one plan and records it in the backlog.
         new("oversized plan sweep", "6.7 row 20", "R6", false,
-            ("Darling/PerformanceMonitor.Darling.Service/OversizedPlanBacklogSweep.cs", "OversizedPlanBacklogSweep", "FetchOnePlanAsync")),
+            ("Darling/PerformanceMonitor.Darling.Service/OversizedPlanBacklogSweep.cs", "OversizedPlanBacklogSweep", "FetchOnePlanAsync"),
+            ("Darling/PerformanceMonitor.Darling.Service/OversizedPlanBacklogSweep.cs", "OversizedPlanBacklogSweep", "JudgeFetchedPlan")),
 
         // The slow-read log stores up to 4 KB of a slow call's arguments (a plan or a statement a caller passed).
         new("slow-read log: the MCP filter's offer", "plan section 1 (slow-read log)", "L7 and L8", true,

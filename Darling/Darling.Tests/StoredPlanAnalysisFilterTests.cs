@@ -81,7 +81,7 @@ public sealed class StoredPlanAnalysisFilterTests
 
     /// <summary>
     /// Every product <c>.cs</c> file under <paramref name="appRoot"/> (not <c>bin</c>, <c>obj</c> or
-    /// <c>deprecated</c>) is read with comments and string contents blanked by <c>CSharpSourceWalker</c> is read. The formatter's <c>BuildAnalysisResult</c> may appear exactly
+    /// <c>deprecated</c>) is read with comments and string contents blanked by <c>CSharpSourceWalker</c>. The formatter's <c>BuildAnalysisResult</c> may appear exactly
     /// once, qualified, in <paramref name="helperRelativePath"/>: a direct call in any other file, a call through
     /// <c>using static</c> or an alias, and a method group all name it again and so fail.
     /// </summary>
