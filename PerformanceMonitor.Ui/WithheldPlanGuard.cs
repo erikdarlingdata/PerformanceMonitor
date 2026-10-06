@@ -49,7 +49,7 @@ public static class WithheldPlanGuard
             return false;
         }
 
-        var title = string.Concat(char.ToUpperInvariant(subject[0]), subject.AsSpan(1)) + " Withheld";
+        var title = char.ToUpperInvariant(subject[0]).ToString() + subject.Substring(1) + " Withheld";
         MessageBox.Show(WithheldSentenceFor(subject), title, MessageBoxButton.OK, MessageBoxImage.Information);
         return true;
     }

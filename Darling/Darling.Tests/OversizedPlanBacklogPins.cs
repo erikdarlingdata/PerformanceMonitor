@@ -13,6 +13,7 @@ using System.Globalization;
 using System.Linq;
 using System.Reflection;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
@@ -862,12 +863,42 @@ public sealed class OversizedPlanBacklogPins
         /* Oldest ATTEMPT first is what makes head-of-line starvation impossible: one plan that can never be
            fetched cannot occupy a slot every tick forever. Largest plan first only breaks ties among rows
            never attempted — those are the plans the cap cost the most visibility on. */
-        Assert.Contains("last_attempt_at ASC NULLS FIRST", claim, StringComparison.Ordinal);
+        Assert.Contains("last_attempt_at ASC", claim, StringComparison.Ordinal);
         Assert.Contains("observed_bytes DESC", claim, StringComparison.Ordinal);
         Assert.True(
-            claim.IndexOf("last_attempt_at ASC NULLS FIRST", StringComparison.Ordinal)
+            claim.IndexOf("last_attempt_at ASC", StringComparison.Ordinal)
                 < claim.IndexOf("observed_bytes DESC", StringComparison.Ordinal),
             "size overtook attempt age in the claim order — an unfetchable large plan would then starve the rest");
+
+        /* #5367: a row tried once is claimed before every row never tried (it used to sort behind them, so new rows
+           arriving each pass could keep it waiting without end), and is judged on a session of its own. */
+        Assert.Contains("(last_attempt_at IS NOT NULL) DESC", claim, StringComparison.Ordinal);
+        Assert.True(
+            claim.IndexOf("(last_attempt_at IS NOT NULL) DESC", StringComparison.Ordinal)
+                < claim.IndexOf("last_attempt_at ASC", StringComparison.Ordinal),
+            "the tried-first key must lead the claim order");
+        Assert.DoesNotContain("NULLS FIRST", claim, StringComparison.Ordinal);
+        Assert.Contains("last_attempt_at IS NOT NULL AS tried", claim, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ATriedRow_IsJudgedOnASessionOfItsOwn_AndANewRowSharesTheBatchSession()
+    {
+        /* #5367: JudgeFetchedPlan retires a plan only on a whole budget, which on the shared session means first in
+           its batch. A row tried before gets a session of its own, so its place in the batch cannot starve it. */
+        var observation = new OversizedPlanObservation("0xPLAN", "0xSQL", 0, 100, "db", null, 1000);
+        var batch = new SensitiveStatements.Session();
+        var fresh = new SensitiveStatements.Session();
+
+        Assert.Same(batch, OversizedPlanBacklogSweep.SessionFor(new OversizedPlanBacklog.PendingPlan("query_stats", observation), batch, () => fresh));
+        Assert.Same(fresh, OversizedPlanBacklogSweep.SessionFor(new OversizedPlanBacklog.PendingPlan("query_stats", observation, 0, true), batch, () => fresh));
+        Assert.NotSame(batch, OversizedPlanBacklogSweep.SessionFor(new OversizedPlanBacklog.PendingPlan("query_stats", observation, 1, true), batch));
+
+        /* The sweep loop asks for it, rather than handing every plan the batch session. */
+        var map = CSharpMemberMap.Of(ReadRepoFile("Darling/PerformanceMonitor.Darling.Service/OversizedPlanBacklogSweep.cs"));
+        var at = map.Code.IndexOf("SessionFor(plan, scrub)", StringComparison.Ordinal);
+        Assert.True(at >= 0, "SweepServerAsync must choose each plan's session through SessionFor");
+        Assert.Equal("SweepServerAsync", CSharpMemberMap.EnclosingMember(map, at));
     }
 
     /* ---- the read surface --------------------------------------------------------------------------- */

@@ -140,7 +140,11 @@ internal static class OversizedPlanBacklogSweep
     ///
     /// <para><b>What it costs at the top of the range.</b> One server's pass is serial under
     /// <see cref="PerPlanBudget"/>, so the worst case for one monitored server is ten times fifteen seconds,
-    /// 150 seconds; the fleet pass is serial too, so 42 servers all timing out at the cap is 105 minutes.
+    /// 150 seconds of fetch; the fleet pass is serial too, so 42 servers all timing out at the cap is 105 minutes of
+    /// fetch. The statement filter's judging is the service's own work, not the monitored server's, and adds to that:
+    /// a row never tried shares one 15-second judging budget with the rest of its batch, and a row tried before
+    /// judges on a budget of its own (<see cref="SessionFor"/>, #5367), so the worst pass is ten tried rows that each
+    /// overrun it: ten times (15 s fetch plus 15 s judging), 300 seconds, against 165 seconds with one shared budget.
     /// Two passes never overlap whatever the interval — <c>DarlingWorker</c> tracks the pass and its gate
     /// will not launch on top of an incomplete one — so a pass that outruns <see cref="SweepInterval"/> runs
     /// back-to-back with its successor at the SAME one-plan-at-a-time load rather than at two passes' worth
@@ -482,8 +486,14 @@ WHERE tqp.query_plan IS NOT NULL;";
                outcome write fall to the storage phase where they belong. */
             var fetchStart = Stopwatch.GetTimestamp();
 
-            var (verdict, planXml, error) = await FetchOnePlanAsync(server, plan, scrub, logger, cancellationToken)
+            var session = SessionFor(plan, scrub);
+            var (verdict, planXml, error) = await FetchOnePlanAsync(server, plan, session, logger, cancellationToken)
                 .ConfigureAwait(false);
+
+            if (!ReferenceEquals(session, scrub))
+            {
+                LogScrub(session, server, logger);
+            }
 
             tally.TargetMs += (long)Stopwatch.GetElapsedTime(fetchStart).TotalMilliseconds;
 
@@ -537,7 +547,7 @@ WHERE tqp.query_plan IS NOT NULL;";
     /// marks nothing, because the sweep is the single writer on this path and a lock held across a
     /// target fetch is the one shape a bound must never take.
     /// </summary>
-    private static async Task<List<OversizedPlanBacklog.PendingPlan>> ClaimAsync(
+    internal static async Task<List<OversizedPlanBacklog.PendingPlan>> ClaimAsync(
         NpgsqlDataSource postgres,
         int serverId,
         CancellationToken cancellationToken)
@@ -566,7 +576,8 @@ WHERE tqp.query_plan IS NOT NULL;";
                     reader.IsDBNull(5) ? null : reader.GetString(5),
                     QueryHash: null,
                     reader.GetInt64(6)),
-                reader.GetInt32(7)));
+                reader.GetInt32(7),
+                reader.GetBoolean(8)));
         }
 
         return claimed;
@@ -695,6 +706,25 @@ WHERE tqp.query_plan IS NOT NULL;";
 
         return (PlanFetchVerdict.Captured, judged, null);
     }
+
+    /// <summary>
+    /// The judging session for one claimed plan (#5367): the batch's shared session for a row never tried, a session of
+    /// its own for a row that was tried before.
+    ///
+    /// <para><b>Why a session of its own, not a claim order alone.</b> <see cref="JudgeFetchedPlan"/> retires a plan
+    /// only when it was judged on a whole budget, which on the shared session means first in its batch. A row that
+    /// was tried once (a connect failure, or a budget an earlier plan had used) is claimed behind the rows never tried
+    /// and, even claimed first among the tried rows, is first in the batch only when nothing is ahead of it. That
+    /// order can repeat for ever, and the row is then fetched and judged again on every pass, the forever-retry the
+    /// retirement limit removed. A session of its own gives every tried row a whole budget whatever its place in the
+    /// batch, so each claim of it ends in a judged plan, a counted timeout, or (on the second timeout) the marker.
+    /// The cost is the time bound: see <see cref="MaxPlansPerServerPerTick"/>.</para>
+    /// </summary>
+    internal static SensitiveStatements.Session SessionFor(
+        OversizedPlanBacklog.PendingPlan plan,
+        SensitiveStatements.Session batch,
+        Func<SensitiveStatements.Session>? fresh = null) =>
+        plan.Tried ? (fresh ?? (() => new SensitiveStatements.Session()))() : batch;
 
     /// <summary>
     /// The statement that records a verdict. Only a judge timeout adds to <c>attempt_count</c> (and a capture, which
