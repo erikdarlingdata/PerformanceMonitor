@@ -668,8 +668,11 @@ FROM " + StoredEventCopies.SystemHealthEvents("server_id = $1 AND event_time >= 
     /// (ties on one instant break by name, so the result is fixed). The floor snapshot is server-wide, so an id missing
     /// from it (an offline, suspect or excluded database is not collected) gets <c>before_floor</c>: its newest row
     /// before the floor, one pass for every such id. The last arm covers an id with no row up to the last error: its
-    /// oldest row after it, also one pass. An error with no time is named by its id's newest name, one more
-    /// read made only when such an error is shown. The ids are ints and go in as literals, because DuckDB takes no
+    /// oldest row after it, also one pass. Both extra arms look at most <see cref="DatabaseNameHistory.LookbackDays"/>
+    /// days (back from the floor, forward from the last error), and the newest-name read the last that many days from now,
+    /// so an id that is never collected cannot make a refresh scan the whole history; the larger name in ordinal order
+    /// wins when one id has two names at one instant, in every arm. An error with no time is named by its id's newest
+    /// name, one more read made only when such an error is shown. The ids are ints and go in as literals, because DuckDB takes no
     /// array parameter through this driver.</para>
     /// </summary>
     public async Task<DatabaseNameHistory> GetDatabaseNameHistoryAsync(
@@ -716,21 +719,23 @@ before_floor AS (
     FROM v_database_size_stats
     WHERE server_id = $1
     AND   collection_time < (SELECT floor_time FROM floor_snap)
+    AND   collection_time >= (SELECT floor_time FROM floor_snap) - INTERVAL '{DatabaseNameHistory.LookbackDays} days'
     AND   database_id IN ({idList})
     AND   database_name IS NOT NULL
     AND   database_id NOT IN (SELECT database_id FROM snap WHERE collection_time = (SELECT floor_time FROM floor_snap))
-    QUALIFY ROW_NUMBER() OVER (PARTITION BY database_id ORDER BY collection_time DESC) = 1
+    QUALIFY ROW_NUMBER() OVER (PARTITION BY database_id ORDER BY collection_time DESC, database_name DESC) = 1
 ),
 after_range AS (
     SELECT database_id, database_name, collection_time
     FROM v_database_size_stats
     WHERE server_id = $1
     AND   collection_time > $3
+    AND   collection_time <= CAST($3 AS TIMESTAMP) + INTERVAL '{DatabaseNameHistory.LookbackDays} days'
     AND   database_id IN ({idList})
     AND   database_name IS NOT NULL
     AND   database_id NOT IN (SELECT database_id FROM snap)
     AND   database_id NOT IN (SELECT database_id FROM before_floor)
-    QUALIFY ROW_NUMBER() OVER (PARTITION BY database_id ORDER BY collection_time) = 1
+    QUALIFY ROW_NUMBER() OVER (PARTITION BY database_id ORDER BY collection_time, database_name DESC) = 1
 )
 SELECT database_id, database_name, collection_time
 FROM runs
@@ -754,9 +759,11 @@ SELECT database_id, database_name, collection_time
 FROM v_database_size_stats
 WHERE server_id = $1
 AND   database_id IN ({idList})
+AND   collection_time >= $2
 AND   database_name IS NOT NULL
 QUALIFY ROW_NUMBER() OVER (PARTITION BY database_id ORDER BY collection_time DESC, database_name DESC) = 1";
             newest.Parameters.Add(new DuckDBParameter { Value = serverId });
+            newest.Parameters.Add(new DuckDBParameter { Value = DateTime.UtcNow - DatabaseNameHistory.LookbackWindow });
             await ReadDatabaseNameChangesAsync(newest, changes);
         }
 

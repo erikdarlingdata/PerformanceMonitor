@@ -381,10 +381,12 @@ VALUES ($1,$2,$3,$4,$5,$6,$7)",
             await PlantEvent(SystemHealthParser.SpServerDiagnosticsEvent, "sp_server_diagnostics_io_subsystem.xml");
             await PlantEvent(SystemHealthParser.MemoryNodeOomEvent, "memory_node_oom.xml");
 
-            /* database_size_stats maps database_id 6 (the error_reported fixture's id) → a name for severe-error resolution. */
+            /* database_size_stats maps database_id 6 (the error_reported fixture's id) → a name for severe-error resolution.
+               The snapshot is taken at the error's own time (the fixture's fixed timestamp, whatever today's date): the
+               name history looks at most 14 days past the error for an id with no earlier snapshot (#5373). */
             await DarlingMcpTestData.ExecAsync(connection, ct,
                 @"INSERT INTO database_size_stats (collection_id, collection_time, server_id, server_name, database_name, database_id)
-VALUES ($1,$2,$3,$4,$5,$6)", CollectionIdGenerator.Next(), t, ServerId, ServerName, "ProdDb", 6);
+VALUES ($1,$2,$3,$4,$5,$6)", CollectionIdGenerator.Next(), new DateTime(2026, 7, 5, 12, 0, 5, 500, DateTimeKind.Utc), ServerId, ServerName, "ProdDb", 6);
 
             DarlingMcpTestData.AssertEnvelope(await DarlingMcpHealthParserTools.GetSchedulerIssues(postgres, ServerName), ServerName, "issues");
 

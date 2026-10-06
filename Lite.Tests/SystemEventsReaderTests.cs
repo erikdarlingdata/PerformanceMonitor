@@ -235,6 +235,81 @@ public sealed class SystemEventsReaderTests : IClassFixture<SharedDuckDbFixture>
     }
 
     [Fact]
+    public async Task SevereErrors_AnIdLastSeenBeyond14DaysBeforeTheFloor_ShowsTheRawId_Within14DaysItsName_5373()
+    {
+        var service = new LocalDataService(_duckDb);
+        var now = Truncate(DateTime.UtcNow);
+
+        /* Ids 5 and 6 are in no snapshot of the range. 5 was last collected 20 days before the floor snapshot (outside
+           the 14-day look-back), 6 ten days before it (inside). */
+        foreach (var h in new[] { 40, 30, 20, 10, 2 }) await SeedDatabaseSizeAsync(1, "master", now.AddHours(-h));
+        await SeedDatabaseSizeAsync(5, "Gone20", now.AddHours(-10).AddDays(-20));
+        await SeedDatabaseSizeAsync(6, "Gone10", now.AddHours(-10).AddDays(-10));
+        await SeedHealthEventAsync(SystemHealthParser.ErrorReportedEvent, ErrorReportedAt(now.AddHours(-3), 5, 50131), now.AddHours(-3));
+        await SeedHealthEventAsync(SystemHealthParser.ErrorReportedEvent, ErrorReportedAt(now.AddHours(-3), 6, 50132), now.AddHours(-3));
+
+        var names = (await service.GetSevereErrorsAsync(ServerId, hoursBack: 200)).ToDictionary(r => r.ErrorNumber ?? 0, r => r.DatabaseName);
+        Assert.Equal("database_id 5", names[50131]);
+        Assert.Equal("Gone10", names[50132]);
+    }
+
+    [Fact]
+    public async Task SevereErrors_AnIdFirstSeenBeyond14DaysAfterTheRange_ShowsTheRawId_Within14DaysItsName_5373()
+    {
+        var service = new LocalDataService(_duckDb);
+        var now = Truncate(DateTime.UtcNow);
+        var errorAt = now.AddHours(-150);
+
+        foreach (var h in new[] { 160, 100, 2 }) await SeedDatabaseSizeAsync(1, "master", now.AddHours(-h));
+        await SeedDatabaseSizeAsync(8, "Late10", errorAt.AddDays(10));
+        await SeedDatabaseSizeAsync(9, "Late20", errorAt.AddDays(20));
+        await SeedHealthEventAsync(SystemHealthParser.ErrorReportedEvent, ErrorReportedAt(errorAt, 8, 50141), errorAt);
+        await SeedHealthEventAsync(SystemHealthParser.ErrorReportedEvent, ErrorReportedAt(errorAt, 9, 50142), errorAt);
+
+        var names = (await service.GetSevereErrorsAsync(ServerId, hoursBack: 200)).ToDictionary(r => r.ErrorNumber ?? 0, r => r.DatabaseName);
+        Assert.Equal("Late10", names[50141]);
+        Assert.Equal("database_id 9", names[50142]);
+    }
+
+    [Fact]
+    public async Task SevereErrors_AnErrorWithNoTime_LooksOnlyTheLast14DaysForItsIdsNewestName_5373()
+    {
+        var service = new LocalDataService(_duckDb);
+        var now = Truncate(DateTime.UtcNow);
+
+        await SeedDatabaseSizeAsync(5, "Gone20", now.AddDays(-20));
+        await SeedDatabaseSizeAsync(6, "Gone10", now.AddDays(-10));
+        await SeedHealthEventAsync(SystemHealthParser.ErrorReportedEvent, WithoutTimestamp(ErrorReportedAt(now.AddHours(-3), 5, 50151)), now.AddHours(-3));
+        await SeedHealthEventAsync(SystemHealthParser.ErrorReportedEvent, WithoutTimestamp(ErrorReportedAt(now.AddHours(-3), 6, 50152)), now.AddHours(-3));
+
+        var names = (await service.GetSevereErrorsAsync(ServerId, hoursBack: 200)).ToDictionary(r => r.ErrorNumber ?? 0, r => r.DatabaseName);
+        Assert.Equal("database_id 5", names[50151]);
+        Assert.Equal("Gone10", names[50152]);
+    }
+
+    [Fact]
+    public async Task SevereErrors_TwoNamesForOneIdAtOneInstant_BeforeTheFloorAndAfterTheRange_GiveTheLargerName_5373()
+    {
+        var service = new LocalDataService(_duckDb);
+        var now = Truncate(DateTime.UtcNow);
+        var errorAt = now.AddHours(-100);
+
+        foreach (var h in new[] { 120, 110, 90, 2 }) await SeedDatabaseSizeAsync(1, "master", now.AddHours(-h));
+        /* Id 7 is offline: two names on one instant before the floor (the smaller name is inserted first). */
+        await SeedDatabaseSizeAsync(7, "AAA", now.AddHours(-130));
+        await SeedDatabaseSizeAsync(7, "ZZZ", now.AddHours(-130));
+        /* Id 8 first appears after the range, again two names on one instant. */
+        await SeedDatabaseSizeAsync(8, "BBB", errorAt.AddDays(3));
+        await SeedDatabaseSizeAsync(8, "YYY", errorAt.AddDays(3));
+        await SeedHealthEventAsync(SystemHealthParser.ErrorReportedEvent, ErrorReportedAt(errorAt, 7, 50161), errorAt);
+        await SeedHealthEventAsync(SystemHealthParser.ErrorReportedEvent, ErrorReportedAt(errorAt, 8, 50162), errorAt);
+
+        var names = (await service.GetSevereErrorsAsync(ServerId, hoursBack: 200)).ToDictionary(r => r.ErrorNumber ?? 0, r => r.DatabaseName);
+        Assert.Equal("ZZZ", names[50161]);
+        Assert.Equal("YYY", names[50162]);
+    }
+
+    [Fact]
     public async Task SevereErrors_UnmappedDatabaseId_SurfacesTheRawId()
     {
         var service = new LocalDataService(_duckDb);

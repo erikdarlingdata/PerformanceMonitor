@@ -36,7 +36,12 @@ public static class DatabaseNameHistoryReader
     /// not collected) gets <c>before_floor</c>: its newest row before the floor, for every such id in ONE pass. The
     /// last arm covers an id with NO row up to the last error: its oldest row after it, also one pass over only the
     /// ids still unfound.</para>
-    /// $1 server_id, $2 first error time, $3 last error time, $4 the int[] of database ids the errors carry.
+    /// <para>Both extra arms are bounded by <see cref="DatabaseNameHistory.LookbackDays"/> on the time index
+    /// (<c>before_floor</c> back from the floor, <c>after_range</c> forward from the last error): an id that is never
+    /// collected (an excluded database, id 32767) must not make every refresh scan the whole history. When one id has two
+    /// names at one instant, the larger name in ordinal order wins in every arm.</para>
+    /// $1 server_id, $2 first error time, $3 last error time, $4 the int[] of database ids the errors carry,
+    /// $5 the look-back interval.
     /// </summary>
     public const string Sql = """
         WITH floor_snap AS (
@@ -78,9 +83,10 @@ public static class DatabaseNameHistoryReader
             WHERE EXISTS (SELECT 1 FROM missing)
             AND   d.server_id = $1
             AND   d.collection_time < (SELECT floor_time FROM floor_snap)
+            AND   d.collection_time >= (SELECT floor_time FROM floor_snap) - $5::interval
             AND   d.database_id IN (SELECT m.database_id FROM missing AS m)
             AND   d.database_name IS NOT NULL
-            ORDER BY d.database_id, d.collection_time DESC
+            ORDER BY d.database_id, d.collection_time DESC, d.database_name COLLATE "C" DESC
         ),
         unfound AS (
             SELECT m.database_id
@@ -94,9 +100,10 @@ public static class DatabaseNameHistoryReader
             WHERE EXISTS (SELECT 1 FROM unfound)
             AND   d.server_id = $1
             AND   d.collection_time > $3
+            AND   d.collection_time <= $3 + $5::interval
             AND   d.database_id IN (SELECT f.database_id FROM unfound AS f)
             AND   d.database_name IS NOT NULL
-            ORDER BY d.database_id, d.collection_time
+            ORDER BY d.database_id, d.collection_time ASC, d.database_name COLLATE "C" DESC
         )
         SELECT database_id, database_name, collection_time
         FROM runs
@@ -109,13 +116,15 @@ public static class DatabaseNameHistoryReader
 
     /// <summary>
     /// The newest row per requested id, for an error with no time (it is named by its id's newest name). Read only
-    /// when such an error is shown, in one pass. $1 server_id, $2 the int[] of database ids.
+    /// when such an error is shown, in one pass over the last <see cref="DatabaseNameHistory.LookbackDays"/> days.
+    /// $1 server_id, $2 the int[] of database ids, $3 the oldest time to look at.
     /// </summary>
     public const string NewestSql = """
         SELECT DISTINCT ON (database_id) database_id, database_name, collection_time
         FROM v_database_size_stats
         WHERE server_id = $1
         AND   database_id = ANY($2)
+        AND   collection_time >= $3
         AND   database_name IS NOT NULL
         ORDER BY database_id, collection_time DESC, database_name COLLATE "C" DESC
         """;
@@ -142,6 +151,7 @@ public static class DatabaseNameHistoryReader
             command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(range.Min, DateTimeKind.Unspecified) });
             command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(range.Max, DateTimeKind.Unspecified) });
             command.Parameters.Add(new NpgsqlParameter<int[]> { TypedValue = plan.Ids });
+            command.Parameters.Add(new NpgsqlParameter<TimeSpan> { TypedValue = DatabaseNameHistory.LookbackWindow });
             await ReadChangesAsync(command, changes, cancellationToken);
         }
 
@@ -151,6 +161,7 @@ public static class DatabaseNameHistoryReader
             newest.CommandTimeout = commandTimeoutSeconds;
             newest.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
             newest.Parameters.Add(new NpgsqlParameter<int[]> { TypedValue = plan.Ids });
+            newest.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(DateTime.UtcNow - DatabaseNameHistory.LookbackWindow, DateTimeKind.Unspecified) });
             await ReadChangesAsync(newest, changes, cancellationToken);
         }
 

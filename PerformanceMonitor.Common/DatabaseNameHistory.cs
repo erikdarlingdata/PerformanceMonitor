@@ -34,6 +34,15 @@ public sealed class DatabaseNameHistory
     /// <summary>One id's name from <see cref="StartedAt"/> on: the first snapshot that carried the id under this name.</summary>
     public readonly record struct Change(int DatabaseId, string DatabaseName, DateTime StartedAt);
 
+    /// <summary>How far each history read looks past the errors' range (#5373): back from the floor snapshot, forward
+    /// from the last error, and back from now for an error with no time. The only index is
+    /// <c>(server_id, collection_time)</c>, so an id that is never collected would otherwise make every refresh scan the
+    /// server's whole history. A database offline longer than this before its error shows <c>database_id N</c>.</summary>
+    public const int LookbackDays = 14;
+
+    /// <summary><see cref="LookbackDays"/> as a span.</summary>
+    public static TimeSpan LookbackWindow { get; } = TimeSpan.FromDays(LookbackDays);
+
     private readonly Dictionary<int, Change[]> _byId;
 
     /// <summary>A history with no snapshots: every real id resolves to its raw id.</summary>
@@ -68,8 +77,16 @@ public sealed class DatabaseNameHistory
         var found = -1;
         for (var i = 0; i < changes.Length && changes[i].StartedAt <= t; i++)
             found = i;
-        /* No snapshot at or before t has the id: the oldest one after it is the first change. */
-        return changes[found < 0 ? 0 : found].DatabaseName;
+        /* No snapshot at or before t has the id: the oldest one after it. Two names at that one instant take the larger
+           name in ordinal order, the same tie rule as the SQL arms and as a time at or after that instant. */
+        if (found < 0)
+        {
+            found = 0;
+            while (found + 1 < changes.Length && changes[found + 1].StartedAt == changes[0].StartedAt)
+                found++;
+        }
+
+        return changes[found].DatabaseName;
     }
 
     /// <summary>What a history read has to cover for a set of errors (#5373): the real database ids, the range of the

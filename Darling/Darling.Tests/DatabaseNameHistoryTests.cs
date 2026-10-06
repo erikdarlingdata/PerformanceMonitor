@@ -112,6 +112,16 @@ public sealed class DatabaseNameHistoryTests
         Assert.Equal("Y", new DatabaseNameHistory(new[] { y, x }).Resolve(7, T2));
         Assert.Equal("Y", new DatabaseNameHistory(new[] { y, x }).Resolve(7, null));
         Assert.Equal("Y", new DatabaseNameHistory(new[] { x, y }).Resolve(7, null));
+
+        /* Before that instant (no snapshot at or before the time) the oldest snapshot after it decides, and two names
+           on that one instant give the same larger name, not whichever sorted first (#5373 tie rule). */
+        var t0 = T1.AddDays(-1);
+        Assert.Equal("Y", new DatabaseNameHistory(new[] { x, y }).Resolve(7, t0));
+        Assert.Equal("Y", new DatabaseNameHistory(new[] { y, x }).Resolve(7, t0));
+        Assert.Equal(new DatabaseNameHistory(new[] { x, y }).Resolve(7, T1), new DatabaseNameHistory(new[] { x, y }).Resolve(7, t0));
+        /* A later, different name does not change what the oldest instant says. */
+        var later = new DatabaseNameHistory.Change(7, "Z", T2);
+        Assert.Equal("Y", new DatabaseNameHistory(new[] { x, y, later }).Resolve(7, t0));
     }
 
     [Fact]
@@ -152,6 +162,25 @@ public sealed class DatabaseNameHistoryTests
         Assert.DoesNotContain("LATERAL", DatabaseNameHistoryReader.NewestSql, StringComparison.Ordinal);
         Assert.DoesNotContain("@", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("now(", sql.ToLowerInvariant());
+    }
+
+    [Fact]
+    public void TheThreeHistoryReads_AreBoundedTo14DaysOnTheTimeIndex_AndTieBreakToTheLargerName_5373()
+    {
+        Assert.Equal(14, DatabaseNameHistory.LookbackDays);
+        Assert.Equal(TimeSpan.FromDays(14), DatabaseNameHistory.LookbackWindow);
+
+        var sql = DatabaseNameHistoryReader.Sql;
+        /* before_floor looks back at most the window before the floor; after_range at most the window past the range end. */
+        Assert.Contains("d.collection_time >= (SELECT floor_time FROM floor_snap) - $5::interval", sql, StringComparison.Ordinal);
+        Assert.Contains("d.collection_time <= $3 + $5::interval", sql, StringComparison.Ordinal);
+        /* One tie rule: two names for one id at one instant, the larger in ordinal order, in both extra arms. */
+        Assert.Contains("ORDER BY d.database_id, d.collection_time DESC, d.database_name COLLATE \"C\" DESC", sql, StringComparison.Ordinal);
+        Assert.Contains("ORDER BY d.database_id, d.collection_time ASC, d.database_name COLLATE \"C\" DESC", sql, StringComparison.Ordinal);
+
+        var newest = DatabaseNameHistoryReader.NewestSql;
+        Assert.Contains("collection_time >= $3", newest, StringComparison.Ordinal);
+        Assert.Contains("database_name COLLATE \"C\" DESC", newest, StringComparison.Ordinal);
     }
 }
 
@@ -367,6 +396,86 @@ VALUES ($1,$2,$3,$4,$5,$6,$7)",
             await ErrorAtAsync(c, now.AddHours(-3), 7, 50123, false, ct);
         });
         Assert.Equal("B", onlyUntimed[50123]);
+    }
+
+    [Fact]
+    public async Task AnIdLastSeenBeyond14DaysBeforeTheFloor_ShowsTheRawId_Within14DaysItsName_5373()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live database-name-history test.");
+
+        /* Ids 5 and 6 are in no snapshot of the range (offline). 5 was last collected 20 days before the floor snapshot
+           (outside the 14-day look-back), 6 ten days before it (inside). */
+        var names = await NamesAsync(cs!, async (c, now, ct) =>
+        {
+            foreach (var h in new[] { 40.0, 30.0, 20.0, 10.0, 2.0 }) await SnapshotAsync(c, now.AddHours(-h), 1, "master", ct);
+            await SnapshotAsync(c, now.AddHours(-10).AddDays(-20), 5, "Gone20", ct);
+            await SnapshotAsync(c, now.AddHours(-10).AddDays(-10), 6, "Gone10", ct);
+            await ErrorAtAsync(c, now.AddHours(-3), 5, 50131, true, ct);
+            await ErrorAtAsync(c, now.AddHours(-3), 6, 50132, true, ct);
+        });
+        Assert.Equal("database_id 5", names[50131]);
+        Assert.Equal("Gone10", names[50132]);
+    }
+
+    [Fact]
+    public async Task AnIdFirstSeenBeyond14DaysAfterTheRange_ShowsTheRawId_Within14DaysItsName_5373()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live database-name-history test.");
+
+        /* Ids 8 and 9 are in no snapshot up to the last error. 8 first appears 10 days after it, 9 twenty days after. */
+        var names = await NamesAsync(cs!, async (c, now, ct) =>
+        {
+            var errorAt = now.AddHours(-150);
+            foreach (var h in new[] { 160.0, 100.0, 2.0 }) await SnapshotAsync(c, now.AddHours(-h), 1, "master", ct);
+            await SnapshotAsync(c, errorAt.AddDays(10), 8, "Late10", ct);
+            await SnapshotAsync(c, errorAt.AddDays(20), 9, "Late20", ct);
+            await ErrorAtAsync(c, errorAt, 8, 50141, true, ct);
+            await ErrorAtAsync(c, errorAt, 9, 50142, true, ct);
+        });
+        Assert.Equal("Late10", names[50141]);
+        Assert.Equal("database_id 9", names[50142]);
+    }
+
+    [Fact]
+    public async Task AnErrorWithNoTime_LooksOnlyTheLast14DaysForItsIdsNewestName_5373()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live database-name-history test.");
+
+        var names = await NamesAsync(cs!, async (c, now, ct) =>
+        {
+            await SnapshotAsync(c, now.AddDays(-20), 5, "Gone20", ct);
+            await SnapshotAsync(c, now.AddDays(-10), 6, "Gone10", ct);
+            await ErrorAtAsync(c, now.AddHours(-3), 5, 50151, false, ct);
+            await ErrorAtAsync(c, now.AddHours(-3), 6, 50152, false, ct);
+        });
+        Assert.Equal("database_id 5", names[50151]);
+        Assert.Equal("Gone10", names[50152]);
+    }
+
+    [Fact]
+    public async Task TwoNamesForOneIdAtOneInstant_BeforeTheFloorAndAfterTheRange_GiveTheLargerName_5373()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live database-name-history test.");
+
+        var names = await NamesAsync(cs!, async (c, now, ct) =>
+        {
+            var errorAt = now.AddHours(-100);
+            foreach (var h in new[] { 120.0, 110.0, 90.0, 2.0 }) await SnapshotAsync(c, now.AddHours(-h), 1, "master", ct);
+            /* Id 7 is offline: two names on one instant before the floor (the smaller name is inserted first). */
+            await SnapshotAsync(c, now.AddHours(-130), 7, "AAA", ct);
+            await SnapshotAsync(c, now.AddHours(-130), 7, "ZZZ", ct);
+            /* Id 8 first appears after the range, again two names on one instant. */
+            await SnapshotAsync(c, errorAt.AddDays(3), 8, "BBB", ct);
+            await SnapshotAsync(c, errorAt.AddDays(3), 8, "YYY", ct);
+            await ErrorAtAsync(c, errorAt, 7, 50161, true, ct);
+            await ErrorAtAsync(c, errorAt, 8, 50162, true, ct);
+        });
+        Assert.Equal("ZZZ", names[50161]);
+        Assert.Equal("YYY", names[50162]);
     }
 
     private static async Task DeleteRowsAsync(NpgsqlConnection connection, System.Threading.CancellationToken ct)
