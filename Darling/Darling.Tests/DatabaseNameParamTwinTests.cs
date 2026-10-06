@@ -211,6 +211,42 @@ public sealed class DatabaseNameParamTwinTests
         Assert.True(problems.Count == 0, "One tool name must keep one database_name contract on both SKUs:\n" + string.Join("\n", problems));
     }
 
+    /// <summary>
+    /// #5244 N3: the sentence that tells a caller which collector a blocking answer came from, and that the DMV snapshot answers only
+    /// when the blocked process reports have no rows for the chosen databases. It is the only place a caller learns, before the call, that
+    /// adding a database can flip the collector, so its exact text is pinned, and the same text sits on all four descriptions (Darling's and
+    /// Lite's get_blocking_trend and get_blocking_stats). The budget pins only bound its length.
+    /// </summary>
+    private const string SourceSentence =
+        "The source key names the collector that answered, blocked-process-report or DMV snapshot; the DMV snapshot is used only when the blocked "
+        + "process reports have no rows for the chosen databases, so source can differ between filters.";
+
+    [Theory]
+    [InlineData("get_blocking_trend")]
+    [InlineData("get_blocking_stats")]
+    public void TheSourceSentence_IsOnTheToolDescription_WordForWord_OnBothSkus(string tool)
+    {
+        var darlingDescription = typeof(DarlingMcpObjectStatsTools).Assembly.GetTypes()
+            .Where(t => t.GetCustomAttribute<McpServerToolTypeAttribute>() is not null)
+            .SelectMany(t => t.GetMethods(BindingFlags.Public | BindingFlags.Static))
+            .Where(m => m.GetCustomAttribute<McpServerToolAttribute>()?.Name == tool)
+            .Select(m => m.GetCustomAttribute<DescriptionAttribute>()!.Description)
+            .Single();
+
+        string? liteDescription = null;
+        foreach (var file in Directory.GetFiles(PathTo("Lite", "Mcp"), "*.cs"))
+        {
+            var m = Regex.Match(
+                ReadRepoFile("Lite", "Mcp", Path.GetFileName(file)),
+                @"\[McpServerTool\(Name = """ + tool + @"""\),\s*Description\(""((?:[^""\\]|\\.)*)""\)\]");
+            if (m.Success) liteDescription = Regex.Unescape(m.Groups[1].Value);
+        }
+
+        Assert.NotNull(liteDescription);
+        Assert.Contains(SourceSentence, darlingDescription, StringComparison.Ordinal);
+        Assert.Contains(SourceSentence, liteDescription, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void TheMiddleRoster_OnlyShrinks_EveryEntryIsStillMidList()
     {

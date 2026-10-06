@@ -4389,7 +4389,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             /* ── sessions (DarlingMcpSessionTools) ── */
             ["get_active_queries"] = R(CatSessions, "Currently-active queries, optionally blocking-only.", PServer(), PHours(1), PDatabases(), PBool("blocking_only", false), PText("wait_type"), PLimit(50), PAsOf()),
             ["get_session_stats"] = R(CatSessions, "Session-level summary counters for a server.", PServer()),
-            ["get_waiting_tasks"] = R(CatSessions, "Tasks currently waiting, with wait type and duration.", PServer(), PHours(1), PLimit(30), PAsOf()),
+            ["get_waiting_tasks"] = R(CatSessions, "Tasks currently waiting, with wait type and duration.", PServer(), PHours(1), PLimit(30), PDatabases(), PAsOf()),
 
             /* ── alerts / mute rules (DarlingMcpAlertTools) ── */
             ["get_alert_history"] = R(CatAlerts, "Recent fired-alert history for a server, newest first and bounded by limit. Excludes operator-dismissed alerts unless include_dismissed is true (dismissed_excluded_count says how many the default hid).", PServer(), PHours(24), PLimit(50), PAsOf(), PBool("include_dismissed", false)),
@@ -4404,9 +4404,9 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             ["get_notification_routes"] = R(CatAlerts, "The alert-family taxonomy (self-monitor / reports / agent-jobs / performance, with every metric each owns) and the notification routes layered over the parent channels — which channels each route sets, never the destination values."),
 
             /* ── blocking / deadlocks (DarlingMcpBlockingTools) ── */
-            ["get_blocked_process_xml"] = R(CatBlocking, "Blocked-process-report XML captures.", PServer(), PHours(24), PLimit(5), PAsOf()),
-            ["get_blocking"] = R(CatBlocking, "Blocking chains observed in the window.", PServer(), PHours(24), PLimit(30), PAsOf()),
-            ["get_blocking_trend"] = R(CatBlocking, "Blocking-event counts over time.", PServer(), PHours(24), PAsOf()),
+            ["get_blocked_process_xml"] = R(CatBlocking, "Blocked-process-report XML captures.", PServer(), PHours(24), PLimit(5), PDatabases(), PAsOf()),
+            ["get_blocking"] = R(CatBlocking, "Blocking chains observed in the window.", PServer(), PHours(24), PLimit(30), PDatabases(), PAsOf()),
+            ["get_blocking_trend"] = R(CatBlocking, "Blocking-event counts over time.", PServer(), PHours(24), PDatabases(), PAsOf()),
             ["get_deadlock_detail"] = R(CatBlocking, "Deadlock graph detail for recent deadlocks.", PServer(), PHours(24), PLimit(5), PBool("full_graph", true), PAsOf()),
             ["get_deadlock_trend"] = R(CatBlocking, "Deadlock counts over time.", PServer(), PHours(24), PAsOf()),
             ["get_deadlocks"] = R(CatBlocking, "Recent deadlocks with victim/resource summary.", PServer(), PHours(24), PLimit(20), PAsOf()),
@@ -4428,8 +4428,8 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             /* ── core data reads (DarlingMcpDataTools + long-query / fleet tools) ── */
             ["get_collection_health"] = R(CatData, "Per-collector collection health for a server.", PServer()),
             ["get_collection_log"] = R(CatData, "Raw per-run collector log for a server, newest first — or slowest first when min_duration_ms is supplied.", PServer(), PHours(24), PLimit(200), PAsOf(), PText("collector_name"), PDouble("min_duration_ms"), PText("status")),
-            ["get_current_waits_trend"] = R(CatData, "Waiting-task and blocked-session series over time.", PServer(), PHours(4), PText("database_name"), PAsOf()),
-            ["get_blocking_stats"] = R(CatData, "Blocking duration and deadlock severity per minute.", PServer(), PHours(24), PAsOf()),
+            ["get_current_waits_trend"] = R(CatData, "Waiting-task and blocked-session series over time.", PServer(), PHours(4), PDatabases(), PAsOf()),
+            ["get_blocking_stats"] = R(CatData, "Blocking duration and deadlock severity per minute.", PServer(), PHours(24), PDatabases(), PAsOf()),
             ["get_cpu_utilization"] = R(CatData, "CPU utilization over time.", PServer(), PHours(4), PAsOf(), PInt("bucket_minutes")),
             ["get_file_io_stats"] = R(CatData, "Per-file IO stall/throughput stats.", PServer()),
             ["get_memory_clerks"] = R(CatData, "Top memory clerks by allocation.", PServer()),
@@ -5257,7 +5257,9 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 ? DarlingMcpSessionTools.GetActiveQueries(pg, Server(c), Hours(c, 1), databases, QueryBool(c, "blocking_only", false), Str(c, "wait_type"), Rows(c, "limit", 50), 2000, AsOf(c), logger, c.RequestAborted)
                 : DatabaseNamesRefusal(c),
             ["get_session_stats"] = (c, pg, an) => DarlingMcpSessionTools.GetSessionStats(pg, Server(c), c.RequestAborted),
-            ["get_waiting_tasks"] = (c, pg, an) => DarlingMcpSessionTools.GetWaitingTasks(pg, Server(c), Hours(c, 1), Rows(c, "limit", 30), as_of: AsOf(c), logger: logger, cancellationToken: c.RequestAborted),
+            ["get_waiting_tasks"] = (c, pg, an) => DatabaseNames(c) is { } databases
+                ? DarlingMcpSessionTools.GetWaitingTasks(pg, Server(c), Hours(c, 1), Rows(c, "limit", 30), databases, AsOf(c), logger, c.RequestAborted)
+                : DatabaseNamesRefusal(c),
 
             /* ── alerts / mute rules ── */
             ["get_alert_history"] = (c, pg, an) => DarlingMcpAlertTools.GetAlertHistory(pg, Server(c), Hours(c, 24), Rows(c, "limit", 50), as_of: AsOf(c), include_dismissed: QueryBool(c, "include_dismissed", false), cancellationToken: c.RequestAborted),
@@ -5286,13 +5288,19 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             ["get_sweep_reports"] = (c, pg, an) => DarlingMcpFleetSweepTools.GetSweepReports(pg, logger, Hours(c, 1), AsOf(c), Str(c, "sweep_id"), Str(c, "watch_state"), c.RequestAborted),
 
             /* ── blocking / deadlocks ── */
-            ["get_blocked_process_xml"] = (c, pg, an) => DarlingMcpBlockingTools.GetBlockedProcessXml(pg, Server(c), Hours(c, 24), Rows(c, "limit", 5), as_of: AsOf(c), logger: logger, cancellationToken: c.RequestAborted),
+            ["get_blocked_process_xml"] = (c, pg, an) => DatabaseNames(c) is { } databases
+                ? DarlingMcpBlockingTools.GetBlockedProcessXml(pg, Server(c), Hours(c, 24), Rows(c, "limit", 5), AsOf(c), databases, logger, c.RequestAborted)
+                : DatabaseNamesRefusal(c),
             /* #4198: the internal overload, not the MCP tool wrapper — pins the OLD row limit (30) and the
                OLD 2000-char text cap (WebSqlTextPreviewLength) explicitly, so this page does not change even
                though the tool's own MCP defaults (limit 15, 150-char preview) did. Same shape #3897's trend
                tools use to pass TrendBudget.Chart here instead of their own MCP point budget. */
-            ["get_blocking"] = (c, pg, an) => DarlingMcpBlockingTools.GetBlocking(pg, Server(c), Hours(c, 24), Rows(c, "limit", 30), null, false, AsOf(c), DarlingMcpBlockingTools.WebSqlTextPreviewLength, registryState, logger, c.RequestAborted),
-            ["get_blocking_trend"] = (c, pg, an) => DarlingMcpBlockingTools.GetBlockingTrend(pg, Server(c), Hours(c, 24), as_of: AsOf(c), cancellationToken: c.RequestAborted),
+            ["get_blocking"] = (c, pg, an) => DatabaseNames(c) is { } databases
+                ? DarlingMcpBlockingTools.GetBlocking(pg, Server(c), Hours(c, 24), Rows(c, "limit", 30), null, false, AsOf(c), databases, DarlingMcpBlockingTools.WebSqlTextPreviewLength, registryState, logger, c.RequestAborted)
+                : DatabaseNamesRefusal(c),
+            ["get_blocking_trend"] = (c, pg, an) => DatabaseNames(c) is { } databases
+                ? DarlingMcpBlockingTools.GetBlockingTrend(pg, Server(c), Hours(c, 24), AsOf(c), databases, c.RequestAborted)
+                : DatabaseNamesRefusal(c),
             /* #4254: full_graph defaults false on the MCP signature (a preview keeps a busy production
                store's tools/list-driven call under the shared response budget), but the web viewer has
                always shown the whole graph. The row pins its OWN default to true so #4198's MCP-side
@@ -5336,8 +5344,12 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             ["get_collection_log"] = (c, pg, an) => OptionalDouble(c, "min_duration_ms", out var minDurationMs)
                 ? DarlingMcpDataTools.GetCollectionLog(pg, Server(c), Hours(c, 24), Rows(c, "limit", 200), AsOf(c), Str(c, "collector_name"), minDurationMs, status: Str(c, "status"), full_text: true, cancellationToken: c.RequestAborted)
                 : UnparseableParam("min_duration_ms"),
-            ["get_current_waits_trend"] = (c, pg, an) => DarlingMcpDataTools.GetCurrentWaitsTrend(pg, Server(c), Hours(c, 4), Str(c, "database_name"), as_of: AsOf(c), cancellationToken: c.RequestAborted),
-            ["get_blocking_stats"] = (c, pg, an) => DarlingMcpDataTools.GetBlockingStats(pg, Server(c), Hours(c, 24), as_of: AsOf(c), cancellationToken: c.RequestAborted),
+            ["get_current_waits_trend"] = (c, pg, an) => DatabaseNames(c) is { } databases
+                ? DarlingMcpDataTools.GetCurrentWaitsTrend(pg, Server(c), Hours(c, 4), databases, AsOf(c), c.RequestAborted)
+                : DatabaseNamesRefusal(c),
+            ["get_blocking_stats"] = (c, pg, an) => DatabaseNames(c) is { } databases
+                ? DarlingMcpDataTools.GetBlockingStats(pg, Server(c), Hours(c, 24), databases, AsOf(c), logger, c.RequestAborted)
+                : DatabaseNamesRefusal(c),
             /* #3960: the core trends a page charts take the CHART budget and bind bucket_minutes, as the trends
                below do (#3897). */
             ["get_cpu_utilization"] = (c, pg, an) => OptionalInt(c, "bucket_minutes", out var bucketMinutes)

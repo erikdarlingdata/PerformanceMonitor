@@ -152,6 +152,18 @@ public class TargetProviderTests
             PostgresTargetProvider.Instance.Classify(pgLockTimeout, yieldsOnLockTimeout: false));
     }
 
+    /// <summary>
+    /// #5378: 15247, what CREATE or ALTER EVENT SESSION raises for a login without ALTER ANY EVENT SESSION, is a permission
+    /// denial for the SQL Server provider, so a collector run that meets it records PERMISSIONS and not ERROR.
+    /// </summary>
+    [Fact]
+    public void ClassifiesAnEventSessionPermissionDenialOnSqlServerAsPermissions()
+    {
+        var denied = LongQueryTraceReadOnlyIntentTests.SqlExceptionFactory.Create(15247, 14, "User does not have permission to perform this action.");
+
+        Assert.Equal(CollectorTargetFault.Permissions, SqlServerTargetProvider.Instance.Classify(denied, false));
+    }
+
     [Fact]
     public void ClassifiesUnrecognizedExceptionsAsUnclassifiedSoTheyStayLoud()
     {

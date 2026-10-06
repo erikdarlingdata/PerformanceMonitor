@@ -432,7 +432,7 @@ public sealed class SensitiveStatementOutputFilterTests
         }
 
         _output.WriteLine($"100-value case over 3 runs: worst {worst:F0} ms, best {best:F0} ms");
-        Assert.True(best <= 1950, $"best elapsed {best:F0} ms (worst {worst:F0} ms)");
+        TimingClaim.AtMost(best, 1950, $"100 timing-out values, best of 3 (worst {worst:F0} ms)");
         var parsed = JsonNode.Parse(TextOf(last!))!.AsArray();
         Assert.Equal(100, parsed.Count);
         AssertEveryStringIsTheMarker(parsed);
@@ -470,7 +470,7 @@ public sealed class SensitiveStatementOutputFilterTests
         }
 
         _output.WriteLine($"two blocks of 50 timing-out values over 3 runs: worst {worst:F0} ms, best {best:F0} ms");
-        Assert.True(best <= 1950, $"best {best:F0} ms (worst {worst:F0} ms)");
+        TimingClaim.AtMost(best, 1950, $"two blocks of 50 timing-out values, best of 3 (worst {worst:F0} ms)");
         foreach (var block in result!.Content.Cast<TextContentBlock>())
             AssertEveryStringIsTheMarker(JsonNode.Parse(block.Text)!.AsArray());
     }

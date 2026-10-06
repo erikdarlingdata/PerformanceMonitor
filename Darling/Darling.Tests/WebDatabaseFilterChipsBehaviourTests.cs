@@ -102,14 +102,14 @@ public sealed class WebDatabaseFilterChipsBehaviourTests
         AssertChip(Heading(r, "queries", "Query Store Memory Clerk"), "server", "Server-wide", ServerTitle);
 
         /* Blocking: the Waiting Tasks SERIES (get_current_waits_trend) is server-wide, the table of the same name is a
-           database-scoped read; Deadlock Severity and Deadlock Graphs are unfiltered, with the deadlock sentence on the graphs. */
+           database-scoped read; Deadlock Severity is unfiltered, and Deadlock Graphs keeps every graph whole while its process rows follow the filter (#5244). */
         var blocking = r.GetProperty("tabs").GetProperty("blocking").EnumerateArray().Where(h => h.GetProperty("title").GetString() == "Waiting Tasks").ToArray();
         AssertChip(Assert.Single(blocking), "server", "Server-wide", ServerTitle);
-        AssertChip(Heading(r, "waits", "Waiting Tasks"), "unfiltered", "All databases", UnfilteredTitle);
-        AssertChip(Heading(r, "blocking", "Blocked Sessions"), "unfiltered", "All databases");
-        AssertChip(Heading(r, "blocking", "Blocking Severity"), "unfiltered", "All databases");
+        AssertChip(Heading(r, "waits", "Waiting Tasks"), "filtered", "2 databases", "SalesDb\nOrders");
+        AssertChip(Heading(r, "blocking", "Blocked Sessions"), "filtered", "2 databases", "SalesDb\nOrders");
+        AssertChip(Heading(r, "blocking", "Blocking Severity"), "filtered", "2 databases", "SalesDb\nOrders");
         AssertChip(Heading(r, "blocking", "Deadlock Severity"), "unfiltered", "All databases", UnfilteredTitle);
-        AssertChip(Heading(r, "blocking", "Deadlock Graphs"), "unfiltered", "All databases", UnfilteredTitle + " The databases are inside each deadlock graph.");
+        AssertChip(Heading(r, "blocking", "Deadlock Graphs"), "process-rows", "Graphs: all; process rows: 2 databases", "Each graph is whole; process rows outside the chosen databases are hidden.");
         AssertChip(Heading(r, "blocking", "Lock Waits"), "server", "Server-wide");
 
         /* A composite built by panelShell passes its main read. */

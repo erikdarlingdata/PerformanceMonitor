@@ -12,6 +12,7 @@ using System.Text.Json;
 using System.Threading.Tasks;
 using System.Windows;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Notifications;
 using PerformanceMonitor.Ui;
 
@@ -149,15 +150,15 @@ public partial class AddServerDialog : Window
             SqlAuthRadio.IsChecked = true;
             UsernameBox.Text = existing.Username ?? "";
             /* The password box starts blank on an edit (#5240): a blank box keeps the stored blob, and a typed one
-               replaces it. Pre-filling the decrypted password would make a host or port change send the stored
+               replaces it. Pre-filling the decrypted password would make a change to how the server is reached send the stored
                password to the new address, as if it had been typed; with the box blank, the save and the connection
-               test ask for the password again when the host or port moves (see TryResolveCredential). */
+               test ask for the password again when how the server is reached changes (see TryResolveCredential). */
             StatusText.Text = KeepStoredSecretHint("password");
         }
         else if (string.Equals(existing.Auth, ServerStoreCredential.ServicePrincipal, StringComparison.OrdinalIgnoreCase))
         {
             /* #3484: prefill a service principal's client id; the secret box starts blank like the SQL password's
-               (#5240): blank keeps the stored blob unless the host or port moves. */
+               (#5240): blank keeps the stored blob unless how the server is reached changes. */
             ServicePrincipalAuthRadio.IsChecked = true;
             AzureClientIdBox.Text = existing.Username ?? "";
             StatusText.Text = KeepStoredSecretHint("client secret");
@@ -408,12 +409,14 @@ public partial class AddServerDialog : Window
     };
 
     private static string KeepStoredSecretHint(string what) =>
-        $"Leave the {what} blank to keep the stored one. If you change the host or port, enter it again.";
+        $"Leave the {what} blank to keep the stored one. If you change how the server is reached (address, database, login or encryption settings), enter it again.";
 
-    /// <summary>True on an edit when the form's host or port differs from the stored one, by the rule the web and MCP
-    /// edit use (<see cref="ViewerDataService.ReachMoved"/>). A port the box cannot parse counts as unchanged here:
-    /// the form's own port check reports it.</summary>
-    private bool ReachMovedFromForm()
+    /// <summary>True on an edit when the form's connection settings differ from the stored row's by the rule the web and MCP
+    /// edit use (<see cref="ServerConnectionRule.ConnectionSettingsDiffer"/>: host, port, engine, database, read-only intent,
+    /// authentication, username, encrypt mode, trust certificate and multi-subnet failover). A port the box cannot parse
+    /// counts as unchanged here: the form's own port check reports it. The authentication and username are the ones the
+    /// credential being resolved carries.</summary>
+    private bool ReachMovedFromForm(string auth, string? username)
     {
         if (_existing is null)
         {
@@ -426,7 +429,14 @@ public partial class AddServerDialog : Window
             port = parsed;
         }
 
-        return ViewerDataService.ReachMoved(_existing.Host, _existing.Port, ServerNameBox.Text.Trim(), port);
+        var database = string.IsNullOrWhiteSpace(DatabaseNameBox.Text) ? null : DatabaseNameBox.Text.Trim();
+        var form = new ServerConnectionSettings(
+            ServerNameBox.Text.Trim(), port, _existing.Engine, database, ReadOnlyIntentCheckBox.IsChecked == true, auth, username,
+            GetSelectedEncryptMode(), TrustCertCheckBox.IsChecked == true, MultiSubnetFailoverCheckBox.IsChecked == true);
+        var stored = ServerConnectionSettings.WithDefaults(
+            _existing.Host, _existing.Port, _existing.Engine, _existing.Database, _existing.ReadOnlyIntent, _existing.Auth,
+            _existing.Username, _existing.EncryptMode, _existing.TrustServerCertificate, _existing.MultiSubnetFailover);
+        return ServerConnectionRule.ConnectionSettingsDiffer(form, stored);
     }
 
     /// <summary>
@@ -516,9 +526,9 @@ public partial class AddServerDialog : Window
                 && string.Equals(_existing.Auth, ServerStoreCredential.Sql, StringComparison.OrdinalIgnoreCase)
                 && !string.IsNullOrEmpty(_existing.EncryptedPassword))
             {
-                /* #5240: the stored password is never reused for a different address. A moved host or port needs it
+                /* #5240: the stored password is never reused for a different address. Any change to how the server is reached needs it
                    typed again, here for the save and the connection test alike (the data layer refuses it too). */
-                if (ReachMovedFromForm())
+                if (ReachMovedFromForm(auth, username))
                 {
                     error = ViewerDataService.EditPasswordNeededText;
                     return false;
@@ -559,9 +569,9 @@ public partial class AddServerDialog : Window
                 && string.Equals(_existing.Auth, ServerStoreCredential.ServicePrincipal, StringComparison.OrdinalIgnoreCase)
                 && !string.IsNullOrEmpty(_existing.EncryptedPassword))
             {
-                /* #5240: the stored password is never reused for a different address. A moved host or port needs it
+                /* #5240: the stored password is never reused for a different address. Any change to how the server is reached needs it
                    typed again, here for the save and the connection test alike (the data layer refuses it too). */
-                if (ReachMovedFromForm())
+                if (ReachMovedFromForm(auth, username))
                 {
                     error = ViewerDataService.EditPasswordNeededText;
                     return false;
@@ -803,7 +813,7 @@ public partial class AddServerDialog : Window
         }
         catch (MonitoredServerPasswordNeededException ex)
         {
-            /* #5240: a moved host or port saved without a newly entered password. The message says so, in the same
+            /* #5240: a change to how the server is reached saved without a newly entered password. The message says so, in the same
                words as the web and MCP edit; nothing was written. */
             StatusText.Text = ex.Message;
             SaveButton.IsEnabled = true;

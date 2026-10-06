@@ -29,7 +29,8 @@ public sealed class TopListTotalOrderPinTests
     [Fact]
     public void TheQueryStatsTopList_RanksOnATotalOrder()
     {
-        var sql = MethodText("Lite/Services/LocalDataService.QueryStats.cs", "GetTopQueriesByCpuAsync");
+        /* #5381: the statement sits in TopQueriesByCpuSql (a test runs it beside the one it replaced); GetTopQueriesByCpuAsync only runs it. */
+        var sql = MethodText("Lite/Services/LocalDataService.QueryStats.cs", "TopQueriesByCpuSql");
 
         Assert.Contains("ORDER BY SUM(delta_worker_time) DESC, " + QueryStatsKey + "\n", sql, StringComparison.Ordinal);
         Assert.Contains("ROW_NUMBER() OVER (ORDER BY r.total_cpu_us DESC, r.database_name, r.query_hash, r.host_object_name) AS page_ord", sql, StringComparison.Ordinal);

@@ -125,6 +125,31 @@ public sealed class DarlingSecretsOwnedReferenceTests : IDisposable
         Assert.DoesNotContain(OwnedFileValue, ex.Message, StringComparison.Ordinal);
     }
 
+    /// <summary>A <c>file:</c> reference into the directory the password key and the log-hash key live in is refused
+    /// before the file is read (#5366): the directory is in the owned set Compute builds for the configuration, so a
+    /// reference to the key file itself, or to anything beside it, never resolves. The file exists and holds text, so a
+    /// resolve that ran first would have returned it.</summary>
+    [Fact]
+    public void AFileReferenceIntoThePasswordKeyDirectory_IsRefusedBeforeItResolves()
+    {
+        var configPath = Path.Combine(_root, "config", "darling.json");
+        var config = new DarlingConfig();
+        config.Postgres.Managed = false;
+        var keyDirectory = DarlingLogHashKeyFile.DirectoryFor(config, configPath);
+        Directory.CreateDirectory(keyDirectory);
+        var keyFile = Path.Combine(keyDirectory, DarlingPasswordKeyFile.UnixFileName);
+        const string KeyFileText = "key-file-text-not-real";
+        File.WriteAllText(keyFile, KeyFileText);
+        DarlingOwnedSecrets.Set(DarlingOwnedSecrets.Compute(config, configPath));
+
+        var ex = Assert.Throws<InvalidOperationException>(
+            () => DarlingSecrets.ResolvePassword(Server("file:" + keyFile), out _));
+
+        Assert.Contains(DarlingOwnedSecrets.ReferenceRefusalText, ex.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain(keyFile, ex.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain(KeyFileText, ex.Message, StringComparison.Ordinal);
+    }
+
     /// <summary>
     /// #2087: add_servers stores env:/file: secret REFERENCES verbatim in the encrypted-password slot on
     /// Linux (a pointer is not a secret, and DPAPI does not exist there). The resolver must therefore
@@ -282,6 +307,8 @@ public sealed class DarlingSecretsOwnedReferenceTests : IDisposable
             StoredServerId = declared.ServerId,
             Host = declared.Host,
             Port = declared.Port,
+            Auth = declared.Auth,
+            Username = declared.Username,
             EncryptedPassword = declared.EncryptedPassword,
         };
 
@@ -420,11 +447,17 @@ public sealed class DarlingSecretsOwnedReferenceTests : IDisposable
         var alphaId = seededRows.Single(s => s.Name == "alpha").ServerId;
         if (remediationSlot)
         {
+            /* The edit core does not move a row that holds a remediation login, so the move is written directly, as the
+               service host's own tools write it. */
             var answer = await Edit.EditServerCoreAsync(
                 new Edit.PostgresServerEditStore(owner), alphaId, "{\"host\":\"moved.example.test\",\"password\":\"typed-secret-Q7\"}",
                 (_, _) => Task.FromResult(new ConnectionProbeResult(true, 15, 3, "Enterprise", false, false, false, true, null)),
                 isWindows: true, logger: null, ct);
-            Assert.Equal("updated", System.Text.Json.Nodes.JsonNode.Parse(answer)!["status"]!.GetValue<string>());
+            Assert.Equal("invalid", System.Text.Json.Nodes.JsonNode.Parse(answer)!["status"]!.GetValue<string>());
+
+            await using var move = owner.CreateCommand("UPDATE config_monitored_servers SET host = 'moved.example.test' WHERE server_id = $1");
+            move.Parameters.Add(new Npgsql.NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Integer, Value = alphaId });
+            Assert.Equal(1, await move.ExecuteNonQueryAsync(ct));
         }
         else
         {

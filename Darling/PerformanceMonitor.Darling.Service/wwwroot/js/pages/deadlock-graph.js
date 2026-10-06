@@ -65,6 +65,17 @@ function shortResource(label) {
   return s;
 }
 
+/**
+ * The per-process rows of a deadlock that sit in one of the chosen databases (#5244). The desktop viewers hide a process row
+ * whose database is not in the selection (`selected.Contains(d.DatabaseName)`), and a process with no database is never in
+ * it, so this does the same: a row with a missing, empty or non-text database is hidden while a filter is active. Names are
+ * compared exactly as stored (no trim, no case folding), as the page's database filter does. The graph is never filtered.
+ */
+export function processRowsInDatabases(rows, names) {
+  const chosen = new Set(Array.isArray(names) ? names : []);
+  return (Array.isArray(rows) ? rows : []).filter((p) => p && typeof p.database_name === "string" && chosen.has(p.database_name));
+}
+
 /** The Graph cell of one get_deadlock_detail row. Draws only when the reader opens it. */
 export function deadlockGraphCell(server, row) {
   const graph = row.graph;

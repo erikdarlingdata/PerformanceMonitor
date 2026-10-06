@@ -182,7 +182,7 @@ const scenarios = {
     globalThis.location.hash = "#/fleet";
     util.setActiveDatabaseFilter({ server: "SRV1", databases: ["SalesDb"] });
     const off = new FakeNode("div");
-    util.mount(off, panels.renderPanel({ title: "T", read: "get_blocking", params: { server: "SRV1" }, viz: "table", rowsKey: "rows", columns: [], emptyText: "none" }));
+    util.mount(off, panels.renderPanel({ title: "T", read: "get_database_sizes", params: { server: "SRV1" }, viz: "table", rowsKey: "rows", columns: [], emptyText: "none" }));
     await settle();
     out.offPage = headings(off);
   },
@@ -197,7 +197,7 @@ const scenarios = {
       return headings(holder)[0];
     };
     out.filtered = await one({ title: "F", read: "get_top_queries_by_cpu" });
-    out.unfiltered = await one({ title: "U", read: "get_blocking" });
+    out.unfiltered = await one({ title: "U", read: "get_database_sizes" });
     out.server = await one({ title: "S", read: "get_cpu_utilization" });
     out.identity = await one({ title: "I", read: "get_query_trend" });
     out.plan = await one({ title: "P", read: "get_plan_xml" });
