@@ -754,6 +754,10 @@ const topRankingPick = { queries: "cpu", procedures: "cpu" };
    window note's place (util.js localizeWindowNote, #5299), so the cards below name `truncation_note` as their one note and need no key of
    their own for it, and a ranking is never silently partial. */
 
+/* #5329: why a Reads ranking reads the raw collections. The per-query and per-procedure hourly rollups keep CPU, duration and execution
+   counts but no reads, so the ranking cannot come from them; rankedCard shows this sentence beside the picker when Reads is picked. */
+const READS_RAW_SENTENCE = "Reads are ranked from the raw collections because the per-query hourly rollups keep no reads.";
+
 function topRankingLabel(ranking) {
   return (TOP_RANKINGS.find((r) => r.value === ranking) || TOP_RANKINGS[0]).label;
 }
@@ -789,6 +793,8 @@ function rankedCard(kind, build) {
         },
         ranking
       ),
+      /* #5329: a reads ranking reads the raw collections, and the card says why in one plain sentence. */
+      ...(ranking === "reads" ? [el("span", { class: "muted" }, [READS_RAW_SENTENCE])] : []),
     ]);
     setPanelSignal(mine.signal);
     const card = build(ranking, picker);

@@ -40,36 +40,38 @@ public sealed class ViewerQueryStatsRow
     public long TotalExecutions { get; set; }
     public long TotalCpuUs { get; set; }
     public long TotalElapsedUs { get; set; }
-    public long TotalLogicalReads { get; set; }
-    public long TotalRows { get; set; }
-    public long TotalLogicalWrites { get; set; }
-    public long TotalPhysicalReads { get; set; }
-    public long TotalSpills { get; set; }
-    public int MinDop { get; set; }
-    public int MaxDop { get; set; }
-    public long MinCpuUs { get; set; }
-    public long MaxCpuUs { get; set; }
-    public long MinElapsedUs { get; set; }
-    public long MaxElapsedUs { get; set; }
-    public long MinPhysicalReads { get; set; }
-    public long MaxPhysicalReads { get; set; }
-    public long MinRows { get; set; }
-    public long MaxRows { get; set; }
-    public long MinGrantKb { get; set; }
-    public long MaxGrantKb { get; set; }
-    public long MinUsedGrantKb { get; set; }
-    public long MaxUsedGrantKb { get; set; }
-    public long MinIdealGrantKb { get; set; }
-    public long MaxIdealGrantKb { get; set; }
-    public long MinReservedThreads { get; set; }
-    public long MaxReservedThreads { get; set; }
-    public long MinUsedThreads { get; set; }
-    public long MaxUsedThreads { get; set; }
-    public long TotalClrUs { get; set; }
-    public long MinSpills { get; set; }
-    public long MaxSpills { get; set; }
-    public long PlanGenerationNum { get; set; }
-    public double WorkerTimePerSecond { get; set; }
+    public long? TotalLogicalReads { get; set; }
+    public long? TotalRows { get; set; }
+    public long? TotalLogicalWrites { get; set; }
+    public long? TotalPhysicalReads { get; set; }
+    public long? TotalSpills { get; set; }
+    public int? MinDop { get; set; }
+    public int? MaxDop { get; set; }
+    /* #5329: null on the hourly route. The rollup keeps min/max of per-collection deltas (sums over many
+       executions), not the per-execution extremes the raw route reads, so showing them would be a wrong number. */
+    public long? MinCpuUs { get; set; }
+    public long? MaxCpuUs { get; set; }
+    public long? MinElapsedUs { get; set; }
+    public long? MaxElapsedUs { get; set; }
+    public long? MinPhysicalReads { get; set; }
+    public long? MaxPhysicalReads { get; set; }
+    public long? MinRows { get; set; }
+    public long? MaxRows { get; set; }
+    public long? MinGrantKb { get; set; }
+    public long? MaxGrantKb { get; set; }
+    public long? MinUsedGrantKb { get; set; }
+    public long? MaxUsedGrantKb { get; set; }
+    public long? MinIdealGrantKb { get; set; }
+    public long? MaxIdealGrantKb { get; set; }
+    public long? MinReservedThreads { get; set; }
+    public long? MaxReservedThreads { get; set; }
+    public long? MinUsedThreads { get; set; }
+    public long? MaxUsedThreads { get; set; }
+    public long? TotalClrUs { get; set; }
+    public long? MinSpills { get; set; }
+    public long? MaxSpills { get; set; }
+    public long? PlanGenerationNum { get; set; }
+    public double? WorkerTimePerSecond { get; set; }
     public string QueryPlanHash { get; set; } = "";
     public string SqlHandle { get; set; } = "";
     public string PlanHandle { get; set; } = "";
@@ -113,13 +115,13 @@ public sealed class ViewerQueryStatsRow
     public double TotalElapsedMs => TotalElapsedUs / 1000.0;
     public double AvgCpuMs => TotalExecutions > 0 ? TotalCpuMs / TotalExecutions : 0;
     public double AvgElapsedMs => TotalExecutions > 0 ? TotalElapsedMs / TotalExecutions : 0;
-    public double AvgReads => TotalExecutions > 0 ? (double)TotalLogicalReads / TotalExecutions : 0;
-    public double MinCpuMs => MinCpuUs / 1000.0;
-    public double MaxCpuMs => MaxCpuUs / 1000.0;
-    public double MinElapsedMs => MinElapsedUs / 1000.0;
-    public double MaxElapsedMs => MaxElapsedUs / 1000.0;
+    public double? AvgReads => TotalLogicalReads is null ? null : TotalExecutions > 0 ? (double)TotalLogicalReads.Value / TotalExecutions : 0;
+    public double? MinCpuMs => MinCpuUs is null ? null : MinCpuUs / 1000.0;
+    public double? MaxCpuMs => MaxCpuUs is null ? null : MaxCpuUs / 1000.0;
+    public double? MinElapsedMs => MinElapsedUs is null ? null : MinElapsedUs / 1000.0;
+    public double? MaxElapsedMs => MaxElapsedUs is null ? null : MaxElapsedUs / 1000.0;
     // total_clr_time is stored in microseconds (like worker/elapsed time)
-    public double TotalClrMs => TotalClrUs / 1000.0;
+    public double? TotalClrMs => TotalClrUs / 1000.0;
 }
 
 public sealed partial class ViewerDataService
@@ -368,8 +370,9 @@ public sealed partial class ViewerDataService
     /// <c>DarlingDataReader.GetTopQueriesByCpuRoutedAsync</c> does — the tier decided over
     /// <see cref="RollupCoverage.For"/>'s legacy pair, Daily clamped to Hourly (out of scope for this lane).
     /// An hourly-routed page carries only what the rollup has: <c>host_object_name</c>/
-    /// <c>module_*</c>/DOP/grant/spill/thread columns are unavailable and read as their defaults, exactly the
-    /// same disclosure the MCP payload's <c>tier_used</c>/<c>precision_note</c> make. An hourly-routed page
+    /// <c>module_*</c> are empty, and the reads/writes/physical-reads/rows/spill/DOP/grant/thread/CLR columns the rollup
+    /// keeps no copy of are NULL on the row (#5329), so the grid shows them blank instead of a false 0 — the same
+    /// disclosure the MCP payload's <c>tier_used</c>/<c>precision_note</c> make (null, never 0). An hourly-routed page
     /// also stops BEFORE <paramref name="endUtc"/> (a bucket is stamped at its start, so an end on the hour
     /// does not add the hour that begins there). Use
     /// <see cref="GetTopQueriesByCpuTierAsync"/> to also learn which tier answered.</para>
@@ -416,7 +419,7 @@ public sealed partial class ViewerDataService
             TimescaleSupport.QueryStatsHourlyView, "f", startUtc, RollupCoverage.StitchTier.Hourly);
         var sql = BuildTopQueriesHourlySql(fromClause);
 
-        var ranked = new List<(string Database, string QueryHash, long TotalExecutions, long TotalCpuUs, long TotalElapsedUs, long MinWorkerTime, long MaxWorkerTime)>();
+        var ranked = new List<(string Database, string QueryHash, long TotalExecutions, long TotalCpuUs, long TotalElapsedUs)>();
         await using (var command = _dataSource.CreateCommand(sql))
         {
             command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
@@ -431,9 +434,7 @@ public sealed partial class ViewerDataService
                     reader.IsDBNull(1) ? "" : reader.GetString(1),
                     reader.IsDBNull(2) ? 0 : reader.GetInt64(2),
                     reader.IsDBNull(3) ? 0 : reader.GetInt64(3),
-                    reader.IsDBNull(4) ? 0 : reader.GetInt64(4),
-                    reader.IsDBNull(5) ? 0 : reader.GetInt64(5),
-                    reader.IsDBNull(6) ? 0 : reader.GetInt64(6)));
+                    reader.IsDBNull(4) ? 0 : reader.GetInt64(4)));
             }
         }
 
@@ -462,8 +463,7 @@ public sealed partial class ViewerDataService
                 TotalExecutions = r.TotalExecutions,
                 TotalCpuUs = r.TotalCpuUs,
                 TotalElapsedUs = r.TotalElapsedUs,
-                MinCpuUs = r.MinWorkerTime,
-                MaxCpuUs = r.MaxWorkerTime,
+                /* #5329: MinCpuUs, MaxCpuUs, MinElapsedUs and MaxElapsedUs stay null here. */
                 QueryText = queryText,
                 /* #4231 stage 3: the rollup has no host_object_name column. */
                 HostObjectName = null,
@@ -484,9 +484,7 @@ public sealed partial class ViewerDataService
             query_hash,
             CAST(SUM(execution_count_sum) AS bigint) AS total_executions,
             CAST(SUM(worker_time_sum) AS bigint) AS total_cpu_us,
-            CAST(SUM(elapsed_time_sum) AS bigint) AS total_elapsed_us,
-            MIN(worker_time_min) AS min_worker_time,
-            MAX(worker_time_max) AS max_worker_time
+            CAST(SUM(elapsed_time_sum) AS bigint) AS total_elapsed_us
         FROM {fromClause}
         WHERE server_id = $1
         AND   bucket >= $2

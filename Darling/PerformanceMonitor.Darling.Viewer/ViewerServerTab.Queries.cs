@@ -191,7 +191,7 @@ public partial class ViewerServerTab
 
     /// <summary>#4231 stage 3: the Queries-tab grid header's hourly-routing disclosure — appended to the
     /// existing "Showing since" banner (#4278) rather than a new widget, per the lane's ruling.</summary>
-    private const string HourlyTierSuffix = " — aggregated hourly, per-caller detail unavailable";
+    private const string HourlyTierSuffix = " — aggregated hourly: per-caller detail, reads, writes, spills and min/max CPU and duration are not kept, so they show blank";
 
     private async Task LoadTopProceduresAsync(DateTime startUtc, DateTime endUtc)
     {
