@@ -1209,7 +1209,7 @@ public partial class ServerTab : UserControl
     {
         try
         {
-            var collectionHealthTask = Helpers.MethodProfiler.TimeAsync("CollectionHealth.Health", () => Task.Run(() => SafeQueryAsync(() => _dataService.GetCollectionHealthAsync(_serverId, allowMemo: true, cancellationToken: ct, memoLifetime: TimeSpan.FromSeconds(App.AutoRefreshIntervalSeconds)), ct)));
+            var collectionHealthTask = Helpers.MethodProfiler.TimeAsync("CollectionHealth.Health", () => Task.Run(() => SafeQueryAsync(() => _dataService.GetCollectionHealthAsync(_serverId, allowMemo: true, memoLifetime: TimeSpan.FromSeconds(App.AutoRefreshIntervalSeconds), cancellationToken: ct), ct)));
             var collectionLogTask = Helpers.MethodProfiler.TimeAsync("CollectionHealth.Log", () => Task.Run(() => SafeQueryAsync(() => _dataService.GetRecentCollectionLogAsync(_serverId, hoursBack, fromDate, toDate, cancellationToken: ct), ct)));
             /* #4989: the Duration Trends chart reads its own buckets over the whole range, beside the grid's read. The grid's
                page is the newest CollectionLogGridCap runs, a sliver of a long range, so the chart is not fed from it. */

@@ -465,7 +465,7 @@ ORDER BY h.collector_name";
     /// lock wait, open, execute (prepare and bind included) and row read times. A read a newer request cancelled logs one
     /// "cancelled after N ms (superseded)" line instead, and no <c>SLOW METHOD</c> block.</para>
     /// </summary>
-    public async Task<List<CollectorHealthRow>> GetCollectionHealthAsync(int serverId, bool allowMemo = false, CancellationToken cancellationToken = default, TimeSpan? memoLifetime = null)
+    public async Task<List<CollectorHealthRow>> GetCollectionHealthAsync(int serverId, bool allowMemo = false, TimeSpan? memoLifetime = null, CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
 

@@ -502,7 +502,7 @@ FROM range(1000000) a, range(1000000) b";
         var source = System.IO.File.ReadAllText(System.IO.Path.Combine(RepoRoot(), "Lite", "Controls", "ServerTab.Refresh.cs"));
 
         Assert.Contains("case 17: await RefreshCollectionHealthAsync(hoursBack, fromDate, toDate, ct); break;", source, StringComparison.Ordinal);
-        Assert.Contains("GetCollectionHealthAsync(_serverId, allowMemo: true, cancellationToken: ct, memoLifetime: TimeSpan.FromSeconds(App.AutoRefreshIntervalSeconds)), ct)", source, StringComparison.Ordinal);
+        Assert.Contains("GetCollectionHealthAsync(_serverId, allowMemo: true, memoLifetime: TimeSpan.FromSeconds(App.AutoRefreshIntervalSeconds), cancellationToken: ct), ct)", source, StringComparison.Ordinal);
         Assert.Contains("GetRecentCollectionLogAsync(_serverId, hoursBack, fromDate, toDate, cancellationToken: ct), ct)", source, StringComparison.Ordinal);
         Assert.Contains("GetCollectorDurationTrendAsync(_serverId, hoursBack, fromDate, toDate, cancellationToken: ct), ct)", source, StringComparison.Ordinal);
 

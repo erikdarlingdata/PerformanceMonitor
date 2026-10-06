@@ -1188,8 +1188,8 @@ VALUES ({_nextId++}, {Literal(collectedAtUtc)}, {ServerId}, '{ServerName}', {Lit
     public void SurfacesWithoutANotice_KeepTheShapeThatNeedsNone()
     {
         var health = File.ReadAllText(RepoFile("Lite", "Services", "LocalDataService.CollectionHealth.cs"));
-        Assert.Contains("public async Task<List<CollectorHealthRow>> GetCollectionHealthAsync(int serverId, bool allowMemo = false, CancellationToken cancellationToken = default, TimeSpan? memoLifetime = null)", health, StringComparison.Ordinal);
-        Assert.Contains("GetCollectionHealthAsync(_serverId, allowMemo: true, cancellationToken: ct, memoLifetime: TimeSpan.FromSeconds(App.AutoRefreshIntervalSeconds))", File.ReadAllText(ControlsFile("ServerTab.Refresh.cs")), StringComparison.Ordinal);
+        Assert.Contains("public async Task<List<CollectorHealthRow>> GetCollectionHealthAsync(int serverId, bool allowMemo = false, TimeSpan? memoLifetime = null, CancellationToken cancellationToken = default)", health, StringComparison.Ordinal);
+        Assert.Contains("GetCollectionHealthAsync(_serverId, allowMemo: true, memoLifetime: TimeSpan.FromSeconds(App.AutoRefreshIntervalSeconds), cancellationToken: ct)", File.ReadAllText(ControlsFile("ServerTab.Refresh.cs")), StringComparison.Ordinal);
 
         /* The Duration Trends chart is no longer pinned here: it reads its own buckets over the whole range, and the tests
            below (DurationTrends_*) say what it draws. */
