@@ -107,4 +107,15 @@ public sealed class FinOpsIndexAnalysisLimitBehaviourTests
         Assert.Equal(new[] { "3 recommendations." + Tail }, Notices(run.GetProperty("fits")));
         Assert.Equal(new[] { "500 recommendations." + Tail }, Notices(run.GetProperty("exact")));
     }
+
+    /* The Database box is shared with the Locking tab (#5244 L8c): a typed "alpha" is sent as the listed "Alpha" (PostgreSQL = is
+       case-sensitive); a name no list holds is sent as typed. RED before the lift: the raw draft was sent. */
+    [Fact]
+    public void ATypedNameThatDiffersOnlyByCase_IsSentInItsStoredSpelling()
+    {
+        var step = Run().GetProperty("storedSpelling");
+        Assert.Equal(new[] { "Alpha" }, step.GetProperty("typedLower").EnumerateArray().Select(e => e.GetString()!).ToArray());
+        Assert.Equal(new[] { "Gamma" }, step.GetProperty("typedUnknown").EnumerateArray().Select(e => e.GetString()!).ToArray());
+        Assert.Equal("Gamma", step.GetProperty("shown").GetString());
+    }
 }

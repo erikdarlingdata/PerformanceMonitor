@@ -90,7 +90,8 @@ public sealed class DarlingMcpObjectStatsToolsSurfaceAndSqlTests
     {
         var p = McpParams("get_object_locking");
 
-        Assert.Equal(new[] { "server_name", "limit" }, p.Select(x => x.Name).ToArray());
+        /* #5231 PR2: database_name is appended LAST (Lite's twin has it too), and optional like the others. */
+        Assert.Equal(new[] { "server_name", "limit", "database_name" }, p.Select(x => x.Name).ToArray());
         Assert.All(p, x => Assert.True(x.Optional, $"{x.Name} must stay optional — existing callers pass neither"));
     }
 
@@ -179,6 +180,23 @@ public sealed class DarlingMcpObjectStatsToolsSurfaceAndSqlTests
             sql,
             "the read is no longer anchored on the server's latest capture — #3878's immortal per-name groups are back");
         Assert.DoesNotContain("GROUP BY database_name", sql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #5372 L1: the locking list's ORDER BY ends in a total order, lock promotions and then the four-part name, as
+    /// <c>get_index_usage</c> does, so a filtered page capped at the limit is the same rows on every poll. The rows listed
+    /// only for a lock promotion all sum to 0 and tie, which is the case the tiebreaker is for. Lite's twin pins the same
+    /// order by running it (<c>TiedRows_AtTheCap_ComeBackInAFixedOrder</c>).
+    /// </summary>
+    [Fact]
+    public void IndexLockingSql_OrderEndsInATotalOrder_SoATiedCappedPageIsStable()
+    {
+        var sql = DarlingObjectStatsReader.IndexLockingSql;
+        var order = sql[sql.LastIndexOf("ORDER BY", StringComparison.Ordinal)..];
+        SqlTextPin.AssertExpresses(
+            "DESC, COALESCE(ios.index_lock_promotion_count, 0) DESC, ios.database_name, ios.schema_name, ios.table_name, ios.index_name NULLS LAST LIMIT $3",
+            order,
+            "the locking list's order has no tiebreaker: tied rows at the cap can change between two polls");
     }
 
     /// <summary>
