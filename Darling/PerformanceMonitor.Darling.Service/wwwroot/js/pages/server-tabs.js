@@ -39,7 +39,7 @@
  * touches innerHTML.
  */
 
-import { el, makeActivatable, readTool, readToolWithinKeptHistory, keptWindowStrip, windowFloorStrip, mount, truncate, loadingStrip, errorStrip, readErrorStrip, emptyStrip, disclosure, noticeStrip, getPath, fmtMs, fmtRate, localTime, parseUtc, windowFromHours, daysText, dbScopeChip, queryWaitFilter, setQueryWaitFilter, waitIsLinked } from "../util.js";
+import { el, makeActivatable, readTool, readToolWithinKeptHistory, keptWindowStrip, windowFloorStrip, mount, truncate, loadingStrip, errorStrip, readErrorStrip, emptyStrip, disclosure, noticeStrip, getPath, fmtMs, fmtRate, localTime, parseUtc, windowFromHours, daysText, dbScopeChip, getActiveDatabaseFilter, queryWaitFilter, setQueryWaitFilter, waitIsLinked } from "../util.js";
 import { renderPanel, setPanelSignal, getPanelSignal, VIZ } from "../panels.js";
 import { zoomableLineChart, chartZoomScope, SERIES_COLORS, CATEGORICAL_COLORS } from "../charts.js";
 import { multiPicker, mergeSeriesRows } from "../multi-picker.js";
@@ -47,7 +47,7 @@ import { pgPlanColumn } from "./pg-plan-viewer.js";
 import { READ_FIELDS } from "../read-fields.js";
 import { analysisFindingsTab } from "./analysis-findings.js";
 import { downloadText } from "../grid-tools.js";
-import { deadlockGraphCell } from "./deadlock-graph.js";
+import { deadlockGraphCell, processRowsInDatabases } from "./deadlock-graph.js";
 import { activePlanColumns, blockingPlanColumns, deadlockPlanColumn, planColumn, procedurePlanColumn, queryStorePlanColumn } from "./plan-viewer.js";
 import { queryStoreHistoryColumn } from "./query-store-history.js";
 
@@ -970,8 +970,8 @@ function pivot(rows, { xKey, seriesKey, valueKey }, maxSeries = 8) {
  * columnPicker).
  *
  * `dbScope` ("server", "unfiltered" or "process-rows") is the panel's own database-scope chip when it differs from its
- * read's class (#5245); null takes the read's class. Deadlock Graphs declares "unfiltered" here and moves to
- * "process-rows" when its process rows are filtered.
+ * read's class (#5245); null takes the read's class. Deadlock Graphs declares "process-rows" here (#5244): each graph stays whole
+ * and its process rows follow the database filter.
  * `control` (#5226) is a node drawn under the title, before the rows: the ranking selector on the Top Queries and Top Procedures cards.
  */
 function table(title, read, params, rowsKey, columns, subtitle, emptyText, span = 2, noteKey = null, moreNoteKeys = null, columnGroups = null, control = null, dbScope = null) {
@@ -1388,20 +1388,7 @@ export const SERVER_TABS = [
           emptyText: "No deadlocks in this window.",
         },
       ]),
-      table(
-        "Deadlock Graphs",
-        "get_deadlock_detail",
-        { server, hours: ctx.hours, limit: 5 },
-        "deadlocks",
-        deadlockXmlColumns(server),
-        ctx.label,
-        "No deadlock graph XML captured in this window.",
-        2,
-        null,
-        null,
-        null,
-        "unfiltered"
-      ),
+      deadlockGraphsPanel(server, ctx),
       table(
         "Blocked Process Reports",
         "get_blocked_process_xml",
@@ -3694,16 +3681,55 @@ function deadlockProcessKey(server, row) {
   return server + "\u0001" + (row.dedup_key || (row.collection_time || "") + "|" + (row.deadlock_time || ""));
 }
 
-/** The expandable per-process sub-grid for one deadlock row of get_deadlock_detail. */
-function deadlockProcessesCell(server, row) {
-  const rows = Array.isArray(row.processes) ? row.processes : [];
-  if (!rows.length) {
+/* The database filter as it applies to this panel, or null for none: the page's filter when it is the active server's and the
+   page is a server page (dbScopeChip's own rule, so the chip and the rows always agree). */
+function deadlockRowFilter(server) {
+  const filter = getActiveDatabaseFilter();
+  const hash = typeof location !== "undefined" && location && typeof location.hash === "string" ? location.hash : "";
+  return filter && filter.server === server && hash.startsWith("#/server/") ? filter : null;
+}
+
+/* One Deadlock Graphs panel's count of the process rows its database filter hid (#5244), per deadlock, so a grid that redraws
+   its cells (a sort) does not count one twice, and the notice line under the panel. */
+function deadlockRowScope() {
+  const hidden = new Map();
+  const note = el("div", { class: "deadlock-rows-note" });
+  const update = () => {
+    let total = 0;
+    for (const n of hidden.values()) total += n;
+    mount(
+      note,
+      total > 0
+        ? noticeStrip(
+            "The database filter hides " + total + (total === 1 ? " process row" : " process rows") + " outside the chosen databases. Each graph is whole."
+          )
+        : null
+    );
+  };
+  return {
+    note,
+    set(key, count) {
+      hidden.set(key, count);
+      update();
+    },
+  };
+}
+
+/** The expandable per-process sub-grid for one deadlock row of get_deadlock_detail. While the page's database filter is active
+ *  only the rows of the chosen databases are listed (#5244); `scope` takes the count of those it hid. */
+function deadlockProcessesCell(server, row, scope = null) {
+  const all = Array.isArray(row.processes) ? row.processes : [];
+  if (!all.length) {
     /* The shared page row budget can cut every row of a deadlock; say so and how to get them, rather than a bare dash. */
     const cut = Number(row.processes_truncated) || 0;
     if (cut <= 0) return document.createTextNode("—");
     return document.createTextNode(cut + (cut === 1 ? " process" : " processes") + " not sent (page row limit); pick Custom… in the time range and narrow it to this deadlock to see them");
   }
   const key = deadlockProcessKey(server, row);
+  const filter = deadlockRowFilter(server);
+  const rows = filter ? processRowsInDatabases(all, filter.databases) : all;
+  if (scope) scope.set(key, all.length - rows.length);
+  if (!rows.length) return document.createTextNode(all.length + (all.length === 1 ? " process" : " processes") + " hidden by the database filter");
   const more = row.processes_truncated > 0 ? " (+" + row.processes_truncated + " more in the graph)" : "";
   const node = disclosure(rows.length + (rows.length === 1 ? " process" : " processes") + more, [
     VIZ.table({ processes: rows }, { id: "deadlock-processes", rowsKey: "processes", columns: DEADLOCK_PROCESS_COLUMNS }),
@@ -3716,7 +3742,30 @@ function deadlockProcessesCell(server, row) {
   return node;
 }
 
-function deadlockXmlColumns(server) {
+/* The Deadlock Graphs panel: each graph is whole, its process rows follow the database filter, and one notice line under the
+   panel says so when the filter hid any (#5244). Its chip is "process-rows". */
+function deadlockGraphsPanel(server, ctx) {
+  const scope = deadlockRowScope();
+  const panel = table(
+    "Deadlock Graphs",
+    "get_deadlock_detail",
+    { server, hours: ctx.hours, limit: 5 },
+    "deadlocks",
+    deadlockXmlColumns(server, scope),
+    ctx.label,
+    "No deadlock graph XML captured in this window.",
+    2,
+    null,
+    null,
+    null,
+    null,
+    "process-rows"
+  );
+  panel.appendChild(scope.note);
+  return panel;
+}
+
+function deadlockXmlColumns(server, scope = null) {
   return [
     { key: "deadlock_time", label: "Deadlock Time", format: "time" },
     { key: "victim_process_id", label: "Victim" },
@@ -3729,7 +3778,7 @@ function deadlockXmlColumns(server) {
         saveXmlButton(r.deadlock_graph_xml, "deadlock_" + fileStamp(r.deadlock_time) + ".xdl", "application/xml;charset=utf-8", r.deadlock_graph_xml_truncated === true),
     },
     { key: "graph", label: "Graph", sortable: false, csv: false, filter: false, copy: false, render: (r) => deadlockGraphCell(server, r) },
-    { key: "processes", label: "Processes", sortable: false, render: (r) => deadlockProcessesCell(server, r) },
+    { key: "processes", label: "Processes", sortable: false, render: (r) => deadlockProcessesCell(server, r, scope) },
     { key: "deadlock_graph_xml", label: "Deadlock graph", render: (r) => xmlDisclosure(r.deadlock_graph_xml) },
   ];
 }
