@@ -828,7 +828,8 @@ public partial class FinOpsTab : UserControl
 
         try
         {
-            var data = await Task.Run(() => _dataService.GetStorageGrowthAsync(serverId));
+            var storageGrowthFilter = SelectedDatabaseFilter();   // #5312: UI thread, before the read goes to the pool
+            var data = await Task.Run(() => _dataService.GetStorageGrowthAsync(serverId, storageGrowthFilter));
             if (_loads.Superseded(nameof(LoadStorageGrowthAsync), gen)) return;
             _storageGrowthFilterMgr!.UpdateData(data);
             _storageGrowthNeedReload = data.Count == 0;

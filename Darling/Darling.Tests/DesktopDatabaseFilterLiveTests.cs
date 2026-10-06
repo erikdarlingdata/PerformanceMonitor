@@ -66,8 +66,12 @@ public sealed class DesktopDatabaseFilterLiveTests
                 await InsertIndexRowAsync(connection, ct, t, db, "Orders_" + db, rowLockWaitMs: 50_000);
             }
 
+            /* A row whose database name is NULL: kept with no filter (read as ""), never matched by a filter, like the MCP reader. */
+            await InsertIndexRowAsync(connection, ct, t, null, "Orders_NullDb", rowLockWaitMs: 50_000);
+
             var all = await viewer.GetIndexLockingAsync(ServerId, 200, null, cancellationToken: ct);
-            Assert.Equal(new[] { DbA, DbB, DbC }, all.Select(r => r.DatabaseName).Order().ToArray());
+            Assert.Equal(new[] { "", DbA, DbB, DbC }, all.Select(r => r.DatabaseName).Order(StringComparer.Ordinal).ToArray());
+            Assert.Equal(4, (await DarlingObjectStatsReader.GetIndexLockingAsync(postgres, ServerId, 200, DatabaseFilter.All, ct)).Count);
 
             /* The same rows as the MCP reader for the same set. */
             var ab = await viewer.GetIndexLockingAsync(ServerId, 200, null, AB, ct);
@@ -86,6 +90,57 @@ public sealed class DesktopDatabaseFilterLiveTests
             Assert.Equal(new[] { DbA }, boxInside.Select(r => r.DatabaseName).Distinct().ToArray());
             Assert.Empty(await viewer.GetIndexLockingAsync(ServerId, 200, DbC, AB, ct));
             Assert.Single(await viewer.GetIndexLockingAsync(ServerId, 200, DbC, null, ct));
+
+            /* The optimized-locking note reads only the chosen databases (OptimizedLockingFlagsSql, $2). A is off, B is on, and the NULL
+               database is on: [A] must say nothing, [B] must say it, and no filter must say it (B and the NULL row are in the read). */
+            await InsertConfigAsync(connection, ct, t, DbA, optimizedLocking: false);
+            await InsertConfigAsync(connection, ct, t, DbB, optimizedLocking: true);
+            await InsertConfigAsync(connection, ct, t, null, optimizedLocking: true);
+            Assert.Null(await viewer.GetOptimizedLockingNoteAsync(ServerId, new[] { DbA }, ct));
+            Assert.NotNull(await viewer.GetOptimizedLockingNoteAsync(ServerId, new[] { DbB }, ct));
+            Assert.NotNull(await viewer.GetOptimizedLockingNoteAsync(ServerId, new[] { DbA, DbB }, ct));
+            Assert.NotNull(await viewer.GetOptimizedLockingNoteAsync(ServerId, cancellationToken: ct));
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) => await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
+    [Fact]
+    public async Task IndexLocking_TiedRows_TheCapPicksTheSameRowsAsTheMcpReader_InTheSameOrder()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), SkipReason);
+        var ct = TestContext.Current.CancellationToken;
+        await using var postgres = NpgsqlDataSource.Create(cs!);
+        await using var viewer = new ViewerDataService(cs!);
+        var bodySucceeded = false;
+        try
+        {
+            using var connection = await SeedAsync(cs!, ct);
+            var t = Naive(DateTime.UtcNow.AddMinutes(-2));
+            /* Every row ties on the wait sum and the promotion count. Inserted in the reverse of the tie-break order (C, B, A, then a NULL
+               database, which sorts last), so a statement with no tie-break would hand the cap whatever the heap held first. */
+            foreach (var db in new[] { DbC, DbB, DbA })
+            {
+                await InsertIndexRowAsync(connection, ct, t, db, "Orders_" + db, rowLockWaitMs: 50_000);
+            }
+
+            await InsertIndexRowAsync(connection, ct, t, null, "Orders_NullDb", rowLockWaitMs: 50_000);
+
+            var viewerTop = await viewer.GetIndexLockingAsync(ServerId, 2, null, cancellationToken: ct);
+            var mcpTop = await DarlingObjectStatsReader.GetIndexLockingAsync(postgres, ServerId, 2, DatabaseFilter.All, ct);
+            Assert.Equal(new[] { DbA, DbB }, viewerTop.Select(r => r.DatabaseName).ToArray());
+            Assert.Equal(
+                mcpTop.Select(r => (r.DatabaseName, r.TableName)).ToArray(),
+                viewerTop.Select(r => (r.DatabaseName, r.TableName)).ToArray());
+
+            /* The same cap under a filter: [B, C] has two rows and a cap of one keeps B. */
+            var filtered = await viewer.GetIndexLockingAsync(ServerId, 1, null, new[] { DbB, DbC }, ct);
+            Assert.Equal(new[] { DbB }, filtered.Select(r => r.DatabaseName).ToArray());
 
             bodySucceeded = true;
         }
@@ -252,12 +307,17 @@ public sealed class DesktopDatabaseFilterLiveTests
         return connection;
     }
 
-    private static Task InsertIndexRowAsync(NpgsqlConnection connection, CancellationToken ct, DateTime t, string db, string table, long rowLockWaitMs) =>
+    private static Task InsertIndexRowAsync(NpgsqlConnection connection, CancellationToken ct, DateTime t, string? db, string table, long rowLockWaitMs) =>
         DarlingMcpTestData.ExecAsync(connection, ct,
             @"INSERT INTO index_object_stats (collection_id, collection_time, server_id, server_name, database_name, schema_name, object_id, table_name, index_id, index_name, index_type_desc, reserved_mb, used_mb, total_rows, row_lock_wait_count, row_lock_wait_in_ms, page_lock_wait_count, page_lock_wait_in_ms, index_lock_promotion_count, page_latch_wait_in_ms, page_io_latch_wait_in_ms)
 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)",
             CollectionIdGenerator.Next(), t, ServerId, ServerName, db, "dbo", 100, table, 1,
             "PK_" + table, "CLUSTERED", 90m, 85m, 500_000L, 80L, rowLockWaitMs, 5L, 60L, 2L, 30L, 10L);
+
+    private static Task InsertConfigAsync(NpgsqlConnection connection, CancellationToken ct, DateTime t, string? db, bool optimizedLocking) =>
+        DarlingMcpTestData.ExecAsync(connection, ct,
+            "INSERT INTO database_config (config_id, capture_time, server_id, server_name, database_name, is_optimized_locking_on) VALUES ($1,$2,$3,$4,$5,$6)",
+            CollectionIdGenerator.Next(), Naive(t), ServerId, ServerName, db, optimizedLocking);
 
     private static Task InsertFileIoAsync(NpgsqlConnection connection, CancellationToken ct, DateTime t, string db, string file, long reads) =>
         DarlingMcpTestData.ExecAsync(connection, ct,
@@ -281,7 +341,7 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)",
     {
         using var cleanup = new NpgsqlCommand(
             $"DELETE FROM index_object_stats WHERE server_id = {ServerId}; DELETE FROM file_io_stats WHERE server_id = {ServerId}; "
-            + $"DELETE FROM database_size_stats WHERE server_id = {ServerId}; DELETE FROM pvs_stats WHERE server_id = {ServerId}; "
+            + $"DELETE FROM database_size_stats WHERE server_id = {ServerId}; DELETE FROM pvs_stats WHERE server_id = {ServerId}; DELETE FROM database_config WHERE server_id = {ServerId}; "
             + $"DELETE FROM servers WHERE server_id = {ServerId};",
             connection);
         await cleanup.ExecuteNonQueryAsync(ct);
@@ -351,6 +411,13 @@ public sealed class DesktopDatabaseFilterSourcePinTests
         Assert.Contains("$4::text[] " + P + " database_name = ANY($4)", ViewerDataService.DatabaseSizeSummarySql, StringComparison.Ordinal);
         Assert.Contains("$2::text[] " + P + " database_name = ANY($2)", ViewerDataService.PvsStatsLatestSql, StringComparison.Ordinal);
         Assert.Contains("$3::text[] " + P + " database_name = ANY($3)", ViewerDataService.PvsTrendSql, StringComparison.Ordinal);
+        /* Locking: the order ends in the total-order tie-break Lite and the MCP reader use (#5372), so the 200-row cap picks the same rows. */
+        foreach (var sql in new[] { ViewerDataService.IndexLockingAllSql, ViewerDataService.IndexLockingByDbSql })
+        {
+            Assert.Contains("COALESCE(ios.index_lock_promotion_count, 0) DESC,", sql, StringComparison.Ordinal);
+            Assert.Contains("ios.database_name, ios.schema_name, ios.table_name, ios.index_name NULLS LAST", sql, StringComparison.Ordinal);
+        }
+
         /* File I/O: the filter sits inside top_files, before the LIMIT, so the ten busiest files are the chosen databases' ten. */
         foreach (var sql in new[] { ViewerDataService.FileIoLatencyTrendSql, ViewerDataService.FileIoThroughputTrendSql })
         {

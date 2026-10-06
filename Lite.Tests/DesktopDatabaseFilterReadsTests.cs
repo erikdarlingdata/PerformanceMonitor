@@ -118,7 +118,24 @@ public sealed class DesktopDatabaseFilterReadsTests : IClassFixture<SharedDuckDb
 
         Assert.Equal(plain.Count, none.Count);
         Assert.Equal(plain.Count, empty.Count);
-        Assert.Equal(LocalDataService.FileIoLatencyTrendSql, LocalDataService.FileIoLatencyTrendSqlFor(""));
+
+        /* The empty clause is the statement as it read before #5312: the top-files CTE below is a literal copy of the old text, so this
+           fails if the empty clause ever leaves residue in the ranking. (FileIoLatencyTrendSql is defined as SqlFor(""), so comparing
+           the two proves nothing.) */
+        const string oldTopFiles = @"
+WITH top_files AS (
+    SELECT database_name, file_name
+    FROM v_file_io_stats
+    WHERE server_id = $1
+    AND   collection_time >= $2
+    AND   collection_time <= $3
+    AND   (delta_reads > 0 OR delta_writes > 0)
+    GROUP BY database_name, file_name
+    ORDER BY SUM(delta_reads + delta_writes) DESC
+    LIMIT 10
+),";
+        Assert.StartsWith(oldTopFiles.Replace("\r\n", "\n"), LocalDataService.FileIoLatencyTrendSql.Replace("\r\n", "\n"), StringComparison.Ordinal);
+        Assert.NotEqual(LocalDataService.FileIoLatencyTrendSql, LocalDataService.FileIoLatencyTrendSqlFor(" AND database_name IN ($5)"));
     }
 
     [Fact]
@@ -199,6 +216,28 @@ public sealed class DesktopDatabaseFilterReadsTests : IClassFixture<SharedDuckDb
 
         var none = await _service.GetDatabaseSizeSummaryAsync(ServerId, 10, new List<string>());
         Assert.Equal(3, none.Count);
+    }
+
+    /* ───────────────────────── Storage Growth ───────────────────────── */
+
+    [Fact]
+    public async Task StorageGrowth_FilterReturnsOnlyTheChosenDatabases_ByExactName()
+    {
+        await SeedSizeAsync("DbA", 5, 100);
+        await SeedSizeAsync("DbB", 5, 200);
+        await SeedSizeAsync("DbC", 5, 300);
+
+        var all = await _service.GetStorageGrowthAsync(ServerId);
+        Assert.Equal(new[] { "DbA", "DbB", "DbC" }, all.Select(r => r.DatabaseName).Order(StringComparer.Ordinal).ToArray());
+
+        Assert.Equal(new[] { "DbA", "DbB" }, (await _service.GetStorageGrowthAsync(ServerId, AAndB)).Select(r => r.DatabaseName).Order(StringComparer.Ordinal).ToArray());
+
+        /* No filter: null and an empty list both read everything. */
+        Assert.Equal(all.Count, (await _service.GetStorageGrowthAsync(ServerId, null)).Count);
+        Assert.Equal(all.Count, (await _service.GetStorageGrowthAsync(ServerId, new List<string>())).Count);
+
+        /* A name that differs only in case matches nothing. (Lite's size tables are NOT NULL on database_name, so no NULL row can exist here.) */
+        Assert.Empty(await _service.GetStorageGrowthAsync(ServerId, new[] { "dba" }));
     }
 
     /* ───────────────────────── Persistent version store ───────────────────────── */
@@ -365,6 +404,14 @@ public sealed class DesktopDatabaseFilterReadsTests : IClassFixture<SharedDuckDb
         Assert.Contains("GetIndexLockingDatabasesAsync(serverId, lockingFilter)", locking, StringComparison.Ordinal);
         Assert.Contains("GetIndexLockingAsync(serverId, 200, db, lockingFilter)", locking, StringComparison.Ordinal);
         Assert.Contains("GetOptimizedLockingNoteAsync(serverId, db, lockingFilter)", locking, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void FinOpsTab_PassesTheSavedFilterIntoTheStorageGrowthRead()
+    {
+        var tab = Source("Lite", "Controls", "FinOpsTab.xaml.cs");
+        Assert.Contains("var storageGrowthFilter = SelectedDatabaseFilter();", tab, StringComparison.Ordinal);
+        Assert.Contains("GetStorageGrowthAsync(serverId, storageGrowthFilter)", tab, StringComparison.Ordinal);
     }
 
     [Fact]

@@ -54,7 +54,8 @@ public sealed partial class ViewerDataService
 {
     /// <summary>Top-N indexes by lock+latch wait across ALL databases, at the SERVER's latest capture (#3878 —
     /// see the file header for why this is not per-database latest). $1 server_id, $2 topN, $3 the saved database filter (a text[],
-    /// NULL = every database; #5312, the web's get_object_locking predicate).</summary>
+    /// NULL = every database; #5312, the web's get_object_locking predicate). The ORDER BY ends in the same total-order tie-break
+    /// columns as Lite and the MCP reader (#5372), so the topN cap picks the same rows when the wait sums tie.</summary>
     public const string IndexLockingAllSql = @"
 SELECT
     ios.database_name,
@@ -88,7 +89,9 @@ AND (
 )
 ORDER BY
     COALESCE(ios.row_lock_wait_in_ms, 0) + COALESCE(ios.page_lock_wait_in_ms, 0)
-    + COALESCE(ios.page_latch_wait_in_ms, 0) + COALESCE(ios.page_io_latch_wait_in_ms, 0) DESC
+    + COALESCE(ios.page_latch_wait_in_ms, 0) + COALESCE(ios.page_io_latch_wait_in_ms, 0) DESC,
+    COALESCE(ios.index_lock_promotion_count, 0) DESC,
+    ios.database_name, ios.schema_name, ios.table_name, ios.index_name NULLS LAST
 LIMIT $2";
 
     /// <summary>Top-N indexes by lock+latch wait for ONE database, at the SERVER's latest capture — the same
@@ -128,7 +131,9 @@ AND (
 )
 ORDER BY
     COALESCE(ios.row_lock_wait_in_ms, 0) + COALESCE(ios.page_lock_wait_in_ms, 0)
-    + COALESCE(ios.page_latch_wait_in_ms, 0) + COALESCE(ios.page_io_latch_wait_in_ms, 0) DESC
+    + COALESCE(ios.page_latch_wait_in_ms, 0) + COALESCE(ios.page_io_latch_wait_in_ms, 0) DESC,
+    COALESCE(ios.index_lock_promotion_count, 0) DESC,
+    ios.database_name, ios.schema_name, ios.table_name, ios.index_name NULLS LAST
 LIMIT $3";
 
     public async Task<List<IndexLockingRow>> GetIndexLockingAsync(int serverId, int topN = 200, string? databaseName = null, IReadOnlyList<string>? databaseNames = null, CancellationToken cancellationToken = default)
