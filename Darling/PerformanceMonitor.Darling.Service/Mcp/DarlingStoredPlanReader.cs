@@ -148,6 +148,119 @@ internal static class DarlingStoredPlanReader
         """;
 
     /// <summary>
+    /// The plan the BLOCKED process of one blocked-process report ran under (#5236), by the report's own key as
+    /// get_blocking lists it: (server, event_time, both spids, both ecids). The plan is the V7 inline text column the
+    /// collector stamps with the report, best-effort (a plan that had left the cache by then is NULL), and no plan
+    /// dimension or backlog is involved. The presence predicate is <c>IS NOT NULL AND &lt;&gt; ''</c> on purpose and
+    /// is the SAME predicate the list's <c>has_blocked_plan</c> flag uses, so a flagged row can never answer "no plan".
+    /// <para>
+    /// No key makes the report unique, so the same event can be stored as more than one copy, and only some copies carry
+    /// a plan. This takes the EARLIEST copy that has one, ties broken by <c>blocked_report_id</c>: the collector resolves
+    /// the plan from the live plan cache when it collects the report, so the copy collected nearest the event is the
+    /// one whose plan was most likely still cached. It is not <c>DESC</c>. $7 is the
+    /// <see cref="EventWindowFloor"/> for the event_time, a partition-column bound with no upper limit, so a
+    /// late-collected report is still found while the chunks older than the event are never opened.
+    /// </para>
+    /// <para>
+    /// The answer is per EVENT, while the list's presence flag is per stored copy. Two copies of one event can carry
+    /// different plans (a recompile between the two collections), and then both rows show a button and both open the
+    /// earlier copy's plan, where the desktop viewer shows each row its own copy's plan. The web page gives those rows
+    /// one panel key, so opening one opens both. That is accepted: the earlier copy is the one whose plan was most likely
+    /// still cached when the event ran, and nothing here tells the two copies apart.
+    /// </para>
+    /// <para>
+    /// An Azure master target collects several databases under one server_id, and each database numbers its own
+    /// sessions, so two databases' reports can share every other part of the key. The optional $8 narrows the read to the
+    /// row's own database, in the same NULL-or-equal form as the other optional database filters in this class; a caller
+    /// that sends none gets the answer it got before the filter existed.
+    /// </para>
+    /// $1 server_id, $2 event_time (naive UTC, microsecond-exact), $3 blocked_spid, $4 blocked_ecid, $5 blocking_spid,
+    /// $6 blocking_ecid, $7 collection_time floor, $8 database_name (NULL = no database filter). Byte-equal to
+    /// <see cref="BlockingPlanSql"/> except for the column.
+    /// </summary>
+    public const string BlockedPlanSql = """
+        SELECT blocked_query_plan_xml
+        FROM blocked_process_reports
+        WHERE server_id = $1
+        AND   event_time = $2
+        AND   blocked_spid = $3
+        AND   blocked_ecid = $4
+        AND   blocking_spid = $5
+        AND   blocking_ecid = $6
+        AND   collection_time >= $7
+        AND   ($8::text IS NULL OR database_name = $8)
+        AND   blocked_query_plan_xml IS NOT NULL
+        AND   blocked_query_plan_xml <> ''
+        ORDER BY collection_time, blocked_report_id
+        LIMIT 1
+        """;
+
+    /// <summary>The BLOCKING process's plan for the same report key: <see cref="BlockedPlanSql"/> over
+    /// <c>blocking_query_plan_xml</c> (a test pins that the two differ only in the column).</summary>
+    public const string BlockingPlanSql = """
+        SELECT blocking_query_plan_xml
+        FROM blocked_process_reports
+        WHERE server_id = $1
+        AND   event_time = $2
+        AND   blocked_spid = $3
+        AND   blocked_ecid = $4
+        AND   blocking_spid = $5
+        AND   blocking_ecid = $6
+        AND   collection_time >= $7
+        AND   ($8::text IS NULL OR database_name = $8)
+        AND   blocking_query_plan_xml IS NOT NULL
+        AND   blocking_query_plan_xml <> ''
+        ORDER BY collection_time, blocked_report_id
+        LIMIT 1
+        """;
+
+    /// <summary>
+    /// The victim's plan for one deadlock (#5236), by the row's own (collection_time, deadlock_time) as get_deadlocks
+    /// lists them. That pair is NOT unique (no key enforces it, and one monitor pass can report two deadlocks whose
+    /// stamps are equal to the millisecond), so the optional <c>victim_process_id</c> narrows it to the one the row
+    /// names, and the optional <c>database_name</c> to the row's own database (the same reason, and the same
+    /// NULL-or-equal form, as <see cref="BlockedPlanSql"/>'s $8). The presence predicate matches the list's
+    /// <c>has_victim_plan</c> flag (see <see cref="BlockedPlanSql"/>). A NULL deadlock_time never lists, so it is never
+    /// asked for here.
+    /// <para>
+    /// One row, two columns. <c>victim_plan_xml</c> is the plan of the lowest <c>deadlock_id</c> among the matching
+    /// deadlocks that captured one (NULL when none did). <c>victim_count</c> counts the distinct victims among ALL the
+    /// matching deadlocks, whether or not each captured a plan, so a twin that captured nothing still shows. When no
+    /// victim is sent and the count is above one, the stamps do not say which deadlock was meant, and the plan of the
+    /// wrong deadlock is worse than none, so <see cref="GetDeadlockVictimPlanXmlAsync"/> reports the read as ambiguous
+    /// and takes none. Copies of one deadlock name the same victim (count 1), and the lowest <c>deadlock_id</c> that
+    /// captured a plan answers; a copy without one never turns that into "not captured".
+    /// </para>
+    /// $1 server_id, $2 collection_time, $3 deadlock_time (both naive UTC, microsecond-exact), $4 victim_process_id
+    /// (NULL = no victim filter), $5 database_name (NULL = no database filter).
+    /// </summary>
+    public const string DeadlockVictimPlanSql = """
+        WITH twins AS
+        (
+            SELECT deadlock_id, victim_process_id, victim_query_plan_xml
+            FROM deadlocks
+            WHERE server_id = $1
+            AND   collection_time = $2
+            AND   deadlock_time = $3
+            AND   ($4::text IS NULL OR victim_process_id = $4)
+            AND   ($5::text IS NULL OR database_name = $5)
+        )
+        SELECT
+            (
+                SELECT victim_query_plan_xml
+                FROM twins
+                WHERE victim_query_plan_xml IS NOT NULL
+                AND   victim_query_plan_xml <> ''
+                ORDER BY deadlock_id
+                LIMIT 1
+            ) AS victim_plan_xml,
+            (
+                SELECT count(DISTINCT coalesce(victim_process_id, ''))
+                FROM twins
+            ) AS victim_count
+        """;
+
+    /// <summary>
     /// The Query Store plan for ONE plan_id as it is stored since #2210: the fact rows carry no plan text (the
     /// collector ships a NULL placeholder), and a plan lives ONCE in <c>query_plan_dim</c>, reached through
     /// <c>collect.query_store_plan_map</c> on its primary key (server_id, database_name, plan_id). Two index
@@ -443,6 +556,65 @@ internal static class DarlingStoredPlanReader
     }
 
     /// <summary>
+    /// The stored plan of one side of one blocked-process report (<see cref="BlockedPlanSql"/> /
+    /// <see cref="BlockingPlanSql"/>), or null when no copy of that report carries a plan for that side.
+    /// <paramref name="eventTimeUtc"/> must be the row's event_time exactly — naive UTC, with the microseconds the
+    /// store keeps — and is relabelled <c>Unspecified</c> by the binder so it is a <c>timestamp</c> and not a
+    /// <c>timestamptz</c> (the #1969 trap). The ecids and spids are the row's own: both sides of the key, whichever
+    /// plan is asked for. A null or empty <paramref name="databaseName"/> adds no database filter.
+    /// </summary>
+    public static async Task<string?> GetBlockingPlanXmlAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime eventTimeUtc, int blockedSpid, int blockedEcid,
+        int blockingSpid, int blockingEcid, bool blockingSide, string? databaseName = null, CancellationToken cancellationToken = default)
+    {
+        await using var command = postgres.CreateCommand(blockingSide ? BlockingPlanSql : BlockedPlanSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        DarlingMcpReadParameters.AddInt(command, serverId);
+        DarlingMcpReadParameters.AddTimestamp(command, eventTimeUtc);
+        DarlingMcpReadParameters.AddInt(command, blockedSpid);
+        DarlingMcpReadParameters.AddInt(command, blockedEcid);
+        DarlingMcpReadParameters.AddInt(command, blockingSpid);
+        DarlingMcpReadParameters.AddInt(command, blockingEcid);
+        DarlingMcpReadParameters.AddTimestamp(command, EventWindowFloor.For(eventTimeUtc));
+        DarlingMcpReadParameters.AddNullableText(command, string.IsNullOrEmpty(databaseName) ? null : databaseName);
+        var result = await command.ExecuteScalarAsync(cancellationToken);
+        return result is string s ? s : null;
+    }
+
+    /// <summary>
+    /// The stored victim plan of one deadlock (<see cref="DeadlockVictimPlanSql"/>), with a null plan when that deadlock
+    /// captured none, or <see cref="DeadlockVictimPlanRead.Ambiguous"/> when no victim was named and the deadlocks the
+    /// stamps match name more than one victim. Both times are the row's own, exactly: naive UTC with the store's
+    /// microseconds. A null or empty <paramref name="victimProcessId"/> adds no victim filter, and a null or empty
+    /// <paramref name="databaseName"/> no database filter.
+    /// </summary>
+    public static async Task<DeadlockVictimPlanRead> GetDeadlockVictimPlanXmlAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime collectionTimeUtc, DateTime deadlockTimeUtc, string? victimProcessId,
+        string? databaseName = null, CancellationToken cancellationToken = default)
+    {
+        await using var command = postgres.CreateCommand(DeadlockVictimPlanSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        DarlingMcpReadParameters.AddInt(command, serverId);
+        DarlingMcpReadParameters.AddTimestamp(command, collectionTimeUtc);
+        DarlingMcpReadParameters.AddTimestamp(command, deadlockTimeUtc);
+        DarlingMcpReadParameters.AddNullableText(command, string.IsNullOrEmpty(victimProcessId) ? null : victimProcessId);
+        DarlingMcpReadParameters.AddNullableText(command, string.IsNullOrEmpty(databaseName) ? null : databaseName);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken))
+        {
+            return new DeadlockVictimPlanRead(null, false);
+        }
+
+        var plan = reader.IsDBNull(0) ? null : reader.GetString(0);
+        var victims = reader.GetInt64(1);
+        /* Two or more distinct victims are only reachable when no victim was sent (a sent victim is in the WHERE), and they
+           are deadlocks the stamps cannot tell apart, so neither plan is taken, whether or not each captured one. */
+        return victims > 1
+            ? new DeadlockVictimPlanRead(null, true)
+            : new DeadlockVictimPlanRead(plan, false);
+    }
+
+    /// <summary>
     /// Executes a one-column backlog read (#3392). Plain text, never gzip: the backlog holds the content the
     /// sweep fetched, and it does not route through the plan dimension — a capped row produced no dim row to
     /// compress into.
@@ -473,3 +645,8 @@ internal static class DarlingStoredPlanReader
 
 /// <summary>A Query Store plan and the plan_id it was stored under.</summary>
 internal sealed record QueryStorePlanRead(string PlanXml, long PlanId);
+
+/// <summary>The victim-plan read's answer (#5236): the plan, or null when no deadlock the key matches captured one.
+/// <see cref="Ambiguous"/> is true, with no plan, when no victim was named and the deadlocks that share both stamps name
+/// more than one victim (whether or not each captured a plan), so the stamps do not say which one was meant.</summary>
+internal sealed record DeadlockVictimPlanRead(string? PlanXml, bool Ambiguous);

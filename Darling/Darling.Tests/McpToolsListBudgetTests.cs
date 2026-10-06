@@ -227,7 +227,15 @@ public sealed class McpToolsListBudgetTests
     // get_active_queries gains its wait_type parameter (#5235, a 190-character description; the served head is unchanged). Constant set to the
     // value McpToolsListBudgetTests itself measured on this tree: +227 bytes. Merged with dev's #5234 (the per-plan Query Store history tool), as
     // the test measured the merged tree: 192,050, against dev's previous ceiling of 191,814.
-    private const int TotalCeilingBytes = 192_050;
+    /* #5236: get_blocking_plan_xml and get_deadlock_plan_xml (the Blocking and Deadlocks grids' plan reads), measured on this tree:
+       191,056 -> 192,755 (+1,699), 177 -> 179 tools. Each head is under 160 characters. */
+    /* #5236 (the plan reads' optional database_name, so two databases under one server_id each read their own plan): both reads gain one
+       parameter with a 52-byte description (108 bytes each with its schema entry), measured on this tree: 192,755 -> 192,971 (+216), 179 tools. */
+    /* #5236 merged with dev d27eb46f7 (#5299 order_by, #5300 get_query_store_query_history growth): re-measured on the merged tree: 193,738 bytes,
+       180 tools (dev's own 178 plus the two plan reads). Constant set to the measured value, not the deltas added by hand. */
+    /* #5236 (merge with dev f82222c73, which carries #5235's get_active_queries wait_type): re-measured on the merged tree: 193,975 bytes, 180 tools.
+       Dev's ceiling was 192,050 and this PR's own was 193,738, so neither side's number was taken. Constant set to the measured value, not the deltas added by hand. */
+    private const int TotalCeilingBytes = 193_975;
 
 
 

@@ -444,6 +444,134 @@ public sealed class DarlingMcpBlockingToolsSurfaceAndSqlTests
         foreach (var tool in BlockingToolSurface)
             Assert.Empty(DarlingMcpSchemaAssert.RequiredOf(tools[tool]));
     }
+
+    /// <summary>
+    /// #5236 W6: a list flag and the point read it feeds test presence with the SAME predicate, <c>IS NOT NULL AND &lt;&gt; ''</c>
+    /// (the house pattern the report-XML read uses). A flag that tested only <c>IS NOT NULL</c> would draw a button for an
+    /// empty-string plan, and the read behind it would answer "unavailable". The flags live in the two page-keyed flag statements.
+    /// </summary>
+    [Fact]
+    public void TheListFlags_UseThePointReadsPresencePredicate()
+    {
+        var flagReads = new (string Sql, string Column)[]
+        {
+            (DarlingBlockingReader.BlockedPlanFlagsSql, "blocked_query_plan_xml"),
+            (DarlingBlockingReader.BlockedPlanFlagsSql, "blocking_query_plan_xml"),
+            (DarlingBlockingReader.DeadlockVictimPlanFlagsSql, "victim_query_plan_xml"),
+        };
+        foreach (var (sql, column) in flagReads)
+        {
+            Assert.Contains($"({column} IS NOT NULL AND {column} <> '')", sql, StringComparison.Ordinal);
+        }
+
+        var pointReads = new (string Sql, string Column)[]
+        {
+            (DarlingStoredPlanReader.BlockedPlanSql, "blocked_query_plan_xml"),
+            (DarlingStoredPlanReader.BlockingPlanSql, "blocking_query_plan_xml"),
+        };
+        foreach (var (sql, column) in pointReads)
+        {
+            Assert.Contains($"AND   {column} IS NOT NULL", sql, StringComparison.Ordinal);
+            Assert.Contains($"AND   {column} <> ''", sql, StringComparison.Ordinal);
+        }
+
+        /* The victim read applies the same predicate inside its plan subquery (the first predicate of that WHERE). */
+        Assert.Contains("WHERE victim_query_plan_xml IS NOT NULL", DarlingStoredPlanReader.DeadlockVictimPlanSql, StringComparison.Ordinal);
+        Assert.Contains("AND   victim_query_plan_xml <> ''", DarlingStoredPlanReader.DeadlockVictimPlanSql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #5236: no list statement, and neither of the two variants that page over XML or graphs, names a plan column. In a
+    /// compressed TimescaleDB chunk every named column is decompressed for each batch the list scans, and a flag computed there
+    /// was evaluated after the per-chunk sorts, so each row's whole plan text went through them (measured: the 7-day deadlock
+    /// list on a server where half the rows carry a plan went from 0.3 s to 1.9 s). The flags come from the two keyed
+    /// statements, which read only the page's own rows.
+    /// </summary>
+    [Fact]
+    public void TheListStatements_NameNoPlanColumn_AndTheFlagStatementsAreKeyedToThePage()
+    {
+        foreach (var sql in new[]
+        {
+            DarlingBlockingReader.BlockedProcessReportsSql,
+            DarlingBlockingReader.BlockedProcessReportsWithXmlSql,
+            DarlingBlockingReader.RecentDeadlocksSql,
+            DarlingBlockingReader.RecentDeadlocksWithGraphSql,
+        })
+        {
+            Assert.DoesNotContain("query_plan_xml", sql, StringComparison.Ordinal);
+            Assert.DoesNotContain("has_blocked_plan", sql, StringComparison.Ordinal);
+            Assert.DoesNotContain("has_blocking_plan", sql, StringComparison.Ordinal);
+            Assert.DoesNotContain("has_victim_plan", sql, StringComparison.Ordinal);
+        }
+
+        /* The key rides in the list: collection_time and the id come back so the page can be re-read for its flags. */
+        Assert.Contains("blocked_report_id", DarlingBlockingReader.BlockedProcessReportsSql, StringComparison.Ordinal);
+        Assert.Contains("deadlock_id", DarlingBlockingReader.RecentDeadlocksSql, StringComparison.Ordinal);
+
+        foreach (var (sql, table, id) in new[]
+        {
+            (DarlingBlockingReader.BlockedPlanFlagsSql, "blocked_process_reports", "blocked_report_id"),
+            (DarlingBlockingReader.DeadlockVictimPlanFlagsSql, "deadlocks", "deadlock_id"),
+        })
+        {
+            Assert.Contains($"FROM {table}", sql, StringComparison.Ordinal);
+            Assert.Contains("WHERE server_id = $1", sql, StringComparison.Ordinal);
+            Assert.Contains("AND   collection_time = ANY($2)", sql, StringComparison.Ordinal);
+            Assert.Contains($"AND   {id} = ANY($3)", sql, StringComparison.Ordinal);
+            Assert.DoesNotContain("LIMIT", sql, StringComparison.Ordinal);
+            Assert.DoesNotContain("ORDER BY", sql, StringComparison.Ordinal);
+        }
+    }
+
+    /// <summary>#5236: the blocked and the blocking plan reads are one statement over two columns, so a change to the key, the
+    /// floor or the copy order cannot reach one side and miss the other.</summary>
+    [Fact]
+    public void TheTwoBlockingPlanSqls_DifferOnlyInTheColumn()
+    {
+        Assert.NotEqual(DarlingStoredPlanReader.BlockedPlanSql, DarlingStoredPlanReader.BlockingPlanSql);
+        Assert.Equal(
+            DarlingStoredPlanReader.BlockingPlanSql,
+            DarlingStoredPlanReader.BlockedPlanSql.Replace("blocked_query_plan_xml", "blocking_query_plan_xml", StringComparison.Ordinal));
+
+        /* The key is the row's own, the floor is the partition bound, and the copy taken is the EARLIEST one with a plan. */
+        Assert.Contains("AND   event_time = $2", DarlingStoredPlanReader.BlockedPlanSql, StringComparison.Ordinal);
+        Assert.Contains("AND   collection_time >= $7", DarlingStoredPlanReader.BlockedPlanSql, StringComparison.Ordinal);
+        Assert.Contains("ORDER BY collection_time, blocked_report_id", DarlingStoredPlanReader.BlockedPlanSql, StringComparison.Ordinal);
+        Assert.DoesNotContain("DESC", DarlingStoredPlanReader.BlockedPlanSql, StringComparison.Ordinal);
+    }
+
+    /// <summary>#5236: every plan read is bound to ONE server and takes its database as the optional NULL-or-equal filter. The live
+    /// cross-server and cross-database tests prove the behaviour; this pins the predicates a later edit could drop without a build error.</summary>
+    [Fact]
+    public void EveryRowPlanSql_IsBoundToItsServer_AndTakesTheOptionalDatabaseFilter()
+    {
+        foreach (var sql in new[] { DarlingStoredPlanReader.BlockedPlanSql, DarlingStoredPlanReader.BlockingPlanSql, DarlingStoredPlanReader.DeadlockVictimPlanSql })
+        {
+            Assert.Contains("WHERE server_id = $1", sql, StringComparison.Ordinal);
+        }
+
+        Assert.Contains("AND   ($8::text IS NULL OR database_name = $8)", DarlingStoredPlanReader.BlockedPlanSql, StringComparison.Ordinal);
+        Assert.Contains("AND   ($8::text IS NULL OR database_name = $8)", DarlingStoredPlanReader.BlockingPlanSql, StringComparison.Ordinal);
+        Assert.Contains("AND   ($5::text IS NULL OR database_name = $5)", DarlingStoredPlanReader.DeadlockVictimPlanSql, StringComparison.Ordinal);
+    }
+
+    /// <summary>#5236: the victim read counts the distinct victims among ALL the deadlocks the stamps match (the presence
+    /// predicate is not in that count), and takes the plan from the lowest deadlock_id that captured one, so a twin that captured
+    /// no plan still makes a no-victim read ambiguous and a plan-less copy of one deadlock never hides its sibling's plan.</summary>
+    [Fact]
+    public void TheDeadlockVictimPlanSql_CountsVictimsAcrossEveryMatch_AndTakesThePlanFromTheLowestCapturedCopy()
+    {
+        var sql = DarlingStoredPlanReader.DeadlockVictimPlanSql;
+        var cte = System.Text.RegularExpressions.Regex.Match(sql, @"WITH twins AS\s*\((.*?)\)\s*SELECT", System.Text.RegularExpressions.RegexOptions.Singleline);
+        Assert.True(cte.Success);
+        Assert.DoesNotContain("victim_query_plan_xml IS NOT NULL", cte.Groups[1].Value, StringComparison.Ordinal);
+        Assert.DoesNotContain("victim_query_plan_xml <>", cte.Groups[1].Value, StringComparison.Ordinal);
+        Assert.Contains("count(DISTINCT coalesce(victim_process_id, ''))", sql, StringComparison.Ordinal);
+        Assert.Contains("ORDER BY deadlock_id", sql, StringComparison.Ordinal);
+        Assert.Contains("AS victim_plan_xml", sql, StringComparison.Ordinal);
+        Assert.Contains("AS victim_count", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("LIMIT 2", sql, StringComparison.Ordinal);
+    }
 }
 
 /// <summary>
