@@ -879,7 +879,8 @@ public sealed class McpQueryTools
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history. Default 24.")] int hours_back = 24,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
-        [Description(TrendBuckets.BucketMinutesDescription)] int? bucket_minutes = null)
+        [Description(TrendBuckets.BucketMinutesDescription)] int? bucket_minutes = null,
+        [Description("Limit to one database. Omit for all databases.")] string? database_name = null)
     {
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
         if (error != null) return error;
@@ -893,9 +894,13 @@ public sealed class McpQueryTools
             var bucketError = TrendBuckets.Resolve(hours_back, bucket_minutes, 1, budget, out var bucketMinutes);
             if (bucketError != null) return bucketError;
 
+            /* #5244: database_name appended LAST (H1). Blank or whitespace is every database. The bucketed read takes a
+               database list, the way the rest of the trend family does. */
+            var database = string.IsNullOrWhiteSpace(database_name) ? null : database_name;
             var grain = Bucketed(bucketMinutes, bucket_minutes is not null, budget.AutoPoints);
             var startUtc = windowEnd.AddHours(-hours_back);
-            var points = await dataService.GetBucketedQueryDurationTrendAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd, bucketMinutes);
+            var points = await dataService.GetBucketedQueryDurationTrendAsync(
+                resolved.ServerId, hours_back, asOfUtc: windowEnd, bucketMinutes, database == null ? null : new[] { database });
 
             if (points.Count == 0)
             {
@@ -911,7 +916,7 @@ public sealed class McpQueryTools
                 return await dataService.HasAnyQueryStatAsync(resolved.ServerId)
                     ? EmptyStatus(
                         "empty",
-                        $"No query samples recorded for {resolved.ServerName} in the last {hours_back} hour(s). This server HAS collected query stats before, so this window is genuinely quiet rather than broken — widen hours_back to find the most recent samples.",
+                        $"No query samples recorded for {ScopedServer(resolved.ServerName, database)} in the last {hours_back} hour(s). This server HAS collected query stats before, so this window is genuinely quiet rather than broken — widen hours_back to find the most recent samples.",
                         startUtc, windowEnd, grain)
                     : EmptyStatus(
                         "unavailable",
@@ -937,7 +942,8 @@ public sealed class McpQueryTools
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history. Default 24.")] int hours_back = 24,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
-        [Description(TrendBuckets.BucketMinutesDescription)] int? bucket_minutes = null)
+        [Description(TrendBuckets.BucketMinutesDescription)] int? bucket_minutes = null,
+        [Description("Limit to one database. Omit for all databases.")] string? database_name = null)
     {
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
         if (error != null) return error;
@@ -951,9 +957,12 @@ public sealed class McpQueryTools
             var bucketError = TrendBuckets.Resolve(hours_back, bucket_minutes, 1, budget, out var bucketMinutes);
             if (bucketError != null) return bucketError;
 
+            /* #5244: database_name appended LAST (H1); blank is every database. See get_query_duration_trend. */
+            var database = string.IsNullOrWhiteSpace(database_name) ? null : database_name;
             var grain = Bucketed(bucketMinutes, bucket_minutes is not null, budget.AutoPoints);
             var startUtc = windowEnd.AddHours(-hours_back);
-            var points = await dataService.GetBucketedProcedureDurationTrendAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd, bucketMinutes);
+            var points = await dataService.GetBucketedProcedureDurationTrendAsync(
+                resolved.ServerId, hours_back, asOfUtc: windowEnd, bucketMinutes, database == null ? null : new[] { database });
             if (points.Count == 0)
             {
                 var gated = await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "procedure_stats");
@@ -963,7 +972,7 @@ public sealed class McpQueryTools
                 }
 
                 return await EmptyTrendAsync(
-                    dataService.HasAnyProcedureStatAsync(resolved.ServerId), resolved.ServerName, hours_back,
+                    dataService.HasAnyProcedureStatAsync(resolved.ServerId), resolved.ServerName, database, hours_back,
                     startUtc, windowEnd, grain,
                     "stored-procedure",
                     "Check that collection is running and that the server is enabled. A server that genuinely runs no stored procedures also lands here, and that is a real answer rather than a fault.");
@@ -984,7 +993,8 @@ public sealed class McpQueryTools
         ServerManager serverManager,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history. Default 24.")] int hours_back = 24,
-        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        [Description("Limit to one database. Omit for all databases.")] string? database_name = null)
     {
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
         if (error != null) return error;
@@ -994,8 +1004,12 @@ public sealed class McpQueryTools
             var hoursError = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
             if (hoursError != null) return hoursError;
 
+            /* #5244: database_name appended LAST (H1); blank is every database. The reader already took a database list
+               (the Query Store tab's filter), on both of its arms. */
+            var database = string.IsNullOrWhiteSpace(database_name) ? null : database_name;
             var startUtc = windowEnd.AddHours(-hours_back);
-            var points = await dataService.GetQueryStoreDurationTrendAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd);
+            var points = await dataService.GetQueryStoreDurationTrendAsync(
+                resolved.ServerId, hours_back, databaseNames: database == null ? null : new[] { database }, asOfUtc: windowEnd);
             if (points.Count == 0)
             {
                 /*
@@ -1010,7 +1024,7 @@ public sealed class McpQueryTools
                 }
 
                 return await EmptyTrendAsync(
-                    dataService.HasAnyQueryStoreStatAsync(resolved.ServerId), resolved.ServerName, hours_back,
+                    dataService.HasAnyQueryStoreStatAsync(resolved.ServerId), resolved.ServerName, database, hours_back,
                     startUtc, windowEnd, PerInterval,
                     "Query Store",
                     "Query Store may be OFF on this server's databases — that, not an absence of slow queries, is the usual cause. Check QUERY_STORE = ON per database, then that collection is running for this server.");
@@ -1297,6 +1311,15 @@ public sealed class McpQueryTools
     }
 
     /// <summary>
+    /// The server's name with the database an answer covered (#5244), Darling's <c>DarlingMcpTrendTools.ScopedServer</c>
+    /// for one database: with a filter the read looked at that database only, so "nothing recorded for the server" would
+    /// be a verdict about a database it never read. No filter leaves the name as it was. The never-sampled answer stays
+    /// on the bare name, because its probe is server-wide and its verdict is too.
+    /// </summary>
+    private static string ScopedServer(string serverName, string? database) =>
+        database == null ? serverName : $"{serverName} (database_name '{database}')";
+
+    /// <summary>
     /// The two-branch empty answer the two new Performance-Trends siblings share (#2484), word for word with
     /// Darling's <c>DarlingMcpTrendTools.QuietWindowMessage</c> / <c>NeverSampledMessage</c> and phrased like
     /// the get_query_duration_trend answer that already ships -- a user moving between the SKUs, or between
@@ -1306,14 +1329,14 @@ public sealed class McpQueryTools
     /// unmaterialized state, which only a tiered store can be in).
     /// </summary>
     private static async Task<string> EmptyTrendAsync(
-        Task<bool> probe, string serverName, int hours_back, DateTime startUtc, DateTime windowEndUtc, TrendGrain grain,
+        Task<bool> probe, string serverName, string? database, int hours_back, DateTime startUtc, DateTime windowEndUtc, TrendGrain grain,
         string what, string checkThis)
     {
         var everSampled = await probe;
         return everSampled
             ? EmptyStatus(
                 "empty",
-                $"No {what} samples were recorded for {serverName} in the last {hours_back} hour(s). This server HAS been sampled before, so this window is genuinely quiet rather than broken — widen hours_back to find the most recent samples.",
+                $"No {what} samples were recorded for {ScopedServer(serverName, database)} in the last {hours_back} hour(s). This server HAS been sampled before, so this window is genuinely quiet rather than broken — widen hours_back to find the most recent samples.",
                 startUtc, windowEndUtc, grain)
             : EmptyStatus(
                 "unavailable",

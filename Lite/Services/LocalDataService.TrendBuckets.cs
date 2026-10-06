@@ -339,13 +339,13 @@ ORDER BY 1";
 
     /// <summary>The query-stats duration trend bucketed (#3897) — <see cref="GetQueryDurationTrendAsync"/>'s
     /// per-collection read over <c>v_query_stats</c>, gathered into buckets.</summary>
-    public Task<List<QueryTrendPoint>> GetBucketedQueryDurationTrendAsync(int serverId, int hoursBack, DateTime asOfUtc, int bucketMinutes) =>
-        ReadBucketedDurationTrendAsync("v_query_stats", serverId, hoursBack, asOfUtc, bucketMinutes);
+    public Task<List<QueryTrendPoint>> GetBucketedQueryDurationTrendAsync(int serverId, int hoursBack, DateTime asOfUtc, int bucketMinutes, IReadOnlyList<string>? databaseNames = null) =>
+        ReadBucketedDurationTrendAsync("v_query_stats", serverId, hoursBack, asOfUtc, bucketMinutes, databaseNames);
 
     /// <summary>The procedure-stats duration trend bucketed (#3897) — <see cref="GetProcedureDurationTrendAsync"/>'s
     /// per-collection read over <c>v_procedure_stats</c>, gathered into buckets.</summary>
-    public Task<List<QueryTrendPoint>> GetBucketedProcedureDurationTrendAsync(int serverId, int hoursBack, DateTime asOfUtc, int bucketMinutes) =>
-        ReadBucketedDurationTrendAsync("v_procedure_stats", serverId, hoursBack, asOfUtc, bucketMinutes);
+    public Task<List<QueryTrendPoint>> GetBucketedProcedureDurationTrendAsync(int serverId, int hoursBack, DateTime asOfUtc, int bucketMinutes, IReadOnlyList<string>? databaseNames = null) =>
+        ReadBucketedDurationTrendAsync("v_procedure_stats", serverId, hoursBack, asOfUtc, bucketMinutes, databaseNames);
 
     /// <summary>
     /// The shared body of the two bucketed duration reads (#3897), Darling's
@@ -354,14 +354,20 @@ ORDER BY 1";
     /// work over their summed seconds — a collection with no knowable interval is left out of both, not counted as
     /// zero — its peak is the worst single collection's rate, and <c>unrated_collections</c> counts what was left
     /// out. <paramref name="relation"/> is one of two constants, never caller text.
+    /// <para>#5244: <paramref name="databaseNames"/> narrows the raw rows BEFORE the per-collection sum, the same place
+    /// Darling's <c>BuildBucketedRawTrendSql(..., withDatabaseFilter: true)</c> puts its predicate, so a database's
+    /// collection that held none of its rows is simply not a collection of that database. Null or empty reads every
+    /// database, the answer this read always gave.</para>
     /// </summary>
     private async Task<List<QueryTrendPoint>> ReadBucketedDurationTrendAsync(
-        string relation, int serverId, int hoursBack, DateTime asOfUtc, int bucketMinutes)
+        string relation, int serverId, int hoursBack, DateTime asOfUtc, int bucketMinutes,
+        IReadOnlyList<string>? databaseNames = null)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
         var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc);
+        var dbClause = BuildDbInClause(databaseNames, "database_name", 5, out var dbValues);
 
         command.CommandText = $@"
 WITH raw AS
@@ -377,7 +383,7 @@ WITH raw AS
     FROM {relation}
     WHERE server_id = $1
     AND   collection_time >= $2
-    AND   collection_time <= $3
+    AND   collection_time <= $3{dbClause}
     GROUP BY collection_time
 ),
 rated AS
@@ -406,6 +412,10 @@ ORDER BY 1";
         command.Parameters.Add(new DuckDBParameter { Value = startTime });
         command.Parameters.Add(new DuckDBParameter { Value = endTime });
         command.Parameters.Add(new DuckDBParameter { Value = bucketMinutes });
+        foreach (var value in dbValues)
+        {
+            command.Parameters.Add(new DuckDBParameter { Value = value });
+        }
 
         var items = new List<QueryTrendPoint>();
         using var reader = await command.ExecuteReaderAsync();
