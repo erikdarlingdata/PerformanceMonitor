@@ -39,9 +39,9 @@ namespace PerformanceMonitor.Darling.Tests;
 [Collection("live-postgres")]
 public sealed class DurationTrendDatabaseFilterLiveTests
 {
-    private const string A = "TrendFilterA";
-    private const string B = "TrendFilterB";
-    private const string C = "TrendFilterC";
+    internal const string A = "TrendFilterA";
+    internal const string B = "TrendFilterB";
+    internal const string C = "TrendFilterC";
 
     private static DatabaseFilter Of(params string[] names) => DatabaseFilter.Of(names);
 
@@ -51,7 +51,7 @@ public sealed class DurationTrendDatabaseFilterLiveTests
             ? n.GetDouble()
             : null;
 
-    private static Task PlantQueryAsync(
+    internal static Task PlantQueryAsync(
         NpgsqlConnection connection, CancellationToken ct, int serverId, string serverName, DateTime at, string db, string text, long weight) =>
         DarlingMcpTestData.ExecAsync(connection, ct,
             @"INSERT INTO query_stats
@@ -63,7 +63,7 @@ public sealed class DurationTrendDatabaseFilterLiveTests
             CollectionIdGenerator.Next(), DarlingMcpTestData.TruncateToSeconds(at), serverId, serverName, db,
             "0xQ" + db, "0xP" + db, "0xS" + db, "0xL" + db, text, SHA256.HashData(Encoding.UTF8.GetBytes(text)), weight);
 
-    private static Task PlantProcedureAsync(
+    internal static Task PlantProcedureAsync(
         NpgsqlConnection connection, CancellationToken ct, int serverId, string serverName, DateTime at, string db, long weight) =>
         DarlingMcpTestData.ExecAsync(connection, ct,
             @"INSERT INTO procedure_stats
@@ -72,7 +72,7 @@ public sealed class DurationTrendDatabaseFilterLiveTests
               VALUES ($1, $2, $3, $4, $5, 'dbo', $6, $7, 10, $8, $8, 100, 3600)",
             CollectionIdGenerator.Next(), DarlingMcpTestData.TruncateToSeconds(at), serverId, serverName, db, "usp_" + db, "0xSQLH" + db, weight);
 
-    private static Task PlantQueryStoreAsync(
+    internal static Task PlantQueryStoreAsync(
         NpgsqlConnection connection, CancellationToken ct, int serverId, string serverName, DateTime at, string db, long durationUs) =>
         DarlingMcpTestData.ExecAsync(connection, ct,
             @"INSERT INTO query_store_stats (collection_id, collection_time, server_id, server_name, database_name, query_id, plan_id, query_hash, query_plan_hash, query_text, execution_count, avg_duration_us, avg_cpu_time_us, last_execution_time)
@@ -80,7 +80,7 @@ public sealed class DurationTrendDatabaseFilterLiveTests
             CollectionIdGenerator.Next(), DarlingMcpTestData.TruncateToSeconds(at), serverId, serverName, db, (long)(10 + db[^1]),
             "0xQ" + db, "0xP" + db, "SELECT qs " + db, durationUs);
 
-    private const string Cleanup =
+    internal const string Cleanup =
         "DELETE FROM query_stats WHERE server_id = {0}; DELETE FROM procedure_stats WHERE server_id = {0}; " +
         "DELETE FROM query_store_stats WHERE server_id = {0}; DELETE FROM query_store_health WHERE server_id = {0}";
 
@@ -112,8 +112,8 @@ public sealed class DurationTrendDatabaseFilterLiveTests
                 /* A repeated name and a blank one are one name, and the public method's answer is the All one. */
                 Assert.Equal(2_000 * perSecond, LastRate(await Read(Of(B, B, " ")))!.Value, 9);
                 Assert.Equal(LastRate(all), LastRate(procedures
-                    ? await DarlingMcpTrendTools.GetProcedureDurationTrend(postgres, serverName, 24, null, null, ct)
-                    : await DarlingMcpTrendTools.GetQueryDurationTrend(postgres, serverName, 24, null, null, ct)));
+                    ? await DarlingMcpTrendTools.GetProcedureDurationTrend(postgres, serverName, 24, null, null, null, ct)
+                    : await DarlingMcpTrendTools.GetQueryDurationTrend(postgres, serverName, 24, null, null, null, ct)));
             }
 
             /* The reader overloads: the same set, a bucket width at $5. */
@@ -182,7 +182,7 @@ public sealed class DurationTrendDatabaseFilterLiveTests
             })
             {
                 Assert.Equal("empty", DarlingMcpTestData.StatusOf(json));
-                Assert.Contains("database_name 'NoSuchDatabase'", JsonDocument.Parse(json).RootElement.GetProperty("message").GetString(), StringComparison.Ordinal);
+                Assert.Contains(" for the database NoSuchDatabase", JsonDocument.Parse(json).RootElement.GetProperty("message").GetString(), StringComparison.Ordinal);
             }
 
             foreach (var json in new[]

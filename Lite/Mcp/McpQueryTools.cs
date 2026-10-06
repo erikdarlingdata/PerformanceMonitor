@@ -927,7 +927,7 @@ public sealed class McpQueryTools
             /* The two siblings below serialize through the SAME helper, so the three Performance-Trends
                reads cannot advertise three different field sets for one shape. */
             return SerializeTrend(resolved.ServerName, hours_back, startUtc, windowEnd, points, grain,
-                await dataService.GetBaselineDiscontinuitiesAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd));
+                await dataService.GetBaselineDiscontinuitiesAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd), database);
         }
         catch (Exception ex)
         {
@@ -979,7 +979,7 @@ public sealed class McpQueryTools
             }
 
             return SerializeTrend(resolved.ServerName, hours_back, startUtc, windowEnd, points, grain,
-                await dataService.GetBaselineDiscontinuitiesAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd));
+                await dataService.GetBaselineDiscontinuitiesAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd), database);
         }
         catch (Exception ex)
         {
@@ -1031,7 +1031,7 @@ public sealed class McpQueryTools
             }
 
             return SerializeTrend(resolved.ServerName, hours_back, startUtc, windowEnd, points, PerInterval,
-                await dataService.GetBaselineDiscontinuitiesAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd));
+                await dataService.GetBaselineDiscontinuitiesAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd), database);
         }
         catch (Exception ex)
         {
@@ -1253,12 +1253,14 @@ public sealed class McpQueryTools
     /// </summary>
     private static string SerializeTrend(
         string serverName, int hours_back, DateTime startUtc, DateTime windowEndUtc, List<QueryTrendPoint> points, TrendGrain grain,
-        IReadOnlyList<BaselineDiscontinuity> discontinuities)
+        IReadOnlyList<BaselineDiscontinuity> discontinuities, string? database)
     {
         var envelope = new Dictionary<string, object?>
         {
             ["server"] = serverName,
             ["hours_back"] = hours_back,
+            /* #5244: which database the series is limited to: the name for one, null for all (the twin of Darling's database_name echo). */
+            ["database_name"] = database,
         };
         /* effective_start is the first COLLECTION the store held — on a bucketed point its first collection, not the
            bucket's start (#3897). */
@@ -1317,7 +1319,7 @@ public sealed class McpQueryTools
     /// on the bare name, because its probe is server-wide and its verdict is too.
     /// </summary>
     private static string ScopedServer(string serverName, string? database) =>
-        database == null ? serverName : $"{serverName} (database_name '{database}')";
+        serverName + McpBlockingTools.ForChosenDatabase(database);
 
     /// <summary>
     /// The two-branch empty answer the two new Performance-Trends siblings share (#2484), word for word with

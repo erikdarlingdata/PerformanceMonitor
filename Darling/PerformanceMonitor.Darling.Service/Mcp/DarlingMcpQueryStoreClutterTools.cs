@@ -98,15 +98,16 @@ public sealed class DarlingMcpQueryStoreClutterTools
         [Description("Maximum database rows to return, worst first. Default 50. truncated is true when the server had more Query-Store-bearing databases than this; database_count is the whole.")] int limit = DefaultLimit,
         [Description("If true, also computes fleet_median: the discrete median of each headline arm over every enabled non-replica SQL Server target. Default false; see the reading guide for the read-cost detail.")] bool include_fleet_median = false,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        [Description("Limit to one database. Omit for all databases.")] string? database_name = null,
         CancellationToken cancellationToken = default)
-        => GetQueryStoreClutter(postgres, server_name, hours_back, limit, include_fleet_median, as_of, DatabaseFilter.All, cancellationToken);
+        => GetQueryStoreClutter(postgres, server_name, hours_back, limit, include_fleet_median, as_of, DatabaseFilter.One(database_name), cancellationToken);
 
     /// <summary>
-    /// #5244: the get_query_store_clutter read over a LIST of databases. The MCP tool passes <see cref="DatabaseFilter.All"/>
-    /// until a later lane wires its <c>database_name</c>. Only the per-database rows narrow (read cost, plan churn, config);
+    /// #5244: the get_query_store_clutter read over a LIST of databases. The MCP tool passes <c>DatabaseFilter.One(database_name)</c>
+    /// and the web dispatch passes the repeated keys. Only the per-database rows narrow (read cost, plan churn, config);
     /// the per-server overhead (waits, memory clerk), the window floor, the baseline discontinuities and the fleet reference
     /// stay whole. The one-name consumers are list-aware: the Query Store precondition on the empty path takes the filter,
-    /// an empty answer for chosen databases is <c>empty</c> and says "for the chosen databases" (never a verdict on the
+    /// an empty answer for chosen databases is <c>empty</c> and says "for the database X" (one name) or "for the chosen databases" (two or more) (never a verdict on the
     /// server), and <c>server_is_replica</c> is read off the server's WHOLE config, not the chosen databases' rows.
     /// </summary>
     internal static async Task<string> GetQueryStoreClutter(
@@ -150,7 +151,7 @@ public sealed class DarlingMcpQueryStoreClutterTools
                     ?? (!databaseFilter.IsAll
                         ? McpHelpers.Status(
                             "empty",
-                            $"No Query Store rows, no query_store fan-out run and no query_store_health capture for the chosen databases in the {hours_back}-hour window. "
+                            $"No Query Store rows, no query_store fan-out run and no query_store_health capture{DarlingMcpBlockingTools.ForChosenDatabases(databaseFilter)} in the {hours_back}-hour window. "
                             + "A chosen database either has Query Store OFF, is not on this server, or has not completed a cycle yet. Widen the selection to read the whole server.")
                         : null)
                     ?? McpHelpers.Status(
@@ -287,6 +288,8 @@ public sealed class DarlingMcpQueryStoreClutterTools
             {
                 server = resolved.ServerName,
                 hours_back,
+                /* #5244: which databases the rows are limited to: the name for one, "the chosen databases" for two or more, null for all. */
+                database_name = databaseFilter.Describe(),
                 /* The window as its own block: the requested edges and, beside them, the raw tier's reach under
                    the window floor's spelling (#2364 / #3653 item 17). Nested rather than flat because this
                    payload ALSO carries a page cut (`truncated`, below), and the two facts must not share a

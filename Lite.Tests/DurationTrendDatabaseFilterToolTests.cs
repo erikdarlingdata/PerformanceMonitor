@@ -101,6 +101,7 @@ public sealed class DurationTrendDatabaseFilterToolTests : IClassFixture<SharedD
             _service, _serverManager, ServerName, 4, database_name: "DbB"));
 
         Assert.Equal(2.0, ExecutionsPerSecond(root), 3);
+        Assert.Equal("DbB", root.GetProperty("database_name").GetString());
     }
 
     [Theory]
@@ -115,6 +116,7 @@ public sealed class DurationTrendDatabaseFilterToolTests : IClassFixture<SharedD
             _service, _serverManager, ServerName, 4, database_name: blank));
 
         Assert.Equal(7.0, ExecutionsPerSecond(root), 3);
+        Assert.Equal(JsonValueKind.Null, root.GetProperty("database_name").ValueKind);
     }
 
     [Fact]
@@ -126,7 +128,7 @@ public sealed class DurationTrendDatabaseFilterToolTests : IClassFixture<SharedD
             _service, _serverManager, ServerName, 4, database_name: "NoSuchDb"));
 
         Assert.Equal("empty", root.GetProperty("status").GetString());
-        Assert.Contains($"{ServerName} (database_name 'NoSuchDb')", root.GetProperty("message").GetString());
+        Assert.Contains($"{ServerName} for the database NoSuchDb", root.GetProperty("message").GetString());
     }
 
     [Fact]
@@ -158,6 +160,7 @@ public sealed class DurationTrendDatabaseFilterToolTests : IClassFixture<SharedD
             _service, _serverManager, ServerName, 4, database_name: "DbC"));
 
         Assert.Equal(4.0, ExecutionsPerSecond(root), 3);
+        Assert.Equal("DbC", root.GetProperty("database_name").GetString());
     }
 
     [Theory]
@@ -172,6 +175,7 @@ public sealed class DurationTrendDatabaseFilterToolTests : IClassFixture<SharedD
             _service, _serverManager, ServerName, 4, database_name: blank));
 
         Assert.Equal(7.0, ExecutionsPerSecond(root), 3);
+        Assert.Equal(JsonValueKind.Null, root.GetProperty("database_name").ValueKind);
     }
 
     [Fact]
@@ -183,7 +187,7 @@ public sealed class DurationTrendDatabaseFilterToolTests : IClassFixture<SharedD
             _service, _serverManager, ServerName, 4, database_name: "NoSuchDb"));
 
         Assert.Equal("empty", root.GetProperty("status").GetString());
-        Assert.Contains($"{ServerName} (database_name 'NoSuchDb')", root.GetProperty("message").GetString());
+        Assert.Contains($"{ServerName} for the database NoSuchDb", root.GetProperty("message").GetString());
     }
 
     [Fact]
@@ -218,6 +222,7 @@ public sealed class DurationTrendDatabaseFilterToolTests : IClassFixture<SharedD
             _service, _serverManager, ServerName, 6, database_name: "DbB"));
 
         Assert.Equal(2.0, ExecutionsPerSecond(root), 3);
+        Assert.Equal("DbB", root.GetProperty("database_name").GetString());
     }
 
     [Theory]
@@ -232,6 +237,7 @@ public sealed class DurationTrendDatabaseFilterToolTests : IClassFixture<SharedD
             _service, _serverManager, ServerName, 6, database_name: blank));
 
         Assert.Equal(7.0, ExecutionsPerSecond(root), 3);
+        Assert.Equal(JsonValueKind.Null, root.GetProperty("database_name").ValueKind);
     }
 
     [Fact]
@@ -243,7 +249,7 @@ public sealed class DurationTrendDatabaseFilterToolTests : IClassFixture<SharedD
             _service, _serverManager, ServerName, 6, database_name: "NoSuchDb"));
 
         Assert.Equal("empty", root.GetProperty("status").GetString());
-        Assert.Contains($"{ServerName} (database_name 'NoSuchDb')", root.GetProperty("message").GetString());
+        Assert.Contains($"{ServerName} for the database NoSuchDb", root.GetProperty("message").GetString());
     }
 
     [Fact]
