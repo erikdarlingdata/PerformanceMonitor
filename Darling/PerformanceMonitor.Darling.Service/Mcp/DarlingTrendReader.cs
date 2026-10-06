@@ -604,8 +604,9 @@ internal static class DarlingTrendReader
     /* ─────────────────────────── file I/O latency trend ─────────────────────────── */
 
     /// <summary>
-    /// The ranking both file I/O statements share, so the series the first one counts are exactly the series the
-    /// second one charts (#3897). A series is a (database, file type) pair — the per-database, data-versus-log
+    /// The ranking of the file I/O series (#3897): <see cref="FileIoSeriesSql"/> aggregates it here, and
+    /// <see cref="FileIoTrendSql"/> numbers the series with the same ordering as window sums (#5425), so the series
+    /// the first counts are exactly the series the second charts. A series is a (database, file type) pair — the per-database, data-versus-log
     /// view the tool promises — or, when <c>$4</c> names a database, each of that database's files. Ranked by the
     /// window's summed stall (read + write ms), because the read exists to find where storage is SLOW: ranking on
     /// operations, the viewer's order, put nine tempdb data files ahead of a user database whose writes averaged
@@ -681,33 +682,82 @@ internal static class DarlingTrendReader
     /// stamped at its bucket's start, the first at the window's start (<c>GREATEST</c>), so no point claims time
     /// the window did not ask for. $1 server_id, $2/$3 window (naive UTC), $4 database (NULL = all), $5 how many
     /// ranked series keep their own line, $6 the bucket width in minutes.</para>
+    ///
+    /// <para><b>No join to the ranking (#5425).</b> This statement used to join every row to the
+    /// <see cref="FileIoRankedCte"/> CTE. On a store whose statistics describe other rows (one store holds many
+    /// servers; an autoanalyze that ran while the table held another server's data) the planner estimates one row
+    /// for the window, picks a nested loop, and re-runs the whole ranking once per file I/O row: 84.6 s over a
+    /// week of the 609-series census shape (265,524 rows), against 0.6 s for the ranking alone. The series totals
+    /// are now window sums over the one scan (<c>totalled</c>), and <c>ranked</c> numbers the series with the same
+    /// ORDER BY the series statement uses; there is no join left for a bad estimate to turn quadratic.</para>
     /// </summary>
     public const string FileIoTrendSql = $"""
-        WITH {FileIoRankedCte},
+        WITH base AS (
+            SELECT
+                collection_time,
+                database_name,
+                file_type,
+                CASE WHEN $4::text IS NULL THEN NULL ELSE file_name END AS file_name,
+                delta_reads,
+                delta_writes,
+                delta_stall_read_ms,
+                delta_stall_write_ms,
+                (delta_reads > 0 OR delta_writes > 0) AS active
+            FROM v_file_io_stats
+            WHERE server_id = $1
+            AND   collection_time >= $2
+            AND   collection_time <= $3
+            AND   ($4::text IS NULL OR database_name = $4)
+            AND   sample_interval_seconds IS DISTINCT FROM 0
+        ),
+        totalled AS (
+            SELECT
+                base.*,
+                SUM(delta_stall_read_ms + delta_stall_write_ms) FILTER (WHERE active) OVER series AS stall_ms,
+                SUM(delta_reads + delta_writes) FILTER (WHERE active) OVER series AS ops,
+                COUNT(*) FILTER (WHERE active) OVER series AS active_rows
+            FROM base
+            WINDOW series AS (PARTITION BY database_name, file_type, file_name)
+        ),
+        ranked AS (
+            SELECT
+                collection_time,
+                database_name,
+                file_type,
+                file_name,
+                delta_reads,
+                delta_writes,
+                delta_stall_read_ms,
+                delta_stall_write_ms,
+                DENSE_RANK() OVER (
+                    ORDER BY stall_ms DESC,
+                             ops DESC,
+                             database_name,
+                             file_type,
+                             file_name
+                ) AS series_rank
+            FROM totalled
+            WHERE active_rows > 0
+        ),
         labelled AS (
             SELECT
-                f.collection_time,
-                CASE WHEN r.series_rank <= $5 THEN r.database_name ELSE '(other)' END AS database_name,
-                CASE WHEN r.series_rank <= $5 THEN r.file_type ELSE '(other)' END AS file_type,
+                collection_time,
+                CASE WHEN series_rank <= $5 THEN database_name ELSE '(other)' END AS database_name,
+                CASE WHEN series_rank <= $5 THEN file_type ELSE '(other)' END AS file_type,
                 CASE
-                    WHEN r.series_rank <= $5 THEN r.file_name
+                    WHEN series_rank <= $5 THEN file_name
                     WHEN $4::text IS NULL THEN NULL
                     ELSE '(other)'
                 END AS file_name,
-                f.delta_reads,
-                f.delta_writes,
-                f.delta_stall_read_ms,
-                f.delta_stall_write_ms
-            FROM v_file_io_stats AS f
-            JOIN ranked AS r
-              ON  r.database_name = f.database_name
-              AND r.file_type = f.file_type
-              AND (r.file_name IS NULL OR r.file_name = f.file_name)
-            WHERE f.server_id = $1
-            AND   f.collection_time >= $2
-            AND   f.collection_time <= $3
-            AND   ($4::text IS NULL OR f.database_name = $4)
-            AND   f.sample_interval_seconds IS DISTINCT FROM 0
+                delta_reads,
+                delta_writes,
+                delta_stall_read_ms,
+                delta_stall_write_ms
+            FROM ranked
+            /* The lookup this replaced matched on database_name = and file_type =, which a NULL never satisfies:
+               a row with no database or no file type ranked a series but charted nothing. */
+            WHERE database_name IS NOT NULL
+            AND   file_type IS NOT NULL
         ),
         per_collection AS (
             SELECT

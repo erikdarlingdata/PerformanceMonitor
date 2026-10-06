@@ -225,12 +225,18 @@ public sealed class TrendPayloadBudgetLiveTests
     /// database's pg_stat_database — counters cumulative where the collector stores them cumulative. And, over
     /// the last four hours only, 300 tenant databases with a data and a log file each: the 600-file server.
     /// </summary>
-    private static async Task SeedAsync(NpgsqlConnection connection, DateTime end, CancellationToken ct)
+    internal static async Task SeedAsync(
+        NpgsqlConnection connection, DateTime end, CancellationToken ct, int? serverId = null, string? serverName = null)
     {
+        /* #5425: TrendStaleStatsLiveTests seeds this same shape for a second server, a month earlier. */
+        var id = serverId ?? ServerId;
+        var name = serverName ?? ServerName;
+        Task Plant(string sql, long idOffset, DateTime first, int minutes) => PlantAsync(connection, ct, sql, idOffset, first, minutes, id, name);
+
         var weekStart = end.AddMinutes(-WeekMinutes);
         var rawStart = end.AddMinutes(-RawMinutes);
 
-        await PlantAsync(connection, ct, @"
+        await Plant(@"
 INSERT INTO file_io_stats
     (collection_id, collection_time, server_id, server_name, database_name, file_name, file_type,
      physical_name, size_mb, delta_reads, delta_writes, delta_read_bytes, delta_write_bytes,
@@ -255,7 +261,7 @@ CROSS JOIN (VALUES
     (11, 'msdb', 'MSDBData.mdf', 'ROWS')
 ) AS f(i, db, file, kind)", 1_000_000L, weekStart, WeekMinutes);
 
-        await PlantAsync(connection, ct, @"
+        await Plant(@"
 INSERT INTO file_io_stats
     (collection_id, collection_time, server_id, server_name, database_name, file_name, file_type,
      physical_name, size_mb, delta_reads, delta_writes, delta_read_bytes, delta_write_bytes,
@@ -269,7 +275,7 @@ FROM generate_series(0, $5) AS n
 CROSS JOIN generate_series(0, 299) AS d(i)
 CROSS JOIN (VALUES (0, '.mdf', 'ROWS'), (1, '_log.ldf', 'LOG')) AS k(j, suffix, kind)", 6_000_000L, end.AddHours(-4), 240);
 
-        await PlantAsync(connection, ct, @"
+        await Plant(@"
 INSERT INTO wait_stats
     (collection_id, collection_time, server_id, server_name, wait_type,
      delta_wait_time_ms, delta_signal_wait_time_ms, delta_waiting_tasks, sample_interval_seconds)
@@ -280,7 +286,7 @@ CROSS JOIN (VALUES (0, 'LCK_M_S'), (1, 'LCK_M_U'), (2, 'LCK_M_X'), (3, 'LCK_M_IS
                    (6, 'LCK_M_SIU'), (7, 'LCK_M_SIX'), (8, 'LCK_M_UIX'), (9, 'LCK_M_BU'), (10, 'LCK_M_RS_S'), (11, 'LCK_M_RIn_NL')
 ) AS w(i, wait_type)", 2_000_000L, weekStart, WeekMinutes);
 
-        await PlantAsync(connection, ct, @"
+        await Plant(@"
 INSERT INTO query_stats
     (collection_id, collection_time, server_id, server_name, database_name, query_hash, query_plan_hash,
      sql_handle, plan_handle, query_text, execution_count, total_worker_time, total_elapsed_time,
@@ -291,7 +297,7 @@ SELECT $1 + n * 4 + q.i, $2 + n * interval '1 minute', $3, $4, 'StackOverflow201
 FROM generate_series(0, $5) AS n
 CROSS JOIN (VALUES (0, '0x1C8F0E7D55A2B391'), (1, '0x2D90F18E66B3C4A2'), (2, '0x3EA1029F77C4D5B3')) AS q(i, hash)", 3_000_000L, rawStart, RawMinutes);
 
-        await PlantAsync(connection, ct, @"
+        await Plant(@"
 WITH s AS (
     SELECT n, o.i, o.object_type, 1100 + (n % 13) * 57 AS r
     FROM generate_series(0, $5) AS n
@@ -306,7 +312,7 @@ SELECT $1 + n * 4 + i, $2 + n * interval '1 minute', $3, $4, 'client backend', o
 FROM s
 WINDOW w AS (PARTITION BY i ORDER BY n)", 4_000_000L, weekStart, WeekMinutes);
 
-        await PlantAsync(connection, ct, @"
+        await Plant(@"
 WITH s AS (
     SELECT n,
            6000 + (n % 11) * 217 AS commits,
@@ -329,7 +335,7 @@ WINDOW w AS (ORDER BY n)", 5_000_000L, weekStart, WeekMinutes);
 
         /* #3960: the rest of the trend family, on the same week. One series each is enough for a payload size
            and cap census -- get_wait_trend's own series count comes from wait_stats' LCK_M_S rows above. */
-        await PlantAsync(connection, ct, @"
+        await Plant(@"
 INSERT INTO cpu_utilization_stats
     (collection_id, collection_time, server_id, server_name, sample_time,
      sqlserver_cpu_utilization, other_process_cpu_utilization)
@@ -337,7 +343,7 @@ SELECT $1 + n, $2 + n * interval '1 minute', $3, $4, $2 + n * interval '1 minute
        40 + (n % 30), 10 + (n % 5)
 FROM generate_series(0, $5) AS n", 7_000_000L, weekStart, WeekMinutes);
 
-        await PlantAsync(connection, ct, @"
+        await Plant(@"
 INSERT INTO tempdb_stats
     (collection_id, collection_time, server_id, server_name,
      user_object_reserved_mb, internal_object_reserved_mb, version_store_reserved_mb,
@@ -347,7 +353,7 @@ SELECT $1 + n, $2 + n * interval '1 minute', $3, $4,
        175 + (n % 80), 825 - (n % 80), 5 + (n % 10), 55 + (n % 3), 12 + (n % 5)
 FROM generate_series(0, $5) AS n", 8_000_000L, weekStart, WeekMinutes);
 
-        await PlantAsync(connection, ct, @"
+        await Plant(@"
 INSERT INTO memory_stats
     (collection_id, collection_time, server_id, server_name,
      total_server_memory_mb, target_server_memory_mb, buffer_pool_mb, plan_cache_mb)
@@ -355,13 +361,13 @@ SELECT $1 + n, $2 + n * interval '1 minute', $3, $4,
        40000 + (n % 500), 49152, 35000 + (n % 400), 5000 + (n % 100)
 FROM generate_series(0, $5) AS n", 9_000_000L, weekStart, WeekMinutes);
 
-        await PlantAsync(connection, ct, @"
+        await Plant(@"
 INSERT INTO memory_grant_stats
     (collection_id, collection_time, server_id, server_name, resource_semaphore_id, pool_id, granted_memory_mb)
 SELECT $1 + n, $2 + n * interval '1 minute', $3, $4, 0, 2, 50 + (n % 30)
 FROM generate_series(0, $5) AS n", 10_000_000L, weekStart, WeekMinutes);
 
-        await PlantAsync(connection, ct, @"
+        await Plant(@"
 INSERT INTO perfmon_stats
     (collection_id, collection_time, server_id, server_name, object_name, counter_name, instance_name,
      cntr_value, delta_cntr_value, sample_interval_seconds)
@@ -369,7 +375,7 @@ SELECT $1 + n, $2 + n * interval '1 minute', $3, $4, 'SQLServer:SQL Statistics',
        5000000 + n * 900, 900 + (n % 50) * 3, 60
 FROM generate_series(0, $5) AS n", 11_000_000L, weekStart, WeekMinutes);
 
-        await PlantAsync(connection, ct, $@"
+        await Plant($@"
 INSERT INTO pg_statement_stats
     (collection_id, collection_time, server_id, server_name, queryid,
      delta_calls, delta_total_exec_time_ms, sample_interval_seconds)
@@ -380,7 +386,7 @@ FROM generate_series(0, $5) AS n", 12_000_000L, weekStart, WeekMinutes);
         /* #4193: get_pg_cpu_utilization's own table, one row/minute like the rest of the family, with the
            V136 host-memory columns populated (not left NULL) since those are what doubled the pre-bucketing
            row width the issue measured. */
-        await PlantAsync(connection, ct, @"
+        await Plant(@"
 INSERT INTO pg_cpu_utilization
     (collection_id, collection_time, server_id, server_name, sample_time,
      cpu_percent, acu_utilization_percent, serverless_capacity_acu, max_configured_acu,
@@ -393,13 +399,14 @@ FROM generate_series(0, $5) AS n", 13_000_000L, weekStart, WeekMinutes);
 
     /// <summary>One generate_series plant: $1 an id base past anything the generator has handed out, $2 the first
     /// collection, $3/$4 the server, $5 the last minute's index.</summary>
-    private static async Task PlantAsync(NpgsqlConnection connection, CancellationToken ct, string sql, long idOffset, DateTime first, int minutes)
+    private static async Task PlantAsync(
+        NpgsqlConnection connection, CancellationToken ct, string sql, long idOffset, DateTime first, int minutes, int serverId, string serverName)
     {
         using var plant = new NpgsqlCommand(sql, connection) { CommandTimeout = 300 };
         plant.Parameters.AddWithValue(CollectionIdGenerator.Next() + idOffset * 100);
         plant.Parameters.AddWithValue(DarlingMcpTestData.Naive(first));
-        plant.Parameters.AddWithValue(ServerId);
-        plant.Parameters.AddWithValue(ServerName);
+        plant.Parameters.AddWithValue(serverId);
+        plant.Parameters.AddWithValue(serverName);
         plant.Parameters.AddWithValue(minutes);
         await plant.ExecuteNonQueryAsync(ct);
     }
