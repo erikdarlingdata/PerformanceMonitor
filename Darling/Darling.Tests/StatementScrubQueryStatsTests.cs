@@ -130,7 +130,10 @@ public sealed partial class StatementCollectionCensusTests
             Assert.False(named.AnyStringContains(needle), needle);
         }
 
-        Assert.Contains(SensitiveStatements.PlaceholderText, named.Strings);
+        /* the written value of the query_text column is exactly the marker */
+        var textColumn = QueryStatsCollector.Instance.PayloadColumns.ToList().FindIndex(c => c.Name == "query_text");
+        Assert.True(textColumn >= 0);
+        Assert.Equal(SensitiveStatements.PlaceholderText, named.Values[textColumn]);
         Assert.Equal(SensitiveStatements.PlaceholderText, rows[0].QueryText);
 
         /* the plain statement is kept (its same-instance pin is the next test) */

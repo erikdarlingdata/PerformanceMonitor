@@ -236,12 +236,15 @@ public sealed class StatementScrubQueryStatsLiveTests
             Assert.Equal(first.QueryPlanXml, plan2);
             StatementFilterCensus.AssertPlanFilteredKeepsTheRest(rawPlan, plan2!);
 
-            foreach (var needle in StatementScrubCanary.SecretNeedles)
-            {
-                Assert.Equal(0L, await CountAsync(connection, "SELECT count(*) FROM query_text_dim WHERE query_text LIKE '%' || $1 || '%'", needle, ct));
-                Assert.Equal(0L, await CountAsync(
-                    connection, "SELECT count(*) FROM query_plan_dim WHERE digest = $2 AND coalesce(query_plan_xml, '') LIKE '%' || $1 || '%'", needle, ct, digests[0]));
-            }
+            /* Nothing the raw statement or the raw plan would have stored is in the dimensions: neither raw digest has a
+               row, and the stored plan holds no secret needle. */
+            Assert.Equal(0L, await CountByDigestAsync(
+                connection, "query_text_dim", PayloadDimensions.Digest(PgCollectorRowWriter.StripEmbeddedNuls(StatementScrubCanary.CanaryStatement)), ct));
+            Assert.Equal(0L, await CountByDigestAsync(
+                connection, "query_plan_dim", PayloadDimensions.Digest(PgCollectorRowWriter.StripEmbeddedNuls(rawPlan)), ct));
+            Assert.Equal(1L, await CountByDigestAsync(
+                connection, "query_text_dim", PayloadDimensions.Digest(PgCollectorRowWriter.StripEmbeddedNuls(SensitiveStatements.PlaceholderText)), ct));
+            Assert.Equal(1L, await CountByDigestAsync(connection, "query_plan_dim", digests[0], ct));
 
             bodySucceeded = true;
         }
@@ -298,16 +301,10 @@ public sealed class StatementScrubQueryStatsLiveTests
         }
     }
 
-    private static async Task<long> CountAsync(
-        NpgsqlConnection connection, string sql, string needle, CancellationToken ct, byte[]? digest = null)
+    private static async Task<long> CountByDigestAsync(NpgsqlConnection connection, string table, byte[] digest, CancellationToken ct)
     {
-        await using var command = new NpgsqlCommand(sql, connection);
-        command.Parameters.AddWithValue(needle);
-        if (digest is not null)
-        {
-            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Bytea, Value = digest });
-        }
-
+        await using var command = new NpgsqlCommand("SELECT count(*) FROM " + table + " WHERE digest = $1", connection);
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Bytea, Value = digest });
         return (long)(await command.ExecuteScalarAsync(ct))!;
     }
 }
