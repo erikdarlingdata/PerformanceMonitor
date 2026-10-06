@@ -1194,8 +1194,15 @@ public sealed class DarlingConfigureNetworkTests
         }
     }
 
-    [Fact]
-    public async Task ConfigureNetwork_Mcp_ListWithABadEntry_RePromptsWithTheListAwareText()
+    /// <summary>
+    /// The re-prompt after a refused list names the list form and the address spelling rule (each IPv4 address is
+    /// four plain decimal numbers, with no IPv6 zone index), in the words both hosts' Critical line uses. The second
+    /// bad list is an IPv4 address with a leading zero, the spelling the rule exists for.
+    /// </summary>
+    [Theory]
+    [InlineData("2", "mcp")]
+    [InlineData("3", "web")]
+    public async Task ConfigureNetwork_ListWithABadEntry_RePromptsWithTheListAwareText_AndTheAddressSpellingRule(string choice, string surface)
     {
         Assert.SkipUnless(OperatingSystem.IsWindows(), "The wizard generates a DPAPI-protected token.");
 
@@ -1204,8 +1211,8 @@ public sealed class DarlingConfigureNetworkTests
         {
             var configPath = CopySampleTo(root.FullName);
 
-            /* The first list has a bad entry, so the resolver refuses it and the wizard asks listen + allowFrom again. */
-            var input = Script("2", "192.168.1.205", "10.8.0.0/16,bogus", "192.168.1.205", "10.8.0.0/16,192.168.1.0/24", "n");
+            /* The first two lists each have a bad entry, so the resolver refuses them and the wizard asks listen + allowFrom again. */
+            var input = Script(choice, "192.168.1.205", "10.8.0.0/16,bogus", "192.168.1.205", "10.8.0.0/16,192.168.010.0/24", "192.168.1.205", "10.8.0.0/16,192.168.1.0/24", "n");
             var output = new StringWriter();
             var error = new StringWriter();
 
@@ -1213,7 +1220,10 @@ public sealed class DarlingConfigureNetworkTests
             Assert.Equal(0, exit);
 
             var text = output.ToString();
-            Assert.Contains("not a valid CIDR list", text, StringComparison.Ordinal);
+            Assert.Equal(2, CountOccurrences(text, "not a valid CIDR list"));
+            Assert.Contains(surface + ".network.allowFrom '10.8.0.0/16,bogus' is not a valid CIDR list", text, StringComparison.Ordinal);
+            Assert.Contains(surface + ".network.allowFrom '10.8.0.0/16,192.168.010.0/24' is not a valid CIDR list", text, StringComparison.Ordinal);
+            Assert.Equal(2, CountOccurrences(text, "every entry in CIDR form (/32 for one address), with each IPv4 address written as four plain decimal numbers (no leading zeros) and no IPv6 zone index, and of the same family as listen"));
             Assert.Contains("masked, not refused", text, StringComparison.Ordinal);
             Assert.DoesNotContain("host bits zeroed", text, StringComparison.Ordinal);
             Assert.Contains("\"allowFrom\": \"10.8.0.0/16,192.168.1.0/24\"", await File.ReadAllTextAsync(configPath), StringComparison.Ordinal);
@@ -1222,6 +1232,17 @@ public sealed class DarlingConfigureNetworkTests
         {
             root.Delete(recursive: true);
         }
+    }
+
+    /// <summary>The README's two allowFrom sentences (the store's one range, the MCP list) carry the same address spelling clause as the re-prompt.</summary>
+    [Fact]
+    public void Readme_NamesTheAddressSpellingRule_OnTheStoreRangeAndOnTheList()
+    {
+        const string Clause = "with each IPv4 address written as four plain decimal numbers (no leading zeros) and no IPv6 zone index";
+        var readme = RepoFile.ReadRepoFile("Darling", "README.md");
+
+        Assert.Contains("**`allowFrom`**: one range in CIDR form, " + Clause + ". The store takes ONE range and never a list", readme, StringComparison.Ordinal);
+        Assert.Contains("Each entry must be in CIDR form (use `/32` for one address), " + Clause + ", and must match the address family of `listen`.", readme, StringComparison.Ordinal);
     }
 
     [Fact]
