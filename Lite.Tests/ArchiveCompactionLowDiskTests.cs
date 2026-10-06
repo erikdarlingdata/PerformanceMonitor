@@ -226,6 +226,113 @@ public sealed class ArchiveCompactionLowDiskTests : IDisposable
     }
 
     [Fact]
+    public void TheDatabasesOwnSize_IsKeptFree_NotJustTheFlatHeadroom()
+    {
+        MakeParquet("20260928_1400_t.parquet", 0, 40_000);
+        MakeParquet("20260928_1500_t.parquet", 40_000, 80_000);
+        MakeParquet("20260928_1600_t.parquet", 80_000, 120_000);
+
+        /* The database file is bigger than the flat headroom: the merges' output may not take the volume down to
+           64 MiB while the database still writes its WAL and a CHECKPOINT grows the file (review of #5394). */
+        var databaseBytes = 200L * 1024 * 1024;
+        using (var db = new FileStream(Path.Combine(_tempDir, "test.duckdb"), FileMode.Create))
+        {
+            db.SetLength(databaseBytes);
+        }
+
+        var (service, initializer) = NewService();
+        service.CompactionBatchInputBytes = 1;
+        var batch = new[] { "20260928_1400_t.parquet", "20260928_1500_t.parquet", "20260928_1600_t.parquet" }.Max(SizeOf);
+        /* Room for the database's size and one batch: the old test of "kept + batch + 64 MiB" let all three
+           through (the batches are far smaller than 64 MiB), the reserve lets exactly one. */
+        initializer.AvailableFreeBytesProvider = _ => databaseBytes + batch;
+        List<string> temps = [];
+        service.OnCompactionTempsReadyForTests = t => temps = t.ToList();
+
+        service.CompactParquetFiles();
+
+        Assert.Single(temps);
+        Assert.Equal(2, ArchiveFileNames().Count(f => f.StartsWith("20260928_", StringComparison.Ordinal)));
+        var warning = Assert.Single(Warnings());
+        Assert.Contains("holds back 2 of its batches", warning, StringComparison.Ordinal);
+        Assert.Contains("keeps " + databaseBytes.ToString("N0", System.Globalization.CultureInfo.InvariantCulture) + " bytes", warning, StringComparison.Ordinal);
+        Assert.Contains("200.0 MiB) free for the database", warning, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void WithoutALargeDatabaseFile_TheReserveIsTheFlatHeadroom()
+    {
+        Assert.Equal(DataVolumeSpace.CompactionHeadroomBytes, DataVolumeSpace.CompactionReserveBytes(Path.Combine(_tempDir, "missing.duckdb")));
+
+        var small = Path.Combine(_tempDir, "small.duckdb");
+        File.WriteAllBytes(small, new byte[1024]);
+        Assert.Equal(DataVolumeSpace.CompactionHeadroomBytes, DataVolumeSpace.CompactionReserveBytes(small));
+    }
+
+    [Fact]
+    public void GetAvailableFreeBytes_AsksTheFolderFirst_FallsBackToTheDriveRoot_AndIsNullWhenBothFail()
+    {
+        var asked = new List<string>();
+        var folder = Path.GetFullPath(_tempDir);
+
+        Assert.Equal(111L, DataVolumeSpace.GetAvailableFreeBytes(_tempDir,
+            p => { asked.Add("folder:" + p); return 111L; },
+            p => { asked.Add("root:" + p); return 222L; }));
+        Assert.Equal(["folder:" + folder], asked);
+
+        asked.Clear();
+        Assert.Equal(222L, DataVolumeSpace.GetAvailableFreeBytes(_tempDir,
+            p => { asked.Add("folder"); return null; },
+            p => { asked.Add("root"); return 222L; }));
+        Assert.Equal(["folder", "root"], asked);
+
+        Assert.Null(DataVolumeSpace.GetAvailableFreeBytes(_tempDir, _ => null, _ => null));
+        Assert.Null(DataVolumeSpace.GetAvailableFreeBytes(_tempDir, _ => throw new IOException("denied"), _ => 1L));
+    }
+
+    [Fact]
+    public void TheVolumeWarning_FiresOnEntry_StaysSilentHourly_RepeatsAfter24Hours_AndLogsRecovery()
+    {
+        var now = new DateTime(2026, 10, 6, 0, 0, 0, DateTimeKind.Utc);
+        File.WriteAllBytes(Path.Combine(_tempDir, "test.duckdb"), new byte[4096]);
+        var (_, initializer) = NewService(freeBytes: 1);
+        initializer.UtcNow = () => now;
+
+        Assert.True(initializer.WarnIfDataVolumeLow(0));
+        Assert.Single(VolumeWarnings());
+
+        for (var hour = 1; hour <= 23; hour++)
+        {
+            now = now.AddHours(1);
+            Assert.False(initializer.WarnIfDataVolumeLow(0));
+        }
+
+        Assert.Single(VolumeWarnings());
+
+        now = now.AddHours(1);
+        Assert.True(initializer.WarnIfDataVolumeLow(0));
+        Assert.Equal(2, VolumeWarnings().Count);
+
+        /* A restart always speaks while the volume is low. */
+        now = now.AddMinutes(5);
+        Assert.True(initializer.WarnIfDataVolumeLow(0, atStartup: true));
+        Assert.Equal(3, VolumeWarnings().Count);
+
+        /* Recovery: one information line, then silence. */
+        initializer.AvailableFreeBytesProvider = _ => long.MaxValue;
+        Assert.False(initializer.WarnIfDataVolumeLow(0));
+        Assert.Single(_initializerLog, e => e.Level == LogLevel.Information && e.Message.Contains("enough free disk space again", StringComparison.Ordinal));
+        Assert.False(initializer.WarnIfDataVolumeLow(0));
+        Assert.Single(_initializerLog, e => e.Message.Contains("enough free disk space again", StringComparison.Ordinal));
+
+        /* Low again after recovering is a new entry: it warns at once. */
+        initializer.AvailableFreeBytesProvider = _ => 1;
+        now = now.AddMinutes(1);
+        Assert.True(initializer.WarnIfDataVolumeLow(0));
+        Assert.Equal(4, VolumeWarnings().Count);
+    }
+
+    [Fact]
     public void WhenTheFreeSpaceIsUnknown_CompactionMergesAsBefore_AndDoesNotWarn()
     {
         MakeParquet("20260928_1400_t.parquet", 0, 1_000);
@@ -273,9 +380,11 @@ public sealed class ArchiveCompactionLowDiskTests : IDisposable
     }
 
     [Fact]
-    public async Task TheDataVolumeWarning_FiresAtStartup_AndOncePerArchivePass_NamingTheFolder()
+    public async Task TheDataVolumeWarning_FiresAtStartup_AndThenOnlyOnTheCadence_NamingTheFolder()
     {
+        var now = new DateTime(2026, 10, 6, 0, 0, 0, DateTimeKind.Utc);
         var (service, initializer) = NewService(freeBytes: 1);
+        initializer.UtcNow = () => now;
 
         await initializer.InitializeAsync();
 
@@ -284,17 +393,21 @@ public sealed class ArchiveCompactionLowDiskTests : IDisposable
         Assert.Contains("1 bytes free", startup, StringComparison.Ordinal);
         Assert.Contains("CHECKPOINT", startup, StringComparison.Ordinal);
 
+        /* Hourly archive passes are silent while the volume stays low; a day later one repeats. */
+        now = now.AddHours(1);
+        await service.ArchiveOldDataAsync(hotDataDays: 7);
+        Assert.Single(VolumeWarnings());
+
+        now = now.AddHours(24);
         await service.ArchiveOldDataAsync(hotDataDays: 7);
         Assert.Equal(2, VolumeWarnings().Count);
 
-        await service.ArchiveOldDataAsync(hotDataDays: 7);
-        Assert.Equal(3, VolumeWarnings().Count);
-
-        /* Enough room: silent. */
+        /* Enough room: silent, with one line saying so. */
         _initializerLog.Clear();
         initializer.AvailableFreeBytesProvider = _ => long.MaxValue;
         await service.ArchiveOldDataAsync(hotDataDays: 7);
         Assert.Empty(VolumeWarnings());
+        Assert.Single(_initializerLog, e => e.Message.Contains("enough free disk space again", StringComparison.Ordinal));
     }
 
     /// <summary>

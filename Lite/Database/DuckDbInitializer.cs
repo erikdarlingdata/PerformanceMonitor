@@ -374,14 +374,25 @@ public partial class DuckDbInitializer : IDisposable
     /// </summary>
     internal Func<string, long?> AvailableFreeBytesProvider { get; set; } = DataVolumeSpace.GetAvailableFreeBytes;
 
+    /// <summary>The clock the volume warning's cadence reads; a test replaces it.</summary>
+    internal Func<DateTime> UtcNow { get; set; } = () => DateTime.UtcNow;
+
+    /// <summary>How long a volume that stays low goes without repeating its warning.</summary>
+    internal static readonly TimeSpan DataVolumeWarningRepeat = TimeSpan.FromHours(24);
+
+    private readonly object _volumeWarningLock = new();
+    private DateTime? _lastVolumeWarningUtc;
+
     /// <summary>
-    /// Logs one warning when the volume holding the data folder has less free space than the larger of
+    /// Warns when the volume holding the data folder has less free space than the larger of
     /// <paramref name="compactionNeedBytes"/> (the biggest merge the archive's next compaction needs, 0 when not
     /// known yet) and the database file's size (a CHECKPOINT can grow the file by up to that much). Called at
-    /// startup and once per archive pass (#5377). Never throws: a failed disk check must not stop the store or
-    /// the archive. Returns whether it warned.
+    /// startup and once per archive pass (#5377), but it speaks on a cadence: when the volume enters the low
+    /// state, again at most every <see cref="DataVolumeWarningRepeat"/> while it stays low, and one information
+    /// line when it recovers. <paramref name="atStartup"/> always warns when low. Never throws: a failed disk
+    /// check must not stop the store or the archive. Returns whether it warned.
     /// </summary>
-    internal bool WarnIfDataVolumeLow(long compactionNeedBytes)
+    internal bool WarnIfDataVolumeLow(long compactionNeedBytes, bool atStartup = false)
     {
         try
         {
@@ -390,7 +401,33 @@ public partial class DuckDbInitializer : IDisposable
             var reason = compactionNeedBytes > databaseBytes
                 ? $"the archive's next compaction ({DataVolumeSpace.FormatBytes(compactionNeedBytes)} of merged output)"
                 : $"a CHECKPOINT (the database file is {DataVolumeSpace.FormatBytes(databaseBytes)})";
-            return DataVolumeSpace.WarnIfLow(_logger, folder, Math.Max(databaseBytes, compactionNeedBytes), reason, AvailableFreeBytesProvider);
+            var needed = Math.Max(databaseBytes, compactionNeedBytes);
+
+            lock (_volumeWarningLock)
+            {
+                var observed = AvailableFreeBytesProvider(folder);
+                if (!DataVolumeSpace.IsLow(folder, needed, _ => observed, out var free))
+                {
+                    if (_lastVolumeWarningUtc is not null && observed is long recovered)
+                    {
+                        _lastVolumeWarningUtc = null;
+                        _logger?.LogInformation(
+                            "The Lite data folder {Folder} has enough free disk space again: {FreeBytes} bytes free ({Free})",
+                            folder, recovered, DataVolumeSpace.FormatBytes(recovered));
+                    }
+
+                    return false;
+                }
+
+                var at = UtcNow();
+                if (!atStartup && _lastVolumeWarningUtc is DateTime last && at - last < DataVolumeWarningRepeat)
+                {
+                    return false;
+                }
+
+                _lastVolumeWarningUtc = at;
+                return DataVolumeSpace.WarnIfLow(_logger, folder, needed, reason, _ => free);
+            }
         }
         catch (Exception ex)
         {
@@ -842,7 +879,7 @@ public partial class DuckDbInitializer : IDisposable
 
         /* Once per start (#5377): a nearly full volume is the cause behind a compaction or CHECKPOINT that
            fails part way, so it is named up front rather than inferred from the I/O error. */
-        WarnIfDataVolumeLow(compactionNeedBytes: 0);
+        WarnIfDataVolumeLow(compactionNeedBytes: 0, atStartup: true);
     }
 
     private bool _identityReadFailed;

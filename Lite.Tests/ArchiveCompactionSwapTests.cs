@@ -210,6 +210,63 @@ public sealed class ArchiveCompactionSwapTests : IDisposable
         Assert.Equal(90_000, Scalar($"SELECT count(*) FROM read_parquet('{P("202609_t_pt003.parquet")}')"));
     }
 
+    [Fact]
+    public void FailedPromote_KeepsEveryRow_ForTwoReplacingOutputs_WhenTheLastMoveFails()
+    {
+        /* Two outputs that BOTH replace an existing part: each batch holds one part and one per-cycle file.
+           Smallest first the files sort c1400 (40k rows), pt001 (60k), pt002 (70k), c1500 (80k); a budget of
+           pt002 + c1500 cuts the first batch after pt001 (adding pt002 would pass it), so the batches are
+           [c1400, pt001] and [pt002, c1500]. With nothing staying the outputs are pt001 and pt002, each the name
+           of a part it consumes, and the move of the last one (pt002) fails. */
+        MakeParquet("20260928_1400_t.parquet", 5_000_000, 5_040_000);
+        MakeParquet("202609_t_pt001.parquet", 0, 60_000);
+        MakeParquet("202609_t_pt002.parquet", 1_000_000, 1_070_000);
+        MakeParquet("20260928_1500_t.parquet", 6_000_000, 6_080_000);
+
+        var service = NewService();
+        service.CompactionBatchInputBytes =
+            new FileInfo(P("202609_t_pt002.parquet").Replace("/", "\\")).Length
+            + new FileInfo(P("20260928_1500_t.parquet").Replace("/", "\\")).Length;
+
+        FileStream? hold = null;
+        List<string> temps = [];
+        service.OnCompactionTempsReadyForTests = t =>
+        {
+            temps = t.ToList();
+            hold = new FileStream(t[^1].Replace("/", "\\"), FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+        };
+
+        try
+        {
+            service.CompactParquetFiles();
+        }
+        finally
+        {
+            hold?.Dispose();
+        }
+
+        Assert.Equal([P("202609_t_pt001.parquet.tmp"), P("202609_t_pt002.parquet.tmp")], temps);
+
+        /* The swap was undone: every row once, the original files back, no swap debris. */
+        var (rows, distinct) = Visible("t");
+        Assert.Equal(250_000, rows);
+        Assert.Equal(250_000, distinct);
+        Assert.Equal(60_000, Scalar($"SELECT count(*) FROM read_parquet('{P("202609_t_pt001.parquet")}') WHERE id < 60000"));
+        Assert.Equal(70_000, Scalar($"SELECT count(*) FROM read_parquet('{P("202609_t_pt002.parquet")}') WHERE id >= 1000000"));
+        Assert.True(File.Exists(P("20260928_1400_t.parquet")));
+        Assert.True(File.Exists(P("20260928_1500_t.parquet")));
+        Assert.DoesNotContain(ArchiveFileNames(), f => f.EndsWith(".replaced", StringComparison.Ordinal) || f.EndsWith(".swap", StringComparison.Ordinal));
+
+        /* Next cycle, nothing held: the same inputs merge into pt001 and pt002, every row exactly once. */
+        service.OnCompactionTempsReadyForTests = null;
+        service.CompactParquetFiles();
+
+        (rows, distinct) = Visible("t");
+        Assert.Equal(250_000, rows);
+        Assert.Equal(250_000, distinct);
+        Assert.Equal(["202609_t_pt001.parquet", "202609_t_pt002.parquet"], ArchiveFileNames());
+    }
+
     /// <summary>
     /// The state a process kill leaves after the swap moved every merged file in but before it deleted the
     /// inputs: the month's file holds the merged rows and the per-cycle file it folded in is still there.

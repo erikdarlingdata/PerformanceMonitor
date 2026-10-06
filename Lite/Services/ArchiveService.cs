@@ -910,7 +910,7 @@ COPY (
 
         /* Groups this pass could not merge in full for want of free disk space (#5377), reported in ONE warning
            after the loop rather than one per group. */
-        var lowSpaceGroups = new List<(string Month, string Table, long NeededBytes, long FreeBytes, long MergedBytes)>();
+        var lowSpaceGroups = new List<(string Month, string Table, long NeededBytes, long FreeBytes, long MergedBytes, long ReserveBytes, int HeldBack)>();
         var largestNeedBytes = 0L;
 
         foreach (var ((month, table), files) in groups)
@@ -976,12 +976,15 @@ COPY (
                 largestNeedBytes = Math.Max(largestNeedBytes, wantedBytes);
 
                 var freeBytes = _duckDb.AvailableFreeBytesProvider(_archivePath);
+                /* The database keeps writing while these merges run (WAL, CHECKPOINT growth), so the fit leaves
+                   the larger of the flat headroom and the database file's size free, not just 64 MiB. */
+                var reserveBytes = DataVolumeSpace.CompactionReserveBytes(_duckDb.DatabasePath);
                 var keptBytes = 0L;
                 batches = [];
                 foreach (var wanted in wantedBatches)
                 {
                     var bytes = BatchInputBytes(wanted);
-                    if (freeBytes is long free && keptBytes + bytes + DataVolumeSpace.CompactionHeadroomBytes > free)
+                    if (freeBytes is long free && keptBytes + bytes + reserveBytes > free)
                     {
                         continue;
                     }
@@ -992,7 +995,7 @@ COPY (
 
                 if (freeBytes is long observedFree && batches.Count < wantedBatches.Count)
                 {
-                    lowSpaceGroups.Add((month, table, wantedBytes + DataVolumeSpace.CompactionHeadroomBytes, observedFree, keptBytes));
+                    lowSpaceGroups.Add((month, table, wantedBytes + reserveBytes, observedFree, keptBytes, reserveBytes, wantedBatches.Count - batches.Count));
                 }
 
                 if (batches.Count == 0)
@@ -1108,7 +1111,7 @@ COPY (
         if (lowSpaceGroups.Count > 0)
         {
             var details = string.Join("; ", lowSpaceGroups.Select(g => FormattableString.Invariant(
-                $"{g.Table} ({g.Month}) needs {g.NeededBytes:N0} bytes ({DataVolumeSpace.FormatBytes(g.NeededBytes)}) and {g.FreeBytes:N0} are free ({DataVolumeSpace.FormatBytes(g.FreeBytes)}), ") +
+                $"{g.Table} ({g.Month}) needs {g.NeededBytes:N0} bytes ({DataVolumeSpace.FormatBytes(g.NeededBytes)}) and {g.FreeBytes:N0} are free ({DataVolumeSpace.FormatBytes(g.FreeBytes)}), keeps {g.ReserveBytes:N0} bytes ({DataVolumeSpace.FormatBytes(g.ReserveBytes)}) free for the database, holds back {g.HeldBack} of its batches, ") +
                 (g.MergedBytes > 0 ? $"{DataVolumeSpace.FormatBytes(g.MergedBytes)} merged anyway" : "nothing merged")));
             _logger?.LogWarning(
                 "Parquet compaction in {Folder} could not merge everything for lack of free disk space: {Details}. " +
