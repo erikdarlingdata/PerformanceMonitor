@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Notifications;
 
@@ -185,6 +186,17 @@ public class AlertMuteContext
     public string? QueryText { get; set; }
     public string? WaitType { get; set; }
     public string? JobName { get; set; }
+
+    /// <summary>The longest query-text pattern a mute dialog pre-fills from an alert.</summary>
+    public const int SeedQueryTextMax = 200;
+
+    /// <summary>The query-text pattern a mute dialog pre-fills for this alert, or null for none. #4348: a statement
+    /// the collector withheld reads as <see cref="SensitiveStatements.PlaceholderText"/>, and a rule on that text
+    /// would "match" every withheld statement and nothing else, so no pattern is seeded from it.</summary>
+    public string? SeedQueryTextPattern() =>
+        string.IsNullOrEmpty(QueryText) || QueryText.Trim() == SensitiveStatements.PlaceholderText
+            ? null
+            : QueryText.Length > SeedQueryTextMax ? QueryText.Substring(0, SeedQueryTextMax) : QueryText;
 
     /// <summary>
     /// Extracts context fields (Database, Query, Wait Type, Job Name) from the

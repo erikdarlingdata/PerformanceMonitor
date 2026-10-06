@@ -11,6 +11,7 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Data.SqlClient;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.PlanAnalysis;
 
@@ -53,20 +54,17 @@ public static class ActualPlanExecutor
         CancellationToken cancellationToken,
         string productName = DefaultProductName)
     {
-        /* Build the repro script (includes SET options from plan XML via #233) */
-        var reproScript = ReproScriptBuilder.BuildReproScript(
-            queryText, databaseName, planXml, isolationLevel,
-            source: "Actual Plan Capture", isAzureSqlDb: isAzureSqlDb,
-            productName: productName);
+        return await ExecuteForActualPlanAsync(
+            connectionString, databaseName, queryText, planXml, isolationLevel, isAzureSqlDb, timeoutSeconds,
+            productName, RunOnServerAsync, cancellationToken);
+    }
 
-        /* Wrap with SET STATISTICS XML ON/OFF */
-        var sb = new StringBuilder();
-        sb.AppendLine("SET STATISTICS XML ON;");
-        sb.AppendLine(reproScript);
-        sb.AppendLine("SET STATISTICS XML OFF;");
-
-        var fullScript = sb.ToString();
-
+    /// <summary>Runs a built batch against the server and returns the captured plan: the production run the
+    /// internal overload takes as its seam, so Darling.Tests can see the batch without a SQL Server.</summary>
+    private static async Task<string?> RunOnServerAsync(
+        string connectionString, string databaseName, string fullScript, bool isAzureSqlDb, int timeoutSeconds,
+        CancellationToken cancellationToken)
+    {
         /* Override database in connection string */
         var builder = new SqlConnectionStringBuilder(connectionString);
         if (!string.IsNullOrEmpty(databaseName) && !isAzureSqlDb)
@@ -88,6 +86,45 @@ public static class ActualPlanExecutor
 
         using var reader = await command.ExecuteReaderAsync(cancellationToken);
         return await CapturePlanXmlAsync(new SqlActualPlanReader(reader), cancellationToken);
+    }
+
+    /// <summary>The executor with the server run replaced by <paramref name="run"/>; everything before the run (the
+    /// refusal check and the batch build) is the production path.</summary>
+    internal static async Task<string?> ExecuteForActualPlanAsync(
+        string connectionString,
+        string databaseName,
+        string queryText,
+        string? planXml,
+        string? isolationLevel,
+        bool isAzureSqlDb,
+        int timeoutSeconds,
+        string productName,
+        Func<string, string, string, bool, int, CancellationToken, Task<string?>> run,
+        CancellationToken cancellationToken)
+    {
+        /* #4348: a collector that withheld a statement stored the marker in its place. Re-running that would send
+           the marker as a comment, capture no plan, and look like the query ran; say what happened instead. */
+        if (queryText.Trim() == SensitiveStatements.PlaceholderText)
+        {
+            throw new InvalidOperationException(
+                "This statement's text was withheld (#4348), so it cannot be run to capture an actual plan.");
+        }
+
+        /* Build the repro script (includes SET options from plan XML via #233) */
+        var reproScript = ReproScriptBuilder.BuildReproScript(
+            queryText, databaseName, planXml, isolationLevel,
+            source: "Actual Plan Capture", isAzureSqlDb: isAzureSqlDb,
+            productName: productName);
+
+        /* Wrap with SET STATISTICS XML ON/OFF */
+        var sb = new StringBuilder();
+        sb.AppendLine("SET STATISTICS XML ON;");
+        sb.AppendLine(reproScript);
+        sb.AppendLine("SET STATISTICS XML OFF;");
+
+        var fullScript = sb.ToString();
+
+        return await run(connectionString, databaseName, fullScript, isAzureSqlDb, timeoutSeconds, cancellationToken);
     }
 
     /// <summary>
