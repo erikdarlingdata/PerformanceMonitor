@@ -144,10 +144,16 @@ AND   f.capture_time >= $1
 AND   ($2::text IS NULL OR ({DarlingMcpStoreQueryStatsTools.RoleKeySql}) = $2)
 ORDER BY f.capture_time, 2";
 
-    /// <summary>The live text for some query ids. <c>$1</c> the ids.</summary>
-    /* max(query) GROUP BY queryid assumes a queryid carries the same text under every role (the same normalized statement); if two roles ever disagreed, one text is shown. */
-    public const string TextSql = @"
-SELECT f.queryid, max(f.query)
+    /// <summary>
+    /// The live text for some query ids. <c>$1</c> the ids. The shared sensitive-statement predicate sits on top of the
+    /// reader function's own filter (#4348): a second layer for a store whose function body is older than the pattern,
+    /// kept here because the diagnostics bundle reads statement text through this tool and its own text read applied it.
+    /// What it withholds arrives as <see cref="PgSensitiveStatementFilter.PlaceholderText"/>, and
+    /// <see cref="DarlingMcpStoreQueryStatsTools.ShownText"/> reads that as <see cref="StoreStatementStats.WithheldText"/>.
+    /// </summary>
+    /* max(query) GROUP BY queryid assumes a queryid carries the same text under every role (the same normalized statement); if two roles ever disagreed, one text is shown. The predicate wraps the chosen text, not each role's, so it is the shown text that is tested. */
+    public static readonly string TextSql = @"
+SELECT f.queryid, " + PgSensitiveStatementFilter.SqlPredicate("max(f.query)") + @"
 FROM " + PgSchemaGenerator.ConfigSchema + "." + StoreStatementStats.FunctionName + @"() AS f
 WHERE f.queryid = ANY($1)
 GROUP BY f.queryid";
@@ -164,14 +170,33 @@ GROUP BY f.queryid";
         "spent, each with calls, mean ms and the newest quarter of its hours vs the rest. With query_id: that " +
         "statement's hourly series, oldest first. Gated: status precondition before the first snapshot. " +
         "<<GUIDE>> Reads collect.store_statement_history: once an hour the service records each statement's CHANGE in calls, total time, rows and blocks since the last snapshot (the 100 that spent the most time), so a statement's mean ms per call can be read hour by hour across a store restart, a pg_stat_statements_reset() or the nightly upgrade. get_store_query_stats answers what is expensive since the counters were last reset; this answers what changed and when. Without query_id: statements ranks by total time over hours_back, with calls, mean_ms (total/calls), the mean in the newest quarter of the hours the statement appears in (recent_mean_ms) against the earlier hours (earlier_mean_ms), and hours_present; truncated says more statements exist than top. With query_id (a string, as get_store_query_stats prints it): series, one row per hour, oldest first, with interval_seconds, calls, mean_ms, total_ms, rows, shared block hits and reads, temp blocks written, max_exec_ms and three flags: first_seen (the statement's first hour in the counters; can be an upper bound, so its figures may include earlier life), entry_restarted (the extension evicted and re-admitted the entry, so the hour is a lower bound) and reset_in_interval (the counters were reset inside the hour). max_exec_ms is the extension's cumulative maximum, not the hour's. captures says how many snapshots the window holds, how many were a fresh baseline (rebaselined: no history written for that hour), how many could not read the extension (precondition), the evictions in the window (dealloc_delta_total) and the hours whose cap hid statements (capped_hours): an hour with no row may be an hour not captured. role is owner, admin, viewer or mcp; the text is the live normalized text, or says it is gone. In ranked mode first_seen_hours, restarted_hours and reset_hours count the flagged hours behind each statement's figures (calls and total_ms include them; restarted hours are lower bounds); first_seen hours are left out of recent_mean_ms and earlier_mean_ms, which are null under 4 other hours. effective_start, window_truncated and truncation_note say where the history starts relative to hours_back. History is kept 90 days and taken hourly. Answers status precondition, with the remedy, when the store predates the history, holds no snapshot yet, or when every snapshot so far could not read the extension. When history exists but the reader is not usable now, the history is still answered and only the text is withheld: query reads 'text unavailable' and text_note says why. No server_name: the store is the subject.")]
-    public static async Task<string> GetStoreQueryHistory(
+    public static Task<string> GetStoreQueryHistory(
         NpgsqlDataSource postgres,
         [Description("One statement's id, as get_store_query_stats prints it. Omit to rank the statements.")] string? query_id = null,
         [Description("Only statements run by this role: owner, admin, viewer or mcp. Omit for every role.")] string? role = null,
         [Description("Hours of history. Default 24, max 2160 (90 days).")] int hours_back = DefaultHours,
         [Description("How many statements when ranking. Default 20, max 1000.")] int top = DefaultTop,
         ILogger? logger = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) =>
+        GetStoreQueryHistoryCoreAsync(postgres, query_id, role, hours_back, top, uncutText: false, logger, cancellationToken);
+
+    /// <summary>
+    /// The diagnostics bundle's read (#5097): the ranked answer, every statement's <c>query</c> whole. The bundle aliases the
+    /// text first and cuts it afterwards, so a name that straddles the tool's own cut is never left as a prefix. Not a tool:
+    /// the MCP surface, its parameters and its output are the ones <see cref="GetStoreQueryHistory"/> has.
+    /// </summary>
+    internal static Task<string> GetStoreQueryHistoryUncut(NpgsqlDataSource postgres, int hours_back, int top, CancellationToken cancellationToken) =>
+        GetStoreQueryHistoryCoreAsync(postgres, query_id: null, role: null, hours_back, top, uncutText: true, logger: null, cancellationToken);
+
+    private static async Task<string> GetStoreQueryHistoryCoreAsync(
+        NpgsqlDataSource postgres,
+        string? query_id,
+        string? role,
+        int hours_back,
+        int top,
+        bool uncutText,
+        ILogger? logger,
+        CancellationToken cancellationToken)
     {
         var invalidTop = McpHelpers.ValidateTop(top, "top");
         if (invalidTop != null)
@@ -241,7 +266,7 @@ GROUP BY f.queryid";
                     truncation_note = notice.TruncationNote,
                     role = roleKey,
                     query_id = id.ToString(CultureInfo.InvariantCulture),
-                    query = ShownQuery(text, id, gate.TextUsable),
+                    query = ShownQuery(text, id, gate.TextUsable, uncutText),
                     text_note = gate.TextNote,
                     hours_returned = series.Count,
                     captures = CapturesShape(captures),
@@ -308,7 +333,7 @@ GROUP BY f.queryid";
                     shared_blks_read = s.BlksRead,
                     temp_blks_written = s.TempWritten,
                     max_exec_ms = s.MaxMs is double m ? Round(m) : (double?)null,
-                    query = ShownQuery(texts, s.QueryId, gate.TextUsable),
+                    query = ShownQuery(texts, s.QueryId, gate.TextUsable, uncutText),
                 }),
                 note = Note,
             }, McpHelpers.JsonOptions);
@@ -323,16 +348,24 @@ GROUP BY f.queryid";
     private const string Note =
         "Each row is the CHANGE since the previous hourly snapshot, so it survives a restart or a reset; the extension keeps at most the 100 statements that spent the most time in an hour, so a cheap statement can be missing from an hour it ran in. max_exec_ms is the extension's cumulative maximum, not the hour's. captures.rebaselined counts hours with no history because the counters could not be trusted. History is kept 90 days and taken hourly.";
 
-    private static string ShownQuery(IReadOnlyDictionary<long, string>? texts, long id, bool textUsable)
+    /// <summary>
+    /// A statement's text as the answer shows it. <paramref name="uncut"/> keeps it whole (redacted, not compacted) for the
+    /// diagnostics bundle, which aliases it before it cuts it (<see cref="GetStoreQueryHistoryUncut"/>).
+    /// </summary>
+    private static string ShownQuery(IReadOnlyDictionary<long, string>? texts, long id, bool textUsable, bool uncut)
     {
         if (!textUsable)
         {
             return TextUnavailable;
         }
 
-        return texts is not null && texts.TryGetValue(id, out var text) && text.Length > 0
-            ? StoreStatementStats.CompactStatementText(DarlingMcpStoreQueryStatsTools.ShownText(text), DarlingMcpStoreQueryStatsTools.PreviewLength)
-            : TextGone;
+        if (texts is null || !texts.TryGetValue(id, out var text) || text.Length == 0)
+        {
+            return TextGone;
+        }
+
+        var shown = DarlingMcpStoreQueryStatsTools.ShownText(text);
+        return uncut ? shown : StoreStatementStats.CompactStatementText(shown, DarlingMcpStoreQueryStatsTools.PreviewLength);
     }
 
     private static double Round(double value) => Math.Round(value, 2);
@@ -476,6 +509,12 @@ GROUP BY f.queryid";
 
     private static async Task<IReadOnlyDictionary<long, string>> ReadTextAsync(NpgsqlDataSource postgres, long[] ids, CancellationToken ct)
     {
+        /* No catch here, on purpose (#5097): both callers let a failed text read reach the tool's one catch, so the whole answer
+           is an error. It is never rows with the text left out, and never a fallback that reads a text some other way: every text
+           this tool shows has passed the reader function, the shared predicate and the lexer, and an error is the one outcome that
+           cannot show a text those layers did not clear. A read that fails after the gate passed (the reader's grant revoked or its
+           function replaced in between, a timeout on a large text file) is rare. The cost is that the bundle then marks the section
+           error, with no history rows, and the verb exits as a partial bundle: a fault to see, not text quietly left out. */
         var texts = new Dictionary<long, string>();
         await using var command = postgres.CreateCommand(TextSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;

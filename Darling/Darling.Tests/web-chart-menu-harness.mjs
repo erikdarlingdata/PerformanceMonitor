@@ -57,8 +57,10 @@ globalThis.URL.revokeObjectURL = () => {};
 const scratch = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "chart-menu-")));
 let charts;
 try {
+  /* Copy the whole js tree (js/, js/pages/ and every subdirectory) rather than a hand-kept list (#5279): a page module that
+     another PR adds then needs no edit here. Only imported files load, so the rest are inert. */
+  fs.cpSync(jsDir, scratch, { recursive: true });
   fs.writeFileSync(path.join(scratch, "package.json"), '{ "type": "module" }');
-  for (const f of ["util.js", "charts.js", "grid-tools.js"]) fs.copyFileSync(path.join(jsDir, f), path.join(scratch, f));
   charts = await import(pathToFileURL(path.join(scratch, "charts.js")).href);
   /* The CSV item loads grid-tools.js on first click; load it now, while the scratch copy exists. */
   await import(pathToFileURL(path.join(scratch, "grid-tools.js")).href);

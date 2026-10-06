@@ -2813,11 +2813,272 @@ public class CrossAppGuardCiGateTests
             StringComparison.Ordinal);
         Assert.Contains("SHARD: ${{ matrix.shard }}", scope, StringComparison.Ordinal);
 
-        /* And the run step honours the mode: the trait selection only in `reads`, the hash cut otherwise. */
+        /* And the run step honours the mode: the trait selection only in `reads`, the duration or hash cut otherwise. */
         var run = StepBlock(job, "Run Lite tests (shard)");
         Assert.Contains("LITE_SCOPE_MODE: ${{ steps.scope.outputs.mode }}", run, StringComparison.Ordinal);
         Assert.Contains("if ($env:LITE_SCOPE_MODE -eq 'reads')", run, StringComparison.Ordinal);
         Assert.Contains("Get-LiteClasses @('-trait', 'Reads=Darling')", run, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #5208: the four Lite shards cut the suite by recorded duration, and a cut is only a partition when every
+    /// shard computes it from the SAME inputs. The shards start minutes apart, so a lookup inside each shard
+    /// would race a dev run finishing in between, and a shard that fell back to the hash on its own while the
+    /// others packed by duration would leave classes in two shards or none. These are the lines that prevent
+    /// that, pinned as text because the steps only run on a hosted runner: the gate picks ONE source run, from
+    /// successful dev push runs only, with EVERY timing artifact of that run unexpired, and pins the exact
+    /// artifact names; every shard reads that pin, and a shard that cannot fetch it, or whose download is not
+    /// exactly the pinned set, fails.
+    /// </summary>
+    [Fact]
+    public void TheLiteShardCut_ComesFromOneTimingSourcePinnedByTheGate_AndNoShardFallsBackAlone()
+    {
+        var yaml = ReadBuildYaml(RepoRoot());
+
+        /* The gate pins the source once per run, reading Actions metadata and nothing else, and cannot fail. */
+        var gate = JobBlock(yaml, "gate");
+        Assert.Contains("    permissions:\n      actions: read\n", gate, StringComparison.Ordinal);
+        Assert.Contains("lite_timing_run: ${{ steps.timing.outputs.run_id }}", gate, StringComparison.Ordinal);
+        Assert.Contains("lite_timing_artifacts: ${{ steps.timing.outputs.artifacts }}", gate, StringComparison.Ordinal);
+        var pin = StepBlock(gate, "Pin the Lite timing source");
+        Assert.Contains("id: timing", pin, StringComparison.Ordinal);
+        Assert.Contains("continue-on-error: true", pin, StringComparison.Ordinal);
+        Assert.Contains("branch=dev&status=success", pin, StringComparison.Ordinal);
+        Assert.Contains("select(.event == \"push\")", pin, StringComparison.Ordinal);
+        Assert.Contains("^lite-tests-timing-[0-9]+$", pin, StringComparison.Ordinal);
+        Assert.Contains("(.expired | not)", pin, StringComparison.Ordinal);
+        Assert.Contains("env.KEEP_UNTIL", pin, StringComparison.Ordinal);
+        /* ALL of the run's timing artifacts must be fresh, not any one of them: a run whose first artifact outlives
+           the others would pass an "at least one" test and then hand a late re-run only some of its files. */
+        Assert.Contains("all(.[]; (.expired | not) and (.expires_at > env.KEEP_UNTIL))", pin, StringComparison.Ordinal);
+
+        /* The shard job may read artifacts (actions: read) and runs the packer from the pin, in the full cut only. */
+        var job = JobBlock(yaml, "lite-tests");
+        Assert.Contains("      contents: read\n", job, StringComparison.Ordinal);
+        Assert.Contains("      actions: read\n", job, StringComparison.Ordinal);
+        /* The packer's own self-test (totality, input-order determinism, the hash fallback) is the only executable
+           proof of "the same plan on every shard"; these pins are text, so without a workflow step that runs it a
+           later edit to the packer could keep every pin green and ship. Shard 0 alone runs it. */
+        Assert.Contains("run: python .github/scripts/lite-shard-pack.py --self-test", job, StringComparison.Ordinal);
+        Assert.Contains("\n        if: matrix.shard == 0\n", StepBlock(job, "Shard packer self-test"), StringComparison.Ordinal);
+        var run = StepBlock(job, "Run Lite tests (shard)");
+        Assert.Contains("LITE_TIMING_RUN: ${{ needs.gate.outputs.lite_timing_run }}", run, StringComparison.Ordinal);
+        Assert.Contains("LITE_TIMING_ARTIFACTS: ${{ needs.gate.outputs.lite_timing_artifacts }}", run, StringComparison.Ordinal);
+        Assert.Contains("GH_TOKEN: ${{ github.token }}", run, StringComparison.Ordinal);
+        Assert.Contains("gh run download $env:LITE_TIMING_RUN --pattern 'lite-tests-timing-*'", run, StringComparison.Ordinal);
+        Assert.Contains("lite-shard-pack.py pack --classes", run, StringComparison.Ordinal);
+        Assert.Contains("lite-shard-pack.py reconcile --classes", run, StringComparison.Ordinal);
+
+        var readsAt = run.IndexOf("if ($env:LITE_SCOPE_MODE -eq 'reads')", StringComparison.Ordinal);
+        var fullAt = run.IndexOf("\n          else {\n", readsAt, StringComparison.Ordinal);
+        Assert.True(readsAt > 0 && fullAt > readsAt, "the run step's reads/full branches moved — find them before editing this test");
+        Assert.DoesNotContain("lite-shard-pack", run[readsAt..fullAt], StringComparison.Ordinal);
+        Assert.Contains("lite-shard-pack", run[fullAt..], StringComparison.Ordinal);
+
+        /* The shard count is the matrix's, never a literal: a literal 4 left behind by a matrix change drops classes. */
+        Assert.Contains("$shards = ${{ strategy.job-total }}", run, StringComparison.Ordinal);
+        Assert.DoesNotContain("% 4", run, StringComparison.Ordinal);
+        Assert.Contains("($hash[0] % $shards) -eq ${{ matrix.shard }}", run, StringComparison.Ordinal);
+
+        /* ...and job-total is the shard count only while `shard` is the matrix's one axis: a second axis (an OS, say)
+           raises job-total while matrix.shard stays 0-3, so the packer would write buckets no leg reads and those
+           classes would never run, with no leg selecting zero. On a one-axis matrix job-index IS the shard value, so
+           each leg checks that and fails when it is not, before either cut uses $shards. */
+        Assert.Contains("if (${{ strategy.job-index }} -ne ${{ matrix.shard }}) { throw ", run, StringComparison.Ordinal);
+        Assert.Matches(@"\$shards = \$\{\{ strategy\.job-total \}\}\s+(?:#[^\r\n]*\s+)*if \(\$\{\{ strategy\.job-index \}\} -ne \$\{\{ matrix\.shard \}\}\) \{ throw [^\r\n]*\}\s+if \(\$env:LITE_TIMING_RUN -match ", run);
+
+        /* The download is tried three times, and every try starts from an EMPTY folder: gh extracts each file
+           create-exclusive, so a file a partial try left would make tries 2 and 3 fail too. The native-command
+           error preference is off before the first try, so a failed gh call reaches the retry instead of throwing
+           out of the step. */
+        Assert.Matches(@"\$PSNativeCommandUseErrorActionPreference = \$false\s+\$downloaded = \$false\s+foreach \(\$attempt in 1\.\.3\) \{\s+(?:#[^\r\n]*\s+)*Remove-Item -Recurse -Force -Path \$timingDir -ErrorAction SilentlyContinue\s+New-Item -ItemType Directory -Force -Path \$timingDir \| Out-Null\s+gh run download ", run);
+
+        /* A shard that cannot get the pinned timings, or whose packer or reconcile fails, FAILS: it never falls
+           back to the hash alone. The only fallbacks are the pin being empty (every shard reads the same empty
+           output) and the packer's own, which every shard reaches from the same files. */
+        Assert.Matches(@"if \(-not \$downloaded\) \{ throw ", run);
+        /* ...and so does a shard whose download is a different artifact set than the one the gate pinned (gh skips an
+           expired or deleted artifact without failing, so the exit code alone cannot see it). */
+        Assert.Matches(@"-ne \(\$got -join ','\)\) \{ throw ", run);
+        Assert.Matches(@"if \(\$packExit -ne 0\) \{ throw ", run);
+        Assert.Matches(@"reconcile --classes \$classesFile --shards \$shards --out \$planDir\s+if \(\$LASTEXITCODE -ne 0\) \{ throw ", run);
+        Assert.Contains("if ($env:LITE_TIMING_RUN -match '^\\d+$')", run, StringComparison.Ordinal);
+
+        /* The logged plan id hashes each shard's file under its own label, so two different partitions of the same
+           classes cannot share an id, and the notice says every shard must print the same id instead of claiming
+           that they do (nothing compares them). */
+        Assert.Contains("\"shard-$_`n\" + (Get-Content -Raw -Path (Join-Path $planDir \"shard-$_.txt\"))", run, StringComparison.Ordinal);
+        Assert.Contains("Every shard of this run must print this same id.", run, StringComparison.Ordinal);
+        Assert.DoesNotContain("the same on every shard", run, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #5208: the run listing the gate reads its timing source from sometimes returns a STALE page (30 rows of
+    /// runs from weeks ago, whose artifacts are long expired, where the current rows should be), and one such
+    /// page sent every Lite shard to the class-name hash although a qualifying run existed. So the step tries
+    /// the listing up to three times, five seconds apart, and takes a page only when a push run on it FINISHED
+    /// in the last five days. That is judged on <c>updated_at</c>, never <c>created_at</c>: artifacts expire
+    /// seven days after their UPLOAD, a run uploads before it finishes and a re-run uploads again, so a run
+    /// created six days ago and re-run today still has fresh timings. The five days are the timing artifacts'
+    /// retention minus the gate's two-day margin, read from build.yml so the three stay tied. A failed call is
+    /// a try, not the end of the loop, and each fallback notice says what the tries saw. Pinned as text because
+    /// the step only runs on a hosted runner (the script was also run under bash against a fake gh for each
+    /// outcome). The pins match words, not layout, so a re-indent, a re-wrap or a trailing comment does not
+    /// fail them and a changed word or value does.
+    /// </summary>
+    [Fact]
+    public void TheTimingSourceListing_IsTriedThreeTimes_AndAPageIsTakenOnlyWhenItsNewestPushRunIsFresh()
+    {
+        var yaml = ReadBuildYaml(RepoRoot());
+        /* A bash line continuation (a backslash at the end of a line) is joined first, so wrapping the long gh
+           call over several lines does not fail a pin on its words. */
+        var pin = Regex.Replace(StepBlock(JobBlock(yaml, "gate"), "Pin the Lite timing source"), @"\\\n[ \t]*", " ");
+
+        /* ONE listing call site: a second, unguarded one would sidestep the retry and the freshness test. */
+        Assert.Equal(1, pin.Split("actions/workflows/build.yml/runs?", StringSplitOptions.None).Length - 1);
+
+        /* Three tries and a five-day bar, each named once (the loop, the bar and the notices all read them), and
+           both counters start at zero. Each is matched as a word at the start of a line: any indentation and any
+           trailing comment pass, a changed value does not. */
+        Assert.Matches(@"(?m)^\s*tries=3\b", pin);
+        Assert.Matches(@"(?m)^\s*stale_days=5\b", pin);
+        Assert.Matches(@"(?m)^\s*stale_tries=0\b", pin);
+        Assert.Matches(@"(?m)^\s*failed_tries=0\b", pin);
+        Assert.Matches(ShellWords("export KEEP_UNTIL FRESH_AFTER"), pin);
+        Assert.Matches(ShellWords("FRESH_AFTER=$(date -u -d \"-${stale_days} days\" +%Y-%m-%dT%H:%M:%SZ)"), pin);
+
+        /* Five seconds before every try but the first, so the step never waits after its last try, and the listing
+           call is an `if` CONDITION. A failed call lands in the else arm below, which counts it and falls through
+           to the next try. Written as `page=$(gh api ...) || page=""`, a failed call would take the `*)` arm, set
+           runs to nothing and BREAK: the first 502 would end the loop with no retry. */
+        Assert.Matches(
+            ShellWords(
+                "for attempt in $(seq 1 \"${tries}\"); do " +
+                "if [ \"${attempt}\" -gt 1 ]; then sleep 5 fi " +
+                "if page=$(gh api \"repos/${GH_REPO}/actions/workflows/build.yml/runs?branch=dev&status=success&per_page=30\" " +
+                "--jq '[.workflow_runs[] | select(.event == \"push\")] | (map(.updated_at) | max) as $newest | " +
+                "if $newest > env.FRESH_AFTER then .[].id else \"stale \\($newest // \"none\")\" end'); then " +
+                "case \"${page}\" in"),
+            pin);
+
+        /* The page is judged on when its newest PUSH run FINISHED (updated_at) against the cutoff, in the filter
+           pinned above. NOT created_at: artifacts expire seven days after their upload, so a run created over five
+           days ago, or re-run since, can still hold fresh timings. A pull request from dev carries head_branch dev
+           too, and its row must not make a stale page look fresh, hence the event test in that same filter. */
+        Assert.False(
+            pin.Contains(".created_at", StringComparison.Ordinal),
+            "the step must not read created_at: judge the page on updated_at (when a run finished), because timing artifacts expire from their upload");
+
+        /* A stale page is counted and tried again; anything else is the fresh page's ids, which end the loop and
+           feed the per-run artifact test below, still the one that decides whether a run qualifies. A failed call
+           is counted and tried again too: the else arm holds the counter and the log line and nothing else, so a
+           `break` added there (which would end the loop on the first failure) fails here. */
+        Assert.Matches(
+            @"stale\*\)\s+stale_tries=\$\(\(\s*stale_tries\s*\+\s*1\s*\)\)\s+echo [^\r\n]*\s+;;\s+\*\)\s+runs=""\$\{page\}""\s+break\s+;;\s+esac",
+            pin);
+        Assert.Matches(
+            @"esac\s+else\s+failed_tries=\$\(\(\s*failed_tries\s*\+\s*1\s*\)\)\s+echo ""Try \$\{attempt\} of \$\{tries\}: the run listing call failed\.""\s+fi\s+done\b",
+            pin);
+        Assert.Matches(ShellWords("all(.[]; (.expired | not) and (.expires_at > env.KEEP_UNTIL))"), pin);
+        var retryAt = pin.IndexOf("for attempt in ", StringComparison.Ordinal);
+        var perRunAt = pin.IndexOf("for id in ${runs}; do", StringComparison.Ordinal);
+        Assert.True(retryAt > 0 && perRunAt > retryAt, "the retry loop must run before the per-run artifact test");
+
+        /* The five-day bar is not a free number. A run qualifies only if its timing artifacts outlive KEEP_UNTIL
+           (now plus the margin) and they expire retention-days after their upload, so only a run that finished
+           within retention minus margin days can qualify: the bar IS that difference. Raise the retention to 14
+           with the bar left at 5 and every page whose newest push run finished 5 to 12 days ago is rejected, which
+           is the quiet-dev case this step exists for, and the fallback is silent (the hash). So the three are read
+           from build.yml and tied, and the bar stays below the retention. */
+        var upload = StepBlock(JobBlock(yaml, "lite-tests"), "Upload Lite test timings");
+        var retentionDays = DaysFrom(upload, @"retention-days:\s*(\d+)", "the lite-tests job's 'Upload Lite test timings' step no longer sets retention-days");
+        var marginDays = DaysFrom(pin, @"KEEP_UNTIL=\$\(date\s+-u\s+-d\s+'\+(\d+)\s+days'", "KEEP_UNTIL is no longer 'now plus N days'");
+        var staleDays = DaysFrom(pin, @"(?m)^\s*stale_days=(\d+)\b", "stale_days is gone");
+        Assert.True(staleDays < retentionDays, $"stale_days ({staleDays}) must stay below the timing artifacts' retention-days ({retentionDays})");
+        Assert.Equal(retentionDays - marginDays, staleDays);
+
+        /* Four notices, in this order, each chosen by what the tries saw: a pinned run; every call failed; no try
+           got a current page (stale, empty or push-less pages, with failed calls among them, and no run was
+           tested); and a current page that was read where no run on it qualified (the old text, which also
+           covers a failed artifact lookup). The old "returned only runs older than" text said a page held runs
+           when an empty or push-less page holds none, and the old catch-all text said a current page had been
+           checked when no page had been taken. */
+        Assert.Matches(
+            ShellWords(
+                "if [ -n \"${source_run}\" ]; then " +
+                "echo \"::notice title=Lite timing source::The Lite shards balance their cut from the timings of run ${source_run}, the newest successful push run on dev that still has them.\" " +
+                "elif [ \"${failed_tries}\" -eq \"${tries}\" ]; then " +
+                "echo \"::notice title=Lite timing source::The run listing call failed on all ${tries} tries, so every Lite shard cuts by class-name hash.\" " +
+                "elif [ -z \"${runs}\" ]; then " +
+                "echo \"::notice title=Lite timing source::The run listing gave no current page in ${tries} tries (${stale_tries} returned no push run that finished in the last ${stale_days} days, a stale API page or no push run that recent, and ${failed_tries} failed), so every Lite shard cuts by class-name hash.\" " +
+                "else " +
+                "echo \"::notice title=Lite timing source::No successful dev push run has unexpired Lite timings (or the lookup failed), so every Lite shard cuts by class-name hash.\" " +
+                "fi"),
+            pin);
+        Assert.DoesNotContain("returned only runs older than", pin, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A regex for a piece of shell: its words, each matched literally, with any run of whitespace (a newline and
+    /// indentation included) allowed wherever the text has a space. Lets a pin on a build.yml run script survive
+    /// a re-indent or a re-wrap while a changed word still fails it.
+    /// </summary>
+    private static string ShellWords(string shell) =>
+        string.Join(
+            @"\s+",
+            shell.Split(new[] { ' ', '\t', '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries).Select(Regex.Escape));
+
+    /// <summary>The one number a pattern captures, with a message that names what went missing instead of a parse error.</summary>
+    private static int DaysFrom(string text, string pattern, string whatIsGone)
+    {
+        var match = Regex.Match(text, pattern);
+        Assert.True(match.Success, whatIsGone);
+        return int.Parse(match.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture);
+    }
+
+    /// <summary>
+    /// The cancel-in-progress argument at the top of build.yml rests on one sentence: exactly one thing reads
+    /// another run's artifacts, the Lite shard packer's download, and it reads successful runs only. If a second
+    /// consumer appeared (a download-artifact or gh run download step, a workflow_run trigger), a cancelled
+    /// push run could starve it and that sentence would be false. Comment lines are not counted, so the prose
+    /// may name these words.
+    /// </summary>
+    [Fact]
+    public void ExactlyOneConsumerReadsAnotherRunsArtifacts_TheLiteShardPackersDownload()
+    {
+        var workflows = Path.Combine(RepoRoot(), ".github", "workflows");
+        var files = Directory.GetFiles(workflows, "*.yml");
+        Assert.Contains(files, f => Path.GetFileName(f) == "build.yml");
+
+        foreach (var file in files)
+        {
+            var name = Path.GetFileName(file);
+            var code = File.ReadAllText(file)
+                .Replace("\r\n", "\n", StringComparison.Ordinal)
+                .Split('\n')
+                .Where(line => !line.TrimStart().StartsWith('#'))
+                .ToArray();
+
+            var downloads = code.Count(line => line.Contains("gh run download", StringComparison.Ordinal));
+            Assert.True(
+                downloads == (name == "build.yml" ? 1 : 0),
+                $"{name} has {downloads} 'gh run download' line(s); only build.yml's Lite shard step may have one, and exactly one.");
+            Assert.True(
+                !code.Any(line => line.TrimStart().StartsWith("run-id:", StringComparison.Ordinal)),
+                $"{name} downloads another run's artifacts through a run-id input; the cancel-in-progress argument in build.yml names only the Lite shard packer.");
+            Assert.True(
+                !code.Any(line => line.TrimStart().StartsWith("workflow_run:", StringComparison.Ordinal)),
+                $"{name} has a workflow_run trigger, a consumer of another run's output that build.yml's cancel-in-progress argument does not allow for.");
+        }
+
+        var build = File.ReadAllText(Path.Combine(workflows, "build.yml")).Replace("\r\n", "\n", StringComparison.Ordinal);
+        Assert.DoesNotContain("download-artifact", string.Join('\n', build.Split('\n').Where(l => !l.TrimStart().StartsWith('#'))), StringComparison.Ordinal);
+
+        /* The one download sits in the Lite shard step, which is also what the comment above the concurrency
+           block names, so the prose and the code cannot part ways quietly. */
+        var shardStep = StepBlock(JobBlock(build, "lite-tests"), "Run Lite tests (shard)");
+        Assert.Contains("gh run download", shardStep, StringComparison.Ordinal);
+        Assert.Contains("the Lite shard packer", build[..build.IndexOf("\nconcurrency:\n", StringComparison.Ordinal)], StringComparison.Ordinal);
     }
 
     /// <summary>

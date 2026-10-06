@@ -1010,6 +1010,7 @@ function vizLine(data, desc) {
     integerTicks: desc.format === "int",
     unit: desc.unit ?? null,
     title: desc.title || null,
+    atTime: desc.atTime || null,
     source: desc.read || desc.path ? { read: desc.read || desc.path, params: desc.params || null } : null,
     windowStart: win ? win.windowStart : null,
     windowEnd: win ? win.windowEnd : null,
