@@ -152,6 +152,22 @@ public sealed class ServerEditLiveTests : IDisposable
 
     private static JsonNode Parse(string answer) => JsonNode.Parse(answer)!;
 
+    /// <summary>Opens the stored value of a row with <paramref name="ring"/>, through the connection settings the row holds.</summary>
+    private static async Task<string> OpenStoredAsync(NpgsqlDataSource owner, int id, IPasswordKeyRing ring, CancellationToken ct)
+    {
+        await using var command = owner.CreateCommand(
+            "SELECT " + ServerConnectionIdentity.StoredColumns + ", encrypted_password FROM config_monitored_servers WHERE server_id = " + id);
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        Assert.True(await reader.ReadAsync(ct));
+        var identity = ServerConnectionIdentity.FromStoredColumns(
+            reader.IsDBNull(0) ? null : reader.GetString(0), reader.IsDBNull(1) ? null : reader.GetInt32(1),
+            reader.IsDBNull(2) ? null : reader.GetString(2), reader.IsDBNull(3) ? null : reader.GetString(3),
+            !reader.IsDBNull(4) && reader.GetBoolean(4), reader.IsDBNull(5) ? null : reader.GetString(5),
+            reader.IsDBNull(6) ? null : reader.GetString(6), reader.IsDBNull(7) ? null : reader.GetString(7),
+            !reader.IsDBNull(8) && reader.GetBoolean(8), !reader.IsDBNull(9) && reader.GetBoolean(9));
+        return ring.Open(reader.GetString(10), PasswordBinding.ForServer(identity));
+    }
+
     [Fact]
     public async Task AsTheMcpRole_AnEditOfNameCostAndAddress_KeepsTheIdTagsAndSettings_AndBumpsTheBeaconOnce()
     {
@@ -318,7 +334,8 @@ public sealed class ServerEditLiveTests : IDisposable
             Assert.True(saved["tested"]!.GetValue<bool>());
             Assert.DoesNotContain(SecretRef, saved.ToJsonString(), StringComparison.Ordinal);
             var storedAfterSave = await ScalarAsync<string>(rig.Owner, "SELECT encrypted_password FROM config_monitored_servers WHERE server_id = 5131", ct);
-            Assert.Equal(SecretRef, DarlingSecrets.Unprotect(storedAfterSave));
+            /* The value is sealed for the row's own connection settings: it opens with the key through them. */
+            Assert.Equal(SecretRef, await OpenStoredAsync(rig.Owner, 5131, TestKeyRings.Healthy, ct));
 
             var denied = await Assert.ThrowsAsync<PostgresException>(async () => await ScalarAsync<string>(rig.Mcp, "SELECT encrypted_password FROM config_monitored_servers", ct));
             Assert.Equal("42501", denied.SqlState);
@@ -332,6 +349,93 @@ public sealed class ServerEditLiveTests : IDisposable
             var rename = Parse(await Edit.EditServerByNameAsync(rig.Mcp, "alpha-31", "{\"display_name\":\"Beta\"}", Reachable, TestKeyRings.Healthy, null, ct));
             Assert.Equal("updated", rename["status"]!.GetValue<string>());
             Assert.Equal(storedAfterSave, await ScalarAsync<string>(rig.Owner, "SELECT encrypted_password FROM config_monitored_servers WHERE server_id = 5131", ct));
+            ok = true;
+        }
+        finally
+        {
+            await DropRoleAsync(rig, ok);
+        }
+    }
+
+    /* ---------------- sealing at add and edit, read back the way the service reads it (#5366) ---------------- */
+
+    private const string TypedPassword = "p@ss-not-real";
+    private const string RetypedPassword = "p@ss-not-real-2";
+
+    /// <summary>The enabled rows, read the way the service reads them at startup.</summary>
+    private static async Task<IReadOnlyList<MonitoredServer>> ReadServersAsync(NpgsqlDataSource owner, CancellationToken ct)
+    {
+        await using var connection = await owner.OpenConnectionAsync(ct);
+        return await StoreConfigProvider.ReadMonitoredServersAsync(connection, new DarlingConfig(), ct);
+    }
+
+    [Fact]
+    public async Task AnAdd_WithALiteralPassword_StoresASealedValue_ThatTheResolverOpensForTheRowsOwnSettings()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var rig = await OpenAsync(ct);
+        var ok = false;
+        try
+        {
+            var answer = await Edit.AddServersAsync(rig.Mcp,
+                $"[{{\"host\":\"alpha-41.example.test\",\"auth\":\"SQL\",\"username\":\"monitor\",\"password\":\"{TypedPassword}\"}}]",
+                Reachable, ct, TestKeyRings.Healthy);
+            Assert.Contains("\"added\"", answer, StringComparison.Ordinal);
+            Assert.DoesNotContain(TypedPassword, answer, StringComparison.Ordinal);
+
+            var server = Assert.Single(await ReadServersAsync(rig.Owner, ct), s => s.Host == "alpha-41.example.test");
+            Assert.StartsWith("sealed:", server.EncryptedPassword, StringComparison.Ordinal);
+            Assert.DoesNotContain(TypedPassword, server.EncryptedPassword, StringComparison.Ordinal);
+
+            /* The service's own resolver opens it with the key, through the settings the row stores. */
+            Assert.Equal(TypedPassword, DarlingSecrets.ResolvePassword(server, out var usedPlaintext, TestKeyRings.Healthy));
+            Assert.False(usedPlaintext);
+
+            /* A ring that does not hold the key cannot open it, and the same value does not open for another host. */
+            Assert.ThrowsAny<Exception>(() => DarlingSecrets.ResolvePassword(
+                server, out _, DarlingPasswordKey.FromPrivateKey(PasswordPrivateKey.Generate())));
+            var otherHost = server.ConnectionIdentity with { Host = "alpha-43.example.test" };
+            Assert.Throws<PasswordSealException>(() => TestKeyRings.Healthy.Open(server.EncryptedPassword!, PasswordBinding.ForServer(otherHost)));
+            ok = true;
+        }
+        finally
+        {
+            await DropRoleAsync(rig, ok);
+        }
+    }
+
+    [Fact]
+    public async Task AnEdit_WithARetypedPasswordAndANewHost_OpensWithTheNewBinding_AndTheOldSealedValueNoLongerOpensForTheNewHost()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var rig = await OpenAsync(ct);
+        var ok = false;
+        try
+        {
+            await Edit.AddServersAsync(rig.Mcp,
+                $"[{{\"host\":\"alpha-51.example.test\",\"auth\":\"SQL\",\"username\":\"monitor\",\"password\":\"{TypedPassword}\"}}]",
+                Reachable, ct, TestKeyRings.Healthy);
+            var before = Assert.Single(await ReadServersAsync(rig.Owner, ct), s => s.Host == "alpha-51.example.test");
+            var oldSealed = before.EncryptedPassword;
+            Assert.Equal(TypedPassword, DarlingSecrets.ResolvePassword(before, out _, TestKeyRings.Healthy));
+
+            /* The host moves and the password is not typed again: refused, nothing written (the old value is bound to the old host). */
+            var refused = Parse(await Edit.EditServerByNameAsync(rig.Mcp, "alpha-51.example.test", "{\"host\":\"alpha-52.example.test\"}", Reachable, TestKeyRings.Healthy, null, ct));
+            Assert.Equal("invalid", refused["status"]!.GetValue<string>());
+            Assert.Equal(oldSealed, (await ReadServersAsync(rig.Owner, ct)).Single(s => s.ServerId == before.ServerId).EncryptedPassword);
+
+            var saved = Parse(await Edit.EditServerByNameAsync(rig.Mcp, "alpha-51.example.test",
+                $"{{\"host\":\"alpha-52.example.test\",\"password\":\"{RetypedPassword}\"}}", Reachable, TestKeyRings.Healthy, null, ct));
+            Assert.Equal("updated", saved["status"]!.GetValue<string>());
+
+            var after = Assert.Single(await ReadServersAsync(rig.Owner, ct), s => s.ServerId == before.ServerId);
+            Assert.Equal("alpha-52.example.test", after.Host);
+            Assert.NotEqual(oldSealed, after.EncryptedPassword);
+            Assert.Equal(RetypedPassword, DarlingSecrets.ResolvePassword(after, out _, TestKeyRings.Healthy));
+
+            /* The value sealed for the old host does not open for the new one. */
+            after.EncryptedPassword = oldSealed;
+            Assert.ThrowsAny<Exception>(() => DarlingSecrets.ResolvePassword(after, out _, TestKeyRings.Healthy));
             ok = true;
         }
         finally

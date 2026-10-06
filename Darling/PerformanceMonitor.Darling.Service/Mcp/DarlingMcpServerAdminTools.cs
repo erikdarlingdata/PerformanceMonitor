@@ -152,8 +152,9 @@ public sealed partial class DarlingMcpServerAdminTools
     /// runs BEFORE any store access, and when NO structurally-valid candidate remains the store is never opened —
     /// so a call whose entries are all invalid (bad field, MFA auth) returns without a connection or a probe.</summary>
     internal static Task<string> AddServersAsync(
-        NpgsqlDataSource postgres, string servers_json, ServerProbe probe, CancellationToken cancellationToken) =>
-        AddServersAsync(new PostgresServerDefinitions(postgres), servers_json, probe, cancellationToken);
+        NpgsqlDataSource postgres, string servers_json, ServerProbe probe, CancellationToken cancellationToken,
+        IPasswordKeyRing? ring = null) =>
+        AddServersAsync(new PostgresServerDefinitions(postgres), servers_json, probe, cancellationToken, ring: ring);
 
     /// <summary>
     /// The add the <c>--add-server</c> verb runs: the same core with the one difference that a password may be an
