@@ -4007,6 +4007,16 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     private static CatalogParam PLimit(int def) => new("limit", TypeInt, false, def);
     private static CatalogParam PTop(int def) => new("top", TypeInt, false, def);
     private static CatalogParam PText(string name) => new(name, TypeText, false, null);
+
+    /// <summary>
+    /// #5245: the catalog row of a read that takes the picker's database list. It is the same
+    /// <see cref="CatalogParam"/> as <c>PText("database_name")</c> (text, optional, no default), so the served
+    /// catalog keeps its shape and a client that sends one <c>database_name</c> is unchanged. The helper exists so
+    /// a census can tell a read that takes a LIST (a <c>PDatabases(</c> row, whose dispatch entry calls
+    /// <see cref="DatabaseNames"/>) from a read that takes one name.
+    /// </summary>
+    internal static CatalogParam PDatabases() => PText("database_name");
+
     /// <summary>A text param with a real default, unlike <see cref="PText(string)"/>'s always-null one — e.g.
     /// get_fleet_overview's detail (#4198), whose default "summary" is part of the contract, not an absence.</summary>
     private static CatalogParam PTextDefault(string name, string def) => new(name, TypeText, false, def);
@@ -5373,6 +5383,141 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// <summary>An optional text parameter; null when absent or empty (so the tool sees its own default).</summary>
     private static string? Str(HttpContext context, string key) => First(context, key);
 
+    /* ── the database list (#5245): repeated ?database_name= keys, one per chosen database ── */
+
+    /// <summary>The query key the picker's database list travels under, once per chosen database.</summary>
+    private const string DatabaseNameKey = "database_name";
+
+    /// <summary>The most databases one request may name, counted AFTER de-duplication.</summary>
+    internal const int MaxDatabaseNames = 50;
+
+    /// <summary>The longest database name a request may carry: a <c>sysname</c> is 128 characters.</summary>
+    internal const int MaxDatabaseNameLength = 128;
+
+    /// <summary>
+    /// The most encoded bytes the <c>database_name</c> part of a query may take: <see cref="DatabaseKeyBytes"/>
+    /// plus <c>encodeURIComponent</c>'s length of each name, summed over the distinct names. The picker (a later
+    /// part of #5245) refuses a check that would pass it, so a hand-built request is the only way to reach this
+    /// refusal, and 4,096 keeps a request well inside Kestrel's 8 KB request line.
+    /// </summary>
+    internal const int MaxDatabaseQueryBytes = 4096;
+
+    /// <summary>The bytes <c>&amp;database_name=</c> takes in front of every name (1 + 13 + 1).</summary>
+    internal const int DatabaseKeyBytes = 15;
+
+    /// <summary>
+    /// The databases a read is asked about, from the REPEATED <c>?database_name=</c> keys, as a
+    /// <see cref="DatabaseFilter"/>; <c>null</c> when the request has to be REFUSED. Spell it
+    /// <c>DatabaseNames(c) is { } databases ? tool(..., databases) : DatabaseNamesRefusal(c)</c>, so a refused
+    /// request cannot reach a read as "all databases" (the type will not let a null through as a filter).
+    ///
+    /// <para>No <c>database_name</c> key at all is <see cref="DatabaseFilter.All"/>. Otherwise the values are
+    /// ITERATED, one per key; a value is never split on a comma, so <c>A,B</c> is one database called
+    /// <c>A,B</c>. Blank values (empty or whitespace-only) are dropped, a kept value is never trimmed or
+    /// case-folded, and repeats are kept once. The refusals, each the existing <c>invalid</c> envelope for the
+    /// <c>database_name</c> parameter:</para>
+    /// <list type="bullet">
+    /// <item>keys were sent but none survived the blank rule. A caller who asked for a database and got
+    /// "all databases" would read an unfiltered page as a filtered one, so the request is refused and never
+    /// widened;</item>
+    /// <item>more than <see cref="MaxDatabaseNames"/> distinct names;</item>
+    /// <item>a name over <see cref="MaxDatabaseNameLength"/> characters;</item>
+    /// <item>distinct names whose encoded query part is over <see cref="MaxDatabaseQueryBytes"/> bytes.</item>
+    /// </list>
+    /// Both caps count the DISTINCT names, so a request that repeats one name a hundred times is one name.
+    /// </summary>
+    internal static DatabaseFilter? DatabaseNames(HttpContext context) =>
+        TryBindDatabaseNames(context.Request.Query[DatabaseNameKey], out var databases, out _) ? databases : null;
+
+    /// <summary>
+    /// The refusal for a request <see cref="DatabaseNames"/> answered <c>null</c> for, as the dispatch entry's own
+    /// result: the <c>invalid</c> envelope (a 400 with the envelope as the body), the same shape
+    /// <see cref="MissingParam"/> and <see cref="UnparseableParam"/> hand back, and returned BEFORE the store is
+    /// touched. Calling it for a request that is fine is a bug, so it throws.
+    /// </summary>
+    internal static Task<string> DatabaseNamesRefusal(HttpContext context) =>
+        TryBindDatabaseNames(context.Request.Query[DatabaseNameKey], out _, out var refusal)
+            ? throw new InvalidOperationException("The request's database_name values are acceptable: there is nothing to refuse.")
+            : Task.FromResult(refusal!);
+
+    /// <summary>
+    /// PURE <see cref="DatabaseNames"/>: <paramref name="sent"/> is every value of the <c>database_name</c> key,
+    /// one element per key the request carried (empty when it carried none). True with the filter when the
+    /// request is acceptable; false with the refusal envelope when it is not.
+    /// </summary>
+    internal static bool TryBindDatabaseNames(IReadOnlyList<string?> sent, out DatabaseFilter databases, out string? refusal)
+    {
+        databases = default;
+        refusal = null;
+        if (sent.Count == 0)
+        {
+            return true;
+        }
+
+        // The blank rule and the de-duplication are DatabaseFilter's one copy; the caps below count what is left.
+        var chosen = DatabaseFilter.Of(sent);
+        if (chosen.IsAll)
+        {
+            refusal = McpHelpers.Refusal(DatabaseNameKey,
+                "database_name was sent, but every value was empty or only spaces. Name at least one database, or leave database_name out to cover them all.");
+            return false;
+        }
+
+        var names = chosen.Names;
+        if (names.Count > MaxDatabaseNames)
+        {
+            refusal = McpHelpers.Refusal(DatabaseNameKey,
+                $"database_name names {names.Count} different databases; at most {MaxDatabaseNames} are accepted. Name fewer, or leave database_name out to cover them all.");
+            return false;
+        }
+
+        foreach (var name in names)
+        {
+            if (name.Length > MaxDatabaseNameLength)
+            {
+                refusal = McpHelpers.Refusal(DatabaseNameKey,
+                    $"A database_name value is {name.Length} characters long; a database name is at most {MaxDatabaseNameLength} characters.");
+                return false;
+            }
+        }
+
+        var bytes = 0;
+        foreach (var name in names)
+        {
+            bytes += DatabaseKeyBytes + EncodedQueryLength(name);
+        }
+
+        if (bytes > MaxDatabaseQueryBytes)
+        {
+            refusal = McpHelpers.Refusal(DatabaseNameKey,
+                $"The database_name values come to {bytes} encoded bytes; at most {MaxDatabaseQueryBytes} are accepted. Name fewer databases, or leave database_name out to cover them all.");
+            return false;
+        }
+
+        databases = chosen;
+        return true;
+    }
+
+    /// <summary>
+    /// PURE: the length <c>encodeURIComponent</c> gives <paramref name="value"/>, which is what the page's
+    /// <c>buildQuery</c> puts on the wire for each name: the UTF-8 bytes, one character for each of
+    /// <c>A-Z a-z 0-9 - _ . ! ~ * ' ( )</c> and three (<c>%XX</c>) for every other byte.
+    /// </summary>
+    internal static int EncodedQueryLength(string value)
+    {
+        var length = 0;
+        foreach (var b in System.Text.Encoding.UTF8.GetBytes(value))
+        {
+            length += IsLeftAloneByEncodeUriComponent(b) ? 1 : 3;
+        }
+
+        return length;
+    }
+
+    private static bool IsLeftAloneByEncodeUriComponent(byte b) =>
+        b is (>= (byte)'A' and <= (byte)'Z') or (>= (byte)'a' and <= (byte)'z') or (>= (byte)'0' and <= (byte)'9')
+            or (byte)'-' or (byte)'_' or (byte)'.' or (byte)'!' or (byte)'~' or (byte)'*' or (byte)'\'' or (byte)'(' or (byte)')';
+
     /// <summary>A required text parameter — true with the value when present, false when absent/empty.</summary>
     private static bool RequireText(HttpContext context, string key, out string value)
     {
@@ -5526,11 +5671,27 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
 
     private static double QueryDouble(HttpContext context, string key, double def) => ParseDouble(First(context, key), def);
 
-    /// <summary>The first non-empty value for a query key, or null.</summary>
-    private static string? First(HttpContext context, string key)
+    /// <summary>
+    /// The first non-empty value for a query key, or null. This is the ONE binding rule for a single-value
+    /// parameter: the other three web surfaces' query helpers (<c>DarlingFleetSweepEndpoints.Query</c>,
+    /// <c>AlertNotebookEndpoint.Query</c>, <c>DarlingTriageEndpoint.Query</c>) call it rather than restate it.
+    ///
+    /// <para>A key sent twice (<c>?server=A&amp;server=B</c>) is its FIRST value. It used to be both values joined
+    /// with a comma (<c>A,B</c>, which is what turning ASP.NET's <c>StringValues</c> into a string does), which
+    /// no server, database or collector is called, so a repeated key silently matched nothing (#5245). A list is
+    /// read by <see cref="DatabaseNames"/>, which iterates the values and never splits on a comma.</para>
+    /// </summary>
+    internal static string? First(HttpContext context, string key)
     {
-        var value = context.Request.Query[key].ToString();
-        return string.IsNullOrEmpty(value) ? null : value;
+        foreach (var value in context.Request.Query[key])
+        {
+            if (!string.IsNullOrEmpty(value))
+            {
+                return value;
+            }
+        }
+
+        return null;
     }
 
     /* Pure parse helpers (invariant culture) — the binding logic the tests pin without an HttpContext. */
