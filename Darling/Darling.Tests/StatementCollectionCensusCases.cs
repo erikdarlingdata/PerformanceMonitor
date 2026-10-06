@@ -25,5 +25,9 @@ internal static class StatementCollectionCensusCases
         {
             // Filled by the lanes that hook a column, one line each, for example:
             // ["query_stats.query_text"] = "StatementCollectionCensusTests.QueryStats_QueryText_IsWithheld",
+            ["long_query_completions.statement_text"] = "StatementCollectionCensusTests.LongQueryCompletions_StatementText_IsWithheldAndThePlainStatementIsUntouched",
+            ["default_trace_events.text_data"] = "StatementCollectionCensusTests.DefaultTraceEvents_TextData_IsWithheldAndThePlainStatementIsUntouched",
+            ["system_health_events.event_xml"] = "StatementCollectionCensusTests.SystemHealthEvents_EventXml_WithholdsTheSqlTextActionAndKeepsTheRestOfTheEvent",
+            ["job_history.message"] = "StatementCollectionCensusTests.JobHistory_Message_IsWithheldWhenItEchoesAStatement_AndAPlainMessageIsUntouched",
         };
 }
