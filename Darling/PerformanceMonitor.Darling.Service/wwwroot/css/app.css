@@ -810,6 +810,31 @@ td.cell-picked { outline: 1px solid var(--accent); outline-offset: -1px; }
    card whose engine_kind is NULL renders no badge at all rather than one asserting a default. */
 .badge.engine { background: var(--lighter); color: var(--muted); font-weight: 500; }
 
+/* The database-scope chip on a panel heading (#5245): drawn only while the server page's database filter is active, and it
+   says whether that panel's read took the filter. "Filtered" names the chosen databases (accent), "unfiltered" is the
+   warning look .badge.band-Warning already gives (the read shows every database), and "server" is the neutral
+   .badge.engine look (the data has no database). A single long database name is cut with an ellipsis; the title holds all. */
+.badge.db-scope { font-weight: 500; max-width: 16rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: inline-block; cursor: help; }
+.badge.db-scope-filtered { background: rgba(46, 174, 241, 0.16); color: var(--accent); }
+.badge.db-scope-process-rows { background: rgba(46, 174, 241, 0.16); color: var(--accent); }
+.badge.db-scope-unfiltered { background: rgba(255, 213, 79, 0.16); color: var(--warn); }
+.badge.db-scope-server { background: var(--lighter); color: var(--muted); }
+
+/* The server page's "Databases: All" / "Databases: 2 of 37" toolbar button (#5245): a small pill beside the range picker,
+   accented while a filter is active (aria-pressed), the same shape as .auto-refresh-toggle. */
+.db-filter-button {
+  padding: 0.2rem 0.6rem;
+  font-size: 0.78rem;
+  color: var(--muted);
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  cursor: pointer;
+}
+.db-filter-button:hover { color: var(--fg); border-color: var(--accent); }
+.db-filter-button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.db-filter-button[aria-pressed="true"], .db-filter-button.on { color: var(--accent); border-color: var(--accent); }
+
 /* ─────────────────────────── sort control ─────────────────────────── */
 
 .sort-control { display: inline-flex; align-items: center; gap: 0.4rem; font-size: 0.78rem; color: var(--muted); }

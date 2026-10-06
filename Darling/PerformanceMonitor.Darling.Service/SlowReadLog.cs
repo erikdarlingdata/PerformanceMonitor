@@ -345,9 +345,20 @@ WHERE slow_read_id IN
         return null;
     }
 
+    /// <summary>The scalar an argument carries. A repeated web query key is recorded as an array, one entry per value
+    /// in the order sent; the web routes read such a key as its first value, so the window reads it the same way. An
+    /// empty array, or a first entry that is not a scalar, carries none.</summary>
+    private static JsonValue? ScalarOf(JsonObject arguments, string key) =>
+        arguments[key] switch
+        {
+            JsonValue value => value,
+            JsonArray { Count: > 0 } list => list[0] as JsonValue,
+            _ => null,
+        };
+
     private static double? NumberOf(JsonObject arguments, string key)
     {
-        if (arguments[key] is not JsonValue value)
+        if (ScalarOf(arguments, key) is not JsonValue value)
         {
             return null;
         }
@@ -372,7 +383,7 @@ WHERE slow_read_id IN
     }
 
     private static DateTime? ParseUtc(JsonObject arguments, string key) =>
-        arguments[key] is JsonValue value && value.TryGetValue<string>(out var text)
+        ScalarOf(arguments, key) is JsonValue value && value.TryGetValue<string>(out var text)
             && DateTime.TryParse(text, CultureInfo.InvariantCulture, DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal, out var parsed)
             ? parsed : null;
 
