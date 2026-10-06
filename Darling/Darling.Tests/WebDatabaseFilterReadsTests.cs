@@ -228,11 +228,11 @@ public sealed class WebDatabaseFilterReadsTests
     /// together; moving a read from one to the other keeps the total), and FILTERED is a subset of what the plan filters: none of
     /// the three deadlock reads.</summary>
     [Fact]
-    public void TheIdentityReads_AreTheFiveRowIdentityReads_AndTheDatabaseScopedReadsAreThirtyFour()
+    public void TheIdentityReads_AreTheSixRowIdentityReads_AndTheDatabaseScopedReadsAreThirtyFour()
     {
         var classes = Classes();
         Assert.Equal(
-            Sorted(new[] { "get_query_trend", "get_plan_xml", "get_query_store_plan_xml", "get_active_query_plan_xml", "get_procedure_plan_xml" }),
+            Sorted(new[] { "get_query_trend", "get_plan_xml", "get_query_store_plan_xml", "get_active_query_plan_xml", "get_procedure_plan_xml", "get_query_store_query_history" }),
             Sorted(classes["IDENTITY"]));
         Assert.Equal(34, classes["FILTERED"].Length + classes["UNFILTERED"].Length);
         Assert.DoesNotContain(classes["FILTERED"], read => read is "get_deadlock_trend" or "get_deadlocks" or "get_deadlock_detail");

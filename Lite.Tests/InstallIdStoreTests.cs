@@ -608,8 +608,9 @@ public sealed class InstallIdStoreTests : IDisposable
         var configDir = Path.Combine(dir, "config");
         Directory.CreateDirectory(configDir);
         var store = StoreFor(dir);
+        using var duckDb = new DuckDbInitializer(Path.Combine(dir, "t.duckdb"));
         var service = new RemoteCollectorService(
-            new DuckDbInitializer(Path.Combine(dir, "t.duckdb")),
+            duckDb,
             new ServerManager(configDir),
             new ScheduleManager(configDir),
             logger: null,
@@ -631,8 +632,9 @@ public sealed class InstallIdStoreTests : IDisposable
     public void TheCollectorService_WithoutAStore_HasNoId()
     {
         var dir = NewDir();
+        using var duckDb = new DuckDbInitializer(Path.Combine(dir, "t.duckdb"));
         var service = new RemoteCollectorService(
-            new DuckDbInitializer(Path.Combine(dir, "t.duckdb")),
+            duckDb,
             new ServerManager(dir),
             new ScheduleManager(dir));
 

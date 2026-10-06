@@ -197,6 +197,6 @@ public sealed class WebDatabaseFilterPickerBehaviourTests
         Assert.Contains("selectAll: withSelectAll = true", multi);
         Assert.Contains("setActiveDatabaseFilter({ server: current.server, databases })", server);
         Assert.Contains("onApply: redrawPanels", server);
-        Assert.Contains("card.is_postgres === true", server);
+        Assert.Contains("isPostgresTarget(card)", server);
     }
 }

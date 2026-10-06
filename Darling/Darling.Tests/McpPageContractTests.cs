@@ -1059,7 +1059,7 @@ public sealed class McpPageContractTests
         })
         {
             var floor = sql.IndexOf("COALESCE(MAX(max_dop), 0) >= $6", StringComparison.Ordinal);
-            var order = sql.IndexOf("ORDER BY SUM(delta_worker_time) DESC", StringComparison.Ordinal);
+            var order = sql.IndexOf("ORDER BY rank_metric DESC NULLS LAST", StringComparison.Ordinal);
             Assert.True(floor >= 0, $"{name}: the parallelism floor is not in the statement");
             Assert.True(order > floor, $"{name}: the parallelism floor sits after the ranking, so it filters a ranked page rather than ranking a filtered population");
         }

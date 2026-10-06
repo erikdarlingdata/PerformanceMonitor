@@ -259,6 +259,7 @@ public sealed class WebDatabaseFilterBehaviourTests
         Assert.Empty(Strings(r, "strayKeys"));
         var scopes = r.GetProperty("scopes");
         Assert.Equal(3, scopes.GetProperty("UNFILTERED").GetInt32());
-        Assert.Equal(5, scopes.GetProperty("IDENTITY").GetInt32());
+        /* Six since #5300: the Query Store History panel's read is one query's own rows, keyed by its database and query_id. */
+        Assert.Equal(6, scopes.GetProperty("IDENTITY").GetInt32());
     }
 }

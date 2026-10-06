@@ -244,6 +244,7 @@ public sealed class ComposeQueryStoreWideExactnessLiveTests
         top.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Text, Value = DBNull.Value });
         top.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Text, Value = DBNull.Value });
         top.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Text, Value = DBNull.Value });
+        top.Parameters.Add(new NpgsqlParameter<int> { TypedValue = PerformanceMonitor.Darling.Storage.TopFill.FirstCandidates(50) });  /* #5313: the round's candidate limit, bound last */
         await using var topReader = await top.ExecuteReaderAsync(ct);
         var queryIdColumn = topReader.GetOrdinal("query_id");
         var executionsColumn = topReader.GetOrdinal("total_executions");

@@ -18,7 +18,8 @@ namespace Darling.Tests;
 /// <summary>
 /// Size pin for the default <c>index_analysis</c> response, built from hand-made rows and no store: ten
 /// recommendations whose script and definition both hit the 300-character cap, more databases than the cap, with long names (the cap keeps 13 serialized), both
-/// caveat notes and the analyzer's full note list. The body must fit the default MCP response budget with headroom.
+/// caveat notes and the analyzer's full note list. The body must fit the default MCP response budget with headroom. A limit of 500 is
+/// measured on three row shapes against the sizes the guide gives (#5238).
 /// </summary>
 public sealed class FinOpsIndexAnalysisViewSizeTests
 {
@@ -60,6 +61,41 @@ public sealed class FinOpsIndexAnalysisViewSizeTests
     }
 
     private static int Bytes(string json) => Encoding.UTF8.GetByteCount(json);
+
+    /* Recommendations of one row shape: every name nameLength characters, script and definition textLength, the free-text columns freeTextLength. */
+    private static IndexCleanupAnalysisResult ShapedResult(int recommendations, int nameLength, int textLength, int freeTextLength)
+    {
+        var rollup = new IndexCleanupRollup { DatabaseName = Long("tenant_database_", nameLength), TotalMaxSavingsGb = 12.345m };
+        var recs = Enumerable.Range(0, recommendations).Select(i => new IndexCleanupRecommendation
+        {
+            DatabaseName = Long($"tenant_database_{i:D3}_", nameLength), SchemaName = Long("schema_", nameLength), TableName = Long("table_", nameLength),
+            IndexName = Long($"IX_index_{i:D3}_", nameLength), IndexId = 12,
+            Action = IndexCleanupAction.Disable, ResultKind = IndexCleanupResultKind.Merge,
+            ConsolidationRule = "Key Duplicate", TargetIndexName = Long("IX_target_", nameLength), SupersededBy = Long("IX_super_", nameLength),
+            MissingIncludedColumns = Long("[col_a], [col_b], ", freeTextLength), AdditionalInfo = Long("Exact duplicate of ", freeTextLength),
+            Script = Long("CREATE INDEX ", textLength), OriginalIndexDefinition = Long("CREATE NONCLUSTERED INDEX ", textLength),
+            IndexSizeGb = 12.3456m, IndexRows = 1234567, IndexReads = 12345, IndexWrites = 123456,
+            CanCompress = true, IsForeignKey = false, ScriptOmitsPartitionPlacement = false,
+        }).ToList();
+        return new IndexCleanupAnalysisResult { Recommendations = recs, DatabaseRollups = [rollup], OverallRollup = rollup, Notes = [] };
+    }
+
+    /* #5238: a limit of 500 is the largest answer this view gives and nothing trims it (#4198), so the guide tail says how big it is. Measured
+       here with 1 MB = 1,048,576 bytes (the 30 KB above is 30 * 1024): 0.46 MB for typical rows, 0.92 MB for long names with script and
+       definition at the 300-character cap, 3.49 MB for full_text on 3,000-character scripts. Each is asserted only within 15% of the figure the
+       guide gives, and the guide must say that figure: the bound keeps the guide true when a field is added to a row; it is not a cap on the answer. */
+    [Theory]
+    [InlineData(28, 110, 30, false, 0.45)]
+    [InlineData(100, 400, 100, false, 1.0)]
+    [InlineData(100, 3000, 100, true, 3.5)]
+    public void FiveHundredRecommendations_StayWithinFifteenPercentOfTheSizeTheGuideGives(int nameLength, int textLength, int freeTextLength, bool fullText, double guideMegabytes)
+    {
+        var json = DarlingMcpFinOpsTools.BuildIndexAnalysisPayload("server", ShapedResult(500, nameLength, textLength, freeTextLength), 500, null, fullText, null);
+        var megabytes = Bytes(json) / (1024.0 * 1024.0);
+
+        Assert.InRange(megabytes, guideMegabytes * 0.85, guideMegabytes * 1.15);
+        Assert.Contains(guideMegabytes.ToString(System.Globalization.CultureInfo.InvariantCulture) + " MB", DarlingMcpFinOpsTools.IndexAnalysisViewGuide, StringComparison.Ordinal);
+    }
 
     [Fact]
     public void DefaultResponse_WithTenFullLengthRecommendationsAndTheDatabaseCap_FitsTheResponseBudget()

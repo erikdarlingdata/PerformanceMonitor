@@ -76,9 +76,14 @@ public sealed class FinOpsTabIndexAnalysisPageTests
         Assert.Contains("readTool(\"get_finops\", params, ctx && ctx.signal)", tab);
         var limit = Regex.Match(tab, "(?m)^const LIMIT = (\\d+);$");
         Assert.True(limit.Success);
-        var max = Regex.Match(ToolsMain(), "private const int MaxLimit = (\\d+);");
+        // The most the view takes for this view (#5238): the 500 of MaxIndexAnalysisRecommendations, which MaxLimitFor hands to index_analysis,
+        // not the 50 every other top-N view stops at.
+        var max = Regex.Match(ToolSource(), "internal const int MaxIndexAnalysisRecommendations = (\\d+);");
         Assert.True(max.Success);
+        Assert.Equal(500, int.Parse(max.Groups[1].Value));
         Assert.Equal(int.Parse(max.Groups[1].Value), int.Parse(limit.Groups[1].Value));
+        Assert.Contains("IndexAnalysisView => MaxIndexAnalysisRecommendations,", ToolsMain());
+        Assert.Contains("var maxLimit = MaxLimitFor(normalized);", ToolsMain());
         // The first, unfiltered read sends neither optional parameter: they are added to params only from a choice.
         var call = tab.Substring(tab.IndexOf("const params = ", System.StringComparison.Ordinal), 200);
         call = call.Substring(0, call.IndexOf(';'));
@@ -315,7 +320,12 @@ public sealed class FinOpsTabIndexAnalysisPageTests
     [Fact]
     public void TheTruncatedNoticeNamesShownThenTotal()
     {
-        Assert.Contains("data.truncated ? \"The largest \" + n + \" of \" + data.recommendation_count + \" recommendations.\"", Tab());
+        var tab = Tab();
+        Assert.Contains("const rowsCut = n > 0 && data.truncated;", tab);
+        /* #5238: the count left over is one name, with a singular branch ("1 more is not shown"); the harness test runs the text itself. */
+        Assert.Contains("const left = data.recommendation_count - n;", tab);
+        Assert.Contains("\"Showing the largest \" + n + \" of \" + data.recommendation_count + \" recommendations. The list stops at \" + n + \", so \" + (left === 1 ? \"1 more is\" : left + \" more are\") + \" not shown.\"", tab);
+        Assert.DoesNotContain("The largest \" + n", tab);
     }
 
     [Fact]

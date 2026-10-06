@@ -583,7 +583,7 @@ public sealed class DarlingMcpDataTools
     /* ═══════════════════════════ query performance ═══════════════════════════ */
 
     [McpServerTool(Name = "get_top_queries_by_cpu"), Description("Gets expensive cached queries from sys.dm_exec_query_stats, ranked by CPU over a window ending at as_of. Filters (database_name, parallel_only, min_dop) apply before the top-N cap: filter_applied names the floor in force, and an empty page under it is the window's real answer, not a miss. min/max_cpu_ms and min/max_elapsed_ms are LIFETIME extremes, not windowed; cpu_attribution's ratio is omitted, not invented, when its inputs are missing. window_truncated marks a window floor, not a page cut; effective_start / effective_hours_back give the reach actually served. <<GUIDE>> On tier_used=hourly, min/max_cpu_ms and min/max_elapsed_ms are null, as are the columns the rollup does not carry (see precision_note), and parallel_only/min_dop/group_by=host_object keep the read on raw. Gets expensive queries from sys.dm_exec_query_stats (plan cache). Best for: currently cached queries with detailed per-execution stats, DOP, spills, and query_hash for trending. Returns query_hash, query_plan_hash, sql_handle, plan_handle, and host_object (the hosting procedure/function for proc-hosted statements, null for ad-hoc) — groups key on (database, query_hash, host_object), so INSERT...EXEC callers in different procedures report separately with their own text. distinct_texts counts statement texts merged into a group (>1 = ad-hoc literal variants or pre-upgrade history; query_text is one representative, 0 means only rows predating the text dimension). 'host_object' rolls all of a procedure's statements into one row — use it when dynamic SQL with per-value literals fragments one statement across many hashes, which no top-N-by-hash ranking can surface. Ad-hoc statements have no host object and stay grouped per hash in both modes. distinct_query_hashes reports how many hashes a row rolled up. Set group_by='host_object' to roll all of a procedure's statements into one row — necessary when dynamic SQL with per-value literals fragments one statement across many hashes, which no top-N-by-hash ranking can surface. detail='full' adds the desktop grid's remaining columns (last_execution_time, creation_time, physical-read, row, grant, spill and thread min/max, total_clr_ms, plan_generation_num, worker_time_per_second), non-null only, raw tier only. Supports database and parallelism filtering; every filter is applied IN the query before the ranking and the cap, so the page is the top-N of the FILTERED population (filter_applied names the parallelism floor in force, null when none), and an empty page under parallel_only/min_dop is the window's answer rather than a page artefact. min/max_cpu_ms and min/max_elapsed_ms are LIFETIME extremes for the plan's time in cache (same semantics as max_dop), not windowed — totals and avgs are windowed deltas; rows where an extreme provably predates the window carry extremes_note. max_dop comes from sys.dm_exec_query_stats and is a lifetime-max for the plan's time in cache, so a plan compiled before MAXDOP was lowered keeps reporting the old higher value until it is evicted or recompiled; confirm current parallelism with analyze_query_plan, which reads the actual plan." + McpHelpers.WindowTruncatedDescription + " " + McpToolGuideTopics.CpuTimeExtremesAndAttribution)]
-    public static async Task<string> GetTopQueriesByCpu(
+    public static Task<string> GetTopQueriesByCpu(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history. Default 24.")] int hours_back = 24,
@@ -595,6 +595,18 @@ public sealed class DarlingMcpDataTools
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
         [Description("'summary' (default) or 'full': full adds the remaining desktop columns (grants, threads, extremes, times), omitting nulls.")] string detail = "summary",
         CancellationToken cancellationToken = default)
+        => GetTopQueriesRanked(postgres, server_name, hours_back, top, database_name, parallel_only, min_dop, group_by, as_of, detail, order_by: null, cancellationToken);
+
+    /// <summary>
+    /// #5226: the body of <see cref="GetTopQueriesByCpu"/> with the ranking choice the web page offers. The MCP tool
+    /// stays CPU-only (it calls this with no <paramref name="order_by"/>, and its parameters and description are
+    /// unchanged); the web read dispatch passes the page's <c>order_by</c> (cpu, duration, reads or executions; absent
+    /// is cpu). An unknown value is refused, which the web answers as a 400, the way it answers a bad
+    /// <c>detail</c> or <c>group_by</c>.
+    /// </summary>
+    internal static async Task<string> GetTopQueriesRanked(
+        NpgsqlDataSource postgres, string? server_name, int hours_back, int top, string? database_name, bool parallel_only, int min_dop,
+        string group_by, string? as_of, string detail, string? order_by, CancellationToken cancellationToken)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
@@ -613,6 +625,13 @@ public sealed class DarlingMcpDataTools
         {
             return McpHelpers.Refusal("group_by",
                 $"group_by must be 'query_hash' or 'host_object' (got '{group_by}').");
+        }
+
+        /* #5226: an unknown ranking is refused, never read as cpu — a caller who asked for duration and got a CPU
+           page would read it as "nothing long-running here", the exact miss this option exists to close. */
+        if (!TopRankings.TryParse(order_by, out var ranking))
+        {
+            return McpHelpers.Refusal("order_by", $"order_by must be {TopRankings.Accepted} (got '{order_by}').");
         }
 
         var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
@@ -637,7 +656,7 @@ public sealed class DarlingMcpDataTools
             var now = windowEnd;
             var requestedStart = now.AddHours(-hours_back);
             var routed = await DarlingDataReader.GetTopQueriesByCpuRoutedAsync(
-                postgres, resolved.ServerId, requestedStart, now, top, database_name, rollUpByHostObject: rollUp, minMaxDop: minMaxDop, cancellationToken: cancellationToken);
+                postgres, resolved.ServerId, requestedStart, now, top, database_name, rollUpByHostObject: rollUp, minMaxDop: minMaxDop, ranking: ranking, cancellationToken: cancellationToken);
             var rows = routed.Rows;
             var tierUsed = routed.Tier == RetentionTier.Hourly ? "hourly" : "raw";
 
@@ -648,7 +667,18 @@ public sealed class DarlingMcpDataTools
             string? precisionNote = null;
             if (routed.RawForced)
             {
-                precisionNote = "parallel_only / min_dop / group_by=host_object need per-row DOP and host_object, which only raw query_stats carries; this read stayed on raw, which reaches back to effective_start (window_truncated says whether that cut the window).";
+                var forcedBy = new List<string>();
+                if (minMaxDop > 0 || rollUp)
+                {
+                    forcedBy.Add("parallel_only / min_dop / group_by=host_object need per-row DOP and host_object, which only raw query_stats carries; this read stayed on raw, which reaches back to effective_start (window_truncated says whether that cut the window).");
+                }
+
+                if (!TopRankings.HourlyCarries(ranking))
+                {
+                    forcedBy.Add("order_by=reads needs per-query logical reads, which only raw query_stats carries (the hourly rollup keeps CPU, elapsed time and execution counts); this read stayed on raw, which reaches back to effective_start (window_truncated says whether that cut the window). Rank by cpu, duration or executions to read the rollup.");
+                }
+
+                precisionNote = string.Join(" ", forcedBy);
             }
 
             /* #4231: what the raw tier actually held, beside what was asked for. Rows above are top-N by CPU,
@@ -687,9 +717,20 @@ public sealed class DarlingMcpDataTools
                was empty. The rollup that does hold the window cannot apply those refinements. */
             if (routed.RawForced && floor is null)
             {
+                var cannot = new List<string>();
+                if (minMaxDop > 0 || rollUp)
+                {
+                    cannot.Add("apply parallel_only/min_dop/group_by=host_object");
+                }
+
+                if (!TopRankings.HourlyCarries(ranking))
+                {
+                    cannot.Add("rank by reads (it carries no per-query logical reads)");
+                }
+
                 return McpHelpers.Status(
                     "empty",
-                    "raw query_stats holds nothing in this window; the hourly rollup, which covers this window, cannot apply parallel_only/min_dop/group_by=host_object",
+                    "raw query_stats holds nothing in this window; the hourly rollup, which covers this window, cannot " + string.Join(" or ", cannot),
                     new
                     {
                         filter_applied = filterApplied,
@@ -831,6 +872,10 @@ public sealed class DarlingMcpDataTools
                           + "server has been monitored for less time than that), so the older part of it was not read."
                         : "The window reaches further back than this server's raw query_stats retains (or this "
                           + "server has been monitored for less time than that), so the older part of it was not read.",
+                /* #5226: the raw route's retention notice (ComposeStoreAvailability.BuildRetentionNotice, the one the composed
+                   panels carry), set only for a reads ranking, which can read raw alone, over a window past what raw keeps. Null
+                   for every other ranking, so the MCP tools (CPU only) always send null. The web page draws it above the grid. */
+                retention_notice = routed.RetentionNotice,
                 queries = result
             }, McpHelpers.JsonOptions);
         }
@@ -927,7 +972,7 @@ public sealed class DarlingMcpDataTools
     }
 
     [McpServerTool(Name = "get_top_procedures_by_cpu"), Description("Gets the most expensive stored procedures ranked by total CPU time over a window ending at as_of. Delta-based: requires ~30 minutes after adding a new server before data appears. min/max_cpu_ms and min/max_elapsed_ms are LIFETIME extremes, not windowed (extremes_note flags a provably stale one); cpu_attribution's ratio is omitted, not invented, when its inputs are missing. window_truncated marks a window floor, not a page cut; effective_start / effective_hours_back give the reach actually served. <<GUIDE>> On tier_used=hourly, min/max_cpu_ms and min/max_elapsed_ms are null, as are the columns the rollup does not carry (see precision_note). Shows execution counts, CPU/elapsed times, and I/O metrics. Delta-based: requires ~30 minutes after adding a new server before data appears." + McpHelpers.WindowTruncatedDescription + " " + McpToolGuideTopics.CpuTimeExtremesAndAttribution)]
-    public static async Task<string> GetTopProceduresByCpu(
+    public static Task<string> GetTopProceduresByCpu(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history. Default 24.")] int hours_back = 24,
@@ -936,6 +981,15 @@ public sealed class DarlingMcpDataTools
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
         [Description("'summary' (default) or 'full': full adds the remaining desktop columns (times, read/write/spill extremes), omitting nulls.")] string detail = "summary",
         CancellationToken cancellationToken = default)
+        => GetTopProceduresRanked(postgres, server_name, hours_back, top, database_name, as_of, detail, order_by: null, cancellationToken);
+
+    /// <summary>
+    /// #5226: the body of <see cref="GetTopProceduresByCpu"/> with the ranking choice the web page offers; the MCP
+    /// tool stays CPU-only and calls this with no <paramref name="order_by"/>. See <see cref="GetTopQueriesRanked"/>.
+    /// </summary>
+    internal static async Task<string> GetTopProceduresRanked(
+        NpgsqlDataSource postgres, string? server_name, int hours_back, int top, string? database_name, string? as_of, string detail,
+        string? order_by, CancellationToken cancellationToken)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
@@ -944,6 +998,12 @@ public sealed class DarlingMcpDataTools
         if (!full && !string.Equals(detail, "summary", StringComparison.OrdinalIgnoreCase))
         {
             return McpHelpers.Refusal("detail", $"detail must be 'summary' or 'full' (got '{detail}').");
+        }
+
+        /* #5226: see GetTopQueriesRanked — an unknown ranking is refused, never read as cpu. */
+        if (!TopRankings.TryParse(order_by, out var ranking))
+        {
+            return McpHelpers.Refusal("order_by", $"order_by must be {TopRankings.Accepted} (got '{order_by}').");
         }
 
         var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
@@ -955,7 +1015,7 @@ public sealed class DarlingMcpDataTools
         {
             var now = windowEnd;
             var requestedStart = now.AddHours(-hours_back);
-            var routed = await DarlingDataReader.GetTopProceduresByCpuRoutedAsync(postgres, resolved.ServerId, requestedStart, now, top, database_name, cancellationToken);
+            var routed = await DarlingDataReader.GetTopProceduresByCpuRoutedAsync(postgres, resolved.ServerId, requestedStart, now, top, database_name, ranking, cancellationToken);
             var rows = routed.Rows;
             var tierUsed = routed.Tier == RetentionTier.Hourly ? "hourly" : "raw";
 
@@ -965,9 +1025,16 @@ public sealed class DarlingMcpDataTools
 
             if (rows.Count == 0)
                 return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "procedure_stats", cancellationToken)
-                    ?? McpHelpers.Status(
-                        "unavailable",
-                        "No procedure stats available. Delta-based collection requires at least two collection cycles (~30 minutes) to produce non-zero values.");
+                    ?? (routed.RawForced
+                        /* #5226: a reads ranking is raw-only, so an empty page here means raw holds nothing in the window while
+                           the hourly rollup (which cannot rank by reads) may — not that nothing was collected. */
+                        ? McpHelpers.Status(
+                            "empty",
+                            "raw procedure_stats holds nothing in this window; the hourly rollup, which covers this window, cannot rank by reads (it carries no per-procedure logical reads). Rank by cpu, duration or executions to read the rollup.",
+                            new { window_truncated = true })
+                        : McpHelpers.Status(
+                            "unavailable",
+                            "No procedure stats available. Delta-based collection requires at least two collection cycles (~30 minutes) to produce non-zero values."));
 
             /* #4231: what the raw tier actually held, beside what was asked for — same probe and disclosure as
                get_top_queries_by_cpu and get_query_store_top (#2364), over procedure_stats.
@@ -980,6 +1047,11 @@ public sealed class DarlingMcpDataTools
                 : await DarlingDataReader.GetProcedureStatsWindowFloorAsync(postgres, resolved.ServerId, requestedStart, now, cancellationToken);
             var effectiveStart = RawWindowFloor.EffectiveStart(floor, requestedStart);
             var windowTruncated = RawWindowFloor.IsTruncated(floor, requestedStart);
+            if (routed.RawForced)
+            {
+                precisionNote = "order_by=reads needs per-procedure logical reads, which only raw procedure_stats carries (the hourly rollup keeps CPU, elapsed time and execution counts); this read stayed on raw, which reaches back to effective_start (window_truncated says whether that cut the window). Rank by cpu, duration or executions to read the rollup.";
+            }
+
             if (hourly)
             {
                 precisionNote = "hourly-rollup rows: object_type, sql_handle, plan_handle, reads/writes/physical reads/spills and min/max cpu/elapsed are null — "
@@ -1066,6 +1138,8 @@ public sealed class DarlingMcpDataTools
                           + "server has been monitored for less time than that), so the older part of it was not read."
                         : "The window reaches further back than this server's raw procedure_stats retains (or this "
                           + "server has been monitored for less time than that), so the older part of it was not read.",
+                /* #5226: as on get_top_queries_by_cpu: the raw route's retention notice for a reads ranking past raw's reach. */
+                retention_notice = routed.RetentionNotice,
                 procedures = result
             }, McpHelpers.JsonOptions);
         }

@@ -77,6 +77,9 @@ export function renderPanel(desc, onSettled) {
     /* The database-scope chip (#5245): while the page's database filter is active it says whether this panel's read took it
        (dbScopeChip in util.js; `desc.dbScope` overrides the read's own class for a panel fed by a shared read). */
     el("h3", {}, [desc.title, desc.subtitle ? el("span", { class: "panel-sub", text: " " + desc.subtitle }) : null, dbScopeChip(desc.read, desc.dbScope)]),
+    /* #5226: an optional control node under the title (the Top Queries / Top Procedures ranking selector), drawn before the body so a
+       load that replaces the body never replaces it. Absent on every other panel. */
+    desc.control || null,
     body,
   ]);
   loadPanel(desc, body, signal, onSettled);

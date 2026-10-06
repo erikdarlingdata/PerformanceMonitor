@@ -40,7 +40,7 @@ public class DuckDbSchemaTests : IDisposable
     [Fact]
     public async Task InitializeAsync_CreatesAllTables()
     {
-        var initializer = new DuckDbInitializer(_dbPath);
+        using var initializer = new DuckDbInitializer(_dbPath);
         await initializer.InitializeAsync();
 
         var expectedTables = new[]
@@ -99,7 +99,7 @@ public class DuckDbSchemaTests : IDisposable
     [Fact]
     public async Task InitializeAsync_SetsCorrectSchemaVersion()
     {
-        var initializer = new DuckDbInitializer(_dbPath);
+        using var initializer = new DuckDbInitializer(_dbPath);
         await initializer.InitializeAsync();
 
         using var connection = new DuckDBConnection($"Data Source={_dbPath}");
@@ -115,7 +115,7 @@ public class DuckDbSchemaTests : IDisposable
     [Fact]
     public async Task InitializeAsync_IsIdempotent()
     {
-        var initializer = new DuckDbInitializer(_dbPath);
+        using var initializer = new DuckDbInitializer(_dbPath);
 
         /* Run twice — should not throw */
         await initializer.InitializeAsync();
@@ -134,7 +134,7 @@ public class DuckDbSchemaTests : IDisposable
     [Fact]
     public async Task InitializeAsync_CreatesArchiveDirectory()
     {
-        var initializer = new DuckDbInitializer(_dbPath);
+        using var initializer = new DuckDbInitializer(_dbPath);
         await initializer.InitializeAsync();
 
         var archivePath = Path.Combine(_tempDir, "archive");
@@ -169,7 +169,7 @@ public class DuckDbSchemaTests : IDisposable
     [Fact]
     public async Task InitializeAsync_CreatesIndexes()
     {
-        var initializer = new DuckDbInitializer(_dbPath);
+        using var initializer = new DuckDbInitializer(_dbPath);
         await initializer.InitializeAsync();
 
         using var connection = new DuckDBConnection($"Data Source={_dbPath}");

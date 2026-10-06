@@ -321,11 +321,15 @@ namespace PerformanceMonitor.Common
 
                        "Web TLS Certificate Expiring" (#3514) — the current value is the certificate's expiry
                        DATE ("expires 2026-... (in 10 days)" / "expired 2026-..."), a date rather than a
-                       measurement, and the fire site passes the 0 sentinel for both numeric columns. */
+                       measurement, and the fire site passes the 0 sentinel for both numeric columns.
+
+                       "MCP TLS Certificate Expiring" (#5288) — the same alert for the MCP endpoint's
+                       certificate, fired by the same code over the same shape of value. */
                     or "Collection Stopped"
                     or "Compression Job Stuck"
                     or "Store Runtime Upgrade"
                     or "Web TLS Certificate Expiring"
+                    or "MCP TLS Certificate Expiring"
 
                     /* #3816, the same split as "Compression Job Stuck" one family over: a refresh or
                        retention policy's stuck reason is elapsed minutes when a run HUNG and a scheduler

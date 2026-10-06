@@ -52,6 +52,7 @@ public sealed class DatabaseStateNoVerdictTests : IDisposable
 
     public void Dispose()
     {
+        _duckDb.Dispose();
         CollectionResetGate.ResetForTests();
         try
         {

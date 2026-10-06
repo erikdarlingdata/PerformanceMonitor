@@ -49,7 +49,7 @@ import { el, mount, apiGetFleet, bandClass, loadingStrip, setActiveRange, setAct
 import { getDatabaseFilter } from "../viewer-local.js";
 import { databaseFilterControl, databaseFilterUnavailable } from "./database-filter.js";
 import { setPanelSignal } from "../panels.js";
-import { serverTabsFor, findServerTab, tabNote } from "./server-tabs.js";
+import { serverTabsFor, isPostgresTarget, findServerTab, tabNote } from "./server-tabs.js";
 import { metricBands } from "./fleet.js";
 
 /** The page time range: the desktop viewers' presets, which stop at 7 days. All but three ranged reads on these
@@ -297,14 +297,14 @@ function redrawPanels() {
    card's id keys the choice, not the route's name, so a rename keeps it. */
 function applyDatabaseFilter() {
   const card = current.server ? (lastCard.get(current.server) || {}).card : null;
-  const databases = card && card.is_postgres !== true && card.server_id ? getDatabaseFilter(card.server_id) : [];
+  const databases = card && !isPostgresTarget(card) && card.server_id ? getDatabaseFilter(card.server_id) : [];
   setActiveDatabaseFilter({ server: current.server, databases });
 }
 
 /* The database filter's button in the page head: none for a PostgreSQL card; for no card (a fleet read that failed on the first
    paint) a disabled "Databases: unavailable" and no filter. A poll whose fleet read failed keeps the control it has. */
 function fillDatabaseFilter(slot, server, card) {
-  if (card && card.is_postgres === true) {
+  if (isPostgresTarget(card)) {
     mount(slot, []);
     return;
   }

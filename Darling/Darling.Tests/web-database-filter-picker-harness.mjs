@@ -94,6 +94,7 @@ try {
       "const tab = { id: 'cpu', label: 'CPU', build(server) { (globalThis.__builds ||= []).push({ server, filter: getActiveDatabaseFilter() }); return el('div', { class: 'stub-panel' }); } };\n" +
       "export const SERVER_TABS = [tab];\nexport const POSTGRES_TABS = [tab];\n" +
       "export function serverTabsFor(card) { return card && card.is_postgres === true ? POSTGRES_TABS : SERVER_TABS; }\n" +
+      "export function isPostgresTarget(card) { return !!card && card.is_postgres === true; }\n" +
       "export function findServerTab(id, tabs) { const r = tabs || SERVER_TABS; return r.find((t) => t.id === id) || r[0]; }\n" +
       "export function tabNote() { return null; }\n"
   );

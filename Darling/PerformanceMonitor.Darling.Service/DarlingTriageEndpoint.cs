@@ -125,6 +125,8 @@ internal static class DarlingTriageEndpoint
         (DarlingSelfAlertEvaluator.RetentionJobRecoveredMetric, DarlingSelfAlertEvaluator.RetentionJobStuckMetric),
         (DarlingSelfAlertEvaluator.StaleMuteResolvedMetric, DarlingSelfAlertEvaluator.StaleMuteMetric),
         (DarlingSelfAlertEvaluator.WebTlsCertRenewedMetric, DarlingSelfAlertEvaluator.WebTlsCertExpiryMetric),
+        /* #5288: the MCP endpoint's certificate alert and its own resolution title. */
+        (DarlingSelfAlertEvaluator.McpTlsCertRenewedMetric, DarlingSelfAlertEvaluator.McpTlsCertExpiryMetric),
         /* #4732: the fleet-gate self-alert's resolution. */
         (DarlingSelfAlertEvaluator.FleetGateClearedMetric, DarlingSelfAlertEvaluator.FleetGateMetric),
         /* The store families that landed AFTER #2768 (#3833). Their resolution titles are triage entry
@@ -319,6 +321,14 @@ internal static class DarlingTriageEndpoint
                not-yet-valid arm of the same metric, the date the window opens) are in the alert detail; the
                history is the firing trail, so the operator can see when the warning began. */
             [DarlingSelfAlertEvaluator.WebTlsCertExpiryMetric] = new[]
+            {
+                F("Recent alerts (the certificate's subject, thumbprint and validity dates are in the alert detail)", "get_alert_history", ("hours", "168"), ("limit", "50")),
+            },
+
+            /* #5288: the MCP endpoint's certificate alert is the web one's twin (mcp.network.tls instead of
+               web.network.tls), and answers the same way: renewing the certificate is an out-of-band step on the
+               service host, the facts are in the alert detail, and the history is the firing trail. */
+            [DarlingSelfAlertEvaluator.McpTlsCertExpiryMetric] = new[]
             {
                 F("Recent alerts (the certificate's subject, thumbprint and validity dates are in the alert detail)", "get_alert_history", ("hours", "168"), ("limit", "50")),
             },

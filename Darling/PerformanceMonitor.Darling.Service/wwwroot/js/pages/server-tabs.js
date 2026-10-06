@@ -49,6 +49,7 @@ import { analysisFindingsTab } from "./analysis-findings.js";
 import { downloadText } from "../grid-tools.js";
 import { deadlockGraphCell } from "./deadlock-graph.js";
 import { activePlanColumns, planColumn, procedurePlanColumn, queryStorePlanColumn } from "./plan-viewer.js";
+import { queryStoreHistoryColumn } from "./query-store-history.js";
 
 /* ─────────────────────────── shared cell renderers ─────────────────────────── */
 
@@ -139,11 +140,13 @@ function sentinelDuration(key) {
 
 /* `read` is the panel's main read and `dbScope` its own scope when one read feeds panels of different kinds ("server",
    "unfiltered" or "process-rows"): together they draw the database-scope chip while the page's database filter is active
-   (#5245, dbScopeChip in util.js). A panel with no read of its own passes none and draws no chip. */
-function panelShell(title, subtitle, span = 2, read = null, dbScope = null) {
+   (#5245, dbScopeChip in util.js). A panel with no read of its own passes none and draws no chip. `control` (#5226) is a node
+   drawn under the title, before the body: the ranking selector of the Top Queries card. */
+function panelShell(title, subtitle, span = 2, read = null, dbScope = null, control = null) {
   const body = el("div", { class: "panel-body" }, [loadingStrip()]);
   const panel = el("div", { class: "panel card" + (span === 2 ? " span-2" : "") }, [
     el("h3", {}, [title, subtitle ? el("span", { class: "panel-sub", text: " " + subtitle }) : null, dbScopeChip(read, dbScope)]),
+    control,
     body,
   ]);
   return { panel, body };
@@ -575,9 +578,24 @@ function perfmonRows(counters) {
  * null reads as the blank it is instead of flattening a chart to a zero nobody measured.
  */
 export function topQueriesPanel(server, ctx) {
-  const { panel, body } = panelShell("Top Queries by CPU", ctx.label + ", with a per-collection trend for the query you pick", 2, "get_top_queries_by_cpu");
+  return rankedCard("queries", (ranking, picker) => topQueriesCard(server, ctx, ranking, picker));
+}
+
+/* One draw of the card for one ranking (#5226): rankedCard draws it again on a pick, so the title and the rows follow the choice. */
+function topQueriesCard(server, ctx, ranking, picker) {
+  const { panel, body } = panelShell(
+    "Top Queries by " + topRankingLabel(ranking),
+    ctx.label + ", with a per-collection trend for the query you pick",
+    2,
+    "get_top_queries_by_cpu",
+    null,
+    picker
+  );
   (async () => {
-    const res = await readToolWithinKeptHistory("get_top_queries_by_cpu", { server, hours: ctx.hours, top: 20, detail: "full" });
+    const res = await readToolWithinKeptHistory(
+      "get_top_queries_by_cpu",
+      rankedParams({ server, hours: ctx.hours, top: 20, detail: "full" }, ranking)
+    );
     if (res.kind === "error") return mount(body, readErrorStrip(res.message));
     if (res.kind === "empty") return mount(body, [keptWindowStrip(res), emptyStrip(res.message)]);
 
@@ -595,7 +613,9 @@ export function topQueriesPanel(server, ctx) {
     ];
     /* #4231: this composite calls VIZ.table directly rather than going through table()/renderPanel, so it
        misses loadPanel's automatic noteKey handling (#3278) and has to render `truncation_note` itself —
-       same field, same meaning, as the plain table() panels below it on this page. */
+       same field, same meaning, as the plain table() panels below it on this page. #5299: a reads ranking past what raw keeps carries
+       `retention_notice` as well, and readTool already put that sentence in `truncation_note`'s place (util.js localizeWindowNote), so this
+       draws the one window note and the retention notice is not drawn a second time. */
     if (typeof res.data.truncation_note === "string" && res.data.truncation_note.trim()) {
       parts.unshift(noticeStrip(res.data.truncation_note));
     }
@@ -699,18 +719,84 @@ async function drawQueryTrend(slot, server, ctx, query) {
  * label (a wait type, a counter name) and a {value, label} pair when it is not — the query picker's value is a
  * row index, because a query has no short name to key on and its text is far too long to be one. Both the value
  * and the label are set through el()'s text/attribute paths, so neither a counter name nor a statement captured
- * from a monitored server can become markup (R4).
+ * from a monitored server can become markup (R4). `selected` (#5226), when it names an option, is the one shown first: a choice kept
+ * across a rebuild.
  */
-function pickerControl(label, options, onPick) {
+function pickerControl(label, options, onPick, selected) {
   const items = options.map((o) => (typeof o === "string" ? { value: o, label: o } : o));
   const sel = el(
     "select",
     { class: "range-select-inline", "aria-label": label },
     items.map((o) => el("option", { value: o.value, text: o.label }))
   );
-  sel.value = items[0].value;
+  sel.value = selected !== undefined && items.some((o) => o.value === selected) ? selected : items[0].value;
   sel.addEventListener("change", () => onPick(sel.value));
   return el("label", { class: "range-control" }, [el("span", { text: label }), sel]);
+}
+
+/* ─────────── #5226: the ranking choice on the Top Queries and Top Procedures cards ─────────── */
+
+/* The rankings the server's whitelist accepts (Mcp/TopRanking.cs), in the order the selector lists them. `cpu` is the default and is
+   sent as nothing, so the request for the default page is exactly what it was before the choice existed. */
+const TOP_RANKINGS = [
+  { value: "cpu", label: "CPU" },
+  { value: "duration", label: "Duration" },
+  { value: "reads", label: "Reads" },
+  { value: "executions", label: "Executions" },
+];
+
+/* The pick, one per list, at MODULE scope so the 60 s rebuild of a tab (a new card every time) keeps it. The CPU tab and the Queries tab draw the
+   same lists, so a pick on one tab is the pick on the other. */
+const topRankingPick = { queries: "cpu", procedures: "cpu" };
+
+/* A reads ranking can only read raw (the hourly rollups keep no logical reads), so over a window past what raw keeps the read says so in
+   `retention_notice`, the retention notice the composed panels carry. It is drawn above the grid as text, once: readTool puts it in the
+   window note's place (util.js localizeWindowNote, #5299), so the cards below name `truncation_note` as their one note and need no key of
+   their own for it, and a ranking is never silently partial. */
+
+function topRankingLabel(ranking) {
+  return (TOP_RANKINGS.find((r) => r.value === ranking) || TOP_RANKINGS[0]).label;
+}
+
+/** A read's params for a ranking: `order_by` only when the pick is not the default (cpu), so the default request is unchanged. */
+function rankedParams(params, ranking) {
+  return ranking === "cpu" ? params : { ...params, order_by: ranking };
+}
+
+/**
+ * A Top Queries or Top Procedures card (`kind` "queries" or "procedures") with its ranking selector. `build(ranking, picker)` draws the card
+ * for the current pick and puts `picker` under its title; a pick stores the choice at module scope and draws the card again, so the title
+ * ("Top Queries by Duration") and the rows follow it. Each draw aborts the one before it, as the Collection Log slot does.
+ */
+function rankedCard(kind, build) {
+  const slot = el("div", {}, []);
+  slot.style.display = "contents";
+  let drawing = null;
+  const draw = () => {
+    if (drawing) drawing.abort();
+    const mine = new AbortController();
+    drawing = mine;
+    const outer = getPanelSignal();
+    if (outer) outer.addEventListener("abort", () => mine.abort(), { once: true });
+    const ranking = topRankingPick[kind];
+    const picker = el("div", { class: "picker-row" }, [
+      pickerControl(
+        "Rank by",
+        TOP_RANKINGS,
+        (value) => {
+          topRankingPick[kind] = value;
+          draw();
+        },
+        ranking
+      ),
+    ]);
+    setPanelSignal(mine.signal);
+    const card = build(ranking, picker);
+    setPanelSignal(outer);
+    mount(slot, [card]);
+  };
+  draw();
+  return slot;
 }
 
 /**
@@ -886,11 +972,13 @@ function pivot(rows, { xKey, seriesKey, valueKey }, maxSeries = 8) {
  * `dbScope` ("server", "unfiltered" or "process-rows") is the panel's own database-scope chip when it differs from its
  * read's class (#5245); null takes the read's class. Deadlock Graphs declares "unfiltered" here and moves to
  * "process-rows" when its process rows are filtered.
+ * `control` (#5226) is a node drawn under the title, before the rows: the ranking selector on the Top Queries and Top Procedures cards.
  */
-function table(title, read, params, rowsKey, columns, subtitle, emptyText, span = 2, noteKey = null, moreNoteKeys = null, columnGroups = null, dbScope = null) {
+function table(title, read, params, rowsKey, columns, subtitle, emptyText, span = 2, noteKey = null, moreNoteKeys = null, columnGroups = null, control = null, dbScope = null) {
   if (!emptyText) throw new Error("table(" + title + "): a table panel must explain its own empty state.");
   const desc = { title, subtitle, read, params, viz: "table", rowsKey, columns, emptyText, moreNoteKeys, span, noteKey, dbScope };
   if (columnGroups) Object.assign(desc, { groups: columnGroups.groups, defaultGroups: columnGroups.defaultGroups });
+  if (control) desc.control = control;
   return renderPanel(desc);
 }
 
@@ -1060,31 +1148,37 @@ export const SERVER_TABS = [
       /* #4231: `noteKey` (#3278) carries `truncation_note` — raw query_stats/procedure_stats are dropped at
          4 days once the rollups are armed, and a window asking further back than that silently served less
          than it asked for. Null when the floor did not bite, the same as every other noteKey panel. */
-      table(
-        "Top Queries by CPU",
-        "get_top_queries_by_cpu",
-        { server, hours: ctx.hours, top: 20, detail: "full" },
-        "queries",
-        [...TOP_QUERY_COLUMNS, planColumn(server)],
-        ctx.label,
-        "No query stats in this window. Delta-based collection needs at least two cycles (~30 minutes) before it reports non-zero values.",
-        2,
-        "truncation_note",
-        null,
-        TOP_QUERY_GROUPS
+      rankedCard("queries", (ranking, picker) =>
+        table(
+          "Top Queries by " + topRankingLabel(ranking),
+          "get_top_queries_by_cpu",
+          rankedParams({ server, hours: ctx.hours, top: 20, detail: "full" }, ranking),
+          "queries",
+          [...TOP_QUERY_COLUMNS, planColumn(server)],
+          ctx.label,
+          "No query stats in this window. Delta-based collection needs at least two cycles (~30 minutes) before it reports non-zero values.",
+          2,
+          "truncation_note",
+          null,
+          TOP_QUERY_GROUPS,
+          picker
+        )
       ),
-      table(
-        "Top Procedures by CPU",
-        "get_top_procedures_by_cpu",
-        { server, hours: ctx.hours, top: 20, detail: "full" },
-        "procedures",
-        [...TOP_PROC_COLUMNS, procedurePlanColumn(server)],
-        ctx.label,
-        "No procedure stats in this window. Delta-based collection needs at least two cycles (~30 minutes).",
-        2,
-        "truncation_note",
-        null,
-        TOP_PROC_GROUPS
+      rankedCard("procedures", (ranking, picker) =>
+        table(
+          "Top Procedures by " + topRankingLabel(ranking),
+          "get_top_procedures_by_cpu",
+          rankedParams({ server, hours: ctx.hours, top: 20, detail: "full" }, ranking),
+          "procedures",
+          [...TOP_PROC_COLUMNS, procedurePlanColumn(server)],
+          ctx.label,
+          "No procedure stats in this window. Delta-based collection needs at least two cycles (~30 minutes).",
+          2,
+          "truncation_note",
+          null,
+          TOP_PROC_GROUPS,
+          picker
+        )
       ),
     ],
   },
@@ -1468,25 +1562,28 @@ export const SERVER_TABS = [
          mean two fetches of get_top_queries_by_cpu for one page's worth of the same twenty rows. */
       topQueriesPanel(server, ctx),
       /* #4231: same `truncation_note` disclosure as the CPU tab's plain tables. */
-      table(
-        "Top Procedures by CPU",
-        "get_top_procedures_by_cpu",
-        { server, hours: ctx.hours, top: 20, detail: "full" },
-        "procedures",
-        [...TOP_PROC_COLUMNS, procedurePlanColumn(server)],
-        ctx.label,
-        "No procedure stats in this window. Delta-based collection needs at least two cycles (~30 minutes).",
-        2,
-        "truncation_note",
-        null,
-        TOP_PROC_GROUPS
+      rankedCard("procedures", (ranking, picker) =>
+        table(
+          "Top Procedures by " + topRankingLabel(ranking),
+          "get_top_procedures_by_cpu",
+          rankedParams({ server, hours: ctx.hours, top: 20, detail: "full" }, ranking),
+          "procedures",
+          [...TOP_PROC_COLUMNS, procedurePlanColumn(server)],
+          ctx.label,
+          "No procedure stats in this window. Delta-based collection needs at least two cycles (~30 minutes).",
+          2,
+          "truncation_note",
+          null,
+          TOP_PROC_GROUPS,
+          picker
+        )
       ),
       table(
         "Query Store",
         "get_query_store_top",
         { server, hours: ctx.hours, top: 20 },
         "queries",
-        [...QUERY_STORE_COLUMNS, queryStorePlanColumn(server)],
+        [...QUERY_STORE_COLUMNS, queryStorePlanColumn(server), queryStoreHistoryColumn(server, ctx.hours)],
         ctx.label,
         "No Query Store rows in this window.",
         2,
@@ -2788,6 +2885,12 @@ export const POSTGRES_TABS = [
  */
 export function serverTabsFor(card) {
   return card && card.is_postgres === true ? POSTGRES_TABS : SERVER_TABS;
+}
+
+/** True only for a POSITIVE PostgreSQL claim on the card, the same test serverTabsFor makes (#5245: the server page's database
+ *  filter reads the claim through this, so server.js never re-derives the boolean from the card itself). */
+export function isPostgresTarget(card) {
+  return !!card && card.is_postgres === true;
 }
 
 /** The tab for an id within a registry, falling back to the first (Overview) — an unknown/absent id is a deep
