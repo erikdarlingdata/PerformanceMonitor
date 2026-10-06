@@ -785,4 +785,38 @@ public sealed class ServerEditRouteTests
         Assert.Equal(DarlingMcpServerAdminTools.EditStoreNeedsRolesText, JsonNode.Parse(body)!["error"]!.GetValue<string>());
         Assert.Contains("provision-roles.sql", body, StringComparison.Ordinal);
     }
+
+    /* A server id is a signed hash of the server's storage name, so about half of all ids are negative. The routes take them. */
+    private const int NegativeServerId = -1862834905;
+
+    [Fact]
+    public async Task AnEditRouteWithANegativeServerId_ReachesTheCoreWithThatId()
+    {
+        await using var rig = await StartAsync();
+        var body = Changes("\"monthly_cost_usd\":12.5");
+
+        var (status, answer) = await PatchAsync(rig, body, id: NegativeServerId);
+
+        Assert.Equal(HttpStatusCode.OK, status);
+        Assert.Equal((NegativeServerId, body), Assert.Single(rig.Edits));
+        Assert.Equal("updated", JsonNode.Parse(answer)!["status"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task TheAdminReadWithANegativeServerId_ReadsThatRow()
+    {
+        var asked = new List<int>();
+        await using var rig = await StartAsync(read: id =>
+        {
+            asked.Add(id);
+            return Task.FromResult<DarlingMcpServerAdminTools.ServerEditRow?>(Row(id));
+        });
+
+        var response = await rig.Client.GetAsync("/api/admin/servers/" + NegativeServerId, TestContext.Current.CancellationToken);
+        var body = await response.Content.ReadAsStringAsync(TestContext.Current.CancellationToken);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal(NegativeServerId, Assert.Single(asked));
+        Assert.Equal("Orders", JsonNode.Parse(body)!["display_name"]!.GetValue<string>());
+    }
 }
