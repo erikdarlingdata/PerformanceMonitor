@@ -142,7 +142,7 @@ ANALYZE collect.query_store_interval_wide;", ct);
                     top.Parameters.Add(Ts(start));
                     top.Parameters.Add(Ts(end));
                     top.Parameters.Add(new NpgsqlParameter<int> { TypedValue = 500 });
-                    top.Parameters.Add(Text());
+                    top.Parameters.Add(PerformanceMonitor.Darling.Storage.DatabaseFilter.All.Parameter());  /* #5245: the database list binds one text[] */
                     top.Parameters.Add(Text());
                     top.Parameters.Add(Text());
                     top.Parameters.Add(new NpgsqlParameter<int> { TypedValue = PerformanceMonitor.Darling.Storage.TopFill.FirstCandidates(500) });  /* #5313: the round's candidate limit, bound last */
