@@ -14,8 +14,9 @@ divided by PARALLEL_CONCURRENCY, because that is how many seconds of parallel cl
 Serial classes are the ones whose xUnit collection is declared `DisableParallelization = true`: the XML names each
 class's collection, and the declarations are read from the test sources (`--tests-dir`, default Lite.Tests at
 the repo root), so there is no hand-kept list to rot. Every class weighs at least MIN_WEIGHT, so a class whose tests were all skipped still moves a
-shard's load and no shard is left empty. A class with no timing history gets the MEAN weight of the known
-classes. When the timings are missing, unreadable, empty, all zero, or cover less than MIN_COVERAGE of the
+shard's load and no shard is left empty. Each class's seconds are blended with a share
+proportional to its test count (COUNT_BLEND, below), because one run's per-class seconds are noisy. A class with no
+timing history gets the MEAN weight of the known classes. When the timings are missing, unreadable, empty, all zero, or cover less than MIN_COVERAGE of the
 discovered classes, the assignment falls back to the class-name hash (SHA-256 first byte modulo N), the cut
 the workflow used before this script existed.
 
@@ -35,10 +36,21 @@ import xml.etree.ElementTree as ET
 
 MIN_COVERAGE = 0.8
 MIN_WEIGHT = 0.001
-# Effective concurrency of the parallel classes in a Lite shard (#5208): fitted to the observed shard walls, where
-# wall = parallel seconds / 3.4 + serial seconds. A serial class (DisableParallelization collection) runs alone, so
-# each of its seconds costs a whole wall second; a parallel class's seconds overlap about 3.4 deep.
-PARALLEL_CONCURRENCY = 3.4
+# Effective concurrency of the parallel classes in a Lite shard (#5208): least squares over the 36 shard walls of nine
+# full dev and train runs (each shard's own parallel and serial seconds against its assembly wall), where
+# wall = parallel seconds / 3.56 + serial seconds. A serial class (DisableParallelization collection) runs alone, so
+# each of its seconds costs a whole wall second; a parallel class's seconds overlap about 3.56 deep (the assembly
+# runs 4 collection threads). The old 3.4 over-predicted by 16 s on average; a free serial multiplier or a fixed
+# per-shard cost fits no better than this one constant, so the model keeps its shape.
+PARALLEL_CONCURRENCY = 3.56
+# Share of a class's weight that comes from its test count instead of its measured seconds (#5208). The fit above
+# is good (3.5 % mean error on a run's own seconds, 2.0 % after the re-fit), but a class's seconds are not stable
+# from run to run: they inflate under contention with whatever else shares the shard (one class took 37 s in one
+# run and 421 s in another, same tests), so one run's seconds predicted a shard's wall 26 % off on average and cut
+# worse than the class-name hash. Blending half the seconds with half a count-proportional share (each group scaled
+# to keep its total seconds) took the replayed cut of seven dev and train runs from a mean max/min shard ratio of
+# 2.25 to 1.56, and the mean slowest shard from 680 s to 600 s (modelled on each run's own seconds).
+COUNT_BLEND = 0.5
 DEFAULT_TESTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "Lite.Tests")
 
 
@@ -47,9 +59,8 @@ def read_classes(path):
         return [ln.strip() for ln in f if ln.strip()]
 
 
-def load_weights(dirs):
-    """Seconds per class from every *.xml under dirs. Returns {} when nothing usable was read."""
-    weights = collections.defaultdict(float)
+def timed_tests(dirs):
+    """Yields (class, seconds) for every test under dirs that has a usable time."""
     for d in dirs:
         paths = sorted(glob.glob(os.path.join(d, "**", "*.xml"), recursive=True)) if os.path.isdir(d) else sorted(glob.glob(d))
         for p in paths:
@@ -68,8 +79,21 @@ def load_weights(dirs):
                     continue
                 if not math.isfinite(secs) or secs < 0:
                     continue
-                weights[cls] += secs
+                yield cls, secs
+
+
+def load_weights(dirs):
+    """Seconds per class from every *.xml under dirs. Returns {} when nothing usable was read."""
+    weights = collections.defaultdict(float)
+    for cls, secs in timed_tests(dirs):
+        weights[cls] += secs
     return dict(weights)
+
+
+def load_counts(dirs):
+    """Timed tests per class from every *.xml under dirs: the same tests load_weights sums."""
+    counts = collections.Counter(cls for cls, _ in timed_tests(dirs))
+    return dict(counts)
 
 
 def load_collections(dirs):
@@ -139,18 +163,39 @@ def class_weight(raw, is_serial):
     return raw if is_serial else raw / PARALLEL_CONCURRENCY
 
 
-def predicted_walls(assignment, weights, serial):
-    """Modelled wall seconds per shard: parallel seconds / PARALLEL_CONCURRENCY + serial seconds. A class with no
-    timing counts at the mean of the timed classes, as `pack` places it (#5208)."""
-    assigned = {c for shard in assignment for c in shard}
-    known = [weights[c] for c in assigned if c in weights]
-    default = sum(known) / len(known) if known else 0.0
-    return [sum(class_weight(weights.get(c, default), c in serial) for c in shard) for shard in assignment]
+def blend_weights(known, counts, serial, blend=COUNT_BLEND):
+    """Seconds per class, each blended with a test-count share (#5208): (1 - blend) * its seconds + blend * its
+    test count * (the group's seconds per test), the serial and the parallel group each scaled to keep their own
+    total seconds. A class with no count, a group with no counts, or no `counts` at all keeps its measured seconds."""
+    est = dict(known)
+    if not counts or blend <= 0:
+        return est
+    for want_serial in (True, False):
+        group = [c for c in sorted(known) if (c in serial) == want_serial and counts.get(c, 0) > 0]
+        total_n = sum(counts[c] for c in group)
+        total_s = sum(known[c] for c in group)
+        if total_n <= 0 or total_s <= 0:
+            continue
+        per_test = total_s / total_n
+        for c in group:
+            est[c] = (1 - blend) * known[c] + blend * counts[c] * per_test
+    return est
 
 
-def pack(classes, shards, weights, serial=frozenset()):
+def predicted_walls(assignment, weights, serial, counts=None):
+    """Modelled wall seconds per shard: parallel seconds / PARALLEL_CONCURRENCY + serial seconds, on the same blended
+    estimates `pack` balanced. A class with no timing counts at the mean of the timed classes, as `pack` places it
+    (#5208)."""
+    assigned = sorted({c for shard in assignment for c in shard})
+    est = blend_weights({c: weights[c] for c in assigned if c in weights}, counts, serial)
+    default = sum(est.values()) / len(est) if est else 0.0
+    return [sum(class_weight(est.get(c, default), c in serial) for c in shard) for shard in assignment]
+
+
+def pack(classes, shards, weights, serial=frozenset(), counts=None):
     """Returns (assignment: list of lists, method). Never drops or duplicates a class. `serial` is the set of
-    classes that run one at a time; with none, every weight is scaled alike and the cut is the plain sum cut."""
+    classes that run one at a time; with none, every weight is scaled alike and the cut is the plain sum cut.
+    `counts` is the timed test count per class; with it each class's seconds are blended with a count share."""
     unique = sorted(set(classes))
     known = {c: weights[c] for c in unique if c in weights}
     usable = bool(unique) and bool(known) and len(known) / len(unique) >= MIN_COVERAGE and sum(known.values()) > 0
@@ -159,10 +204,11 @@ def pack(classes, shards, weights, serial=frozenset()):
         for c in unique:
             out[hash_shard(c, shards)].append(c)
         return out, "hash"
-    default = sum(known.values()) / len(known)
+    est = blend_weights(known, counts, serial)
+    default = sum(est.values()) / len(est)
     # The floor makes an empty shard impossible whenever there are at least as many classes as shards: a zero-time
     # class (every test skipped) would otherwise never move a shard's load off zero.
-    weight = {c: max(class_weight(known.get(c, default), c in serial), MIN_WEIGHT) for c in unique}
+    weight = {c: max(class_weight(est.get(c, default), c in serial), MIN_WEIGHT) for c in unique}
     load = [0.0] * shards
     for c in sorted(unique, key=lambda c: (-weight[c], c)):
         k = min(range(shards), key=lambda i: (load[i], i))
@@ -238,6 +284,7 @@ def main(argv):
         return run_reconcile(classes, read_shards(out, shards))
     timings = arg(rest, "--timings", many=True)
     weights = load_weights(timings)
+    counts = load_counts(timings)
     tests_dir = arg(rest, "--tests-dir", DEFAULT_TESTS_DIR)
     serial_names, unresolved = serial_collection_names(tests_dir)
     for u in unresolved:
@@ -247,10 +294,10 @@ def main(argv):
     serial = {c for c, col in load_collections(timings).items() if col in serial_names}
     if serial_names and not serial:
         print("::warning title=Lite shard packer::serial collections are declared in the sources but no timed class sits in one of them; every class is weighed as parallel")
-    assignment, method = pack(classes, shards, weights, serial)
+    assignment, method = pack(classes, shards, weights, serial, counts)
     write_shards(out, assignment)
     load = [sum(weights.get(c, 0.0) for c in s) for s in assignment]
-    walls = predicted_walls(assignment, weights, serial)
+    walls = predicted_walls(assignment, weights, serial, counts)
     print(f"packed {len(set(classes))} classes into {shards} shards by {method}; "
           f"{len(weights)} classes timed; shard sizes {[len(s) for s in assignment]}; "
           f"timed seconds per shard {[round(x) for x in load]}; "
@@ -320,6 +367,7 @@ def self_test():
             f.write('<a><test type="A"/><test type="B" time="nan"/><test type="C" time="-1"/><test type="D" time="2"/>'
                     '<test type="E" time="inf"/></a>')
         ok(load_weights([d]) == {"D": 2.0}, "no time, NaN, infinite and negative times are not timings")
+        ok(load_counts([d]) == {"D": 1}, "a test with no usable time is not counted either")
 
     # Serial-aware weighting (#5208). Three parallel classes of 1000 s and one of 300 s fix the loads; twelve serial
     # classes of 50 s then all land on the lightest shard under a plain sum cut, where each serial second costs a
@@ -341,6 +389,34 @@ def self_test():
     ok(max(aw) < max(pw), "serial-aware cut lowers the slowest predicted shard")
     ok(pack(list(reversed(fc)), 4, fw, fs)[0] == aware, "serial-aware cut is deterministic regardless of input order")
     ok(class_weight(34.0, True) == 34.0 and abs(class_weight(34.0, False) - 34.0 / PARALLEL_CONCURRENCY) < 1e-9, "serial weighs full, parallel is divided")
+
+    # The wall model and the count blend (#5208 re-fit). A shard's modelled wall is its parallel seconds over the
+    # concurrency plus its serial seconds, with no per-shard constant: the fit found none worth keeping.
+    pw = predicted_walls([["Lite.Tests.P", "Lite.Tests.S"]], {"Lite.Tests.P": 356.0, "Lite.Tests.S": 10.0}, frozenset({"Lite.Tests.S"}))
+    ok(abs(pw[0] - (356.0 / PARALLEL_CONCURRENCY + 10.0)) < 1e-9, "wall = parallel seconds / concurrency + serial seconds")
+    ok(3.4 < PARALLEL_CONCURRENCY < 3.8, "the concurrency stays inside the range the nine fitted runs support")
+    # Equal test counts, one class measured five times slower: the blend halves the gap and keeps the group's total.
+    bw = blend_weights({"A": 100.0, "B": 20.0}, {"A": 10, "B": 10}, frozenset())
+    ok(abs(bw["A"] - 80.0) < 1e-9 and abs(bw["B"] - 40.0) < 1e-9, "blend pulls a noisy class toward its test-count share")
+    ok(abs(sum(bw.values()) - 120.0) < 1e-9, "blend keeps the total seconds")
+    sb = blend_weights({"A": 100.0, "B": 20.0, "S": 50.0}, {"A": 10, "B": 10, "S": 1}, frozenset({"S"}))
+    ok(sb["S"] == 50.0 and abs(sb["A"] - 80.0) < 1e-9, "serial and parallel classes are scaled in separate groups")
+    ok(blend_weights({"A": 100.0, "B": 20.0}, None, frozenset()) == {"A": 100.0, "B": 20.0}, "no counts: seconds untouched")
+    ok(blend_weights({"A": 100.0, "B": 20.0}, {"B": 4}, frozenset()) == {"A": 100.0, "B": 20.0}, "a class with no count keeps its seconds")
+    # Eight classes with the same test count, one measured ten times slower in the single run read: the blend keeps
+    # the outlier from deciding the cut alone, and the blended pack still reconciles and is order independent.
+    noisy = {f"Lite.Tests.N{i}": 20.0 for i in range(8)}
+    noisy["Lite.Tests.N0"] = 200.0
+    nc = {c: 10 for c in noisy}
+    nclasses = sorted(noisy)
+    plain_cut, _ = pack(nclasses, 2, noisy)
+    blend_cut, mb = pack(nclasses, 2, noisy, frozenset(), nc)
+    ok(mb == "duration" and reconcile(nclasses, blend_cut) == [], "blended pack reconciles")
+    ok(sorted(len(x) for x in plain_cut) == [1, 7], "fixture: seconds alone give the outlier a shard to itself")
+    ok(sorted(len(x) for x in blend_cut) == [3, 5], "blended weights give the outlier two more classes instead of a shard to itself")
+    ok(pack(list(reversed(nclasses)), 2, noisy, frozenset(), nc)[0] == blend_cut, "blended pack is deterministic regardless of input order")
+    pwb = predicted_walls(blend_cut, noisy, frozenset(), nc)
+    ok(abs(sum(pwb) * PARALLEL_CONCURRENCY - sum(noisy.values())) < 1e-6, "predicted walls use the blended estimates, which keep the total")
 
     # Collection names from the XML, and serial declarations read from sources (literal and Holder.Name forms).
     with tempfile.TemporaryDirectory() as d:
