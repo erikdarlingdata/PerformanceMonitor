@@ -547,4 +547,42 @@ public class SensitiveStatementXmlTests
         TestContext.Current.SendDiagnosticMessage(line);
         Assert.True(best1 > 0);
     }
+
+    // ── comments and processing instructions are judged like a text node ──
+
+    [Fact]
+    public void ANamedComment_IsWithheld_AndAPlainOneIsByteIdentical()
+    {
+        const string plain = "<r><!--a plain comment--><a v=\"1\"/></r>";
+        Assert.Same(plain, Run(plain));
+
+        string? named = Run("<r><!--CANARY in a comment--><a v=\"1\"/></r>");
+
+        Assert.NotNull(named);
+        Assert.DoesNotContain("CANARY", named);
+        Assert.Contains("<!--" + P + "-->", named);
+        Assert.Contains("<a v=\"1\" />", named);
+    }
+
+    [Fact]
+    public void ANamedProcessingInstruction_IsWithheld_AndAPlainOneIsByteIdentical()
+    {
+        const string plain = "<r><?pi some data?><a v=\"1\"/></r>";
+        Assert.Same(plain, Run(plain));
+
+        string? named = Run("<r><?pi CANARY data?><a v=\"1\"/></r>");
+
+        Assert.NotNull(named);
+        Assert.DoesNotContain("CANARY", named);
+        Assert.Contains("<?pi " + P + "?>", named);
+    }
+
+    [Fact]
+    public void ANamedComment_IsAHitEvenWhenNothingElseIs_AfterTheFirstElement()
+    {
+        string? named = Run("<r><a v=\"1\"/><b/><!--CANARY--></r>");
+
+        Assert.NotNull(named);
+        Assert.DoesNotContain("CANARY", named);
+    }
 }

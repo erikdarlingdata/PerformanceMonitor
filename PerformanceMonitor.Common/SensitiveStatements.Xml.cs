@@ -23,7 +23,7 @@ namespace PerformanceMonitor.Common;
 /// caller's <c>isNamed</c> predicate; this file only decides which values are judged, which are exempt and what is
 /// written in place of a withheld value. Not wired to a caller yet.
 /// </summary>
-static partial class SensitiveStatements
+public static partial class SensitiveStatements
 {
     /// <summary>Output past the cut by this many characters is still produced, so a caller that cuts at
     /// <c>maxOutputChars</c> never sees a short result (P3).</summary>
@@ -112,8 +112,11 @@ static partial class SensitiveStatements
         private long _mark;
 
         /// <summary><c>Stmt*</c> start tags seen so far, in document order. Both passes number them the same way;
-        /// the auto-parameter scope (a later lane) decides from this number in <see cref="OpensScope"/>.</summary>
+        /// pass 1 records the ordinals the auto-parameter probe names and pass 2 opens a scope for each.</summary>
         private int _stmtOrdinal;
+
+        /// <summary>Ordinals of the statements whose probe (or element-form <c>ParameterizedText</c>) is named.</summary>
+        private readonly HashSet<int> _probeNamed = new();
 
         public XmlRun(Func<string, bool> isNamed, Func<bool> budgetSpent, string placeholder, Action<TimeSpan>? chargeParse)
         {
@@ -145,9 +148,10 @@ static partial class SensitiveStatements
         private static bool IsNamespaceDeclaration(XmlReader reader) =>
             reader.Prefix == "xmlns" || (reader.Prefix.Length == 0 && reader.LocalName == "xmlns");
 
-        /// <summary>Whether a statement element opens a withheld scope. Today: when its own text is named. The
-        /// auto-parameter probe (a later lane) also opens it by <paramref name="ordinal"/>.</summary>
-        private bool OpensScope(int ordinal, bool statementOrParameterizedTextNamed) => statementOrParameterizedTextNamed;
+        /// <summary>Whether a statement element opens a withheld scope: its own text is named, or pass 1 named its
+        /// auto-parameter probe (or its element-form <c>ParameterizedText</c>).</summary>
+        private bool OpensScope(int ordinal, bool statementOrParameterizedTextNamed) =>
+            statementOrParameterizedTextNamed || _probeNamed.Contains(ordinal);
 
         private void ChargeParse()
         {
@@ -175,12 +179,142 @@ static partial class SensitiveStatements
             return named;
         }
 
-        /// <summary>Pass 1: read only. Returns at the first named value; nothing named returns Clean.</summary>
+        /// <summary>One open element in pass 1: its local name, and for a <c>Stmt*</c> element the statement state.</summary>
+        private readonly struct OpenElement
+        {
+            public OpenElement(string name, StmtFrame? stmt)
+            {
+                Name = name;
+                Stmt = stmt;
+            }
+
+            public string Name { get; }
+            public StmtFrame? Stmt { get; }
+        }
+
+        /// <summary>A statement open in pass 1. <see cref="Text"/> and <see cref="Values"/> exist only when its
+        /// <c>StatementText</c> holds an auto-parameter token: they are what the probe is made from.</summary>
+        private sealed class StmtFrame
+        {
+            public StmtFrame(int ordinal, string? text)
+            {
+                Ordinal = ordinal;
+                Text = text;
+                if (text is not null)
+                    Values = new Dictionary<string, (string? Compiled, string? Runtime)>(StringComparer.Ordinal);
+            }
+
+            public int Ordinal { get; }
+            public string? Text { get; }
+            public Dictionary<string, (string? Compiled, string? Runtime)>? Values { get; }
+        }
+
+        /// <summary>Whether the raw text could hold an auto-parameter token or an element-form
+        /// <c>ParameterizedText</c>: when it cannot, pass 1 returns at the first hit as it always did. Cheap and
+        /// one-sided (a false yes only costs a full read), and an entity-encoded <c>@</c> counts as a yes.</summary>
+        private static bool MayNeedProbe(string xml)
+        {
+            if (xml.Contains("ParameterizedText>", StringComparison.Ordinal)
+                || xml.Contains("&#64;", StringComparison.Ordinal)
+                || xml.Contains("&#x40;", StringComparison.OrdinalIgnoreCase))
+                return true;
+            for (int i = xml.IndexOf('@'); i >= 0 && i + 1 < xml.Length; i = xml.IndexOf('@', i + 1))
+            {
+                if (xml[i + 1] >= '0' && xml[i + 1] <= '9')
+                    return true;
+            }
+            return false;
+        }
+
+        private static bool IsWordChar(char c) => char.IsLetterOrDigit(c) || c == '_';
+
+        /// <summary>The next auto-parameter token at or after <paramref name="from"/>: <c>@</c> and digits, not
+        /// preceded by <c>@</c> or a word character, not followed by a word character. A linear loop, no regex.</summary>
+        private static bool NextToken(string text, ref int from, out int start, out int end)
+        {
+            start = end = 0;
+            int i = from < text.Length ? text.IndexOf('@', from) : -1;
+            while (i >= 0)
+            {
+                bool tokenStart = i == 0 || (text[i - 1] != '@' && !IsWordChar(text[i - 1]));
+                int j = i + 1;
+                while (j < text.Length && text[j] >= '0' && text[j] <= '9')
+                    j++;
+                if (tokenStart && j > i + 1 && (j == text.Length || !IsWordChar(text[j])))
+                {
+                    start = i;
+                    end = j;
+                    from = j;
+                    return true;
+                }
+                i = j < text.Length ? text.IndexOf('@', j) : -1;
+            }
+            from = text.Length;
+            return false;
+        }
+
+        private static bool HasToken(string text)
+        {
+            int from = 0;
+            return NextToken(text, ref from, out _, out _);
+        }
+
+        /// <summary>The statement as SQL Server would have run it ad hoc: <c>StatementText</c> with every token
+        /// replaced by that statement's compiled value, else its runtime value, else <c>N'?'</c> (also a value
+        /// past the cut, which pass 1 never reached).</summary>
+        private static string ProbeOf(StmtFrame frame)
+        {
+            string text = frame.Text!;
+            var sb = new StringBuilder(text.Length + 16);
+            int copied = 0;
+            int from = 0;
+            while (NextToken(text, ref from, out int start, out int end))
+            {
+                sb.Append(text, copied, start - copied);
+                string value = "N'?'";
+                if (frame.Values!.TryGetValue(text.Substring(start, end - start), out var v))
+                    value = v.Compiled ?? v.Runtime ?? "N'?'";
+                sb.Append(value);
+                copied = end;
+            }
+            sb.Append(text, copied, text.Length - copied);
+            return sb.ToString();
+        }
+
+        /// <summary>Judges one finished (or cut) statement's probe; a named one is recorded by ordinal.</summary>
+        private bool JudgeProbe(StmtFrame frame)
+        {
+            if (frame.Text is null || !Judge(ProbeOf(frame)))
+                return false;
+            _probeNamed.Add(frame.Ordinal);
+            return true;
+        }
+
+        private static StmtFrame? InnermostStmt(Stack<OpenElement> open)
+        {
+            foreach (var element in open)
+            {
+                if (element.Stmt is not null)
+                    return element.Stmt;
+            }
+            return null;
+        }
+
+        /// <summary>Pass 1: read only. With no auto-parameter token (and no element-form
+        /// <c>ParameterizedText</c>) in the plan it returns at the first named value. Otherwise it keeps reading to
+        /// finish the probe set: each <c>ParameterList</c> column belongs to the innermost open statement, and a
+        /// statement's probe is judged at its end tag, or at the stop (the cut) for every statement still open. After
+        /// the first hit nothing else is judged here; pass 2 judges the rest.</summary>
         public XmlPassOutcome PassOne(string xml, long cut)
         {
             int[]? lineStarts = cut == long.MaxValue ? null : LineStarts(xml);
+            bool readOn = MayNeedProbe(xml);
+            bool hit = false;
             _mark = Stopwatch.GetTimestamp();
             _stmtOrdinal = 0;
+            _probeNamed.Clear();
+            var open = new Stack<OpenElement>();
+            int parameterLists = 0;
             using var reader = XmlReader.Create(new StringReader(xml), ReaderSettings());
             var lineInfo = (IXmlLineInfo)reader;
             try
@@ -195,32 +329,118 @@ static partial class SensitiveStatements
                     // L-I: stop when the START of this node is past the cut (logical position, never characters
                     // handed out: the reader reads ahead). Everything after it is cut by the caller.
                     if (lineStarts is not null && NodeStart(lineInfo, lineStarts, type) > cut)
-                        return XmlPassOutcome.Clean;
+                        break;
 
                     switch (type)
                     {
                         case XmlNodeType.Element:
-                            if (IsStmt(reader.LocalName))
-                                _stmtOrdinal++;
-                            if (!reader.HasAttributes)
-                                break;
-                            for (bool more = reader.MoveToFirstAttribute(); more; more = reader.MoveToNextAttribute())
+                        {
+                            string local = reader.LocalName;
+                            bool isStmt = IsStmt(local);
+                            bool isColumn = readOn && parameterLists > 0 && local == "ColumnReference";
+                            string? column = null, compiled = null, runtime = null, statementText = null;
+                            if (reader.HasAttributes)
                             {
-                                if (IsNamespaceDeclaration(reader) || IsExempt(reader.LocalName))
-                                    continue;
-                                if (Judge(reader.Value))
-                                    return XmlPassOutcome.Hit;
+                                for (bool more = reader.MoveToFirstAttribute(); more; more = reader.MoveToNextAttribute())
+                                {
+                                    if (IsNamespaceDeclaration(reader))
+                                        continue;
+                                    string name = reader.LocalName;
+                                    if (readOn)
+                                    {
+                                        if (isStmt && name == "StatementText")
+                                            statementText = reader.Value;
+                                        else if (isColumn && name == "Column")
+                                            column = reader.Value;
+                                        else if (isColumn && name == "ParameterCompiledValue")
+                                            compiled = reader.Value;
+                                        else if (isColumn && name == "ParameterRuntimeValue")
+                                            runtime = reader.Value;
+                                    }
+                                    if (hit || IsExempt(name))
+                                        continue;
+                                    if (Judge(reader.Value))
+                                    {
+                                        if (!readOn)
+                                            return XmlPassOutcome.Hit;
+                                        hit = true;
+                                    }
+                                }
+                                reader.MoveToElement();
                             }
-                            reader.MoveToElement();
+
+                            StmtFrame? frame = null;
+                            if (isStmt)
+                            {
+                                _stmtOrdinal++;
+                                frame = new StmtFrame(_stmtOrdinal,
+                                    statementText is not null && HasToken(statementText) ? statementText : null);
+                            }
+                            else if (isColumn && column is not null)
+                            {
+                                var owner = InnermostStmt(open);
+                                if (owner?.Values is not null)
+                                    owner.Values[column] = (compiled, runtime);
+                            }
+
+                            if (reader.IsEmptyElement)
+                            {
+                                if (frame is not null && JudgeProbe(frame))
+                                    hit = true;
+                            }
+                            else
+                            {
+                                open.Push(new OpenElement(local, frame));
+                                if (local == "ParameterList")
+                                    parameterLists++;
+                            }
                             break;
+                        }
+                        case XmlNodeType.EndElement:
+                        {
+                            if (open.Count == 0)
+                                break;
+                            var closed = open.Pop();
+                            if (closed.Name == "ParameterList")
+                                parameterLists--;
+                            if (closed.Stmt is not null && JudgeProbe(closed.Stmt))
+                                hit = true;
+                            break;
+                        }
                         case XmlNodeType.Text:
                         case XmlNodeType.CDATA:
-                            if (Judge(reader.Value))
+                        case XmlNodeType.Comment:
+                        case XmlNodeType.ProcessingInstruction:
+                        {
+                            // An element-form ParameterizedText is judged even after the first hit: pass 2 reads the
+                            // statement's start tag before this text, so the statement is recorded by ordinal here.
+                            bool paramText = open.Count > 0 && open.Peek().Name == "ParameterizedText";
+                            if (hit && !paramText)
+                                break;
+                            if (!Judge(reader.Value))
+                                break;
+                            if (!readOn)
                                 return XmlPassOutcome.Hit;
+                            hit = true;
+                            if (paramText)
+                            {
+                                var owner = InnermostStmt(open);
+                                if (owner is not null)
+                                    _probeNamed.Add(owner.Ordinal);
+                            }
                             break;
+                        }
                     }
                 }
-                return XmlPassOutcome.Clean;
+
+                // The end of the document or the cut: statements still open are judged with what was read.
+                while (open.Count > 0)
+                {
+                    var closed = open.Pop();
+                    if (closed.Stmt is not null && JudgeProbe(closed.Stmt))
+                        hit = true;
+                }
+                return hit ? XmlPassOutcome.Hit : XmlPassOutcome.Clean;
             }
             finally
             {
@@ -283,10 +503,10 @@ static partial class SensitiveStatements
                             writer.WriteWhitespace(reader.Value);
                             break;
                         case XmlNodeType.Comment:
-                            writer.WriteComment(reader.Value);
+                            writer.WriteComment(TextValue(reader.Value, "", scoped));
                             break;
                         case XmlNodeType.ProcessingInstruction:
-                            writer.WriteProcessingInstruction(reader.Name, reader.Value);
+                            writer.WriteProcessingInstruction(reader.Name, TextValue(reader.Value, "", scoped));
                             break;
                     }
 
@@ -340,6 +560,9 @@ static partial class SensitiveStatements
             }
 
             bool inScope = scoped || opens;
+            // P13: a scope opened by the probe alone keeps its own StatementText (parameterized, no literal, the same
+            // text the grids show), even when it holds a quote.
+            bool keepStatementText = opens && stmtTextVerdict != true && paramTextVerdict != true;
             writer.WriteStartElement(reader.Prefix, local, reader.NamespaceURI);
             if (reader.HasAttributes)
             {
@@ -351,7 +574,7 @@ static partial class SensitiveStatements
                         string name = reader.LocalName;
                         bool? verdict = name == "StatementText" ? stmtTextVerdict
                             : name == "ParameterizedText" ? paramTextVerdict : null;
-                        value = AttributeValue(name, value, inScope, verdict);
+                        value = AttributeValue(name, value, inScope, verdict, keepStatementText && name == "StatementText");
                     }
                     writer.WriteStartAttribute(reader.Prefix, reader.LocalName, reader.NamespaceURI);
                     writer.WriteString(value);
@@ -374,8 +597,10 @@ static partial class SensitiveStatements
 
         /// <summary>What an attribute value is written as. <paramref name="knownVerdict"/> is a verdict already
         /// taken for this value (the statement text of a statement element), so it is never judged twice.</summary>
-        private string AttributeValue(string name, string value, bool inScope, bool? knownVerdict)
+        private string AttributeValue(string name, string value, bool inScope, bool? knownVerdict, bool keep = false)
         {
+            if (keep)
+                return value;
             if (!inScope)
             {
                 if (IsExempt(name))
