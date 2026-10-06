@@ -169,9 +169,15 @@ ON CONFLICT ON CONSTRAINT pk_oversized_plan_backlog DO UPDATE SET
     expired_at = NULL;";
 
     /// <summary>
-    /// The sweep's claim for one server: the rows with no content yet and no standing expiry, oldest ATTEMPT
-    /// first so nothing can starve, then largest plan first among rows never attempted — those are the plans
-    /// the cap cost the most visibility on, which is the whole reason to go back for them.
+    /// The sweep's claim for one server: the rows with no content yet and no standing expiry. Rows already tried
+    /// come first, oldest ATTEMPT first, so nothing can starve; then the rows never attempted, largest plan first —
+    /// those are the plans the cap cost the most visibility on, which is the whole reason to go back for them.
+    ///
+    /// <para><b>Tried rows first (#5367).</b> A row tried once sat behind every row never tried, so with new rows
+    /// arriving each pass it could wait without end, and the sweep judges a tried row on a session of its own
+    /// (<c>OversizedPlanBacklogSweep.SessionFor</c>) so that each claim of it makes progress. Each tried row
+    /// leaves in at most two claims after the one that tried it: judged, or a judge timeout counted and then the
+    /// marker. The tried rows ahead of the never-tried ones are therefore a queue that drains.</para>
     ///
     /// <para>The limit is interpolated from the caller's own constant rather than written here, so the
     /// statement and the policy cannot disagree about how many plans one tick may fetch. It is never user
@@ -186,13 +192,15 @@ SELECT
     statement_end_offset,
     database_name,
     observed_bytes,
-    attempt_count
+    attempt_count,
+    last_attempt_at IS NOT NULL AS tried
 FROM collect.oversized_plan_backlog
 WHERE server_id = $1
 AND   captured_at IS NULL
 AND   expired_at IS NULL
 ORDER BY
-    last_attempt_at ASC NULLS FIRST,
+    (last_attempt_at IS NOT NULL) DESC,
+    last_attempt_at ASC,
     observed_bytes DESC
 LIMIT " + limit.ToString(CultureInfo.InvariantCulture) + ";";
 
@@ -315,7 +323,9 @@ LIMIT 1;";
     /// <param name="AttemptCount">The row's <c>attempt_count</c> at claim time: how many times the plan has had the
     /// whole judging budget to itself and overrun it. The sweep retires a plan the judging budget keeps failing to
     /// cover once this reaches its limit (#5320); a connect failure or an expiry does not add to it.</param>
-    public sealed record PendingPlan(string CollectorName, OversizedPlanObservation Observation, int AttemptCount = 0);
+    /// <param name="Tried">Whether the row had been attempted before this claim (<c>last_attempt_at</c> is set), whatever
+    /// the outcome was. The sweep judges a tried row on a judging session of its own (#5367).</param>
+    public sealed record PendingPlan(string CollectorName, OversizedPlanObservation Observation, int AttemptCount = 0, bool Tried = false);
 
     /// <summary>
     /// Records this cycle's over-cap sightings for one server. Opens NO connection when there are none,

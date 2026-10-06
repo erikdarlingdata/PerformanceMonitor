@@ -52,13 +52,15 @@ public static class FileSaveHelper
 
     /// <summary>
     /// Prompts for a <c>.xml</c> path and writes <paramref name="xml"/> there. <paramref name="suggestedFileName"/>
-    /// is the full pre-filled file name; <paramref name="whatLabel"/> names the content in the error dialog.
+    /// is the full pre-filled file name; <paramref name="whatLabel"/> names the content in the error dialog;
+    /// <paramref name="withheldSubject"/> names it in the withheld sentence (#5367: "deadlock graph", "blocked process
+    /// report"; the plan viewers' own sentence says "plan").
     /// </summary>
-    public static void SaveXmlToFile(string xml, string suggestedFileName, string whatLabel)
+    public static void SaveXmlToFile(string xml, string suggestedFileName, string whatLabel, string withheldSubject)
     {
         /* #5320: a deadlock graph or blocked process report the statement filter withheld whole is the marker, not XML.
            Say so and write no file, the same as the plan save sites do (shared by Lite and the Darling viewer). */
-        if (WithheldPlanGuard.RefuseSave(xml)) return;
+        if (WithheldPlanGuard.RefuseSave(xml, withheldSubject)) return;
 
         var dialog = new SaveFileDialog
         {

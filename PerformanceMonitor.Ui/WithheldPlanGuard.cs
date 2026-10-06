@@ -6,6 +6,7 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+using System;
 using System.Windows;
 using PerformanceMonitor.Common;
 
@@ -26,18 +27,30 @@ public static class WithheldPlanGuard
         SensitiveStatements.IsWithheldPlan(planXml) ? SensitiveStatements.WithheldPlanSentence : null;
 
     /// <summary>
-    /// True when <paramref name="planXml"/> is the whole-plan marker; the sentence is then shown in a message box
-    /// and the caller must not write the file. False for anything else, and nothing is shown.
+    /// The withheld sentence for something other than a plan (a deadlock graph, a blocked process report):
+    /// the same words as <see cref="SensitiveStatements.WithheldPlanSentence"/> with <paramref name="subject"/> in
+    /// place of "plan". For "plan" it returns that sentence itself.
     /// </summary>
-    public static bool RefuseSave(string? planXml)
+    public static string WithheldSentenceFor(string subject) =>
+        string.Equals(subject, "plan", StringComparison.Ordinal)
+            ? SensitiveStatements.WithheldPlanSentence
+            : $"This {subject} was withheld by the statement filter (#4348).";
+
+    /// <summary>
+    /// True when <paramref name="planXml"/> is the whole-plan marker; the sentence is then shown in a message box
+    /// and the caller must not write the file. False for anything else, and nothing is shown. <paramref name="subject"/>
+    /// names what is being saved in that sentence and in the box title (#5367: a withheld deadlock graph or blocked
+    /// process report is not "a plan"); the plan save sites keep the default.
+    /// </summary>
+    public static bool RefuseSave(string? planXml, string subject = "plan")
     {
-        var sentence = WithheldSentence(planXml);
-        if (sentence is null)
+        if (!SensitiveStatements.IsWithheldPlan(planXml))
         {
             return false;
         }
 
-        MessageBox.Show(sentence, "Plan Withheld", MessageBoxButton.OK, MessageBoxImage.Information);
+        var title = char.ToUpperInvariant(subject[0]).ToString() + subject.Substring(1) + " Withheld";
+        MessageBox.Show(WithheldSentenceFor(subject), title, MessageBoxButton.OK, MessageBoxImage.Information);
         return true;
     }
 }
