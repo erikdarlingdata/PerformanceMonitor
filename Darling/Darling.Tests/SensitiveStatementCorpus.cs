@@ -72,6 +72,11 @@ internal static class SensitiveStatementCorpus
         "DECLARE pwd text DEFAULT 'secret-x'",
         "DECLARE pwd text := $q$secret-x$q$",
 
+        // the typed declaration names exactly T3's name set, key_source included (#5320 L1)
+        "DECLARE @key_source nvarchar(100) = N'S3cret'",
+        "DECLARE key_source text := 'secret-x'",
+        "CREATE PROCEDURE dbo.p @key_source varchar(50) = 'S3cret' AS SELECT 1",
+
         // the PostgreSQL forms
         "ALTER ROLE app PASSWORD 'secret-x'",
         "CREATE ROLE r LOGIN PASSWORD 'secret-x'",
@@ -106,6 +111,8 @@ internal static class SensitiveStatementCorpus
         "SELECT * FROM t WHERE pwd_len int",
         "DECLARE @pwd_len int = 8",
         "DECLARE @pwd int = 8",
+        "DECLARE @mykey_source nvarchar(100) = N'x'",
+        "DECLARE @key_sources nvarchar(100) = N'x'",
         "SELECT password varchar FROM t WHERE x = 'a'",
         "SELECT * FROM t WHERE is_secret AND state = 'x'",
         "SELECT [password] FROM t",
@@ -141,6 +148,16 @@ internal static class SensitiveStatementCorpus
         "secret" + string.Concat(Enumerable.Repeat(" /* c */", 40)) + " text :",
         "pwd varchar(" + new string(' ', 100_000) + "x",
         "declare @pwd " + string.Concat(Enumerable.Repeat("nvarchar ", 5_000)) + "= @p",
+    };
+
+    /// <summary>A typed secret-named variable followed by a long dash banner, in a value where another part passes
+    /// the pre-check (<c>hashed_pwd = HASHBYTES(1, @p)</c> has no word start, so only the pre-check's superset hits
+    /// it, and the full judge then runs). The typed-declaration alternative backtracks on the run of dashes (the known
+    /// comment-run case, #5320 L2), so the .NET judge answers TimedOut, which counts as named, while PostgreSQL
+    /// answers Clean. It errs toward withholding. Not part of the parity set; the tests pin both answers.</summary>
+    public static readonly string[] NamedByTimeoutInDotNetOnly =
+    {
+        "UPDATE u SET hashed_pwd = HASHBYTES(1, @p); DECLARE @pwd nvarchar(20) " + new string('-', 60) + "\nSELECT 1",
     };
 
     /// <summary>A named statement as written, lower-cased, and with a leading block comment.</summary>
