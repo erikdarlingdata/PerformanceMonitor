@@ -158,7 +158,9 @@ public sealed class McpBlockingTools
                 collection_time = r.CollectionTime.ToString("o"),
                 deadlock_time = r.DeadlockTime?.ToString("o"),
                 victim_process_id = r.VictimProcessId,
-                deadlock_graph_xml = full_graph ? r.DeadlockGraphXml : McpHelpers.Truncate(r.DeadlockGraphXml, DeadlockGraphPreviewLength),
+                /* #4348: the graph is judged WHOLE before the preview cuts it. A cut graph is no longer well-formed XML and may end inside a
+                   statement's text, so the host's sweep over the preview could not name what the cut left half there. */
+                deadlock_graph_xml = full_graph ? r.DeadlockGraphXml : McpHelpers.Truncate(McpPlanTools.FilterStoredPlan(r.DeadlockGraphXml), DeadlockGraphPreviewLength),
                 deadlock_graph_xml_truncated = !full_graph && r.DeadlockGraphXml.Length > DeadlockGraphPreviewLength
             });
 
