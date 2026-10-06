@@ -85,12 +85,12 @@ public partial class ViewerServerTab
         switch (FileIoSubTabs.SelectedIndex)
         {
             case 1: // File I/O Throughput
-                var throughput = await _dataService.GetFileIoThroughputTrendAsync(_server.ServerId, startUtc, endUtc);
+                var throughput = await _dataService.GetFileIoThroughputTrendAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter);
                 RenderFileIoThroughputCharts(throughput, startUtc, endUtc);
                 break;
             case 0: // File I/O Latency
             default:
-                var latency = await _dataService.GetFileIoLatencyTrendAsync(_server.ServerId, startUtc, endUtc);
+                var latency = await _dataService.GetFileIoLatencyTrendAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter);
                 RenderFileIoLatencyCharts(latency, startUtc, endUtc);
                 break;
         }

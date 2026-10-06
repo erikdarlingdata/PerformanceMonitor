@@ -167,7 +167,7 @@ public sealed class FinOpsDatabaseSizesViewLiveTests
         await using var ds = NpgsqlDataSource.Create(scratch.ConnectionString);
         await using var viewer = new ViewerDataService(scratch.ConnectionString);
 
-        var expected = await viewer.GetDatabaseSizeLatestAsync(ServerId, ct);
+        var expected = await viewer.GetDatabaseSizeLatestAsync(ServerId, cancellationToken: ct);
         var allocated = DatabaseSizeRow.AllocatedTotalMb(expected);
         using var tool = JsonDocument.Parse(await DarlingMcpFinOpsTools.GetFinOps(ds, "database_sizes", ServerName, cancellationToken: ct));
         var rows = tool.RootElement.GetProperty("rows").EnumerateArray().ToList();

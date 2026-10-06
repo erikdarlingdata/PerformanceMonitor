@@ -57,7 +57,7 @@ public sealed class StorageGrowthNoHistoryLiveTests
             await SeedAsync(connection, "full", now.AddDays(-31), 300m, ct);
 
             await using var viewer = new ViewerDataService(cs!);
-            var rows = await viewer.GetStorageGrowthAsync(ServerId, ct);
+            var rows = await viewer.GetStorageGrowthAsync(ServerId, cancellationToken: ct);
 
             var fresh = Assert.Single(rows, r => r.DatabaseName == "fresh");
             Assert.Equal(500m, fresh.CurrentSizeMb);
@@ -111,7 +111,7 @@ public sealed class StorageGrowthNoHistoryLiveTests
 
             /* Collection stopped 20 days ago: "at or before 7 days ago" is the latest snapshot itself, which is no comparison. */
             await SeedAsync(connection, "stale", now.AddDays(-20), 500m, ct);
-            var stale = Assert.Single(await viewer.GetStorageGrowthAsync(ServerId, ct));
+            var stale = Assert.Single(await viewer.GetStorageGrowthAsync(ServerId, cancellationToken: ct));
             Assert.Null(stale.Size7dAgoMb);
             Assert.Null(stale.Growth7dMb);
             Assert.Null(stale.Growth30dMb);
@@ -123,7 +123,7 @@ public sealed class StorageGrowthNoHistoryLiveTests
             await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
             await SeedAsync(connection, "gap", now, 500m, ct);
             await SeedAsync(connection, "gap", now.AddDays(-12), 380m, ct);
-            var gap = Assert.Single(await viewer.GetStorageGrowthAsync(ServerId, ct));
+            var gap = Assert.Single(await viewer.GetStorageGrowthAsync(ServerId, cancellationToken: ct));
             Assert.Equal(120m, gap.Growth7dMb!.Value);
             Assert.Equal(120m / 12m, gap.DailyGrowthRateMb!.Value, 4);
 

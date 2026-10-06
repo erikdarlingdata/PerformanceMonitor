@@ -458,7 +458,7 @@ public partial class MainWindow : Window
         /* The FinOps tab is a self-loading cross-server aggregate control with its own server selector; give
            it the store, surface its load/refresh outcomes on the shared status bar, and route its query grids'
            "View Plan" requests into the standalone Plan Viewer surface (it has no per-server plan host). */
-        FinOpsContent.Initialize(_dataService);
+        FinOpsContent.Initialize(_dataService, _serverStore);
         FinOpsContent.StatusChanged += OnServerTabStatusChanged;
         FinOpsContent.PlanRequested += OpenStoredPlanInPlanViewer;
 
