@@ -34,7 +34,9 @@ public sealed class QueryStoreTopWebDefaultTests
     {
         var web = StripComments(ReadSource(WebEndpoints));
 
-        var marker = "[\"get_query_store_top\"] = (c, pg, an) => DarlingMcpDataTools.GetQueryStoreTop(";
+        /* #5245: the entry reads the chosen databases first (DatabaseNames(c) is { } databases ? ... : refusal), so the
+           marker is the call itself and the row ends at the refusal arm. */
+        var marker = "? DarlingMcpDataTools.GetQueryStoreTop(";
         var start = web.IndexOf(marker, StringComparison.Ordinal);
         Assert.True(start >= 0, "get_query_store_top's /api/read row was not found (renamed or moved?).");
         var end = web.IndexOf("),\r\n", start, StringComparison.Ordinal);

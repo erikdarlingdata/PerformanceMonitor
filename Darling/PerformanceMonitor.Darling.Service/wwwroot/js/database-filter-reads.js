@@ -10,9 +10,12 @@
    row in DarlingWebEndpoints.cs carries PDatabases(), its dispatch entry calls DatabaseNames(c), and its name moves from
    UNFILTERED to here. */
 
-/** Reads whose route takes the chosen databases: readTool adds one `database_name` key per chosen database to each. It is
- *  empty until the pages that wire a read to the filter land; each moves its reads out of UNFILTERED. */
+/** Reads whose route takes the chosen databases: readTool adds one `database_name` key per chosen database to each. The six
+ *  top-query reads are here; each later page moves its reads out of UNFILTERED into this list. */
 export const FILTERED = new Set([
+  // Top queries, procedures, active queries, Query Store and the heatmap.
+  "get_top_queries_by_cpu", "get_top_procedures_by_cpu", "get_active_queries", "get_query_store_top",
+  "get_query_store_regressions", "get_query_heatmap",
 ]);
 
 /** Database-scoped reads that cannot take the filter yet, so they show every database and say so (the "All databases"
@@ -20,9 +23,6 @@ export const FILTERED = new Set([
  *  deadlock reads, which stay unfiltered on purpose (as on the desktop): a deadlock spans several databases, and they are
  *  inside each deadlock graph. The groups follow the page that moves each read into FILTERED. */
 export const UNFILTERED = new Set([
-  // Top queries, procedures, active queries, Query Store and the heatmap.
-  "get_top_queries_by_cpu", "get_top_procedures_by_cpu", "get_active_queries", "get_query_store_top",
-  "get_query_store_regressions", "get_query_heatmap",
   // Object contention and index usage.
   "get_object_locking", "get_index_usage",
   // Blocking.

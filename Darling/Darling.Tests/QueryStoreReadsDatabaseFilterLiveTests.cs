@@ -30,6 +30,7 @@ namespace Darling.Tests;
 /// of the heatmap's idle-grid answer. Both reads are one tier (<c>query_store_stats</c> and <c>query_stats</c>).
 /// The public methods still pass one name, so no MCP schema, dispatch or tools/list byte changes.
 /// </summary>
+[Collection("live-postgres")]
 public sealed class QueryStoreReadsDatabaseFilterLiveTests
 {
     private const int ServerId = -950456;

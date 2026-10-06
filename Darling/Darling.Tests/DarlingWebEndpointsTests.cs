@@ -200,10 +200,11 @@ public sealed class DarlingWebEndpointsTests
            overload with an explicit 2000, the pre-#4198 McpHelpers.Truncate budget every caller got, so the
            Active Queries tab doesn't shrink under it. A regression here (dropping the overload, or the literal
            2000) silently starves that tab's query text down to the MCP preview (400 characters). Source-text pin rather than a
-           live call: no rig in this lane. */
+           live call: no rig in this lane. #5245: the entry now binds the chosen databases (DatabaseNames(c)), so the pin
+           matches the call and not the whole entry; the 2000 is what it guards. */
         var source = RepoFile.ReadRepoFileLf("Darling", "PerformanceMonitor.Darling.Service", "DarlingWebEndpoints.cs");
         Assert.Contains(
-            "[\"get_active_queries\"] = (c, pg, an) => DarlingMcpSessionTools.GetActiveQueries(pg, Server(c), Hours(c, 1), Str(c, \"database_name\"), QueryBool(c, \"blocking_only\", false), Rows(c, \"limit\", 50), 2000, AsOf(c), logger, c.RequestAborted),",
+            "DarlingMcpSessionTools.GetActiveQueries(pg, Server(c), Hours(c, 1), databases, QueryBool(c, \"blocking_only\", false), Rows(c, \"limit\", 50), 2000, AsOf(c), logger, c.RequestAborted)",
             source, StringComparison.Ordinal);
     }
 
