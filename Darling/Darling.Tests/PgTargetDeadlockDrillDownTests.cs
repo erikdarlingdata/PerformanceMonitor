@@ -52,7 +52,7 @@ public sealed class PgTargetDeadlockDrillDownTests
         Assert.Contains("WHERE server_id = $1", sql, StringComparison.Ordinal);
         Assert.Contains("AND   COALESCE(occurred_at, collection_time) >= $2", sql, StringComparison.Ordinal);
         Assert.Contains("AND   COALESCE(occurred_at, collection_time) <= $3", sql, StringComparison.Ordinal);
-        Assert.Contains("AND   collection_time >= $7", sql, StringComparison.Ordinal);
+        Assert.Contains("AND   collection_time >= $5", sql, StringComparison.Ordinal);
         /* The shape, and the recurrence as distinct REPORTS within it. */
         Assert.Contains("GROUP BY participant_count, lock_modes, resources", sql, StringComparison.Ordinal);
         Assert.Contains("count(DISTINCT deadlock_hash)", sql, StringComparison.Ordinal);
@@ -63,10 +63,13 @@ public sealed class PgTargetDeadlockDrillDownTests
         Assert.Contains("count(*) OVER ()", sql, StringComparison.Ordinal);
         Assert.Contains("SUM(reports) OVER ()", sql, StringComparison.Ordinal);
         Assert.Contains("SUM(rows_captured) OVER ()", sql, StringComparison.Ordinal);
-        /* Bounded in the read, with the untruncated lengths for the flags. */
-        Assert.Contains("LEFT(latest_victim_statement, $5)", sql, StringComparison.Ordinal);
+        /* #5320: the statement and graph come back WHOLE, for the filter to judge before the caps cut them in C#, with the
+           untruncated lengths for the flags. */
+        Assert.DoesNotContain("LEFT(latest_victim_statement", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("LEFT(latest_graph_text", sql, StringComparison.Ordinal);
+        Assert.Contains("latest_victim_statement                              AS victim_statement", sql, StringComparison.Ordinal);
+        Assert.Contains("latest_graph_text                                    AS graph_text", sql, StringComparison.Ordinal);
         Assert.Contains("length(latest_victim_statement)", sql, StringComparison.Ordinal);
-        Assert.Contains("LEFT(latest_graph_text, $6)", sql, StringComparison.Ordinal);
         Assert.Contains("length(latest_graph_text)", sql, StringComparison.Ordinal);
         /* Store clock discipline and dialect. */
         Assert.DoesNotContain("now(", sql, StringComparison.OrdinalIgnoreCase);

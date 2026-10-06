@@ -171,7 +171,7 @@ public sealed class PasswordBindingCensusTests
         var sql = Source("tools/provision-roles.sql");
         var marker = sql.IndexOf("'password_needed'", StringComparison.Ordinal);
         Assert.True(marker > 0, "the edit function no longer answers password_needed");
-        var start = sql.LastIndexOf("IF ", marker, StringComparison.Ordinal);
+        var start = sql.LastIndexOf("v_connection_changed :=", marker, StringComparison.Ordinal);
         Assert.True(start > 0);
         var block = sql[start..marker];
 
@@ -209,7 +209,7 @@ public sealed class PasswordBindingCensusTests
         Assert.True(ServerConnectionIdentity.Differ(Base, Base with { Host = "EXAMPLE-SQL-01" }));
     }
 
-    private static DarlingMcpServerAdminTools.ServerConnectionSettings Settings(ServerConnectionIdentity c) =>
+    private static ServerConnectionSettings Settings(ServerConnectionIdentity c) =>
         new(c.Host, c.Port, c.Engine, c.Database, c.ReadOnlyIntent, c.Auth, c.Username, c.EncryptMode,
             c.TrustServerCertificate, c.MultiSubnetFailover);
 
