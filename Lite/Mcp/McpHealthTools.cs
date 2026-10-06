@@ -1381,7 +1381,7 @@ public sealed class McpHealthTools
                             emptyNotice.WindowTruncated, emptyNotice.EffectiveStart,
                             factual: database == null
                                 ? $"No blocking or deadlocks recorded for {resolved.ServerName} in the last {hours} hour(s)"
-                                : $"No blocking for database '{database}' (and no deadlocks, which are not limited by database) recorded for {resolved.ServerName} in the last {hours} hour(s)",
+                                : $"No blocking for {McpDatabaseSelection.Quoted(new[] { database })} (and no deadlocks, which are not limited by database) recorded for {resolved.ServerName} in the last {hours} hour(s)",
                             coveredClaim: ". The blocking collectors HAVE run successfully for this server, so the window is genuinely clear rather than blind."),
                         emptyNotice.AsHints())
                     : McpHelpers.Status(

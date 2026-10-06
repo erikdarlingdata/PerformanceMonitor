@@ -257,7 +257,7 @@ public sealed class McpWaitTools
                     ?? McpHelpers.Status("empty",
                         database == null
                             ? "No waiting tasks captured in the specified time range."
-                            : $"No waiting tasks captured in the specified time range for database '{database}'. "
+                            : $"No waiting tasks captured in the specified time range for {McpDatabaseSelection.Quoted(new[] { database })}. "
                               + "The filter was applied in SQL over the whole window, so waiting tasks of other databases may well exist; drop it to see what the window holds.",
                         notice.AsHints());
             }

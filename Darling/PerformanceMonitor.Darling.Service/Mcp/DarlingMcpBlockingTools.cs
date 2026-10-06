@@ -107,10 +107,11 @@ public sealed class DarlingMcpBlockingTools
         [Description("Optional alert fingerprint (the alert's Dedup Key). The key is scoped to the server's display name and the incident's involved objects. The fingerprint scan runs over the window BEFORE limit.")] string? dedup_key = null,
         [Description("Return each row's full blocked_sql_text/blocking_sql_text instead of a 150-character preview. Default false. A dedup_key call ignores this and always returns the full text.")] bool full_text = false,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        [Description("Limit to one database. Omit for all databases.")] string? database_name = null,
         MonitoredServerRegistryState? registryState = null,
         ILogger? logger = null,
         CancellationToken cancellationToken = default) =>
-        GetBlocking(postgres, server_name, hours_back, limit, dedup_key, full_text, as_of, SqlTextPreviewLength, registryState, logger, cancellationToken);
+        GetBlocking(postgres, server_name, hours_back, limit, dedup_key, full_text, as_of, DatabaseFilter.One(database_name), SqlTextPreviewLength, registryState, logger, cancellationToken);
 
     /// <summary>
     /// get_blocking under an explicit <paramref name="sqlTextPreviewLength"/> (#4198): the MCP tool passes
@@ -349,7 +350,7 @@ public sealed class DarlingMcpBlockingTools
     /// and " for the chosen databases" for two or more (<see cref="DatabaseFilter.Describe"/>'s words). An empty answer under a
     /// selection is about the CHOSEN databases only; it says nothing about the rest.
     /// </summary>
-    private static string ForChosenDatabases(DatabaseFilter databases) =>
+    internal static string ForChosenDatabases(DatabaseFilter databases) =>
         databases.Describe() switch
         {
             null => string.Empty,
@@ -695,9 +696,10 @@ public sealed class DarlingMcpBlockingTools
         [Description("Hours of history. Default 24.")] int hours_back = 24,
         [Description("Maximum reports WITH XML to return, newest first. Default 5. Read truncated to know whether the window held more.")] int limit = 5,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        [Description("Limit to one database. Omit for all databases.")] string? database_name = null,
         ILogger? logger = null,
         CancellationToken cancellationToken = default) =>
-        GetBlockedProcessXml(postgres, server_name, hours_back, limit, as_of, DatabaseFilter.All, logger, cancellationToken);
+        GetBlockedProcessXml(postgres, server_name, hours_back, limit, as_of, DatabaseFilter.One(database_name), logger, cancellationToken);
 
     /// <summary>
     /// get_blocked_process_xml over a SET of databases (#5244): the report-XML predicate and the database predicate are both in the
@@ -792,8 +794,9 @@ public sealed class DarlingMcpBlockingTools
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history. Default 24.")] int hours_back = 24,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        [Description("Limit to one database. Omit for all databases.")] string? database_name = null,
         CancellationToken cancellationToken = default) =>
-        GetBlockingTrend(postgres, server_name, hours_back, as_of, DatabaseFilter.All, cancellationToken);
+        GetBlockingTrend(postgres, server_name, hours_back, as_of, DatabaseFilter.One(database_name), cancellationToken);
 
     /// <summary>
     /// get_blocking_trend over a SET of databases (#5244): both arms of the trend (XE reports and the DMV fallback) count only the

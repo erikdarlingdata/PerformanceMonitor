@@ -672,9 +672,10 @@ public sealed class McpBlockingTools
 
     /// <summary>
     /// What a database selection adds to an empty answer's sentence (#5244): nothing for every database, " for the database X"
-    /// for one. Darling's <c>DarlingMcpBlockingTools.ForChosenDatabases</c> returns the same words for one name; an empty answer
-    /// under a selection is about the CHOSEN database only and says nothing about the rest.
+    /// for one, built by <see cref="McpDatabaseSelection.ForChosen"/> so it says what Darling's
+    /// <c>DarlingMcpBlockingTools.ForChosenDatabases</c> says for one name and for two or more. An empty answer under a selection is
+    /// about the CHOSEN databases only and says nothing about the rest.
     /// </summary>
     internal static string ForChosenDatabase(string? database) =>
-        database == null ? string.Empty : " for the database " + database;
+        McpDatabaseSelection.ForChosen(database == null ? null : new[] { database });
 }

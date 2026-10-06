@@ -1,12 +1,14 @@
 # DarlingMcpBlockingTools: tools/list budget for #3898. Ceilings only go down; see McpToolsListBudgetTests. One block per tool, blank line between blocks.
 tool get_blocked_process_xml 465
 param get_blocked_process_xml.as_of 167
+param get_blocked_process_xml.database_name 46
 param get_blocked_process_xml.hours_back 29
 param get_blocked_process_xml.limit 113
 param get_blocked_process_xml.server_name 28
 
 tool get_blocking 576
 param get_blocking.as_of 167
+param get_blocking.database_name 46
 param get_blocking.dedup_key 191
 param get_blocking.full_text 172
 param get_blocking.hours_back 29
@@ -15,6 +17,7 @@ param get_blocking.server_name 28
 
 tool get_blocking_trend 289
 param get_blocking_trend.as_of 167
+param get_blocking_trend.database_name 46
 param get_blocking_trend.hours_back 29
 param get_blocking_trend.server_name 28
 

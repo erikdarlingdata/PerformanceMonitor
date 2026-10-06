@@ -137,7 +137,7 @@ public sealed class WaitsDatabaseFilterLiveTests
             Assert.Equal(DbC, one.GetProperty("database_name").GetString());
             Assert.Equal(2, one.GetProperty("tasks_returned").GetInt32());
             Assert.False(one.GetProperty("truncated").GetBoolean());
-            var plain = JsonDocument.Parse(await DarlingMcpSessionTools.GetWaitingTasks(postgres, ServerName, 1, 30, asOf, null, ct)).RootElement;
+            var plain = JsonDocument.Parse(await DarlingMcpSessionTools.GetWaitingTasks(postgres, ServerName, 1, 30, asOf, null, null, ct)).RootElement;
             Assert.Equal(JsonValueKind.Null, plain.GetProperty("database_name").ValueKind);
             Assert.Equal(5, plain.GetProperty("tasks_returned").GetInt32());
 
@@ -337,7 +337,7 @@ public sealed class WaitsDatabaseFilterLiveTests
             Assert.Equal(DbC, one.GetProperty("database_name").GetString());
             Assert.Equal(1, one.GetProperty("blocking_duration").GetArrayLength());
 
-            var plain = JsonDocument.Parse(await DarlingMcpDataTools.GetBlockingStats(postgres, ServerName, 1, asOf, null, ct)).RootElement;
+            var plain = JsonDocument.Parse(await DarlingMcpDataTools.GetBlockingStats(postgres, ServerName, 1, asOf, null, null, ct)).RootElement;
             Assert.Equal(JsonValueKind.Null, plain.GetProperty("database_name").ValueKind);
             Assert.Equal(2, plain.GetProperty("blocking_duration").GetArrayLength());
 

@@ -365,9 +365,10 @@ public sealed class DarlingMcpSessionTools
         [Description("Hours of history. Default 1.")] int hours_back = 1,
         [Description("Maximum rows to return, newest capture first. Default 30. This is what bounds the page — read truncated to know whether the window held more.")] int limit = 30,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        [Description("Limit to one database. Omit for all databases.")] string? database_name = null,
         ILogger? logger = null,
         CancellationToken cancellationToken = default) =>
-        GetWaitingTasks(postgres, server_name, hours_back, limit, DatabaseFilter.All, as_of, logger, cancellationToken);
+        GetWaitingTasks(postgres, server_name, hours_back, limit, DatabaseFilter.One(database_name), as_of, logger, cancellationToken);
 
     /// <summary>
     /// #5244: <see cref="GetWaitingTasks(NpgsqlDataSource,string,int,int,string,ILogger,CancellationToken)"/> over a SET of

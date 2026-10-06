@@ -94,11 +94,11 @@ public sealed class DarlingMcpBlockingToolsSurfaceAndSqlTests
     /// Darling-only addition each still fail.</para>
     /// </summary>
     [Theory]
-    [InlineData("get_blocking", "server_name,hours_back,limit,as_of")]
+    [InlineData("get_blocking", "server_name,hours_back,limit,as_of,database_name")]
     [InlineData("get_deadlocks", "server_name,hours_back,limit,as_of")]
     [InlineData("get_deadlock_detail", "server_name,hours_back,limit,as_of")]
-    [InlineData("get_blocked_process_xml", "server_name,hours_back,limit,as_of")]
-    [InlineData("get_blocking_trend", "server_name,hours_back,as_of")]
+    [InlineData("get_blocked_process_xml", "server_name,hours_back,limit,as_of,database_name")]
+    [InlineData("get_blocking_trend", "server_name,hours_back,as_of,database_name")]
     [InlineData("get_deadlock_trend", "server_name,hours_back,as_of")]
     [InlineData("get_lock_wait_trend", "server_name,hours_back,as_of,bucket_minutes")]
     public void ParamContract_MatchesLite(string toolName, string expectedCsv)

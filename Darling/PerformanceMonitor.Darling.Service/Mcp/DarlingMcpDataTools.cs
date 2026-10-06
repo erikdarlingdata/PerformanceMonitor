@@ -3036,9 +3036,10 @@ public sealed class DarlingMcpDataTools
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history. Default 24. No upper bound (this read exists to look further back than the 168-hour reads allow); a negative or zero value is refused rather than read as its absolute value.")] int hours_back = 24,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        [Description("Limit the blocking series to one database. Omit for all databases.")] string? database_name = null,
         ILogger? logger = null,
         CancellationToken cancellationToken = default) =>
-        GetBlockingStats(postgres, server_name, hours_back, DatabaseFilter.All, as_of, logger, cancellationToken);
+        GetBlockingStats(postgres, server_name, hours_back, DatabaseFilter.One(database_name), as_of, logger, cancellationToken);
 
     /// <summary>
     /// #5244: <see cref="GetBlockingStats(NpgsqlDataSource,string,int,string,ILogger,CancellationToken)"/> with the BLOCKING series
