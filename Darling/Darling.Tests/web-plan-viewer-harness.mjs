@@ -3,6 +3,7 @@
        node web-plan-viewer-harness.mjs <path to the js folder> <scenario>
    Only the DOM, fetch, the clipboard and the download plumbing are stand-ins. */
 import { pathToFileURL } from "node:url";
+import { readFileSync } from "node:fs";
 
 class FakeNode {
   constructor(tag) { this.tag = tag; this.children = []; this.attrs = {}; this.listeners = {}; this.parent = null; this._text = ""; this.className = ""; this.style = {}; this.isConnected = FakeNode.newConnected; }
@@ -53,6 +54,15 @@ const pre = (cell) => cell.all((n) => n.tag === "pre")[0] || null;
 const params = () => new URL(fetches[fetches.length - 1], "http://viewer.test");
 
 const scenarios = {
+  /* #4348: the viewer draws exactly what the read route answered. argv[4] is a file holding that answer's body (a plan
+     the statement filter has already judged); the scenario opens the plan panel on it and reports what the panel shows. */
+  async answeredPlan() {
+    reply = { status: 200, body: readFileSync(process.argv[4], "utf8") };
+    const cell = viewer.storedPlanCell("srv-a", row);
+    cell.byText("Plan").click();
+    await flush();
+    out.pre = pre(cell).textContent;
+  },
   async open() {
     planReply(XML);
     const cell = viewer.storedPlanCell("srv-a", row);
