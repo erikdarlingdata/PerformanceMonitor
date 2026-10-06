@@ -74,9 +74,11 @@ process.on("unhandledRejection", (e) => rejections.push(String(e && e.stack ? e.
 const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "compose-notice-"));
 let compose;
 try {
+  /* Copy the whole js tree (js/, js/pages/ and every subdirectory) rather than a hand-kept list (#5279): a page module that
+     another PR adds then needs no edit here. Only imported files load, so the rest are inert; every stand-in below is
+     written AFTER the copy, so it still replaces the real file. */
+  fs.cpSync(jsDir, scratch, { recursive: true });
   fs.writeFileSync(path.join(scratch, "package.json"), '{ "type": "module" }');
-  fs.copyFileSync(path.join(jsDir, "util.js"), path.join(scratch, "util.js"));
-  fs.copyFileSync(path.join(jsDir, "compose.js"), path.join(scratch, "compose.js"));
   fs.writeFileSync(
     path.join(scratch, "charts.js"),
     'import { el } from "./util.js";\n' +
