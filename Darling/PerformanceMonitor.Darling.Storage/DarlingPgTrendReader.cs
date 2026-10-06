@@ -558,17 +558,6 @@ public static class DarlingPgTrendReader
             AND   collection_time >= $4
             AND   collection_time <= $5
         ),
-        /* The interval comes from the DISTINCT collection times of the series being followed, not from a
-           LAG inside each object_type's own window. Object types do not all appear in every snapshot, so a
-           per-partition interval would differ between rows of one snapshot and there would be no single
-           honest denominator for the rates below. */
-        spans AS (
-            SELECT
-                collection_time,
-                CAST(extract(epoch FROM (collection_time - LAG(collection_time) OVER (ORDER BY collection_time)))
-                     AS double precision) AS interval_seconds
-            FROM (SELECT DISTINCT collection_time FROM bounded) AS snapshots
-        ),
         sampled AS (
             SELECT
                 collection_time,
@@ -653,10 +642,20 @@ public static class DarlingPgTrendReader
                           raw_extends, raw_hits, raw_evictions, raw_read_bytes, raw_write_bytes) < 0) AS counter_reset
             FROM sampled
         ),
-        per_snapshot AS (
+        /* #5425: one row per collection time (every object_type summed), with the interval to the previous
+           collection time taken by a LAG over THESE rows. It used to come from a separate "spans" CTE over the
+           DISTINCT collection times of the bounded rows, joined back on collection_time; with a stale or
+           missing row estimate for pg_io_stats the planner put that join as a nested loop, re-running the
+           whole windowed "sampled" pass once per snapshot - 7.7 s over 24 hours and past the 30 s read
+           deadline over 72 (get_pg_io_trend failing "Exception while reading from stream"). With no join
+           there is no join order to get wrong. The set of times is the same one - one row per distinct
+           collection_time in bounded - so the interval is what the join produced: the interval comes from the
+           collection times of the series being followed, not from a LAG inside each object_type's own window.
+           Object types do not all appear in every snapshot, so a per-partition interval would differ between
+           rows of one snapshot and there would be no single honest denominator for the rates below. */
+        snapshot_sums AS (
             SELECT
                 d.collection_time,
-                s.interval_seconds,
                 CAST(coalesce(SUM(d.d_reads), 0) AS bigint)     AS reads,
                 coalesce(SUM(d.d_read_time_ms), 0)              AS read_time_ms,
                 CAST(coalesce(SUM(d.d_writes), 0) AS bigint)    AS writes,
@@ -671,14 +670,22 @@ public static class DarlingPgTrendReader
                 bool_or(d.bytes_estimable)                      AS bytes_estimable,
                 coalesce(bool_or(d.counter_reset), false)       AS counter_reset
             FROM differenced AS d
-            JOIN spans AS s
-              ON s.collection_time = d.collection_time
+            GROUP BY d.collection_time
+        ),
+        per_snapshot AS (
+            SELECT *
+            FROM (
+                SELECT
+                    snapshot_sums.*,
+                    CAST(extract(epoch FROM (collection_time - LAG(collection_time) OVER (ORDER BY collection_time)))
+                         AS double precision) AS interval_seconds
+                FROM snapshot_sums
+            ) AS spanned
             /* The first snapshot in the window has nothing to difference against. Dropping it is not a lost
                point: it is the interval's left edge, and reporting it would report the whole uptime as one
                interval. No HAVING beside it - an interval with no I/O is a real reading in a trend, unlike
                in the single-window read, where an all-zero combination is only noise in a ranked grid. */
-            WHERE s.interval_seconds IS NOT NULL
-            GROUP BY d.collection_time, s.interval_seconds
+            WHERE interval_seconds IS NOT NULL
         ),
         per_interval AS (
         SELECT
