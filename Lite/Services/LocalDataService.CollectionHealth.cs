@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Threading;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using PerformanceMonitor.Analysis.Baselines;
@@ -73,64 +74,174 @@ AND   status = 'PERMISSIONS'";
     /// both MCP surfaces read this result set POSITIONALLY.
     /// </summary>
     internal const string CollectionHealthSql = $@"
+WITH health AS
+(
+    SELECT
+        collector_name,
+        COUNT(*) AS total_runs,
+        -- #2926: SUCCESS excludes an abandonment that predates #2803, so the Success column beside
+        -- Abandoned cannot count the same run twice. Post-#2803 rows need no exclusion - ABANDONED
+        -- is not SUCCESS - and an ordinary empty run stays counted, which is what the COALESCE in
+        -- the shared predicate is for: NULL under this NOT would have dropped it.
+        SUM(CASE WHEN status = 'SUCCESS'
+                  AND NOT {EnumeratedCollectorDriver.AbandonedByNotePredicateSql}
+                 THEN 1 ELSE 0 END) AS success_count,
+        SUM(CASE WHEN status = 'ERROR' THEN 1 ELSE 0 END) AS error_count,
+        AVG(duration_ms) AS avg_duration_ms,
+        -- #2460: the mean above describes a collector whose runs all cost about the same, and says
+        -- nothing true about one whose runs come in two sizes. query_store on a dense shard reported a
+        -- 13,834 ms average over 1,155 runs where 958 of them yielded nothing and cost ~36 ms, which
+        -- puts the other 197 at ~80,900 ms EACH — each one on its own larger than the whole 60,000 ms
+        -- sweep budget. duration_ms has been written per run since the table existed; nothing had ever
+        -- read it as anything but a mean.
+        --
+        -- p95 rather than the max for the number a decision is made from: a max is one run, so a single
+        -- pathological cycle would make a collector look permanently terrible for the rest of the
+        -- window. p95 also scales itself to the sample — over 3,500 runs it discards the one bad cycle,
+        -- and over the six runs a daily collector gets in a week it lands on the max, which is right,
+        -- because with six samples there is no outlier anyone can afford to throw away. DISC rather
+        -- than CONT so the answer is a duration some run actually took instead of an interpolation
+        -- between the two modes, which would be a number describing no run at all — the exact defect
+        -- this column exists to end. Both engines ignore NULL duration_ms here, as AVG already does.
+        MAX(duration_ms) AS max_duration_ms,
+        PERCENTILE_DISC(0.95) WITHIN GROUP (ORDER BY duration_ms) AS p95_duration_ms,
+        -- SKIPPED counts as a healthy run (dedup / version-gated collectors no-op without being stale)
+        MAX(CASE WHEN status IN ('SUCCESS', 'SKIPPED') THEN collection_time END) AS last_success_time,
+        MAX(collection_time) AS last_run_time,
+        -- The newest failure OUTRIGHT, text or not: when did this last FAIL is about the run, not the
+        -- message. It can only name a different row than last_error if a failure was written with no text.
+        -- #3240: EXTENSION_MISSING is in the exemplar set for twin-parity with Darling's reads — its stored
+        -- sentence IS the remedy there. Lite's SQL Server collectors never write the status, so on this SKU
+        -- the branch is inert.
+        MAX(CASE WHEN status IN ('ERROR', 'PERMISSIONS', 'EXTENSION_MISSING') THEN collection_time END) AS last_error_time,
+        SUM(CASE WHEN status = 'PERMISSIONS' THEN 1 ELSE 0 END) AS permission_denied_count,
+        -- YIELDED = the 1s LOCK_TIMEOUT guard fired (#1805): deliberate, benign for collection,
+        -- counted apart from errors because clustering here is a signal about the TARGET's lock
+        -- contention rather than a monitoring fault.
+        SUM(CASE WHEN status = 'YIELDED' THEN 1 ELSE 0 END) AS yield_count,
+        -- #1837: how many of the window's runs carried a note (an enumeration that yielded 0 items, items
+        -- whose enumeration probe failed). Gated on SUCCESS specifically, rather than on every non-failure
+        -- status: the runners attach a note only to the SUCCESS write, and the looser complement would drag
+        -- SESSION_MISSING and CANCELLED messages into a column whose whole claim is that it is NOT an
+        -- error. note_count = total_runs is the persistently-empty signal the operator is actually looking
+        -- for: EVERY run this week came back with nothing. Display text only: no band, no count, no
+        -- threshold reads it, and a legitimately empty target (no user databases, no AGs) stays HEALTHY.
+        COUNT(CASE WHEN status = 'SUCCESS' THEN error_message END) AS note_count,
+        -- #2804: runs the #2673 wall-clock budget abandoned. APPENDED, never inserted — this result set
+        -- is read positionally and Darling's CollectionHealthSql mirrors these ordinals, so a mid-list
+        -- insert would silently re-map every later column in whichever surface was not edited with it.
+        --
+        -- #2926: keyed on the ROW, not on the status alone. collection_log is append-only, so a
+        -- window can still hold cycles written before #2803 gave abandonment its own status:
+        -- status = 'SUCCESS' beside rows_collected = 0 and the budget note. Counted by status
+        -- alone this read 0 for them, and the collector banded HEALTHY while losing cycles - a
+        -- filter correct against current writes and silently wrong against older ones, failing in
+        -- the reassuring direction. The pattern is one LIKE because the budget is INTERPOLATED and
+        -- the shipped values differ (120 s for procedure_stats/query_stats/plan_correction, 600 s
+        -- for query_store), so equality against one rendered sentence matches one collector.
+        SUM(CASE WHEN {EnumeratedCollectorDriver.AbandonedRunPredicateSql}
+                 THEN 1 ELSE 0 END) AS abandoned_count,
+        -- #3010: the newest DENIAL on its own, which is what dates the last_error slot below.
+        -- last_error_time cannot stand in for it -- that column is a MAX over ERROR and PERMISSIONS
+        -- together, so on a collector carrying both it hands a reader an error's instant and lets them
+        -- call it a denial. Compared against last_success_time this separates a collector still being
+        -- refused from one whose refusals all predate a later success. APPENDED, and Darling's
+        -- CollectionHealthSql mirrors the ordinal, because both are read positionally.
+        MAX(CASE WHEN status = 'PERMISSIONS' THEN collection_time END) AS last_denied_time,
+        -- #3017: what the spend BOUGHT. Every other statistic on a health row describes cost -- total_runs,
+        -- the three durations, and the sweep-pressure roll-up built from them -- and the rows figure lived
+        -- on a different tool over a different (hourly, fleet-wide) series, so correlating spend against
+        -- output was a join a reader had to know to make. Read from THIS query's own window so cost and
+        -- output cannot describe different runs, the same reason #3010's two instants come out of one
+        -- aggregate. COALESCE so a zero is unambiguous at the store: without it a collector whose every
+        -- rows_collected is NULL returns NULL, which a reader would have to guess between not-measured and
+        -- stored-nothing, and the whole point is that the second becomes a fact rather than an absence.
+        -- APPENDED, and Darling's CollectionHealthSql mirrors both ordinals, because both are read
+        -- positionally.
+        COALESCE(SUM(rows_collected), 0) AS rows_stored,
+        -- The denominator's partner, and the honest half of a cost/output pair: 12 rows over 3 of 79,333
+        -- runs is a different collector from 12 rows over all of them. get_pg_blocking already reports
+        -- captures_with_blocking beside captures_total off this same rows_collected > 0 test.
+        SUM(CASE WHEN rows_collected > 0 THEN 1 ELSE 0 END) AS runs_with_rows,
+        -- #3240: runs skipped because a PostgreSQL extension the collector DECLARES is not installed — the
+        -- EXTENSION_MISSING status Darling's fault mapper split out of PERMISSIONS. Lite's SQL Server
+        -- collectors never write it, so this counts 0 on this SKU; selected anyway because the two health
+        -- reads are ordinal twins and the shared classifier takes the count. APPENDED, read positionally.
+        SUM(CASE WHEN status = 'EXTENSION_MISSING' THEN 1 ELSE 0 END) AS extension_missing_count,
+        -- #3754: runs whose XE session was missing or could not be created - Darling's SESSION_MISSING
+        -- status. Lite never writes it: its long-query XE reader swallows a permission-denied session read to
+        -- zero rows, and an ensure failure (and, since #4731, a blocked-process or deadlock read failure)
+        -- classifies PERMISSIONS / ERROR through XeSessionEnsureException,
+        -- so this counts 0 on this SKU; selected anyway because the two health reads are ordinal twins and
+        -- the shared output finding takes the count beside error_count as the runs that could not read.
+        -- Counted apart from error_count on purpose - it is not fed to the band. APPENDED, read positionally.
+        SUM(CASE WHEN status = 'SESSION_MISSING' THEN 1 ELSE 0 END) AS session_missing_count,
+        -- #3819: the instant the current skip streak began AFTER: the newest run that was NOT a named skip.
+        -- The vocabulary is interpolated from CollectorRuntimePrecondition, which is where each of those
+        -- statuses is declared, so this cannot ask about three of four after a fourth is split out. A NULL
+        -- status counts as non-skip: it is not one of the declared skip words, and reading it as one would
+        -- let an unwritten status manufacture a streak.
+        MAX(CASE WHEN status IS NULL
+                  OR status NOT IN ({CollectorRuntimePrecondition.NamedSkipStatusSqlList})
+                 THEN collection_time END) AS last_non_skip_time,
+        -- The newest run that stored anything. Off the same rows_collected > 0 test as runs_with_rows above,
+        -- so productive means one thing on this row. Compared against last_non_skip_time it says the
+        -- productivity sits BEFORE the streak rather than inside it, which is the ORDER that makes this a
+        -- regression rather than two unrelated facts.
+        MAX(CASE WHEN rows_collected > 0 THEN collection_time END) AS last_productive_time,
+        -- #5371: the instants the keyed lookups below read at. The statement used to rank every run of the
+        -- window four times (ROW_NUMBER over each collector, sorted on collection_time and a VARCHAR) to
+        -- reach the newest row of four classes; that sorts the whole window. These are plain aggregates, so
+        -- the single pass over the window needs no sort, and each lookup then reads only the rows AT one
+        -- instant. Twins Darling's CollectionHealthSql (#4955), except the lookups here are aggregates
+        -- rather than ORDER BY ... LIMIT 1, which DuckDB plans as a ROW_NUMBER window of its own.
+        MAX(CASE WHEN status IN ('ERROR', 'PERMISSIONS', 'EXTENSION_MISSING')
+                  AND error_message IS NOT NULL
+                 THEN collection_time END) AS last_failure_text_time,
+        MAX(CASE WHEN status = 'SUCCESS' AND error_message IS NOT NULL THEN collection_time END) AS last_note_time,
+        MAX(slowest_item_ms) AS dearest_item_ms,
+        -- #3885: the newest run that BREAKS the zero-row-success streak, and the status the first of them
+        -- carries at that instant (the greater status sorts first at an exact tie, as it always did). The
+        -- abandonment exclusion is success_count's own (#2926): a pre-#2803 abandoned cycle is stored as
+        -- SUCCESS with zero rows plus the budget note, which is data LOSS rather than a source that went
+        -- quiet. status is NOT NULL in the table, so the arg_max below never skips a row on a NULL argument.
+        MAX(CASE WHEN NOT (status = 'SUCCESS'
+                           AND COALESCE(rows_collected, 0) = 0
+                           AND NOT {EnumeratedCollectorDriver.AbandonedByNotePredicateSql})
+                 THEN collection_time END) AS last_streak_break_time,
+        arg_max(status, (collection_time, status))
+            FILTER (WHERE NOT (status = 'SUCCESS'
+                               AND COALESCE(rows_collected, 0) = 0
+                               AND NOT {EnumeratedCollectorDriver.AbandonedByNotePredicateSql})) AS last_streak_break_status
+    FROM v_collection_log
+    WHERE server_id = $1
+    AND   collection_time >= $2
+    GROUP BY collector_name
+)
 SELECT
-    collector_name,
-    COUNT(*) AS total_runs,
-    -- #2926: SUCCESS excludes an abandonment that predates #2803, so the Success column beside
-    -- Abandoned cannot count the same run twice. Post-#2803 rows need no exclusion - ABANDONED
-    -- is not SUCCESS - and an ordinary empty run stays counted, which is what the COALESCE in
-    -- the shared predicate is for: NULL under this NOT would have dropped it.
-    SUM(CASE WHEN status = 'SUCCESS'
-              AND NOT {EnumeratedCollectorDriver.AbandonedByNotePredicateSql}
-             THEN 1 ELSE 0 END) AS success_count,
-    SUM(CASE WHEN status = 'ERROR' THEN 1 ELSE 0 END) AS error_count,
-    AVG(duration_ms) AS avg_duration_ms,
-    -- #2460: the mean above describes a collector whose runs all cost about the same, and says
-    -- nothing true about one whose runs come in two sizes. query_store on a dense shard reported a
-    -- 13,834 ms average over 1,155 runs where 958 of them yielded nothing and cost ~36 ms, which
-    -- puts the other 197 at ~80,900 ms EACH — each one on its own larger than the whole 60,000 ms
-    -- sweep budget. duration_ms has been written per run since the table existed; nothing had ever
-    -- read it as anything but a mean.
-    --
-    -- p95 rather than the max for the number a decision is made from: a max is one run, so a single
-    -- pathological cycle would make a collector look permanently terrible for the rest of the
-    -- window. p95 also scales itself to the sample — over 3,500 runs it discards the one bad cycle,
-    -- and over the six runs a daily collector gets in a week it lands on the max, which is right,
-    -- because with six samples there is no outlier anyone can afford to throw away. DISC rather
-    -- than CONT so the answer is a duration some run actually took instead of an interpolation
-    -- between the two modes, which would be a number describing no run at all — the exact defect
-    -- this column exists to end. Both engines ignore NULL duration_ms here, as AVG already does.
-    MAX(duration_ms) AS max_duration_ms,
-    PERCENTILE_DISC(0.95) WITHIN GROUP (ORDER BY duration_ms) AS p95_duration_ms,
-    -- SKIPPED counts as a healthy run (dedup / version-gated collectors no-op without being stale)
-    MAX(CASE WHEN status IN ('SUCCESS', 'SKIPPED') THEN collection_time END) AS last_success_time,
-    MAX(collection_time) AS last_run_time,
-    -- #1855: the message from the NEWEST failing run, not MAX()'s lexicographically greatest one. The
-    -- status re-check is load-bearing rather than belt-and-braces: when no failing run in the window
-    -- carried text, error_rank = 1 falls through to the newest row of ANY class, and without it a
-    -- SUCCESS row's note could surface here as a fake last error.
-    -- #3240: EXTENSION_MISSING is in the exemplar set for twin-parity with Darling's reads — its stored
-    -- sentence IS the remedy there. Lite's SQL Server collectors never write the status, so on this SKU
-    -- the branch is inert.
-    MAX(CASE WHEN error_rank = 1 AND status IN ('ERROR', 'PERMISSIONS', 'EXTENSION_MISSING') THEN error_message END) AS last_error,
-    -- The newest failure OUTRIGHT, text or not: when did this last FAIL is about the run, not the
-    -- message. It can only name a different row than last_error if a failure was written with no text.
-    MAX(CASE WHEN status IN ('ERROR', 'PERMISSIONS', 'EXTENSION_MISSING') THEN collection_time END) AS last_error_time,
-    SUM(CASE WHEN status = 'PERMISSIONS' THEN 1 ELSE 0 END) AS permission_denied_count,
-    -- YIELDED = the 1s LOCK_TIMEOUT guard fired (#1805): deliberate, benign for collection,
-    -- counted apart from errors because clustering here is a signal about the TARGET's lock
-    -- contention rather than a monitoring fault.
-    SUM(CASE WHEN status = 'YIELDED' THEN 1 ELSE 0 END) AS yield_count,
-    -- #1837: the note a SUCCEEDING run can leave behind (an enumeration that yielded 0 items, items
-    -- whose enumeration probe failed). Gated on SUCCESS specifically, rather than on every non-failure status:
-    -- the runners attach a note only to the SUCCESS write, and the looser complement would drag
-    -- SESSION_MISSING and CANCELLED messages into a column whose whole claim is that it is NOT an
-    -- error. Display text only: no band, no count, no threshold reads it, and a legitimately empty
-    -- target (no user databases, no AGs) stays HEALTHY exactly as before.
-    MAX(CASE WHEN note_rank = 1 AND status = 'SUCCESS' THEN error_message END) AS last_note,
-    -- How many of the window's runs carried one. note_count = total_runs is the persistently-empty
-    -- signal the operator is actually looking for: EVERY run this week came back with nothing.
-    COUNT(CASE WHEN status = 'SUCCESS' THEN error_message END) AS note_count,
+    h.collector_name,
+    h.total_runs,
+    h.success_count,
+    h.error_count,
+    h.avg_duration_ms,
+    h.max_duration_ms,
+    h.p95_duration_ms,
+    h.last_success_time,
+    h.last_run_time,
+    -- #1855: the message from the NEWEST failing run, not MAX()'s lexicographically greatest one: the
+    -- failing rows AT the newest failing-with-text instant, the greater message first at an exact tie
+    -- (error_message DESC, which breaks it identically on DuckDB and Postgres where binary-vs-locale
+    -- collation would not). A failure written with no text is not a candidate, so no such run means
+    -- no row and a NULL here - and a SUCCESS row's note can never surface as a fake last error.
+    failed.error_message AS last_error,
+    h.last_error_time,
+    h.permission_denied_count,
+    h.yield_count,
+    -- The newest SUCCESS run that carried a note (the same instant-then-greater-message rule). Text
+    -- does not sort like the number #1837's probe note carries: 12 item(s) sorts below 9 item(s), so
+    -- collection_time settles it and the message only breaks an exact-timestamp tie.
+    noted.error_message AS last_note,
+    h.note_count,
     -- #1852: the one thing that makes a persistently-empty enumeration interesting — does this target
     -- actually HAVE user databases? Zero items on a server with none is legitimate and stays quiet;
     -- zero items on a server that HAS them is a login that cannot enter any, or a filter that
@@ -167,192 +278,277 @@ SELECT
     -- opposite fixes. (No double quotes anywhere in this string: it is a verbatim literal, where a
     -- lone quote ends it.) The four parts compose into slowest_item_ms * fanout_items /
     -- slowest_run_duration_ms, which is 1.0 for an even fan-out and 6.1 for the dominated example.
-    -- All four come from the SAME row via slowest_rank: parts taken from different runs would
-    -- compose into a ratio describing no run that ever happened. Twins Darling's read.
-    MAX(CASE WHEN slowest_rank = 1 THEN fanout_item_count END) AS fanout_items,
-    MAX(CASE WHEN slowest_rank = 1 THEN slowest_item END) AS slowest_item,
-    MAX(CASE WHEN slowest_rank = 1 THEN slowest_item_ms END) AS slowest_item_ms,
-    MAX(CASE WHEN slowest_rank = 1 THEN duration_ms END) AS slowest_run_duration_ms,
-    -- #2804: runs the #2673 wall-clock budget abandoned. APPENDED, never inserted — this result set
-    -- is read positionally and Darling's CollectionHealthSql mirrors these ordinals, so a mid-list
-    -- insert would silently re-map every later column in whichever surface was not edited with it.
-    --
-    -- #2926: keyed on the ROW, not on the status alone. collection_log is append-only, so a
-    -- window can still hold cycles written before #2803 gave abandonment its own status:
-    -- status = 'SUCCESS' beside rows_collected = 0 and the budget note. Counted by status
-    -- alone this read 0 for them, and the collector banded HEALTHY while losing cycles - a
-    -- filter correct against current writes and silently wrong against older ones, failing in
-    -- the reassuring direction. The pattern is one LIKE because the budget is INTERPOLATED and
-    -- the shipped values differ (120 s for procedure_stats/query_stats/plan_correction, 600 s
-    -- for query_store), so equality against one rendered sentence matches one collector.
-    SUM(CASE WHEN {EnumeratedCollectorDriver.AbandonedRunPredicateSql}
-             THEN 1 ELSE 0 END) AS abandoned_count,
-    -- #3010: the newest DENIAL on its own, which is what dates the last_error slot above.
-    -- last_error_time cannot stand in for it -- that column is a MAX over ERROR and PERMISSIONS
-    -- together, so on a collector carrying both it hands a reader an error's instant and lets them
-    -- call it a denial. Compared against last_success_time this separates a collector still being
-    -- refused from one whose refusals all predate a later success. APPENDED, and Darling's
-    -- CollectionHealthSql mirrors the ordinal, because both are read positionally.
-    MAX(CASE WHEN status = 'PERMISSIONS' THEN collection_time END) AS last_denied_time,
-    -- #3017: what the spend BOUGHT. Every other statistic on a health row describes cost -- total_runs,
-    -- the three durations, and the sweep-pressure roll-up built from them -- and the rows figure lived
-    -- on a different tool over a different (hourly, fleet-wide) series, so correlating spend against
-    -- output was a join a reader had to know to make. Read from THIS query's own window so cost and
-    -- output cannot describe different runs, the same reason #3010's two instants come out of one
-    -- aggregate. COALESCE so a zero is unambiguous at the store: without it a collector whose every
-    -- rows_collected is NULL returns NULL, which a reader would have to guess between not-measured and
-    -- stored-nothing, and the whole point is that the second becomes a fact rather than an absence.
-    -- APPENDED, and Darling's CollectionHealthSql mirrors both ordinals, because both are read
-    -- positionally.
-    COALESCE(SUM(rows_collected), 0) AS rows_stored,
-    -- The denominator's partner, and the honest half of a cost/output pair: 12 rows over 3 of 79,333
-    -- runs is a different collector from 12 rows over all of them. get_pg_blocking already reports
-    -- captures_with_blocking beside captures_total off this same rows_collected > 0 test.
-    SUM(CASE WHEN rows_collected > 0 THEN 1 ELSE 0 END) AS runs_with_rows,
-    -- #3240: runs skipped because a PostgreSQL extension the collector DECLARES is not installed — the
-    -- EXTENSION_MISSING status Darling's fault mapper split out of PERMISSIONS. Lite's SQL Server
-    -- collectors never write it, so this counts 0 on this SKU; selected anyway because the two health
-    -- reads are ordinal twins and the shared classifier takes the count. APPENDED, read positionally.
-    SUM(CASE WHEN status = 'EXTENSION_MISSING' THEN 1 ELSE 0 END) AS extension_missing_count,
-    -- #3754: runs whose XE session was missing or could not be created - Darling's SESSION_MISSING
-    -- status. Lite never writes it: its long-query XE reader swallows a permission-denied session read to
-    -- zero rows, and an ensure failure (and, since #4731, a blocked-process or deadlock read failure)
-    -- classifies PERMISSIONS / ERROR through XeSessionEnsureException,
-    -- so this counts 0 on this SKU; selected anyway because the two health reads are ordinal twins and
-    -- the shared output finding takes the count beside error_count as the runs that could not read.
-    -- Counted apart from error_count on purpose - it is not fed to the band. APPENDED, read positionally.
-    SUM(CASE WHEN status = 'SESSION_MISSING' THEN 1 ELSE 0 END) AS session_missing_count,
-    -- #3819: the three columns that tell a collector which STOPPED producing apart from one that never
-    -- produced here. Darling's twin carries the same three at the same ordinals; both MCP surfaces read
-    -- this result set positionally. Lite's SQL Server collectors write PERMISSIONS but neither of the
-    -- other two skip words, so on this SKU the streak this detects is a permission that was granted and
-    -- has been revoked since -- a narrower population than Darling's, and the same regression.
-    --
-    -- current_status is what the collector is reporting NOW, for the finding's prose. Taken at
-    -- recency_rank = 1 rather than as a MAX over the skip rows: MAX is lexicographic, so on a streak whose
+    -- All four come from the SAME row (one struct out of one lookup): parts taken from different runs
+    -- would compose into a ratio describing no run that ever happened. Ranked on slowest_item_ms rather
+    -- than duration_ms because the question is which database is expensive, not which cycle was.
+    -- A collector that never fans out has no dearest item, and the lookup then reads the NEWEST run,
+    -- which is where the rank this replaces fell through: fanout_items and slowest_item are that run's
+    -- own (NULL for a collector that never fans out, which is most of them), slowest_item_ms is NULL, and
+    -- slowest_run_duration_ms is that run's duration. Twins Darling's read.
+    CASE WHEN h.dearest_item_ms IS NULL THEN newest.pick.fanout_item_count ELSE dearest.pick.fanout_item_count END AS fanout_items,
+    CASE WHEN h.dearest_item_ms IS NULL THEN newest.pick.slowest_item ELSE dearest.pick.slowest_item END AS slowest_item,
+    CASE WHEN h.dearest_item_ms IS NULL THEN newest.pick.slowest_item_ms ELSE dearest.pick.slowest_item_ms END AS slowest_item_ms,
+    CASE WHEN h.dearest_item_ms IS NULL THEN newest.pick.duration_ms ELSE dearest.pick.duration_ms END AS slowest_run_duration_ms,
+    h.abandoned_count,
+    h.last_denied_time,
+    h.rows_stored,
+    h.runs_with_rows,
+    h.extension_missing_count,
+    h.session_missing_count,
+    -- #3819: current_status is what the collector is reporting NOW, for the finding's prose. Taken from
+    -- the NEWEST run rather than as a MAX over the skip rows: MAX is lexicographic, so on a streak whose
     -- status changed it would name whichever word sorts highest instead of the one being reported.
-    MAX(CASE WHEN recency_rank = 1 THEN status END) AS current_status,
-    -- The instant the current skip streak began AFTER: the newest run that was NOT a named skip. The
-    -- vocabulary is interpolated from CollectorRuntimePrecondition, which is where each of those statuses
-    -- is declared, so this cannot ask about three of four after a fourth is split out. A NULL status
-    -- counts as non-skip: it is not one of the declared skip words, and reading it as one would let an
-    -- unwritten status manufacture a streak.
-    MAX(CASE WHEN status IS NULL
-              OR status NOT IN ({CollectorRuntimePrecondition.NamedSkipStatusSqlList})
-             THEN collection_time END) AS last_non_skip_time,
-    -- The newest run that stored anything. Off the same rows_collected > 0 test as runs_with_rows above,
-    -- so productive means one thing on this row. Compared against last_non_skip_time it says the
-    -- productivity sits BEFORE the streak rather than inside it, which is the ORDER that makes this a
-    -- regression rather than two unrelated facts.
-    MAX(CASE WHEN rows_collected > 0 THEN collection_time END) AS last_productive_time,
+    -- status DESC only breaks an exact-timestamp tie, and breaks it identically on DuckDB and Postgres.
+    newest.pick.status AS current_status,
+    h.last_non_skip_time,
+    h.last_productive_time,
     -- #3885: how many runs, counting back from the NEWEST, were SUCCESS with zero rows and nothing else.
     -- The second regression class, and the one #3819 could not see: it keys on a skip STATUS, and a
     -- collector whose source went away while its query stayed VALID records the most reassuring word the
-    -- vocabulary has. Darling's twin carries this at the same ordinal; both MCP surfaces read this result
-    -- set positionally. The class is not Darling-specific -- Lite dedups on the same watermarks and its
-    -- collectors read the same sources -- so this SKU detects it identically rather than counting 0.
-    --
-    -- Exact, and free: recency_rank already exists in the subquery below (#3819 added it for
-    -- current_status), so this buys the streak's true width with no new window function and no new sort.
-    -- MIN of the rank of the newest run that BREAKS the streak, minus one, is the count of runs ahead of
-    -- it; NULL (nothing breaks it -- every run in the window is a zero-row success) falls back to COUNT(*),
-    -- which is that same count. The abandonment exclusion is success_count's own (#2926): a pre-#2803
-    -- abandoned cycle is stored as SUCCESS with zero rows plus the budget note, which is data LOSS rather
-    -- than a source that went quiet. APPENDED, read positionally.
-    COALESCE(
-        MIN(CASE WHEN NOT (status = 'SUCCESS'
-                           AND COALESCE(rows_collected, 0) = 0
-                           AND NOT {EnumeratedCollectorDriver.AbandonedByNotePredicateSql})
-                 THEN recency_rank END) - 1,
-        COUNT(*)) AS trailing_zero_row_success_runs,
+    -- vocabulary has. Exact: the newest run that BREAKS the streak is found by the aggregate above, every
+    -- run ahead of it is by construction a zero-row success, and the lookup COUNTS the runs after that
+    -- instant (plus, at the instant itself, the ones whose status sorts ahead of the first breaker's).
+    -- NULL (no run breaks it -- every run in the window is a zero-row success) falls back to the window's
+    -- run count, which is that same count. A streak broken by an error, a denial, a skip or a productive
+    -- run therefore reads 0 rather than reaching past it, because what this measures is the collector's
+    -- CURRENT state and any of those is a different current state. APPENDED, read positionally.
+    CASE WHEN h.last_streak_break_time IS NULL THEN h.total_runs ELSE streak.runs_ahead_of_break END AS trailing_zero_row_success_runs,
     -- #4748: the note the collector's NEWEST run left, which is not last_note above. last_note is the newest
-    -- run that CARRIED a note (note_rank), so a clean run after a partial-failure cycle still shows the
+    -- run that CARRIED a note, so a clean run after a partial-failure cycle still shows the
     -- older cycle's note there; the band must not read that, because the loss it names is not the
-    -- collector's current state. recency_rank = 1 is the newest run of any status, and the SUCCESS gate
-    -- matches last_note's (only the SUCCESS write carries a note). APPENDED, read positionally; Darling's
-    -- twin carries it at the same ordinal.
-    MAX(CASE WHEN recency_rank = 1 AND status = 'SUCCESS' THEN error_message END) AS latest_run_note
-FROM
+    -- collector's current state. The newest run of any status, and the SUCCESS gate matches last_note's
+    -- (only the SUCCESS write carries a note). APPENDED, read positionally; Darling's twin carries it at
+    -- the same ordinal.
+    CASE WHEN newest.pick.status = 'SUCCESS' THEN newest.pick.error_message END AS latest_run_note
+FROM health h
+-- #5371: the keyed lookups. Each reads ONE collector's rows at an instant the aggregate above already
+-- found, so the scan of v_collection_log carries an equality on collection_time (the hot table's
+-- (server_id, collection_time) index and the parquet row-group statistics both prune on it) instead of
+-- ranking every run of the window. Every lookup is a plain aggregate: ORDER BY ... LIMIT 1 here would be
+-- planned as a ROW_NUMBER window per lookup, which is the shape being removed. The window bound ($2) is
+-- repeated on each so an archive file older than the window is skipped.
+--
+-- The newest run: the rows at the window's newest instant, the greater status first. arg_max skips a
+-- NULL argument, so the columns travel as one struct: a NULL error_message on the winning row must stay
+-- NULL rather than hand back another row's note, and every column comes from the SAME row. The fan-out
+-- columns ride along because this row is also what a collector with no dearest item reports.
+LEFT JOIN LATERAL
 (
-    -- #1855: rank each class of message newest-first so the two exemplar columns above can take the
-    -- LATEST one instead of the lexicographically greatest. Ordering on whether the class's CASE came
-    -- back empty puts every row that carries such a message ahead of every row that does not, so rank 1
-    -- is the newest one that has text — and a later clean run no longer blanks a note the window still
-    -- holds. MAX() was never wrong about WHICH rows to consider, only about which of them wins, and
-    -- text does not sort like the number #1837's probe note carries: 12 item(s) sorts below 9 item(s).
-    -- collection_time settles it; error_message DESC only breaks an exact-timestamp tie, and breaks it
-    -- identically on DuckDB and Postgres, which binary-vs-locale collation would not.
-    SELECT
-        collector_name,
-        collection_time,
-        duration_ms,
-        status,
-        error_message,
-        -- #2926: the abandonment predicate above reads it. Projected here for the same reason
-        -- #2472's three columns are: this subquery ENUMERATES its columns, so an aggregate
-        -- outside naming one it does not carry fails at the STORE and nowhere earlier.
-        rows_collected,
-        -- #2472: projected here because this subquery enumerates its columns rather than SELECT *-ing
-        -- them, so an aggregate outside that names a column the inner query does not carry fails at the
-        -- store and nowhere earlier.
-        fanout_item_count,
-        slowest_item,
-        slowest_item_ms,
-        ROW_NUMBER() OVER
-        (
-            PARTITION BY collector_name
-            ORDER BY (CASE WHEN status = 'SUCCESS' THEN error_message END) IS NULL,
-                     collection_time DESC,
-                     error_message DESC
-        ) AS note_rank,
-        ROW_NUMBER() OVER
-        (
-            PARTITION BY collector_name
-            ORDER BY (CASE WHEN status IN ('ERROR', 'PERMISSIONS', 'EXTENSION_MISSING') THEN error_message END) IS NULL,
-                     collection_time DESC,
-                     error_message DESC
-        ) AS error_rank,
-        -- #2472: the window's dearest single ITEM, and with it the run that carried it. Ranked on
-        -- slowest_item_ms rather than duration_ms because the question is which database is expensive,
-        -- not which cycle was.
-        ROW_NUMBER() OVER
-        (
-            PARTITION BY collector_name
-            ORDER BY slowest_item_ms IS NULL,
-                     slowest_item_ms DESC,
-                     collection_time DESC
-        ) AS slowest_rank,
-        -- #3819: newest run first, so current_status above can take the status the collector is reporting
-        -- NOW. status DESC only breaks an exact-timestamp tie, and breaks it identically on DuckDB and
-        -- Postgres -- the same reason the ranks above tie-break on error_message.
-        ROW_NUMBER() OVER
-        (
-            PARTITION BY collector_name
-            ORDER BY collection_time DESC,
-                     status DESC
-        ) AS recency_rank
-    FROM v_collection_log
-    WHERE server_id = $1
-    AND   collection_time >= $2
-) runs
-GROUP BY collector_name
-ORDER BY collector_name";
+    SELECT arg_max(struct_pack(status := n.status,
+                               error_message := n.error_message,
+                               fanout_item_count := n.fanout_item_count,
+                               slowest_item := n.slowest_item,
+                               slowest_item_ms := n.slowest_item_ms,
+                               duration_ms := n.duration_ms), n.status) AS pick
+    FROM v_collection_log n
+    WHERE n.server_id = $1
+    AND   n.collector_name = h.collector_name
+    AND   n.collection_time >= $2
+    AND   n.collection_time = h.last_run_time
+) newest ON TRUE
+-- The newest failing run that carried text. No such run: the aggregate is NULL, and so is last_error.
+LEFT JOIN LATERAL
+(
+    SELECT MAX(f.error_message) AS error_message
+    FROM v_collection_log f
+    WHERE f.server_id = $1
+    AND   f.collector_name = h.collector_name
+    AND   f.collection_time >= $2
+    AND   f.collection_time = h.last_failure_text_time
+    AND   f.status IN ('ERROR', 'PERMISSIONS', 'EXTENSION_MISSING')
+    AND   f.error_message IS NOT NULL
+) failed ON TRUE
+-- The newest SUCCESS run that carried a note.
+LEFT JOIN LATERAL
+(
+    SELECT MAX(t.error_message) AS error_message
+    FROM v_collection_log t
+    WHERE t.server_id = $1
+    AND   t.collector_name = h.collector_name
+    AND   t.collection_time >= $2
+    AND   t.collection_time = h.last_note_time
+    AND   t.status = 'SUCCESS'
+    AND   t.error_message IS NOT NULL
+) noted ON TRUE
+-- The run that carried the window's dearest item, the newest of any tied on it. A collector with no dearest
+-- item reads nothing here (the outer CASE takes the newest run's columns instead).
+LEFT JOIN LATERAL
+(
+    SELECT arg_max(struct_pack(fanout_item_count := d.fanout_item_count,
+                               slowest_item := d.slowest_item,
+                               slowest_item_ms := d.slowest_item_ms,
+                               duration_ms := d.duration_ms), d.collection_time) AS pick
+    FROM v_collection_log d
+    WHERE d.server_id = $1
+    AND   d.collector_name = h.collector_name
+    AND   d.collection_time >= $2
+    AND   h.dearest_item_ms IS NOT NULL
+    AND   d.slowest_item_ms = h.dearest_item_ms
+) dearest ON TRUE
+-- The runs ahead of the newest streak break, in the order the old rank used: collection_time, then the
+-- greater status first. Every run ahead of the first breaker is a non-breaker, so the count needs no
+-- re-test of the breaker predicate. A non-breaker that shares BOTH its instant and its status with the
+-- first breaker has no defined order against it (the rank this replaces ordered such a pair arbitrarily)
+-- and is counted as behind it. With no break the aggregate's instant is NULL and nothing is read.
+LEFT JOIN LATERAL
+(
+    SELECT COUNT(*) AS runs_ahead_of_break
+    FROM v_collection_log s
+    WHERE s.server_id = $1
+    AND   s.collector_name = h.collector_name
+    AND   s.collection_time >= $2
+    AND   h.last_streak_break_time IS NOT NULL
+    AND   (s.collection_time > h.last_streak_break_time
+           OR (s.collection_time = h.last_streak_break_time
+               AND s.status > h.last_streak_break_status))
+) streak ON TRUE
+ORDER BY h.collector_name";
+
+    /// <summary>How long a memoized Collection Health result is reused when the caller names no lifetime (#5371). The tab
+    /// names the auto-refresh interval it is on (30, 60 or 300 seconds). The window is a fixed seven days, so the toolbar's
+    /// range does not enter the key.</summary>
+    internal static readonly TimeSpan CollectionHealthMemoLifetime = TimeSpan.FromSeconds(30);
+
+    private readonly object _collectionHealthMemoGate = new();
+    /* StartedAtUtc is when the read that produced the rows BEGAN, not when it finished: a read that took 20 seconds must not
+       count as a 20-second-younger answer, or a timer tick one interval after it started would still find it fresh. */
+    private readonly Dictionary<int, (List<CollectorHealthRow> Rows, DateTime StartedAtUtc)> _collectionHealthMemo = new();
+    private long _collectionHealthMemoGeneration;
+
+    /// <summary>Replaces the Health statement for ONE service instance. A test's seam (#5371): the cancellation tests need a
+    /// statement that runs for seconds, which the real aggregate over a test-sized store never does. Production leaves it null.</summary>
+    internal string? CollectionHealthSqlOverride { get; set; }
+
+    /// <summary>The clock the memo ages by. A test's seam; production reads the wall clock.</summary>
+    internal Func<DateTime> CollectionHealthMemoClock { get; set; } = () => DateTime.UtcNow;
+
+    /// <summary>Where a slow Collection Health or Collection Log read's phase line goes (and a cancelled read's one line).
+    /// Null is the profiler's own log; a test's seam.</summary>
+    internal Action<string, double, string>? CollectionHealthPhaseSink { get; set; }
+
+    /// <summary>
+    /// Drops every memoized Collection Health result (#5371). The auto-refresh timer's tick calls it before it asks for a
+    /// read, so a tick at ANY refresh setting reads fresh data, and so does a manual refresh or a range or filter change.
+    /// What is left for the memo to absorb is a second request inside one refresh interval from a different trigger (a
+    /// tab switch, the coordinator's replay). A read that began before the call does not store its result afterwards: the
+    /// generation it started under is stale.
+    /// </summary>
+    internal void InvalidateCollectionHealthMemo()
+    {
+        lock (_collectionHealthMemoGate)
+        {
+            _collectionHealthMemo.Clear();
+            _collectionHealthMemoGeneration++;
+        }
+    }
 
     /// <summary>
     /// Gets collection health summary for all collectors on a server.
+    ///
+    /// <para><b>Cancellable (#5371).</b> The token reaches the read-lock wait, the connection open, the statement and the
+    /// drain. A token fired mid-statement reaches <c>duckdb_interrupt</c> through <c>DuckDBCommand.Cancel()</c>: the
+    /// statement stops, the connection and the read lock are released, and the call throws
+    /// <see cref="OperationCanceledException"/>. A superseded refresh pass uses this to stop its Health read instead of
+    /// finishing a result nobody will paint.</para>
+    ///
+    /// <para><b>Memo (#5371).</b> <paramref name="allowMemo"/> reuses a result for <paramref name="memoLifetime"/> (default
+    /// <see cref="CollectionHealthMemoLifetime"/>) counted from when the read that produced it STARTED, per server. It is
+    /// opt-in, so the MCP tool and every other caller still read the store each time. The tab passes its auto-refresh
+    /// interval, and the timer's tick, a manual refresh and a range or filter change call
+    /// <see cref="InvalidateCollectionHealthMemo"/> first, so a tick at any refresh setting reads fresh data; only a second
+    /// request inside the interval from a different trigger (a tab switch, a coordinator replay) is answered from the
+    /// memo. Callers get their own copies of the rows, because the tab stamps each row's clock, and a memo hit re-applies
+    /// the CURRENT scheduled frequencies to them (<see cref="ApplyScheduledFrequencies"/>), so a schedule edit shows at
+    /// once instead of after the memo expires.</para>
+    ///
+    /// <para><b>Phase timing (#5371).</b> A read whose total passes the slow-method threshold logs one line naming the
+    /// lock wait, open, execute (prepare and bind included) and row read times. A read a newer request cancelled logs one
+    /// "cancelled after N ms (superseded)" line instead, and no <c>SLOW METHOD</c> block.</para>
     /// </summary>
-    public async Task<List<CollectorHealthRow>> GetCollectionHealthAsync(int serverId)
+    public async Task<List<CollectorHealthRow>> GetCollectionHealthAsync(int serverId, bool allowMemo = false, TimeSpan? memoLifetime = null, CancellationToken cancellationToken = default)
     {
-        using var connection = await OpenConnectionAsync();
+        cancellationToken.ThrowIfCancellationRequested();
+
+        long generation;
+        List<CollectorHealthRow>? memoCopies = null;
+        var startedAtUtc = CollectionHealthMemoClock();
+        lock (_collectionHealthMemoGate)
+        {
+            generation = _collectionHealthMemoGeneration;
+            if (allowMemo
+                && _collectionHealthMemo.TryGetValue(serverId, out var memo)
+                && startedAtUtc - memo.StartedAtUtc < (memoLifetime ?? CollectionHealthMemoLifetime))
+            {
+                memoCopies = memo.Rows.ConvertAll(row => row.Copy());
+            }
+        }
+
+        if (memoCopies is not null)
+        {
+            /* The schedule is never memoized: it is a pure lookup, so a hit stamps the cadence in force now. */
+            ApplyScheduledFrequencies(memoCopies, serverId, CollectorFrequencyMinutes);
+            return memoCopies;
+        }
+
+        var items = await TimedReadAsync("GetCollectionHealthAsync", timer => ReadCollectionHealthAsync(serverId, timer, cancellationToken));
+
+        if (allowMemo)
+        {
+            lock (_collectionHealthMemoGate)
+            {
+                if (generation == _collectionHealthMemoGeneration)
+                {
+                    _collectionHealthMemo[serverId] = (items.ConvertAll(row => row.Copy()), startedAtUtc);
+                }
+            }
+        }
+
+        return items;
+    }
+
+    /// <summary>
+    /// Runs one timed store read (#5371): the read fills <c>timer</c>'s phases, and when it ends, whatever way, the timer
+    /// reports. A read that ended in <see cref="OperationCanceledException"/> reports as cancelled (one plain line), not as
+    /// a slow method.
+    /// </summary>
+    private async Task<T> TimedReadAsync<T>(string readName, Func<ReadPhaseTimer, Task<T>> read)
+    {
+        var timer = new ReadPhaseTimer();
+        var cancelled = false;
+        try
+        {
+            return await read(timer);
+        }
+        catch (OperationCanceledException)
+        {
+            cancelled = true;
+            throw;
+        }
+        finally
+        {
+            timer.Report(readName, CollectionHealthPhaseSink, cancelled);
+        }
+    }
+
+    private async Task<List<CollectorHealthRow>> ReadCollectionHealthAsync(int serverId, ReadPhaseTimer timer, CancellationToken cancellationToken)
+    {
+        using var connection = await OpenConnectionAsync(timer, cancellationToken);
         using var command = connection.CreateCommand();
-        command.CommandText = CollectionHealthSql;
+        command.CommandText = CollectionHealthSqlOverride ?? CollectionHealthSql;
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = DateTime.UtcNow.AddDays(-7) });
 
         var items = new List<CollectorHealthRow>();
-        using var reader = await command.ExecuteReaderAsync();
-        while (await reader.ReadAsync())
+        System.Data.Common.DbDataReader reader;
+        /* No separate prepare step: DuckDB.NET's Prepare() parses and binds nothing, so the bind and plan cost lands here. */
+        using (timer.Measure(ReadPhaseTimer.Execute))
+        {
+            reader = await command.ExecuteReaderAsync(cancellationToken);
+        }
+        using var readerScope = reader;
+        using var rowReadScope = timer.Measure(ReadPhaseTimer.RowRead);
+        while (await reader.ReadAsync(cancellationToken))
         {
             items.Add(new CollectorHealthRow
             {
@@ -525,10 +721,15 @@ LIMIT 1";
     /// derived here rather than offered as a separate argument a caller could set the wrong way.</para>
     ///
     /// <para>The desktop Collection Log tab passes neither and is unaffected: no filter, newest first.</para>
+    ///
+    /// <para><paramref name="cancellationToken"/> (#5371) reaches the lock wait, the open, the statement and the drain, like <see cref="GetCollectionHealthAsync"/>: a superseded pass stops this read too.</para>
     /// </summary>
-    public async Task<List<CollectionLogRow>> GetRecentCollectionLogAsync(int serverId, int hoursBack = 4, DateTime? fromDate = null, DateTime? toDate = null, int maxRows = CollectionLogGridCap, DateTime? asOfUtc = null, string? collectorName = null, double? minDurationMs = null, string? status = null)
+    public Task<List<CollectionLogRow>> GetRecentCollectionLogAsync(int serverId, int hoursBack = 4, DateTime? fromDate = null, DateTime? toDate = null, int maxRows = CollectionLogGridCap, DateTime? asOfUtc = null, string? collectorName = null, double? minDurationMs = null, string? status = null, CancellationToken cancellationToken = default) =>
+        TimedReadAsync("GetRecentCollectionLogAsync", timer => ReadRecentCollectionLogAsync(timer, serverId, hoursBack, fromDate, toDate, maxRows, asOfUtc, collectorName, minDurationMs, status, cancellationToken));
+
+    private async Task<List<CollectionLogRow>> ReadRecentCollectionLogAsync(ReadPhaseTimer timer, int serverId, int hoursBack, DateTime? fromDate, DateTime? toDate, int maxRows, DateTime? asOfUtc, string? collectorName, double? minDurationMs, string? status, CancellationToken cancellationToken)
     {
-        using var connection = await OpenConnectionAsync();
+        using var connection = await OpenConnectionAsync(timer, cancellationToken);
         using var command = connection.CreateCommand();
 
         var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
@@ -570,8 +771,14 @@ LIMIT $4";
         command.Parameters.Add(new DuckDBParameter { Value = string.IsNullOrWhiteSpace(status) ? DBNull.Value : status.Trim() });
 
         var items = new List<CollectionLogRow>();
-        using var reader = await command.ExecuteReaderAsync();
-        while (await reader.ReadAsync())
+        System.Data.Common.DbDataReader reader;
+        using (timer.Measure(ReadPhaseTimer.Execute))
+        {
+            reader = await command.ExecuteReaderAsync(cancellationToken);
+        }
+        using var readerScope = reader;
+        using var rowReadScope = timer.Measure(ReadPhaseTimer.RowRead);
+        while (await reader.ReadAsync(cancellationToken))
         {
             items.Add(new CollectionLogRow
             {
@@ -605,9 +812,10 @@ LIMIT $4";
     /// so a slow run still shows as it did when every run was a point; the average and the count ride along for its hover.
     /// The window is the grid's own (<see cref="GetTimeRange"/>), so the chart and the grid beside it describe one span.</para>
     /// </summary>
-    public async Task<List<CollectorDurationBucket>> GetCollectorDurationTrendAsync(int serverId, int hoursBack = 4, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null)
+    public async Task<List<CollectorDurationBucket>> GetCollectorDurationTrendAsync(int serverId, int hoursBack = 4, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null, CancellationToken cancellationToken = default)
     {
-        using var connection = await OpenConnectionAsync();
+        /* #5371: the token reaches the lock wait, the open, the statement and the row read, like the Health and Log reads beside it. */
+        using var connection = await OpenConnectionAsync(timer: null, cancellationToken);
         using var command = connection.CreateCommand();
 
         var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
@@ -634,8 +842,8 @@ ORDER BY 1, 2";
         command.Parameters.Add(new DuckDBParameter { Value = AutoChartBucketMinutes(startTime, endTime) });
 
         var items = new List<CollectorDurationBucket>();
-        using var reader = await command.ExecuteReaderAsync();
-        while (await reader.ReadAsync())
+        using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
         {
             items.Add(new CollectorDurationBucket
             {
@@ -886,6 +1094,9 @@ public class CollectorDurationBucket
 /// </summary>
 public class CollectorHealthRow
 {
+    /// <summary>A shallow copy: every member is a value, a string or the immutable clock, so a copy is independent (#5371's memo hands out copies).</summary>
+    internal CollectorHealthRow Copy() => (CollectorHealthRow)MemberwiseClone();
+
     public string CollectorName { get; set; } = "";
     public long TotalRuns { get; set; }
     public long SuccessCount { get; set; }

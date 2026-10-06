@@ -15,6 +15,7 @@ using Microsoft.Extensions.Logging;
 using Npgsql;
 using NpgsqlTypes;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Service;
 
@@ -702,14 +703,14 @@ WHERE status = 'in_progress'
     /// otherwise the sentence to answer with, before anything is resolved. A password typed as itself is not asked
     /// about. A reference (<see cref="DarlingSecretSource.IsReference"/>, the resolver's own question) is let through only
     /// when a stored server holds that exact text AND matches the test on every connection setting the edit core
-    /// compares (<see cref="PerformanceMonitor.Darling.Service.Mcp.DarlingMcpServerAdminTools.ConnectionSettingsDiffer"/>:
+    /// compares (<see cref="ServerConnectionIdentity.Differ"/>:
     /// host and instance, port, engine, database, read-only intent, auth, username, encrypt mode, certificate trust,
     /// multi-subnet failover), so the stored password is never used anywhere else or with other trust settings. The plain
     /// <c>password</c> slot never carries a reference from a command; no stored server has one.
     /// </summary>
     internal static async Task<string?> TestConnectReferenceRefusalAsync(
         MonitoredServer server,
-        Func<string, CancellationToken, Task<IReadOnlyList<PerformanceMonitor.Darling.Service.Mcp.DarlingMcpServerAdminTools.ServerConnectionSettings>>> storedSettingsOfReference,
+        Func<string, CancellationToken, Task<IReadOnlyList<ServerConnectionIdentity>>> storedSettingsOfReference,
         CancellationToken cancellationToken)
     {
         if (DarlingSecretSource.RequestReferenceRefusal(server.Password) is { } plainSlotRefusal)
@@ -723,12 +724,15 @@ WHERE status = 'in_progress'
             return null;
         }
 
-        var tested = new PerformanceMonitor.Darling.Service.Mcp.DarlingMcpServerAdminTools.ServerConnectionSettings(
-            server.Host, server.Port, server.Engine ?? "sqlserver", server.Database, server.ReadOnlyIntent, server.Auth ?? "integrated",
-            server.Username, server.EncryptMode ?? "Mandatory", server.TrustServerCertificate, server.MultiSubnetFailover);
+        /* The tested settings with the defaults a command's blank fields mean (SQL Server, integrated authentication,
+           mandatory encryption), read through the one mapping every stored row is read through. */
+        var tested = ServerConnectionIdentity.FromStoredColumns(
+            server.Host, server.Port, server.Engine ?? "sqlserver", server.Database, server.ReadOnlyIntent,
+            server.Auth ?? "integrated", server.Username, server.EncryptMode ?? "Mandatory", server.TrustServerCertificate,
+            server.MultiSubnetFailover);
         foreach (var stored in await storedSettingsOfReference(reference!, cancellationToken))
         {
-            if (!PerformanceMonitor.Darling.Service.Mcp.DarlingMcpServerAdminTools.ConnectionSettingsDiffer(tested, stored))
+            if (!ServerConnectionIdentity.Differ(tested, stored))
             {
                 return null;
             }
@@ -738,19 +742,20 @@ WHERE status = 'in_progress'
     }
 
     /// <summary>The connection settings of every stored server that holds exactly this reference text.</summary>
-    private async Task<IReadOnlyList<PerformanceMonitor.Darling.Service.Mcp.DarlingMcpServerAdminTools.ServerConnectionSettings>> StoredSettingsOfReferenceAsync(string reference, CancellationToken cancellationToken)
+    private async Task<IReadOnlyList<ServerConnectionIdentity>> StoredSettingsOfReferenceAsync(string reference, CancellationToken cancellationToken)
     {
-        var found = new List<PerformanceMonitor.Darling.Service.Mcp.DarlingMcpServerAdminTools.ServerConnectionSettings>();
+        var found = new List<ServerConnectionIdentity>();
         await using var command = _postgres.CreateCommand(
-            "SELECT host, port, engine, database, read_only_intent, auth, username, encrypt_mode, trust_server_certificate, multi_subnet_failover " +
+            "SELECT " + ServerConnectionIdentity.StoredColumns + " " +
             "FROM config.config_monitored_servers WHERE encrypted_password = $1");
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = reference });
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
-            /* The same defaults the edit core reads a row with, so a NULL column compares as what it means. */
-            found.Add(new PerformanceMonitor.Darling.Service.Mcp.DarlingMcpServerAdminTools.ServerConnectionSettings(
-                reader.GetString(0), reader.IsDBNull(1) ? 0 : reader.GetInt32(1),
+            /* The one raw-row mapping; a NULL engine is SQL Server and a NULL authentication is integrated, as a test's
+               own blank fields are read above. */
+            found.Add(ServerConnectionIdentity.FromStoredColumns(
+                reader.GetString(0), reader.IsDBNull(1) ? null : reader.GetInt32(1),
                 reader.IsDBNull(2) ? "sqlserver" : reader.GetString(2), reader.IsDBNull(3) ? null : reader.GetString(3),
                 !reader.IsDBNull(4) && reader.GetBoolean(4), reader.IsDBNull(5) ? "integrated" : reader.GetString(5),
                 reader.IsDBNull(6) ? null : reader.GetString(6), reader.IsDBNull(7) ? "Mandatory" : reader.GetString(7),

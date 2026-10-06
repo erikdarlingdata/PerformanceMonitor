@@ -13,6 +13,7 @@ using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Runtime.Versioning;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
@@ -1127,7 +1128,7 @@ GRANT INSERT, UPDATE, DELETE ON {config}.config_monitored_servers TO {mcp};
 --     rather than a natural clear's 'tray' (a teardown surfaces no operator notification) -- so a caller can
 --     page nothing and fabricate no fire; only server_id/name and the already-sanitized title/detail vary.
 --     Definer-safe: owned by the store owner (the creating provisioning role, {owner}), an explicit pinned
---     search_path so no injected path can redirect the unqualified config_alert_log or now(), and a fully
+--     search_path with pg_temp last and the table named by its schema, so no temporary object can redirect the config_alert_log write or now(), and a fully
 --     parameterized INSERT with NO dynamic SQL. Created + REVOKEd-from-PUBLIC by the shared builder below;
 --     EXECUTE is the only privilege the least-privilege roles get, and admin/owner keep their direct INSERT and
 --     never call it. NOT a versioned migration: CREATE OR REPLACE is idempotent and owner-run every start and
@@ -1145,6 +1146,63 @@ GRANT EXECUTE ON FUNCTION {config}.record_custom_alert_resolution(integer, text,
 --     tools/provision-roles.sql, and is told to re-run it when the function is missing.
 {BuildEditMonitoredServerFunctionSql(config)}
 GRANT EXECUTE ON FUNCTION {config}.edit_monitored_server({EditMonitoredServerSignature}) TO {viewer}, {mcp};
+-- The store's own password rules for every role but the owner (see BuildServerPasswordRulesSql): a trigger on
+--     config_monitored_servers that refuses a password reference (env: or file:) and a move that keeps the stored
+--     password. Created here, not in a migration: CREATE OR REPLACE is idempotent and owner-run every start. A
+--     self-managed store gets the same function and trigger from tools/provision-roles.sql.
+{BuildServerPasswordRulesSql(config)}
+
+-- 10a. The password key tables (V165, #5366): written only by the store owner (the service, its command line and the
+--     migration runner); a trigger on each table refuses every other writer. This is the grant side of the same rule,
+--     and it runs after EVERY blanket grant above (the schema-wide SELECT and write grants and the mcp column ACL), so
+--     none of them can put a privilege back. REVOKE ALL ... CASCADE takes every privilege on the four tables from
+--     PUBLIC and the three roles, TRIGGER and REFERENCES included, so no role can add a new trigger or foreign key. A
+--     trigger or foreign key already there (made while a role held the privilege) is dropped by the loops below, with
+--     a WARNING, because it would outlast the REVOKE. Then SELECT on the key and service-state tables is granted back
+--     to {admin} only (the desktop Viewer reads them as admin), and the DO block checks that nothing else is left; the
+--     pin tables are read by the owner only. Provisioning runs after the migrations, so the tables exist here.
+REVOKE ALL ON {config}.password_key, {config}.password_key_service,
+   {config}.legacy_secret_pin, {config}.legacy_secret_pin_marker FROM PUBLIC, {admin}, {viewer}, {mcp} CASCADE;
+GRANT SELECT ON {config}.password_key, {config}.password_key_service TO {admin};
+DO $do$
+DECLARE
+   stray record;
+BEGIN
+   FOR stray IN
+      SELECT t.tgname, t.tgrelid::pg_catalog.regclass::pg_catalog.text AS tablename
+      FROM pg_catalog.pg_trigger AS t
+      WHERE NOT t.tgisinternal
+        AND t.tgrelid IN (pg_catalog.to_regclass('{config}.password_key'), pg_catalog.to_regclass('{config}.password_key_service'), pg_catalog.to_regclass('{config}.legacy_secret_pin'), pg_catalog.to_regclass('{config}.legacy_secret_pin_marker'))
+        AND t.tgname NOT IN ('trg_password_key_owner_only_row', 'trg_password_key_owner_only_truncate', 'trg_password_key_service_owner_only_row', 'trg_password_key_service_owner_only_truncate', 'trg_legacy_secret_pin_owner_only_row', 'trg_legacy_secret_pin_owner_only_truncate', 'trg_legacy_secret_pin_marker_owner_only_row', 'trg_legacy_secret_pin_marker_owner_only_truncate')
+   LOOP
+      RAISE WARNING 'Dropped trigger % from % because only the store owner may write the password key tables.', stray.tgname, stray.tablename;
+      EXECUTE pg_catalog.format('DROP TRIGGER %I ON %s', stray.tgname, stray.tablename);
+   END LOOP;
+
+   FOR stray IN
+      SELECT k.conname, k.conrelid::pg_catalog.regclass::pg_catalog.text AS tablename
+      FROM pg_catalog.pg_constraint AS k
+      WHERE k.contype = 'f'
+        AND k.confrelid IN (pg_catalog.to_regclass('{config}.password_key'), pg_catalog.to_regclass('{config}.password_key_service'), pg_catalog.to_regclass('{config}.legacy_secret_pin'), pg_catalog.to_regclass('{config}.legacy_secret_pin_marker'))
+   LOOP
+      RAISE WARNING 'Dropped foreign key % on % because it references a password key table.', stray.conname, stray.tablename;
+      EXECUTE pg_catalog.format('ALTER TABLE %s DROP CONSTRAINT %I', stray.tablename, stray.conname);
+   END LOOP;
+
+   IF EXISTS (
+      SELECT 1
+      FROM pg_catalog.pg_class AS c
+      CROSS JOIN LATERAL pg_catalog.aclexplode(c.relacl) AS a
+      LEFT JOIN pg_catalog.pg_roles AS r ON r.oid = a.grantee
+      WHERE c.oid IN (pg_catalog.to_regclass('{config}.password_key'), pg_catalog.to_regclass('{config}.password_key_service'), pg_catalog.to_regclass('{config}.legacy_secret_pin'), pg_catalog.to_regclass('{config}.legacy_secret_pin_marker'))
+        AND (a.grantee = 0 OR r.rolname IN ('{admin}', '{viewer}', '{mcp}'))
+        AND NOT (COALESCE(r.rolname = '{admin}', false) AND a.privilege_type = 'SELECT'
+                 AND c.oid IN (pg_catalog.to_regclass('{config}.password_key'), pg_catalog.to_regclass('{config}.password_key_service')))
+   ) THEN
+      RAISE EXCEPTION 'A role other than the store owner still holds a privilege it should not on a password key table.';
+   END IF;
+END
+$do$;
 
 -- 11. Role memberships (#3914): the three roles hold none. Nothing above grants one, so every membership in which
 --     admin, viewer or mcp is the MEMBER was given by someone else, and each outranks the grants above -- a
@@ -1184,8 +1242,8 @@ END $do$;
     /// freshly created function is EXECUTE-able by PUBLIC by default, so revoking is mandatory); the caller adds
     /// the narrow <c>GRANT EXECUTE</c>. Shared so the gated live proof test creates the IDENTICAL function rather
     /// than a drifting hand-copy. Definer-safe by construction: owned by whoever runs it (the provisioning owner,
-    /// which holds the config_alert_log INSERT the body needs), an explicit <c>SET search_path = {config},
-    /// pg_catalog</c> so neither the unqualified table nor <c>now()</c> can be redirected by a caller's
+    /// which holds the config_alert_log INSERT the body needs), an explicit <c>SET search_path = pg_catalog,
+    /// pg_temp</c> so neither the schema-qualified table nor <c>now()</c> can be redirected by a caller's
     /// search_path, and a fully parameterized INSERT that hardcodes the resolution shape (never a fire) with no
     /// dynamic SQL. The 12-column list matches <c>PgAlertHistoryStore.RecordAlertAsync</c>'s write for a
     /// <c>BuildResolutionRecord</c> and so do the fixed values, EXCEPT this is pinned to a no-channel row
@@ -1201,9 +1259,9 @@ CREATE OR REPLACE FUNCTION {config}.record_custom_alert_resolution(
 RETURNS void
 LANGUAGE sql
 SECURITY DEFINER
-SET search_path = {config}, pg_catalog
+SET search_path = pg_catalog, pg_temp
 AS $fn$
-   INSERT INTO config_alert_log
+   INSERT INTO {config}.config_alert_log
       (alert_time, server_id, server_name, metric_name, current_value, threshold_value,
        alert_sent, notification_type, send_error, muted, detail_text, context_json)
    VALUES
@@ -1221,7 +1279,8 @@ REVOKE ALL ON FUNCTION {config}.record_custom_alert_resolution(integer, text, te
     /// (viewer) and the MCP <c>edit_server</c> tool (mcp). Returns the <c>CREATE OR REPLACE FUNCTION</c> plus the
     /// <c>REVOKE ALL ... FROM PUBLIC</c>; the caller adds the <c>GRANT EXECUTE</c>. It locks the row, compares
     /// <c>modified_at</c> to the token the edit read (exact to the microsecond), works out a change of host or port
-    /// itself from the stored row, and answers <c>password_needed</c> instead of writing when that change, or a switch
+    /// itself from the stored row, answers <c>remediation_kept</c> instead of writing when the row holds a remediation login,
+    /// and answers <c>password_needed</c> instead of writing when that change, or a switch
     /// of authentication mode, would keep the stored secret on a SQL or service-principal row. A row whose
     /// authentication stores no secret never keeps one. Same builder for the managed batch, the script's text and the
     /// live tests, so none drifts. Pinned <c>search_path</c>, fixed statements, no dynamic SQL.
@@ -1246,7 +1305,7 @@ CREATE OR REPLACE FUNCTION {config}.edit_monitored_server(
 RETURNS TABLE (outcome text, new_modified_at timestamp)
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = {config}, pg_catalog
+SET search_path = pg_catalog, pg_temp
 AS $fn$
 DECLARE
    v_old_modified_at timestamp;
@@ -1272,14 +1331,17 @@ DECLARE
    v_new_secret boolean;
    v_secret_set boolean;
    v_secret text;
+   v_remediation_held boolean;
+   v_connection_changed boolean;
 BEGIN
    p_columns := COALESCE(p_columns, ARRAY[]::text[]);
 
    SELECT s.modified_at, s.host, s.port, s.auth, s.database, s.read_only_intent, s.username, s.encrypt_mode,
-          s.trust_server_certificate, s.multi_subnet_failover
+          s.trust_server_certificate, s.multi_subnet_failover, COALESCE(s.remediation_encrypted_password, '') <> ''
    INTO v_old_modified_at, v_old_host, v_old_port, v_old_auth, v_old_database, v_old_read_only_intent,
-        v_old_username, v_old_encrypt_mode, v_old_trust_server_certificate, v_old_multi_subnet_failover
-   FROM config_monitored_servers AS s
+        v_old_username, v_old_encrypt_mode, v_old_trust_server_certificate, v_old_multi_subnet_failover,
+        v_remediation_held
+   FROM {config}.config_monitored_servers AS s
    WHERE s.server_id = p_server_id
    FOR UPDATE OF s;
 
@@ -1306,19 +1368,35 @@ BEGIN
    v_secret_auth := lower(v_auth) IN ('sql', 'serviceprincipal');
    v_new_secret := 'encrypted_password' = ANY (p_columns) AND COALESCE(p_secret, '') <> '';
 
+   -- The store takes the password itself from these roles: a secret that starts with env: or file: (a reference,
+   -- compared as the service reads one, case-sensitive and at the start of the text) is refused. References are set
+   -- in the configuration file.
+   IF v_new_secret AND (left(p_secret, 4) = 'env:' OR left(p_secret, 5) = 'file:') THEN
+      RETURN QUERY SELECT 'reference_refused'::text, NULL::timestamp;
+      RETURN;
+   END IF;
+
    -- Any change to how the row connects (host, port, database, read-only intent, authentication mode, username,
    -- encryption, certificate trust, multi-subnet failover) never keeps the stored secret on a row that has one:
    -- the same set the route refuses (#5240). The caller's word is not taken: the change is worked out from the row.
-   IF v_secret_auth AND NOT v_new_secret
-      AND (v_host IS DISTINCT FROM v_old_host
-           OR v_port IS DISTINCT FROM v_old_port
-           OR v_database IS DISTINCT FROM v_old_database
-           OR v_read_only_intent IS DISTINCT FROM v_old_read_only_intent
-           OR lower(v_auth) IS DISTINCT FROM lower(v_old_auth)
-           OR v_username IS DISTINCT FROM v_old_username
-           OR lower(v_encrypt_mode) IS DISTINCT FROM lower(v_old_encrypt_mode)
-           OR v_trust_server_certificate IS DISTINCT FROM v_old_trust_server_certificate
-           OR v_multi_subnet_failover IS DISTINCT FROM v_old_multi_subnet_failover) THEN
+   v_connection_changed := v_host IS DISTINCT FROM v_old_host
+      OR v_port IS DISTINCT FROM v_old_port
+      OR v_database IS DISTINCT FROM v_old_database
+      OR v_read_only_intent IS DISTINCT FROM v_old_read_only_intent
+      OR lower(v_auth) IS DISTINCT FROM lower(v_old_auth)
+      OR v_username IS DISTINCT FROM v_old_username
+      OR lower(v_encrypt_mode) IS DISTINCT FROM lower(v_old_encrypt_mode)
+      OR v_trust_server_certificate IS DISTINCT FROM v_old_trust_server_certificate
+      OR v_multi_subnet_failover IS DISTINCT FROM v_old_multi_subnet_failover;
+
+   -- A row that holds a remediation secret is not moved from here, whatever else the call sends: that secret is
+   -- set and changed on the service host, and a new main password does not replace it.
+   IF v_connection_changed AND v_remediation_held THEN
+      RETURN QUERY SELECT 'remediation_kept'::text, NULL::timestamp;
+      RETURN;
+   END IF;
+
+   IF v_secret_auth AND NOT v_new_secret AND v_connection_changed THEN
       RETURN QUERY SELECT 'password_needed'::text, NULL::timestamp;
       RETURN;
    END IF;
@@ -1335,7 +1413,7 @@ BEGIN
       v_secret := NULL;
    END IF;
 
-   UPDATE config_monitored_servers AS s
+   UPDATE {config}.config_monitored_servers AS s
    SET name = CASE WHEN 'name' = ANY (p_columns) THEN p_name ELSE s.name END,
        host = v_host,
        port = v_port,
@@ -1357,6 +1435,208 @@ BEGIN
 END;
 $fn$;
 REVOKE ALL ON FUNCTION {config}.edit_monitored_server(integer, timestamp, text[], text, text, integer, text, boolean, text, text, text, text, boolean, boolean, numeric) FROM PUBLIC;";
+
+    /// <summary>
+    /// The store's own password rules for every role but the owner: a <c>BEFORE INSERT OR UPDATE</c> trigger on
+    /// <c>config_monitored_servers</c> and its function. A password that starts with <c>env:</c> or <c>file:</c> (a
+    /// reference, read as <see cref="DarlingSecretSource.IsReference"/> reads it) is refused on insert and on change, and an
+    /// update that changes how the row connects while it keeps a stored password is refused, and one that changes it on a
+    /// row holding a remediation login is refused with its own state (<c>PW003</c>). The owner (the table's
+    /// owner or a superuser: the service, <c>--add-server</c>, the configuration-file seed and the body of
+    /// <c>edit_monitored_server</c>) is not held to either rule, and no existing row is touched. The same text is
+    /// in <c>tools/provision-roles.sql</c> for a self-managed store.
+    /// </summary>
+    internal static string BuildServerPasswordRulesSql(string config) => $@"
+CREATE OR REPLACE FUNCTION {config}.monitored_server_password_rules()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog, pg_temp
+AS $rules$
+DECLARE
+   v_reference_main boolean;
+   v_reference_remediation boolean;
+   v_held boolean;
+   v_moved boolean;
+BEGIN
+   -- The store owner (the role that owns the table, and a superuser) writes what it writes: the service, the
+   -- --add-server verb, the configuration-file seed, and the body of edit_monitored_server, which runs as the
+   -- function's owner. Every other role is held to the two rules below.
+   IF pg_has_role(current_user, (SELECT c.relowner FROM pg_catalog.pg_class AS c WHERE c.oid = TG_RELID), 'USAGE') THEN
+      RETURN NEW;
+   END IF;
+
+   v_reference_main := COALESCE(left(NEW.encrypted_password, 4) = 'env:' OR left(NEW.encrypted_password, 5) = 'file:', false);
+   v_reference_remediation := COALESCE(left(NEW.remediation_encrypted_password, 4) = 'env:' OR left(NEW.remediation_encrypted_password, 5) = 'file:', false);
+
+   IF TG_OP = 'INSERT' THEN
+      -- A new row never holds a reference. The one pass: an upsert's proposed row for a server whose stored value is
+      -- already that exact reference (the row is locked, so it cannot go away before the write), which then meets the
+      -- UPDATE rules below. A role that cannot read or lock the row (viewer, mcp) gets the refusal.
+      IF v_reference_main OR v_reference_remediation THEN
+         v_held := false;
+         BEGIN
+            PERFORM 1
+            FROM {config}.config_monitored_servers AS s
+            WHERE s.server_id = NEW.server_id
+              AND (NOT v_reference_main OR s.encrypted_password = NEW.encrypted_password)
+              AND (NOT v_reference_remediation OR s.remediation_encrypted_password = NEW.remediation_encrypted_password)
+            FOR UPDATE OF s;
+            v_held := FOUND;
+         EXCEPTION WHEN insufficient_privilege THEN
+            v_held := false;
+         END;
+
+         IF NOT v_held THEN
+            RAISE EXCEPTION '%', 'Enter the password itself. References (env: or file:) can only be set in the configuration file.' USING ERRCODE = 'PW001';
+         END IF;
+      END IF;
+
+      RETURN NEW;
+   END IF;
+
+   -- An update never sets a reference.
+   IF (v_reference_main AND NEW.encrypted_password IS DISTINCT FROM OLD.encrypted_password)
+      OR (v_reference_remediation AND NEW.remediation_encrypted_password IS DISTINCT FROM OLD.remediation_encrypted_password) THEN
+      RAISE EXCEPTION '%', 'Enter the password itself. References (env: or file:) can only be set in the configuration file.' USING ERRCODE = 'PW001';
+   END IF;
+
+   -- An update that changes how the row connects (the set edit_monitored_server counts, plus the engine) never keeps
+   -- a stored secret that is still there: the main password is typed again with the change, and a remediation
+   -- password is changed on the service host.
+   v_moved := NEW.host IS DISTINCT FROM OLD.host
+      OR NEW.port IS DISTINCT FROM OLD.port
+      OR NEW.engine IS DISTINCT FROM OLD.engine
+      OR NEW.database IS DISTINCT FROM OLD.database
+      OR NEW.read_only_intent IS DISTINCT FROM OLD.read_only_intent
+      OR lower(NEW.auth) IS DISTINCT FROM lower(OLD.auth)
+      OR NEW.username IS DISTINCT FROM OLD.username
+      OR lower(NEW.encrypt_mode) IS DISTINCT FROM lower(OLD.encrypt_mode)
+      OR NEW.trust_server_certificate IS DISTINCT FROM OLD.trust_server_certificate
+      OR NEW.multi_subnet_failover IS DISTINCT FROM OLD.multi_subnet_failover;
+
+   -- A remediation secret that is kept goes with the login name it was stored for: that name is as much a part of how
+   -- the row is reached as the host is, so it is not changed here either. Not part of v_moved, so it never raises PW002.
+   IF COALESCE(OLD.remediation_encrypted_password, '') <> ''
+      AND NEW.remediation_encrypted_password IS NOT DISTINCT FROM OLD.remediation_encrypted_password
+      AND (v_moved OR NEW.remediation_username IS DISTINCT FROM OLD.remediation_username) THEN
+      RAISE EXCEPTION '%', 'This server has a remediation login stored. Change how it is reached on the service host, in the configuration file or with --add-server.' USING ERRCODE = 'PW003';
+   END IF;
+
+   IF v_moved
+      AND COALESCE(OLD.encrypted_password, '') <> ''
+      AND NEW.encrypted_password IS NOT DISTINCT FROM OLD.encrypted_password THEN
+      RAISE EXCEPTION '%', 'Changing how this server is reached needs its password again: it is stored encrypted and this surface cannot read it back.' USING ERRCODE = 'PW002';
+   END IF;
+
+   RETURN NEW;
+END;
+$rules$;
+REVOKE ALL ON FUNCTION {config}.monitored_server_password_rules() FROM PUBLIC;
+CREATE OR REPLACE TRIGGER trg_monitored_server_password_rules
+   BEFORE INSERT OR UPDATE ON {config}.config_monitored_servers
+   FOR EACH ROW EXECUTE FUNCTION {config}.monitored_server_password_rules();";
+
+    /// <summary>
+    /// A self-managed store (not the managed one, and not the compose store the service provisions) has its password rules
+    /// from <c>tools/provision-roles.sql</c> alone, so a store upgraded without re-running the script has none. This runs
+    /// <see cref="BuildServerPasswordRulesSql"/> on the service's own connection, which owns the tables, on every start. It
+    /// never throws and never fails the start: when the connection may not create the function or the trigger, one warning
+    /// names <c>provision-roles.sql</c>. Rules that are already in place are left alone: when the trigger exists, is
+    /// enabled and its function has the built text and search path (a function another role created from the script
+    /// included, which this connection could not replace), nothing is run and nothing is warned, and no lock is taken on
+    /// the table. Returns whether the rules are in place.
+    /// </summary>
+    public static async Task<bool> EnsureServerPasswordRulesAsync(
+        NpgsqlDataSource dataSource, ILogger logger, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(dataSource);
+        ArgumentNullException.ThrowIfNull(logger);
+
+        try
+        {
+            await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
+            if (await ServerPasswordRulesAreInPlaceAsync(connection, cancellationToken))
+            {
+                logger.LogInformation("The store's password rules are already in place on config.config_monitored_servers");
+                return true;
+            }
+
+            await using var command = new NpgsqlCommand(BuildServerPasswordRulesSql("config"), connection)
+            {
+                CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds,
+            };
+            await command.ExecuteNonQueryAsync(cancellationToken);
+            logger.LogInformation("The store's password rules are in place on config.config_monitored_servers");
+            return true;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogWarning(
+                "Could not create the store's password rules on config.config_monitored_servers ({Message}). Run provision-roles.sql against the store as the role that owns its tables.",
+                ex.Message);
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Whether the trigger is on <c>config_monitored_servers</c>, enabled, a row-level BEFORE INSERT OR UPDATE one, and its
+    /// function has the text <see cref="BuildServerPasswordRulesSql"/> builds (full-line comments and spacing set aside) and
+    /// the pinned search path. A read that fails answers false, so the caller falls back to creating them.
+    /// </summary>
+    private static async Task<bool> ServerPasswordRulesAreInPlaceAsync(NpgsqlConnection connection, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await using var read = new NpgsqlCommand(@"
+SELECT p.prosrc, p.proconfig
+FROM pg_catalog.pg_trigger AS t
+JOIN pg_catalog.pg_proc AS p ON p.oid = t.tgfoid
+WHERE t.tgrelid = 'config.config_monitored_servers'::regclass
+  AND t.tgname = 'trg_monitored_server_password_rules'
+  AND t.tgenabled = 'O'
+  AND t.tgtype = 23
+  AND p.proname = 'monitored_server_password_rules'
+  AND p.pronamespace = 'config'::regnamespace", connection)
+            {
+                CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds,
+            };
+            await using var reader = await read.ExecuteReaderAsync(cancellationToken);
+            if (!await reader.ReadAsync(cancellationToken))
+            {
+                return false;
+            }
+
+            var stored = reader.GetString(0);
+            var settings = reader.IsDBNull(1) ? Array.Empty<string>() : reader.GetFieldValue<string[]>(1);
+            if (settings.Length != 1 || !string.Equals(settings[0], "search_path=pg_catalog, pg_temp", StringComparison.Ordinal))
+            {
+                return false;
+            }
+
+            var built = BuildServerPasswordRulesSql("config");
+            const string quote = "$rules$";
+            var open = built.IndexOf(quote, StringComparison.Ordinal);
+            var close = built.IndexOf(quote, open + quote.Length, StringComparison.Ordinal);
+            if (open < 0 || close < 0)
+            {
+                return false;
+            }
+
+            return string.Equals(
+                NormalizeRulesText(stored),
+                NormalizeRulesText(built.Substring(open + quote.Length, close - open - quote.Length)),
+                StringComparison.Ordinal);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>The function text with full-line comments and runs of white space set aside, the comparison the script's
+    /// copy of the rules is held to as well.</summary>
+    private static string NormalizeRulesText(string sql) =>
+        Regex.Replace(Regex.Replace(sql, @"(?m)^\s*--.*$", ""), @"\s+", " ").Trim();
 
     /// <summary>
     /// Fails closed unless <paramref name="secret"/> is a SCRAM-SHA-256 verifier (#3910). This refuses a plain

@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using System.Text.RegularExpressions;
+using PerformanceMonitor.Analysis;
 
 namespace PerformanceMonitor.Notifications;
 
@@ -242,7 +243,12 @@ public static class BlockingIncidentGrouper
     /// Collapses the events into one group per distinct incident, preserving input order of first
     /// appearance, with the highest occurrence count first. Empty input returns an empty list.
     /// </summary>
-    public static List<BlockingGroup> Group(string serverName, IEnumerable<BlockedEvent> events)
+    /// <param name="cutStatement">How the per-event card cuts a blocked or blocking statement (#5320). A caller
+    /// whose events carry raw statement text passes a judge-then-cut (this project cannot reference the statement
+    /// filter); null keeps the plain cut, for events whose text is already judged. The group's identity never
+    /// reads it.</param>
+    public static List<BlockingGroup> Group(
+        string serverName, IEnumerable<BlockedEvent> events, Func<string, string>? cutStatement = null)
     {
         var order = new List<string>();
         var buckets = new Dictionary<string, List<BlockedEvent>>(StringComparer.Ordinal);
@@ -291,7 +297,7 @@ public static class BlockingIncidentGrouper
                     new[] { representative.ContentiousObject! }, rows.Count, waitRange)
                 : AlertFingerprint.ForKey(
                     serverName, AlertFingerprint.Blocking,
-                    QueryPairKey(representative),
+                    FingerprintKey(identity, representative),
                     DatabaseDisplay(representative.Database), rows.Count, waitRange);
 
             // ForObjects/ForKey only return null on empty identity, which IdentityKey already excludes,
@@ -312,7 +318,7 @@ public static class BlockingIncidentGrouper
                the DMV fallback gets null rather than a neighbouring incident's report. */
             var enriched = incident with
             {
-                DetailFields = BlockingDetail(representative),
+                DetailFields = BlockingDetail(representative, cutStatement ?? Truncate),
                 Database = IncidentDatabaseHelpers.NormalizeDatabase(representative.Database),
                 Attachment = rows.Select(r => r.Attachment).FirstOrDefault(a => a is { IsComplete: true }),
             };
@@ -330,7 +336,33 @@ public static class BlockingIncidentGrouper
     private static string IdentityKey(BlockedEvent e) =>
         !string.IsNullOrWhiteSpace(e.ContentiousObject)
             ? "obj|" + Norm(e.Database) + "|" + Norm(e.ContentiousObject)
-            : "qp|" + QueryPairKey(e);
+            : HasWithheldQuery(e)
+                /* #4348: a withheld statement has no text to group on, and every one reads as the same marker, so a
+                   text key would fold different statements into one incident. Key on everything that is NOT
+                   withheld: the database, the visible side's literal-stripped text (the marker stands in for the
+                   withheld side, so which side is withheld still matters) and the lock mode.
+                   Nothing in the sample's position goes in the key: an ordinal would change when sample order
+                   shifts between cycles, and the same incident would get a new dedup key and alert again.
+                   The limit: two withheld chains that differ in nothing visible (same database, same visible
+                   partner statement, same lock mode) are ONE incident, because BlockedEvent carries no
+                   non-text identity to tell them apart. */
+                ? "withheld|" + Norm(e.Database)
+                    + "|" + (IsWithheld(e.BlockedQuery) ? "<withheld>" : NormalizeQuery(e.BlockedQuery))
+                    + "|" + (IsWithheld(e.BlockingQuery) ? "<withheld>" : NormalizeQuery(e.BlockingQuery))
+                    + "|" + Norm(e.LockMode)
+                : "qp|" + QueryPairKey(e);
+
+    /// <summary>The text the incident fingerprint is keyed on: the query pair for a text-keyed incident, the
+    /// withheld-chain key for one whose text was withheld (database, visible side, lock mode; see
+    /// <see cref="IdentityKey"/>).</summary>
+    private static string FingerprintKey(string identity, BlockedEvent representative) =>
+        identity.StartsWith("withheld|", StringComparison.Ordinal) ? identity : QueryPairKey(representative);
+
+    private static bool HasWithheldQuery(BlockedEvent e) =>
+        IsWithheld(e.BlockedQuery) || IsWithheld(e.BlockingQuery);
+
+    private static bool IsWithheld(string? query) =>
+        WithheldStatementMarker.IsMarker(query);
 
     private static string QueryPairKey(BlockedEvent e) =>
         Norm(e.Database) + "|" + NormalizeQuery(e.BlockedQuery) + "|" + NormalizeQuery(e.BlockingQuery);
@@ -360,13 +392,13 @@ public static class BlockingIncidentGrouper
 
     // Forensic detail for a blocking incident's per-event card (#1141): the representative chain's
     // database, contentious object, the blocked/blocking query pair (truncated), and lock mode.
-    private static List<AlertIncidentField> BlockingDetail(BlockedEvent e)
+    private static List<AlertIncidentField> BlockingDetail(BlockedEvent e, Func<string, string> cut)
     {
         var f = new List<AlertIncidentField>();
         if (!string.IsNullOrWhiteSpace(e.Database)) f.Add(new AlertIncidentField("Database", e.Database!));
         if (!string.IsNullOrWhiteSpace(e.ContentiousObject)) f.Add(new AlertIncidentField("Contentious Object", e.ContentiousObject!));
-        if (!string.IsNullOrWhiteSpace(e.BlockedQuery)) f.Add(new AlertIncidentField("Blocked Query", Truncate(e.BlockedQuery!)));
-        if (!string.IsNullOrWhiteSpace(e.BlockingQuery)) f.Add(new AlertIncidentField("Blocking Query", Truncate(e.BlockingQuery!)));
+        if (!string.IsNullOrWhiteSpace(e.BlockedQuery)) f.Add(new AlertIncidentField("Blocked Query", cut(e.BlockedQuery!)));
+        if (!string.IsNullOrWhiteSpace(e.BlockingQuery)) f.Add(new AlertIncidentField("Blocking Query", cut(e.BlockingQuery!)));
         if (!string.IsNullOrWhiteSpace(e.LockMode)) f.Add(new AlertIncidentField("Lock Mode", e.LockMode!));
         return f;
     }

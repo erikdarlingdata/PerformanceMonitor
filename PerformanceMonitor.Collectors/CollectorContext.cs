@@ -286,8 +286,8 @@ public sealed class CollectorContext
 
     /// <summary>
     /// Starts the statement filter's session for ONE read call (#4348). A collector wraps each statement or plan
-    /// string with the session at the line where the string first enters a row; the session judges under its own
-    /// 15-second budget. The context adds every session's counters into the four <c>statement_scrub_*</c>
+    /// string with the session at the line where the string first enters a row; the session judges under one
+    /// 15-second budget that every string of the call shares (the limit is per session, not per string). The context adds every session's counters into the four <c>statement_scrub_*</c>
     /// measurements, written only when the cycle judged a value (a cycle that read no statement text carries none).
     /// </summary>
     public SensitiveStatements.Session BeginStatementScrub()

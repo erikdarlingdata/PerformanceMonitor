@@ -188,10 +188,15 @@ public sealed class CollectorHealthClassifierTests
         Assert.DoesNotContain("SUM(CASE WHEN status = 'ABANDONED' THEN 1 ELSE 0 END)", sql, StringComparison.Ordinal);
         Assert.Contains("SUM(CASE WHEN status = 'ERROR' THEN 1 ELSE 0 END)", sql, StringComparison.Ordinal);
 
-        /* The predicate reads rows_collected, and this query's aggregates sit outside a subquery that
-           ENUMERATES its columns - so the column has to be projected through it or the read fails at the
-           store and nowhere earlier. */
+        /* The predicate reads rows_collected. Until #5371 this query's aggregates sat outside a subquery that
+           ENUMERATES its columns, so the column had to be projected through it or the read failed at the
+           store and nowhere earlier. The aggregates now read v_collection_log directly (one CTE, no column
+           list in between), so what has to hold is the same claim in its new form: the abandonment
+           aggregate is computed over the view's own rows, ahead of the first FROM of the view. */
         Assert.Contains("rows_collected,", sql, StringComparison.Ordinal);
+        Assert.True(
+            sql.IndexOf("AS abandoned_count", StringComparison.Ordinal) < sql.IndexOf("FROM v_collection_log", StringComparison.Ordinal),
+            "abandoned_count must be aggregated over the view's own rows, not over a projected subquery");
     }
 
     /// <summary>
@@ -481,7 +486,12 @@ public sealed class CollectorHealthClassifierTests
     [Fact]
     public void TheCollectionHealthReadSql_ProjectsTheNewestRunsNote()
     {
-        Assert.Contains("recency_rank = 1 AND status = 'SUCCESS' THEN error_message END) AS latest_run_note", LocalDataService.CollectionHealthSql, StringComparison.Ordinal);
+        var sql = LocalDataService.CollectionHealthSql;
+
+        /* #5371: the newest run is a keyed lookup at the aggregate's newest instant (it was recency_rank = 1),
+           and the SUCCESS gate still decides whether its message is a note. */
+        Assert.Contains("CASE WHEN newest.pick.status = 'SUCCESS' THEN newest.pick.error_message END AS latest_run_note", sql, StringComparison.Ordinal);
+        Assert.Contains("AND   n.collection_time = h.last_run_time", sql, StringComparison.Ordinal);
     }
 
 }

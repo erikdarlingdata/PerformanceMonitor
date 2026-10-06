@@ -38,8 +38,8 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// <para><b>Identity.</b> <c>server_id</c> is <c>ServerIdHelper.GetDeterministicHashCode(BuildStorageName(
 /// host, database, readOnlyIntent))</c> — the SAME identity the collectors stamp and the service's seed uses
 /// (<see cref="ComputeServerId"/>), so a viewer-written row JOINs the collected data and the service's
-/// reconcile matches it. <b>Secrets.</b> <c>encrypted_password</c> is a DPAPI-LocalMachine blob produced by
-/// <see cref="ViewerServerSecret"/> (never plaintext); integrated auth stores none. Azure/Entra auth modes
+/// reconcile matches it. <b>Secrets.</b> <c>encrypted_password</c> is a password sealed to the service's published key by
+/// <see cref="ViewerPasswordKey"/> (never plaintext); integrated auth stores none. Azure/Entra auth modes
 /// are not written — the service can't honor them (see <see cref="ServerStoreCredential"/>).</para>
 /// </summary>
 public sealed partial class ViewerDataService
@@ -457,21 +457,48 @@ ORDER BY COALESCE(s.display_name, c.name)";
         await using var command = new NpgsqlCommand(MonitoredServerUpsertSql, connection, transaction);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         BindMonitoredServer(command, row);
-        await ExecuteWriteAsync(command, cancellationToken);
+        try
+        {
+            await ExecuteWriteAsync(command, cancellationToken);
+        }
+        catch (PostgresException ex) when (ex.SqlState == StoreMovedKeepingPasswordSqlState)
+        {
+            /* The store's own rule (a trigger on the table) refused a change of how the server is reached that keeps the
+               stored password: the same answer as the check above, for a row that changed between that read and the write. */
+            throw new MonitoredServerPasswordNeededException();
+        }
+        catch (PostgresException ex) when (ex.SqlState == StoreRemediationKeptSqlState)
+        {
+            /* The store's rule for a row that holds a remediation login: a connection change by this role is refused. */
+            throw new MonitoredServerPasswordNeededException(RemediationKeptText);
+        }
+
         await transaction.CommitAsync(cancellationToken);
     }
 
-    /// <summary>The sentence a refused move gives: the same text the web and MCP edit answer with
-    /// (<c>DarlingMcpServerAdminTools.EditPasswordNeededText</c>), because this project cannot reference the service.
-    /// <c>ServerEditPasswordRulePinTests</c> fails when the two texts differ.</summary>
-    public const string EditPasswordNeededText =
-        "Changing how this server is reached needs its password again: it is stored encrypted and this surface cannot read it back.";
+    /// <summary>The SQLSTATE the store's trigger on <c>config_monitored_servers</c> raises for a change of how a server is
+    /// reached that keeps its stored password.</summary>
+    internal const string StoreMovedKeepingPasswordSqlState = "PW002";
 
-    /// <summary>The stored host, port, auth mode, and whether the stored blob is the one a row carries, for one server id ($1 id,
-    /// $2 the row's blob). Reads <c>encrypted_password</c> only to compare it, in the write's own transaction: an
-    /// <c>admin</c>-role write, like the upsert it guards.</summary>
+    /// <summary>The SQLSTATE the store's trigger raises for a change of how a server is reached on a row that holds a
+    /// remediation secret, made by a role that does not own the table.</summary>
+    internal const string StoreRemediationKeptSqlState = "PW003";
+
+    /// <summary>The sentence a refused change on a row with a remediation login gives: the one in
+    /// <see cref="ServerConnectionRule.RemediationKeptText"/>, which the web and MCP edit answer with too.</summary>
+    public const string RemediationKeptText = ServerConnectionRule.RemediationKeptText;
+
+    /// <summary>The sentence a refused move gives: the one in <see cref="ServerConnectionRule.PasswordNeededOnMoveText"/>,
+    /// which the web and MCP edit answer with too.</summary>
+    public const string EditPasswordNeededText = ServerConnectionRule.PasswordNeededOnMoveText;
+
+    /// <summary>The stored connection settings (host, port, engine, database, read-only intent, auth, username, encrypt mode,
+    /// trust certificate, multi-subnet failover), whether the stored blob is the one a row carries, and whether the row holds a
+    /// remediation secret, for one server id ($1 id, $2 the row's blob). Reads the two secret columns only to compare them
+    /// and test for a value, in the write's own transaction: an <c>admin</c>-role write, like the upsert it guards.</summary>
     public const string MonitoredServerStoredReachSql = @"
-SELECT host, COALESCE(port, 0), auth, COALESCE(encrypted_password = $2, false)
+SELECT host, COALESCE(port, 0), engine, database, read_only_intent, auth, username, encrypt_mode, trust_server_certificate,
+       multi_subnet_failover, COALESCE(encrypted_password = $2, false), COALESCE(remediation_encrypted_password, '') <> ''
 FROM config_monitored_servers
 WHERE server_id = $1";
 
@@ -485,35 +512,22 @@ WHERE server_id = $1";
         "Switching to ServicePrincipal authentication needs the client secret as password.";
 
     /// <summary>
-    /// True when the row's connection moved off the stored one the way the web and MCP edit count a move: the host
-    /// (the incoming host trimmed of spaces, the stored host compared exactly as stored, the instance being part of it)
-    /// or the port differs. Mirrors <c>DarlingMcpServerAdminTools.SameAddress</c> and the store's edit function
-    /// (<c>btrim(host)</c> on the incoming value, then <c>IS DISTINCT FROM</c>).
-    /// </summary>
-    internal static bool ReachMoved(string storedHost, int storedPort, string newHost, int newPort) =>
-        !string.Equals(newHost.Trim(' '), storedHost, StringComparison.Ordinal) || newPort != storedPort;
-
-    /// <summary>
-    /// Refuses (throws <see cref="MonitoredServerPasswordNeededException"/>) a write that moves a SQL or
-    /// service-principal server's host or port, or switches its auth mode (into SQL or service principal, from any
-    /// other mode, including the other of the two), while carrying no newly entered password: the row's blob is
-    /// missing, or is the stored one. A switch gets the core's switch sentence, ahead of the move sentence, as in the
-    /// core. A Windows or managed-identity row stores no secret and is never refused; a row that is not in
-    /// the store yet has nothing to reuse. Runs inside the caller's transaction, after the identity lock.
+    /// Refuses (throws <see cref="MonitoredServerPasswordNeededException"/>) a write that changes how a stored server is
+    /// reached (any setting <see cref="ServerConnectionIdentity.Differ"/> compares: host, port, engine,
+    /// database, read-only intent, authentication, username, encrypt mode, trust certificate, multi-subnet failover) before
+    /// anything is written. A row that holds a remediation secret refuses any such change with
+    /// <see cref="RemediationKeptText"/>, whatever its authentication mode. For a SQL or service-principal row, a change
+    /// that carries no newly entered password (the row's blob is missing, or is the stored one) is refused too: a switch
+    /// of auth mode gets the core's switch sentence, ahead of the change sentence, as in the core. A Windows or
+    /// managed-identity row stores no secret and is otherwise never refused; a row that is not in the store yet has nothing
+    /// to reuse. Runs inside the caller's transaction, after the identity lock.
     /// </summary>
     private async Task RefuseStoredPasswordOnMovedReachAsync(
         NpgsqlConnection connection, NpgsqlTransaction transaction, MonitoredServerRow row, CancellationToken cancellationToken)
     {
-        if (!string.Equals(row.Auth, ServerStoreCredential.Sql, StringComparison.OrdinalIgnoreCase)
-            && !string.Equals(row.Auth, ServerStoreCredential.ServicePrincipal, StringComparison.OrdinalIgnoreCase))
-        {
-            return;
-        }
-
-        string storedHost;
-        int storedPort;
-        string storedAuth;
+        ServerConnectionIdentity stored;
         bool carriesStoredBlob;
+        bool holdsRemediationSecret;
         try
         {
             await using var command = new NpgsqlCommand(MonitoredServerStoredReachSql, connection, transaction);
@@ -526,10 +540,14 @@ WHERE server_id = $1";
                 return;
             }
 
-            storedHost = reader.GetString(0);
-            storedPort = reader.GetInt32(1);
-            storedAuth = reader.GetString(2);
-            carriesStoredBlob = reader.GetBoolean(3);
+            stored = ServerConnectionIdentity.FromStoredColumns(
+                reader.GetString(0), reader.GetInt32(1), reader.IsDBNull(2) ? null : reader.GetString(2),
+                reader.IsDBNull(3) ? null : reader.GetString(3), !reader.IsDBNull(4) && reader.GetBoolean(4),
+                reader.IsDBNull(5) ? null : reader.GetString(5), reader.IsDBNull(6) ? null : reader.GetString(6),
+                reader.IsDBNull(7) ? null : reader.GetString(7), !reader.IsDBNull(8) && reader.GetBoolean(8),
+                !reader.IsDBNull(9) && reader.GetBoolean(9));
+            carriesStoredBlob = reader.GetBoolean(10);
+            holdsRemediationSecret = reader.GetBoolean(11);
         }
         catch (PostgresException ex) when (ex.SqlState == InsufficientPrivilegeSqlState)
         {
@@ -540,12 +558,26 @@ WHERE server_id = $1";
             throw new ViewerSchemaSkewException(ex);
         }
 
+        var incoming = ViewerPasswordSealer.IdentityOf(row);
+        var connectionChanged = ServerConnectionIdentity.Differ(incoming, stored);
+
+        if (holdsRemediationSecret && connectionChanged)
+        {
+            throw new MonitoredServerPasswordNeededException(RemediationKeptText);
+        }
+
+        if (!string.Equals(row.Auth, ServerStoreCredential.Sql, StringComparison.OrdinalIgnoreCase)
+            && !string.Equals(row.Auth, ServerStoreCredential.ServicePrincipal, StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
         if (!string.IsNullOrEmpty(row.EncryptedPassword) && !carriesStoredBlob)
         {
             return;
         }
 
-        if (!string.Equals(storedAuth, row.Auth, StringComparison.OrdinalIgnoreCase))
+        if (!string.Equals(stored.Auth, row.Auth, StringComparison.OrdinalIgnoreCase))
         {
             throw new MonitoredServerPasswordNeededException(
                 string.Equals(row.Auth, ServerStoreCredential.ServicePrincipal, StringComparison.OrdinalIgnoreCase)
@@ -553,7 +585,7 @@ WHERE server_id = $1";
                     : EditSwitchToSqlNeedsPasswordText);
         }
 
-        if (ReachMoved(storedHost, storedPort, row.Host, row.Port))
+        if (connectionChanged)
         {
             throw new MonitoredServerPasswordNeededException();
         }
@@ -878,7 +910,7 @@ WHERE server_id = $1";
 /// store (and hence the service) has — now INCLUDING the per-server alert-delivery override (#1236, V18, the
 /// service honors it at delivery time); the remaining viewer-only cosmetics some Lite fields kept (description,
 /// utility DB, the Azure client ids) are NOT part of the service-honored server model and stay out of the store.
-/// <see cref="EncryptedPassword"/> is a DPAPI-LocalMachine blob, never plaintext. Favorites remain viewer-local
+/// <see cref="EncryptedPassword"/> is the sealed password (or an older DPAPI-LocalMachine blob), never plaintext. Favorites remain viewer-local
 /// (<see cref="ViewerServerStore"/>).
 /// </summary>
 public sealed class MonitoredServerRow
@@ -922,7 +954,7 @@ public sealed class MonitoredServerRow
 
     public string? Username { get; set; }
 
-    /// <summary>DPAPI-LocalMachine base64 blob (<see cref="ViewerServerSecret.Protect"/>), or null for integrated auth.</summary>
+    /// <summary>The sealed password (<see cref="ViewerPasswordSealer.Seal"/>; an older row may hold a DPAPI blob), or null for integrated auth.</summary>
     public string? EncryptedPassword { get; set; }
 
     public string EncryptMode { get; set; } = "Mandatory";
@@ -973,10 +1005,10 @@ public sealed record MonitoredServerAddResult(MonitoredServerAddOutcome Outcome,
 
 /// <summary>
 /// <see cref="ViewerDataService.UpsertMonitoredServerAsync"/> refused an edit (#5240): it moves a SQL or
-/// service-principal server's host or port and carries no newly entered password, so the stored one would have been
-/// sent to the new address, or it switches between SQL and service-principal authentication and keeps the stored
-/// secret. The message is <see cref="ViewerDataService.EditPasswordNeededText"/> for a move, the switch sentence for
-/// a switch; the dialog's save
+/// service-principal server's connection settings and carries no newly entered password, so the stored one would have been
+/// sent to the changed connection, or it changes how a server with a remediation login is reached, or it switches between SQL and service-principal authentication and keeps the stored
+/// secret. The message is <see cref="ViewerDataService.EditPasswordNeededText"/> for a change, the switch sentence for
+/// a switch, <see cref="ViewerDataService.RemediationKeptText"/> for a remediation row; the dialog's save
 /// handler shows it as it is, as it does a claimed address.
 /// </summary>
 public sealed class MonitoredServerPasswordNeededException : InvalidOperationException

@@ -171,7 +171,7 @@ public sealed class PasswordBindingCensusTests
         var sql = Source("tools/provision-roles.sql");
         var marker = sql.IndexOf("'password_needed'", StringComparison.Ordinal);
         Assert.True(marker > 0, "the edit function no longer answers password_needed");
-        var start = sql.LastIndexOf("IF ", marker, StringComparison.Ordinal);
+        var start = sql.LastIndexOf("v_connection_changed :=", marker, StringComparison.Ordinal);
         Assert.True(start > 0);
         var block = sql[start..marker];
 
@@ -183,35 +183,64 @@ public sealed class PasswordBindingCensusTests
     }
 
     [Fact]
-    public void Identity_Differ_answers_as_the_edit_and_connection_test_rule_does_for_every_field()
+    public void Identity_Differ_compares_each_field_by_its_rule()
     {
-        var pairs = new List<(ServerConnectionIdentity A, ServerConnectionIdentity B)> { (Base, Base) };
-        pairs.AddRange(OneFieldChanged().Values.Select(c => (Base, c)));
-        pairs.Add((Base, Base with { Host = "EXAMPLE-SQL-01" }));
-        pairs.Add((Base, Base with { Username = "EXAMPLE_LOGIN" }));
-        pairs.Add((Base, Base with { Database = "EXAMPLE_DB" }));
-        pairs.Add((Base, Base with { Database = null }));
-        pairs.Add((Base with { Database = null }, Base with { Database = "" }));
-        pairs.Add((Base, Base with { Auth = "SQL" }));
-        pairs.Add((Base, Base with { EncryptMode = "MANDATORY" }));
-        pairs.Add((Base, Base with { Engine = "SQLSERVER" }));
-        pairs.Add((Base, Base with { Host = "example-sql-01 " }));
-
-        foreach (var (a, b) in pairs)
+        Assert.False(ServerConnectionIdentity.Differ(Base, Base));
+        foreach (var (field, changed) in OneFieldChanged())
         {
-            var settingsDiffer = DarlingMcpServerAdminTools.ConnectionSettingsDiffer(Settings(a), Settings(b));
-
-            Assert.Equal(settingsDiffer, ServerConnectionIdentity.Differ(a, b));
-            Assert.Equal(settingsDiffer, ServerConnectionIdentity.Differ(b, a));
+            Assert.True(ServerConnectionIdentity.Differ(Base, changed), field + " does not make two connections differ");
+            Assert.True(ServerConnectionIdentity.Differ(changed, Base), field + " is not symmetric");
         }
 
-        Assert.False(ServerConnectionIdentity.Differ(Base, Base with { Auth = "SQL", EncryptMode = "MANDATORY", Engine = "SQLSERVER" }));
+        /* Host, username and database are ordinal. */
         Assert.True(ServerConnectionIdentity.Differ(Base, Base with { Host = "EXAMPLE-SQL-01" }));
+        Assert.True(ServerConnectionIdentity.Differ(Base, Base with { Host = "example-sql-01 " }));
+        Assert.True(ServerConnectionIdentity.Differ(Base, Base with { Username = "EXAMPLE_LOGIN" }));
+        Assert.True(ServerConnectionIdentity.Differ(Base, Base with { Database = "EXAMPLE_DB" }));
+        Assert.True(ServerConnectionIdentity.Differ(Base, Base with { Database = null }));
+
+        /* Authentication, encrypt mode and engine ignore case. */
+        Assert.False(ServerConnectionIdentity.Differ(Base, Base with { Auth = "SQL", EncryptMode = "MANDATORY", Engine = "SQLSERVER" }));
     }
 
-    private static DarlingMcpServerAdminTools.ServerConnectionSettings Settings(ServerConnectionIdentity c) =>
-        new(c.Host, c.Port, c.Engine, c.Database, c.ReadOnlyIntent, c.Auth, c.Username, c.EncryptMode,
-            c.TrustServerCertificate, c.MultiSubnetFailover);
+    /// <summary>
+    /// "Two connections differ" is <see cref="ServerConnectionIdentity.Differ"/> and nothing else (#5366): the edit core,
+    /// the connection test, the file matching and the Viewer all use it. This reads every source file under Darling
+    /// (tests and build output left out) and finds no other comparison of the trust or multi-subnet flags, and none of the
+    /// deleted types or helper names. The worker's own reconnect check compares the whole definition, secrets and display
+    /// name included, so it is the one allowed exception.
+    /// </summary>
+    [Fact]
+    public void No_other_connection_predicate_remains_under_Darling()
+    {
+        var darling = Path.GetFullPath(Path.Combine(Path.GetDirectoryName(ThisFile())!, ".."));
+        var allowed = new HashSet<string>(StringComparer.Ordinal) { "ServerConnectionIdentity.cs", "DarlingWorker.cs" };
+        var flagCompare = new Regex(@"\b(TrustServerCertificate|MultiSubnetFailover)\s*(!=|==)", RegexOptions.CultureInvariant);
+        var offenders = new List<string>();
+        foreach (var file in Directory.EnumerateFiles(darling, "*.cs", SearchOption.AllDirectories))
+        {
+            var relative = Path.GetRelativePath(darling, file).Replace('\\', '/');
+            if (relative.StartsWith("Darling.Tests/", StringComparison.Ordinal)
+                || relative.Contains("/obj/", StringComparison.Ordinal) || relative.Contains("/bin/", StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            var text = File.ReadAllText(file);
+            if (text.Contains("ConnectionSettingsDiffer", StringComparison.Ordinal)
+                || Regex.IsMatch(text, @"\bServerConnectionSettings\b")
+                || (!allowed.Contains(Path.GetFileName(file)) && flagCompare.IsMatch(text)))
+            {
+                offenders.Add(relative);
+            }
+        }
+
+        Assert.True(
+            offenders.Count == 0,
+            "Another connection comparison exists besides ServerConnectionIdentity.Differ: " + string.Join(", ", offenders));
+    }
+
+    private static string ThisFile([CallerFilePath] string thisFile = "") => thisFile;
 
     [Fact]
     public void The_associated_data_is_the_label_key_id_purpose_and_fields_each_with_a_four_byte_length()
@@ -250,5 +279,30 @@ public sealed class PasswordBindingCensusTests
             remediation.Fields.ToArray());
         Assert.Equal("smtp", smtp.Purpose);
         Assert.Equal(new string?[] { "omega-01", "587", "0", "example_mail_user" }, smtp.Fields.ToArray());
+    }
+
+    [Fact]
+    public void The_webhook_purpose_binds_slot_row_proxy_and_bound_url_and_names_only_known_slots()
+    {
+        const string KeyId = "0123456789abcdef";
+        var teams = PasswordBinding.ForWebhook("teams", PasswordBinding.WebhookSettingsRow, "http://proxy.example:8080", null);
+        var headers = PasswordBinding.ForWebhook("generic_headers", PasswordBinding.WebhookRouteRow(7), "", "sealed:v1:example");
+
+        Assert.Equal("webhook", teams.Purpose);
+        Assert.Equal(new string?[] { "teams", "notification", "http://proxy.example:8080", null }, teams.Fields.ToArray());
+        Assert.Equal(new string?[] { "generic_headers", "route:7", "", "sealed:v1:example" }, headers.Fields.ToArray());
+        Assert.Equal(
+            PasswordBinding.ForWebhook("slack", "notification", null, null).EncodeAad(KeyId),
+            PasswordBinding.ForWebhook("slack", "notification", "", "").EncodeAad(KeyId));
+        Assert.Equal(
+            new[] { "teams", "slack", "generic", "pagerduty", "generic_headers" }, PasswordBinding.WebhookSlots.ToArray());
+        Assert.Throws<ArgumentException>(() => PasswordBinding.ForWebhook("smtp", "notification", "", ""));
+
+        /* Every field is part of what the value belongs to. */
+        var baseAad = teams.EncodeAad(KeyId);
+        Assert.NotEqual(baseAad, PasswordBinding.ForWebhook("slack", "notification", "http://proxy.example:8080", null).EncodeAad(KeyId));
+        Assert.NotEqual(baseAad, PasswordBinding.ForWebhook("teams", "route:1", "http://proxy.example:8080", null).EncodeAad(KeyId));
+        Assert.NotEqual(baseAad, PasswordBinding.ForWebhook("teams", "notification", "", null).EncodeAad(KeyId));
+        Assert.NotEqual(baseAad, PasswordBinding.ForWebhook("teams", "notification", "http://proxy.example:8080", "x").EncodeAad(KeyId));
     }
 }

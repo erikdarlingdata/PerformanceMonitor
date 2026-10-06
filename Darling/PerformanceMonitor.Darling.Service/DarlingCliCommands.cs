@@ -175,6 +175,75 @@ public static class DarlingCliCommands
     public static bool IsDisableCollectorVerb(string arg) =>
         string.Equals(arg, "--disable-collector", StringComparison.OrdinalIgnoreCase);
 
+    /// <summary>The verb <see cref="ResetPasswordKeyAsync"/> handles: mark the service's current password key replaced, so
+    /// the next start makes a new one (#5366). It changes the store only (as the store owner) and never touches a key file.</summary>
+    public static bool IsResetPasswordKeyVerb(string arg) =>
+        string.Equals(arg, "--reset-password-key", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>The hidden verb <see cref="DarlingPasswordKeySelfCheck"/> handles: <c>--self-check-password-key &lt;vector-path&gt;</c>
+    /// runs the real password key file, file identity and sealed-value code on Linux and exits non-zero on any failure (#5366).
+    /// It is not in <see cref="UsageText"/>: the Linux build job runs it, an operator has no use for it.</summary>
+    public static bool IsSelfCheckPasswordKeyVerb(string arg) =>
+        string.Equals(arg, "--self-check-password-key", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>The text <c>--reset-password-key</c> prints when the key was marked replaced. <paramref name="sealedPasswords"/>
+    /// is how many saved passwords are sealed to the old key and must be entered again.</summary>
+    public static string ResetPasswordKeyRestartSentence(int sealedPasswords) =>
+        sealedPasswords == 1
+            ? "Restart the service. It will make a new password key, and this 1 saved password must be entered again."
+            : $"Restart the service. It will make a new password key, and these {sealedPasswords.ToString(System.Globalization.CultureInfo.InvariantCulture)} saved passwords must be entered again.";
+
+    /// <summary>
+    /// <c>--reset-password-key [--config &lt;path&gt;]</c>: on the owner connection, in one transaction, counts the saved
+    /// passwords sealed to the current key and marks that key <c>replaced</c> with the reason <c>reset</c>. The next service
+    /// start retires the key file and makes a new key. Key files are never touched here.
+    /// </summary>
+    public static async Task<int> ResetPasswordKeyAsync(
+        string[] rest, TextWriter output, TextWriter error, CancellationToken cancellationToken)
+    {
+        const string Verb = "--reset-password-key";
+        string? configPath = null;
+        for (var i = 0; i < rest.Length; i++)
+        {
+            if (string.Equals(rest[i], "--config", StringComparison.OrdinalIgnoreCase) && i + 1 < rest.Length && !rest[i + 1].StartsWith('-'))
+            {
+                configPath = rest[++i];
+                continue;
+            }
+
+            error.WriteLine($"Unknown or incomplete option for {Verb}: {rest[i]}");
+            output.WriteLine($"Usage: {Verb} [--config <path to darling.json>]");
+            return CollectorToggleExitCode.UsageOrConfig;
+        }
+
+        var created = TryCreateCollectorStoreDataSource(Verb, configPath, error);
+        if (created is null)
+        {
+            return CollectorToggleExitCode.UsageOrConfig;
+        }
+
+        await using var dataSource = created;
+        try
+        {
+            await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
+            await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+            var sealedPasswords = await DarlingPasswordKeyStore.CountSealedPasswordsAsync(connection, cancellationToken);
+            var replaced = await DarlingPasswordKeyStore.MarkCurrentResetAsync(connection, cancellationToken);
+            await transaction.CommitAsync(cancellationToken);
+            output.WriteLine();
+            output.WriteLine(replaced is null
+                ? "The store publishes no password key, so there is nothing to reset."
+                : ResetPasswordKeyRestartSentence(sealedPasswords));
+            output.WriteLine();
+            return CollectorToggleExitCode.Success;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            error.WriteLine($"Could not reset the password key in the store: {ex.Message}");
+            return CollectorToggleExitCode.StoreUnavailable;
+        }
+    }
+
     /// <summary>The verb <see cref="SetCollectorRunAtAsync"/> handles: set, stop or clear the time of day a collector that runs once
     /// a day starts, fleet-wide or for one server (#4938). A heavy daily collector otherwise runs whenever the service happened to
     /// start, which is often a busy hour; this names a quiet one, on the monitored server's own clock.</summary>
@@ -229,7 +298,9 @@ public static class DarlingCliCommands
         || IsEnableCollectorVerb(arg)
         || IsDisableCollectorVerb(arg)
         || IsSetCollectorRunAtVerb(arg)
-        || IsDropXeSessionsVerb(arg);
+        || IsDropXeSessionsVerb(arg)
+        || IsResetPasswordKeyVerb(arg)
+        || IsSelfCheckPasswordKeyVerb(arg);
 
     /// <summary>
     /// Classifies the exe's command line from its FIRST argument (#1581): no args → run the host; a recognized
@@ -434,6 +505,21 @@ public static class DarlingCliCommands
             return config.Servers;
         }
 
+        /* #5366: the pins that let an old-format saved password open are readable only as the store owner (row security
+           hides them from any other role). On a connection that is not the owner those servers cannot be checked, which is
+           not the same as their password needing to be entered again, so they are left out and the note says so. */
+        if (!await CanReadLegacyPinsAsync(connection, cancellationToken))
+        {
+            var notChecked = registryServers
+                .Where(s => s.RequiresResolvedSecret && DarlingSecrets.IsLegacyDpapi(s.EncryptedPassword) && !s.EncryptedPasswordDeclaredByFile)
+                .ToList();
+            if (notChecked.Count > 0)
+            {
+                output.WriteLine(OldFormatPasswordsNotCheckedText(notChecked.Count));
+                registryServers = registryServers.Where(s => !notChecked.Contains(s)).ToList();
+            }
+        }
+
         var registryNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var server in registryServers)
         {
@@ -452,6 +538,31 @@ public static class DarlingCliCommands
         }
 
         return registryServers;
+    }
+
+    /// <summary>The note <c>--validate-config</c> prints when its store connection is not the store owner, so the saved
+    /// passwords in the old format of <paramref name="count"/> server(s) were not checked (#5366).</summary>
+    internal static string OldFormatPasswordsNotCheckedText(int count) =>
+        $"NOTE: this connection is not the store owner, so the saved passwords of {count.ToString(System.Globalization.CultureInfo.InvariantCulture)} "
+        + "server(s) in the old format could not be checked and those server(s) were not tested. Run the verb with the service's own store connection to check them.";
+
+    /// <summary>True when this session may read the pins that old-format saved passwords are matched to: it is the owner of the
+    /// pin table, or the store has no such table yet. Never throws for a store answer.</summary>
+    internal static async Task<bool> CanReadLegacyPinsAsync(NpgsqlConnection connection, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await using var command = new NpgsqlCommand(
+                "SELECT pg_has_role(session_user, c.relowner, 'MEMBER') FROM pg_catalog.pg_class c " +
+                "WHERE c.oid = pg_catalog.to_regclass('config.legacy_secret_pin')", connection)
+            { CommandTimeout = ServiceCommandDeadlines.CliStoreReadSeconds };
+            var answer = await command.ExecuteScalarAsync(cancellationToken);
+            return answer is null or DBNull || (answer is bool owner && owner);
+        }
+        catch (PostgresException)
+        {
+            return false;
+        }
     }
 
     /// <summary>What <see cref="ResolveValidationTargetsAsync"/> tells the operator about the list it settled on, worded for the
@@ -681,8 +792,10 @@ public static class DarlingCliCommands
         DiagnosticsBundleRunner.Outcome outcome;
         try
         {
+            /* #5366: sealed webhook values are opened with the key file read only, so the hosts they hold are aliased. */
+            var keyRing = DarlingCliSealKey.TryOpenFileRing(config, DarlingConfig.ResolveConfigPath(options.ConfigPath), null);
             outcome = await DiagnosticsBundleRunner.BuildAsync(
-                options, config, connectionString, dataSource, storeError, storeReason, cancellationToken);
+                options, config, connectionString, dataSource, storeError, storeReason, cancellationToken, keyRing: keyRing);
         }
         finally
         {
@@ -4463,28 +4576,33 @@ public static class DarlingCliCommands
 
             var hasWork = NotElevatedRunHasWork(handoffs.Select(h => h.Handoff));
 
-            error.WriteLine("This shell is not elevated, so NO firewall rule was changed. Run these in an ELEVATED PowerShell:");
+            /* #5413: a run that returns 0 succeeded, and a successful run writes nothing to the error stream
+               (Windows PowerShell 5.1 turns each stderr line into an error record). The handoff stays on stderr
+               when it is confirmed work, because that run exits 1. */
+            var handoffText = hasWork ? error : output;
+
+            handoffText.WriteLine("This shell is not elevated, so NO firewall rule was changed. Run these in an ELEVATED PowerShell:");
             foreach (var (plan, handoff) in handoffs)
             {
                 switch (handoff)
                 {
                     case FirewallHandoff.OpenCommand:
-                        error.WriteLine("  " + DarlingManagedPostgres.BuildFirewallEnableCommand(plan.RuleName, plan.Port, plan.Cidr!));
+                        handoffText.WriteLine("  " + DarlingManagedPostgres.BuildFirewallEnableCommand(plan.RuleName, plan.Port, plan.Cidr!));
                         break;
 
                     /* The same builder and the same wildcard the elevated path would have used, so the command
                        an operator pastes and the command the verb runs cannot drift apart. */
                     case FirewallHandoff.SweepCommand:
-                        error.WriteLine(
+                        handoffText.WriteLine(
                             $"  # {plan.Surface}: a scoped rule is open on this surface and none belongs on any port.");
-                        error.WriteLine("  " + DarlingManagedPostgres.BuildFirewallSweepCommand(
+                        handoffText.WriteLine("  " + DarlingManagedPostgres.BuildFirewallSweepCommand(
                             DarlingFirewallCheck.SurfaceRuleWildcard(plan.RuleName)));
                         break;
 
                     case FirewallHandoff.SweepCommandUnverified:
-                        error.WriteLine(
+                        handoffText.WriteLine(
                             $"  # {plan.Surface}: the read-only rule probe gave no usable answer, so this may be a no-op.");
-                        error.WriteLine("  " + DarlingManagedPostgres.BuildFirewallSweepCommand(
+                        handoffText.WriteLine("  " + DarlingManagedPostgres.BuildFirewallSweepCommand(
                             DarlingFirewallCheck.SurfaceRuleWildcard(plan.RuleName)));
                         break;
 
@@ -4496,7 +4614,7 @@ public static class DarlingCliCommands
 
             if (!hasWork)
             {
-                error.WriteLine(
+                handoffText.WriteLine(
                     "Returning 0: nothing above is CONFIRMED work. The read-only probe could not answer for at " +
                     "least one surface, so those commands are offered as a precaution — and a non-zero exit is a " +
                     "claim about the firewall, which this run has no measurement to support.");
@@ -5632,14 +5750,22 @@ public static class DarlingCliCommands
         output.WriteLine();
 
         string resultJson;
+        string? sealNotice = null;
         try
         {
             await using var dataSource = NpgsqlDataSource.Create(
                 DarlingStoreConnection.PinSessionTimeZoneUtc(
                     DarlingStoreConnection.WithApplicationName(connectionString, DarlingManagedPostgres.CliApplicationName)));
-            /* Typed at the host's own command line, not a request: a password here may be an env:/file: reference, the
-               way the configuration file's is (DarlingMcpServerAdminTools.AddServersFromHostCommandLineAsync). */
-            resultJson = await DarlingMcpServerAdminTools.AddServersFromHostCommandLineAsync(dataSource, json);
+            /* #5366: a literal password is sealed with the key the service keeps (DarlingCliSealKey: the key file read
+               only, else the key the store publishes). Typed at the host's own command line, not a request: a password
+               here may be an env:/file: reference, the way the configuration file's is
+               (DarlingMcpServerAdminTools.AddServersFromHostCommandLineAsync). */
+            var sealKey = await DarlingCliSealKey.ResolveAsync(config, DarlingConfig.ResolveConfigPath(configPath), dataSource, null, cancellationToken);
+            resultJson = await DarlingMcpServerAdminTools.AddServersFromHostCommandLineAsync(dataSource, json, sealKey.Ring);
+            if (sealKey.Ring is DarlingCliSealKey.PublishedKeyRing { SealedCount: > 0 } && sealKey.Notice is not null)
+            {
+                sealNotice = sealKey.Notice;
+            }
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -5651,6 +5777,12 @@ public static class DarlingCliCommands
         foreach (var line in lines)
         {
             output.WriteLine(line);
+        }
+
+        if (sealNotice is not null)
+        {
+            output.WriteLine();
+            output.WriteLine(sealNotice);
         }
 
         return exitCode;

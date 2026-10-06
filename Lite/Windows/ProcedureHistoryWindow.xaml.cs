@@ -240,12 +240,15 @@ public partial class ProcedureHistoryWindow : Window
         btn.Content = "...";
         try
         {
-            var plan = await LocalDataService.FetchProcedurePlanOnDemandAsync(_connectionString, _databaseName, _schemaName, _objectName);
+            var plan = LivePlanDisplay.Filter(await LocalDataService.FetchProcedurePlanOnDemandAsync(_connectionString, _databaseName, _schemaName, _objectName));
             if (string.IsNullOrEmpty(plan))
             {
                 MessageBox.Show("No plan found in the plan cache for this procedure. The plan may have been evicted.", "Plan Not Found", MessageBoxButton.OK, MessageBoxImage.Information);
                 return;
             }
+
+            /* #5320: a plan the statement filter withheld whole is the marker, not a plan: say so, save nothing. */
+            if (WithheldPlanGuard.RefuseSave(plan)) return;
 
             var dialog = new SaveFileDialog
             {
@@ -278,7 +281,7 @@ public partial class ProcedureHistoryWindow : Window
     private async System.Threading.Tasks.Task<string?> FetchPlanAsync()
     {
         if (string.IsNullOrEmpty(_connectionString) || string.IsNullOrEmpty(_objectName)) return null;
-        return await LocalDataService.FetchProcedurePlanOnDemandAsync(_connectionString, _databaseName, _schemaName, _objectName);
+        return LivePlanDisplay.Filter(await LocalDataService.FetchProcedurePlanOnDemandAsync(_connectionString, _databaseName, _schemaName, _objectName));
     }
 
     private async void ViewPlan_Click(object sender, RoutedEventArgs e)

@@ -57,7 +57,15 @@ if (args.Length > 0 && DarlingCliCommands.IsEncryptPasswordVerb(args[0]))
         return 1;
     }
 
-    Console.Error.Write("Password: ");
+    /* #5413: Windows PowerShell 5.1 turns every line a native command writes to a captured or redirected error
+       stream into an error record, so under $ErrorActionPreference = 'Stop' a successful scripted run stopped the
+       script. The prompt goes to stderr so stdout stays exactly the blob (`... > blob.txt`), but only a person at a
+       keyboard needs it; a pipe or a file feeding stdin does not. */
+    if (!Console.IsInputRedirected)
+    {
+        Console.Error.Write("Password: ");
+    }
+
     var plaintext = Console.ReadLine();
     if (string.IsNullOrEmpty(plaintext))
     {
@@ -69,7 +77,13 @@ if (args.Length > 0 && DarlingCliCommands.IsEncryptPasswordVerb(args[0]))
     }
 
     Console.WriteLine(DarlingSecrets.Protect(plaintext));
-    Console.Error.WriteLine("Paste the line above into the server's \"encryptedPassword\" in darling.json.");
+
+    /* The paste hint is for a person reading the console; a script that captured stdout is not reading it. */
+    if (!Console.IsOutputRedirected)
+    {
+        Console.Error.WriteLine("Paste the line above into the server's \"encryptedPassword\" in darling.json.");
+    }
+
     return 0;
 }
 
@@ -310,6 +324,22 @@ if (args.Length > 0 && (DarlingCliCommands.IsEnableCollectorVerb(args[0]) || Dar
 {
     return await DarlingCliCommands.ToggleCollectorAsync(
         enable: DarlingCliCommands.IsEnableCollectorVerb(args[0]), args[1..], Console.Out, Console.Error, CancellationToken.None);
+}
+
+/* CLI verb: --reset-password-key [--config <path>] (#5366) - mark the service's current password key replaced, so the next
+   start makes a new one, and print how many saved passwords must be entered again. Store only: it never touches a key
+   file. Same platform posture as the verbs around it (Windows only for a MANAGED store credential, which the verb checks). */
+if (args.Length > 0 && DarlingCliCommands.IsResetPasswordKeyVerb(args[0]))
+{
+    return await DarlingCliCommands.ResetPasswordKeyAsync(args[1..], Console.Out, Console.Error, CancellationToken.None);
+}
+
+/* CLI verb: --self-check-password-key <vector-path> (#5366) - hidden: not in the usage text. Runs the real password key file,
+   file identity and sealed-value code in a fresh temporary directory and exits non-zero on any failure. The Linux build job
+   runs it inside the built image, because the test project runs on Windows. It reads no configuration and opens no store. */
+if (args.Length > 0 && DarlingCliCommands.IsSelfCheckPasswordKeyVerb(args[0]))
+{
+    return DarlingPasswordKeySelfCheck.Run(args[1..], Console.Out, Console.Error);
 }
 
 /* CLI verb: --set-collector-run-at <collector> <HH:MM|none|default> [--server <name>] [--config <path>] (#4938) — set,

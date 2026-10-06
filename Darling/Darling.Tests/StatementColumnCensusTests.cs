@@ -63,51 +63,51 @@ public sealed class StatementColumnCensusTests
     private static readonly Dictionary<string, Entry> Listed = new(StringComparer.Ordinal)
     {
         /* Rows 1-4: query_stats and procedure_stats text and plans, inline and deferred fetch (R2). */
-        ["query_stats.query_text"] = Hooked("1", "R2"),
-        ["query_stats.query_plan_xml"] = Hooked("2 and 3 (deferred plan fetch)", "R2"),
-        ["procedure_stats.query_plan_xml"] = Hooked("3 and 4 (deferred plan fetch, inline)", "R2"),
+        ["query_stats.query_text"] = Hooked("1", "R2", pending: false),
+        ["query_stats.query_plan_xml"] = Hooked("2 and 3 (deferred plan fetch)", "R2", pending: false),
+        ["procedure_stats.query_plan_xml"] = Hooked("3 and 4 (deferred plan fetch, inline)", "R2", pending: false),
         ["query_stats.query_plan_hash"] = Exempt("a hash of the plan, not plan text; the filter has nothing to read"),
         ["query_stats.query_plan_xml_bytes"] = Exempt("the byte length of the stored plan, a number"),
         ["procedure_stats.query_plan_xml_bytes"] = Exempt("the byte length of the stored plan, a number"),
 
         /* Row 5: Query Store. Lite stores it live; Darling stores it live and from backfill (R3). */
-        ["query_store.query_text"] = Hooked("5", "R3"),
+        ["query_store.query_text"] = Hooked("5", "R3", pending: false),
         ["query_store.query_plan_hash"] = Exempt("a hash of the plan, not plan text; the filter has nothing to read"),
         ["query_store.query_plan_text"] = Null("the main Query Store query writes a typed NULL here (QueryStoreCollector.cs:738); plan text reaches the store only through the separate by-ids fetch and the plan writer (6.7 row 7, R3)"),
 
         /* Row 8: the live snapshot of running requests (R6). */
-        ["query_snapshots.query_text"] = Hooked("8", "R6"),
-        ["query_snapshots.query_plan"] = Hooked("8", "R6"),
-        ["query_snapshots.live_query_plan"] = Hooked("8", "R6"),
+        ["query_snapshots.query_text"] = Hooked("8", "R6", pending: false),
+        ["query_snapshots.query_plan"] = Hooked("8", "R6", pending: false),
+        ["query_snapshots.live_query_plan"] = Hooked("8", "R6", pending: false),
 
         /* Rows 9-11: blocked process reports (R4). */
-        ["blocked_process_report.blocked_sql_text"] = Hooked("9", "R4"),
-        ["blocked_process_report.blocking_sql_text"] = Hooked("9", "R4"),
-        ["blocked_process_report.blocked_process_report_xml"] = Hooked("10", "R4"),
-        ["blocked_process_report.blocked_query_plan_xml"] = Hooked("11", "R4"),
-        ["blocked_process_report.blocking_query_plan_xml"] = Hooked("11", "R4"),
+        ["blocked_process_report.blocked_sql_text"] = Hooked("9", "R4", pending: false),
+        ["blocked_process_report.blocking_sql_text"] = Hooked("9", "R4", pending: false),
+        ["blocked_process_report.blocked_process_report_xml"] = Hooked("10", "R4", pending: false),
+        ["blocked_process_report.blocked_query_plan_xml"] = Hooked("11", "R4", pending: false),
+        ["blocked_process_report.blocking_query_plan_xml"] = Hooked("11", "R4", pending: false),
 
         /* Rows 12-14: deadlocks (R4). */
-        ["deadlocks.victim_sql_text"] = Hooked("12", "R4"),
-        ["deadlocks.deadlock_graph_xml"] = Hooked("13", "R4"),
-        ["deadlocks.victim_query_plan_xml"] = Hooked("14", "R4"),
+        ["deadlocks.victim_sql_text"] = Hooked("12", "R4", pending: false),
+        ["deadlocks.deadlock_graph_xml"] = Hooked("13", "R4", pending: false),
+        ["deadlocks.victim_query_plan_xml"] = Hooked("14", "R4", pending: false),
 
         /* Row 15: the DMV blocking snapshot (R4). */
-        ["dmv_blocking_snapshot.blocked_sql_text"] = Hooked("15", "R4"),
-        ["dmv_blocking_snapshot.blocking_sql_text"] = Hooked("15", "R4"),
+        ["dmv_blocking_snapshot.blocked_sql_text"] = Hooked("15", "R4", pending: false),
+        ["dmv_blocking_snapshot.blocking_sql_text"] = Hooked("15", "R4", pending: false),
 
         /* Rows 16-18 and 21: the event and history collectors (R5). */
-        ["long_query_completions.statement_text"] = Hooked("16", "R5"),
-        ["default_trace_events.text_data"] = Hooked("17", "R5"),
-        ["system_health_events.event_xml"] = Hooked("18", "R5"),
-        ["job_history.message"] = Hooked("21", "R5"),
+        ["long_query_completions.statement_text"] = Hooked("16", "R5", pending: false),
+        ["default_trace_events.text_data"] = Hooked("17", "R5", pending: false),
+        ["system_health_events.event_xml"] = Hooked("18", "R5", pending: false),
+        ["job_history.message"] = Hooked("21", "R5", pending: false),
 
         /* The widened pattern (input_buffer, batch_text, command, definition) found one more column. Plan 6.7 names it. */
         ["index_object_stats.filter_definition"] = Exempt("an index filter predicate over bracketed column names (IndexObjectStatsCollector.cs), not a statement"),
 
         /* Row 19: plan correction (R6). */
-        ["plan_correction.query_text"] = Hooked("19", "R6"),
-        ["plan_correction.implementation_script"] = Hooked("19", "R6"),
+        ["plan_correction.query_text"] = Hooked("19", "R6", pending: false),
+        ["plan_correction.implementation_script"] = Hooked("19", "R6", pending: false),
     };
 
     /// <summary>
@@ -406,7 +406,8 @@ public sealed class StatementColumnCensusTests
     /// <summary>
     /// A writer that can put statement text, a plan or a caller's arguments into a store without going through a
     /// collector definition's payload columns. <c>Sites</c> are the (file, type, method) places the hook may live;
-    /// every site must still exist, and a non-pending entry needs a <c>SensitiveStatements</c> call in at least one.
+    /// every site must still exist, and in a non-pending entry EACH site must judge (a <c>SensitiveStatements</c> call,
+    /// a session it received) or call another site of the entry that does.
     /// </summary>
     private sealed record Watched(
         string Name, string Row, string Lane, bool Pending, params (string File, string Type, string Method)[] Sites);
@@ -416,23 +417,35 @@ public sealed class StatementColumnCensusTests
     private static readonly Watched[] WatchedWriters =
     {
         // 6.7 row 7: Query Store plans by id. The runner fetches and hands them to the plan writer.
-        new("query store plans by id", "6.7 row 7", "R3", true,
+        new("query store plans by id", "6.7 row 7", "R3", false,
             (Runner, "DarlingCollectorRunner", "FetchAndStorePlansAsync"),
             ("Darling/PerformanceMonitor.Darling.Storage/QueryStorePlanWriter.cs", "QueryStorePlanWriter", "WriteAsync")),
 
         // 6.7 row 6: the Query Store text store.
-        new("query store text store", "6.7 row 6", "R3", true,
+        new("query store text store", "6.7 row 6", "R3", false,
             (Runner, "DarlingCollectorRunner", "FetchAndStoreQueryTextAsync"),
             ("Darling/PerformanceMonitor.Darling.Storage/QueryStoreTextWriter.cs", "QueryStoreTextWriter", "WriteAsync")),
 
         // 6.7 row 20: the oversized-plan sweep fetches one plan and records it in the backlog.
-        new("oversized plan sweep", "6.7 row 20", "R6", true,
-            ("Darling/PerformanceMonitor.Darling.Service/OversizedPlanBacklogSweep.cs", "OversizedPlanBacklogSweep", "FetchOnePlanAsync")),
+        new("oversized plan sweep", "6.7 row 20", "R6", false,
+            ("Darling/PerformanceMonitor.Darling.Service/OversizedPlanBacklogSweep.cs", "OversizedPlanBacklogSweep", "FetchOnePlanAsync"),
+            ("Darling/PerformanceMonitor.Darling.Service/OversizedPlanBacklogSweep.cs", "OversizedPlanBacklogSweep", "JudgeFetchedPlan")),
+
+        // The fetch_plan and execute_actual_plan command results store a plan in result_json. Both handlers must hand
+        // the plan to PlanResultOutcome (the judge): the per-method rule fails a handler that serializes planXml
+        // itself (#5367 review round 2, N1; the live test's fake host calls PlanResultOutcome on its own, so it
+        // cannot see such a revert).
+        new("plan command results", "plan commands (fetch_plan, execute_actual_plan)", "E", false,
+            ("Darling/PerformanceMonitor.Darling.Service/DarlingWorker.cs", "DarlingWorker", "RunFetchPlanAsync"),
+            ("Darling/PerformanceMonitor.Darling.Service/DarlingWorker.cs", "DarlingWorker", "RunExecuteActualPlanAsync"),
+            ("Darling/PerformanceMonitor.Darling.Service/DarlingWorker.cs", "DarlingWorker", "PlanResultOutcome")),
 
         // The slow-read log stores up to 4 KB of a slow call's arguments (a plan or a statement a caller passed).
-        new("slow-read log: the MCP filter's offer", "plan section 1 (slow-read log)", "L7 and L8", true,
-            ("Darling/PerformanceMonitor.Darling.Service/Mcp/McpToolLatencyFilter.cs", "McpToolLatencyFilter", "OfferSlow")),
-        new("slow-read log: the log's offer", "plan section 1 (slow-read log)", "L7 and L8", true,
+        // L7: every surface's offer ends in SlowReadLog.Offer, which judges the arguments before they are stored.
+        new("slow-read log: the MCP filter's offer", "plan section 1 (slow-read log)", "L7 and L8", false,
+            ("Darling/PerformanceMonitor.Darling.Service/Mcp/McpToolLatencyFilter.cs", "McpToolLatencyFilter", "OfferSlow"),
+            ("Darling/PerformanceMonitor.Darling.Service/SlowReadLog.cs", "SlowReadLog", "Offer")),
+        new("slow-read log: the log's offer", "plan section 1 (slow-read log)", "L7 and L8", false,
             ("Darling/PerformanceMonitor.Darling.Service/SlowReadLog.cs", "SlowReadLog", "Offer")),
     };
 
@@ -528,9 +541,14 @@ public sealed class StatementColumnCensusTests
     /// <summary>The bodies of every declaration of <paramref name="method"/> in <paramref name="source"/> (empty
     /// when the type or the method is not there). A declaration is a line that starts with modifiers or a return
     /// type and then the name and "(", followed by a block body.</summary>
-    internal static List<string> BodiesOf(string source, string type, string method)
+    internal static List<string> BodiesOf(string source, string type, string method) =>
+        DeclarationsOf(source, type, method).Select(d => d.Body).ToList();
+
+    /// <summary>As <see cref="BodiesOf"/>, with each declaration's parameter list beside its body, so a writer that
+    /// is HANDED a <c>SensitiveStatements.Session</c> (the batch's, rather than one it makes) can be recognised.</summary>
+    internal static List<(string Parameters, string Body)> DeclarationsOf(string source, string type, string method)
     {
-        var bodies = new List<string>();
+        var bodies = new List<(string Parameters, string Body)>();
         var code = CodeOnly(source);
         if (!Regex.IsMatch(code, @"\b(class|struct|record|interface)\s+" + Regex.Escape(type) + @"\b"))
         {
@@ -583,13 +601,77 @@ public sealed class StatementColumnCensusTests
                 }
             }
 
-            bodies.Add(code[open..Math.Min(close + 1, code.Length)]);
+            var parametersStart = m.Index + m.Length - 1;
+            bodies.Add((
+                code[parametersStart..Math.Max(parametersStart, Math.Min(open, code.Length))],
+                code[open..Math.Min(close + 1, code.Length)]));
         }
 
         return bodies;
     }
 
     private static bool HasSessionCall(string body) => SessionCall.IsMatch(body);
+
+    private static readonly Regex SessionParameter = new(
+        @"\bSensitiveStatements\s*\.\s*Session\??\s+(?<name>\w+)",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
+    /// <summary>
+    /// A writer that is passed the batch's session rather than making one: it names a
+    /// <c>SensitiveStatements.Session</c> parameter and its body calls a judging method (<c>Text</c>, <c>TryText</c>,
+    /// <c>Xml</c>, <c>TryXml</c>) on that parameter. Merely receiving a session, or judging through some other
+    /// object, is not hooking.
+    /// </summary>
+    private static bool JudgesThroughAReceivedSession((string Parameters, string Body) declaration)
+    {
+        foreach (Match p in SessionParameter.Matches(declaration.Parameters))
+        {
+            var call = new Regex(
+                @"(?<![\w.])" + Regex.Escape(p.Groups["name"].Value) + @"\s*\.\s*(Try)?(Text|Xml)\s*\(",
+                RegexOptions.CultureInvariant);
+            if (call.IsMatch(declaration.Body))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Whether <paramref name="body"/> (of a method on <paramref name="ownType"/>) calls the site
+    /// <paramref name="target"/>: an unqualified call when it is on the same type, <c>Type.Method(</c> otherwise, or a
+    /// call on a private instance field (<c>_field.Method(</c>) that <paramref name="fileSource"/> declares with the
+    /// target's type: the MCP filter hands a slow call's arguments to the slow-read log through its
+    /// <c>_slowReads</c> field (#5320, dev's #5362 merged into #5367). A field of any other type does not count
+    /// (#5367 review: a writer calling <c>_queue.Offer(</c> on an unrelated queue is not hooked).
+    /// </summary>
+    private static bool CallsSite(string body, string ownType, (string Type, string Method) target, string fileSource)
+    {
+        if (target.Type == ownType)
+        {
+            return Regex.IsMatch(body, @"(?<![\w.])" + Regex.Escape(target.Method) + @"\s*\(", RegexOptions.CultureInvariant);
+        }
+
+        if (Regex.IsMatch(body, @"(?<![\w])" + Regex.Escape(target.Type) + @"\s*\.\s*" + Regex.Escape(target.Method) + @"\s*\(",
+            RegexOptions.CultureInvariant))
+        {
+            return true;
+        }
+
+        foreach (Match call in Regex.Matches(body, @"(?<![\w.])(?<field>_\w+)\s*\.\s*" + Regex.Escape(target.Method) + @"\s*\(",
+            RegexOptions.CultureInvariant))
+        {
+            // The field must be declared in this file with the target's type, readonly or not, nullable or not.
+            var declared = @"\b" + Regex.Escape(target.Type) + @"\??\s+" + Regex.Escape(call.Groups["field"].Value) + @"\b";
+            if (Regex.IsMatch(fileSource, declared, RegexOptions.CultureInvariant))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
 
     /// <summary>The problems with a watched list, reading each site's file through <paramref name="read"/>.</summary>
     private static string[] WatchedProblems(IEnumerable<Watched> writers, Func<string, string?> read)
@@ -602,23 +684,55 @@ public sealed class StatementColumnCensusTests
                 problems.Add(w.Name + " needs a plan row and an owning lane");
             }
 
-            var hooked = false;
+            // Per method (review of #5367, A-L2): every site is a method that returns or hands on plan or statement
+            // text, and each one must filter. It filters when it judges directly, judges through a session it
+            // received, or calls another site of the same writer that does (the runner's fetch methods hand a session
+            // to the store writer; the sweep's fetch returns what its judging step returns). A second method that
+            // does none of these fails even when a sibling is hooked, so one hooked method cannot vouch for the rest.
+            var sites = new List<(string File, string Type, string Method, List<(string Parameters, string Body)> Bodies)>();
             foreach (var (file, type, method) in w.Sites)
             {
                 var source = read(file);
-                var bodies = source is null ? new List<string>() : BodiesOf(source, type, method);
+                var bodies = source is null ? new List<(string Parameters, string Body)>() : DeclarationsOf(source, type, method);
                 if (bodies.Count == 0)
                 {
                     problems.Add(w.Name + ": " + type + "." + method + " in " + file + " no longer exists; update WatchedWriters");
                     continue;
                 }
 
-                hooked |= bodies.Any(HasSessionCall);
+                sites.Add((file, type, method, bodies));
             }
 
-            if (!w.Pending && !hooked)
+            var filtering = new HashSet<(string Type, string Method)>();
+            foreach (var site in sites)
             {
-                problems.Add(w.Name + " is not pending but none of its sites calls SensitiveStatements");
+                if (site.Bodies.Any(d => HasSessionCall(d.Body) || JudgesThroughAReceivedSession(d)))
+                {
+                    filtering.Add((site.Type, site.Method));
+                }
+            }
+
+            bool changed;
+            do
+            {
+                changed = false;
+                foreach (var site in sites.Where(x => !filtering.Contains((x.Type, x.Method))))
+                {
+                    if (filtering.Any(f => site.Bodies.Any(d => CallsSite(d.Body, site.Type, f, read(site.File) ?? ""))))
+                    {
+                        filtering.Add((site.Type, site.Method));
+                        changed = true;
+                    }
+                }
+            }
+            while (changed);
+
+            if (!w.Pending)
+            {
+                foreach (var site in sites.Where(x => !filtering.Contains((x.Type, x.Method))))
+                {
+                    problems.Add(w.Name + ": " + site.Type + "." + site.Method + " is not pending but neither calls SensitiveStatements nor hands the text to a method that does");
+                }
             }
         }
 
@@ -674,6 +788,149 @@ namespace N
         Assert.Single(WatchedProblems(new[] { one with { Pending = true } }, _ => null));
     }
 
+    [Fact]
+    public void TheWatchedScan_SeesACallOnAPrivateFieldOfAnotherType_ButNotOnALocalOrAnUnrelatedMethod()
+    {
+        var target = ("SlowReadLog", "Offer");
+        const string declares = "private readonly SlowReadLog _slowReads = new();\nprivate SlowReadLog? _optional;";
+        Assert.True(CallsSite("_slowReads.Offer(a, b);", "McpToolLatencyFilter", target, declares));
+        Assert.True(CallsSite("_optional.Offer(a);", "McpToolLatencyFilter", target, declares));
+        Assert.True(CallsSite("SlowReadLog.Offer(a);", "McpToolLatencyFilter", target, ""));
+        Assert.False(CallsSite("local.Offer(a);", "McpToolLatencyFilter", target, declares));
+        Assert.False(CallsSite("_slowReads.ShouldRecord(a);", "McpToolLatencyFilter", target, declares));
+        // A private field of any OTHER type is not the site (#5367 review): the queue is not the slow-read log.
+        Assert.False(CallsSite("_queue.Offer(a);", "McpToolLatencyFilter", target, "private readonly Queue<string> _queue = new();"));
+        Assert.False(CallsSite("_queue.Offer(a);", "McpToolLatencyFilter", target, declares));
+        Assert.False(CallsSite("Offer(a);", "McpToolLatencyFilter", target, declares));
+    }
+
+    [Fact]
+    public void TheWatchedScan_RecognisesTheSessionAWriterReceives_AndAWriterThatNeverJudgesStillFails()
+    {
+        const string Source = @"
+namespace N
+{
+    internal static class R
+    {
+        internal static (int, string) Judges(SensitiveStatements.Session scrub, string xml, int attempts)
+        {
+            if (!scrub.TryXml(xml, out var judged))
+            {
+                return (0, null);
+            }
+
+            return (1, judged);
+        }
+
+        internal static void ReceivesButNeverJudges(SensitiveStatements.Session scrub, string xml)
+        {
+            Use(xml);
+        }
+
+        internal static void JudgesThroughSomethingElse(SensitiveStatements.Session scrub, Other other, string xml)
+        {
+            other.Xml(xml);
+        }
+
+        internal static void JudgesThroughAParameterThatIsNotASession(Other scrub, string xml)
+        {
+            scrub.Xml(xml);
+        }
+
+        internal static void ACommentIsNotAJudgement(SensitiveStatements.Session scrub, string xml)
+        {
+            // scrub.Xml(xml)
+            var s = ""scrub.Xml(x)"";
+        }
+    }
+}";
+        Watched Site(string method) => new("planted", "6.7 row 0", "R0", false, ("f.cs", "R", method));
+
+        Assert.Empty(WatchedProblems(new[] { Site("Judges") }, _ => Source));
+        Assert.Single(WatchedProblems(new[] { Site("ReceivesButNeverJudges") }, _ => Source));
+        Assert.Single(WatchedProblems(new[] { Site("JudgesThroughSomethingElse") }, _ => Source));
+        Assert.Single(WatchedProblems(new[] { Site("JudgesThroughAParameterThatIsNotASession") }, _ => Source));
+        Assert.Single(WatchedProblems(new[] { Site("ACommentIsNotAJudgement") }, _ => Source));
+    }
+
+    [Fact]
+    public void TheWatchedScan_JudgesEveryMethodOfAWriter_NotJustTheOnesThatFilter()
+    {
+        // Review of #5367 (A-L2): the scan passed a writer when any one of its methods filtered, so a method added
+        // beside a hooked one (a second fetch that returns plan text) went unseen.
+        const string Source = @"
+namespace N
+{
+    internal static class Sweep
+    {
+        internal static async Task<(int, string)> Fetch(SensitiveStatements.Session scrub, string xml)
+        {
+            return Judge(scrub, xml);
+        }
+
+        internal static async Task<(int, string)> FetchAnother(SensitiveStatements.Session scrub, string xml)
+        {
+            return (1, xml);
+        }
+
+        internal static (int, string) Judge(SensitiveStatements.Session scrub, string xml)
+        {
+            scrub.TryXml(xml, out var judged);
+            return (1, judged);
+        }
+
+        internal static void Mentions(string xml)
+        {
+            // Judge(scrub, xml) in a comment is not a call
+            Use(xml);
+        }
+    }
+
+    internal static class Runner
+    {
+        internal static void Hands(string xml)
+        {
+            Sweep.Judge(null, xml);
+        }
+
+        internal static void Skips(string xml)
+        {
+            Other.Judge(null, xml);
+        }
+    }
+}";
+        Watched Writer(params (string Type, string Method)[] sites) =>
+            new("planted", "6.7 row 0", "R0", false, sites.Select(s => ("f.cs", s.Type, s.Method)).ToArray());
+
+        // A method that hands the text on to a hooked sibling filters through it (the sweep's fetch, the runner's fetches).
+        Assert.Empty(WatchedProblems(new[] { Writer(("Sweep", "Fetch"), ("Sweep", "Judge")) }, _ => Source));
+        Assert.Empty(WatchedProblems(new[] { Writer(("Runner", "Hands"), ("Sweep", "Judge")) }, _ => Source));
+
+        // RED on the any-method rule: a second method that does not filter fails although a sibling is hooked.
+        var unfiltered = WatchedProblems(new[] { Writer(("Sweep", "Fetch"), ("Sweep", "Judge"), ("Sweep", "FetchAnother")) }, _ => Source);
+        Assert.Single(unfiltered);
+        Assert.Contains("Sweep.FetchAnother", unfiltered[0], StringComparison.Ordinal);
+
+        // A comment naming a hooked sibling, or a call to another type's method of the same name, is not delegation.
+        Assert.Single(WatchedProblems(new[] { Writer(("Sweep", "Mentions"), ("Sweep", "Judge")) }, _ => Source));
+        Assert.Single(WatchedProblems(new[] { Writer(("Runner", "Skips"), ("Sweep", "Judge")) }, _ => Source));
+
+        // A pending writer is not judged, as before.
+        Assert.Empty(WatchedProblems(new[] { Writer(("Sweep", "FetchAnother")) with { Pending = true } }, _ => Source));
+    }
+
+    [Fact]
+    public void TheOversizedSweepWatchedWriter_IsHookedThroughTheSessionItReceives()
+    {
+        var source = ReadSiteFile("Darling/PerformanceMonitor.Darling.Service/OversizedPlanBacklogSweep.cs");
+        Assert.NotNull(source);
+
+        var judge = DeclarationsOf(source!, "OversizedPlanBacklogSweep", "JudgeFetchedPlan");
+        Assert.Single(judge);
+        Assert.False(HasSessionCall(judge[0].Body), "the judging step makes no session of its own");
+        Assert.True(JudgesThroughAReceivedSession(judge[0]));
+    }
+
     // ── the release gate ──
 
     private static string[] PendingEntries() =>
@@ -684,9 +941,19 @@ namespace N
             .ToArray();
 
     /// <summary>
-    /// The release-cut gate (see the release-checklist skill). Run by name; with <c>DARLING_RELEASE_CUT=1</c> it
-    /// fails while any statement-column census entry or watched writer is pending, and its message is the pending
-    /// count and the list. Without the variable it passes and prints the count, so CI is unaffected.
+    /// The gate test's name, bound with <c>nameof</c> so a rename moves it. The release workflow's gate step filters on this
+    /// name, and <c>ReleaseStatementGateWorkflowTests</c> reads this constant, so a rename that leaves the workflow behind
+    /// fails a pin instead of leaving the gate matching zero tests (#5320, review of #5367).
+    /// </summary>
+    public const string ReleaseGateTestName = nameof(StatementCensus_PendingEntries_BlockARelease);
+
+    /// <summary>
+    /// The statement-column ratchet (see the release-checklist skill). It fails while ANY statement-column census entry or
+    /// watched writer is pending, and its message is the pending count and the list. Nothing is pending now, so a pull
+    /// request that adds a statement column or writer without judging it fails here on its own, in every normal Darling
+    /// test run, instead of at the release cut (#5320, ruling 2026-10-06). The name stays because the release workflow's
+    /// gate step and <c>ReleaseStatementGateWorkflowTests</c> bind to it. That step still sets <c>DARLING_RELEASE_CUT=1</c>
+    /// and runs this one test ahead of every publish step; the variable no longer changes what the test asserts.
     /// </summary>
     [Fact]
     public void StatementCensus_PendingEntries_BlockARelease()
@@ -697,9 +964,8 @@ namespace N
 
         Console.WriteLine(summary);
 
-        if (Environment.GetEnvironmentVariable("DARLING_RELEASE_CUT") == "1")
-        {
-            Assert.True(pending.Length == 0, "A release cut needs every statement-column census entry hooked. " + summary);
-        }
+        Assert.True(
+            pending.Length == 0,
+            "Every statement-column census entry and watched writer must be hooked; a pending one fails every test run, not only a release cut. " + summary);
     }
 }

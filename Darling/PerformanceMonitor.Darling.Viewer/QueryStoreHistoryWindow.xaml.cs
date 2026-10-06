@@ -228,6 +228,9 @@ public partial class QueryStoreHistoryWindow : Window
                 return;
             }
 
+            /* #5320: a plan the statement filter withheld whole is the marker, not a plan: say so, save nothing. */
+            if (WithheldPlanGuard.RefuseSave(plan)) return;
+
             var dialog = new SaveFileDialog
             {
                 Filter = "SQL Plan files (*.sqlplan)|*.sqlplan|All files (*.*)|*.*",

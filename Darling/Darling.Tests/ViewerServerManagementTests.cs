@@ -12,7 +12,9 @@ using System.IO;
 using System.Text.Json;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
+using System.Linq;
 using PerformanceMonitor.Darling.Service;
+using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Darling.Viewer;
 using Xunit;
 
@@ -380,40 +382,6 @@ public sealed class ServerStoreCredentialTests
 }
 
 /// <summary>
-/// The DPAPI blob the viewer writes into <c>encrypted_password</c> must be readable by the SERVICE, and vice
-/// versa — a cross-project round trip against <see cref="DarlingSecrets"/> proving the entropy + scope match
-/// (Windows-only; DPAPI is unavailable elsewhere).
-/// </summary>
-public sealed class ViewerServerSecretTests
-{
-    [Fact]
-    public void ViewerProtect_IsReadableByTheService()
-    {
-        Assert.SkipUnless(OperatingSystem.IsWindows(), "DPAPI requires Windows.");
-        var blob = ViewerServerSecret.Protect("s3cr3t!");
-        Assert.Equal("s3cr3t!", DarlingSecrets.Unprotect(blob));
-    }
-
-    [Fact]
-    public void ServiceProtect_IsReadableByTheViewer()
-    {
-        Assert.SkipUnless(OperatingSystem.IsWindows(), "DPAPI requires Windows.");
-        var blob = DarlingSecrets.Protect("another-pw");
-        Assert.Equal("another-pw", ViewerServerSecret.TryUnprotect(blob));
-    }
-
-    [Fact]
-    public void TryUnprotect_ReturnsNullOnGarbage_NeverThrows()
-    {
-        Assert.SkipUnless(OperatingSystem.IsWindows(), "DPAPI requires Windows.");
-        Assert.Null(ViewerServerSecret.TryUnprotect(null));
-        Assert.Null(ViewerServerSecret.TryUnprotect(""));
-        Assert.Null(ViewerServerSecret.TryUnprotect("not-base64!!"));
-        Assert.Null(ViewerServerSecret.TryUnprotect(Convert.ToBase64String(new byte[] { 1, 2, 3, 4 })));
-    }
-}
-
-/// <summary>
 /// The one-time viewer-servers.json → config migrate-in: the per-entry projection (auth mapping + secret
 /// resolution + the shared server_id) and the once-marker guard. Uses an in-memory secret fake + temp files,
 /// never the real vault or a live store.
@@ -448,15 +416,32 @@ public sealed class ViewerServerMigrationTests
         var entry = new ViewerServerEntry { ServerName = "SQL2019", DisplayName = "Dev", AuthenticationType = AuthenticationTypes.SqlServer };
         fixture.ServerStore.AddServer(entry, "monitor", "p@ss");
 
-        var (row, reason) = fixture.Migration.TryProjectEntry(fixture.ServerStore.GetByServerName("SQL2019")!);
+        using var key = PasswordPrivateKey.Generate();
+        var (row, reason) = fixture.Migration.TryProjectEntry(
+            fixture.ServerStore.GetByServerName("SQL2019")!, new ViewerPasswordSealer(key.PublicKey));
 
         Assert.Null(reason);
         Assert.NotNull(row);
         Assert.Equal("sql", row!.Auth);
         Assert.Equal("monitor", row.Username);
         Assert.NotNull(row.EncryptedPassword);
-        /* The service must be able to read what the migrate wrote. */
-        Assert.Equal("p@ss", DarlingSecrets.Unprotect(row.EncryptedPassword!));
+        /* #5366: the migrate seals; the service opens it with its key, for this row's settings, and no DPAPI blob is written. */
+        Assert.StartsWith(PasswordSeal.V1Prefix, row.EncryptedPassword, StringComparison.Ordinal);
+        Assert.Equal("p@ss", PasswordSeal.Open(row.EncryptedPassword!, key, ViewerPasswordSealer.BindingOf(row)));
+    }
+
+    [Fact]
+    public void Projection_SqlEntry_WithoutAKey_IsLeftForALaterRun()
+    {
+        using var fixture = new Fixture();
+        fixture.ServerStore.AddServer(
+            new ViewerServerEntry { ServerName = "SQL2019", DisplayName = "Dev", AuthenticationType = AuthenticationTypes.SqlServer },
+            "monitor", "p@ss");
+
+        var (row, reason) = fixture.Migration.TryProjectEntry(fixture.ServerStore.GetByServerName("SQL2019")!);
+
+        Assert.Null(row);
+        Assert.Equal(ViewerServerMigration.NoPasswordKeyReason, reason);
     }
 
     [Fact]
@@ -510,14 +495,16 @@ public sealed class ViewerServerMigrationTests
         withSecret.ServerStore.AddServer(
             new ViewerServerEntry { ServerName = "azure", DisplayName = "Azure", AuthenticationType = AuthenticationTypes.ServicePrincipal },
             "app-client-id", "the-client-secret");
-        var (row, reason) = withSecret.Migration.TryProjectEntry(withSecret.ServerStore.GetAllServers()[0]);
+        using var key = PasswordPrivateKey.Generate();
+        var (row, reason) = withSecret.Migration.TryProjectEntry(
+            withSecret.ServerStore.GetAllServers()[0], new ViewerPasswordSealer(key.PublicKey));
         Assert.Null(reason);
         Assert.NotNull(row);
         Assert.Equal("serviceprincipal", row!.Auth);
         Assert.Equal("app-client-id", row.Username);
         Assert.NotNull(row.EncryptedPassword);
-        /* The service must be able to read the client secret the migrate wrote. */
-        Assert.Equal("the-client-secret", DarlingSecrets.Unprotect(row.EncryptedPassword!));
+        /* The service opens the client secret the migrate wrote, for this row's settings. */
+        Assert.Equal("the-client-secret", PasswordSeal.Open(row.EncryptedPassword!, key, ViewerPasswordSealer.BindingOf(row)));
     }
 
     [Fact]
@@ -729,13 +716,27 @@ public sealed class BulkServerOnboardingMappingTests
     [Fact]
     public void BuildMonitoredServerRow_SqlAuth_MapsToSql_CarriesBlobAndUsername()
     {
+        using var key = PasswordPrivateKey.Generate();
         var (row, _) = AddMultipleServersDialog.BuildMonitoredServerRow(
             Line("SQL2022"),
-            new BulkSharedSettings { AuthType = AuthenticationTypes.SqlServer, Username = "monitor", EncryptedPassword = "DPAPI-BLOB==" });
+            new BulkSharedSettings { AuthType = AuthenticationTypes.SqlServer, Username = "monitor", Secret = "p@ss-not-real" },
+            new ViewerPasswordSealer(key.PublicKey));
 
         Assert.Equal("sql", row!.Auth);
         Assert.Equal("monitor", row.Username);
-        Assert.Equal("DPAPI-BLOB==", row.EncryptedPassword);
+        Assert.StartsWith(PasswordSeal.V1Prefix, row.EncryptedPassword, StringComparison.Ordinal);
+        Assert.Equal("p@ss-not-real", PasswordSeal.Open(row.EncryptedPassword!, key, ViewerPasswordSealer.BindingOf(row)));
+    }
+
+    [Fact]
+    public void BuildMonitoredServerRow_APasswordWithoutAKey_IsRefusedWithTheKeySentence()
+    {
+        var (row, error) = AddMultipleServersDialog.BuildMonitoredServerRow(
+            Line("SQL2022"),
+            new BulkSharedSettings { AuthType = AuthenticationTypes.SqlServer, Username = "monitor", Secret = "p@ss-not-real" });
+
+        Assert.Null(row);
+        Assert.Equal(ViewerPasswordKey.NoKeyText, error);
     }
 
     [Theory]
@@ -764,7 +765,8 @@ public sealed class BulkServerOnboardingMappingTests
         // client id in username, the client secret in the DPAPI blob for SP; MI carries neither).
         var (row, error) = AddMultipleServersDialog.BuildMonitoredServerRow(
             Line("azure.database.windows.net"),
-            new BulkSharedSettings { AuthType = authType, Username = "app-id", EncryptedPassword = "DPAPI-BLOB==" });
+            new BulkSharedSettings { AuthType = authType, Username = "app-id", Secret = "p@ss-not-real" },
+            new ViewerPasswordSealer(PasswordPrivateKey.Generate().PublicKey));
 
         Assert.Null(error);
         Assert.NotNull(row);
@@ -808,16 +810,31 @@ public sealed class BulkServerOnboardingMappingTests
     }
 
     [Fact]
-    public void SharedBlob_IsReusedAcrossRows_ProtectNotCalledPerRow()
+    public void MultiAddOfThreeRows_GivesThreeValues_EachOpeningOnlyWithItsOwnBinding()
     {
-        // The shared settings carry ONE pre-Protected blob (Protect is called once at resolve time); the mapping
-        // helper reuses it verbatim on every row rather than re-encrypting per server.
-        var shared = new BulkSharedSettings { AuthType = AuthenticationTypes.SqlServer, Username = "u", EncryptedPassword = "ONE-BLOB==" };
-        var (a, _) = AddMultipleServersDialog.BuildMonitoredServerRow(Line("SQL2022"), shared);
-        var (b, _) = AddMultipleServersDialog.BuildMonitoredServerRow(Line("SQL2019"), shared);
+        // #5366: the one shared password is sealed once per row, for that row's own connection settings. Three rows give
+        // three different values, and each opens only with its own binding.
+        using var key = PasswordPrivateKey.Generate();
+        var sealer = new ViewerPasswordSealer(key.PublicKey);
+        var shared = new BulkSharedSettings { AuthType = AuthenticationTypes.SqlServer, Username = "u", Secret = "p@ss-not-real" };
+        var rows = new[] { "alpha-sql", "beta-sql", "gamma-sql" }
+            .Select(host => AddMultipleServersDialog.BuildMonitoredServerRow(Line(host), shared, sealer).Row!)
+            .ToArray();
 
-        Assert.Equal("ONE-BLOB==", a!.EncryptedPassword);
-        Assert.Same(a.EncryptedPassword, b!.EncryptedPassword);
+        Assert.Equal(3, rows.Select(r => r.EncryptedPassword).Distinct().Count());
+        for (var i = 0; i < rows.Length; i++)
+        {
+            Assert.Equal("p@ss-not-real", PasswordSeal.Open(rows[i].EncryptedPassword!, key, ViewerPasswordSealer.BindingOf(rows[i])));
+            for (var j = 0; j < rows.Length; j++)
+            {
+                if (i != j)
+                {
+                    var other = ViewerPasswordSealer.BindingOf(rows[j]);
+                    var ex = Assert.Throws<PasswordSealException>(() => PasswordSeal.Open(rows[i].EncryptedPassword!, key, other));
+                    Assert.Equal(PasswordSealFailure.BindingOrTamper, ex.Kind);
+                }
+            }
+        }
     }
 
     [Fact]
@@ -825,7 +842,8 @@ public sealed class BulkServerOnboardingMappingTests
     {
         var (test, error) = AddMultipleServersDialog.BuildTestConnectServer(
             Line("SQL2022", "Prod", "tpcc"),
-            new BulkSharedSettings { AuthType = AuthenticationTypes.SqlServer, Username = "monitor", EncryptedPassword = "BLOB==", EncryptMode = "Strict", TrustServerCertificate = true });
+            new BulkSharedSettings { AuthType = AuthenticationTypes.SqlServer, Username = "monitor", Secret = "p@ss-not-real", EncryptMode = "Strict", TrustServerCertificate = true },
+            new ViewerPasswordSealer(PasswordPrivateKey.Generate().PublicKey));
 
         Assert.Null(error);
         Assert.NotNull(test);
@@ -834,7 +852,7 @@ public sealed class BulkServerOnboardingMappingTests
         Assert.Equal("tpcc", test.Database);
         Assert.Equal("sql", test.Auth);
         Assert.Equal("monitor", test.Username);
-        Assert.Equal("BLOB==", test.EncryptedPassword);
+        Assert.StartsWith(PasswordSeal.V1Prefix, test.EncryptedPassword, StringComparison.Ordinal);
         Assert.Equal("Strict", test.EncryptMode);
         Assert.True(test.TrustServerCertificate);
     }
@@ -852,7 +870,8 @@ public sealed class BulkServerOnboardingMappingTests
         // ...while a service principal builds the probe (Auth mapped to serviceprincipal).
         var (test, error) = AddMultipleServersDialog.BuildTestConnectServer(
             Line("azure"),
-            new BulkSharedSettings { AuthType = AuthenticationTypes.ServicePrincipal, Username = "app-id", EncryptedPassword = "DPAPI-BLOB==" });
+            new BulkSharedSettings { AuthType = AuthenticationTypes.ServicePrincipal, Username = "app-id", Secret = "p@ss-not-real" },
+            new ViewerPasswordSealer(PasswordPrivateKey.Generate().PublicKey));
         Assert.Null(error);
         Assert.NotNull(test);
         Assert.Equal("serviceprincipal", test!.Auth);

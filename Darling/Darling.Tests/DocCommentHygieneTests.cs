@@ -134,6 +134,46 @@ public sealed class DocCommentHygieneTests
     }
 
     /// <summary>
+    /// No C# source file carries a raw control byte (#5320). A literal 0x01 inside a char literal compiles and
+    /// runs, but it is invisible in an editor and a diff, and <c>file</c> reports the whole file as "data";
+    /// <c>'\u0001'</c> is the same value written where a reader can see it. Tab, line feed and carriage return
+    /// are layout and stay allowed.
+    /// </summary>
+    [Fact]
+    public void NoSourceFileCarriesARawControlByte()
+    {
+        var root = RepoRootOrFail();
+
+        var offenders = new List<string>();
+        foreach (var file in SourceFiles(root))
+        {
+            var bytes = File.ReadAllBytes(file);
+            for (var i = 0; i < bytes.Length; i++)
+            {
+                var b = bytes[i];
+                if (b < 0x20 && b != (byte)'\t' && b != (byte)'\n' && b != (byte)'\r')
+                {
+                    var line = 1;
+                    for (var j = 0; j < i; j++)
+                    {
+                        if (bytes[j] == (byte)'\n')
+                        {
+                            line++;
+                        }
+                    }
+
+                    offenders.Add($"{Path.GetRelativePath(root, file)}:{line} (0x{b:X2})");
+                    break;
+                }
+            }
+        }
+
+        Assert.True(offenders.Count == 0,
+            "Raw control bytes found in C# source. Write the character as an escape ('\\u0001') so the value is " +
+            "visible in an editor and a diff:\n\n" + string.Join("\n", offenders));
+    }
+
+    /// <summary>
     /// Every doc run closes exactly the <c>&lt;summary&gt;</c> elements it opens (#2940).
     ///
     /// <para><b>Why this is a second rule and not a widening of the first.</b>
@@ -635,9 +675,6 @@ public sealed class DocCommentHygieneTests
 
         ["CallerMemberNameAttribute"] =
             "OUTSIDE. Same elision as the entry above.",
-
-        ["IConvertible"] =
-            "OUTSIDE. System.IConvertible, named only to explain what a conversion does NOT go through.",
 
         ["JsonEncodedText.Encode(string)"] =
             "OUTSIDE, and it is important that this entry says so rather than DANGLING: the compiler "
