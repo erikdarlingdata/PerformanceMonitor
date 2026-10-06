@@ -180,9 +180,23 @@ export function databaseQueryBytes(name) {
   return DB_PAIR_OVERHEAD + encodeURIComponent(name).length;
 }
 
+/**
+ * The characters .NET's `char.IsWhiteSpace` counts, which is what the service's `string.IsNullOrWhiteSpace` (DatabaseFilter's
+ * one blank-name rule) tests: U+0009 to U+000D, space, U+0085, U+00A0, U+1680, U+2000 to U+200A, U+2028, U+2029, U+202F,
+ * U+205F and U+3000. Written out rather than `trim()` or `\s`, because JavaScript's set differs on two characters: it counts
+ * U+FEFF (byte order mark) and not U+0085 (next line). A name the page kept that the service then dropped (or the reverse)
+ * would make the chip count differ from the read.
+ */
+const BLANK_NAME = /^[\t-\r \u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]*$/;
+
+/** True for text that is empty or only whitespace by the service's rule (see BLANK_NAME). */
+export function isBlankDatabaseName(name) {
+  return BLANK_NAME.test(name);
+}
+
 /** A name the filter can hold: text, not blank, at most 128 characters. It is never trimmed or case-folded. */
 export function isDatabaseName(name) {
-  return typeof name === "string" && name.trim() !== "" && name.length <= MAX_DB_NAME_LENGTH;
+  return typeof name === "string" && !isBlankDatabaseName(name) && name.length <= MAX_DB_NAME_LENGTH;
 }
 
 /** Whether `names` (de-duplicated, valid) fits both bounds: at most 50 names and at most 4,096 encoded query bytes. */

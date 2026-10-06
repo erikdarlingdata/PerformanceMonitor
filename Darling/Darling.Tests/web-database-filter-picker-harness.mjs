@@ -62,6 +62,7 @@ let card = { server_id: 7, server_name: "SRV1", display_name: "SRV1", is_postgre
 let fleetOk = true;
 let inventory = [];
 let inventoryStatus = 200;
+let inventoryCut = false; // the route answered truncated: true
 globalThis.fetch = async (url) => {
   const u = String(url);
   urls.push(u);
@@ -71,7 +72,7 @@ globalThis.fetch = async (url) => {
   }
   if (u.startsWith("/api/server-databases")) {
     if (inventoryStatus !== 200) return { status: inventoryStatus, ok: false, text: async () => JSON.stringify({ error: "no list" }) };
-    return { status: 200, ok: true, text: async () => JSON.stringify({ server: "SRV1", databases: inventory }) };
+    return { status: 200, ok: true, text: async () => JSON.stringify({ server: "SRV1", databases: inventory, truncated: inventoryCut }) };
   }
   return { status: 200, ok: true, text: async () => "{}" };
 };
@@ -178,6 +179,25 @@ try {
       press(popover, "Apply"); await settle();
       out.stored = stored()["7"];
     },
+    /* #5245: a database whose name is only U+0085 (whitespace to the service, so the service would drop it) can be checked, and
+       Apply refuses it with the sentence about the name, not the one about size; nothing is stored. A name that is only U+FEFF
+       is a real name to the service, so it is kept. */
+    async blankName() {
+      inventory = ["Real", "\u0085", "\ufeff"];
+      const { page } = await open();
+      const popover = page.byClass("db-filter-popover")[0];
+      page.byClass("db-filter-button")[0].fire("click");
+      await settle();
+      const box = (n) => boxes(popover).find((b) => b.attrs["aria-label"] === n);
+      box("\u0085").checked = true; box("\u0085").fire("change");
+      press(popover, "Apply"); await settle();
+      out.message = popover.byClass("db-filter-message")[0].textContent;
+      out.stored = stored()["7"] || null;
+      box("\u0085").checked = false; box("\u0085").fire("change");
+      box("\ufeff").checked = true; box("\ufeff").fire("change");
+      press(popover, "Apply"); await settle();
+      out.storedBom = (stored()["7"] || []).map((n) => n.length + ":" + n.charCodeAt(0).toString(16));
+    },
     /* The 51st check is refused with a sentence; 50 are kept. */
     async limit51() {
       inventory = names(60);
@@ -231,6 +251,31 @@ try {
       out.relisted = popover.byClass("mp-item").map((l) => l.children[1].textContent);
       out.relistedChecked = checked(popover).length;
       out.markupNodesAfter = page.every((n) => n.tag === "img").length;
+    },
+    /* #5245: the route cut the list at its cap (truncated: true). The popover says so and that the search box narrows the
+       names listed, and the label reads "of 40+" because 40 is the cap, not the server's count. A list that is not cut says
+       nothing and its label keeps the plain count. */
+    async cutList() {
+      inventory = names(40);
+      inventoryCut = true;
+      storeChoice(7, ["db01"]);
+      const { page } = await open();
+      const popover = page.byClass("db-filter-popover")[0];
+      page.byClass("db-filter-button")[0].fire("click");
+      await settle();
+      out.note = popover.byClass("db-filter-cut").map((n) => n.textContent);
+      out.offered = boxes(popover).length;
+      out.label = page.byClass("db-filter-button")[0].textContent;
+    },
+    async uncutList() {
+      inventory = names(40);
+      storeChoice(7, ["db01"]);
+      const { page } = await open();
+      const popover = page.byClass("db-filter-popover")[0];
+      page.byClass("db-filter-button")[0].fire("click");
+      await settle();
+      out.note = popover.byClass("db-filter-cut").map((n) => n.textContent);
+      out.label = page.byClass("db-filter-button")[0].textContent;
     },
     /* The inventory read failed: the sentence shows and the stored names stay listed, so the choice can still be undone. */
     async loadFails() {

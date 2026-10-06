@@ -24,11 +24,13 @@ namespace PerformanceMonitor.Darling.Service;
 
 /// <summary>
 /// #5245: <c>GET /api/server-databases?server=&lt;route key&gt;</c>, the list the web viewer's database picker offers:
-/// the user databases the store has collected for one server, answered as <c>{ "server": "...", "databases": [...] }</c>.
+/// the user databases the store has collected for one server, answered as <c>{ "server": "...", "databases": [...], "truncated": false }</c>. The list stops at
+/// <see cref="MaxDatabases"/> names and <c>truncated</c> is true when the server has more.
 ///
 /// <para><b>Why a route and not an MCP tool.</b> No agent needs the list, so a tool would only add bytes to
-/// <c>tools/list</c> and a Lite twin for nothing. The route runs <see cref="CollectedDatabases.NamesSql"/>, the same
-/// constant the desktop viewer's Excluded Databases picker runs, so the two lists cannot drift. It is loaded when the
+/// <c>tools/list</c> and a Lite twin for nothing. The route runs <see cref="CollectedDatabases.NamesLimitedSql"/>, which is
+/// <see cref="CollectedDatabases.NamesSql"/> (the constant the desktop viewer's Excluded Databases picker runs) plus a
+/// row limit, so the two lists cannot drift. It is loaded when the
 /// picker opens, as the desktop does, and it is read-only: the sign-in gate and the seat's method gate in front of
 /// every route let a read-only seat make a GET, and the read runs on the viewer-role pool.</para>
 ///
@@ -61,8 +63,8 @@ internal static class DarlingServerDatabasesEndpoint
 
             try
             {
-                var names = await ReadAsync(postgres, resolved.ServerId, context.RequestAborted);
-                return Results.Text(Render(resolved.ServerName, names), "application/json");
+                var (names, truncated) = await ReadAsync(postgres, resolved.ServerId, MaxDatabases, context.RequestAborted);
+                return Results.Text(Render(resolved.ServerName, names, truncated), "application/json");
             }
             catch (OperationCanceledException) when (context.RequestAborted.IsCancellationRequested)
             {
@@ -77,23 +79,41 @@ internal static class DarlingServerDatabasesEndpoint
         });
     }
 
-    /// <summary>The collected user databases of one server, ordered by name (the SQL's order).</summary>
-    internal static async Task<List<string>> ReadAsync(NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken)
+    /// <summary>
+    /// The most names one answer carries. A server can hold tens of thousands of databases, and each one is a checkbox
+    /// the picker builds every time it opens, so the list stops here and says so (<c>truncated</c>).
+    /// </summary>
+    internal const int MaxDatabases = 5000;
+
+    /// <summary>
+    /// The first <paramref name="cap"/> collected user databases of one server, ordered by name (the SQL's order), and
+    /// whether more exist. The query asks for one row past the cap: that extra row is the proof of "more", and it is not
+    /// returned.
+    /// </summary>
+    internal static async Task<(List<string> Names, bool Truncated)> ReadAsync(
+        NpgsqlDataSource postgres, int serverId, int cap, CancellationToken cancellationToken)
     {
         var names = new List<string>();
-        await using var command = postgres.CreateCommand(CollectedDatabases.NamesSql);
+        await using var command = postgres.CreateCommand(CollectedDatabases.NamesLimitedSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = cap + 1 });
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
             names.Add(reader.GetString(0));
         }
 
-        return names;
+        var truncated = names.Count > cap;
+        if (truncated)
+        {
+            names.RemoveRange(cap, names.Count - cap);
+        }
+
+        return (names, truncated);
     }
 
-    /// <summary>The route's JSON body: <c>{"server": "...", "databases": [...]}</c>.</summary>
-    internal static string Render(string serverName, IReadOnlyList<string> names) =>
-        JsonSerializer.Serialize(new { server = serverName, databases = names });
+    /// <summary>The route's JSON body: <c>{"server": "...", "databases": [...], "truncated": false}</c>.</summary>
+    internal static string Render(string serverName, IReadOnlyList<string> names, bool truncated) =>
+        JsonSerializer.Serialize(new { server = serverName, databases = names, truncated });
 }
