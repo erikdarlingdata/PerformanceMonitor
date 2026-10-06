@@ -891,15 +891,22 @@ public sealed class CollectorRunTimeStartupSeedTests : IDisposable
     private static long s_nextLogId = -1;
 
     private readonly string _dir = Directory.CreateTempSubdirectory("pm-lite-run-time-seed-tests-").FullName;
+    private readonly List<DuckDbInitializer> _initializers = [];
 
     public void Dispose()
     {
+        foreach (var initializer in _initializers)
+        {
+            initializer.Dispose();
+        }
+
         try { Directory.Delete(_dir, recursive: true); } catch { /* best effort */ }
     }
 
     private async Task<(DuckDbInitializer DuckDb, ServerManager Servers, ServerConnection Server)> OpenAsync()
     {
         var duckDb = new DuckDbInitializer(Path.Combine(_dir, "pm.duckdb"));
+        _initializers.Add(duckDb);
         await duckDb.InitializeAsync();
         var servers = new ServerManager(_dir);
         var server = new ServerConnection { ServerName = "seed-test", DisplayName = "seed-test" };

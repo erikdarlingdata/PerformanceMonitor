@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
@@ -31,6 +32,8 @@ namespace PerformanceMonitorLite.Tests;
 [Collection("CollectionResetGate")]
 public sealed class ArchiveResetExportTests : IDisposable
 {
+    private readonly List<DuckDbInitializer> _initializers = [];
+
     private readonly string _tempDir;
     private readonly string _dbPath;
     private readonly string _archiveDir;
@@ -46,6 +49,11 @@ public sealed class ArchiveResetExportTests : IDisposable
 
     public void Dispose()
     {
+        foreach (var initializer in _initializers)
+        {
+            initializer.Dispose();
+        }
+
         try
         {
             if (Directory.Exists(_tempDir))
@@ -79,6 +87,7 @@ public sealed class ArchiveResetExportTests : IDisposable
     private async Task<DuckDbInitializer> SeedAsync()
     {
         var initializer = new DuckDbInitializer(_dbPath);
+        _initializers.Add(initializer);
         await initializer.InitializeAsync();
 
         await ExecAsync(@"

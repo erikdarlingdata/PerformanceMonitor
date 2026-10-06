@@ -49,6 +49,7 @@ public sealed class ArchiveResetRestoresStateTests : IDisposable
 
     public void Dispose()
     {
+        _duckDb.Dispose();
         ArchiveService.AfterPreservedTableRestoredForTests = null;
         ArchiveService.BetweenPreserveCopyAndResetForTests = null;
         ArchiveService.BeforeDatabaseFileResetForTests = null;
@@ -691,7 +692,10 @@ public sealed class ArchiveResetRestoresStateTests : IDisposable
         File.WriteAllText(marker, markerContent);
         var log = new CapturingLogger();
 
-        await new DuckDbInitializer(_dbPath, log).InitializeAsync();
+        using (var initializer = new DuckDbInitializer(_dbPath, log))
+        {
+            await initializer.InitializeAsync();
+        }
 
         Assert.True(Directory.Exists(dir), "an unreadable marker must not make startup delete the preserved copy");
         Assert.True(File.Exists(Path.Combine(dir, "config_mute_rules.parquet")));
