@@ -269,4 +269,52 @@ VALUES ($1, $2, $3, $4, $5, 'Enabled', 'Enabled', 'ok', $6, 'Active', $7, $8, 'S
         Assert.Equal("empty", root.GetProperty("status").GetString());
         Assert.Equal("No plan correction data found for the database NoSuchDb.", root.GetProperty("message").GetString());
     }
+
+    /* ───────────── #5244 review L2 and L3: the empty answers ───────────── */
+
+    /// <summary>
+    /// L3: a filter that empties the answer on a server whose collector HAS rows for other databases ends the message after
+    /// the database clause. It must not send the reader to the opt-in switch, which is already on. With no filter the opt-in
+    /// sentence stays. L2: both answers echo <c>database_name</c> (the name, null for all), blank included.
+    /// </summary>
+    [Fact]
+    public async Task LongQueries_EmptyAnswers_EchoTheDatabase_AndOnlyAnUnfilteredOneBlamesTheOptInSwitch()
+    {
+        await SeedThreeDatabaseLongQueriesAsync();
+
+        var filtered = Parse(await McpLongQueryTools.GetLongQueryCompletions(
+            _service, _serverManager, ServerName, 24, 30, database_name: "NoSuchDb"));
+        Assert.Equal("empty", filtered.GetProperty("status").GetString());
+        Assert.Equal("No long-running query completions found in the specified time range for the database NoSuchDb.",
+            filtered.GetProperty("message").GetString());
+        Assert.Equal("NoSuchDb", filtered.GetProperty("database_name").GetString());
+
+        /* An unfiltered read of a server with no completions at all: the opt-in sentence is true there. */
+        await ExecuteAsync("DELETE FROM long_query_completions");
+        foreach (var blank in new string?[] { null, "", "   " })
+        {
+            var unfiltered = Parse(await McpLongQueryTools.GetLongQueryCompletions(
+                _service, _serverManager, ServerName, 24, 30, database_name: blank));
+            Assert.Equal("empty", unfiltered.GetProperty("status").GetString());
+            Assert.Contains("opt-in (default OFF)", unfiltered.GetProperty("message").GetString(), StringComparison.Ordinal);
+            Assert.Equal(JsonValueKind.Null, unfiltered.GetProperty("database_name").ValueKind);
+        }
+    }
+
+    [Fact]
+    public async Task PlanCorrections_EmptyAnswers_EchoTheDatabase_BlankIsNull()
+    {
+        await SeedThreeDatabasePlanCorrectionsAsync();
+
+        var filtered = Parse(await McpPlanCorrectionTools.GetPlanCorrections(
+            _service, _serverManager, ServerName, 24, 25, database_name: "NoSuchDb"));
+        Assert.Equal("empty", filtered.GetProperty("status").GetString());
+        Assert.Equal("NoSuchDb", filtered.GetProperty("database_name").GetString());
+
+        await ExecuteAsync("DELETE FROM plan_correction");
+        var blank = Parse(await McpPlanCorrectionTools.GetPlanCorrections(
+            _service, _serverManager, ServerName, 24, 25, database_name: "  "));
+        Assert.Equal("empty", blank.GetProperty("status").GetString());
+        Assert.Equal(JsonValueKind.Null, blank.GetProperty("database_name").ValueKind);
+    }
 }

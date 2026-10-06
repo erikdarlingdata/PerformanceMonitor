@@ -238,11 +238,11 @@ public static class DarlingQueryStoreClutterReader
         ORDER BY d.server_id, d.runs_slowest DESC, d.slowest_item_ms_p50 DESC, d.database_name
         """;
 
-    /// <param name="databases">#5244: the chosen databases (the optional last parameter keeps the Viewer's calls compiling
+    /// <param name="databases">#5244: the chosen databases (optional, so the Viewer's calls compile
     /// unchanged); <see cref="DatabaseFilter.All"/>, the default, is every database.</param>
     public static async Task<List<ReadCostRow>> GetReadCostAsync(
-        NpgsqlDataSource postgres, int[] serverIds, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default,
-        DatabaseFilter databases = default)
+        NpgsqlDataSource postgres, int[] serverIds, DateTime startUtc, DateTime endUtc, DatabaseFilter databases = default,
+        CancellationToken cancellationToken = default)
     {
         var rows = new List<ReadCostRow>();
         await using var command = postgres.CreateCommand(ReadCostSql);
@@ -378,10 +378,10 @@ public static class DarlingQueryStoreClutterReader
         ORDER BY d.server_id, d.database_name
         """;
 
-    /// <param name="databases">#5244: the chosen databases (optional and last, so the Viewer's calls compile unchanged).</param>
+    /// <param name="databases">#5244: the chosen databases (optional, so the Viewer's calls compile unchanged).</param>
     public static async Task<List<PlanChurnRow>> GetPlanChurnAsync(
-        NpgsqlDataSource postgres, int[] serverIds, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default,
-        DatabaseFilter databases = default)
+        NpgsqlDataSource postgres, int[] serverIds, DateTime startUtc, DateTime endUtc, DatabaseFilter databases = default,
+        CancellationToken cancellationToken = default)
     {
         var rows = new List<PlanChurnRow>();
         await using var command = postgres.CreateCommand(PlanChurnSql);
@@ -451,10 +451,10 @@ public static class DarlingQueryStoreClutterReader
         ORDER BY server_id, database_name, capture_time DESC
         """;
 
-    /// <param name="databases">#5244: the chosen databases (optional and last, so the Viewer's calls compile unchanged).</param>
+    /// <param name="databases">#5244: the chosen databases (optional, so the Viewer's calls compile unchanged).</param>
     public static async Task<List<ConfigRow>> GetConfigAsync(
-        NpgsqlDataSource postgres, int[] serverIds, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default,
-        DatabaseFilter databases = default)
+        NpgsqlDataSource postgres, int[] serverIds, DateTime startUtc, DateTime endUtc, DatabaseFilter databases = default,
+        CancellationToken cancellationToken = default)
     {
         var rows = new List<ConfigRow>();
         await using var command = postgres.CreateCommand(ConfigSql);

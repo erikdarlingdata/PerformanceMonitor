@@ -217,9 +217,9 @@ public partial class ViewerDataService
         CancellationToken cancellationToken = default)
     {
         var serverIds = new[] { serverId };
-        var readCost = await DarlingQueryStoreClutterReader.GetReadCostAsync(_dataSource, serverIds, startUtc, endUtc, cancellationToken);
-        var planChurn = await DarlingQueryStoreClutterReader.GetPlanChurnAsync(_dataSource, serverIds, startUtc, endUtc, cancellationToken);
-        var config = await DarlingQueryStoreClutterReader.GetConfigAsync(_dataSource, serverIds, startUtc, endUtc, cancellationToken);
+        var readCost = await DarlingQueryStoreClutterReader.GetReadCostAsync(_dataSource, serverIds, startUtc, endUtc, cancellationToken: cancellationToken);
+        var planChurn = await DarlingQueryStoreClutterReader.GetPlanChurnAsync(_dataSource, serverIds, startUtc, endUtc, cancellationToken: cancellationToken);
+        var config = await DarlingQueryStoreClutterReader.GetConfigAsync(_dataSource, serverIds, startUtc, endUtc, cancellationToken: cancellationToken);
         var waits = await DarlingQueryStoreClutterReader.GetQdsWaitsAsync(_dataSource, serverIds, startUtc, endUtc, cancellationToken);
         var clerk = await DarlingQueryStoreClutterReader.GetQueryStoreClerkAsync(_dataSource, serverId, startUtc, endUtc, cancellationToken);
 

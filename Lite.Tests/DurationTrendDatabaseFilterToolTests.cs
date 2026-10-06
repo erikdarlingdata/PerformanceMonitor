@@ -129,6 +129,7 @@ public sealed class DurationTrendDatabaseFilterToolTests : IClassFixture<SharedD
 
         Assert.Equal("empty", root.GetProperty("status").GetString());
         Assert.Contains($"{ServerName} for the database NoSuchDb", root.GetProperty("message").GetString());
+        Assert.Equal("NoSuchDb", root.GetProperty("database_name").GetString());   /* #5244 review L2: the echo rides on an empty answer */
     }
 
     [Fact]
@@ -139,6 +140,20 @@ public sealed class DurationTrendDatabaseFilterToolTests : IClassFixture<SharedD
 
         Assert.Equal("unavailable", root.GetProperty("status").GetString());
         Assert.DoesNotContain("database_name", root.GetProperty("message").GetString());
+        Assert.Equal("DbA", root.GetProperty("database_name").GetString());   /* the echo names the filter even where the message stays on the bare server */
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("   ")]
+    public async Task QueryDurationTrend_NeverCollected_BlankName_EchoesNull(string? blank)
+    {
+        var root = Parse(await McpQueryTools.GetQueryDurationTrend(
+            _service, _serverManager, ServerName, 4, database_name: blank));
+
+        Assert.Equal("unavailable", root.GetProperty("status").GetString());
+        Assert.Equal(JsonValueKind.Null, root.GetProperty("database_name").ValueKind);
     }
 
     /* ───────────────────────── get_procedure_duration_trend ───────────────────────── */
@@ -188,6 +203,7 @@ public sealed class DurationTrendDatabaseFilterToolTests : IClassFixture<SharedD
 
         Assert.Equal("empty", root.GetProperty("status").GetString());
         Assert.Contains($"{ServerName} for the database NoSuchDb", root.GetProperty("message").GetString());
+        Assert.Equal("NoSuchDb", root.GetProperty("database_name").GetString());   /* #5244 review L2: the echo rides on an empty answer */
     }
 
     [Fact]
@@ -198,6 +214,7 @@ public sealed class DurationTrendDatabaseFilterToolTests : IClassFixture<SharedD
 
         Assert.Equal("unavailable", root.GetProperty("status").GetString());
         Assert.DoesNotContain("database_name", root.GetProperty("message").GetString());
+        Assert.Equal("DbA", root.GetProperty("database_name").GetString());   /* the echo names the filter even where the message stays on the bare server */
     }
 
     /* ───────────────────────── get_query_store_duration_trend ───────────────────────── */
@@ -250,6 +267,7 @@ public sealed class DurationTrendDatabaseFilterToolTests : IClassFixture<SharedD
 
         Assert.Equal("empty", root.GetProperty("status").GetString());
         Assert.Contains($"{ServerName} for the database NoSuchDb", root.GetProperty("message").GetString());
+        Assert.Equal("NoSuchDb", root.GetProperty("database_name").GetString());   /* #5244 review L2: the echo rides on an empty answer */
     }
 
     [Fact]
@@ -260,6 +278,7 @@ public sealed class DurationTrendDatabaseFilterToolTests : IClassFixture<SharedD
 
         Assert.Equal("unavailable", root.GetProperty("status").GetString());
         Assert.DoesNotContain("database_name", root.GetProperty("message").GetString());
+        Assert.Equal("DbA", root.GetProperty("database_name").GetString());   /* the echo names the filter even where the message stays on the bare server */
     }
 
     /* ───────────────────────── seeding ───────────────────────── */

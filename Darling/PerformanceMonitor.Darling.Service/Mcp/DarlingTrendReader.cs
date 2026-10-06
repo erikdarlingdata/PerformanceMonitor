@@ -845,15 +845,11 @@ internal static class DarlingTrendReader
     /// reason. Since #3897 a collection like that is left out of its BUCKET's rates (numerator and denominator
     /// both), and a bucket holding nothing else is the unrated point. The hourly twin below has no such row: its
     /// denominator is the bucket width, known for every bucket.</para>
-    /// </summary>
-    public static readonly string QueryDurationTrendSql =
-        DurationTrendRouting.BuildBucketedRawTrendSql("query_stats", withDatabaseFilter: false);
-
-    /// <summary>
-    /// <see cref="QueryDurationTrendSql"/> with the database filter (#5244): the viewer's own text
-    /// (<c>DurationTrendRouting.BuildBucketedRawTrendSql(..., withDatabaseFilter: true)</c>), $4 the guarded
-    /// <c>text[]</c> and $5 the bucket width. The tool reads this one with <see cref="DatabaseFilter.All"/> too, so
-    /// the statement never changes with the selection.
+    ///
+    /// <para><b>The database filter (#5244).</b> The text is the viewer's own (<c>DurationTrendRouting.BuildBucketedRawTrendSql(..., withDatabaseFilter: true)</c>). $4 is the guarded <c>text[]</c> and $5 the bucket width, the
+    /// other parameters as above. The tool reads this one with <see cref="DatabaseFilter.All"/> too, so the statement
+    /// never changes with the selection. The unfiltered constant that stood beside it ran nowhere and was removed
+    /// (#5244 review L1).</para>
     /// </summary>
     public static readonly string QueryDurationTrendFilteredSql =
         DurationTrendRouting.BuildBucketedRawTrendSql("query_stats", withDatabaseFilter: true);
@@ -876,7 +872,7 @@ internal static class DarlingTrendReader
        than const because the Storage side is a builder (one text with and one without the viewer's $4
        database filter), and a const cannot be initialized from a call; no consumer needed the const-ness
        (the tests read the values, and the reads pass them as command text). The two RAW-tier consts —
-       QueryDurationTrendSql above and ProcedureDurationTrendSql below — joined the block last, once #3695
+       QueryDurationTrendFilteredSql above and ProcedureDurationTrendFilteredSql below — joined the block last, once #3695
        had built the raw read in Storage and pinned the builder line-equal to the hand-kept procedure text:
        the query alias changed the tool's answer on one row class (see its remarks), the procedure alias
        changed nothing but where the text lives. */
@@ -890,7 +886,7 @@ internal static class DarlingTrendReader
     public const string HourlyBucketSecondsSql = DurationTrendRouting.HourlyBucketSecondsSql;
 
     /// <summary>
-    /// The hourly-tier twin of <see cref="QueryDurationTrendSql"/> (#3541 A2): the same two per-second rates,
+    /// The hourly-tier twin of <see cref="QueryDurationTrendFilteredSql"/> (#3541 A2): the same two per-second rates,
     /// read from the <c>query_stats_hourly</c> continuous aggregate for windows whose oldest point the raw
     /// tier no longer holds — <see cref="DurationTrendRouting.BuildBucketedHourlyTrendSql"/> over the legacy
     /// view, by alias (#3897), which at a 60-minute width is the viewer's hourly statement's figures hour for
@@ -906,7 +902,7 @@ internal static class DarlingTrendReader
         DurationTrendRouting.BuildBucketedHourlyTrendSql(TimescaleSupport.QueryStatsHourlyView);
 
     /// <summary>
-    /// The hourly-tier twin of <see cref="ProcedureDurationTrendSql"/> (#3541 A2), over
+    /// The hourly-tier twin of <see cref="ProcedureDurationTrendFilteredSql"/> (#3541 A2), over
     /// <c>procedure_stats_hourly</c> — <see cref="DurationTrendRouting.BuildBucketedHourlyTrendSql"/>, by alias
     /// (#3897). Same shape and same bucket-width denominator as <see cref="QueryDurationTrendHourlySql"/>; see
     /// there. $1 server_id, $2/$3 window (naive UTC), $4 bucket width in minutes.
@@ -1106,15 +1102,16 @@ internal static class DarlingTrendReader
     /// its siblings' real interval and contributes 0 to the sums; MAX is 0 only when EVERY row was
     /// unknowable (a restart), and that 0 becomes NULL through <c>NULLIF</c> so the rates are NULL — an
     /// UNRATED point the reader keeps rather than rendering 0.00 ms/sec (#3541 A12; see
-    /// <see cref="QueryDurationTrendSql"/> for why the row stays). NULL (a pre-V128 collection) falls back to
+    /// <see cref="QueryDurationTrendFilteredSql"/> for why the row stays). NULL (a pre-V128 collection) falls back to
     /// the LAG this read always used, whose first row is likewise unrated, never a fabricated 0. No
     /// <c>ELSE 0</c>. This was the idiom the query-stats twin above caught up with in #3695 / #3653; the
     /// builder's remarks carry it once for both tables.</para>
+    ///
+    /// <para><b>The database filter (#5244).</b> The procedure-stats twin of <see cref="QueryDurationTrendFilteredSql"/>. $4 is the guarded <c>text[]</c> and $5 the bucket width, the
+    /// other parameters as above. The tool reads this one with <see cref="DatabaseFilter.All"/> too, so the statement
+    /// never changes with the selection. The unfiltered constant that stood beside it ran nowhere and was removed
+    /// (#5244 review L1).</para>
     /// </summary>
-    public static readonly string ProcedureDurationTrendSql =
-        DurationTrendRouting.BuildBucketedRawTrendSql("procedure_stats", withDatabaseFilter: false);
-
-    /// <summary>The procedure-stats twin of <see cref="QueryDurationTrendFilteredSql"/> (#5244).</summary>
     public static readonly string ProcedureDurationTrendFilteredSql =
         DurationTrendRouting.BuildBucketedRawTrendSql("procedure_stats", withDatabaseFilter: true);
 
@@ -1130,7 +1127,7 @@ internal static class DarlingTrendReader
     /// <c>interval_start_time_utc IS NULL</c>, so they partition the rows with no overlap and no gap.
     /// Rewriting either arm here would make the browser and the desktop viewer disagree about the same
     /// hour. The first placed interval in the window carries NULL rates, not 0 — see
-    /// <see cref="QueryDurationTrendSql"/> (#3541 A12); the rollup route's builder applies the same rule to
+    /// <see cref="QueryDurationTrendFilteredSql"/> (#3541 A12); the rollup route's builder applies the same rule to
     /// its first bucket. $1 server_id, $2/$3 window (naive UTC).</para>
     /// <para><b>The rate is over the interval's own length (#4765).</b> An interval that stored its end
     /// (<c>interval_end_time_utc</c>) is rated over end minus start, where it used to be rated over the seconds
@@ -1141,17 +1138,15 @@ internal static class DarlingTrendReader
     /// <para><b>#2736: this is now the FALLBACK, not the read.</b> The rank-over-raw below costs the whole
     /// slab regardless of the window, which exceeds the mcp role's statement_timeout on a large store —
     /// so on stores with a materialized <c>query_store_stats_corrected_hourly</c> the tool routes through
-    /// <see cref="QueryStoreDurationTrendRollupSql"/> and this shape runs only where it is affordable
+    /// <see cref="QueryStoreDurationTrendRollupFilteredSql"/> and this shape runs only where it is affordable
     /// (no rollup: plain PostgreSQL, or nothing materialized yet). Its ±slab stays untouched on purpose —
     /// see <see cref="QueryStoreTrendRouting"/>.</para>
-    /// </summary>
-    public static readonly string QueryStoreDurationTrendSql = BuildQueryStoreDurationTrendSql(withDatabaseFilter: false);
-
-    /// <summary>
-    /// <see cref="QueryStoreDurationTrendSql"/> with the database filter (#5244) on both arms: $4 is the guarded
-    /// <c>text[]</c> (<see cref="DatabaseFilter.Parameter"/>), the same two predicate lines the viewer's twin
-    /// carries. Both arms read <c>query_store_stats</c>, which carries <c>database_name</c>, and the filter sits inside
-    /// the dedup's WHERE so the ranking sees only the chosen databases' rows.
+    ///
+    /// <para><b>The database filter (#5244).</b> On both arms $4 is the guarded <c>text[]</c>
+    /// (<see cref="DatabaseFilter.Parameter"/>), the same two predicate lines the viewer's twin carries. Both arms read
+    /// <c>query_store_stats</c>, which carries <c>database_name</c>, and the filter sits inside the dedup's WHERE so the
+    /// ranking sees only the chosen databases' rows. The tool reads this one with <see cref="DatabaseFilter.All"/> too;
+    /// the unfiltered constant that stood beside it ran nowhere and was removed (#5244 review L1).</para>
     /// </summary>
     public static readonly string QueryStoreDurationTrendFilteredSql = BuildQueryStoreDurationTrendSql(withDatabaseFilter: true);
 
@@ -1249,16 +1244,13 @@ internal static class DarlingTrendReader
     /// <c>query_store_stats_corrected_hourly</c> as a rollup scan, the unmaterialized tail from the raw arms
     /// with tail-tight bounds instead of the fixed ±slab. Built by
     /// <see cref="QueryStoreTrendRouting.BuildRollupTrendSql"/> — the SAME builder the viewer's twin uses,
-    /// so the two apps cannot drift about the same hour; this copy just omits the viewer's $5 database
+    /// so the two apps cannot drift about the same hour; this is the text WITH the viewer's $5 database
     /// filter. Chosen only when <see cref="QueryStoreTrendRouting.ResolveAsync"/> proved the rollup present
-    /// and materialized; otherwise <see cref="QueryStoreDurationTrendSql"/> runs unchanged.
-    /// $1 server_id, $2/$3 window, $4 the raw boundary (all naive UTC).
+    /// and materialized; otherwise <see cref="QueryStoreDurationTrendFilteredSql"/> runs unchanged.
+    /// $1 server_id, $2/$3 window, $4 the raw boundary (all naive UTC), $5 (#5244) the guarded <c>text[]</c> after the
+    /// raw boundary, on the rollup arm and both raw arms (the builder's own text). The unfiltered constant that stood
+    /// beside this one ran nowhere and was removed (#5244 review L1).
     /// </summary>
-    public static readonly string QueryStoreDurationTrendRollupSql =
-        QueryStoreTrendRouting.BuildRollupTrendSql(withDatabaseFilter: false);
-
-    /// <summary><see cref="QueryStoreDurationTrendRollupSql"/> with the database filter (#5244): $5 the guarded
-    /// <c>text[]</c> after the raw boundary, on the rollup arm and both raw arms (the builder's own text).</summary>
     public static readonly string QueryStoreDurationTrendRollupFilteredSql =
         QueryStoreTrendRouting.BuildRollupTrendSql(withDatabaseFilter: true);
 
@@ -1344,7 +1336,7 @@ internal static class DarlingTrendReader
     }
 
     /// <summary>
-    /// Runs <see cref="QueryStoreDurationTrendSql"/> — the raw-only route, kept for callers that have not
+    /// Runs <see cref="QueryStoreDurationTrendFilteredSql"/> — the raw-only route, kept for callers that have not
     /// resolved a route (and for stores without the corrected rollup, where it IS the route).
     /// </summary>
     public static Task<List<QueryDurationTrendPoint>> GetQueryStoreDurationTrendAsync(
@@ -1391,22 +1383,12 @@ internal static class DarlingTrendReader
     }
 
     /// <summary>
-    /// Shared reader for the three duration trends. All three project the same three columns - point time,
-    /// a per-second value, a per-second execution rate - which is the viewer's own arrangement
-    /// (<c>ReadDurationTrendAsync</c>), kept so the three series cannot drift apart in how they are read.
-    /// Summed bigint deltas come back as Postgres numeric, so the values Convert tolerantly.
+    /// Executes a bound duration-trend command and reads the shared three-column point shape. All three duration
+    /// trends project the same three columns - point time, a per-second value, a per-second execution rate - which is
+    /// the viewer's own arrangement, kept so the three series cannot drift apart in how they are read. Summed bigint
+    /// deltas come back as Postgres numeric, so the values Convert tolerantly. (The unbound-command wrapper that stood
+    /// above this had no callers once every trend ran the filtered statements, #5244 review L1.)
     /// </summary>
-    private static async Task<List<QueryDurationTrendPoint>> ReadDurationTrendAsync(
-        string sql, NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc,
-        CancellationToken cancellationToken)
-    {
-        await using var command = postgres.CreateCommand(sql);
-        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
-        DarlingMcpReadParameters.AddWindow(command, serverId, startUtc, endUtc);
-        return await ReadDurationPointsAsync(command, cancellationToken);
-    }
-
-    /// <summary>Executes a bound duration-trend command and reads the shared three-column point shape.</summary>
     private static async Task<List<QueryDurationTrendPoint>> ReadDurationPointsAsync(
         NpgsqlCommand command, CancellationToken cancellationToken)
     {
@@ -1629,7 +1611,7 @@ internal static class DarlingTrendReader
 
     /// <summary>
     /// Whether this server has EVER recorded a query-stats sample.
-    /// <para>Reads the BASE <c>query_stats</c> table, deliberately, because <see cref="QueryDurationTrendSql"/>
+    /// <para>Reads the BASE <c>query_stats</c> table, deliberately, because <see cref="QueryDurationTrendFilteredSql"/>
     /// does: on a V38+ store <c>v_query_stats</c> is the payload-RESOLVING view, not a passthrough, and the
     /// duration trend projects no text so it never needs it. Probing the view here would be probing a
     /// different relation from the one the read walks — the exact way an existence probe reports the wrong
@@ -1644,7 +1626,7 @@ internal static class DarlingTrendReader
 
     /// <summary>Whether this server has EVER recorded a stored-procedure sample. Reads the BASE
     /// <c>procedure_stats</c> table for the same reason the query-stats probe above does — it is what
-    /// <see cref="ProcedureDurationTrendSql"/> reads. See <see cref="HasAnyMemoryStatSql"/>.</summary>
+    /// <see cref="ProcedureDurationTrendFilteredSql"/> reads. See <see cref="HasAnyMemoryStatSql"/>.</summary>
     public const string HasAnyProcedureStatSql = """
         SELECT 1
         FROM procedure_stats
@@ -1654,7 +1636,7 @@ internal static class DarlingTrendReader
 
     /// <summary>
     /// Whether this server has EVER recorded a Query Store sample. Reads the BASE
-    /// <c>query_store_stats</c> table, the source <see cref="QueryStoreDurationTrendSql"/> walks.
+    /// <c>query_store_stats</c> table, the source <see cref="QueryStoreDurationTrendFilteredSql"/> walks.
     /// <para>Worth the most of the five, because zero rows here has a cause the others do not: Query Store
     /// can simply be OFF on every database. A server with no Query Store data is not a server with no slow
     /// queries, and the read has to say so rather than return a clean-looking empty series.</para>

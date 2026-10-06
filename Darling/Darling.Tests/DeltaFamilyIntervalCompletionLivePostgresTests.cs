@@ -89,11 +89,12 @@ public sealed class DeltaFamilyIntervalCompletionLivePostgresTests
             /* The MCP copy, run as the tool would run it on the raw tier — since #3897 bucketed, here at one
                minute so each bucket holds one collection and its figures are that collection's own; the bucket's
                first collection (ordinal 4) is the collection itself. */
-            await using (var command = postgres.CreateCommand(DarlingTrendReader.ProcedureDurationTrendSql))
+            await using (var command = postgres.CreateCommand(DarlingTrendReader.ProcedureDurationTrendFilteredSql))
             {
                 command.Parameters.AddWithValue(ServerId);
                 command.Parameters.AddWithValue(t1.AddMinutes(-1));
                 command.Parameters.AddWithValue(t4.AddMinutes(1));
+                command.Parameters.Add(DatabaseFilter.All.Parameter());   /* $4: every database (#5244) */
                 command.Parameters.AddWithValue(1);
                 var mcp = new List<(DateTime At, double? Rate, double? Executions)>();
                 await using var reader = await command.ExecuteReaderAsync(ct);

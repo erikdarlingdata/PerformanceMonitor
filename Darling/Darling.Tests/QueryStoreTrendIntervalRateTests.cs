@@ -54,7 +54,7 @@ public sealed class QueryStoreTrendIntervalRateTests
     {
         yield return ("ViewerDataService.QueryStoreDurationTrendSql", ViewerDataService.QueryStoreDurationTrendSql);
         yield return ("ViewerDataService.QueryStoreDurationTrendTableSql", ViewerDataService.QueryStoreDurationTrendTableSql);
-        yield return ("DarlingTrendReader.QueryStoreDurationTrendSql", DarlingTrendReader.QueryStoreDurationTrendSql);
+        yield return ("DarlingTrendReader.QueryStoreDurationTrendFilteredSql", DarlingTrendReader.QueryStoreDurationTrendFilteredSql);
     }
 
     private static IEnumerable<(string Name, string Sql)> AllCopies()

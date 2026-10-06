@@ -58,7 +58,11 @@ public sealed class McpLongQueryTools
                        is missing. The precondition answer names that state instead of quietly blaming a knob
                        that is already switched on. */
                     ?? await McpRuntimePrecondition.StatusAsync(dataService, resolved.ServerId, resolved.ServerName, "long_query_completions")
-                    ?? McpHelpers.Status("empty", "No long-running query completions found in the specified time range" + McpBlockingTools.ForChosenDatabase(database) + ". The long_query_completions collector is opt-in (default OFF) — enable it in the collector schedule to capture data.",
+                    ?? McpHelpers.StatusForDatabase("empty",
+                        /* #5244 review L3: the twin of Darling's: under a filter the answer ends after the database clause. */
+                        "No long-running query completions found in the specified time range" + McpBlockingTools.ForChosenDatabase(database)
+                            + (database == null ? ". The long_query_completions collector is opt-in (default OFF) — enable it in the collector schedule to capture data." : "."),
+                        database, /* #5244 review L2: the echo rides on an empty answer too */
                         (await McpQueryTools.EventWindowNoticeAsync(
                             () => dataService.GetQueryWindowFloorAsync(QueryWindowRelation.LongQueryCompletions, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd),
                             null, windowEnd.AddHours(-hours_back), windowEnd, "long_query_completions", emptyAnswer: true)).AsHints());

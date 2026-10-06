@@ -132,9 +132,9 @@ public sealed class DarlingMcpQueryStoreClutterTools
             var requestedStart = now.AddHours(-hours_back);
             var serverIds = new[] { resolved.ServerId };
 
-            var readCost = await DarlingQueryStoreClutterReader.GetReadCostAsync(postgres, serverIds, requestedStart, now, cancellationToken, databaseFilter);
-            var planChurn = await DarlingQueryStoreClutterReader.GetPlanChurnAsync(postgres, serverIds, requestedStart, now, cancellationToken, databaseFilter);
-            var config = await DarlingQueryStoreClutterReader.GetConfigAsync(postgres, serverIds, requestedStart, now, cancellationToken, databaseFilter);
+            var readCost = await DarlingQueryStoreClutterReader.GetReadCostAsync(postgres, serverIds, requestedStart, now, databaseFilter, cancellationToken);
+            var planChurn = await DarlingQueryStoreClutterReader.GetPlanChurnAsync(postgres, serverIds, requestedStart, now, databaseFilter, cancellationToken);
+            var config = await DarlingQueryStoreClutterReader.GetConfigAsync(postgres, serverIds, requestedStart, now, databaseFilter, cancellationToken);
             var waits = await DarlingQueryStoreClutterReader.GetQdsWaitsAsync(postgres, serverIds, requestedStart, now, cancellationToken);
             var clerk = await DarlingQueryStoreClutterReader.GetQueryStoreClerkAsync(postgres, resolved.ServerId, requestedStart, now, cancellationToken);
 
@@ -149,16 +149,16 @@ public sealed class DarlingMcpQueryStoreClutterTools
                     ?? await DarlingRuntimePrecondition.QueryStoreStatusAsync(postgres, resolved.ServerId, resolved.ServerName, databaseFilter, cancellationToken)
                     ?? await DarlingRuntimePrecondition.StatusAsync(postgres, resolved.ServerId, resolved.ServerName, DarlingQueryStoreClutterReader.CollectorName, cancellationToken)
                     ?? (!databaseFilter.IsAll
-                        ? McpHelpers.Status(
+                        ? McpHelpers.StatusForDatabase(
                             "empty",
                             $"No Query Store rows, no query_store fan-out run and no query_store_health capture{DarlingMcpBlockingTools.ForChosenDatabases(databaseFilter)} in the {hours_back}-hour window. "
-                            + "A chosen database either has Query Store OFF, is not on this server, or has not completed a cycle yet. Widen the selection to read the whole server.")
+                            + "A chosen database either has Query Store OFF, is not on this server, or has not completed a cycle yet. Widen the selection to read the whole server.", databaseFilter.Describe())
                         : null)
-                    ?? McpHelpers.Status(
+                    ?? McpHelpers.StatusForDatabase(
                         "unavailable",
                         $"No Query Store rows, no query_store fan-out run and no query_store_health capture for this server in the {hours_back}-hour window. "
                         + "The query_store collector runs every 5 minutes and query_store_health hourly on SQL Server 2016+; a server with none of the three either predates Query Store, has it OFF everywhere, or has not completed a cycle yet. "
-                        + "The plan-churn arm reads the raw tier, which a store with the rollups armed drops at 4 days — try a shorter window before concluding nothing ran.");
+                        + "The plan-churn arm reads the raw tier, which a store with the rollups armed drops at 4 days — try a shorter window before concluding nothing ran.", databaseFilter.Describe());
             }
 
             /* #2364 / #3653 item 17: what the raw tier actually held, beside what was asked for. The
@@ -179,9 +179,9 @@ public sealed class DarlingMcpQueryStoreClutterTools
             if (include_fleet_median)
             {
                 var fleetIds = await DarlingQueryStoreClutterReader.GetEnabledSqlServerTargetsAsync(postgres, MonitoredEngineKind.SqlServer, cancellationToken);
-                var fleetReadCost = await DarlingQueryStoreClutterReader.GetReadCostAsync(postgres, fleetIds, requestedStart, now, cancellationToken);
-                var fleetChurn = await DarlingQueryStoreClutterReader.GetPlanChurnAsync(postgres, fleetIds, requestedStart, now, cancellationToken);
-                var fleetConfig = await DarlingQueryStoreClutterReader.GetConfigAsync(postgres, fleetIds, requestedStart, now, cancellationToken);
+                var fleetReadCost = await DarlingQueryStoreClutterReader.GetReadCostAsync(postgres, fleetIds, requestedStart, now, cancellationToken: cancellationToken);
+                var fleetChurn = await DarlingQueryStoreClutterReader.GetPlanChurnAsync(postgres, fleetIds, requestedStart, now, cancellationToken: cancellationToken);
+                var fleetConfig = await DarlingQueryStoreClutterReader.GetConfigAsync(postgres, fleetIds, requestedStart, now, cancellationToken: cancellationToken);
                 var fleetWaits = await DarlingQueryStoreClutterReader.GetQdsWaitsAsync(postgres, fleetIds, requestedStart, now, cancellationToken);
                 var median = QueryStoreClutter.ComputeFleetMedian(fleetIds, fleetReadCost, fleetChurn, fleetConfig, fleetWaits);
                 fleetMedian = new
@@ -216,7 +216,7 @@ public sealed class DarlingMcpQueryStoreClutterTools
             var serverIsReplica = QueryStoreClutter.IsReplicaServer(
                 databaseFilter.IsAll
                     ? config
-                    : await DarlingQueryStoreClutterReader.GetConfigAsync(postgres, serverIds, requestedStart, now, cancellationToken));
+                    : await DarlingQueryStoreClutterReader.GetConfigAsync(postgres, serverIds, requestedStart, now, cancellationToken: cancellationToken));
 
             var databases = page.Select(r => new
             {
