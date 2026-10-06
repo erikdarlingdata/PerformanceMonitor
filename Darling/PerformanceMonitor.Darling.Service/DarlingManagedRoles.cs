@@ -1900,7 +1900,9 @@ WHERE u.rolname = current_user";
 
     /// <summary>
     /// Every file the service reads from a credentials directory, and the temporary file each is written through
-    /// (#4004 review, round 2): the three role passwords and the log-hash key, under both platforms' names.
+    /// (#4004 review, round 2): the three role passwords and the log-hash key, under both platforms' names. The
+    /// password key's own two names are not here, because an open directory keeps that file
+    /// (<see cref="PasswordKeyNames"/>); only the temporary file it is written through is.
     /// </summary>
     internal static IReadOnlyList<string> CredentialDirectoryFileNames { get; } = BuildCredentialDirectoryFileNames();
 
@@ -1914,8 +1916,16 @@ WHERE u.rolname = current_user";
             DarlingLogHashKeyFile.UnixFileName,
             DarlingLogHashKeyFile.WindowsFileName,
         };
-        return names.SelectMany(name => new[] { name, name + ".tmp" }).ToArray();
+        return names.SelectMany(name => new[] { name, name + ".tmp" })
+            .Concat(PasswordKeyNames.Select(name => name + ".tmp"))
+            .ToArray();
     }
+
+    /// <summary>The password key's file name on each platform (#5366). The directory check keeps these when it finds the
+    /// directory open, and records that it did (<see cref="ComposeCredentialDirectoryGuard.PasswordKeyKeptAfterOpenDirectory"/>),
+    /// so the key's load can say so and the caller can check the key against what it published.</summary>
+    internal static IReadOnlyList<string> PasswordKeyNames =>
+        [DarlingPasswordKeyFile.UnixFileName, DarlingPasswordKeyFile.WindowsFileName];
 
     /// <summary>
     /// The directory was open to other users until this call set it owner-only (#4004 review, round 2), so any file
@@ -1947,6 +1957,18 @@ WHERE u.rolname = current_user";
     {
         var removed = new List<string>();
         var left = new List<string>();
+
+        /* #5366: the password key is kept, not removed. Anything at its name is noted for the key's load; the load's own
+           checks then read it, or refuse a link or a directory there. */
+        foreach (var name in PasswordKeyNames)
+        {
+            var keyInfo = new FileInfo(Path.Combine(directory, name));
+            if (keyInfo.LinkTarget is not null || keyInfo.Exists)
+            {
+                guard.RecordPasswordKeyKept(directory);
+            }
+        }
+
         foreach (var name in CredentialDirectoryFileNames)
         {
             var path = Path.Combine(directory, name);
@@ -2354,6 +2376,20 @@ internal sealed class ComposeCredentialDirectoryGuard
     /// did not, or when this was already taken.
     /// </summary>
     internal string? TakeDiscardedKey(string directory) => _discardedKeys.TryRemove(Key(directory), out var reason) ? reason : null;
+
+    private readonly ConcurrentDictionary<string, bool> _keptPasswordKeys = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// Records that the discard found the password key in <paramref name="directory"/> while the directory was open and
+    /// kept it (#5366), where it removed every other credential file there.
+    /// </summary>
+    internal void RecordPasswordKeyKept(string directory) => _keptPasswordKeys[Key(directory)] = true;
+
+    /// <summary>
+    /// Whether the password key in <paramref name="directory"/> was found while the directory was open, in this process.
+    /// Not cleared by reading it: every load this start reports it, because the key was found open for the whole start.
+    /// </summary>
+    internal bool PasswordKeyKeptAfterOpenDirectory(string directory) => _keptPasswordKeys.ContainsKey(Key(directory));
 
     private static string Key(string directory) => Path.TrimEndingDirectorySeparator(Path.GetFullPath(directory));
 
