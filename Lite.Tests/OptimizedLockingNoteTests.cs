@@ -83,6 +83,31 @@ public sealed class OptimizedLockingNoteTests : IClassFixture<SharedDuckDbFixtur
         Assert.Null(await NoteAsync());
     }
 
+    /// <summary>
+    /// #5372 M2: with a database chosen, only that database's flag counts (Darling's twin does the same), so the call never
+    /// carries a note about a database it does not show, and the `empty` status for a database with no contention carries
+    /// the note when THAT database has the flag on.
+    /// </summary>
+    [Fact]
+    public async Task WithADatabaseChosen_TheNoteFollowsThatDatabasesFlagOnly()
+    {
+        var t = DateTime.UtcNow.AddMinutes(-30);
+        await SeedContendedIndexAsync(t);
+        await SeedConfigAsync(t, "Sales", false);
+        await SeedConfigAsync(t, "Billing", true);
+
+        using (var sales = JsonDocument.Parse(await McpObjectStatsTools.GetObjectLocking(_dataService, _serverManager, ServerName, database_name: "Sales")))
+            Assert.Equal(JsonValueKind.Null, sales.RootElement.GetProperty("optimized_locking_note").ValueKind);
+
+        using (var all = JsonDocument.Parse(await McpObjectStatsTools.GetObjectLocking(_dataService, _serverManager, ServerName)))
+            Assert.Equal(OptimizedLockingNote.Text, all.RootElement.GetProperty("optimized_locking_note").GetString());
+
+        using var billing = JsonDocument.Parse(await McpObjectStatsTools.GetObjectLocking(_dataService, _serverManager, ServerName, database_name: "Billing"));
+        Assert.Equal("empty", billing.RootElement.GetProperty("status").GetString());
+        Assert.Equal(OptimizedLockingNote.Text,
+            billing.RootElement.GetProperty("hints").GetProperty("optimized_locking_note").GetString());
+    }
+
     [Fact]
     public void OptimizedLockingDisplay_NullIsUnknown_NotNo()
     {
