@@ -651,7 +651,7 @@ public class ArchiveService
             cmd.CommandText = $@"
 COPY (
     SELECT * FROM {table} WHERE {timeColumn} < $1
-) TO '{EscapeSqlPath(filePath)}' (FORMAT PARQUET, COMPRESSION ZSTD)";
+) TO '{EscapeSqlPath(filePath)}' ({ParquetCompaction.ArchiveCopyOptions})";
             cmd.Parameters.Add(new DuckDBParameter { Value = cutoff });
             await cmd.ExecuteNonQueryAsync();
         });
@@ -664,7 +664,7 @@ COPY (
        newly-opened connections start at the resting cap; the COPY value is
        applied transiently around parquet COPY operations and restored after.
        See WithRaisedCopyMemoryLimit and the comment block on ConnectionString. */
-    private const string MainConnectionRestingMemoryLimit = "1GB";
+    private const string MainConnectionRestingMemoryLimit = DuckDbInitializer.MainConnectionMemoryLimit;
     private const string MainConnectionCopyMemoryLimit = "4GB";
 
     /// <summary>
@@ -1611,7 +1611,7 @@ COPY (
                         await WithRaisedCopyMemoryLimit(connection, async () =>
                         {
                             using var exportCmd = connection.CreateCommand();
-                            exportCmd.CommandText = $"COPY (SELECT * FROM {table}) TO '{EscapeSqlPath(tempParquetPath)}' (FORMAT PARQUET, COMPRESSION ZSTD)";
+                            exportCmd.CommandText = $"COPY (SELECT * FROM {table}) TO '{EscapeSqlPath(tempParquetPath)}' ({ParquetCompaction.ArchiveCopyOptions})";
                             await exportCmd.ExecuteNonQueryAsync();
                         });
 
@@ -1683,7 +1683,7 @@ COPY (
                             await WithRaisedCopyMemoryLimit(copyConnection, async () =>
                             {
                                 using var exportCmd = copyConnection.CreateCommand();
-                                exportCmd.CommandText = $"COPY (SELECT * FROM {table}) TO '{EscapeSqlPath(preservePath)}' (FORMAT PARQUET)";
+                                exportCmd.CommandText = $"COPY (SELECT * FROM {table}) TO '{EscapeSqlPath(preservePath)}' ({ParquetCompaction.ArchiveCopyOptions})";
                                 await exportCmd.ExecuteNonQueryAsync();
                             });
                             preservedFiles[table] = preservePath;
