@@ -144,7 +144,8 @@ internal static class DarlingSessionReader
     /// The captured query snapshots over the window — the viewer's <c>LatestQuerySnapshotsSql</c> projected
     /// to the columns Lite's get_active_queries surfaces, from the base <c>query_snapshots</c> table (the
     /// viewer reads base here too). granted_query_memory_gb is <c>numeric(18,2)</c> → double precision.
-    /// $1 server_id, $2/$3 window (naive UTC), $4 row cap, $5 database filter (NULL = all), $6 blocking_only.
+    /// $1 server_id, $2/$3 window (naive UTC), $4 row cap, $5 database filter (NULL = all), $6 blocking_only,
+    /// $7 wait_type filter (NULL = all).
     ///
     /// <para><b>Every filter is part of the query (#3541 A13).</b> This read used to return the whole window
     /// unfiltered and unbounded; the tool then applied <c>database_name</c> and <c>blocking_only</c> in C#,
@@ -170,6 +171,14 @@ internal static class DarlingSessionReader
     /// not) — the caller asked for that database, so the row is honoured and the victim says its blocker was
     /// filtered. A blocker that passes both but falls past the page is detected by the tool, which has the
     /// page.</para>
+    ///
+    /// <para><b>The wait_type filter (#5235)</b> is a population predicate beside <c>database_name</c>, so
+    /// <c>population_count</c> and <c>LIMIT</c> see it and it ANDs with the other filters. It matches the request's
+    /// OWN wait at the capture (<c>query_snapshots.wait_type</c>; a NULL wait never matches), by exact name with
+    /// the case ignored: one equality, so a <c>%</c> or <c>_</c> in the input is literal. Case is ignored because a
+    /// case miss would read as a true <c>empty</c>. The stored value may carry the trailing space an older
+    /// collector wrote, so the match takes the name with and without one. A head blocker on another
+    /// wait leaves the page, and its victims say <c>blocker_not_shown = filtered</c> (the database filter's rule).</para>
     /// </summary>
     public const string ActiveQueriesSql = """
         WITH window_rows AS (
@@ -230,6 +239,7 @@ internal static class DarlingSessionReader
             WHERE (w.query_text NOT LIKE 'WAITFOR%' OR h.session_id IS NOT NULL)
             AND   ($5::text IS NULL OR w.database_name = $5)
             AND   (NOT $6::boolean OR w.blocking_session_id > 0 OR h.session_id IS NOT NULL)
+            AND   ($7::text IS NULL OR upper(w.wait_type) IN (upper($7), upper($7) || ' '))
         )
         SELECT
             p.collection_time,
@@ -281,11 +291,12 @@ internal static class DarlingSessionReader
     /// The newest <paramref name="cap"/> snapshots over the window that pass the filters, with the filtered
     /// population's count (#3541 A13). Callers detecting truncation pass <c>limit + 1</c> and read the extra
     /// row as the signal. <paramref name="databaseName"/> null = every database; <paramref name="blockingOnly"/>
-    /// keeps victims and the head blockers of victims in the same capture.
+    /// keeps victims and the head blockers of victims in the same capture; <paramref name="waitType"/> null = every
+    /// wait (#5235), else only the rows waiting on that wait type at the capture, any case.
     /// </summary>
     public static async Task<ActiveQueriesPage> GetActiveQueriesAsync(
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int cap,
-        string? databaseName = null, bool blockingOnly = false, CancellationToken cancellationToken = default)
+        string? databaseName = null, bool blockingOnly = false, string? waitType = null, CancellationToken cancellationToken = default)
     {
         var rows = new List<ActiveQueryRow>();
         long populationCount = 0;
@@ -295,6 +306,7 @@ internal static class DarlingSessionReader
         DarlingMcpReadParameters.AddInt(command, cap);
         DarlingMcpReadParameters.AddNullableText(command, databaseName);
         DarlingMcpReadParameters.AddBoolean(command, blockingOnly);
+        DarlingMcpReadParameters.AddNullableText(command, waitType);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {

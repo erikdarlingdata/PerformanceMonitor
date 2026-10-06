@@ -35,10 +35,15 @@ import xml.etree.ElementTree as ET
 
 MIN_COVERAGE = 0.8
 MIN_WEIGHT = 0.001
-# Effective concurrency of the parallel classes in a Lite shard (#5208): fitted to the observed shard walls, where
-# wall = parallel seconds / 3.4 + serial seconds. A serial class (DisableParallelization collection) runs alone, so
-# each of its seconds costs a whole wall second; a parallel class's seconds overlap about 3.4 deep.
-PARALLEL_CONCURRENCY = 3.4
+# Effective concurrency of the parallel classes in a Lite shard (#5208): least squares over the 36 shard walls of nine
+# full dev and train runs (each shard's own parallel and serial seconds against its assembly wall), where
+# wall = parallel seconds / 3.56 + serial seconds. A serial class (DisableParallelization collection) runs alone, so
+# each of its seconds costs a whole wall second; a parallel class's seconds overlap about 3.56 deep (the assembly
+# runs 4 collection threads). The old 3.4 over-predicted by 16 s on average; a free serial multiplier or a fixed
+# per-shard cost fits no better than this one constant, so the model keeps its shape. A blend of each class's seconds
+# with its test count was tried and dropped: replayed on 13 fresh timing artifacts it beat the plain cut in 78 of 156
+# ordered pairs, a coin flip.
+PARALLEL_CONCURRENCY = 3.56
 DEFAULT_TESTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "Lite.Tests")
 
 
@@ -341,6 +346,9 @@ def self_test():
     ok(max(aw) < max(pw), "serial-aware cut lowers the slowest predicted shard")
     ok(pack(list(reversed(fc)), 4, fw, fs)[0] == aware, "serial-aware cut is deterministic regardless of input order")
     ok(class_weight(34.0, True) == 34.0 and abs(class_weight(34.0, False) - 34.0 / PARALLEL_CONCURRENCY) < 1e-9, "serial weighs full, parallel is divided")
+    pw1 = predicted_walls([["Lite.Tests.P", "Lite.Tests.S"]], {"Lite.Tests.P": 356.0, "Lite.Tests.S": 10.0}, frozenset({"Lite.Tests.S"}))
+    ok(abs(pw1[0] - (356.0 / PARALLEL_CONCURRENCY + 10.0)) < 1e-9, "wall = parallel seconds / concurrency + serial seconds")
+    ok(3.4 < PARALLEL_CONCURRENCY < 3.8, "the concurrency stays inside the range the nine fitted runs support")
 
     # Collection names from the XML, and serial declarations read from sources (literal and Holder.Name forms).
     with tempfile.TemporaryDirectory() as d:
