@@ -278,7 +278,7 @@ public sealed class DarlingWebHostService : BackgroundService
                    Release the state with the call StopServerAsync makes, once per transition to disabled. */
                 case WebSupervisorAction.None
                     when ListenerTlsCertificateState.ReleasesWhenDisabled(_app is not null, toggle.Enabled, lastEnabled):
-                    _certState.Clear();
+                    ReleaseServerCertificate();
                     break;
             }
 
@@ -304,6 +304,10 @@ public sealed class DarlingWebHostService : BackgroundService
     {
         if (_app is null)
         {
+            /* Nothing is serving, but a start that adopted a certificate and stopped short of building the app
+               must not leave its key held or its verdict published: released BEFORE this return, the way the MCP
+               host's stop does, so no path through this method skips it. */
+            ReleaseServerCertificate();
             return;
         }
 
@@ -325,20 +329,34 @@ public sealed class DarlingWebHostService : BackgroundService
             _appDataSource = null;
         }
 
-        _serverCertificate?.Dispose();
-        _serverCertificate = null;
-
         /* #3514 follow-up: the served certificate is gone, so stop advertising its expiry to the worker's
            alert sweep. A runtime disable of the dashboard (a no-restart op) reaches here; without the clear
            the worker keeps firing the expiry alert about a dashboard the operator turned off. A port-change
            rebind runs Stop→Start in the same supervisor tick, so the next start re-publishes before the
            hourly sweep can observe this null. */
-        _certState.Clear();
+        ReleaseServerCertificate();
 
         _oidcClient?.Dispose();
         _oidcClient = null;
 
         _runningPort = 0;
+    }
+
+    /// <summary>Disposes the held certificate (its private key) and updates the published certificate state, the way
+    /// the MCP host's helper of the same name does. <paramref name="failedStart"/> keeps a published refusal or
+    /// expired verdict (<see cref="ListenerTlsCertificateState.ClearUnlessRefusal"/>); a stop clears it whatever it is.</summary>
+    private void ReleaseServerCertificate(bool failedStart = false)
+    {
+        try { _serverCertificate?.Dispose(); } catch { /* best-effort */ }
+        _serverCertificate = null;
+        if (failedStart)
+        {
+            _certState.ClearUnlessRefusal(DateTimeOffset.UtcNow);
+        }
+        else
+        {
+            _certState.Clear();
+        }
     }
 
     /// <summary>Failed-start cleanup: a partially built app / data source must not leak between attempts.
@@ -357,14 +375,11 @@ public sealed class DarlingWebHostService : BackgroundService
             _appDataSource = null;
         }
 
-        try { _serverCertificate?.Dispose(); } catch { /* best-effort */ }
-        _serverCertificate = null;
-
         /* #3514 follow-up: a start that published its certificate (before the port-in-use / credential
            bail below it) but never served TLS must not leave the worker alerting on a non-served cert.
            #5288: a refusal or an expired certificate is the exception - the listener is loopback-only on that
            verdict whether or not the start failed, so it stays published until a successful load replaces it. */
-        _certState.ClearUnlessRefusal(DateTimeOffset.UtcNow);
+        ReleaseServerCertificate(failedStart: true);
 
         try { _oidcClient?.Dispose(); } catch { /* best-effort */ }
         _oidcClient = null;

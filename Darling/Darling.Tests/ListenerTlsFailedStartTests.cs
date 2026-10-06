@@ -339,6 +339,32 @@ public sealed class ListenerTlsFailedStartTests
         Assert.Equal(new[] { 1, 5 }, releases);
     }
 
+    /// <summary>
+    /// A failed start keeps a refusal or expired verdict published; the stop that follows with no app running releases
+    /// it, on the web host the way the MCP host's stop does (the stop's early return for "no app" releases the
+    /// certificate state too). The stop is the host's own private method, driven directly: the public StopAsync only
+    /// calls it while an app exists.
+    /// </summary>
+    [Theory]
+    [InlineData(Listener.Mcp, Verdict.ExpiredCertificate)]
+    [InlineData(Listener.Mcp, Verdict.LoadRefusal)]
+    [InlineData(Listener.Web, Verdict.ExpiredCertificate)]
+    [InlineData(Listener.Web, Verdict.NotYetValidRefusal)]
+    [InlineData(Listener.Web, Verdict.LoadRefusal)]
+    public async Task AFailedStart_ThenAStop_ReleasesTheKeptVerdict(Listener listener, Verdict verdict)
+    {
+        var (rig, host) = SupervisedRigFor(listener);
+        PublishVerdict(rig.State, verdict, DateTime.UtcNow);
+
+        await rig.FailedStart();
+        Assert.NotNull(rig.State.Read());
+
+        var stop = host.GetType().GetMethod("StopServerAsync", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+        await (Task)stop.Invoke(host, [Ct])!;
+
+        Assert.Null(rig.State.Read());
+    }
+
     private static (Rig Rig, BackgroundService Host) SupervisedRigFor(Listener listener)
     {
         if (listener == Listener.Mcp)
