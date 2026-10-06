@@ -16,6 +16,7 @@
   <ItemGroup>
     <PackageReference Include="AWSSDK.PI" />
     <PackageReference Include="AWSSDK.RDS" />
+    <PackageReference Include="AWSSDK.SecurityToken" />
     <PackageReference Include="Microsoft.Extensions.Hosting" />
     <PackageReference Include="Microsoft.Extensions.Hosting.WindowsServices" />
     <PackageReference Include="Microsoft.Data.SqlClient" />
