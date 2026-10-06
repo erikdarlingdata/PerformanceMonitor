@@ -43,8 +43,10 @@ namespace Darling.Tests;
 /// <c>SensitiveStatementHostFilterTests</c>.</para>
 ///
 /// <para>The deadlock graph is the one field with two shapes: at <c>full_graph: true</c> the XML parses and only the named
-/// statement text is replaced (precise); at the default the tool cuts the graph at 2000 characters, the cut text no longer
-/// parses, and the filter withholds that value whole.</para>
+/// statement text is replaced (precise); at the default the reader judges the whole graph and then cuts it to 2000 characters, so the
+/// cut text carries the marker where the statement was and holds no secret (#5320). Five reads (get_blocking, get_deadlocks,
+/// get_deadlock_detail, get_long_query_completions, get_default_trace_events) judge in the reader too; the census holds them to the
+/// reader's own answer and checks the store still holds the canary.</para>
 /// </summary>
 [Collection("live-postgres")]
 public sealed class StatementFilterBlockingReadsLiveTests
@@ -78,6 +80,39 @@ public sealed class StatementFilterBlockingReadsLiveTests
         }
     }
 
+    /// <summary>
+    /// The census check for a read whose READER judges the whole statement before it cuts it (#5320). The reader's own answer
+    /// holds the withheld marker and not one secret needle, still parses, and the host filter has nothing left to change (so the
+    /// reader did the whole job). The control that the plant is real moves from the raw answer to the STORE: the stored column
+    /// still holds the canary (<see cref="StoredCanaryAsync"/>), so an answer without it is the reader's doing and not an empty plant.
+    /// </summary>
+    private static void AssertReaderJudged(string label, string raw, string filtered)
+    {
+        try
+        {
+            foreach (string needle in StatementScrubCanary.SecretNeedles)
+            {
+                Assert.DoesNotContain(needle, raw);
+            }
+
+            Assert.Contains(Marker, raw);
+            using var parsed = JsonDocument.Parse(raw);
+            Assert.True(string.Equals(raw, filtered, StringComparison.Ordinal), "the host filter changed an answer the reader had already judged");
+        }
+        catch (Exception ex)
+        {
+            throw new Xunit.Sdk.XunitException(label + ": " + ex.Message);
+        }
+    }
+
+    /// <summary>True when <paramref name="column"/> of <paramref name="table"/> holds the canary for this test's server.</summary>
+    private static async Task<bool> StoredCanaryAsync(NpgsqlConnection connection, string table, string column, CancellationToken ct)
+    {
+        await using var cmd = new NpgsqlCommand(
+            $"SELECT EXISTS (SELECT 1 FROM {table} WHERE server_id = $1 AND position('S3cret-canary-ssf' IN {column}) > 0)", connection);
+        cmd.Parameters.AddWithValue(ServerId);
+        return (bool)(await cmd.ExecuteScalarAsync(ct))!;
+    }
     /// <summary>Every string value in <paramref name="json"/> that opens with <c>&lt;</c> (an embedded XML document).</summary>
     private static List<string> EmbeddedXml(string json)
     {
@@ -208,12 +243,23 @@ VALUES ($1, $2, $3, $4, $5, $6, $7)",
 
             /* Every row is checked before the test fails, so one run names each row that leaks. */
             var failures = new List<string>();
-            async Task Check(string label, string raw, Action<string>? more = null)
+            /* A row whose reader judges the statement itself (#5320: the cut-and-judge reads) names its stored column in
+               `readerJudges`; the store must still hold the canary there, and the reader's own answer is held to the marker. The
+               other rows return the stored text raw and the host filter is what withholds it. */
+            async Task Check(string label, string raw, Action<string>? more = null, (string Table, string Column)? readerJudges = null)
             {
                 try
                 {
                     string filtered = await FilteredAsync(host, raw);
-                    AssertFiltered(label, raw, filtered);
+                    if (readerJudges is { } stored)
+                    {
+                        Assert.True(await StoredCanaryAsync(connection, stored.Table, stored.Column, ct), "the stored " + stored.Table + "." + stored.Column + " lost the canary, so the plant never reached the store");
+                        AssertReaderJudged(label, raw, filtered);
+                    }
+                    else
+                    {
+                        AssertFiltered(label, raw, filtered);
+                    }
                     more?.Invoke(filtered);
                 }
                 catch (Exception ex)
@@ -222,9 +268,9 @@ VALUES ($1, $2, $3, $4, $5, $6, $7)",
                 }
             }
 
-            await Check("16 get_blocking", await DarlingMcpBlockingTools.GetBlocking(postgres, ServerName, cancellationToken: ct));
-            await Check("17 get_deadlocks", await DarlingMcpBlockingTools.GetDeadlocks(postgres, ServerName, cancellationToken: ct));
-            await Check("18 get_deadlock_detail", await DarlingMcpBlockingTools.GetDeadlockDetail(postgres, ServerName, cancellationToken: ct));
+            await Check("16 get_blocking", await DarlingMcpBlockingTools.GetBlocking(postgres, ServerName, cancellationToken: ct), readerJudges: ("blocked_process_reports", "blocked_sql_text"));
+            await Check("17 get_deadlocks", await DarlingMcpBlockingTools.GetDeadlocks(postgres, ServerName, cancellationToken: ct), readerJudges: ("deadlocks", "victim_sql_text"));
+            await Check("18 get_deadlock_detail", await DarlingMcpBlockingTools.GetDeadlockDetail(postgres, ServerName, cancellationToken: ct), readerJudges: ("deadlocks", "victim_sql_text"));
 
             /* row 19: the report XML still parses, the canary's inputbuf and frame hold the marker, and the plain side is intact. */
             await Check("19 get_blocked_process_xml", await DarlingMcpBlockingTools.GetBlockedProcessXml(postgres, ServerName, cancellationToken: ct), filtered =>
@@ -237,8 +283,8 @@ VALUES ($1, $2, $3, $4, $5, $6, $7)",
                 Assert.DoesNotContain(bprDoc.Descendants("frame"), f => f.Value.Contains("S3cret", StringComparison.Ordinal));
             });
 
-            await Check("20 get_long_query_completions", await DarlingMcpLongQueryTools.GetLongQueryCompletions(postgres, ServerName, cancellationToken: ct));
-            await Check("21 get_default_trace_events", await DarlingMcpDefaultTraceTools.GetDefaultTraceEvents(postgres, ServerName, cancellationToken: ct));
+            await Check("20 get_long_query_completions", await DarlingMcpLongQueryTools.GetLongQueryCompletions(postgres, ServerName, cancellationToken: ct), readerJudges: ("long_query_completions", "statement_text"));
+            await Check("21 get_default_trace_events", await DarlingMcpDefaultTraceTools.GetDefaultTraceEvents(postgres, ServerName, cancellationToken: ct), readerJudges: ("default_trace_events", "text_data"));
             await Check("22 get_health_parser_significant_waits", await DarlingMcpHealthParserTools.GetSignificantWaits(postgres, ServerName, cancellationToken: ct));
             await Check("23 get_health_parser_severe_errors", await DarlingMcpHealthParserTools.GetSevereErrors(postgres, ServerName, cancellationToken: ct));
             Assert.True(failures.Count == 0, string.Join(" | ", failures));
@@ -255,11 +301,11 @@ VALUES ($1, $2, $3, $4, $5, $6, $7)",
     /// <summary>
     /// <c>get_deadlock_detail</c>'s graph, both ways. With <c>full_graph</c> true the answer carries the whole graph: it parses,
     /// the victim's frame and inputbuf hold the marker, and the other process, its statement and the lock resource are the
-    /// stored ones (precise). By default the tool cuts the graph at 2000 characters before the filter sees it, the cut text is
-    /// not a document, and the graph value is withheld whole (the marker alone), while the rest of the answer stays.
+    /// stored ones (precise). By default the reader judges the whole graph (#5320) and then cuts it to 2000 characters: the cut graph holds the marker where
+    /// the victim's statement was, keeps the other process's statement, says it is truncated, and the host filter has nothing left to change.
     /// </summary>
     [Fact]
-    public async Task GetDeadlockDetail_FullGraphIsPrecise_AndTheDefaultCutGraphIsWithheldWhole()
+    public async Task GetDeadlockDetail_FullGraphIsPrecise_AndTheDefaultCutGraphIsJudgedWholeThenCut()
     {
         var cs = ConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live blocking-read filter test.");
@@ -300,22 +346,24 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)",
             Assert.Equal(22, doc.Descendants("process").Count());
             Assert.Equal(Db + ".dbo.t", (string?)doc.Descendants("keylock").Single().Attribute("objectname"));
 
+            /* The default form (#5320): the reader judges the WHOLE graph, then cuts it to 2000 characters, so its own answer is
+               already safe. The stored graph still holds the canary (the plant is real, and is past the cut length), the answer's
+               graph carries the marker where the victim's statement was, keeps the other process's statement, is cut and says so,
+               and the host filter finds nothing left to change. */
+            Assert.True(await StoredCanaryAsync(connection, "deadlocks", "deadlock_graph_xml", ct), "the stored graph lost the canary, so the plant never reached the store");
             string cut = await DarlingMcpBlockingTools.GetDeadlockDetail(postgres, ServerName, cancellationToken: ct);
             string cutFiltered = await FilteredAsync(host, cut);
-            AssertFiltered("full_graph false", cut, cutFiltered);
-            using (var rawDoc = JsonDocument.Parse(cut))
-            {
-                var rawRow = rawDoc.RootElement.GetProperty("deadlocks")[0];
-                Assert.True(rawRow.GetProperty("deadlock_graph_xml_truncated").GetBoolean());
-                Assert.Contains("S3cret-canary-ssf", rawRow.GetProperty("deadlock_graph_xml").GetString(), StringComparison.Ordinal);
-            }
-
-            using var cutDoc = JsonDocument.Parse(cutFiltered);
+            AssertReaderJudged("full_graph false", cut, cutFiltered);
+            using var cutDoc = JsonDocument.Parse(cut);
             var cutRow = cutDoc.RootElement.GetProperty("deadlocks")[0];
-            Assert.Equal(Marker, cutRow.GetProperty("deadlock_graph_xml").GetString());
-            Assert.Equal("process1a", cutRow.GetProperty("victim_process_id").GetString());
+            string cutGraph = cutRow.GetProperty("deadlock_graph_xml").GetString()!;
             Assert.True(cutRow.GetProperty("deadlock_graph_xml_truncated").GetBoolean());
-
+            Assert.EndsWith("... (truncated)", cutGraph);
+            Assert.True(cutGraph.Length > 1500 && cutGraph.Length < graph.Length, "the cut graph is " + cutGraph.Length + " characters of " + graph.Length);
+            Assert.Contains("<inputbuf>" + Marker + "</inputbuf>", cutGraph);
+            Assert.Contains("<frame procname=\"adhoc\" line=\"1\">" + Marker + "</frame>", cutGraph);
+            Assert.Contains("<inputbuf>" + StatementScrubCanary.PlainStatement + "</inputbuf>", cutGraph);
+            Assert.Equal("process1a", cutRow.GetProperty("victim_process_id").GetString());
             bodySucceeded = true;
         }
         finally
