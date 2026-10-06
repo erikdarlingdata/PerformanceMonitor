@@ -87,13 +87,13 @@ public sealed class DeadlockStoredIdentityReadLiteTests
         var marker = SensitiveStatements.PlaceholderText;
         var expected = new[]
         {
-            "edge", "inside", marker, marker + "process1db1", marker + "process2",
+            "edge", "inside", marker, marker + "\u0001process1\u0001db1", marker + "\u0001process2\u0001",
         };
         Array.Sort(expected, StringComparer.Ordinal);
         Assert.Equal(expected, found);
 
         /* The same text the collector gives a row it is about to write. */
         var row = new DeadlocksCollector.Row { DeadlockTime = EventTime, GraphXml = marker, VictimProcessId = "process1", DatabaseName = "db1" };
-        Assert.Equal(marker + "process1db1", DeadlocksCollector.Instance.GetIdentity(row)!.Value.Graph);
+        Assert.Equal(marker + "\u0001process1\u0001db1", DeadlocksCollector.Instance.GetIdentity(row)!.Value.Graph);
     }
 }

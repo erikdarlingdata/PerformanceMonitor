@@ -105,7 +105,7 @@ public sealed class StatementScrubEndToEndLiveTests
     }
 
     [Fact]
-    public async Task QuerySnapshots_TheCanaryThroughTheDefinitionAndTheHostWriter_IsStoredAsTheMarker_AndBothPlansAreFiltered()
+    public async Task QuerySnapshots_TheCanaryThroughTheRunnersServerWidePath_IsStoredAsTheMarker_AndBothPlansAreFiltered()
     {
         var cs = ConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(cs), SkipReason);
@@ -115,22 +115,13 @@ public sealed class StatementScrubEndToEndLiveTests
         var bodySucceeded = false;
         try
         {
-            /* The runner's server-wide path opens a real SQL Server connection (CreateTargetConnection, no seam), so this
-               case drives the same definition and the same writer the runner calls: ReadAsync over the rows the server
-               would return, then the host's COPY with its payload dimensions, in one transaction. */
-            var context = new CollectorContext
-            {
-                ServerId = CollectSnapshotsId,
-                ServerName = NameOf(CollectSnapshotsId),
-                CollectionTime = Anchor,
-                Deltas = new NoDeltas(),
-                Target = new CollectorTargetInfo(),
-            };
-            await using (var reader = SnapshotsReader())
-            {
-                var read = await QuerySnapshotsCollector.Instance.ReadAsync(reader, context, ct);
-                await WriteBatchAsync(connection, QuerySnapshotsCollector.Instance, context, read, ct);
-            }
+            /* #5320: the runner's server-wide path, driven through the same fake target provider the per-database cases
+               use (the runner opens its server-wide connection through that provider), so the whole run is covered:
+               read, filter, delta, dedupe, write. */
+            var runner = new DarlingCollectorRunner(postgres, new CollectorDeltaCalculator(), null, capturePlans: () => true);
+            runner.TargetProviderOverrideForTests = _ => new FakeTargetProvider(_ => SnapshotsReader());
+
+            await runner.RunAsync(QuerySnapshotsCollector.Instance, Server(CollectSnapshotsId, azure: false), ct);
 
             var rows = await ScalarListAsync(connection,
                 "SELECT session_id::text || '|' || COALESCE(query_text, '<null>') FROM query_snapshots WHERE server_id = " + CollectSnapshotsId + " ORDER BY session_id", ct);
