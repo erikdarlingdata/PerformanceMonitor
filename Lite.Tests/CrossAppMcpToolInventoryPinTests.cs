@@ -244,6 +244,8 @@ public sealed class CrossAppMcpToolInventoryPinTests
         "get_query_store_plan_xml",
         "get_procedure_plan_xml",
         "get_active_query_plan_xml",
+        /* #5233: the repro script behind the web plan panel's Repro button. Lite builds repro scripts in the desktop grid, not over MCP. */
+        "get_query_repro_script",
 
         /* #5236: the blocking and deadlock plan reads behind the web grids' plan buttons - get_blocking_plan_xml and
            get_deadlock_plan_xml. Darling-ONLY, and for a plainer reason than the three above: Lite never captures a
