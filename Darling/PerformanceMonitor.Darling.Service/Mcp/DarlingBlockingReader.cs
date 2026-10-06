@@ -126,6 +126,22 @@ internal static class DarlingBlockingReader
         public DateTime? BlockingLastBatchCompletedUtc { get; set; }
         public int BlockedPriority { get; set; }
         public int BlockingPriority { get; set; }
+
+        /// <summary>The report's own <c>collection_time</c> (#5236): half of the store key that
+        /// <see cref="ReadBlockedPlanFlagsAsync"/> re-reads a page's rows by. Null on a DMV-snapshot row, which has no key.</summary>
+        public DateTime? CollectionTime { get; set; }
+
+        /// <summary>The report's own <c>blocked_report_id</c> (#5236): the other half of that key. Null on a DMV-snapshot row.</summary>
+        public long? BlockedReportId { get; set; }
+
+        /// <summary>Whether this report carries a stored plan for the BLOCKED process (#5236). Filled in by
+        /// <see cref="ReadBlockedPlanFlagsAsync"/> for a page's rows, never by the list read itself, and it answers with
+        /// <c>IS NOT NULL AND &lt;&gt; ''</c>, the presence predicate the plan read (<c>BlockedPlanSql</c>) uses, so a
+        /// flagged row cannot come back "no plan". False until then, and on a DMV-snapshot row, which never has one.</summary>
+        public bool HasBlockedPlan { get; set; }
+
+        /// <summary>The same for the BLOCKING process's plan (#5236).</summary>
+        public bool HasBlockingPlan { get; set; }
     }
 
     /// <summary>One deadlock event — the shared alert-row fields (victim id/SQL, graph XML, the parsed
@@ -138,6 +154,15 @@ internal static class DarlingBlockingReader
         /// <summary>The database the deadlock was captured for. On an Azure SQL Database <c>master</c>
         /// target this is the user database whose deadlock it is.</summary>
         public string? DatabaseName { get; set; }
+
+        /// <summary>The deadlock's own <c>deadlock_id</c> (#5236): with <see cref="CollectionTime"/>, the store key that
+        /// <see cref="ReadVictimPlanFlagsAsync"/> re-reads a page's rows by.</summary>
+        public long? DeadlockId { get; set; }
+
+        /// <summary>Whether this deadlock carries a stored plan for its victim (#5236), by the presence predicate
+        /// <c>DeadlockVictimPlanSql</c> reads with (<c>IS NOT NULL AND &lt;&gt; ''</c>). Filled in by
+        /// <see cref="ReadVictimPlanFlagsAsync"/> for a page's rows, never by the list read itself; false until then.</summary>
+        public bool HasVictimPlan { get; set; }
     }
 
     /* ─────────────────────────── blocked-process reports (XE + DMV fallback) ─────────────────────────── */
@@ -182,7 +207,17 @@ internal static class DarlingBlockingReader
     /// report's own <c>event_time</c> (when it happened), as the viewer grid and Lite do; $5 is the
     /// <see cref="EventWindowFloor"/> for $2 — a partition-column bound with NO upper limit, so an event
     /// collected late (after an outage) still lists. Private so the
-    /// executable statements stay the two public consts the tests pin.</summary>
+    /// executable statements stay the two public consts the tests pin.
+    ///
+    /// <para>The last two columns (#5236) are the row's store key, <c>collection_time</c> and <c>blocked_report_id</c>. The plan
+    /// columns are deliberately NOT in this projection. In a compressed chunk every column a statement names is
+    /// decompressed for each batch it scans, and the list scans every row from the floor to now (there is no
+    /// <c>event_time</c> index) and sorts. A flag computed here was evaluated only after the per-chunk sorts, so each row's whole
+    /// plan text (about 29 KB) went through them: on a server where half the rows carry plans, a 7-day list read moved
+    /// from 0.5 s to 0.6 s and 9,153 to 13,937 buffers, and the deadlock list from 0.3 s to 1.9 s with 217 MB of sort spill.
+    /// The flags come from <see cref="BlockedPlanFlagsSql"/> instead, one statement for the page's rows only, so only the batches
+    /// holding the page's own rows decompress a plan column. (<c>&lt;&gt; ''</c> compares lengths and does not detoast a
+    /// heap tuple, which is why an uncompressed chunk never showed the cost.)</para></summary>
     private const string BlockedProcessReportsBody = """
         SELECT
             event_time,
@@ -219,12 +254,36 @@ internal static class DarlingBlockingReader
             blocked_priority,
             blocking_priority,
             blocked_process_report_xml,
-            contentious_object
+            contentious_object,
+            collection_time,
+            blocked_report_id
         FROM blocked_process_reports
         WHERE server_id = $1
         AND   event_time >= $2
         AND   event_time <= $3
         AND   collection_time >= $5
+        """;
+
+    /// <summary>
+    /// The plan-presence flags for ONE PAGE of <see cref="BlockedProcessReportsSql"/> rows (#5236), found by the rows' own store
+    /// key: $1 server_id, $2 the page's <c>collection_time</c> values (<c>timestamp[]</c>), $3 the page's <c>blocked_report_id</c>
+    /// values (<c>bigint[]</c>). Both arrays name the same rows, so the result is mapped back by the (time, id) pair in
+    /// <see cref="ApplyBlockedPlanFlags"/>. The segment column and the time column let TimescaleDB skip every chunk and batch
+    /// that holds none of the page's rows, so only those batches decompress the two plan columns.
+    ///
+    /// <para>The predicate is <c>IS NOT NULL AND &lt;&gt; ''</c>, the same one <see cref="DarlingStoredPlanReader.BlockedPlanSql"/>
+    /// and <see cref="DarlingStoredPlanReader.BlockingPlanSql"/> read with, so a row flagged here is a row those reads can answer.</para>
+    /// </summary>
+    public const string BlockedPlanFlagsSql = """
+        SELECT
+            collection_time,
+            blocked_report_id,
+            (blocked_query_plan_xml IS NOT NULL AND blocked_query_plan_xml <> '') AS has_blocked_plan,
+            (blocking_query_plan_xml IS NOT NULL AND blocking_query_plan_xml <> '') AS has_blocking_plan
+        FROM blocked_process_reports
+        WHERE server_id = $1
+        AND   collection_time = ANY($2)
+        AND   blocked_report_id = ANY($3)
         """;
 
     /// <summary>
@@ -351,8 +410,9 @@ internal static class DarlingBlockingReader
     }
 
     /// <summary>Maps one row of <see cref="BlockedProcessReportsSql"/> / <see cref="BlockedProcessReportsWithXmlSql"/>
-    /// (35 columns, in the SELECT's order). One mapper for both, so the with-XML variant cannot drift a column
-    /// from the unfiltered one.</summary>
+    /// (37 columns, in the SELECT's order; the last two are the row's store key, #5236, and the plan flags stay false until
+    /// <see cref="ReadBlockedPlanFlagsAsync"/> fills them for a page). One mapper for both, so the with-XML
+    /// variant cannot drift a column from the unfiltered one.</summary>
     internal static BlockedProcessReadRow MapXeRow(DbDataReader reader, ServerClock clock)
     {
         return new BlockedProcessReadRow
@@ -392,7 +452,72 @@ internal static class DarlingBlockingReader
             BlockingPriority = reader.IsDBNull(32) ? 0 : reader.GetInt32(32),
             BlockedProcessReportXml = reader.IsDBNull(33) ? "" : reader.GetString(33),
             ContentiousObject = reader.IsDBNull(34) ? "" : reader.GetString(34),
+            CollectionTime = reader.IsDBNull(35) ? null : reader.GetDateTime(35),
+            BlockedReportId = reader.IsDBNull(36) ? null : reader.GetInt64(36),
         };
+    }
+
+    /// <summary>
+    /// Fills <c>HasBlockedPlan</c> / <c>HasBlockingPlan</c> on the XE rows of one page of <c>get_blocking</c> (#5236), by
+    /// <see cref="BlockedPlanFlagsSql"/>: one statement over the page's own rows, issued after the page is known. A page with
+    /// no keyed row (every row a DMV snapshot) issues none.
+    /// </summary>
+    public static async Task ReadBlockedPlanFlagsAsync(
+        NpgsqlDataSource postgres, int serverId, IReadOnlyCollection<BlockedProcessReadRow> page, CancellationToken cancellationToken = default)
+    {
+        var keyed = new List<BlockedProcessReadRow>(page.Count);
+        foreach (var row in page)
+        {
+            if (row.CollectionTime is not null && row.BlockedReportId is not null)
+            {
+                keyed.Add(row);
+            }
+        }
+
+        if (keyed.Count == 0)
+        {
+            return;
+        }
+
+        var times = new DateTime[keyed.Count];
+        var ids = new long[keyed.Count];
+        for (var i = 0; i < keyed.Count; i++)
+        {
+            times[i] = DateTime.SpecifyKind(keyed[i].CollectionTime!.Value, DateTimeKind.Unspecified);
+            ids[i] = keyed[i].BlockedReportId!.Value;
+        }
+
+        var flags = new Dictionary<(DateTime Time, long Id), (bool Blocked, bool Blocking)>();
+        await using var command = postgres.CreateCommand(BlockedPlanFlagsSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        DarlingMcpReadParameters.AddInt(command, serverId);
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Array | NpgsqlTypes.NpgsqlDbType.Timestamp, Value = times });
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Array | NpgsqlTypes.NpgsqlDbType.Bigint, Value = ids });
+        await using (var reader = await command.ExecuteReaderAsync(cancellationToken))
+        {
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                flags[(reader.GetDateTime(0), reader.GetInt64(1))] =
+                    (!reader.IsDBNull(2) && reader.GetBoolean(2), !reader.IsDBNull(3) && reader.GetBoolean(3));
+            }
+        }
+
+        ApplyBlockedPlanFlags(keyed, flags);
+    }
+
+    /// <summary>Sets the two flags on every row whose (collection_time, blocked_report_id) pair is in <paramref name="flags"/>;
+    /// a row with no entry (its report purged between the two statements) keeps both false.</summary>
+    internal static void ApplyBlockedPlanFlags(
+        IEnumerable<BlockedProcessReadRow> rows, IReadOnlyDictionary<(DateTime Time, long Id), (bool Blocked, bool Blocking)> flags)
+    {
+        foreach (var row in rows)
+        {
+            if (row.CollectionTime is { } time && row.BlockedReportId is { } id && flags.TryGetValue((time, id), out var found))
+            {
+                row.HasBlockedPlan = found.Blocked;
+                row.HasBlockingPlan = found.Blocking;
+            }
+        }
     }
 
     /// <summary>Maps one row of <see cref="DmvBlockingSnapshotsSql"/> (20 columns, in the SELECT's order).</summary>
@@ -453,7 +578,12 @@ internal static class DarlingBlockingReader
         """;
 
     /// <summary>Windows on <c>deadlock_time</c> (when the deadlock happened); $5 is the
-    /// <see cref="EventWindowFloor"/> for $2, with no upper bound so a late-collected deadlock still lists.</summary>
+    /// <see cref="EventWindowFloor"/> for $2, with no upper bound so a late-collected deadlock still lists. The last
+    /// column (#5236) is the row's <c>deadlock_id</c>, which with <c>collection_time</c> is its store key. The victim plan column is
+    /// deliberately NOT in this projection, for the reason <see cref="BlockedProcessReportsSql"/> gives (a compressed chunk
+    /// decompresses every named column of every batch it scans, and the plan text rode through the per-chunk sorts: a 7-day list
+    /// read went from 0.3 s to 1.9 s on a server where half the deadlocks carry a plan). The flag comes from
+    /// <see cref="DeadlockVictimPlanFlagsSql"/>, for the page's rows only.</summary>
     private const string RecentDeadlocksBody = """
         SELECT
             collection_time,
@@ -461,13 +591,89 @@ internal static class DarlingBlockingReader
             victim_process_id,
             victim_sql_text,
             deadlock_graph_xml,
-            database_name
+            database_name,
+            deadlock_id
         FROM deadlocks
         WHERE server_id = $1
         AND   deadlock_time >= $2
         AND   deadlock_time <= $3
         AND   collection_time >= $5
         """;
+
+    /// <summary>
+    /// The victim-plan flag for ONE PAGE of <see cref="RecentDeadlocksSql"/> rows (#5236), found by the rows' own store key:
+    /// $1 server_id, $2 the page's <c>collection_time</c> values (<c>timestamp[]</c>), $3 the page's <c>deadlock_id</c> values
+    /// (<c>bigint[]</c>). The predicate is <c>IS NOT NULL AND &lt;&gt; ''</c>, the one
+    /// <see cref="DarlingStoredPlanReader.DeadlockVictimPlanSql"/> reads with.
+    /// </summary>
+    public const string DeadlockVictimPlanFlagsSql = """
+        SELECT
+            collection_time,
+            deadlock_id,
+            (victim_query_plan_xml IS NOT NULL AND victim_query_plan_xml <> '') AS has_victim_plan
+        FROM deadlocks
+        WHERE server_id = $1
+        AND   collection_time = ANY($2)
+        AND   deadlock_id = ANY($3)
+        """;
+
+    /// <summary>
+    /// Fills <c>HasVictimPlan</c> on one page of <c>get_deadlocks</c> (#5236), by <see cref="DeadlockVictimPlanFlagsSql"/>: one
+    /// statement over the page's own rows, issued after the page is known.
+    /// </summary>
+    public static async Task ReadVictimPlanFlagsAsync(
+        NpgsqlDataSource postgres, int serverId, IReadOnlyCollection<DeadlockReadRow> page, CancellationToken cancellationToken = default)
+    {
+        var keyed = new List<DeadlockReadRow>(page.Count);
+        foreach (var row in page)
+        {
+            if (row.DeadlockId is not null)
+            {
+                keyed.Add(row);
+            }
+        }
+
+        if (keyed.Count == 0)
+        {
+            return;
+        }
+
+        var times = new DateTime[keyed.Count];
+        var ids = new long[keyed.Count];
+        for (var i = 0; i < keyed.Count; i++)
+        {
+            times[i] = DateTime.SpecifyKind(keyed[i].CollectionTime, DateTimeKind.Unspecified);
+            ids[i] = keyed[i].DeadlockId!.Value;
+        }
+
+        var flags = new Dictionary<(DateTime Time, long Id), bool>();
+        await using var command = postgres.CreateCommand(DeadlockVictimPlanFlagsSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        DarlingMcpReadParameters.AddInt(command, serverId);
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Array | NpgsqlTypes.NpgsqlDbType.Timestamp, Value = times });
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Array | NpgsqlTypes.NpgsqlDbType.Bigint, Value = ids });
+        await using (var reader = await command.ExecuteReaderAsync(cancellationToken))
+        {
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                flags[(reader.GetDateTime(0), reader.GetInt64(1))] = !reader.IsDBNull(2) && reader.GetBoolean(2);
+            }
+        }
+
+        ApplyVictimPlanFlags(keyed, flags);
+    }
+
+    /// <summary>Sets <c>HasVictimPlan</c> on every row whose (collection_time, deadlock_id) pair is in <paramref name="flags"/>.</summary>
+    internal static void ApplyVictimPlanFlags(IEnumerable<DeadlockReadRow> rows, IReadOnlyDictionary<(DateTime Time, long Id), bool> flags)
+    {
+        foreach (var row in rows)
+        {
+            if (row.DeadlockId is { } id && flags.TryGetValue((row.CollectionTime, id), out var has))
+            {
+                row.HasVictimPlan = has;
+            }
+        }
+    }
 
     /// <summary>The newest <paramref name="cap"/> deadlocks over the window — every row, or with
     /// <paramref name="graphOnly"/> only those carrying a graph. Callers detecting truncation pass
@@ -492,6 +698,7 @@ internal static class DarlingBlockingReader
                 VictimSqlText = reader.IsDBNull(3) ? "" : reader.GetString(3),
                 DeadlockGraphXml = reader.IsDBNull(4) ? "" : reader.GetString(4),
                 DatabaseName = reader.IsDBNull(5) ? null : reader.GetString(5),
+                DeadlockId = reader.IsDBNull(6) ? null : reader.GetInt64(6),
             });
         }
 
