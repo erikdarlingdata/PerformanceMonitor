@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Text;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Notifications;
@@ -39,8 +40,9 @@ internal sealed class OpenedWebhooks
 /// Opens the sealed webhook values the store holds (#5366): the Teams, Slack and generic URLs, the PagerDuty routing key and
 /// the generic headers, on the notification row and on each route. A value that is not sealed (a legacy one) is used as
 /// stored. A sealed value that will not open turns its channel off, and the failure says so in the channel's health text;
-/// nothing else about the channel's other values changes. A route value that will not open is left empty, which makes that
-/// route inherit the settings row's destination for the channel, as any route with no destination does.
+/// nothing else about the channel's other values changes. A route value that will not open turns that channel off for
+/// that route (see <see cref="NotificationRoute.OffChannels"/>): its alerts are not sent to the settings row's destination
+/// instead.
 /// </summary>
 internal static class DarlingWebhookSecrets
 {
@@ -73,12 +75,18 @@ internal static class DarlingWebhookSecrets
         {
             var routeRow = PasswordBinding.WebhookRouteRow(route.RouteId);
             var where = $" of route {route.RouteId}";
+            var off = new List<string>();
+            var teams = OpenRouteValue(route.TeamsUrl, "teams", routeRow, stored.TeamsProxy, NotificationRouter.TeamsChannel, "Teams webhook URL" + where, ring, failures, off);
+            var slack = OpenRouteValue(route.SlackUrl, "slack", routeRow, stored.SlackProxy, NotificationRouter.SlackChannel, "Slack webhook URL" + where, ring, failures, off);
+            var generic = OpenRouteValue(route.GenericUrl, "generic", routeRow, stored.GenericProxy, NotificationRouter.GenericChannel, "generic webhook URL" + where, ring, failures, off);
+            var pagerDuty = OpenRouteValue(route.PagerDutyRoutingKey, "pagerduty", routeRow, stored.PagerDutyProxy, NotificationRouter.PagerDutyChannel, "PagerDuty routing key" + where, ring, failures, off);
             openedRoutes.Add(route with
             {
-                TeamsUrl = OpenValue(route.TeamsUrl, "teams", routeRow, stored.TeamsProxy, null, NotificationRouter.TeamsChannel, "Teams webhook URL" + where, ring, failures),
-                SlackUrl = OpenValue(route.SlackUrl, "slack", routeRow, stored.SlackProxy, null, NotificationRouter.SlackChannel, "Slack webhook URL" + where, ring, failures),
-                GenericUrl = OpenValue(route.GenericUrl, "generic", routeRow, stored.GenericProxy, null, NotificationRouter.GenericChannel, "generic webhook URL" + where, ring, failures),
-                PagerDutyRoutingKey = OpenValue(route.PagerDutyRoutingKey, "pagerduty", routeRow, stored.PagerDutyProxy, null, NotificationRouter.PagerDutyChannel, "PagerDuty routing key" + where, ring, failures),
+                TeamsUrl = teams,
+                SlackUrl = slack,
+                GenericUrl = generic,
+                PagerDutyRoutingKey = pagerDuty,
+                OffChannels = off.Count == 0 ? route.OffChannels : off,
             });
         }
 
@@ -89,12 +97,37 @@ internal static class DarlingWebhookSecrets
             opened.GenericUrl = "";
             for (var i = 0; i < openedRoutes.Count; i++)
             {
-                openedRoutes[i] = openedRoutes[i] with { GenericUrl = "" };
+                if (!string.IsNullOrWhiteSpace(routes[i].GenericUrl))
+                {
+                    openedRoutes[i] = openedRoutes[i] with { GenericUrl = "", OffChannels = WithChannel(openedRoutes[i].OffChannels, NotificationRouter.GenericChannel) };
+                }
             }
         }
 
         return new OpenedWebhooks(opened, openedRoutes, failures);
     }
+
+    /// <summary>One route value. A sealed value that will not open comes back empty and its channel is added to
+    /// <paramref name="off"/>, so the route sends nothing for that channel instead of inheriting the settings row's
+    /// destination.</summary>
+    private static string OpenRouteValue(
+        string stored, string slot, string row, string? proxy, string channel, string label,
+        IPasswordKeyRing ring, List<WebhookOpenFailure> failures, List<string> off)
+    {
+        var before = failures.Count;
+        var value = OpenValue(stored, slot, row, proxy, null, channel, label, ring, failures);
+        if (failures.Count > before)
+        {
+            off.Add(channel);
+        }
+
+        return value;
+    }
+
+    private static IReadOnlyCollection<string> WithChannel(IReadOnlyCollection<string>? existing, string channel) =>
+        existing is not null && existing.Contains(channel, StringComparer.Ordinal)
+            ? existing
+            : (existing ?? Array.Empty<string>()).Append(channel).ToList();
 
     /// <summary>One value: blank and legacy text are returned as stored, a sealed value is opened for its binding, and a
     /// sealed value that will not open comes back empty with a failure recorded.</summary>

@@ -71,7 +71,7 @@ public sealed class DarlingWebhookSecretsTests
     }
 
     [Fact]
-    public void ASealedTeamsUrlCopiedToARoute_DoesNotOpen_AndTheRouteInheritsTheParent()
+    public void ASealedTeamsUrlCopiedToARoute_DoesNotOpen_AndTheRouteSendsNothingToTeams()
     {
         using var key = PasswordPrivateKey.Generate();
         var sealedForSettings = Seal(key, TeamsUrl, "teams", "notification");
@@ -83,11 +83,75 @@ public sealed class DarlingWebhookSecretsTests
 
         Assert.Equal(TeamsUrl, settings.TeamsWebhookUrl);
         Assert.Equal("", settings.NotificationRoutes.Single().TeamsUrl);
+        /* The route's own Teams destination is off: the alert is not sent to the settings row's Teams URL instead (#5366). */
+        var decision = NotificationRouter.Resolve("High CPU", settings.NotificationRoutes, settings);
+        Assert.False(decision.Teams.IsDelivered);
+        Assert.Null(decision.Teams.Destination);
         var problem = Assert.Single(settings.WebhookChannelProblems);
         Assert.Equal(
             "The Teams webhook URL of route 3 could not be opened: it was saved for a different place or proxy, or was changed. Enter it again in Settings.",
             problem);
         Assert.DoesNotContain("example.test", problem, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ARouteValueThatWillNotOpen_TurnsOffOnlyThatChannelOfThatRoute()
+    {
+        using var key = PasswordPrivateKey.Generate();
+        var config = new DarlingConfig();
+        config.Webhooks.TeamsUrl = Seal(key, TeamsUrl, "teams", "notification");
+        config.Webhooks.SlackUrl = "https://example.test/slack-parent-not-real";
+        config.NotificationRoutes = new[]
+        {
+            new NotificationRoute(3, "High CPU", Seal(key, TeamsUrl, "teams", "notification"), "", "", "", "", true),
+            new NotificationRoute(4, "Low Memory", "", "https://example.test/slack-route-not-real", "", "", "", true),
+        };
+
+        var settings = Settings(config, key);
+
+        var off = NotificationRouter.Resolve("High CPU", settings.NotificationRoutes, settings);
+        Assert.False(off.Teams.IsDelivered);
+        /* A channel the route never set still inherits the parent. */
+        Assert.Equal("https://example.test/slack-parent-not-real", off.Slack.Destination);
+        /* The other route is unaffected, and a metric the broken route does not match still reaches the parent. */
+        Assert.Equal("https://example.test/slack-route-not-real", NotificationRouter.Resolve("Low Memory", settings.NotificationRoutes, settings).Slack.Destination);
+        Assert.Equal(TeamsUrl, NotificationRouter.Resolve("Low Memory", settings.NotificationRoutes, settings).Teams.Destination);
+    }
+
+    [Fact]
+    public void ARouteValueThatWillNotOpen_IsLoggedOnce_AcrossRepeatedReads()
+    {
+        using var key = PasswordPrivateKey.Generate();
+        var config = new DarlingConfig();
+        config.NotificationRoutes = new[]
+        {
+            new NotificationRoute(3, "High CPU", Seal(key, TeamsUrl, "teams", "notification"), "", "", "", "", true),
+        };
+        var logger = new CapturingLogger();
+        var settings = new DarlingAlertSettings(config, logger, DarlingPasswordKey.FromPrivateKey(key));
+
+        _ = settings.NotificationRoutes;
+        _ = settings.NotificationRoutes;
+        _ = settings.WebhookChannelProblems;
+
+        Assert.Equal(1, logger.Errors.Count(m => m.Contains("route 3", StringComparison.Ordinal)));
+    }
+
+    private sealed class CapturingLogger : Microsoft.Extensions.Logging.ILogger
+    {
+        public System.Collections.Generic.List<string> Errors { get; } = new();
+
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+
+        public bool IsEnabled(Microsoft.Extensions.Logging.LogLevel logLevel) => true;
+
+        public void Log<TState>(Microsoft.Extensions.Logging.LogLevel logLevel, Microsoft.Extensions.Logging.EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
+        {
+            if (logLevel == Microsoft.Extensions.Logging.LogLevel.Error)
+            {
+                Errors.Add(formatter(state, exception));
+            }
+        }
     }
 
     [Fact]
