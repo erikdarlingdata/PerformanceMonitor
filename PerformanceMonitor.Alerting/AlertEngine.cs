@@ -3251,6 +3251,13 @@ public sealed class AlertEngine
     /// </summary>
     private async Task<AlertDelivery?> FireAsync(AlertOutcome outcome, CancellationToken ct)
     {
+        /* #5320 (part of #4348): the statement filter runs on every fire, before the log line and before any
+           deliverer sees the outcome. Mute rules were evaluated by the family on the RAW text and arrive as
+           outcome.Muted, so a rule keyed on a statement still matches; only what leaves the process (the log,
+           the channels, the history row) is filtered. Both deliverers re-derive their text from the context, so
+           the context is rewritten, not just DetailText. */
+        outcome = AlertStatementFilter.Apply(outcome);
+
         _logger?.LogWarning(
             "{Line}",
             AlertFiringLog.Fired(
