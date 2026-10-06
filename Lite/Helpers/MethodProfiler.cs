@@ -70,8 +70,17 @@ public static class MethodProfiler
         [CallerFilePath] string filePath = "",
         [CallerLineNumber] int lineNumber = 0)
     {
-        using var _ = StartTiming(context, memberName, filePath, lineNumber);
-        return await operation();
+        using var timing = StartTiming(context, memberName, filePath, lineNumber);
+        try
+        {
+            return await operation();
+        }
+        catch (OperationCanceledException)
+        {
+            /* #5371: an operation a newer request stopped on purpose is not a slow method. */
+            timing.Cancel();
+            throw;
+        }
     }
 
     /// <summary>
@@ -84,8 +93,16 @@ public static class MethodProfiler
         [CallerFilePath] string filePath = "",
         [CallerLineNumber] int lineNumber = 0)
     {
-        using var _ = StartTiming(context, memberName, filePath, lineNumber);
-        await operation();
+        using var timing = StartTiming(context, memberName, filePath, lineNumber);
+        try
+        {
+            await operation();
+        }
+        catch (OperationCanceledException)
+        {
+            timing.Cancel();
+            throw;
+        }
     }
 
     internal static void LogSlowMethod(
@@ -170,11 +187,28 @@ public sealed class MethodTimingContext : IDisposable
 
     public double ElapsedMs => _stopwatch.Elapsed.TotalMilliseconds;
 
+    private bool _cancelled;
+
+    /// <summary>
+    /// Marks the timed operation as one a newer request stopped on purpose (#5371): disposing it then logs nothing, because
+    /// a superseded read is not a slow method and the read itself logs its own one-line "cancelled after N ms" note.
+    /// </summary>
+    internal void Cancel() => _cancelled = true;
+
+    /// <summary>Whether disposing this context will write a SLOW METHOD block when the operation passed the threshold.</summary>
+    internal bool LogsOnDispose => !_cancelled;
+
     public void Dispose()
     {
         if (_disposed) return;
         _disposed = true;
         _stopwatch.Stop();
+
+        if (_cancelled)
+        {
+            GC.SuppressFinalize(this);
+            return;
+        }
 
         MethodProfiler.LogSlowMethod(
             _startTime, DateTime.Now, _stopwatch.Elapsed.TotalMilliseconds,

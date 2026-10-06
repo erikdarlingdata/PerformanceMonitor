@@ -17,25 +17,28 @@ using PerformanceMonitorLite.Helpers;
 namespace PerformanceMonitorLite.Services;
 
 /// <summary>
-/// Where one store read spent its time (#5371): the read-lock wait, the connection open, the statement prepare, the
-/// statement execute and the result drain, each timed apart. The field trace of a 248 s Collection Health read could not
-/// say which of those it was, and the answer decides the fix: a lock wait is a writer parked ahead of us, an execute is
-/// the engine's own work (or its pool and threads shared with an archive scan), a drain is the client side.
+/// Where one store read spent its time (#5371): the read-lock wait, the connection open, the statement execute and the row
+/// read, each timed apart. The field trace of a 248 s Collection Health read could not say which of those it was, and the
+/// answer decides the fix: a lock wait is a writer parked ahead of us, an execute is the engine's own work (or its pool and
+/// threads shared with an archive scan), a row read is the client side.
+///
+/// <para>There is no separate "prepare" phase. DuckDB.NET's <c>Prepare()</c> parses and binds nothing (0.09 ms on the
+/// shipped statement, which then took about 25 ms to execute), so the statement's parse, bind and plan cost, which grows
+/// with the number of archive files, is part of the execute phase, and the log line says so.</para>
 ///
 /// <para>The total is the SUM of the phases, which cover the read end to end, so a test can hand it fake phase times and
 /// get a deterministic total. <see cref="Report"/> logs one <c>SLOW METHOD</c> block, through the profiler's own writer
-/// and under the profiler's own threshold, carrying all five numbers in its context line. A read under the threshold logs
-/// nothing.</para>
+/// and under the profiler's own threshold, carrying all four numbers in its context line. A read under the threshold logs
+/// nothing. A read a newer request superseded logs one plain line saying so instead.</para>
 /// </summary>
 internal sealed class ReadPhaseTimer
 {
     internal const string LockWait = "lock wait";
     internal const string Open = "open";
-    internal const string Prepare = "prepare";
     internal const string Execute = "execute";
-    internal const string Drain = "drain";
+    internal const string RowRead = "row read";
 
-    private static readonly string[] s_order = { LockWait, Open, Prepare, Execute, Drain };
+    private static readonly string[] s_order = { LockWait, Open, Execute, RowRead };
 
     private readonly Dictionary<string, double> _phasesMs = new();
     private readonly DateTime _startedAt = DateTime.Now;
@@ -61,7 +64,8 @@ internal sealed class ReadPhaseTimer
         }
     }
 
-    /// <summary>The five numbers, in read order, as one line: <c>lock wait 12 ms, open 3 ms, ...</c>.</summary>
+    /// <summary>The four numbers, in read order, as one line: <c>lock wait 12 ms, open 3 ms, execute 900 ms (prepare and
+    /// bind included), row read 2 ms</c>.</summary>
     internal string Describe()
     {
         var sb = new StringBuilder();
@@ -69,6 +73,7 @@ internal sealed class ReadPhaseTimer
         {
             if (sb.Length > 0) sb.Append(", ");
             sb.Append(CultureInfo.InvariantCulture, $"{phase} {PhaseMs(phase):F0} ms");
+            if (phase == Execute) sb.Append(" (prepare and bind included)");
         }
         return sb.ToString();
     }
@@ -76,11 +81,29 @@ internal sealed class ReadPhaseTimer
     /// <summary>
     /// Logs the read as a slow method when its total passes the profiler's threshold. <paramref name="sink"/> replaces the
     /// profiler's writer (a test's seam); it is called only for a read that passed the threshold.
+    ///
+    /// <para>A <paramref name="cancelled"/> read, one a newer request stopped on purpose, is not a slow method: it logs ONE
+    /// plain line, <c>cancelled after N ms (superseded)</c> with the phases it got through, and no <c>SLOW METHOD</c> block.
+    /// It still has to pass the threshold, since a read cut off in a few milliseconds is not worth a line. The sink, when
+    /// given, receives that same line as its context.</para>
     /// </summary>
-    internal void Report(string readName, Action<string, double, string>? sink = null, [CallerFilePath] string filePath = "", [CallerLineNumber] int lineNumber = 0)
+    internal void Report(string readName, Action<string, double, string>? sink = null, bool cancelled = false, [CallerFilePath] string filePath = "", [CallerLineNumber] int lineNumber = 0)
     {
         var total = TotalMs;
         if (total < MethodProfiler.ThresholdMs) return;
+
+        if (cancelled)
+        {
+            var line = $"{readName} cancelled after {total.ToString("F0", CultureInfo.InvariantCulture)} ms (superseded); {Describe()}";
+            if (sink is not null)
+            {
+                sink(readName, total, line);
+                return;
+            }
+
+            AppLogger.Info("ReadPhaseTimer", line);
+            return;
+        }
 
         var context = $"{readName} phases: {Describe()}";
         if (sink is not null)

@@ -913,7 +913,7 @@ VALUES ({_nextId++}, {Literal(collectedAtUtc)}, {ServerId}, '{ServerName}', {Lit
     /// </summary>
     [Theory]
     [InlineData("private async System.Threading.Tasks.Task RefreshCollectionHealthAsync(", "ServerTab.Refresh.cs", "CollectionLog", "CollectionLogWindowTruncatedBanner",
-        "collectionLogTask.Result, LocalDataService.CollectionLogGridCap, row => row.CollectionTime")]
+        "collectionLogTask.Result, LocalDataService.CollectionLogGridCap, row => row.CollectionTime, ct: ct")]
     [InlineData("private async Task RefreshLongQueriesAsync(", "ServerTab.LongQueries.cs", "LongQueryCompletions", "LongQueriesWindowTruncatedBanner",
         "task.Result, LocalDataService.LongQueryGridCap, LongQueryRowTimeUtc")]
     public void CappedSurfaces_RefreshTheirBanner_ThroughTheCapAwareStep_AfterTheRowsAreBound(
@@ -1188,8 +1188,8 @@ VALUES ({_nextId++}, {Literal(collectedAtUtc)}, {ServerId}, '{ServerName}', {Lit
     public void SurfacesWithoutANotice_KeepTheShapeThatNeedsNone()
     {
         var health = File.ReadAllText(RepoFile("Lite", "Services", "LocalDataService.CollectionHealth.cs"));
-        Assert.Contains("public async Task<List<CollectorHealthRow>> GetCollectionHealthAsync(int serverId, bool allowMemo = false, CancellationToken cancellationToken = default)", health, StringComparison.Ordinal);
-        Assert.Contains("GetCollectionHealthAsync(_serverId, allowMemo: true, cancellationToken: ct)", File.ReadAllText(ControlsFile("ServerTab.Refresh.cs")), StringComparison.Ordinal);
+        Assert.Contains("public async Task<List<CollectorHealthRow>> GetCollectionHealthAsync(int serverId, bool allowMemo = false, CancellationToken cancellationToken = default, TimeSpan? memoLifetime = null)", health, StringComparison.Ordinal);
+        Assert.Contains("GetCollectionHealthAsync(_serverId, allowMemo: true, cancellationToken: ct, memoLifetime: TimeSpan.FromSeconds(App.AutoRefreshIntervalSeconds))", File.ReadAllText(ControlsFile("ServerTab.Refresh.cs")), StringComparison.Ordinal);
 
         /* The Duration Trends chart is no longer pinned here: it reads its own buckets over the whole range, and the tests
            below (DurationTrends_*) say what it draws. */
@@ -1302,9 +1302,9 @@ WHERE collector_name = 'wait_stats' AND collection_time = (SELECT MIN(collection
         var code = StripComments(File.ReadAllText(ControlsFile("ServerTab.Refresh.cs")).Replace("\r\n", "\n"));
         var start = code.IndexOf("private async System.Threading.Tasks.Task RefreshCollectionHealthAsync(", StringComparison.Ordinal);
         Assert.True(start >= 0);
-        var body = code[start..code.IndexOf("private static async Task<List<T>> SafeQueryAsync<T>", start, StringComparison.Ordinal)];
+        var body = code[start..code.IndexOf("internal static async Task<List<T>> SafeQueryAsync<T>", start, StringComparison.Ordinal)];
 
-        Assert.Contains("_dataService.GetCollectorDurationTrendAsync(_serverId, hoursBack, fromDate, toDate)", body, StringComparison.Ordinal);
+        Assert.Contains("_dataService.GetCollectorDurationTrendAsync(_serverId, hoursBack, fromDate, toDate, cancellationToken: ct)", body, StringComparison.Ordinal);
         Assert.Contains("Task.WhenAll(collectionHealthTask, collectionLogTask, collectorDurationTask)", body, StringComparison.Ordinal);
         Assert.Contains("UpdateCollectorDurationChart(collectorDurationTask.Result, hoursBack, fromDate, toDate)", body, StringComparison.Ordinal);
         Assert.DoesNotContain("UpdateCollectorDurationChart(collectionLogTask", body, StringComparison.Ordinal);
