@@ -207,13 +207,15 @@ public class SensitiveStatementAutoParamTests
     public void TokenWithNoParameterListEntry_FallsBackToTheQuestionMark_AndACredentialNameStillNames()
     {
         const string text = "(@1 nvarchar(4000))UPDATE [dbo].[t] set [password] = @1";
-        string xml = Plan(Stmt("StmtSimple", text));
+        var stmt = Stmt("StmtSimple", text);
+        stmt.Element(Ns + "QueryPlan")!.Add(new XElement(Ns + "ScalarOperator", new XAttribute("ScalarString", "[plain-text]")));
+        string xml = Plan(stmt);
 
         string? result = Run(xml);
 
-        // [password] = N'?' is still named, so the scope opens; the statement text is kept
+        // [password] = N'?' is still named, so the scope opens (the ScalarString inside is withheld); the text is kept
         Assert.NotNull(result);
-        Assert.NotSame(xml, result);
+        Assert.Equal(P, Attrs(result!, "ScalarString").Single());
         Assert.Equal(text, OnlyStatementText(result!));
     }
 
