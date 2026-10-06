@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Text;
 using System.Text.RegularExpressions;
 using Xunit;
 using static Darling.Tests.RepoFile;
@@ -36,11 +37,15 @@ namespace Darling.Tests;
 /// back in), or when its source is already inside the scratch tree (the memory-pressure, perfmon, perfmon-multi,
 /// server-trends, waits and waits-activity-trends harnesses copy the real <c>charts.js</c> to <c>charts-real.js</c> before
 /// they write a wrapper over <c>charts.js</c>). The js folder is whatever name the harness binds straight from
-/// <c>process.argv</c>: the key is where the copy's source comes from, not what it is called. The scratch folder is still
-/// recognised by its name, <c>scratch</c>. A harness that makes a scratch folder (<c>mkdtempSync</c>) must contain the
-/// whole-tree copy, and every stand-in module it writes into the scratch folder (a <c>.js</c> or <c>.mjs</c> path) must come
-/// after EVERY whole-tree copy, because a copy overwrites what is already there. The analysis is text only, so it does not
-/// run Node and it does not need the harnesses to be runnable on the machine that builds the tests.</para>
+/// <c>process.argv</c>: the key is where the copy's source comes from, not what it is called. The scratch folder is found the
+/// same way: it is whatever name the harness binds from <c>mkdtempSync</c> (also when the call is wrapped in
+/// <c>realpathSync</c> or <c>path.resolve</c>), plus every name bound from <c>path.join(&lt;a scratch name&gt;, ...)</c>, which
+/// is a path inside it. <c>scratch</c> stays a scratch name when nothing binds it, so a harness that makes its folder in a helper
+/// function keeps the verdict it had. A harness that makes a scratch folder (<c>mkdtempSync</c>) must contain the whole-tree
+/// copy, and every stand-in module it writes into the scratch folder (a <c>.js</c> or <c>.mjs</c> path, written directly or
+/// through a name bound from one) must come after EVERY whole-tree copy, because a copy overwrites what is already there. The
+/// analysis is text only, so it does not run Node and it does not need the harnesses to be runnable on the machine that builds
+/// the tests.</para>
 /// </summary>
 public sealed class WebHarnessJsTreeCopyTests
 {
@@ -54,7 +59,17 @@ public sealed class WebHarnessJsTreeCopyTests
 
     private static readonly Regex FilterOption = new(@"\bfilter\b", RegexOptions.Compiled, TimeSpan.FromSeconds(5));
 
-    private static readonly Regex InsideScratch = new(@"\bscratch\b", RegexOptions.Compiled, TimeSpan.FromSeconds(5));
+    /// <summary>The call that makes a scratch folder, bound to a name: <c>const tmp = fs.mkdtempSync(...)</c>, the same call wrapped
+    /// in <c>realpathSync</c> or <c>path.resolve</c>, or <c>mkdtempSync</c> imported by name. Group <c>name</c> is the folder.</summary>
+    private static readonly Regex FolderBinding = new(
+        @"\b(?:const|let|var)\s+(?<name>[A-Za-z_$][\w$]*)\s*=\s*(?:(?:fs\.)?realpathSync(?:\.native)?\s*\(\s*|path\.resolve\s*\(\s*)*(?:fs\.)?mkdtempSync\s*\(",
+        RegexOptions.Compiled, TimeSpan.FromSeconds(5));
+
+    /// <summary>A name bound from a path built on another name: <c>const pages = path.join(tmp, "pages")</c>. Group <c>name</c> is the
+    /// bound name, <c>base</c> the name the path is built on, and <c>call</c> and <c>open</c> locate the call.</summary>
+    private static readonly Regex PathBinding = new(
+        @"\b(?:const|let|var)\s+(?<name>[A-Za-z_$][\w$]*)\s*=\s*(?<call>path\.(?:join|resolve))\s*(?<open>\()\s*(?<base>[A-Za-z_$][\w$]*)\s*[,)]",
+        RegexOptions.Compiled, TimeSpan.FromSeconds(5));
 
     private static readonly Regex WriteCall = new(@"\bwriteFileSync\s*\(", RegexOptions.Compiled, TimeSpan.FromSeconds(5));
 
@@ -72,6 +87,10 @@ public sealed class WebHarnessJsTreeCopyTests
 
     private const string ScratchFolder = "const scratch = fs.mkdtempSync(path.join(os.tmpdir(), \"x-\"));\n";
 
+    /// <summary>The line that makes a scratch folder and binds it under <paramref name="name"/>, whatever the harness calls it.</summary>
+    private static string FolderMadeBy(string name) =>
+        "const " + name + " = fs.mkdtempSync(path.join(os.tmpdir(), \"x-\"));\n";
+
     /// <summary>
     /// Every harness copies the whole js tree, and none copies by name. On failure it names each file, the line and the call.
     /// </summary>
@@ -83,6 +102,7 @@ public sealed class WebHarnessJsTreeCopyTests
 
         var offenders = new List<string>();
         var copyingTheTree = 0;
+        var bindingTheFolder = 0;
         foreach (var file in harnesses)
         {
             var source = File.ReadAllText(file);
@@ -92,6 +112,11 @@ public sealed class WebHarnessJsTreeCopyTests
             if (CopiesWholeTree(source))
             {
                 copyingTheTree++;
+            }
+
+            if (new ScratchNames(source).Bound.Count > 0)
+            {
+                bindingTheFolder++;
             }
         }
 
@@ -108,6 +133,10 @@ public sealed class WebHarnessJsTreeCopyTests
         /* Not vacuous: the analysis has to recognise the allowed form in at least one real harness, or it would pass a tree
            whose every harness it simply failed to read. */
         Assert.True(copyingTheTree > 0, "no harness was recognised as copying the whole js tree, so this pin cannot be trusted");
+
+        /* The same for the scratch folder: at least one real harness must bind it from mkdtempSync in a form the analysis
+           recognises, or the order rule would read every harness through the fallback name alone. */
+        Assert.True(bindingTheFolder > 0, "no harness was recognised as binding its scratch folder from mkdtempSync, so this pin cannot be trusted");
     }
 
     /// <summary>
@@ -248,6 +277,178 @@ public sealed class WebHarnessJsTreeCopyTests
     }
 
     /// <summary>
+    /// The scratch folder is recognised by where it comes from, as the js folder is (#5279): it is the name the harness binds from
+    /// <c>mkdtempSync</c>, whatever the harness calls it. A by-name copy into a folder called <c>tmp</c> is flagged exactly as one
+    /// into <c>scratch</c> is, and the whole-tree copy that precedes it does not excuse it.
+    /// </summary>
+    [Theory]
+    [InlineData("scratch")]
+    [InlineData("tmp")]
+    [InlineData("work")]
+    [InlineData("$dir")]
+    public void AByNameCopyIntoTheFolder_IsFlagged_UnderAnyFolderName(string folder)
+    {
+        var source =
+            JsDirFromArgv + FolderMadeBy(folder) +
+            "fs.cpSync(jsDir, " + folder + ", { recursive: true });\n" +
+            "fs.copyFileSync(path.join(jsDir, \"util.js\"), path.join(" + folder + ", \"util.js\"));\n";
+
+        var violation = Assert.Single(Violations(source));
+        Assert.StartsWith("line 4:", violation);
+    }
+
+    /// <summary>
+    /// A stand-in written into the folder before the whole-tree copy is flagged under any folder name (#5279). The copy overwrites it
+    /// with the real module, whether the folder is called <c>scratch</c> or not.
+    /// </summary>
+    [Theory]
+    [InlineData("scratch")]
+    [InlineData("tmp")]
+    [InlineData("work")]
+    [InlineData("$dir")]
+    public void AStandInWrittenBeforeTheWholeTreeCopy_IsFlagged_UnderAnyFolderName(string folder)
+    {
+        var source =
+            JsDirFromArgv + FolderMadeBy(folder) +
+            "fs.writeFileSync(path.join(" + folder + ", \"charts.js\"), \"export const stub = 1;\\n\");\n" +
+            "fs.cpSync(jsDir, " + folder + ", { recursive: true });\n";
+
+        var violation = Assert.Single(Violations(source));
+        Assert.StartsWith("line 3:", violation);
+    }
+
+    /// <summary>
+    /// The correct pattern is clean under any folder name (#5279): the whole-tree copy, then the in-folder copy that keeps the real
+    /// <c>charts.js</c> as <c>charts-real.js</c>, then the stand-in. The in-folder copy is allowed because its source is inside the
+    /// folder, so the folder has to be recognised for the copy to pass.
+    /// </summary>
+    [Theory]
+    [InlineData("scratch")]
+    [InlineData("tmp")]
+    [InlineData("work")]
+    [InlineData("$dir")]
+    public void TheCorrectPattern_IsNotFlagged_UnderAnyFolderName(string folder)
+    {
+        var source =
+            JsDirFromArgv + FolderMadeBy(folder) +
+            "fs.cpSync(jsDir, " + folder + ", { recursive: true });\n" +
+            "fs.copyFileSync(path.join(" + folder + ", \"charts.js\"), path.join(" + folder + ", \"charts-real.js\"));\n" +
+            "fs.writeFileSync(path.join(" + folder + ", \"charts.js\"), \"export const stub = 1;\\n\");\n";
+
+        Assert.Empty(Violations(source));
+        Assert.True(CopiesWholeTree(source));
+    }
+
+    /// <summary>
+    /// A harness binds its folder from <c>mkdtempSync</c> however it spells the call: wrapped in <c>realpathSync</c> (three real
+    /// harnesses resolve the folder this way), wrapped in <c>path.resolve</c>, or imported by name (#5279).
+    /// </summary>
+    [Theory]
+    [InlineData("fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), \"x-\")))")]
+    [InlineData("fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), \"x-\")))")]
+    [InlineData("path.resolve(fs.mkdtempSync(path.join(os.tmpdir(), \"x-\")))")]
+    [InlineData("mkdtempSync(path.join(os.tmpdir(), \"x-\"))")]
+    public void AFolderMadeThroughAWrapperOrAnImport_IsRecognisedByItsBinding(string made)
+    {
+        var early =
+            JsDirFromArgv + "const tmp = " + made + ";\n" +
+            "fs.writeFileSync(path.join(tmp, \"charts.js\"), \"export const stub = 1;\\n\");\n" +
+            "fs.cpSync(jsDir, tmp, { recursive: true });\n";
+        var inOrder =
+            JsDirFromArgv + "const tmp = " + made + ";\n" +
+            "fs.cpSync(jsDir, tmp, { recursive: true });\n" +
+            "fs.copyFileSync(path.join(tmp, \"charts.js\"), path.join(tmp, \"charts-real.js\"));\n" +
+            "fs.writeFileSync(path.join(tmp, \"charts.js\"), \"export const stub = 1;\\n\");\n";
+
+        Assert.Single(Violations(early));
+        Assert.Empty(Violations(inOrder));
+    }
+
+    /// <summary>
+    /// A name bound from <c>path.join(&lt;the folder&gt;, ...)</c> is a path inside the folder (#5279). A copy that reads from it is an
+    /// in-folder copy, and a stand-in written through it (or through a name bound from it) is a stand-in, so the order rule sees it.
+    /// </summary>
+    [Theory]
+    [InlineData("fs.writeFileSync(path.join(tmp, \"charts.js\"), \"x\");")]
+    [InlineData("fs.writeFileSync(path.join(pages, \"charts.js\"), \"x\");")]
+    [InlineData("fs.writeFileSync(server, \"x\");")]
+    [InlineData("fs.writeFileSync(path.resolve(pages, \"stub.mjs\"), \"x\");")]
+    public void AStandInWrittenThroughAPathBoundFromTheFolder_IsFlaggedBeforeTheWholeTreeCopy(string write)
+    {
+        const string bindings =
+            "const pages = path.join(tmp, \"pages\");\n" +
+            "const server = path.join(pages, \"server.js\");\n";
+        var early =
+            JsDirFromArgv + FolderMadeBy("tmp") + bindings + write + "\n" +
+            "fs.cpSync(jsDir, tmp, { recursive: true });\n";
+        var late =
+            JsDirFromArgv + FolderMadeBy("tmp") + bindings +
+            "fs.cpSync(jsDir, tmp, { recursive: true });\n" + write + "\n";
+
+        Assert.Single(Violations(early));
+        Assert.Empty(Violations(late));
+    }
+
+    /// <summary>
+    /// A copy whose source is a name bound from <c>path.join(&lt;the folder&gt;, ...)</c> reads from inside the folder, so it is the
+    /// allowed in-folder copy. A name bound from <c>path.join</c> on the js folder is not, and stays a by-name copy (#5279).
+    /// </summary>
+    [Fact]
+    public void ACopyFromAPathBoundFromTheFolder_IsAnInFolderCopy_ButOneBoundFromTheJsFolderIsNot()
+    {
+        var inFolder =
+            JsDirFromArgv + FolderMadeBy("tmp") +
+            "fs.cpSync(jsDir, tmp, { recursive: true });\n" +
+            "const real = path.join(tmp, \"charts.js\");\n" +
+            "fs.copyFileSync(real, path.join(tmp, \"charts-real.js\"));\n";
+        var byName =
+            JsDirFromArgv + FolderMadeBy("tmp") +
+            "fs.cpSync(jsDir, tmp, { recursive: true });\n" +
+            "const real = path.join(jsDir, \"charts.js\");\n" +
+            "fs.copyFileSync(real, path.join(tmp, \"charts-real.js\"));\n";
+
+        Assert.Empty(Violations(inFolder));
+        Assert.Single(Violations(byName));
+    }
+
+    /// <summary>
+    /// Only a name bound from <c>mkdtempSync</c> (or from <c>path.join</c> on one) is the folder (#5279). A name the harness takes
+    /// from somewhere else, a name that only appears inside a string, and a property that happens to share the folder's name are
+    /// not it, so a copy of a js module out of any of them is still a by-name copy.
+    /// </summary>
+    [Theory]
+    [InlineData("const tmp = process.argv[3];\n", "fs.copyFileSync(path.join(tmp, \"util.js\"), path.join(work, \"util.js\"));")]
+    [InlineData("const tmp = path.join(os.tmpdir(), \"fixed\");\n", "fs.copyFileSync(path.join(tmp, \"util.js\"), path.join(work, \"util.js\"));")]
+    [InlineData("", "fs.copyFileSync(path.join(jsDir, \"work.js\"), path.join(work, \"work.js\"));")]
+    [InlineData("", "fs.copyFileSync(path.join(jsDir, opts.work), path.join(work, \"util.js\"));")]
+    public void ANameNotBoundFromMkdtempSync_IsNotTheFolder(string other, string copy)
+    {
+        var source =
+            JsDirFromArgv + other + FolderMadeBy("work") +
+            "fs.cpSync(jsDir, work, { recursive: true });\n" + copy + "\n";
+
+        Assert.Single(Violations(source));
+    }
+
+    /// <summary>
+    /// <c>scratch</c> stays a folder name when nothing binds it (#5279), as it was before the folder was found by its binding. A
+    /// harness that makes its folder in a helper function binds a different name inside the helper, and the stand-in order rule must
+    /// still see a write into <c>scratch</c> before the whole-tree copy.
+    /// </summary>
+    [Fact]
+    public void AFolderMadeInAHelper_KeepsTheNameScratch()
+    {
+        const string source =
+            JsDirFromArgv +
+            "function makeFolder() { const dir = fs.mkdtempSync(path.join(os.tmpdir(), \"x-\")); return dir; }\n" +
+            "const scratch = makeFolder();\n" +
+            "fs.writeFileSync(path.join(scratch, \"charts.js\"), \"export const stub = 1;\\n\");\n" +
+            "fs.cpSync(jsDir, scratch, { recursive: true });\n";
+
+        Assert.Single(Violations(source));
+    }
+
+    /// <summary>
     /// A harness that imports the shipped scripts in place, with no scratch folder and no copy, has nothing to flag.
     /// </summary>
     [Fact]
@@ -319,6 +520,7 @@ public sealed class WebHarnessJsTreeCopyTests
     {
         var found = new List<string>();
         var lastTreeCopy = -1;
+        var scratch = new ScratchNames(source);
 
         foreach (Match call in CopyCall.Matches(source))
         {
@@ -335,7 +537,7 @@ public sealed class WebHarnessJsTreeCopyTests
                 continue;
             }
 
-            if (InsideScratch.IsMatch(first))
+            if (scratch.Inside(first))
             {
                 continue;
             }
@@ -364,9 +566,14 @@ public sealed class WebHarnessJsTreeCopyTests
 
             var arguments = CallArguments(source, write.Index + write.Length - 1);
             var first = arguments is null ? string.Empty : FirstArgument(arguments);
-            if (InsideScratch.IsMatch(first) && ModuleTarget.IsMatch(first))
+
+            /* A name bound from path.join(<the folder>, ...) stands for that call, so a stand-in written through one is read by
+               the path it was built from. */
+            var target = scratch.PathOf(first);
+            if (scratch.Inside(target) && ModuleTarget.IsMatch(target))
             {
-                found.Add($"line {LineOf(source, write.Index)}: This line writes {first} before the whole-tree copy. The copy overwrites it with the real module. Write every stand-in module after the copy.");
+                var written = target == first ? first : $"{first} ({target})";
+                found.Add($"line {LineOf(source, write.Index)}: This line writes {written} before the whole-tree copy. The copy overwrites it with the real module. Write every stand-in module after the copy.");
             }
         }
 
@@ -413,6 +620,132 @@ public sealed class WebHarnessJsTreeCopyTests
             @"\b(?:const|let|var)\s+(?:\[[^\]]*(?<![\w$])" + escaped + @"(?![\w$])[^\]]*\]|" + escaped + @")\s*=\s*(?:path\.resolve\(\s*)?process\.argv\b",
             RegexOptions.None,
             TimeSpan.FromSeconds(5));
+    }
+
+    /// <summary>
+    /// The scratch folder as one harness spells it, found the way <see cref="TakenFromArgv"/> finds the js folder: by where it comes
+    /// from, not by what it is called (#5279). It is every name the harness binds from <c>mkdtempSync</c>, plus every name bound
+    /// from <c>path.join(&lt;a scratch name&gt;, ...)</c>, which is a path inside the folder (<c>const pages = path.join(tmp,
+    /// "pages")</c>), until no further name turns up. <c>scratch</c> is always one of them, as it was when the folder was found by
+    /// that name alone, so a harness that makes its folder in a helper function keeps the verdict it had.
+    /// </summary>
+    private sealed class ScratchNames
+    {
+        private readonly Regex _use;
+        private readonly Dictionary<string, string> _paths = new(StringComparer.Ordinal);
+
+        public ScratchNames(string source)
+        {
+            var bound = new HashSet<string>(StringComparer.Ordinal);
+            foreach (Match made in FolderBinding.Matches(source))
+            {
+                bound.Add(made.Groups["name"].Value);
+            }
+
+            Bound = bound;
+
+            var inside = new HashSet<string>(bound, StringComparer.Ordinal) { "scratch" };
+            bool grew;
+            do
+            {
+                grew = false;
+                foreach (Match path in PathBinding.Matches(source))
+                {
+                    var name = path.Groups["name"].Value;
+                    if (!inside.Contains(path.Groups["base"].Value) || !inside.Add(name))
+                    {
+                        continue;
+                    }
+
+                    var call = path.Groups["call"];
+                    var open = path.Groups["open"].Index;
+                    var arguments = CallArguments(source, open);
+                    if (arguments is not null)
+                    {
+                        _paths[name] = source.Substring(call.Index, open + arguments.Length + 2 - call.Index);
+                    }
+
+                    grew = true;
+                }
+            }
+            while (grew);
+
+            /* Not preceded by a word character or a dot (a property that shares the folder's name is not the folder), and not
+               followed by a word character (the name is the whole word). */
+            _use = new Regex(
+                @"(?<![\w$.])(?:" + string.Join("|", inside.Select(Regex.Escape)) + @")(?![\w$])",
+                RegexOptions.None,
+                TimeSpan.FromSeconds(5));
+        }
+
+        /// <summary>The names the harness binds from <c>mkdtempSync</c>, not counting the always-present <c>scratch</c>.</summary>
+        public IReadOnlyCollection<string> Bound { get; }
+
+        /// <summary>True when <paramref name="text"/> uses a scratch name as code. A name between quotes is not a use, so a module
+        /// that happens to be called like the folder (<c>path.join(jsDir, "work.js")</c>) is not taken for a path inside it.</summary>
+        public bool Inside(string text) => _use.IsMatch(WithoutStrings(text));
+
+        /// <summary>
+        /// What a path argument stands for: the <c>path.join(&lt;a scratch name&gt;, ...)</c> call a plain name was bound from, or
+        /// the argument itself when it is not such a name.
+        /// </summary>
+        public string PathOf(string argument) => _paths.TryGetValue(argument, out var call) ? call : argument;
+    }
+
+    /// <summary>
+    /// The text with the inside of every string literal emptied, so a name that only appears between quotes is not taken for a use of
+    /// a variable. A template literal keeps what is inside its <c>${...}</c>, because that part is code.
+    /// </summary>
+    private static string WithoutStrings(string text)
+    {
+        var code = new StringBuilder(text.Length);
+        var quote = '\0';
+        for (var i = 0; i < text.Length; i++)
+        {
+            var c = text[i];
+            if (quote == '\0')
+            {
+                code.Append(c);
+                if (c is '"' or '\'' or '`')
+                {
+                    quote = c;
+                }
+
+                continue;
+            }
+
+            if (c == '\\')
+            {
+                i++;
+            }
+            else if (c == quote)
+            {
+                quote = '\0';
+                code.Append(c);
+            }
+            else if (quote == '`' && c == '$' && i + 1 < text.Length && text[i + 1] == '{')
+            {
+                var depth = 0;
+                var end = i + 1;
+                for (; end < text.Length; end++)
+                {
+                    if (text[end] == '{')
+                    {
+                        depth++;
+                    }
+                    else if (text[end] == '}' && --depth == 0)
+                    {
+                        break;
+                    }
+                }
+
+                var inner = text.Substring(i + 2, Math.Max(0, end - i - 2));
+                code.Append(' ').Append(WithoutStrings(inner)).Append(' ');
+                i = end;
+            }
+        }
+
+        return code.ToString();
     }
 
     /// <summary>The text between the parentheses of the call whose opening parenthesis is at <paramref name="open"/>,
