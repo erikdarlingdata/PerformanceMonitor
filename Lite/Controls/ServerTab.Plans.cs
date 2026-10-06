@@ -629,8 +629,8 @@ public partial class ServerTab : UserControl
             var connStr = _credentialResolver.GetConnectionString(_server);
             foreach (var f in frames)
             {
-                planXml = await LocalDataService.FetchPlanBySqlHandleAsync(
-                    connStr, row.DatabaseName, f.SqlHandle, f.StmtStart, f.StmtEnd);
+                planXml = LivePlanDisplay.Filter(await LocalDataService.FetchPlanBySqlHandleAsync(
+                    connStr, row.DatabaseName, f.SqlHandle, f.StmtStart, f.StmtEnd));
                 if (!string.IsNullOrEmpty(planXml)) break;
             }
         }
@@ -721,8 +721,8 @@ public partial class ServerTab : UserControl
             var connStr = _credentialResolver.GetConnectionString(_server);
             foreach (var f in frames)
             {
-                planXml = await LocalDataService.FetchPlanBySqlHandleAsync(
-                    connStr, row.DatabaseName, f.SqlHandle, f.StmtStart, f.StmtEnd);
+                planXml = LivePlanDisplay.Filter(await LocalDataService.FetchPlanBySqlHandleAsync(
+                    connStr, row.DatabaseName, f.SqlHandle, f.StmtStart, f.StmtEnd));
                 if (!string.IsNullOrEmpty(planXml)) break;
             }
         }

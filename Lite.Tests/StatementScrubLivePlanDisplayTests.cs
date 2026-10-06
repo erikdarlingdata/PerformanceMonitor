@@ -167,7 +167,7 @@ public sealed class StatementScrubLivePlanDisplayTests
     }
 
     private static readonly Regex LiveFetchCall = new(
-        @"LocalDataService\s*\.\s*Fetch(?:Query|Procedure|QueryStore)Plan\w*\s*\(",
+        @"LocalDataService\s*\.\s*Fetch\w*Plan\w*\s*\(",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
     private static readonly Regex Wrapped = new(
@@ -216,10 +216,33 @@ public sealed class StatementScrubLivePlanDisplayTests
             }
         }
 
-        /* A scan that found nothing would pass vacuously: the display sites are in these six files. */
-        Assert.True(sites >= 16, "expected at least 16 live plan fetch call sites, found " + sites);
+        /* A scan that found nothing would pass vacuously: the display sites are in these six files. The pattern takes any
+           fetch-a-plan name (the by-sql_handle fetch the blocked-process and deadlock actions use included, #5320), so a
+           fetch added under a new name fails here until it is wrapped. */
+        Assert.True(sites >= 18, "expected at least 18 live plan fetch call sites, found " + sites);
         Assert.Equal(6, files.Count);
         Assert.Empty(problems);
+    }
+
+    /// <summary>
+    /// #5320: a deadlock graph or blocked process report the filter withheld whole is the marker, not XML. The shared
+    /// <c>FileSaveHelper.SaveXmlToFile</c> (the one save path for both reports) asks the guard before it opens the save
+    /// dialog, so the marker is never written to an <c>.xml</c> file and the user is told why.
+    /// </summary>
+    [Fact]
+    public void SaveXmlToFile_RefusesAWithheldReportBeforeTheSaveDialog_AndLitesDownloadsUseIt()
+    {
+        var helper = File.ReadAllText(Path.Combine(RepoRoot(), "PerformanceMonitor.Ui", "FileSaveHelper.cs"));
+        var start = helper.IndexOf("public static void SaveXmlToFile(", StringComparison.Ordinal);
+        Assert.True(start >= 0, "SaveXmlToFile not found");
+        var dialog = helper.IndexOf("new SaveFileDialog", start, StringComparison.Ordinal);
+        var guard = helper.IndexOf("WithheldPlanGuard.RefuseSave(xml)", start, StringComparison.Ordinal);
+        Assert.True(guard >= 0 && dialog >= 0 && guard < dialog, "SaveXmlToFile must call WithheldPlanGuard.RefuseSave(xml) before it opens the dialog");
+
+        var plans = File.ReadAllText(Path.Combine(RepoRoot(), "Lite", "Controls", "ServerTab.Plans.cs"));
+        Assert.Contains("SaveXmlToFile(row.DeadlockGraphXml", plans, StringComparison.Ordinal);
+        Assert.Contains("SaveXmlToFile(row.BlockedProcessReportXml", plans, StringComparison.Ordinal);
+        Assert.DoesNotContain("File.WriteAllText", plans, StringComparison.Ordinal);
     }
 
     private static void OnStaThread(Action body)
