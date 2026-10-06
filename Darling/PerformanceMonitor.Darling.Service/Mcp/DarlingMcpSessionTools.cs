@@ -359,14 +359,28 @@ public sealed class DarlingMcpSessionTools
     }
 
     [McpServerTool(Name = "get_waiting_tasks"), Description("Gets recently captured waiting tasks — queries that were actively waiting on a resource at collection time — NEWEST CAPTURE FIRST, longest wait first within a capture. Shows session ID, wait type, duration, blocking session, and database. Complements get_wait_stats by showing individual waiting queries rather than aggregated stats. <<GUIDE>> THE PAGE IS BOUNDED BY limit, NOT BY hours_back: tasks_returned is how many rows you got, truncated says the window held more than limit, and oldest_returned_collection_time / newest_returned_collection_time bound the page — under newest-first ordering the oldest stamp IS how far back this read reached, and one busy capture can fill the whole page by itself. Raise limit or narrow hours_back when truncated is true. When the store did not cover the whole window, effective_start, window_truncated and truncation_note say where its data starts.")]
-    public static async Task<string> GetWaitingTasks(
+    public static Task<string> GetWaitingTasks(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history. Default 1.")] int hours_back = 1,
         [Description("Maximum rows to return, newest capture first. Default 30. This is what bounds the page — read truncated to know whether the window held more.")] int limit = 30,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        [Description("Limit to one database. Omit for all databases.")] string? database_name = null,
         ILogger? logger = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) =>
+        GetWaitingTasks(postgres, server_name, hours_back, limit, DatabaseFilter.One(database_name), as_of, logger, cancellationToken);
+
+    /// <summary>
+    /// #5244: <see cref="GetWaitingTasks(NpgsqlDataSource,string,int,int,string,ILogger,CancellationToken)"/> over a SET of
+    /// databases. Snapshot rows: the list limits which rows are the population and the cap applies after it, so the page is the newest
+    /// <paramref name="limit"/> of the chosen databases. Every one-name consumer on the empty path is list-aware: a filtered miss still
+    /// asks whether the collector ever ran (so "never collected" stays <c>unavailable</c>, never an <c>empty</c> about databases nobody
+    /// looked at) and otherwise says the CHOSEN databases had none, not that nothing was captured; the echoed <c>database_name</c> is the
+    /// name for one database and "the chosen databases" for two or more.
+    /// </summary>
+    internal static async Task<string> GetWaitingTasks(
+        NpgsqlDataSource postgres, string? server_name, int hours_back, int limit, DatabaseFilter databases, string? as_of,
+        ILogger? logger = null, CancellationToken cancellationToken = default)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
@@ -382,13 +396,23 @@ public sealed class DarlingMcpSessionTools
             /* #3541 A3: the caller's limit + 1 as the fetch, the extra row as the observed truncation
                signal. The reader's LIMIT 500 was invisible, and the envelope stated no bound at all. */
             var rows = await DarlingSessionReader.GetWaitingTasksAsync(
-                postgres, resolved.ServerId, now.AddHours(-hours_back), now, limit + 1, cancellationToken);
+                postgres, resolved.ServerId, now.AddHours(-hours_back), now, limit + 1, databases, cancellationToken);
 
             /* #4966: the window floor, as get_active_queries writes it (see there). */
             var windowStart = now.AddHours(-hours_back);
             var notice = await DarlingMcpWindowNotice.ReadAsync(
                 () => DarlingMcpWindowNotice.Probe(postgres, "waiting_tasks", resolved.ServerName, windowStart, now, cancellationToken),
                 windowStart, now, "waiting_tasks", emptyAnswer: rows.Count == 0, logger: logger, cancellationToken: cancellationToken);
+            /* #5244: a filtered miss is not a collection miss, but it is not a verdict on databases nobody read either: the collector
+               question is asked first (never collected stays unavailable), and only then does the answer say the CHOSEN databases had
+               none. The unfiltered sentence below is the one it always was. */
+            if (rows.Count == 0 && !databases.IsAll)
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "waiting_tasks", cancellationToken)
+                    ?? McpHelpers.Status(
+                        "empty",
+                        $"No waiting tasks captured in the specified time range{DarlingMcpBlockingTools.ForChosenDatabases(databases)}. "
+                        + "The filter was applied in SQL over the whole window, so waiting tasks of other databases may well exist; drop it to see what the window holds.",
+                        notice.AsHints());
             if (rows.Count == 0)
                 return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "waiting_tasks", cancellationToken)
                     ?? McpHelpers.Status("empty", "No waiting tasks captured in the specified time range.", notice.AsHints());
@@ -417,6 +441,9 @@ public sealed class DarlingMcpSessionTools
                 effective_start = notice.EffectiveStart,
                 window_truncated = notice.WindowTruncated,
                 truncation_note = notice.TruncationNote,
+                /* #5244: the name for one database, "the chosen databases" for two or more, null for all. After the three notice
+                   keys, which stay right behind hours_back. */
+                database_name = databases.Describe(),
                 tasks_returned = page.Count,
                 truncated,
                 /* #4966: where the page's rows stop describes the window the page covers, so it prints like

@@ -113,11 +113,13 @@ public sealed class ComparisonWindowUtcTests
             $"the adjacent banner call uses (found {pairedCalls.Count}) -- a divergent tuple means the comparison " +
             "and the banner could disagree about the window again (#4284).");
 
-        // CompareToCombo_SelectionChanged routes its three comparison refreshes through the same
-        // GetQueriesTabWindowUtc tuple the grid reads use, not a bare DateTime.UtcNow/fromDate pair.
-        Assert.Contains(
-            "var (currentStart, currentEnd) = LocalDataService.GetQueriesTabWindowUtc(hoursBack, fromDate, toDate);",
-            comparisonSource);
+        // #5371: CompareToCombo_SelectionChanged no longer builds a window of its own: it asks the refresh
+        // coordinator for the visible tab, whose reads are the six Refresh.cs calls pinned above (the SAME
+        // GetQueriesTabWindowUtc tuple as the grid beside each). So nothing in the handler may call a comparison
+        // read with a window it made up (a bare DateTime.UtcNow/fromDate pair).
+        Assert.False(Regex.IsMatch(comparisonSource, @"Refresh(?:QueryStats|ProcStats|QueryStore)ComparisonAsync\((?!DateTime currentStart)"),
+            "ServerTab.Comparison.cs calls a comparison read directly (#5371): it must go through the coordinator's pass, " +
+            "which reads each comparison over the grid's own UTC window (#4284).");
     }
 
     private static string ControlsFile(string name) => Path.Combine(ControlsDir(), name);

@@ -135,7 +135,7 @@ public sealed class ServerAddViewerRoleLiveTests : IDisposable
     }
 
     private const string OneServer =
-        "[{\"host\":\"added-by-viewer\",\"auth\":\"SQL\",\"username\":\"monitor\",\"password\":\"env:SOME_SECRET_VARIABLE\"}]";
+        "[{\"host\":\"added-by-viewer\",\"auth\":\"SQL\",\"username\":\"monitor\",\"password\":\"Viewer-Add-Pw-1\"}]";
 
     [Fact]
     public async Task TheShippedViewerGrants_LetTheAddCoreInsertAServer_AndTheBeaconTriggerFire()

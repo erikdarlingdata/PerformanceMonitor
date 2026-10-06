@@ -8,6 +8,7 @@ using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using Microsoft.Extensions.Logging;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitorLite.Services;
 
 namespace PerformanceMonitorLite.Database;
 
@@ -363,6 +364,77 @@ public partial class DuckDbInitializer : IDisposable
 
     /// <summary>The archive folder; the restore marker lives at its top level.</summary>
     internal string ArchivePath => _archivePath;
+
+    /// <summary>The database file's path; its folder is Lite's data folder, the one whose volume must have room (#5377).</summary>
+    internal string DatabasePath => _databasePath;
+
+    /// <summary>
+    /// Free bytes on the volume holding a path, or null when unknown (#5377). A test replaces it to stand in for
+    /// a nearly full disk; production reads the drive.
+    /// </summary>
+    internal Func<string, long?> AvailableFreeBytesProvider { get; set; } = DataVolumeSpace.GetAvailableFreeBytes;
+
+    /// <summary>The clock the volume warning's cadence reads; a test replaces it.</summary>
+    internal Func<DateTime> UtcNow { get; set; } = () => DateTime.UtcNow;
+
+    /// <summary>How long a volume that stays low goes without repeating its warning.</summary>
+    internal static readonly TimeSpan DataVolumeWarningRepeat = TimeSpan.FromHours(24);
+
+    private readonly object _volumeWarningLock = new();
+    private DateTime? _lastVolumeWarningUtc;
+
+    /// <summary>
+    /// Warns when the volume holding the data folder has less free space than the larger of
+    /// <paramref name="compactionNeedBytes"/> (the biggest merge the archive's next compaction needs, 0 when not
+    /// known yet) and the database file's size (a CHECKPOINT can grow the file by up to that much). Called at
+    /// startup and once per archive pass (#5377), but it speaks on a cadence: when the volume enters the low
+    /// state, again at most every <see cref="DataVolumeWarningRepeat"/> while it stays low, and one information
+    /// line when it recovers. <paramref name="atStartup"/> always warns when low. Never throws: a failed disk
+    /// check must not stop the store or the archive. Returns whether it warned.
+    /// </summary>
+    internal bool WarnIfDataVolumeLow(long compactionNeedBytes, bool atStartup = false)
+    {
+        try
+        {
+            var folder = Path.GetDirectoryName(Path.GetFullPath(_databasePath)) ?? ".";
+            var databaseBytes = File.Exists(_databasePath) ? new FileInfo(_databasePath).Length : 0;
+            var reason = compactionNeedBytes > databaseBytes
+                ? $"the archive's next compaction ({DataVolumeSpace.FormatBytes(compactionNeedBytes)} of merged output)"
+                : $"a CHECKPOINT (the database file is {DataVolumeSpace.FormatBytes(databaseBytes)})";
+            var needed = Math.Max(databaseBytes, compactionNeedBytes);
+
+            lock (_volumeWarningLock)
+            {
+                var observed = AvailableFreeBytesProvider(folder);
+                if (!DataVolumeSpace.IsLow(folder, needed, _ => observed, out var free))
+                {
+                    if (_lastVolumeWarningUtc is not null && observed is long recovered)
+                    {
+                        _lastVolumeWarningUtc = null;
+                        _logger?.LogInformation(
+                            "The Lite data folder {Folder} has enough free disk space again: {FreeBytes} bytes free ({Free})",
+                            folder, recovered, DataVolumeSpace.FormatBytes(recovered));
+                    }
+
+                    return false;
+                }
+
+                var at = UtcNow();
+                if (!atStartup && _lastVolumeWarningUtc is DateTime last && at - last < DataVolumeWarningRepeat)
+                {
+                    return false;
+                }
+
+                _lastVolumeWarningUtc = at;
+                return DataVolumeSpace.WarnIfLow(_logger, folder, needed, reason, _ => free);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogDebug(ex, "Could not check the free space on the data folder's volume");
+            return false;
+        }
+    }
 
     public DuckDbInitializer(string databasePath, ILogger<DuckDbInitializer>? logger = null)
     {
@@ -766,6 +838,14 @@ public partial class DuckDbInitializer : IDisposable
     ///   complaint — uncapped, buffer pool grows toward 80% of system RAM).
     ///   ArchiveService raises this temporarily for parquet COPY operations,
     ///   which need more headroom due to a DuckDB pre-reservation behavior.
+    /// - parquet_metadata_cache is deliberately left at DuckDB's default, off (#5377). Measured on DuckDB
+    ///   1.5.5, turning it on cut the bind of a 518-file union_by_name read from about 140 ms to about 45 ms,
+    ///   and a file replaced at the same path (compaction's swap, the Query Store repair) still read its new
+    ///   bytes on a fresh connection of the same instance. But the cache lives in the OBJECT_CACHE, which the
+    ///   buffer manager cannot evict and which counts against memory_limit: 38 MB for those 518 files, growing
+    ///   with every 8192-row group of every file. Once it is over the trim cycle's 64 MB target, the trim's
+    ///   `SET memory_limit` fails with "could not free up enough memory" and the trim stops working. The file
+    ///   count is the real cost of a bind, and compaction (this issue) is what keeps that count down.
     /// </summary>
     public string ConnectionString => $"Data Source={_databasePath};memory_limit=1GB;checkpoint_threshold=1GB";
 
@@ -796,6 +876,10 @@ public partial class DuckDbInitializer : IDisposable
            on-disk file what callers should see. Opening here — still under the write lock — means no
            caller can attach to a partially-initialized file. */
         ReopenSentinel();
+
+        /* Once per start (#5377): a nearly full volume is the cause behind a compaction or CHECKPOINT that
+           fails part way, so it is named up front rather than inferred from the I/O error. */
+        WarnIfDataVolumeLow(compactionNeedBytes: 0, atStartup: true);
     }
 
     private bool _identityReadFailed;

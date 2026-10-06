@@ -119,7 +119,7 @@ public sealed class WebDatabaseFilterBehaviourTests
 
         Assert.Equal("/api/read/get_top_queries_by_cpu?server=SRV2&hours=4", One(r, "otherServer"));
         Assert.Equal("/api/read/get_top_queries_by_cpu?hours=4", One(r, "noServer"));
-        Assert.Equal("/api/read/get_blocking?server=SRV1&hours=4", One(r, "unfilteredRead"));
+        Assert.Equal("/api/read/get_database_sizes?server=SRV1&hours=4", One(r, "unfilteredRead"));
         Assert.Equal("/api/read/get_cpu_utilization?server=SRV1&hours=4", One(r, "serverWideRead"));
         Assert.Equal("/api/read/get_pg_top_queries?server=SRV1&hours=4", One(r, "pgRead"));
 
