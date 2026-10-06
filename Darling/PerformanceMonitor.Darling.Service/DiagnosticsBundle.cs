@@ -508,7 +508,7 @@ internal static class DiagnosticsBundle
 
     /// <summary>Opens the sealed webhook values and registers what they hold: each URL's host and the URL itself, each
     /// routing key, and each header value. Returns the note when any sealed value stayed closed.</summary>
-    private static IReadOnlyList<string> SeedSealedWebhookValues(BundleAliaser aliaser, DarlingConfig config, IPasswordKeyRing? keyRing)
+    private static string[] SeedSealedWebhookValues(BundleAliaser aliaser, DarlingConfig config, IPasswordKeyRing? keyRing)
     {
         var hooks = config.Webhooks ?? new WebhooksConfig();
         var routes = config.NotificationRoutes ?? new List<PerformanceMonitor.Notifications.NotificationRoute>();
