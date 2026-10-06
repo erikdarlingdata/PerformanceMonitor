@@ -16,6 +16,34 @@ namespace PerformanceMonitorLite.Mcp;
 public sealed class McpPlanTools
 {
     /// <summary>
+    /// #4348: said when the statement filter withheld a plan whole, so the analysis is skipped instead of reading the
+    /// placeholder as XML and reporting a parse error. Worded once for the four analysis tools.
+    /// </summary>
+    internal const string WithheldPlanMessage = "This plan was withheld by the statement filter (#4348), so it was not analysed.";
+
+    /// <summary>
+    /// #4348: the one way every plan-analysis tool here turns plan XML into its result. The statement filter runs on
+    /// the XML first, because the analysis lifts parameter values and statement text out of it into fields the JSON
+    /// sweep cannot pair with their statement. A plan the filter withholds whole is answered with
+    /// <see cref="WithheldPlanMessage"/>. Kept out of <c>McpPlanAnalysisFormatter.BuildAnalysisResult</c>, which the
+    /// desktop Dashboard also calls.
+    /// </summary>
+    internal static string AnalyzeFilteredPlan(
+        string xml,
+        string? serverName,
+        string source,
+        string? identifier,
+        AnalyzerConfig? analyzerConfig,
+        ServerMetadata? metadata,
+        CancellationToken cancellationToken)
+    {
+        xml = SensitiveStatements.Xml(xml) ?? SensitiveStatements.PlaceholderText;
+        if (xml == SensitiveStatements.PlaceholderText)
+            return McpHelpers.Status("unavailable", WithheldPlanMessage);
+        return McpPlanAnalysisFormatter.BuildAnalysisResult(xml, serverName, source, identifier, analyzerConfig, metadata, cancellationToken);
+    }
+
+    /// <summary>
     /// What every Lite plan read answers when it finds no plan text. Lite never captures plans:
     /// <c>CollectorContext.CapturePlanXml</c> defaults to false and Lite never sets it (Darling does), so
     /// <c>query_stats.query_plan_xml</c> is NULL on every row Lite collects. "No plan found" is therefore the
@@ -67,7 +95,7 @@ public sealed class McpPlanTools
 
             // #4530: one store read per call so rule 38 can see the server's edition/MAXDOP.
             var metadata = await dataService.GetServerMetadataForPlanAnalysisAsync(resolved.ServerId);
-            return McpPlanAnalysisFormatter.BuildAnalysisResult(xml, resolved.ServerName, "query_stats", query_hash, App.AnalyzerConfig, metadata, cancellationToken);
+            return AnalyzeFilteredPlan(xml, resolved.ServerName, "query_stats", query_hash, App.AnalyzerConfig, metadata, cancellationToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -106,7 +134,7 @@ public sealed class McpPlanTools
 
             // #4530: one store read per call so rule 38 can see the server's edition/MAXDOP.
             var metadata = await dataService.GetServerMetadataForPlanAnalysisAsync(resolved.ServerId);
-            return McpPlanAnalysisFormatter.BuildAnalysisResult(xml, resolved.ServerName, "procedure_stats", plan_handle, App.AnalyzerConfig, metadata, cancellationToken);
+            return AnalyzeFilteredPlan(xml, resolved.ServerName, "procedure_stats", plan_handle, App.AnalyzerConfig, metadata, cancellationToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -160,7 +188,7 @@ public sealed class McpPlanTools
 
             // #4530: one store read per call so rule 38 can see the server's edition/MAXDOP.
             var metadata = await dataService.GetServerMetadataForPlanAnalysisAsync(resolved.ServerId);
-            return McpPlanAnalysisFormatter.BuildAnalysisResult(xml, resolved.ServerName, "query_store", $"{database_name}:{plan_id}", App.AnalyzerConfig, metadata, cancellationToken);
+            return AnalyzeFilteredPlan(xml, resolved.ServerName, "query_store", $"{database_name}:{plan_id}", App.AnalyzerConfig, metadata, cancellationToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -188,10 +216,10 @@ public sealed class McpPlanTools
 
         try
         {
-            // #4348: the caller's XML has no stored-plan read to filter it, so the statement filter runs here, before
-            // the analysis lifts parameter values and statement text out of it into fields the JSON sweep cannot pair.
-            plan_xml = SensitiveStatements.Xml(plan_xml) ?? SensitiveStatements.PlaceholderText;
-            return McpPlanAnalysisFormatter.BuildAnalysisResult(plan_xml, null, "xml", null, App.AnalyzerConfig, cancellationToken);
+            // #4348: the caller's XML has no stored-plan read to filter it, so AnalyzeFilteredPlan runs the statement
+            // filter before the analysis lifts parameter values and statement text out of it into fields the JSON sweep
+            // cannot pair.
+            return AnalyzeFilteredPlan(plan_xml, null, "xml", null, App.AnalyzerConfig, null, cancellationToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
