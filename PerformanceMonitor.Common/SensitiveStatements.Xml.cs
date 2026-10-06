@@ -40,7 +40,7 @@ public static partial class SensitiveStatements
     /// an auto-parameter (<c>@N</c>) value is judged inside its statement, and a value past the point where pass 1
     /// stopped reading is withheld. All other such values are kept.
     /// Fails closed: a document that does not parse is judged as decoded text and withheld whole when named; any
-    /// other failure, and a spent budget, withhold the whole document.
+    /// other failure, and a spent budget, withhold the whole document. A plan nested in an <c>EdcShowplanXml</c> attribute is judged one level deep; a deeper one is withheld.
     /// </summary>
     /// <param name="xml">The document or fragment.</param>
     /// <param name="isNamed">The judge for one decoded value.</param>
@@ -50,18 +50,22 @@ public static partial class SensitiveStatements
     /// <paramref name="isNamed"/>), so a budget can count it.</param>
     /// <param name="maxOutputChars">The caller will cut the result at this length: work stops once nothing before
     /// the cut can change (P3, L-I).</param>
+    /// <param name="depth">How deeply this document is nested in a plan held by an <c>EdcShowplanXml</c> attribute
+    /// (0 for a caller's document). Nested plans are judged one level deep; a plan held at a deeper level is
+    /// withheld without being parsed.</param>
     internal static string? XmlCore(
         string? xml,
         Func<string, bool> isNamed,
         Func<bool> budgetSpent,
         string placeholder,
         Action<TimeSpan>? chargeParse = null,
-        int maxOutputChars = int.MaxValue)
+        int maxOutputChars = int.MaxValue,
+        int depth = 0)
     {
         if (string.IsNullOrEmpty(xml))
             return xml;
 
-        var run = new XmlRun(isNamed, budgetSpent, placeholder, chargeParse);
+        var run = new XmlRun(isNamed, budgetSpent, placeholder, chargeParse, depth);
         long cut = maxOutputChars == int.MaxValue ? long.MaxValue : (long)maxOutputChars + XmlCutSlack;
 
         XmlPassOutcome outcome;
@@ -114,6 +118,10 @@ public static partial class SensitiveStatements
         }
     }
 
+    /// <summary>The deepest nesting <see cref="XmlCore"/> parses: a plan held in an <c>EdcShowplanXml</c> attribute
+    /// is depth 1, and a plan held inside that one is withheld.</summary>
+    private const int MaxNestedPlanDepth = 1;
+
     private enum XmlPassOutcome { Clean, Hit, Spent }
 
     /// <summary>One <see cref="XmlCore"/> call: the two passes share the judge, the budget and the parse timer.</summary>
@@ -124,6 +132,9 @@ public static partial class SensitiveStatements
         private readonly string _placeholder;
         private readonly Action<TimeSpan>? _chargeParse;
         private long _mark;
+
+        /// <summary>The nesting depth of this document (0 for a caller's document); see <see cref="XmlCore"/>.</summary>
+        private readonly int _depth;
 
         /// <summary><c>Stmt*</c> start tags seen so far, in document order. Both passes number them the same way;
         /// pass 1 records the ordinals the auto-parameter probe names and pass 2 opens a scope for each.</summary>
@@ -138,8 +149,9 @@ public static partial class SensitiveStatements
         private long _passOneStop = long.MaxValue;
         private bool _pastVetted;
 
-        public XmlRun(Func<string, bool> isNamed, Func<bool> budgetSpent, string placeholder, Action<TimeSpan>? chargeParse)
+        public XmlRun(Func<string, bool> isNamed, Func<bool> budgetSpent, string placeholder, Action<TimeSpan>? chargeParse, int depth = 0)
         {
+            _depth = depth;
             _isNamed = isNamed;
             _budgetSpent = budgetSpent;
             _placeholder = placeholder;
@@ -229,15 +241,24 @@ public static partial class SensitiveStatements
         /// instance when nothing in it is named.</summary>
         private string JudgeNested(string value)
         {
+            // A plan holds at most one level of nested plan: a deeper one is withheld unparsed, so the input cannot
+            // make this recurse once per level.
+            if (_depth >= MaxNestedPlanDepth)
+                return value.Length == 0 ? value : _placeholder;
             ChargeParse();
-            string? nested = XmlCore(value, _isNamed, _budgetSpent, _placeholder);
+            string? nested = XmlCore(value, _isNamed, _budgetSpent, _placeholder, depth: _depth + 1);
             if (_chargeParse is not null)
                 _mark = Stopwatch.GetTimestamp();
             return nested ?? value;
         }
 
+        /// <summary>Whether <paramref name="value"/> is a plan nested deeper than <see cref="MaxNestedPlanDepth"/>:
+        /// withheld without being judged or parsed.</summary>
+        private bool TooDeep(string name, string value) =>
+            _depth >= MaxNestedPlanDepth && HoldsNestedPlan(name) && value.Length > 0;
+
         private bool JudgeAttribute(string name, string value) =>
-            Judge(value) || (HoldsNestedPlan(name) && !ReferenceEquals(JudgeNested(value), value));
+            TooDeep(name, value) || Judge(value) || (HoldsNestedPlan(name) && !ReferenceEquals(JudgeNested(value), value));
 
         private bool Judge(string value)
         {
@@ -811,7 +832,7 @@ public static partial class SensitiveStatements
         /// judged rewrite, else the value.</summary>
         private string JudgedValue(string name, string value, bool? knownVerdict)
         {
-            if (knownVerdict ?? Judge(value))
+            if (TooDeep(name, value) || (knownVerdict ?? Judge(value)))
                 return _placeholder;
             return HoldsNestedPlan(name) ? JudgeNested(value) : value;
         }

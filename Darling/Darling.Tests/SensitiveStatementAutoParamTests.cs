@@ -661,4 +661,87 @@ public class SensitiveStatementAutoParamTests
         Assert.DoesNotContain("edc1", a);
         Assert.DoesNotContain("edc2", b);
     }
+
+    // ── L2g: a plan nested in an EdcShowplanXml attribute is judged one level deep (#5320) ──
+
+    /// <summary><paramref name="s"/> escaped <paramref name="times"/> times as attribute text, written directly
+    /// (an entity escaped k times is <c>&amp;</c>, <c>amp;</c> k-1 times, then its name).</summary>
+    private static void AppendEscaped(StringBuilder sb, string s, int times)
+    {
+        foreach (char c in s)
+        {
+            string? name = c switch { '<' => "lt;", '>' => "gt;", '"' => "quot;", '&' => "amp;", _ => null };
+            if (name is null || times == 0)
+            {
+                sb.Append(c);
+                continue;
+            }
+            sb.Append('&');
+            for (int i = 1; i < times; i++)
+                sb.Append("amp;");
+            sb.Append(name);
+        }
+    }
+
+    /// <summary>A document holding <paramref name="levels"/> plans, each in the <c>EdcShowplanXml</c> attribute of
+    /// the one above, with <paramref name="innermost"/> at the bottom.</summary>
+    private static string NestedPlans(int levels, string innermost)
+    {
+        const string open = "<a EdcShowplanXml=\"";
+        const string close = "\"/>";
+        var sb = new StringBuilder();
+        for (int j = 0; j < levels; j++)
+            AppendEscaped(sb, open, j);
+        AppendEscaped(sb, innermost, levels);
+        for (int j = levels - 1; j >= 0; j--)
+            AppendEscaped(sb, close, j);
+        return sb.ToString();
+    }
+
+    /// <summary>The <c>EdcShowplanXml</c> value of the plan held in the top document's own <c>EdcShowplanXml</c>:
+    /// the level-2 attribute.</summary>
+    private static string LevelTwoAttribute(string result)
+    {
+        string level1 = (string)XElement.Parse(result).Attribute("EdcShowplanXml")!;
+        return (string)XElement.Parse(level1).Attribute("EdcShowplanXml")!;
+    }
+
+    [Fact]
+    public void ANestedPlanTwoLevelsDeep_IsWithheldEvenWhenItHoldsOnlyOrdinaryText()
+    {
+        string xml = NestedPlans(2, "<Plain>lvl2plain</Plain>");
+
+        string? result = Run(xml, CanaryOrStandIn);
+
+        Assert.NotNull(result);
+        Assert.DoesNotContain("lvl2plain", result);
+        Assert.Equal(P, LevelTwoAttribute(result));
+    }
+
+    [Fact]
+    public void ANestedPlanOneLevelDeep_HoldingOnlyOrdinaryText_IsKeptAsTheSameInstance()
+    {
+        string xml = NestedPlans(1, "<Plain>lvl1plain</Plain>");
+
+        string? result = Run(xml, CanaryOrStandIn);
+
+        Assert.Same(xml, result);
+    }
+
+    [Fact]
+    public void ADeeplyNestedPlan_ReturnsWithoutOverflowingTheStack_AndIsWithheldPastTheFirstLevel()
+    {
+        string xml = NestedPlans(2000, "<Plain>deepplain</Plain>");
+
+        // a cheap judge: this pins the walk, not the pattern. The document is 32 MB (escaping makes the size grow with
+        // the square of the depth) and each scan of it costs about half a second, so the bound is a hang guard, not a speed pin.
+        var timer = Stopwatch.StartNew();
+        string? result = Run(xml, v => v.Contains("CANARY", StringComparison.Ordinal));
+        timer.Stop();
+
+        Assert.NotNull(result);
+        Assert.DoesNotContain("deepplain", result);
+        Assert.Equal(P, LevelTwoAttribute(result));
+        Assert.True(timer.Elapsed < TimeSpan.FromSeconds(10), $"took {timer.Elapsed.TotalMilliseconds:F0} ms; size {xml.Length}");
+    }
 }
