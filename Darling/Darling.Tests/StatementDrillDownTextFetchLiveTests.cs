@@ -371,6 +371,105 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 20000, $10, 1024, 2048, 0, 0, $11, $
         }
     }
 
+    /// <summary>
+    /// #1767 / #5361: since the collectors write the fact row's <c>query_text</c> as NULL and keep the text in
+    /// <c>query_text_dim</c>, the inline-text read must resolve the dimension too, the way the view's
+    /// <c>COALESCE(f.query_text, qtd.query_text)</c> does. The two seeded rows above write inline text, so they could
+    /// not see a read of the bare fact column. Here the newest row of one plan has NULL inline text and a digest
+    /// whose text lives only in the dimension; a second plan has inline text AND a dimension row (inline wins, even
+    /// when empty); a third has neither (no text, so the plan is left out of the answer).
+    /// </summary>
+    [Fact]
+    public async Task ParameterSensitiveInlineText_ResolvesADimensionStoredText_WhenTheFactPayloadIsNull()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live drill-down text test.");
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+        var digests = new[]
+        {
+            System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes("d10 dim only")),
+            System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes("d10 inline wins")),
+            System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes("d10 neither")),
+        };
+        var bodySucceeded = false;
+        try
+        {
+            await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+            var end = DarlingMcpTestData.Naive(DateTime.UtcNow).AddMinutes(1);
+            var windowStart = end.AddHours(-4);
+            var dimensionText = "SELECT dimension_only " + new string('d', 800);
+
+            foreach (var (digest, dimText) in new[] { (digests[0], dimensionText), (digests[1], "SELECT dimension_loses") })
+            {
+                await DarlingMcpTestData.ExecAsync(connection, ct,
+                    "INSERT INTO query_text_dim (digest, query_text, last_seen) VALUES ($1, $2, $3) ON CONFLICT (digest) DO NOTHING",
+                    digest, dimText, DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified));
+            }
+
+            /* plan: (plan hash, older inline text, newest inline text, digest). The newest row is the one the read keeps. */
+            var plans = new (string PlanHash, string? Older, string? Newest, byte[] Digest)[]
+            {
+                ("0xPH_DIM", "SELECT older_inline_is_not_the_newest", null, digests[0]),
+                ("0xPH_INLINE", null, "", digests[1]),
+                ("0xPH_NONE", null, null, digests[2]),
+            };
+
+            foreach (var plan in plans)
+            {
+                for (var snapshot = 0; snapshot < 2; snapshot++)
+                {
+                    var newest = snapshot == 1;
+                    await DarlingMcpTestData.ExecAsync(connection, ct, @"
+INSERT INTO query_stats
+    (collection_id, collection_time, server_id, server_name, database_name, query_hash, query_plan_hash,
+     creation_time, execution_count, min_worker_time, max_worker_time, min_grant_kb, max_grant_kb,
+     min_spills, max_spills, query_text, query_text_digest, delta_execution_count)
+VALUES ($1, $2, $3, $4, 'FetchDb', '0xQH_DIM', $5, $6, 500, 20000, 400000, 1024, 2048, 0, 0, $7, $8, 25)",
+                        CollectionIdGenerator.Next(),
+                        DateTime.SpecifyKind(windowStart.AddMinutes(30 + (snapshot * 60)), DateTimeKind.Unspecified),
+                        ServerId, ServerName, plan.PlanHash, DateTime.SpecifyKind(windowStart.AddDays(-2), DateTimeKind.Unspecified),
+                        (object?)(newest ? plan.Newest : plan.Older) ?? DBNull.Value, plan.Digest);
+                }
+            }
+
+            var text = new Dictionary<string, string?>();
+            using (var cmd = new NpgsqlCommand(PgDrillDownCollector.ParameterSensitiveInlineTextSql, connection))
+            {
+                cmd.Parameters.AddWithValue(ServerId);
+                cmd.Parameters.AddWithValue(windowStart);
+                cmd.Parameters.AddWithValue(end);
+                cmd.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Array | NpgsqlTypes.NpgsqlDbType.Text, Value = plans.Select(_ => "FetchDb").ToArray() });
+                cmd.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Array | NpgsqlTypes.NpgsqlDbType.Text, Value = plans.Select(_ => "0xQH_DIM").ToArray() });
+                cmd.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Array | NpgsqlTypes.NpgsqlDbType.Text, Value = plans.Select(p => p.PlanHash).ToArray() });
+                await using var reader = await cmd.ExecuteReaderAsync(ct);
+                while (await reader.ReadAsync(ct))
+                    text[reader.GetString(2)] = reader.IsDBNull(3) ? null : reader.GetString(3);
+            }
+
+            Assert.Equal(3, text.Count);
+            /* Fact payload NULL, text only in the dimension: the whole dimension text, uncut. */
+            Assert.Equal(dimensionText, text["0xPH_DIM"]);
+            /* Inline text wins over the dimension's, even when it is empty (the view's COALESCE). */
+            Assert.Equal("", text["0xPH_INLINE"]);
+            /* No inline text and no dimension row for the digest: NULL, which the reader leaves out. */
+            Assert.Null(text["0xPH_NONE"]);
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                await DeleteRowsAsync(cleanup, cleanupCt);
+                foreach (var digest in digests)
+                    await DarlingMcpTestData.ExecAsync(cleanup, cleanupCt, "DELETE FROM query_text_dim WHERE digest = $1", digest);
+            });
+        }
+    }
+
     private static async Task DeleteRowsAsync(NpgsqlConnection connection, CancellationToken ct)
     {
         foreach (var table in new[] { "blocked_process_reports", "dmv_blocking_snapshots", "query_stats" })

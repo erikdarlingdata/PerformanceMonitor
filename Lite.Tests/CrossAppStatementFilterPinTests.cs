@@ -24,6 +24,7 @@ namespace PerformanceMonitorLite.Tests;
 /// object, last in their call-tool list, and Lite's plan tools read a stored plan only through the one filtered seam.
 /// Source pins, because the defect they hold off is a wiring omission: every tool would still answer, unfiltered.
 /// </summary>
+[Trait("Reads", "Darling")]
 public sealed class CrossAppStatementFilterPinTests
 {
     private const string Registration = "AddCallToolFilter(SensitiveStatementOutputFilter.Instance)";

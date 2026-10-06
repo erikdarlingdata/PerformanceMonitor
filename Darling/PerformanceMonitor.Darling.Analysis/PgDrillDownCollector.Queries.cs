@@ -434,15 +434,18 @@ ORDER BY o.worker_ratio DESC";
     /// read carried it. <c>$1</c> to <c>$3</c> are the server and the window, <c>$4</c> to <c>$6</c> the kept plans'
     /// database, query hash and plan hash as three parallel arrays; a NULL part matches a NULL part, as the ranking's
     /// <c>PARTITION BY</c> groups it. The hash comparison also states <c>= ANY</c> so the (server_id, query_hash,
-    /// collection_time) index serves the read. <see cref="StatementPreview"/> judges and cuts the text (#5320).
+    /// collection_time) index serves the read. The text is the view's own <c>COALESCE</c> (#1767): the row's inline text, else
+    /// the text dimension's for the row's digest, so a row whose text lives only in the dimension still returns it.
+    /// <see cref="StatementPreview"/> judges and cuts the text (#5320).
     /// </summary>
     public const string ParameterSensitiveInlineTextSql = @"
 SELECT DISTINCT ON (q.database_name, q.query_hash, q.query_plan_hash)
     q.database_name,
     q.query_hash,
     q.query_plan_hash,
-    q.query_text
+    COALESCE(q.query_text, d.query_text) AS query_text
 FROM query_stats AS q
+LEFT JOIN query_text_dim AS d ON d.digest = q.query_text_digest
 JOIN unnest($4::text[], $5::text[], $6::text[]) AS k(database_name, query_hash, query_plan_hash)
   ON  q.database_name  IS NOT DISTINCT FROM k.database_name
   AND q.query_hash      IS NOT DISTINCT FROM k.query_hash

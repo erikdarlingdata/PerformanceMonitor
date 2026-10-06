@@ -716,7 +716,12 @@ public sealed class PgTargetQueriesTests
         Assert.Contains("FROM pg_statement_stats", sql, StringComparison.Ordinal);
         Assert.Contains("AND   queryid = $4", sql, StringComparison.Ordinal);
         Assert.Contains("LEFT JOIN pg_statement_text AS t", sql, StringComparison.Ordinal);
-        Assert.Contains("LEFT(MAX(t.query_text), $5)", sql, StringComparison.Ordinal);
+        /* #5320: the text comes back WHOLE and the reader judges it, then cuts it to StatementTextCap; the SQL no longer cuts it
+           (no LEFT, no $5). The hash is the one dev always computed: over the whole MAX(t.query_text), never over a cut or a
+           judged text, so a stored text_hash keeps its meaning for rows already stored. */
+        Assert.Contains("MAX(t.query_text)                                            AS query_text", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("LEFT(", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("$5", sql, StringComparison.Ordinal);
         Assert.Contains("hashtext(MAX(t.query_text))", sql, StringComparison.Ordinal);
         Assert.Contains("MAX(t.first_seen)", sql, StringComparison.Ordinal);
         Assert.Contains("PARTITION BY queryid, database_id, user_id, toplevel", sql, StringComparison.Ordinal);
@@ -730,6 +735,10 @@ public sealed class PgTargetQueriesTests
         /* In CODE: the doc comment names DeSkew to say why it is absent, and prose is not a call. */
         Assert.DoesNotContain("DeSkew", CSharpSourceWalker.StripCommentsAndStrings(source), StringComparison.Ordinal);
         Assert.Contains("CommandTimeout = DarlingAnalysisService.AnalysisCommandTimeoutSeconds", source, StringComparison.Ordinal);
+        /* Judged whole, then cut to the same length the SQL cut used to leave ($5 = StatementTextCap), in both readers. */
+        Assert.Contains("AnalysisStatementText.Preview(reader.GetString(15), StatementTextCap)", source, StringComparison.Ordinal);
+        Assert.Contains("AnalysisStatementText.Preview(reader.GetString(6), StatementTextCap)", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("AddWithValue(StatementTextCap)", source, StringComparison.Ordinal);
         Assert.Contains("long.TryParse(key.AsSpan(PgTargetFactKeys.BadActorKeyPrefix.Length)", source, StringComparison.Ordinal);
         Assert.Contains("finding.DrillDown![\"pg_bad_actor_statements\"]", source, StringComparison.Ordinal);
         /* queryid as a STRING in the JSON, as get_pg_top_queries returns it. */
