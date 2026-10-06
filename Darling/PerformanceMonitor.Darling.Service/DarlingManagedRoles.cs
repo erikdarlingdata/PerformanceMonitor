@@ -906,6 +906,15 @@ GRANT SELECT ON ALL TABLES IN SCHEMA {config}  TO {admin}, {viewer};
 --    in section 6, never the config_command/monitored_servers/notification pivot tables; viewer: none.)
 GRANT INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA {config} TO {admin};
 
+-- 3a. The password key tables (V165, #5366): written only by the store owner (the service, its command line and the
+--     migration runner); a trigger on each table enforces that. This is the grant side of the same rule, so admin's
+--     blanket config write above does not reach them. The pin table is read by the owner only: viewer and mcp lose
+--     SELECT on it. A store below V165 has no such tables, so this runs after the migrations like the grants around it.
+REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON {config}.password_key, {config}.password_key_service,
+   {config}.legacy_secret_pin, {config}.legacy_secret_pin_marker FROM {admin}, {viewer}, {mcp};
+REVOKE SELECT ON {config}.legacy_secret_pin FROM {viewer}, {mcp};
+GRANT SELECT ON {config}.password_key, {config}.password_key_service TO {admin};
+
 -- 4. Default privileges so NEW tables/views auto-inherit (no per-table-grant foot-gun).
 ALTER DEFAULT PRIVILEGES FOR ROLE {owner} IN SCHEMA {collect}
    GRANT SELECT ON TABLES TO {admin}, {viewer};

@@ -655,6 +655,19 @@ CREATE TABLE IF NOT EXISTS config.store_statement_baseline
     /// </summary>
     private const string V164Sql = QueryStatsHourLedger.CreateSql;
 
+    /// <summary>
+    /// V165 (#5366) — the tables for the service's published password key: <c>config.password_key</c> (the public key,
+    /// one <c>current</c> row at most), <c>config.password_key_service</c> (what each service host holds and its state),
+    /// <c>config.legacy_secret_pin</c> and the one-row <c>config.legacy_secret_pin_marker</c>, seeded <c>pending</c>. The
+    /// text and the reasoning are on <see cref="PasswordKeyTables"/>, which the rung embeds.
+    ///
+    /// <para><b>Only the store owner writes them,</b> by a trigger created here on each table (a row trigger and a
+    /// TRUNCATE trigger), so no grant, now or later, opens them. The provisioning scripts add the grant side.</para>
+    ///
+    /// <para><b>No Lite twin.</b> Lite keeps its secrets in its own local store.</para>
+    /// </summary>
+    private const string V165Sql = PasswordKeyTables.CreateSql;
+
     public static IReadOnlyList<Migration> Scripts { get; } = new[]
     {
         new Migration(1, "collector-tables", PgSchemaGenerator.GenerateFullSchema()),
@@ -857,6 +870,7 @@ CREATE TABLE IF NOT EXISTS config.store_statement_baseline
         new Migration(162, "slow-reads", V162Sql),
         new Migration(163, "store-statement-history", V163Sql),
         new Migration(164, "query-stats-hour-ledger", V164Sql),
+        new Migration(165, "password-key", V165Sql),
     };
 
     /// <summary>

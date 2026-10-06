@@ -273,6 +273,15 @@ GRANT SELECT ON config.config_collector_run_times TO mcp;
 -- 3. config writes -- admin gets the whole schema.
 GRANT INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA config TO admin;
 
+-- 3a. The password key tables (V165, #5366): written only by the store owner (the service, its command line and the
+--     migration runner); a trigger on each table enforces that. This is the grant side of the same rule, so admin's
+--     blanket config write above does not reach them. The pin table is read by the owner only: viewer and mcp lose
+--     SELECT on it. A store below V165 has no such tables, so this runs after the migrations like the grants around it.
+REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON config.password_key, config.password_key_service,
+   config.legacy_secret_pin, config.legacy_secret_pin_marker FROM admin, viewer, mcp;
+REVOKE SELECT ON config.legacy_secret_pin FROM viewer, mcp;
+GRANT SELECT ON config.password_key, config.password_key_service TO admin;
+
 -- 3b. Custom views (#1563): the web dashboard's custom-view composer writes exactly this one config table
 --     (non-secret dashboard JSON) as viewer, and the MCP custom-view tools as mcp. Editing is any
 --     authenticated seat -- the web surface's normal networked mode, gated server-side by the host's
