@@ -92,7 +92,7 @@ public sealed class StatementScrubEndToEndLiveTests
                 "SELECT query_hash || '|' || COALESCE(query_text, '<null>') FROM v_query_stats WHERE server_id = " + CollectStatsId + " ORDER BY query_hash", ct);
             Assert.Equal(new[] { "0xC0|" + StatementFilterCensus.Marker, "0xP0|" + StatementScrubCanary.PlainStatement }, texts);
 
-            string? plan = await DarlingStoredPlanReader.GetQueryStatsPlanXmlByHashAsync(postgres, CollectStatsId, "0xC0", null, ct);
+            string? plan = await StoredPlanAsync(connection, CollectStatsId, "0xC0", ct);
             Assert.False(string.IsNullOrEmpty(plan), "the canary row's stored plan did not resolve, so the plan check proves nothing");
             StatementFilterCensus.AssertPlanFilteredKeepsTheRest(StatementScrubCanary.CanaryPlan(), plan!);
             AssertNoSecret(await WholeTableTextAsync(connection, "query_stats", CollectStatsId, ct));
@@ -325,6 +325,20 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)",
     }
 
     // ── plumbing ──
+
+    /// <summary>The plan a stored row resolves to through the view, the way every reader sees it (inline, or diverted to the plan dimension).</summary>
+    private static async Task<string?> StoredPlanAsync(NpgsqlConnection connection, int serverId, string queryHash, CancellationToken ct)
+    {
+        await using var read = new NpgsqlCommand(
+            "SELECT query_plan_xml, query_plan_gz FROM v_query_stats WHERE server_id = $1 AND query_hash = $2", connection);
+        read.Parameters.AddWithValue(serverId);
+        read.Parameters.AddWithValue(queryHash);
+        await using var reader = await read.ExecuteReaderAsync(ct);
+        Assert.True(await reader.ReadAsync(ct), "the row must exist");
+        return PayloadDimensions.ResolveContent(
+            reader.IsDBNull(0) ? null : reader.GetString(0),
+            reader.IsDBNull(1) ? null : reader.GetFieldValue<byte[]>(1));
+    }
 
     private sealed class NoDeltas : ICollectorDeltaCalculator
     {
