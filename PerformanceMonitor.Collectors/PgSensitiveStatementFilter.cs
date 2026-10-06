@@ -58,8 +58,12 @@ public static class PgSensitiveStatementFilter
     /// so <c>PgStatementText</c> and <c>PgBlockingCollector</c> embed the identical expression rather than each
     /// composing their own copy.
     /// </summary>
-    public static string SqlPredicate(string column) =>
-        "CASE WHEN " + column + " ~* " + SqlLiteral(SensitiveStatementPattern) +
+    public static string SqlPredicate(string column) => SqlPredicate(column, SensitiveStatementPattern);
+
+    /// <summary>The same expression with an explicit pattern, for a caller that must stay on a frozen one
+    /// (the stored-text scrub keeps its version 1 pattern); the placeholder stays the shared one.</summary>
+    public static string SqlPredicate(string column, string pattern) =>
+        "CASE WHEN " + column + " ~* " + SqlLiteral(pattern) +
         " THEN " + SqlLiteral(PlaceholderText) +
         " ELSE " + column + " END";
 }

@@ -28,6 +28,27 @@ namespace Darling.Tests;
 public sealed class PgSensitiveStatementFilterTests
 {
     /// <summary>
+    /// The stored-text scrub's frozen pattern is the exact text of the shipped version 1 pattern (the dev
+    /// definition before the filter was widened), and it is not the live shared pattern: no stored row is
+    /// rewritten by the wider filter, so the scrub must keep naming exactly what it named.
+    /// </summary>
+    [Fact]
+    public void TheStoredTextScrubKeepsItsFrozenVersionOnePattern()
+    {
+        const string gap = "([[:space:]]|/[*]([^*]|[*]+[^*/])*[*]+/|--[^[:cntrl:]]*)";
+        var shippedVersionOne =
+            "[[:<:]](create|alter)" + gap + "+(role|user|group|subscription|server)[[:>:]]" +
+            "|[[:<:]]password[[:>:]]" + gap + "*(=|to)?" + gap + "*(e?'|u&'|[$][^0-9])" +
+            "|[[:<:]](pg)?password[[:space:]]*=[[:space:]]*[^$[:space:]]" +
+            "|[a-z][a-z0-9+.-]*://[^[:space:]/@:]+:[^[:space:]/@]+@";
+
+        Assert.Equal(shippedVersionOne, PerformanceMonitor.Darling.Service.PgStatementTextScrub.Version1Pattern);
+        Assert.NotEqual(PerformanceMonitor.Common.SensitiveStatements.Pattern,
+            PerformanceMonitor.Darling.Service.PgStatementTextScrub.Version1Pattern);
+        Assert.Equal(1, PerformanceMonitor.Darling.Service.PgStatementTextScrub.ScrubVersion);
+    }
+
+    /// <summary>
     /// One definition in the whole repo. Every occurrence of the pattern's opening token
     /// (<c>[[:&lt;:]](create|alter)</c>) must be the ONE declaration in <see cref="PgSensitiveStatementFilter"/>
     /// — a second literal copy anywhere else is exactly the drift #4348 exists to prevent. The needle itself
@@ -55,6 +76,15 @@ public sealed class PgSensitiveStatementFilterTests
             // hit on the test's own source is not a second definition, so it is excluded deliberately,
             // by CallerFilePath rather than a name check.
             if (Path.GetFullPath(file) == selfFileFull)
+            {
+                continue;
+            }
+
+            // The stored-text scrub carries one deliberate, frozen copy: the version 1 pattern of the shipped
+            // scrub (PgStatementTextScrub.Version1Pattern), kept apart from the live definition because no
+            // stored row is rewritten by the wider filter. It is pinned to the literal by
+            // TheStoredTextScrubKeepsItsFrozenVersionOnePattern below, so it cannot drift either.
+            if (Path.GetFileName(file) == "PgStatementTextScrub.cs")
             {
                 continue;
             }
