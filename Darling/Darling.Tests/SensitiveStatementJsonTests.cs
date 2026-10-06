@@ -151,6 +151,22 @@ public sealed class SensitiveStatementJsonTests
     }
 
     [Fact]
+    public void JsonThatDoesNotParse_GivesTheRefusal_NotAJudgmentOfTheEscapedText()
+    {
+        // A cut object, and an array nested past the parser's default depth: both start like JSON and are not.
+        // Judged as text they would be the escaped form (a line break is the two characters \r\n), which a pattern
+        // written for the decoded statement does not match, so the raw output would come back.
+        string deep = new string('[', 70) + "\"x\"" + new string(']', 70);
+        foreach (string output in new[] { "{\"a\":\"CREATE\\r\\nSECRET x\"", "  [\"CREATE\\r\\nSECRET x\"", deep })
+        {
+            var r = new Recorder();
+            Assert.Equal(Refusal, r.Run(output));
+            Assert.Empty(r.TextCalls);
+            Assert.Empty(r.XmlCalls);
+        }
+    }
+
+    [Fact]
     public void NonJsonIsJudgedWhole()
     {
         var r = new Recorder();
