@@ -55,6 +55,9 @@ public static partial class SensitiveStatements
             }
             catch (JsonException)
             {
+                // Output that opens like JSON and does not parse (cut, or nested past the parser's depth) would be
+                // judged as its escaped text, which the judge's patterns do not match: refuse it instead.
+                if (StartsWithJsonOpener(output)) return refusal;
                 return Whole(output, text, xml, refusal);
             }
 
@@ -76,6 +79,17 @@ public static partial class SensitiveStatements
     {
         string? judged = StartsWithAngle(output) ? xml(output) : text(output);
         return judged ?? refusal;
+    }
+
+    /// <summary>True when the first non-space character of <paramref name="s"/> is <c>{</c> or <c>[</c>.</summary>
+    private static bool StartsWithJsonOpener(string s)
+    {
+        foreach (char c in s)
+        {
+            if (char.IsWhiteSpace(c)) continue;
+            return c == '{' || c == '[';
+        }
+        return false;
     }
 
     /// <summary>True when the first non-space character of <paramref name="s"/> is <c>&lt;</c>.</summary>
