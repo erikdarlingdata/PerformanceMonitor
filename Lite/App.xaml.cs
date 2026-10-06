@@ -449,6 +449,10 @@ public partial class App : Application
 
         base.OnStartup(e);
 
+        /* #5320 N1: the statement filter's judge takes 250-900 ms to build, and the first connection or AG alert
+           would build it on the UI thread. Build it now, off the UI thread (the in-process MCP server shares it). */
+        _ = Task.Run(SensitiveStatements.WarmUp);
+
         // Right-click selects the DataGrid row under the cursor app-wide, so context-menu actions
         // (e.g. View Plan) act on the clicked row even after an auto-refresh cleared the selection.
         PerformanceMonitor.Ui.DataGridRowSelectionBehavior.Enable();
