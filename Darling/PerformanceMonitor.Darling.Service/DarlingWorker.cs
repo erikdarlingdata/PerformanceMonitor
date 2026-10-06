@@ -774,6 +774,12 @@ public sealed class DarlingWorker : BackgroundService
     /* Set once by ExecuteAsync before the loop starts; the observability writes need it. */
     private NpgsqlDataSource? _postgres;
 
+    /// <summary>#5378: lets a live test give a worker the store ExecuteAsync would, so a run's row can be read back.</summary>
+    internal NpgsqlDataSource? StoreForTests
+    {
+        set => _postgres = value;
+    }
+
     /// <summary>
     /// #4961: this install's id, the eight characters that tell its Extended Events sessions from another install's on
     /// a server both monitor. Made (or read back) once at start, after the store's migrations and before any worker,
