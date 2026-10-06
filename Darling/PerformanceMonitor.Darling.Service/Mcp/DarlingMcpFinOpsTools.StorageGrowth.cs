@@ -27,10 +27,19 @@ public sealed partial class DarlingMcpFinOpsTools
         "storage_growth: database sizes, growth, fastest-growing tables.";
 
     internal const string StorageGrowthViewGuide =
-        "storage_growth answers one level at a time, picked by parameters, beside server, view, level and hours_back; hours_back sets the objects window: 24 (the default) means 30 days, otherwise a whole number of days from 7 to 90 (168 to 2160 hours) is the window; any other value is refused, and the databases level ignores it (its past sizes are fixed at 7 and 30 days). The window is window_days; growth is over it and the daily rate is that growth divided by window_days, so it is understated when the store holds less history than the window. A window over 30 days returns at most 12 objects (truncated says so), so 90 days of cells fit the 32 KB answer. No database_name: level databases, the section databases (status, message, database_count, truncated, rows) with up to 50 rows, ordered by growth_30d_mb descending (null last), then growth_7d_mb descending (null last), then database_name; database_count is the count before the cap. Rows are database_name, current_size_mb, size_7d_ago_mb, size_30d_ago_mb, growth_7d_mb, growth_30d_mb, daily_growth_rate_mb (2 places), growth_pct_30d (1 place), has_sibling_row, has_log_service_file and note (the desktop's note text, null when none); the past sizes, growth, rate and percent are null when the database has no snapshot at that age, never 0. database_name: level objects, the section database (status, message, row: that database's row, or status empty when it is not in the latest snapshot) and the section objects (status, message, window_days, object_count, truncated, days, rows). limit is the object top-N here, 1-20, default 10, and is refused above 20; at the other levels any limit other than the default is refused. Rows are in the desktop's growth order (growth over the window descending with null counted as 0, then schema.table ordinal) and carry object_name ('schema.table'), schema_name, table_name, reserved_mb, used_mb (1 place), total_rows, index_count, growth_mb (1 place; a table created in the window counts its whole size; null when the database has one snapshot only or the table's size is unknown), growth_pct (1 place), daily_growth_rate_mb (2 places) and cells. days lists each UTC day with a sample, ascending, as yyyy-MM-ddTHH:mm:ss.fffffffZ; cells has one [mb, band] per day, aligned to days: mb is the table's reserved MB that day (1 place), band an integer 0-7 from log1p(mb) scaled across all the cells from the smallest positive mb (band 0) to the largest (band 7; every cell is band 0 when all the positive cells are equal, or there is only one); with fewer than 20 rows shown (limit below 20, or a window over 30 days (at most 12 objects)) the bands scale over the rows shown; a day with no sample or 0 MB is [null, null]. database_name plus object_name ('schema.table', exactly as a row of the objects level, from the 20 fastest growers; the key is matched ordinal and case-sensitive with no bracket handling, and when two tables give the same key, only the first is reachable): level indexes, the section database and the section indexes (status, index_count, truncated, rows) with up to 30 rows ordered by index_id then index_name; rows are database_name, schema_name, table_name, index_name, index_type_desc, index_id, reserved_mb (1 place), total_rows, user_seeks, user_scans, user_lookups, total_reads, user_updates, last_user_access_server_local, and classification (Unused, Write-only or Active). last_user_access_server_local is the monitored server's own clock, not UTC, printed yyyy-MM-ddTHH:mm:ss with no Z, null when none. object_name without database_name, or an object_name not among those objects, is refused. Each section's status is ok, empty or not_collected; the whole answer is not_collected only when every section is gated for the server's engine, and empty only when every section is empty and none is gated. Times are UTC and end in Z except last_user_access_server_local.";
+        "storage_growth answers one level at a time, picked by parameters, beside server, view, level and hours_back; hours_back sets the objects window: 24 (the default) means 30 days, otherwise a whole number of days from 7 to 90 (168 to 2160 hours) is the window; any other value is refused, and the databases level ignores it (its past sizes are fixed at 7 and 30 days). The window is window_days; growth is over it and the daily rate is that growth divided by window_days, so it is understated when the store holds less history than the window. A window over 30 days returns at most 12 objects (truncated says so), so 90 days of cells fit the 32 KB answer. No database_name: level databases, the section databases (status, message, database_count, truncated, rows) with up to 50 rows (limit sets the count here: 1 to 500, the default 10 meaning 50), ordered by growth_30d_mb descending (null last), then growth_7d_mb descending (null last), then database_name; database_count is the count before the cap. Rows are database_name, current_size_mb, size_7d_ago_mb, size_30d_ago_mb, growth_7d_mb, growth_30d_mb, daily_growth_rate_mb (2 places), growth_pct_30d (1 place), has_sibling_row, has_log_service_file and note (the desktop's note text, null when none); the past sizes, growth, rate and percent are null when the database has no snapshot at that age, never 0. database_name: level objects, the section database (status, message, row: that database's row, or status empty when it is not in the latest snapshot) and the section objects (status, message, window_days, object_count, truncated, days, rows). limit is the object top-N here, 1-20, default 10, and is refused above 20; the indexes level refuses any limit other than the default. Rows are in the desktop's growth order (growth over the window descending with null counted as 0, then schema.table ordinal) and carry object_name ('schema.table'), schema_name, table_name, reserved_mb, used_mb (1 place), total_rows, index_count, growth_mb (1 place; a table created in the window counts its whole size; null when the database has one snapshot only or the table's size is unknown), growth_pct (1 place), daily_growth_rate_mb (2 places) and cells. days lists each UTC day with a sample, ascending, as yyyy-MM-ddTHH:mm:ss.fffffffZ; cells has one [mb, band] per day, aligned to days: mb is the table's reserved MB that day (1 place), band an integer 0-7 from log1p(mb) scaled across all the cells from the smallest positive mb (band 0) to the largest (band 7; every cell is band 0 when all the positive cells are equal, or there is only one); with fewer than 20 rows shown (limit below 20, or a window over 30 days (at most 12 objects)) the bands scale over the rows shown; a day with no sample or 0 MB is [null, null]. database_name plus object_name ('schema.table', exactly as a row of the objects level, from the 20 fastest growers; the key is matched ordinal and case-sensitive with no bracket handling, and when two tables give the same key, only the first is reachable): level indexes, the section database and the section indexes (status, index_count, truncated, rows) with up to 30 rows ordered by index_id then index_name; rows are database_name, schema_name, table_name, index_name, index_type_desc, index_id, reserved_mb (1 place), total_rows, user_seeks, user_scans, user_lookups, total_reads, user_updates, last_user_access_server_local, and classification (Unused, Write-only or Active). last_user_access_server_local is the monitored server's own clock, not UTC, printed yyyy-MM-ddTHH:mm:ss with no Z, null when none. object_name without database_name, or an object_name not among those objects, is refused. Each section's status is ok, empty or not_collected; the whole answer is not_collected only when every section is gated for the server's engine, and empty only when every section is empty and none is gated. Times are UTC and end in Z except last_user_access_server_local.";
 
-    /// <summary>The fixed ceiling on the database list.</summary>
+    /// <summary>The database list a default call returns: a response sized to the 32 KB target. A <c>limit</c> other than the default
+    /// sets the count instead (#5238), up to <see cref="MaxStorageGrowthDatabaseRows"/>.</summary>
     internal const int MaxStorageGrowthDatabases = 50;
+
+    /// <summary>The most databases a caller may ask the databases level to list (#5238). The web Storage Growth tab asks for it, as the
+    /// Database Sizes tab asks for its 500 files, because the desktop grid lists every database.</summary>
+    internal const int MaxStorageGrowthDatabaseRows = 500;
+
+    /// <summary>The row count a <c>limit</c> asks the databases level for: the default <c>limit</c> means <see cref="MaxStorageGrowthDatabases"/>,
+    /// any other value is the count (the rule database_sizes uses for its 70).</summary>
+    internal static int StorageGrowthDatabaseCap(int limit) => limit == DefaultLimit ? MaxStorageGrowthDatabases : limit;
 
     /// <summary>The fixed ceiling on the index list of one table.</summary>
     internal const int MaxStorageGrowthIndexes = 30;
@@ -183,7 +192,7 @@ public sealed partial class DarlingMcpFinOpsTools
         classification = r.Classification,
     };
 
-    internal static string BuildStorageGrowthDatabasesPayload(string server, int hoursBack, List<StorageGrowthDto> databases)
+    internal static string BuildStorageGrowthDatabasesPayload(string server, int hoursBack, List<StorageGrowthDto> databases, int rowCap = MaxStorageGrowthDatabases)
     {
         var ordered = OrderStorageGrowthDatabases(databases);
         return JsonSerializer.Serialize(new
@@ -197,8 +206,8 @@ public sealed partial class DarlingMcpFinOpsTools
                 status = "ok",
                 message = (string?)null,
                 database_count = ordered.Count,
-                truncated = ordered.Count > MaxStorageGrowthDatabases,
-                rows = ordered.Take(MaxStorageGrowthDatabases).Select(StorageGrowthDatabaseRow).ToList(),
+                truncated = ordered.Count > rowCap,
+                rows = ordered.Take(rowCap).Select(StorageGrowthDatabaseRow).ToList(),
             },
         }, McpHelpers.JsonOptions);
     }
@@ -277,9 +286,9 @@ public sealed partial class DarlingMcpFinOpsTools
         var objectsLevel = databaseName != null && objectName == null;
         if (objectsLevel && limit > MaxStorageGrowthObjects)
             return McpHelpers.Refusal("limit", $"Invalid limit value '{limit}': the objects level of view {StorageGrowthView} returns at most {MaxStorageGrowthObjects} objects.");
-        if (!objectsLevel && limit != DefaultLimit)
+        if (databaseName != null && !objectsLevel && limit != DefaultLimit)
             return McpHelpers.Refusal("limit",
-                $"limit applies only to the objects level (database_name without object_name) of view {StorageGrowthView}; omit it for the {(databaseName == null ? "databases" : "indexes")} level.");
+                $"limit applies only to the databases and objects levels of view {StorageGrowthView}; omit it for the indexes level (database_name with object_name).");
 
         var now = DateTime.UtcNow;
         var timeout = McpCommandDeadlines.ReadSeconds;
@@ -291,7 +300,7 @@ public sealed partial class DarlingMcpFinOpsTools
             if (dbGate != null) return dbGate;
             if (IsBareEmpty([databases.Count], [dbGate]))
                 return McpHelpers.Status("empty", "No database size snapshot was found for this server, so there is no storage growth to show.");
-            return BuildStorageGrowthDatabasesPayload(resolved.ServerName, hoursBack, databases);
+            return BuildStorageGrowthDatabasesPayload(resolved.ServerName, hoursBack, databases, StorageGrowthDatabaseCap(limit));
         }
 
         var windowStart = DateTime.SpecifyKind(now.AddDays(-windowDays), DateTimeKind.Unspecified);

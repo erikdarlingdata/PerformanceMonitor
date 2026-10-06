@@ -71,6 +71,20 @@ public sealed class DarlingMcpFinOpsToolsTests
         Assert.Equal(DarlingMcpFinOpsTools.Views.Length, DarlingMcpFinOpsTools.Views.Distinct().Count());
     }
 
+    /* #5238: the served limit text is read by a caller who has not picked a view yet, and the views do not share a maximum: the top-N views stop
+       at 50, database_sizes, index_analysis and storage_growth's databases level take 500, storage_growth's objects level refuses over 20. So
+       the text names the default and sends the caller to the view's own maximum (the refusal text and the guide tail name it), and it names no
+       one range: "1-50" told a caller that 50 was the top of every view. It is 59 characters, so param get_finops.limit in the tools/list budget
+       file does not move. */
+    [Fact]
+    public void LimitDescription_NamesTheDefault_AndSaysEachViewHasItsOwnMax_NotOneRange()
+    {
+        var limit = ToolMethods().Single().GetParameters().Single(p => p.Name == "limit");
+        var text = limit.GetCustomAttribute<DescriptionAttribute>()!.Description;
+        Assert.Equal("Most rows per list (default 10); each view has its own max.", text);
+        Assert.DoesNotContain("1-50", text, StringComparison.Ordinal);
+    }
+
     [Theory]
     [InlineData(0, "low")]
     [InlineData(59, "low")]
