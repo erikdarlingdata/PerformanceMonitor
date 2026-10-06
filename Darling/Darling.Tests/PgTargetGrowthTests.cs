@@ -335,6 +335,10 @@ public sealed class PgTargetGrowthTests
         Assert.Equal("Database growth has sized databases, but none has 3 hourly samples in the lookback yet", block.Headline);
         Assert.Contains("a withheld trend never reads as zero growth", block.Investigation, StringComparison.Ordinal);
         Assert.Contains("threshold_lineage = 1 on this fact", block.Investigation, StringComparison.Ordinal);
+        // The card shows only when the minimum DID bind for this target: it must say what the minimum is for, never
+        // that it "does not bind" (#4404 review F3).
+        Assert.Contains("a floor on store age", block.Investigation, StringComparison.Ordinal);
+        Assert.DoesNotContain("does not bind", block.Investigation, StringComparison.Ordinal);
         Assert.Contains("Nothing to do but wait for the collector", block.Remediation, StringComparison.Ordinal);
 
         var unsized = Withheld(PgTargetScorer.GrowthReasonAllUnsized, seen: 2, unsized: 2);

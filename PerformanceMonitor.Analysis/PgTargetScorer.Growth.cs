@@ -97,9 +97,10 @@ public static partial class PgTargetScorer
     /// <summary>
     /// Samples a database (or the instance total) needs inside the lookback before its trend is graded: two points
     /// are a line and three is the first count with a middle to disagree with the ends — the bloat family's index
-    /// minimum, for the same reason. Lineage: measured: confirmed, not moved — the minimum does not bind at the collector's
-    /// hourly rate: every one of the 393 databases graded had at least 3 samples and 391 had 335 (50 Aurora PostgreSQL
-    /// clusters of the dogfood fleet, 2026-10-06, <c>pg_database_size_stats</c>, #4404). A fact withheld by this gate carries
+    /// minimum, for the same reason. Lineage: measured: confirmed, not moved — the read counted the databases that
+    /// had at least 3 samples, 393 of them, and 391 of those had 335, the full 14 days at the collector's hourly rate; it
+    /// shows the floor is small against a full lookback, not that the minimum never excludes a database (50 Aurora
+    /// PostgreSQL clusters of the dogfood fleet, 2026-10-06, <c>pg_database_size_stats</c>, #4404). A fact withheld by this gate carries
     /// <see cref="GrowthUnavailableReasonKey"/> = <see cref="GrowthReasonInsufficientSamples"/>.
     /// </summary>
     public const int GrowthMinimumSamples = 3;
@@ -107,7 +108,6 @@ public static partial class PgTargetScorer
     /// <summary>How many databases the fact names (the worst in <see cref="Fact.ObjectName"/>, all of them by name
     /// in metadata). Three, because the advice leads with one and mentions the others; the read's own bound, not a bar.</summary>
     public const int GrowthTopDatabases = 3;
-
     /// <summary>Boost when the bloat trend fired on a database this fact names — growth that is bloat is a different
     /// remedy than growth that is data. Lineage: <b>unmeasured</b> — chosen, not measured; calibrate against the
     /// dogfood PostgreSQL fleet's co-fire rates before the next release.</summary>

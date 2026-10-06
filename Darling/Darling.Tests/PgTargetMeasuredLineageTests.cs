@@ -30,7 +30,7 @@ namespace Darling.Tests;
 /// a bar then means re-reading the fleet or rewriting the comment as unmeasured, and either is honest.</para>
 ///
 /// <para><b>Round 4 (#4404).</b> The host-memory reclaimable bars, the sustain length and the overcommit band are measured
-/// as the empty interval (2026-09-29, 7 days, Aurora clusters); the growth bars and every boost stay unmeasured.</para>
+/// as the empty interval (2026-09-29, 7 days, Aurora clusters); the growth bars were measured in round 5 (2026-10-06, #4404, 14 days over 393 databases) and confirmed as written; the two co-fire boosts and the anomaly pair stay unmeasured.</para>
 ///
 /// <para><b>What stays unmeasured, on purpose.</b> The sampling floor and the sampled profile's bar (population 0
 /// on the fleet as of 2026-09-20 — no cluster runs <c>pg_wait_sampling</c>), the session-count floors (read as a
@@ -216,6 +216,70 @@ public sealed class PgTargetMeasuredLineageTests
         var detector = string.Join("\n", RepoFile.ReadRepoFileLf("Darling", "PerformanceMonitor.Darling.Analysis", "PgTargetAnomalyDetector.cs").Split('\n'));
         Assert.Equal(2, Regex.Matches(detector, @"ZScoreMetadata\([^;]*barsMeasured:\s*true\)").Count);
         Assert.Contains("[\"threshold_lineage\"] = barsMeasured ? 1 : 0,", detector, StringComparison.Ordinal);
+    }
+
+    /// <summary>The growth scorer stamps ONE blanket <c>threshold_lineage</c> for every bar it declares, so a new bar
+    /// added there must be filed as measured or unmeasured here, or it ships under the stamp unclassified: the
+    /// per-constant pins above only see the constants they name (#4404 review F1). Parses the source the way the rest
+    /// of the class does (a regex over the LF-normalised file) and takes every numeric <c>public const</c>; the string
+    /// constants are metadata keys, and the reason and subject codes and the top-N count are not bars.</summary>
+    [Fact]
+    public void EveryNumericConstantInTheGrowthScorer_IsFiledAsMeasuredOrUnmeasured()
+    {
+        const string file = "PgTargetScorer.Growth.cs";
+        var offenders = UnclassifiedBars(Source(file), file);
+
+        Assert.True(
+            offenders.Count == 0,
+            "PgTargetScorer.Growth.cs stamps one threshold_lineage for every bar it declares; each numeric constant "
+            + "must be listed in s_measured or s_stillUnmeasured so a new bar cannot ride the blanket stamp unmarked:"
+            + Environment.NewLine + string.Join(Environment.NewLine, offenders));
+    }
+
+    [Fact]
+    public void TheGrowthCensus_NamesAnArrangedNewBar_AndSkipsTheNonBars()
+    {
+        var lines = new[]
+        {
+            "    public const double GrowthNewBar = 1;",
+            "    public const int GrowthReasonInsufficientSamples = 1;",
+            "    public const int GrowthSubjectDatabase = 1;",
+            "    public const int GrowthTopDatabases = 3;",
+            "    public const string GrowthSomethingKey = \"x\";",
+            "    public const int GrowthMinimumSamples = 3;",
+        };
+
+        var offenders = UnclassifiedBars(lines, "PgTargetScorer.Growth.cs");
+
+        Assert.Single(offenders);
+        Assert.Contains("GrowthNewBar", offenders[0], StringComparison.Ordinal);
+    }
+
+    private static readonly Regex s_numericConst = new(
+        @"^\s*public\s+const\s+(?:int|long|double)\s+(\w+)\s*=", RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
+    private static List<string> UnclassifiedBars(string[] lines, string file)
+    {
+        var filed = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var (f, _, constants) in s_measured)
+            if (f == file) filed.UnionWith(constants);
+        foreach (var (f, constants) in s_stillUnmeasured)
+            if (f == file) filed.UnionWith(constants);
+
+        var offenders = new List<string>();
+        foreach (var line in lines)
+        {
+            var m = s_numericConst.Match(line);
+            if (!m.Success) continue;
+            var name = m.Groups[1].Value;
+            if (name.StartsWith("GrowthReason", StringComparison.Ordinal)
+                || name.StartsWith("GrowthSubject", StringComparison.Ordinal)
+                || name == "GrowthTopDatabases")
+                continue;
+            if (!filed.Contains(name))
+                offenders.Add($"{file}::{name} is a numeric constant listed in neither s_measured nor s_stillUnmeasured");
+        }
+        return offenders;
     }
 
     /* ── the walk-up, exercised on an arranged input so the pin is known to bite ── */

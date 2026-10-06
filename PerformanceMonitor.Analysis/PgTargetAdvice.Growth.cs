@@ -194,7 +194,7 @@ public static partial class PgTargetAdvice
                 break;
             default:
                 headline = $"Database growth has sized databases, but none has {PgTargetScorer.GrowthMinimumSamples} hourly samples in the lookback yet";
-                inv.Append($"A trend needs {PgTargetScorer.GrowthMinimumSamples} samples before it is graded (the minimum does not bind at the hourly collector rate in the fleet read of 2026-10-06 — threshold_lineage = 1 on this fact). The size collector is hourly, so this is a store younger than three hours of PostgreSQL collection, or a target the collector has only just reached. ");
+                inv.Append($"A trend needs {PgTargetScorer.GrowthMinimumSamples} samples before it is graded (three hourly samples is a floor on store age, not a tuned bar: in the fleet read of 2026-10-06, 391 of 393 databases had the full 14 days of samples — threshold_lineage = 1 on this fact). The size collector is hourly, so this is a store younger than three hours of PostgreSQL collection, or a target the collector has only just reached. ");
                 rem.Append("Nothing to do but wait for the collector: the fact grades itself once three hourly samples exist for a sized database. ");
                 break;
         }
