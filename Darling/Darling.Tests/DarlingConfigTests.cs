@@ -681,7 +681,7 @@ public sealed class DarlingConfigTests
         Assert.NotEqual("s3cret!", blob);
         Assert.Equal("s3cret!", DarlingSecrets.Unprotect(blob));
 
-        var server = Server(s => { s.Auth = "sql"; s.Username = "u"; s.EncryptedPassword = blob; s.Password = "wrong-plaintext"; });
+        var server = Server(s => { s.Auth = "sql"; s.Username = "u"; s.EncryptedPassword = blob; s.EncryptedPasswordDeclaredByFile = true; s.Password = "wrong-plaintext"; });
         Assert.Equal("s3cret!", DarlingSecrets.ResolvePassword(server, out var usedPlaintext));
         Assert.False(usedPlaintext);
 

@@ -287,7 +287,7 @@ public sealed class DarlingAlertSettings : IAlertEngineSettings, IAlertSettings
     public string SmtpRecipients => _config.Smtp.To;
 
     /// <summary>
-    /// The SMTP password: smtp.encryptedPassword (DPAPI, Windows, preferred) else smtp.password — a
+    /// The SMTP password: smtp.encryptedPassword (a sealed value, or DPAPI on Windows; preferred) else smtp.password — a
     /// literal or an <c>env:</c>/<c>file:</c> reference (#1804), the only non-Windows email path; null
     /// when neither is set. Called inside EmailSendCore's send try/catch, so a decrypt/dereference
     /// failure surfaces as that alert's send_error rather than killing the sweep.
@@ -297,13 +297,9 @@ public sealed class DarlingAlertSettings : IAlertEngineSettings, IAlertSettings
         var blob = _config.Smtp.EncryptedPassword;
         if (!string.IsNullOrWhiteSpace(blob))
         {
-            if (!OperatingSystem.IsWindows())
-            {
-                throw new PlatformNotSupportedException(
-                    "smtp.encryptedPassword requires Windows (DPAPI); use smtp.password with an env:/file: reference on other platforms.");
-            }
-
-            return DarlingSecrets.Unprotect(blob);
+            /* #5366: a reference, then a sealed value (opened for this SMTP connection), then an old-format value on Windows
+               when darling.json declares it or its pin still matches. Every refusal throws before anything is sent. */
+            return DarlingSecrets.ResolveSmtpPassword(_config.Smtp);
         }
 
         var password = _config.Smtp.Password;

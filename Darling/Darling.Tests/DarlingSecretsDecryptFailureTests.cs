@@ -115,6 +115,8 @@ public sealed class DarlingSecretsDecryptFailureTests
             Username = "monitor",
             /* Valid base64, not a valid DPAPI blob for this machine — the remote-Viewer case, locally. */
             EncryptedPassword = Convert.ToBase64String(new byte[] { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 }),
+            /* #5366: an old-format value opens only when darling.json declares it or a pin matches; the file declares it here. */
+            EncryptedPasswordDeclaredByFile = true,
         };
 
         var ex = Assert.Throws<InvalidOperationException>(
@@ -145,6 +147,7 @@ public sealed class DarlingSecretsDecryptFailureTests
             Auth = "sql",
             Username = "monitor",
             EncryptedPassword = DarlingSecrets.Protect("correct horse battery staple"),
+            EncryptedPasswordDeclaredByFile = true,
         };
 
         Assert.Equal("correct horse battery staple", DarlingSecrets.ResolvePassword(server, out var usedPlaintext));
