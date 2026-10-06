@@ -450,15 +450,6 @@ OPTION(RECOMPILE);";
     }
 
     /// <summary>
-    /// #4348: true for a plan that is the whole-plan marker (<see cref="SensitiveStatements.PlaceholderText"/>: the
-    /// session's budget ran out, or its judge failed). It says nothing about WHICH: a host that must tell a plan the
-    /// budget could not cover (not cached, so the next cycle judges it again) from one withheld for its own sake
-    /// (cached like any plan) reads the <c>unjudged</c> set of <see cref="ReadPlanFetchAsync"/>.
-    /// </summary>
-    public static bool IsWithheldWhole(string? planXml) =>
-        string.Equals(planXml, SensitiveStatements.PlaceholderText, StringComparison.Ordinal);
-
-    /// <summary>
     /// True when the main query carries the plan columns itself: the host captures plans and has not
     /// deferred the fetch to <see cref="BuildPlanFetchQuery"/> (#5158). One definition for the query text
     /// and the read, so the ordinals cannot disagree with the SELECT.

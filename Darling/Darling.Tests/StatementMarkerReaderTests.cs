@@ -229,6 +229,22 @@ public sealed class StatementMarkerReaderTests
         }
     }
 
+    [Fact]
+    public void TheWebMuteContextSeedsItsQueryPatternThroughTheMarkerHelper()
+    {
+        /* B-L3 (round 2): the test above pins the helper, this one pins its call site. mutePrefillParams must decide
+           "is this the marker" with isWithheldMarker (which trims), not an exact-equality check of its own that a padded
+           marker would slip past. */
+        var source = File.ReadAllText(PathTo("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "mute-context.js"));
+        var start = source.IndexOf("export function mutePrefillParams", StringComparison.Ordinal);
+        Assert.True(start >= 0, "mutePrefillParams was not found in mute-context.js");
+        var end = source.IndexOf("\nexport function ", start + 1, StringComparison.Ordinal);
+        var body = end < 0 ? source[start..] : source[start..end];
+
+        Assert.Contains("query_text_pattern: isWithheldMarker(d.queryText)", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("WITHHELD_MARKER", body, StringComparison.Ordinal);
+    }
+
     // ---- Same-statement pileup ---------------------------------------------------------------------------
 
     private static readonly DateTime PileupAt = new(2026, 10, 5, 12, 0, 0, DateTimeKind.Utc);
