@@ -830,7 +830,7 @@ public sealed class DarlingMcpDataTools
                 // null = ad-hoc/prepared text (literal-collapse behavior unchanged). History rows
                 // predating the column read as null and age out with raw retention.
                 host_object = r.HostObjectName,
-                query_text = r.QueryText is null ? null : McpHelpers.Truncate(r.QueryText, 2000),
+                query_text = r.QueryText is null ? null : McpHelpers.TruncateStatement(r.QueryText, 2000),
                 // #2012 stage 1's disclosure, now the residual: with proc-hosted callers split by
                 // host_object, distinct_texts > 1 marks ad-hoc literal blends (or pre-stage-2
                 // history where the split can't apply yet).
@@ -1374,7 +1374,7 @@ public sealed class DarlingMcpDataTools
                 avg_physical_reads = r.AvgPhysicalReads,
                 avg_rowcount = r.AvgRowcount,
                 last_execution_time = r.LastExecutionTime?.ToString("o"),
-                query_text = full_text ? r.QueryText : McpHelpers.Truncate(r.QueryText, previewLength),
+                query_text = full_text ? r.QueryText : McpHelpers.TruncateStatement(r.QueryText, previewLength),
                 query_text_truncated = !full_text && r.QueryText != null && r.QueryText.Length > previewLength,
                 /* Emitted because it is a grouping key: on a 2022+ AG the same query can appear once per
                    replica role, and without this the caller would see duplicate-looking rows with no way

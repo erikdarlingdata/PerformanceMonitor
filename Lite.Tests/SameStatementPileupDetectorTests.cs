@@ -61,7 +61,7 @@ public class SameStatementPileupDetectorTests
            identity key is the DMV hash above, so the text is load-bearing only in the null-hash
            surrogate tests, which supply their own. */
         string? text = "select p.id, p.name, t.qty from dbo.product as p join #scope as t on t.id = p.id where p.org_id = @org_id") =>
-        new(at, sessionId, hash, text, db, status, wait, waitMs, elapsedMs, cpuMs, logicalReads, physicalReads);
+        new(at, sessionId, hash, text, db, status, wait, waitMs, elapsedMs, cpuMs, logicalReads, physicalReads, text);
 
     /// <summary>The 20:10:31Z snapshot verbatim, plus the 20:07:01Z baseline observation.</summary>
     private static List<SameStatementPileupDetector.SnapshotRow> MeasuredIncidentWindow() =>
@@ -161,6 +161,25 @@ public class SameStatementPileupDetectorTests
         var statement = JsonSerializer.SerializeToElement(detection.DrillDown["statement"]);
         Assert.Equal(IncidentHash, statement.GetProperty("identity").GetString());
         Assert.Equal(IncidentDb, statement.GetProperty("database_name").GetString());
+    }
+
+    /// <summary>
+    /// #5361 F1: the drill-down prints <c>PreviewText</c>, the text a reader judged whole before it cut. A row with no
+    /// <c>PreviewText</c> prints nothing: it must never fall back to the raw identity cut in <c>QueryText</c>.
+    /// </summary>
+    [Fact]
+    public void TheDrillDownStatement_FailsClosed_WhenARowCarriesNoPreviewText()
+    {
+        const string canary = "EXEC x @u = N'https://svc:Zx9Qv7Lmk@h'";
+        var window = MeasuredIncidentWindow()
+            .Select(r => r with { QueryText = canary, PreviewText = null })
+            .ToList();
+
+        var detection = Assert.Single(SameStatementPileupDetector.Evaluate(IncidentServer, window, JustAfterPileup));
+
+        var statement = JsonSerializer.SerializeToElement(detection.DrillDown["statement"]);
+        Assert.Equal("", statement.GetProperty("query_text").GetString());
+        Assert.DoesNotContain("Zx9Qv7Lmk", JsonSerializer.Serialize(detection.DrillDown), StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -743,7 +762,7 @@ public class SameStatementPileupDetectorTests
     [Fact]
     public void TheFinding_IsComputedFromSnapshotRowsAlone()
     {
-        /* The row type IS the contract: every member is a query_snapshots column. A field added here
+        /* The row type IS the contract: every member is a query_snapshots column (PreviewText, #5320, is the same text judged whole before the cut). A field added here
            from a query_store source would break this list and have to be justified. */
         var members = typeof(SameStatementPileupDetector.SnapshotRow)
             .GetProperties()
@@ -755,7 +774,7 @@ public class SameStatementPileupDetectorTests
             new[]
             {
                 "CollectionTime", "CpuTimeMs", "DatabaseName", "ElapsedMs", "LogicalReads",
-                "PhysicalReads", "QueryHash", "QueryText", "SessionId", "Status", "WaitTimeMs", "WaitType",
+                "PhysicalReads", "PreviewText", "QueryHash", "QueryText", "SessionId", "Status", "WaitTimeMs", "WaitType",
             },
             members);
 

@@ -23,7 +23,7 @@ public sealed partial class PgDrillDownCollector
     /// for $2 (no upper bound on <c>collection_time</c>: a late-collected deadlock is still in the window).</summary>
     public const string TopDeadlocksSql = @"
 SELECT collection_time, deadlock_time, victim_process_id,
-       LEFT(victim_sql_text, 500) AS victim_sql,
+       victim_sql_text AS victim_sql,
        deadlock_graph_xml
 FROM v_deadlocks
 WHERE server_id = $1 AND deadlock_time >= $2 AND deadlock_time <= $3 AND collection_time >= $4
@@ -36,7 +36,7 @@ LIMIT 3";
     /// read takes a wider page than it shows and the reader applies the rule.</summary>
     public const string TopDeadlocksSkippingSeparateSql = @"
 SELECT collection_time, deadlock_time, victim_process_id,
-       LEFT(victim_sql_text, 500) AS victim_sql,
+       victim_sql_text AS victim_sql,
        deadlock_graph_xml,
        CASE WHEN database_name IS NOT NULL
              AND lower(database_name) <> 'master'
@@ -75,7 +75,7 @@ LIMIT 200";
                 time = reader.IsDBNull(0) ? "" : reader.GetDateTime(0).ToString("o"),
                 deadlock_time = reader.IsDBNull(1) ? "" : reader.GetDateTime(1).ToString("o"),
                 victim = reader.IsDBNull(2) ? "" : reader.GetString(2),
-                victim_sql = reader.IsDBNull(3) ? "" : reader.GetString(3),
+                victim_sql = reader.IsDBNull(3) ? "" : StatementPreview(reader.GetString(3)),
                 objects = string.Join(", ", objects)
             });
         }
@@ -96,8 +96,8 @@ FROM
 (
     SELECT collection_time, database_name, blocked_spid, blocking_spid,
            wait_time_ms, lock_mode,
-           LEFT(blocked_sql_text, 500) AS blocked_sql,
-           LEFT(blocking_sql_text, 500) AS blocking_sql,
+           blocked_sql_text AS blocked_sql,
+           blocking_sql_text AS blocking_sql,
            contentious_object
     FROM v_blocked_process_reports
     WHERE server_id = $1 AND event_time >= $2 AND event_time <= $3 AND collection_time >= $4
@@ -106,8 +106,8 @@ FROM
 
     SELECT collection_time, database_name, blocked_spid, blocking_spid,
            wait_time_ms, lock_mode,
-           LEFT(blocked_sql_text, 500) AS blocked_sql,
-           LEFT(blocking_sql_text, 500) AS blocking_sql,
+           blocked_sql_text AS blocked_sql,
+           blocking_sql_text AS blocking_sql,
            contentious_object
     FROM v_dmv_blocking_snapshots
     WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3
@@ -125,8 +125,8 @@ FROM
 (
     SELECT collection_time, database_name, blocked_spid, blocking_spid,
            wait_time_ms, lock_mode,
-           LEFT(blocked_sql_text, 500) AS blocked_sql,
-           LEFT(blocking_sql_text, 500) AS blocking_sql,
+           blocked_sql_text AS blocked_sql,
+           blocking_sql_text AS blocking_sql,
            contentious_object
     FROM v_blocked_process_reports
     WHERE server_id = $1 AND event_time >= $2 AND event_time <= $3 AND collection_time >= $5
@@ -136,8 +136,8 @@ FROM
 
     SELECT collection_time, database_name, blocked_spid, blocking_spid,
            wait_time_ms, lock_mode,
-           LEFT(blocked_sql_text, 500) AS blocked_sql,
-           LEFT(blocking_sql_text, 500) AS blocking_sql,
+           blocked_sql_text AS blocked_sql,
+           blocking_sql_text AS blocking_sql,
            contentious_object
     FROM v_dmv_blocking_snapshots
     WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3
@@ -171,8 +171,8 @@ LIMIT 5";
                 blocking_spid = reader.IsDBNull(3) ? 0 : Convert.ToInt32(reader.GetValue(3)),
                 wait_time_ms = reader.IsDBNull(4) ? 0L : Convert.ToInt64(reader.GetValue(4)),
                 lock_mode = reader.IsDBNull(5) ? "" : reader.GetString(5),
-                blocked_sql = reader.IsDBNull(6) ? "" : reader.GetString(6),
-                blocking_sql = reader.IsDBNull(7) ? "" : reader.GetString(7),
+                blocked_sql = reader.IsDBNull(6) ? "" : StatementPreview(reader.GetString(6)),
+                blocking_sql = reader.IsDBNull(7) ? "" : StatementPreview(reader.GetString(7)),
                 contentious_object = reader.IsDBNull(8) ? "" : reader.GetString(8)
             });
         }
@@ -182,13 +182,17 @@ LIMIT 5";
     }
 
     // SpidFilter keeps the drill-down, fact collector, and viewer fetch in lockstep on the apex
-    // (a missing blocker maps to spid 0 — see PgBlockingPairRowQuery). SQL text is truncated here
-    // for the drill-down payload; the shared reader mapping is unaffected (same column order).
+    // (a missing blocker maps to spid 0 — see PgBlockingPairRowQuery). The pair-rows come back WITHOUT statement
+    // text (#5361): up to 5,000 rows of whole text, 131 times the bytes of the 500-character cut this read carried
+    // before #5320, to print the levels of three chains. The reconstruction picks the rows, and
+    // PgBlockingPairRowQuery.BprChainLevelTextSql / DmvChainLevelTextSql then read the whole text of only the
+    // levels shown, by event key; the drill-down payload judges it and cuts it in C# (#5320). The shared reader
+    // mapping is unaffected (same column order, empty text in the two text columns).
     public const string ReconstructedChainsSql = $@"
 SELECT
     {PgBlockingPairRowQuery.LeadingColumns},
-    LEFT(blocked_sql_text, 500) AS blocked_sql,
-    LEFT(blocking_sql_text, 500) AS blocking_sql,
+    ''::text AS blocked_sql,
+    ''::text AS blocking_sql,
     {PgBlockingPairRowQuery.IdentityColumns},
     contentious_object,
     {PgBlockingPairRowQuery.TrailingIdentityColumns}
@@ -221,6 +225,8 @@ LIMIT 5000";
                 rows.Add(PgBlockingPairRowQuery.Read(reader));
         }
 
+        var bprRowCount = rows.Count;
+
         // Always-on DMV blocking snapshot fallback. Merge BEFORE the empty check so DMV-only blocking
         // (blocked-process-report unavailable, e.g. AWS RDS) still reconstructs.
         /* A FACTORY that stamps the deadline, not the bare `connection.CreateCommand` method group
@@ -242,7 +248,11 @@ LIMIT 5000";
                 return dmvCommand;
             },
             rows, context.ServerId, context.TimeRangeStart, context.TimeRangeEnd,
-            context.CancellationToken);
+            context.CancellationToken, includeText: false);
+
+        /* #5361: the merge appends only the DMV edges no blocked-process-report edge already holds, after the report
+           rows, so every row past the report count is DMV-sourced: the source of each level's text read below. */
+        var dmvKeys = rows.Skip(bprRowCount).Select(r => r.Key).ToHashSet();
 
         /* A master target leaves out the pairs of databases monitored as their own targets, the same rule
            the BLOCKING_CHAIN fact applies, so the evidence does not show chains the other targets own. */
@@ -255,8 +265,25 @@ LIMIT 5000";
         var reconstruction = BlockingChainReconstructor.Reconstruct(
             rows, maxDepth: 50, maxPairs: 5000, stepBudget: 100_000, scopeByMonitorLoop: false);
 
+        var shownChains = reconstruction.Chains.Take(3).ToList();
+
+        /* #5361: whole statement text for the levels that print, by event key, one read per source. A level whose
+           row is gone by now (retention) reads as empty text. The text is judged and cut below, as before. */
+        var shownKeys = shownChains.SelectMany(c => c.Levels).Select(l => l.Key).Distinct().ToList();
+        var bprText = await PgBlockingPairRowQuery.ReadChainLevelTextAsync(
+            connection, PgBlockingPairRowQuery.BprChainLevelTextSql, context.ServerId,
+            shownKeys.Where(k => !dmvKeys.Contains(k)).ToList(),
+            PerformanceMonitor.Darling.Storage.EventWindowFloor.For(context.TimeRangeStart),
+            DrillDownCommandTimeoutSeconds, context.CancellationToken);
+        var dmvText = await PgBlockingPairRowQuery.ReadChainLevelTextAsync(
+            connection, PgBlockingPairRowQuery.DmvChainLevelTextSql, context.ServerId,
+            shownKeys.Where(dmvKeys.Contains).ToList(), null,
+            DrillDownCommandTimeoutSeconds, context.CancellationToken);
+        (string BlockedSql, string BlockingSql) TextOf(ChainLevel l) =>
+            (dmvKeys.Contains(l.Key) ? dmvText : bprText).GetValueOrDefault(l.Key, (string.Empty, string.Empty));
+
         var items = new List<object>();
-        foreach (var chain in reconstruction.Chains.Take(3))
+        foreach (var chain in shownChains)
         {
             items.Add(new
             {
@@ -273,8 +300,8 @@ LIMIT 5000";
                     blocked_spid = l.BlockedSpid,
                     lock_mode = l.LockMode,
                     wait_time_ms = l.WaitTimeMs,
-                    blocking_sql = l.BlockingSqlText,
-                    blocked_sql = l.BlockedSqlText
+                    blocking_sql = StatementPreview(TextOf(l).BlockingSql),
+                    blocked_sql = StatementPreview(TextOf(l).BlockedSql)
                 }).ToList()
             });
         }
