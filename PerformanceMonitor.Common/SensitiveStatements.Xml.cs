@@ -261,8 +261,8 @@ public static partial class SensitiveStatements
             public int Ordinal { get; }
             public string? Text { get; }
 
-            /// <summary>The statement has a <c>StatementText</c> (with a token or without): its parameter values are
-            /// kept so each can be judged, even when no token in the text puts one back (#5320).</summary>
+            /// <summary>Every statement element keeps its parameter values so each can be judged, whether or not it has
+            /// a <c>StatementText</c> and even when no token in the text puts one back (#5320).</summary>
             public bool TakesValues { get; }
             public Dictionary<string, (string? Compiled, string? Runtime)>? Values { get; private set; }
 
@@ -526,7 +526,7 @@ public static partial class SensitiveStatements
                                 _stmtOrdinal++;
                                 frame = new StmtFrame(_stmtOrdinal,
                                     statementText is not null && HasToken(statementText) ? statementText : null,
-                                    statementText is not null);
+                                    takesValues: true);
                             }
                             else if (isColumn && column is not null)
                             {
