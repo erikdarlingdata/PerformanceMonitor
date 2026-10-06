@@ -335,9 +335,9 @@ latest AS
         max_grant_kb,
         min_spills,
         max_spills,
-        -- #5361: whether the row has text, never the text. This window sort would carry every row's whole text (up to
-        -- 64 KB each) to keep five plans, so the text of those plans is read afterwards (ParameterSensitiveTextSql).
-        query_text IS NOT NULL AS has_text,
+        -- #5361: no text here. This window sort would carry every row's whole text (up to 64 KB each) to keep five
+        -- plans, and even a test of the column for NULL reads it, so the text of the plans that print is read afterwards
+        -- (ParameterSensitiveTextSql); a plan whose newest row has no text prints empty text, as before.
         ROW_NUMBER() OVER
         (
             PARTITION BY database_name, query_hash, query_plan_hash
@@ -359,7 +359,6 @@ SELECT
     max_worker_time::DOUBLE PRECISION / NULLIF(min_worker_time, 0) AS worker_ratio,
     max_grant_kb::DOUBLE PRECISION / NULLIF(min_grant_kb, 0) AS grant_ratio,
     CASE WHEN max_spills > 0 AND min_spills = 0 THEN 1 ELSE 0 END AS spill_divergence,
-    has_text,
     creation_time,
     server_offset_minutes,
     server_time_zone_id
@@ -386,9 +385,9 @@ ORDER BY worker_ratio DESC";
             {
                 /* The exact compiled-before-the-window test with the offset in force when the plan was compiled
                    (#4821); the five-row cap is applied after it, not in SQL. */
-                if (reader.IsDBNull(10)
+                if (reader.IsDBNull(9)
                     || !PlanCreationClock.CompiledBeforeWindow(
-                        PlanCreationClock.ClockFrom(reader, 11, 12), reader.GetDateTime(10), context.TimeRangeStart))
+                        PlanCreationClock.ClockFrom(reader, 10, 11), reader.GetDateTime(9), context.TimeRangeStart))
                 {
                     continue;
                 }
@@ -408,20 +407,16 @@ ORDER BY worker_ratio DESC";
                     MaxWorkerTimeUs: reader.IsDBNull(5) ? 0L : Convert.ToInt64(reader.GetValue(5)),
                     WorkerRatio: reader.IsDBNull(6) ? 0.0 : Convert.ToDouble(reader.GetValue(6)),
                     GrantRatio: reader.IsDBNull(7) ? 0.0 : Convert.ToDouble(reader.GetValue(7)),
-                    SpillsOnSomeInputs: !reader.IsDBNull(8) && Convert.ToInt32(reader.GetValue(8)) == 1,
-                    HasText: !reader.IsDBNull(9) && reader.GetBoolean(9)));
+                    SpillsOnSomeInputs: !reader.IsDBNull(8) && Convert.ToInt32(reader.GetValue(8)) == 1));
             }
         }
 
         if (kept.Count == 0)
             return;
 
-        /* #5361: the whole text of the plans that print, not of every plan the read above ranked. One read, only when a
-           kept plan has text; a plan whose row is gone by now prints empty text, as a row with no text does. */
-        var text = kept.Any(p => p.HasText)
-            ? await ReadParameterSensitiveTextAsync(
-                connection, kept.Where(p => p.HasText).Select(p => p.Key).Distinct().ToList(), context)
-            : new Dictionary<PlanKey, string>();
+        /* #5361: the whole text of the plans that print, not of every plan the read above ranked. One read; a plan whose
+           newest row has no text, or whose row is gone by now, prints empty text, as a row with no text did. */
+        var text = await ReadParameterSensitiveTextAsync(connection, kept.Select(p => p.Key).Distinct().ToList(), context);
 
         finding.DrillDown!["parameter_sensitive_queries"] = kept.Select(p => (object)new
         {
@@ -434,7 +429,7 @@ ORDER BY worker_ratio DESC";
             worker_ratio = p.WorkerRatio,
             grant_ratio = p.GrantRatio,
             spills_on_some_inputs = p.SpillsOnSomeInputs,
-            query_text = p.HasText && text.TryGetValue(p.Key, out var queryText)
+            query_text = text.TryGetValue(p.Key, out var queryText)
                 ? McpHelpers.StatementPreview(queryText, 500)
                 : ""
         }).ToList();
@@ -448,8 +443,7 @@ ORDER BY worker_ratio DESC";
         long MaxWorkerTimeUs,
         double WorkerRatio,
         double GrantRatio,
-        bool SpillsOnSomeInputs,
-        bool HasText);
+        bool SpillsOnSomeInputs);
 
     /// <summary>A plan's identity in <see cref="ParameterSensitiveTextSql"/>: the three raw column values, NULL kept
     /// as NULL (the printed fields map it to empty text), compared ordinally.</summary>
