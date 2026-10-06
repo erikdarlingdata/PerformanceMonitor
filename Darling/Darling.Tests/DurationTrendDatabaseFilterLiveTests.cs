@@ -187,6 +187,15 @@ public sealed class DurationTrendDatabaseFilterLiveTests
             Assert.Equal(3_000 / bucketSeconds, viewerB, 9);
             Assert.Equal(viewerA + viewerB, await Viewer(A, B), 9);
             Assert.Equal((9_000 + 4) / bucketSeconds, await Viewer(), 9);
+
+            /* The viewer's execution-count chart has its own statement, with the same rule: ten executions per row. */
+            async Task<double> ViewerExecutions(params string[] names) =>
+                (await viewer.GetExecutionCountTrendAsync(serverId, viewerStart, end, names.Length == 0 ? null : names, nowUtc: viewerStart.AddHours(1), cancellationToken: ct)).Points.Single().Value;
+
+            var executionsA = await ViewerExecutions(A);
+            Assert.Equal(10 / bucketSeconds, executionsA, 9);
+            Assert.Equal(executionsA + await ViewerExecutions(B), await ViewerExecutions(A, B), 9);
+            Assert.Equal(60 / bucketSeconds, await ViewerExecutions(), 9);
         }, Cleanup);
 
     /// <summary>One <c>query_stats</c> row with the collector's stored interval (the bucket-denominator tests need 900 s collections).</summary>

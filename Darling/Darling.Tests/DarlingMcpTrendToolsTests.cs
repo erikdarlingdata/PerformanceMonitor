@@ -343,12 +343,17 @@ public sealed class DarlingMcpTrendToolsSurfaceAndSqlTests
         Assert.DoesNotContain("ELSE 0", sql, StringComparison.Ordinal);
         Assert.Contains("CASE WHEN interval_seconds > 0 THEN total_elapsed_ms / interval_seconds END AS elapsed_ms_per_second", sql, StringComparison.Ordinal);
 
-        /* The viewer's per-collection CTE minus its database-filter line is the MCP statement's, whitespace aside. */
-        var viewer = string.Join('\n', Cte(Lf(ViewerDataService.ProcedureDurationTrendSql), "raw AS\n(")
-            .Split('\n')
-            .Where(l => !l.Contains("$4::text[]", StringComparison.Ordinal))
-            .Select(l => l.Trim()));
-        var mcp = string.Join('\n', Cte(Lf(sql), "raw AS\n(").Split('\n').Select(l => l.Trim()));
+        /* The viewer's per-collection CTE minus its database-filter lines is the MCP statement's, whitespace aside.
+           #5414 M1: the filter is inside the aggregates, so the lines that differ are the two sums (FILTERed in the
+           viewer's) and the matched-rows count; everything else, the stored-interval CASE and the FROM / WHERE (which
+           carries NO database term, so the interval is the collection's), is the same text. */
+        static bool IsFilteredSumLine(string l) =>
+            l.Contains("delta_elapsed_time", StringComparison.Ordinal) || l.Contains("delta_execution_count", StringComparison.Ordinal)
+            || l.Contains("matched_rows", StringComparison.Ordinal);
+        var viewerCte = Cte(Lf(ViewerDataService.ProcedureDurationTrendSql), "raw AS\n(");
+        Assert.Equal(3, viewerCte.Split('\n').Count(l => l.Contains("FILTER (WHERE $4::text[] IS NULL OR database_name = ANY($4))", StringComparison.Ordinal)));
+        var viewer = string.Join('\n', viewerCte.Split('\n').Where(l => !IsFilteredSumLine(l)).Select(l => l.Trim()));
+        var mcp = string.Join('\n', Cte(Lf(sql), "raw AS\n(").Split('\n').Where(l => !IsFilteredSumLine(l)).Select(l => l.Trim()));
         Assert.Equal(viewer, mcp);
 
         /* And the shared readers KEEP a NULL-rate row as an unrated point rather than reading it as 0 or
@@ -516,7 +521,11 @@ public sealed class DarlingMcpTrendToolsSurfaceAndSqlTests
             Assert.Contains("CASE WHEN MAX(sample_interval_seconds) IS NULL", sql, StringComparison.Ordinal);
             Assert.Contains("THEN extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time))))", sql, StringComparison.Ordinal);
             Assert.Contains("ELSE NULLIF(MAX(sample_interval_seconds), 0)", sql, StringComparison.Ordinal);
-            Assert.DoesNotContain("COALESCE(", sql, StringComparison.Ordinal);
+            /* The wrong spelling is COALESCE over the INTERVAL (a fabricated interval on the restart row); the filtered
+               texts COALESCE their SUMs to 0 (#5414 M1: a collection the chosen databases had no rows in is zero work,
+               a measurement) and say so, so only the interval spellings are refused. */
+            Assert.DoesNotContain("COALESCE(NULLIF(", sql, StringComparison.Ordinal);
+            Assert.DoesNotContain("COALESCE(sample_interval_seconds", sql, StringComparison.Ordinal);
             Assert.DoesNotContain("ELSE 0", sql, StringComparison.Ordinal);
             Assert.Contains("CASE WHEN interval_seconds > 0 THEN CAST(total_executions AS DOUBLE PRECISION) / interval_seconds END AS executions_per_second", sql, StringComparison.Ordinal);
         }
@@ -525,9 +534,14 @@ public sealed class DarlingMcpTrendToolsSurfaceAndSqlTests
            they are now compared against that builder rather than the per-collection BuildRawTrendSql; the
            filter is still the ONLY difference between the viewer's call and the MCP reader's. */
         Assert.Equal(DurationTrendRouting.BuildBucketedRawTrendSql("query_stats", withDatabaseFilter: true), ViewerDataService.QueryDurationTrendSql);
+        /* #5414 M1: the filtered per-collection read carries the filter in its aggregates and a matched-rows point set;
+           minus those lines it is the unfiltered text. */
         Assert.Equal(
-            Lines(DurationTrendRouting.QueryDurationTrendRawSql(withDatabaseFilter: true)).Where(l => !l.Contains("$4::text[]", StringComparison.Ordinal)).ToArray(),
-            Lines(DurationTrendRouting.QueryDurationTrendRawSql(withDatabaseFilter: false)));
+            Lines(DurationTrendRouting.QueryDurationTrendRawSql(withDatabaseFilter: true))
+                .Where(l => !l.Contains("delta_elapsed_time", StringComparison.Ordinal) && !l.Contains("delta_execution_count", StringComparison.Ordinal)
+                            && !l.Contains("matched_rows", StringComparison.Ordinal)).ToArray(),
+            Lines(DurationTrendRouting.QueryDurationTrendRawSql(withDatabaseFilter: false))
+                .Where(l => !l.Contains("delta_elapsed_time", StringComparison.Ordinal) && !l.Contains("delta_execution_count", StringComparison.Ordinal)).ToArray());
 
         /* The alias's ARGUMENT, by value: since #3897 the MCP reader's two raw texts are the BUCKETED builder's
            output, byte for byte (line endings aside) — not line-trimmed, because an alias has no indentation of
