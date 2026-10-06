@@ -193,6 +193,77 @@ public sealed class TopTextLookupFillTests
     }
 
     [Fact]
+    public async Task Run_AnEmptyRoundThatSawAFullCandidateLimit_AsksAgain_UpToTheBound()
+    {
+        /* #5313: every candidate is a shell, so each round trims to nothing and returns no page row, but it still reports
+           that it considered its whole candidate limit. The fill must go on: 30, 120, 225 candidates and then stop. */
+        var asked = new List<int>();
+        var rows = await TopFill.RunAsync(25, c =>
+        {
+            asked.Add(c);
+            return Task.FromResult((new List<int>(), c));
+        });
+        Assert.Equal(new[] { 30, 120, 225 }, asked);   /* at most three rounds, never more than top + 200 candidates */
+        Assert.Empty(rows);
+    }
+
+    [Fact]
+    public async Task Run_AnIdleWindow_CostsOneRound()
+    {
+        /* No candidates at all: the count row says 0, which is under the first limit, so there is nothing to refill. */
+        var asked = new List<int>();
+        var rows = await TopFill.RunAsync(25, c =>
+        {
+            asked.Add(c);
+            return Task.FromResult((new List<int>(), 0));
+        });
+        Assert.Equal(new[] { 30 }, asked);
+        Assert.Empty(rows);
+    }
+
+    [Fact]
+    public async Task Run_AnEmptyFirstRound_ThenRealRows_FillsThePage()
+    {
+        var asked = new List<int>();
+        var rows = await TopFill.RunAsync(3, c =>
+        {
+            asked.Add(c);
+            return Task.FromResult(c < 30 ? (new List<int>(), c) : (new List<int> { 1, 2, 3 }, c));
+        });
+        Assert.Equal(new[] { 8, 32 }, asked);
+        Assert.Equal(3, rows.Count);
+    }
+
+    // ------------------------------------------------------------------ the Query Store twin (#5313)
+
+    public static IEnumerable<object[]> QueryStoreStatements() =>
+        new[] { "McpRaw", "McpTable", "McpDaily", "ViewerRaw", "ViewerTable" }.Select(n => new object[] { n });
+
+    private static (string Sql, string Limit) QueryStoreSql(string name) => name switch
+    {
+        "McpRaw" => (DarlingDataReader.QueryStoreTopSql, "LIMIT $8"),
+        "McpTable" => (DarlingDataReader.QueryStoreTopTableSql, "LIMIT $8"),
+        "McpDaily" => (DarlingDataReader.QueryStoreTopDailyTableSql, "LIMIT $10"),
+        "ViewerRaw" => (ViewerDataService.QueryStoreTopSql, "LIMIT $6"),
+        "ViewerTable" => (ViewerDataService.QueryStoreTopTableSql, "LIMIT $6"),
+        _ => throw new ArgumentOutOfRangeException(nameof(name)),
+    };
+
+    [Theory]
+    [MemberData(nameof(QueryStoreStatements))]
+    public void TheQueryStoreReads_TakeTheCandidateLimitAsAParameter_AndReportTheCountOnTheirOwnRow(string name)
+    {
+        var (sql, limit) = QueryStoreSql(name);
+        Assert.DoesNotContain("+ 5", sql, StringComparison.Ordinal);
+        Assert.Single(Regex.Matches(sql, Regex.Escape(limit) + @"\s*$", RegexOptions.Multiline));
+        Assert.Single(Regex.Matches(sql, @"LIMIT \$4\s*$", RegexOptions.Multiline));   /* the final cap stays top */
+        Assert.Matches(@"FROM \(SELECT COUNT\(\*\) AS candidate_count FROM ranked\) AS c\s+LEFT JOIN page AS p ON TRUE", sql);
+        Assert.Single(Regex.Matches(sql, @"SELECT p\.\*, c\.candidate_count"));
+        Assert.Single(Regex.Matches(sql, @"AS page_ord"));
+        Assert.Matches(@"ORDER BY p\.page_ord\s*$", sql);
+    }
+
+    [Fact]
     public async Task Run_StopsAtTheFirstFullPage_AfterOneRound()
     {
         var asked = new List<int>();
