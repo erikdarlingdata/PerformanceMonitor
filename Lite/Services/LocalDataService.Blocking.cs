@@ -411,8 +411,9 @@ LIMIT 1";
     /// <para><b>The wait_type filter (#5235)</b> is one more population predicate, so the count and the cap see it
     /// and it ANDs with the other two. It matches the request's own wait at the capture by exact name with the case
     /// ignored (one equality, so a <c>%</c> or <c>_</c> in the input is literal), and a NULL wait never matches. The
-    /// stored value is right-trimmed first because an older collector wrote a trailing space. Darling's twin is
-    /// <c>upper(w.wait_type) IN (upper($7), upper($7) || ' ')</c>.</para>
+    /// stored value may carry the one trailing space <c>sys.dm_os_wait_stats</c> reports and an older collector kept,
+    /// so the match takes the name with and without it: the same rule as Darling's twin (a copy of its wait trend
+    /// read), <c>upper(w.wait_type) IN (upper($7), upper($7) || ' ')</c>.</para>
     ///
     /// <para>The predicates are composed as SQL text from the booleans and the optional wait filter (a database
     /// name and the wait value are still bound), the <see cref="BuildDbInClause"/> way, because DuckDB cannot infer a
@@ -431,7 +432,7 @@ LIMIT 1";
             string.IsNullOrWhiteSpace(databaseName) ? null : new[] { databaseName.Trim() }, "w.database_name", 5, out var dbValues);
         var blockingClause = blockingOnly ? " AND (w.blocking_session_id > 0 OR h.session_id IS NOT NULL)" : "";
         var waitFilter = string.IsNullOrWhiteSpace(waitType) ? null : waitType.Trim();
-        var waitClause = waitFilter == null ? "" : $" AND upper(rtrim(w.wait_type)) = upper(${5 + dbValues.Count})";
+        var waitClause = waitFilter == null ? "" : $" AND upper(w.wait_type) IN (upper(${5 + dbValues.Count}), upper(${5 + dbValues.Count}) || ' ')";
 
         command.CommandText = @"
 WITH window_rows AS (
