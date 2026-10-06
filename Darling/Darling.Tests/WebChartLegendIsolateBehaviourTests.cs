@@ -9,6 +9,7 @@
 using System;
 using System.ComponentModel;
 using System.Diagnostics;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Text.Json;
@@ -21,7 +22,8 @@ namespace Darling.Tests;
 /// <summary>
 /// A web line chart's legend hides, shows and isolates a series (#5247), and an entry that drills keeps its drill beside
 /// the switch, by mouse and keyboard. These run the shipped <c>charts.js</c> under Node
-/// (<c>web-chart-legend-harness.mjs</c>). Skipped when Node is not installed.
+/// (<c>web-chart-legend-harness.mjs</c>). Skipped when Node is not installed, except the one test that pins the
+/// swatch's click pad in <c>app.css</c> as source, since a Node run has no layout.
 /// </summary>
 public sealed class WebChartLegendIsolateBehaviourTests
 {
@@ -63,6 +65,7 @@ public sealed class WebChartLegendIsolateBehaviourTests
     private static int Lines(JsonElement s) => s.GetProperty("lines").GetInt32();
     private static double Top(JsonElement s) => s.GetProperty("top").GetDouble();
     private static string[] Drilled(JsonElement s) => s.GetProperty("drilled").EnumerateArray().Select(e => e.GetString()!).ToArray();
+    private static string[] Prevented(JsonElement s) => s.GetProperty("prevented").EnumerateArray().Select(e => e.GetString()!).ToArray();
 
     [Fact]
     public void ClickingAnEntry_HidesTheSeries_AndClickingAgainShowsIt()
@@ -207,6 +210,8 @@ public sealed class WebChartLegendIsolateBehaviourTests
         Assert.Equal(new[] { "SMALL", "MID" }, Drilled(keys));
         Assert.Empty(Off(keys));
         Assert.Equal(3, Lines(keys));
+        // Enter and Space are claimed (so the page does not scroll on Space); Tab is left alone, so focus still moves on.
+        Assert.Equal(new[] { "Enter", " " }, Prevented(keys));
     }
 
     [Fact]
@@ -219,6 +224,65 @@ public sealed class WebChartLegendIsolateBehaviourTests
         Assert.Empty(Off(S(r, "drillSwatchDblClick")));
         foreach (var step in new[] { "drillSwatchEnter", "drillSwatchShiftEnter", "drillSwatchDblClick" })
             Assert.Empty(Drilled(S(r, step)));
+        // The swatch claims Enter, and Shift+Enter (the key is still Enter); a double-click claims nothing more.
+        Assert.Equal(new[] { "Enter" }, Prevented(S(r, "drillSwatchEnter")));
+        Assert.Equal(new[] { "Enter", "Enter" }, Prevented(S(r, "drillSwatchShiftEnter")));
+        Assert.Equal(new[] { "Enter", "Enter" }, Prevented(S(r, "drillSwatchDblClick")));
+    }
+
+    /// <summary>
+    /// #5247: the swatch of a drilling entry, which is its hide/show switch, keeps a transparent click pad that makes
+    /// it a 20 x 25 px target.
+    ///
+    /// <para>The swatch is 12 x 3 px, and on an entry that drills it is the only hide/show control, so an
+    /// <c>::after</c> box widens its click area without moving anything. A Node run has no layout, so deleting that
+    /// rule, the <c>position: relative</c> that anchors it or its <c>content</c> would leave every other test green and
+    /// put the swatch back at 12 x 3 px. The pad must also stop short of the label, which sits one item gap to its
+    /// right (0.35rem on the 14 px root, 4.9 px), or it would take clicks meant for the label's drill. The swatch size
+    /// and that gap are read from the stylesheet and not typed here, so a wider pad, a narrower gap or a smaller root
+    /// font fails the pin. Pinned as source because the repo carries no CSS/DOM test runner (the same pattern as
+    /// FleetPageAttentionFilterTests); the geometry was also measured in a real browser.</para>
+    /// </summary>
+    [Fact]
+    public void ADrillingEntrysSwatch_HasATransparentPad_ThatMakesA20By25Target_AndStopsShortOfTheLabel()
+    {
+        var css = ReadRepoFileLf("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "css", "app.css");
+
+        var size = Regex.Match(css, @"\.chart-legend \.swatch\s*\{[^}]*width:\s*(\d+)px[^}]*height:\s*(\d+)px");
+        Assert.True(size.Success, "the legend swatch lost its width and height in px");
+        var swatchWidth = int.Parse(size.Groups[1].Value, CultureInfo.InvariantCulture);
+        var swatchHeight = int.Parse(size.Groups[2].Value, CultureInfo.InvariantCulture);
+
+        // The pad is placed against the swatch, so the swatch must be the positioned box.
+        Assert.True(
+            Regex.IsMatch(css, @"\.chart-legend \.item \.swatch\[role=""button""\]\s*\{[^}]*position:\s*relative"),
+            "the switch swatch is no longer position: relative, so its pad is not anchored to it");
+
+        var rule = Regex.Match(css, @"\.chart-legend \.item \.swatch\[role=""button""\]::after\s*\{([^}]*)\}");
+        Assert.True(rule.Success, "the switch swatch lost its click pad");
+        var pad = rule.Groups[1].Value;
+        Assert.True(Regex.IsMatch(pad, @"content:\s*"""""), "the click pad has no content, so the browser draws no box for it");
+        Assert.True(Regex.IsMatch(pad, @"position:\s*absolute"), "the click pad is not out of flow, so it would move the label");
+
+        int Reach(string side)
+        {
+            var m = Regex.Match(pad, @"(?<![\w-])" + side + @":\s*-(\d+)px");
+            Assert.True(m.Success, "the click pad has no negative px offset on its " + side);
+            return int.Parse(m.Groups[1].Value, CultureInfo.InvariantCulture);
+        }
+
+        var right = Reach("right");
+        var wide = swatchWidth + Reach("left") + right;
+        var tall = swatchHeight + Reach("top") + Reach("bottom");
+        Assert.True(wide >= 20, $"the pad makes the swatch {wide} px wide, under the 20 px target");
+        Assert.True(tall >= 25, $"the pad makes the swatch {tall} px tall, under the 25 px target");
+
+        // The label is one item gap to the right of the swatch (rem, on the root font size): the pad must stop short of it.
+        var root = Regex.Match(css, @"html, body\s*\{[^}]*font-size:\s*(\d+(?:\.\d+)?)px");
+        var gap = Regex.Match(css, @"\.chart-legend \.item\s*\{[^}]*gap:\s*(\d+(?:\.\d+)?)rem");
+        Assert.True(root.Success && gap.Success, "the root font size or the legend item gap changed shape, so the pad cannot be checked against the label");
+        var gapPx = double.Parse(root.Groups[1].Value, CultureInfo.InvariantCulture) * double.Parse(gap.Groups[1].Value, CultureInfo.InvariantCulture);
+        Assert.True(right < gapPx, $"the pad reaches {right} px to the right, and the label is only {gapPx} px away");
     }
 
     [Fact]
@@ -237,6 +301,8 @@ public sealed class WebChartLegendIsolateBehaviourTests
         var keys = S(r, "noSwitchKeys");
         Assert.Equal(new[] { "BIG", "SMALL", "MID", "MID" }, Drilled(keys));
         Assert.Equal(3, Lines(keys));
+        // The whole entry is the control here, and it claims the Space then the Enter that were sent.
+        Assert.Equal(new[] { " ", "Enter" }, Prevented(keys));
     }
 
     [Fact]

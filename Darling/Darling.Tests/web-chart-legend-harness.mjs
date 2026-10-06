@@ -10,6 +10,11 @@ import { pathToFileURL } from "node:url";
 
 const jsDir = process.argv[process.argv.length - 1];
 
+/* The keys whose default action a bubbled event's handler claimed (called preventDefault on), in order. Enter and Space
+   are claimed so the page does not scroll on Space; every other key is left alone. A scenario clears it with
+   `prevented.length = 0`, as it does `drilled`, then emits a copy beside what it drew. */
+const prevented = [];
+
 class FakeNode {
   constructor(tag, text) {
     this.tag = tag;
@@ -51,9 +56,10 @@ class FakeNode {
   dispatch(type, ev) {
     (this.listeners[type] || []).forEach((l) => l(ev || {}));
   }
-  /* The browser's bubbling: the node's own listeners, then each ancestor's, until one calls stopPropagation. */
+  /* The browser's bubbling: the node's own listeners, then each ancestor's, until one calls stopPropagation. The event's
+     preventDefault records its key in `prevented`, so a scenario can tell a claimed key from one left alone. */
   bubble(type, ev) {
-    const e = { preventDefault() {}, stopPropagation() { this.stopped = true; }, ...(ev || {}) };
+    const e = { preventDefault() { prevented.push(this.key); }, stopPropagation() { this.stopped = true; }, ...(ev || {}) };
     for (let n = this; n && !e.stopped; n = n.parent) (n.listeners[type] || []).forEach((l) => l(e));
   }
   getBoundingClientRect() {
@@ -258,23 +264,26 @@ labelOf(dr, "BIG").bubble("click"); // a hidden series' label still drills, and 
 out.drillWhileHidden = { drilled: [...drilled], ...state(dr) };
 swatchOf(dr, "BIG").bubble("click");
 drilled.length = 0;
+prevented.length = 0;
 labelOf(dr, "SMALL").bubble("keydown", key("Enter"));
 labelOf(dr, "MID").bubble("keydown", key(" "));
 labelOf(dr, "MID").bubble("keydown", key("Tab"));
-out.drillAfterKeys = { drilled: [...drilled], ...state(dr) };
+out.drillAfterKeys = { drilled: [...drilled], prevented: [...prevented], ...state(dr) };
 drilled.length = 0; // from here on, nothing the swatch does may drill
+prevented.length = 0;
 swatchOf(dr, "SMALL").bubble("keydown", key("Enter"));
-out.drillSwatchEnter = { drilled: [...drilled], ...state(dr) };
+out.drillSwatchEnter = { drilled: [...drilled], prevented: [...prevented], ...state(dr) };
 swatchOf(dr, "SMALL").bubble("keydown", key("Enter", { shiftKey: true }));
-out.drillSwatchShiftEnter = { drilled: [...drilled], ...state(dr) };
+out.drillSwatchShiftEnter = { drilled: [...drilled], prevented: [...prevented], ...state(dr) };
 swatchOf(dr, "SMALL").bubble("dblclick");
-out.drillSwatchDblClick = { drilled: [...drilled], ...state(dr) };
+out.drillSwatchDblClick = { drilled: [...drilled], prevented: [...prevented], ...state(dr) };
 
 // 11. an entry that drills but has no switch (no onLegend): the whole entry drills, by click or key, once per click
 const noSwitchDrilled = [];
 const noSwitch = charts.renderLineChart({ ...specFor(), series: drillSeries(), onSelect: (d) => noSwitchDrilled.push(d[0].value) });
 const drillEntry = (label) => find(noSwitch, (n) => n.tag === "span" && /\bitem\b/.test(cls(n)) && n.children.length === 2 && n.children[1].textContent === label)[0];
-const nsState = () => ({ drilled: [...noSwitchDrilled], lines: lines(noSwitch), switchable: legendItems(noSwitch).length, showAll: !!showAll(noSwitch) });
+prevented.length = 0;
+const nsState = () => ({ drilled: [...noSwitchDrilled], prevented: [...prevented], lines: lines(noSwitch), switchable: legendItems(noSwitch).length, showAll: !!showAll(noSwitch) });
 out.noSwitchInitial = { ...nsState(), itemClass: cls(drillEntry("BIG")), itemRole: drillEntry("BIG").attrs.role, itemTab: drillEntry("BIG").attrs.tabindex, labelRole: drillEntry("BIG").children[1].attrs.role ?? null };
 drillEntry("BIG").children[0].bubble("click"); // the swatch
 out.noSwitchSwatchClick = nsState();
