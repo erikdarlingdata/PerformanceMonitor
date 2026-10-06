@@ -54,10 +54,11 @@ fs.writeFileSync(path.join(scratch, "charts.js"),
 globalThis.__charts = [];
 const mod = await import(pathToFileURL(scratch + "/pages/query-store-history.js").href);
 const util = await import(pathToFileURL(scratch + "/util.js").href);
+const pv = await import(pathToFileURL(scratch + "/pages/plan-viewer.js").href);
 const flush = () => new Promise((r) => setTimeout(r, 5));
 const out = {};
 const row = { database_name: "Orders", query_id: 42 };
-const KEY = "srv-a|Orders|42"; // the panel's key for `row` (server|database|query id)
+const KEY = "srv-a|Orders|42|||"; // the panel's key for `row` (server|database|query id|plan id|execution type|replica role)
 const history = (extra = {}) => ({
   database_name: "Orders", query_id: 42, effective_start: "2026-03-04T00:00:00.0000000Z", window_truncated: false, points_truncated: false,
   plans: [
@@ -179,6 +180,55 @@ const scenarios = {
     await flush();
     out.goneTables = tables(only).length;
     out.keys = Object.keys(mod.queryStoreHistoryViewCounts());
+  },
+  /* The grid has a row per plan, execution type and replica role of a query, and History opens under the row clicked and no
+     other row of the query. Closing one leaves the others as they were. */
+  async twoRows() {
+    respond(history());
+    const c = col();
+    const planA = { database_name: "Orders", query_id: 42, plan_id: 7, execution_type_desc: "Regular", replica_role: "PRIMARY" };
+    const rows = [planA, { ...planA, plan_id: 9 }, { ...planA, execution_type_desc: "Aborted" }, { ...planA, replica_role: "SECONDARY" }];
+    const cells = rows.map((r) => body.appendChild(c.render(r)));
+    const shown = () => cells.map((x) => x.byText("Hide history") !== null && tables(x).length === 1);
+    cells[0].byText("History").click();
+    await flush();
+    out.afterFirst = shown();
+    out.fetchesAfterFirst = fetches.length;
+    out.keysAfterFirst = mod.openQueryStoreHistoryKeys();
+    cells[1].byText("History")?.click();
+    await flush();
+    out.afterSecond = shown();
+    cells[0].byText("Hide history")?.click();
+    out.afterHide = shown();
+    out.keysAfterHide = mod.openQueryStoreHistoryKeys();
+  },
+  /* The Plan button in a History table opens its own cell: not the grid's Plan cell for that plan, and not the same plan's button
+     in the History table under another grid row. */
+  async planButtonScope() {
+    respond(history());
+    const c = col();
+    const rowA = { database_name: "Orders", query_id: 42, plan_id: 7, execution_type_desc: "Regular", replica_role: null };
+    const rowB = { ...rowA, plan_id: 9 };
+    const cellA = body.appendChild(c.render(rowA));
+    const cellB = body.appendChild(c.render(rowB));
+    const gridPlan = body.appendChild(pv.queryStorePlanColumn("srv-a").render(rowA));
+    cellA.byText("History").click();
+    cellB.byText("History")?.click();
+    await flush();
+    const planButtons = (cell) => cell.all((n) => n.tag === "button" && n.textContent === "Plan");
+    const openPlans = (cell) => cell.all((n) => n.tag === "button" && n.textContent === "Hide plan").length;
+    const before = fetches.length;
+    planButtons(cellA)[0].click();
+    await flush();
+    out.planReads = fetches.length - before;
+    out.afterTableButton = { a: openPlans(cellA), b: openPlans(cellB), grid: openPlans(gridPlan) };
+    gridPlan.byText("Plan")?.click();
+    await flush();
+    out.afterGridButton = { a: openPlans(cellA), b: openPlans(cellB), grid: openPlans(gridPlan) };
+    planButtons(cellB)[0]?.click();
+    await flush();
+    out.afterOtherTableButton = { a: openPlans(cellA), b: openPlans(cellB), grid: openPlans(gridPlan) };
+    out.planPanels = pv.openPlanKeys().length;
   },
   async cutNotice() {
     respond(history({ points_truncated: true }));

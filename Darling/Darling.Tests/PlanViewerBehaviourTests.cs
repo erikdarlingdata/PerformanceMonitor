@@ -219,6 +219,23 @@ public sealed class PlanViewerBehaviourTests
         Assert.Equal(0, r.GetProperty("refetched").GetInt32());
     }
 
+    /// <summary>A source's scope (#5234) is part of its panel key, so one plan opened from two places is two panels, and the
+    /// scope never goes to the read.</summary>
+    [Fact]
+    public void ASourceScope_KeepsTheSamePlanInTwoPlacesAsTwoPanels_AndIsNotSentToTheRead()
+    {
+        var r = Run("scopedSource");
+        Assert.True(r.GetProperty("scopedOpen").GetBoolean());
+        Assert.False(r.GetProperty("plainOpen").GetBoolean());
+        Assert.False(r.GetProperty("otherOpen").GetBoolean());
+        Assert.Equal(new[] { "srv-a|@query_store|Orders|42|7|@scope|panel-a" }, Strs(r, "keys"));
+        var query = r.GetProperty("query");
+        Assert.False(query.TryGetProperty("scope", out _));
+        Assert.Equal("7", query.GetProperty("plan_id").GetString());
+        Assert.True(r.GetProperty("againOpen").GetBoolean());
+        Assert.Equal(0, r.GetProperty("refetched").GetInt32());
+    }
+
     [Fact]
     public void AQueryStoreRowWithNoStoredPlan_SaysSo()
     {

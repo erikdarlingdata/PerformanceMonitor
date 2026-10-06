@@ -21,7 +21,7 @@ namespace Darling.Tests;
 /// </summary>
 public sealed class QueryStoreHistoryBehaviourTests
 {
-    private static JsonElement Run(string scenario)
+    internal static JsonElement Run(string scenario)
     {
         var psi = new ProcessStartInfo("node") { RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false };
         psi.ArgumentList.Add(PathTo("Darling", "Darling.Tests", "web-qs-history-harness.mjs"));

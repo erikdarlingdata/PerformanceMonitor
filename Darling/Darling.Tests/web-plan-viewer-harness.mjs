@@ -251,6 +251,26 @@ const scenarios = {
     out.showsPlan = pre(second) !== null;
     out.refetched = fetches.length - before;
   },
+  /* A source's `scope` is part of its panel key: the same plan opened from two places is two panels. The scope names who owns
+     the button and never goes to the read. */
+  async scopedSource() {
+    planReply(XML);
+    const src = { kind: "query_store", database_name: "Orders", query_id: 42, plan_id: 7 };
+    const plain = viewer.planSourceCell("srv-a", src);
+    const scoped = viewer.planSourceCell("srv-a", { ...src, scope: "panel-a" });
+    const other = viewer.planSourceCell("srv-a", { ...src, scope: "panel-b" });
+    scoped.byText("Plan").click();
+    await flush();
+    out.scopedOpen = scoped.byText("Hide plan") !== null && pre(scoped) !== null;
+    out.plainOpen = plain.byText("Hide plan") !== null;
+    out.otherOpen = other.byText("Hide plan") !== null;
+    out.query = Object.fromEntries(params().searchParams);
+    out.keys = viewer.openPlanKeys();
+    const before = fetches.length;
+    const again = viewer.planSourceCell("srv-a", { ...src, scope: "panel-a" });
+    out.againOpen = again.byText("Hide plan") !== null;
+    out.refetched = fetches.length - before;
+  },
   async noPlanKind() {
     reply = { status: 200, body: JSON.stringify({ status: "unavailable", message: "No stored Query Store plan found for query_id 42 in database 'Orders'." }) };
     const c = viewer.planSourceCell("srv-a", { kind: "query_store", database_name: "Orders", query_id: 42, plan_id: null });

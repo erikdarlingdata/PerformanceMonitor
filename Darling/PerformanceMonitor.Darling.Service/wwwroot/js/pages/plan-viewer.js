@@ -67,11 +67,15 @@ const SOURCES = {
   },
 };
 
-/* A panel's key: server, then the kind (left out for query_hash, whose key never had one), then the kind's own parts.
-   The kind in the key is what keeps two sources with equal-looking parts from sharing a panel. */
+/* A panel's key: server, then the kind (left out for query_hash, whose key never had one), then the kind's own parts, then
+   the source's `scope` when it has one. The kind in the key is what keeps two sources with equal-looking parts from sharing
+   a panel. The scope does the same for one plan opened from two places: the Query Store History table names its own panel
+   as the scope, so its Plan button opens its own cell and not the grid's Plan cell for that plan (#5234). The scope is
+   never sent to the read. */
 const keyOf = (server, source) => {
   const parts = SOURCES[source.kind].key(source);
-  return [server, ...(source.kind === "query_hash" ? [] : ["@" + source.kind]), ...parts].join("|");
+  const scope = source.scope == null ? [] : ["@scope", source.scope];
+  return [server, ...(source.kind === "query_hash" ? [] : ["@" + source.kind]), ...parts, ...scope].join("|");
 };
 
 /** The state of every open panel, for tests: a copy, so the caller cannot change the module's. */

@@ -11,9 +11,11 @@
  * plan: a per-plan chart of average duration, a per-plan table, and a Plan button on each table row. It is served by
  * one store-only read (get_query_store_query_history); nothing here reaches the monitored server.
  *
- * An open panel is kept at module scope under server|database|query_id, so the page's 60 s rebuild draws it again
- * without a second read. The entry also remembers the window it was read for (hours and the custom range), and a
- * rebuild under a different window reads it again. Every string is drawn through el() as text.
+ * An open panel is kept at module scope under its grid row's key, so the page's 60 s rebuild draws it again without a
+ * second read. The grid has a row per plan, execution type and replica role of a query, so the key names all of them
+ * and History opens under the row clicked, not under every row of the query. The entry also remembers the window it
+ * was read for (hours and the custom range), and a rebuild under a different window reads it again. Every string is
+ * drawn through el() as text.
  */
 import { el, readTool, fmtMs, localTime, windowFromHours, activeRangeStamp } from "../util.js";
 import { zoomableLineChart, chartZoomScope, SERIES_COLORS } from "../charts.js";
@@ -25,7 +27,9 @@ const openHistories = new Map();
    into, so redraw() can tell a cell the page threw away (a grid rebuild, a tab switch) from one still on it. */
 const views = new Map();
 
-const keyOf = (server, row) => [server, row.database_name, row.query_id].join("|");
+/* One key per grid row: get_query_store_top groups by database, query, plan, execution type and replica role. A part a row
+   does not carry (a standalone server has no replica role) joins as nothing. */
+const keyOf = (server, row) => [server, row.database_name, row.query_id, row.plan_id, row.execution_type_desc, row.replica_role].join("|");
 /* The window a read was made for: the preset hours and the page's custom range, so a changed window reads again. */
 const stampOf = (hours) => hours + "@" + activeRangeStamp();
 
@@ -105,7 +109,9 @@ const cell = (text, cls) => el("td", { class: cls || null, text: text == null ? 
 const num = (v, f) => (v == null ? "—" : f(v));
 const whole = (v) => Number(v).toLocaleString("en-US", { maximumFractionDigits: 0 });
 
-function planTable(server, data) {
+/* `scope` is the panel's own key. It keys each Plan button's panel, so a plan opened here is not also open in the grid's Plan
+   column or in the History table under another row of the same query. */
+function planTable(server, data, scope) {
   const head = ["Plan ID", "Execs", "Avg Duration", "Total Duration", "Avg CPU", "Total CPU", "First seen", "Last seen", "Forced", "Plan"];
   const rows = data.plans.map((p) =>
     el("tr", {}, [
@@ -121,7 +127,7 @@ function planTable(server, data) {
       el("td", {}, [
         planSourceCell(
           server,
-          { kind: "query_store", database_name: data.database_name, query_id: data.query_id, plan_id: p.plan_id },
+          { kind: "query_store", database_name: data.database_name, query_id: data.query_id, plan_id: p.plan_id, scope },
           "Plan",
           "Show the stored plan for plan " + p.plan_id
         ),
@@ -160,7 +166,7 @@ function panelFor(key, server, hours) {
     : null;
   const plansCut = d.plans_truncated ? el("div", { class: "strip notice", text: "Only the " + d.plans.length + " plans with the most total duration are listed." }) : null;
   const cut = d.points_truncated ? el("div", { class: "strip notice", text: "The chart shows the newest " + d.points.length.toLocaleString("en-US") + " snapshots of the window; older ones are not drawn." }) : null;
-  return el("div", { class: "plan-panel qs-history" }, [notice, plansCut, cut, chartFor(d, hours), planTable(server, d)]);
+  return el("div", { class: "plan-panel qs-history" }, [notice, plansCut, cut, chartFor(d, hours), planTable(server, d, key)]);
 }
 
 /**
