@@ -300,20 +300,12 @@ const readStdin = async () => {
   return s;
 };
 
-/* The whole folder, subfolders included, never a list of modules that could go stale. */
-const copyTree = (from, to) => {
-  fs.mkdirSync(to, { recursive: true });
-  for (const entry of fs.readdirSync(from, { withFileTypes: true })) {
-    const source = path.join(from, entry.name);
-    if (entry.isDirectory()) copyTree(source, path.join(to, entry.name));
-    else fs.copyFileSync(source, path.join(to, entry.name));
-  }
-};
-
 const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "admin-server-edit-"));
 let output = {};
 try {
-  copyTree(jsDir, scratch);
+  /* The whole js tree (js/, js/pages/ and every subdirectory) rather than a hand-kept list (#5279); any stand-in written
+     below goes AFTER the copy so it still replaces the real file. */
+  fs.cpSync(jsDir, scratch, { recursive: true });
   fs.writeFileSync(path.join(scratch, "package.json"), '{ "type": "module" }');
   const page = await import(pathToFileURL(path.join(scratch, "pages", "admin.js")).href);
   const util = await import(pathToFileURL(path.join(scratch, "util.js")).href);
