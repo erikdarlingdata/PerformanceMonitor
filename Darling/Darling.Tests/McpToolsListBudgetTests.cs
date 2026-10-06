@@ -244,7 +244,9 @@ public sealed class McpToolsListBudgetTests
        Constant set to the measured value. */
     /* #5244 PR3 (W3): get_blocked_process_xml, get_blocking, get_blocking_trend and get_waiting_tasks gain database_name (the 46-character shared sentence, as Lite's twins) and get_blocking_stats gains its 66-character partial-scope form: 195,240 -> 195,745 bytes (+505), 181 tools.
        get_current_waits_trend already took one. Constant set to the measured value. */
-    private const int TotalCeilingBytes = 195_745;
+    /* #5244 PR3 (r1 M1): get_blocking_trend and get_blocking_stats each gain the one sentence that says which collector answered (the source key and when the DMV snapshot is used): 195,745 -> 196,205 bytes (+460), 181 tools.
+       Lite carries the identical sentence on its twins. */
+    private const int TotalCeilingBytes = 196_205;
 
 
 

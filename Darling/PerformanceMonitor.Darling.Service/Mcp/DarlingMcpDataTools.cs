@@ -3030,7 +3030,7 @@ public sealed class DarlingMcpDataTools
         }
     }
 
-    [McpServerTool(Name = "get_blocking_stats"), Description("Gets blocking SEVERITY over time for a server: per-minute blocking duration (event count, total, max and average wait) and per-minute deadlock severity (victim count plus total, max and average wait across every process in the graphs). get_blocking_trend and get_deadlock_trend count incidents; this is how BAD they were. Ten one-second blocks and one ten-minute block are the same count and are not the same problem, which is the distinction this read exists to make.")]
+    [McpServerTool(Name = "get_blocking_stats"), Description("Gets blocking SEVERITY over time for a server: per-minute blocking duration (event count, total, max and average wait) and per-minute deadlock severity (victim count plus total, max and average wait across every process in the graphs). get_blocking_trend and get_deadlock_trend count incidents; this is how BAD they were. Ten one-second blocks and one ten-minute block are the same count and are not the same problem, which is the distinction this read exists to make. The source key names the collector that answered, blocked-process-report or DMV snapshot; the DMV snapshot is used only when the blocked process reports have no rows for the chosen databases, so source can differ between filters.")]
     public static Task<string> GetBlockingStats(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -3112,7 +3112,7 @@ public sealed class DarlingMcpDataTools
                                split by database here), so the sentence says exactly that instead of "no blocking". */
                             factual: databases.IsAll
                                 ? $"No blocking or deadlocks recorded for {resolved.ServerName} in the last {hours_back} hour(s)"
-                                : $"No blocking for {(databases.Names.Count == 1 ? $"database '{databases.Names[0]}'" : DatabaseFilter.ManyDatabasesDescription)} "
+                                : $"No blocking{DarlingMcpBlockingTools.ForChosenDatabases(databases)} "
                                   + $"(and no deadlocks, which are not limited by database) recorded for {resolved.ServerName} in the last {hours_back} hour(s)",
                             coveredClaim: ". The blocking collectors HAVE run successfully for this server, so the window is genuinely clear rather than blind."),
                         emptyNotice.AsHints())
@@ -3138,6 +3138,9 @@ public sealed class DarlingMcpDataTools
                    "the chosen databases" for two or more, null for all. After the three notice keys, which stay right behind
                    hours_back. */
                 database_name = databases.Describe(),
+                /* #5244: which collector the blocking series came from (null when it has no rows): the blocked-process reports, or the
+                   DMV snapshot when those have no rows for the chosen databases. One source per answer. */
+                source = blocking.Count == 0 ? null : blocking[0].Source,
                 /*
                     Severity, not counts. get_blocking_trend already answers how OFTEN; ten one-second
                     blocks and one ten-minute block share a count and are different problems.

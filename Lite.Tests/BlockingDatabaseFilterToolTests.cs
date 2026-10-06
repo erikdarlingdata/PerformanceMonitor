@@ -97,6 +97,8 @@ public sealed class BlockingDatabaseFilterToolTests : IClassFixture<SharedDuckDb
         var only = Assert.Single(reports);
         Assert.Equal("DbB", only.GetProperty("database_name").GetString());
         Assert.Equal(22, only.GetProperty("blocked_spid").GetInt32());
+        /* #5244 L3: the page says it was filtered. */
+        Assert.Equal("DbB", root.GetProperty("database_name").GetString());
     }
 
     [Theory]
@@ -111,6 +113,7 @@ public sealed class BlockingDatabaseFilterToolTests : IClassFixture<SharedDuckDb
             _service, _serverManager, ServerName, database_name: blank));
 
         Assert.Equal(3, root.GetProperty("reports").GetArrayLength());
+        Assert.Equal(JsonValueKind.Null, root.GetProperty("database_name").ValueKind);
     }
 
     /// <summary>The filter is in the SQL before the limit + 1 fetch, so limit counts the CHOSEN database's reports: a
@@ -192,9 +195,32 @@ public sealed class BlockingDatabaseFilterToolTests : IClassFixture<SharedDuckDb
 
         var a = Parse(await McpBlockingTools.GetBlockingTrend(_service, _serverManager, ServerName, database_name: "DbA"));
         Assert.Equal(1, Assert.Single(a.GetProperty("trend").EnumerateArray()).GetProperty("count").GetInt32());
+        /* The answer names its source (#5244 M1): A has a report, so the reports answered. */
+        Assert.Equal("blocked-process-report", a.GetProperty("source").GetString());
+        Assert.Equal("DbA", a.GetProperty("database_name").GetString());
 
         var b = Parse(await McpBlockingTools.GetBlockingTrend(_service, _serverManager, ServerName, database_name: "DbB"));
         Assert.Equal(2, b.GetProperty("trend").GetArrayLength());
+        /* B has snapshots and no report, so the DMV snapshot answered. */
+        Assert.Equal("DMV snapshot", b.GetProperty("source").GetString());
+
+        /* Adding B to A: the reports answer (A's row), so the source is the reports and B's snapshots are not mixed in. */
+        var unfiltered = Parse(await McpBlockingTools.GetBlockingTrend(_service, _serverManager, ServerName));
+        Assert.Equal("blocked-process-report", unfiltered.GetProperty("source").GetString());
+        Assert.Equal(JsonValueKind.Null, unfiltered.GetProperty("database_name").ValueKind);
+    }
+
+    /// <summary>The severity read names its source too (#5244 M1): the DMV snapshot answers only where the reports have no rows.</summary>
+    [Fact]
+    public async Task BlockingStats_Source_IsTheDmvSnapshotOnlyWhenTheFilteredReportArmIsEmpty()
+    {
+        await SeedReportAsync(Minute(30), "DbA", 11, waitMs: 1000);
+        await SeedSnapshotAsync(Minute(20), "DbB", 72);
+
+        var a = Parse(await McpHealthTools.GetBlockingStats(_service, _serverManager, ServerName, database_name: "DbA"));
+        Assert.Equal("blocked-process-report", a.GetProperty("source").GetString());
+        var b = Parse(await McpHealthTools.GetBlockingStats(_service, _serverManager, ServerName, database_name: "DbB"));
+        Assert.Equal("DMV snapshot", b.GetProperty("source").GetString());
     }
 
     [Fact]
@@ -242,6 +268,7 @@ public sealed class BlockingDatabaseFilterToolTests : IClassFixture<SharedDuckDb
 
         var one = Parse(await McpHealthTools.GetBlockingStats(_service, _serverManager, ServerName, database_name: "DbB"));
         Assert.Equal("DbB", one.GetProperty("database_name").GetString());
+        Assert.Equal("blocked-process-report", one.GetProperty("source").GetString());
         var bucket = Assert.Single(one.GetProperty("blocking_duration").EnumerateArray());
         Assert.Equal(2, bucket.GetProperty("event_count").GetInt32());
         Assert.Equal(8000, bucket.GetProperty("total_duration_ms").GetInt64());
@@ -275,7 +302,7 @@ public sealed class BlockingDatabaseFilterToolTests : IClassFixture<SharedDuckDb
 
         Assert.Equal("empty", root.GetProperty("status").GetString());
         Assert.Contains(
-            "No blocking for database 'NoSuchDb' (and no deadlocks, which are not limited by database) recorded for " + ServerName,
+            "No blocking for the database NoSuchDb (and no deadlocks, which are not limited by database) recorded for " + ServerName,
             root.GetProperty("message").GetString()!, StringComparison.Ordinal);
     }
 

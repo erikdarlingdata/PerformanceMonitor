@@ -1280,7 +1280,7 @@ public sealed class McpHealthTools
             {
                 server = resolved.ServerName,
                 hours_back = hours,
-                database_name,
+                database_name = filter?[0],
                 waiting_tasks = waits.Select(w => new
                 {
                     collection_time = w.CollectionTime.ToString("o"),
@@ -1325,7 +1325,7 @@ public sealed class McpHealthTools
             requestedStart, windowEnd, "blocked_process_report and deadlocks", emptyAnswer: emptyAnswer);
     }
 
-    [McpServerTool(Name = "get_blocking_stats"), Description("Gets blocking SEVERITY over time for a server: per-minute blocking duration (event count, total, max and average wait) and per-minute deadlock severity (victim count plus total, max and average wait across every process in the graphs). Incident counts say how OFTEN; this says how BAD. Ten one-second blocks and one ten-minute block are the same count and are not the same problem.")]
+    [McpServerTool(Name = "get_blocking_stats"), Description("Gets blocking SEVERITY over time for a server: per-minute blocking duration (event count, total, max and average wait) and per-minute deadlock severity (victim count plus total, max and average wait across every process in the graphs). Incident counts say how OFTEN; this says how BAD. Ten one-second blocks and one ten-minute block are the same count and are not the same problem. The source key names the collector that answered, blocked-process-report or DMV snapshot; the DMV snapshot is used only when the blocked process reports have no rows for the chosen databases, so source can differ between filters.")]
     public static async Task<string> GetBlockingStats(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -1381,7 +1381,7 @@ public sealed class McpHealthTools
                             emptyNotice.WindowTruncated, emptyNotice.EffectiveStart,
                             factual: database == null
                                 ? $"No blocking or deadlocks recorded for {resolved.ServerName} in the last {hours} hour(s)"
-                                : $"No blocking for {McpDatabaseSelection.Quoted(new[] { database })} (and no deadlocks, which are not limited by database) recorded for {resolved.ServerName} in the last {hours} hour(s)",
+                                : $"No blocking{McpDatabaseSelection.ForChosen(new[] { database })} (and no deadlocks, which are not limited by database) recorded for {resolved.ServerName} in the last {hours} hour(s)",
                             coveredClaim: ". The blocking collectors HAVE run successfully for this server, so the window is genuinely clear rather than blind."),
                         emptyNotice.AsHints())
                     : McpHelpers.Status(
@@ -1404,6 +1404,9 @@ public sealed class McpHealthTools
                 /* #5244: the database the blocking series is limited to (the deadlock series never is); null for all.
                    After the three notice keys, as on Darling's twin. */
                 database_name = database,
+                /* #5244: which collector the blocking series came from (null when it has no rows): the blocked-process reports, or the
+                   DMV snapshot when those have no rows for the chosen databases. One source per answer. */
+                source = blocking.Count == 0 ? null : blocking[0].Source,
                 blocking_duration = blocking.Select(b => new
                 {
                     time = b.Time.ToString("o"),

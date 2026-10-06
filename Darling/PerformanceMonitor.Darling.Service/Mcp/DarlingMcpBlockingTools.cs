@@ -294,6 +294,8 @@ public sealed class DarlingMcpBlockingTools
                 effective_start = notice.EffectiveStart,
                 window_truncated = notice.WindowTruncated,
                 truncation_note = notice.TruncationNote,
+                /* #5244: which databases the page is limited to: the name for one, "the chosen databases" for two or more, null for all. */
+                database_name = databases.Describe(),
                 dedup_key = filtering ? DarlingIncidentFingerprint.NormalizeKey(dedup_key) : null,
                 /*
                     #3541 A3: `total_events` is gone. It was the reader's capped row count — neither the
@@ -769,6 +771,8 @@ public sealed class DarlingMcpBlockingTools
                 effective_start = notice.EffectiveStart,
                 window_truncated = notice.WindowTruncated,
                 truncation_note = notice.TruncationNote,
+                /* #5244: which databases the page is limited to: the name for one, "the chosen databases" for two or more, null for all. */
+                database_name = databases.Describe(),
                 /* #3541 A3: the page bounds, on get_blocking's names. truncated means "more reports WITH
                    XML in the window than limit". */
                 reports_returned = withXml.Count,
@@ -788,7 +792,7 @@ public sealed class DarlingMcpBlockingTools
         }
     }
 
-    [McpServerTool(Name = "get_blocking_trend"), Description("Gets a time-series of blocking event counts per minute over time (blocked process reports, falling back to the always-on DMV blocking snapshot). Useful for identifying patterns (e.g., blocking spikes during batch jobs) or confirming whether blocking is a new, worsening, or resolved issue.")]
+    [McpServerTool(Name = "get_blocking_trend"), Description("Gets a time-series of blocking event counts per minute over time (blocked process reports, falling back to the always-on DMV blocking snapshot). Useful for identifying patterns (e.g., blocking spikes during batch jobs) or confirming whether blocking is a new, worsening, or resolved issue. The source key names the collector that answered, blocked-process-report or DMV snapshot; the DMV snapshot is used only when the blocked process reports have no rows for the chosen databases, so source can differ between filters.")]
     public static Task<string> GetBlockingTrend(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -849,6 +853,10 @@ public sealed class DarlingMcpBlockingTools
             {
                 server = resolved.ServerName,
                 hours_back,
+                /* #5244: which databases the trend is limited to (null for all), and which collector answered: the blocked-process
+                   reports, or the DMV snapshot when those have no rows for the chosen databases. One source per answer. */
+                database_name = databases.Describe(),
+                source = points[0].Source,
                 trend = points.Select(p => new { time = p.Time.ToString("o"), count = p.Count })
             }, McpHelpers.JsonOptions);
         }

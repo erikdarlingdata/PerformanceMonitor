@@ -135,6 +135,8 @@ public sealed class BlockingDatabaseFilterLiveTests
                 Assert.Equal(new[] { "A", "B" }, events.Select(e => e.GetProperty("database_name").GetString()!).Distinct().OrderBy(n => n, StringComparer.Ordinal).ToArray());
                 Assert.Equal(4, events.Count);
                 Assert.False(doc.RootElement.GetProperty("truncated").GetBoolean());
+                /* #5244 L3: the page says it was filtered, in the words the other filtered tools echo. */
+                Assert.Equal("the chosen databases", doc.RootElement.GetProperty("database_name").GetString());
             }
 
             /* The page is the newest `limit` of the chosen databases: limit 2 of A, B leaves the other two out and says so. */
@@ -195,6 +197,7 @@ public sealed class BlockingDatabaseFilterLiveTests
             {
                 var reports = doc.RootElement.GetProperty("reports").EnumerateArray().ToList();
                 Assert.Equal(new[] { "A", "B" }, reports.Select(e => e.GetProperty("database_name").GetString()!).OrderBy(n => n, StringComparer.Ordinal).ToArray());
+                Assert.Equal("the chosen databases", doc.RootElement.GetProperty("database_name").GetString());
             }
 
             using (var doc = JsonDocument.Parse(await DarlingMcpBlockingTools.GetBlockedProcessXml(
@@ -228,6 +231,8 @@ public sealed class BlockingDatabaseFilterLiveTests
                 postgres, ServerName, 1, null, DatabaseFilter.Of(["A", "B"]), ct)))
             {
                 Assert.Equal(2, doc.RootElement.GetProperty("trend").EnumerateArray().Sum(p => p.GetProperty("count").GetInt32()));
+                Assert.Equal("the chosen databases", doc.RootElement.GetProperty("database_name").GetString());
+                Assert.False(string.IsNullOrEmpty(doc.RootElement.GetProperty("source").GetString()));
             }
 
             /* The collectors ran (seeded below) and none of the chosen databases' blocking was in the captures: an all-clear

@@ -18,10 +18,6 @@ internal static class McpDatabaseSelection
         : names.Count == 1 ? names[0]
         : ManyDatabasesDescription;
 
-    /// <summary>The wait-tasks and blocking-stats form: "database 'X'" for one, the many-name words for two or more.</summary>
-    internal static string Quoted(IReadOnlyList<string> names) =>
-        names.Count == 1 ? $"database '{names[0]}'" : ManyDatabasesDescription;
-
     /// <summary>
     /// What a selection adds to an empty answer's sentence: nothing for every database, " for the database X" for one and
     /// " for the chosen databases" for two or more (Darling's <c>ForChosenDatabases</c>).

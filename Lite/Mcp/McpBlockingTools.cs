@@ -310,6 +310,8 @@ public sealed class McpBlockingTools
                 effective_start = notice.EffectiveStart,
                 window_truncated = notice.WindowTruncated,
                 truncation_note = notice.TruncationNote,
+                /* #5244: the database the page is limited to, null for all; after the three notice keys, as on Darling's twin. */
+                database_name = database,
                 /* #3541 A3: the page described as a page, on the names Darling's get_blocking uses. Newest-first
                    makes the page a contiguous slice of the window's tail, so oldest_returned_event_time IS the
                    reach of this read — the #3287 figure, and the field a caller has to read before believing
@@ -403,6 +405,8 @@ public sealed class McpBlockingTools
                 effective_start = notice.EffectiveStart,
                 window_truncated = notice.WindowTruncated,
                 truncation_note = notice.TruncationNote,
+                /* #5244: the database the page is limited to, null for all; after the three notice keys, as on Darling's twin. */
+                database_name = database,
                 /* #3541 A3: the page bounds, on get_blocked_process_reports' names. truncated means "more
                    reports WITH XML in the window than limit". */
                 reports_returned = withXml.Count,
@@ -419,7 +423,7 @@ public sealed class McpBlockingTools
         }
     }
 
-    [McpServerTool(Name = "get_blocking_trend"), Description("Gets a time-series of blocking event counts over time. Useful for identifying patterns (e.g., blocking spikes during batch jobs) or confirming whether blocking is a new, worsening, or resolved issue.")]
+    [McpServerTool(Name = "get_blocking_trend"), Description("Gets a time-series of blocking event counts over time. Useful for identifying patterns (e.g., blocking spikes during batch jobs) or confirming whether blocking is a new, worsening, or resolved issue. The source key names the collector that answered, blocked-process-report or DMV snapshot; the DMV snapshot is used only when the blocked process reports have no rows for the chosen databases, so source can differ between filters.")]
     public static async Task<string> GetBlockingTrend(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -484,6 +488,10 @@ public sealed class McpBlockingTools
             {
                 server = resolved.ServerName,
                 hours_back,
+                /* #5244: the database the trend is limited to (null for all), and which collector answered: the blocked-process
+                   reports, or the DMV snapshot when those have no rows for the chosen databases. One source per answer. */
+                database_name = database,
+                source = points[0].Source,
                 trend = result
             }, McpHelpers.JsonOptions);
         }

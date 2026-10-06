@@ -4683,7 +4683,8 @@ FROM config.config_collector_schedules";
                 COUNT(*) AS event_count,
                 CAST(SUM(wait_time_ms) AS bigint) AS total_duration_ms,
                 MAX(wait_time_ms) AS max_duration_ms,
-                CAST(AVG(wait_time_ms) AS double precision) AS avg_duration_ms
+                CAST(AVG(wait_time_ms) AS double precision) AS avg_duration_ms,
+                'blocked-process-report' AS source
             FROM v_blocked_process_reports
             WHERE server_id = $1 AND event_time >= $2 AND event_time <= $3
             AND   collection_time >= $4
@@ -4696,21 +4697,23 @@ FROM config.config_collector_schedules";
                 COUNT(*) AS event_count,
                 CAST(SUM(wait_time_ms) AS bigint) AS total_duration_ms,
                 MAX(wait_time_ms) AS max_duration_ms,
-                CAST(AVG(wait_time_ms) AS double precision) AS avg_duration_ms
+                CAST(AVG(wait_time_ms) AS double precision) AS avg_duration_ms,
+                'DMV snapshot' AS source
             FROM v_dmv_blocking_snapshots
             WHERE server_id = $1 AND event_time >= $2 AND event_time <= $3
             AND   collection_time >= $4
             {{DatabaseFilter.All.Clause("database_name", 5)}}
             GROUP BY DATE_TRUNC('minute', event_time)
         )
-        SELECT bucket, event_count, total_duration_ms, max_duration_ms, avg_duration_ms FROM bpr
+        SELECT bucket, event_count, total_duration_ms, max_duration_ms, avg_duration_ms, source FROM bpr
         UNION ALL
-        SELECT bucket, event_count, total_duration_ms, max_duration_ms, avg_duration_ms FROM dmv WHERE NOT EXISTS (SELECT 1 FROM bpr)
+        SELECT bucket, event_count, total_duration_ms, max_duration_ms, avg_duration_ms, source FROM dmv WHERE NOT EXISTS (SELECT 1 FROM bpr)
         ORDER BY bucket
         """;
 
+    /// <param name="Source">Which arm answered (#5244): "blocked-process-report" or "DMV snapshot", the tags <c>get_blocking</c> rows carry.</param>
     public sealed record BlockingDurationStatsRow(
-        DateTime Time, long EventCount, long TotalDurationMs, long MaxDurationMs, double AvgDurationMs);
+        DateTime Time, long EventCount, long TotalDurationMs, long MaxDurationMs, double AvgDurationMs, string? Source = null);
 
     /// <summary>
     /// Whether ANY of the three capture paths behind the blocking-severity read has ever produced a row.
@@ -4770,7 +4773,8 @@ FROM config.config_collector_schedules";
                 reader.IsDBNull(1) ? 0 : Convert.ToInt64(reader.GetValue(1)),
                 reader.IsDBNull(2) ? 0 : Convert.ToInt64(reader.GetValue(2)),
                 reader.IsDBNull(3) ? 0 : Convert.ToInt64(reader.GetValue(3)),
-                reader.IsDBNull(4) ? 0 : Convert.ToDouble(reader.GetValue(4))));
+                reader.IsDBNull(4) ? 0 : Convert.ToDouble(reader.GetValue(4)),
+                reader.IsDBNull(5) ? null : reader.GetString(5)));
         }
 
         return rows;

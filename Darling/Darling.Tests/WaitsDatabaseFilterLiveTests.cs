@@ -145,7 +145,7 @@ public sealed class WaitsDatabaseFilterLiveTests
             var oneMiss = JsonDocument.Parse(await DarlingMcpSessionTools.GetWaitingTasks(
                 postgres, ServerName, 1, 30, DatabaseFilter.One("NoSuchDb"), asOf, null, ct)).RootElement;
             Assert.Equal("empty", oneMiss.GetProperty("status").GetString());
-            Assert.Contains("for database 'NoSuchDb'", oneMiss.GetProperty("message").GetString(), StringComparison.Ordinal);
+            Assert.Contains("for the database NoSuchDb", oneMiss.GetProperty("message").GetString(), StringComparison.Ordinal);
             var manyMiss = JsonDocument.Parse(await DarlingMcpSessionTools.GetWaitingTasks(
                 postgres, ServerName, 1, 30, DatabaseFilter.Of(["NoSuchDb", "NorThisOne"]), asOf, null, ct)).RootElement;
             Assert.Equal("empty", manyMiss.GetProperty("status").GetString());
@@ -347,7 +347,7 @@ public sealed class WaitsDatabaseFilterLiveTests
                 postgres, ServerName, 1, DatabaseFilter.One("NoSuchDb"), asOf, null, ct)).RootElement;
             Assert.Equal("empty", oneMiss.GetProperty("status").GetString());
             var oneMessage = oneMiss.GetProperty("message").GetString()!;
-            Assert.Contains("No blocking for database 'NoSuchDb' (and no deadlocks, which are not limited by database)", oneMessage, StringComparison.Ordinal);
+            Assert.Contains("No blocking for the database NoSuchDb (and no deadlocks, which are not limited by database)", oneMessage, StringComparison.Ordinal);
             var manyMiss = JsonDocument.Parse(await DarlingMcpDataTools.GetBlockingStats(
                 postgres, ServerName, 1, DatabaseFilter.Of(["NoSuchDb", "NorThisOne"]), asOf, null, ct)).RootElement;
             Assert.Equal("empty", manyMiss.GetProperty("status").GetString());
@@ -384,20 +384,31 @@ public sealed class WaitsDatabaseFilterLiveTests
 
             /* MixedServer: XE has a row for B only (m1, 5000), DMV has a row for A only (m2, 222). Filter [A] has no XE row, so BOTH tools
                answer from the DMV arm; [A, B] has an XE row, so BOTH answer from the XE arm (and never mix in A's DMV row). */
-            async Task<((DateTime, long, long)[] Stats, (DateTime, int)[] Trend)> AskAsync(DatabaseFilter filter)
+            async Task<((DateTime, long, long)[] Stats, (DateTime, int)[] Trend, string? StatsSource, string? TrendSource)> AskAsync(DatabaseFilter filter)
             {
                 var stats = await DarlingDataReader.GetBlockingDurationStatsAsync(postgres, MixedServerId, start, seed.End, filter, ct);
                 var trend = await DarlingBlockingTrendReader.GetBlockingTrendAsync(postgres, MixedServerId, start, seed.End, filter, ct);
-                return (stats.Select(r => (r.Time, r.EventCount, r.TotalDurationMs)).ToArray(), trend.Select(p => (p.Time, p.Count)).ToArray());
+                return (stats.Select(r => (r.Time, r.EventCount, r.TotalDurationMs)).ToArray(), trend.Select(p => (p.Time, p.Count)).ToArray(),
+                    stats.Select(r => r.Source).Distinct().SingleOrDefault(), trend.Select(p => p.Source).Distinct().SingleOrDefault());
             }
 
             var a = await AskAsync(DatabaseFilter.Of([DbA]));
             Assert.Equal(new[] { (seed.M2, 1L, 222L) }, a.Stats);
             Assert.Equal(new[] { (seed.M2, 1) }, a.Trend);
+            /* #5244 M1: the answer says which arm answered. [A] has no XE row, so the DMV snapshot. */
+            Assert.Equal("DMV snapshot", a.StatsSource);
+            Assert.Equal("DMV snapshot", a.TrendSource);
 
             var ab = await AskAsync(DatabaseFilter.Of([DbA, DbB]));
             Assert.Equal(new[] { (seed.M1, 1L, 5000L) }, ab.Stats);
             Assert.Equal(new[] { (seed.M1, 1) }, ab.Trend);
+            /* Adding B to the filter moves the answer to the XE arm, and the source says so: A's DMV-only row is not mixed in. */
+            Assert.Equal("blocked-process-report", ab.StatsSource);
+            Assert.Equal("blocked-process-report", ab.TrendSource);
+
+            /* The two tools' JSON carries the same word under a top-level source key. */
+            var statsJson = JsonDocument.Parse(await DarlingMcpDataTools.GetBlockingStats(postgres, MixedServerName, 1, DatabaseFilter.Of([DbA]), seed.End.ToString("o"), null, ct)).RootElement;
+            Assert.Equal("DMV snapshot", statsJson.GetProperty("source").GetString());
 
             var b = await AskAsync(DatabaseFilter.One(DbB));
             Assert.Equal(ab.Stats, b.Stats);

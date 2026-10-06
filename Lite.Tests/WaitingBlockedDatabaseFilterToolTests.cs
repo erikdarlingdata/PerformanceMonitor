@@ -145,7 +145,7 @@ public sealed class WaitingBlockedDatabaseFilterToolTests : IClassFixture<Shared
 
         Assert.Equal("empty", root.GetProperty("status").GetString());
         var text = root.GetProperty("message").GetString()!;
-        Assert.Contains("No waiting tasks captured in the specified time range for database 'NoSuchDb'. ", text, StringComparison.Ordinal);
+        Assert.Contains("No waiting tasks captured in the specified time range for the database NoSuchDb. ", text, StringComparison.Ordinal);
         Assert.Contains("waiting tasks of other databases may well exist", text, StringComparison.Ordinal);
     }
 

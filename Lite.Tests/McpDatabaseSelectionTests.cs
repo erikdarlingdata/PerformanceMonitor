@@ -27,11 +27,4 @@ public sealed class McpDatabaseSelectionTests
         Assert.Equal(" for the database A", McpBlockingTools.ForChosenDatabase("A"));
         Assert.Equal(string.Empty, McpBlockingTools.ForChosenDatabase(null));
     }
-
-    [Fact]
-    public void TheQuotedForm_NamesTheOneDatabaseInQuotes_AndTheChosenDatabasesForTwoOrMore()
-    {
-        Assert.Equal("database 'A'", McpDatabaseSelection.Quoted(new[] { "A" }));
-        Assert.Equal("the chosen databases", McpDatabaseSelection.Quoted(new[] { "A", "B" }));
-    }
 }

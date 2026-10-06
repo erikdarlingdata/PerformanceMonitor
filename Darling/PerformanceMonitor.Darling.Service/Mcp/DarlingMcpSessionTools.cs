@@ -410,7 +410,7 @@ public sealed class DarlingMcpSessionTools
                 return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "waiting_tasks", cancellationToken)
                     ?? McpHelpers.Status(
                         "empty",
-                        $"No waiting tasks captured in the specified time range for {(databases.Names.Count == 1 ? $"database '{databases.Names[0]}'" : DatabaseFilter.ManyDatabasesDescription)}. "
+                        $"No waiting tasks captured in the specified time range{DarlingMcpBlockingTools.ForChosenDatabases(databases)}. "
                         + "The filter was applied in SQL over the whole window, so waiting tasks of other databases may well exist; drop it to see what the window holds.",
                         notice.AsHints());
             if (rows.Count == 0)
