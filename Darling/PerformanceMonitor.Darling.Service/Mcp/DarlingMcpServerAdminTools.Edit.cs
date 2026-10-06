@@ -705,6 +705,30 @@ public sealed partial class DarlingMcpServerAdminTools
     internal static bool SameAddress(string host, int port, string otherHost, int otherPort) =>
         string.Equals(host, otherHost, StringComparison.Ordinal) && port == otherPort;
 
+    /// <summary>Every setting that decides where a server is reached and how it is trusted: what an edit and a
+    /// <c>test_connect</c> compare against the stored row before a stored password may be used.</summary>
+    internal readonly record struct ServerConnectionSettings(
+        string Host, int Port, string Engine, string? Database, bool ReadOnlyIntent, string Auth, string? Username,
+        string EncryptMode, bool TrustServerCertificate, bool MultiSubnetFailover);
+
+    /// <summary>
+    /// The ONE rule for "this definition connects differently from that one", shared by the edit core and
+    /// <c>test_connect</c> so neither lets a stored password go anywhere the other would refuse. Host, username and
+    /// database compare ordinally (<see cref="SameAddress"/> for host and port); auth, encrypt mode and engine ignore
+    /// case; the rest compare as stored. The store function in <c>provision-roles.sql</c> (<c>password_needed</c>) names the same set.
+    /// </summary>
+    internal static bool ConnectionSettingsDiffer(ServerConnectionSettings a, ServerConnectionSettings b) =>
+        !SameAddress(a.Host, a.Port, b.Host, b.Port)
+        || !string.Equals(a.Engine, b.Engine, StringComparison.OrdinalIgnoreCase)
+        || !string.Equals(a.Database, b.Database, StringComparison.Ordinal)
+        || a.ReadOnlyIntent != b.ReadOnlyIntent
+        || !string.Equals(a.Auth, b.Auth, StringComparison.OrdinalIgnoreCase)
+        || !string.Equals(a.Username, b.Username, StringComparison.Ordinal)
+        || !string.Equals(a.EncryptMode, b.EncryptMode, StringComparison.OrdinalIgnoreCase)
+        || a.TrustServerCertificate != b.TrustServerCertificate
+        || a.MultiSubnetFailover != b.MultiSubnetFailover;
+
+
     /// <summary>
     /// The merged definition (the stored row plus the request) checked as add checks an entry, and the columns that
     /// differ. The credential rules: a password is required when a SQL or service-principal row's connection changes
@@ -765,15 +789,10 @@ public sealed partial class DarlingMcpServerAdminTools
             return (null, secretRefusal);
         }
 
-        var connectionChanged =
-            !SameAddress(host, port, row.Host, row.Port)
-            || !string.Equals(database, row.Database, StringComparison.Ordinal)
-            || readOnly != row.ReadOnlyIntent
-            || authSwitched
-            || !string.Equals(username, row.Username, StringComparison.Ordinal)
-            || !string.Equals(encryptMode, row.EncryptMode, StringComparison.OrdinalIgnoreCase)
-            || trust != row.TrustServerCertificate
-            || multi != row.MultiSubnetFailover;
+        var connectionChanged = ConnectionSettingsDiffer(
+            new ServerConnectionSettings(host, port, row.Engine, database, readOnly, auth, username, encryptMode, trust, multi),
+            new ServerConnectionSettings(row.Host, row.Port, row.Engine, row.Database, row.ReadOnlyIntent, row.Auth, row.Username,
+                row.EncryptMode, row.TrustServerCertificate, row.MultiSubnetFailover));
 
         if (secretMode && c.Password is null && (authSwitched || connectionChanged))
         {

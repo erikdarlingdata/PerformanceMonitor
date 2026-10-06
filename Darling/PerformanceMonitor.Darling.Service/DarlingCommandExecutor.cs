@@ -265,9 +265,9 @@ WHERE status = 'in_progress'
                     return new CommandOutcome(false, "invalid args_json", ErrorJson("test_connect args_json did not deserialize to a server definition"));
                 }
 
-                /* The test resolves a reference only for the server that already stores it, at the address it stores it
+                /* The test resolves a reference only for the server that already stores it, with the settings it stores it
                    for. Asked BEFORE the probe, so a refused test resolves nothing and connects to nothing. */
-                if (await TestConnectReferenceRefusalAsync(server, StoredAddressesOfReferenceAsync, cancellationToken) is { } refusal)
+                if (await TestConnectReferenceRefusalAsync(server, StoredSettingsOfReferenceAsync, cancellationToken) is { } refusal)
                 {
                     _logger?.LogInformation("Command {Id} (test_connect '{Server}') => refused", command.CommandId, server.DisplayName);
                     return new CommandOutcome(false, "refused", ErrorJson(refusal));
@@ -692,22 +692,24 @@ WHERE status = 'in_progress'
         }
     }
 
-    /// <summary>What a <c>test_connect</c> answers when its password is a reference to a server that is not at the
-    /// address that stored it: the plain ask for the password, with no value in it.</summary>
+    /// <summary>What a <c>test_connect</c> answers when its password is a reference to a server that is not stored with
+    /// these connection settings: the plain ask for the password, with no value in it.</summary>
     internal const string TestConnectPasswordNeededText =
-        "Enter the password again to test this server at a different address: its stored password is only used at the address it was saved for.";
+        "Enter the password again to test this server at a different address or with different connection settings: its stored password is only used for the server as it was saved.";
 
     /// <summary>
     /// PURE over the one store read it is given: null when a <c>test_connect</c> may go on to resolve its credential,
     /// otherwise the sentence to answer with, before anything is resolved. A password typed as itself is not asked
     /// about. A reference (<see cref="DarlingSecretSource.IsReference"/>, the resolver's own question) is let through only
-    /// when a stored server holds that exact text AND sits at the test's host and port (the host text carries the
-    /// instance), so the stored password is never sent to an address it was not saved for. The plain
+    /// when a stored server holds that exact text AND matches the test on every connection setting the edit core
+    /// compares (<see cref="PerformanceMonitor.Darling.Service.Mcp.DarlingMcpServerAdminTools.ConnectionSettingsDiffer"/>:
+    /// host and instance, port, engine, database, read-only intent, auth, username, encrypt mode, certificate trust,
+    /// multi-subnet failover), so the stored password is never used anywhere else or with other trust settings. The plain
     /// <c>password</c> slot never carries a reference from a command; no stored server has one.
     /// </summary>
     internal static async Task<string?> TestConnectReferenceRefusalAsync(
         MonitoredServer server,
-        Func<string, CancellationToken, Task<IReadOnlyList<(string Host, int Port)>>> storedAddressesOfReference,
+        Func<string, CancellationToken, Task<IReadOnlyList<PerformanceMonitor.Darling.Service.Mcp.DarlingMcpServerAdminTools.ServerConnectionSettings>>> storedSettingsOfReference,
         CancellationToken cancellationToken)
     {
         if (DarlingSecretSource.RequestReferenceRefusal(server.Password) is { } plainSlotRefusal)
@@ -721,9 +723,12 @@ WHERE status = 'in_progress'
             return null;
         }
 
-        foreach (var (host, port) in await storedAddressesOfReference(reference!, cancellationToken))
+        var tested = new PerformanceMonitor.Darling.Service.Mcp.DarlingMcpServerAdminTools.ServerConnectionSettings(
+            server.Host, server.Port, server.Engine ?? "sqlserver", server.Database, server.ReadOnlyIntent, server.Auth ?? "integrated",
+            server.Username, server.EncryptMode ?? "Mandatory", server.TrustServerCertificate, server.MultiSubnetFailover);
+        foreach (var stored in await storedSettingsOfReference(reference!, cancellationToken))
         {
-            if (PerformanceMonitor.Darling.Service.Mcp.DarlingMcpServerAdminTools.SameAddress(server.Host, server.Port, host, port))
+            if (!PerformanceMonitor.Darling.Service.Mcp.DarlingMcpServerAdminTools.ConnectionSettingsDiffer(tested, stored))
             {
                 return null;
             }
@@ -732,20 +737,29 @@ WHERE status = 'in_progress'
         return TestConnectPasswordNeededText;
     }
 
-    /// <summary>Every address a stored server holds exactly this reference text for.</summary>
-    private async Task<IReadOnlyList<(string Host, int Port)>> StoredAddressesOfReferenceAsync(string reference, CancellationToken cancellationToken)
+    /// <summary>The connection settings of every stored server that holds exactly this reference text.</summary>
+    private async Task<IReadOnlyList<PerformanceMonitor.Darling.Service.Mcp.DarlingMcpServerAdminTools.ServerConnectionSettings>> StoredSettingsOfReferenceAsync(string reference, CancellationToken cancellationToken)
     {
-        var found = new List<(string Host, int Port)>();
-        await using var command = _postgres.CreateCommand("SELECT host, port FROM config.config_monitored_servers WHERE encrypted_password = $1");
+        var found = new List<PerformanceMonitor.Darling.Service.Mcp.DarlingMcpServerAdminTools.ServerConnectionSettings>();
+        await using var command = _postgres.CreateCommand(
+            "SELECT host, port, engine, database, read_only_intent, auth, username, encrypt_mode, trust_server_certificate, multi_subnet_failover " +
+            "FROM config.config_monitored_servers WHERE encrypted_password = $1");
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = reference });
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
-            found.Add((reader.GetString(0), reader.IsDBNull(1) ? 0 : reader.GetInt32(1)));
+            /* The same defaults the edit core reads a row with, so a NULL column compares as what it means. */
+            found.Add(new PerformanceMonitor.Darling.Service.Mcp.DarlingMcpServerAdminTools.ServerConnectionSettings(
+                reader.GetString(0), reader.IsDBNull(1) ? 0 : reader.GetInt32(1),
+                reader.IsDBNull(2) ? "sqlserver" : reader.GetString(2), reader.IsDBNull(3) ? null : reader.GetString(3),
+                !reader.IsDBNull(4) && reader.GetBoolean(4), reader.IsDBNull(5) ? "integrated" : reader.GetString(5),
+                reader.IsDBNull(6) ? null : reader.GetString(6), reader.IsDBNull(7) ? "Mandatory" : reader.GetString(7),
+                !reader.IsDBNull(8) && reader.GetBoolean(8), !reader.IsDBNull(9) && reader.GetBoolean(9)));
         }
 
         return found;
     }
+
 
     private static MonitoredServer? DeserializeServer(string argsJson)
     {

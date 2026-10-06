@@ -425,16 +425,20 @@ public sealed class ServerPasswordFromRequestTests : IDisposable
         Name = "alpha-01", Host = host, Port = port, Auth = "sql", Username = "monitor", EncryptedPassword = encrypted, Password = password,
     };
 
+    /// <summary>The stored row the tested server (<see cref="Tested"/>) matches on every setting.</summary>
+    private static DarlingMcpServerAdminTools.ServerConnectionSettings StoredRow(string host, int port = 0) =>
+        new(host, port, "sqlserver", null, false, "sql", "monitor", "Mandatory", false, false);
+
     private sealed class StoredAddresses
     {
-        public List<(string Host, int Port)> Rows { get; } = [];
+        public List<DarlingMcpServerAdminTools.ServerConnectionSettings> Rows { get; } = [];
 
         public List<string> Asked { get; } = [];
 
-        public Task<IReadOnlyList<(string Host, int Port)>> ReadAsync(string reference, CancellationToken cancellationToken)
+        public Task<IReadOnlyList<DarlingMcpServerAdminTools.ServerConnectionSettings>> ReadAsync(string reference, CancellationToken cancellationToken)
         {
             Asked.Add(reference);
-            return Task.FromResult<IReadOnlyList<(string Host, int Port)>>(Rows.ToList());
+            return Task.FromResult<IReadOnlyList<DarlingMcpServerAdminTools.ServerConnectionSettings>>(Rows.ToList());
         }
     }
 
@@ -442,7 +446,7 @@ public sealed class ServerPasswordFromRequestTests : IDisposable
     public async Task TestConnect_AStoredReference_IsResolvedOnlyWhereHostPortAndInstanceAllMatch()
     {
         var stored = new StoredAddresses();
-        stored.Rows.Add(("alpha-01.example.test\\INST1", 0));
+        stored.Rows.Add(StoredRow("alpha-01.example.test\\INST1"));
         var ct = CancellationToken.None;
 
         Assert.Null(await DarlingCommandExecutor.TestConnectReferenceRefusalAsync(
@@ -463,6 +467,67 @@ public sealed class ServerPasswordFromRequestTests : IDisposable
         }
     }
 
+    /// <summary>The tested server flipped on one connection setting away from <see cref="StoredRow"/>.</summary>
+    private static MonitoredServer TestedWith(string setting)
+    {
+        var server = Tested("alpha-01.example.test", StoredReference);
+        switch (setting)
+        {
+            case "engine": server.Engine = "postgresql"; break;
+            case "encryptMode": server.EncryptMode = "Optional"; break;
+            case "trustServerCertificate": server.TrustServerCertificate = true; break;
+            case "auth": server.Auth = "serviceprincipal"; break;
+            case "username": server.Username = "someone-else"; break;
+            case "database": server.Database = "other_db"; break;
+            case "readOnlyIntent": server.ReadOnlyIntent = true; break;
+            case "multiSubnetFailover": server.MultiSubnetFailover = true; break;
+            case "host": server.Host = "elsewhere.example.test"; break;
+            case "port": server.Port = 1434; break;
+            case "none": break;
+            default: throw new ArgumentOutOfRangeException(nameof(setting), setting, null);
+        }
+
+        return server;
+    }
+
+    [Theory]
+    [InlineData("engine")]
+    [InlineData("encryptMode")]
+    [InlineData("trustServerCertificate")]
+    [InlineData("auth")]
+    [InlineData("username")]
+    [InlineData("database")]
+    [InlineData("readOnlyIntent")]
+    [InlineData("multiSubnetFailover")]
+    [InlineData("host")]
+    [InlineData("port")]
+    public async Task TestConnect_AStoredReference_IsRefusedWhenAnySingleConnectionSettingDiffersFromTheStoredServer(string setting)
+    {
+        var stored = new StoredAddresses();
+        stored.Rows.Add(StoredRow("alpha-01.example.test"));
+
+        var refusal = await DarlingCommandExecutor.TestConnectReferenceRefusalAsync(TestedWith(setting), stored.ReadAsync, CancellationToken.None);
+
+        Assert.Equal(DarlingCommandExecutor.TestConnectPasswordNeededText, refusal);
+        Assert.Contains("different connection settings", refusal, StringComparison.Ordinal);
+        Assert.DoesNotContain(StoredReference, refusal, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task TestConnect_AStoredReference_IsResolvedWhenEveryConnectionSettingMatches_IgnoringCaseWhereTheEditCoreDoes()
+    {
+        var stored = new StoredAddresses();
+        stored.Rows.Add(StoredRow("alpha-01.example.test"));
+        var server = TestedWith("none");
+        server.Auth = "SQL";
+        server.EncryptMode = "MANDATORY";
+        server.Engine = "SqlServer";
+
+        Assert.Null(await DarlingCommandExecutor.TestConnectReferenceRefusalAsync(TestedWith("none"), stored.ReadAsync, CancellationToken.None));
+        Assert.Null(await DarlingCommandExecutor.TestConnectReferenceRefusalAsync(server, stored.ReadAsync, CancellationToken.None));
+    }
+
+
     [Fact]
     public async Task TestConnect_AReferenceNoStoredServerHolds_IsRefused()
     {
@@ -479,7 +544,7 @@ public sealed class ServerPasswordFromRequestTests : IDisposable
     public async Task TestConnect_AReferenceInThePlainPasswordSlot_IsAlwaysRefused_WithoutAskingTheStore()
     {
         var stored = new StoredAddresses();
-        stored.Rows.Add(("alpha-01.example.test", 0));
+        stored.Rows.Add(StoredRow("alpha-01.example.test"));
 
         var refusal = await DarlingCommandExecutor.TestConnectReferenceRefusalAsync(
             Tested("alpha-01.example.test", null, password: "env:X"), stored.ReadAsync, CancellationToken.None);
