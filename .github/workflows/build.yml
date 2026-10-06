@@ -147,25 +147,28 @@ jobs:
           source_artifacts=""
           runs=""
           stale_tries=0
+          failed_tries=0
           # Filtered on the event here, not in the query: the API's branch+event+status combination
           # returns a stale page of old runs. Branch+status can return one TOO, now and then: 30 rows
           # from weeks ago, whose artifacts have long expired, where the current rows should be, and then
           # every Lite shard cuts by hash although a qualifying run exists (#5208). So the listing is
-          # tried up to three times (tries), five seconds apart, and a page is taken only when its newest
-          # push run is younger than five days (stale_days): artifacts are kept for seven days and the
-          # check below wants two days of margin, so a page whose newest push run is older cannot hold a
-          # usable source anyway. A failed call counts as a try too. When every try is stale the cut is the
-          # hash, with its own notice below. (A pull request FROM dev carries head_branch dev too, hence
-          # the event test.)
+          # tried up to three times (tries), five seconds apart, and a page is taken only when a push run
+          # on it FINISHED in the last five days (stale_days), judged on updated_at and not on created_at:
+          # artifacts expire seven days after their UPLOAD, a run uploads before it finishes, and a re-run
+          # uploads again, so the two days of margin the check below wants can only be met by a run that
+          # finished within five days, however long ago it was created. A page whose latest finish is older
+          # cannot hold a usable source anyway. A failed call counts as a try too. When no try gets a
+          # current page the cut is the hash, and the notice below says what the tries saw. (A pull request
+          # FROM dev carries head_branch dev too, hence the event test.)
           for attempt in $(seq 1 "${tries}"); do
             if [ "${attempt}" -gt 1 ]; then
               sleep 5
             fi
-            if page=$(gh api "repos/${GH_REPO}/actions/workflows/build.yml/runs?branch=dev&status=success&per_page=30" --jq '[.workflow_runs[] | select(.event == "push")] | (map(.created_at) | max) as $newest | if $newest > env.FRESH_AFTER then .[].id else "stale \($newest // "none")" end'); then
+            if page=$(gh api "repos/${GH_REPO}/actions/workflows/build.yml/runs?branch=dev&status=success&per_page=30" --jq '[.workflow_runs[] | select(.event == "push")] | (map(.updated_at) | max) as $newest | if $newest > env.FRESH_AFTER then .[].id else "stale \($newest // "none")" end'); then
               case "${page}" in
                 stale*)
                   stale_tries=$((stale_tries + 1))
-                  echo "Try ${attempt} of ${tries}: no push run on the listing is younger than ${stale_days} days (newest: ${page#stale }), so it is a stale page."
+                  echo "Try ${attempt} of ${tries}: no push run on the listing finished in the last ${stale_days} days (latest: ${page#stale }), so the page counts as stale."
                   ;;
                 *)
                   runs="${page}"
@@ -173,6 +176,7 @@ jobs:
                   ;;
               esac
             else
+              failed_tries=$((failed_tries + 1))
               echo "Try ${attempt} of ${tries}: the run listing call failed."
             fi
           done
@@ -189,10 +193,15 @@ jobs:
 
           echo "run_id=${source_run}" >> "$GITHUB_OUTPUT"
           echo "artifacts=${source_artifacts}" >> "$GITHUB_OUTPUT"
+          # Each notice says what the tries saw: a run was pinned; every call failed; no try got a current
+          # page (stale, empty or push-less pages, with failed calls among them); or a current page was read
+          # and no run on it qualified. Empty runs means no page was taken, so no run was tested at all.
           if [ -n "${source_run}" ]; then
             echo "::notice title=Lite timing source::The Lite shards balance their cut from the timings of run ${source_run}, the newest successful push run on dev that still has them."
-          elif [ "${stale_tries}" -eq "${tries}" ]; then
-            echo "::notice title=Lite timing source::The run listing returned only runs older than ${stale_days} days, ${tries} times (a stale API page, or no push run that recent), so every Lite shard cuts by class-name hash."
+          elif [ "${failed_tries}" -eq "${tries}" ]; then
+            echo "::notice title=Lite timing source::The run listing call failed on all ${tries} tries, so every Lite shard cuts by class-name hash."
+          elif [ -z "${runs}" ]; then
+            echo "::notice title=Lite timing source::The run listing gave no current page in ${tries} tries (${stale_tries} returned no push run that finished in the last ${stale_days} days, a stale API page or no push run that recent, and ${failed_tries} failed), so every Lite shard cuts by class-name hash."
           else
             echo "::notice title=Lite timing source::No successful dev push run has unexpired Lite timings (or the lookup failed), so every Lite shard cuts by class-name hash."
           fi
