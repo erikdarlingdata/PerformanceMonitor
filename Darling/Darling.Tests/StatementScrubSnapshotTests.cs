@@ -240,7 +240,7 @@ public sealed partial class StatementCollectionCensusTests
     public void OversizedPlanSweep_PlanXml_IsFilteredBeforeItIsStored()
     {
         var (verdict, stored, error) = OversizedPlanBacklogSweep.JudgeFetchedPlan(
-            new SensitiveStatements.Session(), StatementScrubCanary.CanaryPlan());
+            new SensitiveStatements.Session(), StatementScrubCanary.CanaryPlan(), 0);
 
         Assert.Equal(OversizedPlanBacklogSweep.PlanFetchVerdict.Captured, verdict);
         Assert.Null(error);
@@ -253,7 +253,7 @@ public sealed partial class StatementCollectionCensusTests
         var plain = "<ShowPlanXML xmlns=\"http://schemas.microsoft.com/sqlserver/2004/07/showplan\"><BatchSequence><Batch><Statements>"
             + "<StmtSimple StatementText=\"" + StatementScrubCanary.PlainStatement + "\" /></Statements></Batch></BatchSequence></ShowPlanXML>";
 
-        var (verdict, stored, _) = OversizedPlanBacklogSweep.JudgeFetchedPlan(new SensitiveStatements.Session(), plain);
+        var (verdict, stored, _) = OversizedPlanBacklogSweep.JudgeFetchedPlan(new SensitiveStatements.Session(), plain, 0);
 
         Assert.Equal(OversizedPlanBacklogSweep.PlanFetchVerdict.Captured, verdict);
         Assert.Same(plain, stored);
@@ -266,12 +266,80 @@ public sealed partial class StatementCollectionCensusTests
            with a fresh budget, fetches it again), and nothing is handed to the store. */
         var spent = new SensitiveStatements.Session(null, null, TimeSpan.Zero, null);
 
-        var (verdict, stored, error) = OversizedPlanBacklogSweep.JudgeFetchedPlan(spent, StatementScrubCanary.CanaryPlan());
+        var (verdict, stored, error) = OversizedPlanBacklogSweep.JudgeFetchedPlan(spent, StatementScrubCanary.CanaryPlan(), 0);
 
         Assert.Equal(OversizedPlanBacklogSweep.PlanFetchVerdict.Failed, verdict);
         Assert.Null(stored);
         Assert.False(string.IsNullOrEmpty(error));
         Assert.Equal(1, spent.Unjudged);
+    }
+
+    /* A session whose budget has room when the plan starts and runs out inside the plan: each judged value costs a
+       second against a 1.5-second budget, so the plan itself is what spends it. */
+    private static SensitiveStatements.Session SessionThePlanOverruns()
+    {
+        var now = TimeSpan.Zero;
+        return new SensitiveStatements.Session(
+            _ =>
+            {
+                now += TimeSpan.FromSeconds(1);
+                return SensitiveStatements.Verdict.Clean;
+            },
+            () => now,
+            TimeSpan.FromMilliseconds(1500),
+            new SensitiveStatements.TimedOutMemo());
+    }
+
+    [Fact]
+    public void OversizedPlanSweep_APlanThatOverrunsTheBudgetOnItsFirstAttempt_StaysClaimable()
+    {
+        var session = SessionThePlanOverruns();
+        Assert.False(session.Spent);
+
+        var (verdict, stored, error) = OversizedPlanBacklogSweep.JudgeFetchedPlan(session, StatementScrubCanary.CanaryPlan(), 0);
+
+        Assert.Equal(OversizedPlanBacklogSweep.PlanFetchVerdict.Failed, verdict);
+        Assert.Null(stored);
+        Assert.False(string.IsNullOrEmpty(error));
+        Assert.True(session.Spent);
+    }
+
+    [Fact]
+    public void OversizedPlanSweep_APlanThatOverrunsTheBudgetAgain_IsStoredOnceAsTheWholePlanMarker()
+    {
+        var attempts = OversizedPlanBacklogSweep.MaxJudgeAttempts - 1;
+        Assert.True(attempts >= 1, "the first judging failure must always leave the row claimable");
+
+        var (verdict, stored, error) = OversizedPlanBacklogSweep.JudgeFetchedPlan(
+            SessionThePlanOverruns(), StatementScrubCanary.CanaryPlan(), attempts);
+
+        /* Captured is the verdict that stamps captured_at, which the claim excludes: the row is resolved. */
+        Assert.Equal(OversizedPlanBacklogSweep.PlanFetchVerdict.Captured, verdict);
+        Assert.Equal(SensitiveStatements.PlaceholderText, stored);
+        Assert.Null(error);
+    }
+
+    [Fact]
+    public void OversizedPlanSweep_ASessionAnEarlierPlanSpent_NeverRetiresARow_HoweverManyAttemptsItHas()
+    {
+        /* The budget was gone before this plan was reached: that says nothing about the plan. */
+        var spent = new SensitiveStatements.Session(null, null, TimeSpan.Zero, null);
+
+        var (verdict, stored, _) = OversizedPlanBacklogSweep.JudgeFetchedPlan(spent, StatementScrubCanary.CanaryPlan(), 500);
+
+        Assert.Equal(OversizedPlanBacklogSweep.PlanFetchVerdict.Failed, verdict);
+        Assert.Null(stored);
+    }
+
+    [Fact]
+    public void OversizedPlanSweep_PassesItsBatchSessionIn_AndMakesNoSessionOfItsOwnInTheJudgingStep()
+    {
+        var source = System.IO.File.ReadAllText(RepoFile.PathTo("Darling/PerformanceMonitor.Darling.Service/OversizedPlanBacklogSweep.cs"));
+        var bodies = StatementColumnCensusTests.BodiesOf(source, "OversizedPlanBacklogSweep", "JudgeFetchedPlan");
+
+        Assert.Single(bodies);
+        Assert.DoesNotContain("new SensitiveStatements.Session", bodies[0], StringComparison.Ordinal);
+        Assert.DoesNotContain("??=", bodies[0], StringComparison.Ordinal);
     }
 
     /* ---- the worst case, for the part file: 200 snapshot rows with 47 KB plans plus one 27 MB plan ---- */

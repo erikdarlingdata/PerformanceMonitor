@@ -559,7 +559,8 @@ WHERE tqp.query_plan IS NOT NULL;";
                     reader.GetInt32(4),
                     reader.IsDBNull(5) ? null : reader.GetString(5),
                     QueryHash: null,
-                    reader.GetInt64(6))));
+                    reader.GetInt64(6)),
+                reader.GetInt32(7)));
         }
 
         return claimed;
@@ -613,7 +614,7 @@ WHERE tqp.query_plan IS NOT NULL;";
                a cycle's drain, not one of them. */
             var planXml = reader.GetString(0);
 
-            return JudgeFetchedPlan(scrub, planXml);
+            return JudgeFetchedPlan(scrub, planXml, plan.AttemptCount);
         }
         catch (Exception ex) when (ex is not OperationCanceledException || budget.IsCancellationRequested)
         {
@@ -635,18 +636,41 @@ WHERE tqp.query_plan IS NOT NULL;";
     }
 
     /// <summary>
-    /// #4348: the statement filter on a fetched plan, where the value first lands and before it is stored. A plan
-    /// the judging budget could not cover is NOT stored as the marker: the verdict is <see cref="PlanFetchVerdict.Failed"/>,
-    /// so the backlog row stays claimable and the next pass, with a fresh budget, fetches it again.
+    /// How many attempts a row gets before a plan the judging budget keeps failing to cover is retired as the
+    /// whole-plan marker (#5320). The backlog table had no cap on attempts (the claim orders by the last attempt
+    /// and nothing else), so without this a plan that always needs more than the session budget would be fetched
+    /// and judged again on every pass with no end. Two: the first budget failure leaves the row claimable, in case
+    /// the budget was only short that once; the second is the plan, not the pass.
     /// </summary>
+    internal const int MaxJudgeAttempts = 2;
+
+    /// <summary>
+    /// #4348: the statement filter on a fetched plan, where the value first lands and before it is stored.
+    /// <paramref name="scrub"/> is the batch's session, passed in; the sweep never makes one of its own here.
+    ///
+    /// <para>A plan the judging budget could not cover is normally NOT stored as the marker: the verdict is
+    /// <see cref="PlanFetchVerdict.Failed"/>, so the backlog row stays claimable and the next pass, with a fresh
+    /// budget, fetches it again. Two cases end that. A session that was already spent before this plan was judged
+    /// says nothing about the plan (an earlier plan in the batch used the budget), so it stays Failed however many
+    /// attempts the row has. A plan that overran a budget that still had room when it started, on a row already
+    /// attempted <see cref="MaxJudgeAttempts"/> minus one times, is terminal: the whole-plan marker is stored as
+    /// the capture, which sets <c>captured_at</c>, so the claim never returns the row again.</para>
+    /// </summary>
+    /// <param name="scrub">The batch's statement-filter session.</param>
+    /// <param name="planXml">The fetched plan.</param>
+    /// <param name="priorAttempts">The row's <c>attempt_count</c> when it was claimed.</param>
     internal static (PlanFetchVerdict Verdict, string? PlanXml, string? Error) JudgeFetchedPlan(
-        SensitiveStatements.Session? scrub, string planXml)
+        SensitiveStatements.Session scrub, string planXml, int priorAttempts)
     {
-        /* The sweep passes its batch's session; a caller without one gets a standalone session of its own. */
-        scrub ??= new SensitiveStatements.Session();
+        var spentBefore = scrub.Spent;
 
         if (!scrub.TryXml(planXml, out var judged))
         {
+            if (!spentBefore && priorAttempts + 1 >= MaxJudgeAttempts)
+            {
+                return (PlanFetchVerdict.Captured, judged, null);
+            }
+
             return (PlanFetchVerdict.Failed, null, "the statement filter's judging budget was spent before this plan");
         }
 
