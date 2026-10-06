@@ -278,13 +278,29 @@ public static partial class SensitiveStatements
         /// one-sided (a false yes only costs a full read), and an entity-encoded <c>@</c> counts as a yes.</summary>
         private static bool MayNeedProbe(string xml)
         {
-            if (xml.Contains("ParameterizedText>", StringComparison.Ordinal)
-                || xml.Contains("&#64;", StringComparison.Ordinal)
-                || xml.Contains("&#x40;", StringComparison.OrdinalIgnoreCase))
+            if (xml.Contains("ParameterizedText>", StringComparison.Ordinal) || HoldsAtReference(xml))
                 return true;
             for (int i = xml.IndexOf('@'); i >= 0 && i + 1 < xml.Length; i = xml.IndexOf('@', i + 1))
             {
                 if (xml[i + 1] >= '0' && xml[i + 1] <= '9')
+                    return true;
+            }
+            return false;
+        }
+
+        /// <summary>Whether the text holds a character reference for <c>@</c> (<c>&amp;#64;</c> or <c>&amp;#x40;</c>),
+        /// with any number of leading zeros.</summary>
+        private static bool HoldsAtReference(string xml)
+        {
+            for (int i = xml.IndexOf("&#", StringComparison.Ordinal); i >= 0; i = xml.IndexOf("&#", i + 2, StringComparison.Ordinal))
+            {
+                int j = i + 2;
+                bool hex = j < xml.Length && (xml[j] == 'x' || xml[j] == 'X');
+                if (hex)
+                    j++;
+                while (j < xml.Length && xml[j] == '0')
+                    j++;
+                if (string.CompareOrdinal(xml, j, hex ? "40;" : "64;", 0, 3) == 0)
                     return true;
             }
             return false;
