@@ -23,7 +23,8 @@ public sealed class McpLongQueryTools
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history. Default 24.")] int hours_back = 24,
         [Description("Maximum rows to return, slowest first. Default 30. This is what bounds the page — read truncated to know whether the window held more.")] int limit = 30,
-        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        [Description("Limit to one database. Omit for all databases.")] string? database_name = null)
     {
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
         if (error != null) return error;
@@ -44,7 +45,11 @@ public sealed class McpLongQueryTools
                 SKUs now serve, from a duration-ranked read with the caller's limit + 1 as the fetch and the
                 extra row as the observed truncation signal.
             */
-            var rows = await dataService.GetSlowestLongQueryCompletionsAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd, limit: limit + 1);
+            /* #5244: database_name appended LAST (H1); blank or whitespace is every database. The predicate rides the raw rows,
+               before the duration ranking and the limit + 1 fetch, so the page is the slowest N of the chosen database. */
+            var database = string.IsNullOrWhiteSpace(database_name) ? null : database_name;
+            var rows = await dataService.GetSlowestLongQueryCompletionsAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd, limit: limit + 1,
+                databaseNames: database == null ? null : new[] { database });
             if (rows.Count == 0)
             {
                 return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "long_query_completions")
@@ -53,7 +58,7 @@ public sealed class McpLongQueryTools
                        is missing. The precondition answer names that state instead of quietly blaming a knob
                        that is already switched on. */
                     ?? await McpRuntimePrecondition.StatusAsync(dataService, resolved.ServerId, resolved.ServerName, "long_query_completions")
-                    ?? McpHelpers.Status("empty", "No long-running query completions found in the specified time range. The long_query_completions collector is opt-in (default OFF) — enable it in the collector schedule to capture data.",
+                    ?? McpHelpers.Status("empty", "No long-running query completions found in the specified time range" + (database == null ? "" : " for the chosen databases") + ". The long_query_completions collector is opt-in (default OFF) — enable it in the collector schedule to capture data.",
                         (await McpQueryTools.EventWindowNoticeAsync(
                             () => dataService.GetQueryWindowFloorAsync(QueryWindowRelation.LongQueryCompletions, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd),
                             null, windowEnd.AddHours(-hours_back), windowEnd, "long_query_completions", emptyAnswer: true)).AsHints());

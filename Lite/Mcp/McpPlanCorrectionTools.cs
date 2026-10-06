@@ -40,7 +40,8 @@ public sealed class McpPlanCorrectionTools
         [Description("Hours of history. Default 24.")] int hours_back = 24,
         [Description("Maximum recommendation rows to return, newest capture first. Default 25. This is what bounds the page - read truncated to know whether the window held more.")] int limit = 25,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
-        [Description("Return each row's full query_text instead of a 150-character preview. Default false.")] bool full_text = false)
+        [Description("Return each row's full query_text instead of a 150-character preview. Default false.")] bool full_text = false,
+        [Description("Limit to one database. Omit for all databases.")] string? database_name = null)
     {
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
         if (error != null) return error;
@@ -53,11 +54,16 @@ public sealed class McpPlanCorrectionTools
             var limitError = McpHelpers.ValidateTop(limit);
             if (limitError != null) return limitError;
 
-            var tuning = await dataService.GetLatestAutomaticTuningAsync(resolved.ServerId);
+            /* #5244: database_name appended LAST (H1); blank or whitespace is every database. BOTH layers narrow to it, as Darling's
+               twin does: the recommendation rows before the page cut (so limit counts the chosen database's rows) and the
+               automatic-tuning snapshot, whose MAX(collection_time) anchor stays whole in the reader. */
+            var database = string.IsNullOrWhiteSpace(database_name) ? null : database_name;
+            var databaseNames = database == null ? null : new[] { database };
+            var tuning = await dataService.GetLatestAutomaticTuningAsync(resolved.ServerId, databaseNames);
             /* #3541 A3: the caller's limit + 1 as the fetch, the extra row as the observed truncation
                signal. The reader's LIMIT 200 over per-cycle re-captures gave every window the same ~16-hour
                reach, and `total_recommendations` published that page as the window's count. */
-            var rows = await dataService.GetPlanCorrectionsAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd, limit: limit + 1);
+            var rows = await dataService.GetPlanCorrectionsAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd, limit: limit + 1, databaseNames: databaseNames);
             var truncated = rows.Count > limit;
             var page = truncated ? rows.Take(limit).ToList() : rows;
 
@@ -65,7 +71,10 @@ public sealed class McpPlanCorrectionTools
             {
                 return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "plan_correction")
                     ?? McpHelpers.Status("empty",
-                        "No plan correction data collected for this server. The collector runs against SQL Server 2017+ " +
+                        /* #5244: a filtered empty is a verdict about the chosen database only, the same words as Darling's twin. */
+                        database != null
+                            ? "No plan correction data found for the chosen databases."
+                            : "No plan correction data collected for this server. The collector runs against SQL Server 2017+ " +
                         "(sys.dm_db_tuning_recommendations); a server that has never produced a row here either predates " +
                         "that or has no databases with Query Store on.",
                         (await McpQueryTools.WindowNoticeAsync(

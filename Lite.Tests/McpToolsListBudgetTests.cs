@@ -147,7 +147,7 @@ public sealed class McpToolsListBudgetTests
     // #5244 PR4 lane L1: get_query_duration_trend, get_procedure_duration_trend and get_query_store_duration_trend gain database_name
     // (46 characters each, the shared sentence); no served head changes. Set to the measured total: 92,494 (+291 over 92,203, the three
     // parameters with their JSON framing). PR4's lane L2 runs after this one on the same total.
-    private const int TotalCeilingBytes = 92_494;
+    private const int TotalCeilingBytes = 92_688;
 
     private const int ConvertedHeadCap = 1_000;
     private const int ConvertedParameterCap = 200;
