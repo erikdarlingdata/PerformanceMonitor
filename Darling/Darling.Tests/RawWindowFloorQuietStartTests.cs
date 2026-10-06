@@ -386,7 +386,7 @@ public sealed class RawWindowFloorEffectiveStartTests
         };
 
         var found = new List<string>();
-        foreach (var file in new[] { "DarlingMcpDataTools.cs", "DarlingMcpQueryStoreClutterTools.cs" })
+        foreach (var file in new[] { "DarlingMcpDataTools.cs", "DarlingMcpQueryStoreClutterTools.cs", "DarlingMcpQueryStoreHistoryTools.cs" })
         {
             var text = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", file);
             foreach (var line in byHand)
