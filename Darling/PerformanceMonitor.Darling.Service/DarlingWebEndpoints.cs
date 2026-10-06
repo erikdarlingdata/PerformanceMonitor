@@ -4519,6 +4519,8 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             /* #5236: the Blocking and Deadlocks grids' plan reads, the same point-read shape: no window (no PHours/PAsOf). */
             ["get_blocking_plan_xml"] = R(CatPlans, "The plan stored with one Blocking row (requires event_time, blocked_spid, blocking_spid); side=blocking for the blocker's plan.", PReqText("event_time"), PReqInt("blocked_spid"), PReqInt("blocking_spid"), PServer(), PInt("blocked_ecid", 0), PInt("blocking_ecid", 0), PTextDefault("side", "blocked"), PText("database_name")),
             ["get_deadlock_plan_xml"] = R(CatPlans, "The victim's plan stored with one Deadlocks row (requires collection_time, deadlock_time).", PReqText("collection_time"), PReqText("deadlock_time"), PServer(), PText("victim_process_id"), PText("database_name")),
+            /* #5233: a repro script built from the stored text and plan — store-only, nothing runs. */
+            ["get_query_repro_script"] = R(CatPlans, "A T-SQL repro script built from a stored query's text and plan (requires kind and its key).", PReqText("kind"), PServer(), PText("database_name"), PText("query_hash"), PInt("query_id"), PInt("plan_id"), PText("collection_time"), PInt("session_id"), PInt("request_id", 0)),
 
             /* ── default trace (DarlingMcpDefaultTraceTools) ── */
             ["get_default_trace_events"] = R(CatDefaultTrace, "Default-trace events (file growth, DDL, security).", PServer(), PHours(24), PLimit(100), PAsOf()),
@@ -5509,6 +5511,16 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 : First(c, "live") is { } liveText && !bool.TryParse(liveText, out _) ? UnparseableParam("live", "Expected true or false.")
                 : WrapPlanXmlAsync(DarlingMcpPlanTools.GetActiveQueryPlanXml(pg, snapTime, snapSession.Value, Server(c), snapRequest ?? 0, QueryBool(c, "live", false), c.RequestAborted),
                     PlanIdentity(("collection_time", snapTime), ("session_id", snapSession), ("request_id", snapRequest ?? 0), ("live", QueryBool(c, "live", false)))),
+            /* #5233: the repro script. A key that is present but unreadable is refused, never defaulted. The JSON passes
+               through unwrapped. */
+            ["get_query_repro_script"] = (c, pg, an) => !RequireText(c, "kind", out var reproKind)
+                ? MissingParam("kind")
+                : !OptionalLong(c, "query_id", out var reproQueryId) ? UnparseableParam("query_id")
+                : !OptionalLong(c, "plan_id", out var reproPlanId) ? UnparseableParam("plan_id")
+                : !OptionalInt(c, "session_id", out var reproSession) ? UnparseableParam("session_id")
+                : !OptionalInt(c, "request_id", out var reproRequest) ? UnparseableParam("request_id")
+                : DarlingMcpPlanTools.GetQueryReproScript(pg, reproKind, Server(c), Str(c, "database_name"), Str(c, "query_hash"),
+                    reproQueryId, reproPlanId, Str(c, "collection_time"), reproSession, request_id: reproRequest ?? 0, cancellationToken: c.RequestAborted),
 
             /* #5236: the Blocking and Deadlocks grids' plan reads, bound by the same rule: a key that is present but
                unreadable is REFUSED, never defaulted. Both times are the row's strings and are matched for equality, so

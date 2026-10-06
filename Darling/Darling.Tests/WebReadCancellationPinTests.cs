@@ -60,7 +60,7 @@ public sealed class WebReadCancellationPinTests
     private static HttpContext CancelledRequest()
     {
         var context = new DefaultHttpContext();
-        context.Request.QueryString = new QueryString("?query_hash=deadbeef&database_name=probe&counter_name=x&wait_type=CXPACKET&metric=total_waits&query_id=1&sql_handle=0x01&collection_time=2026-01-01T00:00:00.000000Z&session_id=1&event_time=2026-01-01T00:00:00.000000Z&blocked_spid=1&blocking_spid=2&deadlock_time=2026-01-01T00:00:00.000000Z&server_id=1&metric_name=x&alert_time=2026-01-01T00:00:00Z");
+        context.Request.QueryString = new QueryString("?kind=query_hash&query_hash=deadbeef&database_name=probe&counter_name=x&wait_type=CXPACKET&metric=total_waits&query_id=1&sql_handle=0x01&collection_time=2026-01-01T00:00:00.000000Z&session_id=1&event_time=2026-01-01T00:00:00.000000Z&blocked_spid=1&blocking_spid=2&deadlock_time=2026-01-01T00:00:00.000000Z&server_id=1&metric_name=x&alert_time=2026-01-01T00:00:00Z");
         context.RequestAborted = new CancellationToken(canceled: true);
         return context;
     }
