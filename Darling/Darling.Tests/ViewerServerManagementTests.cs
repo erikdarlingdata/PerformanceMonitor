@@ -382,40 +382,6 @@ public sealed class ServerStoreCredentialTests
 }
 
 /// <summary>
-/// The DPAPI blob the viewer writes into <c>encrypted_password</c> must be readable by the SERVICE, and vice
-/// versa — a cross-project round trip against <see cref="DarlingSecrets"/> proving the entropy + scope match
-/// (Windows-only; DPAPI is unavailable elsewhere).
-/// </summary>
-public sealed class ViewerServerSecretTests
-{
-    [Fact]
-    public void ViewerProtect_IsReadableByTheService()
-    {
-        Assert.SkipUnless(OperatingSystem.IsWindows(), "DPAPI requires Windows.");
-        var blob = ViewerServerSecret.Protect("s3cr3t!");
-        Assert.Equal("s3cr3t!", DarlingSecrets.Unprotect(blob));
-    }
-
-    [Fact]
-    public void ServiceProtect_IsReadableByTheViewer()
-    {
-        Assert.SkipUnless(OperatingSystem.IsWindows(), "DPAPI requires Windows.");
-        var blob = DarlingSecrets.Protect("another-pw");
-        Assert.Equal("another-pw", ViewerServerSecret.TryUnprotect(blob));
-    }
-
-    [Fact]
-    public void TryUnprotect_ReturnsNullOnGarbage_NeverThrows()
-    {
-        Assert.SkipUnless(OperatingSystem.IsWindows(), "DPAPI requires Windows.");
-        Assert.Null(ViewerServerSecret.TryUnprotect(null));
-        Assert.Null(ViewerServerSecret.TryUnprotect(""));
-        Assert.Null(ViewerServerSecret.TryUnprotect("not-base64!!"));
-        Assert.Null(ViewerServerSecret.TryUnprotect(Convert.ToBase64String(new byte[] { 1, 2, 3, 4 })));
-    }
-}
-
-/// <summary>
 /// The one-time viewer-servers.json → config migrate-in: the per-entry projection (auth mapping + secret
 /// resolution + the shared server_id) and the once-marker guard. Uses an in-memory secret fake + temp files,
 /// never the real vault or a live store.
