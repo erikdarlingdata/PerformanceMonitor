@@ -1310,7 +1310,7 @@ public sealed class DarlingMcpHostService : BackgroundService
             // FinOps web parity (#4843), set B: append new FinOps entries below this line only.
             .WithGeminiCompatibleTools<DarlingMcpFinOpsTools>()
             // FinOps web parity (#4843), set B ends.
-            /* Three call-tool filters, each registered ONCE and each covering every tool with no
+            /* Four call-tool filters, each registered ONCE and each covering every tool with no
                per-tool change — the seam that exists precisely so a decision about all ~147 reads
                is made in one place.
 
@@ -1334,9 +1334,16 @@ public sealed class DarlingMcpHostService : BackgroundService
                through RunComposedPanelAsync, so recording it again here would double-count every MCP
                custom-view run.
 
-               Optional GCF (Graph Compact Format) output runs LAST: when DARLING_OUTPUT_FORMAT=gcf
+               Optional GCF (Graph Compact Format) output runs after those two: when DARLING_OUTPUT_FORMAT=gcf
                it re-encodes each tool's JSON result as a GCF generic wire. Opt-in, lossless, and
-               never larger than the JSON (see GcfCallToolFilter / GcfOutput). #4198 ruled out a
+               never larger than the JSON (see GcfCallToolFilter / GcfOutput).
+
+               The statement filter (#4348, SensitiveStatementOutputFilter) is registered LAST, after GCF. The SDK
+               documents the first filter added as the outermost, so the last one added sits next to the tool and
+               reads each result as the tool's own JSON, before GCF re-encodes it (a GCF wire escapes a line feed
+               and so would defeat the filter's token match). It covers every tool on / and /core, error results
+               included, with no per-tool change; SensitiveStatementHostFilterTests pins the slot and fails if an
+               SDK change reorders the pipeline. #4198 ruled out a
                post-hoc trim-to-budget filter here (it would make a tool's own truncated/*_returned
                fields wrong, cut calls that explicitly asked for more rows, and drop the newest rows
                of anything sorted oldest-first) in favor of sizing each tool's own defaults to fit —
@@ -1344,7 +1351,8 @@ public sealed class DarlingMcpHostService : BackgroundService
             .WithRequestFilters(filters => filters
                 .AddCallToolFilter(McpUnknownArgumentGuard.Instance)
                 .AddCallToolFilter(toolLatency.AsFilter())
-                .AddCallToolFilter(GcfCallToolFilter.Instance));
+                .AddCallToolFilter(GcfCallToolFilter.Instance)
+                .AddCallToolFilter(SensitiveStatementOutputFilter.Instance));
     }
 
     /// <summary>

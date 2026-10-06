@@ -55,13 +55,12 @@ public sealed class PerfmonStatsCollector : CollectorDefinitionBase<PerfmonStats
     /// calculator's reset marker in place of the number the operator wanted.
     ///
     /// <para>This is the write half of one rule whose read half is
-    /// <c>PerformanceMonitor.Common.PerfmonCounterTypes.GaugeTypes</c>. The two live in assemblies that
-    /// reference neither each other nor a common third (Collectors is kept free of the MCP SDK and the
-    /// credential store that Common carries), so the set is spelled twice and
-    /// <c>Lite.Tests/PerfmonCounterTypeTests</c> asserts the spellings equal — a type added to one side
-    /// without the other fails there, not in a chart.</para>
+    /// <c>PerformanceMonitor.Common.PerfmonCounterTypes.GaugeTypes</c>. The set is declared once, there: this
+    /// assembly references Common (the statement filter's scrub session lives in it), so the collector reads
+    /// the vocabulary's set instead of spelling its own, and a type added to the vocabulary changes what the
+    /// collector writes in the same edit.</para>
     /// </summary>
-    public static readonly IReadOnlySet<int> GaugeCounterTypes = new HashSet<int> { 65792, 65536 };
+    public static IReadOnlySet<int> GaugeCounterTypes => PerformanceMonitor.Common.PerfmonCounterTypes.GaugeTypes;
 
     /// <summary>True when the row's stored type is a gauge and the row is written as its level: no delta call,
     /// NULL <c>delta_cntr_value</c>, NULL <c>sample_interval_seconds</c>.</summary>
