@@ -5699,6 +5699,7 @@ LIMIT 1";
             return;
         }
 
+        var fetchClock = Stopwatch.StartNew();
         try
         {
             var now = PgStatementText.Naive(DateTime.UtcNow);
@@ -5735,6 +5736,16 @@ LIMIT 1";
             _logger.LogInformation(
                 "  [{Server}] pg_statement_text => {Count} statement text(s) refreshed (#2219)",
                 runtime.Config.DisplayName, queryIds.Count);
+
+            /* #5320: a refresh that worked writes a SUCCESS row under the same name the failure row uses. Collection
+               health bands a name from the counts of its rows and the age of its newest success, so a name that
+               only ever wrote errors would read failing until the error aged out of the window, whatever the
+               refreshes after it did. The row carries the rows stored and the fetch-plus-store time; a due check
+               that finds nothing due, and a fetch that returns no statements, write none. */
+            await DarlingObservability.LogCollectionAsync(
+                _postgres!, runtime, PgStatementText.CollectorName, "SUCCESS", queryIds.Count, fetchClock.ElapsedMilliseconds, 0,
+                errorMessage: null,
+                fanout: null, phases: null, drain: null, fetchPhases: null, sweepPeerMaxMs: null, _logger, cancellationToken);
         }
         catch (OperationCanceledException)
         {
@@ -5747,6 +5758,14 @@ LIMIT 1";
             _logger.LogWarning(
                 "  [{Server}] pg_statement_text refresh failed, statistics are unaffected: {Message} (#2219)",
                 runtime.Config.DisplayName, ex.Message);
+
+            /* #5320: the failure is also an ERROR row in the collection log under the text fetch's own name, so a
+               fetch that keeps timing out on the target shows in collection health instead of only in the service
+               log. The statistics run's own row stays as it was written: its data was collected. */
+            await DarlingObservability.LogCollectionAsync(
+                _postgres!, runtime, PgStatementText.CollectorName, "ERROR", 0, fetchClock.ElapsedMilliseconds, 0,
+                PgStatementText.DescribeFailure(ex),
+                fanout: null, phases: null, drain: null, fetchPhases: null, sweepPeerMaxMs: null, _logger, cancellationToken);
         }
     }
 
@@ -5781,7 +5800,7 @@ LIMIT 1";
         await connection.OpenAsync(cancellationToken);
         await using var command = new Npgsql.NpgsqlCommand(
             PgStatementText.FetchSqlFor(runtime.Target.IsAurora, runtime.Target.PostgresMajorVersion),
-            connection) { CommandTimeout = 60 };
+            connection) { CommandTimeout = PgStatementText.FetchCommandTimeoutSeconds };
         command.Parameters.AddWithValue(PgStatementTextRowCap);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
