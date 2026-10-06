@@ -145,7 +145,11 @@ FROM collect.cpu_utilization_stats
 GROUP BY server_id, bucket, collection_time
 WITH NO DATA", ct);
         await ExecuteAsync(connection,
-            "SELECT add_continuous_aggregate_policy('collect.cpu_utilization_baseline', start_offset => INTERVAL '3 days', end_offset => INTERVAL '1 hour', schedule_interval => INTERVAL '1 hour', if_not_exists => true)", ct);
+            /* #5416: initial_start a day out, so TimescaleDB's scheduler never runs this policy's refresh job while
+               the test is alive. A refresh job running at the moment of the sweep's DROP fails it with XX000
+               "tuple concurrently deleted" and left a test connection Closed (one CI flake, reproduced locally).
+               The policy still exists for the cascade assertions. */
+            "SELECT add_continuous_aggregate_policy('collect.cpu_utilization_baseline', start_offset => INTERVAL '3 days', end_offset => INTERVAL '1 hour', schedule_interval => INTERVAL '1 hour', initial_start => now() + INTERVAL '1 day', if_not_exists => true)", ct);
         await ExecuteAsync(connection,
             "SELECT add_retention_policy('collect.cpu_utilization_baseline', drop_after => INTERVAL '35 days', if_not_exists => true)", ct);
         await ExecuteAsync(connection,
@@ -278,7 +282,8 @@ WITH NO DATA", ct);
             await ExecuteAsync(connection, TimescaleSupport.LegacyCreateWaitStatsBaselineSql, ct);
             await ExecuteAsync(connection, TimescaleSupport.CreateWaitStatsIntervalBaselineSql, ct);
             await ExecuteAsync(connection,
-                $"SELECT add_continuous_aggregate_policy('collect.{legacy}', start_offset => INTERVAL '1 day', end_offset => INTERVAL '1 hour', schedule_interval => INTERVAL '1 hour', if_not_exists => true)", ct);
+                /* #5416: initial_start a day out, so no refresh job races the day-forty DROP (see the first test). */
+                $"SELECT add_continuous_aggregate_policy('collect.{legacy}', start_offset => INTERVAL '1 day', end_offset => INTERVAL '1 hour', schedule_interval => INTERVAL '1 hour', initial_start => now() + INTERVAL '1 day', if_not_exists => true)", ct);
             await RefreshFromAsync(connection, legacy, hour1, ct);
             await RefreshFromAsync(connection, successor, hour2, ct);
 

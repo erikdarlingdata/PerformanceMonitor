@@ -1297,6 +1297,10 @@ $do$";
                 logger?.LogWarning(
                     "Could not judge or drop superseded baseline relation {Legacy} — it lingers (harmlessly, but materializing) until the next restart retries: {Message}",
                     legacy, ex.Message);
+                if (!await ReopenBrokenConnectionAsync(connection, logger, cancellationToken))
+                {
+                    return dropped;
+                }
             }
         }
 
@@ -1330,10 +1334,51 @@ $do$";
                 logger?.LogWarning(
                     "Could not drop retired baseline relation {View} — it lingers (harmlessly, but materializing) until the next restart retries: {Message}",
                     view, ex.Message);
+                if (!await ReopenBrokenConnectionAsync(connection, logger, cancellationToken))
+                {
+                    return dropped;
+                }
             }
         }
 
         return dropped;
+    }
+
+    /// <summary>
+    /// #5416: after a failed attempt, hands the sweep (and every convergence step that shares its connection
+    /// after it) an OPEN connection again. A continuous aggregate's refresh job running at the moment of the
+    /// sweep's <c>DROP MATERIALIZED VIEW ... CASCADE</c> fails the drop with <c>XX000: tuple concurrently
+    /// deleted</c>, an ERROR (not a FATAL), and Npgsql 10 closes the connection on an ERROR in SQLSTATE classes
+    /// XX, 58 and 53 (<c>State</c> goes to <c>Closed</c>, <c>FullState</c> to <c>Broken</c>; measured against
+    /// Npgsql 10.0.3). The per-relation catch swallows the error, so without this the NEXT relation's probe
+    /// threw "Connection is not open", got logged as a second, misleading failure, and the convergence steps
+    /// behind the sweep on the same connection (baseline fallback views, statement statistics) failed the same way
+    /// until the next hourly pass. Reopened on the same <see cref="NpgsqlConnection"/> object, which a
+    /// data-source connection supports (the worker's #3971 capture reopens the same way). A connection that is
+    /// still Open (a deadlock victim, a plain timeout) is left alone. Returns false when the reopen itself
+    /// failed, which ends the sweep: every later relation would only repeat the failure.
+    /// </summary>
+    private static async Task<bool> ReopenBrokenConnectionAsync(NpgsqlConnection connection, ILogger? logger, CancellationToken cancellationToken)
+    {
+        if (connection.State == System.Data.ConnectionState.Open)
+        {
+            return true;
+        }
+
+        try
+        {
+            /* A Broken connection must be closed before it can open again; closing a Closed one is a no-op. */
+            await connection.CloseAsync();
+            await connection.OpenAsync(cancellationToken);
+            return true;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger?.LogWarning(
+                "The retired-baseline sweep's connection broke and could not be reopened, so the rest of the sweep is skipped until the next pass retries it: {Message}",
+                ex.Message);
+            return false;
+        }
     }
 
     /// <summary>What the superseded pass decided for one legacy relation, and why.</summary>
