@@ -477,14 +477,16 @@ public static class DarlingFileSecurity
     /// <summary>
     /// The accounts beyond SYSTEM, Administrators and the service account that are allowed to write to
     /// <paramref name="directory"/>, delete from it or change who may (#5366), comma-separated; null when there are
-    /// none. Read access is not counted: a directory others may list is not one they can change. A DACL that cannot be
-    /// read is reported, not passed.
+    /// none. Read access is not counted: a directory others may list is not one they can change. An entry that only
+    /// children inherit (inherit-only) does not apply to the directory itself and is not counted. An OWNER outside the
+    /// three is listed too, as "(the owner)": an owner can always change who may do what. A DACL that cannot be read is
+    /// reported, not passed.
     /// </summary>
     public static string? WriteAccessBeyondTrusted(string directory)
     {
         try
         {
-            return AccessBeyondTrusted(new DirectoryInfo(directory).GetAccessControl(), DirectoryChangeRights);
+            return WriteAccessBeyondTrusted(new DirectoryInfo(directory).GetAccessControl());
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidOperationException or PlatformNotSupportedException)
         {
@@ -492,34 +494,35 @@ public static class DarlingFileSecurity
         }
     }
 
+    /// <summary><see cref="WriteAccessBeyondTrusted(string)"/> over a security descriptor already in hand.</summary>
+    internal static string? WriteAccessBeyondTrusted(DirectorySecurity security) =>
+        AccessBeyondTrusted(security, DirectoryChangeRights, includeOwner: true);
+
     private const FileSystemRights DirectoryChangeRights =
         FileSystemRights.WriteData | FileSystemRights.AppendData | FileSystemRights.WriteExtendedAttributes
         | FileSystemRights.WriteAttributes | FileSystemRights.Delete | FileSystemRights.DeleteSubdirectoriesAndFiles
         | FileSystemRights.ChangePermissions | FileSystemRights.TakeOwnership;
 
-    private static string? AccessBeyondTrusted(FileSystemSecurity security, FileSystemRights? onlyRights = null)
+    private static string? AccessBeyondTrusted(FileSystemSecurity security, FileSystemRights? onlyRights = null, bool includeOwner = false)
     {
         var accounts = new List<string>();
+        if (includeOwner && security.GetOwner(typeof(SecurityIdentifier)) is SecurityIdentifier owner && !IsTrusted(owner))
+        {
+            accounts.Add(AccountName(owner) + " (the owner)");
+        }
+
         foreach (FileSystemAccessRule rule in security.GetAccessRules(true, true, typeof(SecurityIdentifier)))
         {
             if (rule.AccessControlType != AccessControlType.Allow
                 || rule.IdentityReference is not SecurityIdentifier sid
                 || IsTrusted(sid)
-                || (onlyRights is { } mask && (rule.FileSystemRights & mask) == 0))
+                || (onlyRights is { } mask && (rule.FileSystemRights & mask) == 0)
+                || (onlyRights is not null && rule.PropagationFlags.HasFlag(PropagationFlags.InheritOnly)))
             {
                 continue;
             }
 
-            string name;
-            try
-            {
-                name = sid.Translate(typeof(NTAccount)).Value;
-            }
-            catch (IdentityNotMappedException)
-            {
-                name = sid.Value;
-            }
-
+            var name = AccountName(sid);
             if (!accounts.Contains(name))
             {
                 accounts.Add(name);
@@ -527,6 +530,18 @@ public static class DarlingFileSecurity
         }
 
         return accounts.Count == 0 ? null : string.Join(", ", accounts);
+    }
+
+    private static string AccountName(SecurityIdentifier sid)
+    {
+        try
+        {
+            return sid.Translate(typeof(NTAccount)).Value;
+        }
+        catch (IdentityNotMappedException)
+        {
+            return sid.Value;
+        }
     }
 
     private static bool IsTrusted(SecurityIdentifier sid) =>

@@ -653,15 +653,17 @@ public sealed class DarlingPasswordKeyFileTests
     [Fact]
     public void TheStatBuffer_IsReadAtEachLayoutsOffsets()
     {
-        var linuxX64 = new byte[512];
-        BitConverter.GetBytes(3UL).CopyTo(linuxX64, 16);
-        BitConverter.GetBytes(1234u).CopyTo(linuxX64, 28);
-        Assert.Equal(new UnixFileOwner(1234, 3), FileIdentity.DecodeUnixOwner(linuxX64, FileIdentity.UnixStatLayout.LinuxX64));
+        var statx = new byte[512];
+        BitConverter.GetBytes(0xCu).CopyTo(statx, 0);
+        BitConverter.GetBytes(3u).CopyTo(statx, 16);
+        BitConverter.GetBytes(1234u).CopyTo(statx, 20);
+        Assert.Equal(new UnixFileOwner(1234, 3), FileIdentity.DecodeUnixOwner(statx, FileIdentity.UnixStatLayout.Statx));
+        Assert.True(FileIdentity.StatxFilledOwnerAndLinks(statx));
 
-        var linuxArm64 = new byte[512];
-        BitConverter.GetBytes(2u).CopyTo(linuxArm64, 20);
-        BitConverter.GetBytes(4321u).CopyTo(linuxArm64, 24);
-        Assert.Equal(new UnixFileOwner(4321, 2), FileIdentity.DecodeUnixOwner(linuxArm64, FileIdentity.UnixStatLayout.LinuxArm64));
+        BitConverter.GetBytes(0x8u).CopyTo(statx, 0);
+        Assert.False(FileIdentity.StatxFilledOwnerAndLinks(statx));
+        BitConverter.GetBytes(0x4u).CopyTo(statx, 0);
+        Assert.False(FileIdentity.StatxFilledOwnerAndLinks(statx));
 
         var mac = new byte[512];
         BitConverter.GetBytes((ushort)1).CopyTo(mac, 6);
@@ -705,6 +707,80 @@ public sealed class DarlingPasswordKeyFileTests
         {
             Remove(directory);
         }
+    }
+
+    [Fact]
+    public void Generate_IntoAnExistingDirectory_IgnoresAnEntryOnlyItsChildrenInherit_OnWindows()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "the directory ACL is Windows's");
+        var directory = NewDirectory();
+        try
+        {
+            var info = Directory.CreateDirectory(directory);
+            var security = info.GetAccessControl();
+            security.AddAccessRule(new FileSystemAccessRule(
+                new SecurityIdentifier(WellKnownSidType.BuiltinUsersSid, null), FileSystemRights.FullControl,
+                InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit, PropagationFlags.InheritOnly, AccessControlType.Allow));
+            info.SetAccessControl(security);
+
+            Assert.Null(DarlingFileSecurity.WriteAccessBeyondTrusted(directory));
+            var generated = DarlingPasswordKeyFile.Generate(directory, () => (byte[])Key3072.Value.Clone(), NullLogger.Instance);
+
+            Assert.Null(generated.Refusal);
+            Assert.True(File.Exists(Path.Combine(directory, DarlingPasswordKeyFile.FileName)));
+        }
+        finally
+        {
+            Remove(directory);
+        }
+    }
+
+    [Fact]
+    public void Generate_IntoAnExistingDirectoryOwnedBySomeoneElse_IsRefused_OnWindows()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "the directory ACL is Windows's");
+        var directory = NewDirectory();
+        try
+        {
+            var info = Directory.CreateDirectory(directory);
+            Assert.Null(DarlingFileSecurity.WriteAccessBeyondTrusted(directory));
+            var security = info.GetAccessControl();
+            try
+            {
+                security.SetOwner(new SecurityIdentifier(WellKnownSidType.BuiltinUsersSid, null));
+                info.SetAccessControl(security);
+            }
+            catch (Exception ex) when (ex is InvalidOperationException or UnauthorizedAccessException or IOException)
+            {
+                Assert.Skip("this account may not hand a directory to another owner: " + ex.Message);
+            }
+
+            var writers = DarlingFileSecurity.WriteAccessBeyondTrusted(directory);
+            var generated = DarlingPasswordKeyFile.Generate(directory, () => (byte[])Key3072.Value.Clone(), NullLogger.Instance);
+
+            Assert.Contains("(the owner)", writers, StringComparison.Ordinal);
+            Assert.True(generated.Untrusted);
+            Assert.Null(generated.Pkcs8);
+            Assert.Contains("(the owner)", generated.Refusal, StringComparison.Ordinal);
+            Assert.False(File.Exists(Path.Combine(directory, DarlingPasswordKeyFile.FileName)));
+        }
+        finally
+        {
+            Remove(directory);
+        }
+    }
+
+    [Fact]
+    public void ADirectoryDescriptor_NamesAnOwnerBeyondTheTrustedThree_ButNotATrustedOne_OnWindows()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "the directory ACL is Windows's");
+        var other = new DirectorySecurity();
+        other.SetOwner(new SecurityIdentifier(WellKnownSidType.BuiltinUsersSid, null));
+        var trusted = new DirectorySecurity();
+        trusted.SetOwner(new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null));
+
+        Assert.Contains("(the owner)", DarlingFileSecurity.WriteAccessBeyondTrusted(other), StringComparison.Ordinal);
+        Assert.Null(DarlingFileSecurity.WriteAccessBeyondTrusted(trusted));
     }
 
     [Fact]
