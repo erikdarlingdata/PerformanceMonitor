@@ -42,11 +42,20 @@ public sealed class TopTextLookupFillTests
 
     // ------------------------------------------------------------------ #5309: one lookup
 
+    /// <summary>The raw statements (and the Viewer's) read the text in ONE pass over the winners. The hourly statement is
+    /// different on purpose and has its own test below.</summary>
+    public static IEnumerable<object[]> RawStatements() =>
+        new[] { "TopQueriesSql", "TopQueriesByHostObjectSql", "ViewerTopQueriesSql" }.Select(n => new object[] { n });
+
     [Theory]
-    [MemberData(nameof(Statements))]
+    [MemberData(nameof(RawStatements))]
     public void TheLatestTextIsOneLookupForAllRankedGroups_NotOnePerRow(string name)
     {
         var sql = Sql(name);
+        /* Materialized: the join to the lookup is NULL-safe, which PostgreSQL cannot hash, so a plain CTE is inlined into a
+           nested loop and re-run per ranked row (#5309's per-row re-run in a new shape; TopTextLookupPlanLiveTests reads it
+           from the plan). */
+        Assert.Contains("latest_text AS MATERIALIZED (", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("LATERAL", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("LIMIT 1", sql, StringComparison.Ordinal);   /* the per-row text lookup's shape */
         Assert.DoesNotMatch(@"(FROM|JOIN) v_query_stats", sql);
@@ -79,12 +88,36 @@ public sealed class TopTextLookupFillTests
     public void TheRawLookupIsBoundedToTheWindow(string name)
     {
         var sql = Sql(name);
-        var lookup = sql[sql.IndexOf("latest_text AS (", StringComparison.Ordinal)..];
+        var lookup = sql[sql.IndexOf("latest_text AS MATERIALIZED (", StringComparison.Ordinal)..];
         var end = lookup.IndexOf("LEFT JOIN query_text_dim AS d ON d.digest = l.query_text_digest", StringComparison.Ordinal);
         lookup = lookup[..end];
         Assert.Contains("q.collection_time >= $2", lookup, StringComparison.Ordinal);
         Assert.Contains("q.collection_time <= $3", lookup, StringComparison.Ordinal);
         Assert.Contains("q.server_id = $1", lookup, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TheHourlyWindowLookup_ProbesTheIndexOncePerRankedKey_NotTheWholeWindow()
+    {
+        var sql = DarlingDataReader.TopQueriesHourlySql;
+        var window = sql.IndexOf("latest_in_window AS (", StringComparison.Ordinal);
+        var lookup = sql[window..sql.IndexOf("missing AS MATERIALIZED (", StringComparison.Ordinal)];
+        /* One probe per ranked key: a lateral over ranked, each arm an ordered LIMIT 1 on the indexed hash equality
+           (idx_query_stats_server_hash_time: server_id, query_hash, collection_time DESC). The old form read every raw row
+           of the window and hash joined it to the ranked keys (1,439,400 rows at 168 hours to find 25 texts). */
+        Assert.Contains("FROM ranked AS rk", lookup, StringComparison.Ordinal);
+        Assert.Contains("CROSS JOIN LATERAL", lookup, StringComparison.Ordinal);
+        Assert.DoesNotContain("DISTINCT ON", lookup, StringComparison.Ordinal);
+        Assert.DoesNotContain("JOIN ranked", lookup, StringComparison.Ordinal);
+        Assert.Contains("q.query_hash = rk.query_hash", lookup, StringComparison.Ordinal);
+        Assert.Equal(2, Regex.Matches(lookup, @"ORDER BY q\.collection_time DESC\s+LIMIT 1").Count);
+        /* NULL-safe on every key column: the database by IS NOT DISTINCT FROM, the hash by its own NULL arm. */
+        Assert.Contains("q.database_name IS NOT DISTINCT FROM rk.database_name", lookup, StringComparison.Ordinal);
+        Assert.Contains("q.query_hash IS NULL", lookup, StringComparison.Ordinal);
+        Assert.Contains("rk.query_hash IS NULL", lookup, StringComparison.Ordinal);
+        /* One text lookup per statement still: the window pass, then the fallback for the keys it found nothing for. */
+        Assert.Single(Regex.Matches(sql, @"LEFT JOIN latest_in_window AS w"));
+        Assert.Single(Regex.Matches(sql, @"FROM latest_in_window"));
     }
 
     [Fact]

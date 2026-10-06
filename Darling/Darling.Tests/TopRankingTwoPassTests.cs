@@ -194,7 +194,7 @@ public sealed class TopRankingTwoPassTests
 
         /* #5309: the text is ONE lookup over the winners (the latest_text CTE), joined to the ranked rows once. */
         Assert.DoesNotContain("LATERAL", sql, StringComparison.Ordinal);
-        var lookup = sql.IndexOf("latest_text AS (", StringComparison.Ordinal);
+        var lookup = sql.IndexOf("latest_text AS MATERIALIZED (", StringComparison.Ordinal);
         var lookupJoin = sql.IndexOf("LEFT JOIN latest_text AS t", StringComparison.Ordinal);
         var waitfor = sql.IndexOf("NOT LIKE 'WAITFOR%'", StringComparison.Ordinal);
         var finalLimit = sql.LastIndexOf("LIMIT $4", StringComparison.Ordinal);

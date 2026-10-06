@@ -82,7 +82,9 @@ public sealed class TopQueriesHourlyRoutingTests
     public void TopQueriesHourlySql_LooksUpTextInStatement_AndSelectsNoDeltaExtremes()
     {
         var sql = DarlingDataReader.TopQueriesHourlySql;
-        Assert.DoesNotContain("LATERAL", sql, StringComparison.Ordinal);   /* #5309: one lookup, not one per row */
+        /* #5309: one text lookup, probed once per ranked key by index (the one lateral, inside latest_in_window), not one
+           per row and not a read of the window's raw rows. */
+        Assert.Single(System.Text.RegularExpressions.Regex.Matches(sql, "LATERAL"));
         Assert.Contains("latest_in_window AS (", sql, StringComparison.Ordinal);
         Assert.Contains("MAX(sql_handle)", sql, StringComparison.Ordinal);
         Assert.Contains("NOT LIKE 'WAITFOR%'", sql, StringComparison.Ordinal);

@@ -219,7 +219,7 @@ public sealed partial class ViewerDataService
                larger $6 (TopFill, at most three rounds). The final LIMIT stays $4. */
             LIMIT $6
         ),
-        latest_text AS (
+        latest_text AS MATERIALIZED (
             /* #5309: the representative text of EVERY ranked group in ONE lookup. This was a lateral
                lookup of the newest row, one per ranked row, which on a store without TimescaleDB scanned the
                raw table once per row. One pass reads the window's rows for the ranked keys and keeps the

@@ -46,7 +46,7 @@ public sealed class ViewerQueriesSqlTests
            what resolves the payload dimension. Note "FROM v_query_stats" does not contain
            "FROM query_stats", so these two assertions really are about two different relations. */
         var rankedRead = sql.IndexOf("FROM query_stats", StringComparison.Ordinal);
-        var lookupAt = sql.IndexOf("latest_text AS (", StringComparison.Ordinal);
+        var lookupAt = sql.IndexOf("latest_text AS MATERIALIZED (", StringComparison.Ordinal);
         var dimRead = sql.IndexOf("query_text_dim", StringComparison.Ordinal);
         Assert.True(rankedRead >= 0, "the ranked CTE must aggregate the base query_stats table");
         /* #5309: the text is ONE lookup for every ranked group; it resolves the dimension itself (what

@@ -634,7 +634,7 @@ public sealed class DarlingMcpDataToolsSurfaceAndSqlTests
            base table's inline query_text is NULL on every row written since. ("FROM v_query_stats" does not
            contain "FROM query_stats", so these two assertions name two different relations.) */
         var rankedRead = sql.IndexOf("FROM query_stats", StringComparison.Ordinal);
-        var lookupAt = sql.IndexOf("latest_text AS (", StringComparison.Ordinal);
+        var lookupAt = sql.IndexOf("latest_text AS MATERIALIZED (", StringComparison.Ordinal);
         var dimRead = sql.IndexOf("query_text_dim", StringComparison.Ordinal);
         Assert.True(rankedRead >= 0, "the ranked CTE must aggregate the base query_stats table");
         /* #5309: the one latest-text lookup resolves the dimension itself (what v_query_stats' COALESCE does) for

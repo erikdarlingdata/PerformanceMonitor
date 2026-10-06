@@ -1171,7 +1171,7 @@ internal static class DarlingDataReader
             AND   {TimescaleSupport.IntervalHonestSourceFilter}
             GROUP BY database_name, query_hash, host_object_name
         ),
-        latest_text AS (
+        latest_text AS MATERIALIZED (
             /* #5309: the representative text of EVERY ranked group in ONE lookup. This used to be a lateral
                lookup of the newest row, one per ranked row, which on a store without TimescaleDB scanned
                the raw table once per row (25 scans, 28 of 38 seconds at seven days). Here one pass reads the
@@ -1180,7 +1180,11 @@ internal static class DarlingDataReader
                query_text_dim for that one row afterwards, so the sort never carries a wide text. A row counts
                as having text when its inline text or its dimension row exists, the rule v_query_stats' COALESCE
                gives. The key match is NULL-safe, with the COALESCE equality as the hashable pre-filter (see
-               pass 2). The group's own host object keeps one caller's text from labelling another's (#2012). */
+               pass 2). The group's own host object keeps one caller's text from labelling another's (#2012).
+               MATERIALIZED, because the join to it below is NULL-safe (IS NOT DISTINCT FROM), which PostgreSQL
+               cannot hash: left plain, it inlines this CTE into a nested loop and re-runs it per ranked row
+               (a 120-candidate round scanned the 20,000-row query_text_dim 10,000 times, 9,975 ms; materialized,
+               805 ms, same rows). The CTE is read once and the join probes its result. */
             SELECT
                 l.database_name,
                 l.query_hash,
@@ -1409,7 +1413,7 @@ internal static class DarlingDataReader
             GROUP BY database_name, host_object_name,
                      CASE WHEN host_object_name IS NULL THEN query_hash END
         ),
-        latest_text AS (
+        latest_text AS MATERIALIZED (
             /* #5309: one lookup for every ranked group - see TopQueriesSql. The key is the grouping key: a
                proc-hosted group takes the newest text of ANY of its fragments (host object, no hash), an
                ad-hoc group the newest text of its OWN hash, exactly the old per-row predicate. */
@@ -1562,33 +1566,52 @@ internal static class DarlingDataReader
             LIMIT $6
         ),
         latest_in_window AS (
-            /* #5309: the representative text of EVERY ranked hash in ONE lookup, replacing a lateral
-               lookup of the newest row per ranked row (a raw scan per row on a store without
-               TimescaleDB). This first pass reads the raw rows of the window for the ranked keys and keeps the
-               newest row per key; the text is resolved from query_text_dim for that one row afterwards (see
-               TopQueriesSql). Raw collection_time is stamped per collection, the rollup's bucket at its start,
-               so the window is [$2, $3) as the rollup reads it. */
+            /* #5309: the representative text of EVERY ranked hash, one index probe per ranked key. This used
+               to read every raw row of the window and hash join it to the ranked keys (1,439,400 rows at 168 h
+               to find 25 texts, 3.7 of 4.4 seconds), which puts the raw scan back into the tier whose point is
+               not to touch raw. Now each ranked key takes its newest row in the window from
+               idx_query_stats_server_hash_time (server_id, query_hash, collection_time DESC), stopping at the
+               first row that has a text, so the rows read are bounded by the ranked keys, not by the window. The
+               hash match is the indexable equality; the NULL-hash key (IS NOT DISTINCT FROM, as before) has its
+               own arm, so a NULL-keyed group still gets its text. The text is resolved from query_text_dim for
+               that one row afterwards (see TopQueriesSql). Raw collection_time is stamped per collection, the
+               rollup's bucket at its start, so the window is [$2, $3) as the rollup reads it. */
             SELECT
-                l.database_name,
-                l.query_hash,
+                rk.database_name,
+                rk.query_hash,
                 COALESCE(l.query_text, d.query_text) AS query_text
-            FROM
+            FROM ranked AS rk
+            CROSS JOIN LATERAL
             (
-                SELECT DISTINCT ON (q.database_name, q.query_hash)
-                    q.database_name,
-                    q.query_hash,
-                    q.query_text,
-                    q.query_text_digest
-                FROM query_stats AS q
-                JOIN ranked AS rk
-                    ON  COALESCE(q.query_hash, '') = COALESCE(rk.query_hash, '')
-                    AND q.database_name IS NOT DISTINCT FROM rk.database_name
-                    AND q.query_hash IS NOT DISTINCT FROM rk.query_hash
-                WHERE q.server_id = $1
-                AND   q.collection_time >= $2
-                AND   q.collection_time < $3
-                AND   (q.query_text IS NOT NULL OR EXISTS (SELECT 1 FROM query_text_dim AS d0 WHERE d0.digest = q.query_text_digest))
-                ORDER BY q.database_name, q.query_hash, q.collection_time DESC
+                (
+                    SELECT q.query_text, q.query_text_digest, q.collection_time
+                    FROM query_stats AS q
+                    WHERE rk.query_hash IS NOT NULL
+                    AND   q.server_id = $1
+                    AND   q.query_hash = rk.query_hash
+                    AND   q.database_name IS NOT DISTINCT FROM rk.database_name
+                    AND   q.collection_time >= $2
+                    AND   q.collection_time < $3
+                    AND   (q.query_text IS NOT NULL OR EXISTS (SELECT 1 FROM query_text_dim AS d0 WHERE d0.digest = q.query_text_digest))
+                    ORDER BY q.collection_time DESC
+                    LIMIT 1
+                )
+                UNION ALL
+                (
+                    SELECT q.query_text, q.query_text_digest, q.collection_time
+                    FROM query_stats AS q
+                    WHERE rk.query_hash IS NULL
+                    AND   q.server_id = $1
+                    AND   q.query_hash IS NULL
+                    AND   q.database_name IS NOT DISTINCT FROM rk.database_name
+                    AND   q.collection_time >= $2
+                    AND   q.collection_time < $3
+                    AND   (q.query_text IS NOT NULL OR EXISTS (SELECT 1 FROM query_text_dim AS d0 WHERE d0.digest = q.query_text_digest))
+                    ORDER BY q.collection_time DESC
+                    LIMIT 1
+                )
+                ORDER BY collection_time DESC
+                LIMIT 1
             ) AS l
             LEFT JOIN query_text_dim AS d ON d.digest = l.query_text_digest
         ),
