@@ -406,7 +406,8 @@ public sealed class StatementColumnCensusTests
     /// <summary>
     /// A writer that can put statement text, a plan or a caller's arguments into a store without going through a
     /// collector definition's payload columns. <c>Sites</c> are the (file, type, method) places the hook may live;
-    /// every site must still exist, and a non-pending entry needs a <c>SensitiveStatements</c> call in at least one.
+    /// every site must still exist, and in a non-pending entry EACH site must judge (a <c>SensitiveStatements</c> call,
+    /// a session it received) or call another site of the entry that does.
     /// </summary>
     private sealed record Watched(
         string Name, string Row, string Lane, bool Pending, params (string File, string Type, string Method)[] Sites);
@@ -429,6 +430,15 @@ public sealed class StatementColumnCensusTests
         new("oversized plan sweep", "6.7 row 20", "R6", false,
             ("Darling/PerformanceMonitor.Darling.Service/OversizedPlanBacklogSweep.cs", "OversizedPlanBacklogSweep", "FetchOnePlanAsync"),
             ("Darling/PerformanceMonitor.Darling.Service/OversizedPlanBacklogSweep.cs", "OversizedPlanBacklogSweep", "JudgeFetchedPlan")),
+
+        // The fetch_plan and execute_actual_plan command results store a plan in result_json. Both handlers must hand
+        // the plan to PlanResultOutcome (the judge): the per-method rule fails a handler that serializes planXml
+        // itself (#5367 review round 2, N1; the live test's fake host calls PlanResultOutcome on its own, so it
+        // cannot see such a revert).
+        new("plan command results", "plan commands (fetch_plan, execute_actual_plan)", "E", false,
+            ("Darling/PerformanceMonitor.Darling.Service/DarlingWorker.cs", "DarlingWorker", "RunFetchPlanAsync"),
+            ("Darling/PerformanceMonitor.Darling.Service/DarlingWorker.cs", "DarlingWorker", "RunExecuteActualPlanAsync"),
+            ("Darling/PerformanceMonitor.Darling.Service/DarlingWorker.cs", "DarlingWorker", "PlanResultOutcome")),
 
         // The slow-read log stores up to 4 KB of a slow call's arguments (a plan or a statement a caller passed).
         new("slow-read log: the MCP filter's offer", "plan section 1 (slow-read log)", "L7 and L8", true,

@@ -208,8 +208,7 @@ public sealed partial class StatementCollectionCensusTests
         var next = await FetchOneAsync(plan, new SensitiveStatements.Session());
 
         Assert.Equal(SensitiveStatements.PlaceholderText, whole);
-        Assert.True(QueryStatsCollector.IsWithheldWhole(whole));
-        Assert.False(QueryStatsCollector.IsWithheldWhole(next));
+        Assert.NotEqual(SensitiveStatements.PlaceholderText, next);
         StatementFilterCensus.AssertPlanFilteredKeepsTheRest(plan, next!);
     }
 
@@ -439,6 +438,6 @@ public sealed partial class StatementCollectionCensusTests
 
         Assert.Single(bodies);
         Assert.Contains("unjudged.Contains(ord)", bodies[0], StringComparison.Ordinal);
-        Assert.DoesNotContain("IsWithheldWhole", bodies[0], StringComparison.Ordinal);
+        Assert.DoesNotContain("PlaceholderText", bodies[0], StringComparison.Ordinal);
     }
 }

@@ -12687,9 +12687,13 @@ AND   j.hypertable_name = '{relation}'", connection))
     /// marker comes back when the plan cannot be judged, and the viewer shows that as withheld. Nothing cuts the
     /// plan here, so there is no second judge after a cut.
     /// </summary>
-    internal static CommandOutcome PlanResultOutcome(string resultStatus, string planXml) =>
-        new(true, resultStatus,
+    internal static CommandOutcome PlanResultOutcome(string resultStatus, string planXml)
+    {
+        /* A block body, not an expression body: the statement-column census reads method bodies, and it only sees a
+           block (#5367 review round 2, N1). */
+        return new(true, resultStatus,
             JsonSerializer.Serialize(new { success = true, planXml = SensitiveStatements.Xml(planXml) }));
+    }
 
     /// <summary>The SQL command timeout (seconds) for the live active-queries DMV read. A "what is running now"
     /// snapshot should return quickly; the shared collector query sets <c>LOCK_TIMEOUT 1000</c> and runs under
