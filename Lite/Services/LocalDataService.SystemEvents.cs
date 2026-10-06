@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using PerformanceMonitor.Analysis.Baselines;
@@ -84,8 +85,8 @@ public sealed class SchedulerIssueRow(SchedulerIssueRecord record)
 
 /// <summary>
 /// One severe-error row (Severe Errors sub-tab). Mirrors sp_HealthParser's <c>*_SevereErrors</c>.
-/// <see cref="DatabaseName"/> is resolved from the store's collected database_id -> database_name mapping
-/// (see <see cref="LocalDataService.ResolveDatabaseName"/>) — the pure shred left it null.
+/// <see cref="DatabaseName"/> is resolved from the store's collected database_id -> database_name history, the name the id carried at
+/// the error's time (see <see cref="DatabaseNameHistory"/>, #5373) — the pure shred left it null.
 /// </summary>
 public sealed class SevereErrorRow(SevereErrorRecord record, string databaseName)
 {
@@ -373,21 +374,29 @@ ORDER BY event_time DESC";
     {
         using var _q = TimeQuery("GetSevereErrorsAsync", "v_system_health_events error_reported shred");
         var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
-        var map = await GetDatabaseNameMapAsync(serverId);
         var xmls = await ReadSystemHealthEventXmlAsync(serverId, startTime, endTime, SystemHealthParser.ErrorReportedEvent);
 
-        var filter = databaseNames is { Count: > 0 } ? new HashSet<string>(databaseNames, StringComparer.OrdinalIgnoreCase) : null;
-
-        var rows = new List<SevereErrorRow>();
+        var records = new List<SevereErrorRecord>();
         foreach (var xml in xmls)
         {
             var record = SystemHealthParser.ParseSevereError(xml);
             if (record != null && SystemHealthSignificance.IsSignificant(record))
-            {
-                var databaseName = ResolveDatabaseName(record.DatabaseId, map);
-                if (filter == null || filter.Contains(databaseName))
-                    rows.Add(new SevereErrorRow(record, databaseName));
-            }
+                records.Add(record);
+        }
+
+        /* #5373: each error is named by what its database_id carried at the error's own time (the collected
+           database-size snapshots), not by the server's latest name for the id. */
+        var names = await GetDatabaseNameHistoryAsync(
+            serverId, records.Select(r => (r.DatabaseId, r.EventTime)));
+
+        var filter = databaseNames is { Count: > 0 } ? new HashSet<string>(databaseNames, StringComparer.OrdinalIgnoreCase) : null;
+
+        var rows = new List<SevereErrorRow>();
+        foreach (var record in records)
+        {
+            var databaseName = names.Resolve(record.DatabaseId, record.EventTime);
+            if (filter == null || filter.Contains(databaseName))
+                rows.Add(new SevereErrorRow(record, databaseName));
         }
         return rows;
     }
@@ -649,51 +658,127 @@ FROM " + StoredEventCopies.SystemHealthEvents("server_id = $1 AND event_time >= 
     // ── Severe-Errors database name resolution ──
 
     /// <summary>
-    /// The server's latest database_id -> database_name mapping from the collected size-stats (the newest
-    /// name per id — handles a dropped-and-recreated id). DuckDB has no <c>DISTINCT ON</c>, so this uses
-    /// <c>QUALIFY ROW_NUMBER() OVER (PARTITION BY database_id ORDER BY collection_time DESC) = 1</c> — the
-    /// same idiom the archive views' dedup uses. database_size_stats is the mapping source because it is the
-    /// only collected table carrying BOTH database_id and database_name for every online DB.
+    /// The database_id -> database_name history the Severe Errors resolve against (#5373): the name each id carried at
+    /// the errors' own time, not the newest name per id (SQL Server reuses a dropped database's id, so the latest map
+    /// names the wrong database for an old error). Read from the collected size-stats snapshots
+    /// (database_size_stats is the only collected table carrying BOTH database_id and database_name for every online
+    /// DB), limited to the errors' time range, in one query. Darling twin: <c>DatabaseNameHistoryReader.Sql</c>.
+    /// <para><c>floor_snap</c> is the newest snapshot at or before the first error, <c>snap</c> every snapshot from
+    /// there to the last error, and <c>runs</c> keeps the rows where an id's name differs from its previous snapshot
+    /// (ties on one instant break by name, so the result is fixed). The floor snapshot is server-wide, so an id missing
+    /// from it (an offline, suspect or excluded database is not collected) gets <c>before_floor</c>: its newest row
+    /// before the floor, one pass for every such id. The last arm covers an id with no row up to the last error: its
+    /// oldest row after it, also one pass. Both extra arms look at most <see cref="DatabaseNameHistory.LookbackDays"/>
+    /// days (back from the floor, forward from the last error), and the newest-name read the last that many days from now,
+    /// so an id that is never collected cannot make a refresh scan the whole history; the larger name in ordinal order
+    /// wins when one id has two names at one instant, in every arm. An error with no time is named by its id's newest
+    /// name, one more read made only when such an error is shown. The ids are ints and go in as literals, because DuckDB takes no
+    /// array parameter through this driver.</para>
     /// </summary>
-    public async Task<Dictionary<int, string>> GetDatabaseNameMapAsync(int serverId)
+    public async Task<DatabaseNameHistory> GetDatabaseNameHistoryAsync(
+        int serverId, IEnumerable<(int? DatabaseId, DateTime? EventTime)> errors)
     {
-        using var connection = await OpenConnectionAsync();
-        using var command = connection.CreateCommand();
+        var plan = DatabaseNameHistory.Plan(errors);
+        if (plan.Ids.Length == 0)
+            return DatabaseNameHistory.Empty;
 
-        command.CommandText = @"
-SELECT
-    database_id,
-    database_name
+        var idList = string.Join(", ", plan.Ids.Select(id => id.ToString(System.Globalization.CultureInfo.InvariantCulture)));
+
+        using var connection = await OpenConnectionAsync();
+        var changes = new List<DatabaseNameHistory.Change>();
+
+        if (plan.Range is { } range)
+        {
+            using var command = connection.CreateCommand();
+            command.CommandText = $@"
+WITH floor_snap AS (
+    SELECT COALESCE(MAX(collection_time), CAST($2 AS TIMESTAMP)) AS floor_time
+    FROM v_database_size_stats
+    WHERE server_id = $1
+    AND   collection_time <= $2
+),
+snap AS (
+    SELECT DISTINCT database_id, database_name, collection_time
+    FROM v_database_size_stats
+    WHERE server_id = $1
+    AND   collection_time >= (SELECT floor_time FROM floor_snap)
+    AND   collection_time <= $3
+    AND   database_id IN ({idList})
+    AND   database_name IS NOT NULL
+),
+runs AS (
+    SELECT
+        database_id,
+        database_name,
+        collection_time,
+        LAG(database_name) OVER (PARTITION BY database_id ORDER BY collection_time, database_name) AS previous_name
+    FROM snap
+),
+before_floor AS (
+    SELECT database_id, database_name, collection_time
+    FROM v_database_size_stats
+    WHERE server_id = $1
+    AND   collection_time < (SELECT floor_time FROM floor_snap)
+    AND   collection_time >= (SELECT floor_time FROM floor_snap) - INTERVAL '{DatabaseNameHistory.LookbackDays} days'
+    AND   database_id IN ({idList})
+    AND   database_name IS NOT NULL
+    AND   database_id NOT IN (SELECT database_id FROM snap WHERE collection_time = (SELECT floor_time FROM floor_snap))
+    QUALIFY ROW_NUMBER() OVER (PARTITION BY database_id ORDER BY collection_time DESC, database_name DESC) = 1
+),
+after_range AS (
+    SELECT database_id, database_name, collection_time
+    FROM v_database_size_stats
+    WHERE server_id = $1
+    AND   collection_time > $3
+    AND   collection_time <= CAST($3 AS TIMESTAMP) + INTERVAL '{DatabaseNameHistory.LookbackDays} days'
+    AND   database_id IN ({idList})
+    AND   database_name IS NOT NULL
+    AND   database_id NOT IN (SELECT database_id FROM snap)
+    AND   database_id NOT IN (SELECT database_id FROM before_floor)
+    QUALIFY ROW_NUMBER() OVER (PARTITION BY database_id ORDER BY collection_time, database_name DESC) = 1
+)
+SELECT database_id, database_name, collection_time
+FROM runs
+WHERE previous_name IS DISTINCT FROM database_name
+UNION ALL
+SELECT database_id, database_name, collection_time FROM before_floor
+UNION ALL
+SELECT database_id, database_name, collection_time FROM after_range";
+
+            command.Parameters.Add(new DuckDBParameter { Value = serverId });
+            command.Parameters.Add(new DuckDBParameter { Value = range.Min });
+            command.Parameters.Add(new DuckDBParameter { Value = range.Max });
+            await ReadDatabaseNameChangesAsync(command, changes);
+        }
+
+        if (plan.NeedsNewest)
+        {
+            using var newest = connection.CreateCommand();
+            newest.CommandText = $@"
+SELECT database_id, database_name, collection_time
 FROM v_database_size_stats
 WHERE server_id = $1
-QUALIFY ROW_NUMBER() OVER (PARTITION BY database_id ORDER BY collection_time DESC) = 1";
+AND   database_id IN ({idList})
+AND   collection_time >= $2
+AND   database_name IS NOT NULL
+QUALIFY ROW_NUMBER() OVER (PARTITION BY database_id ORDER BY collection_time DESC, database_name DESC) = 1";
+            newest.Parameters.Add(new DuckDBParameter { Value = serverId });
+            newest.Parameters.Add(new DuckDBParameter { Value = DateTime.UtcNow - DatabaseNameHistory.LookbackWindow });
+            await ReadDatabaseNameChangesAsync(newest, changes);
+        }
 
-        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        return new DatabaseNameHistory(changes);
+    }
 
-        var map = new Dictionary<int, string>();
+    private static async Task ReadDatabaseNameChangesAsync(DuckDBCommand command, List<DatabaseNameHistory.Change> changes)
+    {
         using var reader = await command.ExecuteReaderAsync();
         while (await reader.ReadAsync())
         {
-            if (reader.IsDBNull(0) || reader.IsDBNull(1))
+            if (reader.IsDBNull(0) || reader.IsDBNull(1) || reader.IsDBNull(2))
                 continue;
-            map[reader.GetInt32(0)] = reader.GetString(1);
+            changes.Add(new DatabaseNameHistory.Change(reader.GetInt32(0), reader.GetString(1), reader.GetDateTime(2)));
         }
-        return map;
-    }
-
-    /// <summary>
-    /// Resolves a severe-error <c>database_id</c> to a display name using the collected mapping. A null or 0
-    /// id means "no database context" (error_reported often carries database_id 0; <c>DB_NAME(0)</c> is NULL
-    /// server-side too) -> empty. A real id absent from the map (a database dropped before the latest
-    /// size-stats snapshot, or one never captured) is surfaced as its raw id rather than silently blanked.
-    /// </summary>
-    public static string ResolveDatabaseName(int? databaseId, IReadOnlyDictionary<int, string> databaseNameMap)
-    {
-        if (databaseId is not { } id || id == 0)
-            return string.Empty;
-        if (databaseNameMap.TryGetValue(id, out var name))
-            return name;
-        return $"database_id {id}";
     }
 
     // ── Default Trace (always-on server events; the Default Trace sub-tab) ──

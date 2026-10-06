@@ -33,7 +33,7 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// means events that happened in the last 24 hours — the viewer's deliberate choice (the sibling Dashboard
 /// windows on collection_time). Bounds bind naive-UTC (Kind=Unspecified → the store's
 /// <c>timestamp without time zone</c> columns). Severe-error <c>database_id</c> is resolved to a name from
-/// the collected size-stats mapping (the viewer's <see cref="ResolveDatabaseName"/> derivation), since the
+/// the collected size-stats history (<see cref="DatabaseNameHistory"/>: the name the id carried at the error's time), since the
 /// DB-free shred left it null. Every SQL string is a public const so Darling.Tests can pin the dialect +
 /// columns without a live Postgres.
 /// </para>
@@ -60,22 +60,6 @@ internal static class DarlingSystemHealthReader
         AND   event_xml IS NOT NULL
         AND   collection_time >= $5
         ORDER BY event_time DESC
-        """;
-
-    /// <summary>
-    /// The server's latest database_id↔database_name mapping — the viewer's <c>DatabaseNameMapSql</c>.
-    /// <c>DISTINCT ON (database_id)</c> keeps the most-recently-collected name per id (handles a dropped-and-
-    /// recreated id). <c>database_size_stats</c> is the source because it is the only collected table carrying
-    /// BOTH database_id and database_name for every online DB. Feeds the Severe Errors DB resolution.
-    /// $1 server_id.
-    /// </summary>
-    public const string DatabaseNameMapSql = """
-        SELECT DISTINCT ON (database_id)
-            database_id,
-            database_name
-        FROM v_database_size_stats
-        WHERE server_id = $1
-        ORDER BY database_id, collection_time DESC
         """;
 
     /// <summary>Reads the raw event_xml blobs for one XE event type over the window (newest first).</summary>
@@ -172,40 +156,5 @@ internal static class DarlingSystemHealthReader
            never returns no rows, so the null check is on the value rather than on the row. */
         var value = await command.ExecuteScalarAsync(cancellationToken);
         return value is DateTime stamp ? stamp : null;
-    }
-
-    /// <summary>Loads the server's latest database_id → database_name map for Severe Errors DB resolution.</summary>
-    public static async Task<Dictionary<int, string>> GetDatabaseNameMapAsync(
-        NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken = default)
-    {
-        var map = new Dictionary<int, string>();
-        await using var command = postgres.CreateCommand(DatabaseNameMapSql);
-        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
-        DarlingMcpReadParameters.AddInt(command, serverId);
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        while (await reader.ReadAsync(cancellationToken))
-        {
-            if (reader.IsDBNull(0) || reader.IsDBNull(1))
-                continue;
-            map[reader.GetInt32(0)] = reader.GetString(1);
-        }
-
-        return map;
-    }
-
-    /// <summary>
-    /// Resolves a severe-error <c>database_id</c> to a display name using the collected mapping — the viewer's
-    /// <c>ResolveDatabaseName</c>. A null or 0 id means "no database context" (error_reported often carries
-    /// database_id 0; <c>DB_NAME(0)</c> is NULL server-side too) → empty. A real id absent from the map (a
-    /// database dropped before the latest size-stats snapshot, or one never captured) is surfaced as its raw
-    /// id rather than silently blanked.
-    /// </summary>
-    public static string ResolveDatabaseName(int? databaseId, IReadOnlyDictionary<int, string> databaseNameMap)
-    {
-        if (databaseId is not { } id || id == 0)
-            return string.Empty;
-        if (databaseNameMap.TryGetValue(id, out var name))
-            return name;
-        return $"database_id {id}";
     }
 }
