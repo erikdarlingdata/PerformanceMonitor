@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using Microsoft.Extensions.DependencyInjection;
 using ModelContextProtocol.Protocol;
 using ModelContextProtocol.Server;
 
@@ -12,14 +13,24 @@ public static class GcfCallToolFilter
 {
     // The filter: run the tool, then transform its result. A filter is `next => handler`.
     public static McpRequestFilter<CallToolRequestParams, CallToolResult> Instance =>
-        next => async (request, cancellationToken) => Transform(await next(request, cancellationToken));
+        next => async (request, cancellationToken) =>
+        {
+            var result = await next(request, cancellationToken);
+            // #5320: a host that registers an IGcfOutputFormat pins the format; the real service
+            // registers none and keeps reading DARLING_OUTPUT_FORMAT on each call.
+            bool enabled = request.Services?.GetService<IGcfOutputFormat>()?.Enabled ?? GcfOutput.Enabled;
+            return Transform(result, enabled);
+        };
 
     // Replaces a single JSON text-content block with its GCF wire when GCF is enabled and
     // the wire is smaller and lossless; otherwise returns the result unchanged. Exposed for
     // testing. StructuredContent (if a tool sets it) is left untouched.
-    public static CallToolResult Transform(CallToolResult result)
+    public static CallToolResult Transform(CallToolResult result) => Transform(result, GcfOutput.Enabled);
+
+    // The same, with the format decision handed in (the filter resolves it per request).
+    public static CallToolResult Transform(CallToolResult result, bool enabled)
     {
-        if (!GcfOutput.Enabled || result.Content == null || result.IsError == true)
+        if (!enabled || result.Content == null || result.IsError == true)
             return result;
 
         // Only a lone text block is re-encoded, so an image or other block sent alongside
