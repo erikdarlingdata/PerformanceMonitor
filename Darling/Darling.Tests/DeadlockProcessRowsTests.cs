@@ -351,6 +351,16 @@ public sealed class DeadlockProcessRowsTests
         Assert.Equal("process-rows", Assert.Single(r.GetProperty("chips").EnumerateArray()).GetProperty("state").GetString());
     }
 
+    /// <summary>#5244: the page row budget runs before the browser filter, so when every sent row is outside the chosen database the
+    /// cell still says how many rows were not sent (their database is unknown, so they are not counted as hidden).</summary>
+    [Fact]
+    public void WhenTheFilterHidesEverySentRow_TheCellStillCountsTheRowsNotSent()
+    {
+        if (!TryRun("cut:A", out var r)) return;
+
+        Assert.Equal(new[] { "1 process hidden by the database filter (+2 more in the graph)" }, Strings(r.GetProperty("cellTexts")));
+    }
+
     [Fact]
     public void TheProcessRowFilter_IsExactAboutDatabaseNames()
     {
