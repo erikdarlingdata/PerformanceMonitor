@@ -204,8 +204,31 @@ public sealed class DarlingWebEndpointsTests
            matches the call and not the whole entry; the 2000 is what it guards. */
         var source = RepoFile.ReadRepoFileLf("Darling", "PerformanceMonitor.Darling.Service", "DarlingWebEndpoints.cs");
         Assert.Contains(
-            "DarlingMcpSessionTools.GetActiveQueries(pg, Server(c), Hours(c, 1), databases, QueryBool(c, \"blocking_only\", false), Rows(c, \"limit\", 50), 2000, AsOf(c), logger, c.RequestAborted)",
+            "DarlingMcpSessionTools.GetActiveQueries(pg, Server(c), Hours(c, 1), databases, QueryBool(c, \"blocking_only\", false), Str(c, \"wait_type\"), Rows(c, \"limit\", 50), 2000, AsOf(c), logger, c.RequestAborted)",
             source, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #5235: the Active Queries page sends <c>?wait_type=</c> to <c>/api/read/get_active_queries</c>, so the web read
+    /// has to declare it and pass it on. The catalog row lists it as optional text between blocking_only and limit (the
+    /// tool's own order, so the catalog picker and the MCP signature agree), and the dispatch row hands the raw query
+    /// value to the tool, which trims it and treats a blank as none. Without the catalog row the picker never offers
+    /// the parameter; without the dispatch argument the page's filter is silently ignored and shows every wait.
+    /// </summary>
+    [Fact]
+    public void ReadEndpoints_ActiveQueries_DeclaresWaitType()
+    {
+        var read = DarlingWebEndpoints.CatalogDescriptors["get_active_queries"];
+        Assert.Equal(
+            new[] { "server", "hours", "database_name", "blocking_only", "wait_type", "limit", "as_of" },
+            read.Params.Select(p => p.Name).ToArray());
+        var waitType = Assert.Single(read.Params, p => p.Name == "wait_type");
+        Assert.Equal("text", waitType.Type);
+        Assert.False(waitType.Required);
+        Assert.Null(waitType.Default);
+
+        var source = RepoFile.ReadRepoFileLf("Darling", "PerformanceMonitor.Darling.Service", "DarlingWebEndpoints.cs");
+        Assert.Contains("Str(c, \"wait_type\"), Rows(c, \"limit\", 50), 2000, AsOf(c)", source, StringComparison.Ordinal);
     }
 
     /* ── response-kind mapping (the error envelope -> 500, the invalid envelope -> 400 as the body, the '{'-sniff -> 200, miss envelope -> 200) ── */

@@ -4069,7 +4069,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             ["get_analysis_findings"] = R(CatAnalysis, "Persisted analysis findings for a server.", PServer(), PHours(24), PAsOf(), PLimit(MaxRowLimit), PBool("include_drilldown", false), PBool("full_text", true)),
 
             /* ── sessions (DarlingMcpSessionTools) ── */
-            ["get_active_queries"] = R(CatSessions, "Currently-active queries, optionally blocking-only.", PServer(), PHours(1), PDatabases(), PBool("blocking_only", false), PLimit(50), PAsOf()),
+            ["get_active_queries"] = R(CatSessions, "Currently-active queries, optionally blocking-only.", PServer(), PHours(1), PDatabases(), PBool("blocking_only", false), PText("wait_type"), PLimit(50), PAsOf()),
             ["get_session_stats"] = R(CatSessions, "Session-level summary counters for a server.", PServer()),
             ["get_waiting_tasks"] = R(CatSessions, "Tasks currently waiting, with wait type and duration.", PServer(), PHours(1), PLimit(30), PAsOf()),
 
@@ -4931,7 +4931,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
 
             /* ── sessions ── */
             ["get_active_queries"] = (c, pg, an) => DatabaseNames(c) is { } databases
-                ? DarlingMcpSessionTools.GetActiveQueries(pg, Server(c), Hours(c, 1), databases, QueryBool(c, "blocking_only", false), Rows(c, "limit", 50), 2000, AsOf(c), logger, c.RequestAborted)
+                ? DarlingMcpSessionTools.GetActiveQueries(pg, Server(c), Hours(c, 1), databases, QueryBool(c, "blocking_only", false), Str(c, "wait_type"), Rows(c, "limit", 50), 2000, AsOf(c), logger, c.RequestAborted)
                 : DatabaseNamesRefusal(c),
             ["get_session_stats"] = (c, pg, an) => DarlingMcpSessionTools.GetSessionStats(pg, Server(c), c.RequestAborted),
             ["get_waiting_tasks"] = (c, pg, an) => DarlingMcpSessionTools.GetWaitingTasks(pg, Server(c), Hours(c, 1), Rows(c, "limit", 30), as_of: AsOf(c), logger: logger, cancellationToken: c.RequestAborted),

@@ -58,6 +58,10 @@ public sealed class ActiveQueriesDatabaseFilterLiveTests
         Assert.Equal("database_name 'X' with blocking_only", DarlingMcpSessionTools.DescribeActiveQueryFilters(DatabaseFilter.One("X"), true));
         Assert.Equal("the chosen databases", DarlingMcpSessionTools.DescribeActiveQueryFilters(DatabaseFilter.Of(["X", "Y"]), false));
         Assert.Equal("the chosen databases with blocking_only", DarlingMcpSessionTools.DescribeActiveQueryFilters(DatabaseFilter.Of(["X", "Y"]), true));
+        /* #5235: the wait_type clause comes last, and the order and wording match what Lite says. */
+        Assert.Equal("wait_type 'LCK_M_S'", DarlingMcpSessionTools.DescribeActiveQueryFilters(DatabaseFilter.All, false, "LCK_M_S"));
+        Assert.Equal("database_name 'X' with blocking_only with wait_type 'LCK_M_S'", DarlingMcpSessionTools.DescribeActiveQueryFilters(DatabaseFilter.One("X"), true, "LCK_M_S"));
+        Assert.Equal("the chosen databases with wait_type 'LCK_M_S'", DarlingMcpSessionTools.DescribeActiveQueryFilters(DatabaseFilter.Of(["X", "Y"]), false, "LCK_M_S"));
     }
 
     [Fact]
@@ -73,33 +77,43 @@ public sealed class ActiveQueriesDatabaseFilterLiveTests
             var end = await SeedAsync(cs!, ct);
             var start = end.AddHours(-1);
 
-            var ab = await DarlingSessionReader.GetActiveQueriesAsync(postgres, ServerId, start, end, 100, DatabaseFilter.Of([DbA, DbB]), false, ct);
+            var ab = await DarlingSessionReader.GetActiveQueriesAsync(postgres, ServerId, start, end, 100, DatabaseFilter.Of([DbA, DbB]), false, null, ct);
             Assert.Equal(new[] { 51, 52, 71, 72, 91 }, ab.Rows.Select(r => r.SessionId).Order().ToArray());
             Assert.All(ab.Rows, r => Assert.Contains(r.DatabaseName, new[] { DbA, DbB }));
             Assert.Equal(5, ab.PopulationCount);
 
             /* The order of the names does not matter. */
-            var ba = await DarlingSessionReader.GetActiveQueriesAsync(postgres, ServerId, start, end, 100, DatabaseFilter.Of([DbB, DbA]), false, ct);
+            var ba = await DarlingSessionReader.GetActiveQueriesAsync(postgres, ServerId, start, end, 100, DatabaseFilter.Of([DbB, DbA]), false, null, ct);
             Assert.Equal(ab.Rows.Select(r => r.SessionId), ba.Rows.Select(r => r.SessionId));
 
             /* One name: the overload and the string method that wraps it return the same page. */
-            var oneList = await DarlingSessionReader.GetActiveQueriesAsync(postgres, ServerId, start, end, 100, DatabaseFilter.One(DbC), false, ct);
-            var oneString = await DarlingSessionReader.GetActiveQueriesAsync(postgres, ServerId, start, end, 100, DbC, false, ct);
+            var oneList = await DarlingSessionReader.GetActiveQueriesAsync(postgres, ServerId, start, end, 100, DatabaseFilter.One(DbC), false, null, ct);
+            var oneString = await DarlingSessionReader.GetActiveQueriesAsync(postgres, ServerId, start, end, 100, DbC, false, null, ct);
             Assert.Equal(new[] { 70, 90 }, oneList.Rows.Select(r => r.SessionId).Order().ToArray());
             Assert.Equal(oneList.Rows.Select(r => r.SessionId), oneString.Rows.Select(r => r.SessionId));
             Assert.Equal(2, oneList.PopulationCount);
 
             /* All: every database, and the empty filter is the same as no filter. */
-            var all = await DarlingSessionReader.GetActiveQueriesAsync(postgres, ServerId, start, end, 100, DatabaseFilter.All, false, ct);
+            var all = await DarlingSessionReader.GetActiveQueriesAsync(postgres, ServerId, start, end, 100, DatabaseFilter.All, false, null, ct);
             Assert.Equal(7, all.Rows.Count);
             Assert.Equal(7, all.PopulationCount);
 
             /* blocking_only composes with the list: victims in the set plus their same-capture head blockers (91; 90 is in C). */
-            var blocking = await DarlingSessionReader.GetActiveQueriesAsync(postgres, ServerId, start, end, 100, DatabaseFilter.Of([DbA, DbB]), true, ct);
+            var blocking = await DarlingSessionReader.GetActiveQueriesAsync(postgres, ServerId, start, end, 100, DatabaseFilter.Of([DbA, DbB]), true, null, ct);
             Assert.Equal(new[] { 51, 52, 91 }, blocking.Rows.Select(r => r.SessionId).Order().ToArray());
 
+            /* #5235 beside #5245: the wait_type filter ANDs with the list (the seed's only waiters are the victims 51 and 52, in A, on LCK_M_S; the
+               case is ignored), and a list that holds neither victim leaves nothing. */
+            var waitInList = await DarlingSessionReader.GetActiveQueriesAsync(postgres, ServerId, start, end, 100, DatabaseFilter.Of([DbA, DbB]), false, "lck_m_s", ct);
+            Assert.Equal(new[] { 51, 52 }, waitInList.Rows.Select(r => r.SessionId).Order().ToArray());
+            Assert.Equal(2, waitInList.PopulationCount);
+            var waitOutOfList = await DarlingSessionReader.GetActiveQueriesAsync(postgres, ServerId, start, end, 100, DatabaseFilter.Of([DbB, DbC]), false, "LCK_M_S", ct);
+            Assert.Empty(waitOutOfList.Rows);
+            var waitAlone = await DarlingSessionReader.GetActiveQueriesAsync(postgres, ServerId, start, end, 100, DatabaseFilter.All, false, "LCK_M_S", ct);
+            Assert.Equal(new[] { 51, 52 }, waitAlone.Rows.Select(r => r.SessionId).Order().ToArray());
+
             /* A name no row carries, or a name with different spelling, finds nothing: the compare is exact. */
-            var none = await DarlingSessionReader.GetActiveQueriesAsync(postgres, ServerId, start, end, 100, DatabaseFilter.Of(["NoSuchDb", DbA.ToLowerInvariant()]), false, ct);
+            var none = await DarlingSessionReader.GetActiveQueriesAsync(postgres, ServerId, start, end, 100, DatabaseFilter.Of(["NoSuchDb", DbA.ToLowerInvariant()]), false, null, ct);
             Assert.Empty(none.Rows);
             Assert.Equal(0, none.PopulationCount);
 
@@ -124,7 +138,7 @@ public sealed class ActiveQueriesDatabaseFilterLiveTests
             var end = await SeedAsync(cs!, ct);
             var asOf = end.ToString("o");
 
-            var json = await DarlingMcpSessionTools.GetActiveQueries(postgres, ServerName, 1, DatabaseFilter.Of([DbA, DbB]), false, 25, 400, asOf, null, ct);
+            var json = await DarlingMcpSessionTools.GetActiveQueries(postgres, ServerName, 1, DatabaseFilter.Of([DbA, DbB]), false, null, 25, 400, asOf, null, ct);
             using var doc = JsonDocument.Parse(json);
             var root = doc.RootElement;
 
@@ -152,7 +166,7 @@ public sealed class ActiveQueriesDatabaseFilterLiveTests
 
             /* Truncation is measured against the set's population: two of five rows, the page says more is held. */
             var cut = JsonDocument.Parse(await DarlingMcpSessionTools.GetActiveQueries(
-                postgres, ServerName, 1, DatabaseFilter.Of([DbA, DbB]), false, 2, 400, asOf, null, ct)).RootElement;
+                postgres, ServerName, 1, DatabaseFilter.Of([DbA, DbB]), false, null, 2, 400, asOf, null, ct)).RootElement;
             Assert.True(cut.GetProperty("truncated").GetBoolean());
             Assert.Equal(5, cut.GetProperty("total_snapshots").GetInt64());
             Assert.Equal(2, cut.GetProperty("snapshots_returned").GetInt32());
@@ -180,7 +194,7 @@ public sealed class ActiveQueriesDatabaseFilterLiveTests
 
             /* One name: the echo is the name itself, exactly as before the list. */
             var one = JsonDocument.Parse(await DarlingMcpSessionTools.GetActiveQueries(
-                postgres, ServerName, 1, DbC, false, 25, 400, asOf, null, ct)).RootElement;
+                postgres, ServerName, 1, DbC, false, null, 25, 400, asOf, null, ct)).RootElement;
             Assert.Equal(DbC, one.GetProperty("filters_applied").GetProperty("database_name").GetString());
             Assert.Equal(2, one.GetProperty("total_snapshots").GetInt64());
 
@@ -188,25 +202,25 @@ public sealed class ActiveQueriesDatabaseFilterLiveTests
             foreach (var blank in new string?[] { null, "   " })
             {
                 var all = JsonDocument.Parse(await DarlingMcpSessionTools.GetActiveQueries(
-                    postgres, ServerName, 1, blank, false, 25, 400, asOf, null, ct)).RootElement;
+                    postgres, ServerName, 1, blank, false, null, 25, 400, asOf, null, ct)).RootElement;
                 Assert.Equal(JsonValueKind.Null, all.GetProperty("filters_applied").GetProperty("database_name").ValueKind);
                 Assert.Equal(7, all.GetProperty("total_snapshots").GetInt64());
             }
 
             /* [M3] The name is no longer trimmed: ' FilterDbA' is a different name from 'FilterDbA' and finds nothing. */
             var padded = JsonDocument.Parse(await DarlingMcpSessionTools.GetActiveQueries(
-                postgres, ServerName, 1, " " + DbA, false, 25, 400, asOf, null, ct)).RootElement;
+                postgres, ServerName, 1, " " + DbA, false, null, 25, 400, asOf, null, ct)).RootElement;
             Assert.Equal("empty", padded.GetProperty("status").GetString());
             Assert.Contains($"matched database_name ' {DbA}'.", padded.GetProperty("message").GetString(), StringComparison.Ordinal);
 
             /* The empty-window sentence for one name is the one it always was; for a set it names "the chosen databases". */
             var oneMiss = JsonDocument.Parse(await DarlingMcpSessionTools.GetActiveQueries(
-                postgres, ServerName, 1, "NoSuchDb", true, 25, 400, asOf, null, ct)).RootElement;
+                postgres, ServerName, 1, "NoSuchDb", true, null, 25, 400, asOf, null, ct)).RootElement;
             Assert.Equal("empty", oneMiss.GetProperty("status").GetString());
             Assert.Contains("matched database_name 'NoSuchDb' with blocking_only. The filters were applied in SQL", oneMiss.GetProperty("message").GetString(), StringComparison.Ordinal);
 
             var manyMiss = JsonDocument.Parse(await DarlingMcpSessionTools.GetActiveQueries(
-                postgres, ServerName, 1, DatabaseFilter.Of(["NoSuchDb", "NorThisOne"]), false, 25, 400, asOf, null, ct)).RootElement;
+                postgres, ServerName, 1, DatabaseFilter.Of(["NoSuchDb", "NorThisOne"]), false, null, 25, 400, asOf, null, ct)).RootElement;
             Assert.Equal("empty", manyMiss.GetProperty("status").GetString());
             var manyMessage = manyMiss.GetProperty("message").GetString()!;
             Assert.Contains("matched the chosen databases. The filters were applied in SQL", manyMessage, StringComparison.Ordinal);

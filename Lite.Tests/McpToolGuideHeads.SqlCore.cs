@@ -271,6 +271,17 @@ public sealed class McpToolGuideHeadsSqlCoreActiveQueriesTests
             StringComparison.Ordinal);
     }
 
+    /// <summary>#5235: <c>wait_type</c>'s parameter description is 190 characters on both apps (each app's test pins the same
+    /// number, and its tools/list budget line says 190 too), under the 200-character parameter cap.</summary>
+    [Fact]
+    public void WaitTypeParameter_IsTheSameTextOnBothApps_UnderTheParameterCap()
+    {
+        var served = McpToolGuideTests.Served("get_active_queries");
+        var waitType = Assert.Single(served.ParameterDescriptionLengths, p => p.Parameter == "wait_type");
+        Assert.Equal(190, waitType.Length);
+        Assert.True(waitType.Length <= 200, $"wait_type: {waitType.Length} > 200");
+    }
+
     /// <summary>Lite's own tail names <c>get_blocked_process_reports</c>, never Darling's <c>get_blocking</c>;
     /// the shared head names neither tool.</summary>
     [Fact]
@@ -281,7 +292,8 @@ public sealed class McpToolGuideHeadsSqlCoreActiveQueriesTests
         Assert.Contains("not_captured (the blocker held no running request at that capture", tail, StringComparison.Ordinal);
         Assert.Contains("get_blocked_process_reports has its input buffer", tail, StringComparison.Ordinal);
         Assert.DoesNotContain("get_blocking has its input buffer", tail, StringComparison.Ordinal);
-        Assert.Contains("filtered (your database_name filter excluded it)", tail, StringComparison.Ordinal);
+        Assert.Contains("filtered (your database_name or wait_type filter excluded it)", tail, StringComparison.Ordinal);
+        Assert.Contains("database_name, blocking_only and wait_type are applied in SQL before the page is cut", tail, StringComparison.Ordinal);
         Assert.Contains("past_page (it is in the filtered population but beyond limit)", tail, StringComparison.Ordinal);
         Assert.DoesNotContain("get_blocking", served.Served, StringComparison.Ordinal);
     }
