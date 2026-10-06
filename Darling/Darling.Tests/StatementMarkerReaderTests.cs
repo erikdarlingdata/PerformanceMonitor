@@ -243,17 +243,90 @@ public sealed class StatementMarkerReaderTests
         Assert.Equal(2, group.OccurrenceCount);
     }
 
+    private static BlockingIncidentGrouper.BlockedEvent ModeChain(string? blocked, string? blocking, string? lockMode, long wait = 5_000) =>
+        new("db1", ContentiousObject: null, blocked, blocking, wait, LockMode: lockMode);
+
+    private static string KeyOf(BlockingIncidentGrouper.BlockedEvent e) =>
+        Assert.Single(BlockingIncidentGrouper.Group("srv", [e])).Incident.DedupKey;
+
     [Theory]
     [InlineData(Marker, Marker)]
     [InlineData(Marker, "UPDATE dbo.t SET c = 1")]
     [InlineData(Plain, Marker)]
-    public void TwoChainsWithAWithheldSideAreNeverOneIncident(string blocked, string blocking)
+    public void TheSameWithheldChainKeepsOneDedupKeyWhateverOrderItsSamplesArriveIn(string blocked, string blocking)
     {
-        var groups = BlockingIncidentGrouper.Group("srv", [Chain(blocked, blocking), Chain(blocked, blocking, 9_000)]);
+        /* Two cycles carry the same two incidents (X and Y, told apart by lock mode) with their samples in a
+           different order. The key must come from what the sample says, never from where it sits in the call. */
+        var x1 = ModeChain(blocked, blocking, "X", 5_000);
+        var x2 = ModeChain(blocked, blocking, "X", 9_000);
+        var y1 = ModeChain(blocked, blocking, "S", 6_000);
+
+        var cycle1 = BlockingIncidentGrouper.Group("srv", [x1, y1, x2]);
+        var cycle2 = BlockingIncidentGrouper.Group("srv", [y1, x2, x1]);
+
+        Assert.Equal(2, cycle1.Count);
+        Assert.Equal(
+            cycle1.Select(g => g.Incident.DedupKey).OrderBy(k => k, StringComparer.Ordinal),
+            cycle2.Select(g => g.Incident.DedupKey).OrderBy(k => k, StringComparer.Ordinal));
+        Assert.Equal(KeyOf(x1), KeyOf(x2));
+    }
+
+    [Fact]
+    public void WithheldChainsThatDifferInNothingVisibleAreOneIncident()
+    {
+        /* The stated limit: with the text withheld, the same database, partner statement and lock mode is all
+           there is to tell chains apart, so those samples are one incident. */
+        var group = Assert.Single(BlockingIncidentGrouper.Group("srv",
+            [ModeChain(Marker, Marker, "X"), ModeChain(Marker, Marker, "X", 9_000)]));
+        Assert.Equal(2, group.OccurrenceCount);
+    }
+
+    [Fact]
+    public void WithheldChainsWithDifferentLockModesAreDifferentIncidents()
+    {
+        var groups = BlockingIncidentGrouper.Group("srv", [ModeChain(Marker, Marker, "X"), ModeChain(Marker, Marker, "S")]);
 
         Assert.Equal(2, groups.Count);
-        Assert.All(groups, g => Assert.Equal(1, g.OccurrenceCount));
         Assert.NotEqual(groups[0].Incident.DedupKey, groups[1].Incident.DedupKey);
+    }
+
+    [Fact]
+    public void WithheldChainsWithDifferentVisiblePartnersAreDifferentIncidents()
+    {
+        var groups = BlockingIncidentGrouper.Group("srv",
+            [ModeChain(Marker, "UPDATE dbo.a SET c = 1", "X"), ModeChain(Marker, "UPDATE dbo.b SET c = 1", "X")]);
+
+        Assert.Equal(2, groups.Count);
+        Assert.NotEqual(groups[0].Incident.DedupKey, groups[1].Incident.DedupKey);
+    }
+
+    [Fact]
+    public void AWithheldSideAndAVisibleSideAreNotInterchangeable()
+    {
+        const string other = "UPDATE dbo.t SET c = 1";
+        var blockedWithheld = KeyOf(ModeChain(Marker, other, "X"));
+        var blockingWithheld = KeyOf(ModeChain(other, Marker, "X"));
+        var bothWithheld = KeyOf(ModeChain(Marker, Marker, "X"));
+
+        Assert.NotEqual(blockedWithheld, blockingWithheld);
+        Assert.NotEqual(blockedWithheld, bothWithheld);
+        Assert.NotEqual(blockingWithheld, bothWithheld);
+    }
+
+    [Fact]
+    public void WithheldChainsThatDifferOnlyByAVisibleLiteralAreOneIncident()
+    {
+        var group = Assert.Single(BlockingIncidentGrouper.Group("srv",
+            [ModeChain(Marker, "UPDATE dbo.t SET c = 1", "X"), ModeChain(Marker, "UPDATE dbo.t SET c = 2", "X", 9_000)]));
+        Assert.Equal(2, group.OccurrenceCount);
+    }
+
+    [Fact]
+    public void TheAnalysisCopyOfTheMarkerEqualsTheCommonOne()
+    {
+        /* PerformanceMonitor.Analysis does not reference Common (a reference would change six packages.lock.json
+           files), so SameStatementPileupDetector carries its own copy of the marker; this pins the two equal. */
+        Assert.Equal(SensitiveStatements.PlaceholderText, WithheldStatementMarker.Text);
     }
 
     [Fact]

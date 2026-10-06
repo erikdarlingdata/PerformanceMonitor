@@ -11,7 +11,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using System.Text.RegularExpressions;
-using PerformanceMonitor.Common;
+using PerformanceMonitor.Analysis;
 
 namespace PerformanceMonitor.Notifications;
 
@@ -248,7 +248,6 @@ public static class BlockingIncidentGrouper
         var order = new List<string>();
         var buckets = new Dictionary<string, List<BlockedEvent>>(StringComparer.Ordinal);
 
-        var ordinal = 0;
         foreach (var raw in events ?? Enumerable.Empty<BlockedEvent>())
         {
             /* #1876: normalize the label HERE, at the one point every blocking fingerprint passes
@@ -267,7 +266,7 @@ public static class BlockingIncidentGrouper
                 ContentiousObject = ContentiousObjectLabel.Normalize(raw.ContentiousObject, raw.Database),
             };
 
-            var identity = IdentityKey(e, ordinal++);
+            var identity = IdentityKey(e);
             if (!buckets.TryGetValue(identity, out var list))
             {
                 list = new List<BlockedEvent>();
@@ -329,18 +328,28 @@ public static class BlockingIncidentGrouper
         return groups;
     }
 
-    private static string IdentityKey(BlockedEvent e, int ordinal) =>
+    private static string IdentityKey(BlockedEvent e) =>
         !string.IsNullOrWhiteSpace(e.ContentiousObject)
             ? "obj|" + Norm(e.Database) + "|" + Norm(e.ContentiousObject)
             : HasWithheldQuery(e)
-                /* #4348: a withheld statement has no text to group on, and every one reads as the same marker,
-                   so two different statements would fold into one incident. Each sample stands alone. */
-                ? "withheld|" + ordinal.ToString(CultureInfo.InvariantCulture) + "|" + Norm(e.Database)
+                /* #4348: a withheld statement has no text to group on, and every one reads as the same marker, so a
+                   text key would fold different statements into one incident. Key on everything that is NOT
+                   withheld: the database, the visible side's literal-stripped text (the marker stands in for the
+                   withheld side, so which side is withheld still matters) and the lock mode.
+                   Nothing in the sample's position goes in the key: an ordinal would change when sample order
+                   shifts between cycles, and the same incident would get a new dedup key and alert again.
+                   The limit: two withheld chains that differ in nothing visible (same database, same visible
+                   partner statement, same lock mode) are ONE incident, because BlockedEvent carries no
+                   non-text identity to tell them apart. */
+                ? "withheld|" + Norm(e.Database)
+                    + "|" + (IsWithheld(e.BlockedQuery) ? "<withheld>" : NormalizeQuery(e.BlockedQuery))
+                    + "|" + (IsWithheld(e.BlockingQuery) ? "<withheld>" : NormalizeQuery(e.BlockingQuery))
+                    + "|" + Norm(e.LockMode)
                 : "qp|" + QueryPairKey(e);
 
     /// <summary>The text the incident fingerprint is keyed on: the query pair for a text-keyed incident, the
-    /// per-sample key for one whose text was withheld (so two different withheld statements never share a
-    /// dedup key).</summary>
+    /// withheld-chain key for one whose text was withheld (database, visible side, lock mode; see
+    /// <see cref="IdentityKey"/>).</summary>
     private static string FingerprintKey(string identity, BlockedEvent representative) =>
         identity.StartsWith("withheld|", StringComparison.Ordinal) ? identity : QueryPairKey(representative);
 
@@ -348,7 +357,7 @@ public static class BlockingIncidentGrouper
         IsWithheld(e.BlockedQuery) || IsWithheld(e.BlockingQuery);
 
     private static bool IsWithheld(string? query) =>
-        query is not null && query.Trim() == SensitiveStatements.PlaceholderText;
+        WithheldStatementMarker.IsMarker(query);
 
     private static string QueryPairKey(BlockedEvent e) =>
         Norm(e.Database) + "|" + NormalizeQuery(e.BlockedQuery) + "|" + NormalizeQuery(e.BlockingQuery);

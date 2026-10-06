@@ -8,7 +8,7 @@
 
 using System;
 using System.Collections.Generic;
-using PerformanceMonitor.Common;
+using PerformanceMonitor.Analysis;
 
 namespace PerformanceMonitor.Notifications;
 
@@ -191,10 +191,10 @@ public class AlertMuteContext
     public const int SeedQueryTextMax = 200;
 
     /// <summary>The query-text pattern a mute dialog pre-fills for this alert, or null for none. #4348: a statement
-    /// the collector withheld reads as <see cref="SensitiveStatements.PlaceholderText"/>, and a rule on that text
+    /// the collector withheld reads as <see cref="WithheldStatementMarker.Text"/>, and a rule on that text
     /// would "match" every withheld statement and nothing else, so no pattern is seeded from it.</summary>
     public string? SeedQueryTextPattern() =>
-        string.IsNullOrEmpty(QueryText) || QueryText.Trim() == SensitiveStatements.PlaceholderText
+        string.IsNullOrEmpty(QueryText) || WithheldStatementMarker.IsMarker(QueryText)
             ? null
             : QueryText.Length > SeedQueryTextMax ? QueryText.Substring(0, SeedQueryTextMax) : QueryText;
 

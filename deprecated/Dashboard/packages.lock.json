@@ -747,10 +747,7 @@
         }
       },
       "performancemonitor.analysis": {
-        "type": "Project",
-        "dependencies": {
-          "PerformanceMonitor.Common": "[3.9.0, )"
-        }
+        "type": "Project"
       },
       "performancemonitor.common": {
         "type": "Project",
