@@ -472,6 +472,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
            read-only notebook definition. Same reach as the triage page it sits beside - everything it
            serves is already reachable through /api/read/*. */
         AlertNotebookEndpoint.Map(app, postgres, analysis, logger);
+        DarlingServerDatabasesEndpoint.Map(app, postgres, logger); // #5245: the database picker's list
     }
 
     /* ─────────────────────────── #1563 custom views: session, catalog, CRUD ─────────────────────────── */
@@ -1972,13 +1973,12 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 return UnsupportedMediaTypeResult();
             }
 
-            var confirmText = context.Request.Query["confirm"].ToString();
-            if (confirmText.Length > 0 && !string.Equals(confirmText, "true", StringComparison.Ordinal))
+            var (confirm, confirmRefusal) = ParseConfirm(context.Request.Query);
+            if (confirmRefusal is not null)
             {
-                return ErrorResult("confirm must be true, or omitted.", StatusCodes.Status400BadRequest);
+                return ErrorResult(confirmRefusal, StatusCodes.Status400BadRequest);
             }
 
-            var confirm = confirmText.Length > 0;
             var stopwatch = Stopwatch.StartNew();
             var result = await Mcp.DarlingMcpServerTagTools.DeleteServerTagCore(store, id, confirm, context.RequestAborted);
             LogServerTagWrite(logger, context, "delete", id, result, 0);
@@ -2567,7 +2567,8 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     }
 
     /// <summary>The query string as slow-read arguments. A key name is caller text: only plain identifier characters
-    /// ([A-Za-z0-9_.-]) are stored, capped at 64; any other key is dropped and counted under <c>_dropped_keys</c>.</summary>
+    /// ([A-Za-z0-9_.-]) are stored, capped at 64; any other key is dropped and counted under <c>_dropped_keys</c>. A key that
+    /// repeats is stored as a JSON array of its values in the order sent; a key sent once is a plain value.</summary>
     internal static JsonObject WebQueryArguments(IEnumerable<KeyValuePair<string, string?>> query)
     {
         var arguments = new JsonObject();
@@ -2580,7 +2581,21 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 continue;
             }
 
-            arguments[key.Length > 64 ? key[..64] : key] = value;
+            var stored = key.Length > 64 ? key[..64] : key;
+            if (!arguments.TryGetPropertyValue(stored, out var existing))
+            {
+                arguments[stored] = value;
+            }
+            else if (existing is JsonArray repeated)
+            {
+                repeated.Add(value);
+            }
+            else
+            {
+                /* A key sent more than once records every value, in the order sent, so the record shows the request as it
+                   was made (#5245); a key sent once stays a plain value. */
+                arguments[stored] = new JsonArray(existing?.DeepClone(), JsonValue.Create(value));
+            }
         }
 
         if (droppedKeys > 0)
@@ -2613,7 +2628,11 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
 
         try
         {
-            var arguments = WebQueryArguments(context.Request.Query.Select(q => new KeyValuePair<string, string?>(q.Key, q.Value.Count > 0 ? q.Value[0] : null)));
+            /* One pair per value, so a key sent more than once keeps every value (WebQueryArguments folds them into an array);
+               a key with no value at all (a bare ?key) is one null pair, as before. */
+            var arguments = WebQueryArguments(context.Request.Query.SelectMany(q => q.Value.Count > 0
+                ? q.Value.Select(v => new KeyValuePair<string, string?>(q.Key, v))
+                : [new KeyValuePair<string, string?>(q.Key, null)]));
 
             recorder.SlowReads.Offer(scope, ReadSurface.Web, name, outcome, elapsedMs, arguments, errorClass, recorder.Logger);
         }
@@ -4306,6 +4325,16 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     private static CatalogParam PLimit(int def) => new("limit", TypeInt, false, def);
     private static CatalogParam PTop(int def) => new("top", TypeInt, false, def);
     private static CatalogParam PText(string name) => new(name, TypeText, false, null);
+
+    /// <summary>
+    /// #5245: the catalog row of a read that takes the picker's database list. It is the same
+    /// <see cref="CatalogParam"/> as <c>PText("database_name")</c> (text, optional, no default), so the served
+    /// catalog keeps its shape and a client that sends one <c>database_name</c> is unchanged. The helper exists so
+    /// a census can tell a read that takes a LIST (a <c>PDatabases(</c> row, whose dispatch entry calls
+    /// <see cref="DatabaseNames"/>) from a read that takes one name.
+    /// </summary>
+    internal static CatalogParam PDatabases() => PText("database_name");
+
     /// <summary>A text param with a real default, unlike <see cref="PText(string)"/>'s always-null one — e.g.
     /// get_fleet_overview's detail (#4198), whose default "summary" is part of the contract, not an absence.</summary>
     private static CatalogParam PTextDefault(string name, string def) => new(name, TypeText, false, def);
@@ -4358,7 +4387,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             ["get_analysis_findings"] = R(CatAnalysis, "Persisted analysis findings for a server.", PServer(), PHours(24), PAsOf(), PLimit(MaxRowLimit), PBool("include_drilldown", false), PBool("full_text", true)),
 
             /* ── sessions (DarlingMcpSessionTools) ── */
-            ["get_active_queries"] = R(CatSessions, "Currently-active queries, optionally blocking-only.", PServer(), PHours(1), PText("database_name"), PBool("blocking_only", false), PText("wait_type"), PLimit(50), PAsOf()),
+            ["get_active_queries"] = R(CatSessions, "Currently-active queries, optionally blocking-only.", PServer(), PHours(1), PDatabases(), PBool("blocking_only", false), PText("wait_type"), PLimit(50), PAsOf()),
             ["get_session_stats"] = R(CatSessions, "Session-level summary counters for a server.", PServer()),
             ["get_waiting_tasks"] = R(CatSessions, "Tasks currently waiting, with wait type and duration.", PServer(), PHours(1), PLimit(30), PAsOf()),
 
@@ -4406,16 +4435,16 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             ["get_memory_clerks"] = R(CatData, "Top memory clerks by allocation.", PServer()),
             ["get_memory_stats"] = R(CatData, "Server memory summary counters.", PServer()),
             ["get_perfmon_stats"] = R(CatData, "Perfmon counter values, filtered by counter/instance.", PServer(), PText("counter_name"), PText("instance_name")),
-            ["get_query_heatmap"] = R(CatData, "Query counts per (time bin x log-magnitude bucket) - the viewer's Query Heatmap as a table.", PServer(), PHours(24), PText("metric"), PText("database_name"), PInt("bucket_minutes", 5), PLimit(500), PAsOf()),
-            ["get_query_store_regressions"] = R(CatData, "Queries whose Query Store performance got WORSE vs their baseline.", PServer(), PHours(24), PText("database_name"), PLimit(50), PBool("full_text", true), PAsOf()),
+            ["get_query_heatmap"] = R(CatData, "Query counts per (time bin x log-magnitude bucket) - the viewer's Query Heatmap as a table.", PServer(), PHours(24), PText("metric"), PDatabases(), PInt("bucket_minutes", 5), PLimit(500), PAsOf()),
+            ["get_query_store_regressions"] = R(CatData, "Queries whose Query Store performance got WORSE vs their baseline.", PServer(), PHours(24), PDatabases(), PLimit(50), PBool("full_text", true), PAsOf()),
             ["get_query_store_clutter"] = R(CatData, "The Query Store CLUTTER view: per database the collector's read cost (how often and by how much it was the slowest fan-out item), plan churn (plans per query, arrivals per day, one-shot plans) and the options row, each with raw numbers and a decomposed verdict; ONE per-server overhead block (non-sleep QDS_* wait deltas with the excluded sleep waits named, and the Query Store memory clerk). Replicas excluded by architecture with the reason on the row; query_capture_mode (ALL / AUTO / CUSTOM / NONE) carried with capture_mode_known beside it, null meaning a capture older than the V137 rung rather than NONE. window_truncated says the raw tier did not hold the whole window. Composed from collected rows - no new query against the server.", PServer(), PHours(24), PLimit(DarlingMcpQueryStoreClutterTools.DefaultLimit), PBool("include_fleet_median", false), PAsOf()),
             ["get_query_store_query_history"] = R(CatData, "One Query Store query's executions, duration and CPU per plan over the window (requires database_name, query_id).", PReqText("database_name"), PReqInt("query_id"), PServer(), PHours(24), PAsOf()),
-            ["get_query_store_top"] = R(CatData, "Top Query Store queries in the window, optionally filtered by execution outcome or to one exact module before ranking; window_truncated says the raw tier did not hold the whole window (effective_hours_back how far it reached).", PServer(), PHours(24), PTop(20), PText("database_name"), PAsOf(), PText("execution_type"), PText("module_name"), PBool("full_text", false)),
+            ["get_query_store_top"] = R(CatData, "Top Query Store queries in the window, optionally filtered by execution outcome or to one exact module before ranking; window_truncated says the raw tier did not hold the whole window (effective_hours_back how far it reached).", PServer(), PHours(24), PTop(20), PDatabases(), PAsOf(), PText("execution_type"), PText("module_name"), PBool("full_text", false)),
             ["get_long_query_completions"] = R(CatData, "Completed long-running queries captured by the XE trace.", PServer(), PHours(24), PLimit(30), PAsOf()),
             ["get_server_properties"] = R(CatData, "Server properties/inventory for a server.", PServer()),
             ["get_tempdb_trend"] = R(CatData, "tempdb space usage over time.", PServer(), PHours(24), PAsOf(), PInt("bucket_minutes")),
-            ["get_top_procedures_by_cpu"] = R(CatData, "Top stored procedures, ranked by CPU (the default), duration, reads or executions (order_by).", PServer(), PHours(24), PTop(20), PText("database_name"), PTextDefault("order_by", "cpu"), PAsOf(), PTextDefault("detail", "summary")),
-            ["get_top_queries_by_cpu"] = R(CatData, "Top queries, ranked by CPU (the default), duration, reads or executions (order_by), optionally parallel-only / min-DOP.", PServer(), PHours(24), PTop(20), PText("database_name"), PBool("parallel_only", false), PInt("min_dop", 0), PTextDefault("order_by", "cpu"), PAsOf(), PTextDefault("detail", "summary")),
+            ["get_top_procedures_by_cpu"] = R(CatData, "Top stored procedures, ranked by CPU (the default), duration, reads or executions (order_by).", PServer(), PHours(24), PTop(20), PDatabases(), PTextDefault("order_by", "cpu"), PAsOf(), PTextDefault("detail", "summary")),
+            ["get_top_queries_by_cpu"] = R(CatData, "Top queries, ranked by CPU (the default), duration, reads or executions (order_by), optionally parallel-only / min-DOP.", PServer(), PHours(24), PTop(20), PDatabases(), PBool("parallel_only", false), PInt("min_dop", 0), PTextDefault("order_by", "cpu"), PAsOf(), PTextDefault("detail", "summary")),
             ["get_pg_top_queries"] = R(CatData, "Top PostgreSQL query shapes by total execution time (Aurora targets).", PServer(), PHours(24), PLimit(20), PAsOf()),
             ["get_pg_plans"] = R(CatData, "Captured PostgreSQL execution plans, grouped by shape. Plans are redacted at collection.", PServer(), PHours(24), PLimit(10), PText("query_id"), PAsOf()),
             ["get_pg_plan_capture_readiness"] = R(CatData, "Whether a PostgreSQL target can capture execution plans at all, facet by facet, with the remedy for each step that is not in place. Read this when a plan or target-log read is empty.", PServer(), PHours(24), PLimit(25), PAsOf()),
@@ -5224,7 +5253,9 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             ["get_analysis_findings"] = (c, pg, an) => DarlingMcpTools.GetAnalysisFindings(an, pg, Server(c), Hours(c, 24), Rows(c, "limit", MaxRowLimit), QueryBool(c, "include_drilldown", false), QueryBool(c, "full_text", true), as_of: AsOf(c), logger: logger, cancellationToken: c.RequestAborted),
 
             /* ── sessions ── */
-            ["get_active_queries"] = (c, pg, an) => DarlingMcpSessionTools.GetActiveQueries(pg, Server(c), Hours(c, 1), Str(c, "database_name"), QueryBool(c, "blocking_only", false), Str(c, "wait_type"), Rows(c, "limit", 50), 2000, AsOf(c), logger, c.RequestAborted),
+            ["get_active_queries"] = (c, pg, an) => DatabaseNames(c) is { } databases
+                ? DarlingMcpSessionTools.GetActiveQueries(pg, Server(c), Hours(c, 1), databases, QueryBool(c, "blocking_only", false), Str(c, "wait_type"), Rows(c, "limit", 50), 2000, AsOf(c), logger, c.RequestAborted)
+                : DatabaseNamesRefusal(c),
             ["get_session_stats"] = (c, pg, an) => DarlingMcpSessionTools.GetSessionStats(pg, Server(c), c.RequestAborted),
             ["get_waiting_tasks"] = (c, pg, an) => DarlingMcpSessionTools.GetWaitingTasks(pg, Server(c), Hours(c, 1), Rows(c, "limit", 30), as_of: AsOf(c), logger: logger, cancellationToken: c.RequestAborted),
 
@@ -5316,12 +5347,16 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             ["get_memory_clerks"] = (c, pg, an) => DarlingMcpDataTools.GetMemoryClerks(pg, Server(c), c.RequestAborted),
             ["get_memory_stats"] = (c, pg, an) => DarlingMcpDataTools.GetMemoryStats(pg, Server(c), c.RequestAborted),
             ["get_perfmon_stats"] = (c, pg, an) => DarlingMcpDataTools.GetPerfmonStats(pg, Server(c), Str(c, "counter_name"), Str(c, "instance_name"), c.RequestAborted),
-            ["get_query_heatmap"] = (c, pg, an) => DarlingMcpQueryHeatmapTools.GetQueryHeatmap(pg, Server(c), Hours(c, 24), Str(c, "metric"), Str(c, "database_name"), QueryInt(c, "bucket_minutes", null, 5), Rows(c, "limit", 500), as_of: AsOf(c), logger: logger, cancellationToken: c.RequestAborted),
+            ["get_query_heatmap"] = (c, pg, an) => DatabaseNames(c) is { } databases
+                ? DarlingMcpQueryHeatmapTools.GetQueryHeatmap(pg, Server(c), Hours(c, 24), Str(c, "metric"), databases, QueryInt(c, "bucket_minutes", null, 5), Rows(c, "limit", 500), as_of: AsOf(c), full_text: false, logger: logger, cancellationToken: c.RequestAborted)
+                : DatabaseNamesRefusal(c),
             /* #4198: full_text defaults false on the MCP signature (a 240-character preview keeps a busy
                production store's default call under the shared response budget), but the web viewer has
                always shown the whole query text. The row pins its OWN default to true so the MCP-side
                budget cut does not silently shrink what the viewer renders. */
-            ["get_query_store_regressions"] = (c, pg, an) => DarlingMcpQueryStoreRegressionTools.GetQueryStoreRegressions(pg, Server(c), Hours(c, 24), Str(c, "database_name"), Rows(c, "limit", 50), full_text: QueryBool(c, "full_text", true), as_of: AsOf(c), logger: logger, cancellationToken: c.RequestAborted),
+            ["get_query_store_regressions"] = (c, pg, an) => DatabaseNames(c) is { } databases
+                ? DarlingMcpQueryStoreRegressionTools.GetQueryStoreRegressions(pg, Server(c), Hours(c, 24), databases, Rows(c, "limit", 50), full_text: QueryBool(c, "full_text", true), as_of: AsOf(c), logger: logger, cancellationToken: c.RequestAborted)
+                : DatabaseNamesRefusal(c),
             ["get_query_store_clutter"] = (c, pg, an) => DarlingMcpQueryStoreClutterTools.GetQueryStoreClutter(pg, Server(c), Hours(c, 24), Rows(c, "limit", DarlingMcpQueryStoreClutterTools.DefaultLimit), QueryBool(c, "include_fleet_median", false), AsOf(c), c.RequestAborted),
             /* #4198: query_text already had a 2000-character cap before this tool had a full_text opt-in at
                all, so the viewer keeps that exact number through the previewLength overload -- QueryBool
@@ -5334,14 +5369,20 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 : !OptionalLong(c, "query_id", out var qshQueryId) ? UnparseableParam("query_id")
                 : qshQueryId is null ? MissingParam("query_id")
                 : DarlingMcpQueryStoreHistoryTools.GetQueryStoreQueryHistory(pg, qshDatabase, qshQueryId.Value, Server(c), Hours(c, 24), AsOf(c), c.RequestAborted),
-            ["get_query_store_top"] = (c, pg, an) => DarlingMcpDataTools.GetQueryStoreTop(pg, Server(c), Hours(c, 24), Rows(c, "top", 20), Str(c, "database_name"), as_of: AsOf(c), execution_type: Str(c, "execution_type"), module_name: Str(c, "module_name"), full_text: QueryBool(c, "full_text", false), previewLength: 2000, cancellationToken: c.RequestAborted),
+            ["get_query_store_top"] = (c, pg, an) => DatabaseNames(c) is { } databases
+                ? DarlingMcpDataTools.GetQueryStoreTop(pg, Server(c), Hours(c, 24), Rows(c, "top", 20), databases, as_of: AsOf(c), execution_type: Str(c, "execution_type"), module_name: Str(c, "module_name"), full_text: QueryBool(c, "full_text", false), previewLength: 2000, cancellationToken: c.RequestAborted)
+                : DatabaseNamesRefusal(c),
             ["get_long_query_completions"] = (c, pg, an) => DarlingMcpLongQueryTools.GetLongQueryCompletions(pg, Server(c), Hours(c, 24), Rows(c, "limit", 30), as_of: AsOf(c), logger: logger, cancellationToken: c.RequestAborted),
             ["get_server_properties"] = (c, pg, an) => DarlingMcpDataTools.GetServerProperties(pg, Server(c), c.RequestAborted),
             ["get_tempdb_trend"] = (c, pg, an) => OptionalInt(c, "bucket_minutes", out var bucketMinutes)
                 ? DarlingMcpDataTools.GetTempDbTrend(pg, Server(c), Hours(c, 24), AsOf(c), bucketMinutes, TrendBudget.Chart, cancellationToken: c.RequestAborted)
                 : UnparseableParam("bucket_minutes"),
-            ["get_top_procedures_by_cpu"] = (c, pg, an) => DarlingMcpDataTools.GetTopProceduresRanked(pg, Server(c), Hours(c, 24), Rows(c, "top", 20), Str(c, "database_name"), as_of: AsOf(c), detail: Str(c, "detail") ?? "summary", order_by: Str(c, "order_by"), cancellationToken: c.RequestAborted),
-            ["get_top_queries_by_cpu"] = (c, pg, an) => DarlingMcpDataTools.GetTopQueriesRanked(pg, Server(c), Hours(c, 24), Rows(c, "top", 20), Str(c, "database_name"), QueryBool(c, "parallel_only", false), QueryInt(c, "min_dop", null, 0), group_by: "query_hash", as_of: AsOf(c), detail: Str(c, "detail") ?? "summary", order_by: Str(c, "order_by"), cancellationToken: c.RequestAborted),
+            ["get_top_procedures_by_cpu"] = (c, pg, an) => DatabaseNames(c) is { } databases
+                ? DarlingMcpDataTools.GetTopProceduresRanked(pg, Server(c), Hours(c, 24), Rows(c, "top", 20), databases, as_of: AsOf(c), detail: Str(c, "detail") ?? "summary", order_by: Str(c, "order_by"), cancellationToken: c.RequestAborted)
+                : DatabaseNamesRefusal(c),
+            ["get_top_queries_by_cpu"] = (c, pg, an) => DatabaseNames(c) is { } databases
+                ? DarlingMcpDataTools.GetTopQueriesRanked(pg, Server(c), Hours(c, 24), Rows(c, "top", 20), databases, QueryBool(c, "parallel_only", false), QueryInt(c, "min_dop", null, 0), group_by: "query_hash", as_of: AsOf(c), detail: Str(c, "detail") ?? "summary", order_by: Str(c, "order_by"), cancellationToken: c.RequestAborted)
+                : DatabaseNamesRefusal(c),
             ["get_pg_top_queries"] = (c, pg, an) => DarlingMcpPgStatementTools.GetPgTopQueries(pg, Server(c), Hours(c, 24), Rows(c, "limit", 20), as_of: AsOf(c), cancellationToken: c.RequestAborted),
             /* query_id arrives as TEXT and is passed through as text (#2548): a queryid that made a
                round trip through a JSON number has already been rounded, and the tool rejects one it
@@ -5722,6 +5763,150 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// <summary>An optional text parameter; null when absent or empty (so the tool sees its own default).</summary>
     private static string? Str(HttpContext context, string key) => First(context, key);
 
+    /* ── the database list (#5245): repeated ?database_name= keys, one per chosen database ── */
+
+    /// <summary>The query key the picker's database list travels under, once per chosen database.</summary>
+    private const string DatabaseNameKey = "database_name";
+
+    /// <summary>The most databases one request may name, counted AFTER de-duplication.</summary>
+    internal const int MaxDatabaseNames = 50;
+
+    /// <summary>The longest database name a request may carry: a <c>sysname</c> is 128 characters.</summary>
+    internal const int MaxDatabaseNameLength = 128;
+
+    /// <summary>
+    /// The most encoded bytes the <c>database_name</c> part of a query may take: <see cref="DatabaseKeyBytes"/>
+    /// plus <c>encodeURIComponent</c>'s length of each name, summed over the distinct names. The picker (a later
+    /// part of #5245) refuses a check that would pass it, so a hand-built request is the only way to reach this
+    /// refusal, and 4,096 keeps a request well inside Kestrel's 8 KB request line.
+    /// </summary>
+    internal const int MaxDatabaseQueryBytes = 4096;
+
+    /// <summary>The bytes <c>&amp;database_name=</c> takes in front of every name (1 + 13 + 1).</summary>
+    internal const int DatabaseKeyBytes = 15;
+
+    /// <summary>
+    /// The databases a read is asked about, from the REPEATED <c>?database_name=</c> keys, as a
+    /// <see cref="DatabaseFilter"/>; <c>null</c> when the request has to be REFUSED. Spell it
+    /// <c>DatabaseNames(c) is { } databases ? tool(..., databases) : DatabaseNamesRefusal(c)</c>, so a refused
+    /// request cannot reach a read as "all databases" (the type will not let a null through as a filter).
+    ///
+    /// <para>No <c>database_name</c> key at all is <see cref="DatabaseFilter.All"/>. Otherwise the values are
+    /// ITERATED, one per key; a value is never split on a comma, so <c>A,B</c> is one database called
+    /// <c>A,B</c>. Blank values (empty or whitespace-only) are dropped, a kept value is never trimmed or
+    /// case-folded, and repeats are kept once. The refusals, each the existing <c>invalid</c> envelope for the
+    /// <c>database_name</c> parameter:</para>
+    /// <list type="bullet">
+    /// <item>keys were sent but none survived the blank rule. A caller who asked for a database and got
+    /// "all databases" would read an unfiltered page as a filtered one, so the request is refused and never
+    /// widened;</item>
+    /// <item>more than <see cref="MaxDatabaseNames"/> distinct names;</item>
+    /// <item>a name over <see cref="MaxDatabaseNameLength"/> characters;</item>
+    /// <item>distinct names whose encoded query part is over <see cref="MaxDatabaseQueryBytes"/> bytes.</item>
+    /// </list>
+    /// Both caps count the DISTINCT names, so a request that repeats one name a hundred times is one name.
+    /// </summary>
+    internal static DatabaseFilter? DatabaseNames(HttpContext context) =>
+        TryBindDatabaseNames(context.Request.Query[DatabaseNameKey], out var databases, out _) ? databases : null;
+
+    /// <summary>
+    /// The refusal for a request <see cref="DatabaseNames"/> answered <c>null</c> for, as the dispatch entry's own
+    /// result: the <c>invalid</c> envelope (a 400 with the envelope as the body), the same shape
+    /// <see cref="MissingParam"/> and <see cref="UnparseableParam"/> hand back, and returned BEFORE the store is
+    /// touched. Calling it for a request that is fine is a bug, so it throws.
+    /// </summary>
+    internal static Task<string> DatabaseNamesRefusal(HttpContext context) =>
+        TryBindDatabaseNames(context.Request.Query[DatabaseNameKey], out _, out var refusal)
+            ? throw new InvalidOperationException("The request's database_name values are acceptable: there is nothing to refuse.")
+            : Task.FromResult(refusal!);
+
+    /// <summary>
+    /// PURE <see cref="DatabaseNames"/>: <paramref name="sent"/> is every value of the <c>database_name</c> key,
+    /// one element per key the request carried (empty when it carried none). True with the filter when the
+    /// request is acceptable; false with the refusal envelope when it is not.
+    /// </summary>
+    internal static bool TryBindDatabaseNames(IReadOnlyList<string?> sent, out DatabaseFilter databases, out string? refusal)
+    {
+        databases = default;
+        refusal = null;
+        if (sent.Count == 0)
+        {
+            return true;
+        }
+
+        // The blank rule and the de-duplication are DatabaseFilter's one copy; the caps below count what is left.
+        var chosen = DatabaseFilter.Of(sent);
+        if (chosen.IsAll)
+        {
+            refusal = McpHelpers.Refusal(DatabaseNameKey,
+                "database_name was sent, but every value was empty or only spaces. Name at least one database, or leave database_name out to cover them all.");
+            return false;
+        }
+
+        var names = chosen.Names;
+        if (names.Count > MaxDatabaseNames)
+        {
+            refusal = McpHelpers.Refusal(DatabaseNameKey,
+                $"database_name names {names.Count} different databases; at most {MaxDatabaseNames} are accepted. Name fewer, or leave database_name out to cover them all.");
+            return false;
+        }
+
+        foreach (var name in names)
+        {
+            /* PostgreSQL refuses a text value holding 0x00 (SQLSTATE 22021) and no stored database name can hold one, so the
+               name is refused here with the same envelope, rather than costing the read a 500. The sentence echoes no name. */
+            if (name.Contains('\0'))
+            {
+                refusal = McpHelpers.Refusal(DatabaseNameKey,
+                    "A database_name value holds a character a database name cannot hold.");
+                return false;
+            }
+
+            if (name.Length > MaxDatabaseNameLength)
+            {
+                refusal = McpHelpers.Refusal(DatabaseNameKey,
+                    $"A database_name value is {name.Length} characters long; a database name is at most {MaxDatabaseNameLength} characters.");
+                return false;
+            }
+        }
+
+        var bytes = 0;
+        foreach (var name in names)
+        {
+            bytes += DatabaseKeyBytes + EncodedQueryLength(name);
+        }
+
+        if (bytes > MaxDatabaseQueryBytes)
+        {
+            refusal = McpHelpers.Refusal(DatabaseNameKey,
+                $"The database_name values come to {bytes} encoded bytes; at most {MaxDatabaseQueryBytes} are accepted. Name fewer databases, or leave database_name out to cover them all.");
+            return false;
+        }
+
+        databases = chosen;
+        return true;
+    }
+
+    /// <summary>
+    /// PURE: the length <c>encodeURIComponent</c> gives <paramref name="value"/>, which is what the page's
+    /// <c>buildQuery</c> puts on the wire for each name: the UTF-8 bytes, one character for each of
+    /// <c>A-Z a-z 0-9 - _ . ! ~ * ' ( )</c> and three (<c>%XX</c>) for every other byte.
+    /// </summary>
+    internal static int EncodedQueryLength(string value)
+    {
+        var length = 0;
+        foreach (var b in System.Text.Encoding.UTF8.GetBytes(value))
+        {
+            length += IsLeftAloneByEncodeUriComponent(b) ? 1 : 3;
+        }
+
+        return length;
+    }
+
+    private static bool IsLeftAloneByEncodeUriComponent(byte b) =>
+        b is (>= (byte)'A' and <= (byte)'Z') or (>= (byte)'a' and <= (byte)'z') or (>= (byte)'0' and <= (byte)'9')
+            or (byte)'-' or (byte)'_' or (byte)'.' or (byte)'!' or (byte)'~' or (byte)'*' or (byte)'\'' or (byte)'(' or (byte)')';
+
     /// <summary>A required text parameter — true with the value when present, false when absent/empty.</summary>
     private static bool RequireText(HttpContext context, string key, out string value)
     {
@@ -5875,11 +6060,66 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
 
     private static double QueryDouble(HttpContext context, string key, double def) => ParseDouble(First(context, key), def);
 
-    /// <summary>The first non-empty value for a query key, or null.</summary>
-    private static string? First(HttpContext context, string key)
+    /// <summary>
+    /// The first non-empty value for a query key, or null. This is the ONE binding rule for a single-value
+    /// parameter: the other three web surfaces' query helpers (<c>DarlingFleetSweepEndpoints.Query</c>,
+    /// <c>AlertNotebookEndpoint.Query</c>, <c>DarlingTriageEndpoint.Query</c>) call it rather than restate it.
+    ///
+    /// <para>A key sent twice (<c>?server=A&amp;server=B</c>) is its FIRST value. It used to be both values joined
+    /// with a comma (<c>A,B</c>, which is what turning ASP.NET's <c>StringValues</c> into a string does), which
+    /// no server, database or collector is called, so a repeated key silently matched nothing (#5245). A list is
+    /// read by <see cref="DatabaseNames"/>, which iterates the values and never splits on a comma.</para>
+    /// </summary>
+    internal static string? First(HttpContext context, string key)
     {
-        var value = context.Request.Query[key].ToString();
-        return string.IsNullOrEmpty(value) ? null : value;
+        foreach (var value in context.Request.Query[key])
+        {
+            if (!string.IsNullOrEmpty(value))
+            {
+                return value;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// The ONE reader for a query key that must carry exactly one value (a confirm flag, the access token, the
+    /// sign-in callback's <c>code</c>/<c>state</c>/<c>error</c>/<c>return</c>). Returns false when the key is
+    /// sent more than once (<c>?code=a&amp;code=b</c>): RFC 6749 section 3.1 says such a parameter MUST NOT be
+    /// included more than once, and reading it as <c>Query[key].ToString()</c> joins the copies into
+    /// <c>a,b</c>, which is a value nobody sent (#5245). An absent key is true with an empty
+    /// <paramref name="value"/>, exactly what <c>Query[key].ToString()</c> gave, so a request that sends each
+    /// key once behaves as it always did.
+    /// </summary>
+    internal static bool TrySingleQueryValue(IQueryCollection query, string key, out string value)
+    {
+        var values = query[key];
+        if (values.Count > 1)
+        {
+            value = string.Empty;
+            return false;
+        }
+
+        value = values.ToString();
+        return true;
+    }
+
+    /// <summary>The <c>confirm</c> flag of a delete: absent is false, <c>true</c> is true, anything else (including
+    /// a key sent twice) is a refusal sentence for the 400 (#5245). Pure, so the rule pins without a host.</summary>
+    internal static (bool Confirm, string? Refusal) ParseConfirm(IQueryCollection query)
+    {
+        if (!TrySingleQueryValue(query, "confirm", out var confirmText))
+        {
+            return (false, "confirm must be given once, as true, or omitted.");
+        }
+
+        if (confirmText.Length > 0 && !string.Equals(confirmText, "true", StringComparison.Ordinal))
+        {
+            return (false, "confirm must be true, or omitted.");
+        }
+
+        return (confirmText.Length > 0, null);
     }
 
     /* Pure parse helpers (invariant culture) — the binding logic the tests pin without an HttpContext. */

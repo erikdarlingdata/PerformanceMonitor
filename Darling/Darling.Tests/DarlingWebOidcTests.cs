@@ -503,6 +503,7 @@ public sealed class DarlingWebOidcTests
     [InlineData(true, "DELETE", "/api/views/3", true)]
     [InlineData(false, "GET", "/api/fleet", true)]              // viewer: the whole read surface
     [InlineData(false, "HEAD", "/api/fleet", true)]
+    [InlineData(false, "GET", "/api/server-databases", true)]   // #5245: the database picker's list is a viewer read
     [InlineData(false, "OPTIONS", "/api/views", true)]
     [InlineData(false, "POST", "/api/compose/run", true)]       // the ONE unsafe-method read (panel preview/run)
     [InlineData(false, "POST", "/api/views", false)]            // viewer: no create

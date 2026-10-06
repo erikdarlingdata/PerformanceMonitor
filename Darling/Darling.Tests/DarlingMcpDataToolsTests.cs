@@ -650,7 +650,7 @@ public sealed class DarlingMcpDataToolsSurfaceAndSqlTests
            hosts still collapse) and pins the LATERAL to the group's own rows. */
         Assert.Contains("GROUP BY database_name, query_hash, host_object_name", sql, StringComparison.Ordinal);
         Assert.Contains("host_object_name IS NOT DISTINCT FROM r.host_object_name", sql, StringComparison.Ordinal);
-        Assert.Contains("$5::text IS NULL OR database_name = $5", sql, StringComparison.Ordinal); /* optional db filter */
+        Assert.Contains("$5::text[] IS NULL OR database_name = ANY($5)", sql, StringComparison.Ordinal); /* optional db filter */
         Assert.Contains("NOT LIKE 'WAITFOR%'", sql, StringComparison.Ordinal);          /* over-fetch + trim */
         Assert.Contains("LIMIT $4", sql, StringComparison.Ordinal);
     }
@@ -661,7 +661,7 @@ public sealed class DarlingMcpDataToolsSurfaceAndSqlTests
         var sql = DarlingDataReader.TopProceduresSql;
         Assert.Contains("FROM procedure_stats", sql, StringComparison.Ordinal);
         Assert.Contains("GROUP BY database_name, schema_name, object_name, object_type", sql, StringComparison.Ordinal);
-        Assert.Contains("$5::text IS NULL OR database_name = $5", sql, StringComparison.Ordinal);
+        Assert.Contains("$5::text[] IS NULL OR database_name = ANY($5)", sql, StringComparison.Ordinal);
         Assert.Contains("SUM(delta_worker_time) AS rank_metric", TopRankings.Apply(sql, TopRanking.Cpu, hourly: false), StringComparison.Ordinal);
     }
 
@@ -698,7 +698,7 @@ public sealed class DarlingMcpDataToolsSurfaceAndSqlTests
         /* replica_role is a grouping key: an AG's shared Query Store (2022+) would otherwise report
            primary and secondary workload blended into one row. */
         Assert.Contains("GROUP BY database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role", sql, StringComparison.Ordinal);
-        Assert.Contains("$5::text IS NULL OR database_name = $5", sql, StringComparison.Ordinal);
+        Assert.Contains("$5::text[] IS NULL OR database_name = ANY($5)", sql, StringComparison.Ordinal);
         Assert.Contains("$6::text IS NULL OR execution_type_desc = $6", sql, StringComparison.Ordinal);
         Assert.Contains("r.execution_type_desc", sql, StringComparison.Ordinal);
         Assert.Contains("$7::text IS NULL OR module_name = $7", sql, StringComparison.Ordinal);

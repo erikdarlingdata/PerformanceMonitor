@@ -39,7 +39,7 @@
  * touches innerHTML.
  */
 
-import { el, makeActivatable, readTool, readToolWithinKeptHistory, keptWindowStrip, windowFloorStrip, mount, truncate, loadingStrip, errorStrip, readErrorStrip, emptyStrip, disclosure, noticeStrip, getPath, fmtMs, fmtRate, localTime, parseUtc, windowFromHours, daysText, queryWaitFilter, setQueryWaitFilter, waitIsLinked } from "../util.js";
+import { el, makeActivatable, readTool, readToolWithinKeptHistory, keptWindowStrip, windowFloorStrip, mount, truncate, loadingStrip, errorStrip, readErrorStrip, emptyStrip, disclosure, noticeStrip, getPath, fmtMs, fmtRate, localTime, parseUtc, windowFromHours, daysText, dbScopeChip, queryWaitFilter, setQueryWaitFilter, waitIsLinked } from "../util.js";
 import { renderPanel, setPanelSignal, getPanelSignal, VIZ } from "../panels.js";
 import { zoomableLineChart, chartZoomScope, SERIES_COLORS, CATEGORICAL_COLORS } from "../charts.js";
 import { multiPicker, mergeSeriesRows } from "../multi-picker.js";
@@ -138,10 +138,14 @@ function sentinelDuration(key) {
 /* Two panels chain reads or reshape rows, so they are built by hand rather than declared. Both were already on
    the page before the tabs existed; they keep their behaviour and move into the tab that owns them. */
 
-function panelShell(title, subtitle, span = 2, control = null) {
+/* `read` is the panel's main read and `dbScope` its own scope when one read feeds panels of different kinds ("server",
+   "unfiltered" or "process-rows"): together they draw the database-scope chip while the page's database filter is active
+   (#5245, dbScopeChip in util.js). A panel with no read of its own passes none and draws no chip. `control` (#5226) is a node
+   drawn under the title, before the body: the ranking selector of the Top Queries card. */
+function panelShell(title, subtitle, span = 2, read = null, dbScope = null, control = null) {
   const body = el("div", { class: "panel-body" }, [loadingStrip()]);
   const panel = el("div", { class: "panel card" + (span === 2 ? " span-2" : "") }, [
-    el("h3", {}, [title, subtitle ? el("span", { class: "panel-sub", text: " " + subtitle }) : null]),
+    el("h3", {}, [title, subtitle ? el("span", { class: "panel-sub", text: " " + subtitle }) : null, dbScopeChip(read, dbScope)]),
     control,
     body,
   ]);
@@ -195,7 +199,7 @@ function fanout(read, params, specs) {
       throw new Error("fanout(" + spec.title + "): a data panel must explain its own empty state.");
     }
   }
-  const shells = specs.map((s) => panelShell(s.title, s.subtitle, s.span ?? 2));
+  const shells = specs.map((s) => panelShell(s.title, s.subtitle, s.span ?? 2, read, s.dbScope));
   const keys = specs.map((s) => panelMemoryKey(read, params, s));
   specs.forEach((s, i) => {
     if (s.hideWhenNoRows && !panelHadRows.get(keys[i])) shells[i].panel.style.display = "none";
@@ -251,7 +255,7 @@ const WAIT_METRICS = [
  * the metric live in multi-picker.js's module state keyed by server, so the 60 s rebuild keeps them.
  */
 export function waitsPanel(server, ctx) {
-  const { panel, body } = panelShell("Wait Stats", ctx.label + ", with a trend for the waits you check");
+  const { panel, body } = panelShell("Wait Stats", ctx.label + ", with a trend for the waits you check", 2, "get_wait_stats");
   (async () => {
     const res = await readToolWithinKeptHistory("get_wait_stats", { server, hours: ctx.hours, limit: 20 });
     if (res.kind === "error") return mount(body, readErrorStrip(res.message));
@@ -408,7 +412,7 @@ function perfmonDefaults(available, max) {
  * module state keyed by server, so the 60 s rebuild keeps them.
  */
 export function perfmonPanel(server, ctx) {
-  const { panel, body } = panelShell("Perfmon Counters", "latest snapshot, with a trend for the counters you check");
+  const { panel, body } = panelShell("Perfmon Counters", "latest snapshot, with a trend for the counters you check", 2, "get_perfmon_stats");
   (async () => {
     const res = await readTool("get_perfmon_stats", { server });
     if (res.kind === "error") return mount(body, readErrorStrip(res.message));
@@ -583,6 +587,8 @@ function topQueriesCard(server, ctx, ranking, picker) {
     "Top Queries by " + topRankingLabel(ranking),
     ctx.label + ", with a per-collection trend for the query you pick",
     2,
+    "get_top_queries_by_cpu",
+    null,
     picker
   );
   (async () => {
@@ -799,7 +805,7 @@ function rankedCard(kind, build) {
  * #3897 the read projected only the database, and nine tempdb files wrote over each other in this pivot.
  */
 export function fileIoPanel(server, ctx) {
-  const { panel, body } = panelShell("File I/O Latency", "avg read and write latency per database and file type, " + ctx.label);
+  const { panel, body } = panelShell("File I/O Latency", "avg read and write latency per database and file type, " + ctx.label, 2, "get_file_io_trend");
   (async () => {
     const res = await readToolWithinKeptHistory("get_file_io_trend", { server, hours: ctx.hours });
     if (res.kind === "error") return mount(body, readErrorStrip(res.message));
@@ -859,8 +865,8 @@ export function fileIoPanel(server, ctx) {
  * calendar drawn over six hours is not a calendar.
  */
 export function dailySummaryPanels(server) {
-  const tile = panelShell("Daily Summary", "today (UTC)");
-  const calendar = panelShell("Daily Health Calendar", "last 30 days (UTC)");
+  const tile = panelShell("Daily Summary", "today (UTC)", 2, "get_daily_summary_range");
+  const calendar = panelShell("Daily Health Calendar", "last 30 days (UTC)", 2, "get_daily_summary_range");
   (async () => {
     const res = await readTool("get_daily_summary_range", { server, days_back: 30 });
     if (res.kind === "error") {
@@ -963,11 +969,14 @@ function pivot(rows, { xKey, seriesKey, valueKey }, maxSeries = 8) {
  * is shown only while its group's toggle is on, and the ungrouped columns are always shown (see vizTable's
  * columnPicker).
  *
+ * `dbScope` ("server", "unfiltered" or "process-rows") is the panel's own database-scope chip when it differs from its
+ * read's class (#5245); null takes the read's class. Deadlock Graphs declares "unfiltered" here and moves to
+ * "process-rows" when its process rows are filtered.
  * `control` (#5226) is a node drawn under the title, before the rows: the ranking selector on the Top Queries and Top Procedures cards.
  */
-function table(title, read, params, rowsKey, columns, subtitle, emptyText, span = 2, noteKey = null, moreNoteKeys = null, columnGroups = null, control = null) {
+function table(title, read, params, rowsKey, columns, subtitle, emptyText, span = 2, noteKey = null, moreNoteKeys = null, columnGroups = null, control = null, dbScope = null) {
   if (!emptyText) throw new Error("table(" + title + "): a table panel must explain its own empty state.");
-  const desc = { title, subtitle, read, params, viz: "table", rowsKey, columns, emptyText, moreNoteKeys, span, noteKey };
+  const desc = { title, subtitle, read, params, viz: "table", rowsKey, columns, emptyText, moreNoteKeys, span, noteKey, dbScope };
   if (columnGroups) Object.assign(desc, { groups: columnGroups.groups, defaultGroups: columnGroups.defaultGroups });
   if (control) desc.control = control;
   return renderPanel(desc);
@@ -1321,6 +1330,7 @@ export const SERVER_TABS = [
         {
           title: "Waiting Tasks",
           subtitle: ctx.label,
+          dbScope: "server",
           viz: "line",
           rowsKey: "waiting_tasks",
           xKey: "collection_time",
@@ -1369,6 +1379,7 @@ export const SERVER_TABS = [
         {
           title: "Deadlock Severity",
           subtitle: ctx.label,
+          dbScope: "unfiltered",
           viz: "line",
           atTimeItem: "deadlocks",
           rowsKey: "deadlock_severity",
@@ -1384,7 +1395,12 @@ export const SERVER_TABS = [
         "deadlocks",
         deadlockXmlColumns(server),
         ctx.label,
-        "No deadlock graph XML captured in this window."
+        "No deadlock graph XML captured in this window.",
+        2,
+        null,
+        null,
+        null,
+        "unfiltered"
       ),
       table(
         "Blocked Process Reports",
@@ -1616,6 +1632,7 @@ export const SERVER_TABS = [
         {
           title: "Query Store Overhead (per server)",
           subtitle: ctx.label,
+          dbScope: "server",
           viz: "table",
           rowsKey: "qs_overhead.wait_stats.included",
           floorKey: "window",
@@ -1629,6 +1646,7 @@ export const SERVER_TABS = [
           title: "Query Store Memory Clerk",
           subtitle: SNAPSHOT,
           span: 1,
+          dbScope: "server",
           viz: "stat",
           stats: QS_CLERK_STATS,
           noteKey: "qs_overhead.memory_clerk.note",
@@ -2861,6 +2879,12 @@ export function serverTabsFor(card) {
   return card && card.is_postgres === true ? POSTGRES_TABS : SERVER_TABS;
 }
 
+/** True only for a POSITIVE PostgreSQL claim on the card, the same test serverTabsFor makes (#5245: the server page's database
+ *  filter reads the claim through this, so server.js never re-derives the boolean from the card itself). */
+export function isPostgresTarget(card) {
+  return !!card && card.is_postgres === true;
+}
+
 /** The tab for an id within a registry, falling back to the first (Overview) — an unknown/absent id is a deep
  *  link, not an error. `overview`, `activity`, `waits` and `io` exist in BOTH registries, so those deep links
  *  survive a server turning out to be the other engine; the rest fall back rather than break. */
@@ -3907,7 +3931,7 @@ const SERVER_TRENDS = {
 /** A get_server_trend line panel for `kind` (a key of SERVER_TRENDS), over the page's range and its `as_of`. */
 export function serverTrendPanel(server, ctx, kind) {
   const spec = SERVER_TRENDS[kind];
-  const { panel, body } = panelShell(spec.title + " Trend", ctx.label);
+  const { panel, body } = panelShell(spec.title + " Trend", ctx.label, 2, "get_server_trend");
   (async () => {
     const res = await readToolWithinKeptHistory("get_server_trend", { server, metric: spec.metric, hours: ctx.hours }, ctx && ctx.signal);
     if (res.kind === "error") return mount(body, readErrorStrip(res.message));
@@ -3945,7 +3969,7 @@ const DEFAULT_CLERKS_CHECKED = 5;
  * so the 60 s rebuild keeps them.
  */
 export function memoryClerksTrendPanel(server, ctx) {
-  const { panel, body } = panelShell("Memory Clerks Trend", ctx.label + ", with a trend for the clerks you check");
+  const { panel, body } = panelShell("Memory Clerks Trend", ctx.label + ", with a trend for the clerks you check", 2, "get_memory_clerks");
   (async () => {
     const res = await readToolWithinKeptHistory("get_memory_clerks", { server }, ctx && ctx.signal);
     if (res.kind === "error") return mount(body, readErrorStrip(res.message));
@@ -4073,7 +4097,7 @@ const DEFAULT_NAMES_CHECKED = 5;
 
 export function namedTrendPanel(server, ctx, kind) {
   const spec = NAMED_TRENDS[kind];
-  const { panel, body } = panelShell(spec.title, ctx.label + ", with a trend for the " + spec.noun + "s you check");
+  const { panel, body } = panelShell(spec.title, ctx.label + ", with a trend for the " + spec.noun + "s you check", 2, spec.optionsTool);
   (async () => {
     const res = await readToolWithinKeptHistory(spec.optionsTool, { server, hours: ctx.hours, top: MAX_NAMES_CHARTED }, ctx && ctx.signal);
     if (res.kind === "error") return mount(body, readErrorStrip(res.message));
@@ -4172,7 +4196,7 @@ const SESSION_TREND_SERIES = [
 
 /** Session Stats trend: the server-wide session counts per bucket, with the newest bucket's top application and host as text. */
 export function sessionStatsTrendPanel(server, ctx) {
-  const { panel, body } = panelShell("Session Stats Trend", ctx.label);
+  const { panel, body } = panelShell("Session Stats Trend", ctx.label, 2, "get_server_trend");
   (async () => {
     const res = await readToolWithinKeptHistory("get_server_trend", { server, metric: "session_stats", hours: ctx.hours }, ctx && ctx.signal);
     if (res.kind === "error") return mount(body, readErrorStrip(res.message));
@@ -4211,8 +4235,8 @@ export function sessionStatsTrendPanel(server, ctx) {
  * recorded, which on a server monitored for less than the range includes the hours before collection started.
  */
 export function memoryPressurePanels(server, ctx) {
-  const chart = panelShell("Memory Pressure Events per Hour", ctx.label, 2);
-  const grid = panelShell("Memory Pressure Events", ctx.label, 1);
+  const chart = panelShell("Memory Pressure Events per Hour", ctx.label, 2, "get_memory_pressure_events");
+  const grid = panelShell("Memory Pressure Events", ctx.label, 1, "get_memory_pressure_events");
   (async () => {
     const res = await readToolWithinKeptHistory("get_memory_pressure_events", { server, hours: ctx.hours });
     if (res.kind === "error") {
@@ -4320,7 +4344,7 @@ const SCOPED_CONFIG_COLUMNS = [
 /* The scoped-configuration read groups settings under each database; the grid wants one row per setting. The
    rows live in the panel's closure, not module state, so the 60 s repaint rebuilds them from the read. */
 function scopedConfigPanel(server) {
-  const { panel, body } = panelShell("Database Scoped Configuration", "sys.database_scoped_configurations, newest connect-time snapshot");
+  const { panel, body } = panelShell("Database Scoped Configuration", "sys.database_scoped_configurations, newest connect-time snapshot", 2, "get_database_scoped_config");
   (async () => {
     const res = await readTool("get_database_scoped_config", { server });
     if (res.kind === "error") return mount(body, readErrorStrip(res.message));
