@@ -213,7 +213,7 @@ public partial class ServerTab : UserControl
         _customRange.Set(fromUtc, toUtc);
 
         // Switch to Custom without triggering a refresh
-        _isRefreshing = true;
+        _suppressRangeRefresh = true;
         try
         {
             TimeRangeCombo.SelectedIndex = 5; // Custom
@@ -231,7 +231,7 @@ public partial class ServerTab : UserControl
         }
         finally
         {
-            _isRefreshing = false;
+            _suppressRangeRefresh = false;
         }
     }
 }
