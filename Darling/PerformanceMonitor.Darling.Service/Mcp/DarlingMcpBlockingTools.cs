@@ -203,6 +203,10 @@ public sealed class DarlingMcpBlockingTools
             var truncated = rows.Count > limit;
             var page = rows.Take(limit).ToList();
 
+            /* #5236: which of the page's rows carry a stored plan, read for those rows only. The list read does not project the plan
+               columns (a compressed chunk decompresses a named column for every batch the list scans); this is one keyed statement. */
+            await DarlingBlockingReader.ReadBlockedPlanFlagsAsync(postgres, resolved.ServerId, page, cancellationToken);
+
             /* #4966: where the store's data starts for the window. An event list, so the floor is the earlier of the coverage probe and
                the oldest event the page shows (a first run of a collector can store events from before itself). The
                page is fed by two collectors (XE reports and DMV snapshots), so the probe is both and the earlier wins, as the viewer's grid does. */
@@ -410,6 +414,9 @@ public sealed class DarlingMcpBlockingTools
 
             var truncated = rows.Count > limit;
             var page = rows.Take(limit).ToList();
+
+            /* #5236: the victim-plan flag for the page's rows only (see get_blocking). */
+            await DarlingBlockingReader.ReadVictimPlanFlagsAsync(postgres, resolved.ServerId, page, cancellationToken);
 
             /* #4966: an event list, so the floor is the earlier of the coverage probe and the oldest deadlock the page shows. */
             var notice = await DarlingMcpWindowNotice.ReadEventAsync(

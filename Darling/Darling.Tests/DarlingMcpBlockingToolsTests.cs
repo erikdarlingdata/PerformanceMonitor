@@ -448,19 +448,16 @@ public sealed class DarlingMcpBlockingToolsSurfaceAndSqlTests
     /// <summary>
     /// #5236 W6: a list flag and the point read it feeds test presence with the SAME predicate, <c>IS NOT NULL AND &lt;&gt; ''</c>
     /// (the house pattern the report-XML read uses). A flag that tested only <c>IS NOT NULL</c> would draw a button for an
-    /// empty-string plan, and the read behind it would answer "unavailable".
+    /// empty-string plan, and the read behind it would answer "unavailable". The flags live in the two page-keyed flag statements.
     /// </summary>
     [Fact]
     public void TheListFlags_UseThePointReadsPresencePredicate()
     {
         var flagReads = new (string Sql, string Column)[]
         {
-            (DarlingBlockingReader.BlockedProcessReportsSql, "blocked_query_plan_xml"),
-            (DarlingBlockingReader.BlockedProcessReportsSql, "blocking_query_plan_xml"),
-            (DarlingBlockingReader.BlockedProcessReportsWithXmlSql, "blocked_query_plan_xml"),
-            (DarlingBlockingReader.BlockedProcessReportsWithXmlSql, "blocking_query_plan_xml"),
-            (DarlingBlockingReader.RecentDeadlocksSql, "victim_query_plan_xml"),
-            (DarlingBlockingReader.RecentDeadlocksWithGraphSql, "victim_query_plan_xml"),
+            (DarlingBlockingReader.BlockedPlanFlagsSql, "blocked_query_plan_xml"),
+            (DarlingBlockingReader.BlockedPlanFlagsSql, "blocking_query_plan_xml"),
+            (DarlingBlockingReader.DeadlockVictimPlanFlagsSql, "victim_query_plan_xml"),
         };
         foreach (var (sql, column) in flagReads)
         {
@@ -477,6 +474,49 @@ public sealed class DarlingMcpBlockingToolsSurfaceAndSqlTests
         {
             Assert.Contains($"AND   {column} IS NOT NULL", sql, StringComparison.Ordinal);
             Assert.Contains($"AND   {column} <> ''", sql, StringComparison.Ordinal);
+        }
+    }
+
+    /// <summary>
+    /// #5236: no list statement, and neither of the two variants that page over XML or graphs, names a plan column. In a
+    /// compressed TimescaleDB chunk every named column is decompressed for each batch the list scans, and a flag computed there
+    /// was evaluated after the per-chunk sorts, so each row's whole plan text went through them (measured: the 7-day deadlock
+    /// list on a server where half the rows carry a plan went from 0.3 s to 1.9 s). The flags come from the two keyed
+    /// statements, which read only the page's own rows.
+    /// </summary>
+    [Fact]
+    public void TheListStatements_NameNoPlanColumn_AndTheFlagStatementsAreKeyedToThePage()
+    {
+        foreach (var sql in new[]
+        {
+            DarlingBlockingReader.BlockedProcessReportsSql,
+            DarlingBlockingReader.BlockedProcessReportsWithXmlSql,
+            DarlingBlockingReader.RecentDeadlocksSql,
+            DarlingBlockingReader.RecentDeadlocksWithGraphSql,
+        })
+        {
+            Assert.DoesNotContain("query_plan_xml", sql, StringComparison.Ordinal);
+            Assert.DoesNotContain("has_blocked_plan", sql, StringComparison.Ordinal);
+            Assert.DoesNotContain("has_blocking_plan", sql, StringComparison.Ordinal);
+            Assert.DoesNotContain("has_victim_plan", sql, StringComparison.Ordinal);
+        }
+
+        /* The key rides in the list: collection_time and the id come back so the page can be re-read for its flags. */
+        Assert.Contains("blocked_report_id", DarlingBlockingReader.BlockedProcessReportsSql, StringComparison.Ordinal);
+        Assert.Contains("deadlock_id", DarlingBlockingReader.RecentDeadlocksSql, StringComparison.Ordinal);
+
+        foreach (var (sql, table, id) in new[]
+        {
+            (DarlingBlockingReader.BlockedPlanFlagsSql, "blocked_process_reports", "blocked_report_id"),
+            (DarlingBlockingReader.DeadlockVictimPlanFlagsSql, "deadlocks", "deadlock_id"),
+        })
+        {
+            Assert.Contains($"FROM {table}", sql, StringComparison.Ordinal);
+            Assert.Contains("WHERE server_id = $1", sql, StringComparison.Ordinal);
+            Assert.Contains("AND   collection_time = ANY($2)", sql, StringComparison.Ordinal);
+            Assert.Contains($"AND   {id} = ANY($3)", sql, StringComparison.Ordinal);
+            Assert.DoesNotContain("LIMIT", sql, StringComparison.Ordinal);
+            Assert.DoesNotContain("ORDER BY", sql, StringComparison.Ordinal);
         }
     }
 
