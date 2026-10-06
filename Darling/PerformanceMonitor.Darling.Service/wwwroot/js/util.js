@@ -767,6 +767,31 @@ export function setActiveRange(range) {
   activeRange = range || null;
 }
 
+/* The wait the Active Queries grid is filtered to, per server (#5235): set when a wait row or the wait trend chart opens
+   Active Queries at that wait. In memory only, like activeRange: not persisted and not in the URL, so a reload or a pasted
+   link shows every active query. A blank wait deletes the entry. */
+const queryWaitFilters = new Map();
+
+/** The wait type server `server`'s Active Queries grid is filtered to, or "" when it shows every query. */
+export function queryWaitFilter(server) {
+  return queryWaitFilters.get(server) || "";
+}
+
+/** Filter server `server`'s Active Queries to wait `w`; a blank (or non-text) `w` clears the filter. */
+export function setQueryWaitFilter(server, w) {
+  const v = typeof w === "string" ? w.trim() : "";
+  if (v === "") queryWaitFilters.delete(server);
+  else queryWaitFilters.set(server, v);
+}
+
+/** Whether wait `w` gets a link to Active Queries (#5235): any named wait except Query Store's QDS_* waits, which are the
+ *  background tasks' own and never a request's wait at a capture. The wait rows and the wait trend chart's menu item both
+ *  ask this, so the two cannot disagree. */
+export function waitIsLinked(w) {
+  const v = typeof w === "string" ? w.trim() : "";
+  return v !== "" && !/^QDS_/i.test(v);
+}
+
 /* The windowed reads that take no `as_of` (the catalog's `hours` without an `as_of`): they keep answering "the last N
    hours ending now", and say so. Every other windowed read takes `as_of`. WebServerPageRangeTests pins this list
    against the read catalog. */
