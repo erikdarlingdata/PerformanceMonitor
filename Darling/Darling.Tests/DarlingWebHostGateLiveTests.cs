@@ -574,6 +574,27 @@ public sealed class DarlingWebHostGateLiveTests
         Assert.True(single.Response.Headers.SetCookie.Count > 0);
     }
 
+    /// <summary>A repeated <c>?token=</c> is refused and still leaves one Token refusal line, as a wrong single token does:
+    /// the line says the key was sent more than once and holds neither token value (#5245).</summary>
+    [Theory]
+    [InlineData("/", StatusCodes.Status200OK)]
+    [InlineData("/api/fleet", StatusCodes.Status401Unauthorized)]
+    public async Task NetworkMode_RepeatedTokenKey_LeavesOneRefusalLine_WithNoTokenValue(string path, int expectedStatus)
+    {
+        var hostLogger = new CapturingTestLogger();
+        using var server = await BuildServer(networkMode: true, hostLogger: hostLogger);
+
+        var (ctx, _) = await Fetch(server, path, "?token=guess-one-value&token=guess-two-value");
+        Assert.Equal(expectedStatus, ctx.Response.StatusCode);
+
+        var line = Assert.Single(hostLogger.Lines);
+        Assert.StartsWith("Warning: Web dashboard ", line, StringComparison.Ordinal);
+        Assert.Contains("the ?token= key was sent more than once", line, StringComparison.Ordinal);
+        Assert.DoesNotContain("guess-one-value", line, StringComparison.Ordinal);
+        Assert.DoesNotContain("guess-two-value", line, StringComparison.Ordinal);
+        Assert.DoesNotContain(Token, line, StringComparison.Ordinal);
+    }
+
     [Fact]
     public async Task OidcLogin_RepeatedReturnKey_IsRefusedBeforeTheProviderIsAsked()
     {

@@ -1093,7 +1093,8 @@ public sealed class DarlingWebHostService : BackgroundService
 
                 /* A token sent twice is not a token (#5245): joined into "a,b" it is a value nobody sent, and
                    the gate answers as it would a wrong token rather than reading the first copy. */
-                var hasValidToken = DarlingWebEndpoints.TrySingleQueryValue(context.Request.Query, "token", out var presentedToken)
+                var tokenSentOnce = DarlingWebEndpoints.TrySingleQueryValue(context.Request.Query, "token", out var presentedToken);
+                var hasValidToken = tokenSentOnce
                     && DarlingHostBinding.FixedTimeTokenEquals(presentedToken, token);
                 var isAuthFlowRoute = IsAuthFlowPath(context.Request.Path.Value ?? "/", oidcClient is not null);
 
@@ -1199,6 +1200,19 @@ public sealed class DarlingWebHostService : BackgroundService
                                 isApiCall
                                     ? "the presented ?token= does not match web.network.encryptedToken, so the API call was refused"
                                     : "the presented ?token= does not match web.network.encryptedToken, so the login page was served instead",
+                                DateTime.UtcNow);
+                        }
+                        else if (!tokenSentOnce)
+                        {
+                            /* A ?token= sent more than once reads as no token at all (above), so it must be logged on
+                               its own arm: it is a credential that was presented and can never match (#5245). The line
+                               names the key, never a value. */
+                            refusals.Report(
+                                _logger, "Web dashboard", DarlingRefusalGate.Token, shownStatus,
+                                remote,
+                                isApiCall
+                                    ? "the ?token= key was sent more than once, so the API call was refused"
+                                    : "the ?token= key was sent more than once, so the login page was served instead",
                                 DateTime.UtcNow);
                         }
 
