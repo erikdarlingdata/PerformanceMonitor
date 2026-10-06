@@ -16,7 +16,7 @@ using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Xml.Linq;
-using ModelContextProtocol.Protocol;
+using Microsoft.AspNetCore.TestHost;
 using Npgsql;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
@@ -37,10 +37,9 @@ namespace Darling.Tests;
 ///
 /// <para>The tools: <c>get_blocking</c>, <c>get_deadlocks</c>, <c>get_deadlock_detail</c>, <c>get_blocked_process_xml</c>,
 /// <c>get_long_query_completions</c>, <c>get_default_trace_events</c>, <c>get_health_parser_significant_waits</c> and
-/// <c>get_health_parser_severe_errors</c>. The class calls the filter directly rather than through
-/// <see cref="StatementFilterCensus.FilterThroughHostAsync"/>: that helper's host also runs the GCF filter, which reads
-/// <c>DARLING_OUTPUT_FORMAT</c> on every call, so a test in this live collection could be re-encoded by a class in the
-/// <c>DarlingOutputFormatEnv</c> collection that sets it. The filter's slot in the host's list is pinned by
+/// <c>get_health_parser_severe_errors</c>. Each answer goes through <see cref="StatementFilterCensus.FilterThroughHostAsync"/>, the host's whole registered filter list. That
+/// host is built with GCF pinned off (#5320), so <c>DARLING_OUTPUT_FORMAT</c>, which classes in the <c>DarlingOutputFormatEnv</c>
+/// collection set while this live class may be running, cannot re-encode an answer. The filter's slot in the list is also pinned by
 /// <c>SensitiveStatementHostFilterTests</c>.</para>
 ///
 /// <para>The deadlock graph is the one field with two shapes: at <c>full_graph: true</c> the XML parses and only the named
@@ -57,15 +56,12 @@ public sealed class StatementFilterBlockingReadsLiveTests
 
     private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
 
-    /// <summary>The tool's answer through the host's output filter, as a client receives it.</summary>
-    private static string Filtered(string raw)
+    /// <summary>The tool's answer through the host's whole filter list, as a client receives it.</summary>
+    private static async Task<string> FilteredAsync(TestServer host, string raw)
     {
-        var swept = SensitiveStatementOutputFilter.Sweep(new CallToolResult
-        {
-            Content = new List<ContentBlock> { new TextContentBlock { Text = raw } },
-        });
-        Assert.NotEqual(true, swept.IsError);
-        return ((TextContentBlock)swept.Content![0]).Text;
+        var (text, isError) = await StatementFilterCensus.FilterThroughHostAsync(host, raw);
+        Assert.False(isError);
+        return text;
     }
 
     private static void AssertFiltered(string label, string raw, string filtered)
@@ -150,6 +146,7 @@ public sealed class StatementFilterBlockingReadsLiveTests
         await PgMigrations.MigrateAsync(connection, ct);
         await DeleteRowsAsync(connection, ct);
         await using var postgres = NpgsqlDataSource.Create(cs!);
+        using var host = await StatementFilterCensus.BuildHostAsync();
 
         var bodySucceeded = false;
         try
@@ -211,11 +208,11 @@ VALUES ($1, $2, $3, $4, $5, $6, $7)",
 
             /* Every row is checked before the test fails, so one run names each row that leaks. */
             var failures = new List<string>();
-            void Check(string label, string raw, Action<string>? more = null)
+            async Task Check(string label, string raw, Action<string>? more = null)
             {
                 try
                 {
-                    string filtered = Filtered(raw);
+                    string filtered = await FilteredAsync(host, raw);
                     AssertFiltered(label, raw, filtered);
                     more?.Invoke(filtered);
                 }
@@ -225,12 +222,12 @@ VALUES ($1, $2, $3, $4, $5, $6, $7)",
                 }
             }
 
-            Check("16 get_blocking", await DarlingMcpBlockingTools.GetBlocking(postgres, ServerName, cancellationToken: ct));
-            Check("17 get_deadlocks", await DarlingMcpBlockingTools.GetDeadlocks(postgres, ServerName, cancellationToken: ct));
-            Check("18 get_deadlock_detail", await DarlingMcpBlockingTools.GetDeadlockDetail(postgres, ServerName, cancellationToken: ct));
+            await Check("16 get_blocking", await DarlingMcpBlockingTools.GetBlocking(postgres, ServerName, cancellationToken: ct));
+            await Check("17 get_deadlocks", await DarlingMcpBlockingTools.GetDeadlocks(postgres, ServerName, cancellationToken: ct));
+            await Check("18 get_deadlock_detail", await DarlingMcpBlockingTools.GetDeadlockDetail(postgres, ServerName, cancellationToken: ct));
 
             /* row 19: the report XML still parses, the canary's inputbuf and frame hold the marker, and the plain side is intact. */
-            Check("19 get_blocked_process_xml", await DarlingMcpBlockingTools.GetBlockedProcessXml(postgres, ServerName, cancellationToken: ct), filtered =>
+            await Check("19 get_blocked_process_xml", await DarlingMcpBlockingTools.GetBlockedProcessXml(postgres, ServerName, cancellationToken: ct), filtered =>
             {
                 var reports = EmbeddedXml(filtered);
                 Assert.Single(reports);
@@ -240,10 +237,10 @@ VALUES ($1, $2, $3, $4, $5, $6, $7)",
                 Assert.DoesNotContain(bprDoc.Descendants("frame"), f => f.Value.Contains("S3cret", StringComparison.Ordinal));
             });
 
-            Check("20 get_long_query_completions", await DarlingMcpLongQueryTools.GetLongQueryCompletions(postgres, ServerName, cancellationToken: ct));
-            Check("21 get_default_trace_events", await DarlingMcpDefaultTraceTools.GetDefaultTraceEvents(postgres, ServerName, cancellationToken: ct));
-            Check("22 get_health_parser_significant_waits", await DarlingMcpHealthParserTools.GetSignificantWaits(postgres, ServerName, cancellationToken: ct));
-            Check("23 get_health_parser_severe_errors", await DarlingMcpHealthParserTools.GetSevereErrors(postgres, ServerName, cancellationToken: ct));
+            await Check("20 get_long_query_completions", await DarlingMcpLongQueryTools.GetLongQueryCompletions(postgres, ServerName, cancellationToken: ct));
+            await Check("21 get_default_trace_events", await DarlingMcpDefaultTraceTools.GetDefaultTraceEvents(postgres, ServerName, cancellationToken: ct));
+            await Check("22 get_health_parser_significant_waits", await DarlingMcpHealthParserTools.GetSignificantWaits(postgres, ServerName, cancellationToken: ct));
+            await Check("23 get_health_parser_severe_errors", await DarlingMcpHealthParserTools.GetSevereErrors(postgres, ServerName, cancellationToken: ct));
             Assert.True(failures.Count == 0, string.Join(" | ", failures));
 
             bodySucceeded = true;
@@ -273,6 +270,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7)",
         await PgMigrations.MigrateAsync(connection, ct);
         await DeleteRowsAsync(connection, ct);
         await using var postgres = NpgsqlDataSource.Create(cs!);
+        using var host = await StatementFilterCensus.BuildHostAsync();
 
         var bodySucceeded = false;
         try
@@ -288,7 +286,7 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)",
                 CollectionIdGenerator.Next(), t.AddSeconds(5), ServerId, ServerName, Db, t, "process1a", StatementScrubCanary.CanaryStatement, graph);
 
             string full = await DarlingMcpBlockingTools.GetDeadlockDetail(postgres, ServerName, full_graph: true, cancellationToken: ct);
-            string fullFiltered = Filtered(full);
+            string fullFiltered = await FilteredAsync(host, full);
             AssertFiltered("full_graph true", full, fullFiltered);
             var fullGraphs = EmbeddedXml(fullFiltered);
             Assert.Single(fullGraphs);
@@ -303,7 +301,7 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)",
             Assert.Equal(Db + ".dbo.t", (string?)doc.Descendants("keylock").Single().Attribute("objectname"));
 
             string cut = await DarlingMcpBlockingTools.GetDeadlockDetail(postgres, ServerName, cancellationToken: ct);
-            string cutFiltered = Filtered(cut);
+            string cutFiltered = await FilteredAsync(host, cut);
             AssertFiltered("full_graph false", cut, cutFiltered);
             using (var rawDoc = JsonDocument.Parse(cut))
             {
@@ -345,6 +343,7 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)",
         await PgMigrations.MigrateAsync(connection, ct);
         await DeleteRowsAsync(connection, ct);
         await using var postgres = NpgsqlDataSource.Create(cs!);
+        using var host = await StatementFilterCensus.BuildHostAsync();
 
         var bodySucceeded = false;
         try
@@ -362,7 +361,7 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)",
             string raw = await DarlingMcpBlockingTools.GetDeadlockDetail(postgres, ServerName, full_graph: true, cancellationToken: ct);
             read.Stop();
             var filter = Stopwatch.StartNew();
-            string filtered = Filtered(raw);
+            string filtered = await FilteredAsync(host, raw);
             filter.Stop();
             string timings = string.Create(CultureInfo.InvariantCulture,
                 $"graph {graph.Length} chars, answer {raw.Length} chars: tool {read.ElapsedMilliseconds} ms, filter {filter.ElapsedMilliseconds} ms");

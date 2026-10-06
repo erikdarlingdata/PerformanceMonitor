@@ -99,17 +99,12 @@ public sealed class StatementFilterQueryReadsLiveTests
                     throw new Xunit.Sdk.XunitException(label + ": " + ex.Message);
                 }
 
-                /* The no-hit page: nothing to withhold, so the answer is the raw read, byte for byte. The output format variable is
-                   process-wide and other classes flip it, so the identity is asserted only when it was unset around the call. */
+                /* The no-hit page: nothing to withhold, so the answer is the raw read, byte for byte. The host is built with GCF
+                   pinned off (#5320), so no other class's DARLING_OUTPUT_FORMAT reaches it and the identity holds every run. */
                 string clean = await read(CleanServer);
                 Assert.DoesNotContain("S3cret-canary-ssf", clean, StringComparison.Ordinal);
-                string? formatBefore = Environment.GetEnvironmentVariable("DARLING_OUTPUT_FORMAT");
                 string cleanFiltered = (await StatementFilterCensus.FilterThroughHostAsync(host, clean)).Text;
-                string? formatAfter = Environment.GetEnvironmentVariable("DARLING_OUTPUT_FORMAT");
-                if (string.IsNullOrEmpty(formatBefore) && string.IsNullOrEmpty(formatAfter))
-                {
-                    Assert.True(string.Equals(clean, cleanFiltered, StringComparison.Ordinal), label + ": a page with no canary changed under the filter");
-                }
+                Assert.True(string.Equals(clean, cleanFiltered, StringComparison.Ordinal), label + ": a page with no canary changed under the filter");
 
                 _output.WriteLine($"{label}: no-hit page {Encoding.UTF8.GetByteCount(clean):N0} bytes raw, {Encoding.UTF8.GetByteCount(cleanFiltered):N0} bytes filtered; canary page {Encoding.UTF8.GetByteCount(raw):N0} raw, {Encoding.UTF8.GetByteCount(filtered):N0} filtered.");
             }
