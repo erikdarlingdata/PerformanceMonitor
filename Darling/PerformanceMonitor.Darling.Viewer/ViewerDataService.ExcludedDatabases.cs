@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Viewer;
 
@@ -27,23 +28,6 @@ namespace PerformanceMonitor.Darling.Viewer;
 public sealed partial class ViewerDataService
 {
     /// <summary>
-    /// DISTINCT user-database names the store has collected for one server, from either the database
-    /// config snapshot or the per-file size stats (UNION dedupes across both), system databases removed,
-    /// ordered by name. $1 server_id.
-    /// </summary>
-    public const string CollectedDatabaseNamesSql = """
-        SELECT database_name
-        FROM (
-            SELECT database_name FROM v_database_config WHERE server_id = $1
-            UNION
-            SELECT database_name FROM v_database_size_stats WHERE server_id = $1
-        ) AS d
-        WHERE database_name IS NOT NULL
-        AND   database_name NOT IN ('master', 'model', 'msdb', 'tempdb')
-        ORDER BY database_name
-        """;
-
-    /// <summary>
     /// The distinct user databases the store has collected for one server (empty when nothing has been
     /// collected yet). Feeds the Excluded Databases picker's checkbox list.
     /// </summary>
@@ -51,7 +35,7 @@ public sealed partial class ViewerDataService
     {
         var names = new List<string>();
 
-        await using var command = _dataSource.CreateCommand(CollectedDatabaseNamesSql);
+        await using var command = _dataSource.CreateCommand(CollectedDatabases.NamesSql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
