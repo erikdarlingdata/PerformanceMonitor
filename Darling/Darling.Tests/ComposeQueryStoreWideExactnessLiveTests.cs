@@ -241,7 +241,7 @@ public sealed class ComposeQueryStoreWideExactnessLiveTests
         top.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(WindowStart, DateTimeKind.Unspecified) });
         top.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(WindowEnd, DateTimeKind.Unspecified) });
         top.Parameters.Add(new NpgsqlParameter<int> { TypedValue = 50 });
-        top.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Text, Value = DBNull.Value });
+        top.Parameters.Add(PerformanceMonitor.Darling.Storage.DatabaseFilter.All.Parameter());  /* #5245: the database list binds one text[] */
         top.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Text, Value = DBNull.Value });
         top.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Text, Value = DBNull.Value });
         top.Parameters.Add(new NpgsqlParameter<int> { TypedValue = PerformanceMonitor.Darling.Storage.TopFill.FirstCandidates(50) });  /* #5313: the round's candidate limit, bound last */

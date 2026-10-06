@@ -8,13 +8,16 @@
 
 /*
  * Shared leaf utilities for Darling Web (#1562): DOM builders, UTC->local time, value formatters, and the API
- * fetch helper. This module imports nothing (it is the base of the module DAG: app/panels/charts/pages all
- * import it, so there is no import cycle). Two rules are enforced HERE so every caller inherits them:
+ * fetch helper. This module imports only database-filter-reads.js, which is pure data and imports nothing (so it is
+ * still the base of the module DAG: app/panels/charts/pages all import it, so there is no import cycle). Two rules are
+ * enforced HERE so every caller inherits them:
  *   R4 (XSS): the el() builder assigns untrusted text ONLY through textContent / text nodes; it throws if a
  *     caller ever tries to pass raw HTML, so no data path can reach innerHTML.
  *   R5 (time): every timestamp from the API is naive UTC ISO-8601 (no zone suffix) — parseUtc() appends 'Z'
  *     so the browser reads it as UTC, then formatting localizes it to the viewer's zone.
  */
+
+import { FILTERED, readScope } from "./database-filter-reads.js";
 
 /* ─────────────────────────── DOM builders (textContent-only) ─────────────────────────── */
 
@@ -481,11 +484,19 @@ export function getPath(obj, path) {
 
 /* ─────────────────────────── API fetch ─────────────────────────── */
 
-/** Build a query string from a params object, skipping null/undefined/empty values. */
+/** Build a query string from a params object, skipping null/undefined/empty values. An array is written as repeated keys
+ *  (`database_name=A&database_name=B`), one encodeURIComponent per item, and as nothing at all when it is empty (#5245):
+ *  a name that holds a comma, a bracket or a space is one key holding exactly that name, never several. Its items are
+ *  written as given, with no trim and no dropping, so a value the server cannot use is refused there instead of being
+ *  read as "all". An array used to serialize as ONE comma-joined value, and no caller passed one before this. */
 export function buildQuery(params) {
   if (!params) return "";
   const parts = [];
   for (const [k, v] of Object.entries(params)) {
+    if (Array.isArray(v)) {
+      for (const item of v) parts.push(encodeURIComponent(k) + "=" + encodeURIComponent(item));
+      continue;
+    }
     if (v == null || v === "") continue;
     parts.push(encodeURIComponent(k) + "=" + encodeURIComponent(v));
   }
@@ -746,7 +757,7 @@ export function alertDeliveryState(a) {
 /** GET a read-only tool by its MCP name with query-string params. `signal` — see apiGet (#4191). */
 export function readTool(tool, params, signal) {
   const plan = planCustomRange(tool, params);
-  return apiGet("/api/read/" + tool + buildQuery(plan.params), signal)
+  return apiGet("/api/read/" + tool + buildQuery(withDatabaseFilter(tool, plan.params)), signal)
     .then(localizeWindowNote)
     .then((res) => finishCustomRange(res, plan));
 }
@@ -865,4 +876,98 @@ function trimToRange(node, startMs, endMs, depth) {
     }
   }
   return out;
+}
+
+/* ─────────────────────────── database filter (server page) ─────────────────────────── */
+
+/* The server page's database filter (#5244, #5245), or null for none: `{ server, databases }`. The page sets it before it
+   redraws a panel and clears it when the reader leaves the server page, as it does the custom range. It is applied here, to
+   every FILTERED read of the active server (database-filter-reads.js), so the page's ~100 `readTool` call sites need no
+   change: readTool adds one `database_name` key per chosen database. dbScopeChip below says, per panel, whether it applied. */
+let activeDatabaseFilter = null;
+
+/** `{ server, databases }` for the page's database filter. `databases` is a list of names, kept exactly as given (never
+ *  trimmed, case-folded or split on commas: a name may hold a comma). No list, an empty list or no server is no filter. */
+export function setActiveDatabaseFilter(filter) {
+  const databases = filter && Array.isArray(filter.databases) ? filter.databases.slice() : [];
+  const server = filter && typeof filter.server === "string" ? filter.server : "";
+  activeDatabaseFilter = databases.length > 0 && server !== "" ? { server, databases } : null;
+}
+
+/** A copy of the filter set by setActiveDatabaseFilter, or null for none. It does not look at the page: the server page's
+ *  own code asks it for the chosen names (readTool and dbScopeChip also need the page to be a server page). */
+export function getActiveDatabaseFilter() {
+  return activeDatabaseFilter ? { server: activeDatabaseFilter.server, databases: activeDatabaseFilter.databases.slice() } : null;
+}
+
+/* The filter belongs to the server page: a read or a panel on any other page is never touched by it. */
+function liveDatabaseFilter() {
+  const hash = typeof location !== "undefined" && location && typeof location.hash === "string" ? location.hash : "";
+  return activeDatabaseFilter && hash.startsWith("#/server/") ? activeDatabaseFilter : null;
+}
+
+/* Whether a read's own `database_name` names anything the query string would carry (buildQuery skips null, undefined, "" and
+   an empty array). */
+const namesADatabase = (value) => (Array.isArray(value) ? value.length > 0 : value != null && value !== "");
+
+/* The params a read goes out with: the chosen databases are added as an array (buildQuery writes it as repeated keys) only
+   when the page is a server page, the read is in FILTERED, `params.server` is the active server and the params name no
+   database of their own, so an explicit name wins. The caller's object is never changed. */
+function withDatabaseFilter(tool, params) {
+  const filter = liveDatabaseFilter();
+  if (!filter || !params || params.server !== filter.server || !FILTERED.has(tool) || namesADatabase(params.database_name)) return params;
+  return { ...params, database_name: filter.databases.slice() };
+}
+
+/* The deadlock reads are unfiltered by design: a deadlock spans several databases, and they are inside each graph. */
+const DEADLOCK_READS = new Set(["get_deadlock_trend", "get_deadlocks", "get_deadlock_detail"]);
+
+/**
+ * What a panel's database scope chip says, or null for no chip (#5244 D4). Only while a filter is active on the server page:
+ * an empty filter shows no chip anywhere. `read` is the panel's main read; `override` is the panel's own `dbScope` when one
+ * read feeds panels of different kinds ("server", "unfiltered" or "process-rows"), and wins over the read's class.
+ *   "filtered"     the read takes the filter
+ *   "unfiltered"   a database-scoped read that cannot take it, so it shows every database
+ *   "server"       the data has no database
+ *   "process-rows" the Deadlock Graphs panel: each graph whole, its process rows filtered in the browser
+ *   null           an identity read (the query drill and the seven plan-viewer reads), or a read no class names
+ */
+export function dbScopeState(read, override) {
+  if (!liveDatabaseFilter()) return null;
+  if (override === "server" || override === "unfiltered" || override === "process-rows") return override;
+  const scope = readScope(read);
+  return scope === "identity" ? null : scope;
+}
+
+/**
+ * The chip for dbScopeState(read, override), or null. It reuses the badge look (warning for "unfiltered", muted for "server")
+ * and tags itself with `data-db-scope`. A database name is only ever text here: the label is `el(..., { text })` and the
+ * title, which lists the names one per line, is set as an attribute, so no name is read as markup (R4).
+ */
+export function dbScopeChip(read, override) {
+  const state = dbScopeState(read, override);
+  if (state === null) return null;
+  const names = liveDatabaseFilter().databases;
+  const countText = (n) => (n === 1 ? "1 database" : n + " databases");
+  let text;
+  let title;
+  let look = "";
+  if (state === "filtered") {
+    text = names.length === 1 ? names[0] : countText(names.length);
+    title = names.join("\n");
+  } else if (state === "unfiltered") {
+    text = "All databases";
+    title =
+      "This panel's read cannot take the database filter, so it shows every database." +
+      (DEADLOCK_READS.has(read) ? " The databases are inside each deadlock graph." : "");
+    look = " band-Warning";
+  } else if (state === "process-rows") {
+    text = "Graphs: all; process rows: " + countText(names.length);
+    title = "Each graph is whole; process rows outside the chosen databases are hidden.";
+  } else {
+    text = "Server-wide";
+    title = "This data has no database, so the filter does not apply.";
+    look = " engine";
+  }
+  return el("span", { class: "badge db-scope db-scope-" + state + look, title, text, dataset: { dbScope: state } });
 }

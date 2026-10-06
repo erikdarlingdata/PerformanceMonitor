@@ -96,6 +96,55 @@ public sealed class SlowReadLogTests
     }
 
     [Fact]
+    public void ARepeatedHoursKey_RecordedAsAnArray_KeepsTheWindowOfItsFirstValue()
+    {
+        var started = new DateTime(2026, 10, 1, 12, 0, 0, DateTimeKind.Utc);
+
+        var (_, _, start, end) = SlowReadLog.NormaliseArguments(
+            new JsonObject { ["hours"] = new JsonArray("2", "24") }, null, started);
+        Assert.Equal(new DateTime(2026, 10, 1, 12, 0, 0), end);
+        Assert.Equal(new DateTime(2026, 10, 1, 10, 0, 0), start);
+
+        var (_, _, backStart, _) = SlowReadLog.NormaliseArguments(
+            new JsonObject { ["hours_back"] = new JsonArray(6, 24) }, null, started);
+        Assert.Equal(new DateTime(2026, 10, 1, 6, 0, 0), backStart);
+    }
+
+    [Fact]
+    public void ARepeatedAsOfKey_RecordedAsAnArray_EndsTheWindowAtItsFirstValue()
+    {
+        var started = new DateTime(2026, 10, 1, 12, 0, 0, DateTimeKind.Utc);
+
+        var (_, _, start, end) = SlowReadLog.NormaliseArguments(
+            new JsonObject { ["hours"] = "4", ["as_of"] = new JsonArray("2026-09-30T08:00:00Z", "2026-01-01T00:00:00Z") },
+            null, started);
+
+        Assert.Equal(new DateTime(2026, 9, 30, 8, 0, 0), end);
+        Assert.Equal(new DateTime(2026, 9, 30, 4, 0, 0), start);
+    }
+
+    [Fact]
+    public void APlainHoursValue_IsReadAsBefore_AndAnEmptyArrayDerivesNoWindow()
+    {
+        var started = new DateTime(2026, 10, 1, 12, 0, 0, DateTimeKind.Utc);
+
+        var (_, _, plainStart, plainEnd) = SlowReadLog.NormaliseArguments(
+            new JsonObject { ["hours"] = "2" }, null, started);
+        Assert.Equal(new DateTime(2026, 10, 1, 10, 0, 0), plainStart);
+        Assert.Equal(new DateTime(2026, 10, 1, 12, 0, 0), plainEnd);
+
+        var (_, _, emptyStart, emptyEnd) = SlowReadLog.NormaliseArguments(
+            new JsonObject { ["hours"] = new JsonArray() }, null, started);
+        Assert.Null(emptyStart);
+        Assert.Null(emptyEnd);
+
+        var (_, _, noAsOfStart, noAsOfEnd) = SlowReadLog.NormaliseArguments(
+            new JsonObject { ["hours"] = "2", ["as_of"] = new JsonArray() }, null, started);
+        Assert.Equal(new DateTime(2026, 10, 1, 12, 0, 0), noAsOfEnd);
+        Assert.Equal(new DateTime(2026, 10, 1, 10, 0, 0), noAsOfStart);
+    }
+
+    [Fact]
     public void Arguments_OverFourKilobytes_AreReplacedByATruncatedObject()
     {
         /* Strings over 128 characters are omitted, so the size bound is reached by many short keys. */
@@ -453,6 +502,29 @@ public sealed class SlowReadLogTests
         Assert.False(args.ContainsKey(new string('k', 100)));
         Assert.Equal("5", (string)args["top"]!);
         Assert.False(DarlingWebEndpoints.WebQueryArguments(new[] { new KeyValuePair<string, string?>("top", "5") }).ContainsKey("_dropped_keys"));
+    }
+
+    /// <summary>A repeated key is recorded as a JSON array of its values, in the order sent; a key sent once stays a
+    /// plain string, and the 64-character key rule still applies to a repeated key (#5245).</summary>
+    [Fact]
+    public void ARepeatedWebQueryKey_KeepsEveryValueAsAnArray_AndASingleKeyIsUnchanged()
+    {
+        var args = DarlingWebEndpoints.WebQueryArguments(new[]
+        {
+            new KeyValuePair<string, string?>("database_name", "A"),
+            new KeyValuePair<string, string?>("top", "5"),
+            new KeyValuePair<string, string?>("database_name", "B"),
+            new KeyValuePair<string, string?>("server", ""),
+            new KeyValuePair<string, string?>("server", "S2"),
+            new KeyValuePair<string, string?>(new string('k', 100), "x"),
+            new KeyValuePair<string, string?>(new string('k', 100), "y"),
+        });
+
+        var databases = Assert.IsType<JsonArray>(args["database_name"]);
+        Assert.Equal(new[] { "A", "B" }, databases.Select(v => (string?)v).ToArray());
+        Assert.Equal(new[] { "", "S2" }, Assert.IsType<JsonArray>(args["server"]).Select(v => (string?)v).ToArray());
+        Assert.Equal(new[] { "x", "y" }, Assert.IsType<JsonArray>(args[new string('k', 64)]).Select(v => (string?)v).ToArray());
+        Assert.Equal("5", Assert.IsAssignableFrom<JsonValue>(args["top"]).GetValue<string>());
     }
 
     [Fact]

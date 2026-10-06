@@ -18,6 +18,7 @@ using Microsoft.Extensions.Logging;
 using ModelContextProtocol.Server;
 using Npgsql;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Storage;
 
 #pragma warning disable CA1707 // MCP tools use snake_case naming convention
 
@@ -143,8 +144,20 @@ public sealed class DarlingMcpSessionTools
     /// so the two surfaces differ only in preview length; null means no truncation at all, not "unbounded
     /// preview length" — the ternary below never truncates on a null budget.
     /// </summary>
-    internal static async Task<string> GetActiveQueries(
+    internal static Task<string> GetActiveQueries(
         NpgsqlDataSource postgres, string? server_name, int hours_back, string? database_name, bool blocking_only, string? waitType,
+        int limit, int? queryTextPreviewLength, string? as_of, ILogger? logger = null, CancellationToken cancellationToken = default) =>
+        GetActiveQueries(postgres, server_name, hours_back, DatabaseFilter.One(database_name), blocking_only, waitType,
+            limit, queryTextPreviewLength, as_of, logger, cancellationToken);
+
+    /// <summary>
+    /// The same read over a SET of databases (#5245). The MCP tool and the web mirror pass <see cref="DatabaseFilter.One"/> of
+    /// their one <c>database_name</c> until a later lane wires the list. <b>The name is no longer trimmed (#5245):</b> a blank
+    /// name is <see cref="DatabaseFilter.All"/>, and every other name is compared exactly as given, so ' SalesDb' no longer
+    /// finds <c>SalesDb</c>. The wait type is still trimmed (#5235).
+    /// </summary>
+    internal static async Task<string> GetActiveQueries(
+        NpgsqlDataSource postgres, string? server_name, int hours_back, DatabaseFilter databases, bool blocking_only, string? waitType,
         int limit, int? queryTextPreviewLength, string? as_of, ILogger? logger = null, CancellationToken cancellationToken = default)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
@@ -158,7 +171,9 @@ public sealed class DarlingMcpSessionTools
         try
         {
             var now = windowEnd;
-            var filter = string.IsNullOrWhiteSpace(database_name) ? null : database_name.Trim();
+            /* #5245: the databases are a SET (DatabaseFilter), and a name is compared as given; it used to be trimmed here.
+               The one-name echo and text below stay as they were, and two or more names say "the chosen databases". */
+            var filter = databases.Describe();
             /* #5235: the wait filter is trimmed the same way, so a blank is none and the echo below names the value that was applied. */
             var waitFilter = string.IsNullOrWhiteSpace(waitType) ? null : waitType.Trim();
 
@@ -167,7 +182,7 @@ public sealed class DarlingMcpSessionTools
                the page. total_snapshots is the SQL's COUNT(*) OVER () of that same population — the number
                used to be rows.Count of an unfiltered window read, a different population from the rows. */
             var page = await DarlingSessionReader.GetActiveQueriesAsync(
-                postgres, resolved.ServerId, now.AddHours(-hours_back), now, limit + 1, filter, blocking_only, waitFilter, cancellationToken);
+                postgres, resolved.ServerId, now.AddHours(-hours_back), now, limit + 1, databases, blocking_only, waitFilter, cancellationToken);
             var rows = page.Rows;
 
             /* #4966: where the store's coverage of the window starts, in the three keys every window-floor tool writes. An answer
@@ -181,12 +196,12 @@ public sealed class DarlingMcpSessionTools
             {
                 /* A filtered miss is not a collection miss: with the filters in the query, an empty page under
                    database_name, blocking_only or wait_type means the window held no snapshot matching them. */
-                if (filter != null || blocking_only || waitFilter != null)
+                if (!databases.IsAll || blocking_only || waitFilter != null)
                 {
                     return McpHelpers.Status(
                         "empty",
                         $"No active query snapshots on {resolved.ServerName} in the last {hours_back} hour(s) matched "
-                        + DescribeActiveQueryFilters(filter, blocking_only, waitFilter)
+                        + DescribeActiveQueryFilters(databases, blocking_only, waitFilter)
                         + ". The filters were applied in SQL over the whole window, so unfiltered snapshots may well exist — drop them to see what the window holds.",
                         notice.AsHints());
                 }
@@ -318,14 +333,24 @@ public sealed class DarlingMcpSessionTools
 
     /// <summary>
     /// Names the active filters for the filtered-miss sentence, in the caller's own vocabulary, joined with " with ":
-    /// database_name, then blocking_only, then wait_type (#5235). The database_name and blocking_only wording is
+    /// database_name, then blocking_only, then wait_type (#5235). One database keeps the sentence it always had
+    /// (database_name 'X'); two or more say "the chosen databases" (#5245). The database_name and blocking_only wording is
     /// byte-identical to what it was before the wait filter existed, and Lite's twin says the same.
     /// </summary>
-    private static string DescribeActiveQueryFilters(string? databaseName, bool blockingOnly, string? waitType)
+    internal static string DescribeActiveQueryFilters(DatabaseFilter databases, bool blockingOnly, string? waitType = null)
     {
         var parts = new List<string>(3);
-        if (databaseName != null)
-            parts.Add($"database_name '{databaseName}'");
+        switch (databases.Names.Count)
+        {
+            case 0:
+                break;
+            case 1:
+                parts.Add($"database_name '{databases.Names[0]}'");
+                break;
+            default:
+                parts.Add(DatabaseFilter.ManyDatabasesDescription);
+                break;
+        }
         if (blockingOnly)
             parts.Add("blocking_only");
         if (waitType != null)

@@ -487,7 +487,8 @@ AND   hypertable_name = 'query_store_stats';";
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(start, DateTimeKind.Unspecified) });
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(rig.End, DateTimeKind.Unspecified) });
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = TestTop });
-        for (var i = 0; i < 3; i++)
+        command.Parameters.Add(PerformanceMonitor.Darling.Storage.DatabaseFilter.All.Parameter());  /* #5245: the database list binds one text[] */
+        for (var i = 0; i < 2; i++)
         {
             command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = DBNull.Value });
         }
