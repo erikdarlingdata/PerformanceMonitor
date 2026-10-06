@@ -163,7 +163,10 @@ public sealed class FinOpsPageShellTests
         var onDisk = Directory.GetFiles(
                 Path.GetDirectoryName(PathTo(Wwwroot.Concat(new[] { "js", "pages", "finops", "utilization.js" }).ToArray()))!,
                 "*.js")
-            .Select(Path.GetFileNameWithoutExtension).OrderBy(x => x, StringComparer.Ordinal).ToArray();
+            .Select(Path.GetFileNameWithoutExtension)
+            // database-box.js is the shared Database box the Index Analysis and Locking tabs import (#5231), not a tab.
+            .Where(name => name != "database-box")
+            .OrderBy(x => x, StringComparer.Ordinal).ToArray();
         Assert.Equal(TabIds.OrderBy(x => x, StringComparer.Ordinal).ToArray(), onDisk);
 
         foreach (var id in TabIds)
