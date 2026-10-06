@@ -90,7 +90,10 @@ public sealed partial class StatementCollectionCensusTests
         return dataSet.CreateDataReader();
     }
 
-    private static DataTableReader DeadlockReader(params (DateTime Time, string Graph, string? Plan)[] graphs)
+    private static DataTableReader DeadlockReader(params (DateTime Time, string Graph, string? Plan)[] graphs) =>
+        DeadlockReaderWithVictims(graphs.Select(g => (g.Time, g.Graph, g.Plan, "process1")).ToArray());
+
+    private static DataTableReader DeadlockReaderWithVictims(params (DateTime Time, string Graph, string? Plan, string Victim)[] graphs)
     {
         var dataSet = new DataSet();
         var payload = new DataTable("payload");
@@ -99,9 +102,9 @@ public sealed partial class StatementCollectionCensusTests
         payload.Columns.Add("deadlock_graph_xml", typeof(string));
         payload.Columns.Add("victim_query_plan_xml", typeof(string));
         payload.Columns.Add("source_database_name", typeof(string));
-        foreach (var (time, graph, plan) in graphs)
+        foreach (var (time, graph, plan, victim) in graphs)
         {
-            payload.Rows.Add(time, "process1", graph, (object?)plan ?? DBNull.Value, DBNull.Value);
+            payload.Rows.Add(time, victim, graph, (object?)plan ?? DBNull.Value, DBNull.Value);
         }
 
         dataSet.Tables.Add(payload);
@@ -270,23 +273,26 @@ public sealed partial class StatementCollectionCensusTests
     }
 
     [Fact]
-    public async Task Deadlocks_TwoWholeMarkerGraphsAtTheSameTime_AreBothKept_AndAReReadStoresThemAgain()
+    public async Task Deadlocks_AWholeMarkerGraph_HasAnIdentityFromItsParsedColumns_SoReReadsAreDropped_AndDifferentOnesStay()
     {
-        // A graph that does not parse and holds the canary is withheld whole. Two different ones at the same time
-        // share the marker, so they have no identity and neither is dropped.
+        // A graph that does not parse and holds the canary is withheld whole, so the stored graph is only the marker.
+        // The identity then comes from the columns read before judging it: the event time, the victim process id and
+        // the database. Two different deadlocks at the same time (different victims) keep their own identities.
         var truncatedA = "<deadlock><process-list><process id=\"process1\"><inputbuf>" + StatementScrubCanary.CanaryStatement;
         var truncatedB = "<deadlock><process-list><process id=\"process9\"><inputbuf>" + StatementScrubCanary.CanaryStatement;
 
-        var (rows, writer) = await RunDeadlocksAsync(BlockingContext(), DeadlockReader((EventTime, truncatedA, null), (EventTime, truncatedB, null)));
+        var (rows, writer) = await RunDeadlocksAsync(BlockingContext(),
+            DeadlockReaderWithVictims((EventTime, truncatedA, null, "process1"), (EventTime, truncatedB, null, "process9")));
 
         Assert.Equal(2, rows.Count);
         Assert.All(rows, r => Assert.Equal(SensitiveStatements.PlaceholderText, r.GraphXml));
-        Assert.All(rows, r => Assert.Null(DeadlocksCollector.Instance.GetIdentity(r)));
+        Assert.All(rows, r => Assert.NotNull(DeadlocksCollector.Instance.GetIdentity(r)));
+        Assert.NotEqual(DeadlocksCollector.Instance.GetIdentity(rows[0]), DeadlocksCollector.Instance.GetIdentity(rows[1]));
         AssertNoNeedle(writer);
         Assert.Equal(2, DeadlocksCollector.Instance.DropAlreadyStored(rows, new HashSet<(DateTime Time, string Graph)>()).Count);
 
-        // Recorded for the overlap (r2 L-H): a whole-marker graph has no stored identity, so every re-read inside
-        // the 10-minute overlap that withholds it whole again stores one more row. Three reads leave three rows.
+        // Three reads of the same whole-marker deadlock inside the 10-minute overlap leave one row (R4 recorded
+        // three before the identity existed).
         var stored = new HashSet<(DateTime Time, string Graph)>();
         var kept = 0;
         for (var cycle = 0; cycle < 3; cycle++)
@@ -294,9 +300,31 @@ public sealed partial class StatementCollectionCensusTests
             var (again, _) = await RunDeadlocksAsync(BlockingContext(), DeadlockReader((EventTime, truncatedA, null)));
             var survivors = DeadlocksCollector.Instance.DropAlreadyStored(again, stored);
             kept += survivors.Count;
+            foreach (var survivor in survivors)
+                stored.Add(DeadlocksCollector.Instance.GetIdentity(survivor)!.Value);
         }
 
-        Assert.Equal(3, kept);
+        Assert.Equal(1, kept);
+    }
+
+    [Fact]
+    public async Task Deadlocks_TwoWholeMarkerGraphsAtDifferentTimes_AreBothKept_AndOneWithNoVictimIdHasNoIdentity()
+    {
+        var truncated = "<deadlock><process-list><process id=\"process1\"><inputbuf>" + StatementScrubCanary.CanaryStatement;
+
+        var (rows, _) = await RunDeadlocksAsync(BlockingContext(),
+            DeadlockReader((EventTime, truncated, null), (EventTime.AddSeconds(30), truncated, null)));
+
+        Assert.Equal(2, DeadlocksCollector.Instance.DropAlreadyStored(rows,
+            new HashSet<(DateTime Time, string Graph)>()).Count);
+        var stored = new HashSet<(DateTime Time, string Graph)> { DeadlocksCollector.Instance.GetIdentity(rows[0])!.Value };
+        Assert.Single(DeadlocksCollector.Instance.DropAlreadyStored(rows, stored));
+
+        // No victim process id: nothing tells this row apart from another whole-marker row at its time, so it has
+        // no identity and is never dropped.
+        var (noVictim, _) = await RunDeadlocksAsync(BlockingContext(),
+            DeadlockReaderWithVictims((EventTime, truncated, null, "")));
+        Assert.Null(DeadlocksCollector.Instance.GetIdentity(noVictim[0]));
     }
 
     [Fact]

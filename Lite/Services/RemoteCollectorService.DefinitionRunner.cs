@@ -1280,7 +1280,7 @@ public partial class RemoteCollectorService
     /// the earliest batch event time minus one day.
     /// </summary>
     internal static string StoredIdentitySql(string targetTable) =>
-        $"SELECT deadlock_time, deadlock_graph_xml FROM {targetTable} " +
+        $"SELECT deadlock_time, {DeadlocksCollector.StoredGraphIdentitySql} FROM {targetTable} " +
         "WHERE server_id = $1 AND deadlock_graph_xml IS NOT NULL AND deadlock_graph_xml <> '' " +
         "AND deadlock_time IN (SELECT UNNEST($2)) AND collection_time >= $3";
 

@@ -61,7 +61,11 @@ internal static class StoredEventCopies
     /* Each identity is the row's server, its event time and the event's own text. An event's XML is keyed by
        XmlKey, so the grouped side holds 8 bytes for it instead of the XML, which averages about 13,000 characters in
        a blocked process report. Every other part is compared exactly. */
-    private static readonly string[] BlockedProcessReportIdentity = XmlEventIdentity("blocked_process_report_xml", "blocked_report_id");
+    private static readonly string[] BlockedProcessReportIdentity = XmlEventIdentity("blocked_process_report_xml", "blocked_report_id",
+        /* #4348 (R4b): a report withheld whole is the marker, so its identity adds the sessions, database and wait
+           resource the collector parsed before judging it; a marker row naming neither session is never collapsed. */
+        ["database_name", "blocked_spid", "blocked_ecid", "blocking_spid", "blocking_ecid", "wait_resource"],
+        "blocked_spid IS NULL AND blocking_spid IS NULL");
 
     /* A long query completion stores no event XML: its statement text, session and XE event_sequence stand in for
        it, all compared exactly. */
@@ -69,20 +73,33 @@ internal static class StoredEventCopies
         ["server_id", "database_name", "event_time", "statement_text", "session_id", "event_sequence",
          .. NeverCollapsed("statement_text", "long_query_completion_id", "event_time")];
 
-    private static readonly string[] SystemHealthEventIdentity = XmlEventIdentity("event_xml", "system_health_event_id");
+    /* #4348 (R4b): an event withheld whole is the marker, so its identity adds the event type the collector read
+       beside it; a marker row with no event type is never collapsed. */
+    private static readonly string[] SystemHealthEventIdentity = XmlEventIdentity("event_xml", "system_health_event_id",
+        ["event_type"], "event_type IS NULL");
 
     /* The one place an event's XML becomes its key: DuckDB's 64-bit hash() of the whole text. Two different events
        that share a server and event time merge only if their XML collides in 64 bits, about 2^-64 per pair. A merge
        hides one row from one read: nothing stores the key, and nothing is deleted. */
     private static string XmlKey(string xmlColumn) => $"hash({xmlColumn})";
 
-    private static string[] XmlEventIdentity(string xmlColumn, string idColumn) =>
-        ["server_id", "event_time", XmlKey(xmlColumn), .. NeverCollapsed(xmlColumn, idColumn, "event_time")];
+    private static string[] XmlEventIdentity(string xmlColumn, string idColumn, string[] markerParts, string markerHasNoIdentity) =>
+        ["server_id", "event_time", XmlKey(xmlColumn), .. WholeMarkerParts(xmlColumn, markerParts),
+         .. NeverCollapsed(xmlColumn, idColumn, "event_time", markerHasNoIdentity)];
 
-    /* A deadlock's identity is its server, time and exact graph. */
+    /* #4348 (R4b): an event's text the statement filter withheld WHOLE is the marker, the same for every such event,
+       so the text cannot tell two events at one time apart. Its identity adds the non-text columns the collector
+       parsed from the raw event before judging it. Each part is the column for a marker row and NULL for every other
+       row, so a row with real text keeps the identity it had. */
+    private static IEnumerable<string> WholeMarkerParts(string textColumn, string[] columns) =>
+        columns.Select(column => $"CASE WHEN {textColumn} = '{SensitiveStatements.PlaceholderText}' THEN {column} END");
+
+    /* A deadlock's identity is its server, time and exact graph; a graph withheld whole adds its victim process id and
+       database, and a marker graph with no victim process id is never collapsed. */
     private static readonly string[] DeadlockIdentity =
         ["server_id", "deadlock_time", XmlKey("deadlock_graph_xml"),
-         .. NeverCollapsed("deadlock_graph_xml", "deadlock_id", "deadlock_time", neverCollapseWithheld: true)];
+         .. WholeMarkerParts("deadlock_graph_xml", ["victim_process_id", "database_name"]),
+         .. NeverCollapsed("deadlock_graph_xml", "deadlock_id", "deadlock_time", "victim_process_id IS NULL OR victim_process_id = ''")];
 
     /// <summary>The identity tuple a deadlock count distinguishes by: server, time and exact graph, plus the two
     /// never-collapse parts, so a row with no graph or no time counts on its own. The grouped side of
@@ -99,15 +116,14 @@ internal static class StoredEventCopies
     /* A row with no usable identity (no text, or no event time) is never collapsed: these parts add the row's own
        id and collection_time to the key for it alone, and are NULL (one shared group) for every other row. They
        test the raw text, never its key, because hash(NULL) is not NULL. */
-    private static string[] NeverCollapsed(string textColumn, string idColumn, string timeColumn, bool neverCollapseWithheld = false)
+    private static string[] NeverCollapsed(string textColumn, string idColumn, string timeColumn, string? markerHasNoIdentity = null)
     {
         var unusable = $"{textColumn} IS NULL OR {textColumn} = '' OR {timeColumn} IS NULL";
-        /* #4348: an event's XML that the statement filter withheld WHOLE is the marker text, the same for every such
-           event, so two different events at the same time would share one identity and read as one. Such a row is
-           kept on its own, like a row with no text (deadlock graphs). */
-        if (neverCollapseWithheld)
+        /* #4348: a withheld-whole marker row whose parsed columns are all missing has nothing to tell it apart from
+           another marker row at its time, so it is kept on its own, like a row with no text. */
+        if (markerHasNoIdentity is not null)
         {
-            unusable += $" OR {textColumn} = '{SensitiveStatements.PlaceholderText}'";
+            unusable += $" OR ({textColumn} = '{SensitiveStatements.PlaceholderText}' AND ({markerHasNoIdentity}))";
         }
 
         return [$"CASE WHEN {unusable} THEN {idColumn} END", $"CASE WHEN {unusable} THEN collection_time END"];

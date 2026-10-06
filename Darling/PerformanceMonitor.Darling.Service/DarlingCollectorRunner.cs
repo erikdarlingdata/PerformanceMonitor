@@ -4127,7 +4127,7 @@ public sealed class DarlingCollectorRunner
     /// hypertable's partitioning column) for chunk exclusion. A null graph is never an identity.
     /// </summary>
     internal const string StoredDeadlockIdentitySql =
-        "SELECT deadlock_time, deadlock_graph_xml FROM deadlocks " +
+        "SELECT deadlock_time, " + DeadlocksCollector.StoredGraphIdentitySql + " FROM deadlocks " +
         "WHERE server_id = $1 AND deadlock_graph_xml IS NOT NULL AND deadlock_graph_xml <> '' " +
         "AND deadlock_time = ANY($2::timestamp[]) AND collection_time >= $3";
 
