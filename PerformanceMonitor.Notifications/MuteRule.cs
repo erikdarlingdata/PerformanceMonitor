@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using PerformanceMonitor.Analysis;
 
 namespace PerformanceMonitor.Notifications;
 
@@ -185,6 +186,44 @@ public class AlertMuteContext
     public string? QueryText { get; set; }
     public string? WaitType { get; set; }
     public string? JobName { get; set; }
+
+    /// <summary>The longest query-text pattern a mute dialog pre-fills from an alert.</summary>
+    public const int SeedQueryTextMax = 200;
+
+    /// <summary>The query-text pattern a mute dialog pre-fills for this alert, or null for none. #4348: a statement
+    /// the collector withheld reads as <see cref="WithheldStatementMarker.Text"/>, and a rule on that text
+    /// would "match" every withheld statement and nothing else, so no pattern is seeded from it. #5320: the text
+    /// parsed out of a stored alert's detail may predate the statement filter (alert rows written before the
+    /// filter were never judged), so the WHOLE text goes through <paramref name="judgeStatement"/> first and the
+    /// cut to <see cref="SeedQueryTextMax"/> is taken from the judged text, never from the stored text (a cut
+    /// first could leave half of a statement the whole of it names). A statement the judge withholds seeds
+    /// nothing. This project cannot reference the project that holds the judge, so each dialog passes
+    /// <c>SensitiveStatements.Text</c>.</summary>
+    /// <param name="judgeStatement">The shared statement judge: returns the text unchanged when it is clean and
+    /// the withheld marker (or null) when it is named. Required: there is no unjudged overload.</param>
+    public string? SeedQueryTextPattern(Func<string?, string?> judgeStatement)
+    {
+        ArgumentNullException.ThrowIfNull(judgeStatement);
+        if (string.IsNullOrEmpty(QueryText))
+        {
+            return null;
+        }
+
+        var judged = judgeStatement(QueryText);
+        if (string.IsNullOrEmpty(judged) || WithheldStatementMarker.IsMarker(judged))
+        {
+            return null;
+        }
+
+        if (judged.Length <= SeedQueryTextMax)
+        {
+            return judged;
+        }
+
+        /* Do not cut between the halves of a surrogate pair. */
+        var cut = char.IsHighSurrogate(judged[SeedQueryTextMax - 1]) ? SeedQueryTextMax - 1 : SeedQueryTextMax;
+        return judged.Substring(0, cut);
+    }
 
     /// <summary>
     /// Extracts context fields (Database, Query, Wait Type, Job Name) from the

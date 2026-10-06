@@ -13,6 +13,7 @@ using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Numerics;
+using System.Threading;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using PerformanceMonitor.Analysis.Baselines;
@@ -41,14 +42,31 @@ public partial class LocalDataService
     /// The lock prevents CHECKPOINT and compaction from reorganizing the database file
     /// while this connection is reading from it.
     /// </summary>
-    internal async Task<LockedConnection> OpenConnectionAsync()
+    internal Task<LockedConnection> OpenConnectionAsync() => OpenConnectionAsync(timer: null, CancellationToken.None);
+
+    /// <summary>
+    /// The same open, abandonable and timed (#5371). A token that can fire takes <c>AcquireReadLock(CancellationToken)</c>,
+    /// which polls the lock and throws <see cref="OperationCanceledException"/> when the token fires, so a superseded read
+    /// stops waiting behind a parked writer instead of queueing for it. <see cref="CancellationToken.None"/> takes the
+    /// original uninterruptible path, so every read that passes no token is unchanged. <paramref name="timer"/> records the
+    /// lock wait and the open apart; null times nothing.
+    /// </summary>
+    internal async Task<LockedConnection> OpenConnectionAsync(ReadPhaseTimer? timer, CancellationToken cancellationToken)
     {
-        var readLock = _duckDb.AcquireReadLock();
+        IDisposable readLock;
+        using (timer?.Measure(ReadPhaseTimer.LockWait))
+        {
+            readLock = _duckDb.AcquireReadLock(cancellationToken);
+        }
+
         try
         {
-            var connection = _duckDb.CreateConnection();
-            await connection.OpenAsync();
-            return new LockedConnection(connection, readLock);
+            using (timer?.Measure(ReadPhaseTimer.Open))
+            {
+                var connection = _duckDb.CreateConnection();
+                await connection.OpenAsync(cancellationToken);
+                return new LockedConnection(connection, readLock);
+            }
         }
         catch
         {

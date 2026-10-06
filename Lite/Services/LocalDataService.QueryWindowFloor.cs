@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Threading;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using PerformanceMonitor.Analysis.Baselines;
@@ -286,21 +287,23 @@ public partial class LocalDataService
     /// one (no row and no logged run of that collector in the window) gives way to the other's. A tool that reads only the
     /// first collector's rows (the report XML) passes <c>includeAlsoCovered: false</c> to probe that collector alone.</para>
     /// </summary>
-    public async Task<DateTime?> GetQueryWindowFloorAsync(QueryWindowRelation relation, int serverId, DateTime startUtc, DateTime endUtc, ServerClock? serverClock = null, bool includeAlsoCovered = true)
+    public async Task<DateTime?> GetQueryWindowFloorAsync(QueryWindowRelation relation, int serverId, DateTime startUtc, DateTime endUtc, ServerClock? serverClock = null, bool includeAlsoCovered = true, CancellationToken cancellationToken = default)
     {
-        var own = await GetOwnQueryWindowFloorAsync(relation, serverId, startUtc, endUtc, serverClock);
+        var own = await GetOwnQueryWindowFloorAsync(relation, serverId, startUtc, endUtc, serverClock, cancellationToken);
         return includeAlsoCovered && QueryWindowRelationAlsoCoveredBy(relation) is QueryWindowRelation also
-            ? EarlierCoverageFloor(own, await GetOwnQueryWindowFloorAsync(also, serverId, startUtc, endUtc, serverClock))
+            ? EarlierCoverageFloor(own, await GetOwnQueryWindowFloorAsync(also, serverId, startUtc, endUtc, serverClock, cancellationToken))
             : own;
     }
 
     /// <summary>One relation's own probe, which <see cref="GetQueryWindowFloorAsync"/> documents. Each call opens and releases its
     /// own connection, so the two answers of a grid fed by two collectors never nest the non-recursive read lock.</summary>
-    private async Task<DateTime?> GetOwnQueryWindowFloorAsync(QueryWindowRelation relation, int serverId, DateTime startUtc, DateTime endUtc, ServerClock? serverClock)
+    private async Task<DateTime?> GetOwnQueryWindowFloorAsync(QueryWindowRelation relation, int serverId, DateTime startUtc, DateTime endUtc, ServerClock? serverClock, CancellationToken cancellationToken = default)
     {
         var view = QueryWindowRelationView(relation);
         using var _q = TimeQuery("GetQueryWindowFloorAsync", $"{view} window floor");
-        using var connection = await OpenConnectionAsync();
+        /* #5371: a token (the Collection Health pass's) reaches the lock wait, the open and the two statements of the generic
+           path below; a caller that passes none keeps the original uninterruptible read. */
+        using var connection = await OpenConnectionAsync(timer: null, cancellationToken);
 
         var collector = QueryWindowRelationCollector(relation);
         var timeColumn = QueryWindowRelationTimeColumn(relation);
@@ -332,7 +335,7 @@ SELECT LEAST(
             windowCommand.Parameters.Add(new DuckDBParameter { Value = serverId });
             windowCommand.Parameters.Add(new DuckDBParameter { Value = startUtc });
             windowCommand.Parameters.Add(new DuckDBParameter { Value = endUtc });
-            firstInWindow = await windowCommand.ExecuteScalarAsync() is DateTime first ? first : null;
+            firstInWindow = await windowCommand.ExecuteScalarAsync(cancellationToken) is DateTime first ? first : null;
         }
 
         if (firstInWindow is not DateTime firstRow || firstRow <= startUtc)
@@ -350,7 +353,7 @@ AND   {timeColumn} < $2
 LIMIT 1";
             olderCommand.Parameters.Add(new DuckDBParameter { Value = serverId });
             olderCommand.Parameters.Add(new DuckDBParameter { Value = startUtc });
-            if (await olderCommand.ExecuteScalarAsync() is not null)
+            if (await olderCommand.ExecuteScalarAsync(cancellationToken) is not null)
             {
                 return startUtc;
             }

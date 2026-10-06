@@ -745,7 +745,7 @@ COPY (
     SELECT {projection}
     FROM read_parquet('{EscapePath(file.Path)}')
     GROUP BY {string.Join(", ", key)}
-) TO '{EscapePath(temp)}' (FORMAT PARQUET, COMPRESSION ZSTD)";
+) TO '{EscapePath(temp)}' ({ParquetCompaction.ArchiveCopyOptions})";
                 await command.ExecuteNonQueryAsync(cancellationToken);
             });
 

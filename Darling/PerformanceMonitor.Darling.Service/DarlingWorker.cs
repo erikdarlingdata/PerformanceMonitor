@@ -12736,8 +12736,24 @@ AND   j.hypertable_name = '{relation}'", connection))
         }
 
         _logger.LogInformation("[{Server}] fetch_plan returned a {Length}-char plan", displayName, planXml.Length);
-        return new CommandOutcome(true, "plan fetched",
-            JsonSerializer.Serialize(new { success = true, planXml }));
+        return PlanResultOutcome("plan fetched", planXml);
+    }
+
+    /// <summary>
+    /// #5320 (the Darling twin of Lite's <c>LivePlanDisplay.Filter</c>): the one place the <c>fetch_plan</c> and
+    /// <c>execute_actual_plan</c> handlers turn a plan read live from the monitored server into the command's
+    /// <c>result_json</c>. The plan is judged whole by the statement filter BEFORE it is serialized, so the stored
+    /// result never holds the raw text (the viewer deletes the row after it reads it, but a row it never reads stays
+    /// until the terminal-command purge). The same instance comes back when nothing is named; the whole-plan
+    /// marker comes back when the plan cannot be judged, and the viewer shows that as withheld. Nothing cuts the
+    /// plan here, so there is no second judge after a cut.
+    /// </summary>
+    internal static CommandOutcome PlanResultOutcome(string resultStatus, string planXml)
+    {
+        /* A block body, not an expression body: the statement-column census reads method bodies, and it only sees a
+           block (#5367 review round 2, N1). */
+        return new(true, resultStatus,
+            JsonSerializer.Serialize(new { success = true, planXml = SensitiveStatements.Xml(planXml) }));
     }
 
     /// <summary>The SQL command timeout (seconds) for the live active-queries DMV read. A "what is running now"
@@ -13129,8 +13145,7 @@ LIMIT 1";
             }
 
             _logger.LogInformation("[{Server}] execute_actual_plan captured a {Length}-char actual plan", displayName, planXml.Length);
-            return new CommandOutcome(true, "actual plan captured",
-                JsonSerializer.Serialize(new { success = true, planXml }));
+            return PlanResultOutcome("actual plan captured", planXml);
         }
         catch (OperationCanceledException)
         {

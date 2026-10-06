@@ -547,6 +547,9 @@ AND   (
     {
         var rows = new List<Row>();
         var regressionReported = false;
+        /* #4348: a job step's message can echo the statement it ran; it goes through the statement filter where it
+           first enters a row. */
+        var scrub = context.BeginStatementScrub();
 
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -584,7 +587,7 @@ AND   (
                 RunDateTime = reader.IsDBNull(9) ? null : reader.GetDateTime(9),
                 RunDurationSeconds = reader.IsDBNull(10) ? 0 : Convert.ToInt64(reader.GetValue(10), CultureInfo.InvariantCulture),
                 RetriesAttempted = reader.IsDBNull(11) ? 0 : Convert.ToInt32(reader.GetValue(11), CultureInfo.InvariantCulture),
-                Message = reader.IsDBNull(12) ? null : reader.GetString(12),
+                Message = reader.IsDBNull(12) ? null : scrub.Text(reader.GetString(12)),
             });
         }
 

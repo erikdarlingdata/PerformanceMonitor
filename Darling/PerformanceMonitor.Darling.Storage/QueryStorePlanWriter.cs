@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Darling.Storage;
 
@@ -53,6 +54,16 @@ public static class QueryStorePlanWriter
     /// fetch re-selects it every cycle forever, which is the old oversized-plan stall reborn through the
     /// probe. Readers are unaffected — a NULL digest joins to no dimension row, which renders exactly like
     /// the absent content it records.</para>
+    ///
+    /// <para>#4348: each plan goes through the statement filter BEFORE its digest is taken, so the dimension
+    /// row, the digest and the map row all carry the filtered plan (a named statement's text and values are the
+    /// marker; the rest of the plan is unchanged). A plan the filter could NOT fully judge because its per-batch
+    /// budget ran out (<see cref="SensitiveStatements.Session.TryXml"/> false) is DROPPED from the batch: the
+    /// map row is what makes a plan "fetched", so a plan with no map row reads as missing and the probe
+    /// refetches it next cycle under a fresh budget, where storing the marker would stand for that plan for
+    /// good. A dropped plan is not in the returned list. The caller's byte accounting measures the raw fetch
+    /// and is not affected. <paramref name="scrub"/> is the cycle's session; null starts a standalone one for
+    /// this batch.</para>
     /// </summary>
     public static async Task<IReadOnlyList<long>> WriteAsync(
         NpgsqlConnection connection,
@@ -61,6 +72,7 @@ public static class QueryStorePlanWriter
         IReadOnlyList<FetchedPlan> plans,
         DateTime collectionTimeUtc,
         int commandTimeoutSeconds,
+        SensitiveStatements.Session? scrub = null,
         CancellationToken cancellationToken = default)
     {
         if (connection is null)
@@ -79,6 +91,7 @@ public static class QueryStorePlanWriter
             return landed;
         }
 
+        scrub ??= new SensitiveStatements.Session();
         var batch = new PayloadDimensionBatch();
         var mapServerIds = new List<int>(plans.Count);
         var mapDatabases = new List<string>(plans.Count);
@@ -94,13 +107,20 @@ public static class QueryStorePlanWriter
 
         foreach (var plan in plans)
         {
+            /* #4348: judged before the digest, so the digest is of the filtered plan; an unjudged plan is dropped
+               (see the method comment) and never reaches the batch or the map. */
+            if (!scrub.TryXml(plan.PlanXml, out var planXml))
+            {
+                continue;
+            }
+
             landed.Add(plan.PlanId);
 
             byte[]? digest = null;
-            if (!string.IsNullOrEmpty(plan.PlanXml))
+            if (!string.IsNullOrEmpty(planXml))
             {
-                digest = PayloadDimensions.Digest(plan.PlanXml!);
-                batch.Add(PayloadDimensions.QueryPlanDimTable, digest, plan.PlanXml!);
+                digest = PayloadDimensions.Digest(planXml!);
+                batch.Add(PayloadDimensions.QueryPlanDimTable, digest, planXml!);
             }
 
             mapServerIds.Add(serverId);
@@ -108,6 +128,11 @@ public static class QueryStorePlanWriter
             mapPlanIds.Add(plan.PlanId);
             mapDigests.Add(digest);
             mapHashes.Add(plan.PlanHash);
+        }
+
+        if (landed.Count == 0)
+        {
+            return landed;
         }
 
         using var transaction = await connection.BeginTransactionAsync(cancellationToken);

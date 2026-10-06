@@ -556,6 +556,9 @@ OUTER APPLY
         var inlinePlan = InlinePlanCapture(context);
         var deferredIdentity = DeferredPlanIdentity(context);
         var identityOrdinal = IdentityOrdinal(context);
+        /* #4348: the inline plan is filtered where it first enters a row (the deferred fetch's plans are filtered in
+           QueryStatsCollector.ReadPlanFetchAsync). */
+        var scrub = context.BeginStatementScrub();
 
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -589,7 +592,7 @@ OUTER APPLY
                 reader.IsDBNull(26) ? null : reader.GetString(26),
                 /* query_plan_xml is the trailing column present only when CapturePlanXml spliced it
                    into every branch's SELECT (ordinal 27); the short-circuit skips it entirely when off. */
-                inlinePlan && !reader.IsDBNull(27) ? reader.GetString(27) : null,
+                inlinePlan && !reader.IsDBNull(27) ? scrub.Xml(reader.GetString(27)) : null,
                 /* #3392: the plan's measured size rides the same splice at ordinal 28, so the same
                    short-circuit covers it. Convert rather than GetInt64: DATALENGTH's return type widens to
                    bigint only for the max types, and a provider that hands back an Int32 here would throw on
