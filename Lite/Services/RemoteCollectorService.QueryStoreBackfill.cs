@@ -630,6 +630,7 @@ public partial class RemoteCollectorService
                #5377: each live read holds it in a scope that ends before the archive read, which takes the
                limiter first and then its own lock, so a read that waits for the limiter holds no lock. */
             bool liveHit;
+            DateTime? liveMin = null;
             using (var readLock = _duckDb.AcquireReadLock(cancellationToken))
             {
                 using var conn = _duckDb.CreateConnection();
@@ -640,40 +641,40 @@ public partial class RemoteCollectorService
                 exists.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = databaseName });
                 exists.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = floorLimit });
                 liveHit = await exists.ExecuteScalarAsync(cancellationToken) is not null;
+
+                /* #5377 (review F1): the live MIN is read HERE, before the archive read, whether or not the archive
+                   turns out to need it. The two reads are no longer under one lock, and the combination is exact only
+                   in this order: a hot row that moves to Parquet after this scope bumps the archive generation before
+                   the archive read samples it, so the view is re-read and holds the row. Reading the live MIN after the
+                   archive read missed a row that moved in between (the floor came out too high). */
+                if (!liveHit)
+                {
+                    using var min = conn.CreateCommand();
+                    min.CommandText = $"SELECT MIN({columnName}) FROM {tableName} WHERE server_id = $1 AND {databaseColumnName} = $2 AND collection_time > $3";
+                    min.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = serverId });
+                    min.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = databaseName });
+                    min.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = floorLimit });
+                    if (await min.ExecuteScalarAsync(cancellationToken) is DateTime dt)
+                        liveMin = dt;
+                }
             }
 
-            /* The archive side, cached per archive generation under a key with no limit in it: the oldest
-               collection_time and the oldest value over the whole archived history for this database. A row
-               at or before the limit exists exactly when that oldest collection_time is <= the limit; and when
-               none does, every archived row is newer than the limit, so the unbounded oldest value IS the
-               bounded one. Live and archive combine as the lesser value / the OR of the two probes. */
-            var archivedRow = await ReadArchiveViewAsync(
-                $"floor|{tableName}|{columnName}|{databaseColumnName}|{serverId}|{databaseName}",
-                $"SELECT MIN(collection_time), MIN({columnName}) FROM v_{tableName} WHERE server_id = $1 AND {databaseColumnName} = $2",
-                [serverId, databaseName], cancellationToken,
-                readRow: reader => (reader.IsDBNull(0) ? (DateTime?)null : reader.GetDateTime(0),
-                                    reader.IsDBNull(1) ? (DateTime?)null : reader.GetDateTime(1)));
-            var (archivedOldestCollection, archivedMin) =
-                archivedRow is ValueTuple<DateTime?, DateTime?> archivedPair ? archivedPair : (null, null);
+            /* The archive side (#5377 grouped): the oldest collection_time and the oldest value over the whole archived
+               history for this database come out of the SAME per-table grouped read the watermark map uses (same table,
+               value column and database column), so the backfill shares its cache and single flight and costs no
+               per-database scan. A database the archive does not hold is absent from the map: null, null, as the old
+               per-database read returned. A row at or before the limit exists exactly when the oldest collection_time
+               is <= the limit; when none does, every archived row is newer than the limit, so the unbounded oldest value
+               IS the bounded one. Live and archive combine as the lesser value / the OR of the two probes. */
+            var map = await ReadArchivedDatabaseMapAsync(tableName, columnName, databaseColumnName, cancellationToken);
+            map.TryGetValue((serverId, databaseName), out var archivedEntry);
+            var archivedOldestCollection = archivedEntry.OldestCollection;
+            var archivedMin = archivedEntry.OldestValue;
 
             if (liveHit || archivedOldestCollection <= floorLimit)
             {
                 _readFailures.RecordSuccess(serverId, databaseName);
                 return floorLimit;
-            }
-
-            DateTime? liveMin = null;
-            using (var readLock = _duckDb.AcquireReadLock(cancellationToken))
-            {
-                using var conn = _duckDb.CreateConnection();
-                await conn.OpenAsync(cancellationToken);
-                using var min = conn.CreateCommand();
-                min.CommandText = $"SELECT MIN({columnName}) FROM {tableName} WHERE server_id = $1 AND {databaseColumnName} = $2 AND collection_time > $3";
-                min.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = serverId });
-                min.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = databaseName });
-                min.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = floorLimit });
-                if (await min.ExecuteScalarAsync(cancellationToken) is DateTime dt)
-                    liveMin = dt;
             }
 
             _readFailures.RecordSuccess(serverId, databaseName);

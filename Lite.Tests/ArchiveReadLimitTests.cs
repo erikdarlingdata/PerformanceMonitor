@@ -201,6 +201,98 @@ public sealed class ArchiveWatermarkSingleFlightTests
         Assert.Equal(5, await leader);
         Assert.Equal(5, await cache.GetOrReadAsync("k", 1, () => Task.FromResult<object?>("never")));
     }
+
+    private static TaskCompletionSource<object?> Gate() => new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    [Fact]
+    public async Task AfterAGenerationBump_EightCallers_CauseExactlyOneNewRead_WhileAnOlderReadIsStillInFlight()
+    {
+        /* Review F2: a leader that sampled generation 1 is still queued for a slot when an archive pass bumps to 2.
+           Every later caller samples 2 and finds the generation-1 flight. They must take it over, not each run a
+           whole-archive read of their own. */
+        var cache = new ArchiveWatermarkCache();
+        int oldReads = 0, newReads = 0;
+        var oldRelease = Gate();
+        var newRelease = Gate();
+        var oldLeader = cache.GetOrReadAsync("k", 1, () => { Interlocked.Increment(ref oldReads); return oldRelease.Task; });
+
+        var callers = Enumerable.Range(0, 8)
+            .Select(_ => cache.GetOrReadAsync("k", 2, () => { Interlocked.Increment(ref newReads); return newRelease.Task; }))
+            .ToArray();
+        await Task.Delay(100, TestContext.Current.CancellationToken);
+        Assert.Equal(1, Volatile.Read(ref newReads));
+
+        newRelease.SetResult("new");
+        foreach (var value in await Task.WhenAll(callers))
+            Assert.Equal("new", value);
+        Assert.Equal(1, newReads);
+
+        /* The old leader finishing late neither overwrites the newer entry nor costs another read. */
+        oldRelease.SetResult("old");
+        Assert.Equal("old", await oldLeader);
+        Assert.Equal("new", await cache.GetOrReadAsync("k", 2, () => Task.FromResult<object?>("never")));
+        Assert.Equal((1, 1), (oldReads, newReads));
+    }
+
+    [Fact]
+    public async Task TheOldLeaderFinishingFirst_DoesNotDropTheTakeoverFlight()
+    {
+        var cache = new ArchiveWatermarkCache();
+        var newReads = 0;
+        var oldRelease = Gate();
+        var newRelease = Gate();
+        var oldLeader = cache.GetOrReadAsync("k", 1, () => oldRelease.Task);
+        var takeover = cache.GetOrReadAsync("k", 2, () => { Interlocked.Increment(ref newReads); return newRelease.Task; });
+
+        oldRelease.SetResult("old");
+        await oldLeader;
+
+        /* A caller after the old read ended still joins the takeover read rather than starting a third. */
+        var late = cache.GetOrReadAsync("k", 2, () => { Interlocked.Increment(ref newReads); return Task.FromResult<object?>("late"); });
+        await Task.Delay(100, TestContext.Current.CancellationToken);
+        Assert.False(late.IsCompleted);
+        newRelease.SetResult("new");
+        Assert.Equal("new", await takeover);
+        Assert.Equal("new", await late);
+        Assert.Equal(1, newReads);
+    }
+
+    [Fact]
+    public async Task ACancelledTakeoverLeader_DoesNotPoisonItsJoiners()
+    {
+        var cache = new ArchiveWatermarkCache();
+        var oldRelease = Gate();
+        _ = cache.GetOrReadAsync("k", 1, () => oldRelease.Task);
+        using var leaderCts = new CancellationTokenSource();
+        var leader = cache.GetOrReadAsync("k", 2, async () =>
+        {
+            await Task.Delay(Timeout.Infinite, leaderCts.Token);
+            return null;
+        });
+        var joiner = cache.GetOrReadAsync("k", 2, () => Task.FromResult<object?>("joiner read"));
+        await Task.Delay(100, TestContext.Current.CancellationToken);
+        Assert.False(joiner.IsCompleted);
+
+        leaderCts.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => leader);
+        Assert.Equal("joiner read", await joiner.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken));
+        oldRelease.SetResult("old");
+    }
+
+    [Fact]
+    public async Task AFailedTakeoverRead_FailsItsJoiners_AndStoresNothing()
+    {
+        var cache = new ArchiveWatermarkCache();
+        var oldRelease = Gate();
+        var fail = Gate();
+        _ = cache.GetOrReadAsync("k", 1, () => oldRelease.Task);
+        var callers = Enumerable.Range(0, 3).Select(_ => cache.GetOrReadAsync("k", 2, () => fail.Task)).ToArray();
+        fail.SetException(new InvalidOperationException("boom"));
+        foreach (var caller in callers)
+            await Assert.ThrowsAsync<InvalidOperationException>(() => caller);
+        Assert.Equal(9, await cache.GetOrReadAsync("k", 2, () => Task.FromResult<object?>(9)));
+        oldRelease.SetResult("old");
+    }
 }
 
 /// <summary>
@@ -260,6 +352,19 @@ public sealed class ArchiveGroupedWatermarkReadTests : IDisposable
 
         public Task<DateTime?> TimeAsync(int serverId, string table, string column, CancellationToken cancellationToken = default) =>
             GetLastCollectedTimeAsync(serverId, table, column, cancellationToken);
+
+        public Task<(DateTime? Value, bool FromUtcColumn)> FrameAsync(int serverId, CancellationToken cancellationToken = default) =>
+            GetLastCollectedTimeWithFrameAsync(serverId, Table, Column, "collection_time", cancellationToken);
+
+        public Task<long?> IdentityAsync(int serverId, CancellationToken cancellationToken = default) =>
+            GetLastCollectedInstanceIdAsync(serverId, Table, "collection_id", cancellationToken);
+
+        public Task<bool> SuccessAsync(int serverId, string collector, CancellationToken cancellationToken = default) =>
+            HasPriorCollectorSuccessAsync(serverId, collector, cancellationToken);
+
+        public Task<DateTime?> BackfillFloorAsync(
+            int serverId, string databaseName, DateTime floorLimit, CancellationToken cancellationToken = default) =>
+            GetMinCollectedTimeForDatabaseAsync(serverId, Table, Column, "database_name", databaseName, floorLimit, cancellationToken);
 
         public int CacheEntryCount()
         {
@@ -547,6 +652,229 @@ public sealed class ArchiveGroupedWatermarkReadTests : IDisposable
         first.Dispose();
         second.Dispose();
         Assert.Equal(2, limiter.Available);
+    }
+
+    /* ---- The Query Store backfill's floor read, grouped (review check 5) ---- */
+
+    /// <summary>The old per-database floor answer, run straight against the live table and the view (the oracle).</summary>
+    private async Task<DateTime?> OldBackfillAnswerAsync(int serverId, string db, DateTime floorLimit)
+    {
+        using var conn = _duckDb.CreateConnection();
+        await conn.OpenAsync(TestContext.Current.CancellationToken);
+
+        async Task<object?> ScalarAsync(string sql)
+        {
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = sql;
+            cmd.Parameters.Add(new DuckDBParameter { Value = serverId });
+            cmd.Parameters.Add(new DuckDBParameter { Value = db });
+            cmd.Parameters.Add(new DuckDBParameter { Value = floorLimit });
+            return await cmd.ExecuteScalarAsync(TestContext.Current.CancellationToken);
+        }
+
+        var liveHit = await ScalarAsync($"SELECT 1 FROM {Table} WHERE server_id = $1 AND database_name = $2 AND collection_time <= $3 LIMIT 1") is not null;
+        using var archiveCmd = conn.CreateCommand();
+        archiveCmd.CommandText = $"SELECT MIN(collection_time), MIN({Column}) FROM v_{Table} WHERE server_id = $1 AND database_name = $2";
+        archiveCmd.Parameters.Add(new DuckDBParameter { Value = serverId });
+        archiveCmd.Parameters.Add(new DuckDBParameter { Value = db });
+        DateTime? oldest = null, archivedMin = null;
+        using (var reader = await archiveCmd.ExecuteReaderAsync(TestContext.Current.CancellationToken))
+        {
+            if (await reader.ReadAsync(TestContext.Current.CancellationToken))
+            {
+                oldest = reader.IsDBNull(0) ? null : reader.GetDateTime(0);
+                archivedMin = reader.IsDBNull(1) ? null : reader.GetDateTime(1);
+            }
+        }
+
+        if (liveHit || oldest <= floorLimit)
+            return floorLimit;
+        var liveMin = await ScalarAsync($"SELECT MIN({Column}) FROM {Table} WHERE server_id = $1 AND database_name = $2 AND collection_time > $3") as DateTime?;
+        return liveMin is DateTime l && archivedMin is DateTime a ? (l <= a ? l : a) : liveMin ?? archivedMin;
+    }
+
+    [Fact]
+    public async Task TheBackfillFloor_EqualsTheOldPerDatabaseAnswer_OnAHotAndParquetStore()
+    {
+        await SeedHotAndParquetAsync();
+        var reads = new Reads(_duckDb);
+
+        DateTime[] limits = [Now.AddHours(-10), Now.AddHours(-7), Now.AddHours(-6), Now.AddHours(-6).AddMinutes(30),
+            Now.AddHours(-4), Floor, Floor.AddMinutes(10), Now.AddHours(-2).AddMinutes(-1), Now.AddHours(-1), Now];
+        foreach (var server in new[] { 1, 2, 3 })
+        {
+            foreach (var db in Databases)
+            {
+                foreach (var limit in limits)
+                {
+                    Assert.Equal(
+                        await OldBackfillAnswerAsync(server, db, limit),
+                        await reads.BackfillFloorAsync(server, db, limit, TestContext.Current.CancellationToken));
+                }
+            }
+        }
+    }
+
+    [Fact]
+    public async Task TheBackfillFloor_ForManyDatabases_CostsExactlyOneArchiveRead_SharedWithTheWatermarkMap()
+    {
+        await SeedHotAndParquetAsync();
+        var reads = new Reads(_duckDb);
+
+        foreach (var db in Databases)
+            await reads.BackfillFloorAsync(1, db, Now.AddHours(-10), TestContext.Current.CancellationToken);
+        await reads.BackfillFloorAsync(2, "Active", Now.AddHours(-10), TestContext.Current.CancellationToken);
+        Assert.Equal(1, reads.ArchiveViewReadsForTests);
+
+        /* The same grouped read answers the watermark reads of the same table and columns. */
+        foreach (var db in Databases)
+            await reads.DatabaseTimeAsync(1, db, since: null, TestContext.Current.CancellationToken);
+        Assert.Equal(1, reads.ArchiveViewReadsForTests);
+    }
+
+    /* ---- Every caller: no lock while waiting for a slot, limiter before read lock, live read before the
+            generation sample (review F1 and F3) ---- */
+
+    public static IEnumerable<TheoryDataRow<string>> Callers() =>
+        new[] { "time", "database", "frame", "identity", "success", "backfill" }.Select(c => new TheoryDataRow<string>(c));
+
+    /// <summary>One call of the named caller, one that reaches its archive read on this store.</summary>
+    private static Task Call(Reads reads, string caller) => caller switch
+    {
+        "time" => reads.TimeAsync(1, Table, Column, TestContext.Current.CancellationToken),
+        "database" => reads.DatabaseTimeAsync(1, "Active", since: null, TestContext.Current.CancellationToken),
+        "frame" => reads.FrameAsync(1, TestContext.Current.CancellationToken),
+        "identity" => reads.IdentityAsync(1, TestContext.Current.CancellationToken),
+        "success" => reads.SuccessAsync(1, "no_such_collector", TestContext.Current.CancellationToken),
+        "backfill" => reads.BackfillFloorAsync(1, "Active", Now.AddHours(-10), TestContext.Current.CancellationToken),
+        _ => throw new ArgumentOutOfRangeException(nameof(caller), caller, null)
+    };
+
+    [Theory]
+    [MemberData(nameof(Callers))]
+    public async Task EveryCaller_WaitingForASlot_HoldsNoReadLock_SoAWriterIsNotParked(string caller)
+    {
+        await SeedHotAndParquetAsync();
+        var limiter = new ArchiveReadLimiter(1);
+        var reads = new Reads(_duckDb) { ArchiveReadLimiterForTests = limiter };
+
+        var held = await limiter.EnterAsync(CancellationToken.None);
+        var waiting = Call(reads, caller);
+        await Task.Delay(300, TestContext.Current.CancellationToken);
+        Assert.False(waiting.IsCompleted, $"{caller} is waiting for a slot");
+
+        /* Acquired and released with no await between, because the lock is thread-affine. */
+        var writer = _duckDb.AcquireWriteLock(TimeSpan.FromSeconds(10));
+        writer.Dispose();
+
+        held.Dispose();
+        await waiting.WaitAsync(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
+    }
+
+    [Theory]
+    [MemberData(nameof(Callers))]
+    public async Task EveryCaller_TakesTheLimiterBeforeTheReadLock(string caller)
+    {
+        await SeedHotAndParquetAsync();
+        var steps = new List<string>();
+        var dbLock = DbLock();
+        var reads = new Reads(_duckDb)
+        {
+            ArchiveReadStepForTests = step => steps.Add($"{step}:{(dbLock.IsReadLockHeld ? "read lock held" : "no read lock")}")
+        };
+
+        await Call(reads, caller);
+
+        Assert.Equal(["limiter:no read lock", "readlock:read lock held", "read:read lock held"], steps);
+    }
+
+    [Theory]
+    [MemberData(nameof(Callers))]
+    public async Task EveryCaller_SamplesTheGenerationWithNoLockHeld(string caller)
+    {
+        await SeedHotAndParquetAsync();
+        var dbLock = DbLock();
+        var samples = new List<bool>();
+        var reads = new Reads(_duckDb) { ArchiveGenerationSampledForTests = () => samples.Add(dbLock.IsReadLockHeld) };
+
+        await Call(reads, caller);
+
+        Assert.Equal([false], samples);
+    }
+
+    /// <summary>
+    /// A hot row appears AFTER the cache was warmed, and the archive-and-reset moves it to Parquet at the moment the
+    /// archive read has sampled the generation (the cached answer is now one generation stale, and a cache hit takes
+    /// no lock). The answer must still include the row: only a caller that read live BEFORE that point sees it.
+    /// </summary>
+    [Theory]
+    [MemberData(nameof(Callers))]
+    public async Task EveryCaller_ReadsLiveBeforeTheArchiveGenerationIsSampled(string caller)
+    {
+        await SeedHotAndParquetAsync();
+        var reads = new Reads(_duckDb);
+        var recent = Now.AddMinutes(-1);
+
+        /* Warm the cache for this caller at the current generation. */
+        await Call(reads, caller);
+
+        var armed = false;
+        reads.ArchiveGenerationSampledForTests = () =>
+        {
+            if (!armed)
+                return;
+            armed = false;
+            Task.Run(ResetAsync).GetAwaiter().GetResult();
+        };
+
+        switch (caller)
+        {
+            case "time":
+                await ExecuteAsync(QueryStore(1, recent, "Active", recent));
+                armed = true;
+                Assert.Equal(recent, await reads.TimeAsync(1, Table, Column, TestContext.Current.CancellationToken));
+                break;
+            case "database":
+                await ExecuteAsync(QueryStore(1, recent, "Active", recent));
+                armed = true;
+                Assert.Equal(recent, await reads.DatabaseTimeAsync(1, "Active", since: null, TestContext.Current.CancellationToken));
+                break;
+            case "frame":
+                await ExecuteAsync(QueryStore(1, recent, "Active", recent));
+                armed = true;
+                Assert.Equal((recent, true), await reads.FrameAsync(1, TestContext.Current.CancellationToken));
+                break;
+            case "identity":
+            {
+                await ExecuteAsync(QueryStore(1, recent, "Active", recent));
+                long newest;
+                using (var conn = _duckDb.CreateConnection())
+                {
+                    await conn.OpenAsync(TestContext.Current.CancellationToken);
+                    using var cmd = conn.CreateCommand();
+                    cmd.CommandText = $"SELECT MAX(collection_id) FROM {Table}";
+                    newest = Convert.ToInt64(await cmd.ExecuteScalarAsync(TestContext.Current.CancellationToken));
+                }
+
+                armed = true;
+                Assert.Equal(newest, await reads.IdentityAsync(1, TestContext.Current.CancellationToken));
+                break;
+            }
+            case "success":
+                await ExecuteAsync(
+                    $"INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, status) VALUES (9001, 1, 'S1', 'no_such_collector', {Ts(recent)}, 'SUCCESS')");
+                armed = true;
+                Assert.True(await reads.SuccessAsync(1, "no_such_collector", TestContext.Current.CancellationToken));
+                break;
+            case "backfill":
+                /* ArchOnlyRecent's archived rows start at Now-2h, above the limit; the new hot row is older still. */
+                await ExecuteAsync(QueryStore(1, recent, "ArchOnlyRecent", Now.AddHours(-4)));
+                armed = true;
+                Assert.Equal(Now.AddHours(-4), await reads.BackfillFloorAsync(1, "ArchOnlyRecent", Now.AddHours(-3), TestContext.Current.CancellationToken));
+                break;
+            default:
+                throw new ArgumentOutOfRangeException(nameof(caller), caller, null);
+        }
     }
 }
 

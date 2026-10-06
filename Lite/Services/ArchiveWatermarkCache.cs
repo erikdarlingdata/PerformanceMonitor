@@ -41,7 +41,8 @@ namespace PerformanceMonitorLite.Services;
 /// token without disturbing the read; if the read itself is abandoned because ITS caller was cancelled, each
 /// remaining joiner retries (one of them runs the read again) rather than inheriting that caller's
 /// cancellation. A read that fails for any other reason fails every joiner with the same exception and
-/// stores nothing, so the next call tries again.</para>
+/// stores nothing, so the next call tries again. A caller that finds an OLDER generation's read still in
+/// flight takes the flight over, so a newly bumped generation costs one read, not one per caller.</para>
 ///
 /// <para>One instance lives on each <c>RemoteCollectorService</c>, which the app creates once.</para>
 /// </summary>
@@ -82,9 +83,22 @@ internal sealed class ArchiveWatermarkCache
             if (ReferenceEquals(flight, mine))
                 return await RunFlightAsync(key, generation, variant, mine, readView);
 
+            if (flight.Generation < generation)
+            {
+                /* The running read belongs to an OLDER generation (its leader sampled before an archive pass bumped
+                   it and may still be queued for a slot). Its answer is useless to this caller, and leaving it
+                   registered would send every caller of the new generation to a whole-archive read of its own, the
+                   per-database herd back right after each archive pass. Take the flight over: the first caller of
+                   the new generation wins the swap and runs one read, the rest join it. The old leader keeps its
+                   own joiners and removes only its own flight when it finishes. A lost swap goes round again. */
+                if (_flights.TryUpdate(key, mine, flight))
+                    return await RunFlightAsync(key, generation, variant, mine, readView);
+                continue;
+            }
+
             if (flight.Generation != generation || flight.Variant != variant)
             {
-                /* A read for a different generation or bucket is running for this key. It would answer a
+                /* A read for a newer generation or a different bucket is running for this key. It would answer a
                    different question, so this caller reads for itself and shares nothing. */
                 var own = await readView();
                 Store(key, generation, variant, own);

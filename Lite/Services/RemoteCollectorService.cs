@@ -151,6 +151,14 @@ public partial class RemoteCollectorService
     /// </summary>
     internal Action<string>? ArchiveReadStepForTests { get; set; }
 
+    /// <summary>
+    /// Test seam (#5377, review F3): called right after an archive read samples the archive generation, on a
+    /// cache hit as well as a miss and before the cache is consulted. A test runs the archive-and-reset here to
+    /// pin that every caller's live read came BEFORE this point (see <see cref="ReadArchiveViewAsync"/>).
+    /// Production leaves it null.
+    /// </summary>
+    internal Action? ArchiveGenerationSampledForTests { get; set; }
+
     private int _archiveViewReads;
 
     /// <summary>Test seam (#5377): how many archive-view reads have run (cache misses that reached DuckDB).</summary>
@@ -1991,8 +1999,10 @@ public partial class RemoteCollectorService
         return null;
     }
 
-    /// <summary>One database's archived watermark: its newest value and the newest collection time of its rows.</summary>
-    private readonly record struct ArchivedDatabaseWatermark(DateTime? Maximum, DateTime? NewestCollection);
+    /// <summary>One database's archived watermark: its newest value and the newest collection time of its rows,
+    /// plus the oldest of each, which the Query Store backfill's floor read takes from the same grouped read.</summary>
+    private readonly record struct ArchivedDatabaseWatermark(
+        DateTime? Maximum, DateTime? NewestCollection, DateTime? OldestCollection, DateTime? OldestValue);
 
     /// <summary>
     /// The per-table map behind <see cref="GetLastCollectedTimeForDatabaseAsync"/> (#5377): for every (server,
@@ -2009,7 +2019,7 @@ public partial class RemoteCollectorService
             {
                 using var cmd = conn.CreateCommand();
                 cmd.CommandText =
-                    $"SELECT server_id, {databaseColumnName}, MAX({columnName}), MAX(collection_time) FROM v_{tableName} GROUP BY server_id, {databaseColumnName}";
+                    $"SELECT server_id, {databaseColumnName}, MAX({columnName}), MAX(collection_time), MIN(collection_time), MIN({columnName}) FROM v_{tableName} GROUP BY server_id, {databaseColumnName}";
                 var rows = new Dictionary<(int ServerId, string Database), ArchivedDatabaseWatermark>();
                 using var reader = await cmd.ExecuteReaderAsync(token);
                 while (await reader.ReadAsync(token))
@@ -2018,7 +2028,9 @@ public partial class RemoteCollectorService
                         continue;
                     rows[(Convert.ToInt32(reader.GetValue(0)), reader.GetString(1))] = new ArchivedDatabaseWatermark(
                         reader.GetValue(2) is DateTime maximum ? maximum : null,
-                        reader.GetValue(3) is DateTime newest ? newest : null);
+                        reader.GetValue(3) is DateTime newest ? newest : null,
+                        reader.GetValue(4) is DateTime oldestCollection ? oldestCollection : null,
+                        reader.GetValue(5) is DateTime oldestValue ? oldestValue : null);
                 }
 
                 return rows;
@@ -2203,9 +2215,13 @@ public partial class RemoteCollectorService
     /// opens its own connection, reads, and releases the read lock and then the slot. A read that waits for a
     /// slot therefore never holds the read lock, which a held read lock would turn into a stall for the
     /// CHECKPOINT writer and every reader parked behind it. Callers do their live read in a lock scope of its
-    /// own and call this after it ends; combining a live value read just before with an archive value read
-    /// just after is exact for the reason above, and a reset between the two bumps the generation. Concurrent
-    /// misses on one key share one read (see <see cref="ArchiveWatermarkCache"/>).
+    /// own and call this after it ends. <b>Every caller reads live FIRST</b> (the archive generation is sampled
+    /// in here, after it): the archive-and-reset moves rows from the live table to Parquet and bumps the
+    /// generation inside ONE write lock, so a move that lands before the live read has bumped the generation
+    /// before the sample (the view is re-read and holds the rows), and a move that lands after the sample was
+    /// already seen by the live read. No row is missing from both answers. Reading live AFTER this call loses
+    /// that guarantee (the cache-hit path takes no lock). Concurrent misses on one key share one read (see
+    /// <see cref="ArchiveWatermarkCache"/>).
     /// <paramref name="readRow"/> turns the first row of a multi-column read into the cached value.</para>
     /// </summary>
     private Task<object?> ReadArchiveViewAsync(
@@ -2239,6 +2255,7 @@ public partial class RemoteCollectorService
         Func<DuckDB.NET.Data.DuckDBConnection, CancellationToken, Task<object?>> read, CancellationToken cancellationToken)
     {
         var generation = _duckDb.ArchiveViewGeneration;
+        ArchiveGenerationSampledForTests?.Invoke();
         return await _archiveWatermarks.GetOrReadAsync(cacheKey, generation, async () =>
         {
             using var slot = await _archiveReadLimiter.EnterAsync(cancellationToken);
