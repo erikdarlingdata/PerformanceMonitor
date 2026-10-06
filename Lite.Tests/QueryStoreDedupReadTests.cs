@@ -925,6 +925,11 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
            the un-deduped rows straight back into the numbers (or the text). */
         Assert.Equal(10, rankFilters);
 
+        /* The top-queries read's `ranked` is a pass-through over `deduped` (WHERE 1 = 1) since #5381: the join to the
+           latest snapshot's id is the only thing keeping an un-deduped row out of it (#1841). Counting rn filters does
+           not see that join go, so it is pinned here. */
+        Assert.Contains("INNER JOIN latest ON latest.latest_id = collection_id", source, StringComparison.Ordinal);
+
         /* Every dedup orders by collection_time FIRST — "latest" is never decided by execution_count, which
            can sit still across a hundred re-collections of the same interval.
 

@@ -282,6 +282,102 @@ WHERE {presence}";
         Assert.Contains(oracle, r => ((string?)r["query_text"] ?? "").Length > 0);
     }
 
+    /// <summary>
+    /// The review of #5396 (F2): a query whose NEWEST kept interval has no text, with an older kept interval in the same
+    /// period that has one, showed that older text under the old per-period MAX and showed '' under the winner-row read.
+    /// The extra rows go into the hot table, so every shape sits inside the windows the seed's days already fill.
+    /// </summary>
+    [Fact]
+    public async Task Comparison_ShowsAnOlderKeptRowsText_WhenTheNewestKeptRowHasNone()
+    {
+        var duckDb = await BuildStoreAsync(textRepeat: 3);
+        using (var readLock = duckDb.AcquireReadLock())
+        using (var connection = duckDb.CreateConnection())
+        {
+            await connection.OpenAsync();
+            /* 901: the newest interval is NULL, an older one has text. */
+            await InsertExtraAsync(connection, 9011, 901, "h901", 9011, _anchor.AddHours(-30), "older text 901");
+            await InsertExtraAsync(connection, 9012, 901, "h901", 9012, _anchor.AddHours(-2), null);
+            /* 903 + 904 share a hash: 903's newest is NULL but its older text sorts HIGHER than 904's, so dropping it changes the MAX. */
+            await InsertExtraAsync(connection, 9031, 903, "h903", 9031, _anchor.AddHours(-60), "zz 903");
+            await InsertExtraAsync(connection, 9032, 903, "h903", 9032, _anchor.AddHours(-1), null);
+            await InsertExtraAsync(connection, 9041, 904, "h903", 9041, _anchor.AddHours(-3), "aa 904");
+            /* 905: the text is two UTC days back, behind two NULL rows, so the per-day walk has to go past a day. */
+            await InsertExtraAsync(connection, 9051, 905, "h905", 9051, _anchor.AddHours(-50), "day-old 905");
+            await InsertExtraAsync(connection, 9052, 905, "h905", 9052, _anchor.AddHours(-26), null);
+            await InsertExtraAsync(connection, 9053, 905, "h905", 9053, _anchor.AddHours(-1), null);
+            /* 906: baseline period only. */
+            await InsertExtraAsync(connection, 9061, 906, "h906", 9061, _anchor.AddHours(-100), "baseline text 906");
+            await InsertExtraAsync(connection, 9062, 906, "h906", 9062, _anchor.AddHours(-80), null);
+            /* 907: ONE interval snapshotted twice; the older snapshot has text, the kept (newer) one does not. Old read: ''. */
+            await InsertExtraAsync(connection, 9071, 907, "h907", 9070, _anchor.AddHours(-5), "snapshot text 907");
+            await InsertExtraAsync(connection, 9072, 907, "h907", 9070, _anchor.AddHours(-4), null);
+        }
+
+        var (cs, ce, bs, be) = (_anchor.AddHours(-72), _anchor, _anchor.AddHours(-120), _anchor.AddHours(-72));
+        var oracle = await OracleAsync(QueryStoreOldReadSql.Comparison, ServerId, cs, ce, bs, be);
+        var actual = await new LocalDataService(duckDb).GetQueryStoreComparisonAsync(ServerId, cs, ce, bs, be);
+
+        oracle = [.. oracle.OrderBy(r => (string?)r["database_name"], StringComparer.Ordinal).ThenBy(r => (string?)r["query_hash"], StringComparer.Ordinal)];
+        var sorted = actual.OrderBy(r => r.DatabaseName, StringComparer.Ordinal).ThenBy(r => r.QueryHash, StringComparer.Ordinal).ToList();
+        AssertSameRows(oracle, sorted, new Dictionary<string, string>
+        {
+            ["exec_count"] = "ExecutionCount",
+            ["avg_cpu_ms"] = "AvgCpuMs",
+            ["avg_reads"] = "AvgReads",
+            ["baseline_exec_count"] = "BaselineExecutionCount",
+            ["baseline_avg_duration_ms"] = "BaselineAvgDurationMs",
+            ["baseline_avg_cpu_ms"] = "BaselineAvgCpuMs",
+            ["baseline_avg_reads"] = "BaselineAvgReads",
+        });
+        Assert.Equal("older text 901", Assert.Single(actual, r => r.QueryHash == "h901").QueryText);
+        Assert.Equal("zz 903", Assert.Single(actual, r => r.QueryHash == "h903").QueryText);
+        Assert.Equal("day-old 905", Assert.Single(actual, r => r.QueryHash == "h905").QueryText);
+        Assert.Equal("baseline text 906", Assert.Single(actual, r => r.QueryHash == "h906").QueryText);
+        Assert.Equal("", Assert.Single(actual, r => r.QueryHash == "h907").QueryText);
+    }
+
+    /// <summary>
+    /// The regressions fallback (a key whose latest kept row has no text) walks the window one UTC day at a time, newest
+    /// first, and stops at the first day with a text, instead of one MAX over every file of the window. Both window ends
+    /// are inclusive, including a row collected exactly at either.
+    /// </summary>
+    [Fact]
+    public async Task WindowTextFallback_WalksTheWindowNewestUtcDayFirst()
+    {
+        var duckDb = await BuildStoreAsync(textRepeat: 3);
+        using (var readLock = duckDb.AcquireReadLock())
+        using (var connection = duckDb.CreateConnection())
+        {
+            await connection.OpenAsync();
+            /* 'zzz older' sorts above 'aaa newer', so a MAX over the whole window and a newest-day-first walk disagree. */
+            await InsertExtraAsync(connection, 9101, 910, "h910", 9101, _anchor.AddDays(-3), "zzz older");
+            await InsertExtraAsync(connection, 9102, 910, "h910", 9102, _anchor.AddDays(-1).AddHours(-2), "aaa newer");
+            await InsertExtraAsync(connection, 9103, 910, "h910", 9103, _anchor.AddHours(-1), null);
+            await InsertExtraAsync(connection, 9111, 911, "h911", 9111, _anchor.AddDays(-3), "edge start 911");
+            await InsertExtraAsync(connection, 9121, 912, "h912", 9121, _anchor, "edge end 912");
+        }
+
+        using var read = await new LocalDataService(duckDb).OpenConnectionAsync();
+        var from = _anchor.AddDays(-3);
+        Assert.Equal("aaa newer", await LocalDataService.ReadQueryStoreWindowTextAsync(read, ServerId, "db_odd", 910, from, _anchor));
+        Assert.Equal("edge start 911", await LocalDataService.ReadQueryStoreWindowTextAsync(read, ServerId, "db_odd", 911, from, _anchor));
+        Assert.Equal("edge end 912", await LocalDataService.ReadQueryStoreWindowTextAsync(read, ServerId, "db_odd", 912, from, _anchor));
+        Assert.Null(await LocalDataService.ReadQueryStoreWindowTextAsync(read, ServerId, "db_odd", 910, from.AddDays(2), _anchor.AddDays(-1)));
+        Assert.Null(await LocalDataService.ReadQueryStoreWindowTextAsync(read, ServerId, "db_odd", 913, from, _anchor));
+    }
+
+    private async Task InsertExtraAsync(DuckDBConnection connection, long collectionId, long queryId, string hash, long interval, DateTime when, string? text)
+    {
+        var t = when.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture);
+        var first = when.Date.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture);
+        await ExecAsync(connection, $@"
+INSERT INTO query_store_stats ({Columns})
+VALUES ({collectionId}, TIMESTAMP '{t}', {ServerId}, 'srv', 'db_odd', {queryId}, {queryId}, 'Regular',
+        TIMESTAMP '{first}', TIMESTAMP '{t}', NULL, {(text is null ? "NULL" : "'" + text + "'")}, '{hash}', 10, 500, 1000, 5, 0, 0, 'p{queryId}',
+        FALSE, 0, {interval}, NULL)");
+    }
+
     [Fact]
     public async Task Regressions_ReturnTheOldReadsRows_ColumnForColumn()
     {
@@ -407,6 +503,11 @@ WHERE {presence}";
                 $"the {name} text lookup's plan does not mention collection_time:\n{text}");
             /* The bound must be on the scan itself (a Filters line of the parquet scan), not only in a later FILTER. */
             Assert.Matches(@"(?s)(READ_PARQUET|PARQUET_SCAN|TABLE_SCAN).*Filters:.*collection_time", text);
+            /* Both bounds must be literal comparisons on the column, which is what DuckDB turns into a row-group skip: a bound
+               wrapped in a function (epoch_ms(collection_time) >= ...) still prints under Filters: but skips nothing. */
+            var bare = Regex.Replace(text, @"[\s│┌┐└┘├┤┬┴┼─]+", "");
+            Assert.Contains("collection_time>=", bare, StringComparison.Ordinal);
+            Assert.Contains("collection_time<=", bare, StringComparison.Ordinal);
         }
     }
 

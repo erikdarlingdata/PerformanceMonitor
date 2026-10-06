@@ -627,12 +627,13 @@ baseline_period AS (
    so the MAX over those rows is the MAX over every kept row, and the lookup touches one row per query instead of
    one per collected interval. kind 1 = current period's rows, kind 2 = baseline's, kind 0 = the comparison rows. */
 current_winner AS (
-    SELECT database_name, query_hash, collection_id, collection_time
+    SELECT database_name, query_hash, query_id, collection_id, collection_time
     FROM
     (
         SELECT
             th.database_name,
             th.query_hash,
+            qs.query_id,
             qs.collection_id,
             qs.collection_time,
             ROW_NUMBER() OVER (PARTITION BY th.database_name, th.query_hash, qs.query_id ORDER BY qs.collection_time DESC, qs.collection_id DESC) AS wr
@@ -646,12 +647,13 @@ current_winner AS (
     WHERE wr = 1
 ),
 baseline_winner AS (
-    SELECT database_name, query_hash, collection_id, collection_time
+    SELECT database_name, query_hash, query_id, collection_id, collection_time
     FROM
     (
         SELECT
             th.database_name,
             th.query_hash,
+            qs.query_id,
             qs.collection_id,
             qs.collection_time,
             ROW_NUMBER() OVER (PARTITION BY th.database_name, th.query_hash, qs.query_id ORDER BY qs.collection_time DESC, qs.collection_id DESC) AS wr
@@ -673,7 +675,8 @@ SELECT 0 AS kind,
        b.avg_cpu_ms AS baseline_avg_cpu_ms,
        b.avg_reads AS baseline_avg_reads,
        CAST(NULL AS BIGINT) AS text_collection_id,
-       CAST(NULL AS TIMESTAMP) AS text_collection_time
+       CAST(NULL AS TIMESTAMP) AS text_collection_time,
+       CAST(NULL AS BIGINT) AS text_query_id
 FROM current_period c
 FULL OUTER JOIN baseline_period b
   ON  c.database_name IS NOT DISTINCT FROM b.database_name
@@ -681,12 +684,12 @@ FULL OUTER JOIN baseline_period b
 UNION ALL
 SELECT 1, database_name, query_hash,
        NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
-       collection_id, collection_time
+       collection_id, collection_time, query_id
 FROM current_winner
 UNION ALL
 SELECT 2, database_name, query_hash,
        NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
-       collection_id, collection_time
+       collection_id, collection_time, query_id
 FROM baseline_winner;";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
@@ -700,6 +703,8 @@ FROM baseline_winner;";
         var items = new List<QueryStatsComparisonItem>();
         var currentKeys = new Dictionary<(string?, string?), List<(long, DateTime)>>();
         var baselineKeys = new Dictionary<(string?, string?), List<(long, DateTime)>>();
+        var currentWinners = new List<(string? DatabaseName, string? QueryHash, long QueryId, long CollectionId, DateTime CollectionTime)>();
+        var baselineWinners = new List<(string? DatabaseName, string? QueryHash, long QueryId, long CollectionId, DateTime CollectionTime)>();
         var itemKeys = new List<(string?, string?)>();
         using (var reader = await command.ExecuteReaderAsync())
         {
@@ -715,6 +720,7 @@ FROM baseline_winner;";
                         keys[key] = list = [];
                     }
                     list.Add((reader.GetInt64(11), reader.GetDateTime(12)));
+                    (kind == 1 ? currentWinners : baselineWinners).Add((key.Item1, key.Item2, reader.GetInt64(13), reader.GetInt64(11), reader.GetDateTime(12)));
                     continue;
                 }
 
@@ -740,6 +746,11 @@ FROM baseline_winner;";
         var texts = await ReadQueryStoreTextByRowAsync(
             connection, serverId,
             currentKeys.Values.Concat(baselineKeys.Values).SelectMany(v => v).Select(v => (v.Item1, v.Item2)));
+        /* A query_id whose latest kept row in the period carries no text: the old MAX skipped NULLs, so it still showed
+           an older kept row's text from the same period (the review of #5396). Read only those queries' other kept rows,
+           newest UTC day first, until each has a text. */
+        await ReadQueryStoreFallbackTextsAsync(connection, serverId, currentWinners, currentStart, currentEnd, currentKeys, texts);
+        await ReadQueryStoreFallbackTextsAsync(connection, serverId, baselineWinners, baselineStart, baselineEnd, baselineKeys, texts);
         for (var i = 0; i < items.Count; i++)
         {
             var text = MaxUtf8Text(currentKeys, itemKeys[i], texts) ?? MaxUtf8Text(baselineKeys, itemKeys[i], texts);

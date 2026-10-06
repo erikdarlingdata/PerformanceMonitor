@@ -164,20 +164,159 @@ LIMIT 1";
 
     /// <summary>
     /// The greatest non-null <c>query_text</c> one (database, query_id) has inside a collection_time window, or null.
-    /// The by-key reads' fallback for a key whose latest kept row carried no text.
+    /// The by-key reads' fallback for a key whose latest kept row carried no text. One statement per UTC day of the
+    /// window, newest day first, stopping at the first day that has a text: a single day's text is in memory at a time,
+    /// and a query that has text anywhere recent never touches the older days (the review of #5396).
     /// </summary>
     internal static async Task<string?> ReadQueryStoreWindowTextAsync(
         LockedConnection connection, int serverId, string databaseName, long queryId, DateTime windowStart, DateTime windowEnd)
     {
-        using var command = connection.CreateCommand();
-        command.CommandText = WindowTextSql;
-        command.Parameters.Add(new DuckDBParameter { Value = serverId });
-        command.Parameters.Add(new DuckDBParameter { Value = databaseName });
-        command.Parameters.Add(new DuckDBParameter { Value = queryId });
-        command.Parameters.Add(new DuckDBParameter { Value = windowStart });
-        command.Parameters.Add(new DuckDBParameter { Value = windowEnd });
-        var value = await command.ExecuteScalarAsync();
-        return value is null or DBNull ? null : (string)value;
+        for (var day = windowEnd.Date; day >= windowStart.Date; day = day.AddDays(-1))
+        {
+            /* DuckDB's TIMESTAMP has microsecond precision: a tick-sized step back from midnight would round up to it. */
+            var from = day > windowStart ? day : windowStart;
+            var dayEnd = day.AddDays(1).AddTicks(-10);
+            var to = dayEnd < windowEnd ? dayEnd : windowEnd;
+            using var command = connection.CreateCommand();
+            command.CommandText = WindowTextSql;
+            command.Parameters.Add(new DuckDBParameter { Value = serverId });
+            command.Parameters.Add(new DuckDBParameter { Value = databaseName });
+            command.Parameters.Add(new DuckDBParameter { Value = queryId });
+            command.Parameters.Add(new DuckDBParameter { Value = from });
+            command.Parameters.Add(new DuckDBParameter { Value = to });
+            var value = await command.ExecuteScalarAsync();
+            if (value is not null and not DBNull)
+            {
+                return (string)value;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// The KEPT rows (the latest snapshot of each interval, with executions) one period has for the named
+    /// (database_name, query_id) keys, on narrow columns only, as <c>(database_name, query_hash, query_id,
+    /// collection_id, collection_time)</c>. The dedupe is the comparison's own, so a row an older snapshot of the same
+    /// interval would offer is not among them. Keys travel as parameters: a database name is user data.
+    /// </summary>
+    internal static async Task<List<(string? DatabaseName, string? QueryHash, long QueryId, long CollectionId, DateTime CollectionTime)>> ReadQueryStoreKeptRowsAsync(
+        LockedConnection connection, int serverId, IEnumerable<(string? DatabaseName, long QueryId)> keys, DateTime windowStart, DateTime windowEnd)
+    {
+        var result = new List<(string?, string?, long, long, DateTime)>();
+        var distinct = keys.Distinct().ToList();
+        for (var i = 0; i < distinct.Count; i += QueryStoreLatestRowKeyChunk)
+        {
+            var slice = distinct.Skip(i).Take(QueryStoreLatestRowKeyChunk).ToList();
+            using var command = connection.CreateCommand();
+            /* $1 server, $2 and $3 the window; key n is ($4 + 2n, $5 + 2n). */
+            command.CommandText = @"
+SELECT x.database_name, x.query_hash, x.query_id, x.collection_id, x.collection_time
+FROM
+(
+    SELECT
+        v.database_name,
+        v.query_hash,
+        v.query_id,
+        v.collection_id,
+        v.collection_time,
+        v.execution_count,
+        ROW_NUMBER() OVER
+        (
+            PARTITION BY v.database_name, v.query_id, v.plan_id, v.runtime_stats_interval_id, v.first_execution_time, v.execution_type_desc, v.replica_role
+            ORDER BY v.collection_time DESC, v.execution_count DESC
+        ) AS rn
+    FROM v_query_store_stats v
+    INNER JOIN (VALUES " + string.Join(", ", slice.Select((_, n) => $"(CAST(${4 + 2 * n} AS VARCHAR), CAST(${5 + 2 * n} AS BIGINT))")) + @") k(database_name, query_id)
+      ON  k.database_name IS NOT DISTINCT FROM v.database_name
+      AND k.query_id = v.query_id
+    WHERE v.server_id = $1
+    AND   v.collection_time >= $2
+    AND   v.collection_time <= $3
+) x
+WHERE x.rn = 1
+AND   x.execution_count > 0";
+            command.Parameters.Add(new DuckDBParameter { Value = serverId });
+            command.Parameters.Add(new DuckDBParameter { Value = windowStart });
+            command.Parameters.Add(new DuckDBParameter { Value = windowEnd });
+            foreach (var (databaseName, queryId) in slice)
+            {
+                command.Parameters.Add(new DuckDBParameter { Value = (object?)databaseName ?? DBNull.Value });
+                command.Parameters.Add(new DuckDBParameter { Value = queryId });
+            }
+
+            using var reader = await command.ExecuteReaderAsync();
+            while (await reader.ReadAsync())
+            {
+                result.Add((reader.IsDBNull(0) ? null : reader.GetString(0), reader.IsDBNull(1) ? null : reader.GetString(1),
+                    reader.GetInt64(2), reader.GetInt64(3), reader.GetDateTime(4)));
+            }
+        }
+
+        return result;
+    }
+
+    /// <summary>
+    /// The comparison's text fallback. A period's winner row is the latest kept row of one query_id; when its text came
+    /// back NULL, the old per-period MAX still found a text on an older kept row of that query in the same period. This
+    /// reads only the queries whose winner has no text: their other kept rows are listed on narrow columns, then their
+    /// text is read one UTC day at a time, newest day first, dropping a query from the work as soon as it has a text.
+    /// What is found is added to <paramref name="rowsByKey"/> and <paramref name="texts"/> so the MAX sees it.
+    /// </summary>
+    internal static async Task ReadQueryStoreFallbackTextsAsync(
+        LockedConnection connection, int serverId,
+        List<(string? DatabaseName, string? QueryHash, long QueryId, long CollectionId, DateTime CollectionTime)> winners,
+        DateTime windowStart, DateTime windowEnd,
+        Dictionary<(string?, string?), List<(long, DateTime)>> rowsByKey,
+        Dictionary<(long CollectionId, DateTime CollectionTime), string?> texts)
+    {
+        var pending = winners
+            .Where(w => !texts.TryGetValue((w.CollectionId, w.CollectionTime), out var text) || text is null)
+            .Select(w => (w.DatabaseName, w.QueryHash, w.QueryId))
+            .ToHashSet();
+        if (pending.Count == 0)
+        {
+            return;
+        }
+
+        var kept = await ReadQueryStoreKeptRowsAsync(connection, serverId, pending.Select(p => (p.DatabaseName, p.QueryId)), windowStart, windowEnd);
+        foreach (var day in kept
+            .Where(r => !texts.ContainsKey((r.CollectionId, r.CollectionTime)))
+            .GroupBy(r => r.CollectionTime.Date)
+            .OrderByDescending(g => g.Key))
+        {
+            if (pending.Count == 0)
+            {
+                break;
+            }
+
+            var rows = day.Where(r => pending.Contains((r.DatabaseName, r.QueryHash, r.QueryId))).ToList();
+            if (rows.Count == 0)
+            {
+                continue;
+            }
+
+            var dayTexts = await ReadQueryStoreTextByRowAsync(connection, serverId, rows.Select(r => (r.CollectionId, r.CollectionTime)));
+            foreach (var (rowKey, text) in dayTexts)
+            {
+                texts[rowKey] = text;
+            }
+
+            foreach (var row in rows)
+            {
+                var key = (row.DatabaseName, row.QueryHash);
+                if (!rowsByKey.TryGetValue(key, out var list))
+                {
+                    rowsByKey[key] = list = [];
+                }
+
+                list.Add((row.CollectionId, row.CollectionTime));
+                if (dayTexts.TryGetValue((row.CollectionId, row.CollectionTime), out var found) && found is not null)
+                {
+                    pending.Remove((row.DatabaseName, row.QueryHash, row.QueryId));
+                }
+            }
+        }
     }
 
     /// <summary>

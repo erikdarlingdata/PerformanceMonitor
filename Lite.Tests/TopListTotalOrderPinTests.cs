@@ -47,7 +47,8 @@ public sealed class TopListTotalOrderPinTests
 
         Assert.Contains("AVG(CAST(avg_duration_us AS DOUBLE PRECISION)) DESC, " + QueryStoreKey + "\n", sql, StringComparison.Ordinal);
         Assert.Contains("ROW_NUMBER() OVER (ORDER BY r.total_executions * r.avg_duration_ms DESC, r.database_name, r.query_id, r.plan_id, r.query_hash, r.execution_type_desc, r.replica_role) AS page_ord", sql, StringComparison.Ordinal);
-        Assert.Contains("\nORDER BY r.total_executions * r.avg_duration_ms DESC, r.database_name, r.query_id, r.plan_id, r.query_hash, r.execution_type_desc, r.replica_role\nLIMIT $4", sql, StringComparison.Ordinal);
+        /* #5381: the limit moved to code, after the WAITFOR filter, so the statement now ends on the page order; the total order is pinned by the page_ord line above. */
+        Assert.Contains("\nORDER BY p.page_ord", sql, StringComparison.Ordinal);
         AssertNoRankingOrderEndsOnTheMetric(sql, @"ORDER BY (?:SUM\(execution_count\) \*|r\.total_executions \*)[^\n]*");
     }
 
