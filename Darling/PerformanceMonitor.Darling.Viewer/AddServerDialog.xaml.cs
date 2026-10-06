@@ -148,28 +148,19 @@ public partial class AddServerDialog : Window
         {
             SqlAuthRadio.IsChecked = true;
             UsernameBox.Text = existing.Username ?? "";
-            /* Decrypt the stored blob to pre-fill the password (same-machine managed deploy). A blob produced
-               on another machine can't be read here — leave it blank; a blank password on save keeps the
-               existing blob (see the save path), so the server is not broken by an un-readable pre-fill. */
-            var decrypted = OperatingSystem.IsWindows() ? ViewerServerSecret.TryUnprotect(existing.EncryptedPassword) : null;
-            PasswordBox.Password = decrypted ?? "";
-            if (decrypted is null && !string.IsNullOrEmpty(existing.EncryptedPassword))
-            {
-                StatusText.Text = "The stored password can't be read on this machine — leave it blank to keep it, or type a new one.";
-            }
+            /* The password box starts blank on an edit (#5240): a blank box keeps the stored blob, and a typed one
+               replaces it. Pre-filling the decrypted password would make a host or port change send the stored
+               password to the new address, as if it had been typed; with the box blank, the save and the connection
+               test ask for the password again when the host or port moves (see TryResolveCredential). */
+            StatusText.Text = KeepStoredSecretHint("password");
         }
         else if (string.Equals(existing.Auth, ServerStoreCredential.ServicePrincipal, StringComparison.OrdinalIgnoreCase))
         {
-            /* #3484: prefill a service principal — client id in the app-id box, the secret decrypted from the
-               blob like a SQL password (blank on save keeps the existing blob). */
+            /* #3484: prefill a service principal's client id; the secret box starts blank like the SQL password's
+               (#5240): blank keeps the stored blob unless the host or port moves. */
             ServicePrincipalAuthRadio.IsChecked = true;
             AzureClientIdBox.Text = existing.Username ?? "";
-            var decrypted = OperatingSystem.IsWindows() ? ViewerServerSecret.TryUnprotect(existing.EncryptedPassword) : null;
-            AzureClientSecretBox.Password = decrypted ?? "";
-            if (decrypted is null && !string.IsNullOrEmpty(existing.EncryptedPassword))
-            {
-                StatusText.Text = "The stored client secret can't be read on this machine — leave it blank to keep it, or type a new one.";
-            }
+            StatusText.Text = KeepStoredSecretHint("client secret");
         }
         else if (string.Equals(existing.Auth, ServerStoreCredential.ManagedIdentity, StringComparison.OrdinalIgnoreCase))
         {
@@ -416,6 +407,28 @@ public partial class AddServerDialog : Window
         _ => "Optional"
     };
 
+    private static string KeepStoredSecretHint(string what) =>
+        $"Leave the {what} blank to keep the stored one. If you change the host or port, enter it again.";
+
+    /// <summary>True on an edit when the form's host or port differs from the stored one, by the rule the web and MCP
+    /// edit use (<see cref="ViewerDataService.ReachMoved"/>). A port the box cannot parse counts as unchanged here:
+    /// the form's own port check reports it.</summary>
+    private bool ReachMovedFromForm()
+    {
+        if (_existing is null)
+        {
+            return false;
+        }
+
+        var port = _existing.Port;
+        if (PostgresEngineRadio.IsChecked == true && ParsePortText(PortBox.Text) is (var parsed, null))
+        {
+            port = parsed;
+        }
+
+        return ViewerDataService.ReachMoved(_existing.Host, _existing.Port, ServerNameBox.Text.Trim(), port);
+    }
+
     /// <summary>
     /// Resolves the chosen credential source into the store's (auth, username, encrypted blob), or a
     /// user-facing error. Shared by Save and Test Connection so both apply the identical rules — including
@@ -503,6 +516,14 @@ public partial class AddServerDialog : Window
                 && string.Equals(_existing.Auth, ServerStoreCredential.Sql, StringComparison.OrdinalIgnoreCase)
                 && !string.IsNullOrEmpty(_existing.EncryptedPassword))
             {
+                /* #5240: the stored password is never reused for a different address. A moved host or port needs it
+                   typed again, here for the save and the connection test alike (the data layer refuses it too). */
+                if (ReachMovedFromForm())
+                {
+                    error = ViewerDataService.EditPasswordNeededText;
+                    return false;
+                }
+
                 encryptedPassword = _existing.EncryptedPassword;
                 return true;
             }
@@ -538,6 +559,14 @@ public partial class AddServerDialog : Window
                 && string.Equals(_existing.Auth, ServerStoreCredential.ServicePrincipal, StringComparison.OrdinalIgnoreCase)
                 && !string.IsNullOrEmpty(_existing.EncryptedPassword))
             {
+                /* #5240: the stored password is never reused for a different address. A moved host or port needs it
+                   typed again, here for the save and the connection test alike (the data layer refuses it too). */
+                if (ReachMovedFromForm())
+                {
+                    error = ViewerDataService.EditPasswordNeededText;
+                    return false;
+                }
+
                 encryptedPassword = _existing.EncryptedPassword;
                 return true;
             }
@@ -769,6 +798,13 @@ public partial class AddServerDialog : Window
         }
         catch (ViewerSchemaSkewException ex)
         {
+            StatusText.Text = ex.Message;
+            SaveButton.IsEnabled = true;
+        }
+        catch (MonitoredServerPasswordNeededException ex)
+        {
+            /* #5240: a moved host or port saved without a newly entered password. The message says so, in the same
+               words as the web and MCP edit; nothing was written. */
             StatusText.Text = ex.Message;
             SaveButton.IsEnabled = true;
         }
