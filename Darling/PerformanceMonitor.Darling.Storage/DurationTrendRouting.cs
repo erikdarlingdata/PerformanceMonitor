@@ -230,34 +230,53 @@ public static class DurationTrendRouting
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(rawTable);
 
-        var filter = withDatabaseFilter
-            ? "\n    AND   ($4::text[] IS NULL OR database_name = ANY($4))"
+        /* #5414 M1: the filtered point set is the collections where the chosen databases had rows (the chart's
+           points are per collection, so a collection the database was absent from is simply not a point of it);
+           the collection's INTERVAL is still read over every row of the collection. */
+        var matchedOnly = withDatabaseFilter
+            ? "\n            WHERE matched_rows > 0"
             : "";
 
         return $"""
-            WITH {RawCollectionsCte(rawTable, filter)}
+            WITH {RawCollectionsCte(rawTable, withDatabaseFilter)}
             SELECT
                 collection_time,
                 CASE WHEN interval_seconds > 0 THEN total_elapsed_ms / interval_seconds END AS elapsed_ms_per_second,
                 CASE WHEN interval_seconds > 0 THEN CAST(total_executions AS DOUBLE PRECISION) / interval_seconds END AS executions_per_second
-            FROM raw
+            FROM raw{matchedOnly}
             ORDER BY collection_time
             """;
     }
 
     /// <summary>
-    /// The per-collection CTE both raw-tier statements read — <see cref="BuildRawTrendSql"/> (the viewer's chart
+    /// The per-collection CTE both raw-tier statements read - <see cref="BuildRawTrendSql"/> (the viewer's chart
     /// and, with its filter, the desktop's Performance Trends) and <see cref="BuildBucketedRawTrendSql"/> (the MCP
-    /// tools, #3897) — one text, so the chart's points and the tool's buckets are built from the same collections
-    /// with the same three-state interval. <paramref name="filter"/> is the viewer's database clause or empty.
+    /// tools, #3897) - one text, so the chart's points and the tool's buckets are built from the same collections
+    /// with the same three-state interval. With <paramref name="withDatabaseFilter"/>, $4 is the viewer's database
+    /// clause, applied INSIDE the aggregates (#5414 M1) and not in the WHERE: the collection's interval is the
+    /// collection's, whichever databases were asked about, so a collection where the chosen database had no rows
+    /// (the query-stats collector keeps only plans that ran in the last ten minutes, so a quiet database is absent
+    /// from most collections) stays in the bucket as zero work over its real seconds instead of vanishing from the
+    /// denominator and reading the rate high. <c>matched_rows</c> counts the rows that passed the filter; it is
+    /// what the point set (and the tool's <c>empty</c> status) is decided on. Unfiltered, the text carries no
+    /// FILTER and no <c>matched_rows</c>, byte for byte what the MCP reader's pin asserts.
     /// </summary>
-    private static string RawCollectionsCte(string rawTable, string filter) => $"""
+    private static string RawCollectionsCte(string rawTable, bool withDatabaseFilter)
+    {
+        const string match = "$4::text[] IS NULL OR database_name = ANY($4)";
+        var sums = withDatabaseFilter
+            ? $"COALESCE(SUM(delta_elapsed_time) FILTER (WHERE {match}), 0) / 1000.0 AS total_elapsed_ms,\n"
+              + $"        COALESCE(SUM(delta_execution_count) FILTER (WHERE {match}), 0) AS total_executions,\n"
+              + $"        COUNT(*) FILTER (WHERE {match}) AS matched_rows,"
+            : "SUM(delta_elapsed_time) / 1000.0 AS total_elapsed_ms,\n"
+              + "        SUM(delta_execution_count) AS total_executions,";
+
+        return $"""
         raw AS
         (
             SELECT
                 collection_time,
-                SUM(delta_elapsed_time) / 1000.0 AS total_elapsed_ms,
-                SUM(delta_execution_count) AS total_executions,
+                {sums}
                 CASE WHEN MAX(sample_interval_seconds) IS NULL
                      THEN extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time))))
                      ELSE NULLIF(MAX(sample_interval_seconds), 0)
@@ -265,10 +284,11 @@ public static class DurationTrendRouting
             FROM {rawTable}
             WHERE server_id = $1
             AND   collection_time >= $2
-            AND   collection_time <= $3{filter}
+            AND   collection_time <= $3
             GROUP BY collection_time
         )
         """;
+    }
 
     /// <summary>
     /// The raw-tier duration trend BUCKETED (#3897): <see cref="BuildRawTrendSql"/>'s per-collection read — the same
@@ -301,13 +321,16 @@ public static class DurationTrendRouting
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(rawTable);
 
-        var filter = withDatabaseFilter
-            ? "\n    AND   ($4::text[] IS NULL OR database_name = ANY($4))"
-            : "";
         var widthParam = withDatabaseFilter ? "$5" : "$4";
+        /* #5414 M1: a bucket where the chosen databases had no rows at all is no point of theirs (and an answer
+           with no such bucket is the tool's empty); a bucket with any is read over EVERY collection in it. */
+        var matchedColumn = withDatabaseFilter ? ",\n                    matched_rows" : "";
+        var having = withDatabaseFilter
+            ? "\n            HAVING SUM(matched_rows) > 0"
+            : "";
 
         return $"""
-            WITH {RawCollectionsCte(rawTable, filter)},
+            WITH {RawCollectionsCte(rawTable, withDatabaseFilter)},
             rated AS
             (
                 SELECT
@@ -316,7 +339,7 @@ public static class DurationTrendRouting
                     CASE WHEN interval_seconds > 0 THEN total_executions END AS rated_executions,
                     CASE WHEN interval_seconds > 0 THEN interval_seconds END AS rated_seconds,
                     CASE WHEN interval_seconds > 0 THEN total_elapsed_ms / interval_seconds END AS elapsed_ms_per_second,
-                    CASE WHEN interval_seconds > 0 THEN CAST(total_executions AS DOUBLE PRECISION) / interval_seconds END AS executions_per_second
+                    CASE WHEN interval_seconds > 0 THEN CAST(total_executions AS DOUBLE PRECISION) / interval_seconds END AS executions_per_second{matchedColumn}
                 FROM raw
             )
             SELECT
@@ -328,7 +351,7 @@ public static class DurationTrendRouting
                 COUNT(*) - COUNT(rated_seconds) AS unrated_collections,
                 COUNT(*) AS collection_count
             FROM rated
-            GROUP BY 1
+            GROUP BY 1{having}
             ORDER BY 1
             """;
     }
@@ -353,8 +376,17 @@ public static class DurationTrendRouting
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(hourlyView);
 
-        var filter = withDatabaseFilter
-            ? "\n                AND   ($4::text[] IS NULL OR database_name = ANY($4))"
+        /* #5414 M1: the filter goes inside the aggregates, so an hour where the chosen databases had no rollup row
+           still counts (zero work) in the bucket's hour count; matched_rows decides the point set and empty. */
+        const string match = "$4::text[] IS NULL OR database_name = ANY($4)";
+        var sums = withDatabaseFilter
+            ? $"COALESCE(SUM(elapsed_time_sum) FILTER (WHERE {match}), 0) / 1000.0 AS elapsed_ms,\n"
+              + $"                    COALESCE(SUM(execution_count_sum) FILTER (WHERE {match}), 0) AS executions,\n"
+              + $"                    COUNT(*) FILTER (WHERE {match}) AS matched_rows"
+            : "SUM(elapsed_time_sum) / 1000.0 AS elapsed_ms,\n"
+              + "                    SUM(execution_count_sum) AS executions";
+        var having = withDatabaseFilter
+            ? "\n            HAVING SUM(matched_rows) > 0"
             : "";
         var widthParam = withDatabaseFilter ? "$5" : "$4";
 
@@ -363,12 +395,11 @@ public static class DurationTrendRouting
             (
                 SELECT
                     bucket,
-                    SUM(elapsed_time_sum) / 1000.0 AS elapsed_ms,
-                    SUM(execution_count_sum) AS executions
+                    {sums}
                 FROM {hourlyView}
                 WHERE server_id = $1
                 AND   bucket >= $2
-                AND   bucket < $3{filter}
+                AND   bucket < $3
                 GROUP BY bucket
             )
             SELECT
@@ -379,7 +410,7 @@ public static class DurationTrendRouting
                 MIN(bucket) AS first_collection_time,
                 0 AS unrated_collections
             FROM hourly
-            GROUP BY 1
+            GROUP BY 1{having}
             ORDER BY 1
             """;
     }

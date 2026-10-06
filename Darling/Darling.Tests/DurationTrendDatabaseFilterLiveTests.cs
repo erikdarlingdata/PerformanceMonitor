@@ -128,6 +128,80 @@ public sealed class DurationTrendDatabaseFilterLiveTests
             Assert.Equal(14_000 * perSecond, everyDatabase.Points.Last().Value!.Value, 9);
         }, Cleanup);
 
+    /// <summary>
+    /// [#5414 M1] A quiet database's bucket is read over EVERY collection in it. The query-stats collector keeps only
+    /// plans that ran in the last ten minutes, so a database that ran nothing recently has no row in most collections;
+    /// dividing by only the collections it appeared in read its rate high (one 6 s query in a 60-minute bucket of four
+    /// 15-minute collections read 6000 ms / 900 s, four times the true 6000 ms / 3600 s). A is busy in the first
+    /// collection only, B in the third only, C (a small steady load) in all four, so [A] and [B] each miss three of the
+    /// four collections. The MCP reader and the Darling viewer's chart read the one builder.
+    /// </summary>
+    [Fact]
+    public Task TheRawTier_AFilteredBucket_IsReadOverEveryCollectionInIt_SoTheDatabasesAddUp() =>
+        WithSharedStoreAsync("trend-filter-denominator", async (connection, postgres, serverId, serverName, now, ct) =>
+        {
+            var hour = new DateTime(now.Year, now.Month, now.Day, now.Hour, 0, 0, DateTimeKind.Unspecified).AddHours(-3);
+            for (var i = 0; i < 4; i++)
+            {
+                var at = hour.AddMinutes(15 * i);
+                if (i == 0) { await PlantWithIntervalAsync(connection, ct, serverId, serverName, at, A, 6_000_000); }
+                if (i == 2) { await PlantWithIntervalAsync(connection, ct, serverId, serverName, at, B, 3_000_000); }
+                await PlantWithIntervalAsync(connection, ct, serverId, serverName, at, C, 1_000);
+            }
+
+            const double bucketSeconds = 4 * 900;
+            var start = now.AddHours(-24);
+            var end = now.AddMinutes(5);
+            var rollups = await ComposeStoreAvailability.GetRollupsAsync(postgres, ct);
+            var route = DarlingTrendReader.ResolveQueryDurationTrendRoute(start, rollups.Item1, rollups.Item2, windowEndUtc: end);
+            Assert.Equal(RetentionTier.Raw, route.Tier);
+
+            async Task<double> Mcp(DatabaseFilter databases)
+            {
+                var result = await DarlingTrendReader.GetQueryDurationTrendAsync(postgres, serverId, start, end, route, 60, databases, ct);
+                return result.Points.Single().Value!.Value;
+            }
+
+            var a = await Mcp(DatabaseFilter.One(A));
+            var b = await Mcp(DatabaseFilter.One(B));
+            var both = await Mcp(Of(A, B));
+            Assert.Equal(6_000 / bucketSeconds, a, 9);
+            Assert.Equal(3_000 / bucketSeconds, b, 9);
+            Assert.Equal(a + b, both, 9);
+            Assert.Equal((9_000 + 4) / bucketSeconds, await Mcp(DatabaseFilter.All), 9);
+            Assert.Equal(4 / bucketSeconds, await Mcp(DatabaseFilter.One(C)), 9);
+
+            /* The Darling viewer's chart reads the same builder. Its bucket width is the window's own, so the window is
+               sized wide enough for a whole number of hours (the age rule is told it is an hour past the window's start, so
+               the raw tier serves it): every collection planted lies in one bucket. */
+            var viewerStart = now.AddDays(-90);
+            Assert.Equal(0, TrendBuckets.AutoMinutes(
+                (int)Math.Ceiling((end - viewerStart).TotalMinutes), 1, TrendBudget.Chart.AutoPoints) % 60);
+            await using var viewer = new PerformanceMonitor.Darling.Viewer.ViewerDataService(Environment.GetEnvironmentVariable("DARLING_TEST_PG")!);
+            async Task<double> Viewer(params string[] names) =>
+                (await viewer.GetQueryDurationTrendAsync(serverId, viewerStart, end, names.Length == 0 ? null : names, nowUtc: viewerStart.AddHours(1), cancellationToken: ct)).Points.Single().Value;
+
+            var viewerA = await Viewer(A);
+            var viewerB = await Viewer(B);
+            Assert.Equal(6_000 / bucketSeconds, viewerA, 9);
+            Assert.Equal(3_000 / bucketSeconds, viewerB, 9);
+            Assert.Equal(viewerA + viewerB, await Viewer(A, B), 9);
+            Assert.Equal((9_000 + 4) / bucketSeconds, await Viewer(), 9);
+        }, Cleanup);
+
+    /// <summary>One <c>query_stats</c> row with the collector's stored interval (the bucket-denominator tests need 900 s collections).</summary>
+    private static Task PlantWithIntervalAsync(
+        NpgsqlConnection connection, CancellationToken ct, int serverId, string serverName, DateTime at, string db, long weight) =>
+        DarlingMcpTestData.ExecAsync(connection, ct,
+            @"INSERT INTO query_stats
+                  (collection_id, collection_time, server_id, server_name, database_name, query_hash, query_plan_hash, sql_handle, plan_handle,
+                   query_text, query_text_digest, delta_execution_count, delta_worker_time, delta_elapsed_time, delta_logical_reads,
+                   delta_logical_writes, delta_physical_reads, min_worker_time, max_worker_time, min_elapsed_time, max_elapsed_time,
+                   min_dop, max_dop, sample_interval_seconds)
+              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 10, $12, $12, 100, 0, 0, 1, $12, 1, $12, 1, 1, 900)",
+            CollectionIdGenerator.Next(), DarlingMcpTestData.TruncateToSeconds(at), serverId, serverName, db,
+            "0xQ" + db, "0xP" + db, "0xS" + db, "0xL" + db, "SELECT " + db, SHA256.HashData(Encoding.UTF8.GetBytes("SELECT " + db)), weight);
+
     [Fact]
     public Task TheQueryStoreRawRoute_AListOfDatabases_ReadsOnlyThoseDatabasesWork() =>
         WithSharedStoreAsync("trend-filter-query-store", async (connection, postgres, serverId, serverName, now, ct) =>
@@ -209,16 +283,25 @@ public sealed class DurationTrendDatabaseFilterLiveTests
     {
         const string predicate4 = "($4::text[] IS NULL OR database_name = ANY($4))";
         const string predicate5 = "($5::text[] IS NULL OR database_name = ANY($5))";
+        /* #5414 M1: the query-stats and procedure-stats trends carry the list predicate INSIDE their aggregates (three
+           FILTERs: elapsed, executions, matched rows), never as a WHERE term, so the collection's seconds are read over
+           every database. */
+        const string filterPredicate4 = "FILTER (WHERE $4::text[] IS NULL OR database_name = ANY($4))";
 
         static int Count(string sql, string text) => System.Text.RegularExpressions.Regex.Matches(sql, System.Text.RegularExpressions.Regex.Escape(text)).Count;
 
         /* Raw: the per-collection CTE, the filter at $4 and the bucket width at $5. */
-        Assert.Equal(1, Count(DarlingTrendReader.QueryDurationTrendFilteredSql, predicate4));
-        Assert.Equal(1, Count(DarlingTrendReader.ProcedureDurationTrendFilteredSql, predicate4));
+        Assert.Equal(3, Count(DarlingTrendReader.QueryDurationTrendFilteredSql, filterPredicate4));
+        Assert.Equal(3, Count(DarlingTrendReader.ProcedureDurationTrendFilteredSql, filterPredicate4));
+        Assert.Equal(0, Count(DarlingTrendReader.QueryDurationTrendFilteredSql, predicate4));
+        Assert.Equal(0, Count(DarlingTrendReader.ProcedureDurationTrendFilteredSql, predicate4));
+        Assert.Contains("HAVING SUM(matched_rows) > 0", DarlingTrendReader.QueryDurationTrendFilteredSql, StringComparison.Ordinal);
         Assert.Contains("CAST($5 AS integer)", DarlingTrendReader.QueryDurationTrendFilteredSql, StringComparison.Ordinal);
         /* Hourly: the rollup CTE, same numbering. */
         var hourly = DurationTrendRouting.BuildBucketedHourlyTrendSql("collect.query_stats_interval_hourly AS h", withDatabaseFilter: true);
-        Assert.Equal(1, Count(hourly, predicate4));
+        Assert.Equal(3, Count(hourly, filterPredicate4));
+        Assert.Equal(0, Count(hourly, predicate4));
+        Assert.Contains("HAVING SUM(matched_rows) > 0", hourly, StringComparison.Ordinal);
         Assert.Contains("CAST($5 AS integer)", hourly, StringComparison.Ordinal);
         /* Unfiltered text is untouched: no predicate, the width at $4, so the pinned constants keep their text. */
         var unfiltered = DurationTrendRouting.BuildBucketedHourlyTrendSql("collect.query_stats_interval_hourly AS h");
@@ -349,6 +432,19 @@ public sealed class DurationTrendDatabaseFilterHourlyLiveTests
                   VALUES ($1, $2, $3, $4, $5, 'dbo', 'usp_SURV', '0xSQLHSURV', 1, 1000, 1000, 7, 1000, 3600)",
                 CollectionIdGenerator.Next(), SurvivorAt, ServerId, ServerName, A);
 
+            /* #5414 M1: hour 2 holds B alone, so in the 240-minute bucket [00:00, 04:00) A is active in one of its two
+               hours and B in both. */
+            await DarlingMcpTestData.ExecAsync(connection, ct,
+                @"INSERT INTO collect.query_stats (collection_id, collection_time, server_id, server_name, database_name, query_hash, sql_handle,
+                      delta_execution_count, delta_worker_time, delta_elapsed_time, delta_logical_reads, total_logical_reads, sample_interval_seconds)
+                  VALUES ($1, $2, $3, $4, $5, '0xQHOUR2', '0xSQLHHOUR2', 10, 4000, 4000, 100, 1000, 3600)",
+                CollectionIdGenerator.Next(), WindowStart.AddHours(2).AddMinutes(10), ServerId, ServerName, B);
+            await DarlingMcpTestData.ExecAsync(connection, ct,
+                @"INSERT INTO collect.procedure_stats (collection_id, collection_time, server_id, server_name, database_name, schema_name, object_name, sql_handle,
+                      delta_execution_count, delta_worker_time, delta_elapsed_time, delta_logical_reads, total_logical_reads, sample_interval_seconds)
+                  VALUES ($1, $2, $3, $4, $5, 'dbo', 'usp_HOUR2', '0xSQLHHOUR2', 10, 4000, 4000, 100, 1000, 3600)",
+                CollectionIdGenerator.Next(), WindowStart.AddHours(2).AddMinutes(10), ServerId, ServerName, B);
+
             foreach (var view in new[] { TimescaleSupport.QueryStatsIntervalHourlyView, TimescaleSupport.ProcedureStatsIntervalHourlyView })
             {
                 await using var refresh = new NpgsqlCommand($"CALL refresh_continuous_aggregate('collect.{view}'::regclass, $1::timestamp, $2::timestamp)", connection);
@@ -398,6 +494,25 @@ public sealed class DurationTrendDatabaseFilterHourlyLiveTests
                 var oneByName = Series(await Read(DatabaseFilter.One(B)));
                 Assert.Equal(2_000 * perSecond, oneByName[hourOne], 9);
                 Assert.DoesNotContain(hourFive, oneByName.Keys);
+
+                /* [#5414 M1] A 240-minute bucket is its hours' work over the hours the rollup HOLDS in it (hours 1 and 2,
+                   so 2 * 3600 s), whichever databases were asked about: A, active in hour 1 only, is half its hour-1
+                   work, not all of it, and [A] + [B] = [A, B] = the bucket's server rate less C. */
+                async Task<double> Wide(DatabaseFilter databases)
+                {
+                    var json = procedures
+                        ? await DarlingMcpTrendTools.GetProcedureDurationTrend(hourly, ServerName, 24, asOf, 240, databases, budget, ct)
+                        : await DarlingMcpTrendTools.GetQueryDurationTrend(hourly, ServerName, 24, asOf, 240, databases, budget, ct);
+                    return Series(json)[WindowStart];
+                }
+
+                const double twoHours = perSecond / 2;
+                var wideA = await Wide(DatabaseFilter.One(A));
+                var wideB = await Wide(DatabaseFilter.One(B));
+                Assert.Equal(3_000 * twoHours, wideA, 9);
+                Assert.Equal(6_000 * twoHours, wideB, 9);
+                Assert.Equal(wideA + wideB, await Wide(Of(A, B)), 9);
+                Assert.Equal(18_000 * twoHours, await Wide(DatabaseFilter.All), 9);
 
                 /* [M4] A list that matches nothing in the rollup is "empty", and the message names the chosen databases. */
                 var emptyJson = await Read(Of("NoSuchDatabase", "NoSuchEither"));

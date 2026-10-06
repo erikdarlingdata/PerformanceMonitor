@@ -354,10 +354,11 @@ ORDER BY 1";
     /// work over their summed seconds — a collection with no knowable interval is left out of both, not counted as
     /// zero — its peak is the worst single collection's rate, and <c>unrated_collections</c> counts what was left
     /// out. <paramref name="relation"/> is one of two constants, never caller text.
-    /// <para>#5244: <paramref name="databaseNames"/> narrows the raw rows BEFORE the per-collection sum, the same place
-    /// Darling's <c>BuildBucketedRawTrendSql(..., withDatabaseFilter: true)</c> puts its predicate, so a database's
-    /// collection that held none of its rows is simply not a collection of that database. Null or empty reads every
-    /// database, the answer this read always gave.</para>
+    /// <para>#5244: <paramref name="databaseNames"/> narrows the per-collection SUMS, inside the aggregate, the same
+    /// place Darling's <c>BuildBucketedRawTrendSql(..., withDatabaseFilter: true)</c> puts its predicate (#5414 M1):
+    /// a collection where the chosen databases had no rows still counts its seconds, as zero work, so a quiet
+    /// database's rate is its true rate over the bucket and [A] + [B] = [A, B]. A bucket with no matching row at
+    /// all is dropped (the tool's empty). Null or empty reads every database, the answer this read always gave.</para>
     /// </summary>
     private async Task<List<QueryTrendPoint>> ReadBucketedDurationTrendAsync(
         string relation, int serverId, int hoursBack, DateTime asOfUtc, int bucketMinutes,
@@ -368,22 +369,28 @@ ORDER BY 1";
 
         var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc);
         var dbClause = BuildDbInClause(databaseNames, "database_name", 5, out var dbValues);
+        /* #5414 M1: the database filter is applied INSIDE the aggregates, not in the WHERE (see DbInPredicate). */
+        var matchedRows = dbClause.Length == 0
+            ? ""
+            : $",\n        COUNT(*) FILTER (WHERE {DbInPredicate(dbClause)}) AS matched_rows";
+        var matchedCarry = dbClause.Length == 0 ? "" : ",\n        matched_rows";
+        var having = dbClause.Length == 0 ? "" : "\nHAVING SUM(matched_rows) > 0";
 
         command.CommandText = $@"
 WITH raw AS
 (
     SELECT
         collection_time,
-        SUM(delta_elapsed_time) / 1000.0 AS total_elapsed_ms,
-        SUM(delta_execution_count) AS total_executions,
+        {FilteredSum("delta_elapsed_time", dbClause)} / 1000.0 AS total_elapsed_ms,
+        {FilteredSum("delta_execution_count", dbClause)} AS total_executions,
         CASE WHEN MAX(sample_interval_seconds) IS NULL
              THEN extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time))))
              ELSE NULLIF(MAX(sample_interval_seconds), 0)
-        END AS interval_seconds
+        END AS interval_seconds{matchedRows}
     FROM {relation}
     WHERE server_id = $1
     AND   collection_time >= $2
-    AND   collection_time <= $3{dbClause}
+    AND   collection_time <= $3
     GROUP BY collection_time
 ),
 rated AS
@@ -394,7 +401,7 @@ rated AS
         CASE WHEN interval_seconds > 0 THEN total_executions END AS rated_executions,
         CASE WHEN interval_seconds > 0 THEN interval_seconds END AS rated_seconds,
         CASE WHEN interval_seconds > 0 THEN total_elapsed_ms / interval_seconds END AS elapsed_ms_per_second,
-        CASE WHEN interval_seconds > 0 THEN CAST(total_executions AS DOUBLE PRECISION) / interval_seconds END AS executions_per_second
+        CASE WHEN interval_seconds > 0 THEN CAST(total_executions AS DOUBLE PRECISION) / interval_seconds END AS executions_per_second{matchedCarry}
     FROM raw
 )
 SELECT
@@ -405,7 +412,7 @@ SELECT
     MIN(collection_time) AS first_collection_time,
     COUNT(*) - COUNT(rated_seconds) AS unrated_collections
 FROM rated
-GROUP BY 1
+GROUP BY 1{having}
 ORDER BY 1";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
