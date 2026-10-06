@@ -15,6 +15,7 @@ using Microsoft.Extensions.Logging;
 using Npgsql;
 using NpgsqlTypes;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Service;
 
@@ -709,7 +710,7 @@ WHERE status = 'in_progress'
     /// </summary>
     internal static async Task<string?> TestConnectReferenceRefusalAsync(
         MonitoredServer server,
-        Func<string, CancellationToken, Task<IReadOnlyList<PerformanceMonitor.Darling.Service.Mcp.DarlingMcpServerAdminTools.ServerConnectionSettings>>> storedSettingsOfReference,
+        Func<string, CancellationToken, Task<IReadOnlyList<ServerConnectionSettings>>> storedSettingsOfReference,
         CancellationToken cancellationToken)
     {
         if (DarlingSecretSource.RequestReferenceRefusal(server.Password) is { } plainSlotRefusal)
@@ -723,7 +724,7 @@ WHERE status = 'in_progress'
             return null;
         }
 
-        var tested = new PerformanceMonitor.Darling.Service.Mcp.DarlingMcpServerAdminTools.ServerConnectionSettings(
+        var tested = new ServerConnectionSettings(
             server.Host, server.Port, server.Engine ?? "sqlserver", server.Database, server.ReadOnlyIntent, server.Auth ?? "integrated",
             server.Username, server.EncryptMode ?? "Mandatory", server.TrustServerCertificate, server.MultiSubnetFailover);
         foreach (var stored in await storedSettingsOfReference(reference!, cancellationToken))
@@ -738,9 +739,9 @@ WHERE status = 'in_progress'
     }
 
     /// <summary>The connection settings of every stored server that holds exactly this reference text.</summary>
-    private async Task<IReadOnlyList<PerformanceMonitor.Darling.Service.Mcp.DarlingMcpServerAdminTools.ServerConnectionSettings>> StoredSettingsOfReferenceAsync(string reference, CancellationToken cancellationToken)
+    private async Task<IReadOnlyList<ServerConnectionSettings>> StoredSettingsOfReferenceAsync(string reference, CancellationToken cancellationToken)
     {
-        var found = new List<PerformanceMonitor.Darling.Service.Mcp.DarlingMcpServerAdminTools.ServerConnectionSettings>();
+        var found = new List<ServerConnectionSettings>();
         await using var command = _postgres.CreateCommand(
             "SELECT host, port, engine, database, read_only_intent, auth, username, encrypt_mode, trust_server_certificate, multi_subnet_failover " +
             "FROM config.config_monitored_servers WHERE encrypted_password = $1");
@@ -749,7 +750,7 @@ WHERE status = 'in_progress'
         while (await reader.ReadAsync(cancellationToken))
         {
             /* The same defaults the edit core reads a row with, so a NULL column compares as what it means. */
-            found.Add(new PerformanceMonitor.Darling.Service.Mcp.DarlingMcpServerAdminTools.ServerConnectionSettings(
+            found.Add(new ServerConnectionSettings(
                 reader.GetString(0), reader.IsDBNull(1) ? 0 : reader.GetInt32(1),
                 reader.IsDBNull(2) ? "sqlserver" : reader.GetString(2), reader.IsDBNull(3) ? null : reader.GetString(3),
                 !reader.IsDBNull(4) && reader.GetBoolean(4), reader.IsDBNull(5) ? "integrated" : reader.GetString(5),
