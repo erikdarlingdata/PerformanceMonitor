@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Threading;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using PerformanceMonitor.Analysis.Baselines;
@@ -403,21 +404,119 @@ LEFT JOIN LATERAL
 ) streak ON TRUE
 ORDER BY h.collector_name";
 
+    /// <summary>How long a memoized Collection Health result is reused (#5371). The window is a fixed seven days, so the
+    /// toolbar's range does not enter the key, and a result a few seconds old describes the same week.</summary>
+    internal static readonly TimeSpan CollectionHealthMemoLifetime = TimeSpan.FromSeconds(30);
+
+    private readonly object _collectionHealthMemoGate = new();
+    private readonly Dictionary<int, (List<CollectorHealthRow> Rows, DateTime AtUtc)> _collectionHealthMemo = new();
+    private long _collectionHealthMemoGeneration;
+
+    /// <summary>Replaces the Health statement for ONE service instance. A test's seam (#5371): the cancellation tests need a
+    /// statement that runs for seconds, which the real aggregate over a test-sized store never does. Production leaves it null.</summary>
+    internal string? CollectionHealthSqlOverride { get; set; }
+
+    /// <summary>The clock the memo ages by. A test's seam; production reads the wall clock.</summary>
+    internal Func<DateTime> CollectionHealthMemoClock { get; set; } = () => DateTime.UtcNow;
+
+    /// <summary>Where a slow Collection Health read's phase line goes. Null is the profiler's own log; a test's seam.</summary>
+    internal Action<string, double, string>? CollectionHealthPhaseSink { get; set; }
+
+    /// <summary>
+    /// Drops every memoized Collection Health result (#5371). A user gesture (manual refresh, range or filter change, tab
+    /// switch) and a collector-settings change call this before they ask for a read, so only the timer's tick reuses a
+    /// memo. A read that began before the call does not store its result afterwards: the generation it started under is
+    /// stale.
+    /// </summary>
+    internal void InvalidateCollectionHealthMemo()
+    {
+        lock (_collectionHealthMemoGate)
+        {
+            _collectionHealthMemo.Clear();
+            _collectionHealthMemoGeneration++;
+        }
+    }
+
     /// <summary>
     /// Gets collection health summary for all collectors on a server.
+    ///
+    /// <para><b>Cancellable (#5371).</b> The token reaches the read-lock wait, the connection open, the statement and the
+    /// drain. A token fired mid-statement reaches <c>duckdb_interrupt</c> through <c>DuckDBCommand.Cancel()</c>: the
+    /// statement stops, the connection and the read lock are released, and the call throws
+    /// <see cref="OperationCanceledException"/>. A superseded refresh pass uses this to stop its Health read instead of
+    /// finishing a result nobody will paint.</para>
+    ///
+    /// <para><b>Memo (#5371).</b> <paramref name="allowMemo"/> reuses a result up to <see cref="CollectionHealthMemoLifetime"/>
+    /// old, per server. It is opt-in, so the MCP tool and every other caller still read the store each time. The tab asks
+    /// for it, and bypasses it with <see cref="InvalidateCollectionHealthMemo"/> on any user gesture. Callers get their own
+    /// copies of the rows, because the tab stamps each row's clock.</para>
+    ///
+    /// <para><b>Phase timing (#5371).</b> A read whose total passes the slow-method threshold logs one line naming the
+    /// lock wait, open, prepare, execute and drain times.</para>
     /// </summary>
-    public async Task<List<CollectorHealthRow>> GetCollectionHealthAsync(int serverId)
+    public async Task<List<CollectorHealthRow>> GetCollectionHealthAsync(int serverId, bool allowMemo = false, CancellationToken cancellationToken = default)
     {
-        using var connection = await OpenConnectionAsync();
+        cancellationToken.ThrowIfCancellationRequested();
+
+        long generation;
+        lock (_collectionHealthMemoGate)
+        {
+            generation = _collectionHealthMemoGeneration;
+            if (allowMemo
+                && _collectionHealthMemo.TryGetValue(serverId, out var memo)
+                && CollectionHealthMemoClock() - memo.AtUtc < CollectionHealthMemoLifetime)
+            {
+                return memo.Rows.ConvertAll(row => row.Copy());
+            }
+        }
+
+        var timer = new ReadPhaseTimer();
+        List<CollectorHealthRow> items;
+        try
+        {
+            items = await ReadCollectionHealthAsync(serverId, timer, cancellationToken);
+        }
+        finally
+        {
+            timer.Report("GetCollectionHealthAsync", CollectionHealthPhaseSink);
+        }
+
+        if (allowMemo)
+        {
+            lock (_collectionHealthMemoGate)
+            {
+                if (generation == _collectionHealthMemoGeneration)
+                {
+                    _collectionHealthMemo[serverId] = (items.ConvertAll(row => row.Copy()), CollectionHealthMemoClock());
+                }
+            }
+        }
+
+        return items;
+    }
+
+    private async Task<List<CollectorHealthRow>> ReadCollectionHealthAsync(int serverId, ReadPhaseTimer timer, CancellationToken cancellationToken)
+    {
+        using var connection = await OpenConnectionAsync(timer, cancellationToken);
         using var command = connection.CreateCommand();
-        command.CommandText = CollectionHealthSql;
+        command.CommandText = CollectionHealthSqlOverride ?? CollectionHealthSql;
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = DateTime.UtcNow.AddDays(-7) });
 
         var items = new List<CollectorHealthRow>();
-        using var reader = await command.ExecuteReaderAsync();
-        while (await reader.ReadAsync())
+        System.Data.Common.DbDataReader reader;
+        using (timer.Measure(ReadPhaseTimer.Prepare))
+        {
+            command.Prepare();
+        }
+        using (timer.Measure(ReadPhaseTimer.Execute))
+        {
+            reader = await command.ExecuteReaderAsync(cancellationToken);
+        }
+        using var readerScope = reader;
+        using var drainScope = timer.Measure(ReadPhaseTimer.Drain);
+        while (await reader.ReadAsync(cancellationToken))
         {
             items.Add(new CollectorHealthRow
             {
@@ -590,10 +689,12 @@ LIMIT 1";
     /// derived here rather than offered as a separate argument a caller could set the wrong way.</para>
     ///
     /// <para>The desktop Collection Log tab passes neither and is unaffected: no filter, newest first.</para>
+    ///
+    /// <para><paramref name="cancellationToken"/> (#5371) reaches the lock wait, the open, the statement and the drain, like <see cref="GetCollectionHealthAsync"/>: a superseded pass stops this read too.</para>
     /// </summary>
-    public async Task<List<CollectionLogRow>> GetRecentCollectionLogAsync(int serverId, int hoursBack = 4, DateTime? fromDate = null, DateTime? toDate = null, int maxRows = CollectionLogGridCap, DateTime? asOfUtc = null, string? collectorName = null, double? minDurationMs = null, string? status = null)
+    public async Task<List<CollectionLogRow>> GetRecentCollectionLogAsync(int serverId, int hoursBack = 4, DateTime? fromDate = null, DateTime? toDate = null, int maxRows = CollectionLogGridCap, DateTime? asOfUtc = null, string? collectorName = null, double? minDurationMs = null, string? status = null, CancellationToken cancellationToken = default)
     {
-        using var connection = await OpenConnectionAsync();
+        using var connection = await OpenConnectionAsync(timer: null, cancellationToken);
         using var command = connection.CreateCommand();
 
         var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
@@ -635,8 +736,8 @@ LIMIT $4";
         command.Parameters.Add(new DuckDBParameter { Value = string.IsNullOrWhiteSpace(status) ? DBNull.Value : status.Trim() });
 
         var items = new List<CollectionLogRow>();
-        using var reader = await command.ExecuteReaderAsync();
-        while (await reader.ReadAsync())
+        using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
         {
             items.Add(new CollectionLogRow
             {
@@ -951,6 +1052,9 @@ public class CollectorDurationBucket
 /// </summary>
 public class CollectorHealthRow
 {
+    /// <summary>A shallow copy: every member is a value, a string or the immutable clock, so a copy is independent (#5371's memo hands out copies).</summary>
+    internal CollectorHealthRow Copy() => (CollectorHealthRow)MemberwiseClone();
+
     public string CollectorName { get; set; } = "";
     public long TotalRuns { get; set; }
     public long SuccessCount { get; set; }

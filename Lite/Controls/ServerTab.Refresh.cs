@@ -128,13 +128,23 @@ public partial class ServerTab : UserControl
         });
 
     /// <summary>A user gesture (range or filter change, manual refresh, tab became visible): refresh everything, latest request wins.</summary>
-    private Task RefreshAllDataAsync() => Refresher.RequestAsync(RefreshScope.Full);
+    private Task RefreshAllDataAsync()
+    {
+        /* #5371: a gesture asks for a fresh answer, so it drops the Collection Health memo the timer's ticks reuse. Collector-settings
+           changes reach the tab through here too (MainWindow's RefreshData). */
+        _dataService.InvalidateCollectionHealthMemo();
+        return Refresher.RequestAsync(RefreshScope.Full);
+    }
 
     /// <summary>The timer tick: refresh everything unless a pass is already running or waiting, which makes it redundant.</summary>
     private Task RefreshAllDataOnTimerAsync() => Refresher.PollAsync();
 
     /// <summary>A tab or sub-tab switch (or a drill that loaded a tab): reload just the tab now showing, latest request wins.</summary>
-    private Task RefreshVisibleTabOnlyAsync() => Refresher.RequestAsync(RefreshScope.VisibleTab);
+    private Task RefreshVisibleTabOnlyAsync()
+    {
+        _dataService.InvalidateCollectionHealthMemo();
+        return Refresher.RequestAsync(RefreshScope.VisibleTab);
+    }
 
     private async Task RunRefreshPassAsync(RefreshScope scope, CancellationToken ct)
     {
@@ -292,7 +302,7 @@ public partial class ServerTab : UserControl
             case 14: await RefreshCpuSchedulerAsync(hoursBack, fromDate, toDate); break;
             case 15: await RefreshPlanCacheAsync(hoursBack, fromDate, toDate); break;
             case 16: await RefreshSessionStatsAsync(hoursBack, fromDate, toDate); break;
-            case 17: await RefreshCollectionHealthAsync(hoursBack, fromDate, toDate); break;
+            case 17: await RefreshCollectionHealthAsync(hoursBack, fromDate, toDate, ct); break;
             case 18: await RefreshSystemEventsAsync(hoursBack, fromDate, toDate); break;
             case 19: await RefreshConfigChangesAsync(hoursBack, fromDate, toDate); break;
             case 20: await RefreshLongQueriesAsync(hoursBack, fromDate, toDate); break;
@@ -1182,12 +1192,12 @@ public partial class ServerTab : UserControl
     }
 
     /// <summary>Tab 17 — Collection Health</summary>
-    private async System.Threading.Tasks.Task RefreshCollectionHealthAsync(int hoursBack, DateTime? fromDate, DateTime? toDate)
+    private async System.Threading.Tasks.Task RefreshCollectionHealthAsync(int hoursBack, DateTime? fromDate, DateTime? toDate, CancellationToken ct = default)
     {
         try
         {
-            var collectionHealthTask = Helpers.MethodProfiler.TimeAsync("CollectionHealth.Health", () => Task.Run(() => SafeQueryAsync(() => _dataService.GetCollectionHealthAsync(_serverId))));
-            var collectionLogTask = Helpers.MethodProfiler.TimeAsync("CollectionHealth.Log", () => Task.Run(() => SafeQueryAsync(() => _dataService.GetRecentCollectionLogAsync(_serverId, hoursBack, fromDate, toDate))));
+            var collectionHealthTask = Helpers.MethodProfiler.TimeAsync("CollectionHealth.Health", () => Task.Run(() => SafeQueryAsync(() => _dataService.GetCollectionHealthAsync(_serverId, allowMemo: true, cancellationToken: ct), ct)));
+            var collectionLogTask = Helpers.MethodProfiler.TimeAsync("CollectionHealth.Log", () => Task.Run(() => SafeQueryAsync(() => _dataService.GetRecentCollectionLogAsync(_serverId, hoursBack, fromDate, toDate, cancellationToken: ct), ct)));
             /* #4989: the Duration Trends chart reads its own buckets over the whole range, beside the grid's read. The grid's
                page is the newest CollectionLogGridCap runs, a sliver of a long range, so the chart is not fed from it. */
             var collectorDurationTask = Helpers.MethodProfiler.TimeAsync("CollectionHealth.DurationTrends", () => Task.Run(() => SafeQueryAsync(() => _dataService.GetCollectorDurationTrendAsync(_serverId, hoursBack, fromDate, toDate))));
@@ -1208,6 +1218,10 @@ public partial class ServerTab : UserControl
             var (windowStart, windowEnd) = LocalDataService.GetQueriesTabWindowUtc(hoursBack, fromDate, toDate);
             await RefreshCappedGridBannerAsync(QueryWindowRelation.CollectionLog, CollectionLogWindowTruncatedBanner, windowStart, windowEnd, collectionLogTask.Result, LocalDataService.CollectionLogGridCap, row => row.CollectionTime);
         }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            /* #5371: a newer request superseded this pass and its token interrupted the Health or Log read; the replay loads the tab. */
+        }
         catch (Exception ex)
         {
             AppLogger.Info("ServerTab", $"[{_server.DisplayName}] RefreshCollectionHealthAsync failed: {ex.Message}");
@@ -1217,11 +1231,16 @@ public partial class ServerTab : UserControl
     /// <summary>
     /// Wraps a query in a try/catch so it returns an empty list on failure instead of faulting.
     /// </summary>
-    private static async Task<List<T>> SafeQueryAsync<T>(Func<Task<List<T>>> query)
+    private static async Task<List<T>> SafeQueryAsync<T>(Func<Task<List<T>>> query, CancellationToken ct = default)
     {
         try
         {
             return await query();
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            /* #5371: the pass was superseded and its read stopped on purpose; that is not a failed query to swallow into an empty list. */
+            throw;
         }
         catch (Exception ex)
         {
