@@ -32,8 +32,10 @@ public sealed class StoreServerPasswordRulesLiveTests
 {
     private const string ReferenceSentence = "Enter the password itself. References (env: or file:) can only be set in the configuration file.";
     private const string MoveSentence = "Changing how this server is reached needs its password again: it is stored encrypted and this surface cannot read it back.";
+    private const string RemediationSentence = "This server has a remediation login stored. Change how it is reached on the service host, in the configuration file or with --add-server.";
     private const string ReferenceState = "PW001";
     private const string MoveState = "PW002";
+    private const string RemediationState = "PW003";
 
     private static string RequireLivePostgres()
     {
@@ -81,6 +83,18 @@ public sealed class StoreServerPasswordRulesLiveTests
         var end = script.IndexOf(triggerEnd, start, StringComparison.Ordinal);
         Assert.True(end >= 0, "provision-roles.sql carries no password rules trigger");
         return script[start..(end + triggerEnd.Length)];
+    }
+
+    /// <summary>The edit function as the self-managed script carries it, cut out of the script's text.</summary>
+    private static string ByoEditFunctionSql()
+    {
+        var script = RepoFile.ReadRepoFile("Darling", "tools", "provision-roles.sql").Replace("\r\n", "\n", StringComparison.Ordinal);
+        var start = script.IndexOf("CREATE OR REPLACE FUNCTION config.edit_monitored_server(", StringComparison.Ordinal);
+        Assert.True(start >= 0, "provision-roles.sql carries no edit function");
+        const string functionEnd = "$fn$;";
+        var end = script.IndexOf(functionEnd, start, StringComparison.Ordinal);
+        Assert.True(end >= 0, "provision-roles.sql carries no end for the edit function");
+        return script[start..(end + functionEnd.Length)];
     }
 
     private static async Task InsertServerAsync(
@@ -140,6 +154,7 @@ public sealed class StoreServerPasswordRulesLiveTests
             await ExecAsync(owner, batch, ct);
             if (selfManagedText)
             {
+                await ExecAsync(owner, ByoEditFunctionSql(), ct);
                 await ExecAsync(owner, ByoRulesSql(), ct);
             }
 
@@ -229,7 +244,8 @@ public sealed class StoreServerPasswordRulesLiveTests
 
             /* A new password is not enough while a remediation password is still stored with it, and a move that keeps a
                stored reference is refused like any other. */
-            await RefusedAsync(() => ExecAsync(admin, "UPDATE config_monitored_servers SET host = 'own-host', encrypted_password = 'a-new-protected-blob' WHERE server_id = 7403", ct), MoveState, MoveSentence);
+            await RefusedAsync(() => ExecAsync(admin, "UPDATE config_monitored_servers SET host = 'own-host', encrypted_password = 'a-new-protected-blob' WHERE server_id = 7403", ct), RemediationState, RemediationSentence);
+            await RefusedAsync(() => ExecAsync(admin, "UPDATE config_monitored_servers SET host = 'own-host' WHERE server_id = 7403", ct), RemediationState, RemediationSentence);
             await RefusedAsync(() => ExecAsync(admin, "UPDATE config_monitored_servers SET host = 'own-host' WHERE server_id = 7402", ct), MoveState, MoveSentence);
             Assert.Equal("keep-host", await TextAsync(owner, "SELECT host FROM config_monitored_servers WHERE server_id = 7401", ct));
             Assert.Equal(ProtectedBlob, await TextAsync(owner, "SELECT encrypted_password FROM config_monitored_servers WHERE server_id = 7401", ct));
@@ -256,6 +272,139 @@ public sealed class StoreServerPasswordRulesLiveTests
             await RefusedAsync(() => ExecAsync(admin, string.Format(System.Globalization.CultureInfo.InvariantCulture, upsert.Replace("7402", "7499", StringComparison.Ordinal), "'ref-host'", "'file:/run/secrets/sql_password'"), ct), ReferenceState, ReferenceSentence);
             Assert.Equal("ref-host", await TextAsync(owner, "SELECT host FROM config_monitored_servers WHERE server_id = 7402", ct));
         });
+    }
+
+    /// <summary>
+    /// A role that may create a temporary table puts one named like a catalog or a table the store's code reads first in its
+    /// own session: the rules and the edit function name what they read, and keep the temporary schema last.
+    /// </summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ATemporaryTableNamedLikeACatalogOrAStoreTable_ChangesNothingTheRulesOrTheEditFunctionRead(bool selfManagedText)
+    {
+        await RunScenarioAsync(selfManagedText, async (ownerString, owner, ct) =>
+        {
+            await InsertServerAsync(owner, 7901, "keep-host", ProtectedBlob, null, ct);
+            await using var viewer = await ConnectAsync(ownerString, "viewer", ProvisioningTestSecrets.ViewerPassword, ct);
+            await using var mcp = await ConnectAsync(ownerString, "mcp", ProvisioningTestSecrets.McpPassword, ct);
+
+            static async Task ShadowCatalogAsync(NpgsqlConnection role, CancellationToken token)
+            {
+                await ExecAsync(role, "CREATE TEMP TABLE pg_class (oid oid, relowner oid)", token);
+                await ExecAsync(role,
+                    "INSERT INTO pg_class VALUES ('config.config_monitored_servers'::regclass, (SELECT oid FROM pg_catalog.pg_roles WHERE rolname = current_user))", token);
+            }
+
+            await ShadowCatalogAsync(viewer, ct);
+            await RefusedAsync(() => InsertServerAsync(viewer, 7902, "h-env", "env:SOME_SECRET", null, ct), ReferenceState, ReferenceSentence);
+
+            await ShadowCatalogAsync(mcp, ct);
+            await RefusedAsync(() => ExecAsync(mcp, "UPDATE config_monitored_servers SET host = 'moved' WHERE server_id = 7901", ct), MoveState, MoveSentence);
+            Assert.Equal("keep-host", await TextAsync(owner, "SELECT host FROM config_monitored_servers WHERE server_id = 7901", ct));
+
+            /* The edit function reads and writes the store's table, not a temporary table of the same name. */
+            await ExecAsync(viewer, "CREATE TEMP TABLE config_monitored_servers (server_id integer)", ct);
+            Assert.Equal("saved", await EditOutcomeAsync(viewer, 7901, "'host','encrypted_password'", "moved-host", "a-new-protected-blob", owner, ct));
+            Assert.Equal("moved-host", await TextAsync(owner, "SELECT host FROM config_monitored_servers WHERE server_id = 7901", ct));
+        });
+    }
+
+    private const string RemediationBlob = "AQAAANCMnd8-a-remediation-blob";
+
+    /// <summary>
+    /// A change to how a server is reached on a row that holds a remediation login is refused by the edit function whatever
+    /// else the call sends, and nothing is written; the same call on a row without one saves. The store's own trigger refuses
+    /// the same change made directly, with the same sentence.
+    /// </summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task AChangeToHowAServerIsReached_OnARowWithARemediationLogin_IsRefusedAndWritesNothing(bool selfManagedText)
+    {
+        await RunScenarioAsync(selfManagedText, async (ownerString, owner, ct) =>
+        {
+            await InsertServerAsync(owner, 8001, "rem-viewer", ProtectedBlob, RemediationBlob, ct);
+            await InsertServerAsync(owner, 8002, "plain-viewer", ProtectedBlob, null, ct);
+            await InsertServerAsync(owner, 8003, "rem-mcp", ProtectedBlob, RemediationBlob, ct);
+            await InsertServerAsync(owner, 8004, "plain-mcp", ProtectedBlob, null, ct);
+            await using var viewer = await ConnectAsync(ownerString, "viewer", ProvisioningTestSecrets.ViewerPassword, ct);
+            await using var mcp = await ConnectAsync(ownerString, "mcp", ProvisioningTestSecrets.McpPassword, ct);
+
+            foreach (var (role, remediationId, plainId, host) in new[] { (viewer, 8001, 8002, "rem-viewer"), (mcp, 8003, 8004, "rem-mcp") })
+            {
+                Assert.Equal("remediation_kept", await EditOutcomeAsync(role, remediationId, "'host','encrypted_password'", "evil-host", "typed-anything", owner, ct));
+                Assert.Equal("remediation_kept", await EditOutcomeAsync(role, remediationId, "'host'", "evil-host", null, owner, ct));
+                Assert.Equal(host + "|" + ProtectedBlob + "|" + RemediationBlob,
+                    await TextAsync(owner, $"SELECT host || '|' || encrypted_password || '|' || remediation_encrypted_password FROM config_monitored_servers WHERE server_id = {remediationId}", ct));
+
+                /* A change that is not to how the row is reached still saves, and leaves the remediation login alone. */
+                Assert.Equal("saved", await EditOutcomeAsync(role, remediationId, "'encrypted_password'", null, "a-new-protected-blob", owner, ct));
+                Assert.Equal(RemediationBlob, await TextAsync(owner, $"SELECT remediation_encrypted_password FROM config_monitored_servers WHERE server_id = {remediationId}", ct));
+
+                Assert.Equal("saved", await EditOutcomeAsync(role, plainId, "'host','encrypted_password'", "moved-host", "a-new-protected-blob", owner, ct));
+                Assert.Equal("moved-host", await TextAsync(owner, $"SELECT host FROM config_monitored_servers WHERE server_id = {plainId}", ct));
+            }
+
+            await RefusedAsync(() => ExecAsync(mcp, "UPDATE config_monitored_servers SET host = 'evil-host' WHERE server_id = 8003", ct), RemediationState, RemediationSentence);
+            await RefusedAsync(() => ExecAsync(mcp, "UPDATE config_monitored_servers SET host = 'evil-host', encrypted_password = 'typed-anything' WHERE server_id = 8003", ct), RemediationState, RemediationSentence);
+            Assert.Equal("rem-mcp", await TextAsync(owner, "SELECT host FROM config_monitored_servers WHERE server_id = 8003", ct));
+        });
+    }
+
+    /// <summary>
+    /// A self-managed store's rules are created on the service's start, as the role that owns its tables, when the script was
+    /// not re-run after an upgrade; running it again changes nothing, and a login that may not create them gets one warning
+    /// that names the script and fails nothing.
+    /// </summary>
+    [Fact]
+    public async Task ASelfManagedStoreWithNoRules_GetsThemFromTheServicesStart_AndALoginThatMayNotCreateThemGetsOneWarning()
+    {
+        var connectionString = RequireLivePostgres();
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(connectionString, ct);
+        var login = "rules_probe_" + Guid.NewGuid().ToString("N")[..8];
+        const string triggerCount = "SELECT count(*) FROM pg_trigger WHERE tgrelid = 'config.config_monitored_servers'::regclass AND tgname = 'trg_monitored_server_password_rules'";
+        const string functionCount = "SELECT count(*) FROM pg_proc WHERE oid = 'config.monitored_server_password_rules()'::regprocedure";
+
+        var bodySucceeded = false;
+        try
+        {
+            await using var owner = new NpgsqlConnection(scratch.ConnectionString);
+            await owner.OpenAsync(ct);
+            await PgMigrations.MigrateAsync(owner, ct);
+            Assert.Equal("0", await TextAsync(owner, triggerCount, ct));
+
+            var log = new CapturingTestLogger();
+            await using (var ownerSource = NpgsqlDataSource.Create(scratch.ConnectionString))
+            {
+                Assert.True(await DarlingManagedRoles.EnsureServerPasswordRulesAsync(ownerSource, log, ct), log.Joined);
+                Assert.True(await DarlingManagedRoles.EnsureServerPasswordRulesAsync(ownerSource, log, ct), log.Joined);
+            }
+
+            Assert.Equal("1", await TextAsync(owner, triggerCount, ct));
+            Assert.Equal("1", await TextAsync(owner, functionCount, ct));
+            Assert.Equal(0, log.CountAtLevel(Microsoft.Extensions.Logging.LogLevel.Warning));
+
+            await ExecAsync(owner, "DROP TRIGGER trg_monitored_server_password_rules ON config.config_monitored_servers", ct);
+            await ExecAsync(owner, $"CREATE ROLE {login} LOGIN PASSWORD 'rules-probe-1'", ct);
+            var restricted = new NpgsqlConnectionStringBuilder(scratch.ConnectionString) { Username = login, Password = "rules-probe-1" }.ConnectionString;
+            var warned = new CapturingTestLogger();
+            await using (var restrictedSource = NpgsqlDataSource.Create(restricted))
+            {
+                Assert.False(await DarlingManagedRoles.EnsureServerPasswordRulesAsync(restrictedSource, warned, ct), warned.Joined);
+            }
+
+            Assert.Equal(1, warned.CountAtLevel(Microsoft.Extensions.Logging.LogLevel.Warning));
+            Assert.Contains("provision-roles.sql", warned.Joined, StringComparison.Ordinal);
+            Assert.Equal("0", await TextAsync(owner, triggerCount, ct));
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (cleanup, cleanupCt) =>
+                await ExecAsync(cleanup, $"DROP OWNED BY {login}; DROP ROLE IF EXISTS {login}", cleanupCt));
+        }
     }
 
     [Fact]

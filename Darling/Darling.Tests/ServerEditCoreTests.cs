@@ -718,4 +718,16 @@ public sealed class ServerEditCoreTests : IDisposable
         Assert.Equal("Enter the password itself. References (env: or file:) can only be set in the configuration file.", answer["message"]!.GetValue<string>());
         Assert.Equal(Edit.EditReferenceRefusedText, answer["message"]!.GetValue<string>());
     }
+
+    [Fact]
+    public async Task AStoreThatKeepsARemediationLoginOnAMove_GivesTheOneSentenceForIt()
+    {
+        var store = new FakeStore { Row = SqlRow(), WriteResult = Edit.ServerEditWriteKind.RemediationKept };
+
+        var answer = JsonNode.Parse(await Run(store, "{\"monthly_cost_usd\":5}"))!;
+
+        Assert.Equal("invalid", answer["status"]!.GetValue<string>());
+        Assert.Equal("This server has a remediation login stored. Change how it is reached on the service host, in the configuration file or with --add-server.", answer["message"]!.GetValue<string>());
+        Assert.Equal(Edit.EditRemediationKeptText, answer["message"]!.GetValue<string>());
+    }
 }

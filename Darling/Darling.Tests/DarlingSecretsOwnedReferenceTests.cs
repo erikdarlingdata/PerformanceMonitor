@@ -420,11 +420,17 @@ public sealed class DarlingSecretsOwnedReferenceTests : IDisposable
         var alphaId = seededRows.Single(s => s.Name == "alpha").ServerId;
         if (remediationSlot)
         {
+            /* The edit core does not move a row that holds a remediation login, so the move is written directly, as the
+               service host's own tools write it. */
             var answer = await Edit.EditServerCoreAsync(
                 new Edit.PostgresServerEditStore(owner), alphaId, "{\"host\":\"moved.example.test\",\"password\":\"typed-secret-Q7\"}",
                 (_, _) => Task.FromResult(new ConnectionProbeResult(true, 15, 3, "Enterprise", false, false, false, true, null)),
                 isWindows: true, logger: null, ct);
-            Assert.Equal("updated", System.Text.Json.Nodes.JsonNode.Parse(answer)!["status"]!.GetValue<string>());
+            Assert.Equal("invalid", System.Text.Json.Nodes.JsonNode.Parse(answer)!["status"]!.GetValue<string>());
+
+            await using var move = owner.CreateCommand("UPDATE config_monitored_servers SET host = 'moved.example.test' WHERE server_id = $1");
+            move.Parameters.Add(new Npgsql.NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Integer, Value = alphaId });
+            Assert.Equal(1, await move.ExecuteNonQueryAsync(ct));
         }
         else
         {

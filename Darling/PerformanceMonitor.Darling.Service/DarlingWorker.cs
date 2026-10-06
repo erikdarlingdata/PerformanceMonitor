@@ -2610,6 +2610,17 @@ LIMIT 1";
                 _composeStoreRolesProvisioned = true;
                 _appliedComposeStatementTimeoutSeconds = verdict.AppliedComposeStatementTimeoutSeconds;
             }
+            else
+            {
+                await DarlingManagedRoles.EnsureServerPasswordRulesAsync(postgres, _logger, stoppingToken);
+            }
+        }
+        else if (!config.Postgres.Managed)
+        {
+            /* A self-managed store gets the store's password rules from tools/provision-roles.sql; a store upgraded
+               without re-running it has none. Best-effort on every start as the role that owns the tables, the way the
+               database-default search_path is: one warning naming the script when the login may not create them. */
+            await DarlingManagedRoles.EnsureServerPasswordRulesAsync(postgres, _logger, stoppingToken);
         }
 
         /* Optional TimescaleDB adoption — runtime setup, deliberately NOT a versioned migration
