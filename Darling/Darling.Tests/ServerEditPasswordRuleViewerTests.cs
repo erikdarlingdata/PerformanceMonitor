@@ -52,9 +52,48 @@ public sealed class ServerEditPasswordRuleViewerTests
     [InlineData("edit-rule.example.test\\inst", 0, "edit-rule.example.test", 0, true)]
     [InlineData("edit-rule.example.test", 0, "edit-rule.example.test", 5433, true)]
     [InlineData("edit-rule.example.test", 5433, "edit-rule.example.test", 5433, false)]
+    /* Only the incoming host is trimmed; the stored text is compared exactly, as the core's SameAddress does. */
+    [InlineData("edit-rule.example.test ", 0, "edit-rule.example.test", 0, true)]
+    [InlineData("edit-rule.example.test ", 0, "edit-rule.example.test ", 0, true)]
     public void TheViewersMoveRule_IsTheCoresHostAndPortRule(string storedHost, int storedPort, string newHost, int newPort, bool moved)
     {
         Assert.Equal(moved, ViewerDataService.ReachMoved(storedHost, storedPort, newHost, newPort));
+    }
+
+    [Theory]
+    [InlineData("edit-rule.example.test", 0, "edit-rule.example.test", 0)]
+    [InlineData("edit-rule.example.test", 0, "  edit-rule.example.test ", 0)]
+    [InlineData("edit-rule.example.test", 0, "EDIT-RULE.example.test", 0)]
+    [InlineData("edit-rule.example.test ", 0, "edit-rule.example.test", 0)]
+    [InlineData("edit-rule.example.test ", 0, "edit-rule.example.test ", 0)]
+    [InlineData("edit-rule.example.test", 0, "edit-rule.example.test", 5433)]
+    public void TheViewersMoveRule_AgreesWithTheCoresSameAddress_OnTheTrimmedIncomingHost(string storedHost, int storedPort, string newHost, int newPort)
+    {
+        /* The core trims a request's host when it reads it, then calls SameAddress with the stored text as it is. */
+        Assert.Equal(
+            !Edit.SameAddress(newHost.Trim(' '), newPort, storedHost, storedPort),
+            ViewerDataService.ReachMoved(storedHost, storedPort, newHost, newPort));
+    }
+
+    [Theory]
+    [InlineData("serviceprincipal", "sql")]
+    [InlineData("sql", "serviceprincipal")]
+    [InlineData("integrated", "sql")]
+    public void TheViewersSwitchSentences_AreTheCoresSentences(string storedAuth, string newAuth)
+    {
+        var row = new Edit.ServerEditRow(
+            ServerId: ServerId, Name: "edit-rule", Host: StoredHost, Port: 0, Database: null, ReadOnlyIntent: false, Engine: "sqlserver",
+            Auth: storedAuth, Username: "app-user", EncryptMode: "Mandatory", TrustServerCertificate: false,
+            MultiSubnetFailover: false, MonthlyCostUsd: 0m, ModifiedAt: new DateTime(2026, 10, 5, 12, 0, 0, DateTimeKind.Unspecified));
+        var (changes, parseError) = Edit.ParseEditChanges("{\"auth\":\"" + (newAuth == "sql" ? "SQL" : "ServicePrincipal") + "\",\"username\":\"app-user\"}");
+        Assert.Null(parseError);
+
+        var (plan, error) = Edit.PlanEdit(row, changes!, isWindows: true);
+
+        Assert.Null(plan);
+        Assert.Equal(
+            newAuth == "sql" ? ViewerDataService.EditSwitchToSqlNeedsPasswordText : ViewerDataService.EditSwitchToServicePrincipalNeedsSecretText,
+            error);
     }
 
     [Fact]
@@ -200,5 +239,58 @@ public sealed class ServerEditPasswordRuleViewerTests
         await viewer.UpsertMonitoredServerAsync(Row("integrated", MovedHost, null), ct);
 
         Assert.Equal((MovedHost, null, "Mandatory"), await StoredAsync(rig, ct));
+    }
+
+    [Theory]
+    [InlineData("sql", "serviceprincipal", "Switching to ServicePrincipal authentication needs the client secret as password.")]
+    [InlineData("serviceprincipal", "sql", "Switching to SQL authentication needs the password.")]
+    [InlineData("integrated", "sql", "Switching to SQL authentication needs the password.")]
+    public async Task AnAuthSwitch_ThatKeepsTheStoredBlob_OrCarriesNone_IsRefused_WithTheCoresSentence_AndNothingIsWritten(
+        string storedAuth, string newAuth, string sentence)
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var storedBlob = storedAuth == "integrated" ? null : StoredBlob;
+        await using var rig = await OpenAsync(storedAuth, storedBlob, ct);
+        await using var viewer = new ViewerDataService(rig.Scratch.ConnectionString);
+
+        if (storedBlob is not null)
+        {
+            var kept = await Assert.ThrowsAsync<MonitoredServerPasswordNeededException>(
+                () => viewer.UpsertMonitoredServerAsync(Row(newAuth, StoredHost, StoredBlob), ct));
+            Assert.Equal(sentence, kept.Message);
+        }
+
+        var none = await Assert.ThrowsAsync<MonitoredServerPasswordNeededException>(
+            () => viewer.UpsertMonitoredServerAsync(Row(newAuth, StoredHost, null), ct));
+        Assert.Equal(sentence, none.Message);
+
+        Assert.Equal((StoredHost, storedBlob, "Mandatory"), await StoredAsync(rig, ct));
+    }
+
+    [Theory]
+    [InlineData("sql", "serviceprincipal")]
+    [InlineData("serviceprincipal", "sql")]
+    [InlineData("integrated", "sql")]
+    public async Task AnAuthSwitch_WithANewlyEnteredSecret_Saves(string storedAuth, string newAuth)
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var rig = await OpenAsync(storedAuth, storedAuth == "integrated" ? null : StoredBlob, ct);
+        await using var viewer = new ViewerDataService(rig.Scratch.ConnectionString);
+
+        await viewer.UpsertMonitoredServerAsync(Row(newAuth, StoredHost, NewBlob), ct);
+
+        Assert.Equal((StoredHost, NewBlob, "Mandatory"), await StoredAsync(rig, ct));
+    }
+
+    [Fact]
+    public async Task ASwitchOutOfASecretMode_NeedsNoSecret_AndSaves()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var rig = await OpenAsync("sql", StoredBlob, ct);
+        await using var viewer = new ViewerDataService(rig.Scratch.ConnectionString);
+
+        await viewer.UpsertMonitoredServerAsync(Row("integrated", StoredHost, null), ct);
+
+        Assert.Equal((StoredHost, null, "Mandatory"), await StoredAsync(rig, ct));
     }
 }

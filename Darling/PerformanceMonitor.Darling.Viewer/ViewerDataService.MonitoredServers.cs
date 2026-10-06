@@ -467,27 +467,38 @@ ORDER BY COALESCE(s.display_name, c.name)";
     public const string EditPasswordNeededText =
         "Changing how this server is reached needs its password again: it is stored encrypted and this surface cannot read it back.";
 
-    /// <summary>The stored host, port, and whether the stored blob is the one a row carries, for one server id ($1 id,
+    /// <summary>The stored host, port, auth mode, and whether the stored blob is the one a row carries, for one server id ($1 id,
     /// $2 the row's blob). Reads <c>encrypted_password</c> only to compare it, in the write's own transaction: an
     /// <c>admin</c>-role write, like the upsert it guards.</summary>
     public const string MonitoredServerStoredReachSql = @"
-SELECT host, COALESCE(port, 0), COALESCE(encrypted_password = $2, false)
+SELECT host, COALESCE(port, 0), auth, COALESCE(encrypted_password = $2, false)
 FROM config_monitored_servers
 WHERE server_id = $1";
 
+    /// <summary>The sentence a switch into SQL authentication gives when no new password comes with it: the edit core's
+    /// (<c>DarlingMcpServerAdminTools.PlanEdit</c>). The core's sentence is an inline literal, so
+    /// <c>ServerEditPasswordRuleViewerTests</c> drives the core and fails if the two texts differ.</summary>
+    public const string EditSwitchToSqlNeedsPasswordText = "Switching to SQL authentication needs the password.";
+
+    /// <summary>The service-principal twin of <see cref="EditSwitchToSqlNeedsPasswordText"/>.</summary>
+    public const string EditSwitchToServicePrincipalNeedsSecretText =
+        "Switching to ServicePrincipal authentication needs the client secret as password.";
+
     /// <summary>
     /// True when the row's connection moved off the stored one the way the web and MCP edit count a move: the host
-    /// (trimmed of spaces, compared exactly, the instance being part of it) or the port differs. Mirrors
-    /// <c>DarlingMcpServerAdminTools.PlanEdit</c> and the store's edit function (<c>btrim(host)</c>, then
-    /// <c>IS DISTINCT FROM</c>); the stored values are compared as they are stored.
+    /// (the incoming host trimmed of spaces, the stored host compared exactly as stored, the instance being part of it)
+    /// or the port differs. Mirrors <c>DarlingMcpServerAdminTools.SameAddress</c> and the store's edit function
+    /// (<c>btrim(host)</c> on the incoming value, then <c>IS DISTINCT FROM</c>).
     /// </summary>
     internal static bool ReachMoved(string storedHost, int storedPort, string newHost, int newPort) =>
         !string.Equals(newHost.Trim(' '), storedHost, StringComparison.Ordinal) || newPort != storedPort;
 
     /// <summary>
     /// Refuses (throws <see cref="MonitoredServerPasswordNeededException"/>) a write that moves a SQL or
-    /// service-principal server's host or port while carrying no newly entered password: the row's blob is missing, or
-    /// is the stored one. A Windows or managed-identity row stores no secret and is never refused; a row that is not in
+    /// service-principal server's host or port, or switches its auth mode (into SQL or service principal, from any
+    /// other mode, including the other of the two), while carrying no newly entered password: the row's blob is
+    /// missing, or is the stored one. A switch gets the core's switch sentence, ahead of the move sentence, as in the
+    /// core. A Windows or managed-identity row stores no secret and is never refused; a row that is not in
     /// the store yet has nothing to reuse. Runs inside the caller's transaction, after the identity lock.
     /// </summary>
     private async Task RefuseStoredPasswordOnMovedReachAsync(
@@ -501,6 +512,7 @@ WHERE server_id = $1";
 
         string storedHost;
         int storedPort;
+        string storedAuth;
         bool carriesStoredBlob;
         try
         {
@@ -516,7 +528,8 @@ WHERE server_id = $1";
 
             storedHost = reader.GetString(0);
             storedPort = reader.GetInt32(1);
-            carriesStoredBlob = reader.GetBoolean(2);
+            storedAuth = reader.GetString(2);
+            carriesStoredBlob = reader.GetBoolean(3);
         }
         catch (PostgresException ex) when (ex.SqlState == InsufficientPrivilegeSqlState)
         {
@@ -527,8 +540,20 @@ WHERE server_id = $1";
             throw new ViewerSchemaSkewException(ex);
         }
 
-        if (ReachMoved(storedHost, storedPort, row.Host, row.Port)
-            && (string.IsNullOrEmpty(row.EncryptedPassword) || carriesStoredBlob))
+        if (!string.IsNullOrEmpty(row.EncryptedPassword) && !carriesStoredBlob)
+        {
+            return;
+        }
+
+        if (!string.Equals(storedAuth, row.Auth, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new MonitoredServerPasswordNeededException(
+                string.Equals(row.Auth, ServerStoreCredential.ServicePrincipal, StringComparison.OrdinalIgnoreCase)
+                    ? EditSwitchToServicePrincipalNeedsSecretText
+                    : EditSwitchToSqlNeedsPasswordText);
+        }
+
+        if (ReachMoved(storedHost, storedPort, row.Host, row.Port))
         {
             throw new MonitoredServerPasswordNeededException();
         }
@@ -949,13 +974,22 @@ public sealed record MonitoredServerAddResult(MonitoredServerAddOutcome Outcome,
 /// <summary>
 /// <see cref="ViewerDataService.UpsertMonitoredServerAsync"/> refused an edit (#5240): it moves a SQL or
 /// service-principal server's host or port and carries no newly entered password, so the stored one would have been
-/// sent to the new address. The message is <see cref="ViewerDataService.EditPasswordNeededText"/>; the dialog's save
+/// sent to the new address, or it switches between SQL and service-principal authentication and keeps the stored
+/// secret. The message is <see cref="ViewerDataService.EditPasswordNeededText"/> for a move, the switch sentence for
+/// a switch; the dialog's save
 /// handler shows it as it is, as it does a claimed address.
 /// </summary>
 public sealed class MonitoredServerPasswordNeededException : InvalidOperationException
 {
     public MonitoredServerPasswordNeededException()
         : base(ViewerDataService.EditPasswordNeededText)
+    {
+    }
+
+    /// <summary>A refusal with the edit core's switch sentence (<see cref="ViewerDataService.EditSwitchToSqlNeedsPasswordText"/>
+    /// or its service-principal twin).</summary>
+    public MonitoredServerPasswordNeededException(string message)
+        : base(message)
     {
     }
 }
