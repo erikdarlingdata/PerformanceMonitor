@@ -9,6 +9,7 @@
 using System;
 using System.Globalization;
 using System.Net;
+using System.Runtime.Versioning;
 using System.Security.Authentication;
 using System.Security.Cryptography.X509Certificates;
 using Microsoft.AspNetCore.Server.Kestrel.Https;
@@ -209,12 +210,31 @@ internal static class DarlingListenerTls
         DarlingWebTls.LoadedCertificate? loaded = null;
         try
         {
+            /* #5288: a literal PKCS#12 password in darling.json is readable by every interactive user, so it is
+               named BEFORE the load (a load that then fails on a wrong password still carries the nudge). The
+               DPAPI slot and a file:/env: reference are the supported shapes and do not warn, and only the
+               PKCS#12 form reads the password at all: beside a PEM pair a stray password is the plan's own
+               warning below. */
+            if (plan.Shape == DarlingWebTls.TlsShape.Pfx && UsesPlaintextPfxPassword(tls))
+            {
+                logger.LogWarning("{Surface} TLS: {Warning}", labels.Surface, PlaintextPfxPasswordWarning(labels));
+            }
+
             loaded = DarlingWebTls.Load(tls, plan.Shape, labels.Section);
             var certificate = loaded.Value.Leaf;
 
             if (plan.Warning is not null)
             {
                 logger.LogWarning("{Surface} TLS: {Warning}", labels.Surface, plan.Warning);
+            }
+
+            /* #5288: the private key is what makes the endpoint this endpoint, and a key file kept in a folder that
+               inherits read for BUILTIN\Users can be read by every local account. After a successful load, on
+               Windows (where the ACL this reads exists), the file is named when ordinary users can read it. A
+               warning, not a refusal: the listener works, and the fix is one icacls line. */
+            if (OperatingSystem.IsWindows())
+            {
+                WarnWhenKeyFileIsReadableByUsers(logger, labels, tls, plan.Shape);
             }
 
             /* Lifetime is checked BEFORE the listener is built, not left to the handshake: an
@@ -306,6 +326,76 @@ internal static class DarlingListenerTls
                 labels.Surface, ex.Message);
             return new ListenerTlsOutcome(Expose: false, Certificate: null, plan.Shape);
         }
+    }
+
+    /// <summary>
+    /// Logs a Warning when ordinary users (<c>Users</c>, <c>Authenticated Users</c>, <c>Everyone</c>) can read the
+    /// file that holds the private key: the PEM key (the certificate beside it is public), or the whole PKCS#12
+    /// bundle. Called after a successful load, so the path is known to exist and to name the shape's file.
+    /// </summary>
+    [SupportedOSPlatform("windows")]
+    private static void WarnWhenKeyFileIsReadableByUsers(
+        ILogger logger,
+        ListenerTlsLabels labels,
+        WebTlsConfig tls,
+        DarlingWebTls.TlsShape shape)
+    {
+        /* Trimmed exactly as the loader trims it, so this reads the file the loader read. */
+        var path = (shape == DarlingWebTls.TlsShape.Pfx ? tls.PfxPath : tls.KeyPath)!.Trim();
+        if (!DarlingFileSecurity.IsReadableByOrdinaryUsers(path))
+        {
+            return;
+        }
+
+        logger.LogWarning(
+            "{Surface} TLS: {Warning}",
+            labels.Surface,
+            KeyFileReadableWarning(
+                shape,
+                path,
+                DarlingFileSecurity.DescribeOwnerAndExposure(path),
+                DarlingFileSecurity.ServiceAccountDisplayName));
+    }
+
+    /// <summary>
+    /// The warning for a key file that ordinary users can read: it names the file and gives the <c>icacls</c> line
+    /// that leaves it to SYSTEM, Administrators and the service account. PURE.
+    /// </summary>
+    /// <param name="shape">Which file it is: the PKCS#12 bundle for <see cref="DarlingWebTls.TlsShape.Pfx"/>,
+    /// otherwise the PEM private key.</param>
+    /// <param name="path">The file, as the loader read it.</param>
+    /// <param name="detail">The owner-and-exposure parenthetical (<c>DarlingFileSecurity.DescribeOwnerAndExposure</c>),
+    /// or an empty string.</param>
+    /// <param name="account">The account the service runs as, which the <c>icacls</c> line grants read.</param>
+    internal static string KeyFileReadableWarning(DarlingWebTls.TlsShape shape, string path, string detail, string account)
+    {
+        var what = shape == DarlingWebTls.TlsShape.Pfx ? "PKCS#12 bundle" : "private key file";
+
+        return $"the {what} {path} is readable by ordinary users{detail}. Only SYSTEM, Administrators and the service "
+            + $"account should be able to read it. Restrict it with: icacls \"{path}\" /inheritance:r /grant:r "
+            + $"\"NT AUTHORITY\\SYSTEM:(F)\" \"BUILTIN\\Administrators:(F)\" \"{account}:(R)\"";
+    }
+
+    /// <summary>
+    /// True when the PKCS#12 password the loader will read is a literal in the config file: <c>pfxPassword</c> is
+    /// set, is not an <c>env:</c>/<c>file:</c> reference, and the DPAPI slot (<c>encryptedPfxPassword</c>), which
+    /// <see cref="WebTlsConfig.ResolvePfxPassword"/> prefers, is blank. Reads no secret, so it cannot throw. PURE.
+    /// </summary>
+    private static bool UsesPlaintextPfxPassword(WebTlsConfig tls)
+        => !string.IsNullOrWhiteSpace(tls.PfxPassword)
+           && string.IsNullOrWhiteSpace(tls.EncryptedPfxPassword)
+           && !DarlingSecretSource.IsReference(tls.PfxPassword);
+
+    /// <summary>
+    /// The warning for a PKCS#12 password written as a literal in <c>darling.json</c>. It names the setting for the
+    /// listener's section and the two supported shapes. PURE.
+    /// </summary>
+    internal static string PlaintextPfxPasswordWarning(ListenerTlsLabels labels)
+    {
+        ArgumentNullException.ThrowIfNull(labels);
+
+        return $"{labels.Section}.network.tls.pfxPassword is set in plaintext (dev convenience). "
+            + "Prefer encryptedPfxPassword (--encrypt-password) or a file:/env: reference.";
     }
 
     /// <summary>

@@ -16,7 +16,9 @@ using System.Net.Security;
 using System.Net.Sockets;
 using System.Security.Authentication;
 using System.Security.Cryptography;
+using System.Security.AccessControl;
 using System.Security.Cryptography.X509Certificates;
+using System.Security.Principal;
 using System.Threading.Tasks;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
@@ -312,6 +314,182 @@ public sealed class DarlingListenerTlsTests
             Assert.Equal(DarlingWebTls.TlsShape.Pem, outcome.Shape);
             Assert.True(outcome.Certificate.Value.Leaf.HasPrivateKey);
             Assert.Equal(cert.Thumbprint, outcome.Certificate.Value.Leaf.Thumbprint);
+        }
+    }
+
+    /* ---- the private key file: named when ordinary users can read it (Windows) ---- */
+
+    /// <summary>
+    /// A key file (the PEM key, or the PKCS#12 bundle) that BUILTIN\Users can read logs one Warning that names the
+    /// file and gives the icacls line, and the listener still serves: it is a warning, not a refusal.
+    /// </summary>
+    [Theory]
+    [InlineData("web", "pem")]
+    [InlineData("mcp", "pem")]
+    [InlineData("mcp", "pfx")]
+    public void Resolve_KeyFileReadableByUsers_Warns(string section, string form)
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "ACLs are Windows-only.");
+
+        var labels = section == "web" ? ListenerTlsLabels.Web : ListenerTlsLabels.Mcp;
+        using var temp = new TempDir();
+        using var cert = Make("readable", DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddDays(365), ips: new[] { "192.168.1.205" });
+        var block = form == "pem" ? WritePem(temp, cert) : WritePfx(temp, cert);
+        var file = form == "pem" ? block.KeyPath! : block.PfxPath!;
+        GrantUsersRead(file);
+        Assert.True(DarlingFileSecurity.IsReadableByOrdinaryUsers(file), "the arrangement must make the file readable");
+        var log = new RecordingLogger();
+
+        var outcome = DarlingListenerTls.Resolve(log, new WebTlsCertificateState(), labels, block, Listen, Port, null);
+
+        using (outcome.Certificate!.Value)
+        {
+            Assert.True(outcome.Expose);
+            Assert.Equal(
+                $"{labels.Surface} TLS: the {(form == "pem" ? "private key file" : "PKCS#12 bundle")} {file} is readable by ordinary users"
+                + $"{DarlingFileSecurity.DescribeOwnerAndExposure(file)}. Only SYSTEM, Administrators and the service account should be able to read it. "
+                + $"Restrict it with: icacls \"{file}\" /inheritance:r /grant:r \"NT AUTHORITY\\SYSTEM:(F)\" \"BUILTIN\\Administrators:(F)\" "
+                + $"\"{DarlingFileSecurity.ServiceAccountDisplayName}:(R)\"",
+                Assert.Single(log.At(LogLevel.Warning)));
+        }
+    }
+
+    /// <summary>
+    /// The same file once its ordinary-user read is gone logs nothing, and for a PEM pair the certificate beside the
+    /// key is public: a readable certificate file alone does not warn.
+    /// </summary>
+    [Theory]
+    [InlineData("pem")]
+    [InlineData("pfx")]
+    public void Resolve_KeyFileRestricted_IsSilent(string form)
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "ACLs are Windows-only.");
+
+        using var temp = new TempDir();
+        using var cert = Make("restricted", DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddDays(365), ips: new[] { "192.168.1.205" });
+        var block = form == "pem" ? WritePem(temp, cert) : WritePfx(temp, cert);
+        var file = form == "pem" ? block.KeyPath! : block.PfxPath!;
+
+        /* Control: readable, so the same call warns. Then the read is removed and it does not. */
+        GrantUsersRead(file);
+        var control = new RecordingLogger();
+        using (DarlingListenerTls.Resolve(control, new WebTlsCertificateState(), ListenerTlsLabels.Mcp, block, Listen, Port, null).Certificate!.Value)
+        {
+            Assert.Single(control.At(LogLevel.Warning));
+        }
+
+        MakePrivate(file);
+        if (form == "pem")
+        {
+            GrantUsersRead(block.CertPath!);
+        }
+
+        Assert.False(DarlingFileSecurity.IsReadableByOrdinaryUsers(file));
+        var log = new RecordingLogger();
+        using (DarlingListenerTls.Resolve(log, new WebTlsCertificateState(), ListenerTlsLabels.Mcp, block, Listen, Port, null).Certificate!.Value)
+        {
+            Assert.Empty(log.At(LogLevel.Warning));
+        }
+    }
+
+    /* ---- the PKCS#12 password slots: only a literal in the config file is named ---- */
+
+    private static string PlaintextPasswordText(ListenerTlsLabels labels)
+        => $"{labels.Surface} TLS: {labels.Section}.network.tls.pfxPassword is set in plaintext (dev convenience). "
+           + "Prefer encryptedPfxPassword (--encrypt-password) or a file:/env: reference.";
+
+    /// <summary>A literal <c>pfxPassword</c> logs one Warning naming the section's setting, and the bundle still loads.</summary>
+    [Theory]
+    [InlineData("web")]
+    [InlineData("mcp")]
+    public void Resolve_PlaintextPfxPassword_Warns(string section)
+    {
+        var labels = section == "web" ? ListenerTlsLabels.Web : ListenerTlsLabels.Mcp;
+        using var temp = new TempDir();
+        using var cert = Make("literal", DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddDays(365), ips: new[] { "192.168.1.205" });
+        var block = WritePfx(temp, cert);
+        block.PfxPassword = "hunter2";
+        var log = new RecordingLogger();
+
+        var outcome = DarlingListenerTls.Resolve(log, new WebTlsCertificateState(), labels, block, Listen, Port, null);
+
+        using (outcome.Certificate!.Value)
+        {
+            Assert.True(outcome.Expose);
+            Assert.Equal(PlaintextPasswordText(labels), Assert.Single(log.At(LogLevel.Warning)));
+        }
+    }
+
+    /// <summary>The warning comes before the load, so a wrong literal that then fails to open the bundle still carries it.</summary>
+    [Fact]
+    public void Resolve_PlaintextPfxPassword_WarnsEvenWhenTheLoadFails()
+    {
+        using var temp = new TempDir();
+        using var cert = Make("literal-wrong", DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddDays(365));
+        var block = WritePfx(temp, cert, exportPassword: "right");
+        block.PfxPassword = "wrong";
+        var log = new RecordingLogger();
+
+        var outcome = DarlingListenerTls.Resolve(log, new WebTlsCertificateState(), ListenerTlsLabels.Mcp, block, Listen, Port, null);
+
+        Assert.False(outcome.Expose);
+        Assert.Equal(PlaintextPasswordText(ListenerTlsLabels.Mcp), Assert.Single(log.At(LogLevel.Warning)));
+        Assert.Single(log.At(LogLevel.Critical));
+    }
+
+    /// <summary>An <c>env:</c> or <c>file:</c> reference is not plaintext in the config, so neither logs a Warning.</summary>
+    [Theory]
+    [InlineData("file")]
+    [InlineData("env")]
+    public void Resolve_ReferencePfxPassword_IsSilent(string kind)
+    {
+        using var temp = new TempDir();
+        using var cert = Make("reference", DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddDays(365), ips: new[] { "192.168.1.205" });
+        var block = WritePfx(temp, cert);
+        const string variable = "DARLING_TEST_5295_L18_PFX_PASSWORD";
+        if (kind == "env")
+        {
+            block.PfxPassword = "env:" + variable;
+        }
+
+        Assert.StartsWith(kind + ":", block.PfxPassword, StringComparison.Ordinal);
+        var log = new RecordingLogger();
+
+        try
+        {
+            Environment.SetEnvironmentVariable(variable, "hunter2");
+            var outcome = DarlingListenerTls.Resolve(log, new WebTlsCertificateState(), ListenerTlsLabels.Mcp, block, Listen, Port, null);
+
+            using (outcome.Certificate!.Value)
+            {
+                Assert.True(outcome.Expose);
+                Assert.Empty(log.At(LogLevel.Warning));
+            }
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(variable, null);
+        }
+    }
+
+    /// <summary>The DPAPI slot is the preferred shape: set on its own it logs no Warning (Windows, where DPAPI is).</summary>
+    [Fact]
+    public void Resolve_EncryptedPfxPassword_IsSilent()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "DPAPI is Windows-only.");
+
+        using var temp = new TempDir();
+        using var cert = Make("encrypted", DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddDays(365), ips: new[] { "192.168.1.205" });
+        var withFile = WritePfx(temp, cert);
+        var block = new WebTlsConfig { PfxPath = withFile.PfxPath, EncryptedPfxPassword = DarlingSecrets.Protect("hunter2") };
+        var log = new RecordingLogger();
+
+        var outcome = DarlingListenerTls.Resolve(log, new WebTlsCertificateState(), ListenerTlsLabels.Mcp, block, Listen, Port, null);
+
+        using (outcome.Certificate!.Value)
+        {
+            Assert.True(outcome.Expose);
+            Assert.Empty(log.At(LogLevel.Warning));
         }
     }
 
@@ -743,7 +921,14 @@ public sealed class DarlingListenerTlsTests
     {
         var path = Path.Combine(temp.Path, Guid.NewGuid().ToString("N") + ".pfx");
         File.WriteAllBytes(path, cert.Export(X509ContentType.Pkcs12, exportPassword));
-        return new WebTlsConfig { PfxPath = path, PfxPassword = configPassword ?? exportPassword };
+
+        /* The password goes in as a file: reference, the shape a deployment is told to use, so a test that counts
+           the Warning lines is not also counting the plaintext-password warning. The tests for that warning put a
+           literal in the block themselves. */
+        var secret = Path.Combine(temp.Path, Guid.NewGuid().ToString("N") + ".secret");
+        File.WriteAllText(secret, configPassword ?? exportPassword);
+        MakePrivate(path);
+        return new WebTlsConfig { PfxPath = path, PfxPassword = "file:" + secret };
     }
 
     private static WebTlsConfig WritePem(TempDir temp, X509Certificate2 cert)
@@ -753,7 +938,40 @@ public sealed class DarlingListenerTlsTests
         var keyPath = Path.Combine(temp.Path, id + ".key");
         File.WriteAllText(certPath, cert.ExportCertificatePem());
         File.WriteAllText(keyPath, cert.GetRSAPrivateKey()!.ExportPkcs8PrivateKeyPem());
+        MakePrivate(keyPath);
         return new WebTlsConfig { CertPath = certPath, KeyPath = keyPath };
+    }
+
+    private static readonly SecurityIdentifier s_builtinUsers = new(WellKnownSidType.BuiltinUsersSid, null);
+
+    /// <summary>
+    /// Leaves <paramref name="path"/> readable by the current user alone (Windows): no inherited ACE and no Users
+    /// grant. Fixture files are private by construction, so a test that counts Warning lines is not also counting
+    /// the key-file warning on a machine whose temp folder grants Users read.
+    /// </summary>
+    private static void MakePrivate(string path)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var info = new FileInfo(path);
+        var security = info.GetAccessControl();
+        security.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
+        security.PurgeAccessRules(s_builtinUsers);
+        security.AddAccessRule(new FileSystemAccessRule(
+            WindowsIdentity.GetCurrent().User!, FileSystemRights.FullControl, AccessControlType.Allow));
+        info.SetAccessControl(security);
+    }
+
+    /// <summary>Reproduces what a folder under the system drive root hands the files in it: BUILTIN\Users allowed Read.</summary>
+    private static void GrantUsersRead(string path)
+    {
+        var info = new FileInfo(path);
+        var security = info.GetAccessControl();
+        security.AddAccessRule(new FileSystemAccessRule(s_builtinUsers, FileSystemRights.Read, AccessControlType.Allow));
+        info.SetAccessControl(security);
     }
 
     /// <summary>A real root, intermediate and leaf, so the chain test measures the handshake itself.</summary>

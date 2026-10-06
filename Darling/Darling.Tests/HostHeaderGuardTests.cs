@@ -196,14 +196,45 @@ public sealed class HostHeaderGuardTests
            AFTER TryStartServerAsync's own unrelated "if (networkMode)" (its post-start logging branch) —
            so the FIRST "if (networkMode)" after Build() is no longer necessarily the one that gates the
            auth middleware. Searching from the guard's own position finds the auth-gating conditional that
-           actually follows it in the same method, which is the invariant this test claims either way. */
-        var networkOnly = afterBuild.IndexOf("if (networkMode)", guard, StringComparison.Ordinal);
+           actually follows it in the same method, which is the invariant this test claims either way.
+           #5288: the prefix, not the whole condition, because the auth gate also installs on the loopback-only
+           server that network mode fell back to (if (networkMode || requireTokenWhenLoopbackOnly)). */
+        var networkOnly = afterBuild.IndexOf("if (networkMode", guard, StringComparison.Ordinal);
 
         Assert.True(networkOnly >= 0, "expected a network-mode-only middleware block to exist after the guard");
         Assert.True(
             guard < networkOnly,
             "the Host-header guard must be registered BEFORE the network-mode-only block — inside it, the " +
             "tokenless loopback bind is left unguarded, which is issue #1648.");
+    }
+
+    /// <summary>
+    /// #5288: a start that network mode degraded out of after its token resolved (a refused TLS certificate) keeps the
+    /// token gate on the loopback-only server. The behavior is proven through <c>ConfigurePipeline</c> in
+    /// <c>DarlingMcpHostGateLiveTests</c> and <c>DarlingWebHostGateLiveTests</c>
+    /// (<c>TlsRefusal_DegradedLoopbackServer_StillRequiresTheToken</c>); this pins the host's own glue, which a
+    /// network-mode start cannot drive from a test: the flag is derived from the FINAL mode and the token local (set
+    /// only once the token resolved, so a start with no network block, or an unreadable token, leaves it false), after
+    /// the TLS decision, and is handed to the pipeline.
+    /// </summary>
+    [Theory]
+    [InlineData("DarlingMcpHostService.cs", "bearerToken")]
+    [InlineData("DarlingWebHostService.cs", "accessToken")]
+    public void TlsRefusal_TheHostHandsThePipelineTheTokenFlag_DerivedFromTheFinalMode(string fileName, string tokenLocal)
+    {
+        var source = ReadHostSource(fileName);
+
+        var tlsDecision = source.IndexOf("networkMode = tlsOutcome.Expose;", StringComparison.Ordinal);
+        var flag = source.IndexOf(
+            $"var requireTokenWhenLoopbackOnly = !networkMode && {tokenLocal}.Length > 0;", StringComparison.Ordinal);
+        var call = source.IndexOf("ConfigurePipeline(_app,", StringComparison.Ordinal);
+
+        Assert.True(
+            tlsDecision > 0 && flag > tlsDecision && call > flag,
+            $"{fileName}: the token flag must be derived after the TLS decision and before the pipeline call");
+
+        var callText = source[call..source.IndexOf(';', call)];
+        Assert.EndsWith(", requireTokenWhenLoopbackOnly)", callText, StringComparison.Ordinal);
     }
 
     /// <summary>And it must precede the endpoint mapping, or a request reaches a handler before being judged.</summary>
@@ -334,7 +365,7 @@ public sealed class HostHeaderGuardTests
         Assert.True(build >= 0 && callStart > build, "ConfigurePipeline is no longer called after Build() - this test needs rewriting");
 
         var call = source[callStart..source.IndexOf(';', callStart)];
-        Assert.EndsWith(", allowedHostName)", call, StringComparison.Ordinal);
+        Assert.EndsWith(", allowedHostName, requireTokenWhenLoopbackOnly)", call, StringComparison.Ordinal);
 
         var decision = System.Text.RegularExpressions.Regex.Match(
             source[build..callStart],
