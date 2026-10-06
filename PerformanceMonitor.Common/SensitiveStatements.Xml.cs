@@ -228,14 +228,20 @@ public static partial class SensitiveStatements
             return named;
         }
 
-        /// <summary>One open element in pass 1: its local name, and for a <c>Stmt*</c> element the statement state.</summary>
+        /// <summary>One open element in pass 1: its local name, and for a statement element the statement state.
+        /// <see cref="OwnsValues"/> is true only for a <c>Stmt*</c> element: an element of another name that carries a
+        /// <c>StatementText</c> is a frame (scope, ordinal) but the parameter values below it are the outer
+        /// statement's.</summary>
         private readonly struct OpenElement
         {
             public OpenElement(string name, StmtFrame? stmt)
             {
                 Name = name;
                 Stmt = stmt;
+                OwnsValues = stmt is not null && IsStmt(name);
             }
+
+            public bool OwnsValues { get; }
 
             public string Name { get; }
             public StmtFrame? Stmt { get; }
@@ -434,7 +440,7 @@ public static partial class SensitiveStatements
         {
             foreach (var element in open)
             {
-                if (element.Stmt is not null)
+                if (element.OwnsValues)
                     return element.Stmt;
             }
             return null;

@@ -586,4 +586,79 @@ public class SensitiveStatementAutoParamTests
         }
         Assert.Contains(PText, Measure("check", probeFirst, Max).Result);
     }
+
+    // ── L2f: review round 2 (the statement filter, comments and edges) ──
+
+    private const string ShowplanOpen =
+        "<ShowPlanXML xmlns=\"http://schemas.microsoft.com/sqlserver/2004/07/showplan\"><BatchSequence><Batch><Statements>";
+    private const string ShowplanClose = "</Statements></Batch></BatchSequence></ShowPlanXML>";
+
+    // needs the real value: neither the stored text (a token) nor the placeholder value (N'?') names it
+    private static bool NeedsTheRealValue(string s) =>
+        s.Contains("password", StringComparison.Ordinal) && s.Contains("S3cretSt", StringComparison.Ordinal);
+
+    [Fact]
+    public void AnElementThatIsNotAStmtButCarriesAStatementText_DoesNotTakeTheParameterValuesBelowIt()
+    {
+        string xml = ShowplanOpen
+            + "<StmtSimple StatementId=\"1\" StatementText=\"UPDATE [dbo].[u] set [password] = @1\"><QueryPlan>"
+            + "<Foo StatementText=\"x\"><ParameterList><ColumnReference Column=\"@1\" ParameterCompiledValue=\"N&apos;S3cretSt&apos;\"/></ParameterList></Foo>"
+            + "</QueryPlan></StmtSimple>" + ShowplanClose;
+
+        string? result = Run(xml, NeedsTheRealValue);
+
+        Assert.NotNull(result);
+        Assert.DoesNotContain("S3cretSt", result);
+    }
+
+    [Fact]
+    public void AStatementElementWithNoStatementText_HasItsAutoParameterValuesJudged()
+    {
+        string xml = ShowplanOpen
+            + "<StmtSimple StatementId=\"1\"><QueryPlan><ParameterList>"
+            + "<ColumnReference Column=\"@1\" ParameterCompiledValue=\"N&apos;Server=h;PWD=nt&apos;\"/></ParameterList></QueryPlan></StmtSimple>"
+            + ShowplanClose;
+
+        string? result = Run(xml);
+
+        Assert.NotNull(result);
+        Assert.DoesNotContain("PWD=nt", result);
+    }
+
+    [Theory]
+    [InlineData("&#64;")]
+    [InlineData("&#064;")]
+    [InlineData("&#x40;")]
+    [InlineData("&#x0040;")]
+    public void AZeroPaddedCharacterReferenceForTheAtSign_StillBuildsTheProbe(string at)
+    {
+        string xml = ShowplanOpen
+            + "<StmtSimple StatementId=\"1\" StatementText=\"UPDATE [dbo].[u] set [password] = " + at + "1\"><QueryPlan>"
+            + "<ParameterList><ColumnReference Column=\"" + at + "1\" ParameterCompiledValue=\"N&apos;S3cretSt&apos;\"/></ParameterList>"
+            + "</QueryPlan></StmtSimple>" + ShowplanClose;
+
+        string? result = Run(xml, NeedsTheRealValue);
+
+        Assert.NotNull(result);
+        Assert.DoesNotContain("S3cretSt", result);
+    }
+
+    [Fact]
+    public void ANestedPlanInAnEdcShowplanXmlAttribute_IsJudgedAsAPlan()
+    {
+        const string nested = "&lt;ShowPlanXML&gt;&lt;StmtSimple StatementText=&quot;ALTER LOGIN x WITH PASSWORD = &amp;apos;edc1&amp;apos;&quot;/&gt;&lt;/ShowPlanXML&gt;";
+        string outside = "<r><ExternalDistributedComputation EdcShowplanXml=\"" + nested + "\"/></r>";
+        // the same nested plan inside a withheld statement
+        const string nestedWhere = "&lt;ShowPlanXML&gt;&lt;StmtSimple StatementText=&quot;SELECT 1 WHERE c = &amp;apos;edc2&amp;apos;&quot;/&gt;&lt;/ShowPlanXML&gt;";
+        string inside = ShowplanOpen + "<StmtSimple StatementId=\"1\" StatementText=\"CANARY x\"><QueryPlan>"
+            + "<ExternalDistributedComputation EdcShowplanXml=\"" + nestedWhere + "\"/></QueryPlan></StmtSimple>" + ShowplanClose;
+
+        string? a = Run(outside, CanaryOrStandIn);
+        string? b = Run(inside, CanaryOrStandIn);
+
+        Assert.NotNull(a);
+        Assert.NotNull(b);
+        Assert.DoesNotContain("edc1", a);
+        Assert.DoesNotContain("edc2", b);
+    }
 }
