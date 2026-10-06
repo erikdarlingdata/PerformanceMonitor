@@ -29,7 +29,7 @@ namespace PerformanceMonitor.Darling.Service;
 ///
 /// <para><b>A background job, not a migration</b> — the same design <see cref="PgSettingScrub"/> uses: both
 /// target tables already exist, so this reads candidate rows with the shared
-/// <see cref="PgSensitiveStatementFilter.SensitiveStatementPattern"/>, replaces the matching text with
+/// frozen <see cref="Version1Pattern"/>, replaces the matching text with
 /// <see cref="PgSensitiveStatementFilter.PlaceholderText"/>, and only updates rows the pattern actually
 /// names. Runs after startup, concurrently with the rest of the startup sequence, and never holds up
 /// collection.</para>
@@ -72,10 +72,23 @@ public static class PgStatementTextScrub
 
     /// <summary>Bumped when the shared pattern changes in a way that would redact more (or differently)
     /// than a prior run already covered, so a store that already ran this scrub runs it again rather than
-    /// trusting a stale "done". Version 2: the shared pattern gained the T-SQL alternatives (#4348), which also
-    /// name more PostgreSQL text (a word ending in password or secret assigned a literal, a quoted
-    /// <c>"password" = '...'</c>), so every store re-scrubs once more.</summary>
-    public const int ScrubVersion = 2;
+    /// trusting a stale "done".</summary>
+    public const int ScrubVersion = 1;
+
+    /// <summary>The frozen pattern of the shipped version 1 scrub: the exact text of
+    /// <c>PgSensitiveStatementFilter.SensitiveStatementPattern</c> as it stood before the statement filter
+    /// was widened. It is never the live definition. No stored row is rewritten by the widening (Erik's
+    /// ruling, 2026-10-06), so this scrub keeps behaving exactly as the shipped one did and every predicate in
+    /// it uses this string; the wider shared pattern applies only to new rows (the collectors, before they
+    /// store) and on read. Changing this value would change what the one-shot scrub does to old rows, so a
+    /// pin test compares it with the literal.</summary>
+    public const string Version1Pattern =
+        "[[:<:]](create|alter)" + Version1TokenGap + "+(role|user|group|subscription|server)[[:>:]]"
+        + "|[[:<:]]password[[:>:]]" + Version1TokenGap + "*(=|to)?" + Version1TokenGap + "*(e?'|u&'|[$][^0-9])"
+        + "|[[:<:]](pg)?password[[:space:]]*=[[:space:]]*[^$[:space:]]"
+        + "|[a-z][a-z0-9+.-]*://[^[:space:]/@:]+:[^[:space:]/@]+@";
+
+    private const string Version1TokenGap = "([[:space:]]|/[*]([^*]|[*]+[^*/])*[*]+/|--[^[:cntrl:]]*)";
 
     /// <summary>The candidate read's deadline for one server's <c>pg_statement_text</c> batch.</summary>
     internal const int CandidateReadTimeoutSeconds = 300;
@@ -133,7 +146,7 @@ SELECT server_id, queryid, query_text
 FROM collect.pg_statement_text
 WHERE server_id = $1
 AND   queryid > $2
-AND   query_text ~* " + PgSensitiveStatementFilter.SqlLiteral(PgSensitiveStatementFilter.SensitiveStatementPattern) + @"
+AND   query_text ~* " + PgSensitiveStatementFilter.SqlLiteral(Version1Pattern) + @"
 AND   query_text <> " + PgSensitiveStatementFilter.SqlLiteral(PgSensitiveStatementFilter.PlaceholderText) + @"
 ORDER BY queryid
 LIMIT " + StatementTextBatchSize.ToString(CultureInfo.InvariantCulture);
@@ -182,13 +195,13 @@ WHERE server_id = $1";
     private static readonly string BlockingEdgesCandidateSql = @"
 SELECT
     collection_time, collection_id,
-    " + PgSensitiveStatementFilter.SqlPredicate("blocked_query") + @" AS new_blocked_query,
-    " + PgSensitiveStatementFilter.SqlPredicate("blocking_query") + @" AS new_blocking_query
+    " + PgSensitiveStatementFilter.SqlPredicate("blocked_query", Version1Pattern) + @" AS new_blocked_query,
+    " + PgSensitiveStatementFilter.SqlPredicate("blocking_query", Version1Pattern) + @" AS new_blocking_query
 FROM collect.pg_blocking_edges
 WHERE server_id = $1
 AND   collection_time >= $2 AND collection_time < $3
-AND ((blocked_query ~* " + PgSensitiveStatementFilter.SqlLiteral(PgSensitiveStatementFilter.SensitiveStatementPattern) + @" AND blocked_query <> " + PgSensitiveStatementFilter.SqlLiteral(PgSensitiveStatementFilter.PlaceholderText) + @")
- OR (blocking_query ~* " + PgSensitiveStatementFilter.SqlLiteral(PgSensitiveStatementFilter.SensitiveStatementPattern) + @" AND blocking_query <> " + PgSensitiveStatementFilter.SqlLiteral(PgSensitiveStatementFilter.PlaceholderText) + @"))";
+AND ((blocked_query ~* " + PgSensitiveStatementFilter.SqlLiteral(Version1Pattern) + @" AND blocked_query <> " + PgSensitiveStatementFilter.SqlLiteral(PgSensitiveStatementFilter.PlaceholderText) + @")
+ OR (blocking_query ~* " + PgSensitiveStatementFilter.SqlLiteral(Version1Pattern) + @" AND blocking_query <> " + PgSensitiveStatementFilter.SqlLiteral(PgSensitiveStatementFilter.PlaceholderText) + @"))";
 
     private const string BlockingEdgesUpdateSql = @"
 WITH batch AS (
