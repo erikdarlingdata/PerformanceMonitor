@@ -584,7 +584,9 @@ public sealed class CollectorRunTimeRungLiveTests
             Host = "runtime-alpha-host",
             Auth = "sql",
             Username = "runtime-user",
-            EncryptedPassword = "not-a-real-blob",
+            /* A reference, not a stored old-format password: the load warns that an old-format password needs to be entered again (#5366),
+               and these tests count the warnings that belong to the run times. */
+            EncryptedPassword = "env:RUNTIME_ALPHA_PASSWORD_NOT_SET",
             EncryptMode = "Strict",
             TrustServerCertificate = true,
         });
