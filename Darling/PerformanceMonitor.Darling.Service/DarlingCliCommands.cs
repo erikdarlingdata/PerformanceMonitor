@@ -792,8 +792,10 @@ public static class DarlingCliCommands
         DiagnosticsBundleRunner.Outcome outcome;
         try
         {
+            /* #5366: sealed webhook values are opened with the key file read only, so the hosts they hold are aliased. */
+            var keyRing = DarlingCliSealKey.TryOpenFileRing(config, DarlingConfig.ResolveConfigPath(options.ConfigPath), null);
             outcome = await DiagnosticsBundleRunner.BuildAsync(
-                options, config, connectionString, dataSource, storeError, storeReason, cancellationToken);
+                options, config, connectionString, dataSource, storeError, storeReason, cancellationToken, keyRing: keyRing);
         }
         finally
         {

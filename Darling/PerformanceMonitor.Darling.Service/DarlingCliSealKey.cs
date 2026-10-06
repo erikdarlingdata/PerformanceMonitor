@@ -161,6 +161,43 @@ internal static class DarlingCliSealKey
         return new Decision(new PublishedKeyRing(publicKey), NoticeFor(publicKey.KeyId));
     }
 
+    /// <summary>
+    /// The ring a diagnostics bundle opens sealed webhook values with when the service is not the one making it: the key
+    /// file read only (never generated or changed), or null when there is no directory, no file, or the file cannot be
+    /// read. The in-process ring is used instead when it holds a key.
+    /// </summary>
+    internal static IPasswordKeyRing? TryOpenFileRing(DarlingConfig config, string? configPath, ILogger? logger)
+    {
+        if (DarlingPasswordKey.Current.Status.CanSeal)
+        {
+            return DarlingPasswordKey.Current;
+        }
+
+        byte[]? pkcs8 = null;
+        try
+        {
+            if (configPath is null)
+            {
+                return null;
+            }
+
+            var directory = DarlingLogHashKeyFile.DirectoryFor(config, configPath);
+            pkcs8 = DarlingPasswordKeyFile.Load(directory, logger ?? NullLogger.Instance).Pkcs8;
+            return pkcs8 is null ? null : DarlingPasswordKey.FromPrivateKey(PasswordPrivateKey.FromPkcs8(pkcs8));
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return null;
+        }
+        finally
+        {
+            if (pkcs8 is not null)
+            {
+                CryptographicOperations.ZeroMemory(pkcs8);
+            }
+        }
+    }
+
     private static Decision Refused(string reason) => new(DarlingPasswordKey.Refusing(reason), null);
 
     /// <summary>A ring that seals to a public key and cannot open anything. Counts what it sealed, so the verb prints

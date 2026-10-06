@@ -217,10 +217,11 @@ SELECT to_regclass('collect.store_statement_history') IS NOT NULL AND to_regclas
         Exception? storeError,
         string? storeReason,
         CancellationToken cancellationToken,
-        NameSourceSql? nameSources = null)
+        NameSourceSql? nameSources = null,
+        IPasswordKeyRing? keyRing = null)
     {
         var aliaser = new BundleAliaser();
-        var warnings = new List<string>(DiagnosticsBundle.SeedFromConfig(aliaser, config, connectionString));
+        var warnings = new List<string>(DiagnosticsBundle.SeedFromConfig(aliaser, config, connectionString, keyRing));
         var sections = new List<BundleSection>();
         string scope = "fleet";
 
