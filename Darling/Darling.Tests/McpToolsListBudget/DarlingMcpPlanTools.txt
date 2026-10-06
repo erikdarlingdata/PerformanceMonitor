@@ -50,6 +50,17 @@ tool get_procedure_plan_xml 134
 param get_procedure_plan_xml.server_name 28
 param get_procedure_plan_xml.sql_handle 52
 
+tool get_query_repro_script 160
+param get_query_repro_script.collection_time 49
+param get_query_repro_script.database_name 51
+param get_query_repro_script.kind 43
+param get_query_repro_script.plan_id 63
+param get_query_repro_script.query_hash 39
+param get_query_repro_script.query_id 38
+param get_query_repro_script.request_id 56
+param get_query_repro_script.server_name 28
+param get_query_repro_script.session_id 44
+
 tool get_query_store_plan_xml 147
 param get_query_store_plan_xml.database_name 43
 param get_query_store_plan_xml.plan_id 84
