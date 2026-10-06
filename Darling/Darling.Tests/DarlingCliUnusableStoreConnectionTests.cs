@@ -98,6 +98,7 @@ public sealed class DarlingCliUnusableStoreConnectionTests
                 enable: false, ["wait_stats", "--config", configPath], output, error, ct),
             "--set-collector-run-at" => await DarlingCliCommands.SetCollectorRunAtAsync(
                 ["index_object_stats", "02:00", "--config", configPath], output, error, ct),
+            "--reset-password-key" => await DarlingCliCommands.ResetPasswordKeyAsync(["--config", configPath], output, error, ct),
             "--drop-xe-sessions" => await DarlingCliCommands.DropXeSessionsAsync(["SQL2022", "--dry-run", "--config", configPath], output, error, ct),
             "--diagnostics-bundle" => await DarlingCliCommands.DiagnosticsBundleAsync(
                 [Path.Combine(Path.GetTempPath(), "darling-unusable-" + Guid.NewGuid().ToString("N") + ".json"), "--config", configPath], output, error, ct),
@@ -120,6 +121,7 @@ public sealed class DarlingCliUnusableStoreConnectionTests
     [InlineData("--enable-collector")]
     [InlineData("--disable-collector")]
     [InlineData("--set-collector-run-at")]
+    [InlineData("--reset-password-key")]
     [InlineData("--drop-xe-sessions")]
     [InlineData("--diagnostics-bundle")]
     public async Task ConnectionStringThatDoesNotParse_ExitsWithOne_AndNamesTheSetting(string verb)
@@ -156,6 +158,7 @@ public sealed class DarlingCliUnusableStoreConnectionTests
     [InlineData("--enable-collector")]
     [InlineData("--disable-collector")]
     [InlineData("--set-collector-run-at")]
+    [InlineData("--reset-password-key")]
     [InlineData("--drop-xe-sessions")]
     public async Task ManagedCredentialThatCannotBeRead_ExitsWithOne_InsteadOfThrowing(string verb)
     {
@@ -202,6 +205,7 @@ public sealed class DarlingCliUnusableStoreConnectionTests
     [InlineData("--enable-collector")]
     [InlineData("--disable-collector")]
     [InlineData("--set-collector-run-at")]
+    [InlineData("--reset-password-key")]
     [InlineData("--drop-xe-sessions")]
     public async Task ManagedCredentialThatDpapiCannotUnprotect_IsDescribedAsDpapi_NotAsARawCryptoError(string verb)
     {

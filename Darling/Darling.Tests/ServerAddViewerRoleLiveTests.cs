@@ -44,7 +44,7 @@ public sealed class ServerAddViewerRoleLiveTests : IDisposable
 
     public void Dispose() => DarlingOwnedSecrets.Set(_ownedBefore);
 
-    private static readonly string RolePassword = Convert.ToHexString(RandomNumberGenerator.GetBytes(16));
+    internal static readonly string RolePassword = Convert.ToHexString(RandomNumberGenerator.GetBytes(16));
 
     private const string ServerGrant = "GRANT INSERT ON config.config_monitored_servers TO viewer;";
 
@@ -159,7 +159,7 @@ public sealed class ServerAddViewerRoleLiveTests : IDisposable
                 versionBefore = Convert.ToInt64(await read.ExecuteScalarAsync(ct));
             }
 
-            var answer = JsonNode.Parse(await DarlingMcpServerAdminTools.AddServersAsync(asViewer, OneServer, Reachable, ct))!;
+            var answer = JsonNode.Parse(await DarlingMcpServerAdminTools.AddServersAsync(asViewer, OneServer, Reachable, ct, TestKeyRings.Healthy))!;
             Assert.Equal(1, answer["added"]!.GetValue<int>());
             Assert.Equal("added", answer["results"]![0]!["status"]!.GetValue<string>());
 
@@ -235,7 +235,7 @@ public sealed class ServerAddViewerRoleLiveTests : IDisposable
             Assert.Equal("42501", denied.SqlState);
 
             /* Through the core, the same refusal is a typed not_saved, with no row written. */
-            var answer = JsonNode.Parse(await DarlingMcpServerAdminTools.AddServersAsync(asViewer, OneServer, Reachable, ct))!;
+            var answer = JsonNode.Parse(await DarlingMcpServerAdminTools.AddServersAsync(asViewer, OneServer, Reachable, ct, TestKeyRings.Healthy))!;
             Assert.Equal(0, answer["added"]!.GetValue<int>());
             Assert.Equal("not_saved", answer["results"]![0]!["status"]!.GetValue<string>());
             await using (var count = owner.CreateCommand("SELECT count(*) FROM config_monitored_servers WHERE host IN ('h', 'added-by-viewer')"))
