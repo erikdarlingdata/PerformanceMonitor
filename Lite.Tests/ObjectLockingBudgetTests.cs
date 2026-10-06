@@ -110,6 +110,42 @@ public sealed class ObjectLockingBudgetTests : IClassFixture<SharedDuckDbFixture
         }
     }
 
+    /// <summary>
+    /// #5231: <c>database_name</c> (appended last) reaches the reader's one-database filter. Over the seeded 200
+    /// rows across 10 databases, one name returns exactly that database's 20 rows, omitting it or passing a blank
+    /// returns the whole server, and a name nothing was collected for gets the database named in its empty answer.
+    /// </summary>
+    [Fact]
+    public async Task DatabaseName_LimitsTheAnswerToThatDatabase()
+    {
+        await SeedAsync();
+
+        var json = await McpObjectStatsTools.GetObjectLocking(_dataService, _serverManager, ServerName,
+            limit: SeededRowCount, database_name: "TenantDb03");
+        Assert.False(McpHelpers.IsErrorEnvelope(json), $"tool returned an error: {json}");
+        using (var doc = JsonDocument.Parse(json))
+        {
+            var objects = doc.RootElement.GetProperty("objects");
+            Assert.Equal(SeededRowCount / DatabaseCount, objects.GetArrayLength());
+            foreach (var o in objects.EnumerateArray())
+                Assert.Equal("TenantDb03", o.GetProperty("database_name").GetString());
+            Assert.False(doc.RootElement.GetProperty("truncated").GetBoolean());
+        }
+
+        foreach (var unfiltered in new string?[] { null, "", "   " })
+        {
+            var all = await McpObjectStatsTools.GetObjectLocking(_dataService, _serverManager, ServerName,
+                limit: SeededRowCount, database_name: unfiltered);
+            using var allDoc = JsonDocument.Parse(all);
+            Assert.Equal(SeededRowCount, allDoc.RootElement.GetProperty("objects").GetArrayLength());
+        }
+
+        var none = await McpObjectStatsTools.GetObjectLocking(_dataService, _serverManager, ServerName,
+            database_name: "NoSuchDb");
+        Assert.False(McpHelpers.IsErrorEnvelope(none), $"tool returned an error: {none}");
+        Assert.Contains("NoSuchDb", none);
+    }
+
     private async Task SeedAsync()
     {
         var capture = DateTime.UtcNow;

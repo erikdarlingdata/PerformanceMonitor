@@ -239,7 +239,8 @@ public sealed class McpObjectStatsTools
         LocalDataService dataService,
         ServerManager serverManager,
         [Description("Server name or display name.")] string? server_name = null,
-        [Description("Maximum rows to return. Default 75.")] int limit = ObjectLockingTop)
+        [Description("Maximum rows to return. Default 75.")] int limit = ObjectLockingTop,
+        [Description("Limit to one database. Omit for all databases.")] string? database_name = null)
     {
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
         if (error != null) return error;
@@ -252,7 +253,11 @@ public sealed class McpObjectStatsTools
             /* #4198: limit + 1 as the fetch, the extra row as the OBSERVED truncation signal (#3653's
                dialect) -- McpHelpers.BoundPage trims the page back to `limit`, so objects_returned below is
                always a count of the page and never of the over-fetch. Darling's twin mirrors this. */
-            var fetched = await dataService.GetIndexLockingAsync(resolved.ServerId, limit + 1);
+            /* #5231: database_name appended LAST (#5244 H1). GetIndexLockingAsync already filters on one
+               name (the FinOps tab's picker), so the argument is passed straight through; a blank is "no
+               filter", the same reading get_index_usage gives it. */
+            var database = string.IsNullOrWhiteSpace(database_name) ? null : database_name;
+            var fetched = await dataService.GetIndexLockingAsync(resolved.ServerId, limit + 1, database);
             var (rows, truncated) = McpHelpers.BoundPage(fetched, limit);
 
             var optimizedLockingNote = await dataService.GetOptimizedLockingNoteAsync(resolved.ServerId);
@@ -261,7 +266,10 @@ public sealed class McpObjectStatsTools
             {
                 return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "index_object_stats")
                     ?? McpHelpers.Status("unavailable",
-                        "No locking/contention data recorded. Index/object stats are collected daily."
+                        (database is null
+                            ? "No locking/contention data recorded."
+                            : $"No locking/contention data recorded for database '{database}'.")
+                        + " Index/object stats are collected daily."
                         + (optimizedLockingNote is null ? "" : " " + optimizedLockingNote),
                         optimizedLockingNote is null ? null : new { optimized_locking_note = optimizedLockingNote });
             }
@@ -303,7 +311,9 @@ public sealed class McpObjectStatsTools
                       + "snapshot. Rows are ordered by total wait time (row lock + page lock + page latch + "
                       + "page I/O latch) descending, so the highest-contention indexes are returned first; "
                       + "raise limit to see more."
-                    : "Complete: every index with lock/latch contention at the latest snapshot is included.",
+                    : database is null
+                        ? "Complete: every index with lock/latch contention at the latest snapshot is included."
+                        : "Complete: every index in this database with lock/latch contention at the latest snapshot is included.",
                 optimized_locking_note = optimizedLockingNote,
                 separately_monitored_note = PerformanceMonitorLite.Analysis.SeparatelyMonitoredScope.ListNote(resolved.ServerId),
                 objects = result
