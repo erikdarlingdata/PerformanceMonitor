@@ -35,6 +35,12 @@ public partial class RemoteCollectorService
     internal Func<string, CollectorQuery, DbDataReader>? AzureDatabaseReaderOverrideForTests { get; set; }
 
     /// <summary>
+    /// Supplies the primary reader of the server-wide (not per-database) single-query path instead of a live
+    /// connection (#5320, the twin of <see cref="AzureDatabaseReaderOverrideForTests"/>). Null in production.
+    /// </summary>
+    internal Func<CollectorQuery, DbDataReader>? ServerReaderOverrideForTests { get; set; }
+
+    /// <summary>
     /// One Azure database's open connection, command and reader, disposed in that order (reader,
     /// command, connection). The command and connection are null when a test supplied the reader.
     /// </summary>
@@ -645,7 +651,10 @@ public partial class RemoteCollectorService
         }
         else
         {
-            using var sqlConnection = await CreateConnectionAsync(server, cancellationToken);
+            /* An unopened connection stands in when a test supplies the reader: nothing below touches it then. */
+            using var sqlConnection = ServerReaderOverrideForTests is null
+                ? await CreateConnectionAsync(server, cancellationToken)
+                : new SqlConnection();
 
             var enumerationPlan = definition.BuildEnumerationQuery(context);
             if (enumerationPlan is not null)
@@ -946,7 +955,9 @@ public partial class RemoteCollectorService
                 try
                 {
                     using var command = CreateCollectorCommand(plan, sqlConnection, definition.CommandTimeoutSecondsOverride ?? CommandTimeoutSeconds);
-                    using var reader = await command.ExecuteReaderAsync(itemToken);
+                    using var reader = ServerReaderOverrideForTests is { } serverReader
+                        ? serverReader(plan)
+                        : await command.ExecuteReaderAsync(itemToken);
                     rows = await definition.ReadAsync(reader, context, itemToken);
 
                     /* #1851: a definition that declares it may hand back an OPTIONAL trailing
@@ -1280,7 +1291,7 @@ public partial class RemoteCollectorService
     /// the earliest batch event time minus one day.
     /// </summary>
     internal static string StoredIdentitySql(string targetTable) =>
-        $"SELECT deadlock_time, deadlock_graph_xml FROM {targetTable} " +
+        $"SELECT deadlock_time, {DeadlocksCollector.StoredGraphIdentitySql} FROM {targetTable} " +
         "WHERE server_id = $1 AND deadlock_graph_xml IS NOT NULL AND deadlock_graph_xml <> '' " +
         "AND deadlock_time IN (SELECT UNNEST($2)) AND collection_time >= $3";
 

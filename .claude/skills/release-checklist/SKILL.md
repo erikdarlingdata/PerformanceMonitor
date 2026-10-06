@@ -87,7 +87,7 @@ dotnet build PerformanceMonitor.sln -c Debug -t:Rebuild
 ```
 All projects must succeed with **0 Warning(s) / 0 Error(s)** — the repo's bar is zero-warning, test projects included (they sit outside the WarningsAsErrors gate, so a warm incremental build can hide a warning a Rebuild surfaces).
 
-A release cut fails while any statement-column census entry is pending. Run `DARLING_RELEASE_CUT=1 Darling/Darling.Tests/bin/Debug/net10.0-windows/Darling.Tests.exe -method "*StatementCensus_PendingEntries_BlockARelease*"` (without the variable it only prints the pending count); the cut proceeds only when it passes.
+The statement-column census test fails while any entry or watched writer is pending, in every Darling test run, with or without the variable. Run `DARLING_RELEASE_CUT=1 Darling/Darling.Tests/bin/Debug/net10.0-windows/Darling.Tests.exe -method "*StatementCensus_PendingEntries_BlockARelease*"` to see the list early; the cut proceeds only when it passes. The release workflow (build.yml, the "Statement filter release gate" step) runs the same test with the variable set before it publishes or packages anything, so a release cannot ship while an entry is pending even if this step is skipped; run it here first to see the list early.
 
 (The deprecated Installer/Dashboard test suites run in CI on the release event with the CI's own filter; they are no longer run from this checklist.)
 

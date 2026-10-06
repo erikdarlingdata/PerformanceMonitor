@@ -32,7 +32,8 @@ public static partial class SensitiveStatements
     /// <summary>Verdicts the process remembers for values whose match timed out (r2 M-G, A-5).</summary>
     private const int TimedOutMemoLimit = 4096;
 
-    /// <summary>The elapsed-time budget of one collection session (3.4).</summary>
+    /// <summary>The elapsed-time budget of one collection session (3.4). It is per session: every value the session judges
+    /// draws on the same 15 seconds, so it is not a limit per value or per item.</summary>
     private static readonly TimeSpan SessionBudget = TimeSpan.FromSeconds(15);
 
     /// <summary>
@@ -110,7 +111,7 @@ public static partial class SensitiveStatements
     /// <see cref="PlaceholderText"/> (or, for a document, the document with the named values replaced). They never
     /// throw, never observe a cancellation token and never await.
     ///
-    /// <para><b>Budget.</b> One 15-second elapsed budget per session. A value reached after the budget is spent is
+    /// <para><b>Budget.</b> One 15-second elapsed budget per session, shared by every value the session judges (it is not a limit per value or per item). A value reached after the budget is spent is
     /// the marker, unjudged, and is counted in <see cref="Unjudged"/>; a document that crosses the budget part way
     /// is withheld whole. <see cref="TryText"/> and <see cref="TryXml"/> return false for such a value so a writer
     /// that can fetch it again next cycle may drop the row instead of storing the marker. A value whose match timed
@@ -126,7 +127,7 @@ public static partial class SensitiveStatements
         private readonly TimedOutMemo _timedOut;
         private readonly Dictionary<string, Outcome> _memo = new(StringComparer.Ordinal);
 
-        /// <summary>A session with the real judge and the 15-second budget.</summary>
+        /// <summary>A session with the real judge and the 15-second budget, which is shared by every value the session judges.</summary>
         public Session()
             : this(null, null, null, null)
         {
