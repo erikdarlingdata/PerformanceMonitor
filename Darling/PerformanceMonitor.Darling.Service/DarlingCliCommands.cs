@@ -180,6 +180,12 @@ public static class DarlingCliCommands
     public static bool IsResetPasswordKeyVerb(string arg) =>
         string.Equals(arg, "--reset-password-key", StringComparison.OrdinalIgnoreCase);
 
+    /// <summary>The hidden verb <see cref="DarlingPasswordKeySelfCheck"/> handles: <c>--self-check-password-key &lt;vector-path&gt;</c>
+    /// runs the real password key file, file identity and sealed-value code on Linux and exits non-zero on any failure (#5366).
+    /// It is not in <see cref="UsageText"/>: the Linux build job runs it, an operator has no use for it.</summary>
+    public static bool IsSelfCheckPasswordKeyVerb(string arg) =>
+        string.Equals(arg, "--self-check-password-key", StringComparison.OrdinalIgnoreCase);
+
     /// <summary>The text <c>--reset-password-key</c> prints when the key was marked replaced. <paramref name="sealedPasswords"/>
     /// is how many saved passwords are sealed to the old key and must be entered again.</summary>
     public static string ResetPasswordKeyRestartSentence(int sealedPasswords) =>
@@ -293,7 +299,8 @@ public static class DarlingCliCommands
         || IsDisableCollectorVerb(arg)
         || IsSetCollectorRunAtVerb(arg)
         || IsDropXeSessionsVerb(arg)
-        || IsResetPasswordKeyVerb(arg);
+        || IsResetPasswordKeyVerb(arg)
+        || IsSelfCheckPasswordKeyVerb(arg);
 
     /// <summary>
     /// Classifies the exe's command line from its FIRST argument (#1581): no args → run the host; a recognized
