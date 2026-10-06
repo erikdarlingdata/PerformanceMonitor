@@ -35,20 +35,26 @@ public sealed class BlockingListPlanFlagsLivePostgresTests
 
     private const string Plan = "<ShowPlanXML xmlns=\"http://schemas.microsoft.com/sqlserver/2004/07/showplan\"><BatchSequence/></ShowPlanXML>";
 
+    private const string SkipReason =
+        "Set DARLING_TEST_PG to a Postgres connection string to run the live list plan flag test (it mints its own scratch database).";
+
     private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
 
     [Fact]
     public async Task GetBlocking_FlagsThePagesRows_ByTheirOwnStoredPlans()
     {
-        var cs = ConnectionString;
-        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live list plan flag test.");
+        var baseConnectionString = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), SkipReason);
         var ct = TestContext.Current.CancellationToken;
 
+        // #1776 own-store: a scratch database, so no other class's chunks shape the store under test (#4650).
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        var cs = scratch.ConnectionString;
         using var connection = new NpgsqlConnection(cs);
         await connection.OpenAsync(ct);
-        await PgMigrations.MigrateAsync(connection, ct);
+        await PrepareStoreAsync(cs, connection, ct);
         await DeleteRowsAsync(connection, ct);
-        await using var postgres = NpgsqlDataSource.Create(cs!);
+        await using var postgres = NpgsqlDataSource.Create(cs);
 
         var bodySucceeded = false;
         try
@@ -101,7 +107,7 @@ VALUES ($1,$2,$3,$4,$5,'PlanFlagsDb',$6,0,$7,0,1000,'X','SELECT 1','UPDATE t SET
         }
         finally
         {
-            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+            await LiveStoreCleanup.RunAsync(cs, bodySucceeded, async (cleanup, cleanupCt) =>
                 await DeleteRowsAsync(cleanup, cleanupCt));
         }
     }
@@ -109,15 +115,18 @@ VALUES ($1,$2,$3,$4,$5,'PlanFlagsDb',$6,0,$7,0,1000,'X','SELECT 1','UPDATE t SET
     [Fact]
     public async Task GetDeadlocks_FlagsThePagesRows_ByTheirOwnStoredPlans()
     {
-        var cs = ConnectionString;
-        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live list plan flag test.");
+        var baseConnectionString = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), SkipReason);
         var ct = TestContext.Current.CancellationToken;
 
+        // #1776 own-store: a scratch database, so no other class's chunks shape the store under test (#4650).
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        var cs = scratch.ConnectionString;
         using var connection = new NpgsqlConnection(cs);
         await connection.OpenAsync(ct);
-        await PgMigrations.MigrateAsync(connection, ct);
+        await PrepareStoreAsync(cs, connection, ct);
         await DeleteRowsAsync(connection, ct);
-        await using var postgres = NpgsqlDataSource.Create(cs!);
+        await using var postgres = NpgsqlDataSource.Create(cs);
 
         var bodySucceeded = false;
         try
@@ -150,7 +159,7 @@ VALUES ($1,$2,$3,$4,$5,$6,'UPDATE t SET c = 1','<deadlock/>',$7,'PlanFlagsDb')",
         }
         finally
         {
-            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+            await LiveStoreCleanup.RunAsync(cs, bodySucceeded, async (cleanup, cleanupCt) =>
                 await DeleteRowsAsync(cleanup, cleanupCt));
         }
     }
@@ -160,13 +169,16 @@ VALUES ($1,$2,$3,$4,$5,$6,'UPDATE t SET c = 1','<deadlock/>',$7,'PlanFlagsDb')",
     [Fact]
     public async Task TheListStatements_PlannerOutput_NamesNoPlanColumn()
     {
-        var cs = ConnectionString;
-        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live list plan flag test.");
+        var baseConnectionString = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), SkipReason);
         var ct = TestContext.Current.CancellationToken;
 
+        // #1776 own-store: a scratch database, so no other class's chunks shape the plan under test (#4650).
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        var cs = scratch.ConnectionString;
         using var connection = new NpgsqlConnection(cs);
         await connection.OpenAsync(ct);
-        await PgMigrations.MigrateAsync(connection, ct);
+        await PrepareStoreAsync(cs, connection, ct);
 
         var now = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
         foreach (var sql in new[]
@@ -191,6 +203,19 @@ VALUES ($1,$2,$3,$4,$5,$6,'UPDATE t SET c = 1','<deadlock/>',$7,'PlanFlagsDb')",
             }
 
             Assert.DoesNotContain(lines, line => line.Contains("query_plan_xml", StringComparison.Ordinal));
+        }
+    }
+
+    /// <summary>The store the way the service builds it: migrated, with hypertables where TimescaleDB is present (the probe
+    /// runs on its own connection, #1922), and no background policy job reshaping chunks under the assertions.</summary>
+    private static async Task PrepareStoreAsync(string connectionString, NpgsqlConnection connection, System.Threading.CancellationToken ct)
+    {
+        await PgMigrations.MigrateAsync(connection, ct);
+        if (await LiveTimescaleProbe.TryEnableAsync(connectionString, ct))
+        {
+            await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
+            await using var stop = new NpgsqlCommand("SELECT _timescaledb_functions.stop_background_workers()", connection);
+            await stop.ExecuteNonQueryAsync(ct);
         }
     }
 
