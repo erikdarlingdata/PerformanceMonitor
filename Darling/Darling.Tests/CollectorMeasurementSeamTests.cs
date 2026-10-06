@@ -584,6 +584,13 @@ public class CollectorMeasurementSeamTests
                    from its own trailing result set), so only one need be listed here for the distinct-label
                    set this assertion actually checks. */
                 BlockedProcessReportCollector.ShredGatedMeasurement,
+                /* #4348: the statement filter's four counters, measured by CollectorContext itself (the sessions a
+                   collector opens with BeginStatementScrub), which is why the consts live in CollectorContext.cs
+                   beside the four .Measure( calls. Written only when the cycle judged a value. */
+                CollectorContext.StatementScrubNamedMeasurement,
+                CollectorContext.StatementScrubTimeoutsMeasurement,
+                CollectorContext.StatementScrubUnjudgedMeasurement,
+                CollectorContext.StatementScrubMsMeasurement,
             }.OrderBy(l => l, StringComparer.Ordinal).ToList(),
             resolved.Distinct(StringComparer.Ordinal).OrderBy(l => l, StringComparer.Ordinal).ToList());
     }
