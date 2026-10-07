@@ -183,6 +183,24 @@ public sealed class ProcedureStatsFloorAndHistoryLiveTests
     }
 
     [Fact]
+    public async Task ProcedureWindowFloor_BusyRowsDroppedAndNoRowSinceThen_TheFloorIsTheCutNotTheOldestRun()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var store = await SeededStore.CreateAsync(ct, daysBack: 10);
+        /* Hours 0-71: busy runs (outside the window). Hours 72-119, 7 to 5 days ago: busy runs whose rows retention dropped.
+           From hour 120 to now: every procedure idle, so no row is left at or before the window end (#5449 round 2). */
+        await store.SeedStepsAsync(TimeSpan.FromHours(1), 240, k => k < 120 ? 'D' : 'I', ct);
+
+        var windowStart = store.Start.AddDays(3);
+        var floor = await RawWindowFloor.GetAsync(store.DataSource, RawWindowFloor.Table.ProcedureStats, Server, windowStart, store.Start.AddDays(10), cancellationToken: ct);
+
+        /* The first run after the newest dropped one (hour 119): the idle stretch since is covered, the dropped hours are not.
+           Falling back to the oldest run (hour 0) would read the whole window as covered with no truncation note. */
+        Assert.Equal(store.Start.AddHours(120).AddSeconds(3), floor);
+        Assert.True(RawWindowFloor.IsTruncated(floor, windowStart));
+    }
+
+    [Fact]
     public void QueryViewFloors_AreByteIdenticalToTheirPreviousText()
     {
         /* #5449 changed procedure_stats' floor only. SHA-256 of the previous text (line endings normalised). */

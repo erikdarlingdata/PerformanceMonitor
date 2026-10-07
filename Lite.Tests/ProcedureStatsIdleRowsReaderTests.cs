@@ -287,6 +287,23 @@ FROM generate_series(TIMESTAMP '{t0.AddMinutes(firstMinute):yyyy-MM-dd HH:mm:ss}
         _nextId -= await cmd.ExecuteNonQueryAsync() + 1;
     }
 
+    /// <summary>#5449 round 2: a window that ends between a run's log time and its rows (they land 200 ms later). Rows are read past
+    /// the window end, so run 10 is seen to own its row and is not an idle point; the final cut at the window end then drops the run's
+    /// own point (its row is past the end). Before, the row was not read, run 10 looked idle, and a false 0 plotted at its log time.</summary>
+    [Fact]
+    public async Task ProcedureChartPoints_AWindowEndingBetweenARunAndItsRows_PlotsNoFalseZero()
+    {
+        var t0 = TenMinuteFloor(DateTime.UtcNow.AddMinutes(-60));
+        await SeedBusyMinutesAsync(NewServer, t0, 0, 10);
+
+        var points = await _dataService.GetProcedureDurationTrendAsync(NewServer, 1, t0.AddMinutes(-5), t0.AddMinutes(10).AddMilliseconds(100));
+
+        /* Runs 0-9 each stored a row at 200 ms past their stamp, all busy. Run 10's row is past the window end: no point, not a 0. */
+        Assert.Equal(10, points.Count);
+        Assert.DoesNotContain(points, p => p.CollectionTime == t0.AddMinutes(10));
+        Assert.All(points, p => Assert.True(p.Value > 0));
+    }
+
     [Fact]
     public void IdleRunTimes_ARunOwnsTheRowsUpToTheNextRun_WhetherStampedBeforeOrAtTheRows()
     {

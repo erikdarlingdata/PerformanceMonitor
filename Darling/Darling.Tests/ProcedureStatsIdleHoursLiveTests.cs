@@ -286,6 +286,56 @@ public sealed class ProcedureStatsIdleHoursLiveTests
         }
     }
 
+    /// <summary>
+    /// #5449 round 2: a busy run (it stored rows) whose point lands in the next hour must not make that hour. The run starts at
+    /// 1:59:58 and stores its row in hour 1, but its log row (2:00:02, duration 1 s) puts the plotted point in hour 2. Hour 2 has no
+    /// rollup row and no other run: the collector was down for it, so it stays a gap. Counting a busy run in <c>run_hours</c> filled it
+    /// with a 0 over 3,600 s. Hours 0 and 3 hold idle runs and fill with 0.
+    /// </summary>
+    [Fact]
+    public async Task HourlyTier_ABusyRunCrossingAnHourEdgeDoesNotFillTheOutageHourAfterIt()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live procedure_stats idle-hour test.");
+        var ct = TestContext.Current.CancellationToken;
+        const int server = -544915;
+        const string name = "idle-hours-edge-run";
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = await OpenHypertableStoreAsync(scratch, ct, (server, name));
+        var bodySucceeded = false;
+        try
+        {
+            var h0 = WindowStart.AddDays(30);
+            var end = h0.AddHours(6);
+
+            await LogRunAsync(connection, server, name, h0.AddMinutes(10).AddSeconds(3), rowsCollected: 0, ct);
+            await InsertAsync(connection, server, name, h0.AddHours(1).AddMinutes(10), busy: true, ct, skipWhenIdle: true);
+            await LogRunAsync(connection, server, name, h0.AddHours(1).AddMinutes(10).AddSeconds(3), rowsCollected: 1, ct);
+            await InsertAsync(connection, server, name, h0.AddHours(1).AddMinutes(59).AddSeconds(58), busy: true, ct, skipWhenIdle: true);
+            await LogRunAsync(connection, server, name, h0.AddHours(2).AddSeconds(2), rowsCollected: 1, ct, durationMs: 1000);
+            await LogRunAsync(connection, server, name, h0.AddHours(3).AddMinutes(10).AddSeconds(3), rowsCollected: 0, ct);
+
+            await RefreshAndPurgeAsync(connection, h0, end, ct);
+
+            await using var data = NpgsqlDataSource.Create(scratch.ConnectionString);
+            var rollup = $"collect.{TimescaleSupport.ProcedureStatsIntervalHourlyView}";
+            var points = await ReadAsync(
+                data, DurationTrendRouting.BuildHourlyTrendSql(rollup, false, coverIdleHours: true), false, server, h0, end, null, ct);
+
+            Assert.Equal(new[] { 0, 1, 3 }.Select(h => h0.AddHours(h)), points.Select(p => p.Time));
+            Assert.Equal(0.0, points[0].Value, 9);
+            Assert.Equal(0.0, points[2].Value, 9);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await CleanupAsync(scratch, bodySucceeded);
+        }
+    }
+
     private static async Task<NpgsqlConnection> OpenHypertableStoreAsync(
         ScratchPostgres scratch, CancellationToken ct, params (int Id, string Name)[] servers)
     {
@@ -387,11 +437,11 @@ public sealed class ProcedureStatsIdleHoursLiveTests
     }
 
     private static async Task LogRunAsync(
-        NpgsqlConnection connection, int serverId, string serverName, DateTime loggedAt, int rowsCollected, CancellationToken ct)
+        NpgsqlConnection connection, int serverId, string serverName, DateTime loggedAt, int rowsCollected, CancellationToken ct, int durationMs = 3000)
         => await DarlingMcpTestData.ExecAsync(connection, ct,
             @"INSERT INTO collect.collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, rows_collected)
-              VALUES ($1, $2, $3, 'procedure_stats', $4, 3000, 'SUCCESS', $5)",
-            CollectionIdGenerator.Next(), serverId, serverName, loggedAt, rowsCollected);
+              VALUES ($1, $2, $3, 'procedure_stats', $4, $6, 'SUCCESS', $5)",
+            CollectionIdGenerator.Next(), serverId, serverName, loggedAt, rowsCollected, durationMs);
 
     private static async Task InsertAsync(
         NpgsqlConnection connection, int serverId, string serverName, DateTime at, bool busy, CancellationToken ct, bool skipWhenIdle)

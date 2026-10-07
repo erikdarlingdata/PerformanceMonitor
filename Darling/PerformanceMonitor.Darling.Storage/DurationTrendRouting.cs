@@ -279,7 +279,8 @@ public static class DurationTrendRouting
     /// bucket's seconds do not count time the collector was down. Hours older than the log (it keeps 60 days) have no runs, and a
     /// store that never logged runs has none at all: both read as the rollup alone, which is the rule before this fill existed. An
     /// old materialization hole past raw retention, with runs, reads 0. Uses the log's watermark index; the raw probe per hour
-    /// is a no-op once the raw rows are past retention. $1 server_id, $2/$3 window (naive UTC, $3 exclusive, as the rollup read).</para>
+    /// is a no-op once the raw rows are past retention. Only idle runs (<c>rows_collected = 0</c>) make an hour: a busy run that starts at
+    /// H:59:58 plots in the next hour, and counting it there would fill an outage hour with a 0 instead of a gap. $1 server_id, $2/$3 window (naive UTC, $3 exclusive, as the rollup read).</para>
     /// </summary>
     private static string ProcedureIdleHoursSql()
         => $"""
@@ -290,6 +291,7 @@ public static class DurationTrendRouting
                 WHERE server_id = $1
                 AND   collector_name = 'procedure_stats'
                 AND   status = 'SUCCESS'
+                AND   rows_collected = 0
                 AND   collection_time >= $2
                 AND   collection_time < $3 + INTERVAL '1 hour'
             ),
@@ -495,6 +497,10 @@ public static class DurationTrendRouting
                 collection_time,
                 total_elapsed_ms,
                 total_executions,
+                -- #5449: a stored collection whose rows ALL carry interval 0 reads as a restart and stays unrated, its seconds out of
+                -- the bucket. This is the chosen three-state rule. It also catches a collection of only 0/0 rows (a quiet server whose
+                -- procedure returns at or past the 3600 s gap policy): SQL cannot tell that from a collector restart, so the minute is
+                -- unrated and counted in unrated_collections rather than rated 0.
                 CASE WHEN is_stored AND max_interval_seconds = 0 THEN NULL
                      WHEN gap_seconds IS NOT NULL THEN CASE WHEN gap_seconds <= {maxGap} THEN gap_seconds END
                      WHEN is_stored THEN NULLIF(max_interval_seconds, 0)

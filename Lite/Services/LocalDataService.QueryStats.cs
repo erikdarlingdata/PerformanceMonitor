@@ -1446,6 +1446,10 @@ ORDER BY 1";
     /// exact. Both tables are read from an hour before <c>$2</c> so the first in-window point has its previous point, and the
     /// points before <c>$2</c> are dropped after the LAG. With no log (an imported or old store) the axis is the stored
     /// collections alone. The database filter stays inside the sums; an idle point has 0 matched rows.
+    ///
+    /// <para>Rows and runs are read to <c>$3</c> plus the gap policy and the points are cut at <c>$3</c> last: a window can end between
+    /// a run's log time and its rows (a few hundred ms later), and a run whose rows sit past <c>$3</c> would otherwise read as idle
+    /// and plot a false 0 at its log time. The next run's time (the LEAD) is read past <c>$3</c> for the same reason (#5449).</para>
     /// </summary>
     internal static string ProcedureCollectionsSql(string dbClause)
     {
@@ -1465,7 +1469,7 @@ ORDER BY 1";
     FROM v_procedure_stats
     WHERE server_id = $1
     AND   collection_time >= $2 - to_seconds({gap})
-    AND   collection_time <= $3
+    AND   collection_time <= $3 + to_seconds({gap})
     GROUP BY collection_time
 ),
 axis AS
@@ -1494,7 +1498,7 @@ axis AS
         AND   collector_name = 'procedure_stats'
         AND   status = 'SUCCESS'
         AND   collection_time >= $2 - to_seconds({gap})
-        AND   collection_time <= $3
+        AND   collection_time <= $3 + to_seconds({gap})
     ) AS r
     WHERE NOT EXISTS
     (
@@ -1511,6 +1515,10 @@ raw AS
         total_elapsed_ms,
         total_executions,
         CASE
+            -- #5449: a stored collection whose rows ALL carry interval 0 reads as a restart and stays unrated, its seconds out of the
+            -- bucket. This is the chosen three-state rule. It also catches a collection of only 0/0 rows (a quiet server whose procedure
+            -- returns at or past the 3600 s gap policy): SQL cannot tell that from a collector restart, so the minute is unrated and
+            -- counted in unrated_collections rather than rated 0.
             WHEN is_stored AND stored_interval = 0 THEN NULL
             WHEN prev_t IS NOT NULL
             THEN CASE
@@ -1527,6 +1535,7 @@ raw AS
         FROM axis
     ) AS a
     WHERE collection_time >= $2
+    AND   collection_time <= $3
 ),";
     }
 

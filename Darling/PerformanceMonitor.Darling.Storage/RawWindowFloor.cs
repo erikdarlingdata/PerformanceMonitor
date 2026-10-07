@@ -97,7 +97,8 @@ public static class RawWindowFloor
     /// <para>The floor is the earlier of the oldest row and the first run the retention cut left standing. The cut is found from the
     /// log, because SQL cannot read the raw tier's policy (TimescaleDB 4 days, a plain store 30, or a custom one): G is the newest
     /// SUCCESS run that stored rows (<c>rows_collected &gt; 0</c>) inside the window and before the oldest row. Those rows are gone,
-    /// so retention dropped them, and coverage starts after G. With no G, nothing stored was ever dropped, and the floor is
+    /// so retention dropped them, and coverage starts after G. With no row left at or before $3 (busy long ago, idle since) the
+    /// "before the oldest row" bound is infinity, so G is the newest busy run in the window, not the oldest run. With no G, nothing stored was ever dropped, and the floor is
     /// the oldest run. Idle runs (<c>rows_collected = 0</c>) are never a G: they stored nothing to lose, so they say nothing
     /// about the cut and a window of them reads as covered back to the oldest run. $1 server_id, $2/$3 window (naive UTC).</para>
     /// </summary>
@@ -130,12 +131,13 @@ public static class RawWindowFloor
                         AND   g.rows_collected > 0
                         AND   g.collection_time >= $2
                         AND   g.collection_time <
+                        COALESCE(
                         (
                             SELECT MIN(f2.collection_time)
                             FROM {PgSchemaGenerator.CollectSchema}.procedure_stats AS f2
                             WHERE f2.server_id = $1
                             AND   f2.collection_time <= $3
-                        )
+                        ), 'infinity'::timestamp)
                         ORDER BY g.collection_time DESC
                         LIMIT 1
                     ), '-infinity'::timestamp)
