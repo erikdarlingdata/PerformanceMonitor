@@ -140,9 +140,134 @@ public sealed class QueryStoreBackfillDroppedDatabaseTests : IClassFixture<Share
         Assert.Contains(Dropped, run.Attempts);
     }
 
-    private sealed class Harness(DuckDbInitializer duckDb, ServerManager servers, ScheduleManager schedules)
-        : RemoteCollectorService(duckDb, servers, schedules, logger: null!)
+    [Fact]
+    public void SnapshotStalenessBound_IsThreeIntervals_NeverUnderOneHour_AndAnExactBoundIsFresh()
     {
+        Assert.Equal(TimeSpan.FromHours(1), QueryStoreBackfillState.SnapshotStalenessBound(1));
+        Assert.Equal(TimeSpan.FromHours(1), QueryStoreBackfillState.SnapshotStalenessBound(0));
+        Assert.Equal(TimeSpan.FromHours(1), QueryStoreBackfillState.SnapshotStalenessBound(-5));
+        Assert.Equal(TimeSpan.FromHours(1), QueryStoreBackfillState.SnapshotStalenessBound(20));
+        Assert.Equal(TimeSpan.FromMinutes(90), QueryStoreBackfillState.SnapshotStalenessBound(30));
+        Assert.Equal(TimeSpan.FromHours(6), QueryStoreBackfillState.SnapshotStalenessBound(120));
+
+        var now = new DateTime(2026, 10, 7, 12, 0, 0, DateTimeKind.Utc);
+        Assert.False(QueryStoreBackfillState.IsSnapshotStale(now - TimeSpan.FromHours(1), now, 1));
+        Assert.True(QueryStoreBackfillState.IsSnapshotStale(now - TimeSpan.FromHours(1) - TimeSpan.FromTicks(1), now, 1));
+        Assert.False(QueryStoreBackfillState.IsSnapshotStale(now - TimeSpan.FromMinutes(89), now, 30));
+        Assert.True(QueryStoreBackfillState.IsSnapshotStale(now - TimeSpan.FromMinutes(91), now, 30));
+    }
+
+    [Fact]
+    public async Task AStaleSnapshot_DropsNothing_AndRunsNoProbe()
+    {
+        var log = new CaptureLog();
+        using var run = new Run(_duckDb, log);
+
+        /* The newest snapshot is three hours old, past the one-hour floor, and does not name the dropped database.
+           It could equally predate the drop, so it must not be believed: both databases stay candidates. The
+           Information line is written only after the per-database probe has found nothing newer, so its absence
+           shows no probe ran. */
+        await run.SeedRowAsync(Kept, TimeSpan.FromHours(5));
+        await run.SeedRowAsync(Dropped, TimeSpan.FromHours(5));
+        await run.SeedSnapshotAsync(TimeSpan.FromHours(3), Kept);
+
+        await run.TicksAsync(4);
+
+        Assert.Contains(Kept, run.Attempts);
+        Assert.Contains(Dropped, run.Attempts);
+        Assert.DoesNotContain(log.Lines, line => line.Contains("not in the newest database_states snapshot", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task ASnapshotInsideThreeIntervals_StillDrops_WhenTheServersIntervalIsLong()
+    {
+        using var run = new Run(_duckDb);
+
+        /* Three hours old would be stale at the one-hour floor, but a server that collects database_states every
+           two hours has a six-hour bound, so the snapshot still decides. */
+        await run.SeedRowAsync(Kept, TimeSpan.FromHours(5));
+        await run.SeedRowAsync(Dropped, TimeSpan.FromHours(5));
+        await run.SeedSnapshotAsync(TimeSpan.FromHours(3), Kept);
+
+        Assert.Equal([Kept], await run.DropGoneAsync([Kept, Dropped], databaseStatesIntervalMinutes: 120));
+        Assert.Equal([Kept, Dropped], await run.DropGoneAsync([Kept, Dropped], databaseStatesIntervalMinutes: 1));
+    }
+
+    [Fact]
+    public async Task ASnapshotWhoseNamesAreAllNull_DropsNothing()
+    {
+        using var run = new Run(_duckDb);
+
+        await run.SeedRowAsync(Kept, TimeSpan.FromHours(1));
+        await run.SeedRowAsync(Dropped, TimeSpan.FromHours(1));
+        await run.SeedNullNamedSnapshotAsync(TimeSpan.FromMinutes(5));
+
+        await run.TicksAsync(4);
+
+        Assert.Contains(Kept, run.Attempts);
+        Assert.Contains(Dropped, run.Attempts);
+    }
+
+    [Fact]
+    public async Task ARowExactlyAtTheSnapshotTime_KeepsTheDatabase()
+    {
+        using var run = new Run(_duckDb);
+
+        /* The freshness test is >=: a row stamped the same instant as the snapshot proves the database was alive
+           when the snapshot was read, which the snapshot (it does not name it) cannot contradict. */
+        var snapshotTime = DateTime.UtcNow - TimeSpan.FromMinutes(10);
+        await run.SeedRowAsync(Kept, TimeSpan.FromHours(1));
+        await run.SeedRowAtAsync(Created, snapshotTime);
+        await run.SeedSnapshotAtAsync(snapshotTime, Kept);
+
+        Assert.Equal([Kept, Created], await run.DropGoneAsync([Kept, Created]));
+    }
+
+    [Fact]
+    public async Task ARowJustBeforeTheSnapshotTime_DoesNotKeepTheDatabase()
+    {
+        using var run = new Run(_duckDb);
+
+        var snapshotTime = DateTime.UtcNow - TimeSpan.FromMinutes(10);
+        await run.SeedRowAsync(Kept, TimeSpan.FromHours(1));
+        await run.SeedRowAtAsync(Dropped, snapshotTime.AddTicks(-10));
+        await run.SeedSnapshotAtAsync(snapshotTime, Kept);
+
+        Assert.Equal([Kept], await run.DropGoneAsync([Kept, Dropped]));
+    }
+
+    [Fact]
+    public async Task TheGoneReportedSet_IsTrimmedToTheCandidatesStillListed()
+    {
+        using var run = new Run(_duckDb);
+
+        await run.SeedRowAsync(Kept, TimeSpan.FromHours(1));
+        await run.SeedRowAsync(Dropped, TimeSpan.FromHours(1));
+        await run.SeedSnapshotAsync(TimeSpan.FromMinutes(5), Kept);
+
+        Assert.Equal([Kept], await run.DropGoneAsync([Kept, Dropped]));
+        Assert.Equal(1, run.GoneReportedCount);
+
+        /* The dropped database's rows aged out, so it left the candidate list: its entry goes with it. */
+        Assert.Equal([Kept], await run.DropGoneAsync([Kept]));
+        Assert.Equal(0, run.GoneReportedCount);
+
+        /* An empty list trims too. */
+        Assert.Equal([Kept], await run.DropGoneAsync([Kept, Dropped]));
+        Assert.Equal(1, run.GoneReportedCount);
+        Assert.Empty(await run.DropGoneAsync([]));
+        Assert.Equal(0, run.GoneReportedCount);
+    }
+
+    private sealed class Harness(DuckDbInitializer duckDb, ServerManager servers, ScheduleManager schedules, ILogger<RemoteCollectorService>? logger)
+        : RemoteCollectorService(duckDb, servers, schedules, logger)
+    {
+        public Task<List<string>> DropGoneAsync(int serverId, List<string> candidates, int databaseStatesIntervalMinutes)
+            => DropGoneBackfillDatabasesAsync(
+                serverId, candidates, DateTime.UtcNow.AddDays(-7), CancellationToken.None, ServerLabel, databaseStatesIntervalMinutes);
+
+        public int GoneReportedCount(int serverId) => GoneReportedCountForTests(serverId);
+
         public Task<bool> TickAsync(ServerConnection server) => RunQueryStoreBackfillSliceAsync(server, CancellationToken.None);
 
         public Task PruneAsync(int serverId) => PruneOrphanedQueryStoreDatabaseStateAsync(serverId, CancellationToken.None);
@@ -166,11 +291,11 @@ public sealed class QueryStoreBackfillDroppedDatabaseTests : IClassFixture<Share
         private readonly ServerConnection _server = new() { ServerName = ServerLabel, DisplayName = ServerLabel };
         private long _id = 548300;
 
-        public Run(DuckDbInitializer duckDb)
+        public Run(DuckDbInitializer duckDb, ILogger<RemoteCollectorService>? logger = null)
         {
             _duckDb = duckDb;
             Directory.CreateDirectory(_configDirectory);
-            Harness = new Harness(duckDb, new ServerManager(_configDirectory), new ScheduleManager(_configDirectory));
+            Harness = new Harness(duckDb, new ServerManager(_configDirectory), new ScheduleManager(_configDirectory), logger);
             ServerId = RemoteCollectorService.GetDeterministicHashCode(RemoteCollectorService.GetServerNameForStorage(_server));
             Harness.SliceOverrideForTests = async (database, span) =>
             {
@@ -290,6 +415,76 @@ VALUES ($1, $2, $3, $4, $5, $6, 'ONLINE', false)";
             }
         }
 
+        public int GoneReportedCount => Harness.GoneReportedCount(ServerId);
+
+        public Task<List<string>> DropGoneAsync(List<string> candidates, int databaseStatesIntervalMinutes = 0)
+            => Harness.DropGoneAsync(ServerId, candidates, databaseStatesIntervalMinutes);
+
+        /// <summary>One stored row stamped exactly <paramref name="collectionTime"/>.</summary>
+        public async Task SeedRowAtAsync(string databaseName, DateTime collectionTime)
+        {
+            using var readLock = _duckDb.AcquireReadLock();
+            using var connection = _duckDb.CreateConnection();
+            await connection.OpenAsync();
+            using var cmd = connection.CreateCommand();
+            cmd.CommandText = @"
+INSERT INTO query_store_stats
+    (collection_id, collection_time, server_id, server_name, database_name,
+     query_id, plan_id, execution_type_desc, first_execution_time, last_execution_time,
+     query_text, query_hash, execution_count, avg_cpu_time_us, avg_duration_us,
+     query_plan_hash, is_forced_plan, force_failure_count)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)";
+            var id = ++_id;
+            cmd.Parameters.Add(new DuckDBParameter { Value = id });
+            cmd.Parameters.Add(new DuckDBParameter { Value = collectionTime });
+            cmd.Parameters.Add(new DuckDBParameter { Value = ServerId });
+            cmd.Parameters.Add(new DuckDBParameter { Value = ServerLabel });
+            cmd.Parameters.Add(new DuckDBParameter { Value = databaseName });
+            cmd.Parameters.Add(new DuckDBParameter { Value = id });
+            cmd.Parameters.Add(new DuckDBParameter { Value = 1L });
+            cmd.Parameters.Add(new DuckDBParameter { Value = "Regular" });
+            cmd.Parameters.Add(new DuckDBParameter { Value = collectionTime });
+            cmd.Parameters.Add(new DuckDBParameter { Value = collectionTime });
+            cmd.Parameters.Add(new DuckDBParameter { Value = "SELECT 1" });
+            cmd.Parameters.Add(new DuckDBParameter { Value = "0xTESTHASH" });
+            cmd.Parameters.Add(new DuckDBParameter { Value = 10L });
+            cmd.Parameters.Add(new DuckDBParameter { Value = 1000L });
+            cmd.Parameters.Add(new DuckDBParameter { Value = 2000L });
+            cmd.Parameters.Add(new DuckDBParameter { Value = "0xTESTPLANHASH" });
+            cmd.Parameters.Add(new DuckDBParameter { Value = false });
+            cmd.Parameters.Add(new DuckDBParameter { Value = 0L });
+            await cmd.ExecuteNonQueryAsync();
+        }
+
+        public Task SeedSnapshotAtAsync(DateTime collectionTime, params string[] databases)
+            => SeedSnapshotRowsAsync(collectionTime, databases);
+
+        /// <summary>A snapshot whose rows carry no database name (the column allows NULL).</summary>
+        public Task SeedNullNamedSnapshotAsync(TimeSpan age)
+            => SeedSnapshotRowsAsync(DateTime.UtcNow - age, [null]);
+
+        private async Task SeedSnapshotRowsAsync(DateTime collectionTime, string?[] databases)
+        {
+            using var readLock = _duckDb.AcquireReadLock();
+            using var connection = _duckDb.CreateConnection();
+            await connection.OpenAsync();
+            var dbId = 1;
+            foreach (var database in databases)
+            {
+                using var cmd = connection.CreateCommand();
+                cmd.CommandText = @"
+INSERT INTO database_states (collection_id, collection_time, server_id, server_name, database_name, database_id, state_desc, is_in_standby)
+VALUES ($1, $2, $3, $4, $5, $6, 'ONLINE', false)";
+                cmd.Parameters.Add(new DuckDBParameter { Value = ++_id });
+                cmd.Parameters.Add(new DuckDBParameter { Value = collectionTime });
+                cmd.Parameters.Add(new DuckDBParameter { Value = ServerId });
+                cmd.Parameters.Add(new DuckDBParameter { Value = ServerLabel });
+                cmd.Parameters.Add(new DuckDBParameter { Value = (object?)database ?? DBNull.Value });
+                cmd.Parameters.Add(new DuckDBParameter { Value = dbId++ });
+                await cmd.ExecuteNonQueryAsync();
+            }
+        }
+
         public Task<string?> HoleAsync(string databaseName) => StateAsync(QueryStoreBackfillState.HoleKeyPrefix, databaseName);
 
         public async Task<string?> StateAsync(string prefix, string databaseName)
@@ -314,6 +509,35 @@ VALUES ($1, $2, $3, $4, $5, $6, 'ONLINE', false)";
             catch (IOException)
             {
                 /* Best effort: a leftover temp directory is harmless. */
+            }
+        }
+    }
+
+    /// <summary>Keeps every formatted line with its level, so a test can count Warnings and look for text.</summary>
+    private sealed class CaptureLog : ILogger<RemoteCollectorService>
+    {
+        private readonly List<(LogLevel Level, string Line)> _entries = [];
+
+        public IReadOnlyList<string> Lines
+        {
+            get
+            {
+                lock (_entries)
+                {
+                    return _entries.ConvertAll(entry => entry.Line);
+                }
+            }
+        }
+
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+
+        public bool IsEnabled(LogLevel logLevel) => true;
+
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
+        {
+            lock (_entries)
+            {
+                _entries.Add((logLevel, formatter(state, exception)));
             }
         }
     }

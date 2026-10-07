@@ -12,6 +12,7 @@ using System.Globalization;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using Npgsql;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Service;
@@ -148,6 +149,166 @@ public sealed class QueryStoreBackfillDroppedDatabaseTests
         Assert.Contains(Dropped, fixture.Attempts);
     }
 
+    [Fact]
+    public void SnapshotStalenessBound_IsThreeIntervals_NeverUnderOneHour_AndAnExactBoundIsFresh()
+    {
+        Assert.Equal(TimeSpan.FromHours(1), QueryStoreBackfillState.SnapshotStalenessBound(1));
+        Assert.Equal(TimeSpan.FromHours(1), QueryStoreBackfillState.SnapshotStalenessBound(0));
+        Assert.Equal(TimeSpan.FromHours(1), QueryStoreBackfillState.SnapshotStalenessBound(-5));
+        Assert.Equal(TimeSpan.FromHours(1), QueryStoreBackfillState.SnapshotStalenessBound(20));
+        Assert.Equal(TimeSpan.FromMinutes(90), QueryStoreBackfillState.SnapshotStalenessBound(30));
+        Assert.Equal(TimeSpan.FromHours(6), QueryStoreBackfillState.SnapshotStalenessBound(120));
+
+        var now = new DateTime(2026, 10, 7, 12, 0, 0, DateTimeKind.Utc);
+        Assert.False(QueryStoreBackfillState.IsSnapshotStale(now - TimeSpan.FromHours(1), now, 1));
+        Assert.True(QueryStoreBackfillState.IsSnapshotStale(now - TimeSpan.FromHours(1) - TimeSpan.FromTicks(1), now, 1));
+        Assert.False(QueryStoreBackfillState.IsSnapshotStale(now - TimeSpan.FromMinutes(89), now, 30));
+        Assert.True(QueryStoreBackfillState.IsSnapshotStale(now - TimeSpan.FromMinutes(91), now, 30));
+    }
+
+    [Fact]
+    public async Task AStaleSnapshot_DropsNothing_AndRunsNoProbe()
+    {
+        var log = new CapturingTestLogger();
+        await using var fixture = await DroppedBackfillStore.CreateAsync(log);
+        var ct = TestContext.Current.CancellationToken;
+
+        /* The newest snapshot is three hours old, past the one-hour floor, and does not name the dropped database.
+           It could equally predate the drop, so it must not be believed: both databases stay candidates. The
+           Information line is written only after the per-database probe has found nothing newer, so its absence
+           shows no probe ran. */
+        await fixture.SeedRowAsync(Kept, TimeSpan.FromHours(5), ct);
+        await fixture.SeedRowAsync(Dropped, TimeSpan.FromHours(5), ct);
+        await fixture.SeedSnapshotAsync(TimeSpan.FromHours(3), [Kept], ct);
+
+        await fixture.RunTicksAsync(4, ct);
+
+        Assert.Contains(Kept, fixture.Attempts);
+        Assert.Contains(Dropped, fixture.Attempts);
+        Assert.DoesNotContain(log.Lines, line => line.Contains("not in the newest database_states snapshot", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task ASnapshotInsideThreeIntervals_StillDrops_WhenTheServersIntervalIsLong()
+    {
+        var log = new CapturingTestLogger();
+        await using var fixture = await DroppedBackfillStore.CreateAsync(log, serverId => 120);
+        var ct = TestContext.Current.CancellationToken;
+
+        /* Three hours old would be stale at the one-hour floor, but this server collects database_states every two
+           hours, so the bound is six hours and the snapshot still decides. */
+        await fixture.SeedRowAsync(Kept, TimeSpan.FromHours(5), ct);
+        await fixture.SeedRowAsync(Dropped, TimeSpan.FromHours(5), ct);
+        await fixture.SeedSnapshotAsync(TimeSpan.FromHours(3), [Kept], ct);
+
+        await fixture.RunTicksAsync(4, ct);
+
+        Assert.Contains(Kept, fixture.Attempts);
+        Assert.DoesNotContain(Dropped, fixture.Attempts);
+    }
+
+    [Fact]
+    public async Task ASnapshotWhoseNamesAreAllNull_DropsNothing()
+    {
+        await using var fixture = await DroppedBackfillStore.CreateAsync();
+        var ct = TestContext.Current.CancellationToken;
+
+        await fixture.SeedRowAsync(Kept, TimeSpan.FromHours(1), ct);
+        await fixture.SeedRowAsync(Dropped, TimeSpan.FromHours(1), ct);
+        await fixture.SeedNullNamedSnapshotAsync(TimeSpan.FromMinutes(5), ct);
+
+        await fixture.RunTicksAsync(4, ct);
+
+        Assert.Contains(Kept, fixture.Attempts);
+        Assert.Contains(Dropped, fixture.Attempts);
+    }
+
+    [Fact]
+    public async Task ARowExactlyAtTheSnapshotTime_KeepsTheDatabase()
+    {
+        await using var fixture = await DroppedBackfillStore.CreateAsync();
+        var ct = TestContext.Current.CancellationToken;
+
+        /* The freshness test is >=: a row stamped the same instant as the snapshot proves the database was alive
+           when the snapshot was read, which the snapshot (it does not name it) cannot contradict. */
+        var snapshotTime = Ago(TimeSpan.FromMinutes(10));
+        await fixture.SeedRowAsync(Kept, TimeSpan.FromHours(1), ct);
+        await fixture.SeedRowAtAsync(Created, snapshotTime, ct);
+        await fixture.SeedSnapshotAtAsync(snapshotTime, [Kept], ct);
+
+        var survivors = await fixture.DropGoneAsync([Kept, Created], ct);
+
+        Assert.Equal([Kept, Created], survivors);
+    }
+
+    [Fact]
+    public async Task ARowJustBeforeTheSnapshotTime_DoesNotKeepTheDatabase()
+    {
+        await using var fixture = await DroppedBackfillStore.CreateAsync();
+        var ct = TestContext.Current.CancellationToken;
+
+        var snapshotTime = Ago(TimeSpan.FromMinutes(10));
+        await fixture.SeedRowAsync(Kept, TimeSpan.FromHours(1), ct);
+        await fixture.SeedRowAtAsync(Dropped, snapshotTime.AddTicks(-10), ct);
+        await fixture.SeedSnapshotAtAsync(snapshotTime, [Kept], ct);
+
+        var survivors = await fixture.DropGoneAsync([Kept, Dropped], ct);
+
+        Assert.Equal([Kept], survivors);
+    }
+
+    [Fact]
+    public async Task AFailedGoneCheck_KeepsEveryCandidate_AndWarnsOncePerRun()
+    {
+        var log = new CapturingTestLogger();
+        await using var fixture = await DroppedBackfillStore.CreateAsync(log);
+        var ct = TestContext.Current.CancellationToken;
+
+        await fixture.SeedRowAsync(Kept, TimeSpan.FromHours(1), ct);
+        await fixture.SeedRowAsync(Dropped, TimeSpan.FromHours(1), ct);
+        await fixture.SeedSnapshotAsync(TimeSpan.FromMinutes(5), [Kept], ct);
+        await fixture.BreakSnapshotTableAsync(ct);
+
+        for (var tick = 0; tick < 3; tick++)
+        {
+            Assert.Equal([Kept, Dropped], await fixture.DropGoneAsync([Kept, Dropped], ct));
+        }
+
+        Assert.Equal(1, log.CountAtLevel(LogLevel.Warning));
+        Assert.Contains(log.Lines, line => line.Contains("checking which databases are gone failed", StringComparison.Ordinal));
+
+        /* A check that works again ends the run, so the next failure warns again. */
+        await fixture.RepairSnapshotTableAsync(ct);
+        Assert.Equal([Kept], await fixture.DropGoneAsync([Kept, Dropped], ct));
+        await fixture.BreakSnapshotTableAsync(ct);
+        Assert.Equal([Kept, Dropped], await fixture.DropGoneAsync([Kept, Dropped], ct));
+        Assert.Equal(2, log.CountAtLevel(LogLevel.Warning));
+    }
+
+    [Fact]
+    public async Task TheGoneReportedSet_IsTrimmedToTheCandidatesStillListed()
+    {
+        await using var fixture = await DroppedBackfillStore.CreateAsync();
+        var ct = TestContext.Current.CancellationToken;
+
+        await fixture.SeedRowAsync(Kept, TimeSpan.FromHours(1), ct);
+        await fixture.SeedRowAsync(Dropped, TimeSpan.FromHours(1), ct);
+        await fixture.SeedSnapshotAsync(TimeSpan.FromMinutes(5), [Kept], ct);
+
+        Assert.Equal([Kept], await fixture.DropGoneAsync([Kept, Dropped], ct));
+        Assert.Equal(1, fixture.GoneReportedCount);
+
+        /* The dropped database's rows aged out, so it left the candidate list: its entry goes with it. */
+        Assert.Equal([Kept], await fixture.DropGoneAsync([Kept], ct));
+        Assert.Equal(0, fixture.GoneReportedCount);
+
+        /* An empty list trims too. */
+        Assert.Equal([Kept], await fixture.DropGoneAsync([Kept, Dropped], ct));
+        Assert.Equal(1, fixture.GoneReportedCount);
+        Assert.Empty(await fixture.DropGoneAsync([], ct));
+        Assert.Equal(0, fixture.GoneReportedCount);
+    }
+
     /// <summary>A scratch store, a real runner and backfill, and a slice body that completes for every database
     /// except <see cref="Dropped"/>, which throws what a missing database throws.</summary>
     private sealed class DroppedBackfillStore : IAsyncDisposable
@@ -162,7 +323,7 @@ public sealed class QueryStoreBackfillDroppedDatabaseTests
 
         public List<string> Attempts { get; } = [];
 
-        public static async Task<DroppedBackfillStore> CreateAsync()
+        public static async Task<DroppedBackfillStore> CreateAsync(ILogger? logger = null, Func<int, int>? databaseStatesIntervalMinutes = null)
         {
             var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
             Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
@@ -181,7 +342,8 @@ public sealed class QueryStoreBackfillDroppedDatabaseTests
 
             fixture._postgres = NpgsqlDataSource.Create(fixture._scratch.ConnectionString);
             fixture.Runner = new DarlingCollectorRunner(fixture._postgres, new CollectorDeltaCalculator());
-            fixture._backfill = new QueryStoreBackfill(fixture._postgres, fixture.Runner, new CollectorDeltaCalculator(), null);
+            fixture._backfill = new QueryStoreBackfill(
+                fixture._postgres, fixture.Runner, new CollectorDeltaCalculator(), logger, databaseStatesIntervalMinutes: databaseStatesIntervalMinutes);
             fixture._backfill.SliceOverrideForTests = async (database, span) =>
             {
                 fixture.Attempts.Add(database);
@@ -280,6 +442,73 @@ VALUES (0, $1, $2, 'SQL01', $3, 5, 'ONLINE', false)", connection);
                 command.Parameters.AddWithValue(database);
                 await command.ExecuteNonQueryAsync(ct);
             }
+        }
+
+        public int GoneReportedCount => _backfill.GoneReportedCountForTests(TestServerId);
+
+        public Task<List<string>> DropGoneAsync(List<string> candidates, CancellationToken ct)
+            => _backfill.DropGoneDatabasesAsync(TestServerId, candidates, DateTime.UtcNow.AddDays(-7), ct, "backfill-dropped-test");
+
+        /* The snapshot table renamed away, so the gone check's first read fails the way a store outage would. */
+        public async Task BreakSnapshotTableAsync(CancellationToken ct)
+        {
+            await using var connection = await _postgres.OpenConnectionAsync(ct);
+            await using var command = new NpgsqlCommand("ALTER TABLE collect.database_states RENAME TO database_states_away", connection);
+            await command.ExecuteNonQueryAsync(ct);
+        }
+
+        public async Task RepairSnapshotTableAsync(CancellationToken ct)
+        {
+            await using var connection = await _postgres.OpenConnectionAsync(ct);
+            await using var command = new NpgsqlCommand("ALTER TABLE collect.database_states_away RENAME TO database_states", connection);
+            await command.ExecuteNonQueryAsync(ct);
+        }
+
+        /// <summary>One stored row stamped exactly <paramref name="collectionTime"/>.</summary>
+        public async Task SeedRowAtAsync(string databaseName, DateTime collectionTime, CancellationToken ct)
+        {
+            await using var connection = await _postgres.OpenConnectionAsync(ct);
+            await using var command = new NpgsqlCommand(@"
+INSERT INTO collect.query_store_stats
+    (collection_id, collection_time, server_id, server_name, database_name, module_name, query_hash,
+     query_id, plan_id, execution_type_desc, replica_role,
+     runtime_stats_interval_id, interval_start_time_utc, first_execution_time, last_execution_time,
+     execution_count, avg_duration_us, avg_cpu_time_us, min_duration_us, max_duration_us)
+VALUES
+    ($1, $2, $3, 'SQL01', $4, 'dbo.GetOrders', '0xABCD', 91, 111, 'Regular', 'Primary',
+     1, $2, $2, $2, 1, 100, 100, 100, 100)", connection);
+            command.Parameters.AddWithValue(++_collectionId);
+            command.Parameters.AddWithValue(collectionTime);
+            command.Parameters.AddWithValue(TestServerId);
+            command.Parameters.AddWithValue(databaseName);
+            await command.ExecuteNonQueryAsync(ct);
+        }
+
+        public async Task SeedSnapshotAtAsync(DateTime collectionTime, string[] databases, CancellationToken ct)
+        {
+            await using var connection = await _postgres.OpenConnectionAsync(ct);
+            foreach (var database in databases)
+            {
+                await using var command = new NpgsqlCommand(@"
+INSERT INTO collect.database_states (collection_id, collection_time, server_id, server_name, database_name, database_id, state_desc, is_in_standby)
+VALUES (0, $1, $2, 'SQL01', $3, 5, 'ONLINE', false)", connection);
+                command.Parameters.AddWithValue(collectionTime);
+                command.Parameters.AddWithValue(TestServerId);
+                command.Parameters.AddWithValue(database);
+                await command.ExecuteNonQueryAsync(ct);
+            }
+        }
+
+        /// <summary>A snapshot whose rows carry no database name (the column allows NULL).</summary>
+        public async Task SeedNullNamedSnapshotAsync(TimeSpan age, CancellationToken ct)
+        {
+            await using var connection = await _postgres.OpenConnectionAsync(ct);
+            await using var command = new NpgsqlCommand(@"
+INSERT INTO collect.database_states (collection_id, collection_time, server_id, server_name, database_name, database_id, state_desc, is_in_standby)
+VALUES (0, $1, $2, 'SQL01', NULL, 5, 'ONLINE', false)", connection);
+            command.Parameters.AddWithValue(Ago(age));
+            command.Parameters.AddWithValue(TestServerId);
+            await command.ExecuteNonQueryAsync(ct);
         }
 
         public Task<string?> HoleAsync(string databaseName, CancellationToken ct)

@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Data.SqlClient;
@@ -145,6 +146,10 @@ public sealed class QueryStoreBackfill
        say — the conservative direction, since the narrower horizon cannot produce a tier split. */
     private readonly Func<bool> _hasContinuousAggregates;
 
+    /* #5483: a server's effective database_states interval in minutes, which sets how old a snapshot may be before the
+       gone-database check ignores it. Null = the one-hour floor alone (tests and any non-Darling host). */
+    private readonly Func<int, int> _databaseStatesIntervalMinutes;
+
     /* #2164: the per-database text budget override in MB, read live like _capturePlans. Backfill slices
        carry the SAME nvarchar(max) query-text/plan-XML payload over the same link as a live tick, so the
        operator knob has to reach here too — a knob that only bounds the tick would leave the heavier of
@@ -158,7 +163,8 @@ public sealed class QueryStoreBackfill
         ILogger? logger,
         Func<bool>? capturePlans = null,
         Func<int>? textBudgetMb = null,
-        Func<bool>? hasContinuousAggregates = null)
+        Func<bool>? hasContinuousAggregates = null,
+        Func<int, int>? databaseStatesIntervalMinutes = null)
     {
         _postgres = postgres ?? throw new ArgumentNullException(nameof(postgres));
         _runner = runner ?? throw new ArgumentNullException(nameof(runner));
@@ -168,6 +174,7 @@ public sealed class QueryStoreBackfill
         /* Null provider = keep the collector's compile-time budget (tests and any non-Darling host). */
         _textBudgetMb = textBudgetMb ?? (() => 0);
         _hasContinuousAggregates = hasContinuousAggregates ?? (() => true);
+        _databaseStatesIntervalMinutes = databaseStatesIntervalMinutes ?? (_ => 0);
     }
 
     /// <summary>
@@ -671,8 +678,18 @@ public sealed class QueryStoreBackfill
     }
 
     /// <summary>#5483: databases already reported as gone, per (server, database), so the Information line below is
-    /// one per database per run of the service rather than one per tick. In memory on purpose, like the ledgers.</summary>
+    /// one per database per run of the service rather than one per tick. In memory on purpose, like the ledgers.
+    /// Trimmed each tick to the names still in the candidate list (see <see cref="DropGoneDatabasesAsync"/>), so it
+    /// never outgrows the candidates.</summary>
     private readonly System.Collections.Concurrent.ConcurrentDictionary<(int ServerId, string Database), byte> _goneReported = new();
+
+    /// <summary>#5483: failed gone-database checks, one Warning per run of failures like the other backfill reads.
+    /// Its own instance, because the candidate read ends ITS run on every success and would otherwise end this
+    /// one too, warning every tick.</summary>
+    private readonly QueryStoreBackfillReadFailureRuns _goneCheckFailures = new();
+
+    /// <summary>How many databases the server's gone-report set holds. For the tests that pin the trim.</summary>
+    internal int GoneReportedCountForTests(int serverId) => _goneReported.Keys.Count(key => key.ServerId == serverId);
 
     /// <summary>
     /// #5483: removes from <paramref name="candidates"/> every database the server no longer has.
@@ -694,12 +711,29 @@ public sealed class QueryStoreBackfill
     /// drops nothing — an unknown list is not an empty one. No monitored-server round trip; the two reads are on
     /// the store.</para>
     ///
-    /// <para>A failed read keeps every candidate (the old behavior, never an invented drop) and says so at Debug.
-    /// A database found gone also forgets its in-memory failure counts, which nothing else would ever clear.</para>
+    /// <para><b>A stale snapshot is no snapshot.</b> One older than three times the server's own database_states
+    /// interval (floor one hour, <see cref="QueryStoreBackfillState.IsSnapshotStale"/>) is unknown too. It still names a
+    /// database dropped after it, so it could not tell us anything, and each probe for a database it misses would
+    /// scan every chunk since it, compressed ones included, on every tick.</para>
+    ///
+    /// <para>A failed read keeps every candidate (the old behavior, never an invented drop) and logs one Warning for
+    /// each run of failures, the rest at Debug. A database found gone also forgets its in-memory failure counts, which
+    /// nothing else would ever clear.</para>
     /// </summary>
     internal async Task<List<string>> DropGoneDatabasesAsync(
         int serverId, List<string> candidates, DateTime floorLimit, CancellationToken cancellationToken, string? serverLabel = null)
     {
+        /* Entries for databases that left the candidate list (their rows aged out) can never be reported again, so
+           they go now, before any early return below. */
+        var candidateSet = new HashSet<string>(candidates, StringComparer.Ordinal);
+        foreach (var key in _goneReported.Keys)
+        {
+            if (key.ServerId == serverId && !candidateSet.Contains(key.Database))
+            {
+                _goneReported.TryRemove(key, out _);
+            }
+        }
+
         if (candidates.Count == 0)
         {
             return candidates;
@@ -727,56 +761,75 @@ public sealed class QueryStoreBackfill
                 }
             }
 
-            if (newest is not DateTime snapshotTime || snapshotDatabases.Count == 0)
+            var result = candidates;
+            if (newest is DateTime snapshotTime
+                && snapshotDatabases.Count > 0
+                && !QueryStoreBackfillState.IsSnapshotStale(snapshotTime, DateTime.UtcNow, _databaseStatesIntervalMinutes(serverId)))
             {
-                return candidates;
-            }
-
-            var absent = QueryStoreBackfillState.AbsentFromSnapshot(candidates, snapshotDatabases);
-            foreach (var candidate in candidates)
-            {
-                if (snapshotDatabases.Contains(candidate))
+                var absent = QueryStoreBackfillState.AbsentFromSnapshot(candidates, snapshotDatabases);
+                foreach (var candidate in candidates)
                 {
-                    _goneReported.TryRemove((serverId, candidate), out _);
-                }
-            }
-
-            if (absent.Count == 0)
-            {
-                return candidates;
-            }
-
-            var gone = new HashSet<string>(StringComparer.Ordinal);
-            foreach (var database in absent)
-            {
-                using var newer = new NpgsqlCommand(QueryStoreBackfillState.RowAtOrAfterSnapshotSql, connection);
-                newer.CommandTimeout = ServiceCommandDeadlines.QueryStoreBackfillReadSeconds;
-                newer.Parameters.AddWithValue(serverId);
-                newer.Parameters.AddWithValue(database);
-                newer.Parameters.AddWithValue(snapshotTime);
-                if (await newer.ExecuteScalarAsync(cancellationToken) is null)
-                {
-                    gone.Add(database);
-                    if (_goneReported.TryAdd((serverId, database), 0))
+                    if (snapshotDatabases.Contains(candidate))
                     {
-                        _sliceFailures.RecordCompletion(serverId, database);
-                        _readFailures.RecordSuccess(serverId, database);
-                        _logger?.LogInformation(
-                            "query_store backfill on '{Server}' [{Database}]: no longer on the server (absent from the newest database_states snapshot, no stored row since); not backfilling it.",
-                            serverLabel ?? serverId.ToString(CultureInfo.InvariantCulture), database);
+                        _goneReported.TryRemove((serverId, candidate), out _);
                     }
                 }
-                else
+
+                var gone = new HashSet<string>(StringComparer.Ordinal);
+                foreach (var database in absent)
                 {
-                    _goneReported.TryRemove((serverId, database), out _);
+                    using var newer = new NpgsqlCommand(QueryStoreBackfillState.RowAtOrAfterSnapshotSql, connection);
+                    newer.CommandTimeout = ServiceCommandDeadlines.QueryStoreBackfillReadSeconds;
+                    newer.Parameters.AddWithValue(serverId);
+                    newer.Parameters.AddWithValue(database);
+                    newer.Parameters.AddWithValue(snapshotTime);
+                    if (await newer.ExecuteScalarAsync(cancellationToken) is null)
+                    {
+                        gone.Add(database);
+                        if (_goneReported.TryAdd((serverId, database), 0))
+                        {
+                            _sliceFailures.RecordCompletion(serverId, database);
+                            _readFailures.RecordSuccess(serverId, database);
+                            /* "Not in the newest list", not "gone from the server": the snapshot is stamped at the
+                               start of its run, and a database created between the stamp and the read, whose first
+                               query_store rows carry an earlier stamp, is skipped for one snapshot cycle. It has no
+                               history to backfill yet, so nothing is lost. */
+                            _logger?.LogInformation(
+                                "query_store backfill on '{Server}' [{Database}]: not in the newest database_states snapshot and no stored row since; not backfilling it until a snapshot lists it.",
+                                serverLabel ?? serverId.ToString(CultureInfo.InvariantCulture), database);
+                        }
+                    }
+                    else
+                    {
+                        _goneReported.TryRemove((serverId, database), out _);
+                    }
+                }
+
+                if (gone.Count > 0)
+                {
+                    result = candidates.FindAll(database => !gone.Contains(database));
                 }
             }
 
-            return gone.Count == 0 ? candidates : candidates.FindAll(database => !gone.Contains(database));
+            _goneCheckFailures.RecordSuccess(serverId);
+            return result;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            _logger?.LogDebug(ex, "query_store backfill liveness read failed; keeping every candidate this tick");
+            /* A failed check keeps every candidate, so a persistent failure brings the original bug back with nothing
+               saying so. One Warning at the first failure of a run; the repeats stay at Debug. */
+            if (_goneCheckFailures.RecordFailure(serverId))
+            {
+                _logger?.LogWarning(
+                    ex,
+                    "query_store backfill on '{Server}': checking which databases are gone failed, so every candidate is tried until a check succeeds. Further failures are logged at debug level.",
+                    serverLabel ?? serverId.ToString(CultureInfo.InvariantCulture));
+            }
+            else
+            {
+                _logger?.LogDebug(ex, "query_store backfill gone-database check failed; keeping every candidate this tick");
+            }
+
             return candidates;
         }
     }

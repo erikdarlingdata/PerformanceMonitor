@@ -256,4 +256,32 @@ public static class QueryStoreBackfillState
 
         return absent;
     }
+
+    /// <summary>#5483: the shortest a <c>database_states</c> snapshot may be before the gone-database check stops
+    /// trusting it, however fast the collector runs.</summary>
+    public static readonly TimeSpan MinimumSnapshotStaleness = TimeSpan.FromHours(1);
+
+    /// <summary>#5483: a snapshot is stale once it is older than this many times the collector's own interval.</summary>
+    public const int SnapshotStalenessIntervals = 3;
+
+    /// <summary>
+    /// #5483: how old a <c>database_states</c> snapshot may be and still decide that a database is gone: three times
+    /// the collector's own interval for that server (<paramref name="intervalMinutes"/>, the effective schedule both
+    /// apps resolve), never under <see cref="MinimumSnapshotStaleness"/>. A zero, negative or unknown interval gives
+    /// the floor.
+    /// </summary>
+    public static TimeSpan SnapshotStalenessBound(int intervalMinutes)
+    {
+        var scaled = TimeSpan.FromMinutes((double)Math.Max(0, intervalMinutes) * SnapshotStalenessIntervals);
+        return scaled > MinimumSnapshotStaleness ? scaled : MinimumSnapshotStaleness;
+    }
+
+    /// <summary>
+    /// #5483: true when the snapshot taken at <paramref name="snapshotTime"/> (a store timestamp, UTC) is older than
+    /// <see cref="SnapshotStalenessBound"/> at <paramref name="nowUtc"/>. A stale snapshot is unknown, the same as no
+    /// snapshot: it still names a database dropped after it, and every probe for a database it misses would read the
+    /// store's chunks back to it. A snapshot exactly at the bound is still fresh.
+    /// </summary>
+    public static bool IsSnapshotStale(DateTime snapshotTime, DateTime nowUtc, int intervalMinutes)
+        => nowUtc - snapshotTime > SnapshotStalenessBound(intervalMinutes);
 }
