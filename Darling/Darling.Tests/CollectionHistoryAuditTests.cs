@@ -278,6 +278,93 @@ public sealed class CollectionHistoryAuditTests
         Assert.Contains("AND c.is_enabled", passes, StringComparison.Ordinal);
 
         Assert.Throws<ArgumentException>(() => CollectionHistoryAudit.BuildSql(new Rollup("x; DROP TABLE y", true)));
+        Assert.Throws<ArgumentException>(() => CollectionHistoryAudit.BuildSql(new Rollup("x; DROP TABLE y", false, CollectionHistoryAudit.ReadShape.Probe)));
+    }
+
+    /// <summary>#5461: the probe statement keeps the three things the big-store timing depends on, and drops the
+    /// hours nobody has a row in.</summary>
+    [Fact]
+    public void TheProbeSql_IsAPerServerPerHourLateralWithALimit_OnATimestampSeries_AndDropsEmptyHours()
+    {
+        var probe = CollectionHistoryAudit.BuildSql(new Rollup("collect.query_store_stats_hourly", false, CollectionHistoryAudit.ReadShape.Probe));
+        Assert.DoesNotContain("COUNT(DISTINCT", probe, StringComparison.Ordinal);
+        Assert.Contains("generate_series($1::timestamp, $2::timestamp, INTERVAL '1 hour')", probe, StringComparison.Ordinal);
+        Assert.Contains("CROSS JOIN config.config_monitored_servers AS c", probe, StringComparison.Ordinal);
+        Assert.Contains("LEFT JOIN LATERAL", probe, StringComparison.Ordinal);
+        Assert.Contains("FROM collect.query_store_stats_hourly AS r", probe, StringComparison.Ordinal);
+        Assert.Contains("r.server_id = c.server_id", probe, StringComparison.Ordinal);
+        Assert.Contains("r.bucket = h.bucket", probe, StringComparison.Ordinal);
+        Assert.Contains("WHERE c.is_enabled", probe, StringComparison.Ordinal);
+        Assert.Contains("h.bucket < $2::timestamp", probe, StringComparison.Ordinal);
+
+        /* LIMIT 1 inside the lateral keeps the planner from flattening it to a semi join that reads the whole range. */
+        Assert.Matches(@"(?s)LATERAL \(.*LIMIT 1\s*\) AS p ON true", probe);
+
+        /* An hour with no server is ABSENT, as in the scan: IsSettled counts any bucket, so a zero row would mark a
+           hole as materialized. */
+        Assert.Contains("HAVING COUNT(p.one) > 0", probe, StringComparison.Ordinal);
+
+        /* The scan shape is unchanged for a Scan source. */
+        var scan = CollectionHistoryAudit.BuildSql(new Rollup("collect.query_stats_interval_hourly", false));
+        Assert.DoesNotContain("LATERAL", scan, StringComparison.Ordinal);
+    }
+
+    /// <summary>#5461: the interval hourly is not audited directly, and the reason is pinned. Each assertion's
+    /// message names the reason, so a change to one of these CREATE statements says why the audit needs a look.</summary>
+    [Fact]
+    public void TheIntervalHourlyIsNotAudited_BecauseItsChildAndSiblingReadTheSameRawTableWithNoFilter()
+    {
+        var corrected = TimescaleSupport.CreateQueryStoreStatsCorrectedHourlySql;
+        var hourly = TimescaleSupport.CreateQueryStoreStatsHourlySql;
+        var interval = TimescaleSupport.CreateQueryStoreStatsIntervalHourlySql;
+        const string Why = " (#5461: the history audit does not read query_store_stats_interval_hourly because its same-width child"
+            + " query_store_stats_corrected_hourly has no filter on it, and query_store_stats_hourly reads the same raw table with no filter,"
+            + " so a server missing from the interval hourly is missing from both audited views. Re-decide the audit's coverage.)";
+
+        Assert.True(corrected.Contains("FROM collect.query_store_stats_interval_hourly", StringComparison.Ordinal),
+            "the corrected hourly no longer reads FROM collect.query_store_stats_interval_hourly" + Why);
+        Assert.True(corrected.Contains("time_bucket('1 hour', bucket)", StringComparison.Ordinal),
+            "the corrected hourly is no longer a time_bucket('1 hour', bucket) over the interval hourly" + Why);
+        Assert.False(corrected.Contains("WHERE", StringComparison.OrdinalIgnoreCase),
+            "the corrected hourly now has a WHERE on the interval hourly" + Why);
+
+        foreach (var (name, sql) in new[] { ("query_store_stats_hourly", hourly), ("query_store_stats_interval_hourly", interval) })
+        {
+            Assert.True(System.Text.RegularExpressions.Regex.IsMatch(sql, @"FROM collect\.query_store_stats\s"),
+                name + " no longer reads FROM collect.query_store_stats" + Why);
+            Assert.False(sql.Contains("WHERE", StringComparison.OrdinalIgnoreCase),
+                name + " now has a WHERE on collect.query_store_stats" + Why);
+        }
+
+        Assert.Equal(new[] { TimescaleSupport.QueryStoreStatsIntervalHourlyView }, CollectionHistoryAudit.UnauditedHourlyViews.ToArray());
+    }
+
+    /// <summary>#5461: the two probe sources each keep a (server_id, bucket) index, every hourly aggregate is
+    /// audited with a shape or is the one documented exclusion, and no other source is probed.</summary>
+    [Fact]
+    public void EveryProbeSourceKeepsAServerIdBucketIndex_AndEveryHourlyAggregateIsAuditedOrTheOneExclusion()
+    {
+        foreach (var rollup in CollectionHistoryAudit.Rollups.Where(r => r.Shape == CollectionHistoryAudit.ReadShape.Probe))
+        {
+            var view = rollup.Relation["collect.".Length..];
+            Assert.True(TimescaleSupport.QueryStoreRollupKeptIndexesSql.TryGetValue(view, out var kept),
+                view + " is probed but TimescaleSupport keeps no indexes for it");
+            Assert.Contains("a1.attname = 'server_id'", kept, StringComparison.Ordinal);
+            Assert.Contains("a2.attname = 'bucket'", kept, StringComparison.Ordinal);
+            Assert.False(rollup.JudgesPasses, "a probe only learns whether a server has a row in an hour, never passes");
+        }
+
+        Assert.Equal(
+            new[] { "collect.query_store_stats_corrected_hourly", "collect.query_store_stats_hourly" },
+            CollectionHistoryAudit.Rollups.Where(r => r.Shape == CollectionHistoryAudit.ReadShape.Probe).Select(r => r.Relation).OrderBy(x => x, StringComparer.Ordinal));
+
+        var audited = CollectionHistoryAudit.Rollups.Select(r => r.Relation).ToHashSet(StringComparer.Ordinal);
+        foreach (var (_, view) in TimescaleSupport.HourlyAggregates)
+        {
+            var isAudited = audited.Contains("collect." + view);
+            var isExcluded = CollectionHistoryAudit.UnauditedHourlyViews.Contains(view);
+            Assert.True(isAudited ^ isExcluded, view + " must be audited with a read shape, or be the one documented exclusion, not both or neither");
+        }
     }
 
     [Fact]
@@ -285,9 +372,11 @@ public sealed class CollectionHistoryAuditTests
     {
         var names = CollectionHistoryAudit.Rollups.Select(r => r.Relation).ToArray();
         Assert.Equal(
-            TimescaleSupport.HourlyAggregates.Select(a => "collect." + a.View)
+            TimescaleSupport.HourlyAggregates.Where(a => a.View != TimescaleSupport.QueryStoreStatsIntervalHourlyView)
+                .Select(a => "collect." + a.View)
                 .Append("collect." + TimescaleSupport.PerfmonIntervalBaselineView),
             names);
+        Assert.DoesNotContain("collect." + TimescaleSupport.QueryStoreStatsIntervalHourlyView, names);
         Assert.DoesNotContain("collect." + TimescaleSupport.QueryStatsHourlyView, names);
         Assert.DoesNotContain("collect." + TimescaleSupport.ProcedureStatsHourlyView, names);
 
@@ -300,7 +389,10 @@ public sealed class CollectionHistoryAuditTests
         {
             Assert.Contains("AS bucket", createSql, StringComparison.Ordinal);
             Assert.Contains("server_id", createSql, StringComparison.Ordinal);
-            Assert.Contains("collect." + view, names);
+            if (view != TimescaleSupport.QueryStoreStatsIntervalHourlyView)
+            {
+                Assert.Contains("collect." + view, names);
+            }
         }
 
         Assert.Contains("AS bucket", TimescaleSupport.CreatePerfmonIntervalBaselineSql, StringComparison.Ordinal);
@@ -313,14 +405,14 @@ public sealed class CollectionHistoryAuditTests
         var shared = new[] { new CollectionHistoryAudit.FlaggedRange(18, 21, 0, 40, 0, 0) };
         var other = new[] { new CollectionHistoryAudit.FlaggedRange(4, 5, 10, 40, 0, 0) };
         var a = new Rollup("collect.query_store_stats_hourly", false);
-        var b = new Rollup("collect.query_store_stats_interval_hourly", false);
+        var b = new Rollup("collect.query_store_stats_corrected_hourly", false);
         var c = new Rollup("collect.query_stats_interval_hourly", false);
         var text = CollectionHistoryAudit.Render(AuditDay, new (Rollup, IReadOnlyList<CollectionHistoryAudit.FlaggedRange>)[]
         {
             (a, shared), (c, other), (b, shared),
         }, new[] { new Rollup("collect.procedure_stats_interval_hourly", false) });
 
-        Assert.Contains("query_store_stats_hourly, query_store_stats_interval_hourly: 18:00-21:00Z (servers as low as 0 vs usual 40)", text, StringComparison.Ordinal);
+        Assert.Contains("query_store_stats_hourly, query_store_stats_corrected_hourly: 18:00-21:00Z (servers as low as 0 vs usual 40)", text, StringComparison.Ordinal);
         Assert.Contains("query_stats_interval_hourly: 04:00-05:00Z (servers as low as 10 vs usual 40)", text, StringComparison.Ordinal);
         Assert.Equal(1, text.Split("18:00-21:00Z").Length - 1);
         Assert.Contains("Not read for this day: procedure_stats_interval_hourly", text, StringComparison.Ordinal);
@@ -1069,6 +1161,234 @@ AND   NOT (b::date = DATE '2026-10-14' AND extract(hour FROM b) BETWEEN 5 AND 7 
                     source, rollup, CollectionHistoryAudit.ReadFrom(AuditDay), CollectionHistoryAudit.ReadTo(AuditDay), Ct);
                 Assert.NotNull(buckets);
                 Assert.Empty(buckets!);
+            }
+
+            ok = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunOwnedAsync(ok, async () => await scratch.DisposeAsync());
+        }
+    }
+
+    /* ---------------- live: the #5461 probe read against the real Query Store rollups ---------------- */
+
+    private static readonly DateTime ProbeFrom = new(2026, 3, 4, 0, 0, 0, DateTimeKind.Utc);
+
+    /// <summary>
+    /// Builds the real store, strips the refresh policies (a background run must not race the manual refreshes),
+    /// and seeds <c>collect.query_store_stats</c> from 2026-03-04 00:00Z. Servers 101-103 are enabled, 104 is
+    /// disabled. Hours: 0 = all four servers (3 enabled), 1 = server 101 with 50 rows, 2 = nobody, 3 = servers 102
+    /// and 103, 4 = only the disabled 104, 5 = all four, 6 = server 101 (outside the window the tests read). Then
+    /// the three Query Store hourlies are materialized, in dependency order.
+    /// </summary>
+    private static async Task SeedProbeStoreAsync(NpgsqlConnection connection)
+    {
+        await PgMigrations.MigrateAsync(connection, Ct);
+        Assert.True(await TimescaleSupport.TryEnableAsync(connection, null, Ct), "TimescaleDB must be enabled on the test cluster");
+        await TimescaleSupport.ConvertToHypertablesAsync(connection, null, Ct);
+        await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, Ct);
+        foreach (var (view, _, _, _, _) in TimescaleSupport.RollupViews)
+        {
+            await ExecAsync(connection, $"SELECT remove_continuous_aggregate_policy('collect.{view}', if_exists => true)");
+        }
+
+        await ExecAsync(connection, @"
+INSERT INTO config.config_monitored_servers (server_id, name, host, is_enabled) VALUES
+    (101, 'probe-101', 'h', true), (102, 'probe-102', 'h', true), (103, 'probe-103', 'h', true), (104, 'probe-104', 'h', false);
+
+CREATE TEMP TABLE probe_spec (server_id integer, hr integer, n integer);
+INSERT INTO probe_spec VALUES
+    (101, 0, 1), (102, 0, 1), (103, 0, 1), (104, 0, 1),
+    (101, 1, 50),
+    (102, 3, 1), (103, 3, 2),
+    (104, 4, 3),
+    (101, 5, 1), (102, 5, 1), (103, 5, 1), (104, 5, 1),
+    (101, 6, 1);
+
+INSERT INTO collect.query_store_stats (collection_id, collection_time, server_id, server_name, database_name, query_id, plan_id,
+    execution_type_desc, first_execution_time, module_name, query_hash, execution_count, avg_duration_us, avg_cpu_time_us,
+    max_duration_us, max_cpu_time_us, replica_role, runtime_stats_interval_id, interval_start_time_utc)
+SELECT 1, TIMESTAMP '2026-03-04 00:00' + (s.hr * interval '1 hour') + ((i % 6) * interval '10 minutes'),
+    s.server_id, 'probe-' || s.server_id, 'db', 100 + i, 1000 + i,
+    'Regular', TIMESTAMP '2026-03-04 00:00', 'mod', md5('q' || i), 10, 500, 300, 900, 700, 'PRIMARY', 77 + i,
+    TIMESTAMP '2026-03-04 00:00'
+FROM probe_spec AS s CROSS JOIN LATERAL generate_series(1, s.n) AS i;");
+
+        var to = ProbeFrom.AddHours(12);
+        foreach (var view in new[]
+        {
+            TimescaleSupport.QueryStoreStatsHourlyView,
+            TimescaleSupport.QueryStoreStatsIntervalHourlyView,
+            TimescaleSupport.QueryStoreStatsCorrectedHourlyView,
+        })
+        {
+            for (var attempt = 1; ; attempt++)
+            {
+                try
+                {
+                    await using var refresh = new NpgsqlCommand(
+                        $"CALL refresh_continuous_aggregate('collect.{view}', $1::timestamp, $2::timestamp)", connection);
+                    refresh.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Timestamp, Value = DateTime.SpecifyKind(ProbeFrom, DateTimeKind.Unspecified) });
+                    refresh.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Timestamp, Value = DateTime.SpecifyKind(to, DateTimeKind.Unspecified) });
+                    await refresh.ExecuteNonQueryAsync(Ct);
+                    break;
+                }
+                catch (PostgresException ex) when (ex.SqlState == "55P03" && attempt < 12)
+                {
+                    await Task.Delay(TimeSpan.FromSeconds(1), Ct);
+                }
+            }
+        }
+    }
+
+    [Fact]
+    public async Task Live_TheProbeRead_EqualsAnOracleDistinctServerCount_OnBothQueryStoreRollups_AndLeavesAnEmptyHourAbsent()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(Env()), "Set DARLING_TEST_PG to run the #5461 live tests.");
+        var ok = false;
+        var scratch = await ScratchPostgres.CreateAsync(Env()!, Ct);
+        try
+        {
+            await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+            await connection.OpenAsync(Ct);
+            await SeedProbeStoreAsync(connection);
+            await using var source = NpgsqlDataSource.Create(scratch.ConnectionString);
+            var to = ProbeFrom.AddHours(6);
+
+            foreach (var view in new[] { TimescaleSupport.QueryStoreStatsHourlyView, TimescaleSupport.QueryStoreStatsCorrectedHourlyView })
+            {
+                var probe = await CollectionHistoryAudit.ReadAsync(
+                    source, new Rollup("collect." + view, false, CollectionHistoryAudit.ReadShape.Probe), ProbeFrom, to, Ct);
+                var scan = await CollectionHistoryAudit.ReadAsync(
+                    source, new Rollup("collect." + view, false, CollectionHistoryAudit.ReadShape.Scan), ProbeFrom, to, Ct);
+                Assert.NotNull(probe);
+                Assert.NotNull(scan);
+
+                /* The oracle, written here: distinct enabled servers per bucket, buckets with no row absent. */
+                var oracle = new Dictionary<DateTime, int>();
+                await using (var command = new NpgsqlCommand($@"
+SELECT r.bucket, COUNT(DISTINCT r.server_id)::int
+FROM collect.{view} AS r
+WHERE r.server_id IN (SELECT server_id FROM config.config_monitored_servers WHERE is_enabled)
+AND   r.bucket >= $1 AND r.bucket < $2
+GROUP BY r.bucket", connection))
+                {
+                    command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Timestamp, Value = DateTime.SpecifyKind(ProbeFrom, DateTimeKind.Unspecified) });
+                    command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Timestamp, Value = DateTime.SpecifyKind(to, DateTimeKind.Unspecified) });
+                    await using var reader = await command.ExecuteReaderAsync(Ct);
+                    while (await reader.ReadAsync(Ct))
+                    {
+                        oracle[DateTime.SpecifyKind(reader.GetDateTime(0), DateTimeKind.Utc)] = reader.GetInt32(1);
+                    }
+                }
+
+                /* Hours 0 (3 enabled of 4), 1 (one server, 50 rows), 3 (two), 5 (3 enabled of 4). Hour 2 has no
+                   server and hour 4 only the disabled one: both ABSENT, as in the scan. Hour 6 is the exclusive end. */
+                var expected = new Dictionary<DateTime, int>
+                {
+                    [ProbeFrom] = 3, [ProbeFrom.AddHours(1)] = 1, [ProbeFrom.AddHours(3)] = 2, [ProbeFrom.AddHours(5)] = 3,
+                };
+                Assert.Equal(expected, oracle);
+                Assert.Equal(oracle, probe!.ToDictionary(b => b.HourUtc, b => b.Servers));
+                Assert.Equal(oracle, scan!.ToDictionary(b => b.HourUtc, b => b.Servers));
+                Assert.All(probe!, b => Assert.Equal(0L, b.Passes));
+                Assert.Equal(4, probe!.Count);
+
+                /* The audited day 2026-03-04 settles on a bucket at or after 23:00: the empty hours must not read as one. */
+                Assert.False(CollectionHistoryAudit.IsSettled(ProbeFrom, probe!));
+            }
+
+            ok = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunOwnedAsync(ok, async () => await scratch.DisposeAsync());
+        }
+    }
+
+    [Fact]
+    public async Task Live_TheProbeRead_IsANestedLoopOverTheServerIdBucketIndex_OnATimestampSeries_AgainstARealTimeFreeView()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(Env()), "Set DARLING_TEST_PG to run the #5461 live tests.");
+        var ok = false;
+        var scratch = await ScratchPostgres.CreateAsync(Env()!, Ct);
+        try
+        {
+            await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+            await connection.OpenAsync(Ct);
+            await SeedProbeStoreAsync(connection);
+
+            foreach (var view in new[] { TimescaleSupport.QueryStoreStatsHourlyView, TimescaleSupport.QueryStoreStatsCorrectedHourlyView })
+            {
+                /* The probe reads the materialization only: the view is not real-time, and bucket is a timestamp
+                   (the series is a timestamp series, so no cross-type compare keeps the index out). */
+                await using (var meta = new NpgsqlCommand(@"
+SELECT ca.materialized_only, ca.materialization_hypertable_schema, ca.materialization_hypertable_name,
+       (SELECT data_type FROM information_schema.columns
+        WHERE table_schema = ca.materialization_hypertable_schema AND table_name = ca.materialization_hypertable_name AND column_name = 'bucket')
+FROM timescaledb_information.continuous_aggregates AS ca
+WHERE ca.view_schema = 'collect' AND ca.view_name = $1", connection))
+                {
+                    meta.Parameters.AddWithValue(view);
+                    await using var reader = await meta.ExecuteReaderAsync(Ct);
+                    Assert.True(await reader.ReadAsync(Ct));
+                    Assert.True(reader.GetBoolean(0), view + " must be materialized_only: the probe reads the materialization alone (#5461)");
+                    Assert.Equal("timestamp without time zone", reader.GetString(3));
+                }
+
+                var sql = CollectionHistoryAudit.BuildSql(new Rollup("collect." + view, false, CollectionHistoryAudit.ReadShape.Probe));
+                await using var transaction = await connection.BeginTransactionAsync(Ct);
+
+                /* The rig's data is a few rows, where the planner prefers a seq scan of the materialization; the
+                   rig proves the index path EXISTS for this statement, and the big store proves its cost. */
+                await ExecAsync(connection, "SET LOCAL enable_seqscan = off");
+
+                string json;
+                await using (var explain = new NpgsqlCommand("EXPLAIN (FORMAT JSON) " + sql, connection, transaction))
+                {
+                    explain.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Timestamp, Value = DateTime.SpecifyKind(ProbeFrom, DateTimeKind.Unspecified) });
+                    explain.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Timestamp, Value = DateTime.SpecifyKind(ProbeFrom.AddHours(200), DateTimeKind.Unspecified) });
+                    json = (string)(await explain.ExecuteScalarAsync(Ct))!;
+                }
+
+                var nodes = new List<System.Text.Json.JsonElement>();
+                void Walk(System.Text.Json.JsonElement node)
+                {
+                    nodes.Add(node);
+                    if (node.TryGetProperty("Plans", out var plans))
+                    {
+                        foreach (var child in plans.EnumerateArray())
+                        {
+                            Walk(child);
+                        }
+                    }
+                }
+
+                Walk(System.Text.Json.JsonDocument.Parse(json).RootElement[0].GetProperty("Plan"));
+                string Text(System.Text.Json.JsonElement n, string name) => n.TryGetProperty(name, out var v) ? v.GetString() ?? "" : "";
+
+                Assert.Contains(nodes, n => Text(n, "Node Type") == "Nested Loop");
+                var indexScans = nodes.Where(n => Text(n, "Node Type") is "Index Scan" or "Index Only Scan"
+                    && Text(n, "Relation Name").StartsWith("_hyper_", StringComparison.Ordinal)).ToList();
+                Assert.NotEmpty(indexScans);
+                Assert.DoesNotContain(nodes, n => Text(n, "Node Type") == "Seq Scan"
+                    && Text(n, "Relation Name").StartsWith("_hyper_", StringComparison.Ordinal));
+
+                foreach (var scan in indexScans)
+                {
+                    /* The index is the kept (server_id, bucket) one, probed on both columns with no cross-type cast. */
+                    await using var def = new NpgsqlCommand("SELECT indexdef FROM pg_indexes WHERE indexname = $1", connection, transaction);
+                    def.Parameters.AddWithValue(Text(scan, "Index Name"));
+                    var indexDef = (string?)await def.ExecuteScalarAsync(Ct);
+                    Assert.Contains("(server_id, bucket", indexDef, StringComparison.Ordinal);
+                    var cond = Text(scan, "Index Cond");
+                    Assert.Contains("server_id", cond, StringComparison.Ordinal);
+                    Assert.Contains("bucket", cond, StringComparison.Ordinal);
+                    Assert.DoesNotContain("time zone", cond, StringComparison.Ordinal);
+                }
+
+                await transaction.RollbackAsync(Ct);
             }
 
             ok = true;

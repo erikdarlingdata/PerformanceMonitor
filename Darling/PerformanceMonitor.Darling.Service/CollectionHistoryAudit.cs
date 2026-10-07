@@ -25,8 +25,8 @@ namespace PerformanceMonitor.Darling.Service;
 /// audited UTC day's per-hour counts are compared with the median of the seven days before it, for the same hour
 /// of day, so the daily load curve is the yardstick. An hour is flagged when a count is under half of usual.
 ///
-/// <para><b>Two kinds of source, two tests.</b> The six live hourly aggregates
-/// (<see cref="TimescaleSupport.HourlyAggregates"/>) are QUERY-WORKLOAD rollups: a row exists only for a query or
+/// <para><b>Two kinds of source, two tests.</b> The live hourly aggregates
+/// (<see cref="TimescaleSupport.HourlyAggregates"/>, less <see cref="UnauditedHourlyViews"/>) are QUERY-WORKLOAD rollups: a row exists only for a query or
 /// plan that ran, and their <c>sample_count</c> moves with the workload, so a quiet weekend would read as a
 /// failure. They get the SERVER-COUNT half test only: presence, which catches a hole (a stopped collector, a
 /// rollup whose refresh stopped). The perfmon baseline
@@ -34,6 +34,12 @@ namespace PerformanceMonitor.Darling.Service;
 /// whatever the workload, so it also gets the COLLECTION-PASS half test: per hour, <c>COUNT(*)</c> is the
 /// collection passes and <c>COUNT(DISTINCT server_id)</c> the servers. That is the detector for case 2 of the
 /// issue, where rows arrived every hour and only the volume fell (collection passes at 20% of usual).</para>
+///
+/// <para><b>Two read shapes (#5461).</b> Most sources are read by one <c>GROUP BY bucket</c> pass over the window
+/// (<see cref="ReadShape.Scan"/>, 0.02-4.6 s on the largest store). The two big Query Store rollups, which a scan
+/// timed out on, are read by per-server per-hour index probes (<see cref="ReadShape.Probe"/>, see
+/// <see cref="BuildProbeSql"/>). The third Query Store hourly is covered by those two (see
+/// <see cref="UnauditedHourlyViews"/>).</para>
 ///
 /// <para><b>Only servers enabled now.</b> Every count, on the audited day and the seven before it, counts only
 /// servers that are enabled now (<c>config.config_monitored_servers.is_enabled</c>). A server removed or disabled
@@ -73,12 +79,24 @@ internal static class CollectionHistoryAudit
     /// at 02:0X) have both materialized the audited day's last hour.</summary>
     internal static readonly TimeSpan DueTimeOfDay = TimeSpan.FromHours(3);
 
-    /// <summary>The audit read's own deadline, longer than the 10 s alert-pass reads because it aggregates eight days.</summary>
+    /// <summary>The audit read's own deadline, longer than the 10 s alert-pass reads because it covers eight days. It stays 60 s: the redesigned read (#5461) is what fits it, not a longer deadline.</summary>
     internal const int CommandTimeoutSeconds = 60;
 
-    /// <summary>One source to audit: its relation, and whether it is judged on collection passes (a row per
-    /// server per pass) as well as on servers.</summary>
-    internal sealed record Rollup(string Relation, bool JudgesPasses);
+    /// <summary>How a source is read (#5461, big-store timing).</summary>
+    internal enum ReadShape
+    {
+        /// <summary>One <c>GROUP BY bucket</c> pass over the window: right for a source that reads in seconds.</summary>
+        Scan,
+
+        /// <summary>Per-server, per-hour existence probes against the <c>(server_id, bucket)</c> index the
+        /// materialization keeps: right for the two big Query Store rollups, where the scan timed out.</summary>
+        Probe,
+    }
+
+    /// <summary>One source to audit: its relation, whether it is judged on collection passes (a row per
+    /// server per pass) as well as on servers, and how it is read. A <see cref="ReadShape.Probe"/> source never
+    /// judges passes, because a probe only learns whether a server has a row in an hour.</summary>
+    internal sealed record Rollup(string Relation, bool JudgesPasses, ReadShape Shape = ReadShape.Scan);
 
     /// <summary>One hour bucket read from a source: distinct servers, and rows (collection passes) in it. Passes
     /// is 0 for a source that does not judge them.</summary>
@@ -91,10 +109,37 @@ internal static class CollectionHistoryAudit
     internal sealed record FlaggedRange(
         int StartHour, int EndHour, int LowestServers, double UsualServers, long LowestPasses, double UsualPasses);
 
-    /// <summary>The audited sources: the live hourly aggregates (servers only), then the perfmon baseline (servers
-    /// and collection passes). Derived from the store's own lists.</summary>
+    /// <summary>The hourly aggregate the audit does NOT read directly, and why (#5461): its materialization keeps
+    /// only the bucket index on purpose (#3597 measured per-column indexes as a 4.3x refresh tax), so a probe
+    /// cannot use an index and a scan of its 10-17 GB times out. It is covered by the two sources that are read.
+    /// Its same-width child, <see cref="TimescaleSupport.QueryStoreStatsCorrectedHourlyView"/>, is
+    /// <c>time_bucket('1 hour', bucket)</c> over it with no filter, and
+    /// <see cref="TimescaleSupport.QueryStoreStatsHourlyView"/> reads the same raw table
+    /// (<c>collect.query_store_stats</c>) with no filter, so a server missing from this view in an hour is missing
+    /// from both of those too, and a refresh that stopped here stops the child too. The pins in
+    /// <c>CollectionHistoryAuditTests</c> fail if any of those three shapes changes.</summary>
+    internal static readonly IReadOnlySet<string> UnauditedHourlyViews = new HashSet<string>(StringComparer.Ordinal)
+    {
+        TimescaleSupport.QueryStoreStatsIntervalHourlyView,
+    };
+
+    /// <summary>The two hourly views read by <see cref="ReadShape.Probe"/>: each keeps a <c>(server_id, bucket)</c>
+    /// index on its materialization (<c>TimescaleSupport.Create...KeptIndexesSql</c>). Both are
+    /// <c>materialized_only = true</c> (confirmed in <c>timescaledb_information.continuous_aggregates</c>), so a
+    /// probe reads the materialization alone and never the real-time union with the raw table.</summary>
+    internal static readonly IReadOnlySet<string> ProbedHourlyViews = new HashSet<string>(StringComparer.Ordinal)
+    {
+        TimescaleSupport.QueryStoreStatsHourlyView,
+        TimescaleSupport.QueryStoreStatsCorrectedHourlyView,
+    };
+
+    /// <summary>The audited sources: the live hourly aggregates (servers only) except
+    /// <see cref="UnauditedHourlyViews"/>, then the perfmon baseline (servers and collection passes). Derived from
+    /// the store's own lists.</summary>
     internal static IReadOnlyList<Rollup> Rollups { get; } = TimescaleSupport.HourlyAggregates
-        .Select(a => new Rollup("collect." + a.View, false))
+        .Where(a => !UnauditedHourlyViews.Contains(a.View))
+        .Select(a => new Rollup(
+            "collect." + a.View, false, ProbedHourlyViews.Contains(a.View) ? ReadShape.Probe : ReadShape.Scan))
         .Append(new Rollup("collect." + TimescaleSupport.PerfmonIntervalBaselineView, true))
         .ToArray();
 
@@ -102,14 +147,22 @@ internal static class CollectionHistoryAudit
         "^[a-z_][a-z0-9_]*(\\.[a-z_][a-z0-9_]*)?$", RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
     /// <summary>
-    /// The one heavy statement per source, with a time-range predicate on <c>bucket</c> so chunk exclusion applies,
-    /// over servers enabled now only. $1 is the first bucket read and $2 the end, exclusive.
+    /// The one statement per source, over servers enabled now only. $1 is the first bucket read and $2 the end,
+    /// exclusive; both are bound as <c>timestamp</c> (the views' <c>bucket</c> type, see
+    /// <see cref="ReadAsync"/>). A <see cref="ReadShape.Scan"/> source is one <c>GROUP BY bucket</c> pass with a
+    /// time-range predicate on <c>bucket</c> so chunk exclusion applies. A <see cref="ReadShape.Probe"/> source is
+    /// read by existence probes, see <see cref="BuildProbeSql"/>.
     /// </summary>
     internal static string BuildSql(Rollup rollup)
     {
         if (!s_relation.IsMatch(rollup.Relation))
         {
             throw new ArgumentException("Not a plain relation name: " + rollup.Relation, nameof(rollup));
+        }
+
+        if (rollup.Shape == ReadShape.Probe)
+        {
+            return BuildProbeSql(rollup);
         }
 
         var passes = rollup.JudgesPasses ? "COUNT(*)::bigint" : "0::bigint";
@@ -123,6 +176,42 @@ WHERE r.bucket >= $1
 AND   r.bucket <  $2
 GROUP BY r.bucket";
     }
+
+    /// <summary>
+    /// The probe read (#5461): one hour bucket per hour of the window from <c>generate_series</c>, crossed with the
+    /// enabled servers, and for each pair a <c>LEFT JOIN LATERAL</c> that asks whether the view has ANY row for that
+    /// server in that hour. That is one index lookup on the materialization's <c>(server_id, bucket)</c> index per
+    /// pair (about 200 hours times the fleet), where the <c>COUNT(DISTINCT)</c> scan read every row of an 8-day
+    /// window of a 10-17 GB rollup and timed out at the 60 s deadline.
+    ///
+    /// <para><b>The <c>LIMIT 1</c> inside the lateral subquery is load-bearing.</b> Without it the planner is free to
+    /// flatten the lateral into a semi join and read the whole range; with it, each probe stops at its first row.
+    /// Keep it.</para>
+    ///
+    /// <para><b>The series is a <c>timestamp</c> series, as the views' <c>bucket</c> column is.</b> A
+    /// <c>timestamptz</c> series would compare across types and can keep the index from being used, so both
+    /// parameters are cast to <c>timestamp</c> and the caller binds them as such.</para>
+    ///
+    /// <para><b>An hour no enabled server has a row in is absent, as in the scan.</b> The scan returns no row for
+    /// a bucket with no rows; the probe would return it with 0, and <see cref="IsSettled"/> counts any bucket at or
+    /// after the day's 23:00 as settled, so a zero row would mark a hole as materialized. <c>HAVING COUNT(p.one) &gt; 0</c>
+    /// drops those hours, so the two shapes return the same result.</para>
+    /// </summary>
+    internal static string BuildProbeSql(Rollup rollup) => $@"
+SELECT h.bucket, COUNT(p.one)::int, 0::bigint
+FROM generate_series($1::timestamp, $2::timestamp, INTERVAL '1 hour') AS h(bucket)
+CROSS JOIN config.config_monitored_servers AS c
+LEFT JOIN LATERAL (
+    SELECT 1 AS one
+    FROM {rollup.Relation} AS r
+    WHERE r.server_id = c.server_id
+    AND   r.bucket = h.bucket
+    LIMIT 1
+) AS p ON true
+WHERE c.is_enabled
+AND   h.bucket < $2::timestamp
+GROUP BY h.bucket
+HAVING COUNT(p.one) > 0";
 
     /// <summary>The first bucket the audit reads for <paramref name="auditDayUtc"/>: seven days before it.</summary>
     internal static DateTime ReadFrom(DateTime auditDayUtc) => auditDayUtc.Date.AddDays(-PriorDays);
@@ -324,7 +413,7 @@ GROUP BY r.bucket";
 
     /// <summary>
     /// The alert's text: the day, then the flagged ranges with the counts against usual, one line for all the
-    /// sources whose flagged ranges are identical (the three Query Store rollups share one signal), then any
+    /// sources whose flagged ranges are identical (the two Query Store rollups share one signal), then any
     /// source that could not be read for this day. A source in <paramref name="incomplete"/> had not caught up to the
     /// end of the day when the audit gave up: its ranges are judged on what it held, and are marked as not complete.
     /// </summary>
