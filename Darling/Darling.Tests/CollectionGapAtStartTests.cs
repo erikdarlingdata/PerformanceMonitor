@@ -291,10 +291,18 @@ FROM generate_series(@newest - make_interval(days => @days), @newest, INTERVAL '
             await ExecAsync(connection, "ANALYZE collect.collection_log");
             Assert.Equal(newest, Assert.IsType<DateTime>(await ScalarAsync(connection, DarlingSelfAlertEvaluator.NewestCollectionTimeSql)));
 
-            var chunks = Convert.ToInt32(await ScalarAsync(connection,
-                "SELECT count(*) FROM timescaledb_information.chunks WHERE hypertable_name = 'collection_log'"), CultureInfo.InvariantCulture);
-            var isHypertable = Convert.ToInt32(await ScalarAsync(connection,
-                "SELECT count(*) FROM timescaledb_information.hypertables WHERE hypertable_name = 'collection_log'"), CultureInfo.InvariantCulture);
+            /* A plain-PostgreSQL scratch database need not carry the TimescaleDB extension at all (CI's does not),
+               so its information views are read only where they exist; absent, collection_log is plainly not a
+               hypertable. */
+            var timescaleViews = await ScalarAsync(connection, "SELECT to_regclass('timescaledb_information.hypertables') IS NOT NULL") is true;
+            var chunks = timescaleViews
+                ? Convert.ToInt32(await ScalarAsync(connection,
+                    "SELECT count(*) FROM timescaledb_information.chunks WHERE hypertable_name = 'collection_log'"), CultureInfo.InvariantCulture)
+                : 0;
+            var isHypertable = timescaleViews
+                ? Convert.ToInt32(await ScalarAsync(connection,
+                    "SELECT count(*) FROM timescaledb_information.hypertables WHERE hypertable_name = 'collection_log'"), CultureInfo.InvariantCulture)
+                : 0;
             Assert.Equal(hypertable ? 1 : 0, isHypertable);
             if (hypertable)
             {
