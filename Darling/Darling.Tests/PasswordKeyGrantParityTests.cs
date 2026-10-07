@@ -63,9 +63,23 @@ public sealed class PasswordKeyGrantParityTests
         Assert.Equal(script.RevokeText, managed.RevokeText);
         Assert.Equal(script.GrantText, managed.GrantText);
         Assert.Equal(
-            "REVOKE ALL ON config.password_key, config.password_key_service, config.legacy_secret_pin, config.legacy_secret_pin_marker, config.legacy_secret_pin_candidate FROM PUBLIC, admin, viewer, mcp CASCADE",
+            "REVOKE ALL ON config.password_key, config.password_key_service, config.legacy_secret_pin, config.legacy_secret_pin_marker FROM PUBLIC, admin, viewer, mcp CASCADE",
             managed.RevokeText);
         Assert.Equal("GRANT SELECT ON config.password_key, config.password_key_service TO admin", managed.GrantText);
+
+        /* The candidate table (V167) has its own REVOKE, the same text in both files. */
+        const string CandidateRevoke = "REVOKE ALL ON config.legacy_secret_pin_candidate FROM PUBLIC, admin, viewer, mcp CASCADE";
+        foreach (var text in new[] { Managed, Script })
+        {
+            var at = text.IndexOf("REVOKE ALL ON {config}.legacy_secret_pin_candidate", StringComparison.Ordinal);
+            if (at < 0)
+            {
+                at = text.IndexOf("REVOKE ALL ON config.legacy_secret_pin_candidate", StringComparison.Ordinal);
+            }
+
+            Assert.True(at >= 0, "the candidate table's REVOKE is missing");
+            Assert.Equal(CandidateRevoke, Normalise(text, at));
+        }
 
         /* Nothing else is granted on the key tables in either file. */
         foreach (var text in new[] { Managed, Script })
@@ -73,6 +87,37 @@ public sealed class PasswordKeyGrantParityTests
             Assert.Single(Regex.Matches(text, @"GRANT [^;]*password_key"));
             Assert.DoesNotContain("legacy_secret_pin TO", text, StringComparison.Ordinal);
         }
+    }
+
+    [Fact]
+    public void TheScriptsGuard_NamesTheFourV165Tables_AndTheCandidateTableHasItsOwnBranch()
+    {
+        var script = Script.Replace("\r\n", "\n", StringComparison.Ordinal);
+        var start = script.IndexOf("-- 3g.", StringComparison.Ordinal);
+        var block = script[start..script.IndexOf("-- 4. Default privileges", start, StringComparison.Ordinal)];
+
+        /* The guard: the four V165 tables only, so a store at V165 or V166 still gets their revoke. */
+        var guardStart = block.IndexOf("IF pg_catalog.to_regclass('config.password_key')", StringComparison.Ordinal);
+        Assert.True(guardStart >= 0, "the guard is missing");
+        var guard = block[guardStart..block.IndexOf("THEN", guardStart, StringComparison.Ordinal)];
+        Assert.Equal(4, Regex.Matches(guard, "to_regclass\\(").Count);
+        Assert.DoesNotContain("legacy_secret_pin_candidate", guard, StringComparison.Ordinal);
+
+        /* The candidate table is revoked in its own branch, inside the guarded block and after the four-table revoke. */
+        var branch = Regex.Match(block,
+            @"IF pg_catalog\.to_regclass\('config\.legacy_secret_pin_candidate'\) IS NOT NULL THEN\s+REVOKE ALL ON config\.legacy_secret_pin_candidate FROM PUBLIC, admin, viewer, mcp CASCADE;\s+END IF;");
+        Assert.True(branch.Success, "the candidate table's own branch is missing");
+        Assert.True(branch.Index > block.IndexOf("REVOKE ALL ON config.password_key,", StringComparison.Ordinal), "the branch follows the four-table revoke");
+        Assert.True(branch.Index > guardStart, "the branch sits inside the guarded block");
+
+        /* The four-table revoke names no candidate table. */
+        var four = block[block.IndexOf("REVOKE ALL ON config.password_key,", StringComparison.Ordinal)..];
+        four = four[..four.IndexOf(';', StringComparison.Ordinal)];
+        Assert.DoesNotContain("legacy_secret_pin_candidate", four, StringComparison.Ordinal);
+
+        /* The rung that creates the candidate table is V167, and both texts say so. */
+        Assert.Contains("V167", block, StringComparison.Ordinal);
+        Assert.Contains("V167 adds the legacy pin candidate table", Managed, StringComparison.Ordinal);
     }
 
     [Fact]

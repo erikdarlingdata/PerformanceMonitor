@@ -652,6 +652,29 @@ VALUES (1, 'alpha-example', 'evil-example', '', 'sql', 'monitor_login', 'legacy-
     }
 
     [Fact]
+    public async Task AStoreWhoseStepWasSkippedBeforeTheRecord_RecordsNothing_AndAWindowsHostSetsItDone()
+    {
+        await using var store = await StoreFixture.CreateAsync();
+        var bodySucceeded = false;
+        try
+        {
+            await store.ExecAsync("UPDATE config.legacy_secret_pin_marker SET state = 'skipped' WHERE id = 1;");
+            await store.SeedServersAtUpgradeAsync();
+            Assert.Equal(0L, await store.CandidatesAsync());
+
+            await store.StartAsync(isWindows: true, canOpen: static _ => throw new InvalidOperationException("must not be called"));
+            Assert.Equal("done", await store.MarkerAsync());
+            Assert.Empty(await store.ReadPinsAsync());
+            Assert.Equal(0L, await store.CandidatesAsync());
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await store.CleanupAsync(bodySucceeded);
+        }
+    }
+
+    [Fact]
     public async Task AHostThatOpensNone_LeavesTheStepOpen()
     {
         await using var store = await StoreFixture.CreateAsync();

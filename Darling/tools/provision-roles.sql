@@ -627,9 +627,10 @@ GRANT INSERT, UPDATE, DELETE ON config.config_monitored_servers TO mcp;
 --     a new trigger or foreign key. A trigger or foreign key already there (made while a role held the privilege) is
 --     dropped by the loops below, with a WARNING, because it would outlast the REVOKE. Then SELECT on the key and
 --     service-state tables is granted back to admin only (the desktop Viewer reads them as admin), and the DO block
---     checks that nothing else is left; the pin tables are read by the owner only. The tables are created by V165 and V166: on a
---     store below it the block warns and skips, so the rest of the script (the PUBLIC revoke below included) still
---     runs; re-run the script once the service has migrated the store to V166.
+--     checks that nothing else is left; the pin tables are read by the owner only. The four tables are created by V165 and the
+--     legacy pin candidate table by V167: on a store below V165 the block warns and skips, so the rest of the script
+--     (the PUBLIC revoke below included) still runs; re-run the script once the service has migrated the store to V167.
+--     A store at V165 or V166 gets the four-table revoke now, and the candidate table's own revoke once V167 has made it.
 DO $do$
 DECLARE
     stray record;
@@ -637,12 +638,13 @@ BEGIN
     IF pg_catalog.to_regclass('config.password_key') IS NOT NULL
        AND pg_catalog.to_regclass('config.password_key_service') IS NOT NULL
        AND pg_catalog.to_regclass('config.legacy_secret_pin') IS NOT NULL
-       AND pg_catalog.to_regclass('config.legacy_secret_pin_marker') IS NOT NULL
-       AND pg_catalog.to_regclass('config.legacy_secret_pin_candidate') IS NOT NULL THEN
+       AND pg_catalog.to_regclass('config.legacy_secret_pin_marker') IS NOT NULL THEN
         REVOKE ALL ON config.password_key, config.password_key_service,
-           config.legacy_secret_pin, config.legacy_secret_pin_marker,
-           config.legacy_secret_pin_candidate FROM PUBLIC, admin, viewer, mcp CASCADE;
+           config.legacy_secret_pin, config.legacy_secret_pin_marker FROM PUBLIC, admin, viewer, mcp CASCADE;
         GRANT SELECT ON config.password_key, config.password_key_service TO admin;
+        IF pg_catalog.to_regclass('config.legacy_secret_pin_candidate') IS NOT NULL THEN
+            REVOKE ALL ON config.legacy_secret_pin_candidate FROM PUBLIC, admin, viewer, mcp CASCADE;
+        END IF;
 
         FOR stray IN
            SELECT t.tgname, t.tgrelid::pg_catalog.regclass::pg_catalog.text AS tablename

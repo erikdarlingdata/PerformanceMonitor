@@ -1158,7 +1158,7 @@ GRANT EXECUTE ON FUNCTION {config}.edit_monitored_server({EditMonitoredServerSig
 --     self-managed store gets the same function and trigger from tools/provision-roles.sql.
 {BuildServerPasswordRulesSql(config)}
 
--- 10a. The password key tables (V165, #5366; V166 adds the legacy pin candidate table): written only by the store owner (the service, its command line and the
+-- 10a. The password key tables (V165, #5366; V167 adds the legacy pin candidate table): written only by the store owner (the service, its command line and the
 --     migration runner); a trigger on each table refuses every other writer. This is the grant side of the same rule,
 --     and it runs after EVERY blanket grant above (the schema-wide SELECT and write grants and the mcp column ACL), so
 --     none of them can put a privilege back. REVOKE ALL ... CASCADE takes every privilege on the five tables from
@@ -1168,8 +1168,8 @@ GRANT EXECUTE ON FUNCTION {config}.edit_monitored_server({EditMonitoredServerSig
 --     to {admin} only (the desktop Viewer reads them as admin), and the DO block checks that nothing else is left; the
 --     pin tables are read by the owner only. Provisioning runs after the migrations, so the tables exist here.
 REVOKE ALL ON {config}.password_key, {config}.password_key_service,
-   {config}.legacy_secret_pin, {config}.legacy_secret_pin_marker,
-   {config}.legacy_secret_pin_candidate FROM PUBLIC, {admin}, {viewer}, {mcp} CASCADE;
+   {config}.legacy_secret_pin, {config}.legacy_secret_pin_marker FROM PUBLIC, {admin}, {viewer}, {mcp} CASCADE;
+REVOKE ALL ON {config}.legacy_secret_pin_candidate FROM PUBLIC, {admin}, {viewer}, {mcp} CASCADE;
 GRANT SELECT ON {config}.password_key, {config}.password_key_service TO {admin};
 DO $do$
 DECLARE

@@ -97,7 +97,7 @@ public sealed class LegacyPinCandidateRungTests
     {
         var capture = LegacyPinCandidateTables.CaptureSql.Replace("\r\n", "\n", StringComparison.Ordinal);
 
-        Assert.Contains("m.state IN ('pending', 'skipped')", capture, StringComparison.Ordinal);
+        Assert.Contains("m.state = 'pending'", capture, StringComparison.Ordinal);
         Assert.Contains("FROM config.legacy_secret_pin_marker AS m WHERE m.id = 1", capture, StringComparison.Ordinal);
         Assert.Contains("ON CONFLICT (server_id, slot) DO NOTHING;", capture, StringComparison.Ordinal);
 
@@ -208,6 +208,13 @@ ON CONFLICT (id) DO UPDATE SET smtp_host = EXCLUDED.smtp_host, smtp_port = EXCLU
             await ExecAsync(connection, "DELETE FROM darling_schema_version WHERE version >= " + LegacyPinCandidateTables.RungVersion, ct);
             await ExecAsync(connection, "DROP TABLE config.legacy_secret_pin_candidate", ct);
             await ExecAsync(connection, "UPDATE config.legacy_secret_pin_marker SET state = 'done'", ct);
+            await PgMigrations.MigrateAsync(connection, ct);
+            Assert.Equal(0L, await ScalarAsync(connection, "SELECT count(*) FROM config.legacy_secret_pin_candidate", ct));
+
+            /* A store whose step was set aside (marker skipped) records nothing either. */
+            await ExecAsync(connection, "DELETE FROM darling_schema_version WHERE version >= " + LegacyPinCandidateTables.RungVersion, ct);
+            await ExecAsync(connection, "DROP TABLE config.legacy_secret_pin_candidate", ct);
+            await ExecAsync(connection, "UPDATE config.legacy_secret_pin_marker SET state = 'skipped'", ct);
             await PgMigrations.MigrateAsync(connection, ct);
             Assert.Equal(0L, await ScalarAsync(connection, "SELECT count(*) FROM config.legacy_secret_pin_candidate", ct));
 

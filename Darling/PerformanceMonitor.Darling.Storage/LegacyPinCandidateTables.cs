@@ -72,7 +72,7 @@ ALTER TABLE config.legacy_secret_pin_candidate ENABLE ALWAYS TRIGGER trg_legacy_
     /// Records every old-format saved password in the store now: one row per non-blank server, remediation and
     /// mail-server value that is not a reference (<c>env:</c> / <c>file:</c>) and not sealed, with the hash of the
     /// stored text (the same hash the pin step and the resolver take of it) and the connection columns. Runs only while
-    /// the pin step is still open (marker <c>pending</c> or <c>skipped</c>), so a store whose step is done records
+    /// the pin step is pending (marker <c>pending</c>), so a store whose step is done or set aside (<c>skipped</c>) records
     /// nothing. The mail server's row is <c>server_id</c> 0. Idempotent: a row already recorded is left as it is.
     /// </summary>
     public const string CaptureSql = @"
@@ -104,7 +104,7 @@ WHERE v.stored IS NOT NULL
   AND NOT pg_catalog.starts_with(v.stored, 'sealed:')
   AND NOT pg_catalog.starts_with(v.stored, 'env:')
   AND NOT pg_catalog.starts_with(v.stored, 'file:')
-  AND EXISTS (SELECT 1 FROM config.legacy_secret_pin_marker AS m WHERE m.id = 1 AND m.state IN ('pending', 'skipped'))
+  AND EXISTS (SELECT 1 FROM config.legacy_secret_pin_marker AS m WHERE m.id = 1 AND m.state = 'pending')
 ON CONFLICT (server_id, slot) DO NOTHING;";
 
     /// <summary>The two triggers <see cref="CreateSql"/> creates, by table. The service checks the catalog against them and expects both to be <c>ENABLE ALWAYS</c>.</summary>
