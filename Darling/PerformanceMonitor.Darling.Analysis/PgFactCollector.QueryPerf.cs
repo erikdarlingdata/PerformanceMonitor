@@ -445,40 +445,6 @@ WITH plan_agg AS
 ";
 
     /// <summary>
-    /// The built days at or after <paramref name="windowFloor"/> for one server (#5448), or none when the read fails.
-    /// A failure is logged and answers "none built", which is the exact-bound table read: a store without the daily
-    /// tables yet, a lock or a timeout costs the speedup, never the finding. A cancelled pass is not swallowed.
-    /// </summary>
-    private async Task<List<DateOnly>> ReadPlanRegressionBuiltDaysAsync(
-        NpgsqlConnection connection, AnalysisContext context, int serverId, DateTime windowFloor, CancellationToken cancellationToken)
-    {
-        var days = new List<DateOnly>();
-        try
-        {
-            using var cmd = new NpgsqlCommand(PlanRegressionBuiltDaysSql, connection) { CommandTimeout = FactCommandTimeoutSeconds };
-            cmd.Parameters.AddWithValue(serverId);
-            cmd.Parameters.AddWithValue(NpgsqlTypes.NpgsqlDbType.Timestamp, windowFloor);
-            using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
-            while (await reader.ReadAsync(cancellationToken))
-            {
-                days.Add(reader.GetFieldValue<DateOnly>(0));
-            }
-
-            return days;
-        }
-        catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, cancellationToken))
-        {
-            _logger?.LogWarning(ex, "PLAN_REGRESSION built-days read failed for server {ServerId}; reading the interval table directly", serverId);
-
-            /* Recorded under the fact's own method name, like every swallowing catch here (#2826): a timeout in this read
-               means the store is struggling, and the exact-bound read that follows is the slower one. If that read
-               succeeds the fact is whole and the caveat over-states what is missing; if it fails it records its own. */
-            ReportCollectionFailure(ex, context, nameof(CollectPlanRegressionFactsAsync));
-            return new List<DateOnly>();
-        }
-    }
-
-    /// <summary>
     /// The closed days of the PLAN_REGRESSION window that are fully built (#5448): $1 server_id, $2 M (the window's
     /// day-aligned start). A day is valid when its build saw every late row (<c>built_seq = late_seq</c>) and the
     /// interval table's coverage claim reaches the whole day, which is <c>day &gt;= filled_since::date + 1</c>: the
@@ -723,11 +689,15 @@ LIMIT 20";
 
             /* #5448: the closed days that are fully built, only when the table is the source. Any failure is an empty
                set: the read below then runs PlanRegressionTableSql on its exact bounds, as it did before the daily
-               totals existed. A cancelled pass is not swallowed. */
+               totals existed. That failure is logged in the helper and is NOT a collection caveat: the exact read is
+               whole, so nothing is missing, and if it fails too its own catch records it, once. A cancelled pass is
+               not swallowed. */
             var rawWindowStart = AsNaive(context.TimeRangeStart.AddDays(-PlanRegressionWindowDays));
             var windowFloor = PlanRegressionWindowFloor(rawWindowStart);
             var builtDays = readsTable
-                ? await ReadPlanRegressionBuiltDaysAsync(connection, context, context.ServerId, windowFloor, context.CancellationToken)
+                ? await QueryStoreIntervalLatest.ReadBuiltDaysAsync(
+                    connection, PlanRegressionBuiltDaysSql, context.ServerId, windowFloor, FactCommandTimeoutSeconds, _logger,
+                    ex => AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken), context.CancellationToken)
                 : new List<DateOnly>();
             var readsDays = builtDays.Count > 0;
             context.PlanRegressionWindowStart = readsDays ? windowFloor : null;

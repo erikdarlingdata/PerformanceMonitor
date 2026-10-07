@@ -32,26 +32,32 @@ namespace Darling.Tests;
 public sealed class PlanRegressionTimeoutCaveatTests
 {
     [Fact]
-    public void EveryCommandThePlanRegressionFactRuns_CarriesTheFactDeadline_AndItsCatchReports()
+    public void EveryCommandThePlanRegressionFactRuns_CarriesTheFactDeadline_AndOnlyTheReadThatLeavesTheFactEmptyRecords()
     {
         var source = File.ReadAllText(Path.Combine(
             RepoRoot(), "Darling", "PerformanceMonitor.Darling.Analysis", "PgFactCollector.QueryPerf.cs"));
+        var storage = File.ReadAllText(Path.Combine(
+            RepoRoot(), "Darling", "PerformanceMonitor.Darling.Storage", "QueryStoreIntervalLatest.cs"));
 
         var fact = Slice(source, "private async Task CollectPlanRegressionFactsAsync(", "public const string ProcedureStatsSql");
-        var builtDays = Slice(source, "private async Task<List<DateOnly>> ReadPlanRegressionBuiltDaysAsync(", "internal const string PlanRegressionBuiltDaysSql");
+        var builtDays = Slice(storage, "public static async Task<List<DateOnly>> ReadBuiltDaysAsync(", "private readonly ConcurrentDictionary<int, byte> _coverageEnsured");
 
-        /* The fact's own read and the built-days read: each NpgsqlCommand is built with the deadline. */
+        /* The fact's own read carries the deadline, and the built-days read is handed it (it builds its command in the
+           storage helper, from the same constant). */
         Assert.Single(Regex.Matches(fact, @"new NpgsqlCommand\("));
         Assert.Single(Regex.Matches(fact, @"CommandTimeout = FactCommandTimeoutSeconds"));
+        Assert.Contains("PlanRegressionBuiltDaysSql, context.ServerId, windowFloor, FactCommandTimeoutSeconds", fact, StringComparison.Ordinal);
         Assert.Single(Regex.Matches(builtDays, @"new NpgsqlCommand\("));
-        Assert.Single(Regex.Matches(builtDays, @"CommandTimeout = FactCommandTimeoutSeconds"));
+        Assert.Single(Regex.Matches(builtDays, @"CommandTimeout = commandTimeoutSeconds"));
 
-        /* The fact's swallowing catch reports, and so does the built-days read's, under the fact's own name, so a timeout in
-           either is a plan_regression caveat; the built-days read then answers "none built", which is the exact-bound read,
-           and it does not swallow a cancelled pass. */
+        /* #5448: the fact's swallowing catch reports, so a timeout of the exact read is a plan_regression caveat. The
+           built-days read does NOT: it falls back to that exact read, which is whole, so a stored caveat would say data is
+           missing when none is. It still does not swallow a cancelled pass, and it still logs the failure. */
         Assert.Contains("ReportCollectionFailure(ex, context);", fact, StringComparison.Ordinal);
-        Assert.Contains("when (!AnalysisShutdown.IsExpectedAbandon(ex, cancellationToken))", builtDays, StringComparison.Ordinal);
-        Assert.Contains("ReportCollectionFailure(ex, context, nameof(CollectPlanRegressionFactsAsync));", builtDays, StringComparison.Ordinal);
+        Assert.DoesNotContain("ReportCollectionFailure", builtDays, StringComparison.Ordinal);
+        Assert.DoesNotContain("ReadPlanRegressionBuiltDaysAsync", source, StringComparison.Ordinal);
+        Assert.Contains("when (!isExpectedAbandon(ex))", builtDays, StringComparison.Ordinal);
+        Assert.Contains("logger?.LogWarning(", builtDays, StringComparison.Ordinal);
     }
 
     [Fact]
