@@ -275,7 +275,7 @@ public sealed class DarlingMcpTrendTools
         [Description(TrendBuckets.BucketMinutesDescription)] int? bucket_minutes = null,
         [Description("One database, charted per file. Omit for every database.")] string? database_name = null,
         CancellationToken cancellationToken = default) =>
-        GetFileIoTrend(postgres, server_name, hours_back, as_of, bucket_minutes, database_name, TrendBudget.Mcp(TrendBuckets.FileIoMaxPoints), cancellationToken);
+        GetFileIoTrend(postgres, server_name, hours_back, as_of, bucket_minutes, DatabaseFilter.One(database_name), TrendBudget.Mcp(TrendBuckets.FileIoMaxPoints), cancellationToken);
 
     /// <summary>
     /// get_file_io_trend under an explicit <paramref name="budget"/> (#3897): the MCP tool above passes its own,
@@ -287,10 +287,15 @@ public sealed class DarlingMcpTrendTools
     /// bucket width — five lines and an "(other)" line need coarser buckets than two lines do to stay inside the
     /// same budget. The second buckets only those lines; it re-derives the same ranking in SQL rather than taking
     /// the list back as parameters, which keeps the two statements one shared CTE and the two SKUs one shape.</para>
+    ///
+    /// <para><paramref name="databases"/> (#5244) limits both reads. One database keeps the per-file chart (each line a
+    /// file, <c>file_name</c> on every row); two or more draw per-database lines within the set, and every database is the
+    /// per-database view. The top five lines plus "(other)" cap applies in each shape, after the filter. The name is kept
+    /// exactly: a leading or trailing space is part of it, as for every other filtered read.</para>
     /// </summary>
     internal static async Task<string> GetFileIoTrend(
         NpgsqlDataSource postgres, string? server_name, int hours_back, string? as_of, int? bucket_minutes,
-        string? database_name, TrendBudget budget, CancellationToken cancellationToken = default)
+        DatabaseFilter databases, TrendBudget budget, CancellationToken cancellationToken = default)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
@@ -303,20 +308,22 @@ public sealed class DarlingMcpTrendTools
         var widthError = TrendBuckets.ValidateWidth(bucket_minutes);
         if (widthError != null) return widthError;
 
-        var scope = string.IsNullOrWhiteSpace(database_name) ? null : database_name.Trim();
+        /* The one-database case is the per-file chart; the same single name is what the empty answer names. */
+        var scope = databases.Names.Count == 1 ? databases.Names[0] : null;
+        var echo = databases.Describe();
 
         try
         {
             var now = windowEnd;
             var start = now.AddHours(-hours_back);
-            var series = await DarlingTrendReader.GetFileIoSeriesAsync(postgres, resolved.ServerId, start, now, scope, cancellationToken);
+            var series = await DarlingTrendReader.GetFileIoSeriesAsync(postgres, resolved.ServerId, start, now, databases, cancellationToken);
             if (series.Count == 0)
             {
                 /* Same two states as the memory trend, same probe discipline. The quiet-window sentence
                    carries one extra clause the others do not need: the ranking counts only series that read
                    or wrote, so a genuinely idle file set is empty here even on a server whose file_io_stats
                    collector ran every cycle. */
-                var gated = await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "file_io_stats", cancellationToken);
+                var gated = McpHelpers.WithDatabase(await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "file_io_stats", cancellationToken), echo);
                 if (gated != null)
                 {
                     return gated;
@@ -325,37 +332,52 @@ public sealed class DarlingMcpTrendTools
                 var everCollected = await DarlingTrendReader.HasAnyFileIoStatAsync(postgres, resolved.ServerId, cancellationToken);
 
                 /* A scoped read that found nothing is first a question about the NAME: a misspelt database
-                   and an idle one land here alike, and only the collected names tell them apart. */
-                if (scope is not null && everCollected)
+                   and an idle one land here alike, and only the collected names tell them apart. With a list the
+                   sentence says "the chosen databases" and no verdict about any one of them: the read looked at
+                   the set, and the quiet-window sentence below is about the whole server, which it never read. */
+                if (!databases.IsAll && everCollected)
                 {
-                    return McpHelpers.Status("empty", TrendPayloads.FileIoScopeEmptyMessage(resolved.ServerName, scope, hours_back));
+                    return McpHelpers.StatusForDatabase(
+                        "empty",
+                        scope is not null
+                            ? TrendPayloads.FileIoScopeEmptyMessage(resolved.ServerName, scope, hours_back)
+                            : FileIoChosenDatabasesEmptyMessage(resolved.ServerName, hours_back),
+                        echo);
                 }
 
                 return everCollected
-                    ? McpHelpers.Status(
+                    ? McpHelpers.StatusForDatabase(
                         "empty",
-                        $"No file I/O samples recorded for {resolved.ServerName} in the last {hours_back} hour(s). This server HAS collected file I/O stats before, so this window is genuinely quiet rather than broken — widen hours_back, or read it as no measurable read or write activity on any file in this window.")
-                    : McpHelpers.Status(
+                        $"No file I/O samples recorded for {resolved.ServerName} in the last {hours_back} hour(s). This server HAS collected file I/O stats before, so this window is genuinely quiet rather than broken — widen hours_back, or read it as no measurable read or write activity on any file in this window.", echo)
+                    : McpHelpers.StatusForDatabase(
                         "unavailable",
-                        $"No file I/O stats have EVER been recorded for {resolved.ServerName}. This is not an empty window — the file_io_stats collector has stored nothing at all for this server. Check that collection is running and that the server is enabled; get_file_io_stats will be equally empty until it does.");
+                        $"No file I/O stats have EVER been recorded for {resolved.ServerName}. This is not an empty window — the file_io_stats collector has stored nothing at all for this server. Check that collection is running and that the server is enabled; get_file_io_stats will be equally empty until it does.", echo);
             }
 
             var bucketError = TrendBuckets.Resolve(hours_back, bucket_minutes, TrendPayloads.LinesFor(series.Count), budget, out var bucketMinutes);
             if (bucketError != null) return bucketError;
 
             var points = await DarlingTrendReader.GetFileIoTrendAsync(
-                postgres, resolved.ServerId, start, now, scope, TrendPayloads.ChartedFor(series.Count), bucketMinutes, cancellationToken);
+                postgres, resolved.ServerId, start, now, databases, TrendPayloads.ChartedFor(series.Count), bucketMinutes, cancellationToken);
             var discontinuities = await DarlingTrendReader.GetBaselineDiscontinuitiesAsync(postgres, resolved.ServerId, start, now, cancellationToken);
 
             return TrendPayloads.FileIoTrend(
                 resolved.ServerName, hours_back, scope, series, points, bucketMinutes, bucket_minutes is not null,
-                budget.AutoPoints, BaselineDiscontinuities.ToPayload(discontinuities));
+                budget.AutoPoints, BaselineDiscontinuities.ToPayload(discontinuities), databaseEcho: echo);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_file_io_trend", ex);
         }
     }
+
+    /// <summary>
+    /// The empty answer for a file I/O trend limited to two or more databases that saw no I/O in the window (#5244): about the
+    /// set, not about any one name. The single-name sentence is <see cref="TrendPayloads.FileIoScopeEmptyMessage"/>.
+    /// </summary>
+    internal static string FileIoChosenDatabasesEmptyMessage(string serverName, int hoursBack) =>
+        $"No read or write activity was recorded for {DatabaseFilter.ManyDatabasesDescription} on {serverName} in the last {hoursBack} hour(s). "
+        + "Each name must match a collected database exactly (get_file_io_stats lists them); omit database_name for every database.";
 
     [McpServerTool(Name = "get_query_trend"), Description("Gets a time-series of performance metrics for a specific query identified by its query_hash. Use this after identifying a problematic query from get_top_queries_by_cpu or get_query_store_top to see how it has changed over time." + McpHelpers.WindowTruncatedDescription + BaselineDiscontinuities.DescriptionSentence)]
     public static async Task<string> GetQueryTrend(

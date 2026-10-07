@@ -18,7 +18,7 @@ using Xunit;
 namespace Darling.Tests;
 
 /// <summary>
-/// V167: the per-server AWS role on <c>config.config_monitored_servers</c> (#5452). The static pins: the rung's place in
+/// V168: the per-server AWS role on <c>config.config_monitored_servers</c> (#5452). The static pins: the rung's place in
 /// the ladder and its shape, the viewer's version probe, the column ACL, and the self-managed script's copy of the edit
 /// function, its wrapper and the trigger rule. The store behaviour is in <see cref="AwsPerServerRoleLiveTests"/>.
 ///
@@ -26,11 +26,11 @@ namespace Darling.Tests;
 /// </summary>
 public sealed class AwsPerServerRoleRungTests
 {
-    internal const int RungVersion = 167;
-    private const int PreviousVersion = 166;
+    internal const int RungVersion = 168;
+    private const int PreviousVersion = 167;
 
     /// <summary>This rung's sentinel ordinal in the viewer probe: the newest, so the last argument.</summary>
-    private const int ProbeOrdinal = 142;
+    private const int ProbeOrdinal = 143;
 
     private const string RoleColumn = "aws_role_arn";
 
@@ -116,15 +116,15 @@ public sealed class AwsPerServerRoleRungTests
         behind[ProbeOrdinal] = false;
         Assert.Equal(PreviousVersion, (int)method.Invoke(null, behind)!);
 
-        /* In the source the arm sits ABOVE V166's, and returns this build's version. */
-        var v167 = viewer.IndexOf("if (hasAwsRole)", StringComparison.Ordinal);
-        var v166 = viewer.IndexOf("if (hasPagerDutyAutoResolve)", StringComparison.Ordinal);
-        Assert.True(v167 >= 0, "the viewer has no V167 sentinel arm, so a fully-migrated store would map to 166");
-        Assert.True(v166 >= 0, "the V166 arm is gone, so this pin is comparing against nothing");
-        Assert.True(v167 < v166, "the V167 arm sits below V166's, so a current store maps one rung low");
+        /* In the source the arm sits ABOVE V167's, and returns this build's version. */
+        var v168 = viewer.IndexOf("if (hasAwsRole)", StringComparison.Ordinal);
+        var v167 = viewer.IndexOf("if (hasLegacyPinCandidates)", StringComparison.Ordinal);
+        Assert.True(v168 >= 0, "the viewer has no V168 sentinel arm, so a fully-migrated store would map to 167");
+        Assert.True(v167 >= 0, "the V167 arm is gone, so this pin is comparing against nothing");
+        Assert.True(v168 < v167, "the V168 arm sits below V167's, so a current store maps one rung low");
         Assert.Contains(
             "return " + StorageVersion.SchemaVersion.ToString(CultureInfo.InvariantCulture) + ";",
-            viewer[v167..], StringComparison.Ordinal);
+            viewer[v168..], StringComparison.Ordinal);
     }
 
     /* ---- the column ACL -------------------------------------------------------------------------------- */

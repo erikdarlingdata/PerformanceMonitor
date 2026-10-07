@@ -359,7 +359,7 @@ public class PostgresTargetConfigTests
                they round-trip in both directions and belong here rather than beside Password's exemption. */
             ("RemediationUsername", "remediation_username"),
             ("RemediationEncryptedPassword", "remediation_encrypted_password"),
-            /* V167 (#5452): the AWS role a target uses and its external ID. Settable from darling.json (seeded into a
+            /* V168 (#5452): the AWS role a target uses and its external ID. Settable from darling.json (seeded into a
                new row) and read back by the registry read, like the credential above. */
             ("AwsRoleArn", "aws_role_arn"),
             ("AwsExternalId", "aws_external_id"),

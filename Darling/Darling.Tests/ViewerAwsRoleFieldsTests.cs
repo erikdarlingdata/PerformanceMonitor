@@ -21,7 +21,7 @@ namespace Darling.Tests;
 /// The desktop viewer's per-server AWS role fields (#5452). The writes name <c>aws_role_arn</c> and <c>aws_external_id</c> and
 /// never the generated <c>aws_external_id_set</c>; the by-id read an admin seat makes is the one read of the external ID,
 /// because the read-only roles are denied the column; and every read's column count agrees with the ordinals its reader
-/// uses, which a live test would only catch on a store with the V167 columns.
+/// uses, which a live test would only catch on a store with the V168 columns.
 /// </summary>
 public sealed class ViewerAwsRoleFieldsTests
 {

@@ -318,14 +318,23 @@ public sealed class CaggGroupIndexDropLiveTests
     /// A future rung that adds a new probe sentinel must add its artifact's removal here.</summary>
     private static async Task DropArtifactsOfLaterRungsAsync(NpgsqlConnection connection, int simulatedVersion, CancellationToken ct)
     {
-        if (simulatedVersion < 167)
+        if (simulatedVersion < 168)
         {
-            /* V167 (#5452) - the per-server AWS role on config_monitored_servers; the role column is the probe's sentinel.
+            /* V168 (#5452) - the per-server AWS role on config_monitored_servers; the role column is the probe's sentinel.
                Dropping the columns drops the table's check on them too. */
             await using var dropAwsRole = new NpgsqlCommand(
                 "ALTER TABLE config.config_monitored_servers DROP COLUMN IF EXISTS aws_external_id_set, "
                 + "DROP COLUMN IF EXISTS aws_external_id, DROP COLUMN IF EXISTS aws_role_arn", connection);
             await dropAwsRole.ExecuteNonQueryAsync(ct);
+        }
+
+        if (simulatedVersion < LegacyPinCandidateTables.RungVersion)
+        {
+            /* V167 (#5456) - the table that records the old-format values present at the upgrade;
+               config.legacy_secret_pin_candidate is the probe's sentinel. It goes before the V165 arm below, because its
+               triggers use the function that arm drops. */
+            await using var dropCandidates = new NpgsqlCommand("DROP TABLE IF EXISTS config.legacy_secret_pin_candidate", connection);
+            await dropCandidates.ExecuteNonQueryAsync(ct);
         }
 
         if (simulatedVersion < 166)

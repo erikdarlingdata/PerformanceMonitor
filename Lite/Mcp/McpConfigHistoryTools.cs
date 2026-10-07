@@ -101,7 +101,8 @@ public sealed class McpConfigHistoryTools
         ServerManager serverManager,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history to retrieve. Default 168 (7 days).")] int hours_back = 168,
-        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        [Description("Limit to one database. Omit for all databases.")] string? database_name = null)
     {
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
         if (error != null) return error;
@@ -111,11 +112,16 @@ public sealed class McpConfigHistoryTools
             var hoursError = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
             if (hoursError != null) return hoursError;
 
-            var rows = await dataService.GetDatabaseConfigChangesAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd);
+            /* #5244: database_name appended LAST (H1). The reader filters the snapshots in SQL before the diff, the way Darling's
+               does; a blank is "no filter". The empty answer names the database it looked at instead of speaking for the server. */
+            var database = string.IsNullOrWhiteSpace(database_name) ? null : database_name;
+            var rows = await dataService.GetDatabaseConfigChangesAsync(
+                resolved.ServerId, hours_back, databaseNames: database is null ? null : new[] { database }, asOfUtc: windowEnd);
             if (rows.Count == 0)
-                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "database_config")
-                    ?? McpHelpers.Status("empty",
-                        $"No database configuration changes detected in the last {hours_back}h. Config is captured on connect, so at least two snapshots are needed to detect a change.",
+                return McpHelpers.WithDatabase(await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "database_config"), database)
+                    ?? McpHelpers.StatusForDatabase("empty",
+                        $"No database configuration changes detected in the last {hours_back}h{McpDatabaseSelection.ForChosen(database is null ? null : new[] { database })}. Config is captured on connect, so at least two snapshots are needed to detect a change.",
+                        database,
                         (await WindowNoticeAsync(dataService, QueryWindowRelation.DatabaseConfig, resolved.ServerId, hours_back, windowEnd, "database_config", emptyAnswer: true)).AsHints());
 
             var notice = await WindowNoticeAsync(dataService, QueryWindowRelation.DatabaseConfig, resolved.ServerId, hours_back, windowEnd, "database_config");
@@ -129,6 +135,7 @@ public sealed class McpConfigHistoryTools
                 effective_start = notice.EffectiveStart,
                 window_truncated = notice.WindowTruncated,
                 truncation_note = notice.TruncationNote,
+                database_name = database,
                 change_count = rows.Count,
                 changes = rows.Select(r => new
                 {

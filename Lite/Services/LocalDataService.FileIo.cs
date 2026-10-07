@@ -19,12 +19,16 @@ public partial class LocalDataService
 {
     /// <summary>
     /// Gets the latest file I/O stats snapshot with computed latency.
+    /// <para>#5244: <paramref name="databaseNames"/> (null or empty = every database) limits the ROWS of the newest capture. The
+    /// capture is the server's newest whatever the filter, so a filtered and an unfiltered call carry the same
+    /// <c>collection_time</c>. Darling's <c>GetLatestFileIoStatsAsync</c> is the twin.</para>
     /// </summary>
-    public async Task<List<FileIoRow>> GetLatestFileIoStatsAsync(int serverId)
+    public async Task<List<FileIoRow>> GetLatestFileIoStatsAsync(int serverId, IReadOnlyList<string>? databaseNames = null)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
-        command.CommandText = @"
+        var dbClause = BuildDbInClause(databaseNames, "database_name", 2, out var dbValues);
+        command.CommandText = $@"
 SELECT
     database_name,
     file_name,
@@ -41,10 +45,12 @@ SELECT
     collection_time
 FROM v_file_io_stats
 WHERE server_id = $1
-AND   collection_time = (SELECT MAX(collection_time) FROM v_file_io_stats WHERE server_id = $1)
+AND   collection_time = (SELECT MAX(collection_time) FROM v_file_io_stats WHERE server_id = $1){dbClause}
 ORDER BY (delta_stall_read_ms + delta_stall_write_ms) DESC";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        foreach (var db in dbValues)
+            command.Parameters.Add(new DuckDBParameter { Value = db });
 
         var items = new List<FileIoRow>();
         using var reader = await command.ExecuteReaderAsync();

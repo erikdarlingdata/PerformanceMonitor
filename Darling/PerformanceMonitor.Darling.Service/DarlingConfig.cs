@@ -354,6 +354,23 @@ public sealed class DarlingConfig
     [JsonPropertyName("peers")]
     public PeersConfig Peers { get; set; } = new();
 
+    /// <summary>
+    /// The outbound heartbeat (#5450): a GET to a dead-man's-switch URL while the service is collecting, so a check
+    /// outside the box alerts when the process stops or stops collecting. File-only like <see cref="Peers"/>, and its URL
+    /// is a secret that no read surface returns. Off unless <c>heartbeat.url</c> is set. See <see cref="HeartbeatConfig"/>.
+    /// </summary>
+    [JsonPropertyName("heartbeat")]
+    public HeartbeatConfig Heartbeat
+    {
+        get => _heartbeat;
+
+        /* "heartbeat": null means off, the same as an absent block (#5460): the JSON options here do not honor nullable
+           annotations, so a null would otherwise land in this property and fault the loop at shutdown. */
+        set => _heartbeat = value ?? new();
+    }
+
+    private HeartbeatConfig _heartbeat = new();
+
     public static string ResolveConfigPath(string? explicitPath = null)
     {
         if (!string.IsNullOrWhiteSpace(explicitPath))
@@ -505,6 +522,8 @@ public sealed class DarlingConfig
         }
 
         problems.AddRange(PeersConfig.Validate(Peers));
+        /* #5450: the heartbeat block, for the same reason (a broken one is reported even with no servers yet). */
+        problems.AddRange(HeartbeatConfig.Validate(Heartbeat));
 
         if (Servers is null || Servers.Count == 0)
         {

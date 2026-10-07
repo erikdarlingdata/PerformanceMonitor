@@ -114,16 +114,31 @@ public sealed class WebDatabaseFilterChipsBehaviourTests
 
         /* A composite built by panelShell passes its main read. */
         AssertChip(Heading(r, "waits", "Wait Stats"), "server", "Server-wide");
-        AssertChip(Heading(r, "io", "File I/O Latency"), "unfiltered", "All databases");
+        AssertChip(Heading(r, "io", "File I/O Latency"), "filtered", "2 databases", "SalesDb\nOrders");
         AssertChip(Heading(r, "memory", "Memory Pressure Events"), "server", "Server-wide");
         AssertChip(Heading(r, "overview", "Daily Summary"), "server", "Server-wide");
-        AssertChip(Heading(r, "config", "Database Scoped Configuration"), "unfiltered", "All databases");
+        AssertChip(Heading(r, "config", "Database Scoped Configuration"), "filtered", "2 databases", "SalesDb\nOrders");
         AssertChip(Heading(r, "recommendations", "Recommendations"), "server", "Server-wide");
 
         /* No panel on any SQL Server tab is left without a chip, and none draws two. */
         var headings = r.GetProperty("tabs").EnumerateObject().SelectMany(t => t.Value.EnumerateArray()).ToArray();
         Assert.True(headings.Length > 90, "the tabs drew only " + headings.Length + " panels");
         Assert.Empty(headings.Where(h => h.GetProperty("chips").GetInt32() != 1).Select(h => h.GetProperty("title").GetString()));
+    }
+
+    /// <summary>#5244 PR5: the File I/O Latency subtitle says what a line is. Exactly one chosen database draws one line per file
+    /// ("per file"); every database, an emptied filter, two or more databases, or a filter that belongs to another server draw one
+    /// line per database and file type.</summary>
+    [Fact]
+    public void TheFileIoSubtitle_SaysPerFileForExactlyOneChosenDatabase()
+    {
+        var r = Run("fileio");
+        Assert.Contains("per file,", r.GetProperty("one").GetString());
+        Assert.DoesNotContain("per database and file type", r.GetProperty("one").GetString());
+        foreach (var key in new[] { "two", "none", "emptied", "otherServer" })
+        {
+            Assert.Contains("per database and file type,", r.GetProperty(key).GetString());
+        }
     }
 
     /// <summary>With no filter, an emptied one, or off the server page, no panel draws a chip. A read that names a database as the
@@ -140,7 +155,7 @@ public sealed class WebDatabaseFilterChipsBehaviourTests
 
         var r = Run("renderPanel");
         AssertChip(r.GetProperty("filtered"), "filtered", "SalesDb", "SalesDb");
-        AssertChip(r.GetProperty("unfiltered"), "unfiltered", "All databases", UnfilteredTitle);
+        AssertChip(r.GetProperty("unfiltered"), "unfiltered", "All databases", UnfilteredTitle + " The databases are inside each deadlock graph.");
         AssertChip(r.GetProperty("server"), "server", "Server-wide", ServerTitle);
         Assert.Equal(0, r.GetProperty("identity").GetProperty("chips").GetInt32());
         Assert.Equal(0, r.GetProperty("plan").GetProperty("chips").GetInt32());
@@ -178,5 +193,34 @@ public sealed class WebDatabaseFilterChipsBehaviourTests
         Assert.Equal(string.Join("\n", Awkward), all.GetProperty("chipTitle").GetString());
         Assert.Equal(Awkward, all.GetProperty("lines").EnumerateArray().Select(e => e.GetString()!).ToArray());
         Assert.Equal(0, all.GetProperty("imgs").GetInt32());
+    }
+
+    private static string[] Texts(JsonElement r, string name) => r.GetProperty(name).EnumerateArray().Select(e => e.GetString()!).ToArray();
+
+    /// <summary>The configuration, scoped-configuration and Query Store health panels (#5244): a database filter that matches nothing
+    /// on a server that has a snapshot answers rows-free but not snapshot-free, so the panels say the chosen databases have no row
+    /// instead of "no snapshot yet". A server with no snapshot, and a page with no filter, keep their own text.</summary>
+    [Fact]
+    public void ASnapshotPanelWhoseFilterMatchesNothing_DoesNotSayThereIsNoSnapshot()
+    {
+        const string filteredText = "No database in the chosen databases has a row in this snapshot.";
+        string[] snapshotTexts = { "No database configuration snapshot yet.", "No database-scoped configuration snapshot yet.", "No Query Store health rows yet." };
+        var r = Run("emptyText");
+
+        var filtered = Texts(r, "filtered");
+        Assert.Equal(3, filtered.Count(t => t == filteredText));
+        foreach (var text in snapshotTexts) Assert.DoesNotContain(text, filtered);
+        Assert.Equal(filteredText, Assert.Single(Texts(r, "filteredTemplate")));
+
+        /* No snapshot at all: the read's own envelope message, not the filtered sentence. */
+        var noSnapshot = Texts(r, "filteredNoSnapshot");
+        Assert.DoesNotContain(filteredText, noSnapshot);
+        Assert.Contains("Nothing collected for this server yet.", noSnapshot);
+
+        /* No filter: the panels' own text. */
+        var unfiltered = Texts(r, "unfiltered");
+        Assert.DoesNotContain(filteredText, unfiltered);
+        foreach (var text in snapshotTexts) Assert.Contains(text, unfiltered);
+        Assert.Equal("No database configuration snapshot yet.", Assert.Single(Texts(r, "unfilteredTemplate")));
     }
 }

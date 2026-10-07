@@ -12,6 +12,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
 
@@ -101,7 +102,7 @@ internal static class DarlingConfigHistoryReader
     /* ─────────────────────────── database config snapshots (WIDE) ─────────────────────────── */
 
     /// <summary>Every sys.databases snapshot for a server, with the 27 setting columns CAST to text for a
-    /// uniform value-diff. $1 server_id. The SELECT order is
+    /// uniform value-diff. $1 server_id, $2 the chosen databases (text[], NULL = every database). The SELECT order is
     /// <see cref="ConfigChangeDiff.DatabaseConfigChangeSettingNames"/>.</summary>
     public const string DatabaseConfigSnapshotsSql = """
         SELECT
@@ -136,16 +137,25 @@ internal static class DarlingConfigHistoryReader
             is_optimized_locking_on::text
         FROM v_database_config
         WHERE server_id = $1
+        AND   ($2::text[] IS NULL OR database_name = ANY($2))
         ORDER BY database_name, capture_time
         """;
 
-    public static async Task<List<ConfigChangeDiff.DatabaseConfigSnapshot>> GetDatabaseConfigSnapshotsAsync(
-        NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken = default)
+    public static Task<List<ConfigChangeDiff.DatabaseConfigSnapshot>> GetDatabaseConfigSnapshotsAsync(
+        NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken = default) =>
+        GetDatabaseConfigSnapshotsAsync(postgres, serverId, DatabaseFilter.All, cancellationToken);
+
+    /// <summary>#5245: the snapshots of a SET of databases (<see cref="DatabaseFilter.All"/> is every database), the
+    /// list bound as the one <c>text[]</c> $2 (never spliced). The diff walks each database's own captures, so a
+    /// filtered read changes exactly the databases it keeps.</summary>
+    internal static async Task<List<ConfigChangeDiff.DatabaseConfigSnapshot>> GetDatabaseConfigSnapshotsAsync(
+        NpgsqlDataSource postgres, int serverId, DatabaseFilter databases, CancellationToken cancellationToken = default)
     {
         var rows = new List<ConfigChangeDiff.DatabaseConfigSnapshot>();
         await using var command = postgres.CreateCommand(DatabaseConfigSnapshotsSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddInt(command, serverId);
+        command.Parameters.Add(databases.Parameter());
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {

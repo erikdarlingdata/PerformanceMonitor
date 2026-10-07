@@ -119,7 +119,7 @@ public sealed class WebDatabaseFilterBehaviourTests
 
         Assert.Equal("/api/read/get_top_queries_by_cpu?server=SRV2&hours=4", One(r, "otherServer"));
         Assert.Equal("/api/read/get_top_queries_by_cpu?hours=4", One(r, "noServer"));
-        Assert.Equal("/api/read/get_database_sizes?server=SRV1&hours=4", One(r, "unfilteredRead"));
+        Assert.Equal("/api/read/get_deadlocks?server=SRV1&hours=4", One(r, "unfilteredRead"));
         Assert.Equal("/api/read/get_cpu_utilization?server=SRV1&hours=4", One(r, "serverWideRead"));
         Assert.Equal("/api/read/get_pg_top_queries?server=SRV1&hours=4", One(r, "pgRead"));
 
@@ -182,7 +182,7 @@ public sealed class WebDatabaseFilterBehaviourTests
         Chip(one.GetProperty("overrideServer"), "server", "Server-wide", ServerTitle, " engine");
         Chip(one.GetProperty("overrideUnfiltered"), "unfiltered", "All databases", Unfiltered, " band-Warning");
         Chip(one.GetProperty("overrideDeadlock"), "unfiltered", "All databases", Unfiltered + DeadlockSentence, " band-Warning");
-        Chip(one.GetProperty("unknownOverride"), "unfiltered", "All databases", Unfiltered, " band-Warning");
+        Chip(one.GetProperty("unknownOverride"), "unfiltered", "All databases", Unfiltered + DeadlockSentence, " band-Warning");
 
         /* Several databases: "N databases", with the names one per line in the title (a name may hold a comma). */
         var three = r.GetProperty("three");

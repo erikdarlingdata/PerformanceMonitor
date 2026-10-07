@@ -172,6 +172,9 @@ public sealed class SystemEventsReaderTests : IClassFixture<SharedDuckDbFixture>
         Assert.Equal(new[] { 50001, 50002 }, onlyA.Select(r => r.ErrorNumber ?? 0).OrderBy(n => n).ToArray());
         var onlyB = await service.GetSevereErrorsAsync(ServerId, hoursBack: 48, databaseNames: new[] { "B" });
         Assert.Equal(new[] { 50003, 50004 }, onlyB.Select(r => r.ErrorNumber ?? 0).OrderBy(n => n).ToArray());
+        /* #5244: an id the history never saw is in no chosen database (its "database_id N" label is not a name), and the match is ordinal. */
+        Assert.Empty(await service.GetSevereErrorsAsync(ServerId, hoursBack: 48, databaseNames: new[] { "database_id 99" }));
+        Assert.Empty(await service.GetSevereErrorsAsync(ServerId, hoursBack: 48, databaseNames: new[] { "a" }));
     }
 
     [Fact]

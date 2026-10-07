@@ -517,6 +517,8 @@ public sealed class NotificationRoutingTests
             DarlingSelfAlertEvaluator.RetentionHoldMetric, DarlingSelfAlertEvaluator.StoreUpgradeMetric,
             /* #5450: fired through the constant, so the FireAsync literal scan below cannot see it. */
             DarlingSelfAlertEvaluator.CollectionGapAtStartMetric,
+            /* #5450: fired through the constant too. */
+            DarlingSelfAlertEvaluator.CollectionGapsInHistoryMetric,
             /* #4299: fired through the constant (FireAsync(..., RawPurgeOverHorizonMetric, ...)), not a quoted
                literal, so the FireAsync regex scan below cannot see it — listed here like StoreSettingsMetric. */
             DarlingSelfAlertEvaluator.RawPurgeOverHorizonMetric,

@@ -922,7 +922,7 @@ public sealed class AlertReadFailureSurfaceTests
            DarlingWorker. 16th exempt since #4750: EvaluateNotificationChannelsAsync's wrapper catch — the
            webhook channels' failure counts are read from the webhook service's memory, so there is no store
            read for the condition to swallow. */
-        (Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingSelfAlertEvaluator.cs"), 12, 18),
+        (Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingSelfAlertEvaluator.cs"), 13, 18),
     };
 
     /// <summary>
@@ -1010,9 +1010,11 @@ public sealed class AlertReadFailureSurfaceTests
     /// shape at the store's own health. And a THIRTEENTH since #4215: the store-settings
     /// self-alert's rejected-verdict read, moved from exempt to counted because a RejectedValue row is one of
     /// the three conditions the alert fires on — losing it leaves that condition unjudgeable, and the original
-    /// exempt classification would let one failed read write a false "Store Settings Resolved".</para>
+    /// exempt classification would let one failed read write a false "Store Settings Resolved". And a
+    /// THIRTY-EIGHTH since #5450: the daily retained-history audit's per-rollup read, counted because a swallowed
+    /// read skips that rollup for the day, and the audit is the only place the day's thin hours are ever named.</para>
     /// </summary>
-    private const int CountedSites = 37;
+    private const int CountedSites = 38;
 
     /// <summary>
     /// Log-message fragments that identify a catch block DELIBERATELY not counted, each paired with the

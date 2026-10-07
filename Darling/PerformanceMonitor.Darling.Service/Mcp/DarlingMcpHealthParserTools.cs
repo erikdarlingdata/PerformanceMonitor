@@ -130,12 +130,34 @@ public sealed class DarlingMcpHealthParserTools
     }
 
     [McpServerTool(Name = "get_health_parser_severe_errors"), Description("Gets severe errors from system_health over an event_time window ending at as_of, newest first. Gated: severity 19 or higher only, benign connection-reset error numbers excluded, so a lower-severity error is never listed. An empty answer with status empty is a real result: nothing in this window passed the gate, and events_in_window counts what was captured and filtered out. status unavailable with source_observed false is no evidence either way. <<GUIDE>> Gets severe errors from system_health (severity >= 19, benign connection-reset numbers excluded): error number, severity, state, database, and message. These are critical SQL Server events (stack dumps, fatal errors). " + McpToolGuideTopics.SystemHealthEmptyWindows)]
-    public static async Task<string> GetSevereErrors(
+    public static Task<string> GetSevereErrors(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history to retrieve. Default 24.")] int hours_back = 24,
         [Description("Maximum number of entries. Default 50.")] int limit = 50,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        [Description("Limit to one database. Omit for all databases.")] string? database_name = null,
+        ILogger? logger = null,
+        CancellationToken cancellationToken = default) =>
+        GetSevereErrors(postgres, server_name, hours_back, limit, DatabaseFilter.One(database_name), as_of, logger, cancellationToken);
+
+    /// <summary>
+    /// The same read over a SET of databases (#5245). The MCP tool passes <c>DatabaseFilter.One(database_name)</c> (blank is every
+    /// database) and the web route the repeated keys (#5244). Every answer shape echoes <c>database_name</c> (the name for one
+    /// database, "the chosen databases" for two or more, null for all). The store keeps no database name for these events, so the filter runs
+    /// in C#, on the name each error's <c>database_id</c> carried AT THE ERROR'S TIME (<c>names.Resolve(id, eventTime)</c>, the name
+    /// the row shows, #5373), compared ordinally, AFTER the severity gate and BEFORE the counts and the page limit:
+    /// <c>error_count</c> and the page are the chosen databases' errors. An error whose id resolves to no name (no database
+    /// context, or an id the collected history never saw) is in no chosen database while a filter is active. A database id
+    /// reused by a second database therefore matches each error by the name it had then.
+    /// </summary>
+    internal static async Task<string> GetSevereErrors(
+        NpgsqlDataSource postgres,
+        string? server_name,
+        int hours_back,
+        int limit,
+        DatabaseFilter databases,
+        string? as_of,
         ILogger? logger = null,
         CancellationToken cancellationToken = default)
     {
@@ -159,16 +181,22 @@ public sealed class DarlingMcpHealthParserTools
                 .ToList();
             /* database_id → name resolution needs the collected size-stats history (the shred left it null). #5373: each
                error gets the name its id carried at the error's own time, not the server's latest name for the id.
-               Only the errors shown are resolved, so the history read covers just their time range. */
-            var shown = rows.Take(limit).ToList();
+               #5244: the database filter matches on that same per-error name (the store has none), in C#, before the counts
+               and the page cap, so the history is read for every gated error under a filter and only for the errors shown
+               otherwise. */
             var names = await DatabaseNameHistoryReader.ReadAsync(
-                postgres, resolved.ServerId, shown.Select(r => (r.DatabaseId, r.EventTime)),
+                postgres, resolved.ServerId,
+                (databases.IsAll ? rows.Take(limit) : rows).Select(r => (r.DatabaseId, r.EventTime)),
                 McpCommandDeadlines.ReadSeconds, cancellationToken);
+            if (!databases.IsAll)
+                rows = rows.Where(r => names.IsIn(r.DatabaseId, r.EventTime, databases.Names)).ToList();
+            var shown = rows.Take(limit).ToList();
             if (rows.Count == 0)
-                return await EmptyAsync(
+                return McpHelpers.WithDatabase(await EmptyAsync(
                     postgres, new Collected<SevereErrorRecord>(null, resolved.ServerId, resolved.ServerName, rows, xmls.Count, lastCapturedAt, now),
                     hours_back, SystemHealthParser.ErrorReportedEvent,
-                    $"none was a significant severe error (severity {SystemHealthSignificance.SevereErrorMinSeverity}+ and off the benign connection-reset list)", logger, cancellationToken);
+                    $"none was a significant severe error (severity {SystemHealthSignificance.SevereErrorMinSeverity}+ and off the benign connection-reset list)"
+                        + DarlingMcpBlockingTools.ForChosenDatabases(databases), logger, cancellationToken), databases.Describe())!;
 
             var collected = new Collected<SevereErrorRecord>(null, resolved.ServerId, resolved.ServerName, rows, xmls.Count, lastCapturedAt, now);
             var notice = await NoticeAsync(postgres, collected, hours_back, EarliestOf(rows.Select(r => r.EventTime)), emptyAnswer: false, logger, cancellationToken);
@@ -182,6 +210,7 @@ public sealed class DarlingMcpHealthParserTools
                 truncation_note = notice.TruncationNote,
                 source_observed = true,
                 last_captured_at = Stamp(lastCapturedAt),
+                database_name = databases.Describe(),
                 error_count = rows.Count,
                 shown = Math.Min(rows.Count, limit),
                 errors = shown.Select(r => new

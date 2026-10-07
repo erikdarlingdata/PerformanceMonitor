@@ -670,7 +670,7 @@ A route names what it matches and a destination per channel type, and **an empty
 
 | Family | Owns |
 |---|---|
-| `self-monitor` | The monitor about itself: `Collection Stopped`, `Capture Down`, `Compression Job Stuck`, `Refresh Job Stuck`, `Retention Job Stuck`, `Store Job Failing`, `Store Disk Pressure`, `Store Runtime Upgrade`, `Store Job Over Cadence`, `Retention Held`, `Custom Alert Rules Unhealthy`, `Stale Mute Rules`, `Web TLS Certificate Expiring`, `MCP TLS Certificate Expiring`, `Store Settings Need Attention`, `Collector Cost Regression`, `Collection Falling Behind`, `Collection Gap At Start` (once per start, when the service was not collecting for 15 minutes or more before it started) |
+| `self-monitor` | The monitor about itself: `Collection Stopped`, `Capture Down`, `Compression Job Stuck`, `Refresh Job Stuck`, `Retention Job Stuck`, `Store Job Failing`, `Store Disk Pressure`, `Store Runtime Upgrade`, `Store Job Over Cadence`, `Retention Held`, `Custom Alert Rules Unhealthy`, `Stale Mute Rules`, `Web TLS Certificate Expiring`, `MCP TLS Certificate Expiring`, `Store Settings Need Attention`, `Collector Cost Regression`, `Collection Falling Behind`, `Collection Gap At Start` (once per start, when the service was not collecting for 15 minutes or more before it started), `Collection Gaps In History` (once a day, after 03:00Z, for the previous UTC day: an hour whose servers, or perfmon collection passes, fell below half of the usual for that hour; changing the perfmon collection schedule can trigger it for a few days) |
 | `reports` | Scheduled prose, never a page: `Collector Cost Digest`, `Fleet Sweep Rollup`, `Analysis Singles Digest` |
 | `agent-jobs` | `Failed Agent Job`, `Long-Running Job`, `Agent Not Running` |
 | `performance` | Everything about a monitored server the on-call is paged for: `High CPU`, `Blocking Detected`, `Blocking Wait Time`, `Deadlocks Detected`, `Poison Wait`, `Long-Running Query`, `tempdb Space`, `Volume Free Space`, `Version Store (PVS)`, `Database File Growth`, `Database State`, `Forced Plan Failing`, the three PostgreSQL outage predictors, the five `AG …` alerts, `Server Unreachable` / `Server Restored`, every `Custom:<id>` rule and every `Analysis: …` finding — and any metric the taxonomy does not name, so an unclassified alert lands where every alert landed before routes existed |
@@ -821,6 +821,10 @@ A **file-only** block (not seeded into the control plane): it describes the depl
 **Declaring nothing changes nothing, with one exception worth knowing about on upgrade.** The instructions, the resolution-miss message, and `list_servers`' empty-registry sentence are byte-for-byte what they were. But `list_servers`' JSON envelope carries `this_store_covers`, `peer_fleets` and `peer_note` on *every* response, declared or not — so a script comparing that tool's exact shape sees three new keys even if you never write a `peers` block. That is deliberate: an empty `peer_fleets` means *either* "this is the only store" *or* "nobody declared the siblings", and a note that only appeared when peers were declared would say nothing in precisely the case that produces the wrong conclusion.
 
 **A `peers` block that fails validation is refused whole, and nothing is disclosed** — not the valid subset. An unfinished block that asserts coverage which may be wrong is worse than no block, and the service logs each problem at Critical. The check runs inside the publish rather than only in config validation, because the MCP host loads its own config and deliberately never validates it (its fail-closed checks are host-local), so validation alone would leave the one path that actually broadcasts uncovered.
+
+### heartbeat
+
+An optional outbound ping to a dead-man's-switch URL, off unless `url` is set. File-only: the web Admin and MCP cannot edit it, and no page returns it. See [Watching the service from outside](#watching-the-service-from-outside).
 
 ### No Schedule Knobs, by Design
 
@@ -1333,6 +1337,50 @@ The service is built to restart cleanly, any time:
 - Mute rules (`config_mute_rules`) load once at service startup — restart the service after adding rows.
 
 A monitored server that is down is retried every 60 seconds forever; a collector that errors is logged and retried at its next scheduled time; a mid-cycle connection-level failure forces a clean reconnect and re-probe. The loop never dies for one bad cycle.
+
+### Watching the service from outside
+
+If the service stops, nothing inside it can tell you. Two ways to have something outside the box notice.
+
+Option 1 is the `heartbeat` block. The service sends a GET to a URL you choose (a dead-man's-switch check such as Healthchecks.io or Uptime Kuma). Your check alerts when the pings stop. Add this to `darling.json`:
+
+```json
+"heartbeat": {
+  "url": "file:/etc/darling/heartbeat-url",
+  "intervalSeconds": 300
+}
+```
+
+The file holds one line, the check's full URL (for example `https://hc-ping.example/your-check-id`).
+
+- It is off unless `url` is set (an absent block, `"heartbeat": null` and an empty `url` all mean off). `intervalSeconds` defaults to 300 and must be between 60 and 3600. A bad value stops the service at start, like the rest of the config checks.
+- **The whole URL is a secret.** It carries the check's token, and anyone who holds it can send "up" pings that keep your check green while the service is down. Put it in a `file:/path` reference, with the file readable by the service account only, rather than writing it in `darling.json`. An `env:NAME` reference works too, but on Windows a service's environment is stored where other local users can read it, so prefer the file. These are the same two reference forms the other secrets take. A URL written straight into `darling.json` works, but it is plaintext in the config, readable by anyone who can read that file.
+- The start-up check looks only at the shape of a reference (a variable name, an absolute path) and does not read it, so commands such as `--validate-config` and `--diagnostics-bundle` work from a shell that cannot see the service's variable or file. The service reads the reference on every ping, so a rotated token file is picked up without a restart. A file larger than 8 KB is refused. A reference that cannot be read logs one fixed warning, then at most one per hour, and skips the ping.
+- A URL that carries a user name and password (`https://user:pass@host/`) is refused: the service would not send them. Put the token in the path.
+- `http://` is allowed (a check on your own network is common) but the token then crosses the network unencrypted on every ping, so the service logs one warning at start. Use `https://` where the check host offers it.
+- Because the file that a `file:` reference names decides where the service sends its GET, protect it as you protect `darling.json`.
+- The service never writes the URL to the log, which names only the scheme and host, and a diagnostics bundle aliases that host. The web Admin, the MCP tools and the triage page cannot read or edit it. Edit it in the file and restart.
+- The service pings only while it is collecting. Each interval it checks the newest `collection_log` time across enabled servers. It sends the ping when no server is enabled, or when the newest collection is no more than 15 minutes old and no more than 5 minutes ahead of the clock. It skips the ping when collection is older than that, when the newest time is further ahead of the clock than that (a clock jump or a stray row), when no enabled server has a collection row, or when the store cannot be read. The service still pings with no enabled servers, so a check on this heartbeat proves the process is up and the store is readable, not that any server is being monitored. So your check alerts when the process stops and also when it keeps running but no longer collects.
+- A ping waits at most 10 seconds, follows no redirects, and counts only a 2xx answer as success. A failed ping logs one warning, then at most one more per hour until a ping succeeds, and then one line saying it recovered. A failed ping never raises an alert and never slows collection.
+
+Option 2 is a check of your own. If your monitoring already runs checks on the host, use two. The first: the service process is running (the Windows service, the systemd unit or the container). The second: the newest `collection_log` time is within 15 minutes. Run this against the store. It returns `true` when collection is current:
+
+```sql
+SELECT coalesce(
+         (SELECT max(n.collection_time)
+          FROM config.config_monitored_servers c
+          CROSS JOIN LATERAL (
+              SELECT l.collection_time
+              FROM collect.collection_log l
+              WHERE l.server_id = c.server_id
+              ORDER BY l.collection_time DESC
+              LIMIT 1) n
+          WHERE c.is_enabled),
+         'epoch'::timestamp)
+       > (now() AT TIME ZONE 'UTC') - interval '15 minutes' AS collecting;
+```
+
+`collection_time` is stored in UTC, which is why the check compares it with `now() AT TIME ZONE 'UTC'`. The query reads one row per enabled server from the `(server_id, collection_time)` index. It returns `false` when no enabled server has a row, so treat a store with no enabled servers as a case for your own rule.
 
 ---
 

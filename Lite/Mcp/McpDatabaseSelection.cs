@@ -19,6 +19,16 @@ internal static class McpDatabaseSelection
         : ManyDatabasesDescription;
 
     /// <summary>
+    /// How a sentence names the databases a storage read was asked about: null for every database, <c>database 'X'</c> for one
+    /// and "the chosen databases" for two or more (Darling's <c>DarlingMcpObjectStatsTools.DescribeScope</c>). Never a verdict
+    /// about a database the read did not look at.
+    /// </summary>
+    internal static string? Scope(IReadOnlyList<string>? names) =>
+        names == null || names.Count == 0 ? null
+        : names.Count == 1 ? $"database '{names[0]}'"
+        : ManyDatabasesDescription;
+
+    /// <summary>
     /// What a selection adds to an empty answer's sentence: nothing for every database, " for the database X" for one and
     /// " for the chosen databases" for two or more (Darling's <c>ForChosenDatabases</c>).
     /// </summary>

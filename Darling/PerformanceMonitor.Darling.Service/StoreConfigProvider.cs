@@ -62,7 +62,13 @@ public sealed class StoreConfigProvider
     /// once-per-call warning rather than to silence.</para>
     /// </summary>
     private int _viewReadFailureStreak;
-    private int _lastReenterCountLogged = -1;
+    private (int Count, bool Waiting) _lastReenterLogged = (-1, false);
+
+    /// <summary>
+    /// Says whether the one-time pin step is open and has not been able to run (#5456). Set by the worker right after the
+    /// password key start; null (tests, other callers) means it is not waiting.
+    /// </summary>
+    public Func<bool>? LegacyPinsWaiting { get; set; }
 
     public StoreConfigProvider(NpgsqlDataSource postgres, ILogger? logger = null)
     {
@@ -1265,7 +1271,7 @@ ON CONFLICT (server_id) DO NOTHING", connection, transaction) { CommandTimeout =
                does not exist, deliberately. */
             AddNullableText(command, server.RemediationUsername);
             AddNullableText(command, server.RemediationEncryptedPassword);
-            /* V167 (#5452): the AWS role and its external ID, trimmed with blank as NULL. Seeded for a NEW row only,
+            /* V168 (#5452): the AWS role and its external ID, trimmed with blank as NULL. Seeded for a NEW row only,
                like every other column here (ON CONFLICT DO NOTHING). An external ID with no role would break the
                table's check, so it is dropped with the role it belonged to; Validate refuses that file earlier. */
             var seedRole = AwsRoleSettings.Normalize(server.AwsRoleArn);
@@ -1356,20 +1362,21 @@ ON CONFLICT (server_id) DO NOTHING", connection, transaction) { CommandTimeout =
 
             var servers = await ReadMonitoredServersAsync(connection, bootstrap, cancellationToken, pins);
 
-            /* Once per change, not once per reload: the count is the same on every reload until someone enters a password. */
+            /* Once per change, not once per reload: the count is the same on every reload until someone enters a password.
+               #5456: while the one-time pin step is waiting to run, the same count is a different message (do not enter
+               them again yet), so the line is repeated once when that changes. */
             var enterAgain = CountPasswordsToEnterAgain(servers, smtp, LegacyDpapi.Current);
-            if (enterAgain == 1 && _lastReenterCountLogged != 1)
+            var waiting = LegacyPinsWaiting?.Invoke() == true;
+            if ((enterAgain, waiting) != _lastReenterLogged)
             {
-                _logger?.LogWarning("1 saved password needs to be entered again. It is in the old format and cannot be opened here, or it no longer matches its server's connection settings");
-            }
-            else if (enterAgain > 1 && enterAgain != _lastReenterCountLogged)
-            {
-                _logger?.LogWarning(
-                    "{Count} saved passwords need to be entered again. They are in the old format and cannot be opened here, or they no longer match their server's connection settings",
-                    enterAgain);
+                var line = ReenterLine(enterAgain, waiting);
+                if (line is not null)
+                {
+                    _logger?.LogWarning("{ReenterLine}", line);
+                }
             }
 
-            _lastReenterCountLogged = enterAgain;
+            _lastReenterLogged = (enterAgain, waiting);
             var schedules = await ReadScheduleOverridesAsync(connection, _logger, cancellationToken);
 
             /* #4938: ResolveSchedule drops a run time that cannot apply, and it runs every sweep, so it stays pure and
@@ -1824,6 +1831,29 @@ ORDER BY name", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoo
     }
 
     /// <summary>
+    /// The line logged when saved passwords have to be entered again, or null when none do. While the one-time pin step
+    /// is waiting to run (<paramref name="waiting"/>) the old-format values are not lost yet, so the line says to wait.
+    /// </summary>
+    internal static string? ReenterLine(int count, bool waiting)
+    {
+        if (count <= 0)
+        {
+            return null;
+        }
+
+        if (waiting)
+        {
+            return count == 1
+                ? "1 saved old-format password waits for the one-time pin step. Do not enter it again yet."
+                : $"{count} saved old-format passwords wait for the one-time pin step. Do not enter them again yet.";
+        }
+
+        return count == 1
+            ? "1 saved password needs to be entered again. It is in the old format and cannot be opened here, or it no longer matches its server's connection settings"
+            : $"{count} saved passwords need to be entered again. They are in the old format and cannot be opened here, or they no longer match their server's connection settings";
+    }
+
+    /// <summary>
     /// How many saved old-format passwords this service cannot open and the operator must enter again: a value in a
     /// server slot, a remediation slot or the SMTP slot that is not a reference or a sealed value, on a machine that cannot
     /// open it or with no declaration or matching pin (#5366).
@@ -1903,7 +1933,7 @@ ORDER BY name", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoo
                about; it is the shipped state, and it means this server has no phase-1 surface. */
             RemediationUsername = reader.IsDBNull(17) ? null : reader.GetString(17),
             RemediationEncryptedPassword = reader.IsDBNull(18) ? null : reader.GetString(18),
-            /* V167 (#5452): the AWS role and its external ID. Nullable with no default: NULL is every server nobody
+            /* V168 (#5452): the AWS role and its external ID. Nullable with no default: NULL is every server nobody
                has pointed at a role, and it means the process's own credentials. */
             AwsRoleArn = reader.IsDBNull(19) ? null : reader.GetString(19),
             AwsExternalId = reader.IsDBNull(20) ? null : reader.GetString(20),

@@ -162,17 +162,17 @@ public sealed class AwsPerServerRoleLiveTests
                 "SELECT count(*) FROM pg_constraint WHERE conname = 'config_monitored_servers_aws_role_check'", ct));
             Assert.True(await ProbeSentinelAsync(owner, ct), "the viewer's probe must see the role column on a migrated store");
 
-            /* A V166 store: the columns gone, the stamp rolled back, a server already registered. */
+            /* A V167 store: the columns gone, the stamp rolled back, a server already registered. */
             await InsertServerAsync(owner, 8101, null, null, ct);
             await ExecAsync(owner, "ALTER TABLE config.config_monitored_servers DROP COLUMN aws_external_id_set, DROP COLUMN aws_external_id, DROP COLUMN aws_role_arn", ct);
-            await ExecAsync(owner, "DELETE FROM darling_schema_version WHERE version >= 167", ct);
+            await ExecAsync(owner, "DELETE FROM darling_schema_version WHERE version >= 168", ct);
             Assert.False(await ProbeSentinelAsync(owner, ct), "the probe must not see the role column once it is gone");
 
             await PgMigrations.MigrateAsync(owner, ct);
 
             Assert.True(await ProbeSentinelAsync(owner, ct));
             Assert.Equal("<null> | <null> | false", await StoredAsync(owner, 8101, ct));
-            Assert.Equal("167", await TextAsync(owner, "SELECT max(version) FROM darling_schema_version", ct));
+            Assert.Equal("168", await TextAsync(owner, "SELECT max(version) FROM darling_schema_version", ct));
 
             /* Running the rung's text again changes nothing and raises nothing. */
             var rung = PgMigrations.Scripts.Single(s => s.Version == AwsPerServerRoleRungTests.RungVersion).Sql;

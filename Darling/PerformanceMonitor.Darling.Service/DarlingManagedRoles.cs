@@ -165,7 +165,7 @@ public static class DarlingManagedRoles
                    learns a server is armed at all: the phase-1 surface exists when this is non-null, so a
                    `viewer` seat that could not read it would see no surface on an armed server. */
                 "remediation_username",
-                /* V167 (#5452): the AWS role Darling assumes for an RDS or Aurora target, and whether an external
+                /* V168 (#5452): the AWS role Darling assumes for an RDS or Aurora target, and whether an external
                    ID is stored with it. Non-secret: an account id is an identifier, not a credential, and the
                    viewer has to be able to SHOW which role a target uses. The flag lets it show that an
                    external ID is set without ever being able to read the ID. */
@@ -176,7 +176,7 @@ public static class DarlingManagedRoles
                anything in this table is secret it is. Named explicitly rather than left unclassified
                because unclassified is only invisible until someone "fixes" the failing security gate by
                adding the column to whichever list is nearer. */
-            /* aws_external_id (V167, #5452) is write-only for these roles. AWS does not treat an external ID as
+            /* aws_external_id (V168, #5452) is write-only for these roles. AWS does not treat an external ID as
                a secret, but a role that trusts a whole account plus an external ID is only as closed as that ID
                is private, so it is named here rather than left unclassified. */
             SecretColumns: new[] { "encrypted_password", "remediation_encrypted_password", "aws_external_id" }),
@@ -1171,10 +1171,10 @@ GRANT EXECUTE ON FUNCTION {config}.edit_monitored_server({EditMonitoredServerLeg
 --     self-managed store gets the same function and trigger from tools/provision-roles.sql.
 {BuildServerPasswordRulesSql(config)}
 
--- 10a. The password key tables (V165, #5366): written only by the store owner (the service, its command line and the
+-- 10a. The password key tables (V165, #5366; V167 adds the legacy pin candidate table): written only by the store owner (the service, its command line and the
 --     migration runner); a trigger on each table refuses every other writer. This is the grant side of the same rule,
 --     and it runs after EVERY blanket grant above (the schema-wide SELECT and write grants and the mcp column ACL), so
---     none of them can put a privilege back. REVOKE ALL ... CASCADE takes every privilege on the four tables from
+--     none of them can put a privilege back. REVOKE ALL ... CASCADE takes every privilege on the five tables from
 --     PUBLIC and the three roles, TRIGGER and REFERENCES included, so no role can add a new trigger or foreign key. A
 --     trigger or foreign key already there (made while a role held the privilege) is dropped by the loops below, with
 --     a WARNING, because it would outlast the REVOKE. Then SELECT on the key and service-state tables is granted back
@@ -1182,6 +1182,7 @@ GRANT EXECUTE ON FUNCTION {config}.edit_monitored_server({EditMonitoredServerLeg
 --     pin tables are read by the owner only. Provisioning runs after the migrations, so the tables exist here.
 REVOKE ALL ON {config}.password_key, {config}.password_key_service,
    {config}.legacy_secret_pin, {config}.legacy_secret_pin_marker FROM PUBLIC, {admin}, {viewer}, {mcp} CASCADE;
+REVOKE ALL ON {config}.legacy_secret_pin_candidate FROM PUBLIC, {admin}, {viewer}, {mcp} CASCADE;
 GRANT SELECT ON {config}.password_key, {config}.password_key_service TO {admin};
 DO $do$
 DECLARE
@@ -1191,8 +1192,8 @@ BEGIN
       SELECT t.tgname, t.tgrelid::pg_catalog.regclass::pg_catalog.text AS tablename
       FROM pg_catalog.pg_trigger AS t
       WHERE NOT t.tgisinternal
-        AND t.tgrelid IN (pg_catalog.to_regclass('{config}.password_key'), pg_catalog.to_regclass('{config}.password_key_service'), pg_catalog.to_regclass('{config}.legacy_secret_pin'), pg_catalog.to_regclass('{config}.legacy_secret_pin_marker'))
-        AND t.tgname NOT IN ('trg_password_key_owner_only_row', 'trg_password_key_owner_only_truncate', 'trg_password_key_service_owner_only_row', 'trg_password_key_service_owner_only_truncate', 'trg_legacy_secret_pin_owner_only_row', 'trg_legacy_secret_pin_owner_only_truncate', 'trg_legacy_secret_pin_marker_owner_only_row', 'trg_legacy_secret_pin_marker_owner_only_truncate')
+        AND t.tgrelid IN (pg_catalog.to_regclass('{config}.password_key'), pg_catalog.to_regclass('{config}.password_key_service'), pg_catalog.to_regclass('{config}.legacy_secret_pin'), pg_catalog.to_regclass('{config}.legacy_secret_pin_marker'), pg_catalog.to_regclass('{config}.legacy_secret_pin_candidate'))
+        AND t.tgname NOT IN ('trg_password_key_owner_only_row', 'trg_password_key_owner_only_truncate', 'trg_password_key_service_owner_only_row', 'trg_password_key_service_owner_only_truncate', 'trg_legacy_secret_pin_owner_only_row', 'trg_legacy_secret_pin_owner_only_truncate', 'trg_legacy_secret_pin_marker_owner_only_row', 'trg_legacy_secret_pin_marker_owner_only_truncate', 'trg_legacy_secret_pin_candidate_owner_only_row', 'trg_legacy_secret_pin_candidate_owner_only_truncate')
    LOOP
       RAISE WARNING 'Dropped trigger % from % because only the store owner may write the password key tables.', stray.tgname, stray.tablename;
       EXECUTE pg_catalog.format('DROP TRIGGER %I ON %s', stray.tgname, stray.tablename);
@@ -1202,7 +1203,7 @@ BEGIN
       SELECT k.conname, k.conrelid::pg_catalog.regclass::pg_catalog.text AS tablename
       FROM pg_catalog.pg_constraint AS k
       WHERE k.contype = 'f'
-        AND k.confrelid IN (pg_catalog.to_regclass('{config}.password_key'), pg_catalog.to_regclass('{config}.password_key_service'), pg_catalog.to_regclass('{config}.legacy_secret_pin'), pg_catalog.to_regclass('{config}.legacy_secret_pin_marker'))
+        AND k.confrelid IN (pg_catalog.to_regclass('{config}.password_key'), pg_catalog.to_regclass('{config}.password_key_service'), pg_catalog.to_regclass('{config}.legacy_secret_pin'), pg_catalog.to_regclass('{config}.legacy_secret_pin_marker'), pg_catalog.to_regclass('{config}.legacy_secret_pin_candidate'))
    LOOP
       RAISE WARNING 'Dropped foreign key % on % because it references a password key table.', stray.conname, stray.tablename;
       EXECUTE pg_catalog.format('ALTER TABLE %s DROP CONSTRAINT %I', stray.tablename, stray.conname);
@@ -1213,7 +1214,7 @@ BEGIN
       FROM pg_catalog.pg_class AS c
       CROSS JOIN LATERAL pg_catalog.aclexplode(c.relacl) AS a
       LEFT JOIN pg_catalog.pg_roles AS r ON r.oid = a.grantee
-      WHERE c.oid IN (pg_catalog.to_regclass('{config}.password_key'), pg_catalog.to_regclass('{config}.password_key_service'), pg_catalog.to_regclass('{config}.legacy_secret_pin'), pg_catalog.to_regclass('{config}.legacy_secret_pin_marker'))
+      WHERE c.oid IN (pg_catalog.to_regclass('{config}.password_key'), pg_catalog.to_regclass('{config}.password_key_service'), pg_catalog.to_regclass('{config}.legacy_secret_pin'), pg_catalog.to_regclass('{config}.legacy_secret_pin_marker'), pg_catalog.to_regclass('{config}.legacy_secret_pin_candidate'))
         AND (a.grantee = 0 OR r.rolname IN ('{admin}', '{viewer}', '{mcp}'))
         AND NOT (COALESCE(r.rolname = '{admin}', false) AND a.privilege_type = 'SELECT'
                  AND c.oid IN (pg_catalog.to_regclass('{config}.password_key'), pg_catalog.to_regclass('{config}.password_key_service')))
