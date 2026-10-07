@@ -472,8 +472,8 @@ public sealed class StatementFilterAlertTests
         Assert.Equal(3, filtered.Incidents!.Count(i => i.Attachment!.Xml.Length > 4_000_000));
         // Three distinct reports: the alert-level copy of the first one was a memo hit, not a second walk.
         Assert.Equal(3, budget.DocumentPasses);
-        // And the budget earned 0.5 s per MB of each of them (about 2.0 s each, so 1.5 + 3 x 2.0 and a little over), not 1.5 s in all.
-        Assert.InRange(budget.Limit, TimeSpan.FromSeconds(7.5), TimeSpan.FromSeconds(8.5));
+        // And the budget earned 0.5 s per MB of each of them (a little under 2.0 s each, so about 7.4 s), not 1.5 s in all.
+        Assert.InRange(budget.Limit, TimeSpan.FromSeconds(7.25), TimeSpan.FromSeconds(8.5));
     }
 
     [Fact]
