@@ -92,6 +92,7 @@ namespace Darling.Tests;
 /// <para>Files whose names carry <c>ForcePlan</c> are outside every sweep here by standing decision, not by
 /// allowance: the force-plan bot is not this campaign's to census.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class McpPayloadContractCensusTests
 {
     /* ───────────────────────── the population ───────────────────────── */

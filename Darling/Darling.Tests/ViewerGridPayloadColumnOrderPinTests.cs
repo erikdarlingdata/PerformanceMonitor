@@ -46,6 +46,7 @@ namespace Darling.Tests;
 /// exactly like the other parity pins. Headers are read verbatim, so a header carrying an XML entity would
 /// have to be written into the table in its raw <c>&amp;#x0394;</c> form; no pinned header has one today.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class ViewerGridPayloadColumnOrderPinTests
 {
     /// <summary>A grid whose payload columns are pinned: where the anchor sits, and what must follow it.</summary>

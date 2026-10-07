@@ -19,6 +19,7 @@ namespace Darling.Tests;
 /// it, so a preview cut BEFORE the at-sign is judged clean and returns part of the secret. These pins walk every cut
 /// length over the shipping helper <see cref="McpHelpers.TruncateStatement"/> and <see cref="McpHelpers.StatementPreview"/>.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class StatementPreviewCutPinTests
 {
     /// <summary>Text in the corpus's named statements that must never leave in any preview of them.</summary>

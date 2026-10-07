@@ -19,6 +19,7 @@ namespace Darling.Tests;
 /// Procedures cards, where its choice lives, what it sends, and that the card draws the reads ranking's retention
 /// notice. The server half is pinned by <c>TopRankingTests</c> and the live classes.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class TopRankingPagePinTests
 {
     private static string Tab() =>

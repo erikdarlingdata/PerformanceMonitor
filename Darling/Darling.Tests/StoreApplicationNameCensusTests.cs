@@ -33,6 +33,7 @@ namespace Darling.Tests;
 /// <c>WithApplicationName(</c> call on the same line, the same round-1-review discipline the TZ census
 /// applies to its own pin).</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class StoreApplicationNameCensusTests
 {
     /* Same floors as StoreSessionTimeZonePinCensusTests: this scan finds the identical 29 call sites (the

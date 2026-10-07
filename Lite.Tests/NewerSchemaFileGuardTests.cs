@@ -12,6 +12,7 @@ namespace PerformanceMonitorLite.Tests;
 /// #4727: a data file stamped with a schema version newer than the app's is refused, with a message naming both
 /// versions, and nothing is written to it. A read-only open would not be enough: the collectors would still fail.
 /// </summary>
+[Trait("Stage", "Guard")]
 public class NewerSchemaFileGuardTests : IDisposable
 {
     private readonly string _tempDir;

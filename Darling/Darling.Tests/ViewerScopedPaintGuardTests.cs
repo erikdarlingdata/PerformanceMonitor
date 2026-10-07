@@ -61,6 +61,7 @@ namespace Darling.Tests;
 /// count at ten and its await count at two — every count a name-and-tally control could check is invariant
 /// across it, which is why one was not used.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class ViewerScopedPaintGuardTests
 {
     /// <summary>

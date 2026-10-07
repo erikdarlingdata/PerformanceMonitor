@@ -166,6 +166,7 @@ namespace PerformanceMonitorLite.Tests;
 /// ends of that copy.</para>
 /// </summary>
 [Trait("Reads", "Darling")]
+[Trait("Stage", "Guard")]
 public sealed class MeasurementContractCensusTests
 {
     /* ---------------- the swept population ---------------- */

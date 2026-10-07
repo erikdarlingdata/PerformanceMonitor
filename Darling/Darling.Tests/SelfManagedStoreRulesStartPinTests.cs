@@ -18,6 +18,7 @@ namespace Darling.Tests;
 /// method on a live worker, so no unit seam reaches it; this reads the worker's source, comments removed, and fails when
 /// any of the three calls is gone from the provisioning chain or moves out of its branch.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class SelfManagedStoreRulesStartPinTests
 {
     private static string ProvisioningChain()

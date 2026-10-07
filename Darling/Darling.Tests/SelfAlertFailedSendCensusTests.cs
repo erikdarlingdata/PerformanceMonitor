@@ -34,6 +34,7 @@ namespace Darling.Tests;
 /// <c>AfterSelfFire</c> arm pins the metric and the interval the arm passes, because the interval is the one
 /// argument a wrong copy would leave compiling: the back-dated stamp then opens the arm's gate at the wrong time.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class SelfAlertFailedSendCensusTests
 {
     private const string RestoreNotice =

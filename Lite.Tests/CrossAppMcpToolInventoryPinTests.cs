@@ -39,6 +39,7 @@ namespace Lite.Tests;
 /// </para>
 /// </summary>
 [Trait("Reads", "Darling")]
+[Trait("Stage", "Guard")]
 public sealed class CrossAppMcpToolInventoryPinTests
 {
     private const string LiteMcpDir = "Lite/Mcp";

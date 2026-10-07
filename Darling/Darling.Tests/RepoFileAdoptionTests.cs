@@ -71,6 +71,7 @@ namespace Darling.Tests;
 /// without a reader on top of it. That is the same duplication one layer down, it is a larger population
 /// than this one was, and it is deliberately not in scope.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class RepoFileAdoptionTests
 {
     private const string Authority = "RepoFile.cs";

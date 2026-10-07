@@ -21,6 +21,7 @@ namespace Darling.Tests;
 /// make an id for a store nobody started, and two makers racing is what the row's one-row CHECK and the make's
 /// race-safe update exist to survive, not to invite.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class StoreInstallIdSourcePinTests
 {
     private static readonly string[] ProductProjects =

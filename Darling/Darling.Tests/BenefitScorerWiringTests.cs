@@ -22,6 +22,7 @@ namespace Darling.Tests;
 /// is now the one place that runs <see cref="PlanAnalyzer.Analyze"/> then <see cref="BenefitScorer.Score"/>,
 /// and every entry point that used to call the analyzer directly calls the pipeline instead.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class BenefitScorerWiringTests
 {
     /// <summary>

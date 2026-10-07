@@ -18,6 +18,7 @@ namespace Darling.Tests;
 /// window to run: the probes sit outside the charts' main <c>Task.WhenAll</c>, the note is fed from both series, and the banner is
 /// declared in an Auto row. The choice itself is in <c>ViewerOverviewBlockingLaneDataStartTests</c>.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class ViewerOverviewBlockingLaneDataStartPinTests
 {
     private static string Code() => ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "CorrelatedTimelineLanesControl.xaml.cs").ReplaceLineEndings("\n");

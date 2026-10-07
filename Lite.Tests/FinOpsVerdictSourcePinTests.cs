@@ -28,6 +28,7 @@ namespace Lite.Tests;
 /// this whole issue is about — the shared predicate removed the duplicated LOGIC, but the two apps still
 /// carry their own copies of the SQL that feeds it.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class FinOpsVerdictSourcePinTests
 {
     private const string Utilization = "Lite/Services/LocalDataService.FinOps.Utilization.cs";

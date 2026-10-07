@@ -24,6 +24,7 @@ namespace Lite.Tests;
 /// <see cref="CollectorScheduleDefaults"/>, and the delta calculator / server-identity idioms
 /// must be the shared implementations — so the two SKUs cannot drift apart silently.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class SharedCollectorDefaultsPinTests
 {
     private static string FindRepoFile(string relativePath)

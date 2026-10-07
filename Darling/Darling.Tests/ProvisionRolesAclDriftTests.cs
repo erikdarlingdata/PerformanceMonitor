@@ -54,6 +54,7 @@ namespace Darling.Tests;
 /// identical comparison against a mutated copy of the file and asserts it reports the difference, so a parser
 /// that silently matched nothing (a reformatted GRANT, a renamed file) can never pass as "no drift".</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class ProvisionRolesAclDriftTests
 {
     /// <summary>

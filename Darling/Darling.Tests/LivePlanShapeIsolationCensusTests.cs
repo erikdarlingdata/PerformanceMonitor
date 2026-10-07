@@ -23,6 +23,7 @@ namespace Darling.Tests;
 /// <para>This is a plain token scan over the raw file text and deliberately counts comments: the rule is about
 /// where a file puts its database, not about executable statements, so no comment filter applies.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class LivePlanShapeIsolationCensusTests
 {
     /// <summary>The classes that run <c>EXPLAIN</c> against the shared store and are kept there on purpose, each

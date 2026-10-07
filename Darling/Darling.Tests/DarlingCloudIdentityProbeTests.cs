@@ -512,6 +512,7 @@ public sealed class DarlingCloudIdentityProbeTests
 /// lane orders' "real gates" list). Proved once, by hand, that each assertion fails when the source it pins is
 /// broken (reverted after).
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class DarlingCloudIdentityProbeSourcePinTests
 {
     private const string ProbeClassName = "DarlingCloudIdentityProbe";

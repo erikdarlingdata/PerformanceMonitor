@@ -28,6 +28,7 @@ namespace Darling.Tests;
 /// and the columns the store's edit function compares. Also pins the identity's comparison rule to the one the edit
 /// and connection-test paths use today, and the byte layout of the associated data.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class PasswordBindingCensusTests
 {
     private static readonly ServerConnectionIdentity Base =

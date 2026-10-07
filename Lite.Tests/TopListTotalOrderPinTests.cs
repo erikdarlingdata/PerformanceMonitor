@@ -21,6 +21,7 @@ namespace Lite.Tests;
 /// the page's own ORDER BY. A tie at the candidate cut then picks the same keys in every refill round, so one read cannot return a
 /// different page from the next. The statements are inline in the reader methods, so the pin reads the method text from the source.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class TopListTotalOrderPinTests
 {
     private const string QueryStatsKey = "database_name, query_hash, host_object_name";

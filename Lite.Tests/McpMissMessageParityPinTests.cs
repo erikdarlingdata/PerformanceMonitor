@@ -34,6 +34,7 @@ namespace Lite.Tests;
 /// somebody added an unshared one.</para>
 /// </summary>
 [Trait("Reads", "Darling")]
+[Trait("Stage", "Guard")]
 public sealed class McpMissMessageParityPinTests
 {
     /// <summary>

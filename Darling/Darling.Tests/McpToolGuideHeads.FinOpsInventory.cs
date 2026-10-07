@@ -16,6 +16,7 @@ namespace Darling.Tests;
 /// Head pins for the FinOps Server Inventory: <c>get_finops_inventory</c>. Follows the pattern in
 /// <see cref="McpToolGuideHeadsPvsTests"/>.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class McpToolGuideHeadsFinOpsInventoryTests
 {
     private static readonly string[] ConvertedTools =

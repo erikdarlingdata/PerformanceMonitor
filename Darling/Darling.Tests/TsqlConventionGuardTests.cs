@@ -94,6 +94,7 @@ namespace Darling.Tests;
 /// which is how the gap was found rather than assumed. The injected path has to EXIST — that guard drops
 /// references which do not resolve on disk, so a made-up filename is a red-proof that proves nothing.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class TsqlConventionGuardTests
 {
     /* Rule identifiers. Covered ones are what Findings can emit; uncovered ones exist so the disposition map

@@ -34,6 +34,7 @@ namespace PerformanceMonitorLite.Tests;
 /// other tests that do the same share.</para>
 /// </summary>
 [Collection("app-logger-statics")]
+[Trait("Stage", "Guard")]
 public sealed class FinOpsServerInventoryTests : IDisposable
 {
     private readonly string _tempDir = Path.Combine(Path.GetTempPath(), "LiteFinOpsInv_" + Guid.NewGuid().ToString("N")[..8]);
