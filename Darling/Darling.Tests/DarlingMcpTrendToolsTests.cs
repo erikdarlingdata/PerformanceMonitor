@@ -354,12 +354,21 @@ public sealed class DarlingMcpTrendToolsSurfaceAndSqlTests
     public void ProcedureDurationTrendSql_PrefersTheStoredInterval_NeverFabricatesZero_AndMirrorsTheViewer()
     {
         var sql = DarlingTrendReader.ProcedureDurationTrendFilteredSql;
-        Assert.Contains("CASE WHEN MAX(sample_interval_seconds) IS NULL", sql, StringComparison.Ordinal);
-        Assert.Contains("ELSE NULLIF(MAX(sample_interval_seconds), 0)", sql, StringComparison.Ordinal);
-        Assert.DoesNotContain("ELSE 0", sql, StringComparison.Ordinal);
+        /* #5449: the procedure statement does not read the stored interval with a LAG fallback as the query views do. Its time
+           axis is the collector's SUCCESS runs (ProcedureCollectionsCte): a point's seconds are the gap to the previous point,
+           unrated past the collector's one-hour policy, and the stored interval answers only for a restart (all rows 0: unrated)
+           and for the series' first point. The old span term and the idle-run union are gone. */
+        Assert.Contains("CASE WHEN is_stored AND max_interval_seconds = 0 THEN NULL", sql, StringComparison.Ordinal);
+        Assert.Contains($"CASE WHEN gap_seconds <= {CollectorDeltaCalculator.DefaultMaxGapSeconds} THEN gap_seconds END", sql, StringComparison.Ordinal);
+        Assert.Contains("WHEN is_stored THEN NULLIF(max_interval_seconds, 0)", sql, StringComparison.Ordinal);
+        Assert.Equal(2, System.Text.RegularExpressions.Regex.Matches(sql, @"collection_time >= \$2 - INTERVAL '3600 seconds'").Count);
+        Assert.Contains("FROM gapped\nWHERE collection_time >= $2", string.Join('\n', Lines(sql)), StringComparison.Ordinal);
+        Assert.DoesNotContain("COALESCE(MAX(", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("series_first", sql, StringComparison.Ordinal);
         Assert.Contains("CASE WHEN interval_seconds > 0 THEN total_elapsed_ms / interval_seconds END AS elapsed_ms_per_second", sql, StringComparison.Ordinal);
+        Assert.Contains("SUM(rated_elapsed_ms) / SUM(rated_seconds) AS elapsed_ms_per_second", sql, StringComparison.Ordinal);
 
-        /* #5449: the procedure statement's per-collection CTE is named stored (idle runs are unioned after it as raw). The viewer's per-collection CTE minus its database-filter lines is the MCP statement's, whitespace aside (since
+        /* The viewer's per-collection CTEs minus their database-filter lines are the MCP statement's (whitespace aside; since
            #5244 both run the filtered statement).
            #5414 M1: the filter is inside the aggregates, so the lines that differ are the two sums (FILTERed in the
            viewer's) and the matched-rows count; everything else, the stored-interval CASE and the FROM / WHERE (which
@@ -367,11 +376,17 @@ public sealed class DarlingMcpTrendToolsSurfaceAndSqlTests
         static bool IsFilteredSumLine(string l) =>
             l.Contains("delta_elapsed_time", StringComparison.Ordinal) || l.Contains("delta_execution_count", StringComparison.Ordinal)
             || l.Contains("matched_rows", StringComparison.Ordinal);
-        var viewerCte = Cte(Lf(ViewerDataService.ProcedureDurationTrendSql), "stored AS\n(");
-        Assert.Equal(3, viewerCte.Split('\n').Count(l => l.Contains("FILTER (WHERE $4::text[] IS NULL OR database_name = ANY($4))", StringComparison.Ordinal)));
-        var viewer = string.Join('\n', viewerCte.Split('\n').Where(l => !IsFilteredSumLine(l)).Select(l => l.Trim()));
-        var mcp = string.Join('\n', Cte(Lf(sql), "stored AS\n(").Split('\n').Where(l => !IsFilteredSumLine(l)).Select(l => l.Trim()));
-        Assert.Equal(viewer, mcp);
+        foreach (var cte in new[] { "stored AS\n(", "runs AS\n(", "events AS\n(", "sequenced AS\n(", "points AS\n(", "gapped AS\n(", "raw AS\n(" })
+        {
+            var viewerCte = Cte(Lf(ViewerDataService.ProcedureDurationTrendSql), cte);
+            if (cte == "stored AS\n(")
+            {
+                Assert.Equal(3, viewerCte.Split('\n').Count(l => l.Contains("FILTER (WHERE $4::text[] IS NULL OR database_name = ANY($4))", StringComparison.Ordinal)));
+            }
+            var viewer = string.Join('\n', viewerCte.Split('\n').Where(l => !IsFilteredSumLine(l)).Select(l => l.Trim()));
+            var mcp = string.Join('\n', Cte(Lf(sql), cte).Split('\n').Where(l => !IsFilteredSumLine(l)).Select(l => l.Trim()));
+            Assert.Equal(viewer, mcp);
+        }
 
         /* And the shared readers KEEP a NULL-rate row as an unrated point rather than reading it as 0 or
            dropping it — the C# half of the idiom (#3541 A12): the bucketed one the duration pair has read

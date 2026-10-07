@@ -50,10 +50,11 @@ public sealed class ProcedureStatsIdleRowsLiveTests
             Assert.Equal(oldRows[i].ExecutionsPerSecond, newRows[i].ExecutionsPerSecond, precision: 6);
         }
 
-        /* 1,200 ms of work over the bucket's 600 s, not over the two stored one-minute collections' 120 s (which read 10). */
-        Assert.Equal(2.0, newRows[0].ElapsedMsPerSecond, precision: 6);
+        /* 1,200 ms of work over the nine rated one-minute points (minutes 1 to 9: minute 0, the series' first run, has no previous
+           point, so it carries no seconds), not over the two stored collections' 120 s (which read 10). */
+        Assert.Equal(1200.0 / 540.0, newRows[0].ElapsedMsPerSecond, precision: 6);
         Assert.Equal(1.0, newRows[1].ElapsedMsPerSecond, precision: 6);
-        /* The last bucket: 600 ms over the six collections (minute 20 and five quiet runs) it holds, 360 s. */
+        /* The last bucket: 600 ms over the six points (minute 20 and five quiet runs) it holds, 360 s. */
         Assert.Equal(600.0 / 360.0, newRows[2].ElapsedMsPerSecond, precision: 6);
     }
 
@@ -66,9 +67,12 @@ public sealed class ProcedureStatsIdleRowsLiveTests
         var oldRows = await ReadTrendAsync(store, OldServer, ct, bucketMinutes: 1);
         var newRows = await ReadTrendAsync(store, NewServer, ct, bucketMinutes: 1);
 
-        /* Every run from minute 0 to 25 is a point (26), the quiet ones at 0: no line drawn across a gap. */
+        /* Every run from minute 0 to 25 is a point (26), the quiet ones at 0: no line drawn across a gap. Minute 0 is the first
+           run in the series, so it has no rate to plot (the read keeps it as an unrated point). */
         Assert.Equal(26, oldRows.Count);
         Assert.Equal(oldRows.Select(r => (r.Bucket, r.ElapsedMsPerSecond)), newRows.Select(r => (r.Bucket, r.ElapsedMsPerSecond)));
+        Assert.Equal(Enumerable.Range(3, 12).Concat(Enumerable.Range(16, 4)).Concat(Enumerable.Range(21, 5)),
+            newRows.Where(r => r.ElapsedMsPerSecond == 0.0).Select(r => (int)(r.Bucket - store.WorkStart).TotalMinutes).OrderBy(m => m));
         Assert.Equal(0.0, newRows.Single(r => r.Bucket == store.WorkStart.AddMinutes(3)).ElapsedMsPerSecond, precision: 6);
         Assert.Equal(10.0, newRows.Single(r => r.Bucket == store.WorkStart.AddMinutes(15)).ElapsedMsPerSecond, precision: 6);
     }
@@ -189,14 +193,16 @@ public sealed class ProcedureStatsIdleRowsLiveTests
     {
         await using var command = store.DataSource.CreateCommand(DurationTrendRouting.BuildBucketedRawTrendSql("procedure_stats", withDatabaseFilter: false));
         command.Parameters.AddWithValue(serverId);
-        command.Parameters.AddWithValue(DateTime.SpecifyKind(store.WorkStart.AddMinutes(-5), DateTimeKind.Unspecified));
-        command.Parameters.AddWithValue(DateTime.SpecifyKind(store.WorkStart.AddMinutes(25), DateTimeKind.Unspecified));
+        /* From the first run to the run at minute 25 (its log row lands three seconds after its start, so the window ends a moment later). */
+        command.Parameters.AddWithValue(DateTime.SpecifyKind(store.WorkStart, DateTimeKind.Unspecified));
+        command.Parameters.AddWithValue(DateTime.SpecifyKind(store.WorkStart.AddMinutes(25).AddSeconds(30), DateTimeKind.Unspecified));
         command.Parameters.AddWithValue(bucketMinutes);
         var rows = new List<(DateTime, double, double)>();
         await using var reader = await command.ExecuteReaderAsync(ct);
         while (await reader.ReadAsync(ct))
         {
-            rows.Add((reader.GetDateTime(0), reader.GetDouble(1), reader.GetDouble(2)));
+            /* A NULL rate (the series' first point has no previous point) reads as NaN so two reads compare equal. */
+            rows.Add((reader.GetDateTime(0), reader.IsDBNull(1) ? double.NaN : reader.GetDouble(1), reader.IsDBNull(2) ? double.NaN : reader.GetDouble(2)));
         }
         return rows;
     }
@@ -283,18 +289,24 @@ VALUES ((SELECT COALESCE(MAX(collection_id), 0) + 1 FROM collect.procedure_stats
                     await never.ExecuteNonQueryAsync(ct);
                 }
 
-                /* The collector's runs for the new server across the whole span, every one of them SUCCESS storing 0 rows
-                   after the work: so the last two hours hold runs and no procedure_stats row. */
+                /* The collector's runs for the new server across the whole span, in production order: a run's rows are stamped at its
+                   start T and its log row lands three seconds later (the run's SQL and storage time, 3000 ms), SUCCESS, with the rows
+                   it stored. The busy minutes (1, 2, 15, 20) stored one row; every other run stored none and logs rows_collected 0.
+                   So the last hours hold runs and no procedure_stats row. */
                 await DarlingMcpTestData.ExecAsync(
                     connection, ct,
                     "INSERT INTO collect.collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, rows_collected) "
-                    + "SELECT row_number() OVER (), $1, $2, 'procedure_stats', t, 12, 'SUCCESS', 0 FROM generate_series($3::timestamp, $4::timestamp, interval '1 minute') AS t",
+                    + "SELECT row_number() OVER (), $1, $2, 'procedure_stats', t + interval '3 seconds', 3000, 'SUCCESS', "
+                    + "CASE WHEN extract(epoch FROM t - $3::timestamp) / 60 IN (1, 2, 15, 20) THEN 1 ELSE 0 END "
+                    + "FROM generate_series($3::timestamp, $4::timestamp, interval '1 minute') AS t",
                     NewServer, "idle-rows-new", DateTime.SpecifyKind(workStart, DateTimeKind.Unspecified), DateTime.SpecifyKind(end, DateTimeKind.Unspecified));
-                /* The old store ran the collector on the same cadence; it just kept a row for every run. */
+                /* The old store ran the collector on the same cadence; it just kept a row for every run (minutes 1 to 20 here). */
                 await DarlingMcpTestData.ExecAsync(
                     connection, ct,
                     "INSERT INTO collect.collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, rows_collected) "
-                    + "SELECT 1000000 + row_number() OVER (), $1, $2, 'procedure_stats', t, 12, 'SUCCESS', 1 FROM generate_series($3::timestamp, $4::timestamp, interval '1 minute') AS t",
+                    + "SELECT 1000000 + row_number() OVER (), $1, $2, 'procedure_stats', t + interval '3 seconds', 3000, 'SUCCESS', "
+                    + "CASE WHEN extract(epoch FROM t - $3::timestamp) / 60 BETWEEN 1 AND 20 THEN 1 ELSE 0 END "
+                    + "FROM generate_series($3::timestamp, $4::timestamp, interval '1 minute') AS t",
                     OldServer, "idle-rows-old", DateTime.SpecifyKind(workStart, DateTimeKind.Unspecified), DateTime.SpecifyKind(end, DateTimeKind.Unspecified));
 
                 return new SeededStore(scratch, NpgsqlDataSource.Create(scratch.ConnectionString), workStart, end);
