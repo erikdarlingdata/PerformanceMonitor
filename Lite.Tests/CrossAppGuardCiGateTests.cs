@@ -225,7 +225,11 @@ public class CrossAppGuardCiGateTests
     };
 
     /// <summary>The exact command <c>darling-tree-guards</c> has to run for anything in
-    /// <see cref="DarlingTestsBackstopped"/> to be covered: the WHOLE Darling suite.
+    /// <see cref="DarlingTestsBackstopped"/> to be covered: the WHOLE Darling suite. Since #5459 change 2 the
+    /// Stage=Guard classes are left out of it exactly when the job used the Guard job's build of the same run
+    /// (<see cref="BackstopGuardFilterLine"/>, the only argument it may carry): that job ran them on the very
+    /// same binaries, so every class still runs once per run. Without the artifact the job builds for itself and
+    /// the filter is empty, which is the whole suite as before.
     ///
     /// <para>Compared as a whole line rather than searched for as a substring, which is the difference
     /// between a bound and a hope. A <c>-class</c> or <c>-method</c> filter appended to this invocation
@@ -233,7 +237,13 @@ public class CrossAppGuardCiGateTests
     /// had stopped running the two twin guards the exemptions above name — and those exemptions would
     /// then be the only thing standing between an unreachable read and a green build.</para></summary>
     private const string BackstopRunLine =
-        "run: dotnet run --project Darling/Darling.Tests/Darling.Tests.csproj -c Release --no-build";
+        "dotnet run --project Darling/Darling.Tests/Darling.Tests.csproj -c Release --no-build -- @guardFilter";
+
+    /// <summary>The one statement that decides whether the backstop leaves the Guard classes out: only when the
+    /// job's own check proved it used the Guard job's build of this run (a separate step output, pinned by
+    /// GuardStageWorkflowTests).</summary>
+    private const string BackstopGuardFilterLine =
+        "$guardFilter = @(if ($env:GUARD_BUILD_USED -eq 'true') { '-trait-'; 'Stage=Guard' })";
 
     [Fact]
     public void TheGlobMatcher_AgreesWithKnownAnswers()
@@ -1460,6 +1470,10 @@ public class CrossAppGuardCiGateTests
             BackstopRunLine,
             consumingJob.Split('\n').Select(line => line.Trim()),
             StringComparer.Ordinal);
+        Assert.Contains(
+            BackstopGuardFilterLine,
+            consumingJob.Split('\n').Select(line => line.Trim()),
+            StringComparer.Ordinal);
 
         /* And the same fact through the predicate the exemptions are gated on, so the two cannot drift:
            the pin above would keep passing on a yaml this returns false for if it ever stopped reading
@@ -1802,7 +1816,9 @@ public class CrossAppGuardCiGateTests
 
         return consumingJob.Contains("= \"skipped\"", StringComparison.Ordinal)
             && consumingJob.Split('\n')
-                .Any(line => line.Trim().Equals(BackstopRunLine, StringComparison.Ordinal));
+                .Any(line => line.Trim().Equals(BackstopRunLine, StringComparison.Ordinal))
+            && consumingJob.Split('\n')
+                .Any(line => line.Trim().Equals(BackstopGuardFilterLine, StringComparison.Ordinal));
     }
 
     /// <summary>Repo-relative paths naming a tree of <paramref name="other"/> that a test in
@@ -2779,8 +2795,13 @@ public class CrossAppGuardCiGateTests
 
         foreach (var name in new[] { "Setup .NET 10.0", "Restore Lite.Tests", "Build Lite.Tests", "Run Lite tests (shard)" })
         {
+            /* Restore and build also wait for the Guard-build check (#5459 change 2): they run only when the shard did
+               not use the Guard job's build, and still only where the scope step says the suite runs. */
+            var restoreOrBuild = name is "Restore Lite.Tests" or "Build Lite.Tests";
             Assert.Contains(
-                "\n        if: steps.scope.outputs.run == 'true'\n",
+                restoreOrBuild
+                    ? "\n        if: steps.scope.outputs.run == 'true' && steps.guard-build-check.outputs.used != 'true'\n"
+                    : "\n        if: steps.scope.outputs.run == 'true'\n",
                 StepBlock(job, name),
                 StringComparison.Ordinal);
         }
@@ -3072,7 +3093,17 @@ public class CrossAppGuardCiGateTests
         }
 
         var build = File.ReadAllText(Path.Combine(workflows, "build.yml")).Replace("\r\n", "\n", StringComparison.Ordinal);
-        Assert.DoesNotContain("download-artifact", string.Join('\n', build.Split('\n').Where(l => !l.TrimStart().StartsWith('#'))), StringComparison.Ordinal);
+        /* The one download-artifact use is the shards' fetch of THIS run's Guard build (#5459 change 2): the three jobs that
+           build the same test projects, each naming the Guard job's output and no run-id (the loop above pins that). A
+           fourth use, or one that names anything else, is a second reader the cancel-in-progress argument does not cover. */
+        var buildCode = string.Join('\n', build.Split('\n').Where(l => !l.TrimStart().StartsWith('#')));
+        Assert.Equal(3, Regex.Matches(buildCode, "download-artifact").Count);
+        foreach (var jobKey in new[] { "darling-pg", "darling-tree-guards", "lite-tests" })
+        {
+            var fetch = StepBlock(JobBlock(build, jobKey), "Fetch the Guard job's build of the test project");
+            Assert.Contains("uses: actions/download-artifact@v6", fetch, StringComparison.Ordinal);
+            Assert.Contains("name: ${{ needs.guard-tests.outputs.", fetch, StringComparison.Ordinal);
+        }
 
         /* The one download sits in the Lite shard step, which is also what the comment above the concurrency
            block names, so the prose and the code cannot part ways quietly. */
