@@ -50,7 +50,7 @@ public sealed class QueryStoreBackfillDroppedDatabaseTests
     [Fact]
     public async Task ADroppedDatabase_StopsBeingTried_OnceTheNewestSnapshotLeavesItOut_AndItsStateIsPruned()
     {
-        await using var fixture = await Fixture.CreateAsync();
+        await using var fixture = await DroppedBackfillStore.CreateAsync();
         var ct = TestContext.Current.CancellationToken;
 
         /* Two databases with a young stored history, so each has a pending tail slice. The dropped one also carries
@@ -78,9 +78,46 @@ public sealed class QueryStoreBackfillDroppedDatabaseTests
     }
 
     [Fact]
+    public async Task ADroppedDatabaseWhoseHistoryReachesTheHorizon_IsNotMarkedDoneAgain_AfterThePruneRetiredItsMarker()
+    {
+        await using var fixture = await DroppedBackfillStore.CreateAsync();
+        var ct = TestContext.Current.CancellationToken;
+
+        /* A row inside the horizon makes the dropped database a candidate; a row past it makes the tick mark it done
+           without a slice. Before the fix the hourly prune deleted that marker and the next tick wrote it back, so
+           the database was never retired. */
+        await fixture.SeedRowAsync(Kept, TimeSpan.FromHours(1), ct);
+        await fixture.SeedRowAsync(Dropped, TimeSpan.FromHours(1), ct);
+        await fixture.SeedRowAsync(Dropped, QueryStoreBackfill.PlainStoreHorizon + TimeSpan.FromDays(1), ct);
+        await fixture.SeedSnapshotAsync(TimeSpan.FromMinutes(30), [Kept, Dropped], ct);
+        await fixture.RunTicksAsync(4, ct);
+        Assert.NotNull(await fixture.StateAsync(QueryStoreBackfillState.DoneKeyPrefix, Dropped, ct));
+
+        /* A snapshot a second ahead of the marker's own write, so the prune judges it (a marker is stamped "now"). */
+        await fixture.SeedSnapshotAsync(TimeSpan.FromSeconds(-1), [Kept], ct);
+        Assert.True(await fixture.Runner.PruneOrphanedQueryStoreDatabaseStateAsync(TestServerId, ct));
+        Assert.Null(await fixture.StateAsync(QueryStoreBackfillState.DoneKeyPrefix, Dropped, ct));
+
+        await fixture.RunTicksAsync(4, ct);
+
+        Assert.Null(await fixture.StateAsync(QueryStoreBackfillState.DoneKeyPrefix, Dropped, ct));
+    }
+
+    [Fact]
+    public void AbsentFromSnapshot_ReturnsOnlyTheCandidatesTheSnapshotDoesNotName_ComparedOrdinally()
+    {
+        var snapshot = new HashSet<string>(StringComparer.Ordinal) { "App", "Live" };
+
+        Assert.Equal(
+            ["AppArchive", "app"],
+            QueryStoreBackfillState.AbsentFromSnapshot(["App", "AppArchive", "Live", "app"], snapshot));
+        Assert.Empty(QueryStoreBackfillState.AbsentFromSnapshot([], snapshot));
+    }
+
+    [Fact]
     public async Task ADatabaseWithRowsNewerThanTheSnapshot_IsStillTried()
     {
-        await using var fixture = await Fixture.CreateAsync();
+        await using var fixture = await DroppedBackfillStore.CreateAsync();
         var ct = TestContext.Current.CancellationToken;
 
         /* Created after the newest snapshot: absent from it, but its rows are newer than it. Dropping it would be
@@ -97,7 +134,7 @@ public sealed class QueryStoreBackfillDroppedDatabaseTests
     [Fact]
     public async Task WithNoSnapshotAtAll_NothingIsDropped()
     {
-        await using var fixture = await Fixture.CreateAsync();
+        await using var fixture = await DroppedBackfillStore.CreateAsync();
         var ct = TestContext.Current.CancellationToken;
 
         /* No database_states row for this server (Azure SQL DB never collects one; so does a server that has not
@@ -113,7 +150,7 @@ public sealed class QueryStoreBackfillDroppedDatabaseTests
 
     /// <summary>A scratch store, a real runner and backfill, and a slice body that completes for every database
     /// except <see cref="Dropped"/>, which throws what a missing database throws.</summary>
-    private sealed class Fixture : IAsyncDisposable
+    private sealed class DroppedBackfillStore : IAsyncDisposable
     {
         private ScratchPostgres _scratch = null!;
         private NpgsqlDataSource _postgres = null!;
@@ -125,14 +162,14 @@ public sealed class QueryStoreBackfillDroppedDatabaseTests
 
         public List<string> Attempts { get; } = [];
 
-        public static async Task<Fixture> CreateAsync()
+        public static async Task<DroppedBackfillStore> CreateAsync()
         {
             var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
             Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
                 "Set DARLING_TEST_PG to a Postgres connection string to run the live dropped-database backfill tests (they mint their own scratch database).");
 
             var ct = TestContext.Current.CancellationToken;
-            var fixture = new Fixture
+            var fixture = new DroppedBackfillStore
             {
                 _scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct),
             };
@@ -245,14 +282,17 @@ VALUES (0, $1, $2, 'SQL01', $3, 5, 'ONLINE', false)", connection);
             }
         }
 
-        public async Task<string?> HoleAsync(string databaseName, CancellationToken ct)
+        public Task<string?> HoleAsync(string databaseName, CancellationToken ct)
+            => StateAsync(QueryStoreBackfillState.HoleKeyPrefix, databaseName, ct);
+
+        public async Task<string?> StateAsync(string prefix, string databaseName, CancellationToken ct)
         {
             await using var connection = await _postgres.OpenConnectionAsync(ct);
             await using var command = new NpgsqlCommand(
                 "SELECT state_value FROM collect.collector_state WHERE server_id = $1 AND collector_name = $2 AND state_key = $3", connection);
             command.Parameters.AddWithValue(TestServerId);
             command.Parameters.AddWithValue(QueryStoreBackfill.StateCollectorName);
-            command.Parameters.AddWithValue(QueryStoreBackfillState.HoleKeyPrefix + databaseName);
+            command.Parameters.AddWithValue(prefix + databaseName);
             return await command.ExecuteScalarAsync(ct) as string;
         }
 

@@ -84,6 +84,31 @@ public sealed class QueryStoreBackfillDroppedDatabaseTests : IClassFixture<Share
     }
 
     [Fact]
+    public async Task ADroppedDatabaseWhoseHistoryReachesTheHorizon_IsNotMarkedDoneAgain_AfterThePruneRetiredItsMarker()
+    {
+        using var run = new Run(_duckDb);
+
+        /* A row inside the horizon makes the dropped database a candidate; a row past it makes the tick mark it done
+           without a slice. Before the fix the hourly prune deleted that marker and the next tick wrote it back, so
+           the database was never retired. */
+        await run.SeedRowAsync(Kept, TimeSpan.FromHours(1));
+        await run.SeedRowAsync(Dropped, TimeSpan.FromHours(1));
+        await run.SeedRowAsync(Dropped, run.Horizon + TimeSpan.FromDays(1));
+        await run.SeedSnapshotAsync(TimeSpan.FromMinutes(30), Kept, Dropped);
+        await run.TicksAsync(4);
+        Assert.NotNull(await run.StateAsync(QueryStoreBackfillState.DoneKeyPrefix, Dropped));
+
+        /* A snapshot a second ahead of the marker's own write, so the prune judges it (a marker is stamped "now"). */
+        await run.SeedSnapshotAsync(TimeSpan.FromSeconds(-1), Kept);
+        await run.Harness.PruneAsync(run.ServerId);
+        Assert.Null(await run.StateAsync(QueryStoreBackfillState.DoneKeyPrefix, Dropped));
+
+        await run.TicksAsync(4);
+
+        Assert.Null(await run.StateAsync(QueryStoreBackfillState.DoneKeyPrefix, Dropped));
+    }
+
+    [Fact]
     public async Task ADatabaseWithRowsNewerThanTheSnapshot_IsStillTried()
     {
         using var run = new Run(_duckDb);
@@ -162,6 +187,9 @@ public sealed class QueryStoreBackfillDroppedDatabaseTests : IClassFixture<Share
         public Harness Harness { get; }
 
         public int ServerId { get; }
+
+        /// <summary>The backfill horizon for this server: a row older than it makes a database "done" without a slice.</summary>
+        public TimeSpan Horizon => Harness.BackfillHorizonFor(_server);
 
         public List<string> Attempts { get; } = [];
 
@@ -262,7 +290,9 @@ VALUES ($1, $2, $3, $4, $5, $6, 'ONLINE', false)";
             }
         }
 
-        public async Task<string?> HoleAsync(string databaseName)
+        public Task<string?> HoleAsync(string databaseName) => StateAsync(QueryStoreBackfillState.HoleKeyPrefix, databaseName);
+
+        public async Task<string?> StateAsync(string prefix, string databaseName)
         {
             using var readLock = _duckDb.AcquireReadLock();
             using var connection = _duckDb.CreateConnection();
@@ -271,7 +301,7 @@ VALUES ($1, $2, $3, $4, $5, $6, 'ONLINE', false)";
             cmd.CommandText = "SELECT state_value FROM collector_state WHERE server_id = $1 AND collector_name = $2 AND state_key = $3";
             cmd.Parameters.Add(new DuckDBParameter { Value = ServerId });
             cmd.Parameters.Add(new DuckDBParameter { Value = QueryStoreBackfillState.StateCollectorName });
-            cmd.Parameters.Add(new DuckDBParameter { Value = QueryStoreBackfillState.HoleKeyPrefix + databaseName });
+            cmd.Parameters.Add(new DuckDBParameter { Value = prefix + databaseName });
             return await cmd.ExecuteScalarAsync() as string;
         }
 

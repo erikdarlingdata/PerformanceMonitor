@@ -217,6 +217,15 @@ public sealed class QueryStoreBackfill
            QueryStoreBackfillState.MergeHoleDatabases for why the union is required, not just cheaper. */
         var databases = await GetCandidateDatabasesAsync(server.ServerId, floorLimit, state, cancellationToken, server.Config.DisplayName);
 
+        /* #5483: a database the server no longer has is not a candidate. The list above is read from the rows this
+           store holds, so a dropped database stays in it until its rows age out of the horizon, and every tick
+           would otherwise try it and fail. Gated on the same AppliesTo that decides whether database_states is
+           collected at all: Azure SQL DB has no snapshot by design, so the read would be a guaranteed no-op. */
+        if (DatabaseStateCollector.Instance.AppliesTo(server.Target))
+        {
+            databases = await DropGoneDatabasesAsync(server.ServerId, databases, floorLimit, cancellationToken, server.Config.DisplayName);
+        }
+
         /* Databases whose slices keep failing: their slice is held back while any other database has work
            (see QueryStoreBackfillFailureLedger), then one of them is retried after the walk. */
         List<(string Database, DateTime Floor, DateTime Ceiling, bool IsHole)>? skipped = null;
@@ -659,6 +668,117 @@ public sealed class QueryStoreBackfill
         }
 
         return QueryStoreBackfillState.MergeHoleDatabases(databases, state);
+    }
+
+    /// <summary>#5483: databases already reported as gone, per (server, database), so the Information line below is
+    /// one per database per run of the service rather than one per tick. In memory on purpose, like the ledgers.</summary>
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<(int ServerId, string Database), byte> _goneReported = new();
+
+    /// <summary>
+    /// #5483: removes from <paramref name="candidates"/> every database the server no longer has.
+    ///
+    /// <para><b>Why the candidate list needs this.</b> It is read from the rows this store holds
+    /// (<see cref="CandidateSql"/>), plus any database a hole key names, so a database dropped from the server stays
+    /// in it until its last row ages past the horizon. Each tick then reads its stored floor, finds the history does
+    /// not reach the horizon, and opens a slice that fails with "database does not exist" — every tick, and
+    /// <see cref="QueryStoreBackfillFailureLedger"/> only reorders the failures, it never retires them. The
+    /// <c>collector_state</c> keys were never the cause: a failed slice writes none, and the orphan prune
+    /// (<see cref="QueryStorePerDatabaseState"/>) retires a dropped database's <c>done:</c> and <c>hole:</c> keys, but the
+    /// candidate list does not read them.</para>
+    ///
+    /// <para><b>The rule is the prune's.</b> A candidate is gone when the newest <c>database_states</c> snapshot does
+    /// not name it AND the store holds no row for it at or after that snapshot. The second half is the same freshness
+    /// guard the prune has: a snapshot cannot judge a database created after it was taken, and such a database has
+    /// shipped rows since (<see cref="QueryStoreBackfillState.RowAtOrAfterSnapshotSql"/>). It holds whatever the
+    /// relative cadence of database_states and the backfill tick. No snapshot, or one with no database names,
+    /// drops nothing — an unknown list is not an empty one. No monitored-server round trip; the two reads are on
+    /// the store.</para>
+    ///
+    /// <para>A failed read keeps every candidate (the old behavior, never an invented drop) and says so at Debug.
+    /// A database found gone also forgets its in-memory failure counts, which nothing else would ever clear.</para>
+    /// </summary>
+    internal async Task<List<string>> DropGoneDatabasesAsync(
+        int serverId, List<string> candidates, DateTime floorLimit, CancellationToken cancellationToken, string? serverLabel = null)
+    {
+        if (candidates.Count == 0)
+        {
+            return candidates;
+        }
+
+        try
+        {
+            await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+
+            var snapshotDatabases = new HashSet<string>(StringComparer.Ordinal);
+            DateTime? newest = null;
+            using (var snapshot = new NpgsqlCommand(QueryStoreBackfillState.NewestSnapshotSql, connection))
+            {
+                snapshot.CommandTimeout = ServiceCommandDeadlines.QueryStoreBackfillReadSeconds;
+                snapshot.Parameters.AddWithValue(serverId);
+                snapshot.Parameters.AddWithValue(DateTime.SpecifyKind(floorLimit, DateTimeKind.Unspecified));
+                await using var reader = await snapshot.ExecuteReaderAsync(cancellationToken);
+                while (await reader.ReadAsync(cancellationToken))
+                {
+                    newest = reader.GetDateTime(1);
+                    if (!reader.IsDBNull(0))
+                    {
+                        snapshotDatabases.Add(reader.GetString(0));
+                    }
+                }
+            }
+
+            if (newest is not DateTime snapshotTime || snapshotDatabases.Count == 0)
+            {
+                return candidates;
+            }
+
+            var absent = QueryStoreBackfillState.AbsentFromSnapshot(candidates, snapshotDatabases);
+            foreach (var candidate in candidates)
+            {
+                if (snapshotDatabases.Contains(candidate))
+                {
+                    _goneReported.TryRemove((serverId, candidate), out _);
+                }
+            }
+
+            if (absent.Count == 0)
+            {
+                return candidates;
+            }
+
+            var gone = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var database in absent)
+            {
+                using var newer = new NpgsqlCommand(QueryStoreBackfillState.RowAtOrAfterSnapshotSql, connection);
+                newer.CommandTimeout = ServiceCommandDeadlines.QueryStoreBackfillReadSeconds;
+                newer.Parameters.AddWithValue(serverId);
+                newer.Parameters.AddWithValue(database);
+                newer.Parameters.AddWithValue(snapshotTime);
+                if (await newer.ExecuteScalarAsync(cancellationToken) is null)
+                {
+                    gone.Add(database);
+                    if (_goneReported.TryAdd((serverId, database), 0))
+                    {
+                        _sliceFailures.RecordCompletion(serverId, database);
+                        _readFailures.RecordSuccess(serverId, database);
+                        _logger?.LogInformation(
+                            "query_store backfill on '{Server}' [{Database}]: no longer on the server (absent from the newest database_states snapshot, no stored row since); not backfilling it.",
+                            serverLabel ?? serverId.ToString(CultureInfo.InvariantCulture), database);
+                    }
+                }
+                else
+                {
+                    _goneReported.TryRemove((serverId, database), out _);
+                }
+            }
+
+            return gone.Count == 0 ? candidates : candidates.FindAll(database => !gone.Contains(database));
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger?.LogDebug(ex, "query_store backfill liveness read failed; keeping every candidate this tick");
+            return candidates;
+        }
     }
 
     /// <summary>The derived backfill ceiling for one database, the mirror of the runner's MAX()

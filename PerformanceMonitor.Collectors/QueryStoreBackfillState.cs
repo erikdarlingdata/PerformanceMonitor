@@ -213,4 +213,47 @@ public static class QueryStoreBackfillState
 
         return new List<string>(merged);
     }
+
+    /// <summary>
+    /// #5483: the newest <c>database_states</c> snapshot for one server, bounded below at the backfill floor:
+    /// <c>$1</c> server_id, <c>$2</c> floor. One row per database in the snapshot (<c>database_name</c>,
+    /// <c>collection_time</c>), none when no snapshot newer than the floor exists. The same text runs on
+    /// PostgreSQL and on DuckDB, and the snapshot is the same unfiltered <c>sys.databases</c> read the orphan
+    /// prune judges by (see <see cref="QueryStorePerDatabaseState"/>), not query_store's own filtered
+    /// enumeration. The floor bound keeps the read to the recent chunks, the way #4197 bounds the candidate read.
+    /// </summary>
+    public const string NewestSnapshotSql =
+        "SELECT database_name, collection_time FROM database_states WHERE server_id = $1 AND collection_time = (SELECT MAX(collection_time) FROM database_states WHERE server_id = $1 AND collection_time > $2)";
+
+    /// <summary>
+    /// #5483: is there a collected query_store row for one database at or after the snapshot's time:
+    /// <c>$1</c> server_id, <c>$2</c> database, <c>$3</c> the snapshot's collection_time. A hit is proof the
+    /// database was alive after the snapshot was taken, so its absence from the snapshot means "created since",
+    /// not "dropped". The same text runs on PostgreSQL and on DuckDB.
+    /// </summary>
+    public const string RowAtOrAfterSnapshotSql =
+        "SELECT 1 FROM query_store_stats WHERE server_id = $1 AND database_name = $2 AND collection_time >= $3 LIMIT 1";
+
+    /// <summary>
+    /// #5483: the candidates the newest <c>database_states</c> snapshot does not name, in candidate order. These are
+    /// the only databases worth a freshness check: the rest are on the server. Compared ordinally, as the orphan
+    /// prune compares a state key to <c>prefix || database_name</c> (PostgreSQL and DuckDB both compare text
+    /// case-sensitively), so a name that differs only by case is a different database here too.
+    ///
+    /// <para>Not by itself a verdict. A database created after the snapshot is absent from it and alive; the caller
+    /// asks <see cref="RowAtOrAfterSnapshotSql"/> about each name returned before it drops one.</para>
+    /// </summary>
+    public static List<string> AbsentFromSnapshot(IEnumerable<string> candidates, ISet<string> snapshotDatabases)
+    {
+        var absent = new List<string>();
+        foreach (var candidate in candidates)
+        {
+            if (!snapshotDatabases.Contains(candidate))
+            {
+                absent.Add(candidate);
+            }
+        }
+
+        return absent;
+    }
 }

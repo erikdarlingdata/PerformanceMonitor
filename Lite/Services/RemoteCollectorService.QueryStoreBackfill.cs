@@ -273,6 +273,15 @@ public partial class RemoteCollectorService
            a hole key already names (state is loaded above, for free). */
         var databases = await GetBackfillCandidateDatabasesAsync(serverId, floorLimit, state, cancellationToken, server.DisplayName);
 
+        /* #5483, the twin of Darling's: a database the server no longer has is not a candidate. The list above is read
+           from the rows this store holds, so a dropped database stayed in it until its rows aged out of the horizon,
+           and every tick tried it and failed. Gated on the same AppliesTo that decides whether database_states is
+           collected at all: Azure SQL DB has no snapshot by design, so the read would be a guaranteed no-op. */
+        if (DatabaseStateCollector.Instance.AppliesTo(target))
+        {
+            databases = await DropGoneBackfillDatabasesAsync(serverId, databases, floorLimit, cancellationToken, server.DisplayName);
+        }
+
         /* Databases whose slices keep failing: their slice is held back while any other database has work
            (see QueryStoreBackfillFailureLedger), then one of them is retried after the walk. */
         List<(string Database, DateTime Floor, DateTime Ceiling, bool IsHole)>? skipped = null;
@@ -612,6 +621,113 @@ public partial class RemoteCollectorService
         }
 
         return QueryStoreBackfillState.MergeHoleDatabases(databases, state);
+    }
+
+    /// <summary>#5483: databases already reported as gone, per (server, database), so the Information line below is
+    /// one per database per run of the app rather than one per tick. In memory on purpose, like the ledgers.</summary>
+    private readonly ConcurrentDictionary<(int ServerId, string Database), byte> _goneReported = new();
+
+    /// <summary>
+    /// #5483: removes from <paramref name="candidates"/> every database the server no longer has — the twin of
+    /// Darling's <c>QueryStoreBackfill.DropGoneDatabasesAsync</c>, the same rule on the same shared SQL text
+    /// (<see cref="QueryStoreBackfillState.NewestSnapshotSql"/>, <see cref="QueryStoreBackfillState.RowAtOrAfterSnapshotSql"/>).
+    ///
+    /// <para>The candidate list is read from the rows this store holds (<see cref="CandidateSql"/>), plus any database
+    /// a hole key names, so a database dropped from the server stayed in it until its last row aged past the
+    /// horizon, and every tick read its stored floor, opened a slice and failed with "database does not exist". The
+    /// <c>collector_state</c> keys were never the cause: a failed slice writes none, and the orphan prune retires a
+    /// dropped database's <c>done:</c> and <c>hole:</c> keys, but the candidate list does not read them.</para>
+    ///
+    /// <para>A candidate is gone when the newest <c>database_states</c> snapshot does not name it AND the store holds no
+    /// row for it at or after that snapshot (the prune's freshness guard: a snapshot cannot judge a database created
+    /// after it was taken). No snapshot, or one with no database names, drops nothing. A failed read keeps every
+    /// candidate and says so at Debug. A database found gone forgets its in-memory failure counts.</para>
+    /// </summary>
+    internal async Task<List<string>> DropGoneBackfillDatabasesAsync(
+        int serverId, List<string> candidates, DateTime floorLimit, CancellationToken cancellationToken, string? serverLabel = null)
+    {
+        if (candidates.Count == 0)
+        {
+            return candidates;
+        }
+
+        try
+        {
+            /* The backfill runs outside the collection gate, so its reads take the read lock (see the slice's write). */
+            using var readLock = _duckDb.AcquireReadLock(cancellationToken);
+            using var conn = _duckDb.CreateConnection();
+            await conn.OpenAsync(cancellationToken);
+
+            var snapshotDatabases = new HashSet<string>(StringComparer.Ordinal);
+            DateTime? newest = null;
+            using (var snapshot = conn.CreateCommand())
+            {
+                snapshot.CommandText = QueryStoreBackfillState.NewestSnapshotSql;
+                snapshot.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = serverId });
+                snapshot.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = floorLimit });
+                using var reader = await snapshot.ExecuteReaderAsync(cancellationToken);
+                while (await reader.ReadAsync(cancellationToken))
+                {
+                    newest = reader.GetDateTime(1);
+                    if (!reader.IsDBNull(0))
+                    {
+                        snapshotDatabases.Add(reader.GetString(0));
+                    }
+                }
+            }
+
+            if (newest is not DateTime snapshotTime || snapshotDatabases.Count == 0)
+            {
+                return candidates;
+            }
+
+            var absent = QueryStoreBackfillState.AbsentFromSnapshot(candidates, snapshotDatabases);
+            foreach (var candidate in candidates)
+            {
+                if (snapshotDatabases.Contains(candidate))
+                {
+                    _goneReported.TryRemove((serverId, candidate), out _);
+                }
+            }
+
+            if (absent.Count == 0)
+            {
+                return candidates;
+            }
+
+            var gone = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var database in absent)
+            {
+                using var newer = conn.CreateCommand();
+                newer.CommandText = QueryStoreBackfillState.RowAtOrAfterSnapshotSql;
+                newer.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = serverId });
+                newer.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = database });
+                newer.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = snapshotTime });
+                if (await newer.ExecuteScalarAsync(cancellationToken) is null)
+                {
+                    gone.Add(database);
+                    if (_goneReported.TryAdd((serverId, database), 0))
+                    {
+                        _sliceFailures.RecordCompletion(serverId, database);
+                        _readFailures.RecordSuccess(serverId, database);
+                        _logger?.LogInformation(
+                            "query_store backfill on '{Server}' [{Database}]: no longer on the server (absent from the newest database_states snapshot, no stored row since); not backfilling it.",
+                            serverLabel ?? serverId.ToString(CultureInfo.InvariantCulture), database);
+                    }
+                }
+                else
+                {
+                    _goneReported.TryRemove((serverId, database), out _);
+                }
+            }
+
+            return gone.Count == 0 ? candidates : candidates.FindAll(database => !gone.Contains(database));
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger?.LogDebug(ex, "query_store backfill liveness read failed; keeping every candidate this tick");
+            return candidates;
+        }
     }
 
     /// <summary>The derived backfill ceiling for one database, the mirror of
