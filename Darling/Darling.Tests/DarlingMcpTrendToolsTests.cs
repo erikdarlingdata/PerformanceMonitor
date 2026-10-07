@@ -363,6 +363,10 @@ public sealed class DarlingMcpTrendToolsSurfaceAndSqlTests
         Assert.Contains("WHEN is_stored THEN NULLIF(max_interval_seconds, 0)", sql, StringComparison.Ordinal);
         Assert.Equal(2, System.Text.RegularExpressions.Regex.Matches(sql, @"collection_time >= \$2 - INTERVAL '3600 seconds'").Count);
         Assert.Contains("FROM gapped\nWHERE collection_time >= $2", string.Join('\n', Lines(sql)), StringComparison.Ordinal);
+        /* A run is logged after it finishes, so one that began inside the window can be logged just past its end: the runs are read
+           an hour past $3 (once), the stored rows and the final points stop at $3 (twice). */
+        Assert.Single(System.Text.RegularExpressions.Regex.Matches(sql, @"collection_time <= \$3 \+ INTERVAL '3600 seconds'"));
+        Assert.Equal(2, System.Text.RegularExpressions.Regex.Matches(sql, @"collection_time <= \$3\r?\n").Count);
         Assert.DoesNotContain("COALESCE(MAX(", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("series_first", sql, StringComparison.Ordinal);
         Assert.Contains("CASE WHEN interval_seconds > 0 THEN total_elapsed_ms / interval_seconds END AS elapsed_ms_per_second", sql, StringComparison.Ordinal);
@@ -449,8 +453,24 @@ public sealed class DarlingMcpTrendToolsSurfaceAndSqlTests
         var sql = SqlByName(sqlName);
 
         Assert.Contains("FROM " + view, sql, StringComparison.Ordinal);
-        Assert.DoesNotContain("FROM " + rawTable + "\n", sql, StringComparison.Ordinal);
-        Assert.DoesNotContain("collection_time >=", sql, StringComparison.Ordinal);
+        if (rawTable == "procedure_stats")
+        {
+            /* #5449: the procedure read adds the hours a collector run fell in with no raw row. The raw table is read only to test
+               that one hour holds no row: a single NOT EXISTS probe that projects no work, never the hour's sums. */
+            var probeAt = sql.IndexOf("FROM " + rawTable + "\n", StringComparison.Ordinal);
+            Assert.True(probeAt > 0, "the idle-hours raw probe is gone");
+            Assert.Equal(probeAt, sql.LastIndexOf("FROM " + rawTable + "\n", StringComparison.Ordinal));
+            Assert.Contains("NOT EXISTS", sql[..probeAt], StringComparison.Ordinal);
+            Assert.Contains("SELECT 1", sql[(probeAt - 40)..probeAt], StringComparison.Ordinal);
+            Assert.Contains("collect.collection_log", sql, StringComparison.Ordinal);
+            Assert.Contains("status = 'SUCCESS'", sql, StringComparison.Ordinal);
+        }
+        else
+        {
+            Assert.DoesNotContain("FROM " + rawTable + "\n", sql, StringComparison.Ordinal);
+            Assert.DoesNotContain("collection_time >=", sql, StringComparison.Ordinal);
+        }
+
         Assert.Contains("bucket >= $2", sql, StringComparison.Ordinal);
         /* A bucket is stamped at its START, so the window end is exclusive: `bucket <= $3` would take the whole
            hour that begins at an end falling on the hour (RollupWindowEndBoundTests pins the same for every rollup read). */

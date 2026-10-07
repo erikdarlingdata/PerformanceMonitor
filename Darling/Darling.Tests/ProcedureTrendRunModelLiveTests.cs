@@ -227,6 +227,61 @@ public sealed class ProcedureTrendRunModelLiveTests
         Assert.Equal(900.0 / 45.0, Assert.Single(buckets).ElapsedMsPerSecond!.Value, precision: 6);
     }
 
+    /// <summary>
+    /// An idle run that started inside the window but was logged just after its end still plots its 0: runs are read an hour past
+    /// the window's end, and the points stop at it. The run began at minute 2 (logged at minute 2 + 3 s, 3,000 ms of work), and the
+    /// window ends one second after it began.
+    /// </summary>
+    [Fact]
+    public async Task RawTrend_AnIdleRunThatStartedBeforeTheWindowEndAndWasLoggedAfterItPlotsItsZero()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var store = await RunModelStore.CreateAsync(ct);
+        const int server = -544920;
+        await store.RegisterAsync(server, ct);
+        var h = store.Hour;
+        foreach (var k in new[] { 0, 1 })
+        {
+            await store.RowAsync(server, "usp_Work", h.AddMinutes(k), elapsedUs: 600_000, executions: 10, interval: 60, ct);
+            await store.RunAsync(server, h.AddMinutes(k) + RunLogLag, 3000, "SUCCESS", 1, ct);
+        }
+        await store.RunAsync(server, h.AddMinutes(2) + RunLogLag, 3000, "SUCCESS", 0, ct);
+
+        var buckets = await store.ReadAsync(server, h, h.AddMinutes(2).AddSeconds(1), widthMinutes: 1, ct);
+
+        Assert.Equal(Enumerable.Range(0, 3).Select(k => h.AddMinutes(k)), buckets.Select(b => b.Bucket));
+        Assert.Equal(0.0, buckets[2].ElapsedMsPerSecond!.Value, precision: 6);
+        Assert.Equal(10.0, buckets[1].ElapsedMsPerSecond!.Value, precision: 6);
+    }
+
+    /// <summary>
+    /// The same edge for a busy run: its rows (stamped at its start) are inside the window and its log row is just after the end.
+    /// The run read past the window's end must not make that run an idle one: the minute has its one point, the stored work.
+    /// </summary>
+    [Fact]
+    public async Task RawTrend_ABusyRunLoggedAfterTheWindowEndIsNotAnIdleRun()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var store = await RunModelStore.CreateAsync(ct);
+        const int server = -544921;
+        await store.RegisterAsync(server, ct);
+        var h = store.Hour;
+        foreach (var k in new[] { 0, 1, 2 })
+        {
+            await store.RowAsync(server, "usp_Work", h.AddMinutes(k), elapsedUs: 600_000, executions: 10, interval: 60, ct);
+            await store.RunAsync(server, h.AddMinutes(k) + RunLogLag, 3000, "SUCCESS", 1, ct);
+        }
+        /* The next run's rows are past the window's end, so they are not read; its log row, an hour of reads past the end, is. */
+        await store.RowAsync(server, "usp_Work", h.AddMinutes(3), elapsedUs: 600_000, executions: 10, interval: 60, ct);
+        await store.RunAsync(server, h.AddMinutes(3) + RunLogLag, 3000, "SUCCESS", 1, ct);
+
+        var buckets = await store.ReadAsync(server, h, h.AddMinutes(2).AddSeconds(1), widthMinutes: 1, ct);
+
+        Assert.Equal(Enumerable.Range(0, 3).Select(k => h.AddMinutes(k)), buckets.Select(b => b.Bucket));
+        Assert.All(buckets, b => Assert.Equal(10.0, b.ElapsedMsPerSecond!.Value, precision: 6));
+        Assert.All(buckets, b => Assert.Equal(1, b.CollectionCount));
+    }
+
     internal sealed record TrendPoint(
         DateTime Bucket, double? ElapsedMsPerSecond, double? ExecutionsPerSecond, double? PeakElapsedMsPerSecond,
         DateTime FirstCollection, int UnratedCollections, int CollectionCount);

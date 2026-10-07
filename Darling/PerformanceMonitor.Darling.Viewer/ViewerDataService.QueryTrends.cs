@@ -468,8 +468,8 @@ public sealed partial class ViewerDataService
         DateTime? nowUtc = null, CancellationToken cancellationToken = default)
         => ReadRoutedDurationTrendAsync(
             QueryDurationTrendSql, QueryDurationTrendHourlySql, TimescaleSupport.QueryStatsHourlyView, TimescaleSupport.QueryStatsDailyView,
-            static rollups => rollups.QueryGrainHourly, serverId, startUtc, endUtc, databaseNames, nowUtc, cancellationToken,
-            coverIdleHours: false);
+            static rollups => rollups.QueryGrainHourly, serverId, startUtc, endUtc, databaseNames, nowUtc,
+            coverIdleHours: false, cancellationToken);
 
     /// <summary>Procedure-stats duration trend over the window — the procedure twin of
     /// <see cref="GetQueryDurationTrendAsync"/>, routed the same way over <c>procedure_stats_hourly</c>.</summary>
@@ -478,16 +478,17 @@ public sealed partial class ViewerDataService
         DateTime? nowUtc = null, CancellationToken cancellationToken = default)
         => ReadRoutedDurationTrendAsync(
             ProcedureDurationTrendSql, ProcedureDurationTrendHourlySql, TimescaleSupport.ProcedureStatsHourlyView, TimescaleSupport.ProcedureStatsDailyView,
-            static rollups => rollups.ProcedureGrainHourly, serverId, startUtc, endUtc, databaseNames, nowUtc, cancellationToken,
-            coverIdleHours: true);
+            static rollups => rollups.ProcedureGrainHourly, serverId, startUtc, endUtc, databaseNames, nowUtc,
+            coverIdleHours: true, cancellationToken);
 
     /// <summary>
     /// The shared body of the two routed reads (#3653): probe what the store has and has materialized (the
     /// viewer's cached <see cref="GetRollupAvailabilityAsync"/>), resolve the tier, run that tier's SQL, and
     /// describe what came back. One method so the query and procedure trends cannot drift in how they route,
     /// read, or describe coverage — the MCP reader's <c>ReadRoutedDurationTrendAsync</c> arrangement.
-    /// <paramref name="coverIdleHours"/> (#5449, the procedure grain) fills an hour with no rollup row in as zero work, between the
-    /// window's first and last rollup hour: the procedure collector stores no row for an hour in which no procedure worked.
+    /// <paramref name="coverIdleHours"/> (#5449, the procedure grain) adds the hours a collector run fell in with no
+    /// raw row as zero work (<see cref="DurationTrendRouting"/>'s idle hours): the procedure collector stores no row for an hour in
+    /// which no procedure worked.
     /// <paramref name="hourlyAvailable"/> picks the GRAIN's own availability flag off the probe: a store with
     /// the query rollup but not the procedure one (a failed ensure sweep, #1664's failure isolation) must
     /// route the procedure trend to raw, whatever the query grain is doing.
@@ -498,7 +499,7 @@ public sealed partial class ViewerDataService
     private async Task<QueryTrendSeries> ReadRoutedDurationTrendAsync(
         string rawSql, string hourlySql, string hourlyView, string dailyView, Func<RollupAvailability, bool> hourlyAvailable,
         int serverId, DateTime startUtc, DateTime endUtc, IReadOnlyList<string>? databaseNames, DateTime? nowUtc,
-        CancellationToken cancellationToken, bool coverIdleHours)
+        bool coverIdleHours, CancellationToken cancellationToken)
     {
         var (rollups, coverage) = await GetRollupAvailabilityAsync(cancellationToken);
         var tier = DurationTrendRouting.ResolveTier(

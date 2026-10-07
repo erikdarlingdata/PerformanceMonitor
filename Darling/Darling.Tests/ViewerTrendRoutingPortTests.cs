@@ -62,6 +62,33 @@ public sealed class ViewerTrendRoutingPortTests
     }
 
     /// <summary>
+    /// #5449: the idle hours (<c>run_hours</c> and <c>idle_hours</c>: a SUCCESS collector run falls in the hour and the raw table
+    /// holds no row in it) are on both procedure hourly statements, the viewer's and the tool's, as the same text, and on no
+    /// query-view statement. The fill reads the collector's log, so it is bounded by the window like the rollup read.
+    /// </summary>
+    [Fact]
+    public void ProcedureHourlySql_CarriesTheSameIdleHoursFragment_AndTheQueryViewsCarryNone()
+    {
+        static string Fragment(string sql)
+        {
+            var text = Lf(sql);
+            var start = text.IndexOf("run_hours AS", StringComparison.Ordinal);
+            var end = text.IndexOf("filled AS", StringComparison.Ordinal);
+            Assert.True(start > 0 && end > start, "no idle-hours fragment");
+            return string.Join('\n', text[start..end].Split('\n').Select(l => l.Trim()));
+        }
+
+        var mcp = Fragment(DarlingTrendReader.ProcedureDurationTrendHourlySql);
+        Assert.Equal(mcp, Fragment(ViewerDataService.ProcedureDurationTrendHourlySql));
+        Assert.Equal(mcp, Fragment(DurationTrendRouting.BuildHourlyTrendSql(TimescaleSupport.ProcedureStatsHourlyView, withDatabaseFilter: false, coverIdleHours: true)));
+        Assert.Contains("collection_time < $3 + INTERVAL '1 hour'", mcp, StringComparison.Ordinal);
+        Assert.Contains("run_hours.bucket < $3", mcp, StringComparison.Ordinal);
+        Assert.Contains("NOT EXISTS", mcp, StringComparison.Ordinal);
+        Assert.DoesNotContain("run_hours", DarlingTrendReader.QueryDurationTrendHourlySql, StringComparison.Ordinal);
+        Assert.DoesNotContain("run_hours", ViewerDataService.QueryDurationTrendHourlySql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// The viewer's hourly SQL reads the rollup rows the MCP's buckets are built from, plus exactly one line —
     /// the #1319 database filter, the same guarded <c>$4::text[]</c> shape its raw reads carry. Until #3897 the
     /// two were one statement; now the tool gathers the hours into its own width (the chart plots every hour), so

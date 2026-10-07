@@ -298,7 +298,7 @@ public sealed partial class ViewerDataService
     /// <summary>
     /// #5449: the collector's SUCCESS runs for <c>procedure_stats</c> over a window, ascending. The per-procedure history chart
     /// reads them to plot a 0 for each run that stored nothing for the procedure (the collector keeps no row for a procedure
-    /// that did no work in a cycle). Same <c>collection_log</c> read as <c>IdleRunCollectionsSql</c>; it uses
+    /// that did no work in a cycle). The same <c>collection_log</c> runs the bucketed trend's <c>ProcedureCollectionsCte</c> reads; it uses
     /// <c>idx_collection_log_watermark (server_id, collector_name, collection_time DESC)</c>. The log time and the run's logged
     /// <c>duration_ms</c> come back together: the log row is written after the run, so the 0 for a quiet run is placed at the log
     /// time minus the duration (<see cref="ViewerProcedureHistoryIdleRuns.IdleRunTimes"/>). $1 server_id, $2 window start,

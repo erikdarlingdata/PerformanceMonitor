@@ -168,7 +168,7 @@ public static class DurationTrendRouting
 
         if (coverIdleHours)
         {
-            return BuildFilledHourlyTrendSql(hourlyView, withDatabaseFilter);
+            return BuildHourlyTrendWithIdleHoursSql(hourlyView, withDatabaseFilter);
         }
 
         if (withDatabaseFilter)
@@ -218,13 +218,12 @@ public static class DurationTrendRouting
 
     /// <summary>
     /// #5449: the procedure rollups hold no row for an hour in which no procedure did work (the collector stores no row for a
-    /// procedure that did none, where an older store kept zero rows), so a fully idle hour is a gap here where an older store
-    /// has a measured 0. <see cref="BuildHourlyTrendSql"/>'s read with the hours between the series' first and last rollup hour
-    /// filled in as zero work over the same <see cref="HourlyBucketSecondsSql"/>. Only between the first and last hour in the
-    /// window: the rollup cannot say whether the collector was running before the first work or after the last, and a 0 there
-    /// would be invented. Read time only, no change to the rollup. $1..$4 as <see cref="BuildHourlyTrendSql"/>.
+    /// procedure that did none, where an older store kept zero rows), so a fully idle hour is a gap in the rollup where an older
+    /// store has a measured 0. <see cref="BuildHourlyTrendSql"/>'s read with the idle hours (<see cref="ProcedureIdleHoursSql"/>)
+    /// added to the rollup's hours as zero work over the same <see cref="HourlyBucketSecondsSql"/>. Read time only, no change to
+    /// the rollup. $1..$4 as <see cref="BuildHourlyTrendSql"/>.
     /// </summary>
-    private static string BuildFilledHourlyTrendSql(string hourlyView, bool withDatabaseFilter)
+    private static string BuildHourlyTrendWithIdleHoursSql(string hourlyView, bool withDatabaseFilter)
     {
         const string match = "$4::text[] IS NULL OR database_name = ANY($4)";
         var sums = withDatabaseFilter
@@ -248,16 +247,68 @@ public static class DurationTrendRouting
                 AND   bucket >= $2
                 AND   bucket < $3
                 GROUP BY bucket
+            ),
+            {ProcedureIdleHoursSql()},
+            filled AS
+            (
+                SELECT bucket, elapsed_time_sum, execution_count_sum
+                FROM hourly
+                UNION ALL
+                SELECT idle_hours.bucket, 0, 0
+                FROM idle_hours
+                WHERE NOT EXISTS (SELECT 1 FROM hourly WHERE hourly.bucket = idle_hours.bucket)
             )
             SELECT
-                hours.bucket AS collection_time,
-                COALESCE(hourly.elapsed_time_sum, 0) / 1000.0 / {HourlyBucketSecondsSql} AS elapsed_ms_per_second,
-                CAST(COALESCE(hourly.execution_count_sum, 0) AS DOUBLE PRECISION) / {HourlyBucketSecondsSql} AS executions_per_second
-            FROM (SELECT generate_series(MIN(bucket), MAX(bucket), INTERVAL '1 hour') AS bucket FROM hourly) AS hours
-            LEFT JOIN hourly ON hourly.bucket = hours.bucket{windowHasRows}
-            ORDER BY hours.bucket
+                bucket AS collection_time,
+                elapsed_time_sum / 1000.0 / {HourlyBucketSecondsSql} AS elapsed_ms_per_second,
+                CAST(execution_count_sum AS DOUBLE PRECISION) / {HourlyBucketSecondsSql} AS executions_per_second
+            FROM filled{windowHasRows}
+            ORDER BY bucket
             """;
     }
+
+    /// <summary>
+    /// #5449: the CTEs (<c>run_hours</c> and <c>idle_hours</c>, the hours the rollup has no row for) that add the idle hours to the
+    /// hourly read. An hour is in the series when the rollup has a row, OR a SUCCESS run of the collector falls in it AND the raw
+    /// <c>procedure_stats</c> table holds no row in that hour: a collector that ran and stored nothing measured zero work over the
+    /// 3,600 seconds. The runs come from <c>collect.collection_log</c> (a run is logged after it finishes, so its point is the log
+    /// time less its <c>duration_ms</c>, the same instant the raw tier plots an idle run at).
+    ///
+    /// <para>The raw-row test is what keeps the one or two trailing hours the continuous aggregate has not materialized yet a gap on
+    /// a busy server instead of a false 0: those hours have raw rows. An outage hour (no rollup row, no run) stays a gap, so a
+    /// bucket's seconds do not count time the collector was down. Hours older than the log (it keeps 60 days) have no runs, and a
+    /// store that never logged runs has none at all: both read as the rollup alone, which is the rule before this fill existed. An
+    /// old materialization hole past raw retention, with runs, reads 0. Uses the log's watermark index; the raw probe per hour
+    /// is a no-op once the raw rows are past retention. $1 server_id, $2/$3 window (naive UTC, $3 exclusive, as the rollup read).</para>
+    /// </summary>
+    private static string ProcedureIdleHoursSql()
+        => $"""
+            run_hours AS
+            (
+                SELECT DISTINCT date_trunc('hour', collection_time - COALESCE(duration_ms, 0) * INTERVAL '1 millisecond') AS bucket
+                FROM {PgSchemaGenerator.CollectSchema}.collection_log
+                WHERE server_id = $1
+                AND   collector_name = 'procedure_stats'
+                AND   status = 'SUCCESS'
+                AND   collection_time >= $2
+                AND   collection_time < $3 + INTERVAL '1 hour'
+            ),
+            idle_hours AS
+            (
+                SELECT run_hours.bucket
+                FROM run_hours
+                WHERE run_hours.bucket >= $2
+                AND   run_hours.bucket < $3
+                AND   NOT EXISTS
+                (
+                    SELECT 1
+                    FROM procedure_stats
+                    WHERE procedure_stats.server_id = $1
+                    AND   procedure_stats.collection_time >= run_hours.bucket
+                    AND   procedure_stats.collection_time < run_hours.bucket + INTERVAL '1 hour'
+                )
+            )
+            """;
 
     /// <summary>The query-stats hourly trend — <see cref="BuildHourlyTrendSql"/> over
     /// <see cref="TimescaleSupport.QueryStatsHourlyView"/>.</summary>
@@ -354,7 +405,10 @@ public static class DurationTrendRouting
     /// high.</para>
     ///
     /// <para>Both tables are read from <c>$2 - 1 hour</c> so the first point in the window has its previous point; points before
-    /// <c>$2</c> are dropped after the previous point is found. With <paramref name="withDatabaseFilter"/> the database clause is
+    /// <c>$2</c> are dropped after the previous point is found. The runs are read to <c>$3 + 1 hour</c>, because a run is logged
+    /// after it finishes: an idle run that began inside the window but was logged just past <c>$3</c> still plots its 0. Stored
+    /// rows stop at <c>$3</c> and the points do too (a run past <c>$3</c> whose rows were not read is dropped by that final bound,
+    /// its point is never earlier than its own start). With <paramref name="withDatabaseFilter"/> the database clause is
     /// applied inside the sums as in <see cref="RawCollectionsCte"/>, and an idle point carries <c>matched_rows</c> 0. Ends in a
     /// CTE named <c>raw</c> with the query grain's columns. $1 server_id, $2/$3 window (naive UTC).</para>
     /// </summary>
@@ -394,7 +448,7 @@ public static class DurationTrendRouting
             AND   collector_name = 'procedure_stats'
             AND   status = 'SUCCESS'
             AND   collection_time >= $2 - INTERVAL '{maxGap} seconds'
-            AND   collection_time <= $3
+            AND   collection_time <= $3 + INTERVAL '{maxGap} seconds'
         ),
         events AS
         (
@@ -447,6 +501,7 @@ public static class DurationTrendRouting
                 END AS interval_seconds{matched}
             FROM gapped
             WHERE collection_time >= $2
+            AND   collection_time <= $3
         )
         """;
     }
@@ -537,9 +592,9 @@ public static class DurationTrendRouting
     /// every hourly rollup and the interval successors group by <c>database_name</c>), $4 is the guarded
     /// <c>text[]</c> database filter (<see cref="DatabaseFilter.Clause"/>'s shape) and the width moves to $5, as
     /// <see cref="BuildBucketedRawTrendSql"/> does; off, the text is the one the MCP reader's constants pin.
-    /// With <paramref name="coverIdleHours"/> (#5449, the procedure rollups only) every hour between the window's first and last
-    /// rollup hour counts, an hour with no rollup row as zero work, so a quiet hour is in the bucket's seconds as it is on a store
-    /// that kept the idle rows; off, the text is unchanged.
+    /// With <paramref name="coverIdleHours"/> (#5449, the procedure rollups only) the hours <see cref="ProcedureIdleHoursSql"/> finds
+    /// (a SUCCESS run of the collector, no raw row) count as zero work, so a quiet hour is in the bucket's seconds as it is on a
+    /// store that kept the idle rows; off, the text is unchanged.
     /// </summary>
     public static string BuildBucketedHourlyTrendSql(string hourlyView, bool withDatabaseFilter = false, bool coverIdleHours = false)
     {
@@ -562,19 +617,20 @@ public static class DurationTrendRouting
 
         /* #5449: procedure rollups hold no row for an hour in which no procedure worked, so the hours the bucket divides by (COUNT(*)
            of the rollup's hours in it) leave out the idle ones and a wider bucket reads high where an older store, which kept the
-           idle rows, reads lower. The seconds are then the larger of the hours the rollup holds and the bucket's own span, clipped
-           to the first and last rollup hour in the window: every hour between them is a bucket hour, a quiet one with 0 work. */
+           idle rows, reads lower. ProcedureIdleHoursSql adds the hours a SUCCESS run of the collector falls in with no raw row in
+           them as zero work; an outage hour (no rollup row, no run) stays out of the bucket's seconds. */
         var filled = coverIdleHours
-            ? """
+            ? $"""
             ,
+            {ProcedureIdleHoursSql()},
             filled AS
             (
-                SELECT
-                    hours.bucket,
-                    COALESCE(hourly.elapsed_ms, 0) AS elapsed_ms,
-                    COALESCE(hourly.executions, 0) AS executions
-                FROM (SELECT generate_series(MIN(bucket), MAX(bucket), INTERVAL '1 hour') AS bucket FROM hourly) AS hours
-                LEFT JOIN hourly ON hourly.bucket = hours.bucket
+                SELECT bucket, elapsed_ms, executions
+                FROM hourly
+                UNION ALL
+                SELECT idle_hours.bucket, 0, 0
+                FROM idle_hours
+                WHERE NOT EXISTS (SELECT 1 FROM hourly WHERE hourly.bucket = idle_hours.bucket)
             )
             """
             : "";

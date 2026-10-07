@@ -518,6 +518,20 @@ public sealed class DurationTrendDatabaseFilterHourlyLiveTests
                   VALUES ($1, $2, $3, $4, $5, 'dbo', 'usp_HOUR2', '0xSQLHHOUR2', 10, 4000, 4000, 100, 1000, 3600)",
                 CollectionIdGenerator.Next(), WindowStart.AddHours(2).AddMinutes(10), ServerId, ServerName, B);
 
+            /* #5449: the procedure collector's runs. Each stored collection above is a busy run logged just after its rows; hour 3
+               has one quiet run (nothing stored), which is what makes it a measured zero hour on the procedure rollup. */
+            foreach (var (runAt, rows) in new[]
+            {
+                (WindowStart.AddHours(1).AddMinutes(10), 1), (WindowStart.AddHours(1).AddMinutes(20), 1), (WindowStart.AddHours(1).AddMinutes(30), 1),
+                (WindowStart.AddHours(2).AddMinutes(10), 1), (WindowStart.AddHours(3).AddMinutes(10), 0), (SurvivorAt, 1),
+            })
+            {
+                await DarlingMcpTestData.ExecAsync(connection, ct,
+                    @"INSERT INTO collect.collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, rows_collected)
+                      VALUES ($1, $2, $3, 'procedure_stats', $4, 3000, 'SUCCESS', $5)",
+                    CollectionIdGenerator.Next(), ServerId, ServerName, runAt.AddSeconds(3), rows);
+            }
+
             foreach (var view in new[] { TimescaleSupport.QueryStatsIntervalHourlyView, TimescaleSupport.ProcedureStatsIntervalHourlyView })
             {
                 await using var refresh = new NpgsqlCommand($"CALL refresh_continuous_aggregate('collect.{view}'::regclass, $1::timestamp, $2::timestamp)", connection);
@@ -581,8 +595,8 @@ public sealed class DurationTrendDatabaseFilterHourlyLiveTests
                     return Series(json)[WindowStart];
                 }
 
-                /* #5449: the procedure rollup also counts an hour in which no procedure worked, as zero work, between its first and
-                   last hour (hour 3 here), so its bucket holds three hours; the query rollup keeps its two. */
+                /* #5449: the procedure rollup also counts an hour in which the collector ran and no procedure worked (a logged run, no
+                   raw row: hour 3 here), as zero work, so its bucket holds three hours; the query rollup keeps its two. */
                 var twoHours = perSecond / (procedures ? 3 : 2);
                 var wideA = await Wide(DatabaseFilter.One(A));
                 var wideB = await Wide(DatabaseFilter.One(B));
