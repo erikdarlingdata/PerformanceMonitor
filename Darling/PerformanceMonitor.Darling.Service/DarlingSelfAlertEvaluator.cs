@@ -5327,6 +5327,99 @@ internal sealed class DarlingSelfAlertEvaluator
         }
     }
 
+    /* ---------------- the gap before this start (#5450) ---------------- */
+
+    /// <summary>
+    /// The alert metric name for "the service was not collecting before this start" (#5450). A WEBHOOK
+    /// AUTOMATION KEY like its siblings, so it is a const and must stay stable across releases.
+    /// </summary>
+    internal const string CollectionGapAtStartMetric = "Collection Gap At Start";
+
+    /// <summary>Fleet-level key, non-numeric so it never collides with a real server_id (the DiskKey shape).</summary>
+    private const string CollectionGapKey = "collectiongapatstart";
+
+    /// <summary>
+    /// The shortest gap that is reported. An ordinary install or upgrade restart takes about one to two
+    /// minutes, so 15 never fires on one; a gap this long means the service or its host was down on
+    /// purpose or by accident, which is what the alert exists to say. A const, not a setting.
+    /// </summary>
+    internal static readonly TimeSpan CollectionGapAtStartThreshold = TimeSpan.FromMinutes(15);
+
+    /// <summary>
+    /// The newest collection time that was in the store BEFORE this start's first collector wrote, over the
+    /// currently ENABLED servers only (#5450). A store whose servers are all disabled or removed reads NULL and
+    /// so fires nothing. The fleet sentinel (server_id 0: the daily purge's run record and the oversized-plan
+    /// sweep) is excluded naturally, because it is not a configured server. Bounded: one backward probe of
+    /// <c>idx_collection_log_time (server_id, collection_time)</c> per server, each stopping at its first row,
+    /// so it never scans or sorts the table, on a hypertable or on plain PostgreSQL.
+    /// </summary>
+    internal const string NewestCollectionTimeSql = @"
+SELECT max(n.collection_time)
+FROM config.config_monitored_servers c
+CROSS JOIN LATERAL (
+    SELECT l.collection_time
+    FROM collect.collection_log l
+    WHERE l.server_id = c.server_id
+    ORDER BY l.collection_time DESC
+    LIMIT 1) n
+WHERE c.is_enabled";
+
+    /// <summary>
+    /// <paramref name="LastCollectionUtc"/> is read from a <c>timestamp</c> column that is written as UTC, so
+    /// Npgsql hands it back with Kind Unspecified; <paramref name="StartUtc"/> is the service process start,
+    /// in UTC. The gap is measured from the last collection to the PROCESS start, so a long migration or a
+    /// store runtime upgrade after the start is not counted as downtime. Null at the call site (not a report)
+    /// when no enabled server had rows.
+    /// </summary>
+    internal sealed record CollectionGapReport(DateTime LastCollectionUtc, DateTime StartUtc);
+
+    /// <summary>
+    /// Raises "Collection Gap At Start" ONCE per service start when the newest pre-start collection is at
+    /// least <see cref="CollectionGapAtStartThreshold"/> before the start (#5450). The self-monitor alerts
+    /// run inside the service and cannot see its own downtime, but the next start can. An event, not an
+    /// edge machine: fired at the first opportunity the alert engine exists and never re-evaluated.
+    /// </summary>
+    public async Task EvaluateCollectionGapAtStartAsync(CollectionGapReport? report, CancellationToken cancellationToken)
+    {
+        if (report is null || !_settings.AlertsEnabled)
+        {
+            return;
+        }
+
+        /* A negative gap (a clock step, or a row newer than the start) is under the threshold too. */
+        var gap = report.StartUtc - report.LastCollectionUtc;
+        if (gap < CollectionGapAtStartThreshold)
+        {
+            return;
+        }
+
+        try
+        {
+            var minutes = (int)Math.Floor(gap.TotalMinutes);
+            var last = report.LastCollectionUtc.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture);
+            var start = report.StartUtc.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture);
+            await FireAsync(
+                StoreKey(CollectionGapKey), _storeLabel, CollectionGapAtStartMetric,
+                $"{minutes} minutes", $"{(int)CollectionGapAtStartThreshold.TotalMinutes} minutes",
+                detail: $"Darling was not collecting from {last} to {start} UTC ({minutes} minutes). " +
+                    "Nothing was collected for any server in that window. " +
+                    "If this was not a planned stop, check why the service or its host was down.",
+                severity: AlertSeverityLevel.Warning,
+                shortMessage: $"not collecting for {minutes} minutes before this start",
+                numericCurrentValue: minutes, numericThresholdValue: (int)CollectionGapAtStartThreshold.TotalMinutes,
+                cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            /* The report is a parameter; no store read happens here. */
+            _logger?.LogError("Collection gap at start self-alert failed: {Message}", ex.Message);
+        }
+    }
+
     /* ---------------- the store's TimescaleDB extension (#3908) ---------------- */
 
     /// <summary>

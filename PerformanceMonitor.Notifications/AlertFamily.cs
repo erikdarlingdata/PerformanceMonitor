@@ -116,6 +116,8 @@ public static class AlertFamily
         ["Compression Job Stuck"] = SelfMonitor,
         ["Store Disk Pressure"] = SelfMonitor,
         ["Store Runtime Upgrade"] = SelfMonitor,
+        /* #5450: raised once per service start when the store shows the service was not collecting. */
+        ["Collection Gap At Start"] = SelfMonitor,
         ["Store Job Over Cadence"] = SelfMonitor,
         ["Retention Held"] = SelfMonitor,
         ["Custom Alert Rules Unhealthy"] = SelfMonitor,

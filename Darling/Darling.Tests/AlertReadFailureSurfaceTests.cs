@@ -922,7 +922,7 @@ public sealed class AlertReadFailureSurfaceTests
            DarlingWorker. 16th exempt since #4750: EvaluateNotificationChannelsAsync's wrapper catch — the
            webhook channels' failure counts are read from the webhook service's memory, so there is no store
            read for the condition to swallow. */
-        (Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingSelfAlertEvaluator.cs"), 12, 17),
+        (Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingSelfAlertEvaluator.cs"), 12, 18),
     };
 
     /// <summary>
@@ -1029,6 +1029,7 @@ public sealed class AlertReadFailureSurfaceTests
         ["Store disk-pressure self-alert failed"] = "handed its evidence as parameters; the read is counted in DarlingWorker",
         ["Custom-alert rule-health self-alert failed"] = "handed its evidence (the report) as a parameter; the report-building read is in CustomAlertEvaluator, outside this census",
         ["Store runtime upgrade self-alert failed"] = "handed its evidence as parameters",
+        ["Collection gap at start self-alert failed"] = "handed its evidence as parameters",
         ["Store TimescaleDB self-alert failed"] = "handed its evidence as parameters; the version was read by the bootstrap (#3908)",
         /* #3816 renamed this line with the check: the same catch, one family over — the self-heal now covers
            every policy family, so "Compression-job health" would have named a third of what it isolates. */
@@ -1244,8 +1245,9 @@ public sealed class AlertReadFailureSurfaceTests
            webhook service's memory rather than the store. 34th since #4732: the Collection Falling Behind
            self-alert's wrapper catch, whose counts come from the worker's in-memory gate statistics. 35th since
            #5097: the store statement history snapshot's catch, a telemetry write sweep whose loss costs an hour's
-           capture and never an alert. */
-        Assert.Equal(35, totalExempt);
+           capture and never an alert. 36th since #5450: the Collection Gap At Start self-alert's catch, handed
+           its evidence as a parameter. */
+        Assert.Equal(36, totalExempt);
 
         /* Every exemption in the table is actually used. An exemption for a message that no longer exists
            is a hole this pin would otherwise keep open indefinitely — the shape that lets a real new catch

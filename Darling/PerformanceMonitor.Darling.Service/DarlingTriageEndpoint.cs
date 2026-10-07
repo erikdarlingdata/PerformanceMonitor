@@ -291,6 +291,8 @@ internal static class DarlingTriageEndpoint
                and collector cost is what DRIVES the volume all three are downstream of. */
             [DarlingSelfAlertEvaluator.DiskPressureMetric] = StoreSections(),
             [DarlingSelfAlertEvaluator.StoreUpgradeMetric] = StoreSections(),
+            /* #5450: a fleet-level event about the whole store's collection, so the same fleet-level sections. */
+            [DarlingSelfAlertEvaluator.CollectionGapAtStartMetric] = StoreSections(),
             [DarlingSelfAlertEvaluator.JobCadenceMetric] = StoreSections(),
             [DarlingSelfAlertEvaluator.CompressionJobMetric] = StoreSections(),
             /* #3816: the same shape for the two families the self-heal now covers and for the failure arm —
