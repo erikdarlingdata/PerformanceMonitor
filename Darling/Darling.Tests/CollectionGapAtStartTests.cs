@@ -209,6 +209,17 @@ FROM generate_series(@newest - make_interval(days => @days), @newest, INTERVAL '
 
     private static string? Env() => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
 
+    /// <summary>
+    /// Now, cut to whole microseconds. <c>collection_log.collection_time</c> is a PostgreSQL <c>timestamp</c>, which keeps
+    /// microseconds, while <see cref="DateTime.UtcNow"/> carries 100 ns ticks on Windows; an exact equality on the read-back
+    /// value would otherwise differ in the last digit.
+    /// </summary>
+    private static DateTime UtcNowToTheMicrosecond()
+    {
+        var now = DateTime.UtcNow;
+        return new DateTime(now.Ticks - (now.Ticks % 10), DateTimeKind.Utc);
+    }
+
     [Fact]
     public async Task NoEnabledServer_ReadsNull_SoNothingFires()
     {
@@ -240,7 +251,7 @@ FROM generate_series(@newest - make_interval(days => @days), @newest, INTERVAL '
         var (scratch, connection) = await OpenStoreAsync(Env()!, hypertable: false);
         try
         {
-            var now = DateTime.UtcNow;
+            var now = UtcNowToTheMicrosecond();
             var newest = DateTime.SpecifyKind(now.AddMinutes(-40), DateTimeKind.Unspecified);
             await AddServerAsync(connection, 7, enabled: true);
             await AddServerAsync(connection, 8, enabled: false);
@@ -268,7 +279,7 @@ FROM generate_series(@newest - make_interval(days => @days), @newest, INTERVAL '
         var (scratch, connection) = await OpenStoreAsync(Env()!, hypertable);
         try
         {
-            var now = DateTime.UtcNow;
+            var now = UtcNowToTheMicrosecond();
             var newest = DateTime.SpecifyKind(now.AddMinutes(-40), DateTimeKind.Unspecified);
             foreach (var id in new[] { 7, 8, 9 })
             {
