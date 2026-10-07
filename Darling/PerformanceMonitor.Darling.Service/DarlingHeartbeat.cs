@@ -9,7 +9,9 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.IO;
 using System.Net.Http;
+using System.Text;
 using System.Text.Json.Serialization;
 using System.Threading;
 using System.Threading.Tasks;
@@ -24,9 +26,10 @@ namespace PerformanceMonitor.Darling.Service;
 ///
 /// <para><b>FILE-ONLY, like <see cref="PeersConfig"/>.</b> The web Admin and MCP cannot edit it and no read surface
 /// returns it: <see cref="Url"/> usually carries the check's token, so the WHOLE URL is a secret. It takes the same
-/// <c>env:</c>/<c>file:</c> reference the other secrets take (<see cref="DarlingSecretSource"/>, #1804), resolved where
-/// it is used, so a rotated token file is picked up on the next ping. The URL is never logged and never put in a
-/// validation message: logs and problems name the scheme and host only.</para>
+/// <c>env:</c>/<c>file:</c> reference the other secrets take (<see cref="DarlingSecretSource"/>, #1804). Validation
+/// checks only the SHAPE of a reference and never resolves it; the loop resolves it on every tick, so a rotated token
+/// file is picked up on the next ping. The URL is never logged and never put in a validation message: logs name the
+/// scheme and host only, and every problem text is fixed.</para>
 /// </summary>
 public sealed class HeartbeatConfig
 {
@@ -54,48 +57,203 @@ public sealed class HeartbeatConfig
     [JsonIgnore]
     public bool IsConfigured => !string.IsNullOrWhiteSpace(Url);
 
+    /// <summary>Most bytes read from a <c>file:</c> reference: a URL is far under this, so a larger file is a mistake
+    /// (or a device that never ends), not a secret.</summary>
+    internal const int MaxReferenceFileBytes = 8 * 1024;
+
+    /// <summary>How long resolving a reference may take before the tick counts it as a failure.</summary>
+    internal static readonly TimeSpan ResolveTimeout = TimeSpan.FromSeconds(10);
+
+    /* Fixed texts: none carries the URL, a variable name, a path, a file's contents or an exception message. The
+       problem list reaches /api/ping, the stopped marker and the CLI, so it is shaped for that audience. */
+    internal const string UrlShapeProblem =
+        "heartbeat.url must be an absolute http or https URL. (The value is not echoed: the URL is a secret.)";
+    internal const string UserInfoProblem =
+        "heartbeat.url must not carry a user name or password; put the check's token in the path. (The value is not echoed: the URL is a secret.)";
+    internal const string EnvShapeProblem =
+        "heartbeat.url: an env: reference must name an environment variable. (The value is not echoed.)";
+    internal const string FileShapeProblem =
+        "heartbeat.url: a file: reference must give an absolute path. (The value is not echoed.)";
+    internal const string EnvUnsetProblem =
+        "the environment variable named by the heartbeat.url env: reference is not set, or is blank";
+    internal const string FileUnreadableProblem =
+        "the file named by the heartbeat.url file: reference could not be read";
+    internal const string FileTooLargeProblem =
+        "the file named by the heartbeat.url file: reference is larger than 8 KB";
+    internal const string FileEmptyProblem =
+        "the file named by the heartbeat.url file: reference is empty";
+    internal const string FileTimeoutProblem =
+        "the file named by the heartbeat.url file: reference did not answer within 10 seconds";
+
     /// <summary>
-    /// Resolves <see cref="Url"/> to an absolute http/https <see cref="Uri"/>. A failure's <paramref name="problem"/>
-    /// names the setting, and for a reference the variable or file it points at, and NEVER the URL itself.
+    /// The SHAPE of a value, nothing more (#5460 ruling): a plain URL is fully validated; an <c>env:</c> or <c>file:</c>
+    /// reference is only checked for being well formed (a name, an absolute path) and is NOT resolved, because the
+    /// secure setups (a variable in the service's own environment, a file the service account alone can read) are
+    /// the ones an operator's shell cannot resolve, and every CLI verb that validates would refuse them. Null when it
+    /// is fine; otherwise one of the fixed problem texts.
     /// </summary>
-    internal bool TryResolveUrl(out Uri? uri, out string? problem)
+    internal static string? ShapeProblem(string? value)
     {
-        uri = null;
-        problem = null;
-        if (!IsConfigured)
+        if (string.IsNullOrWhiteSpace(value))
         {
-            return true;
+            return null;
         }
 
-        var text = Url!.Trim();
-        if (DarlingSecretSource.IsReference(text))
+        var text = value.Trim();
+        if (!DarlingSecretSource.IsReference(text))
         {
-            try
+            return TryParseUrl(text, out _);
+        }
+
+        if (text.StartsWith("env:", StringComparison.Ordinal))
+        {
+            return IsWellFormedEnvName(text["env:".Length..].Trim()) ? null : EnvShapeProblem;
+        }
+
+        var path = text["file:".Length..].Trim();
+        return path.Length > 0 && path.IndexOf('\0', StringComparison.Ordinal) < 0 && Path.IsPathFullyQualified(path)
+            ? null
+            : FileShapeProblem;
+    }
+
+    private static bool IsWellFormedEnvName(string name)
+    {
+        if (name.Length == 0)
+        {
+            return false;
+        }
+
+        foreach (var c in name)
+        {
+            if (c == '=' || char.IsWhiteSpace(c) || char.IsControl(c))
             {
-                text = DarlingSecretSource.Resolve(text, "heartbeat.url").Trim();
-            }
-            catch (InvalidOperationException ex)
-            {
-                problem = ex.Message;
                 return false;
             }
         }
 
+        return true;
+    }
+
+    /// <summary>Parses a literal URL: absolute, http or https, a host, and no user info. Null problem = fine.</summary>
+    private static string? TryParseUrl(string text, out Uri? uri)
+    {
+        uri = null;
         if (!Uri.TryCreate(text, UriKind.Absolute, out var parsed)
             || (parsed.Scheme != Uri.UriSchemeHttp && parsed.Scheme != Uri.UriSchemeHttps)
             || string.IsNullOrEmpty(parsed.Host))
         {
-            problem = "heartbeat.url must be an absolute http or https URL. (The value is not echoed: the URL is a secret.)";
-            return false;
+            return UrlShapeProblem;
+        }
+
+        /* HttpClient never turns user info into an Authorization header, so a URL with it would just fail as HTTP 401
+           with no hint. Refused up front instead. */
+        if (!string.IsNullOrEmpty(parsed.UserInfo))
+        {
+            return UserInfoProblem;
         }
 
         uri = parsed;
-        return true;
+        return null;
+    }
+
+    /// <summary>
+    /// Resolves <see cref="Url"/> to an absolute http/https <see cref="Uri"/>, for the loop's tick (and the diagnostics
+    /// bundle's alias seed). A failure's problem is one of the fixed texts, never the URL, a name, a path or an exception
+    /// message. A <c>file:</c> reference is read asynchronously, capped at <see cref="MaxReferenceFileBytes"/>, and given
+    /// <see cref="ResolveTimeout"/>, so a hung share or a device cannot stall a thread or the shutdown. Only
+    /// <paramref name="cancellationToken"/> being cancelled throws.
+    /// </summary>
+    internal async Task<(Uri? Uri, string? Problem)> ResolveAsync(CancellationToken cancellationToken)
+    {
+        if (!IsConfigured)
+        {
+            return (null, "heartbeat.url is not set");
+        }
+
+        var text = Url!.Trim();
+        if (text.StartsWith("env:", StringComparison.Ordinal))
+        {
+            var name = text["env:".Length..].Trim();
+            var value = IsWellFormedEnvName(name) ? Environment.GetEnvironmentVariable(name) : null;
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                return (null, EnvUnsetProblem);
+            }
+
+            text = value.Trim();
+        }
+        else if (text.StartsWith("file:", StringComparison.Ordinal))
+        {
+            var (contents, problem) = await ReadReferenceFileAsync(text["file:".Length..].Trim(), cancellationToken);
+            if (contents is null)
+            {
+                return (null, problem);
+            }
+
+            text = contents;
+        }
+
+        var parseProblem = TryParseUrl(text, out var uri);
+        return parseProblem is null ? (uri, null) : (null, parseProblem);
+    }
+
+    private static async Task<(string? Contents, string? Problem)> ReadReferenceFileAsync(string path, CancellationToken cancellationToken)
+    {
+        try
+        {
+            /* The open itself can block (a share that never answers, a pipe), so the whole read runs off the caller's
+               thread and the caller waits at most ResolveTimeout. */
+            var bytes = await Task.Run(() => ReadCappedAsync(path, cancellationToken), cancellationToken)
+                .WaitAsync(ResolveTimeout, cancellationToken);
+            if (bytes is null)
+            {
+                return (null, FileTooLargeProblem);
+            }
+
+            var start = bytes.Length >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF ? 3 : 0;
+            var contents = Encoding.UTF8.GetString(bytes, start, bytes.Length - start).Trim();
+            return contents.Length == 0 ? (null, FileEmptyProblem) : (contents, null);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (TimeoutException)
+        {
+            return (null, FileTimeoutProblem);
+        }
+        catch (Exception)
+        {
+            /* Deliberately no type or message here: a path can ride in either, and the problem is fixed text. */
+            return (null, FileUnreadableProblem);
+        }
+    }
+
+    /// <summary>The file's bytes, or null when it holds more than <see cref="MaxReferenceFileBytes"/>.</summary>
+    private static async Task<byte[]?> ReadCappedAsync(string path, CancellationToken cancellationToken)
+    {
+        await using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete,
+            bufferSize: 0, FileOptions.Asynchronous);
+        var buffer = new byte[MaxReferenceFileBytes + 1];
+        var total = 0;
+        while (total < buffer.Length)
+        {
+            var read = await stream.ReadAsync(buffer.AsMemory(total), cancellationToken);
+            if (read == 0)
+            {
+                break;
+            }
+
+            total += read;
+        }
+
+        return total > MaxReferenceFileBytes ? null : buffer.AsSpan(0, total).ToArray();
     }
 
     /// <summary>
     /// Validates the block; returns human-readable problems (empty = valid). Fatal, like the rest of
     /// <see cref="DarlingConfig.Validate"/>: a heartbeat that would silently never ping is worse than a refused start.
+    /// A null block (<c>"heartbeat": null</c>) is the same as an absent one: off.
     /// </summary>
     public static IReadOnlyList<string> Validate(HeartbeatConfig? heartbeat)
     {
@@ -111,9 +269,10 @@ public sealed class HeartbeatConfig
                 $"heartbeat.intervalSeconds must be between {MinIntervalSeconds} and {MaxIntervalSeconds} (got {heartbeat.IntervalSeconds})."));
         }
 
-        if (!heartbeat.TryResolveUrl(out _, out var problem) && problem is not null)
+        var shape = ShapeProblem(heartbeat.Url);
+        if (shape is not null)
         {
-            problems.Add(problem);
+            problems.Add(shape);
         }
 
         return problems;
@@ -137,6 +296,9 @@ internal enum HeartbeatDecision
 
     /// <summary>The store read failed: no ping.</summary>
     SkipReadFailed,
+
+    /// <summary>The newest time is further in the future than the clock-skew allowance: no ping (#5460).</summary>
+    SkipFuture,
 }
 
 /// <summary>The edge a ping result produced for the log.</summary>
@@ -207,6 +369,12 @@ internal sealed class HeartbeatFailureGate
 /// </summary>
 internal sealed class DarlingHeartbeat
 {
+    /// <summary>
+    /// How far past now a newest collection time may sit and still count as fresh (#5460). A time beyond this is a
+    /// skewed clock or a stray row, and trusting it would hold the ping green until wall-clock time caught up.
+    /// </summary>
+    internal static readonly TimeSpan FutureTolerance = TimeSpan.FromMinutes(5);
+
     /// <summary>How long one ping may take, from the send to the response headers.</summary>
     internal static readonly TimeSpan PingTimeout = TimeSpan.FromSeconds(10);
 
@@ -232,20 +400,29 @@ internal sealed class DarlingHeartbeat
     private readonly ILogger _logger;
     private readonly HttpClient _client;
     private readonly Func<DateTime> _utcNow;
+    private readonly Func<TimeSpan, CancellationToken, Task> _delay;
     private readonly HeartbeatFailureGate _gate = new();
-    private bool _skipping;
+    private readonly HeartbeatFailureGate _tickGate = new();
+    private HeartbeatDecision? _loggedSkip;
+    private bool _announced;
+    private bool _httpWarned;
 
-    internal DarlingHeartbeat(ILogger logger, HttpClient? client = null, Func<DateTime>? utcNow = null)
+    internal DarlingHeartbeat(
+        ILogger logger, HttpClient? client = null, Func<DateTime>? utcNow = null,
+        Func<TimeSpan, CancellationToken, Task>? delay = null)
     {
         _logger = logger;
         _client = client ?? s_client;
         _utcNow = utcNow ?? (() => DateTime.UtcNow);
+        _delay = delay ?? ((span, token) => Task.Delay(span, token));
     }
 
     /// <summary>
     /// The ping decision. Fresh = ping; no enabled server = ping (a service with nothing to collect is up);
-    /// stale, or enabled servers with no row at all = skip; a failed read = skip. A newest time AFTER now (clock
-    /// skew) counts as fresh, like #5454's negative gap.
+    /// stale, or enabled servers with no row at all = skip; a failed read = skip. Fresh means
+    /// <c>now - threshold &lt;= newest &lt;= now + <see cref="FutureTolerance"/></c> (#5460): a newest time further in the
+    /// future than that is skipped, because for a liveness signal the safe direction on a skewed clock or a stray
+    /// future-dated row is silence, not a green ping.
     /// </summary>
     internal static HeartbeatDecision Decide(HeartbeatRead read, DateTime nowUtc)
     {
@@ -264,7 +441,12 @@ internal sealed class DarlingHeartbeat
             return HeartbeatDecision.SkipStale;
         }
 
-        return nowUtc - newest < DarlingSelfAlertEvaluator.CollectionGapAtStartThreshold
+        if (newest > nowUtc + FutureTolerance)
+        {
+            return HeartbeatDecision.SkipFuture;
+        }
+
+        return nowUtc - newest <= DarlingSelfAlertEvaluator.CollectionGapAtStartThreshold
             ? HeartbeatDecision.Ping
             : HeartbeatDecision.SkipStale;
     }
@@ -331,18 +513,35 @@ internal sealed class DarlingHeartbeat
     }
 
     /// <summary>
-    /// One interval: resolve the URL, read the store, decide, and ping or skip. Returns what it did. Never throws
-    /// except for cancellation.
+    /// One interval: resolve the URL, read the store, decide, and ping or skip. Returns what it did (null when the URL
+    /// could not be resolved). Throws only for cancellation or a failure of <paramref name="read"/>, which the loop logs.
     /// </summary>
     internal async Task<HeartbeatDecision?> TickAsync(
         HeartbeatConfig config, Func<CancellationToken, Task<HeartbeatRead>> read, CancellationToken cancellationToken)
     {
-        if (!config.TryResolveUrl(out var url, out var problem) || url is null)
+        /* Resolved on every tick, so a rotated token file is picked up. A failure is fixed text only. */
+        var (url, problem) = await config.ResolveAsync(cancellationToken);
+        if (url is null)
         {
-            /* The problem names the setting and the variable or file, never the URL. Counted as a failed ping so it
-               warns once and then hourly, and the external check alerts, which is what it should do. */
-            LogFailure("the heartbeat.url reference could not be resolved: " + problem, null);
+            /* Counted as a failed ping so it warns once and then hourly, and the external check alerts, which is what
+               it should do. */
+            LogFailure("the URL could not be resolved: " + problem, null);
             return null;
+        }
+
+        if (!_announced)
+        {
+            _announced = true;
+            _logger.LogInformation(
+                "Heartbeat on: GET {Scheme}://{Host} every {Seconds} s while collection is current.",
+                url.Scheme, url.Host, config.IntervalSeconds);
+        }
+
+        if (url.Scheme == Uri.UriSchemeHttp && !_httpWarned)
+        {
+            _httpWarned = true;
+            _logger.LogWarning(
+                "Heartbeat URL uses http://, so the check's token crosses the network unencrypted on every ping. Use https:// where the check host offers it.");
         }
 
         var snapshot = await read(cancellationToken);
@@ -350,22 +549,28 @@ internal sealed class DarlingHeartbeat
         var decision = Decide(snapshot, now);
         if (decision != HeartbeatDecision.Ping)
         {
-            if (!_skipping)
+            if (_loggedSkip != decision)
             {
-                _skipping = true;
+                _loggedSkip = decision;
                 _logger.LogWarning(
-                    decision == HeartbeatDecision.SkipReadFailed
-                        ? "Heartbeat ping skipped: the store could not be read. The external check will alert until collection can be confirmed."
-                        : "Heartbeat ping skipped: no enabled server has collected within {Minutes} minutes. The external check will alert until collection resumes.",
+                    decision switch
+                    {
+                        HeartbeatDecision.SkipReadFailed =>
+                            "Heartbeat ping skipped: the store could not be read. The external check will alert until collection can be confirmed.",
+                        HeartbeatDecision.SkipFuture =>
+                            "Heartbeat ping skipped: the newest collection time is in the future (a clock jump or a stray row). The external check will alert until it is no longer ahead of the clock.",
+                        _ =>
+                            "Heartbeat ping skipped: no enabled server has collected within {Minutes} minutes. The external check will alert until collection resumes.",
+                    },
                     (int)DarlingSelfAlertEvaluator.CollectionGapAtStartThreshold.TotalMinutes);
             }
 
             return decision;
         }
 
-        if (_skipping)
+        if (_loggedSkip is not null)
         {
-            _skipping = false;
+            _loggedSkip = null;
             _logger.LogInformation("Heartbeat pings resume: collection is current.");
         }
 
@@ -405,45 +610,54 @@ internal sealed class DarlingHeartbeat
 
     /// <summary>
     /// The loop: a tick now, then one per <see cref="HeartbeatConfig.IntervalSeconds"/> until the token is cancelled.
-    /// Returns at once when no URL is set. A tick that throws (it should not) is logged by type and the loop goes on.
+    /// Returns at once when no URL is set, and a null block counts as unset (#5460). It yields first, so the first tick
+    /// (a reference resolve, a store command) never runs on the caller's startup path.
     /// </summary>
-    internal async Task RunAsync(HeartbeatConfig config, NpgsqlDataSource store, CancellationToken stoppingToken)
+    internal Task RunAsync(HeartbeatConfig? config, NpgsqlDataSource store, CancellationToken stoppingToken)
+        => RunLoopAsync(config, ct => ReadAsync(store, ct), stoppingToken);
+
+    /// <summary>
+    /// The loop over an injected read. Only shutdown ends it: a cancellation that is NOT the stopping token (a driver or
+    /// handler giving up internally), and any other exception a tick throws, is logged by type, throttled like a failed
+    /// ping, and the loop goes on (#5460).
+    /// </summary>
+    internal async Task RunLoopAsync(
+        HeartbeatConfig? config, Func<CancellationToken, Task<HeartbeatRead>> read, CancellationToken stoppingToken)
     {
-        if (!config.IsConfigured)
+        if (config is null || !config.IsConfigured)
         {
             return;
         }
 
+        await Task.Yield();
         var interval = TimeSpan.FromSeconds(config.IntervalSeconds);
-        if (config.TryResolveUrl(out var first, out _) && first is not null)
-        {
-            _logger.LogInformation(
-                "Heartbeat on: GET {Scheme}://{Host} every {Seconds} s while collection is current.",
-                first.Scheme, first.Host, config.IntervalSeconds);
-        }
-
         while (!stoppingToken.IsCancellationRequested)
         {
             try
             {
-                await TickAsync(config, ct => ReadAsync(store, ct), stoppingToken);
-                await Task.Delay(interval, stoppingToken);
+                await TickAsync(config, read, stoppingToken);
+                _tickGate.OnSuccess();
             }
-            catch (OperationCanceledException)
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
             {
                 return;
             }
             catch (Exception ex)
             {
-                _logger.LogWarning("Heartbeat tick failed ({Reason}).", ex.GetType().Name);
-                try
+                if (_tickGate.OnFailure(_utcNow()) == HeartbeatLogEdge.Warn)
                 {
-                    await Task.Delay(interval, stoppingToken);
+                    _logger.LogWarning(
+                        "Heartbeat tick failed ({Reason}). Further failures are logged at most once an hour.", ex.GetType().Name);
                 }
-                catch (OperationCanceledException)
-                {
-                    return;
-                }
+            }
+
+            try
+            {
+                await _delay(interval, stoppingToken);
+            }
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+            {
+                return;
             }
         }
     }

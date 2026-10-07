@@ -575,9 +575,12 @@
   // Outbound heartbeat (#5450): a GET to a dead-man's-switch URL (Healthchecks.io, Uptime Kuma and the like) every
   // intervalSeconds (60 to 3600, default 300) WHILE the service is collecting. It skips the ping when no enabled server
   // has collected in the last 15 minutes or the store cannot be read, so the outside check alerts both when the process
-  // stops and when it runs but no longer collects. Off unless "url" is set. The URL usually carries the check's token,
-  // so it is a secret: it may be an "env:NAME" or "file:/path" reference, and it is never logged. File-only: the web
-  // Admin and MCP cannot edit it.
+  // stops and when it runs but no longer collects. Off unless "url" is set. The WHOLE URL is a secret (it carries the
+  // check's token): lead with a "file:/path" reference to a file only the service account can read, or an "env:NAME"
+  // reference (on Windows a service's environment is readable by other local users, so prefer the file). Both are the
+  // same reference forms the other secrets take. A URL typed here is plaintext in this file. It is never logged, and
+  // it may not carry a user name and password. An http:// URL works but logs a warning. File-only: the web Admin and
+  // MCP cannot edit it.
   "heartbeat": {
     "url": "",
     "intervalSeconds": 300

@@ -351,7 +351,16 @@ public sealed class DarlingConfig
     /// is a secret that no read surface returns. Off unless <c>heartbeat.url</c> is set. See <see cref="HeartbeatConfig"/>.
     /// </summary>
     [JsonPropertyName("heartbeat")]
-    public HeartbeatConfig Heartbeat { get; set; } = new();
+    public HeartbeatConfig Heartbeat
+    {
+        get => _heartbeat;
+
+        /* "heartbeat": null means off, the same as an absent block (#5460): the JSON options here do not honor nullable
+           annotations, so a null would otherwise land in this property and fault the loop at shutdown. */
+        set => _heartbeat = value ?? new();
+    }
+
+    private HeartbeatConfig _heartbeat = new();
 
     public static string ResolveConfigPath(string? explicitPath = null)
     {

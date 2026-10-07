@@ -1346,14 +1346,21 @@ Option 1 is the `heartbeat` block. The service sends a GET to a URL you choose (
 
 ```json
 "heartbeat": {
-  "url": "https://hc-ping.example/your-check-id",
+  "url": "file:/etc/darling/heartbeat-url",
   "intervalSeconds": 300
 }
 ```
 
-- It is off unless `url` is set. `intervalSeconds` defaults to 300 and must be between 60 and 3600. A bad value stops the service at start, like the rest of the config checks.
-- The URL usually carries the check's token, so treat all of it as a secret. It can be an `env:NAME` or `file:/path` reference, like the other secrets. The service never writes it to the log, which names only the scheme and host. The web Admin, the MCP tools and the triage page cannot read or edit it. Edit it in the file and restart.
-- The service pings only while it is collecting. Each interval it checks the newest `collection_log` time across enabled servers. It sends the ping when no server is enabled, or when the newest collection is under 15 minutes old. It skips the ping when collection is older than that, when no enabled server has a collection row, or when the store cannot be read. So your check alerts when the process stops and also when it keeps running but no longer collects.
+The file holds one line, the check's full URL (for example `https://hc-ping.example/your-check-id`).
+
+- It is off unless `url` is set (an absent block, `"heartbeat": null` and an empty `url` all mean off). `intervalSeconds` defaults to 300 and must be between 60 and 3600. A bad value stops the service at start, like the rest of the config checks.
+- **The whole URL is a secret.** It carries the check's token, and anyone who holds it can send "up" pings that keep your check green while the service is down. Put it in a `file:/path` reference, with the file readable by the service account only, rather than writing it in `darling.json`. An `env:NAME` reference works too, but on Windows a service's environment is stored where other local users can read it, so prefer the file. These are the same two reference forms the other secrets take. A URL written straight into `darling.json` works, but it is plaintext in the config, readable by anyone who can read that file.
+- The start-up check looks only at the shape of a reference (a variable name, an absolute path) and does not read it, so commands such as `--validate-config` and `--diagnostics-bundle` work from a shell that cannot see the service's variable or file. The service reads the reference on every ping, so a rotated token file is picked up without a restart. A file larger than 8 KB is refused. A reference that cannot be read logs one fixed warning, then at most one per hour, and skips the ping.
+- A URL that carries a user name and password (`https://user:pass@host/`) is refused: the service would not send them. Put the token in the path.
+- `http://` is allowed (a check on your own network is common) but the token then crosses the network unencrypted on every ping, so the service logs one warning at start. Use `https://` where the check host offers it.
+- Because the file that a `file:` reference names decides where the service sends its GET, protect it as you protect `darling.json`.
+- The service never writes the URL to the log, which names only the scheme and host, and a diagnostics bundle aliases that host. The web Admin, the MCP tools and the triage page cannot read or edit it. Edit it in the file and restart.
+- The service pings only while it is collecting. Each interval it checks the newest `collection_log` time across enabled servers. It sends the ping when no server is enabled, or when the newest collection is no more than 15 minutes old and no more than 5 minutes ahead of the clock. It skips the ping when collection is older than that, when the newest time is further ahead of the clock than that (a clock jump or a stray row), when no enabled server has a collection row, or when the store cannot be read. The service still pings with no enabled servers, so a check on this heartbeat proves the process is up and the store is readable, not that any server is being monitored. So your check alerts when the process stops and also when it keeps running but no longer collects.
 - A ping waits at most 10 seconds, follows no redirects, and counts only a 2xx answer as success. A failed ping logs one warning, then at most one more per hour until a ping succeeds, and then one line saying it recovered. A failed ping never raises an alert and never slows collection.
 
 Option 2 is a check of your own. If your monitoring already runs checks on the host, use two. The first: the service process is running (the Windows service, the systemd unit or the container). The second: the newest `collection_log` time is within 15 minutes. Run this against the store. It returns `true` when collection is current:

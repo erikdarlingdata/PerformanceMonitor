@@ -68,6 +68,7 @@ public sealed class DarlingHeartbeatTests
     [InlineData("hc-ping.example/your-check-id")]
     [InlineData("not a url")]
     [InlineData("https://")]
+    [InlineData("https://user:pass@hc-ping.example/your-check-id")]
     public void BadScheme_Relative_OrMalformedUrl_IsFatal_AndTheProblemNeverEchoesIt(string url)
     {
         var heartbeat = new HeartbeatConfig { Url = url };
@@ -117,25 +118,37 @@ public sealed class DarlingHeartbeatTests
         Assert.DoesNotContain(problems, p => p.Contains(Token, StringComparison.Ordinal));
     }
 
-    [Fact]
-    public void EnvReference_Resolves_AndAMissingVariableIsFatalWithoutTheValue()
+    [Theory]
+    [InlineData("env:")]
+    [InlineData("env:   ")]
+    [InlineData("env:BAD NAME")]
+    [InlineData("env:A=B")]
+    [InlineData("file:")]
+    [InlineData("file:relative/secret-path-5450.txt")]
+    public void MalformedReference_IsFatal_WithFixedText(string url)
     {
-        var name = "DARLING_TEST_HEARTBEAT_URL_5450";
+        var problems = HeartbeatConfig.Validate(new HeartbeatConfig { Url = url });
+        var problem = Assert.Single(problems);
+        Assert.Contains("heartbeat.url", problem, StringComparison.Ordinal);
+        Assert.DoesNotContain("secret-path-5450", problem, StringComparison.Ordinal);
+        Assert.DoesNotContain("BAD NAME", problem, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Validate_ChecksOnlyTheShapeOfAReference_AndNeverResolvesIt()
+    {
+        /* The secure setups (a variable in the service's environment, a file only its account reads) are the ones an
+           operator's shell cannot resolve, so a well-formed reference to something absent here is still valid (#5460). */
+        var missingFile = Path.Combine(Path.GetTempPath(), "heartbeat-5450-absent-" + Guid.NewGuid().ToString("N") + ".txt");
+        Assert.Empty(HeartbeatConfig.Validate(new HeartbeatConfig { Url = "env:DARLING_TEST_HEARTBEAT_NEVER_SET_5450" }));
+        Assert.Empty(HeartbeatConfig.Validate(new HeartbeatConfig { Url = "file:" + missingFile }));
+
+        /* A reference holding a bad URL is also not read here: the loop reads it. */
+        var name = "DARLING_TEST_HEARTBEAT_URL_SHAPE_5450";
         try
         {
-            Environment.SetEnvironmentVariable(name, "https://hc-ping.example/" + Token);
-            var heartbeat = new HeartbeatConfig { Url = "env:" + name };
-            Assert.Empty(HeartbeatConfig.Validate(heartbeat));
-            Assert.True(heartbeat.TryResolveUrl(out var uri, out _));
-            Assert.Equal("hc-ping.example", uri!.Host);
-
             Environment.SetEnvironmentVariable(name, "ftp://hc-ping.example/" + Token);
-            Assert.NotEmpty(HeartbeatConfig.Validate(heartbeat));
-            Assert.All(HeartbeatConfig.Validate(heartbeat), p => Assert.DoesNotContain(Token, p, StringComparison.Ordinal));
-
-            Environment.SetEnvironmentVariable(name, null);
-            var missing = HeartbeatConfig.Validate(heartbeat);
-            Assert.Contains(missing, p => p.Contains("heartbeat.url", StringComparison.Ordinal) && p.Contains(name, StringComparison.Ordinal));
+            Assert.Empty(HeartbeatConfig.Validate(new HeartbeatConfig { Url = "env:" + name }));
         }
         finally
         {
@@ -144,19 +157,90 @@ public sealed class DarlingHeartbeatTests
     }
 
     [Fact]
-    public void FileReference_Resolves_AndAMissingFileIsFatal()
+    public async Task EnvReference_ResolvesOnTheTick_AndAFailureIsFixedTextWithNoNameOrValue()
+    {
+        var name = "DARLING_TEST_HEARTBEAT_URL_5450";
+        try
+        {
+            Environment.SetEnvironmentVariable(name, "https://hc-ping.example/" + Token);
+            var heartbeat = new HeartbeatConfig { Url = "env:" + name };
+            var (uri, problem) = await heartbeat.ResolveAsync(Ct);
+            Assert.Null(problem);
+            Assert.Equal("hc-ping.example", uri!.Host);
+
+            Environment.SetEnvironmentVariable(name, "ftp://hc-ping.example/" + Token);
+            (uri, problem) = await heartbeat.ResolveAsync(Ct);
+            Assert.Null(uri);
+            Assert.Equal(HeartbeatConfig.UrlShapeProblem, problem);
+
+            Environment.SetEnvironmentVariable(name, "https://user:pw@hc-ping.example/" + Token);
+            (_, problem) = await heartbeat.ResolveAsync(Ct);
+            Assert.Equal(HeartbeatConfig.UserInfoProblem, problem);
+
+            Environment.SetEnvironmentVariable(name, null);
+            (uri, problem) = await heartbeat.ResolveAsync(Ct);
+            Assert.Null(uri);
+            Assert.Equal(HeartbeatConfig.EnvUnsetProblem, problem);
+            Assert.DoesNotContain(name, problem, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(name, null);
+        }
+    }
+
+    [Fact]
+    public async Task FileReference_ResolvesOnTheTick_WithFixedTextForEveryFailure()
     {
         var path = Path.Combine(Path.GetTempPath(), "heartbeat-5450-" + Guid.NewGuid().ToString("N") + ".txt");
         try
         {
-            File.WriteAllText(path, "https://hc-ping.example/" + Token + "\n");
             var heartbeat = new HeartbeatConfig { Url = "file:" + path };
-            Assert.Empty(HeartbeatConfig.Validate(heartbeat));
-            Assert.True(heartbeat.TryResolveUrl(out var uri, out _));
+
+            await File.WriteAllTextAsync(path, "https://hc-ping.example/" + Token + "\n", Ct);
+            var (uri, problem) = await heartbeat.ResolveAsync(Ct);
+            Assert.Null(problem);
             Assert.EndsWith(Token, uri!.AbsolutePath, StringComparison.Ordinal);
 
+            /* A byte-order mark, as Windows editors write one. */
+            await File.WriteAllBytesAsync(path, [0xEF, 0xBB, 0xBF, .. Encoding.UTF8.GetBytes("https://hc-ping.example/bom\n")], Ct);
+            (uri, problem) = await heartbeat.ResolveAsync(Ct);
+            Assert.Null(problem);
+            Assert.Equal("/bom", uri!.AbsolutePath);
+
+            await File.WriteAllTextAsync(path, "  \n", Ct);
+            Assert.Equal(HeartbeatConfig.FileEmptyProblem, (await heartbeat.ResolveAsync(Ct)).Problem);
+
+            /* A cap on the read (#5460): a file past 8 KB is refused, never read whole. */
+            await File.WriteAllTextAsync(path, "https://hc-ping.example/" + new string('x', HeartbeatConfig.MaxReferenceFileBytes), Ct);
+            Assert.Equal(HeartbeatConfig.FileTooLargeProblem, (await heartbeat.ResolveAsync(Ct)).Problem);
+
+            await File.WriteAllTextAsync(path, "not a url " + Token, Ct);
+            var shape = (await heartbeat.ResolveAsync(Ct)).Problem;
+            Assert.Equal(HeartbeatConfig.UrlShapeProblem, shape);
+
             File.Delete(path);
-            Assert.NotEmpty(HeartbeatConfig.Validate(heartbeat));
+            var missing = (await heartbeat.ResolveAsync(Ct)).Problem;
+            Assert.Equal(HeartbeatConfig.FileUnreadableProblem, missing);
+            Assert.DoesNotContain(Path.GetFileName(path), missing, StringComparison.Ordinal);
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public async Task FileReference_AtTheCap_IsRead()
+    {
+        var path = Path.Combine(Path.GetTempPath(), "heartbeat-5450-cap-" + Guid.NewGuid().ToString("N") + ".txt");
+        try
+        {
+            var prefix = "https://hc-ping.example/";
+            await File.WriteAllTextAsync(path, prefix + new string('x', HeartbeatConfig.MaxReferenceFileBytes - prefix.Length), Ct);
+            var (uri, problem) = await new HeartbeatConfig { Url = "file:" + path }.ResolveAsync(Ct);
+            Assert.Null(problem);
+            Assert.NotNull(uri);
         }
         finally
         {
@@ -212,13 +296,18 @@ public sealed class DarlingHeartbeatTests
     {
         Assert.Equal(HeartbeatDecision.Ping, DarlingHeartbeat.Decide(new HeartbeatRead(true, 3, Now.AddMinutes(-1)), Now));
         Assert.Equal(HeartbeatDecision.Ping, DarlingHeartbeat.Decide(new HeartbeatRead(true, 3, Now.AddMinutes(-14).AddSeconds(-59)), Now));
-        Assert.Equal(HeartbeatDecision.SkipStale, DarlingHeartbeat.Decide(new HeartbeatRead(true, 3, Now.AddMinutes(-15)), Now));
+        /* #5460: fresh means now - 15 min <= newest <= now + 5 min, both ends inclusive. */
+        Assert.Equal(HeartbeatDecision.Ping, DarlingHeartbeat.Decide(new HeartbeatRead(true, 3, Now.AddMinutes(-15)), Now));
+        Assert.Equal(HeartbeatDecision.SkipStale, DarlingHeartbeat.Decide(new HeartbeatRead(true, 3, Now.AddMinutes(-15).AddSeconds(-1)), Now));
         Assert.Equal(HeartbeatDecision.SkipStale, DarlingHeartbeat.Decide(new HeartbeatRead(true, 3, Now.AddHours(-6)), Now));
         Assert.Equal(HeartbeatDecision.Ping, DarlingHeartbeat.Decide(new HeartbeatRead(true, 0, null), Now));
         Assert.Equal(HeartbeatDecision.SkipStale, DarlingHeartbeat.Decide(new HeartbeatRead(true, 2, null), Now));
         Assert.Equal(HeartbeatDecision.SkipReadFailed, DarlingHeartbeat.Decide(new HeartbeatRead(false, 0, null), Now));
-        /* A time after now (clock skew) is fresh, like #5454's negative gap. */
+        /* A little clock skew is fresh; a newest time further ahead than 5 minutes is not (fail-closed, #5460). */
         Assert.Equal(HeartbeatDecision.Ping, DarlingHeartbeat.Decide(new HeartbeatRead(true, 1, Now.AddMinutes(2)), Now));
+        Assert.Equal(HeartbeatDecision.Ping, DarlingHeartbeat.Decide(new HeartbeatRead(true, 1, Now.AddMinutes(5)), Now));
+        Assert.Equal(HeartbeatDecision.SkipFuture, DarlingHeartbeat.Decide(new HeartbeatRead(true, 1, Now.AddMinutes(5).AddSeconds(1)), Now));
+        Assert.Equal(HeartbeatDecision.SkipFuture, DarlingHeartbeat.Decide(new HeartbeatRead(true, 1, Now.AddDays(30)), Now));
     }
 
     [Fact]
@@ -449,14 +538,15 @@ public sealed class DarlingHeartbeatTests
         Func<CancellationToken, Task<HeartbeatRead>> fresh = _ => Task.FromResult(new HeartbeatRead(true, 1, clock.Value.AddMinutes(-1)));
 
         ok = false;
+        /* The stub is http://, so the first tick also logs the one http warning (#5460): two warnings, not one. */
         await hb.TickAsync(config, fresh, Ct);                       /* failure: one warning */
         clock.Value = Now.AddMinutes(5);
         await hb.TickAsync(config, fresh, Ct);                       /* throttled: no second warning */
-        Assert.Equal(1, logger.CountAtLevel(LogLevel.Warning));
+        Assert.Equal(2, logger.CountAtLevel(LogLevel.Warning));
 
         clock.Value = Now.AddMinutes(61);
         await hb.TickAsync(config, fresh, Ct);                       /* an hour on: one more */
-        Assert.Equal(2, logger.CountAtLevel(LogLevel.Warning));
+        Assert.Equal(3, logger.CountAtLevel(LogLevel.Warning));
 
         ok = true;
         await hb.TickAsync(config, fresh, Ct);                       /* recovery line, once */
@@ -468,6 +558,7 @@ public sealed class DarlingHeartbeatTests
 
         var bad = new HeartbeatConfig { Url = "env:DARLING_TEST_HEARTBEAT_UNSET_5450" };
         await hb.TickAsync(bad, fresh, Ct);                          /* bad reference line */
+        Assert.DoesNotContain(logger.Lines, l => l.Contains("DARLING_TEST_HEARTBEAT_UNSET_5450", StringComparison.Ordinal));
 
         Assert.NotEmpty(logger.Lines);
         Assert.All(logger.Lines, line =>
@@ -510,6 +601,232 @@ public sealed class DarlingHeartbeatTests
         cts.Cancel();
         await hb.RunAsync(new HeartbeatConfig { Url = "https://hc-ping.example/x" }, null!, cts.Token);
     }
+
+    /* ───────────────────────── review round 1 (#5460) ───────────────────────── */
+
+    [Fact]
+    public async Task Tick_AFileReferenceFailure_LogsFixedText_ThrottledLikeAFailedPing_AndARotatedFileIsPickedUp()
+    {
+        var paths = new List<string>();
+        using var stub = new Stub(path =>
+        {
+            lock (paths)
+            {
+                paths.Add(path);
+            }
+
+            return Reply(200);
+        });
+        var (hb, logger, clock) = Build();
+        var file = Path.Combine(Path.GetTempPath(), "heartbeat-5450-marker-" + Guid.NewGuid().ToString("N") + ".txt");
+        var config = new HeartbeatConfig { Url = "file:" + file };
+        Func<CancellationToken, Task<HeartbeatRead>> fresh = _ => Task.FromResult(new HeartbeatRead(true, 1, clock.Value.AddMinutes(-1)));
+        try
+        {
+            /* Missing: logs once, then once an hour; the log names neither the path nor its file name. */
+            Assert.Null(await hb.TickAsync(config, fresh, Ct));
+            clock.Value = Now.AddMinutes(10);
+            Assert.Null(await hb.TickAsync(config, fresh, Ct));
+            Assert.Equal(1, logger.CountAtLevel(LogLevel.Warning));
+            clock.Value = Now.AddMinutes(61);
+            Assert.Null(await hb.TickAsync(config, fresh, Ct));
+            Assert.Equal(2, logger.CountAtLevel(LogLevel.Warning));
+            Assert.All(logger.Lines, line => Assert.DoesNotContain("heartbeat-5450-marker", line, StringComparison.Ordinal));
+            Assert.Contains(logger.Lines, l => l.Contains(HeartbeatConfig.FileUnreadableProblem, StringComparison.Ordinal));
+            Assert.Empty(paths);
+
+            /* Written, then rewritten: each tick reads the file again. */
+            await File.WriteAllTextAsync(file, stub.Url("/first"), Ct);
+            Assert.Equal(HeartbeatDecision.Ping, await hb.TickAsync(config, fresh, Ct));
+            await File.WriteAllTextAsync(file, stub.Url("/second"), Ct);
+            Assert.Equal(HeartbeatDecision.Ping, await hb.TickAsync(config, fresh, Ct));
+            Assert.Equal(new[] { "/first", "/second" }, paths);
+        }
+        finally
+        {
+            File.Delete(file);
+        }
+    }
+
+    [Fact]
+    public async Task Tick_AnHttpUrl_LogsOneWarningAtStart_AnHttpsUrlLogsNone()
+    {
+        using var stub = new Stub(_ => Reply(200));
+        var (hb, logger, clock) = Build();
+        Func<CancellationToken, Task<HeartbeatRead>> fresh = _ => Task.FromResult(new HeartbeatRead(true, 1, clock.Value.AddMinutes(-1)));
+        var config = new HeartbeatConfig { Url = stub.Url("/x/" + Token) };
+
+        await hb.TickAsync(config, fresh, Ct);
+        await hb.TickAsync(config, fresh, Ct);
+        await hb.TickAsync(config, fresh, Ct);
+        var http = logger.Lines.Where(l => l.Contains("http://, so", StringComparison.Ordinal)).ToList();
+        Assert.Single(http);
+        Assert.DoesNotContain(Token, http[0], StringComparison.Ordinal);
+        Assert.Equal(1, logger.CountAtLevel(LogLevel.Warning));
+
+        /* https: nothing about cleartext. A closed local port fails fast, which is all this needs. */
+        var (hb2, logger2, clock2) = Build();
+        Func<CancellationToken, Task<HeartbeatRead>> fresh2 = _ => Task.FromResult(new HeartbeatRead(true, 1, clock2.Value.AddMinutes(-1)));
+        await hb2.TickAsync(new HeartbeatConfig { Url = "https://127.0.0.1:1/x" }, fresh2, Ct);
+        Assert.DoesNotContain(logger2.Lines, l => l.Contains("http://, so", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task Tick_ANewestTimeInTheFuture_SkipsThePing_AndLogsFixedTextOnTheEdge()
+    {
+        using var stub = new Stub(_ => Reply(200));
+        var (hb, logger, _) = Build();
+        var config = new HeartbeatConfig { Url = stub.Url("/ping/" + Token) };
+        var future = ReadOf(new HeartbeatRead(true, 2, Now.AddHours(2)));
+
+        Assert.Equal(HeartbeatDecision.SkipFuture, await hb.TickAsync(config, future, Ct));
+        Assert.Equal(HeartbeatDecision.SkipFuture, await hb.TickAsync(config, future, Ct));
+        Assert.Equal(0, stub.Requests);
+        Assert.Equal(1, logger.Lines.Count(l => l.Contains("in the future", StringComparison.Ordinal)));
+        Assert.All(logger.Lines, line => Assert.DoesNotContain(Token, line, StringComparison.Ordinal));
+
+        /* Back in range: pings resume and says so once. */
+        Assert.Equal(HeartbeatDecision.Ping, await hb.TickAsync(config, ReadOf(new HeartbeatRead(true, 2, Now.AddMinutes(-1))), Ct));
+        Assert.Equal(1, stub.Requests);
+        Assert.Equal(1, logger.Lines.Count(l => l.Contains("pings resume", StringComparison.Ordinal)));
+    }
+
+    [Fact]
+    public async Task NullBlock_IsOff_AndNothingThrows_InTheConfigTheLoopOrTheWorkersAwait()
+    {
+        /* "heartbeat": null used to land as a null property and fault the loop's task (#5460). */
+        var config = DarlingConfig.Parse("{\"heartbeat\":null}");
+        Assert.NotNull(config.Heartbeat);
+        Assert.False(config.Heartbeat.IsConfigured);
+        Assert.Empty(HeartbeatConfig.Validate(config.Heartbeat));
+        Assert.Empty(HeartbeatConfig.Validate(null));
+        _ = config.SecretReferencesAsWritten;
+
+        var (hb, _, _) = Build();
+        await hb.RunAsync(config.Heartbeat, null!, Ct);
+        await hb.RunAsync(null, null!, Ct);
+        await hb.RunLoopAsync(null, ReadOf(new HeartbeatRead(true, 0, null)), Ct);
+
+        var assigned = new DarlingConfig { Heartbeat = null! };
+        Assert.NotNull(assigned.Heartbeat);
+    }
+
+    [Fact]
+    public async Task Loop_AnUnrelatedCancellationOrAnException_IsLoggedThrottled_AndTheLoopGoesOn()
+    {
+        var logger = new CapturingTestLogger();
+        var clock = new Clock();
+        using var stop = new CancellationTokenSource();
+        var delays = 0;
+        var reads = 0;
+        var hb = new DarlingHeartbeat(
+            logger, new HttpClient(), () => clock.Value,
+            delay: (_, token) =>
+            {
+                if (++delays >= 4)
+                {
+                    stop.Cancel();
+                }
+
+                token.ThrowIfCancellationRequested();
+                return Task.CompletedTask;
+            });
+        Task<HeartbeatRead> Read(CancellationToken _)
+        {
+            reads++;
+            if (reads == 1)
+            {
+                /* A cancellation that is NOT the stopping token: a driver or handler giving up inside. */
+                throw new OperationCanceledException();
+            }
+
+            throw new InvalidOperationException("secret detail " + Token);
+        }
+
+        await hb.RunLoopAsync(new HeartbeatConfig { Url = "https://hc-ping.example/x" }, Read, stop.Token);
+
+        Assert.Equal(4, reads);
+        var failed = logger.Lines.Where(l => l.Contains("tick failed", StringComparison.Ordinal)).ToList();
+        Assert.Single(failed);                                     /* throttled: one line for four ticks */
+        Assert.Contains("OperationCanceledException", failed[0], StringComparison.Ordinal);
+        Assert.All(logger.Lines, line => Assert.DoesNotContain("secret detail", line, StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task Loop_ShutdownEndsItQuietly_EvenInsideATick()
+    {
+        var logger = new CapturingTestLogger();
+        using var stop = new CancellationTokenSource();
+        var hb = new DarlingHeartbeat(logger, new HttpClient());
+        Task<HeartbeatRead> Read(CancellationToken token)
+        {
+            stop.Cancel();
+            token.ThrowIfCancellationRequested();
+            return Task.FromResult(new HeartbeatRead(true, 0, null));
+        }
+
+        await hb.RunLoopAsync(new HeartbeatConfig { Url = "https://hc-ping.example/x" }, Read, stop.Token);
+        Assert.DoesNotContain(logger.Lines, l => l.Contains("tick failed", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task Loop_TheFirstTick_DoesNotRunOnTheCallersStartupPath()
+    {
+        var callerReturned = 0;
+        var sawCallerReturned = false;
+        using var stop = new CancellationTokenSource();
+        var hb = new DarlingHeartbeat(new CapturingTestLogger(), new HttpClient(), delay: (_, token) =>
+        {
+            stop.Cancel();
+            token.ThrowIfCancellationRequested();
+            return Task.CompletedTask;
+        });
+        Task<HeartbeatRead> Read(CancellationToken _)
+        {
+            /* On the caller's own thread this waits the whole 3 seconds and sees false: the call has not returned. */
+            sawCallerReturned = SpinWait.SpinUntil(() => Volatile.Read(ref callerReturned) == 1, TimeSpan.FromSeconds(3));
+            return Task.FromResult(new HeartbeatRead(true, 0, null));
+        }
+
+        var task = hb.RunLoopAsync(new HeartbeatConfig { Url = "https://127.0.0.1:1/x" }, Read, stop.Token);
+        Volatile.Write(ref callerReturned, 1);
+        await task;
+        Assert.True(sawCallerReturned);
+    }
+
+    [Fact]
+    public void TheDiagnosticsBundle_AliasesTheHeartbeatHost_AndRegistersTheUrlAsASecret()
+    {
+        /* The service-log warning names scheme and host, and the bundle is meant for public bug reports. */
+        var literal = new DarlingConfig { Heartbeat = new HeartbeatConfig { Url = "https://kuma.zetahb5450.example.test/api/push/" + Token } };
+        var aliaser = new BundleAliaser();
+        DiagnosticsBundle.SeedNotificationIdentifiers(aliaser, literal);
+        var text = aliaser.Alias("Heartbeat ping to https://kuma.zetahb5450.example.test failed (HTTP 500). Pushed https://kuma.zetahb5450.example.test/api/push/" + Token);
+        Assert.DoesNotContain("zetahb5450", text, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(Token, text, StringComparison.Ordinal);
+
+        /* A reference: resolved for the seed, and what it holds is registered the same way. */
+        var file = Path.Combine(Path.GetTempPath(), "heartbeat-5450-bundle-" + Guid.NewGuid().ToString("N") + ".txt");
+        try
+        {
+            File.WriteAllText(file, "https://kuma.etahb5450.example.test/api/push/" + Token + "\n");
+            var viaFile = new DarlingConfig { Heartbeat = new HeartbeatConfig { Url = "file:" + file } };
+            var fileAliaser = new BundleAliaser();
+            DiagnosticsBundle.SeedNotificationIdentifiers(fileAliaser, viaFile);
+            var fileText = fileAliaser.Alias("Heartbeat ping to https://kuma.etahb5450.example.test failed. Pushed https://kuma.etahb5450.example.test/api/push/" + Token);
+            Assert.DoesNotContain("etahb5450", fileText, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain(Token, fileText, StringComparison.Ordinal);
+        }
+        finally
+        {
+            File.Delete(file);
+        }
+
+        /* A reference that cannot be resolved here is skipped without a throw. */
+        var unresolved = new DarlingConfig { Heartbeat = new HeartbeatConfig { Url = "env:DARLING_TEST_HEARTBEAT_NEVER_SET_5450" } };
+        DiagnosticsBundle.SeedNotificationIdentifiers(new BundleAliaser(), unresolved);
+    }
+
 
     /* ───────────────────────── the read, against a real store ───────────────────────── */
 

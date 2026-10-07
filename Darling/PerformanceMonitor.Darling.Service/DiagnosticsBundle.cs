@@ -504,7 +504,44 @@ internal static class DiagnosticsBundle
             }
         }
 
+        SeedHeartbeat(aliaser, config.Heartbeat);
         return SeedSealedWebhookValues(aliaser, config, keyRing);
+    }
+
+    /// <summary>
+    /// The heartbeat's check URL (#5460): its host is aliased, because the failure warning names scheme and host and a
+    /// self-hosted check host is as identifying as a webhook's, and the URL itself is a secret, as a webhook URL is. A
+    /// <c>env:</c>/<c>file:</c> reference is resolved here (every failure swallowed: a bundle never fails on it, and the
+    /// read is capped and timed out) and what it holds is registered the same way.
+    /// </summary>
+    private static void SeedHeartbeat(BundleAliaser aliaser, HeartbeatConfig? heartbeat)
+    {
+        if (heartbeat is null || !heartbeat.IsConfigured)
+        {
+            return;
+        }
+
+        var written = heartbeat.Url!.Trim();
+        if (!DarlingSecretSource.IsReference(written))
+        {
+            AddUrlHost(aliaser, written);
+            aliaser.AddSecret(written);
+            return;
+        }
+
+        try
+        {
+            var (uri, _) = Task.Run(() => heartbeat.ResolveAsync(CancellationToken.None)).GetAwaiter().GetResult();
+            if (uri is not null)
+            {
+                AddUrlHost(aliaser, uri.OriginalString);
+                aliaser.AddSecret(uri.OriginalString);
+            }
+        }
+        catch (Exception)
+        {
+            /* Unresolvable here (the operator's shell may not see the service's variable or file): nothing to register. */
+        }
     }
 
     /// <summary>Opens the sealed webhook values and registers what they hold: each URL's host and the URL itself, each
