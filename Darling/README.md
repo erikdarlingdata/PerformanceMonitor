@@ -822,6 +822,10 @@ A **file-only** block (not seeded into the control plane): it describes the depl
 
 **A `peers` block that fails validation is refused whole, and nothing is disclosed** — not the valid subset. An unfinished block that asserts coverage which may be wrong is worse than no block, and the service logs each problem at Critical. The check runs inside the publish rather than only in config validation, because the MCP host loads its own config and deliberately never validates it (its fail-closed checks are host-local), so validation alone would leave the one path that actually broadcasts uncovered.
 
+### heartbeat
+
+An optional outbound ping to a dead-man's-switch URL, off unless `url` is set. File-only: the web Admin and MCP cannot edit it, and no page returns it. See [Watching the service from outside](#watching-the-service-from-outside).
+
 ### No Schedule Knobs, by Design
 
 There are deliberately **no collection-schedule or retention settings** in `darling.json`. The service consumes the shared per-collector defaults (`CollectorScheduleDefaults`) — the same cadences and retention horizons a fresh Lite install uses, identity-pinned by tests so the two editions cannot drift. If a schedule knob is ever genuinely needed, it will be added then, not speculatively.
@@ -1333,6 +1337,43 @@ The service is built to restart cleanly, any time:
 - Mute rules (`config_mute_rules`) load once at service startup — restart the service after adding rows.
 
 A monitored server that is down is retried every 60 seconds forever; a collector that errors is logged and retried at its next scheduled time; a mid-cycle connection-level failure forces a clean reconnect and re-probe. The loop never dies for one bad cycle.
+
+### Watching the service from outside
+
+If the service stops, nothing inside it can tell you. Two ways to have something outside the box notice.
+
+Option 1 is the `heartbeat` block. The service sends a GET to a URL you choose (a dead-man's-switch check such as Healthchecks.io or Uptime Kuma). Your check alerts when the pings stop. Add this to `darling.json`:
+
+```json
+"heartbeat": {
+  "url": "https://hc-ping.example/your-check-id",
+  "intervalSeconds": 300
+}
+```
+
+- It is off unless `url` is set. `intervalSeconds` defaults to 300 and must be between 60 and 3600. A bad value stops the service at start, like the rest of the config checks.
+- The URL usually carries the check's token, so treat all of it as a secret. It can be an `env:NAME` or `file:/path` reference, like the other secrets. The service never writes it to the log, which names only the scheme and host. The web Admin, the MCP tools and the triage page cannot read or edit it. Edit it in the file and restart.
+- The service pings only while it is collecting. Each interval it checks the newest `collection_log` time across enabled servers. It sends the ping when no server is enabled, or when the newest collection is under 15 minutes old. It skips the ping when collection is older than that, when no enabled server has a collection row, or when the store cannot be read. So your check alerts when the process stops and also when it keeps running but no longer collects.
+- A ping waits at most 10 seconds, follows no redirects, and counts only a 2xx answer as success. A failed ping logs one warning, then at most one more per hour until a ping succeeds, and then one line saying it recovered. A failed ping never raises an alert and never slows collection.
+
+Option 2 is a check of your own. If your monitoring already runs checks on the host, use two. The first: the service process is running (the Windows service, the systemd unit or the container). The second: the newest `collection_log` time is within 15 minutes. Run this against the store. It returns `true` when collection is current:
+
+```sql
+SELECT coalesce(
+         (SELECT max(n.collection_time)
+          FROM config.config_monitored_servers c
+          CROSS JOIN LATERAL (
+              SELECT l.collection_time
+              FROM collect.collection_log l
+              WHERE l.server_id = c.server_id
+              ORDER BY l.collection_time DESC
+              LIMIT 1) n
+          WHERE c.is_enabled),
+         'epoch'::timestamp)
+       > (now() AT TIME ZONE 'UTC') - interval '15 minutes' AS collecting;
+```
+
+`collection_time` is stored in UTC, which is why the check compares it with `now() AT TIME ZONE 'UTC'`. The query reads one row per enabled server from the `(server_id, collection_time)` index. It returns `false` when no enabled server has a row, so treat a store with no enabled servers as a case for your own rule.
 
 ---
 

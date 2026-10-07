@@ -99,6 +99,7 @@ internal static class DiagnosticsBundle
         "DarlingConfig.Analysis",
         "DarlingConfig.ForcePlanBot",
         "DarlingConfig.Peers",
+        "DarlingConfig.Heartbeat",
         "PostgresConfig.WebConnectionString",
         "PostgresConfig.McpConnectionString",
         "PostgresConfig.Port",
