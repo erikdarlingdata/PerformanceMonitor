@@ -250,6 +250,12 @@ public static class NotificationRouter
     {
         foreach (var route in exact)
         {
+            /* #5366: a destination the route set but that could not be read is off, not inherited. */
+            if (route.IsOffFor(channel))
+            {
+                return new RoutedDestination(channel, null, route.RouteId, RouteSource.None);
+            }
+
             var value = column(route);
             if (!string.IsNullOrWhiteSpace(value))
             {
@@ -259,6 +265,11 @@ public static class NotificationRouter
 
         foreach (var route in byFamily)
         {
+            if (route.IsOffFor(channel))
+            {
+                return new RoutedDestination(channel, null, route.RouteId, RouteSource.None);
+            }
+
             var value = column(route);
             if (!string.IsNullOrWhiteSpace(value))
             {

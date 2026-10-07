@@ -42,6 +42,7 @@ import {
   sevClass,
   windowFromHours,
   dbScopeChip,
+  sourceStrip,
 } from "./util.js";
 import { zoomableLineChart, chartZoomScope, SERIES_COLORS } from "./charts.js";
 import { toTsv, toCsv, isListValue, csvFileName, copyText, downloadCsv } from "./grid-tools.js";
@@ -161,6 +162,8 @@ async function loadPanelBody(desc, body, signal) {
     mount(body, [
       kept,
       floor,
+      /* #5244: which collector answered a blocking read, for a descriptor that names its field (`sourceKey`); null for every other panel. */
+      sourceStrip(res.data, desc),
       typeof note === "string" && note.trim() ? noticeStrip(note) : null,
       ...moreNotes.map((n) => (typeof n === "string" && n.trim() ? noticeStrip(n) : null)),
       rendered,

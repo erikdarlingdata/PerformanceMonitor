@@ -452,7 +452,7 @@ public sealed class DarlingSecretsOwnedReferenceTests : IDisposable
             var answer = await Edit.EditServerCoreAsync(
                 new Edit.PostgresServerEditStore(owner), alphaId, "{\"host\":\"moved.example.test\",\"password\":\"typed-secret-Q7\"}",
                 (_, _) => Task.FromResult(new ConnectionProbeResult(true, 15, 3, "Enterprise", false, false, false, true, null)),
-                isWindows: true, logger: null, ct);
+                TestKeyRings.Healthy, logger: null, ct);
             Assert.Equal("invalid", System.Text.Json.Nodes.JsonNode.Parse(answer)!["status"]!.GetValue<string>());
 
             await using var move = owner.CreateCommand("UPDATE config_monitored_servers SET host = 'moved.example.test' WHERE server_id = $1");

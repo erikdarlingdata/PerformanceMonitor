@@ -52,6 +52,13 @@ internal static class SecretTextGuard
         RegexOptions.IgnoreCase | RegexOptions.CultureInvariant,
         TimeSpan.FromMilliseconds(250));
 
+    /* #5366: a sealed password or webhook value. The text is ciphertext, but it is a stored credential all the same, so it is
+       treated like one anywhere it appears. The token runs to the next space, quote, comma or semicolon. */
+    private static readonly Regex s_sealed = new(
+        @"(?<![A-Za-z0-9_])sealed:[^\s;,""']*",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant,
+        TimeSpan.FromMilliseconds(250));
+
     private static readonly Regex s_redactedAssignment = new(
         @"(password|pwd)\s*=\s*\[redacted\]",
         RegexOptions.IgnoreCase | RegexOptions.CultureInvariant,
@@ -98,7 +105,7 @@ internal static class SecretTextGuard
 
         try
         {
-            return s_credentialShape.IsMatch(cleaned);
+            return s_sealed.IsMatch(cleaned) || s_credentialShape.IsMatch(cleaned);
         }
         catch (RegexMatchTimeoutException)
         {
@@ -122,6 +129,7 @@ internal static class SecretTextGuard
         {
             var result = s_urlCredential.Replace(text, m => m.Groups["scheme"].Value + RedactedMarker + "@");
             result = s_secretPair.Replace(result, m => m.Groups["key"].Value + m.Groups["sep"].Value + RedactedMarker);
+            result = s_sealed.Replace(result, RedactedMarker);
             result = s_bearer.Replace(result, m => m.Groups["key"].Value + m.Groups["sep"].Value + RedactedMarker);
             var probe = s_redactedAssignment.Replace(result, string.Empty);
             return s_credentialShape.IsMatch(probe) ? RedactedMarker : result;

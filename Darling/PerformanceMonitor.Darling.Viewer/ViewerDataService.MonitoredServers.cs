@@ -38,8 +38,8 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// <para><b>Identity.</b> <c>server_id</c> is <c>ServerIdHelper.GetDeterministicHashCode(BuildStorageName(
 /// host, database, readOnlyIntent))</c> — the SAME identity the collectors stamp and the service's seed uses
 /// (<see cref="ComputeServerId"/>), so a viewer-written row JOINs the collected data and the service's
-/// reconcile matches it. <b>Secrets.</b> <c>encrypted_password</c> is a DPAPI-LocalMachine blob produced by
-/// <see cref="ViewerServerSecret"/> (never plaintext); integrated auth stores none. Azure/Entra auth modes
+/// reconcile matches it. <b>Secrets.</b> <c>encrypted_password</c> is a password sealed to the service's published key by
+/// <see cref="ViewerPasswordKey"/> (never plaintext); integrated auth stores none. Azure/Entra auth modes
 /// are not written — the service can't honor them (see <see cref="ServerStoreCredential"/>).</para>
 /// </summary>
 public sealed partial class ViewerDataService
@@ -513,7 +513,7 @@ WHERE server_id = $1";
 
     /// <summary>
     /// Refuses (throws <see cref="MonitoredServerPasswordNeededException"/>) a write that changes how a stored server is
-    /// reached (any setting <see cref="ServerConnectionRule.ConnectionSettingsDiffer"/> compares: host, port, engine,
+    /// reached (any setting <see cref="ServerConnectionIdentity.Differ"/> compares: host, port, engine,
     /// database, read-only intent, authentication, username, encrypt mode, trust certificate, multi-subnet failover) before
     /// anything is written. A row that holds a remediation secret refuses any such change with
     /// <see cref="RemediationKeptText"/>, whatever its authentication mode. For a SQL or service-principal row, a change
@@ -525,7 +525,7 @@ WHERE server_id = $1";
     private async Task RefuseStoredPasswordOnMovedReachAsync(
         NpgsqlConnection connection, NpgsqlTransaction transaction, MonitoredServerRow row, CancellationToken cancellationToken)
     {
-        ServerConnectionSettings stored;
+        ServerConnectionIdentity stored;
         bool carriesStoredBlob;
         bool holdsRemediationSecret;
         try
@@ -540,7 +540,7 @@ WHERE server_id = $1";
                 return;
             }
 
-            stored = ServerConnectionSettings.WithDefaults(
+            stored = ServerConnectionIdentity.FromStoredColumns(
                 reader.GetString(0), reader.GetInt32(1), reader.IsDBNull(2) ? null : reader.GetString(2),
                 reader.IsDBNull(3) ? null : reader.GetString(3), !reader.IsDBNull(4) && reader.GetBoolean(4),
                 reader.IsDBNull(5) ? null : reader.GetString(5), reader.IsDBNull(6) ? null : reader.GetString(6),
@@ -558,10 +558,8 @@ WHERE server_id = $1";
             throw new ViewerSchemaSkewException(ex);
         }
 
-        var incoming = ServerConnectionSettings.WithDefaults(
-            row.Host, row.Port, row.Engine, row.Database, row.ReadOnlyIntent, row.Auth, row.Username,
-            row.EncryptMode, row.TrustServerCertificate, row.MultiSubnetFailover);
-        var connectionChanged = ServerConnectionRule.ConnectionSettingsDiffer(incoming, stored);
+        var incoming = ViewerPasswordSealer.IdentityOf(row);
+        var connectionChanged = ServerConnectionIdentity.Differ(incoming, stored);
 
         if (holdsRemediationSecret && connectionChanged)
         {
@@ -912,7 +910,7 @@ WHERE server_id = $1";
 /// store (and hence the service) has — now INCLUDING the per-server alert-delivery override (#1236, V18, the
 /// service honors it at delivery time); the remaining viewer-only cosmetics some Lite fields kept (description,
 /// utility DB, the Azure client ids) are NOT part of the service-honored server model and stay out of the store.
-/// <see cref="EncryptedPassword"/> is a DPAPI-LocalMachine blob, never plaintext. Favorites remain viewer-local
+/// <see cref="EncryptedPassword"/> is the sealed password (or an older DPAPI-LocalMachine blob), never plaintext. Favorites remain viewer-local
 /// (<see cref="ViewerServerStore"/>).
 /// </summary>
 public sealed class MonitoredServerRow
@@ -956,7 +954,7 @@ public sealed class MonitoredServerRow
 
     public string? Username { get; set; }
 
-    /// <summary>DPAPI-LocalMachine base64 blob (<see cref="ViewerServerSecret.Protect"/>), or null for integrated auth.</summary>
+    /// <summary>The sealed password (<see cref="ViewerPasswordSealer.Seal"/>; an older row may hold a DPAPI blob), or null for integrated auth.</summary>
     public string? EncryptedPassword { get; set; }
 
     public string EncryptMode { get; set; } = "Mandatory";

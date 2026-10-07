@@ -910,6 +910,46 @@ internal static class McpHelpers
     }
 
     /// <summary>
+    /// <see cref="Status"/> for a read that takes <c>database_name</c> (#5244 review L2): the same <c>status</c>,
+    /// <c>message</c> and optional <c>hints</c>, with the database echo beside them, so an empty answer says which
+    /// databases it was limited to the way the answer with rows does. <paramref name="databaseName"/> is the name for one
+    /// database, "the chosen databases" for two or more and null for every database (Darling's
+    /// <c>DatabaseFilter.Describe()</c>, Lite's <c>McpDatabaseSelection.Describe</c>); the key is always written, null
+    /// included, so a client reads it without first checking whether it got data.
+    /// </summary>
+    public static string StatusForDatabase(string status, string message, string? databaseName, object? hints = null)
+    {
+        return hints is null
+            ? JsonSerializer.Serialize(new { status, message, database_name = databaseName }, JsonOptions)
+            : JsonSerializer.Serialize(new { status, message, database_name = databaseName, hints }, JsonOptions);
+    }
+
+    /// <summary>
+    /// <paramref name="statusJson"/> (a <c>not_collected</c> or <c>precondition</c> envelope another helper built) with
+    /// the <c>database_name</c> echo added, so every answer shape of a tool that takes <c>database_name</c> says which
+    /// databases the call was limited to (#5244 PR4 review round 2, L2). The echo is the name for one database, "the chosen
+    /// databases" for two or more and null for every database (Darling's <c>DatabaseFilter.Describe()</c>, Lite's single
+    /// name); the key is written even when null. Null in, null out, so it wraps a <c>??</c> ladder's rungs. An envelope that
+    /// already carries the key is returned unchanged.
+    /// </summary>
+    public static string? WithDatabase(string? statusJson, string? databaseName)
+    {
+        if (statusJson is null)
+        {
+            return null;
+        }
+
+        var node = System.Text.Json.Nodes.JsonNode.Parse(statusJson) as System.Text.Json.Nodes.JsonObject;
+        if (node is null || node.ContainsKey("database_name"))
+        {
+            return statusJson;
+        }
+
+        node["database_name"] = databaseName;
+        return node.ToJsonString(JsonOptions);
+    }
+
+    /// <summary>
     /// #4966: the claim an empty answer carries INSTEAD of its "quiet" or "all-clear" clause when its window notice says the
     /// window is cut (<c>hints.window_truncated</c> true) and names where the store's data starts
     /// (<c>hints.effective_start</c> set). Both apps use this one constant, so a client reads the same words from either;

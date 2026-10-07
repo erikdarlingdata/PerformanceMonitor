@@ -409,8 +409,13 @@ public sealed class DarlingConfig
                 continue;
             }
 
-            server.EncryptedPasswordDeclaredByFile = DarlingSecretSource.IsReference(server.EncryptedPassword);
-            server.RemediationEncryptedPasswordDeclaredByFile = DarlingSecretSource.IsReference(server.RemediationEncryptedPassword);
+            server.EncryptedPasswordDeclaredByFile = DarlingSecrets.DeclaresSecretText(server.EncryptedPassword);
+            server.RemediationEncryptedPasswordDeclaredByFile = DarlingSecrets.DeclaresSecretText(server.RemediationEncryptedPassword);
+        }
+
+        if (config.Smtp is not null)
+        {
+            config.Smtp.EncryptedPasswordDeclaredByFile = DarlingSecrets.DeclaresSecretText(config.Smtp.EncryptedPassword);
         }
 
         /* #1804: postgres.connectionString also takes an env:/file: reference — for the WHOLE string,
@@ -1187,6 +1192,19 @@ public sealed class SmtpConfig
     /// <summary>DPAPI-LocalMachine-protected SMTP password, base64 — produced by --encrypt-password.</summary>
     [JsonPropertyName("encryptedPassword")]
     public string? EncryptedPassword { get; set; }
+
+    /// <summary>Whether darling.json itself declares <see cref="EncryptedPassword"/> as it stands (the
+    /// <see cref="MonitoredServer.EncryptedPasswordDeclaredByFile"/> rule, for the SMTP slot, #5366).</summary>
+    [JsonIgnore]
+    internal bool EncryptedPasswordDeclaredByFile { get; set; }
+
+    /// <summary>The pin taken at upgrade for the SMTP slot, when the store holds one (#5366).</summary>
+    [JsonIgnore]
+    internal LegacyPin? SecretPin { get; set; }
+
+    /// <summary>The binding a sealed SMTP password must have been sealed for.</summary>
+    [JsonIgnore]
+    internal PasswordBinding SecretBinding => PasswordBinding.ForSmtp(Host, Port, UseSsl, Username);
 
     /// <summary>
     /// The SMTP password as a literal or an <c>env:</c>/<c>file:</c> reference (#1804 —
@@ -2362,9 +2380,11 @@ public sealed class MonitoredServer
 
     /// <summary>
     /// Whether darling.json itself declares <see cref="EncryptedPassword"/> as it stands: the same <c>env:</c>/<c>file:</c>
-    /// reference, in this same slot, for this same server id (#5240). It is the one thing that lets such a reference
-    /// resolve when it names one of the service's own configuration files or secrets
-    /// (<see cref="DarlingSecrets.ResolvePassword"/>); every other owned reference is refused where it resolves.
+    /// reference or old-format (DPAPI) value, in this same slot, for this same server id (#5240, #5366). It is the one thing
+    /// that lets such a reference resolve when it names one of the service's own configuration files or secrets
+    /// (<see cref="DarlingSecrets.ResolvePassword(MonitoredServer, out bool, IPasswordKeyRing?)"/>), and lets an old-format
+    /// value open without a pin; every other owned reference is refused where it resolves, and an old-format value with no
+    /// pin is not opened. A sealed value is never marked: it opens through the key ring only.
     ///
     /// <para>Set in two places, and never from a stored value. <see cref="DarlingConfig.Parse"/> sets it on an entry read from
     /// the file, since the file declares what it holds. <c>StoreConfigProvider.BuildServerFromRow</c> sets it on a server
@@ -2378,6 +2398,38 @@ public sealed class MonitoredServer
     /// <summary><see cref="EncryptedPasswordDeclaredByFile"/> for <see cref="RemediationEncryptedPassword"/>.</summary>
     [JsonIgnore]
     internal bool RemediationEncryptedPasswordDeclaredByFile { get; set; }
+
+    /// <summary>
+    /// The connection as the store row holds it, read once by <see cref="ServerConnectionIdentity.FromStoredColumns"/> from the raw
+    /// columns (null text and a null port are not defaulted any further). Null for an entry read from darling.json, whose
+    /// own properties are the connection (#5366).
+    /// </summary>
+    [JsonIgnore]
+    internal ServerConnectionIdentity? StoredIdentity { get; set; }
+
+    /// <summary>The pin taken at upgrade for the <c>encryptedPassword</c> slot, when the store holds one (#5366).</summary>
+    [JsonIgnore]
+    internal LegacyPin? SecretPin { get; set; }
+
+    /// <summary>The pin taken at upgrade for the remediation slot, when the store holds one (#5366).</summary>
+    [JsonIgnore]
+    internal LegacyPin? RemediationPin { get; set; }
+
+    /// <summary>
+    /// The connection settings this server's saved password is bound to (#5366). Throws <see cref="ArgumentException"/> when a
+    /// field is not valid text; the resolver treats that as the saved password not matching this connection.
+    /// </summary>
+    [JsonIgnore]
+    internal ServerConnectionIdentity ConnectionIdentity => StoredIdentity ?? ServerConnectionIdentity.FromStoredColumns(
+        Host, Port, Engine, Database, ReadOnlyIntent, Auth, Username, EncryptMode, TrustServerCertificate, MultiSubnetFailover);
+
+    /// <summary>The binding a sealed <c>encryptedPassword</c> must have been sealed for.</summary>
+    [JsonIgnore]
+    internal PasswordBinding SecretBinding => PasswordBinding.ForServer(ConnectionIdentity);
+
+    /// <summary>The binding a sealed remediation password must have been sealed for.</summary>
+    [JsonIgnore]
+    internal PasswordBinding RemediationBinding => PasswordBinding.ForRemediation(ConnectionIdentity, RemediationUsername);
 
     /// <summary>
     /// This server's <c>server_id</c>: the stored value when there is one, otherwise derived from

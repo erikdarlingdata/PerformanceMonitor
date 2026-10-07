@@ -61,7 +61,7 @@ public sealed partial class ViewerDataService
     /// The <c>total_size_mb DESC</c> lead is display-only and safe to change: the grid is the sole order-sensitive
     /// consumer — the other two callers (<c>GetUtilizationEfficiencyAsync</c>'s free-space math and the dormant-DB
     /// recommendation's cost share) only <c>Sum</c> the rows, and the "Allocated vs Used" chart is a separate read
-    /// (<c>GetDatabaseSizeSummaryAsync</c>). $1 server_id, $2 collection_time (resolved by
+    /// (<c>GetDatabaseSizeSummaryAsync</c>). #5312: $3 is the saved database filter (a text[], NULL = every database). $1 server_id, $2 collection_time (resolved by
     /// <see cref="DarlingFinOpsStorageGrowthReader.GetLatestDatabaseSizeSnapshotAsync"/> — see #4245 on the type doc).</summary>
     public const string DatabaseSizeLatestSql = @"
 SELECT
@@ -82,9 +82,10 @@ SELECT
 FROM v_database_size_stats
 WHERE server_id = $1
 AND   collection_time = $2
+AND   ($3::text[] IS NULL OR database_name = ANY($3))
 ORDER BY total_size_mb DESC NULLS LAST, database_name, file_type_desc, file_name";
 
-    public async Task<List<DatabaseSizeRow>> GetDatabaseSizeLatestAsync(int serverId, CancellationToken cancellationToken = default)
+    public async Task<List<DatabaseSizeRow>> GetDatabaseSizeLatestAsync(int serverId, IReadOnlyList<string>? databaseNames = null, CancellationToken cancellationToken = default)
     {
         var items = new List<DatabaseSizeRow>();
         var snapshotTime = await DarlingFinOpsStorageGrowthReader.GetLatestDatabaseSizeSnapshotAsync(
@@ -98,6 +99,7 @@ ORDER BY total_size_mb DESC NULLS LAST, database_name, file_type_desc, file_name
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = snapshotTime.Value });
+        command.Parameters.Add(DatabaseFilterParameter(databaseNames));
 
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
@@ -128,7 +130,7 @@ ORDER BY total_size_mb DESC NULLS LAST, database_name, file_type_desc, file_name
 
     /// <summary>Per-database allocated + used space for the Utilization size chart. $1 server_id,
     /// $2 collection_time (resolved by <see cref="DarlingFinOpsStorageGrowthReader.GetLatestDatabaseSizeSnapshotAsync"/> — see #4245 on
-    /// the type doc), $3 topN.</summary>
+    /// the type doc), $3 topN, $4 the saved database filter (#5312, a text[], NULL = every database).</summary>
     public const string DatabaseSizeSummarySql = @"
 SELECT
     database_name,
@@ -139,11 +141,12 @@ SELECT
 FROM v_database_size_stats
 WHERE server_id = $1
 AND   collection_time = $2
+AND   ($4::text[] IS NULL OR database_name = ANY($4))
 GROUP BY database_name
 ORDER BY total_mb DESC
 LIMIT $3";
 
-    public async Task<List<DatabaseSizeSummaryRow>> GetDatabaseSizeSummaryAsync(int serverId, int topN = 10, CancellationToken cancellationToken = default)
+    public async Task<List<DatabaseSizeSummaryRow>> GetDatabaseSizeSummaryAsync(int serverId, int topN = 10, IReadOnlyList<string>? databaseNames = null, CancellationToken cancellationToken = default)
     {
         var items = new List<DatabaseSizeSummaryRow>();
         var snapshotTime = await DarlingFinOpsStorageGrowthReader.GetLatestDatabaseSizeSnapshotAsync(
@@ -158,6 +161,7 @@ LIMIT $3";
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = snapshotTime.Value });
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = topN });
+        command.Parameters.Add(DatabaseFilterParameter(databaseNames));
 
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
@@ -199,13 +203,25 @@ LIMIT $3";
     /// <summary>The storage-growth read's SQL; lives in <see cref="DarlingFinOpsStorageGrowthReader"/>.</summary>
     public const string StorageGrowthSql = DarlingFinOpsStorageGrowthReader.StorageGrowthSql;
 
-    public async Task<List<StorageGrowthRow>> GetStorageGrowthAsync(int serverId, CancellationToken cancellationToken = default)
+    /// <summary>
+    /// One row per database (the Storage Growth grid, which also lists the databases the table and index heatmap's picker offers).
+    /// #5312: <paramref name="databaseNames"/> is the saved database filter; null or empty is every database. The rows are narrowed after the
+    /// read, by the same exact-name rule as the SQL clause <c>database_name = ANY(filter)</c>, so a NULL database never matches a filter.
+    /// </summary>
+    public async Task<List<StorageGrowthRow>> GetStorageGrowthAsync(int serverId, IReadOnlyList<string>? databaseNames = null, CancellationToken cancellationToken = default)
     {
         var now = DateTime.UtcNow;
 
         var rows = await DarlingFinOpsStorageGrowthReader.GetStorageGrowthAsync(
             _dataSource, serverId, now, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
-        return rows.Select(StorageGrowthRow.From).ToList();
+        var mapped = rows.Select(StorageGrowthRow.From);
+        if (databaseNames is { Count: > 0 })
+        {
+            var chosen = new HashSet<string>(databaseNames, StringComparer.Ordinal);
+            mapped = mapped.Where(r => chosen.Contains(r.DatabaseName));
+        }
+
+        return mapped.ToList();
     }
 
     /// <summary>The object-growth bounds SQL; lives in <see cref="DarlingFinOpsStorageGrowthReader"/>.</summary>

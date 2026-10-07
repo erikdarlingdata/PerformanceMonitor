@@ -182,12 +182,12 @@ public partial class ViewerServerTab
                    total/max/avg wait, parsed on-the-fly from deadlock_graph_xml) is drawn from the SAME
                    v_deadlocks window as the count (deadlock_time in the window, plus the collection_time
                    floor), so the two reconcile in period. */
-                var durationStatsTask = _dataService.GetBlockingDurationStatsAsync(_server.ServerId, startUtc, endUtc);
+                var durationStatsTask = _dataService.GetBlockingDurationStatsAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter);
                 var deadlockCountTask = _dataService.GetDeadlockTrendAsync(_server.ServerId, startUtc, endUtc);
                 var deadlockSeverityTask = _dataService.GetDeadlockSeverityStatsAsync(_server.ServerId, startUtc, endUtc);
                 /* #4966: the blocking pair draws from the blocked-process-report sources and the deadlock pair from deadlocks, so each pair has its
                    own probe and banner. The probes stay OUT of any join: one that throws costs only its pair's note. */
-                var blockingStartTask = _dataService.GetBlockingChartDataStartAsync(_server.ServerId, startUtc, endUtc);
+                var blockingStartTask = _dataService.GetBlockingChartDataStartAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter);
                 var deadlockStartTask = _dataService.GetDeadlocksDataStartAsync(_server.ServerId, startUtc, endUtc);
 
                 /* #5022: as in Trends, each call watches one probe and passes the join on. */
@@ -564,7 +564,7 @@ public partial class ViewerServerTab
         BlockingTrendChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
         BlockingTrendChart.Plot.Axes.SetLimitsX(rangeStart.ToOADate(), rangeEnd.ToOADate());
         ReapplyAxisColors(BlockingTrendChart);
-        BlockingTrendChart.Plot.YLabel("Blocking Incidents");
+        BlockingTrendChart.Plot.YLabel(PerformanceMonitor.Ui.BlockingSourceLabel.For("Blocking Incidents", data.Select(d => d.Source)));
         SetChartYLimitsWithLegendPadding(BlockingTrendChart, 0, data.Max(d => d.Count));
         ShowChartLegend(BlockingTrendChart);
         BlockingTrendChart.Refresh();
@@ -696,7 +696,7 @@ public partial class ViewerServerTab
         BlockingDurationChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
         BlockingDurationChart.Plot.Axes.SetLimitsX(rangeStart.ToOADate(), rangeEnd.ToOADate());
         ReapplyAxisColors(BlockingDurationChart);
-        BlockingDurationChart.Plot.YLabel("Block Duration (ms)");
+        BlockingDurationChart.Plot.YLabel(PerformanceMonitor.Ui.BlockingSourceLabel.For("Block Duration (ms)", data.Select(d => d.Source)));
         SetChartYLimitsWithLegendPadding(BlockingDurationChart, 0, globalMax > 0 ? globalMax : 1);
         ShowChartLegend(BlockingDurationChart);
         BlockingDurationChart.Refresh();
@@ -751,7 +751,7 @@ public partial class ViewerServerTab
         BlockingTotalDurationChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
         BlockingTotalDurationChart.Plot.Axes.SetLimitsX(rangeStart.ToOADate(), rangeEnd.ToOADate());
         ReapplyAxisColors(BlockingTotalDurationChart);
-        BlockingTotalDurationChart.Plot.YLabel("Total Block Duration (ms)");
+        BlockingTotalDurationChart.Plot.YLabel(PerformanceMonitor.Ui.BlockingSourceLabel.For("Total Block Duration (ms)", data.Select(d => d.Source)));
         SetChartYLimitsWithLegendPadding(BlockingTotalDurationChart, 0, globalMax > 0 ? globalMax : 1);
         ShowChartLegend(BlockingTotalDurationChart);
         BlockingTotalDurationChart.Refresh();

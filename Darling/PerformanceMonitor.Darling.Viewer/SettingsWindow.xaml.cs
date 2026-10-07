@@ -53,9 +53,16 @@ public partial class SettingsWindow : Window
     private readonly ViewerDataService? _dataService;
     private readonly IReadOnlyList<DarlingServer> _servers;
 
-    /// <summary>The store's current SMTP blob, held so an unchanged (or undecryptable) password survives a Save
-    /// without being wiped — mirrors the server dialog's DPAPI "re-enter to change" handling.</summary>
-    private string? _loadedSmtpBlob;
+    /// <summary>The notification row as the window loaded it: its stored SMTP password survives a Save that leaves the
+    /// box blank, and its host, port, SSL flag and user name say whether a blank box is allowed (#5366).</summary>
+    private NotificationRow _loadedNotification = NotificationRow.Defaults();
+
+    /// <summary>The password the box was pre-filled with: a value saved before passwords were sealed that this machine
+    /// could read. Null when the box was left blank (nothing saved, or a sealed value nobody here can read).</summary>
+
+    /// <summary>The password typed for a save that seals it, held between reading the controls and the async key read.</summary>
+    private string? _smtpPasswordToSeal;
+
 
     /// <summary>The service's paused state as last read from <c>config_service</c>, reflected on the button.</summary>
     private bool _paused;
@@ -1285,21 +1292,29 @@ public partial class SettingsWindow : Window
         SmtpRecipientsBox.Text = r.SmtpRecipients;
         EmailCooldownBox.Text = r.EmailCooldownMinutes.ToString(CultureInfo.InvariantCulture);
 
-        _loadedSmtpBlob = r.SmtpEncryptedPassword;
-        SmtpPasswordBox.Password = OperatingSystem.IsWindows()
-            ? ViewerServerSecret.TryUnprotect(r.SmtpEncryptedPassword) ?? ""
+        /* A saved password is never put back in the box, sealed or in the older format: the box stays blank and says the
+           password is saved (#5366). A blank box keeps it; a changed host, port, SSL flag or user name asks for it again. */
+        _loadedNotification = r;
+        SmtpPasswordBox.Password = "";
+        SmtpStatusText.Text = !string.IsNullOrEmpty(r.SmtpEncryptedPassword)
+            ? ViewerSmtpSeal.SavedText
             : "";
 
         TeamsWebhookEnabledCheckBox.IsChecked = !string.IsNullOrWhiteSpace(r.TeamsUrl);
-        TeamsWebhookUrlBox.Text = r.TeamsUrl;
+        TeamsWebhookUrlBox.Text = ViewerWebhookSealing.ShownText(r.TeamsUrl);
+        TeamsStatusText.Text = ViewerWebhookSealing.IsSaved(r.TeamsUrl) ? ViewerWebhookSealing.KeepHint : "";
         TeamsProxyAddressBox.Text = r.TeamsProxy;
         SlackWebhookEnabledCheckBox.IsChecked = !string.IsNullOrWhiteSpace(r.SlackUrl);
-        SlackWebhookUrlBox.Text = r.SlackUrl;
+        SlackWebhookUrlBox.Text = ViewerWebhookSealing.ShownText(r.SlackUrl);
+        SlackStatusText.Text = ViewerWebhookSealing.IsSaved(r.SlackUrl) ? ViewerWebhookSealing.KeepHint : "";
         SlackProxyAddressBox.Text = r.SlackProxy;
 
         GenericWebhookEnabledCheckBox.IsChecked = !string.IsNullOrWhiteSpace(r.GenericUrl);
-        GenericWebhookUrlBox.Text = r.GenericUrl;
-        GenericWebhookHeadersBox.Text = r.GenericHeaders;
+        GenericWebhookUrlBox.Text = ViewerWebhookSealing.ShownText(r.GenericUrl);
+        GenericWebhookHeadersBox.Text = ViewerWebhookSealing.ShownText(r.GenericHeaders);
+        GenericStatusText.Text = ViewerWebhookSealing.IsSaved(r.GenericUrl) || ViewerWebhookSealing.IsSaved(r.GenericHeaders)
+            ? ViewerWebhookSealing.KeepHint
+            : "";
         /* Blank means "use the built-in default" — show it, so the operator has something to edit rather
            than a blank box whose shape they have to guess. */
         GenericWebhookBodyBox.Text = string.IsNullOrWhiteSpace(r.GenericBodyTemplate)
@@ -1308,7 +1323,8 @@ public partial class SettingsWindow : Window
         GenericWebhookProxyAddressBox.Text = r.GenericProxy;
 
         PagerDutyWebhookEnabledCheckBox.IsChecked = !string.IsNullOrWhiteSpace(r.PagerDutyRoutingKey);
-        PagerDutyRoutingKeyBox.Text = r.PagerDutyRoutingKey;
+        PagerDutyRoutingKeyBox.Text = ViewerWebhookSealing.ShownText(r.PagerDutyRoutingKey);
+        PagerDutyStatusText.Text = ViewerWebhookSealing.IsSaved(r.PagerDutyRoutingKey) ? ViewerWebhookSealing.KeepHint : "";
         PagerDutyEuRegionCheckBox.IsChecked = r.PagerDutyUseEuRegion;
         PagerDutyProxyAddressBox.Text = r.PagerDutyProxy;
 
@@ -1325,6 +1341,7 @@ public partial class SettingsWindow : Window
     private NotificationRow BuildNotificationRowFromControls(List<string> errors)
     {
         var row = new NotificationRow();
+        _smtpPasswordToSeal = null;
 
         if (int.TryParse(EmailCooldownBox.Text, out var emailCooldown) && emailCooldown is >= 1 and <= 120)
             row.EmailCooldownMinutes = emailCooldown;
@@ -1341,25 +1358,31 @@ public partial class SettingsWindow : Window
             row.SmtpUsername = string.IsNullOrWhiteSpace(username) ? null : username;
             row.SmtpFromAddress = SmtpFromBox.Text?.Trim() ?? "";
             row.SmtpRecipients = SmtpRecipientsBox.Text?.Trim() ?? "";
-            row.SmtpEncryptedPassword = ResolveSmtpBlob();
+            ResolveSmtpPassword(row, errors);
         }
 
         if (TeamsWebhookEnabledCheckBox.IsChecked == true)
         {
-            row.TeamsUrl = TeamsWebhookUrlBox.Text?.Trim() ?? "";
+            row.TeamsUrl = ViewerWebhookSealing.CarryKept(TeamsWebhookUrlBox.Text, _loadedNotification?.TeamsUrl);
             row.TeamsProxy = TeamsProxyAddressBox.Text?.Trim() ?? "";
         }
 
         if (SlackWebhookEnabledCheckBox.IsChecked == true)
         {
-            row.SlackUrl = SlackWebhookUrlBox.Text?.Trim() ?? "";
+            row.SlackUrl = ViewerWebhookSealing.CarryKept(SlackWebhookUrlBox.Text, _loadedNotification?.SlackUrl);
             row.SlackProxy = SlackProxyAddressBox.Text?.Trim() ?? "";
         }
 
         if (GenericWebhookEnabledCheckBox.IsChecked == true)
         {
-            row.GenericUrl = GenericWebhookUrlBox.Text?.Trim() ?? "";
-            row.GenericHeaders = GenericWebhookHeadersBox.Text?.Trim() ?? "";
+            row.GenericUrl = ViewerWebhookSealing.CarryKept(GenericWebhookUrlBox.Text, _loadedNotification?.GenericUrl);
+            row.GenericHeaders = ViewerWebhookSealing.CarryKept(GenericWebhookHeadersBox.Text, _loadedNotification?.GenericHeaders);
+            if (ViewerWebhookSealing.HeadersNeedUrlRetyped(
+                    GenericWebhookHeadersBox.Text, GenericWebhookUrlBox.Text,
+                    _loadedNotification?.GenericHeaders, _loadedNotification?.GenericUrl))
+            {
+                errors.Add(ViewerWebhookSealing.RetypeUrlForHeadersText);
+            }
             /* Persist the empty "use built-in default" sentinel unless the operator actually edited the body box
                (the Settings load pre-fills it with the default), so a future release can still improve it. */
             row.GenericBodyTemplate = WebhookAlertService.IsDefaultBodyTemplate(GenericWebhookBodyBox.Text)
@@ -1369,7 +1392,9 @@ public partial class SettingsWindow : Window
 
             /* A malformed headers JSON / body template would let the service accept the channel and then
                drop every alert with only a log line to show for it — block the Save instead (#1506). */
-            var configError = WebhookAlertService.ValidateGenericConfig(row.GenericHeaders, row.GenericBodyTemplate);
+            var configError = WebhookAlertService.ValidateGenericConfig(
+                PasswordSeal.IsSealed(row.GenericHeaders) || row.GenericHeaders == ViewerWebhookSealing.ClearMarker ? "" : row.GenericHeaders,
+                row.GenericBodyTemplate);
             if (configError != null)
             {
                 errors.Add(configError);
@@ -1378,7 +1403,7 @@ public partial class SettingsWindow : Window
 
         if (PagerDutyWebhookEnabledCheckBox.IsChecked == true)
         {
-            row.PagerDutyRoutingKey = PagerDutyRoutingKeyBox.Text?.Trim() ?? "";
+            row.PagerDutyRoutingKey = ViewerWebhookSealing.CarryKept(PagerDutyRoutingKeyBox.Text, _loadedNotification?.PagerDutyRoutingKey);
             row.PagerDutyUseEuRegion = PagerDutyEuRegionCheckBox.IsChecked == true;
             row.PagerDutyProxy = PagerDutyProxyAddressBox.Text?.Trim() ?? "";
         }
@@ -1386,17 +1411,117 @@ public partial class SettingsWindow : Window
         return row;
     }
 
-    /// <summary>The SMTP blob to persist: seal the typed password when the box holds one; otherwise keep the
-    /// store's existing blob (so an unchanged — or another-machine, undecryptable — password survives Save).</summary>
-    private string? ResolveSmtpBlob()
+    /// <summary>
+    /// Seals the typed webhook values for the settings row (#5366): kept values stay as stored, anything typed is sealed to the
+    /// service's key for its slot, proxy and (for the headers) generic URL. The key is asked for only when something was typed.
+    /// A key notice is shown once. Throws <see cref="ViewerPasswordRefusedException"/> when a value cannot be saved.
+    /// </summary>
+    private async Task SealWebhookValuesAsync(NotificationRow row)
     {
-        var typed = SmtpPasswordBox.Password;
-        if (!string.IsNullOrEmpty(typed) && OperatingSystem.IsWindows())
+        ViewerPasswordSealer? sealer = null;
+        string? refusal = null;
+        if (ViewerWebhookSealing.NeedsKey(row, _loadedNotification))
         {
-            return ViewerServerSecret.Protect(typed);
+            var key = await ViewerPasswordKey.GetSealKeyAsync(_dataService!, this);
+            sealer = key.Sealer;
+            refusal = key.Refusal;
+            if (key.Notice is { } notice)
+            {
+                MessageBox.Show(notice, "Settings", MessageBoxButton.OK, MessageBoxImage.Information);
+            }
         }
 
-        return string.IsNullOrEmpty(typed) ? _loadedSmtpBlob : null;
+        ViewerWebhookSealing.ResolveSettingsRow(row, _loadedNotification, sealer, refusal);
+    }
+
+    /// <summary>
+    /// Whether this save changes a channel's proxy while a route holds a value sealed for the old proxy (#5366). A route list
+    /// that cannot be read says nothing: the save itself does not depend on it.
+    /// </summary>
+    private async Task<bool> RouteValuesNeedEnteringAgainAsync(NotificationRow row)
+    {
+        try
+        {
+            var routes = await _dataService!.GetNotificationRoutesAsync();
+            return ViewerWebhookSealing.RouteValuesNeedEnteringAgain(_loadedNotification, row, routes);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            ViewerLogger.Warn("SettingsWindow", "The routes could not be read to check them against a proxy change: " + ex.Message);
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Decides the SMTP password for a save (#5366). A blank box keeps the stored value, and is refused when the host, port,
+    /// SSL flag or user name changed (the stored password only opens for the settings it was sealed for). A typed password
+    /// is sealed later, in <see cref="SealSmtpPasswordAsync"/>, once the service's key has been read; its text is checked here.
+    /// </summary>
+    private void ResolveSmtpPassword(NotificationRow row, List<string> errors)
+    {
+        _smtpPasswordToSeal = null;
+        row.SmtpEncryptedPassword = _loadedNotification.SmtpEncryptedPassword;
+
+        var typed = SmtpPasswordBox.Password;
+        switch (ViewerSmtpSeal.Decide(_loadedNotification, null, row, typed))
+        {
+            case ViewerSmtpPasswordAction.Refuse:
+                errors.Add(ViewerSmtpSeal.ReenterText);
+                break;
+            case ViewerSmtpPasswordAction.Seal:
+                if (!ViewerSmtpSeal.IsValidText(typed))
+                {
+                    errors.Add(ViewerPasswordSealer.PasswordCharactersText);
+                }
+                else if (ViewerSmtpSeal.FirstInvalidBoundField(row.SmtpHost, row.SmtpUsername) is { } field)
+                {
+                    errors.Add(ViewerPasswordSealer.FieldCharactersText(field));
+                }
+                else
+                {
+                    _smtpPasswordToSeal = typed;
+                    row.SmtpEncryptedPassword = null;
+                }
+
+                break;
+        }
+    }
+
+    /// <summary>
+    /// Seals the typed SMTP password to the service's published key for the row's host, port, SSL flag and user name
+    /// (#5366). Returns the sentence that says why not when it cannot; it never carries the password.
+    /// </summary>
+    private async Task<string?> SealSmtpPasswordAsync(NotificationRow row)
+    {
+        if (_smtpPasswordToSeal is null)
+        {
+            return null;
+        }
+
+        var key = await ViewerPasswordKey.GetSealKeyAsync(_dataService!, this);
+        if (key.Notice is not null)
+        {
+            /* The window closes when the save succeeds, so the status line alone would never be seen. */
+            SmtpStatusText.Text = key.Notice;
+            MessageBox.Show(key.Notice, "SMTP password", MessageBoxButton.OK, MessageBoxImage.Information);
+        }
+
+        if (key.Sealer is null)
+        {
+            return key.Refusal;
+        }
+
+        try
+        {
+            row.SmtpEncryptedPassword = key.Sealer.SealSmtp(_smtpPasswordToSeal, row.SmtpHost, row.SmtpPort, row.SmtpUseSsl, row.SmtpUsername);
+        }
+        catch (ViewerPasswordRefusedException ex)
+        {
+            return ex.Message;
+        }
+
+        _smtpPasswordToSeal = null;
+        return null;
     }
 
     private void SmtpEnabledCheckBox_Changed(object sender, RoutedEventArgs e) => UpdateSmtpControlStates();
@@ -1453,6 +1578,13 @@ public partial class SettingsWindow : Window
             /* Build the test settings straight from the live UI (test before save), so the user verifies
                exactly what they typed. The shared EmailSendCore renders + sends — no store/service needed. */
             var settings = TestAlertSettings.FromUi(this);
+            if (SmtpPasswordBox.Password.Length == 0 && !string.IsNullOrEmpty(_loadedNotification.SmtpEncryptedPassword))
+            {
+                /* The saved password is never read back into this window: nothing here can send with it. */
+                MessageBox.Show(ViewerSmtpSeal.SavedCannotTestText, "Test Email", MessageBoxButton.OK, MessageBoxImage.Information);
+                return;
+            }
+
             var error = await EmailSendCore.SendTestEmailAsync(settings, s_branding);
             if (error == null)
             {
@@ -1513,8 +1645,26 @@ public partial class SettingsWindow : Window
         TestPagerDutyButton.IsEnabled = enabled;
     }
 
+    /// <summary>Shows why a Send Test cannot run when its box is blank because the value is saved (#5366). True when it was shown.</summary>
+    private static bool RefuseTestOfSavedValue(string? typed, string? stored, string label)
+    {
+        var text = ViewerWebhookSealing.CannotTestSavedValueText(typed, stored, label);
+        if (text is null)
+        {
+            return false;
+        }
+
+        MessageBox.Show(text, "Test Webhook", MessageBoxButton.OK, MessageBoxImage.Information);
+        return true;
+    }
+
     private async void TestPagerDutyButton_Click(object sender, RoutedEventArgs e)
     {
+        if (RefuseTestOfSavedValue(PagerDutyRoutingKeyBox.Text, _loadedNotification.PagerDutyRoutingKey, "PagerDuty routing key"))
+        {
+            return;
+        }
+
         TestPagerDutyButton.IsEnabled = false;
         TestPagerDutyButton.Content = "Sending...";
 
@@ -1546,6 +1696,11 @@ public partial class SettingsWindow : Window
 
     private async void TestTeamsButton_Click(object sender, RoutedEventArgs e)
     {
+        if (RefuseTestOfSavedValue(TeamsWebhookUrlBox.Text, _loadedNotification.TeamsUrl, "Teams webhook URL"))
+        {
+            return;
+        }
+
         TestTeamsButton.IsEnabled = false;
         TestTeamsButton.Content = "Sending...";
 
@@ -1577,6 +1732,11 @@ public partial class SettingsWindow : Window
 
     private async void TestSlackButton_Click(object sender, RoutedEventArgs e)
     {
+        if (RefuseTestOfSavedValue(SlackWebhookUrlBox.Text, _loadedNotification.SlackUrl, "Slack webhook URL"))
+        {
+            return;
+        }
+
         TestSlackButton.IsEnabled = false;
         TestSlackButton.Content = "Sending...";
 
@@ -1629,6 +1789,12 @@ public partial class SettingsWindow : Window
     /// </summary>
     private async void TestGenericButton_Click(object sender, RoutedEventArgs e)
     {
+        if (RefuseTestOfSavedValue(GenericWebhookUrlBox.Text, _loadedNotification.GenericUrl, "generic webhook URL")
+            || RefuseTestOfSavedValue(GenericWebhookHeadersBox.Text, _loadedNotification.GenericHeaders, "generic webhook headers"))
+        {
+            return;
+        }
+
         var url = GenericWebhookUrlBox.Text?.Trim() ?? "";
         var headers = GenericWebhookHeadersBox.Text?.Trim();
 
@@ -1756,14 +1922,38 @@ public partial class SettingsWindow : Window
         {
             try
             {
+                var sealRefusal = await SealSmtpPasswordAsync(notifyRow);
+                if (sealRefusal is not null)
+                {
+                    SmtpStatusText.Text = sealRefusal;
+                    MessageBox.Show(sealRefusal, "SMTP password not saved", MessageBoxButton.OK, MessageBoxImage.Warning);
+                    return;
+                }
+
+                await SealWebhookValuesAsync(notifyRow);
+                var routeValuesNeedEnteringAgain = await RouteValuesNeedEnteringAgainAsync(notifyRow);
                 await _dataService.UpsertAlertSettingsAsync(alertRow);
                 await _dataService.UpsertNotificationAsync(notifyRow);
                 await _dataService.UpdateServiceFlagsAsync(capturePlans, mcpEnabled, mcpPort, webEnabled, webPort,
                     QueryStoreBackfillCheckBox.IsChecked == true, textBudgetMb, maxSweeps);
+                if (routeValuesNeedEnteringAgain)
+                {
+                    /* The settings were saved; the routes' sealed values were bound to the old proxy (#5366). */
+                    MessageBox.Show(
+                        ViewerWebhookSealing.RouteValuesNeedEnteringAgainText,
+                        "Settings", MessageBoxButton.OK, MessageBoxImage.Warning);
+                }
             }
             catch (ViewerReadOnlyException ex)
             {
                 MessageBox.Show(ex.Message, "Read-only connection", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+            catch (ViewerPasswordRefusedException ex)
+            {
+                MessageBox.Show(
+                    "The webhook settings were not saved:\n\n" + ex.Message,
+                    "Settings", MessageBoxButton.OK, MessageBoxImage.Warning);
                 return;
             }
             catch (ViewerSchemaSkewException ex)

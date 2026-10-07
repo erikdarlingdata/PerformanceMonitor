@@ -773,6 +773,8 @@ public sealed class DarlingWorker : BackgroundService
 
     /* Set once by ExecuteAsync before the loop starts; the observability writes need it. */
     private NpgsqlDataSource? _postgres;
+    /* #5366: the service's password key at run time, set once at start; null before it. */
+    private DarlingPasswordKeyRuntime? _passwordKeyRuntime;
 
     /// <summary>#5378: lets a live test give a worker the store ExecuteAsync would, so a run's row can be read back.</summary>
     internal NpgsqlDataSource? StoreForTests
@@ -2918,6 +2920,12 @@ LIMIT 1";
            users, by whichever look found it so (role provisioning above, a host, or this load), which removes the key
            there and then: null means the file could not be used, the reason is already logged, and those runs refuse
            rather than hash without it. */
+        /* #5366: the service's password key, after migrations and role provisioning and before any collection or reload
+           can need it: loaded (or made and published) here, with the legacy pin snapshot, and the ring every writer and
+           the resolver seal and open through is set. Until this returns the ring refuses with the "still loading" reason.
+           Never throws; a key that cannot be used is a refusing ring with the reason logged and recorded in the store. */
+        _passwordKeyRuntime = await DarlingPasswordKeyRuntime.StartForServiceAsync(
+            config, DarlingConfig.ResolveConfigPath(), postgres, _logger, stoppingToken);
         var logHashKeyLoad = DarlingLogHashKeyFile.LoadForService(config, DarlingConfig.ResolveConfigPath(), _logger);
         var logHashKey = logHashKeyLoad.Key;
         /* #4004 review, round 3: a key that replaced one the directory check discarded is noted on the collection-log
@@ -2981,7 +2989,7 @@ LIMIT 1";
            are hoisted here because the AN3 analysis-notification path below shares them. The mute
            service is hoisted too so a reload can re-LoadAsync() it (closes F16 — the engine holds
            its IsAlertMuted delegate, so refreshing the same instance's cache mutes the next sweep). */
-        var alertSettings = new DarlingAlertSettings(config);
+        var alertSettings = new DarlingAlertSettings(config, _logger);
         var historyStore = new PgAlertHistoryStore(postgres, _logger);
         var webhookAlertService = new WebhookAlertService(
             alertSettings, DarlingAlertDeliverer.Branding,
@@ -3252,6 +3260,14 @@ LIMIT 1";
                wall clock the collectors' due stamps are written on, so a sleep, a stall or a clock step of either sign
                since the previous pass raises the floor before this pass launches any body. */
             _skipCreditFloor.Tick(DateTime.UtcNow);
+
+            /* #5366: the password key check, once per pass: the store still publishes the key this service holds and the key
+               tables still have all their triggers. A change turns the ring to refusing until the start fixes it; the check
+               never throws and costs two small reads. */
+            if (_passwordKeyRuntime is not null)
+            {
+                await _passwordKeyRuntime.SweepCheckAsync(stoppingToken);
+            }
 
             /* Control-plane reload beacon: poll config_version at a SAFE point (top of the sweep, never
                mid-collection). On change, re-read the store and hot-swap the live config: the alert /
@@ -7366,7 +7382,7 @@ LIMIT 1";
             return;
         }
 
-        var alertSettings = new DarlingAlertSettings(config);
+        var alertSettings = new DarlingAlertSettings(config, _logger);
 
         if (!alertSettings.CpuEnabled)
         {
@@ -7683,7 +7699,7 @@ LIMIT 1";
             return;
         }
 
-        var alertSettings = new DarlingAlertSettings(config);
+        var alertSettings = new DarlingAlertSettings(config, _logger);
 
         if (!alertSettings.DeadlockEnabled)
         {
@@ -7891,7 +7907,7 @@ LIMIT 1";
             return;
         }
 
-        var alertSettings = new DarlingAlertSettings(config);
+        var alertSettings = new DarlingAlertSettings(config, _logger);
 
         if (!alertSettings.BlockingEnabled)
         {
@@ -8118,7 +8134,7 @@ LIMIT 1";
             return;
         }
 
-        var alertSettings = new DarlingAlertSettings(config);
+        var alertSettings = new DarlingAlertSettings(config, _logger);
 
         if (!alertSettings.LongRunningQueryEnabled)
         {
@@ -8342,7 +8358,7 @@ LIMIT 1";
             return;
         }
 
-        var alertSettings = new DarlingAlertSettings(config);
+        var alertSettings = new DarlingAlertSettings(config, _logger);
         if (!alertSettings.PoisonWaitEnabled)
         {
             return;

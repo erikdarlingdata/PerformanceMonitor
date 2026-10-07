@@ -23,7 +23,8 @@ public sealed class McpLongQueryTools
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history. Default 24.")] int hours_back = 24,
         [Description("Maximum rows to return, slowest first. Default 30. This is what bounds the page — read truncated to know whether the window held more.")] int limit = 30,
-        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        [Description("Limit to one database. Omit for all databases.")] string? database_name = null)
     {
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
         if (error != null) return error;
@@ -44,19 +45,39 @@ public sealed class McpLongQueryTools
                 SKUs now serve, from a duration-ranked read with the caller's limit + 1 as the fetch and the
                 extra row as the observed truncation signal.
             */
-            var rows = await dataService.GetSlowestLongQueryCompletionsAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd, limit: limit + 1);
+            /* #5244: database_name appended LAST (H1); blank or whitespace is every database. The predicate rides the raw rows,
+               before the duration ranking and the limit + 1 fetch, so the page is the slowest N of the chosen database. */
+            var database = string.IsNullOrWhiteSpace(database_name) ? null : database_name;
+            var rows = await dataService.GetSlowestLongQueryCompletionsAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd, limit: limit + 1,
+                databaseNames: database == null ? null : new[] { database });
             if (rows.Count == 0)
             {
-                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "long_query_completions")
+                /* #5244 round 2 (L2): not_collected and precondition echo database_name like every other shape. */
+                var unmet = McpHelpers.WithDatabase(
+                    await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "long_query_completions"), database)
                     /* #2546: this collector is opt-in, so the fall-through below already sends the reader to
-                       the schedule — which is the wrong place when the collector IS enabled and its session
+                       the schedule, which is the wrong place when the collector IS enabled and its session
                        is missing. The precondition answer names that state instead of quietly blaming a knob
                        that is already switched on. */
-                    ?? await McpRuntimePrecondition.StatusAsync(dataService, resolved.ServerId, resolved.ServerName, "long_query_completions")
-                    ?? McpHelpers.Status("empty", "No long-running query completions found in the specified time range. The long_query_completions collector is opt-in (default OFF) — enable it in the collector schedule to capture data.",
-                        (await McpQueryTools.EventWindowNoticeAsync(
-                            () => dataService.GetQueryWindowFloorAsync(QueryWindowRelation.LongQueryCompletions, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd),
-                            null, windowEnd.AddHours(-hours_back), windowEnd, "long_query_completions", emptyAnswer: true)).AsHints());
+                    ?? McpHelpers.WithDatabase(
+                        await McpRuntimePrecondition.StatusAsync(dataService, resolved.ServerId, resolved.ServerName, "long_query_completions"), database);
+                if (unmet != null)
+                {
+                    return unmet;
+                }
+
+                var emptyNotice = await McpQueryTools.EventWindowNoticeAsync(
+                    () => dataService.GetQueryWindowFloorAsync(QueryWindowRelation.LongQueryCompletions, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd),
+                    null, windowEnd.AddHours(-hours_back), windowEnd, "long_query_completions", emptyAnswer: true);
+                /* #5244 round 2 (L3): the twin of Darling's. The floor probe is not database-filtered, so a null floor (no effective_start)
+                   means the store holds no long-query row for this server in the window, and only then does the answer send the reader to
+                   the opt-in switch; with rows for other databases the collector is on. */
+                var collectorMayBeOff = database == null || emptyNotice.EffectiveStart is null;
+                return McpHelpers.StatusForDatabase("empty",
+                    "No long-running query completions found in the specified time range" + McpBlockingTools.ForChosenDatabase(database)
+                        + (collectorMayBeOff ? ". The long_query_completions collector is opt-in (default OFF) — enable it in the collector schedule to capture data." : "."),
+                    database, /* #5244 review L2: the echo rides on an empty answer too */
+                    emptyNotice.AsHints());
             }
 
             var truncated = rows.Count > limit;
@@ -105,6 +126,8 @@ public sealed class McpLongQueryTools
                 effective_start = notice.EffectiveStart,
                 window_truncated = notice.WindowTruncated,
                 truncation_note = notice.TruncationNote,
+                /* #5244: which database the page is limited to: the name for one, null for all (the twin of Darling's database_name echo). */
+                database_name = database,
                 /* #3541 A3: the page described as a page, on Darling's names. Under a duration RANKING the
                    two stamps bound the slowest runs, not the reach — the description says so. */
                 completions_returned = page.Count,

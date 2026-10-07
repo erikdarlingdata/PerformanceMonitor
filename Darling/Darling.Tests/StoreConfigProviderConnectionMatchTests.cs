@@ -130,4 +130,40 @@ public sealed class StoreConfigProviderConnectionMatchTests
 
         Assert.False(row.EncryptedPasswordDeclaredByFile, field);
     }
+
+    [Fact]
+    public void TheEqualRow_GetsTheRemediationDeclaredMark()
+    {
+        var entry = Entry();
+        entry.RemediationUsername = "fixer";
+        entry.RemediationEncryptedPassword = DeclaredReference;
+        entry.RemediationEncryptedPasswordDeclaredByFile = true;
+        var row = RowLike(entry, null);
+        row.RemediationUsername = "fixer";
+        row.RemediationEncryptedPassword = DeclaredReference;
+
+        StoreConfigProvider.MarkSlotsTheFileDeclares(row, new DarlingConfig { Servers = [entry] });
+
+        Assert.True(row.RemediationEncryptedPasswordDeclaredByFile);
+    }
+
+    [Theory]
+    [InlineData("other-fixer")]
+    [InlineData("")]
+    [InlineData(null)]
+    public void ARowWithAnotherRemediationUsername_GetsNoRemediationDeclaredMark(string? rowUsername)
+    {
+        /* #5366: the remediation reference is declared for one remediation login; a row that names another (or none) is not it. */
+        var entry = Entry();
+        entry.RemediationUsername = "fixer";
+        entry.RemediationEncryptedPassword = DeclaredReference;
+        entry.RemediationEncryptedPasswordDeclaredByFile = true;
+        var row = RowLike(entry, null);
+        row.RemediationUsername = rowUsername;
+        row.RemediationEncryptedPassword = DeclaredReference;
+
+        StoreConfigProvider.MarkSlotsTheFileDeclares(row, new DarlingConfig { Servers = [entry] });
+
+        Assert.False(row.RemediationEncryptedPasswordDeclaredByFile);
+    }
 }

@@ -28,7 +28,7 @@ namespace PerformanceMonitor.Darling.Viewer;
 ///
 /// <para><b>Auth + secrets.</b> The service connects with Windows, SQL, and the two non-interactive Entra
 /// modes — service principal and managed identity (#3484) — so those are the modes written (Windows →
-/// <c>integrated</c>; SQL → <c>sql</c> + a DPAPI-LocalMachine password blob via <see cref="ViewerServerSecret"/>;
+/// <c>integrated</c>; SQL → <c>sql</c> + a password sealed to the service's published key (<see cref="ViewerPasswordKey"/>);
 /// service principal → <c>serviceprincipal</c> + the client secret in the same blob shape; managed identity →
 /// <c>managedidentity</c>, secret-less), never plaintext. A SQL credential PROFILE is resolved to its concrete
 /// username + secret at write time. The INTERACTIVE Entra modes (MFA / device-code / default-credential) have
@@ -258,37 +258,7 @@ public partial class AddServerDialog : Window
         {
             StatusText.Text = "";
         }
-        /* #2279: a stored secret — a SQL password OR a service-principal client secret (#3484) — is a DPAPI
-           LocalMachine blob ONLY the machine writing it can decrypt. The service is what has to decrypt it, so
-           a credential saved from a viewer on another PC than the service can never be used and the server
-           fails to connect on every sweep afterwards (the #2255 report). Said as soon as either secret-bearing
-           mode is picked, so it lands before the secret is typed rather than after the save.
-
-           WARNED, not refused: a non-loopback store does not prove this viewer is remote (a BYO store on
-           another host with the service local reads the same), and refusing would block a legitimate first-run
-           Add. Silent for a loopback store, which is the managed single-box deploy and the overwhelmingly
-           common case — a hint that fires for everyone is a hint nobody reads. */
-        else if ((SqlAuthRadio.IsChecked == true || ServicePrincipalAuthRadio.IsChecked == true)
-            && _dataService is { StoreIsOnThisMachine: false })
-        {
-            StatusText.Text = SqlCredentialMachineBoundHint;
-        }
-        else if (StatusText.Text == SqlCredentialMachineBoundHint)
-        {
-            StatusText.Text = "";
-        }
     }
-
-    /// <summary>
-    /// The #2279 hint. A const so <see cref="AuthMode_Changed"/> can clear exactly its own message when the mode
-    /// changes away — the same self-clearing discipline the Azure arm uses, which is what stops a stale hint
-    /// sitting under an unrelated mode.
-    /// </summary>
-    private const string SqlCredentialMachineBoundHint =
-        "This viewer's store is not on this machine. A SQL-auth password is encrypted for THIS machine only, " +
-        "so if the Darling service runs elsewhere it will not be able to decrypt it and the server will fail " +
-        "to connect. Add it from a viewer on the service's host, run --add-server there, or use an env:/file: " +
-        "reference instead.";
 
     /// <summary>
     /// #3499: swaps the engine-specific parts of the form. The SQL Server arm is the XAML's default state —
@@ -412,7 +382,7 @@ public partial class AddServerDialog : Window
         $"Leave the {what} blank to keep the stored one. If you change how the server is reached (address, database, login or encryption settings), enter it again.";
 
     /// <summary>True on an edit when the form's connection settings differ from the stored row's by the rule the web and MCP
-    /// edit use (<see cref="ServerConnectionRule.ConnectionSettingsDiffer"/>: host, port, engine, database, read-only intent,
+    /// edit use (<see cref="ServerConnectionIdentity.Differ"/>: host, port, engine, database, read-only intent,
     /// authentication, username, encrypt mode, trust certificate and multi-subnet failover). A port the box cannot parse
     /// counts as unchanged here: the form's own port check reports it. The authentication and username are the ones the
     /// credential being resolved carries.</summary>
@@ -430,13 +400,11 @@ public partial class AddServerDialog : Window
         }
 
         var database = string.IsNullOrWhiteSpace(DatabaseNameBox.Text) ? null : DatabaseNameBox.Text.Trim();
-        var form = new ServerConnectionSettings(
+        var form = ServerConnectionIdentity.FromStoredColumns(
             ServerNameBox.Text.Trim(), port, _existing.Engine, database, ReadOnlyIntentCheckBox.IsChecked == true, auth, username,
             GetSelectedEncryptMode(), TrustCertCheckBox.IsChecked == true, MultiSubnetFailoverCheckBox.IsChecked == true);
-        var stored = ServerConnectionSettings.WithDefaults(
-            _existing.Host, _existing.Port, _existing.Engine, _existing.Database, _existing.ReadOnlyIntent, _existing.Auth,
-            _existing.Username, _existing.EncryptMode, _existing.TrustServerCertificate, _existing.MultiSubnetFailover);
-        return ServerConnectionRule.ConnectionSettingsDiffer(form, stored);
+        var stored = ViewerPasswordSealer.IdentityOf(_existing);
+        return ServerConnectionIdentity.Differ(form, stored);
     }
 
     /// <summary>
@@ -445,11 +413,12 @@ public partial class AddServerDialog : Window
     /// blocking the Azure/Entra modes the service can't honor and keeping an existing blob when the password
     /// box is left blank on edit.
     /// </summary>
-    private bool TryResolveCredential(out string auth, out string? username, out string? encryptedPassword, out string? error)
+    private bool TryResolveCredential(out string auth, out string? username, out string? encryptedPassword, out string? secret, out string? error)
     {
         auth = ServerStoreCredential.Integrated;
         username = null;
         encryptedPassword = null;
+        secret = null;
         error = null;
 
         if (UseProfileRadio.IsChecked == true)
@@ -484,15 +453,15 @@ public partial class AddServerDialog : Window
             /* Secret-bearing profiles (SQL, service principal): resolve the concrete secret and write it onto
                the row — the store keeps concrete creds; profiles are a viewer authoring convenience the store
                needs no table for. */
-            var secret = _profileStore.GetSecret(profile.Id);
-            if (secret is null || string.IsNullOrEmpty(secret.Value.Password))
+            var profileSecret = _profileStore.GetSecret(profile.Id);
+            if (profileSecret is null || string.IsNullOrEmpty(profileSecret.Value.Password))
             {
                 error = $"The credential profile '{profile.Name}' has no stored secret on this machine. Re-enter it under Credential Profiles.";
                 return false;
             }
 
-            username = string.IsNullOrWhiteSpace(secret.Value.Username) ? profile.Username : secret.Value.Username;
-            encryptedPassword = ViewerServerSecret.Protect(secret.Value.Password);
+            username = string.IsNullOrWhiteSpace(profileSecret.Value.Username) ? profile.Username : profileSecret.Value.Username;
+            secret = profileSecret.Value.Password;
             return true;
         }
 
@@ -515,7 +484,7 @@ public partial class AddServerDialog : Window
             var typed = PasswordBox.Password;
             if (!string.IsNullOrEmpty(typed))
             {
-                encryptedPassword = ViewerServerSecret.Protect(typed);
+                secret = typed;
                 return true;
             }
 
@@ -558,7 +527,7 @@ public partial class AddServerDialog : Window
             var typedSecret = AzureClientSecretBox.Password;
             if (!string.IsNullOrEmpty(typedSecret))
             {
-                encryptedPassword = ViewerServerSecret.Protect(typedSecret);
+                secret = typedSecret;
                 return true;
             }
 
@@ -601,9 +570,10 @@ public partial class AddServerDialog : Window
     }
 
     /// <summary>Reads the form into a fresh store row (server_id derived from identity), or a user-facing error.</summary>
-    private MonitoredServerRow? BuildRowFromForm(out string? error)
+    private MonitoredServerRow? BuildRowFromForm(out string? error, out string? secret)
     {
         error = null;
+        secret = null;
 
         var host = ServerNameBox.Text.Trim();
         if (string.IsNullOrEmpty(host))
@@ -637,7 +607,7 @@ public partial class AddServerDialog : Window
             port = parsedPort;
         }
 
-        if (!TryResolveCredential(out var auth, out var username, out var encryptedPassword, out var credError))
+        if (!TryResolveCredential(out var auth, out var username, out var encryptedPassword, out secret, out var credError))
         {
             error = credError;
             return null;
@@ -700,6 +670,50 @@ public partial class AddServerDialog : Window
         };
     }
 
+    /// <summary>The password is sealed once for the form's settings: the test and the save that follows it store the same text.</summary>
+    private readonly ViewerSealCache _sealCache = new();
+
+    /// <summary>
+    /// Reads the form into a store row and seals a newly entered password (#5366) to the service's published key, for that
+    /// row's connection settings. A password that is kept (a blank box on edit) stays as stored. The error is a sentence for
+    /// the status line; it never carries a password.
+    /// </summary>
+    private async Task<(MonitoredServerRow? Row, string? Error)> BuildSealedRowFromFormAsync()
+    {
+        var row = BuildRowFromForm(out var error, out var secret);
+        if (row is null || secret is null)
+        {
+            return (row, error);
+        }
+
+        if (_dataService is null)
+        {
+            return (null, ViewerPasswordKey.NoKeyText);
+        }
+
+        var key = await ViewerPasswordKey.GetSealKeyAsync(_dataService, this);
+        if (key.Sealer is null)
+        {
+            return (null, key.Refusal);
+        }
+
+        if (key.Notice is not null)
+        {
+            StatusText.Text = key.Notice;
+        }
+
+        try
+        {
+            row.EncryptedPassword = _sealCache.GetOrSeal(key.Sealer, secret, row);
+        }
+        catch (ViewerPasswordRefusedException ex)
+        {
+            return (null, ex.Message);
+        }
+
+        return (row, null);
+    }
+
     /// <summary>The per-server delivery override the combo encodes: index 0 = inherit the global (null),
     /// 1 = force Summary, 2 = force Per-event (#1236).</summary>
     private AlertNotificationMode? GetSelectedDeliveryOverride() => AlertDeliveryOverrideBox.SelectedIndex switch
@@ -738,8 +752,8 @@ public partial class AddServerDialog : Window
         {
             SaveButton.IsEnabled = false;
 
-            /* Build (incl. DPAPI Protect, which can throw) inside the try so nothing escapes this async void. */
-            var row = BuildRowFromForm(out var error);
+            /* Build (incl. sealing the password) inside the try so nothing escapes this async void. */
+            var (row, error) = await BuildSealedRowFromFormAsync();
             if (row is null)
             {
                 StatusText.Text = error;
@@ -848,8 +862,8 @@ public partial class AddServerDialog : Window
             TestConnectionButton.IsEnabled = false;
             SaveButton.IsEnabled = false;
 
-            /* Build (incl. DPAPI Protect) inside the try — a crypto failure must not escape this async void. */
-            var row = BuildRowFromForm(out var error);
+            /* Build (incl. sealing the password) inside the try — a crypto failure must not escape this async void. */
+            var (row, error) = await BuildSealedRowFromFormAsync();
             if (row is null)
             {
                 StatusText.Text = error;

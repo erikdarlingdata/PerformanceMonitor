@@ -23,6 +23,9 @@ export const FILTERED = new Set([
   // get_blocking_stats limits only its blocking series (deadlock severity stays whole).
   "get_blocking_trend", "get_waiting_tasks", "get_blocking", "get_current_waits_trend", "get_blocking_stats",
   "get_blocked_process_xml",
+  // Duration trends, Query Store clutter, long queries and plan corrections (#5244 PR4).
+  "get_query_duration_trend", "get_procedure_duration_trend", "get_query_store_duration_trend",
+  "get_query_store_clutter", "get_long_query_completions", "get_plan_corrections",
 ]);
 
 /** Database-scoped reads that cannot take the filter yet, so they show every database and say so (the "All databases"
@@ -30,9 +33,6 @@ export const FILTERED = new Set([
  *  deadlock reads, which stay unfiltered on purpose (as on the desktop): a deadlock spans several databases, and they are
  *  inside each deadlock graph. The groups follow the page that moves each read into FILTERED. */
 export const UNFILTERED = new Set([
-  // Duration trends, Query Store clutter, long queries and plan corrections.
-  "get_query_duration_trend", "get_procedure_duration_trend", "get_query_store_duration_trend",
-  "get_query_store_clutter", "get_long_query_completions", "get_plan_corrections",
   // File I/O, sizes and the persistent version store.
   "get_file_io_trend", "get_file_io_stats", "get_database_sizes", "get_table_index_sizes", "get_pvs_stats",
   // Configuration, Query Store health, configuration changes, severe errors and the default trace.

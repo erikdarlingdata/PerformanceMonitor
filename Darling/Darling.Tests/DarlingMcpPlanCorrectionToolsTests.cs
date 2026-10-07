@@ -62,7 +62,7 @@ public sealed class DarlingMcpPlanCorrectionToolsTests
             .Select(p => (p.Name, p.HasDefaultValue))
             .ToArray();
 
-        Assert.Equal(new[] { "server_name", "hours_back", "limit", "as_of", "full_text" }, mcpParams.Select(p => p.Name).ToArray());
+        Assert.Equal(new[] { "server_name", "hours_back", "limit", "as_of", "full_text", "database_name" }, mcpParams.Select(p => p.Name).ToArray());
         Assert.True(mcpParams.Single(p => p.Name == "server_name").HasDefaultValue, "server_name must be optional");
     }
 
@@ -121,7 +121,8 @@ public sealed class DarlingMcpPlanCorrectionToolsTests
         Assert.DoesNotContain("@", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("N'", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("getdate", sql.ToLowerInvariant());
-        Assert.DoesNotContain("[", sql, StringComparison.Ordinal);
+        /* #5244: the database list predicate casts its parameter to text[], an array type, not a T-SQL bracket identifier. */
+        Assert.DoesNotContain("[", sql.Replace("text[]", "", StringComparison.Ordinal), StringComparison.Ordinal);
     }
 }
 

@@ -1234,8 +1234,8 @@ LEFT JOIN texts t ON t.sql_handle = j.text_handle;";
     /// unknowable), <c>NULLIF(…, 0)</c> so the restart collection is UNRATED, and the LAG only for a
     /// pre-v61 collection (NULL) that never recorded one, so history renders exactly as it did.
     /// <c>COALESCE(NULLIF(sample_interval_seconds, 0), LAG)</c> would be the wrong spelling — it falls back
-    /// to a fabricated interval on precisely the restart row. Darling's twin is
-    /// <c>DurationTrendRouting.BuildRawTrendSql</c>.</para>
+    /// to a fabricated interval on precisely the restart row. Darling's twin is the per-collection CTE
+    /// <c>DurationTrendRouting.BuildBucketedRawTrendSql</c> builds.</para>
     /// <para><b>An unrated collection is a point with no rate, not a missing point (#3541 A12, #3540 A8).</b>
     /// The first collection of a pre-v61 stretch has a NULL LAG, a restart collection a NULL interval; either
     /// way the <c>CASE ... ELSE 0 END</c> this replaced published that unknowable as a measured 0.0, and every
@@ -1339,8 +1339,10 @@ LEFT JOIN texts t ON t.sql_handle = j.text_handle;";
     /// an unrated collection's work/executions/seconds rather than its rate directly (so the bucket sums work and
     /// seconds separately and divides once — summed rates, never averaged ones), then one row per bucket.
     /// <c>bucket_start</c> is clamped to the window start (<c>GREATEST</c>) so an unaligned window's first,
-    /// partial bucket does not render before it. No <c>HAVING</c>: a bucket with no rated collection still gets a
-    /// row, its rate NULL — the per-collection contract above, applied per bucket. <paramref name="dbClause"/> is
+    /// partial bucket does not render before it. No <c>HAVING</c> on the rate: a bucket with no rated collection still gets a
+    /// row, its rate NULL — the per-collection contract above, applied per bucket. With a database filter the filter sits
+    /// INSIDE the aggregates (#5414 M1: a collection the chosen databases had no rows in still counts its seconds) and
+    /// whether the chosen databases had any row at all is one window-level <c>WHERE EXISTS</c> (the empty chart), never a per-bucket test, so a bucket they were quiet in reads 0 and is not missing (#5414 round 2). <paramref name="dbClause"/> is
     /// <see cref="LocalDataService.BuildDbInClause"/>'s own <c>$4..</c> numbering, unchanged by bucketing; the
     /// width is appended as its OWN trailing parameter at <paramref name="widthParamIndex"/> so that numbering
     /// never shifts, mirroring the wait/perfmon trend reads' own width parameter.
@@ -1350,18 +1352,18 @@ WITH raw AS
 (
     SELECT
         collection_time,
-        SUM(delta_elapsed_time) / 1000.0 AS total_elapsed_ms,
-        SUM(delta_execution_count) AS total_executions,
+        {FilteredSum("delta_elapsed_time", dbClause)} / 1000.0 AS total_elapsed_ms,
+        {FilteredSum("delta_execution_count", dbClause)} AS total_executions,
         /* The stored interval, three-state (#3653 A11): MAX 0 = every row unknowable (a restart) -> NULL, so
            the collection is unrated; NULL = pre-v61, the LAG stands in; n = measured. */
         CASE WHEN MAX(sample_interval_seconds) IS NULL
              THEN extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time))))
              ELSE NULLIF(MAX(sample_interval_seconds), 0)
-        END AS interval_seconds
+        END AS interval_seconds{(dbClause.Length == 0 ? "" : $",\n        COUNT(*) FILTER (WHERE {DbInPredicate(dbClause)}) AS matched_rows")}
     FROM {relation}
     WHERE server_id = $1
     AND   collection_time >= $2
-    AND   collection_time <= $3{dbClause}
+    AND   collection_time <= $3
     GROUP BY collection_time
 ),
 rated AS
@@ -1370,7 +1372,7 @@ rated AS
         collection_time,
         CASE WHEN interval_seconds > 0 THEN total_elapsed_ms END AS rated_elapsed_ms,
         CASE WHEN interval_seconds > 0 THEN total_executions END AS rated_executions,
-        CASE WHEN interval_seconds > 0 THEN interval_seconds END AS rated_seconds
+        CASE WHEN interval_seconds > 0 THEN interval_seconds END AS rated_seconds{(dbClause.Length == 0 ? "" : ",\n        matched_rows")}
     FROM raw
 )
 SELECT
@@ -1381,7 +1383,7 @@ SELECT
     CAST(SUM(rated_executions) AS DOUBLE PRECISION) / SUM(rated_seconds) AS executions_per_second,
     MIN(collection_time) AS first_collection_time,
     COUNT(*) AS collection_count
-FROM rated
+FROM rated{(dbClause.Length == 0 ? "" : "\nWHERE EXISTS (SELECT 1 FROM rated WHERE matched_rows > 0)")}
 GROUP BY 1
 ORDER BY 1";
 
@@ -1500,16 +1502,16 @@ WITH raw AS
 (
     SELECT
         collection_time,
-        SUM(delta_execution_count) AS total_executions,
+        {FilteredSum("delta_execution_count", dbClause)} AS total_executions,
         /* The stored interval, three-state (#3653 A11) — see GetQueryDurationTrendAsync. */
         CASE WHEN MAX(sample_interval_seconds) IS NULL
              THEN extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time))))
              ELSE NULLIF(MAX(sample_interval_seconds), 0)
-        END AS interval_seconds
+        END AS interval_seconds{(dbClause.Length == 0 ? "" : $",\n        COUNT(*) FILTER (WHERE {DbInPredicate(dbClause)}) AS matched_rows")}
     FROM v_query_stats
     WHERE server_id = $1
     AND   collection_time >= $2
-    AND   collection_time <= $3{dbClause}
+    AND   collection_time <= $3
     GROUP BY collection_time
 ),
 rated AS
@@ -1517,7 +1519,7 @@ rated AS
     SELECT
         collection_time,
         CASE WHEN interval_seconds > 0 THEN total_executions END AS rated_executions,
-        CASE WHEN interval_seconds > 0 THEN interval_seconds END AS rated_seconds
+        CASE WHEN interval_seconds > 0 THEN interval_seconds END AS rated_seconds{(dbClause.Length == 0 ? "" : ",\n        matched_rows")}
     FROM raw
 )
 SELECT
@@ -1527,7 +1529,7 @@ SELECT
     CAST(SUM(rated_executions) AS DOUBLE PRECISION) / SUM(rated_seconds) AS executions_per_second,
     MIN(collection_time) AS first_collection_time,
     COUNT(*) AS collection_count
-FROM rated
+FROM rated{(dbClause.Length == 0 ? "" : "\nWHERE EXISTS (SELECT 1 FROM rated WHERE matched_rows > 0)")}
 GROUP BY 1
 ORDER BY 1";
 

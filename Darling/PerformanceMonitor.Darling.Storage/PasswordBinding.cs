@@ -35,6 +35,22 @@ public sealed class PasswordBinding
     /// <summary>The purpose of the mail-server password.</summary>
     public const string SmtpPurpose = "smtp";
 
+    /// <summary>The purpose of a webhook URL, the PagerDuty routing key and the generic webhook's headers.</summary>
+    public const string WebhookPurpose = "webhook";
+
+    /// <summary>The webhook slots, in the order the notification row lists its columns: the Teams URL, the Slack URL,
+    /// the generic URL, the PagerDuty routing key and the generic headers.</summary>
+    public static readonly IReadOnlyList<string> WebhookSlots = new[]
+    {
+        "teams", "slack", "generic", "pagerduty", "generic_headers",
+    };
+
+    /// <summary>The row id of the notification settings row, for <see cref="ForWebhook"/>.</summary>
+    public const string WebhookSettingsRow = "notification";
+
+    /// <summary>The row id of a notification route, for <see cref="ForWebhook"/>.</summary>
+    public static string WebhookRouteRow(int routeId) => "route:" + Number(routeId);
+
     /// <summary>The names of the server purpose's fields, in the order <see cref="ForServer"/> binds them. The census
     /// checks these against <see cref="ServerConnectionIdentity"/>.</summary>
     internal static readonly IReadOnlyList<string> ServerFieldNames = new[]
@@ -61,6 +77,7 @@ public sealed class PasswordBinding
         [ServerPurpose] = 10,
         [RemediationPurpose] = 7,
         [SmtpPurpose] = 4,
+        [WebhookPurpose] = 4,
     };
 
     private PasswordBinding(string purpose, string?[] fields)
@@ -103,6 +120,28 @@ public sealed class PasswordBinding
     /// <summary>The binding for the mail-server password: host, port, whether SSL is used, and the username.</summary>
     public static PasswordBinding ForSmtp(string? host, int port, bool useSsl, string? username) =>
         new(SmtpPurpose, new string?[] { host, Number(port), Flag(useSsl), username });
+
+    /// <summary>
+    /// The binding for a webhook value: its slot (one of <see cref="WebhookSlots"/>), the row it is stored in
+    /// (<see cref="WebhookSettingsRow"/> or <see cref="WebhookRouteRow"/>), the proxy text of its channel, and, for the
+    /// generic headers, the stored text of the same row's generic URL (empty for every other slot). A value opens only
+    /// in the slot and row it was sealed for, and a changed proxy or generic URL needs the value again.
+    /// </summary>
+    public static PasswordBinding ForWebhook(string slot, string row, string? proxy, string? boundUrl)
+    {
+        var known = false;
+        foreach (var name in WebhookSlots)
+        {
+            known |= string.Equals(name, slot, StringComparison.Ordinal);
+        }
+
+        if (!known)
+        {
+            throw new ArgumentException("A webhook binding names one of the webhook slots.", nameof(slot));
+        }
+
+        return new(WebhookPurpose, new string?[] { slot, row, proxy, boundUrl });
+    }
 
     /// <summary>The associated data for a value sealed under <paramref name="keyId"/>: the format label, the key id, the
     /// purpose and each field, each as a 4-byte big-endian length and its UTF-8 bytes.</summary>

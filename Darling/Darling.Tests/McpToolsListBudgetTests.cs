@@ -246,7 +246,10 @@ public sealed class McpToolsListBudgetTests
        get_current_waits_trend already took one. Constant set to the measured value. */
     /* #5244 PR3 (r1 M1): get_blocking_trend and get_blocking_stats each gain the one sentence that says which collector answered (the source key and when the DMV snapshot is used): 195,745 -> 196,205 bytes (+460), 181 tools.
        Lite carries the identical sentence on its twins. */
-    private const int TotalCeilingBytes = 196_205;
+    /* #5244 PR4 (W4): get_query_duration_trend, get_procedure_duration_trend, get_query_store_duration_trend, get_long_query_completions,
+       get_plan_corrections and get_query_store_clutter gain database_name (the 46-character shared sentence, as Lite's twins where they exist):
+       196,205 -> 196,787 bytes (+582), measured. */
+    private const int TotalCeilingBytes = 196_787;
 
 
 

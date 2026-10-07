@@ -128,6 +128,67 @@ WHERE route_id = $1";
         await ExecuteWriteAsync(command, cancellationToken);
     }
 
+    /// <summary>
+    /// Saves a route with its webhook destinations sealed (#5366) and returns its <c>route_id</c>. A new route is inserted with
+    /// every destination empty to get its id, because a sealed value is bound to the row it is stored in, then updated with the
+    /// sealed values, in one transaction: a refusal rolls the insert back. <paramref name="stored"/> is the row as read, for the
+    /// values a blank box keeps; <paramref name="parent"/> is the settings row, which holds each channel's proxy.
+    /// </summary>
+    public async Task<int> SaveNotificationRouteSealedAsync(
+        NotificationRouteRow typed, NotificationRouteRow? stored, NotificationRow parent, ViewerPasswordSealer? sealer,
+        string? refusal, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(typed);
+        ArgumentNullException.ThrowIfNull(parent);
+
+        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        try
+        {
+            var routeId = typed.RouteId;
+            if (routeId == 0)
+            {
+                await using var insert = new NpgsqlCommand(NotificationRouteInsertSql, connection, transaction);
+                insert.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
+                insert.Parameters.Add(new NpgsqlParameter<string> { TypedValue = typed.MetricMatch.Trim() });
+                for (var i = 0; i < 5; i++)
+                {
+                    insert.Parameters.Add(new NpgsqlParameter<string> { TypedValue = "" });
+                }
+
+                insert.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = typed.Enabled });
+                routeId = Convert.ToInt32(await insert.ExecuteScalarAsync(cancellationToken), System.Globalization.CultureInfo.InvariantCulture);
+            }
+
+            var resolved = typed.Clone();
+            resolved.RouteId = routeId;
+            ViewerWebhookSealing.ResolveRoute(resolved, stored, parent, routeId, sealer, refusal);
+            ValidateRoute(resolved);
+
+            await using var update = new NpgsqlCommand(NotificationRouteUpdateSql, connection, transaction);
+            update.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
+            update.Parameters.Add(new NpgsqlParameter<int> { TypedValue = routeId });                          // $1
+            update.Parameters.Add(new NpgsqlParameter<string> { TypedValue = resolved.MetricMatch.Trim() });    // $2
+            update.Parameters.Add(new NpgsqlParameter<string> { TypedValue = resolved.TeamsUrl });              // $3
+            update.Parameters.Add(new NpgsqlParameter<string> { TypedValue = resolved.SlackUrl });              // $4
+            update.Parameters.Add(new NpgsqlParameter<string> { TypedValue = resolved.GenericUrl });            // $5
+            update.Parameters.Add(new NpgsqlParameter<string> { TypedValue = resolved.PagerDutyRoutingKey });   // $6
+            update.Parameters.Add(new NpgsqlParameter<string> { TypedValue = resolved.SmtpRecipients.Trim() }); // $7
+            update.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = resolved.Enabled });                 // $8
+            await update.ExecuteNonQueryAsync(cancellationToken);
+            await transaction.CommitAsync(cancellationToken);
+            return routeId;
+        }
+        catch (PostgresException ex) when (ex.SqlState == InsufficientPrivilegeSqlState)
+        {
+            throw new ViewerReadOnlyException(ex);
+        }
+        catch (PostgresException ex) when (ex.SqlState is UndefinedColumnSqlState or UndefinedTableSqlState)
+        {
+            throw new ViewerSchemaSkewException(ex);
+        }
+    }
+
     public async Task SetNotificationRouteEnabledAsync(int routeId, bool enabled, CancellationToken cancellationToken = default)
     {
         await using var command = _dataSource.CreateCommand(NotificationRouteSetEnabledSql);

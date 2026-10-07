@@ -318,6 +318,16 @@ public sealed class CaggGroupIndexDropLiveTests
     /// A future rung that adds a new probe sentinel must add its artifact's removal here.</summary>
     private static async Task DropArtifactsOfLaterRungsAsync(NpgsqlConnection connection, int simulatedVersion, CancellationToken ct)
     {
+        if (simulatedVersion < PasswordKeyTables.RungVersion)
+        {
+            /* V165 (#5366) - the tables for the service's password key; config.password_key is the probe's sentinel.
+               The four tables go first, which also drops their triggers, and then the trigger function they shared. */
+            await using var dropPasswordKey = new NpgsqlCommand(
+                "DROP TABLE IF EXISTS config.password_key, config.password_key_service, config.legacy_secret_pin, config.legacy_secret_pin_marker;"
+                + " DROP FUNCTION IF EXISTS config.password_key_owner_only()", connection);
+            await dropPasswordKey.ExecuteNonQueryAsync(ct);
+        }
+
         if (simulatedVersion < 153)
         {
             /* V153 (#4608, split #4615) — the interval-tables-latest first_execution_time index. */

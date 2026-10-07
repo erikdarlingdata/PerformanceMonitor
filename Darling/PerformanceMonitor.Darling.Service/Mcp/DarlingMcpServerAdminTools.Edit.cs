@@ -147,12 +147,12 @@ public sealed partial class DarlingMcpServerAdminTools
         [Description("A JSON object with ONLY the fields to change (e.g. {\"display_name\":\"Orders\",\"monthly_cost_usd\":120}). See the tool guide for the keys.")] string changes_json,
         ILogger? logger = null,
         CancellationToken cancellationToken = default) =>
-        EditServerByNameAsync(postgres, server_name, changes_json, DefaultProbeAsync, OperatingSystem.IsWindows(), logger, cancellationToken);
+        EditServerByNameAsync(postgres, server_name, changes_json, DefaultProbeAsync, DarlingPasswordKey.Current, logger, cancellationToken);
 
     /// <summary>The tool's body with the probe and the platform injected, so a test drives the product's own path
     /// (parse, resolve, core, store) without a reachable server.</summary>
     internal static async Task<string> EditServerByNameAsync(
-        NpgsqlDataSource postgres, string server_name, string changes_json, ServerProbe probe, bool isWindows, ILogger? logger, CancellationToken cancellationToken)
+        NpgsqlDataSource postgres, string server_name, string changes_json, ServerProbe probe, IPasswordKeyRing ring, ILogger? logger, CancellationToken cancellationToken)
     {
         string? submittedSecret = null;
         try
@@ -199,7 +199,7 @@ public sealed partial class DarlingMcpServerAdminTools
 
             return await EditServerCoreAsync(
                 new PostgresServerEditStore(postgres), target.Candidates[0].ServerId, changes!, probe,
-                isWindows, logger, cancellationToken);
+                ring, logger, cancellationToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -231,7 +231,7 @@ public sealed partial class DarlingMcpServerAdminTools
 
             submittedSecret = changes!.Password;
             return await EditServerCoreAsync(
-                new PostgresServerEditStore(postgres), serverId, changes, DefaultProbeAsync, OperatingSystem.IsWindows(), logger, cancellationToken);
+                new PostgresServerEditStore(postgres), serverId, changes, DefaultProbeAsync, DarlingPasswordKey.Current, logger, cancellationToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -240,15 +240,15 @@ public sealed partial class DarlingMcpServerAdminTools
         }
     }
 
-    /// <summary>The core over a changes string: parses it, then runs <see cref="EditServerCoreAsync(IServerEditStore, int, ServerEditChanges, ServerProbe, bool, ILogger?, CancellationToken)"/>.
+    /// <summary>The core over a changes string: parses it, then runs <see cref="EditServerCoreAsync(IServerEditStore, int, ServerEditChanges, ServerProbe, IPasswordKeyRing, ILogger?, CancellationToken)"/>.
     /// An unparseable body is <c>invalid</c> without a store read.</summary>
     internal static async Task<string> EditServerCoreAsync(
-        IServerEditStore store, int serverId, string changesJson, ServerProbe probe, bool isWindows, ILogger? logger, CancellationToken cancellationToken)
+        IServerEditStore store, int serverId, string changesJson, ServerProbe probe, IPasswordKeyRing ring, ILogger? logger, CancellationToken cancellationToken)
     {
         var (changes, error) = ParseEditChanges(changesJson);
         return error != null
             ? Outcome(EditStatus.Invalid, error)
-            : await EditServerCoreAsync(store, serverId, changes!, probe, isWindows, logger, cancellationToken);
+            : await EditServerCoreAsync(store, serverId, changes!, probe, ring, logger, cancellationToken);
     }
 
     /// <summary>
@@ -256,7 +256,7 @@ public sealed partial class DarlingMcpServerAdminTools
     /// outcome is an answer; only an unexpected store fault throws (the caller turns it into the error envelope).
     /// </summary>
     internal static async Task<string> EditServerCoreAsync(
-        IServerEditStore store, int serverId, ServerEditChanges changes, ServerProbe probe, bool isWindows, ILogger? logger, CancellationToken cancellationToken)
+        IServerEditStore store, int serverId, ServerEditChanges changes, ServerProbe probe, IPasswordKeyRing ring, ILogger? logger, CancellationToken cancellationToken)
     {
         var row = await store.ReadRowAsync(serverId, cancellationToken);
         if (row is null)
@@ -270,7 +270,7 @@ public sealed partial class DarlingMcpServerAdminTools
             return ConflictAnswer(row);
         }
 
-        var (plan, planError) = PlanEdit(row, changes, isWindows);
+        var (plan, planError) = PlanEdit(row, changes, ring.Status);
         if (planError != null)
         {
             return Outcome(EditStatus.Invalid, planError);
@@ -327,7 +327,7 @@ public sealed partial class DarlingMcpServerAdminTools
         if (plan.PlaintextSecret is not null)
         {
             sets = sets.Select(s => s.Column == "encrypted_password"
-                ? s with { Value = ProtectPasswordForStorage(plan.PlaintextSecret) }
+                ? s with { Value = ProtectPasswordForStorage(plan.PlaintextSecret, BindingOf(plan.ProbeConfig), ring) }
                 : s).ToList();
         }
 
@@ -713,18 +713,13 @@ public sealed partial class DarlingMcpServerAdminTools
     internal static bool SameAddress(string host, int port, string otherHost, int otherPort) =>
         ServerConnectionRule.SameAddress(host, port, otherHost, otherPort);
 
-    /// <summary>The shared connection-settings rule (<see cref="ServerConnectionRule.ConnectionSettingsDiffer"/>), kept under this name for the edit core.</summary>
-    internal static bool ConnectionSettingsDiffer(ServerConnectionSettings a, ServerConnectionSettings b) =>
-        ServerConnectionRule.ConnectionSettingsDiffer(a, b);
-
-
     /// <summary>
     /// The merged definition (the stored row plus the request) checked as add checks an entry, and the columns that
     /// differ. The credential rules: a password is required when a SQL or service-principal row's connection changes
     /// (probe rule b) or when the row switches INTO one of those modes, and it is never reused across modes; a
     /// switch out of them clears the stored secret; a row that stores no secret needs none.
     /// </summary>
-    internal static (ServerEditPlan? Plan, string? Error) PlanEdit(ServerEditRow row, ServerEditChanges c, bool isWindows)
+    internal static (ServerEditPlan? Plan, string? Error) PlanEdit(ServerEditRow row, ServerEditChanges c, PasswordKeyStatus key)
     {
         var host = c.Host ?? row.Host;
         var port = c.Port ?? row.Port;
@@ -773,14 +768,14 @@ public sealed partial class DarlingMcpServerAdminTools
             }
         }
 
-        if (secretMode && c.Password is not null && ValidateSecret(c.Password, isWindows, isSp) is { } secretRefusal)
+        if (secretMode && c.Password is not null && (ValidateSecret(c.Password, key, isSp) ?? SealableTextRefusal(c.Password, host, database, username)) is { } secretRefusal)
         {
             return (null, secretRefusal);
         }
 
-        var connectionChanged = ConnectionSettingsDiffer(
-            new ServerConnectionSettings(host, port, row.Engine, database, readOnly, auth, username, encryptMode, trust, multi),
-            new ServerConnectionSettings(row.Host, row.Port, row.Engine, row.Database, row.ReadOnlyIntent, row.Auth, row.Username,
+        var connectionChanged = ServerConnectionIdentity.Differ(
+            ServerConnectionIdentity.FromStoredColumns(host, port, row.Engine, database, readOnly, auth, username, encryptMode, trust, multi),
+            ServerConnectionIdentity.FromStoredColumns(row.Host, row.Port, row.Engine, row.Database, row.ReadOnlyIntent, row.Auth, row.Username,
                 row.EncryptMode, row.TrustServerCertificate, row.MultiSubnetFailover));
 
         if (secretMode && c.Password is null && (authSwitched || connectionChanged))

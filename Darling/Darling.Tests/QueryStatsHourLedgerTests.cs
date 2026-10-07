@@ -75,14 +75,14 @@ public sealed class QueryStatsHourLedgerTests
     }
 
     [Fact]
-    public void TheRungIsRegisteredOnce_InADenseLadder_AsTheTopRung()
+    public void TheRungIsRegisteredOnce_InADenseLadder()
     {
         var versions = PgMigrations.Scripts.Select(s => s.Version).ToList();
 
         Assert.Equal(164, Rung.Version);
         Assert.Equal(QueryStatsHourLedger.RungVersion, Rung.Version); // the runner's below-the-rung check reads this constant
         Assert.Single(PgMigrations.Scripts, m => m.Name == RungName);
-        Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
+        Assert.Contains(Rung.Version + 1, versions); // no longer the top rung: V165 landed above it
         Assert.Equal(versions.Distinct().OrderBy(v => v), versions);
         Assert.Contains(Rung.Version - 1, versions);
     }
@@ -177,19 +177,18 @@ public sealed class QueryStatsHourLedgerTests
         var probe = ViewerDataService.StoreSchemaProbeSql.Replace("\r\n", "\n", StringComparison.Ordinal);
         var arm = "to_regclass('collect.query_stats_hour_ledger') IS NOT NULL";
         Assert.Contains(arm, probe, StringComparison.Ordinal);
-        Assert.True(probe.LastIndexOf("EXISTS", StringComparison.Ordinal) < probe.IndexOf(arm, StringComparison.Ordinal),
-            "the new arm is the probe's last EXISTS, so it reads at the next ordinal");
+        /* No longer the probe's last EXISTS: V165 (the password key tables) landed above it. */
 
         var viewer = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.cs");
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal})", viewer, StringComparison.Ordinal);
-        Assert.DoesNotContain($"reader.GetBoolean({ProbeOrdinal + 1})", viewer, StringComparison.Ordinal);
+        Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 1})", viewer, StringComparison.Ordinal);
 
         var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
         var parameters = method.GetParameters();
-        Assert.Equal(ProbeOrdinal, parameters.Length - 1);
+        Assert.True(ProbeOrdinal < parameters.Length - 1, "a newer rung's sentinel follows this one");
         Assert.Equal("hasQueryStatsHourLedger", parameters[ProbeOrdinal].Name);
 
-        var all = Enumerable.Repeat((object)true, parameters.Length).ToArray();
+        var all = Enumerable.Range(0, parameters.Length).Select(i => (object)(i <= ProbeOrdinal)).ToArray();
         Assert.Equal(Rung.Version, (int)method.Invoke(null, all)!);
         Assert.Equal(StorageVersion.SchemaVersion, ViewerDataService.RequiredStoreSchemaVersion);
 

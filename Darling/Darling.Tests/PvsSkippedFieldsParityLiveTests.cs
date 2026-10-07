@@ -91,7 +91,7 @@ VALUES ($1, $2, $3, $4, $5, 15, TRUE, 1, $6, 0, 1280, 3, $7, $8, $9, $10, $11, $
                 .ToDictionary(d => d.GetProperty("database_name").GetString()!);
 
             await using var viewer = new ViewerDataService(cs!);
-            var rows = await viewer.GetPvsStatsLatestAsync(ServerId, ct);
+            var rows = await viewer.GetPvsStatsLatestAsync(ServerId, cancellationToken: ct);
             Assert.Equal(3, rows.Count);
 
             static long? Num(JsonElement d, string key) =>

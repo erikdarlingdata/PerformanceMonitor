@@ -66,7 +66,28 @@ public partial class FinOpsTab : UserControl
     private DarlingServer _server => (DarlingServer)ServerSelector.SelectedItem!;
 
     /// <summary>Wires the data service. Call once, before the tab is first shown.</summary>
-    public void Initialize(ViewerDataService dataService) => _dataService = dataService;
+    public void Initialize(ViewerDataService dataService, ViewerServerStore? serverStore = null)
+    {
+        _dataService = dataService;
+        _serverStore = serverStore;
+    }
+
+    /// <summary>The shell's server store, which holds each server's saved database filter (#5312); null before <see cref="Initialize"/> or in a test.</summary>
+    private ViewerServerStore? _serverStore;
+
+    /// <summary>
+    /// #5312: the selected server's saved database filter, read from the same store the server tab's database picker writes, so the two cannot
+    /// disagree. Null when nothing is chosen: every read then keeps its unfiltered SQL and rows. Read per load, so a change made in the server
+    /// tab shows on the next refresh here.
+    /// </summary>
+    private IReadOnlyList<string>? SelectedDatabaseFilter
+    {
+        get
+        {
+            var saved = _serverStore?.GetViewFilterDatabases(_server.ServerName);
+            return saved is { Count: > 0 } ? saved.ToList() : null;
+        }
+    }
 
     /// <summary>
     /// Populates the server selector from the shell's server list (mirrors the Recommendations tab's own

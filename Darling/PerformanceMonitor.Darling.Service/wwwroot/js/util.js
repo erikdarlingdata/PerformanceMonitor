@@ -139,6 +139,25 @@ export function noticeStrip(message) {
   return el("div", { class: "strip notice", role: "status" }, [message]);
 }
 /**
+ * The two collectors the blocking reads draw from (#5244): the blocked-process-report XE session when it holds a row in the window
+ * for the chosen databases, and the DMV snapshot only when it holds none. The MCP answers name the one that answered in `source`;
+ * these are the same two tags.
+ */
+export const BLOCKING_SOURCES = ["blocked-process-report", "DMV snapshot"];
+
+/**
+ * Which collector answered a blocking read, as a line above the chart (#5244). A filter of [A] can draw A's DMV-only event that
+ * [A, B] drops, and nothing on the chart said which collector it was reading. `desc.sourceKey` names the answer's field (`source`
+ * on get_blocking_trend and get_blocking_stats). Null when the descriptor names no field, when the answer carries no source (no
+ * rows: the empty answer and the zero-row answer both leave it null), or when the value is not one of the two tags. The tag is
+ * text, never markup (R4).
+ */
+export function sourceStrip(data, desc) {
+  if (!desc || !desc.sourceKey) return null;
+  const tag = getPath(data, desc.sourceKey);
+  return BLOCKING_SOURCES.includes(tag) ? el("div", { class: "strip source", role: "status" }, ["Source: " + tag]) : null;
+}
+/**
  * Render a read error, degrading the "window too wide" case to a notice (#2780). A range wider than a read can
  * serve comes back as a raw `hours_back value 'N' exceeds maximum of M hours (D days)...` validation string
  * (McpHelpers.ValidateHoursBack); that is a range choice, not a fault, so it becomes a status notice naming the

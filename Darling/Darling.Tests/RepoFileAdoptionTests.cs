@@ -155,6 +155,9 @@ public sealed class RepoFileAdoptionTests
            CreateCommand-plus-CommandTimeout shape, and the statement's own WHERE/AND tail) — the same
            reasoning as the fleet twin above, which is the file this one was written beside. */
         "PerServerCollectionHealthMemoTests.cs",
+        /* #5366: its Linux-build-job pin slices the `darling-linux:` job out of the workflow starting at a line break
+           (`\n  darling-linux:`), so the text must be LF whatever the checkout's line endings. */
+        "PasswordKeySelfCheckTests.cs",
         "FleetPageAttentionFilterTests.cs",
         /* Its every-site pins match each `new AlertMuteContext { ... };` initializer across its line breaks in
            AlertEngine.cs and the Darling producers, and assert each one sets ServerId. */

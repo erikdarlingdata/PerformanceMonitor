@@ -151,7 +151,10 @@ public sealed class McpToolsListBudgetTests
     // get_waiting_tasks (46 each); no served head changes. Constant set to the value McpToolsListBudgetTests itself measured on this tree.
     // #5244 PR3 (r1 M1): get_blocking_trend and get_blocking_stats each gain the one sentence that says which collector answered (the source key
     // and when the DMV snapshot is used), identical to Darling's twins: 92,805 -> 93,265 bytes (+460).
-    private const int TotalCeilingBytes = 93_265;
+    // #5244 PR4 lane L1: get_query_duration_trend, get_procedure_duration_trend and get_query_store_duration_trend gain database_name
+    // (46 characters each, the shared sentence); no served head changes. The ceiling is the measured total: 93,750 = dev 93,265 + 485 (lane L1 291, the three
+    // parameters with their JSON framing, + lane L2 194).
+    private const int TotalCeilingBytes = 93_750;
 
     private const int ConvertedHeadCap = 1_000;
     private const int ConvertedParameterCap = 200;

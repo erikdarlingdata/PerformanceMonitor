@@ -190,7 +190,8 @@ public sealed class StatementFilterPlanReadsLiveTests
             Assert.True(big.Length > 600_000);
             await InsertStatsAsync(connection, "query_stats", Anchor, "0xBIGHIT", null, big, null, ct);
 
-            string cut = await DarlingMcpPlanTools.GetPlanXml(postgres, "0xBIGHIT", ServerName, cancellationToken: ct);
+            string cut = await UntilNotStarvedAsync("cut read",
+                () => DarlingMcpPlanTools.GetPlanXml(postgres, "0xBIGHIT", ServerName, cancellationToken: ct), SensitiveStatements.IsWithheldPlan);
             Assert.NotEqual(SensitiveStatements.PlaceholderText, cut);
             Assert.StartsWith("<ShowPlanXML", cut, StringComparison.Ordinal);
             Assert.EndsWith("... (truncated)", cut, StringComparison.Ordinal);
@@ -200,7 +201,8 @@ public sealed class StatementFilterPlanReadsLiveTests
             Assert.Contains(StatementFilterCensus.Marker, cut, StringComparison.Ordinal);
             Assert.Contains("canary_plain_ssf", cut, StringComparison.Ordinal);
 
-            string whole = (await DarlingStoredPlanReader.GetQueryStatsPlanXmlByHashAsync(postgres, ServerId, "0xBIGHIT", null, cancellationToken: ct))!;
+            string whole = await UntilNotStarvedAsync("whole read",
+                async () => (await DarlingStoredPlanReader.GetQueryStatsPlanXmlByHashAsync(postgres, ServerId, "0xBIGHIT", null, cancellationToken: ct))!, SensitiveStatements.IsWithheldPlan);
             Assert.True(whole.Length > 512_000);
             foreach (string needle in StatementScrubCanary.SecretNeedles)
                 Assert.DoesNotContain(needle, whole, StringComparison.Ordinal);
@@ -237,6 +239,13 @@ public sealed class StatementFilterPlanReadsLiveTests
         await using var postgres = NpgsqlDataSource.Create(cs!);
         using var host = await StatementFilterCensus.BuildHostAsync();
 
+        /* #5440: pay the filter's one-time costs (the judge build and the first parse, which run before and inside its
+           time limits) on a small plan of the same shape, as the service does at startup, so the 600,000-character reads
+           below are timed on a warm filter. */
+        SensitiveStatements.WarmUp();
+        string primed = SensitiveStatements.Xml(BigPlan(30_000, canaryFirst: true), 500_000)!;
+        _ = await StatementFilterCensus.FilterThroughHostAsync(host, primed);
+
         var bodySucceeded = false;
         try
         {
@@ -245,16 +254,21 @@ public sealed class StatementFilterPlanReadsLiveTests
             await InsertStatsAsync(connection, "query_stats", Anchor, "0xWIRETOKENS", null, BigPlan(600_000, canaryFirst: true, autoParameterTokens: true), null, ct);
 
             /* No tokens: the cut, filtered plan, on both wires. */
-            string noTokens = await DarlingMcpPlanTools.GetPlanXml(postgres, "0xWIRENOTOKEN", ServerName, cancellationToken: ct);
-            string mcpCut = (await StatementFilterCensus.FilterThroughHostAsync(host, noTokens)).Text;
+            string noTokens = await UntilNotStarvedAsync("tool read, no tokens",
+                () => DarlingMcpPlanTools.GetPlanXml(postgres, "0xWIRENOTOKEN", ServerName, cancellationToken: ct), SensitiveStatements.IsWithheldPlan);
+            string mcpCut = await UntilNotStarvedAsync("host filter, no tokens",
+                async () => (await StatementFilterCensus.FilterThroughHostAsync(host, noTokens)).Text, SensitiveStatements.IsWithheldPlan);
             AssertCutFilteredPlan("host filter, no tokens", mcpCut, markerSuffix: true);
             /* The web wrap moves the "... (truncated)" suffix into a truncated flag, so the plan_xml text is the cut plan without it. */
-            using var webCutDoc = JsonDocument.Parse(await WebAnswerAsync(noTokens, "0xWIRENOTOKEN"));
+            using var webCutDoc = JsonDocument.Parse(await UntilNotStarvedAsync("web read, no tokens",
+                () => WebAnswerAsync(noTokens, "0xWIRENOTOKEN"),
+                answer => !JsonDocument.Parse(answer).RootElement.TryGetProperty("plan_xml", out var planXml) || SensitiveStatements.IsWithheldPlan(planXml.GetString())));
             Assert.True(webCutDoc.RootElement.GetProperty("truncated").GetBoolean());
             AssertCutFilteredPlan("web read, no tokens", webCutDoc.RootElement.GetProperty("plan_xml").GetString()!, markerSuffix: false);
 
             /* Tokens: the tool's own answer is the cut plan; the second check withholds it whole on both wires. */
-            string withTokens = await DarlingMcpPlanTools.GetPlanXml(postgres, "0xWIRETOKENS", ServerName, cancellationToken: ct);
+            string withTokens = await UntilNotStarvedAsync("tool read, with tokens",
+                () => DarlingMcpPlanTools.GetPlanXml(postgres, "0xWIRETOKENS", ServerName, cancellationToken: ct), SensitiveStatements.IsWithheldPlan);
             Assert.EndsWith("... (truncated)", withTokens, StringComparison.Ordinal);
             string mcpHeld = (await StatementFilterCensus.FilterThroughHostAsync(host, withTokens)).Text;
             Assert.Equal(SensitiveStatements.PlaceholderText, mcpHeld);
@@ -267,6 +281,39 @@ public sealed class StatementFilterPlanReadsLiveTests
         {
             await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
                 await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
+    /// <summary>How many times one read of a 600,000-character plan is tried before a withheld answer counts.</summary>
+    private const int StarvedAttempts = 3;
+
+    /// <summary>
+    /// #5440: runs one filtered read of a plan far over the transport limit and gives back its answer. The filter
+    /// withholds a plan it cannot finish judging inside its limits: <see cref="SensitiveStatements.ReadBudget"/> (1.5 s for the
+    /// whole read) and <see cref="SensitiveStatements.MatchTimeout"/> (250 ms for one value, which the cut plan's text is,
+    /// because it no longer parses). Both run on the wall clock, and a read of this plan takes 35 to 100 ms on an idle
+    /// machine, so a runner that stalls the thread for a quarter of a second gets the placeholder instead of the plan. The
+    /// product keeps both limits (a slow judge must still fail closed). This test measures the read and, only when the
+    /// answer is withheld AND the read took at least <see cref="SensitiveStatements.MatchTimeout"/> (the smallest time
+    /// the filter can give up in), reads again, up to <see cref="StarvedAttempts"/> times, and reports each time.
+    /// A withheld answer that came back fast is never retried, and the caller still asserts a cut, filtered plan on the
+    /// answer it gets, so a filter that withholds a plan it should cut still fails on every attempt.
+    /// </summary>
+    private static async Task<string> UntilNotStarvedAsync(string label, Func<Task<string>> read, Func<string, bool> isWithheld)
+    {
+        for (int attempt = 1; ; attempt++)
+        {
+            long started = Stopwatch.GetTimestamp();
+            string answer = await read();
+            TimeSpan took = Stopwatch.GetElapsedTime(started);
+            bool withheld = isWithheld(answer);
+            bool starved = withheld && took >= SensitiveStatements.MatchTimeout;
+            TestContext.Current.SendDiagnosticMessage(
+                $"#5440 {label}: attempt {attempt} took {took.TotalMilliseconds:F0} ms, withheld={withheld}, starved={starved}");
+            if (!starved || attempt >= StarvedAttempts)
+            {
+                return answer;
+            }
         }
     }
 

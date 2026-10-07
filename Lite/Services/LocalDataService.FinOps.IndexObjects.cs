@@ -273,14 +273,18 @@ AND   collection_time = (SELECT MAX(collection_time) FROM v_index_object_stats W
     /// <c>MAX(collection_time)</c> read for the stamp: that one can resolve to the NEXT capture. The grid
     /// ignores the column; it costs the snapshot's own anchor value per row and buys the MCP surface a
     /// truthful age on a DAILY-collected read.</para>
+    /// <para>#5312: <paramref name="databaseNames"/> is the saved per-server database filter, and it ANDs with the one-database
+    /// box (<paramref name="databaseName"/>): both apply. Null or empty = no filter, the statement as it always read.</para>
     /// </summary>
-    public async Task<List<IndexLockingRow>> GetIndexLockingAsync(int serverId, int topN = 200, string? databaseName = null)
+    public async Task<List<IndexLockingRow>> GetIndexLockingAsync(int serverId, int topN = 200, string? databaseName = null, IReadOnlyList<string>? databaseNames = null)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
         // Build the optional DB filter as literal SQL so a NULL parameter never has to be typed by DuckDB.
         var dbFilter = databaseName == null ? "" : " AND ios.database_name = $2";
+        /* #5312: the saved filter's list follows the box's parameter, so it starts at $3 when the box is set, else $2. */
+        dbFilter += BuildDbInClause(databaseNames, "ios.database_name", databaseName == null ? 2 : 3, out var filterValues);
 
         /* #5372 L1: the ORDER BY ends in a total order (promotions, then the four-part name, as get_index_usage does), so
            two runs over a set that ties at the cap return the same rows; the rows listed only for a lock promotion all
@@ -327,6 +331,8 @@ LIMIT {topN}";
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         if (databaseName != null)
             command.Parameters.Add(new DuckDBParameter { Value = databaseName });
+        foreach (var db in filterValues)
+            command.Parameters.Add(new DuckDBParameter { Value = db });
 
         var items = new List<IndexLockingRow>();
         using var reader = await command.ExecuteReaderAsync();
@@ -363,7 +369,7 @@ LIMIT {topN}";
     /// The shared optimized-locking note when any database's newest stored <c>is_optimized_locking_on</c> is true;
     /// null otherwise (false and unknown both show no note).
     /// </summary>
-    public async Task<string?> GetOptimizedLockingNoteAsync(int serverId, string? databaseName = null)
+    public async Task<string?> GetOptimizedLockingNoteAsync(int serverId, string? databaseName = null, IReadOnlyList<string>? databaseNames = null)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
@@ -372,6 +378,8 @@ LIMIT {topN}";
            the page does not show (Darling's twin does the same). The anchor stays the server's newest capture. Literal
            SQL, the way GetIndexLockingAsync builds its filter, so a NULL parameter is never typed. */
         var dbFilter = databaseName == null ? "" : " AND database_name = $2";
+        /* #5312: the saved database filter narrows the flags too, so the note never warns about a database the grid hides. */
+        dbFilter += BuildDbInClause(databaseNames, "database_name", databaseName == null ? 2 : 3, out var filterValues);
 
         command.CommandText = $@"
 SELECT is_optimized_locking_on
@@ -381,6 +389,8 @@ AND   capture_time = (SELECT MAX(capture_time) FROM v_database_config WHERE serv
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         if (databaseName != null)
             command.Parameters.Add(new DuckDBParameter { Value = databaseName });
+        foreach (var db in filterValues)
+            command.Parameters.Add(new DuckDBParameter { Value = db });
 
         var flags = new List<bool?>();
         using var reader = await command.ExecuteReaderAsync();
@@ -396,16 +406,18 @@ AND   capture_time = (SELECT MAX(capture_time) FROM v_database_config WHERE serv
     /// under #3876's per-name grouping both offered month-dead names (the selector is how the reporter's old
     /// names could still be PICKED, not merely displayed).
     /// </summary>
-    public async Task<List<string>> GetIndexLockingDatabasesAsync(int serverId)
+    public async Task<List<string>> GetIndexLockingDatabasesAsync(int serverId, IReadOnlyList<string>? databaseNames = null)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        command.CommandText = @"
+        /* #5312: only databases inside the saved filter are offered, so the box cannot pick a database the filter hides. */
+        var dbClause = BuildDbInClause(databaseNames, "ios.database_name", 2, out var dbValues);
+        command.CommandText = $@"
 SELECT DISTINCT ios.database_name
 FROM v_index_object_stats ios
 WHERE ios.server_id = $1
-AND   ios.collection_time = (SELECT MAX(collection_time) FROM v_index_object_stats WHERE server_id = $1)
+AND   ios.collection_time = (SELECT MAX(collection_time) FROM v_index_object_stats WHERE server_id = $1){dbClause}
 AND (
     COALESCE(ios.row_lock_wait_in_ms, 0) > 0
     OR COALESCE(ios.page_lock_wait_in_ms, 0) > 0
@@ -416,6 +428,8 @@ AND (
 ORDER BY ios.database_name";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        foreach (var db in dbValues)
+            command.Parameters.Add(new DuckDBParameter { Value = db });
 
         var items = new List<string>();
         using var reader = await command.ExecuteReaderAsync();

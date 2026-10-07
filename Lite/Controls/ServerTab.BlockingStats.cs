@@ -110,7 +110,7 @@ public partial class ServerTab : UserControl
         BlockingDurationChart.Plot.Axes.DateTimeTicksBottomUtc(GetPickerZone);
         BlockingDurationChart.Plot.Axes.SetLimitsX(rangeStart.ToOADate(), rangeEnd.ToOADate());
         ReapplyAxisColors(BlockingDurationChart);
-        BlockingDurationChart.Plot.YLabel("Block Duration (ms)");
+        BlockingDurationChart.Plot.YLabel(PerformanceMonitor.Ui.BlockingSourceLabel.For("Block Duration (ms)", data.Select(d => d.Source)));
         SetChartYLimitsWithLegendPadding(BlockingDurationChart, 0, globalMax > 0 ? globalMax : 1);
         ShowChartLegend(BlockingDurationChart);
         BlockingDurationChart.Refresh();
@@ -163,7 +163,7 @@ public partial class ServerTab : UserControl
         BlockingTotalDurationChart.Plot.Axes.DateTimeTicksBottomUtc(GetPickerZone);
         BlockingTotalDurationChart.Plot.Axes.SetLimitsX(rangeStart.ToOADate(), rangeEnd.ToOADate());
         ReapplyAxisColors(BlockingTotalDurationChart);
-        BlockingTotalDurationChart.Plot.YLabel("Total Block Duration (ms)");
+        BlockingTotalDurationChart.Plot.YLabel(PerformanceMonitor.Ui.BlockingSourceLabel.For("Total Block Duration (ms)", data.Select(d => d.Source)));
         SetChartYLimitsWithLegendPadding(BlockingTotalDurationChart, 0, globalMax > 0 ? globalMax : 1);
         ShowChartLegend(BlockingTotalDurationChart);
         BlockingTotalDurationChart.Refresh();

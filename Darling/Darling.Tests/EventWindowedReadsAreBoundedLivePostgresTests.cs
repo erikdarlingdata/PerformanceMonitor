@@ -50,24 +50,25 @@ public sealed class EventWindowedReadsAreBoundedLivePostgresTests
     /* ── the replaced statements, verbatim (kept independent of the pin test's copies, so a change to
        either file's constants cannot silently make both agree on the wrong thing) ── */
 
+    /* #5244: the oracle names the arm too, like the shipped read: the floor is what this test compares. */
     private const string OldBlockingTrendSql = """
         WITH bpr AS (
-            SELECT DATE_TRUNC('minute', event_time) AS bucket, COUNT(*) AS incident_count
+            SELECT DATE_TRUNC('minute', event_time) AS bucket, COUNT(*) AS incident_count, 'blocked-process-report' AS source
             FROM v_blocked_process_reports
             WHERE server_id = $1 AND event_time >= $2 AND event_time <= $3
             AND   ($4::text[] IS NULL OR database_name = ANY($4))
             GROUP BY DATE_TRUNC('minute', event_time)
         ),
         dmv AS (
-            SELECT DATE_TRUNC('minute', event_time) AS bucket, COUNT(*) AS incident_count
+            SELECT DATE_TRUNC('minute', event_time) AS bucket, COUNT(*) AS incident_count, 'DMV snapshot' AS source
             FROM v_dmv_blocking_snapshots
             WHERE server_id = $1 AND event_time >= $2 AND event_time <= $3
             AND   ($4::text[] IS NULL OR database_name = ANY($4))
             GROUP BY DATE_TRUNC('minute', event_time)
         )
-        SELECT bucket, incident_count FROM bpr
+        SELECT bucket, incident_count, source FROM bpr
         UNION ALL
-        SELECT bucket, incident_count FROM dmv WHERE NOT EXISTS (SELECT 1 FROM bpr)
+        SELECT bucket, incident_count, source FROM dmv WHERE NOT EXISTS (SELECT 1 FROM bpr)
         ORDER BY bucket
         """;
 
@@ -122,7 +123,8 @@ public sealed class EventWindowedReadsAreBoundedLivePostgresTests
                 COUNT(*) AS event_count,
                 CAST(SUM(wait_time_ms) AS bigint) AS total_duration_ms,
                 MAX(wait_time_ms) AS max_duration_ms,
-                CAST(AVG(wait_time_ms) AS double precision) AS avg_duration_ms
+                CAST(AVG(wait_time_ms) AS double precision) AS avg_duration_ms,
+                'blocked-process-report' AS source
             FROM v_blocked_process_reports
             WHERE server_id = $1 AND event_time >= $2 AND event_time <= $3
             GROUP BY DATE_TRUNC('minute', event_time)
@@ -133,14 +135,15 @@ public sealed class EventWindowedReadsAreBoundedLivePostgresTests
                 COUNT(*) AS event_count,
                 CAST(SUM(wait_time_ms) AS bigint) AS total_duration_ms,
                 MAX(wait_time_ms) AS max_duration_ms,
-                CAST(AVG(wait_time_ms) AS double precision) AS avg_duration_ms
+                CAST(AVG(wait_time_ms) AS double precision) AS avg_duration_ms,
+                'DMV snapshot' AS source
             FROM v_dmv_blocking_snapshots
             WHERE server_id = $1 AND event_time >= $2 AND event_time <= $3
             GROUP BY DATE_TRUNC('minute', event_time)
         )
-        SELECT bucket, event_count, total_duration_ms, max_duration_ms, avg_duration_ms FROM bpr
+        SELECT bucket, event_count, total_duration_ms, max_duration_ms, avg_duration_ms, source FROM bpr
         UNION ALL
-        SELECT bucket, event_count, total_duration_ms, max_duration_ms, avg_duration_ms FROM dmv WHERE NOT EXISTS (SELECT 1 FROM bpr)
+        SELECT bucket, event_count, total_duration_ms, max_duration_ms, avg_duration_ms, source FROM dmv WHERE NOT EXISTS (SELECT 1 FROM bpr)
         ORDER BY bucket
         """;
 
@@ -294,11 +297,11 @@ public sealed class EventWindowedReadsAreBoundedLivePostgresTests
             /* BlockingDurationStatsSql: same two-CTE shape as BlockingTrendSql. */
             await AssertEqualAsync(connection,
                 OldBlockingDurationStatsSql, new NpgsqlParameter[] { P(EvtA), P(marks.WindowStart), P(now) },
-                ViewerDataService.BlockingDurationStatsSql, new NpgsqlParameter[] { P(EvtA), P(marks.WindowStart), P(now), P(floor) },
+                ViewerDataService.BlockingDurationStatsSql, new NpgsqlParameter[] { P(EvtA), P(marks.WindowStart), P(now), P(floor), NoDatabaseFilter() },
                 ct, expectedCount: 3, "BlockingDurationStatsSql/A");
             await AssertEqualAsync(connection,
                 OldBlockingDurationStatsSql, new NpgsqlParameter[] { P(EvtB), P(marks.WindowStart), P(now) },
-                ViewerDataService.BlockingDurationStatsSql, new NpgsqlParameter[] { P(EvtB), P(marks.WindowStart), P(now), P(floor) },
+                ViewerDataService.BlockingDurationStatsSql, new NpgsqlParameter[] { P(EvtB), P(marks.WindowStart), P(now), P(floor), NoDatabaseFilter() },
                 ct, expectedCount: 1, "BlockingDurationStatsSql/B");
 
             /* BlockingPairRowsSql */
@@ -387,7 +390,7 @@ public sealed class EventWindowedReadsAreBoundedLivePostgresTests
 
             await AssertChunksAsync(connection,
                 OldBlockingDurationStatsSql, new NpgsqlParameter[] { P(EvtA), P(marks.WindowStart), P(now) },
-                ViewerDataService.BlockingDurationStatsSql, new NpgsqlParameter[] { P(EvtA), P(marks.WindowStart), P(now), P(floor) },
+                ViewerDataService.BlockingDurationStatsSql, new NpgsqlParameter[] { P(EvtA), P(marks.WindowStart), P(now), P(floor), NoDatabaseFilter() },
                 ct, "BlockingDurationStatsSql", maxChunks: 6);
 
             await AssertChunksAsync(connection,
