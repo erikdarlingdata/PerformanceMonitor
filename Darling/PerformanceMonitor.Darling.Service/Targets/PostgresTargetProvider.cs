@@ -112,7 +112,10 @@ public sealed class PostgresTargetProvider : ITargetProvider
         var state = pg.SqlState ?? string.Empty;
 
         if (state.StartsWith("08", StringComparison.Ordinal)
-            || state is "57P01" or "57P02" or "57P03")
+            || state is "57P01" or "57P02" or "57P03"
+            /* A refused login (invalid authorization, wrong password) ends the session's standing: dropping the runtime
+               stops every read that rests on the old login, including the RDS and Performance Insights reads. */
+            || state is "28000" or "28P01")
         {
             return CollectorTargetFault.ConnectionFatal;
         }

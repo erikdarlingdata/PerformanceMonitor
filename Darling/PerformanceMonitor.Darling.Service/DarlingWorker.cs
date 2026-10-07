@@ -1080,6 +1080,9 @@ public sealed class DarlingWorker : BackgroundService
        inside the gap policy's hour cannot subtract the new identity's counters from the old one's. Built
        and seeded once in RunCollectionLoopAsync, ahead of the runner that shares it. */
     private CollectorDeltaCalculator? _deltas;
+
+    /* The collector runner, kept for the reconcile, which clears a changed server's RDS endpoint verdicts on it. */
+    private DarlingCollectorRunner? _runner;
     /* Concrete rather than IAlertDeliverer: there is exactly one implementation here and it is constructed
        a few lines from where this is assigned, so the interface bought an indirection per delivered alert
        and no seam (CA1859). */
@@ -3020,6 +3023,7 @@ LIMIT 1";
                 LiveAlertTargets(_registryState.Read()?.Servers)),
             /* #4961: this install's id, made at start before any worker runs. */
             installId: () => _installId);
+        _runner = runner;
         var servers = new List<ServerLoopState>();
         /* #1581 cold-start stagger: capture ONE startup instant so every initial server's first-sweep offset is
            measured from the same base — the deterministic per-server ColdStartFirstSweepDue then spreads the
@@ -6243,6 +6247,8 @@ LIMIT 1";
                    calls after this and re-populate the server's cache for one pass; that is the same window the
                    Forget above tolerates, and a re-add inside it is the A5 epoch question, not this one. */
                 _deltas?.ClearServer(id);
+                /* The RDS endpoint verdict and fresh login held for this id go with the server: a re-add checks again. */
+                _runner?.ForgetRdsVerdicts(id);
                 /* #4999: and its single-flight slots. The id is the registration's, so a re-add carries the same one, and a
                    run of this removed state that is still going, or still queued for a permit (hours, behind other daily
                    runs), would hold the slot the re-added server's first daily run needs. That run would skip, and a
@@ -6287,6 +6293,9 @@ LIMIT 1";
                    when an operator points a registration at a different instance, and named here rather than
                    avoided: avoiding it means a store write on this reload path to erase the persisted pair. */
                 _deltas?.ClearServer(id);
+                /* The RDS endpoint verdict and fresh login held for this id belong to the old definition (host, role,
+                   credentials), so the next RDS read asks AWS and logs in again. */
+                _runner?.ForgetRdsVerdicts(id);
             }
 
             desiredById.Remove(id);
@@ -14451,6 +14460,22 @@ LIMIT 1";
                 _postgres!, runtime, collectorName, "SESSION_MISSING", 0, runClock.ElapsedMilliseconds, 0, ex.Message, fanout: null, phases: null, drain: null, fetchPhases: null, sweepPeerMaxMs: peerMaxAtDispatchMs, _logger, cancellationToken);
             return 0;
         }
+        catch (RdsEndpointMismatchException ex)
+        {
+            /* The host is not the endpoint AWS reports for the id parsed from it, or the target did not accept a fresh
+               login, so no RDS or Performance Insights call was made for this target. PERMISSIONS, like the other
+               refused-source outcomes, and the message names the host and the id (or the login). Written on every sweep
+               so collection health keeps reading it. */
+            _logger.LogWarning(ex is RdsTargetLoginException
+                    ? "  [{Server}] {Collector} => PERMISSIONS: the target did not accept a fresh login"
+                    : "  [{Server}] {Collector} => PERMISSIONS: the host does not match the endpoint AWS reports",
+                server.Config.DisplayName, collectorName);
+
+            await DarlingObservability.LogCollectionAsync(
+                _postgres!, runtime, collectorName, "PERMISSIONS", 0, 0, runClock.ElapsedMilliseconds, ex.Message,
+                fanout: null, phases: null, drain: null, fetchPhases: null, sweepPeerMaxMs: peerMaxAtDispatchMs, _logger, cancellationToken);
+            return 0;
+        }
         catch (RdsLogUnavailableException ex) when (ex.IsAuthorizationFailure)
         {
             /* #2633: the AWS call was DENIED, so nothing was read. Degraded to PERMISSIONS rather than
@@ -14469,7 +14494,8 @@ LIMIT 1";
                 _postgres!, runtime, collectorName, "PERMISSIONS", 0, 0, runClock.ElapsedMilliseconds,
                 $"{ex.Message} — the MONITORING HOST's IAM role lacks a grant this source needs, which is "
                 + "not a database grant: plan capture on managed PostgreSQL reads the server log through "
-                + "the RDS API, so the role needs rds:DescribeDBLogFiles and rds:DownloadDBLogFilePortion "
+                + "the RDS API, so the role needs rds:DescribeDBInstances, rds:DescribeDBClusters, "
+                + "rds:DescribeDBLogFiles and rds:DownloadDBLogFilePortion "
                 + "on the target instance. Nothing was read this cycle — this is NOT 'no plans were "
                 + "captured'.",
                 fanout: null, phases: null, drain: null, fetchPhases: null, sweepPeerMaxMs: peerMaxAtDispatchMs, _logger, cancellationToken);
