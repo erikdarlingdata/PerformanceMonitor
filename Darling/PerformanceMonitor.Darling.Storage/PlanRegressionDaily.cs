@@ -21,7 +21,7 @@ namespace PerformanceMonitor.Darling.Storage;
 /// The SQL and day arithmetic for the per-day per-plan totals of <c>collect.query_store_interval_latest</c>
 /// (<c>collect.plan_regression_daily</c>, #5448), which PLAN_REGRESSION reads for CLOSED days so a run no longer
 /// re-aggregates 14 days of the interval table. This file is the storage half: the rung that creates the tables and the
-/// trigger is V167 (<see cref="PgMigrations"/>), the builder is the hourly-tick tenant at the bottom of this file
+/// trigger is V168 (<see cref="PgMigrations"/>), the builder is the hourly-tick tenant at the bottom of this file
 /// (<see cref="RunTickAsync(NpgsqlDataSource, DateTime, ILogger, CancellationToken)"/>), and the read follows in its own lane.
 ///
 /// <para><b>Row day is the day of <c>last_execution_time</c></b> (naive UTC), the column PLAN_REGRESSION's window filters
@@ -48,7 +48,7 @@ public static class PlanRegressionDaily
     /// </summary>
     public const int ClosedDayLagDays = 1 + PlanRegressionSkewMarginDays + 1;
 
-    /// <summary>How far back (in days) V167's trigger marks a day stale: a row older than this can never be read, because
+    /// <summary>How far back (in days) V168's trigger marks a day stale: a row older than this can never be read, because
     /// the read's window is <see cref="WindowDays"/> and a row's day can be a day after the day of its first execution.</summary>
     public const int MarkLateWindowDays = WindowDays + 2;
 

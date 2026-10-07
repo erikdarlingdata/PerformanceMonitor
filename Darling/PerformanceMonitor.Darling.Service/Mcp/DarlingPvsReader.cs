@@ -13,6 +13,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Analysis.Baselines;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
 
@@ -47,7 +48,8 @@ internal static class DarlingPvsReader
     /// <summary>Latest PVS snapshot, one row per database, biggest version store first, with the four cleaner
     /// times as stored (the server's local clock; <see cref="MapPvsStatsRow"/> converts them to naive UTC). The
     /// snapshot self-subquery and the ordering both stay off the cleaner columns, so neither depends on the
-    /// clock. $1 server_id.</summary>
+    /// clock. $1 server_id, $2 database filter (#5244: a text[], NULL = every database; the shape of
+    /// <see cref="DatabaseFilter.Clause"/>), applied AFTER the newest-collection anchor, which stays the server's.</summary>
     public const string PvsStatsLatestSql = @"
 SELECT
     database_name,
@@ -73,10 +75,12 @@ AND   collection_time = (
     FROM v_pvs_stats
     WHERE server_id = $1
 )
+AND   ($2::text[] IS NULL OR database_name = ANY($2))
 ORDER BY persistent_version_store_size_mb DESC NULLS LAST, database_name";
 
     /// <summary>The #2018 trend window for the TOP-5 databases by newest PVS size, per-point
-    /// percent-of-database. $1 server_id, $2 window start (naive UTC).</summary>
+    /// percent-of-database. $1 server_id, $2 window start (naive UTC), $3 database filter (#5244: a text[], NULL = every
+    /// database): the top five are the top five of the CHOSEN databases.</summary>
     public const string PvsTrendSql = @"
 WITH top_dbs AS (
     SELECT database_name
@@ -87,6 +91,7 @@ WITH top_dbs AS (
         FROM v_pvs_stats
         WHERE server_id = $1
     )
+    AND   ($3::text[] IS NULL OR database_name = ANY($3))
     ORDER BY persistent_version_store_size_mb DESC NULLS LAST, database_name
     LIMIT 5
 )
@@ -135,14 +140,21 @@ ORDER BY p.database_name, p.collection_time";
         double? PvsSizeMb,
         double? PctOfDatabase);
 
+    public static Task<List<PvsStatsRow>> GetPvsStatsLatestAsync(
+        NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken = default) =>
+        GetPvsStatsLatestAsync(postgres, serverId, DatabaseFilter.All, cancellationToken);
+
+    /// <summary>#5244: <see cref="GetPvsStatsLatestAsync(NpgsqlDataSource,int,CancellationToken)"/> over a SET of databases
+    /// (<see cref="DatabaseFilter.All"/> = every database): the chosen databases' rows at the server's newest snapshot.</summary>
     public static async Task<List<PvsStatsRow>> GetPvsStatsLatestAsync(
-        NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken = default)
+        NpgsqlDataSource postgres, int serverId, DatabaseFilter databases, CancellationToken cancellationToken = default)
     {
         var rows = new List<PvsStatsRow>();
         var clock = await DarlingServerClockReader.ReadAsync(postgres, serverId, cancellationToken);
         await using var command = postgres.CreateCommand(PvsStatsLatestSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         command.Parameters.AddWithValue(serverId);
+        command.Parameters.Add(databases.Parameter());
 
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
@@ -173,14 +185,21 @@ ORDER BY p.database_name, p.collection_time";
             reader.IsDBNull(14) ? null : reader.GetInt64(14),
             reader.IsDBNull(15) ? null : reader.GetInt64(15));
 
+    public static Task<List<PvsTrendPoint>> GetPvsTrendAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime sinceUtc, CancellationToken cancellationToken = default) =>
+        GetPvsTrendAsync(postgres, serverId, sinceUtc, DatabaseFilter.All, cancellationToken);
+
+    /// <summary>#5244: <see cref="GetPvsTrendAsync(NpgsqlDataSource,int,DateTime,CancellationToken)"/> over a SET of databases:
+    /// the top five databases by newest PVS size AMONG THE CHOSEN ones (the cap applies after the filter).</summary>
     public static async Task<List<PvsTrendPoint>> GetPvsTrendAsync(
-        NpgsqlDataSource postgres, int serverId, DateTime sinceUtc, CancellationToken cancellationToken = default)
+        NpgsqlDataSource postgres, int serverId, DateTime sinceUtc, DatabaseFilter databases, CancellationToken cancellationToken = default)
     {
         var rows = new List<PvsTrendPoint>();
         await using var command = postgres.CreateCommand(PvsTrendSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         command.Parameters.AddWithValue(serverId);
         command.Parameters.AddWithValue(DateTime.SpecifyKind(sinceUtc, DateTimeKind.Unspecified));
+        command.Parameters.Add(databases.Parameter());
 
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))

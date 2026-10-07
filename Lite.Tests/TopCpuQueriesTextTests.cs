@@ -89,7 +89,7 @@ LIMIT 5";
 
     /* One UtcNow read, truncated to the second, so the round-tripped last-seen timestamps compare equal. */
     private static readonly DateTime WindowEnd =
-        DateTime.SpecifyKind(new DateTime(DateTime.UtcNow.Ticks - (DateTime.UtcNow.Ticks % TimeSpan.TicksPerSecond)), DateTimeKind.Unspecified);
+        DateTime.SpecifyKind(new DateTime(DateTime.UtcNow.Ticks / TimeSpan.TicksPerSecond * TimeSpan.TicksPerSecond), DateTimeKind.Unspecified);
 
     private static readonly DateTime WindowStart = WindowEnd.AddHours(-4);
 

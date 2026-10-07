@@ -225,8 +225,39 @@ public class WebhookAlertService
                incidents -> the metric-level fallback key (today's behavior). WHETHER to post only;
                #3313's filter below decides WHICH incidents the post contains. */
             var window = TimeSpan.FromMinutes(_settings.EmailCooldownMinutes);
+
+            /* #3598 / #5366: ONE snapshot of the webhook settings for this whole delivery, and the route
+               resolved from it. Taken here, ahead of the cooldown (the route resolution is pure, so a throttled
+               alert resolving it costs nothing), because the cooldown key below depends on whether PagerDuty
+               is routed for this alert. Every later read of a webhook setting, the PagerDuty flag included,
+               comes from this one snapshot. With an adapter that does not override SnapshotForDelivery (Lite)
+               it is the live settings. */
+            var delivery = _settings.SnapshotForDelivery();
+            var route = NotificationRouter.Resolve(metricName, delivery.NotificationRoutes, delivery);
+
+            /* #5469: the PagerDuty auto-resolve behaviour reaches the cooldown only when PagerDuty will
+               actually be sent this alert: the flag on AND a destination for this metric. The flag is read
+               ONCE, here, into autoResolveFlag. The scope, the seed, both clears, the triage link and the
+               PagerDuty send (its dedup key and its event action) all use that one value, so they name one
+               key and one action even if the flag is saved while the post is in flight (Lite, which does not
+               freeze a snapshot, included). With the flag off, or PagerDuty unset or not routed for the
+               metric, every key is the one dev has always used. */
+            var autoResolveFlag = delivery.PagerDutyAutoResolve;
+            var pagerDutyAutoResolve = autoResolveFlag && route.PagerDuty.Destination is not null;
+
+            /* Each AG replica is its own incident, so its cooldown window is its own too (Teams, Slack and the
+               generic webhook share it: one notice per replica per window). Null (not applying, not the AG
+               pair, or no identity) is the per-server key of today. The pair's other edge rides along so the
+               history seed can tell which incident a stored send belongs to (#5469 restart case). */
+            var cooldownScope = PairedReplicaScope(metricName, context, pagerDutyAutoResolve);
+            string? pairedEdge = null;
+            if (pagerDutyAutoResolve && AlertFamily.TryGetPairedEdge(metricName, out var otherEdge))
+            {
+                pairedEdge = otherEdge;
+            }
+
             var decision = await _cooldown.EvaluateAsync(
-                serverId, metricName, context?.Incidents, window);
+                serverId, metricName, context?.Incidents, window, cooldownScope, pairedEdge);
 
             if (!decision.ShouldSend)
             {
@@ -315,27 +346,26 @@ public class WebhookAlertService
                alert-history id, because the history row is written AFTER delivery — the page resolves the
                row on read. Null (base URL unset/invalid) means every channel omits the link; delivery is
                never gated on it. The dedup key uses the same serverId-else-serverName identity the generic
-               channel's {{dedup_key}} token uses, so link, token, and PagerDuty all correlate — and it
-               reads the RENDERED incidents, so the anchor names an incident the card actually shows. */
+               channel's {{dedup_key}} token uses, and it reads the RENDERED incidents, so the anchor names an
+               incident the card actually shows. The link and PagerDuty follow the auto-resolve flag and so
+               correlate with each other; the generic {{dedup_key}} token does NOT follow it (#5469), so under
+               auto-resolve a paired edge's link and PagerDuty key are the pair's, the token is per state. */
             var triageUrl = TriageLink.Build(
                 _settings.TriageBaseUrl, serverName, metricName, nowUtc,
-                DerivePagerDutyDedupKeyForSend(
-                    string.IsNullOrEmpty(serverId) ? serverName : serverId, metricName, renderContext, _settings));
+                DerivePagerDutyDedupKey(
+                    string.IsNullOrEmpty(serverId) ? serverName : serverId, metricName, renderContext, autoResolveFlag));
 
-            /* #3598: WHERE each channel posts, resolved ONCE for the whole fan-out and AFTER the cooldown and
-               the budget above (design point 2) — so one firing is one delivery decision regardless of where
-               it lands, and a throttled alert never resolves at all. Exact-metric route, then family route,
+            /* #3598: WHERE each channel posts, resolved ONCE for the whole fan-out (see the snapshot and the route
+               at the top of this method: the cooldown key needs the PagerDuty answer, and the resolution is pure
+               so resolving it before the cooldown changes nothing the cooldown or budget decide) — so one
+               firing is one delivery decision regardless of where it lands. Exact-metric route, then family route,
                then the parent row's own destination, per channel; with zero routes every destination below
                IS the settings member the four gates above read, so the fan-out is the pre-routes one byte
                for byte. A channel that resolves to nothing is not attempted, exactly as an unconfigured one
                was not. The decision rides the result so the deliverer can record it on the history row. */
-            /* #5366: ONE snapshot of the webhook settings for this whole delivery. The routing decision above and
-               every channel's URL, headers, body template and proxy below read from it, so a saved setting that
-               changes while the posts are in flight cannot send a later channel somewhere the decision did not
-               name. With an adapter that does not override SnapshotForDelivery (Lite) it is the live settings. */
-            var delivery = _settings.SnapshotForDelivery();
-            var route = NotificationRouter.Resolve(metricName, delivery.NotificationRoutes, delivery);
-
+            /* #5366: the routing decision and every channel's URL, headers, body template and proxy below
+               read from the delivery snapshot taken above, so a saved setting that changes while the posts are
+               in flight cannot send a later channel somewhere the decision did not name. */
             if (route.Teams.Destination is { } teamsUrl)
             {
                 attempted = true;
@@ -360,7 +390,7 @@ public class WebhookAlertService
             if (route.PagerDuty.Destination is { } pagerDutyKey)
             {
                 attempted = true;
-                var pagerDutyError = await TrySendPagerDutyAlertAsync(delivery, pagerDutyKey, metricName, serverName, currentValue, thresholdValue, serverId, renderContext, triageUrl, prose, nowUtc, displayName, cancellationToken);
+                var pagerDutyError = await TrySendPagerDutyAlertAsync(delivery, autoResolveFlag, pagerDutyKey, metricName, serverName, currentValue, thresholdValue, serverId, renderContext, triageUrl, prose, nowUtc, displayName, cancellationToken);
                 Record(NotificationRouter.PagerDutyChannel, pagerDutyError);
 
                 /* With auto-resolve on, a DELIVERED close re-opens the lifecycle: the cooldown entry the
@@ -371,16 +401,29 @@ public class WebhookAlertService
                    and it names exactly the pair's firing metric, so a failed close never re-arms an outage
                    whose incident may still be open in PagerDuty. */
                 if (pagerDutyError is null
-                    && delivery.PagerDutyAutoResolve
+                    && pagerDutyAutoResolve
                     && AlertFamily.RecoveryPairs.TryGetValue(metricName, out var clearedFiring))
                 {
-                    /* Accepted (review point on the AG pair): this clear is per SERVER + pair — the
-                       metric-level key — not per replica, so one replica's reconnect also re-arms a
-                       sibling replica that is still down on the same server. Cost accepted and bounded:
-                       the re-armed entry only bites a NEW firing, and the sibling's open incident is still
-                       its own per-replica PagerDuty incident (the dedup key carries the identity), so the
-                       worst case is a re-post inside that sibling's window, not a lost resolve. */
-                    _cooldown.ClearMetric(serverId, clearedFiring);
+                    /* The AG pair's clear is per REPLICA (#5469 part 2): the firing and recovery keys carry
+                       the replica identity under this same flag, so one replica's reconnect forgets only
+                       its own firing entry and a sibling that is still down keeps its window. The server
+                       pair, and an AG edge without the identity, clear the per-server key as before. */
+                    _cooldown.ClearMetric(serverId, clearedFiring, cooldownScope);
+                }
+
+                /* #5469: the other half of the same re-arm. The recovery stamps ITS OWN key on its first send,
+                   and the clear above names only the firing's key, so a second outage that recovers inside
+                   the window met the first recovery's stamp: its resolve was throttled and PagerDuty's
+                   second incident stayed open. A DELIVERED firing of the pair, under the same condition as
+                   the clear above, therefore forgets its closing edge's entry — the new incident has not
+                   been closed yet, so the next recovery is a first notice again. Like the clear above it names
+                   the replica's own key for the AG pair (cooldownScope), so a sibling replica's recovery
+                   window is left alone. */
+                if (pagerDutyError is null
+                    && pagerDutyAutoResolve
+                    && AlertFamily.TryGetRecoveryOf(metricName, out var recoveryOfFiring))
+                {
+                    _cooldown.ClearMetric(serverId, recoveryOfFiring, cooldownScope);
                 }
             }
 
@@ -2098,7 +2141,9 @@ public class WebhookAlertService
             : RenderContextForTemplate(context, branding, prose);
 
         /* Keyed on the numeric serverId the fan-out passes — the same identity the LIVE PagerDuty path
-           feeds DerivePagerDutyDedupKey — so the two channels' keys are equal for the same alert. The
+           feeds DerivePagerDutyDedupKey — so the two channels' keys are equal for the same alert, except
+           an edge pair with PagerDuty auto-resolve on: this call keeps the default autoResolve = false on
+           purpose (#5469), so the token stays on per-state keys while PagerDuty's follows the flag. The
            serverName arm is THIS channel's own fallback for callers with no id (the settings-window test
            send); it is not a guarantee PagerDuty's path shares, so a caller wanting cross-channel
            correlation must pass the id. */
@@ -2466,6 +2511,7 @@ public class WebhookAlertService
     /// — see <see cref="TrySendTeamsAlertAsync"/>.</summary>
     private async Task<string?> TrySendPagerDutyAlertAsync(
         IAlertSettings settings,
+        bool autoResolve,
         string routingKey,
         string metricName,
         string serverName,
@@ -2484,7 +2530,7 @@ public class WebhookAlertService
             /* Derive the dedup_key from the same fingerprint the cooldown uses, so repeated alerts for
                the same ongoing incident correlate into one PagerDuty alert. Falls back to a stable
                metric+server key when there is no incident. */
-            var dedupKey = DerivePagerDutyDedupKeyForSend(serverId, metricName, context, settings);
+            var dedupKey = DerivePagerDutyDedupKey(serverId, metricName, context, autoResolve);
 
             /* #3598: the routed routing key (a PagerDuty SERVICE is a destination); the EU-region flag and
                proxy stay the parent's. */
@@ -2492,7 +2538,7 @@ public class WebhookAlertService
                 metricName, serverName, currentValue, thresholdValue, _branding,
                 routingKey, context: context, dedupKey: dedupKey, triageUrl: triageUrl,
                 detailText: detailText, displayName: displayName, nowUtc: nowUtc,
-                autoResolve: settings.PagerDutyAutoResolve);
+                autoResolve: autoResolve);
 
             /* #4752: test-only override for the PagerDuty send above (below). A test funneling an
                alert THROUGH the service must read the payload the wire saw — which a real post won't let
@@ -2738,6 +2784,29 @@ public class WebhookAlertService
         DerivePagerDutyDedupKey(serverId, metricName, context, settings.PagerDutyAutoResolve);
 
     /// <summary>
+    /// The per-replica identity of an AG pair edge, or null (#5469): non-null only with auto-resolve on, for
+    /// either edge of the AG Replica Disconnected / Reconnected pair, and only when the alert carries
+    /// <see cref="AlertContext.AgReplicaIdentity"/>. The ONE place the rule lives: the PagerDuty dedup key
+    /// appends it so each replica is its own incident, and the webhook cooldown folds it into the metric-level
+    /// key so each replica's window is its own too. Null leaves both keys exactly as they were, so a flag off,
+    /// the server pair and an AG edge without the identity are all byte-identical to the per-server shape.
+    /// The AG firing literal is spelled here rather than read from PerformanceMonitor.Common's AG consts: this
+    /// assembly must not take that dependency.
+    /// </summary>
+    internal static string? PairedReplicaScope(string metricName, AlertContext? context, bool autoResolve)
+    {
+        if (!autoResolve
+            || !AlertFamily.IsPairedEdge(metricName)
+            || !string.Equals(AlertFamily.Canonical(metricName), "AG Replica Disconnected", StringComparison.Ordinal)
+            || string.IsNullOrWhiteSpace(context?.AgReplicaIdentity))
+        {
+            return null;
+        }
+
+        return context.AgReplicaIdentity;
+    }
+
+    /// <summary>
     /// Derives the PagerDuty dedup_key from the same fingerprint the cooldown uses, so repeated alerts for
     /// the same ongoing incident correlate into one PagerDuty alert. Falls back to a stable server+incident
     /// key when there is no incident (mirrors the cooldown's own "no incidents → metric-level fallback key"
@@ -2751,9 +2820,10 @@ public class WebhookAlertService
     /// current STATE, so using it minted a distinct dedup_key per edge and PagerDuty showed two incidents for
     /// one outage (and a closing edge could never resolve the open one — its key named a different
     /// incident). Every future pair added to that census joins this by construction. With the default off,
-    /// each edge keeps its own state-named key, so the generic <c>{{dedup_key}}</c> token and the triage link
-    /// read exactly as they did before this rung: correlation is an opt-in behaviour change, scoped entirely
-    /// to the operator who switched it on.</para>
+    /// each edge keeps its own state-named key, so the triage link reads exactly as it did before this rung:
+    /// correlation is an opt-in behaviour change, scoped entirely to the operator who switched it on. The
+    /// generic webhook's <c>{{dedup_key}}</c> token is NOT part of the opt-in (#5469): its send derives the key
+    /// with the default <c>autoResolve = false</c>, so it stays on per-state keys with the flag on or off.</para>
     ///
     /// <para>The AG pair's key is also scoped per replica: "{serverId}:AG Replica Disconnected:{ag}:{replica}"
     /// from <see cref="AlertContext.AgReplicaIdentity"/>. Without that there is still one key per SERVER for
@@ -2767,9 +2837,9 @@ public class WebhookAlertService
     /// <para>The rename runs before the incident-fingerprint path on purpose: a closing edge that ever
     /// carried incident fingerprints would hash them under its own state name and split the pair again, and
     /// the deliverable recovery set is pinned to stateless notices — the incident identity IS the firing's
-    /// canonical name. All three consumers of this helper (PagerDuty, the generic <c>{{dedup_key}}</c>
-    /// token, and the triage link) share the normalized key, which is the cross-channel correlation those
-    /// call sites document.</para>
+    /// canonical name. The consumers that follow the flag (PagerDuty and the triage link) share the
+    /// normalized key, which is the cross-channel correlation those call sites document. The generic
+    /// <c>{{dedup_key}}</c> token does not follow it (#5469).</para>
     ///
     /// <para>Internal (#4220), not private: <see cref="EmailSendCore"/> reads it too, so the triage link's
     /// dedup key agrees with PagerDuty's for the same firing across every channel, email included.</para>
@@ -2789,10 +2859,10 @@ public class WebhookAlertService
         if (autoResolve && AlertFamily.IsPairedEdge(metricName))
         {
             var firing = AlertFamily.Canonical(metricName);
-            if (string.Equals(firing, "AG Replica Disconnected", StringComparison.Ordinal)
-                && !string.IsNullOrWhiteSpace(context?.AgReplicaIdentity))
+            var replica = PairedReplicaScope(metricName, context, autoResolve);
+            if (replica is not null)
             {
-                return $"{serverId}:{firing}:{context!.AgReplicaIdentity}";
+                return $"{serverId}:{firing}:{replica}";
             }
 
             return $"{serverId}:{firing}";

@@ -40,12 +40,12 @@ public sealed class PlanRegressionDailyRungTests
 {
     public const string RungName = "plan-regression-daily";
 
-    private const int RungVersion = 167;
+    private const int RungVersion = 168;
 
-    private const int PreviousVersion = 166;
+    private const int PreviousVersion = 167;
 
     /// <summary>This rung's sentinel ordinal in the viewer probe, the newest and so the last argument.</summary>
-    private const int ProbeOrdinal = 142;
+    private const int ProbeOrdinal = 143;
 
     private const string Daily = "plan_regression_daily";
 
@@ -283,8 +283,8 @@ public sealed class PlanRegressionDailyRungTests
         var probe = ViewerDataService.StoreSchemaProbeSql.Replace("\r\n", "\n", StringComparison.Ordinal);
         var arm = $"to_regclass('collect.{Built}') IS NOT NULL";
         Assert.Contains(arm, probe, StringComparison.Ordinal);
-        Assert.True(probe.IndexOf(arm, StringComparison.Ordinal) > probe.IndexOf("pagerduty_auto_resolve", StringComparison.Ordinal),
-            "this rung's sentinel follows V166's");
+        Assert.True(probe.IndexOf(arm, StringComparison.Ordinal) > probe.IndexOf("legacy_secret_pin_candidate", StringComparison.Ordinal),
+            "this rung's sentinel follows V167's");
 
         var viewer = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.cs");
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal})", viewer, StringComparison.Ordinal);
@@ -308,16 +308,16 @@ public sealed class PlanRegressionDailyRungTests
         behind[ProbeOrdinal] = false;
         Assert.Equal(PreviousVersion, (int)method.Invoke(null, behind)!);
 
-        /* The arm sits ABOVE V166's (newest-first is the contract of that method) and returns this rung's version. */
+        /* The arm sits ABOVE V167's (newest-first is the contract of that method) and returns this rung's version. */
         var thisArm = viewer.IndexOf("if (hasPlanRegressionDaily)", StringComparison.Ordinal);
-        var previousArm = viewer.IndexOf("if (hasPagerDutyAutoResolve)", StringComparison.Ordinal);
-        Assert.True(thisArm >= 0, "the viewer has no V167 sentinel arm: a fully-migrated store would map to 166");
-        Assert.True(previousArm >= 0, "the V166 arm is gone, so this pin is comparing against nothing");
-        Assert.True(thisArm < previousArm, "this arm sits below V166's, so a current store maps one rung low");
+        var previousArm = viewer.IndexOf("if (hasLegacyPinCandidates)", StringComparison.Ordinal);
+        Assert.True(thisArm >= 0, "the viewer has no V168 sentinel arm: a fully-migrated store would map to 167");
+        Assert.True(previousArm >= 0, "the V167 arm is gone, so this pin is comparing against nothing");
+        Assert.True(thisArm < previousArm, "this arm sits below V167's, so a current store maps one rung low");
         Assert.Contains("return " + RungVersion.ToString(CultureInfo.InvariantCulture) + ";", viewer[thisArm..previousArm], StringComparison.Ordinal);
 
         /* The table is named in the probe line and nowhere in the arm's prose (the V71 finding). */
-        var proseStart = viewer.LastIndexOf("/* V167 (#5448)", thisArm, StringComparison.Ordinal);
+        var proseStart = viewer.LastIndexOf("/* V168 (#5448)", thisArm, StringComparison.Ordinal);
         Assert.True(proseStart >= 0, "the arm has no comment block saying why it exists");
         Assert.DoesNotContain(Built, viewer[proseStart..thisArm], StringComparison.Ordinal);
         Assert.DoesNotContain(Daily, viewer[proseStart..thisArm], StringComparison.Ordinal);

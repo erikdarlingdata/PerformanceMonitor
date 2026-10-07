@@ -410,15 +410,16 @@ public sealed partial class ViewerDataService
 
         /* #1319 database filter: severe_errors has no database_name column (the DB is resolved in C# from the
            event's database_id), so the filter is applied client-side on the resolved name. A null/empty
-           selection leaves every row (today's behavior). */
-        var filter = databaseNames is { Count: > 0 } ? new HashSet<string>(databaseNames, StringComparer.OrdinalIgnoreCase) : null;
+           selection leaves every row (today's behavior). #5244: it matches on the SAME per-error name the rows
+           show (names.Resolve, #5373), ordinal, and an id the history never saw or an error with no database
+           context is in no chosen database, as in the Darling MCP tool and Lite. */
+        var filter = databaseNames is { Count: > 0 } ? databaseNames : null;
 
         var rows = new List<SevereErrorRow>();
         foreach (var record in records)
         {
-            var databaseName = names.Resolve(record.DatabaseId, record.EventTime);
-            if (filter == null || filter.Contains(databaseName))
-                rows.Add(new SevereErrorRow(record, databaseName));
+            if (filter == null || names.IsIn(record.DatabaseId, record.EventTime, filter))
+                rows.Add(new SevereErrorRow(record, names.Resolve(record.DatabaseId, record.EventTime)));
         }
         return rows;
     }

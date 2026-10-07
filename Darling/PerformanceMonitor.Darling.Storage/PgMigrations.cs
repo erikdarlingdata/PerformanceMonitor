@@ -690,7 +690,19 @@ ALTER TABLE config.config_notification
     ADD COLUMN IF NOT EXISTS pagerduty_auto_resolve boolean NOT NULL DEFAULT FALSE;";
 
     /// <summary>
-    /// V167 (#5448) — <c>collect.plan_regression_daily</c> and <c>collect.plan_regression_daily_built</c>: the per-day
+    /// V167 (#5456) - the record of which old-format saved passwords were in the store at the upgrade:
+    /// <c>config.legacy_secret_pin_candidate</c>, with the hash of each stored value and the connection columns it is
+    /// saved for. The text and the reasoning are on <see cref="LegacyPinCandidateTables"/>, which the rung embeds. The
+    /// table and its two owner-only triggers are made first and the values are recorded after them in the same
+    /// transaction, and only while the one-time pin step is still open (a store whose step is done records nothing). V165
+    /// is not changed: a store already at 165 does not run it again, which is why this is a new rung.
+    ///
+    /// <para><b>No Lite twin.</b> Lite keeps its secrets in its own local store.</para>
+    /// </summary>
+    private const string V167Sql = LegacyPinCandidateTables.CreateSql + "\n\n" + LegacyPinCandidateTables.CaptureSql;
+
+    /// <summary>
+    /// V168 (#5448) — <c>collect.plan_regression_daily</c> and <c>collect.plan_regression_daily_built</c>: the per-day
     /// per-plan totals PLAN_REGRESSION reads for CLOSED days instead of re-aggregating 14 days of
     /// <c>collect.query_store_interval_latest</c> on every run, plus the trigger that marks a day stale when a late row
     /// lands in it.
@@ -722,8 +734,8 @@ ALTER TABLE config.config_notification
     /// <c>query_store_interval_latest</c> is added here: if the big-store EXPLAIN says the per-day builds need one,
     /// it goes at the top of this rung in V153's shape.</para>
     /// </summary>
-    private const string V167Sql = @"
-/* V167 (#5448): per-day per-plan totals for PLAN_REGRESSION's closed days, and the trigger that marks a day stale when
+    private const string V168Sql = @"
+/* V168 (#5448): per-day per-plan totals for PLAN_REGRESSION's closed days, and the trigger that marks a day stale when
    a late row lands in it. Naive UTC throughout. The builder (the service) owns every write to the first table; the
    function writes only plan_regression_daily_built, the rung's own bookkeeping table. */
 CREATE TABLE IF NOT EXISTS collect.plan_regression_daily
@@ -1007,7 +1019,8 @@ CREATE TRIGGER trg_plan_regression_daily_late
         new Migration(164, "query-stats-hour-ledger", V164Sql),
         new Migration(165, "password-key", V165Sql),
         new Migration(166, "pagerduty-auto-resolve", V166Sql),
-        new Migration(167, "plan-regression-daily", V167Sql),
+        new Migration(167, "legacy-pin-candidates", V167Sql),
+        new Migration(168, "plan-regression-daily", V168Sql),
     };
 
     /// <summary>

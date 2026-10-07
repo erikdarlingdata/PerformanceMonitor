@@ -76,7 +76,7 @@ public sealed class RdsDeadlockReportResumeTests
             },
         };
 
-        return (() => ingestor.IngestAsync(1, "s", Host, false, false, CancellationToken.None), stored);
+        return (() => ingestor.IngestAsync(1, "s", Host, false, false, cancellationToken: CancellationToken.None), stored);
     }
 
     private static string SavedPosition(RdsFakeCollectorState state) => state.Value("pg_deadlocks", "log_resume") ?? "(none)";

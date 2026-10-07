@@ -55,10 +55,10 @@ public sealed class RdsPlanIngestor
     /// </summary>
     private readonly RdsCsvlogCarryBook _csvCarry = new();
 
-    public RdsPlanIngestor(NpgsqlDataSource postgres, RdsLogSource? logs = null, ILogger? logger = null, RdsResumeStore? resume = null)
+    public RdsPlanIngestor(NpgsqlDataSource postgres, RdsLogSource? logs = null, ILogger? logger = null, RdsResumeStore? resume = null, RdsEndpointVerifier? verifier = null)
     {
         _postgres = postgres ?? throw new ArgumentNullException(nameof(postgres));
-        _logs = logs ?? new RdsLogSource(logger: logger);
+        _logs = logs ?? new RdsLogSource(logger: logger, verifier: verifier);
         _logger = logger;
         _resume = resume;
     }
@@ -80,6 +80,7 @@ public sealed class RdsPlanIngestor
         string storageName,
         string host,
         bool pgLogUsesCsvlog = false,
+        string? loginConnectionString = null,
         CancellationToken cancellationToken = default)
     {
         /* #4708: what the last process saved for this server is loaded once, before its first read, so a
@@ -92,7 +93,7 @@ public sealed class RdsPlanIngestor
         /* #4708: a rotated file is finished and the newest file opened in the SAME cycle (bounded), rather than
            the old file on one cycle and the new one on the next. */
         return await RdsLogSource.RunPassesAsync(
-            () => IngestPassAsync(serverId, storageName, host, pgLogUsesCsvlog, cancellationToken));
+            () => IngestPassAsync(serverId, storageName, host, pgLogUsesCsvlog, loginConnectionString, cancellationToken));
     }
 
     /// <summary>
@@ -105,6 +106,7 @@ public sealed class RdsPlanIngestor
         string storageName,
         string host,
         bool pgLogUsesCsvlog,
+        string? loginConnectionString,
         CancellationToken cancellationToken)
     {
         RdsLogSource.LogChunk? chunk;
@@ -113,7 +115,13 @@ public sealed class RdsPlanIngestor
 
         try
         {
-            chunk = await _logs.ReadNewestAsync(host, kind, cancellationToken);
+            chunk = await _logs.ReadNewestAsync(host, kind, serverId, cancellationToken, loginConnectionString);
+        }
+        catch (RdsEndpointMismatchException)
+        {
+            /* The host is not the endpoint AWS reports for this id: propagated UNWRAPPED so DarlingWorker records
+               the PERMISSIONS outcome with this message, not the IAM text the wrapped type carries. */
+            throw;
         }
         catch (PgNoCsvlogFileException)
         {

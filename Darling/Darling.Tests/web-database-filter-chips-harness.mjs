@@ -144,6 +144,7 @@ const headings = (root) => {
       chipTitle: chips[0] ? chips[0].getAttribute("title") : null,
       className: chips[0] ? chips[0].className : null,
       chipChildren: chips[0] ? chips[0].children.length : null,
+      sub: (node.children.find((c) => c.className === "panel-sub") || { textContent: null }).textContent,
     });
   });
   return found;
@@ -182,7 +183,7 @@ const scenarios = {
     globalThis.location.hash = "#/fleet";
     util.setActiveDatabaseFilter({ server: "SRV1", databases: ["SalesDb"] });
     const off = new FakeNode("div");
-    util.mount(off, panels.renderPanel({ title: "T", read: "get_database_sizes", params: { server: "SRV1" }, viz: "table", rowsKey: "rows", columns: [], emptyText: "none" }));
+    util.mount(off, panels.renderPanel({ title: "T", read: "get_deadlocks", params: { server: "SRV1" }, viz: "table", rowsKey: "rows", columns: [], emptyText: "none" }));
     await settle();
     out.offPage = headings(off);
   },
@@ -197,7 +198,7 @@ const scenarios = {
       return headings(holder)[0];
     };
     out.filtered = await one({ title: "F", read: "get_top_queries_by_cpu" });
-    out.unfiltered = await one({ title: "U", read: "get_database_sizes" });
+    out.unfiltered = await one({ title: "U", read: "get_deadlocks" });
     out.server = await one({ title: "S", read: "get_cpu_utilization" });
     out.identity = await one({ title: "I", read: "get_query_trend" });
     out.plan = await one({ title: "P", read: "get_plan_xml" });
@@ -205,6 +206,21 @@ const scenarios = {
     out.overrideServer = await one({ title: "O1", read: "get_current_waits_trend", dbScope: "server" });
     out.overrideUnfiltered = await one({ title: "O2", read: "get_blocking_stats", dbScope: "unfiltered" });
     out.overrideProcessRows = await one({ title: "O3", read: "get_deadlock_detail", dbScope: "process-rows" });
+  },
+  /* The File I/O Latency subtitle (#5244 PR5): "per file" for exactly one chosen database, "per database and file type" for none,
+     two, or a one-database filter that belongs to another server. */
+  fileio: async () => {
+    const sub = async (names) => (await buildTabs(names)).tabs.io.find((h) => h.title === "File I/O Latency").sub;
+    out.one = await sub(["SalesDb"]);
+    out.two = await sub(["SalesDb", "Orders"]);
+    out.none = await sub(null);
+    out.emptied = await sub([]);
+    globalThis.location.hash = "#/server/SRV1";
+    util.setActiveDatabaseFilter({ server: "OTHER", databases: ["SalesDb"] });
+    const holder = new FakeNode("div");
+    util.mount(holder, tabs.fileIoPanel("SRV1", { hours: 24, label: "last 24h" }));
+    await settle();
+    out.otherServer = headings(holder)[0].sub;
   },
   /* One database at a time, each of the six awkward names: the Top Queries panel's chip names it as text, and no markup was read. */
   awkward: async () => {
@@ -218,6 +234,52 @@ const scenarios = {
     const top = all.tabs.queries.find((h) => h.title === "Top Queries by CPU");
     out.all = { state: top.state, text: top.text, chipTitle: top.chipTitle, lines: top.chipTitle.split("\n"), imgs: all.imgs };
   },
+};
+
+/* The empty text of the three snapshot panels (#5244): the reads answer a snapshot with an empty `databases` list, as they do when the
+   filter matches no database. A text node is the strip's only child, so the strips' text is read back by class. */
+const emptyStrips = (root) => {
+  const found = [];
+  walk(root, (node) => {
+    if (node.attrs.class === "strip empty" || node.className === "strip empty") found.push(node.textContent);
+  });
+  return found;
+};
+scenarios.emptyText = async () => {
+  const SNAPSHOT_READS = ["get_database_config", "get_database_scoped_config", "get_query_store_health"];
+  let mode = "snapshot";
+  globalThis.fetch = async (url) => {
+    const tool = String(url).replace(/^\/api\/read\//, "").split("?")[0];
+    if (!SNAPSHOT_READS.includes(tool)) return { status: 200, ok: true, text: async () => "{}" };
+    const body = mode === "snapshot" ? { captured_at: "2026-01-01T00:00:00Z", database_count: 0, databases: [] } : { status: "not_collected", message: "Nothing collected for this server yet." };
+    return { status: 200, ok: true, text: async () => JSON.stringify(body) };
+  };
+  const panelTexts = async () => {
+    const texts = [];
+    for (const tab of tabs.SERVER_TABS) {
+      const holder = new FakeNode("div");
+      util.mount(holder, tab.build("SRV1", { hours: 24, label: "last 24 hours" }));
+      await settle();
+      texts.push(...emptyStrips(holder));
+    }
+    return texts;
+  };
+  const templateText = async () => {
+    const holder = new FakeNode("div");
+    util.mount(holder, panels.renderPanel({ title: "T", read: "get_database_config", params: { server: "SRV1" }, viz: "table", rowsKey: "databases", columns: [{ key: "database_name", label: "Database" }], emptyText: "No database configuration snapshot yet." }));
+    await settle();
+    return emptyStrips(holder);
+  };
+  globalThis.location.hash = "#/server/SRV1";
+  util.setActiveDatabaseFilter({ server: "SRV1", databases: ["NoSuchDb"] });
+  out.filtered = await panelTexts();
+  out.filteredTemplate = await templateText();
+  mode = "none";
+  out.filteredNoSnapshot = await panelTexts();
+  mode = "snapshot";
+  util.setActiveDatabaseFilter(null);
+  out.unfiltered = await panelTexts();
+  out.unfilteredTemplate = await templateText();
 };
 
 const chosen = scenarios[scenario];

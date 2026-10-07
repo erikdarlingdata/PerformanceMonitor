@@ -106,13 +106,15 @@ internal static class TrendPayloads
 
     /// <summary>
     /// <c>get_file_io_trend</c>'s data envelope. <paramref name="scope"/> is the database the read was narrowed
-    /// to (per-file grain), null for the per-(database, file type) grain. The <c>series</c> legend's totals are
+    /// to (per-file grain), null for the per-(database, file type) grain. <paramref name="databaseEcho"/> (#5244) is the
+    /// <c>database_name</c> the answer reports when it differs from <paramref name="scope"/>: Darling's "the chosen
+    /// databases" for a read limited to two or more databases, which keeps the per-database grain. The <c>series</c> legend's totals are
     /// summed from the served points, so the legend and the lines cannot disagree about a series; its file counts
     /// come from the ranking.
     /// </summary>
     public static string FileIoTrend(
         string serverName, int hoursBack, string? scope, IReadOnlyList<FileIoSeries> series, IReadOnlyList<FileIoPoint> points,
-        int bucketMinutes, bool requested, int autoBudget, object discontinuities)
+        int bucketMinutes, bool requested, int autoBudget, object discontinuities, string? databaseEcho = null)
     {
         var charted = ChartedFor(series.Count);
         var folded = series.Count - charted;
@@ -135,7 +137,7 @@ internal static class TrendPayloads
         {
             ["server"] = serverName,
             ["hours_back"] = hoursBack,
-            ["database_name"] = scope,
+            ["database_name"] = databaseEcho ?? scope,
             ["series_grain"] = perFile ? "file" : "database_file_type",
             ["bucket"] = TrendBuckets.Word(bucketMinutes),
             ["bucket_minutes"] = bucketMinutes,

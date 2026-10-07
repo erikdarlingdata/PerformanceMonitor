@@ -4421,12 +4421,12 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             ["get_plan_corrections"] = R(CatAnalysis, "Automatic plan correction activity + per-database FORCE_LAST_GOOD_PLAN state.", PServer(), PHours(24), PLimit(50), PAsOf(), PBool("full_text", true), PDatabases()),
 
             /* ── config: current + history (DarlingMcpConfigTools / DarlingMcpConfigHistoryTools) ── */
-            ["get_database_config"] = R(CatConfig, "Database-level configuration for a server.", PServer(), PText("database_name")),
+            ["get_database_config"] = R(CatConfig, "Database-level configuration for a server.", PServer(), PDatabases()),
             ["get_server_config"] = R(CatConfig, "Server-level configuration (sp_configure) for a server.", PServer()),
             ["get_trace_flags"] = R(CatConfig, "Active trace flags for a server.", PServer()),
-            ["get_database_config_changes"] = R(CatConfig, "Database-configuration changes over time.", PServer(), PHours(168), PAsOf()),
-            ["get_database_scoped_config"] = R(CatConfig, "Database-scoped configuration for a database.", PServer(), PText("database_name")),
-            ["get_query_store_health"] = R(CatConfig, "Per-database Query Store health: actual vs desired state, readonly_reason, storage vs cap, and the two capture modes (query_capture_mode ALL / AUTO / CUSTOM / NONE, wait_stats_capture_mode ON / OFF; null on a pre-rung row or a pre-2017 engine).", PServer(), PText("database_name")),
+            ["get_database_config_changes"] = R(CatConfig, "Database-configuration changes over time.", PServer(), PHours(168), PAsOf(), PDatabases()),
+            ["get_database_scoped_config"] = R(CatConfig, "Database-scoped configuration for a database.", PServer(), PDatabases()),
+            ["get_query_store_health"] = R(CatConfig, "Per-database Query Store health: actual vs desired state, readonly_reason, storage vs cap, and the two capture modes (query_capture_mode ALL / AUTO / CUSTOM / NONE, wait_stats_capture_mode ON / OFF; null on a pre-rung row or a pre-2017 engine).", PServer(), PDatabases()),
             ["get_server_config_changes"] = R(CatConfig, "Server-configuration changes over time.", PServer(), PHours(168), PAsOf()),
             ["get_trace_flag_changes"] = R(CatConfig, "Trace-flag changes over time.", PServer(), PHours(168), PAsOf()),
 
@@ -4436,7 +4436,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             ["get_current_waits_trend"] = R(CatData, "Waiting-task and blocked-session series over time.", PServer(), PHours(4), PDatabases(), PAsOf()),
             ["get_blocking_stats"] = R(CatData, "Blocking duration and deadlock severity per minute.", PServer(), PHours(24), PDatabases(), PAsOf()),
             ["get_cpu_utilization"] = R(CatData, "CPU utilization over time.", PServer(), PHours(4), PAsOf(), PInt("bucket_minutes")),
-            ["get_file_io_stats"] = R(CatData, "Per-file IO stall/throughput stats.", PServer()),
+            ["get_file_io_stats"] = R(CatData, "Per-file IO stall/throughput stats.", PServer(), PDatabases()),
             ["get_memory_clerks"] = R(CatData, "Top memory clerks by allocation.", PServer()),
             ["get_memory_stats"] = R(CatData, "Server memory summary counters.", PServer()),
             ["get_perfmon_stats"] = R(CatData, "Perfmon counter values, filtered by counter/instance.", PServer(), PText("counter_name"), PText("instance_name")),
@@ -4491,7 +4491,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             ["list_servers"] = R(CatData, "The monitored servers known to the store."),
 
             /* ── trends (DarlingMcpTrendTools) ── */
-            ["get_file_io_trend"] = R(CatTrends, "File I/O read and write latency over time per database and file type, heaviest stall first; database_name charts one database per file.", PServer(), PHours(24), PAsOf(), PInt("bucket_minutes"), PText("database_name")),
+            ["get_file_io_trend"] = R(CatTrends, "File I/O read and write latency over time per database and file type, heaviest stall first; database_name charts one database per file.", PServer(), PHours(24), PAsOf(), PInt("bucket_minutes"), PDatabases()),
             ["get_memory_trend"] = R(CatTrends, "Memory usage over time.", PServer(), PHours(24), PAsOf(), PInt("bucket_minutes")),
             ["get_server_trend"] = R(CatTrends, "One instance trend over time, picked by metric: total_waits, cpu_scheduler, memory_clerks, plan_cache, latch, spinlock, session_stats, collector_duration, tempdb_file_io, tempdb_size or file_io_throughput.", PReqText("metric"), PServer(), PHours(24), PAsOf(), PInt("bucket_minutes"), PText("clerk_types"), PText("names")),
             ["get_perfmon_trend"] = R(CatTrends, "One perfmon counter over time (requires counter_name).", PReqText("counter_name"), PServer(), PHours(24), PAsOf(), PInt("bucket_minutes")),
@@ -4530,11 +4530,11 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             ["get_resource_semaphore"] = R(CatMemoryGrants, "Resource-semaphore state over time.", PServer(), PHours(24), PAsOf()),
 
             /* ── object / index stats (DarlingMcpObjectStatsTools) ── */
-            ["get_database_sizes"] = R(CatObjects, "Per-database size breakdown.", PServer()),
-            ["get_pvs_stats"] = R(CatObjects, "ADR persistent version store state per database, with an optional top-5 size trend.", PServer(), PInt("trend_hours_back", 0)),
+            ["get_database_sizes"] = R(CatObjects, "Per-database size breakdown.", PServer(), PDatabases()),
+            ["get_pvs_stats"] = R(CatObjects, "ADR persistent version store state per database, with an optional top-5 size trend.", PServer(), PInt("trend_hours_back", 0), PDatabases()),
             ["get_index_usage"] = R(CatObjects, "Index usage (seeks/scans/updates) per index. Unused-first, so pass database_name unless you want a server-wide sweep; the answer carries matching_index_count and truncated.", PServer(), PDatabases(), PLimit(200)),
             ["get_object_locking"] = R(CatObjects, "Per-object locking/contention stats.", PServer(), PLimit(200), PDatabases(), PText("detail_database"), PText("detail_schema"), PText("detail_table"), PText("detail_index")),
-            ["get_table_index_sizes"] = R(CatObjects, "Per-table/index size breakdown.", PServer()),
+            ["get_table_index_sizes"] = R(CatObjects, "Per-table/index size breakdown.", PServer(), PDatabases()),
 
             /* ── plan cache / scheduler (DarlingMcpPlanCacheSchedulerTools) ── */
             ["get_cpu_scheduler_pressure"] = R(CatPlanCache, "CPU scheduler pressure indicators from the newest snapshot within the window.", PServer(), PHours(24), PAsOf()),
@@ -4557,7 +4557,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             ["get_query_repro_script"] = R(CatPlans, "A T-SQL repro script built from a stored query's text and plan (requires kind and its key).", PReqText("kind"), PServer(), PText("database_name"), PText("query_hash"), PInt("query_id"), PInt("plan_id"), PText("collection_time"), PInt("session_id"), PInt("request_id", 0)),
 
             /* ── default trace (DarlingMcpDefaultTraceTools) ── */
-            ["get_default_trace_events"] = R(CatDefaultTrace, "Default-trace events (file growth, DDL, security).", PServer(), PHours(24), PLimit(100), PAsOf()),
+            ["get_default_trace_events"] = R(CatDefaultTrace, "Default-trace events (file growth, DDL, security).", PServer(), PHours(24), PLimit(100), PAsOf(), PDatabases()),
 
             /* ── system_health parse-on-read family (DarlingMcpHealthParserTools) ── */
             ["get_health_parser_cpu_tasks"] = R(CatSystemHealth, "system_health: CPU-bound task snapshots.", PServer(), PHours(24), PLimit(50), PAsOf()),
@@ -4566,7 +4566,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             ["get_health_parser_memory_conditions"] = R(CatSystemHealth, "system_health: resource-monitor memory conditions.", PServer(), PHours(24), PLimit(50), PAsOf()),
             ["get_health_parser_memory_node_oom"] = R(CatSystemHealth, "system_health: per-node out-of-memory events.", PServer(), PHours(24), PLimit(50), PAsOf()),
             ["get_health_parser_scheduler_issues"] = R(CatSystemHealth, "system_health: non-yielding scheduler issues.", PServer(), PHours(24), PLimit(50), PAsOf()),
-            ["get_health_parser_severe_errors"] = R(CatSystemHealth, "system_health: severe (sev >= 17) errors.", PServer(), PHours(24), PLimit(50), PAsOf()),
+            ["get_health_parser_severe_errors"] = R(CatSystemHealth, "system_health: severe (sev >= 19) errors.", PServer(), PHours(24), PLimit(50), PAsOf(), PDatabases()),
             ["get_health_parser_significant_waits"] = R(CatSystemHealth, "system_health: individual 500 ms+ waits with their statement.", PServer(), PHours(24), PLimit(50), PAsOf()),
             ["get_health_parser_system_health"] = R(CatSystemHealth, "system_health: the raw parsed session records.", PServer(), PHours(24), PLimit(50), PAsOf()),
             // FinOps web parity (#4843), set A: append new FinOps entries below this line only.
@@ -5328,12 +5328,20 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 : DatabaseNamesRefusal(c),
 
             /* ── config (current + history) ── */
-            ["get_database_config"] = (c, pg, an) => DarlingMcpConfigTools.GetDatabaseConfig(pg, Server(c), Str(c, "database_name"), c.RequestAborted),
+            ["get_database_config"] = (c, pg, an) => DatabaseNames(c) is { } databases
+                ? DarlingMcpConfigTools.GetDatabaseConfig(pg, Server(c), databases, c.RequestAborted)
+                : DatabaseNamesRefusal(c),
             ["get_server_config"] = (c, pg, an) => DarlingMcpConfigTools.GetServerConfig(pg, Server(c), c.RequestAborted),
             ["get_trace_flags"] = (c, pg, an) => DarlingMcpConfigTools.GetTraceFlags(pg, Server(c), c.RequestAborted),
-            ["get_database_config_changes"] = (c, pg, an) => DarlingMcpConfigHistoryTools.GetDatabaseConfigChanges(pg, Server(c), Hours(c, 168), as_of: AsOf(c), cancellationToken: c.RequestAborted),
-            ["get_database_scoped_config"] = (c, pg, an) => DarlingMcpConfigHistoryTools.GetDatabaseScopedConfig(pg, Server(c), Str(c, "database_name"), cancellationToken: c.RequestAborted),
-            ["get_query_store_health"] = (c, pg, an) => DarlingMcpConfigHistoryTools.GetQueryStoreHealth(pg, Server(c), Str(c, "database_name"), c.RequestAborted),
+            ["get_database_config_changes"] = (c, pg, an) => DatabaseNames(c) is { } databases
+                ? DarlingMcpConfigHistoryTools.GetDatabaseConfigChanges(pg, Server(c), Hours(c, 168), databases, AsOf(c), null, c.RequestAborted)
+                : DatabaseNamesRefusal(c),
+            ["get_database_scoped_config"] = (c, pg, an) => DatabaseNames(c) is { } databases
+                ? DarlingMcpConfigHistoryTools.GetDatabaseScopedConfig(pg, Server(c), databases, c.RequestAborted)
+                : DatabaseNamesRefusal(c),
+            ["get_query_store_health"] = (c, pg, an) => DatabaseNames(c) is { } databases
+                ? DarlingMcpConfigHistoryTools.GetQueryStoreHealth(pg, Server(c), databases, c.RequestAborted)
+                : DatabaseNamesRefusal(c),
             ["get_server_config_changes"] = (c, pg, an) => DarlingMcpConfigHistoryTools.GetServerConfigChanges(pg, Server(c), Hours(c, 168), as_of: AsOf(c), cancellationToken: c.RequestAborted),
             ["get_trace_flag_changes"] = (c, pg, an) => DarlingMcpConfigHistoryTools.GetTraceFlagChanges(pg, Server(c), Hours(c, 168), as_of: AsOf(c), cancellationToken: c.RequestAborted),
 
@@ -5362,7 +5370,9 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             ["get_cpu_utilization"] = (c, pg, an) => OptionalInt(c, "bucket_minutes", out var bucketMinutes)
                 ? DarlingMcpDataTools.GetCpuUtilization(pg, Server(c), Hours(c, 4), AsOf(c), bucketMinutes, TrendBudget.Chart, cancellationToken: c.RequestAborted)
                 : UnparseableParam("bucket_minutes"),
-            ["get_file_io_stats"] = (c, pg, an) => DarlingMcpDataTools.GetFileIoStats(pg, Server(c), c.RequestAborted),
+            ["get_file_io_stats"] = (c, pg, an) => DatabaseNames(c) is { } databases
+                ? DarlingMcpDataTools.GetFileIoStats(pg, Server(c), databases, c.RequestAborted)
+                : DatabaseNamesRefusal(c),
             ["get_memory_clerks"] = (c, pg, an) => DarlingMcpDataTools.GetMemoryClerks(pg, Server(c), c.RequestAborted),
             ["get_memory_stats"] = (c, pg, an) => DarlingMcpDataTools.GetMemoryStats(pg, Server(c), c.RequestAborted),
             ["get_perfmon_stats"] = (c, pg, an) => DarlingMcpDataTools.GetPerfmonStats(pg, Server(c), Str(c, "counter_name"), Str(c, "instance_name"), c.RequestAborted),
@@ -5466,7 +5476,9 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                should read — and bind bucket_minutes, refusing a value that is not a number rather than quietly
                sizing the points itself (the OptionalDouble rule). */
             ["get_file_io_trend"] = (c, pg, an) => OptionalInt(c, "bucket_minutes", out var bucketMinutes)
-                ? DarlingMcpTrendTools.GetFileIoTrend(pg, Server(c), Hours(c, 24), AsOf(c), bucketMinutes, Str(c, "database_name"), TrendBudget.Chart, cancellationToken: c.RequestAborted)
+                ? (DatabaseNames(c) is { } databases
+                    ? DarlingMcpTrendTools.GetFileIoTrend(pg, Server(c), Hours(c, 24), AsOf(c), bucketMinutes, databases, TrendBudget.Chart, cancellationToken: c.RequestAborted)
+                    : DatabaseNamesRefusal(c))
                 : UnparseableParam("bucket_minutes"),
             ["get_memory_trend"] = (c, pg, an) => OptionalInt(c, "bucket_minutes", out var bucketMinutes)
                 ? DarlingMcpTrendTools.GetMemoryTrend(pg, Server(c), Hours(c, 24), AsOf(c), bucketMinutes, TrendBudget.Chart, cancellationToken: c.RequestAborted)
@@ -5532,8 +5544,12 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             ["get_resource_semaphore"] = (c, pg, an) => DarlingMcpMemoryGrantTools.GetResourceSemaphore(pg, Server(c), Hours(c, 24), as_of: AsOf(c), cancellationToken: c.RequestAborted),
 
             /* ── object / index stats ── */
-            ["get_database_sizes"] = (c, pg, an) => DarlingMcpObjectStatsTools.GetDatabaseSizes(pg, Server(c), cancellationToken: c.RequestAborted),
-            ["get_pvs_stats"] = (c, pg, an) => DarlingMcpPvsTools.GetPvsStats(pg, Server(c), QueryInt(c, "trend_hours_back", null, 0), c.RequestAborted),
+            ["get_database_sizes"] = (c, pg, an) => DatabaseNames(c) is { } databases
+                ? DarlingMcpObjectStatsTools.GetDatabaseSizes(pg, Server(c), databases, c.RequestAborted)
+                : DatabaseNamesRefusal(c),
+            ["get_pvs_stats"] = (c, pg, an) => DatabaseNames(c) is { } databases
+                ? DarlingMcpPvsTools.GetPvsStats(pg, Server(c), QueryInt(c, "trend_hours_back", null, 0), databases, c.RequestAborted)
+                : DatabaseNamesRefusal(c),
             ["get_index_usage"] = (c, pg, an) => DatabaseNames(c) is { } databases
                 ? DarlingMcpObjectStatsTools.GetIndexUsage(pg, Server(c), databases, Rows(c, "limit", 200), c.RequestAborted)
                 : DatabaseNamesRefusal(c),
@@ -5548,7 +5564,9 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 : DatabaseNames(c) is { } databases
                     ? DarlingMcpObjectStatsTools.GetObjectLockingWithHeatAsync(pg, Server(c), Rows(c, "limit", 200), registryState, databases, c.RequestAborted)
                     : DatabaseNamesRefusal(c),
-            ["get_table_index_sizes"] = (c, pg, an) => DarlingMcpObjectStatsTools.GetTableIndexSizes(pg, Server(c), cancellationToken: c.RequestAborted),
+            ["get_table_index_sizes"] = (c, pg, an) => DatabaseNames(c) is { } databases
+                ? DarlingMcpObjectStatsTools.GetTableIndexSizes(pg, Server(c), databases, c.RequestAborted)
+                : DatabaseNamesRefusal(c),
 
             /* ── plan cache / scheduler ── */
             ["get_cpu_scheduler_pressure"] = (c, pg, an) => DarlingMcpPlanCacheSchedulerTools.GetCpuSchedulerPressure(pg, Server(c), Hours(c, 24), as_of: AsOf(c), cancellationToken: c.RequestAborted),
@@ -5625,7 +5643,9 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                     PlanIdentity(("collection_time", deadlockCollection), ("deadlock_time", deadlockTime), ("victim_process_id", Str(c, "victim_process_id")), ("database_name", Str(c, "database_name")))),
 
             /* ── default trace ── */
-            ["get_default_trace_events"] = (c, pg, an) => DarlingMcpDefaultTraceTools.GetDefaultTraceEvents(pg, Server(c), Hours(c, 24), Rows(c, "limit", 100), as_of: AsOf(c), cancellationToken: c.RequestAborted),
+            ["get_default_trace_events"] = (c, pg, an) => DatabaseNames(c) is { } databases
+                ? DarlingMcpDefaultTraceTools.GetDefaultTraceEvents(pg, Server(c), Hours(c, 24), Rows(c, "limit", 100), databases, AsOf(c), null, c.RequestAborted)
+                : DatabaseNamesRefusal(c),
 
             /* ── system_health parse-on-read family ── */
             ["get_health_parser_cpu_tasks"] = (c, pg, an) => DarlingMcpHealthParserTools.GetCPUTasks(pg, Server(c), Hours(c, 24), Rows(c, "limit", 50), as_of: AsOf(c), cancellationToken: c.RequestAborted),
@@ -5634,7 +5654,9 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             ["get_health_parser_memory_conditions"] = (c, pg, an) => DarlingMcpHealthParserTools.GetMemoryConditions(pg, Server(c), Hours(c, 24), Rows(c, "limit", 50), as_of: AsOf(c), cancellationToken: c.RequestAborted),
             ["get_health_parser_memory_node_oom"] = (c, pg, an) => DarlingMcpHealthParserTools.GetMemoryNodeOOM(pg, Server(c), Hours(c, 24), Rows(c, "limit", 50), as_of: AsOf(c), cancellationToken: c.RequestAborted),
             ["get_health_parser_scheduler_issues"] = (c, pg, an) => DarlingMcpHealthParserTools.GetSchedulerIssues(pg, Server(c), Hours(c, 24), Rows(c, "limit", 50), as_of: AsOf(c), cancellationToken: c.RequestAborted),
-            ["get_health_parser_severe_errors"] = (c, pg, an) => DarlingMcpHealthParserTools.GetSevereErrors(pg, Server(c), Hours(c, 24), Rows(c, "limit", 50), as_of: AsOf(c), cancellationToken: c.RequestAborted),
+            ["get_health_parser_severe_errors"] = (c, pg, an) => DatabaseNames(c) is { } databases
+                ? DarlingMcpHealthParserTools.GetSevereErrors(pg, Server(c), Hours(c, 24), Rows(c, "limit", 50), databases, AsOf(c), null, c.RequestAborted)
+                : DatabaseNamesRefusal(c),
             ["get_health_parser_significant_waits"] = (c, pg, an) => DarlingMcpHealthParserTools.GetSignificantWaits(pg, Server(c), Hours(c, 24), Rows(c, "limit", 50), as_of: AsOf(c), cancellationToken: c.RequestAborted),
             ["get_health_parser_system_health"] = (c, pg, an) => DarlingMcpHealthParserTools.GetSystemHealth(pg, Server(c), Hours(c, 24), Rows(c, "limit", 50), as_of: AsOf(c), cancellationToken: c.RequestAborted),
             // FinOps web parity (#4843), set A: append new FinOps entries below this line only.

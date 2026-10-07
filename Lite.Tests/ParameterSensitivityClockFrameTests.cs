@@ -89,7 +89,7 @@ public sealed class ParameterSensitivityClockFrameTests : IClassFixture<SharedDu
     private static int ExpectedOffenders => Plans.Count(p => p.Expected);
 
     private static readonly DateTime WindowEnd =
-        DateTime.SpecifyKind(new DateTime(DateTime.UtcNow.Ticks - (DateTime.UtcNow.Ticks % TimeSpan.TicksPerSecond)), DateTimeKind.Unspecified);
+        DateTime.SpecifyKind(new DateTime(DateTime.UtcNow.Ticks / TimeSpan.TicksPerSecond * TimeSpan.TicksPerSecond), DateTimeKind.Unspecified);
     private static readonly DateTime WindowStart = WindowEnd.AddHours(-4);
 
     private readonly DuckDbInitializer _duckDb;

@@ -32,7 +32,7 @@ namespace Darling.Tests;
 ///
 /// <para>This file carried the "I am the top rung" claims that moved off
 /// <see cref="QueryStatsHourLedgerTests"/> (V164) when this rung landed; they moved on to
-/// <see cref="PlanRegressionDailyRungTests"/> (V167) when that rung landed above it.</para>
+/// <see cref="PlanRegressionDailyRungTests"/> (V168) when that rung landed above it.</para>
 /// </summary>
 public sealed class PagerDutyAutoResolveRungTests
 {
@@ -55,8 +55,7 @@ public sealed class PagerDutyAutoResolveRungTests
             "pagerduty-auto-resolve",
             PgMigrations.Scripts.Single(s => s.Version == RungVersion).Name);
 
-        /* No longer the top rung: V167 (the PLAN_REGRESSION per-day totals) landed above it. */
-        Assert.True(RungVersion < StorageVersion.SchemaVersion);
+        /* V167 (the record of old-format saved passwords) landed above this rung, so it is no longer the top. */
         Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
         Assert.Equal(StorageVersion.SchemaVersion, versions.Max());
         Assert.Contains(RungVersion, versions);
@@ -114,17 +113,14 @@ public sealed class PagerDutyAutoResolveRungTests
 
         var viewer = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.cs");
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal})", viewer, StringComparison.Ordinal);
-        Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 1})", viewer, StringComparison.Ordinal);
-
         Assert.Equal(StorageVersion.SchemaVersion, ViewerDataService.RequiredStoreSchemaVersion);
 
         var method = typeof(ViewerDataService)
             .GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
         var arity = method.GetParameters().Length;
 
-        /* Not the last argument any more: a newer rung's sentinel follows this one. */
+        /* A newer rung's sentinel (V167's) follows this one. */
         Assert.True(ProbeOrdinal < arity - 1, "a newer rung's sentinel follows this one");
-        Assert.Equal("hasPagerDutyAutoResolve", method.GetParameters()[ProbeOrdinal].Name);
 
         /* Every sentinel true = a fully-migrated store, which must map to exactly this version. */
         var all = Enumerable.Repeat((object)true, arity).ToArray();

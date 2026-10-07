@@ -822,7 +822,8 @@ internal static class DarlingDataReader
     /// The latest file-I/O snapshot per database file — Lite's <c>GetLatestFileIoStatsAsync</c>, ordered
     /// by total stall descending; avg latency (stall/op) is computed by the tool. size_mb is
     /// <c>numeric</c> → double precision, and NULL for the log file of an Azure SQL Database Hyperscale database;
-    /// the delta columns are bigint. $1 server_id. <c>collection_time</c>
+    /// the delta columns are bigint. $1 server_id, $2 the chosen databases (#5244: one text[], NULL for every database; the
+    /// anchor subquery is NOT filtered). <c>collection_time</c>
     /// is the trailing column (#3541 A10): the snapshot's stamp, read once and published as <c>captured_at</c>.
     /// </summary>
     public const string LatestFileIoStatsSql = """
@@ -843,17 +844,45 @@ internal static class DarlingDataReader
         FROM v_file_io_stats
         WHERE server_id = $1
         AND   collection_time = (SELECT MAX(collection_time) FROM v_file_io_stats WHERE server_id = $1)
+        AND   ($2::text[] IS NULL OR database_name = ANY($2))
         ORDER BY (delta_stall_read_ms + delta_stall_write_ms) DESC
         """;
 
-    public static async Task<LatestSnapshot<FileIoRow>> GetLatestFileIoStatsAsync(
+    /// <summary>
+    /// When the newest file-I/O snapshot was taken, whatever databases it holds (#5244). A snapshot read filters ROWS and
+    /// never moves its anchor, so a filtered read that finds no row asks this to tell "the chosen databases are not in the
+    /// newest capture" (a true negative, <c>empty</c>) from "nothing was ever collected" (<c>unavailable</c>). NULL when no
+    /// file I/O row exists for the server. $1 server_id.
+    /// </summary>
+    public const string LatestFileIoCaptureSql = """
+        SELECT MAX(collection_time) FROM v_file_io_stats WHERE server_id = $1
+        """;
+
+    /// <summary>Runs <see cref="LatestFileIoCaptureSql"/>: the newest file-I/O capture's stamp, or null when none exists.</summary>
+    public static async Task<DateTime?> GetLatestFileIoCaptureAsync(
         NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken = default)
+    {
+        await using var command = postgres.CreateCommand(LatestFileIoCaptureSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        AddInt(command, serverId);
+        var value = await command.ExecuteScalarAsync(cancellationToken);
+        return value is DateTime stamp ? stamp : null;
+    }
+
+    /// <summary>
+    /// The newest file-I/O snapshot (#5244: <paramref name="databases"/> keeps the rows of the chosen databases; the default
+    /// is every database). The filter is on the rows only: the capture the rows come from is the server's newest whatever the
+    /// filter, so a filtered and an unfiltered call show the same capture.
+    /// </summary>
+    public static async Task<LatestSnapshot<FileIoRow>> GetLatestFileIoStatsAsync(
+        NpgsqlDataSource postgres, int serverId, DatabaseFilter databases = default, CancellationToken cancellationToken = default)
     {
         var rows = new List<FileIoRow>();
         DateTime? capturedAt = null;
         await using var command = postgres.CreateCommand(LatestFileIoStatsSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         AddInt(command, serverId);
+        command.Parameters.Add(databases.Parameter());
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
