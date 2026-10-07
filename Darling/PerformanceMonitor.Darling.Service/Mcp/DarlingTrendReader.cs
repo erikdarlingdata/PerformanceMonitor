@@ -959,7 +959,7 @@ internal static class DarlingTrendReader
     /// there. $1 server_id, $2/$3 window (naive UTC), $4 bucket width in minutes.
     /// </summary>
     public static readonly string ProcedureDurationTrendHourlySql =
-        DurationTrendRouting.BuildBucketedHourlyTrendSql(TimescaleSupport.ProcedureStatsHourlyView);
+        DurationTrendRouting.BuildBucketedHourlyTrendSql(TimescaleSupport.ProcedureStatsHourlyView, coverIdleHours: true);
 
     /// <summary>
     /// Which tier one unkeyed duration trend read serves from, and the evidence the choice rests on (#3541 A2)
@@ -1343,7 +1343,10 @@ internal static class DarlingTrendReader
         await using var command = postgres.CreateCommand(
             route.Tier == RetentionTier.Raw
                 ? rawSql
-                : DurationTrendRouting.BuildBucketedHourlyTrendSql(route.HourlyFromClauseOrDefault, withDatabaseFilter: true));
+                : DurationTrendRouting.BuildBucketedHourlyTrendSql(
+                    route.HourlyFromClauseOrDefault, withDatabaseFilter: true,
+                    /* #5449: the procedure rollups hold no row for an hour in which no procedure worked. */
+                    coverIdleHours: route.RawTable == "procedure_stats"));
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddWindow(command, serverId, startUtc, endUtc);
         /* #5244: $4 the database set (SQL NULL for every database), then $5 the bucket width, on both tiers. */

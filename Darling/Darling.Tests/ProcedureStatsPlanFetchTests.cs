@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Data;
 using System.Globalization;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using PerformanceMonitor.Collectors;
@@ -26,9 +27,10 @@ namespace Darling.Tests;
 /// </summary>
 public sealed class ProcedureStatsPlanFetchTests
 {
-    private static CollectorContext MakeContext(bool capture, bool defer = false, bool azure = false)
+    private static CollectorContext MakeContext(bool capture, bool defer = false, bool azure = false, bool identity = false)
         => new()
         {
+            PlanIdentityColumns = identity,
             ServerId = 42,
             ServerName = "test-server",
             CollectionTime = new DateTime(2026, 7, 2, 12, 0, 0, DateTimeKind.Utc),
@@ -49,89 +51,226 @@ public sealed class ProcedureStatsPlanFetchTests
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
-    public void MainQuery_Deferred_CarriesNoPlanRender_AndNoPlanColumns(bool azure)
+    public void MainQuery_IsNumbersOnly_InEveryPlanMode(bool azure)
     {
-        var sql = Build(MakeContext(capture: true, defer: true, azure: azure));
+        /* #5449: no plan columns, no identity columns, no apply and no derived table, whatever the mode. */
+        foreach (var context in new[]
+        {
+            MakeContext(capture: false, azure: azure),
+            MakeContext(capture: true, azure: azure),
+            MakeContext(capture: true, azure: azure, identity: true),
+            MakeContext(capture: true, defer: true, azure: azure, identity: true),
+            MakeContext(capture: false, azure: azure, identity: true),
+        })
+        {
+            var sql = Build(context);
 
-        Assert.DoesNotContain("dm_exec_text_query_plan", sql, StringComparison.Ordinal);
-        Assert.DoesNotContain("query_plan_xml", sql, StringComparison.Ordinal);
+            Assert.DoesNotContain("dm_exec_text_query_plan", sql, StringComparison.Ordinal);
+            Assert.DoesNotContain("query_plan_xml", sql, StringComparison.Ordinal);
+            Assert.DoesNotContain("plan_statement_count", sql, StringComparison.Ordinal);
+            Assert.DoesNotContain("ranked", sql, StringComparison.Ordinal);
+            Assert.DoesNotContain("TOP (150)", sql, StringComparison.Ordinal);
+            Assert.Contains("TOP (" + ProcedureStatsCollector.MaxCandidateRows + ")", sql, StringComparison.Ordinal);
+            Assert.Contains("last_execution_time DESC", sql, StringComparison.Ordinal);
+            Assert.DoesNotContain("PLAN_SELECT", sql, StringComparison.Ordinal);
+            Assert.DoesNotContain("PLAN_APPLY", sql, StringComparison.Ordinal);
+        }
     }
 
-    [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public void MainQuery_Deferred_IsTheNoPlanForm_PlusOnlyTheIdentityFragments(bool azure)
-    {
-        /* The checkout's line endings are CRLF on every OS (.gitattributes), so compare as LF. */
-        var deferred = Build(MakeContext(capture: true, defer: true, azure: azure)).ReplaceLineEndings("\n");
-        var captureOff = Build(MakeContext(capture: false, azure: azure)).ReplaceLineEndings("\n");
-
-        Assert.Contains("plan_statement_count", deferred, StringComparison.Ordinal);
-        Assert.Contains("plan_last_statement_compile", deferred, StringComparison.Ordinal);
-        Assert.Contains("plan_generation_sum", deferred, StringComparison.Ordinal);
-        Assert.Contains("OUTER APPLY", deferred, StringComparison.Ordinal);
-        Assert.Contains("sys.dm_exec_query_stats", deferred, StringComparison.Ordinal);
-
-        /* Cut the select fragment (from its leading comma through its last column) and the apply fragment
-           (from its newline through the alias) and what remains is the capture-off text. */
-        var selectStart = deferred.IndexOf(",\n    plan_statement_count", StringComparison.Ordinal);
-        Assert.True(selectStart >= 0);
-        var stripped = Strip(deferred, selectStart, "plan_generation_sum = pfp.plan_generation_sum");
-        var applyStart = stripped.IndexOf("OUTER APPLY\n(", StringComparison.Ordinal);
-        Assert.True(applyStart > 0);
-        /* The apply fragment starts with a newline that follows `) AS ranked`; remove that newline too. */
-        applyStart = stripped.LastIndexOf('\n', applyStart - 1) is var nl && nl >= 0 && stripped[nl..applyStart].Trim().Length == 0
-            ? nl
-            : applyStart;
-        stripped = Strip(stripped, applyStart, ") AS pfp");
-
-        Assert.Equal(captureOff, stripped);
-    }
-
-    /// <summary>
-    /// The standard query nests the identity fragments inside N'...' dynamic SQL, so a single quote in either
-    /// one would end the literal early. What the deferred text adds over capture-off carries none.
-    /// </summary>
     [Fact]
-    public void IdentityFragments_CarryNoSingleQuote_ForTheStandardNestedVariant()
+    public void TheCandidateCap_IsOneConstant_BesideThePlanLimit()
     {
-        var deferred = Build(MakeContext(capture: true, defer: true)).ReplaceLineEndings("\n");
-        var captureOff = Build(MakeContext(capture: false)).ReplaceLineEndings("\n");
+        Assert.Equal(5000, ProcedureStatsCollector.MaxCandidateRows);
+        Assert.Equal(150, ProcedureStatsCollector.MaxPlansPerRun);
+        Assert.Equal(ProcedureStatsCollector.MaxPlansPerRun, PerformanceMonitor.Darling.Service.ProcedureStatsPlanReuse.MaxMissesPerRun);
 
-        var selectStart = deferred.IndexOf(",\n    plan_statement_count", StringComparison.Ordinal);
-        Assert.True(selectStart >= 0);
-        var selectEnd = deferred.IndexOf("plan_generation_sum = pfp.plan_generation_sum", selectStart, StringComparison.Ordinal);
-        Assert.True(selectEnd >= 0);
-        var applyStart = deferred.IndexOf("OUTER APPLY\n(", StringComparison.Ordinal);
-        Assert.True(applyStart >= 0);
-        var applyEnd = deferred.IndexOf(") AS pfp", applyStart, StringComparison.Ordinal);
-        Assert.True(applyEnd >= 0);
-
-        var added = deferred[selectStart..selectEnd] + deferred[applyStart..applyEnd];
-        Assert.Contains("plan_statement_count", added, StringComparison.Ordinal);
-        Assert.Contains("COUNT_BIG", added, StringComparison.Ordinal);
-        Assert.DoesNotContain("'", added, StringComparison.Ordinal);
-        Assert.Equal(captureOff.Split('\'').Length, deferred.Split('\'').Length);
+        /* The standard text names the cap once, in the dynamic SQL; the Azure text names it once. */
+        Assert.Single(System.Text.RegularExpressions.Regex.Matches(Build(MakeContext(capture: false)), @"TOP \(\d+\)"));
+        Assert.Single(System.Text.RegularExpressions.Regex.Matches(Build(MakeContext(capture: false, azure: true)), @"TOP \(\d+\)"));
     }
 
-    private static string Strip(string text, int start, string endMarker)
-    {
-        var end = text.IndexOf(endMarker, start, StringComparison.Ordinal);
-        Assert.True(end >= 0);
-        return text.Remove(start, end + endMarker.Length - start);
-    }
+    private static string PlanPhase(CollectorContext c) => ProcedureStatsCollector.BuildPlanPhaseQuery(c, s_handles).Text.ReplaceLineEndings("\n");
 
-    [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public void MainQuery_InlineCapture_StillCarriesTheModuleGrainPlanFetch(bool azure)
+    [Fact]
+    public void PlanPhase_Off_AppliesThePlanFragmentOverTheValuesList()
     {
-        var sql = Build(MakeContext(capture: true, azure: azure));
+        var sql = PlanPhase(MakeContext(capture: true));
 
-        Assert.Contains("OUTER APPLY sys.dm_exec_text_query_plan(CONVERT(varbinary(64), ranked.plan_handle, 1), 0, -1) AS tqp",
-            sql, StringComparison.Ordinal);
+        Assert.Contains("OUTER APPLY sys.dm_exec_text_query_plan(CONVERT(varbinary(64), ranked.plan_handle, 1), 0, -1) AS tqp", sql, StringComparison.Ordinal);
         Assert.Contains("query_plan_xml_bytes", sql, StringComparison.Ordinal);
+        Assert.Contains(") AS ranked (ord, plan_handle)", sql, StringComparison.Ordinal);
+        Assert.Contains("(0, '0x050005AB')", sql, StringComparison.Ordinal);
+        Assert.Contains("(1, '0x05000F01EE')", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("plan_statement_count", sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void PlanPhase_Shadow_AppliesBothFragments_PlanFirst()
+    {
+        var sql = PlanPhase(MakeContext(capture: true, identity: true));
+
+        Assert.Contains("dm_exec_text_query_plan", sql, StringComparison.Ordinal);
+        Assert.Contains("plan_statement_count = pfp.plan_statement_count", sql, StringComparison.Ordinal);
+        Assert.True(sql.IndexOf("query_plan_xml_bytes", StringComparison.Ordinal) < sql.IndexOf("plan_statement_count", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void PlanPhase_On_AppliesTheIdentityFragmentAlone()
+    {
+        foreach (var context in new[] { MakeContext(capture: true, defer: true, identity: true), MakeContext(capture: false, identity: true) })
+        {
+            var sql = PlanPhase(context);
+
+            Assert.DoesNotContain("dm_exec_text_query_plan", sql, StringComparison.Ordinal);
+            Assert.DoesNotContain("query_plan_xml", sql, StringComparison.Ordinal);
+            Assert.Contains("sys.dm_exec_query_stats", sql, StringComparison.Ordinal);
+            Assert.Contains("WHERE qs.plan_handle = CONVERT(varbinary(64), ranked.plan_handle, 1)", sql, StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
+    public void PlanPhase_Throws_OnEmpty_TooMany_ABadHandle_OrARunWithNoPlanPhase()
+    {
+        Assert.Throws<InvalidOperationException>(() =>
+            ProcedureStatsCollector.BuildPlanPhaseQuery(MakeContext(capture: true), Array.Empty<byte[]>()));
+        Assert.Throws<InvalidOperationException>(() =>
+            ProcedureStatsCollector.BuildPlanPhaseQuery(MakeContext(capture: false), s_handles));
+        Assert.Throws<InvalidOperationException>(() =>
+            ProcedureStatsCollector.BuildPlanPhaseQuery(MakeContext(capture: true), new[] { new byte[65] }));
+        Assert.Throws<InvalidOperationException>(() =>
+            ProcedureStatsCollector.BuildPlanPhaseQuery(MakeContext(capture: true), new[] { Array.Empty<byte>() }));
+        Assert.Throws<InvalidOperationException>(() =>
+            ProcedureStatsCollector.BuildPlanPhaseQuery(
+                MakeContext(capture: true), System.Linq.Enumerable.Repeat(new byte[] { 1 }, ProcedureStatsCollector.MaxPlansPerRun + 1).ToArray()));
+
+        /* Exactly the limit is fine. */
+        _ = ProcedureStatsCollector.BuildPlanPhaseQuery(
+            MakeContext(capture: true), System.Linq.Enumerable.Repeat(new byte[] { 1 }, ProcedureStatsCollector.MaxPlansPerRun).ToArray());
+    }
+
+    [Fact]
+    public void PlanPhaseApplies_OnlyWhenPlansOrIdentitiesAreAsked()
+    {
+        Assert.False(ProcedureStatsCollector.PlanPhaseApplies(MakeContext(capture: false)));
+        Assert.True(ProcedureStatsCollector.PlanPhaseApplies(MakeContext(capture: true)));
+        Assert.True(ProcedureStatsCollector.PlanPhaseApplies(MakeContext(capture: true, identity: true)));
+        Assert.True(ProcedureStatsCollector.PlanPhaseApplies(MakeContext(capture: false, identity: true)));
+        Assert.True(ProcedureStatsCollector.PlanPhaseApplies(MakeContext(capture: true, defer: true, identity: true)));
+    }
+
+    [Fact]
+    public void SelectPlanPhaseRows_TakesTheFirst150ParsableHandles_InRowOrder()
+    {
+        var rows = new List<ProcedureStatsCollector.Row>();
+        for (var i = 0; i < 200; i++)
+        {
+            /* Every tenth row has a handle that does not parse; it is never sent. */
+            rows.Add(default(ProcedureStatsCollector.Row) with { PlanHandle = i % 10 == 3 ? "garbage" : "0x" + i.ToString("X4", CultureInfo.InvariantCulture) });
+        }
+
+        var indexes = ProcedureStatsCollector.SelectPlanPhaseRows(rows, out var handles);
+
+        Assert.Equal(150, indexes.Count);
+        Assert.Equal(150, handles.Count);
+        Assert.DoesNotContain(3, indexes);
+        Assert.Equal(new[] { 0, 1, 2, 4 }, indexes.GetRange(0, 4));
+        Assert.Equal(new byte[] { 0x00, 0x04 }, handles[3]);
+        Assert.True(indexes.SequenceEqual(indexes.OrderBy(x => x)));
+    }
+
+    [Fact]
+    public void ApplyPlanPhase_MergesByPosition_AndMarksEveryOtherRowSkipped()
+    {
+        var rows = new List<ProcedureStatsCollector.Row>
+        {
+            default(ProcedureStatsCollector.Row) with { PlanHandle = "0x01" },
+            default(ProcedureStatsCollector.Row) with { PlanHandle = "0x02" },
+            default(ProcedureStatsCollector.Row) with { PlanHandle = "garbage" },
+        };
+        var compile = new DateTime(2026, 7, 1, 8, 30, 0, DateTimeKind.Utc);
+        var results = new Dictionary<int, ProcedureStatsCollector.PlanPhaseResult>
+        {
+            [0] = new("<p/>", 4L, 7L, compile, 19L),
+        };
+
+        ProcedureStatsCollector.ApplyPlanPhase(rows, new[] { 0, 1 }, results);
+
+        Assert.Equal("<p/>", rows[0].QueryPlanXml);
+        Assert.Equal(4L, rows[0].QueryPlanXmlBytes);
+        Assert.Equal(7L, rows[0].PlanStatementCount);
+        Assert.Equal(compile, rows[0].PlanLastStatementCompile);
+        Assert.Equal(19L, rows[0].PlanGenerationSum);
+        Assert.False(rows[0].PlanPhaseSkipped);
+        Assert.True(rows[1].PlanPhaseSkipped); /* sent, but no result came back */
+        Assert.True(rows[2].PlanPhaseSkipped); /* never sent */
+
+        /* A failed phase (null results) marks every row skipped and gives none a plan. */
+        ProcedureStatsCollector.ApplyPlanPhase(rows, new[] { 0, 1 }, null);
+        Assert.All(rows, r => Assert.True(r.PlanPhaseSkipped));
+    }
+
+    [Fact]
+    public async Task ReadPlanPhaseAsync_ReadsTheColumnsOfTheRunsMode()
+    {
+        var compile = new DateTime(2026, 7, 1, 8, 30, 0, DateTimeKind.Utc);
+
+        var on = await ReadPlanPhaseOneRowAsync(MakeContext(capture: true, defer: true, identity: true), "on", compile);
+        Assert.Null(on.PlanXml);
+        Assert.Null(on.PlanBytes);
+        Assert.Equal(7L, on.StatementCount);
+        Assert.Equal(compile, on.LastStatementCompile);
+        Assert.Equal(19L, on.GenerationSum);
+
+        var off = await ReadPlanPhaseOneRowAsync(MakeContext(capture: true), "off", compile);
+        Assert.Equal("<ShowPlanXML/>", off.PlanXml);
+        Assert.Equal(14L, off.PlanBytes);
+        Assert.Null(off.StatementCount);
+        Assert.Null(off.GenerationSum);
+
+        var shadow = await ReadPlanPhaseOneRowAsync(MakeContext(capture: true, identity: true), "shadow", compile);
+        Assert.Equal("<ShowPlanXML/>", shadow.PlanXml);
+        Assert.Equal(14L, shadow.PlanBytes);
+        Assert.Equal(7L, shadow.StatementCount);
+        Assert.Equal(compile, shadow.LastStatementCompile);
+        Assert.Equal(19L, shadow.GenerationSum);
+    }
+
+    private static async Task<ProcedureStatsCollector.PlanPhaseResult> ReadPlanPhaseOneRowAsync(CollectorContext context, string mode, DateTime compile)
+    {
+        using var table = new DataTable();
+        table.Columns.Add("ord", typeof(int));
+        if (mode != "on")
+        {
+            table.Columns.Add("query_plan_xml", typeof(string));
+            table.Columns.Add("query_plan_xml_bytes", typeof(long));
+        }
+
+        if (mode != "off")
+        {
+            table.Columns.Add("plan_statement_count", typeof(long));
+            table.Columns.Add("plan_last_statement_compile", typeof(DateTime));
+            table.Columns.Add("plan_generation_sum", typeof(long));
+        }
+
+        var values = new List<object> { 0 };
+        if (mode != "on")
+        {
+            values.Add("<ShowPlanXML/>");
+            values.Add(14L);
+        }
+
+        if (mode != "off")
+        {
+            values.Add(7L);
+            values.Add(compile);
+            values.Add(19L);
+        }
+
+        table.Rows.Add(values.ToArray());
+
+        await using var reader = table.CreateDataReader();
+        var results = await ProcedureStatsCollector.ReadPlanPhaseAsync(reader, context, CancellationToken.None);
+        return Assert.Single(results).Value;
     }
 
     [Fact]
@@ -214,48 +353,22 @@ public sealed class ProcedureStatsPlanFetchTests
     }
 
     [Fact]
-    public async Task ReadAsync_Deferred_ReadsIdentityOrdinals_NotPlanOrdinals()
+    public async Task ReadAsync_ReadsOrdinals0To26Only_NoPlanAndNoIdentity()
     {
-        var compile = new DateTime(2026, 7, 1, 8, 30, 0, DateTimeKind.Utc);
-
-        var deferred = await ReadOneRowAsync(MakeContext(capture: true, defer: true), deferredShape: true, compile);
-        Assert.Null(deferred.QueryPlanXml);
-        Assert.Null(deferred.QueryPlanXmlBytes);
-        Assert.Null(deferred.KnownPlanDigest);
-        Assert.Equal(7L, deferred.PlanStatementCount);
-        Assert.Equal(compile, deferred.PlanLastStatementCompile);
-        Assert.Equal(19L, deferred.PlanGenerationSum);
-
-        var inline = await ReadOneRowAsync(MakeContext(capture: true), deferredShape: false, compile);
-        Assert.Equal("<ShowPlanXML/>", inline.QueryPlanXml);
-        Assert.Equal(14L, inline.QueryPlanXmlBytes);
-        Assert.Null(inline.PlanStatementCount);
-        Assert.Null(inline.PlanGenerationSum);
-
-        var off = await ReadOneRowAsync(MakeContext(capture: false), deferredShape: false, compile, extra: false);
-        Assert.Null(off.QueryPlanXml);
-        Assert.Null(off.PlanStatementCount);
+        var row27 = await ReadOneRowAsync(MakeContext(capture: true, identity: true));
+        Assert.Null(row27.QueryPlanXml);
+        Assert.Null(row27.QueryPlanXmlBytes);
+        Assert.Null(row27.PlanStatementCount);
+        Assert.Null(row27.PlanGenerationSum);
+        Assert.False(row27.PlanPhaseSkipped);
     }
 
-    private static async Task<ProcedureStatsCollector.Row> ReadOneRowAsync(
-        CollectorContext context, bool deferredShape, DateTime compile, bool extra = true)
+    private static async Task<ProcedureStatsCollector.Row> ReadOneRowAsync(CollectorContext context)
     {
         using var table = new DataTable();
         for (var i = 0; i < 27; i++)
         {
             table.Columns.Add("c" + i.ToString(CultureInfo.InvariantCulture), ColumnType(i));
-        }
-
-        if (extra && deferredShape)
-        {
-            table.Columns.Add("plan_statement_count", typeof(long));
-            table.Columns.Add("plan_last_statement_compile", typeof(DateTime));
-            table.Columns.Add("plan_generation_sum", typeof(long));
-        }
-        else if (extra)
-        {
-            table.Columns.Add("query_plan_xml", typeof(string));
-            table.Columns.Add("query_plan_xml_bytes", typeof(long));
         }
 
         var values = new object[table.Columns.Count];
@@ -264,18 +377,6 @@ public sealed class ProcedureStatsPlanFetchTests
             values[i] = ColumnType(i) == typeof(long) && (i is 6 or 7 or 8 or 9 or 10 or 11 or 22 or 23 or 24)
                 ? 1L
                 : DBNull.Value;
-        }
-
-        if (extra && deferredShape)
-        {
-            values[27] = 7L;
-            values[28] = compile;
-            values[29] = 19L;
-        }
-        else if (extra)
-        {
-            values[27] = "<ShowPlanXML/>";
-            values[28] = 14L;
         }
 
         table.Rows.Add(values);
