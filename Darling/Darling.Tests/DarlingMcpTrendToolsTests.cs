@@ -359,7 +359,7 @@ public sealed class DarlingMcpTrendToolsSurfaceAndSqlTests
         Assert.DoesNotContain("ELSE 0", sql, StringComparison.Ordinal);
         Assert.Contains("CASE WHEN interval_seconds > 0 THEN total_elapsed_ms / interval_seconds END AS elapsed_ms_per_second", sql, StringComparison.Ordinal);
 
-        /* The viewer's per-collection CTE minus its database-filter lines is the MCP statement's, whitespace aside (since
+        /* #5449: the procedure statement's per-collection CTE is named stored (idle runs are unioned after it as raw). The viewer's per-collection CTE minus its database-filter lines is the MCP statement's, whitespace aside (since
            #5244 both run the filtered statement).
            #5414 M1: the filter is inside the aggregates, so the lines that differ are the two sums (FILTERed in the
            viewer's) and the matched-rows count; everything else, the stored-interval CASE and the FROM / WHERE (which
@@ -367,10 +367,10 @@ public sealed class DarlingMcpTrendToolsSurfaceAndSqlTests
         static bool IsFilteredSumLine(string l) =>
             l.Contains("delta_elapsed_time", StringComparison.Ordinal) || l.Contains("delta_execution_count", StringComparison.Ordinal)
             || l.Contains("matched_rows", StringComparison.Ordinal);
-        var viewerCte = Cte(Lf(ViewerDataService.ProcedureDurationTrendSql), "raw AS\n(");
+        var viewerCte = Cte(Lf(ViewerDataService.ProcedureDurationTrendSql), "stored AS\n(");
         Assert.Equal(3, viewerCte.Split('\n').Count(l => l.Contains("FILTER (WHERE $4::text[] IS NULL OR database_name = ANY($4))", StringComparison.Ordinal)));
         var viewer = string.Join('\n', viewerCte.Split('\n').Where(l => !IsFilteredSumLine(l)).Select(l => l.Trim()));
-        var mcp = string.Join('\n', Cte(Lf(sql), "raw AS\n(").Split('\n').Where(l => !IsFilteredSumLine(l)).Select(l => l.Trim()));
+        var mcp = string.Join('\n', Cte(Lf(sql), "stored AS\n(").Split('\n').Where(l => !IsFilteredSumLine(l)).Select(l => l.Trim()));
         Assert.Equal(viewer, mcp);
 
         /* And the shared readers KEEP a NULL-rate row as an unrated point rather than reading it as 0 or
