@@ -465,6 +465,8 @@ WHERE view_schema = 'collect' AND view_name = '{HourlyView}'", connection);
     {
         await using var admin = new NpgsqlConnection(baseConnectionString);
         await admin.OpenAsync(ct);
+        /* No TimescaleDB job worker is left in the database the FORCE drop below kills (#5480). */
+        await ScratchPostgres.QuiesceTimescaleJobsAsync(baseConnectionString, databaseName);
         await using (var drop = new NpgsqlCommand($"DROP DATABASE \"{databaseName}\" WITH (FORCE)", admin))
         {
             await drop.ExecuteNonQueryAsync(ct);

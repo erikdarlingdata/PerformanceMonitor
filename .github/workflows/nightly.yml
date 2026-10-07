@@ -520,6 +520,26 @@ jobs:
           DARLING_TEST_PGRUNTIME_PREVIOUS: ${{ github.workspace }}\Darling\artifacts\upgrade-fixture\previous\pg-runtime
         run: dotnet run --project Darling/Darling.Tests/Darling.Tests.csproj -c Release --no-build -- -trx TestResults/darling-nightly.trx
 
+      # PR #5480: a TimescaleDB job worker died with 0xC0000005 in two CI runs and both runs read "success",
+      # because the postmaster restarts and the tests retry. The crash shows only in the PostgreSQL log, as
+      # "terminated by exception", so this step turns it into a warning on the run. It only warns: it never
+      # fails the job, and it runs when the tests failed too.
+      - name: Warn if a PostgreSQL worker crashed
+        if: always()
+        shell: pwsh
+        run: |
+          $log = "$env:RUNNER_TEMP\darling-pg.log"
+          if (Test-Path $log) {
+            $hits = @(Select-String -Path $log -Pattern 'terminated by exception' -SimpleMatch)
+            foreach ($hit in ($hits | Select-Object -First 5)) {
+              $line = $hit.Line
+              if ($line.Length -gt 300) { $line = $line.Substring(0, 300) }
+              Write-Host "::warning title=PostgreSQL worker terminated by exception::$line"
+            }
+            if ($hits.Count -gt 0) { Write-Host "$($hits.Count) 'terminated by exception' line(s) in darling-pg.log" }
+          }
+          exit 0
+
       - name: Stop PostgreSQL
         if: always()
         shell: pwsh
