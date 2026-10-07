@@ -30,7 +30,7 @@ public sealed class StatementFilterAlertTests
     private const string Marker = SensitiveStatements.PlaceholderText;
 
     /// <summary>A blocked-process report whose two input buffers hold the canary and the plain statement.</summary>
-    private static string ReportXml() =>
+    internal static string ReportXml() =>
         "<blocked-process-report monitorLoop=\"1\"><blocked-process><process id=\"p1\" spid=\"55\">"
         + "<inputbuf>" + StatementScrubCanary.CanaryStatement + "</inputbuf></process></blocked-process>"
         + "<blocking-process><process id=\"p2\" spid=\"155\"><inputbuf>" + StatementScrubCanary.PlainStatement
@@ -88,7 +88,7 @@ public sealed class StatementFilterAlertTests
         }
     }
 
-    private static void AssertNoSecret(string text)
+    internal static void AssertNoSecret(string text)
     {
         foreach (var needle in StatementScrubCanary.SecretNeedles)
         {
@@ -96,7 +96,7 @@ public sealed class StatementFilterAlertTests
         }
     }
 
-    private static AlertEngineTests.Harness BlockingHarness(out AlertEngineTests.Harness h)
+    internal static AlertEngineTests.Harness BlockingHarness(out AlertEngineTests.Harness h)
     {
         h = new AlertEngineTests.Harness();
         h.Settings.BlockingEnabled = true;
@@ -479,99 +479,5 @@ public sealed class StatementFilterAlertTests
         Assert.Equal(3, budget.DocumentPasses);
         // And the budget earned 0.5 s per MB of each of them (a little under 2.0 s each, so about 7.4 s), not 1.5 s in all.
         Assert.InRange(budget.Limit, TimeSpan.FromSeconds(7.25), TimeSpan.FromSeconds(8.5));
-    }
-
-    // ---- #5478: an alert that arrives while the warm-up is still running waits for it, but never longer than a bound ----
-
-    [Fact]
-    public void WaitForWarmUp_ARunningWarmUp_IsWaitedForOnlyUpToTheLimit()
-    {
-        var running = new TaskCompletionSource();
-        Assert.Equal(TimeSpan.FromSeconds(3), AlertStatementFilter.WarmUpWaitLimit);
-
-        var watch = Stopwatch.StartNew();
-        var finished = AlertStatementFilter.WaitForWarmUp(running.Task, TimeSpan.FromMilliseconds(300));
-        watch.Stop();
-
-        Assert.False(finished);
-        Assert.InRange(watch.ElapsedMilliseconds, 250, 2500);
-
-        // The same task, finished a moment later, ends the wait early.
-        _ = Task.Run(async () => { await Task.Delay(200); running.SetResult(); });
-        watch.Restart();
-        Assert.True(AlertStatementFilter.WaitForWarmUp(running.Task, TimeSpan.FromSeconds(20)));
-        Assert.InRange(watch.ElapsedMilliseconds, 0, 5000);
-    }
-
-    [Fact]
-    public void WaitForWarmUp_NoWarmUp_AFinishedOne_OrAThrownOne_DelaysNoOne()
-    {
-        var thrown = Task.FromException(new InvalidOperationException("boom"));
-        var watch = Stopwatch.StartNew();
-        Assert.True(AlertStatementFilter.WaitForWarmUp(null, TimeSpan.FromSeconds(20)));
-        Assert.True(AlertStatementFilter.WaitForWarmUp(Task.CompletedTask, TimeSpan.FromSeconds(20)));
-        Assert.True(AlertStatementFilter.WaitForWarmUp(thrown, TimeSpan.FromSeconds(20)));
-        watch.Stop();
-        Assert.True(watch.ElapsedMilliseconds < 1000, "took " + watch.ElapsedMilliseconds + " ms");
-        _ = thrown.Exception;
-    }
-
-    [Fact]
-    public async Task Apply_DuringASlowWarmUp_WaitsForItAndThenJudgesTheContext()
-    {
-        // Settle the process's own warm-up first, so no other test replaces the one this test staged.
-        await StatementFilterWarmUp.EnsureAsync();
-        using var release = new ManualResetEventSlim(false);
-        var slow = AlertStatementFilter.WarmUpAsync(() => release.Wait(TimeSpan.FromSeconds(20)));
-
-        var apply = Task.Run(() => AlertStatementFilter.Apply(new AlertContext { AttachmentXml = ReportXml() }));
-        await Task.Delay(500);
-        Assert.False(apply.IsCompleted, "Apply did not wait for the warm-up that was still running");
-
-        release.Set();
-        var filtered = await apply.WaitAsync(TimeSpan.FromSeconds(20));
-        await slow;
-
-        AssertNoSecret(filtered!.AttachmentXml!);
-        Assert.Contains(StatementScrubCanary.PlainStatement, filtered.AttachmentXml!, StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public async Task TheWarmUpsOwnApplyCalls_NeverWaitOnTheWarmUp()
-    {
-        await StatementFilterWarmUp.EnsureAsync();
-        long insideMs = -1;
-        var warmUp = AlertStatementFilter.WarmUpAsync(() =>
-        {
-            var watch = Stopwatch.StartNew();
-            _ = AlertStatementFilter.Apply(new AlertContext { AttachmentXml = ReportXml() });
-            _ = AlertStatementFilter.Apply(new FindingAlert("A", "SRV", "1", "1", "101", new AlertContext { AttachmentXml = ReportXml() }, 0.9, 0.5, "plain", true));
-            insideMs = watch.ElapsedMilliseconds;
-        });
-
-        // Waiting on itself would cost the whole 3 s limit.
-        await warmUp.WaitAsync(TimeSpan.FromSeconds(20));
-        Assert.InRange(insideMs, 0, 2000);
-    }
-
-    [Fact]
-    public async Task Apply_AfterAWarmUpThatThrew_IsNotDelayed()
-    {
-        await StatementFilterWarmUp.EnsureAsync();
-        await AlertStatementFilter.WarmUpAsync(() => throw new InvalidOperationException("boom"));
-
-        var watch = Stopwatch.StartNew();
-        var filtered = AlertStatementFilter.Apply(new AlertContext { AttachmentXml = ReportXml() });
-        watch.Stop();
-
-        Assert.True(watch.ElapsedMilliseconds < 2000, "took " + watch.ElapsedMilliseconds + " ms");
-        AssertNoSecret(filtered!.AttachmentXml!);
-    }
-
-    [Fact]
-    public async Task TheAlertWarmUpSwallowsAThrownException_AndRunsTheDefaultProbe()
-    {
-        await AlertStatementFilter.WarmUpAsync(() => throw new InvalidOperationException("boom"));
-        await AlertStatementFilter.WarmUpAsync();
     }
 }

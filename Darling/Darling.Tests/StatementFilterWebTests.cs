@@ -295,6 +295,7 @@ public sealed class StatementFilterWebTests
     [Fact]
     public async Task AOneMegabyteAnswerThatNamesNothing_IsWrittenUnchanged_AndSweptInsideTheBudget()
     {
+        await StatementFilterWarmUp.EnsureAsync();
         var rows = new JsonArray();
         for (int i = 0; rows.Count < 12000; i++)
         {

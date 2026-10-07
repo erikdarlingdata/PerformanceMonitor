@@ -12,7 +12,6 @@ using System.Diagnostics;
 using System.Globalization;
 using System.Text;
 using System.Text.Json;
-using System.Threading;
 using System.Runtime.CompilerServices;
 using System.Threading.Tasks;
 using PerformanceMonitor.Common;
@@ -56,7 +55,9 @@ namespace PerformanceMonitor.Alerting;
 /// reports do not starve each other and one alert still stalls for a bounded time. A document that appears twice
 /// (the alert's attachment is also its first incident's) is judged once per budget and the repeat reuses the first
 /// result (#5477). Past the limit a value is withheld unjudged (the marker), never passed. A list of finding alerts
-/// shares one budget across the list.</para>
+/// shares one budget across the list. A call that judges 256 KB or more of text first waits for a running start-up
+/// warm-up, up to 3 s after the warm-up started; that wait comes before the budget starts and is not counted in it
+/// (#5478).</para>
 ///
 /// <para><b>Failure.</b> Never throws and never lets the input through after a failure: the alert is delivered
 /// with its detail items cleared, its attachments dropped, each incident's objects, forensic fields and attachment
@@ -85,7 +86,7 @@ public static class AlertStatementFilter
             return outcome;
         }
 
-        WaitForWarmUp();
+        SensitiveStatements.WaitForWarmUp(JudgedChars(outcome));
         try
         {
             var budget = new SensitiveStatements.JudgeBudget(SensitiveStatements.ReadBudget);
@@ -166,7 +167,7 @@ public static class AlertStatementFilter
             return null;
         }
 
-        WaitForWarmUp();
+        SensitiveStatements.WaitForWarmUp(JudgedChars(context));
         try
         {
             return ApplyCore(context, new SensitiveStatements.JudgeBudget(SensitiveStatements.ReadBudget));
@@ -186,7 +187,7 @@ public static class AlertStatementFilter
     public static FindingAlert Apply(FindingAlert alert)
     {
         ArgumentNullException.ThrowIfNull(alert);
-        WaitForWarmUp();
+        SensitiveStatements.WaitForWarmUp(JudgedChars(alert));
         return ApplyFinding(alert, new SensitiveStatements.JudgeBudget(SensitiveStatements.ReadBudget));
     }
 
@@ -195,7 +196,13 @@ public static class AlertStatementFilter
     {
         ArgumentNullException.ThrowIfNull(alerts);
 
-        WaitForWarmUp();
+        long judgedChars = 0;
+        for (var i = 0; i < alerts.Count; i++)
+        {
+            judgedChars += JudgedChars(alerts[i]);
+        }
+
+        SensitiveStatements.WaitForWarmUp(judgedChars);
         var budget = new SensitiveStatements.JudgeBudget(SensitiveStatements.ReadBudget);
         List<FindingAlert>? result = null;
         for (var i = 0; i < alerts.Count; i++)
@@ -242,54 +249,113 @@ public static class AlertStatementFilter
     /// here, and the hot methods are called enough times, with pauses between the rounds so the runtime's background
     /// compiler gets to replace their first, unoptimized code (#5477). At least 40 judged documents, but never more than
     /// about 2 seconds, off the startup path. Never throws and logs nothing; the task it returns always completes normally.
+    /// <para>Every <c>Apply</c> call that judges 256 KB or more of text in total waits for the most recent warm-up before
+    /// its budget starts, but never past 3 seconds from the moment that warm-up started, so the wait is not budget
+    /// time. The engine's async fire path awaits the warm-up instead of blocking a thread.</para>
     /// </summary>
-    /// <param name="probe">What to run in place of the default; a test passes one that throws.</param>
-    public static Task WarmUpAsync(Action? probe = null)
-    {
-        var warmUp = Task.Run(async () =>
-        {
-            /* The warm-up's own Apply and Json calls never wait on the warm-up they belong to. The flag is async-local,
-               so it follows the warm-up across its awaits and never reaches a caller's thread. */
-            s_insideWarmUp.Value = true;
-            await RunWarmUpAsync(probe).ConfigureAwait(false);
-        });
-        Volatile.Write(ref s_warmUp, warmUp);
-        return warmUp;
-    }
+    public static Task WarmUpAsync() => WarmUpAsync(null);
 
-    /// <summary>The longest an alert waits for a warm-up that is still running (#5478); then it is judged as it would be cold.</summary>
-    internal static readonly TimeSpan WarmUpWaitLimit = TimeSpan.FromSeconds(3);
-
-    private static Task? s_warmUp;
-    private static readonly AsyncLocal<bool> s_insideWarmUp = new();
+    /// <summary>The same with a probe in place of the default work; a test passes one that throws or stalls. Internal so
+    /// no caller outside the product's own start path can choose the work every alert waits on (#5484).</summary>
+    internal static Task WarmUpAsync(Action? probe) =>
+        /* The task and its start time are registered before the work can run, and the work's own Apply calls never wait
+           on the warm-up they belong to. */
+        SensitiveStatements.StartWarmUp(() => RunWarmUpAsync(probe));
 
     /// <summary>
-    /// #5478: the warm-up starts at the same moment as the first stored alerts are read (Lite judges the stored fleet
-    /// as soon as its window is up), and the first walks of a large report in a cold process can cost more than the
-    /// judging budget, which would clear the report. So an alert that arrives while the warm-up is still running waits
-    /// for it, but never longer than <see cref="WarmUpWaitLimit"/>. A warm-up that finished, threw, was never started,
-    /// or is the caller itself costs nothing. Never throws.
+    /// The characters this call will judge, summed over the fields the filter reads (#5478): the text of each detail
+    /// item, the attachment, and each incident's objects, fields and attachment. The size gate of the warm-up wait.
     /// </summary>
-    private static void WaitForWarmUp() => WaitForWarmUp(Volatile.Read(ref s_warmUp), WarmUpWaitLimit);
+    private static long JudgedChars(AlertOutcome outcome) =>
+        JudgedChars(outcome.Context) + Len(outcome.DetailText) + Len(outcome.ShortMessage) + Len(outcome.DisplayName);
 
-    internal static bool WaitForWarmUp(Task? warmUp, TimeSpan limit)
+    private static long JudgedChars(FindingAlert alert) => JudgedChars(alert.Context) + Len(alert.DetailText);
+
+    private static long JudgedChars(AlertContext? context)
     {
-        if (warmUp is null || warmUp.IsCompleted || s_insideWarmUp.Value)
+        if (context is null)
         {
-            return true;
+            return 0;
         }
 
         try
         {
-            return warmUp.Wait(limit);
+            return SumJudgedChars(context);
         }
-#pragma warning disable CA1031 // a failed wait changes nothing: the alert is judged as it would be cold
+#pragma warning disable CA1031 // a context that cannot be measured (a null item) is failed closed by the judging itself
         catch (Exception)
 #pragma warning restore CA1031
         {
-            return false;
+            return 0;
         }
     }
+
+    private static long SumJudgedChars(AlertContext context)
+    {
+        long total = Len(context.AttachmentXml);
+        if (context.Details is not null)
+        {
+            foreach (var item in context.Details)
+            {
+                total += Len(item.Heading) + Len(item.Body);
+                if (item.Fields is not null)
+                {
+                    foreach (var field in item.Fields)
+                    {
+                        total += Len(field.Value);
+                    }
+                }
+
+                if (item.Records is not null)
+                {
+                    foreach (var record in item.Records)
+                    {
+                        total += Len(record.Summary);
+                        if (record.Texts is not null)
+                        {
+                            foreach (var text in record.Texts)
+                            {
+                                total += Len(text.Text);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if (context.Incidents is not null)
+        {
+            foreach (var incident in context.Incidents)
+            {
+                if (incident is null)
+                {
+                    continue;
+                }
+
+                if (incident.InvolvedObjects is not null)
+                {
+                    foreach (var involved in incident.InvolvedObjects)
+                    {
+                        total += Len(involved);
+                    }
+                }
+
+                if (incident.DetailFields is not null)
+                {
+                    foreach (var field in incident.DetailFields)
+                    {
+                        total += Len(field.Value);
+                    }
+                }
+
+                total += Len(incident.Attachment?.Xml);
+            }
+        }
+
+        return total;
+    }
+
+    private static int Len(string? text) => text?.Length ?? 0;
 
     private static async Task RunWarmUpAsync(Action? probe)
     {

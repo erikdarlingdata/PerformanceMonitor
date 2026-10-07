@@ -3256,6 +3256,9 @@ public sealed class AlertEngine
            outcome.Muted, so a rule keyed on a statement still matches; only what leaves the process (the log,
            the channels, the history row) is filtered. Both deliverers re-derive their text from the context, so
            the context is rewritten, not just DetailText. */
+        /* #5484: when the start-up warm-up is still running, wait for it here, asynchronously (Lite fires from its UI
+           thread), so the filter's own blocking wait finds the warm-up done or the 3 s deadline passed. */
+        await SensitiveStatements.WhenWarmAsync();
         outcome = AlertStatementFilter.MarkJudged(AlertStatementFilter.Apply(outcome));
 
         _logger?.LogWarning(

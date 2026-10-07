@@ -84,6 +84,10 @@ public static class SensitiveStatementOutputFilter
 
         try
         {
+            /* #5478 / #5484: a large read in the first seconds of the process would walk cold code and be withheld, so
+               a result of 256 KB or more first waits for the start-up warm-up, up to 3 s after it started. The sweep
+               runs on a pool thread, so the blocking wait is fine. */
+            SensitiveStatements.WaitForWarmUp(SweptChars(result));
             var budget = new SensitiveStatements.JudgeBudget(SensitiveStatements.ReadBudget);
             bool changed = false;
 
@@ -132,6 +136,33 @@ public static class SensitiveStatementOutputFilter
         {
             return Refusal();
         }
+    }
+
+    /// <summary>The characters the sweep will judge in <paramref name="result"/>: the text of each text block and text
+    /// resource, and the structured content. The size gate of the warm-up wait; a block the sweep cannot read
+    /// counts for nothing here because it is refused, not walked.</summary>
+    private static long SweptChars(CallToolResult result)
+    {
+        long total = 0;
+        if (result.Content is { Count: > 0 } blocks)
+        {
+            foreach (ContentBlock block in blocks)
+            {
+                total += block switch
+                {
+                    TextContentBlock text => text.Text?.Length ?? 0,
+                    EmbeddedResourceBlock { Resource: TextResourceContents resource } => resource.Text?.Length ?? 0,
+                    _ => 0,
+                };
+            }
+        }
+
+        if (result.StructuredContent is { } structured)
+        {
+            total += structured.GetRawText().Length;
+        }
+
+        return total;
     }
 
     /// <summary>Sweeps one block. A block type this filter does not know (an image, audio, a blob resource, a
