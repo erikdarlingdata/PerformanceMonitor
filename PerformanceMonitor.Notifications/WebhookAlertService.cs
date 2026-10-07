@@ -237,8 +237,9 @@ public class WebhookAlertService
 
             /* #5469: the PagerDuty auto-resolve behaviour reaches the cooldown only when PagerDuty will
                actually be sent this alert: the flag on AND a destination for this metric. Read ONCE, here: the
-               scope, the seed, both clears and the dedup key all use this one value, so they name one key
-               even if the flag is saved while the post is in flight. With the flag off, or PagerDuty unset or
+               scope, the seed and both clears use this one value, so they name one key even if the
+               flag is saved while the post is in flight. The send's own dedup key and the triage link read
+               the same delivery snapshot (the live settings in Lite, which does not freeze one). With the flag off, or PagerDuty unset or
                not routed for the metric, every key is the one dev has always used. */
             var pagerDutyAutoResolve = delivery.PagerDutyAutoResolve && route.PagerDuty.Destination is not null;
 
