@@ -903,6 +903,7 @@ public sealed class CompressionEnableGuardLiveTests
 /// #5444, live: a convergence step whose failure makes Npgsql close the shared connection (XX000 is in the
 /// classes Npgsql 10 closes on) must not fail the steps behind it on the same connection.
 /// </summary>
+[Collection("live-postgres")]
 public sealed class StoreObjectConvergenceReopenLiveTests
 {
     private static DarlingWorker.StoreObjectConvergenceStep Step(string name, Func<NpgsqlConnection, Task> body) =>
