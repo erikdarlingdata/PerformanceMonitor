@@ -318,6 +318,15 @@ public sealed class CaggGroupIndexDropLiveTests
     /// A future rung that adds a new probe sentinel must add its artifact's removal here.</summary>
     private static async Task DropArtifactsOfLaterRungsAsync(NpgsqlConnection connection, int simulatedVersion, CancellationToken ct)
     {
+        if (simulatedVersion < LegacyPinCandidateTables.RungVersion)
+        {
+            /* V166 (#5456) - the table that records the old-format values present at the upgrade;
+               config.legacy_secret_pin_candidate is the probe's sentinel. It goes before the V165 arm below, because its
+               triggers use the function that arm drops. */
+            await using var dropCandidates = new NpgsqlCommand("DROP TABLE IF EXISTS config.legacy_secret_pin_candidate", connection);
+            await dropCandidates.ExecuteNonQueryAsync(ct);
+        }
+
         if (simulatedVersion < PasswordKeyTables.RungVersion)
         {
             /* V165 (#5366) - the tables for the service's password key; config.password_key is the probe's sentinel.

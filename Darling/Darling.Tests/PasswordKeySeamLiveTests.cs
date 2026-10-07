@@ -121,6 +121,9 @@ VALUES (@id, @name, 'alpha-example', 'example_db', 'sqlserver', 1433, FALSE, 'sq
             // A value saved before the upgrade, in the old format.
             await ExecAsync(source, InsertServer, ct, ("id", 1), ("name", "alpha-example"), ("stored", "legacy-server-blob"));
 
+            // The upgrade records the old-format values that are in the store; only those can be pinned.
+            await ExecAsync(source, LegacyPinCandidateTables.CaptureSql, ct);
+
             var opened = 0;
             string Unprotect(string text)
             {
@@ -128,11 +131,17 @@ VALUES (@id, @name, 'alpha-example', 'example_db', 'sqlserver', 1433, FALSE, 'sq
                 return text == "legacy-server-blob" ? FakePassword : throw new System.Security.Cryptography.CryptographicException("not a saved value");
             }
 
+            bool CanOpen(string text)
+            {
+                opened++;
+                return text == "legacy-server-blob" ? true : throw new System.Security.Cryptography.CryptographicException("not a saved value");
+            }
+
             // The first start on Windows pins the value to its row and connection.
             IPasswordKeyRing? ring = null;
             await DarlingPasswordKeyRuntime.StartAsync(
                 directory, source, new CapturingTestLogger(), ct,
-                new PasswordKeyStartOptions { IsWindows = true, Unprotect = Unprotect, SetRing = r => ring = r, ServiceHost = "example-host" });
+                new PasswordKeyStartOptions { IsWindows = true, CanOpen = CanOpen, SetRing = r => ring = r, ServiceHost = "example-host" });
             var openedByTheStart = opened;
             Assert.True(openedByTheStart > 0, "the start did not open the old value to pin it");
 

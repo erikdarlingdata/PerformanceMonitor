@@ -27,8 +27,8 @@ internal sealed record PasswordKeyStartOptions
     /// <summary>The platform answer for the legacy pin snapshot. Null means this machine.</summary>
     public bool? IsWindows { get; init; }
 
-    /// <summary>Opens a legacy value. Null means <see cref="DarlingSecrets.Unprotect"/> on Windows.</summary>
-    public Func<string, string?>? Unprotect { get; init; }
+    /// <summary>Says whether this machine opens a legacy value, without returning it. Null means <see cref="DarlingSecrets.CanUnprotect"/> on Windows.</summary>
+    public Func<string, bool>? CanOpen { get; init; }
 
     /// <summary>Judges a key kept from an open directory against the published key. Null means <see cref="DarlingPasswordKeyRuntime.SelfTest"/>.</summary>
     public Func<PasswordPrivateKey, PublishedKey, bool>? SelfTest { get; init; }
@@ -487,8 +487,9 @@ internal sealed class DarlingPasswordKeyRuntime
         try
         {
             var windows = options.IsWindows ?? OperatingSystem.IsWindows();
-            var unprotect = options.Unprotect ?? WindowsUnprotect;
-            var snapshot = await DarlingPasswordKeyStore.SnapshotLegacyPinsAsync(postgres, windows, unprotect, logger, ct).ConfigureAwait(false);
+            var canOpen = options.CanOpen ?? WindowsCanOpen;
+            var snapshot = await DarlingPasswordKeyStore.SnapshotLegacyPinsAsync(
+                postgres, windows, canOpen, ServiceCommandDeadlines.BootstrapSeconds, logger, ct).ConfigureAwait(false);
             if (windows && string.Equals(snapshot.MarkerState, "done", StringComparison.Ordinal))
             {
                 logger.LogInformation("Legacy password pins: {Pinned} saved password(s) pinned to their connection.", snapshot.Pinned);
@@ -500,6 +501,6 @@ internal sealed class DarlingPasswordKeyRuntime
         }
     }
 
-    private static string? WindowsUnprotect(string stored) =>
-        OperatingSystem.IsWindows() ? DarlingSecrets.Unprotect(stored) : null;
+    private static bool WindowsCanOpen(string stored) =>
+        OperatingSystem.IsWindows() && DarlingSecrets.CanUnprotect(stored);
 }

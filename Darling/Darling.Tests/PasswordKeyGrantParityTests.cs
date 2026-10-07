@@ -63,7 +63,7 @@ public sealed class PasswordKeyGrantParityTests
         Assert.Equal(script.RevokeText, managed.RevokeText);
         Assert.Equal(script.GrantText, managed.GrantText);
         Assert.Equal(
-            "REVOKE ALL ON config.password_key, config.password_key_service, config.legacy_secret_pin, config.legacy_secret_pin_marker FROM PUBLIC, admin, viewer, mcp CASCADE",
+            "REVOKE ALL ON config.password_key, config.password_key_service, config.legacy_secret_pin, config.legacy_secret_pin_marker, config.legacy_secret_pin_candidate FROM PUBLIC, admin, viewer, mcp CASCADE",
             managed.RevokeText);
         Assert.Equal("GRANT SELECT ON config.password_key, config.password_key_service TO admin", managed.GrantText);
 

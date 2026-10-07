@@ -671,6 +671,18 @@ CREATE TABLE IF NOT EXISTS config.store_statement_baseline
     /// </summary>
     private const string V165Sql = PasswordKeyTables.CreateSql;
 
+    /// <summary>
+    /// V166 (#5456) — the record of which old-format saved passwords were in the store at the upgrade:
+    /// <c>config.legacy_secret_pin_candidate</c>, with the hash of each stored value and the connection columns it is
+    /// saved for. The text and the reasoning are on <see cref="LegacyPinCandidateTables"/>, which the rung embeds. The
+    /// table and its two owner-only triggers are made first and the values are recorded after them in the same
+    /// transaction, and only while the one-time pin step is still open (a store whose step is done records nothing). V165
+    /// is not changed: a store already at 165 does not run it again, which is why this is a new rung.
+    ///
+    /// <para><b>No Lite twin.</b> Lite keeps its secrets in its own local store.</para>
+    /// </summary>
+    private const string V166Sql = LegacyPinCandidateTables.CreateSql + "\n\n" + LegacyPinCandidateTables.CaptureSql;
+
     public static IReadOnlyList<Migration> Scripts { get; } = new[]
     {
         new Migration(1, "collector-tables", PgSchemaGenerator.GenerateFullSchema()),
@@ -874,6 +886,7 @@ CREATE TABLE IF NOT EXISTS config.store_statement_baseline
         new Migration(163, "store-statement-history", V163Sql),
         new Migration(164, "query-stats-hour-ledger", V164Sql),
         new Migration(165, "password-key", V165Sql),
+        new Migration(166, "legacy-pin-candidates", V166Sql),
     };
 
     /// <summary>

@@ -117,6 +117,17 @@ public sealed class DarlingPasswordKeyRuntimeTests
     }
 
     [Fact]
+    public void ThePinStep_NeverBuildsThePlaintext()
+    {
+        // #5456: the step asks whether this machine opens a value (CanUnprotect) and never holds the opened password.
+        foreach (var file in new[] { "DarlingPasswordKeyStore.cs", "DarlingPasswordKeyRuntime.cs" })
+        {
+            var source = ReadSource("Darling/PerformanceMonitor.Darling.Service/" + file);
+            Assert.DoesNotContain("DarlingSecrets.Unprotect(", source, StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
     public void TheVerb_IsDispatchedFromProgram()
     {
         var program = ReadSource("Darling/PerformanceMonitor.Darling.Service/Program.cs");

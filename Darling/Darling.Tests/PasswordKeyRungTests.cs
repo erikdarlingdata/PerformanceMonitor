@@ -20,8 +20,8 @@ namespace Darling.Tests;
 
 /// <summary>
 /// Pins the Darling rung that adds the tables for the service's published password key (V165, #5366): the rung's place
-/// in the ladder (always the NEWEST rung, written as <c>Scripts[^1]</c> so the next rung needs no edit here), the shape of
-/// its script, and the schema-version probe's newest sentinel. The live fact mints its own scratch store.
+/// in a dense ladder, the shape of its script, and its schema-version probe sentinel, which is an arm below the newest
+/// (V166's) now. The live fact mints its own scratch store.
 /// </summary>
 [Collection("live-postgres")]
 public sealed class PasswordKeyRungTests
@@ -44,6 +44,7 @@ public sealed class PasswordKeyRungTests
 
         Assert.Equal(PasswordKeyTables.RungVersion, Rung.Version);
         Assert.Single(PgMigrations.Scripts, m => m.Name == RungName);
+        Assert.True(Rung.Version <= StorageVersion.SchemaVersion);
         Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
         Assert.Equal(versions.Distinct().OrderBy(v => v), versions);
         Assert.Contains(Rung.Version - 1, versions);
@@ -156,33 +157,39 @@ public sealed class PasswordKeyRungTests
     }
 
     [Fact]
-    public void TheProbeCarriesTheKeyTable_AsTheNewestArm_AndMapsFullyMigratedToTheNewestRung()
+    public void TheProbeCarriesTheKeyTable_AsAnArmBelowTheNewest_AndMapsAStoreWithoutTheNewerRungsToV165()
     {
         var probe = ViewerDataService.StoreSchemaProbeSql.Replace("\r\n", "\n", StringComparison.Ordinal);
-        var arm = "to_regclass('config.password_key') IS NOT NULL";
+        var arm ="to_regclass('config.password_key') IS NOT NULL";
         Assert.Contains(arm, probe, StringComparison.Ordinal);
-        Assert.True(probe.LastIndexOf("EXISTS", StringComparison.Ordinal) < probe.IndexOf(arm, StringComparison.Ordinal),
-            "the new arm is the probe's last EXISTS, so it reads at the next ordinal");
 
         var viewer = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.cs");
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal})", viewer, StringComparison.Ordinal);
-        Assert.DoesNotContain($"reader.GetBoolean({ProbeOrdinal + 1})", viewer, StringComparison.Ordinal);
 
         var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
         var parameters = method.GetParameters();
-        Assert.Equal(ProbeOrdinal, parameters.Length - 1);
         Assert.Equal("hasPasswordKey", parameters[ProbeOrdinal].Name);
 
+        /* Every rung above this one must also be false, or the map finds the newer arm first and this assertion would be
+           checking the wrong rung's fallthrough. */
         var all = Enumerable.Repeat((object)true, parameters.Length).ToArray();
         Assert.Equal(PgMigrations.Scripts[^1].Version, (int)method.Invoke(null, all)!);
         Assert.Equal(StorageVersion.SchemaVersion, ViewerDataService.RequiredStoreSchemaVersion);
 
         var behind = (object[])all.Clone();
+        for (var i = ProbeOrdinal + 1; i < parameters.Length; i++)
+        {
+            behind[i] = false;
+        }
+
+        Assert.Equal(Rung.Version, (int)method.Invoke(null, behind)!);
         behind[ProbeOrdinal] = false;
-        Assert.Equal(PgMigrations.Scripts[^1].Version - 1, (int)method.Invoke(null, behind)!);
+        Assert.Equal(Rung.Version - 1, (int)method.Invoke(null, behind)!);
 
         var thisArm = viewer.IndexOf("if (hasPasswordKey)", StringComparison.Ordinal);
         var previousArm = viewer.IndexOf("if (hasQueryStatsHourLedger)", StringComparison.Ordinal);
+        var topArm = viewer.IndexOf("if (hasLegacyPinCandidates)", StringComparison.Ordinal);
+        Assert.True(topArm >= 0 && topArm < thisArm, "the newest rung's arm sits above this one");
         Assert.True(thisArm >= 0 && thisArm < previousArm, "this arm sits above the previous rung's");
         Assert.Contains($"return {Rung.Version};", viewer[thisArm..previousArm], StringComparison.Ordinal);
 
@@ -206,9 +213,9 @@ public sealed class PasswordKeyRungTests
         try
         {
             Assert.Equal(StorageVersion.SchemaVersion, Convert.ToInt32(await ScalarAsync(connection, "SELECT MAX(version) FROM darling_schema_version", ct)));
-            Assert.Equal(4L, await ScalarAsync(connection,
-                "SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'config' AND c.relkind = 'r' AND c.relname IN ('password_key','password_key_service','legacy_secret_pin','legacy_secret_pin_marker')", ct));
-            Assert.Equal(8L, await ScalarAsync(connection,
+            Assert.Equal(5L, await ScalarAsync(connection,
+                "SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'config' AND c.relkind = 'r' AND c.relname IN ('password_key','password_key_service','legacy_secret_pin','legacy_secret_pin_marker','legacy_secret_pin_candidate')", ct));
+            Assert.Equal(10L, await ScalarAsync(connection,
                 "SELECT count(*) FROM pg_trigger t JOIN pg_proc p ON p.oid = t.tgfoid WHERE NOT t.tgisinternal AND p.proname = 'password_key_owner_only'", ct));
             Assert.Equal(1L, await ScalarAsync(connection, "SELECT count(*) FROM config.legacy_secret_pin_marker WHERE id = 1 AND state = 'pending'", ct));
             Assert.Equal(1L, await ScalarAsync(connection, "SELECT count(*) FROM config.legacy_secret_pin_marker", ct));
@@ -224,7 +231,7 @@ public sealed class PasswordKeyRungTests
             await PgMigrations.MigrateAsync(connection, ct);
             Assert.Equal(StorageVersion.SchemaVersion, Convert.ToInt32(await ScalarAsync(connection, "SELECT MAX(version) FROM darling_schema_version", ct)));
             Assert.Equal(1L, await ScalarAsync(connection, "SELECT count(*) FROM config.legacy_secret_pin_marker WHERE id = 1 AND state = 'done' AND changed_at = '2026-01-05 10:00:00'", ct));
-            Assert.Equal(8L, await ScalarAsync(connection,
+            Assert.Equal(10L, await ScalarAsync(connection,
                 "SELECT count(*) FROM pg_trigger t JOIN pg_proc p ON p.oid = t.tgfoid WHERE NOT t.tgisinternal AND p.proname = 'password_key_owner_only'", ct));
 
             bodySucceeded = true;

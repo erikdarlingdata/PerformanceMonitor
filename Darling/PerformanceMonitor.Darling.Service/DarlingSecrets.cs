@@ -100,6 +100,36 @@ public static class DarlingSecrets
     }
 
     /// <summary>
+    /// True when this machine's data protection opens <paramref name="base64Blob"/>; throws what
+    /// <see cref="Unprotect"/> throws for a value that is not a blob or that this machine cannot open. It answers the
+    /// question and nothing more: the opened bytes are cleared before it returns and no string is built from them, so
+    /// a caller that only needs to know whether a value opens (the legacy pin step, #5456) never holds the password.
+    /// </summary>
+    [SupportedOSPlatform("windows")]
+    internal static bool CanUnprotect(string base64Blob)
+    {
+        if (string.IsNullOrWhiteSpace(base64Blob))
+        {
+            throw new ArgumentException("Encrypted password blob is empty.", nameof(base64Blob));
+        }
+
+        byte[]? plainBytes = null;
+        try
+        {
+            plainBytes = ProtectedData.Unprotect(
+                Convert.FromBase64String(base64Blob), s_entropy, DataProtectionScope.LocalMachine);
+            return true;
+        }
+        finally
+        {
+            if (plainBytes is not null)
+            {
+                CryptographicOperations.ZeroMemory(plainBytes);
+            }
+        }
+    }
+
+    /// <summary>
     /// Dereferences an <c>env:</c>/<c>file:</c> reference held in a server's stored secret slot (#5240), after asking
     /// whether it names one of this service's own configuration files or secrets
     /// (<see cref="DarlingOwnedSecrets.ReferenceRefusal(string?)"/>), the question the app asks before it saves a
