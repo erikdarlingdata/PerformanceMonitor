@@ -72,6 +72,9 @@ public sealed class ProcedureStatsIdleRowsReaderTests : IClassFixture<SharedDuck
     public async Task BucketedProcedureTrend_IdleMinutesNotStored_ReadsTheSameAsStoredIdleRows()
     {
         var t0 = await SeedTwentyMinutesAsync();
+        /* The collector ran every minute on the new server, which is how its quiet minutes are known; the old server's
+           stored idle rows are its own record of them. */
+        await SeedRunsAsync(NewServer, "procedure_stats", t0.AddMinutes(1), t0.AddMinutes(20));
         var asOf = t0.AddMinutes(25);
 
         var oldPoints = await _dataService.GetBucketedProcedureDurationTrendAsync(OldServer, 1, asOf, 10);
@@ -86,8 +89,9 @@ public sealed class ProcedureStatsIdleRowsReaderTests : IClassFixture<SharedDuck
             Assert.Equal(oldPoints[i].ExecutionsPerSecond!.Value, newPoints[i].ExecutionsPerSecond!.Value, precision: 6);
         }
 
-        /* 1,200 ms of work over the bucket's 600 s, not over the two stored one-minute collections' 120 s (which read 10). */
-        Assert.Equal(2.0, newPoints[0].Value!.Value, precision: 6);
+        /* 1,200 ms of work over the bucket's nine one-minute points (minutes 1-9, 540 s), not over the two stored
+           collections' 120 s (which read 10). The first point's own interval is the store's, 60 s. */
+        Assert.Equal(1200.0 / 540.0, newPoints[0].Value!.Value, precision: 6);
         Assert.Equal(1.0, newPoints[1].Value!.Value, precision: 6);
         /* The last bucket holds only the series' final collection: its own 60 s. */
         Assert.Equal(10.0, newPoints[2].Value!.Value, precision: 6);
@@ -210,6 +214,77 @@ public sealed class ProcedureStatsIdleRowsReaderTests : IClassFixture<SharedDuck
         var chart = await ChartRowsAsync(NewServer, t0);
 
         Assert.Equal(new[] { 1, 2, 4, 5 }, chart.Select(r => (int)(r.CollectionTime - t0).TotalMinutes).ToArray());
+    }
+
+    /// <summary>#5449 M2: one collection holds a procedure that was measured over 60 s and one that came back after 1,800 s. The whole
+    /// delta lands in the run that stored it, over that run's gap to the previous point (60 s), never over the longer stored interval:
+    /// the MAX of the collection's stored intervals (1,800 s) read the minute 30 times too low.</summary>
+    [Fact]
+    public async Task ProcedureChartPoints_AReturningProceduresDeltaIsRatedOverTheRunsGap()
+    {
+        var t = TenMinuteFloor(DateTime.UtcNow.AddMinutes(-40)).AddMinutes(5);
+        await SeedAsync(NewServer, t.AddMinutes(-1), "usp_Prev", executions: 0, elapsedUs: 0, interval: 60);
+        await SeedAsync(NewServer, t, "usp_P1", executions: 10, elapsedUs: 600_000, interval: 60);
+        await SeedAsync(NewServer, t, "usp_P2", executions: 20, elapsedUs: 1_200_000, interval: 1800);
+        await SeedRunsAsync(NewServer, "procedure_stats", t.AddMinutes(-1), t);
+
+        var points = await _dataService.GetProcedureDurationTrendAsync(NewServer, 1, t.AddMinutes(-2), t.AddMinutes(10));
+        var bucketed = await _dataService.GetBucketedProcedureDurationTrendAsync(NewServer, 1, t.AddMinutes(10), 1);
+
+        /* (600 + 1,200) ms and 30 executions over the run's own 60 s gap; the head read 1,800 s (MAX) and said 1 and 0.0167. */
+        var point = points.Single(p => p.CollectionTime == t);
+        Assert.Equal(30.0, point.Value!.Value, precision: 6);
+        Assert.Equal(0.5, point.ExecutionsPerSecond!.Value, precision: 6);
+        var bucket = bucketed.Single(p => p.CollectionTime == t);
+        Assert.Equal(30.0, bucket.Value!.Value, precision: 6);
+        Assert.Equal(30.0, bucket.PeakElapsedMsPerSecond!.Value, precision: 6);
+    }
+
+    /// <summary>#5449 M1: a 240-minute bucket with an outage inside it. The collector's runs are the axis, so the outage is not
+    /// seconds the bucket was observed for: the first collection after it (past the collector's 3,600 s gap limit, here a store row
+    /// of zero work) is unrated, and the bucket's seconds are the 119 one-minute points on either side, 7,140 s. The head
+    /// stretched the denominator over the bucket's whole span (14,400 s) and read the busy hours at half their rate.</summary>
+    [Fact]
+    public async Task BucketedProcedureTrend_AnOutageIsNotSeconds_AndTheCollectionAfterItIsUnrated()
+    {
+        var t0 = BucketFloor(240, DateTime.UtcNow.AddHours(-9));
+        /* A point a minute before the window (it supplies the first gap), busy minutes 0-59 and 181-239, an outage 60-179, and a
+           zero-work collection at minute 180 right after it. Runs stamp at t, rows land 200 ms later. */
+        await SeedBusyMinutesAsync(NewServer, t0, -1, 59);
+        await SeedBusyMinutesAsync(NewServer, t0, 181, 239);
+        await SeedAsync(NewServer, t0.AddMinutes(180).AddMilliseconds(200), "usp_Work", executions: 0, elapsedUs: 0, interval: 60);
+        await SeedRunsAsync(NewServer, "procedure_stats", t0.AddMinutes(180), t0.AddMinutes(180));
+
+        var points = await _dataService.GetBucketedProcedureDurationTrendAsync(NewServer, 4, t0.AddHours(4), 240);
+
+        var point = Assert.Single(points);
+        /* 119 busy minutes of 1,000 ms and 1 execution each, over 60 + 59 rated minutes. */
+        Assert.Equal(119_000.0 / 7140.0, point.Value!.Value, precision: 6);
+        Assert.Equal(119.0 / 7140.0, point.ExecutionsPerSecond!.Value, precision: 6);
+        Assert.Equal(1, point.UnratedInBucket);
+    }
+
+    /// <summary>The 4-hour-aligned (any whole-hour width that divides a day) floor of <paramref name="from"/>, the bucket origin being midnight.</summary>
+    private static DateTime BucketFloor(int minutes, DateTime from) =>
+        DateTime.SpecifyKind(new DateTime(from.Ticks - (from.Ticks % TimeSpan.FromMinutes(minutes).Ticks)), DateTimeKind.Unspecified);
+
+    /// <summary>A busy collection every minute from <paramref name="firstMinute"/> to <paramref name="lastMinute"/> after <paramref name="t0"/>:
+    /// the log stamps the run at the minute, the rows land 200 ms later (1,000 ms, one execution, a 60 s interval).</summary>
+    private async Task SeedBusyMinutesAsync(int serverId, DateTime t0, int firstMinute, int lastMinute)
+    {
+        await SeedRunsAsync(serverId, "procedure_stats", t0.AddMinutes(firstMinute), t0.AddMinutes(lastMinute));
+        using var readLock = _duckDb.AcquireReadLock();
+        var conn = await SeedConnectionAsync();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = $@"
+INSERT INTO procedure_stats
+    (collection_id, collection_time, server_id, server_name, database_name, schema_name, object_name, object_type,
+     execution_count, total_worker_time, total_elapsed_time, total_logical_reads, total_physical_reads, total_logical_writes,
+     delta_execution_count, delta_worker_time, delta_elapsed_time, sample_interval_seconds)
+SELECT {_nextId} - row_number() OVER (), g.t + INTERVAL 200 MILLISECOND, {serverId}, 'idle-rows', 'AppDb', 'dbo', 'usp_Work', 'PROCEDURE',
+       0, 0, 0, 0, 0, 0, 1, 1000000, 1000000, 60
+FROM generate_series(TIMESTAMP '{t0.AddMinutes(firstMinute):yyyy-MM-dd HH:mm:ss}', TIMESTAMP '{t0.AddMinutes(lastMinute):yyyy-MM-dd HH:mm:ss}', INTERVAL 1 MINUTE) AS g(t)";
+        _nextId -= await cmd.ExecuteNonQueryAsync() + 1;
     }
 
     [Fact]

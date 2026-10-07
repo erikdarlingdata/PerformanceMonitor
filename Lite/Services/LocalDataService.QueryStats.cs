@@ -14,6 +14,7 @@ using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using Microsoft.Data.SqlClient;
 using PerformanceMonitor.Analysis.Baselines;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Ui;
 using PerformanceMonitor.Common;
 
