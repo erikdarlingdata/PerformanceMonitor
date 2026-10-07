@@ -230,6 +230,69 @@ public sealed class IncidentDeliveryFilterTests
         Assert.Contains(item.Fields, f => f.Label == AlertIncidentRenderer.DedupKeyFactName && f.Value == Stale);
     }
 
+    /* ─────────────── the per-replica identity survives the copies ─────────────── */
+
+    /// <summary>
+    /// The review's second finding, reproduced: a copy of an alert that drops
+    /// <see cref="AlertContext.AgReplicaIdentity"/> re-keys the AG pair per SERVER, because PagerDuty's key
+    /// is derived from the COPY the fan-out sends on (WebhookAlertService derives it from
+    /// <c>render.Context</c>, not from the caller's instance) — and a resolve that keys on the server is a
+    /// resolve of no replica's incident. This is the ROSTER copy: a stateless AG firing carrying a fold's
+    /// roster takes WithRoster's explicit copy, and the identity must ride along.
+    /// </summary>
+    [Fact]
+    public void AnAgReplicaIdentity_SurvivesTheRosterAppendedCopy()
+    {
+        var context = AgAlertContexts.ForReplica("OrdersAG", "REPLICA-A");
+
+        var render = IncidentDeliveryFilter.ForDelivery(
+            context, null, deliverableDedupKeys: null, aggregateRoster: RosterItem());
+
+        Assert.NotSame(context, render.Context);
+        Assert.Equal("OrdersAG:REPLICA-A", render.Context!.AgReplicaIdentity);
+        Assert.Contains(
+            render.Context.Details, d => d.Heading == RepeatDeliveryBudget.RosterHeading);
+    }
+
+    /// <summary>
+    /// The same for the FILTERED copy: the AG pair cannot arrive in this shape from the shipped fire sites
+    /// (the state edge is stateless), but nothing in <see cref="IncidentDeliveryFilter.ForDelivery"/> knows
+    /// that — any context that carries both an identity and fingerprinted incidents (a future custom rule,
+    /// a merged artifact) walks this copy, so the identity hop is not conditional on today's shapes.
+    /// </summary>
+    [Fact]
+    public void AnAgReplicaIdentity_SurvivesTheFilteredRenderedCopy()
+    {
+        var context = AgAlertContexts.ForReplica("OrdersAG", "REPLICA-A");
+        AlertIncidentRenderer.Apply(context, Incidents());
+
+        var render = IncidentDeliveryFilter.ForDelivery(context, null, new[] { Fresh });
+
+        Assert.NotSame(context, render.Context);
+        Assert.Equal(1, render.SuppressedIncidentCount);
+        Assert.Equal("OrdersAG:REPLICA-A", render.Context!.AgReplicaIdentity);
+    }
+
+    /// <summary>
+    /// The reason identity survival matters, at the pair the fan-out actually forms: derive the PagerDuty
+    /// key from the ROSTER-CARRYING render — the shaped-end-to-end half of the repro (render, then the
+    /// key that leaves on it) without a socket. With the identity dropped, this key becomes the per-server
+    /// fallback ("13:AG Replica Disconnected") and the reconnect resolves no replica's incident.
+    /// </summary>
+    [Fact]
+    public void TheReplicaScopedPagerDutyKey_SurvivesTheFoldedRender()
+    {
+        var context = AgAlertContexts.ForReplica("OrdersAG", "REPLICA-A");
+
+        var render = IncidentDeliveryFilter.ForDelivery(
+            context, null, deliverableDedupKeys: null, aggregateRoster: RosterItem());
+
+        Assert.Equal(
+            "13:AG Replica Disconnected:OrdersAG:REPLICA-A",
+            WebhookAlertService.DerivePagerDutyDedupKey(
+                "13", "AG Replica Disconnected", render.Context, autoResolve: true));
+    }
+
     /* ─────────────── the wire ─────────────── */
 
     /// <summary>
@@ -384,6 +447,18 @@ public sealed class IncidentDeliveryFilterTests
         AlertIncidentRenderer.Apply(context, Incidents());
         return context;
     }
+
+    /* The #3430 roster item a folded repeat leaves pending, built by hand in the budget's own shape so
+       the press sites above exercise the roster press without staging a real fold. */
+    private static AlertDetailItem RosterItem() => new()
+    {
+        Heading = RepeatDeliveryBudget.RosterHeading,
+        Fields = new()
+        {
+            (RepeatDeliveryBudget.RosterCountFactName, "1"),
+            (RepeatDeliveryBudget.RosterListFactName, "PROD02")
+        }
+    };
 
     /* The engine's own shape: DetailText is ContextToDetailText of the context, which is what makes
        ProseForDelivery recognise it as a restatement and suppress it. */

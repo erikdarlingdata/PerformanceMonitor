@@ -374,6 +374,12 @@ public class WebhookAlertService
                     && delivery.PagerDutyAutoResolve
                     && AlertFamily.RecoveryPairs.TryGetValue(metricName, out var clearedFiring))
                 {
+                    /* Accepted (review point on the AG pair): this clear is per SERVER + pair — the
+                       metric-level key — not per replica, so one replica's reconnect also re-arms a
+                       sibling replica that is still down on the same server. Cost accepted and bounded:
+                       the re-armed entry only bites a NEW firing, and the sibling's open incident is still
+                       its own per-replica PagerDuty incident (the dedup key carries the identity), so the
+                       worst case is a re-post inside that sibling's window, not a lost resolve. */
                     _cooldown.ClearMetric(serverId, clearedFiring);
                 }
             }

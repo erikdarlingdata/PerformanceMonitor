@@ -384,20 +384,38 @@ public class PagerDutyWebhookTests
     {
         /* The review's down-back-down case: with the flag on, a delivered close clears the cooldown entry
            its firing left behind, so the next "Server Unreachable" posts instead of meeting the old window.
-           Asserted on the wire bodies: unreachable, restored, unreachable again delivers THREE posts. */
+           Asserted on the wire bodies: unreachable, restored, unreachable again delivers THREE posts.
+           Wired here with a real seeding history store (both production paths pass one) that carries the
+           first outage's send row, so the third send has to beat the history seed through the clear — the
+           row behind the seed is PRE-clear, exactly the re-throttle the clear-fix was for; a running this
+           test now only for the store-less path had kept three posts passing while production re-seeded
+           and throttled. */
         var endpoint = new CapturingPagerDuty();
+        var history = new FakeHistoryStore();
 
         var settings = new WebhookSettings { PagerDutyRoutingKey = "rk-test", PagerDutyAutoResolve = true, Capture = endpoint };
 
-        var service = ServiceFor(settings, endpoint);
+        var service = ServiceFor(settings, endpoint, history);
 
         Assert.Equal(AlertChannelOutcome.Delivered, await SendSingleAlertAsync(service, "Server Unreachable"));
+        /* The delivery's history row (the deliverer records every delivered post; the service does not):
+           the first outage's send time, in-window, answered for THAT metric until the end of the test. */
+        history.SentRow("Server Unreachable", "261742202", DateTime.UtcNow);
+
         Assert.Equal(AlertChannelOutcome.Delivered, await SendSingleAlertAsync(service, "Server Restored"));
         var second = await SendSingleAlertAsync(service, "Server Unreachable");
 
         Assert.Equal(AlertChannelOutcome.Delivered, second);
         Assert.Equal(3, endpoint.Bodies.Count);
         Assert.Equal("trigger", WireAction(endpoint.Bodies[2]));
+
+        /* And the seed was a live participant, not a silent store: at least one of its reads went out
+           ANSWERED with the first outage's row (a fan-out that stopped consulting history would still
+           deliver three posts — only an answered read proves the third send was rated against the seed and
+           won through the clear). The row itself is untouched: the clear works on the cooldown, not on
+           history, so the restart class the seed deliberately accepts stays intact. */
+        Assert.True(history.SeedReads > 0);
+        Assert.True(history.AnsweredReads > 0);
     }
 
     /// <summary>
@@ -415,13 +433,13 @@ public class PagerDutyWebhookTests
         return result.Outcome;
     }
 
-    private WebhookAlertService ServiceFor(WebhookSettings settings, CapturingPagerDuty capture)
+    private WebhookAlertService ServiceFor(WebhookSettings settings, CapturingPagerDuty capture, FakeHistoryStore? history = null)
     {
         var service = new WebhookAlertService(
             settings,
             Branding,
             Microsoft.Extensions.Logging.Abstractions.NullLogger<WebhookAlertService>.Instance,
-            historyStore: null);
+            historyStore: history);
         service.PostPagerDutyAsyncOverride = async (endpoint, payload) =>
         {
             Assert.Equal("https://events.pagerduty.com/v2/enqueue", endpoint);
@@ -429,6 +447,45 @@ public class PagerDutyWebhookTests
             return await Task.FromResult<string?>(null);
         };
         return service;
+    }
+
+    /// <summary>
+    /// The seeding history store the WebhookCooldownSeedTests' fake established the shape for (that class's
+    /// <c>FakeHistoryStore</c> is per-class, like every other double here): the last WEBHOOK send time the
+    /// real stores answer the cooldown's seed with, set by <see cref="SentRow"/> to model the history write
+    /// the deliverer makes after a delivery. Scope-guarded by metric — the real store answers per
+    /// (server, metric, dedup key), so answering one metric's question with another metric's row is
+    /// unfaithful and would seed "Server Restored" with the outage's time and suppress the resolve.
+    /// </summary>
+    private sealed class FakeHistoryStore : IAlertHistoryStore
+    {
+        private readonly List<(string Metric, string ServerId, DateTime AtUtc)> _sentRows = new();
+
+        public int SeedReads { get; private set; }
+        public int AnsweredReads { get; private set; }
+
+        public void SentRow(string metricName, string serverId, DateTime atUtc) =>
+            _sentRows.Add((metricName, serverId, atUtc));
+
+        public Task<DateTime?> GetLastWebhookSentUtcAsync(string serverId, string metricName, string? dedupKey = null)
+        {
+            SeedReads++;
+            DateTime? max = null;
+            foreach (var row in _sentRows)
+            {
+                if (row.Metric == metricName && row.ServerId == serverId && (max is null || row.AtUtc > max.Value))
+                    max = row.AtUtc;
+            }
+
+            if (max.HasValue)
+                AnsweredReads++;
+            return Task.FromResult(max);
+        }
+
+        public Task RecordAlertAsync(AlertHistoryRecord record) => Task.CompletedTask;
+        public Task<DateTime?> GetLastEmailSentUtcAsync(string serverId, string metricName, string? dedupKey = null) => Task.FromResult<DateTime?>(null);
+        public Task<DateTime?> GetLastAlertTimeAsync(string serverId, string metricName, string? dedupKey = null) => Task.FromResult<DateTime?>(null);
+        public Task<DateTime?> GetLastDeliveredPageUtcAsync(string serverId, string metricName) => Task.FromResult<DateTime?>(null);
     }
 
     private static string WireAction(string body) =>
