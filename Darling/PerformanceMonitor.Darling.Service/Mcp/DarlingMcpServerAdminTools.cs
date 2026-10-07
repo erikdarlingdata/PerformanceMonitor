@@ -18,6 +18,7 @@ using ModelContextProtocol.Server;
 using Npgsql;
 using NpgsqlTypes;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Service.Targets;
 using PerformanceMonitor.Darling.Storage;
 
 #pragma warning disable CA1707 // MCP tools use snake_case naming convention
@@ -114,7 +115,10 @@ public sealed partial class DarlingMcpServerAdminTools
         "encrypt_mode (\"Optional\"|\"Mandatory\"|\"Strict\", default \"Mandatory\"); " +
         "trust_server_certificate (bool, default false — set true to accept a self-signed server cert, and " +
         "typically REQUIRED for Aurora, which presents an RDS CA a stock trust store does not know); " +
-        "read_only_intent (bool, default false); multi_subnet_failover (bool, default false). Servers are processed " +
+        "read_only_intent (bool, default false); multi_subnet_failover (bool, default false); aws_role_arn (optional, " +
+        "PostgreSQL on Amazon RDS or Aurora only: the IAM role ARN to assume, such as " +
+        "arn:aws:iam::123456789012:role/darling-monitor; accepted only if darling.json's allowedAwsRoles lists it) and " +
+        "aws_external_id (optional, write-only, needs aws_role_arn). Servers are processed " +
         "IN ORDER, one at a time. A case-variant or exact duplicate of an already-monitored server (or an earlier " +
         "entry in the same array) is skipped as status \"duplicate\". A server that fails to connect is recorded as " +
         "status \"connection_failed\" and does NOT stop the rest of the batch. If saving an entry fails, that entry " +
@@ -170,12 +174,12 @@ public sealed partial class DarlingMcpServerAdminTools
     /// definitions table that faults on a chosen write or swallows one without a live database.</summary>
     internal static async Task<string> AddServersAsync(
         IServerDefinitions definitions, string servers_json, ServerProbe probe, CancellationToken cancellationToken,
-        bool allowSecretReferences = false, IPasswordKeyRing? ring = null)
+        bool allowSecretReferences = false, IPasswordKeyRing? ring = null, AwsRoleAllowlist? awsRoleAllowlist = null)
     {
         ring ??= DarlingPasswordKey.Current;
         try
         {
-            var (entries, invalidResults, wholeError) = ParseRequest(servers_json, ring.Status, allowSecretReferences);
+            var (entries, invalidResults, wholeError) = ParseRequest(servers_json, ring.Status, allowSecretReferences, awsRoleAllowlist);
             if (wholeError != null)
             {
                 return Outcome("invalid", wholeError);
@@ -721,8 +725,11 @@ ORDER BY d.host, d.database";
     /// <summary><see cref="ParseRequest(string)"/> with the password key's status named, so a test can ask what a
     /// healthy key and a key that is not ready each answer for a literal password.</summary>
     internal static (List<ParsedServerEntry> Entries, List<ServerResult> Invalid, string? WholeError) ParseRequest(
-        string servers_json, PasswordKeyStatus key, bool allowSecretReferences = false)
+        string servers_json, PasswordKeyStatus key, bool allowSecretReferences = false, AwsRoleAllowlist? awsRoleAllowlist = null)
     {
+        /* #5452: the roles this surface may set. The host command line (allowSecretReferences) is the operator's own and is
+           not held to the list; the service runs a role only if it is listed. Null means the list in use. */
+        var roleList = allowSecretReferences ? null : awsRoleAllowlist ?? AwsRoleAllowlist.Current;
         var entries = new List<ParsedServerEntry>();
         var invalid = new List<ServerResult>();
 
@@ -748,7 +755,7 @@ ORDER BY d.host, d.database";
 
         for (var i = 0; i < array.Count; i++)
         {
-            var (entry, result) = ParseEntry(i, array[i], key, allowSecretReferences);
+            var (entry, result) = ParseEntry(i, array[i], key, allowSecretReferences, roleList);
             if (entry != null)
             {
                 entries.Add(entry);
@@ -766,7 +773,7 @@ ORDER BY d.host, d.database";
     /// problem. The service honors Windows, SQL, and the two non-interactive Entra modes (ServicePrincipal,
     /// ManagedIdentity); the interactive Entra modes (MFA/device-code/default-credential) are rejected — they
     /// cannot run headless (#3484).</summary>
-    private static (ParsedServerEntry? Entry, ServerResult? Result) ParseEntry(int index, JsonNode? node, PasswordKeyStatus key, bool allowSecretReferences)
+    private static (ParsedServerEntry? Entry, ServerResult? Result) ParseEntry(int index, JsonNode? node, PasswordKeyStatus key, bool allowSecretReferences, AwsRoleAllowlist? roleList)
     {
         if (node is not JsonObject obj)
         {
@@ -892,8 +899,39 @@ ORDER BY d.host, d.database";
             return (null, Invalid(portError));
         }
 
+        /* #5452: the AWS role for an RDS or Aurora target, and its external ID. Blank is "not set"; the formats and the
+           pairing are AwsRoleSettings' own; a role is PostgreSQL-only; and, from the web and MCP, it must be on the list. */
+        if (obj["aws_role_arn"] is not null && TryGetString(obj, "aws_role_arn") is null)
+        {
+            return (null, Invalid("aws_role_arn must be text."));
+        }
+
+        if (obj["aws_external_id"] is not null && TryGetString(obj, "aws_external_id") is null)
+        {
+            return (null, Invalid("aws_external_id must be text."));
+        }
+
+        var awsRole = AwsRoleSettings.Normalize(TryGetString(obj, "aws_role_arn"));
+        var awsExternalId = AwsRoleSettings.Normalize(TryGetString(obj, "aws_external_id"));
+        if (AwsRoleSettings.ValidatePair(awsRole, awsExternalId) is { } awsPairError)
+        {
+            return (null, Invalid(awsPairError));
+        }
+
+        if (awsRole is not null && engine == EngineSqlServer)
+        {
+            return (null, Invalid(AwsRoleSettings.RoleNeedsPostgresMessage));
+        }
+
+        if (roleList is not null && AwsRoleListRefusal(awsRole, null, roleList) is { } awsListRefusal)
+        {
+            return (null, Invalid(awsListRefusal));
+        }
+
         var probeConfig = new MonitoredServer
         {
+            AwsRoleArn = awsRole,
+            AwsExternalId = awsExternalId,
             Name = displayName,
             Host = host,
             Database = database,
@@ -1086,8 +1124,9 @@ ORDER BY d.host, d.database";
 INSERT INTO config_monitored_servers (
     server_id, name, host, database, auth, username, encrypted_password, encrypt_mode,
     trust_server_certificate, read_only_intent, multi_subnet_failover, excluded_databases,
-    monthly_cost_usd, capture_plans, alert_delivery_mode_override, engine, port, is_enabled, created_at, modified_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NULL, NULL, $15, $16, TRUE, $14, $14)
+    monthly_cost_usd, capture_plans, alert_delivery_mode_override, engine, port, is_enabled, created_at, modified_at,
+    aws_role_arn, aws_external_id)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NULL, NULL, $15, $16, TRUE, $14, $14, $17, $18)
 ON CONFLICT (server_id) DO NOTHING";
 
     /// <summary>
@@ -1229,6 +1268,8 @@ ON CONFLICT (server_id) DO NOTHING";
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = now });                           // $14
         command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = config.Engine });                                           // $15
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = config.Port });                                                // $16
+        AddNullableText(command, config.AwsRoleArn);                                                                                  // $17
+        AddNullableText(command, config.AwsRoleArn is null ? null : config.AwsExternalId);                                            // $18
         var written = await command.ExecuteNonQueryAsync(cancellationToken);
         await transaction.CommitAsync(cancellationToken);
         return written;

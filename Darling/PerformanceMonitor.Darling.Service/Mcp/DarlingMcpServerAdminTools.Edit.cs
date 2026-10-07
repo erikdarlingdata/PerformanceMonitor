@@ -20,6 +20,7 @@ using ModelContextProtocol.Server;
 using Npgsql;
 using NpgsqlTypes;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Service.Targets;
 using PerformanceMonitor.Darling.Storage;
 
 #pragma warning disable CA1707 // MCP tools use snake_case naming convention
@@ -65,7 +66,8 @@ public sealed partial class DarlingMcpServerAdminTools
     internal static readonly string[] EditableKeys =
     [
         "display_name", "host", "port", "database", "read_only_intent", "auth", "username", "password",
-        "encrypt_mode", "trust_server_certificate", "multi_subnet_failover", "monthly_cost_usd", "expected_modified_at",
+        "encrypt_mode", "trust_server_certificate", "multi_subnet_failover", "monthly_cost_usd", "aws_role_arn", "aws_external_id",
+        "expected_modified_at",
     ];
 
     /// <summary>Keys that name a column this surface never writes. Named in the refusal, so a caller learns that it
@@ -92,6 +94,8 @@ public sealed partial class DarlingMcpServerAdminTools
         ["trust_server_certificate"] = "trust_server_certificate",
         ["multi_subnet_failover"] = "multi_subnet_failover",
         ["monthly_cost_usd"] = "monthly_cost_usd",
+        ["aws_role_arn"] = "aws_role_arn",
+        ["aws_external_id"] = "aws_external_id",
     };
 
     private const string EditNoteSweep = "The service applies this within one sweep.";
@@ -114,11 +118,38 @@ public sealed partial class DarlingMcpServerAdminTools
     internal const string EditStoreNeedsRolesText =
         "This store's roles predate server edits: re-run provision-roles.sql against the store, then try again.";
 
+    /// <summary>The refusal when a role is set or changed and darling.json lists no role the web and MCP may set (#5452).</summary>
+    internal const string EditAwsRoleNoListText =
+        "The web and MCP cannot set an AWS role until darling.json lists the roles they may use. Add allowedAwsRoles to darling.json, then restart the service.";
+
+    /// <summary>The refusal when a role is set or changed to one the list does not allow (#5452).</summary>
+    internal const string EditAwsRoleNotListedText =
+        "That AWS role is not on the list of roles the web and MCP may set. Add it to allowedAwsRoles in darling.json and restart the service.";
+
+    /// <summary>
+    /// The text that refuses a role this surface may not set, or null when it may: no list, or a role not on it. Only a
+    /// role being SET or CHANGED is checked; clearing and an unchanged role never are (#5452).
+    /// </summary>
+    internal static string? AwsRoleListRefusal(string? newRole, string? storedRole, AwsRoleAllowlist allowlist)
+    {
+        if (newRole is null || string.Equals(newRole, storedRole, StringComparison.Ordinal))
+        {
+            return null;
+        }
+
+        if (allowlist.Count == 0)
+        {
+            return EditAwsRoleNoListText;
+        }
+
+        return allowlist.IsAllowed(newRole) ? null : EditAwsRoleNotListedText;
+    }
+
     /* ─────────────────────────────── the tool ─────────────────────────────── */
 
     [McpServerTool(Name = "edit_server"), Description(
         "Edits one monitored server's settings in place, no confirm step: name, address, database, authentication, " +
-        "TLS posture or monthly cost. The server keeps its id, tags and history. A change to how it is reached is " +
+        "TLS posture, monthly cost or (PostgreSQL on Amazon RDS or Aurora) the AWS role. The server keeps its id, tags and history. A change to how it is reached is " +
         "probed first and saved only if the server answers; the service applies it within one sweep. Engine, " +
         "enabled state and excluded databases cannot change. Returns updated, unchanged, or " +
         "invalid/not_found/ambiguous/conflict/collides/connection_failed with nothing written." +
@@ -126,14 +157,19 @@ public sealed partial class DarlingMcpServerAdminTools
         "Changes ONLY the fields named in changes_json, a JSON object. Keys: display_name, host, port (PostgreSQL), " +
         "database, read_only_intent, auth (\"Windows\", \"SQL\", \"ServicePrincipal\", \"ManagedIdentity\"), username, " +
         "password, encrypt_mode, trust_server_certificate, multi_subnet_failover, monthly_cost_usd, " +
-        "expected_modified_at. The values mean what they mean in add_servers. Naming engine, is_enabled, " +
+        "aws_role_arn, aws_external_id, expected_modified_at. The values mean what they mean in add_servers. Naming engine, is_enabled, " +
         "excluded_databases or any other key is status \"invalid\". The server keeps its id: tags, history and " +
         "settings stay attached, even when the address changes; the old address then cannot be added as a new " +
         "server under the same spelling. PASSWORD: omit it, or leave it blank, to keep the stored one; a typed one replaces it and is the password itself (a value starting with env: or file: is refused, references are set in the configuration file). The stored secret cannot be " +
         "read back, so changing the host, port, database, read_only_intent, auth, username, encrypt_mode, " +
         "trust_server_certificate or multi_subnet_failover of a SQL or ServicePrincipal server REQUIRES password " +
         "again, and so does switching into either mode; a name or cost change, and a Windows or ManagedIdentity " +
-        "server, need none. The secret is checked as add_servers checks it and is never returned or logged. " +
+        "server, need none. AWS ROLE: aws_role_arn (an IAM role ARN such as arn:aws:iam::123456789012:role/darling-monitor) " +
+        "applies to a PostgreSQL target only and can be set or changed only to a role darling.json's allowedAwsRoles lists; " +
+        "omit it, or leave it blank, to keep the stored role, and send null to remove it (always allowed, and the " +
+        "external ID goes with it). aws_external_id is write-only and never returned (current shows aws_external_id_set): " +
+        "omit it to keep the stored one, send text to replace it, send null to clear it. Changing the role on a target " +
+        "that has an external ID stored needs aws_external_id in the same request. The secret is checked as add_servers checks it and is never returned or logged. " +
         "expected_modified_at is the modified_at an earlier answer returned; if the row changed since, the answer " +
         "is \"conflict\" with the current non-secret values and nothing is written. Omit it for last write wins. " +
         "\"collides\": the new address belongs to another monitored server, or the connection lands in a database " +
@@ -154,7 +190,7 @@ public sealed partial class DarlingMcpServerAdminTools
     internal static async Task<string> EditServerByNameAsync(
         NpgsqlDataSource postgres, string server_name, string changes_json, ServerProbe probe, IPasswordKeyRing ring, ILogger? logger, CancellationToken cancellationToken)
     {
-        string? submittedSecret = null;
+        string?[] submittedSecrets = [];
         try
         {
             if (string.IsNullOrWhiteSpace(server_name))
@@ -169,7 +205,7 @@ public sealed partial class DarlingMcpServerAdminTools
                 return Outcome(EditStatus.Invalid, parseError);
             }
 
-            submittedSecret = changes!.Password;
+            submittedSecrets = [changes!.Password, changes.AwsExternalId];
             var definitions = await LoadDefinitionsForRemovalAsync(postgres);
             var target = ResolveForRemoval(definitions.Select(d => d.Server).ToList(), server_name);
             if (target.Candidates.Count == 0)
@@ -204,7 +240,7 @@ public sealed partial class DarlingMcpServerAdminTools
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             /* A probe or driver that throws can carry the submitted secret in its message: redact the whole envelope. */
-            ex = new InvalidOperationException(RedactEditSecret(ex.Message, submittedSecret));
+            ex = new InvalidOperationException(RedactEditSecret(ex.Message, submittedSecrets));
             return McpHelpers.FormatError("edit_server", ex);
         }
     }
@@ -220,7 +256,7 @@ public sealed partial class DarlingMcpServerAdminTools
     internal static async Task<string> EditServerByIdAsync(
         NpgsqlDataSource postgres, int serverId, string changesJson, ILogger? logger, CancellationToken cancellationToken)
     {
-        string? submittedSecret = null;
+        string?[] submittedSecrets = [];
         try
         {
             var (changes, parseError) = ParseEditChanges(changesJson);
@@ -229,13 +265,13 @@ public sealed partial class DarlingMcpServerAdminTools
                 return Outcome(EditStatus.Invalid, parseError);
             }
 
-            submittedSecret = changes!.Password;
+            submittedSecrets = [changes!.Password, changes.AwsExternalId];
             return await EditServerCoreAsync(
                 new PostgresServerEditStore(postgres), serverId, changes, DefaultProbeAsync, DarlingPasswordKey.Current, logger, cancellationToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            ex = new InvalidOperationException(RedactEditSecret(ex.Message, submittedSecret));
+            ex = new InvalidOperationException(RedactEditSecret(ex.Message, submittedSecrets));
             return McpHelpers.FormatError("edit_server", ex);
         }
     }
@@ -305,7 +341,7 @@ public sealed partial class DarlingMcpServerAdminTools
             if (!probeResult.Success)
             {
                 var detail = string.IsNullOrWhiteSpace(probeResult.Error) ? "Could not connect to the server." : $"Could not connect: {probeResult.Error}";
-                return Outcome(EditStatus.ConnectionFailed, RedactEditSecret(detail, plan.PlaintextSecret) + " Nothing was saved.");
+                return Outcome(EditStatus.ConnectionFailed, RedactEditSecret(detail, plan.PlaintextSecret, plan.PlaintextExternalId) + " Nothing was saved.");
             }
 
             tested = true;
@@ -314,7 +350,7 @@ public sealed partial class DarlingMcpServerAdminTools
             var collision = ActualIdentityCollision(probedEntry, connectedDatabase, otherKeys);
             if (collision is not null)
             {
-                return ActualCollisionOutcome(collision, plan.PlaintextSecret);
+                return ActualCollisionOutcome(collision, plan.PlaintextSecret, plan.PlaintextExternalId);
             }
 
             /* #5240: the key the check above compared, handed to the write so the write compares it again under the
@@ -346,7 +382,7 @@ public sealed partial class DarlingMcpServerAdminTools
                     throw new InvalidOperationException("The store refused an actual database key that this edit never handed it.");
                 }
 
-                return ActualCollisionOutcome(ActualIdentityCollisionText(probedEntry, connectedDatabase), plan.PlaintextSecret);
+                return ActualCollisionOutcome(ActualIdentityCollisionText(probedEntry, connectedDatabase), plan.PlaintextSecret, plan.PlaintextExternalId);
             case ServerEditWriteKind.PasswordNeeded:
                 /* The store's own check: a move of host or port that keeps the stored secret. The plan refuses it first, so
                    this is the answer when the two ever read the row differently, and it is the same sentence. */
@@ -357,6 +393,11 @@ public sealed partial class DarlingMcpServerAdminTools
             case ServerEditWriteKind.RemediationKept:
                 /* The store's own check of a change to how the row connects while it holds a remediation login: nothing is written. */
                 return Outcome(EditStatus.Invalid, EditRemediationKeptText);
+            case ServerEditWriteKind.ExternalIdNeeded:
+                /* The store's own check of a role change that would keep the stored external ID unseen. The plan refuses it first. */
+                return Outcome(EditStatus.Invalid, AwsRoleSettings.RoleChangeNeedsExternalIdMessage);
+            case ServerEditWriteKind.ExternalIdNeedsRole:
+                return Outcome(EditStatus.Invalid, AwsRoleSettings.ExternalIdNeedsRoleMessage);
             case ServerEditWriteKind.Conflict:
                 /* Same shape as the pre-probe conflict: the current non-secret values, so the caller can retry. */
                 if (await store.ReadRowAsync(serverId, cancellationToken) is { } currentRow)
@@ -368,6 +409,13 @@ public sealed partial class DarlingMcpServerAdminTools
         }
 
         /* One line per edit: the id and the field NAMES. Never a value, never the secret. */
+        if (plan.ChangedFields.Contains("aws_role_arn"))
+        {
+            /* #5452: the role is non-secret and its change gets an audit line of its own: old and new ARN, never the external ID. */
+            logger?.LogInformation("AWS role changed through edit_server: id {ServerId}, from {OldRole} to {NewRole}",
+                serverId, row.AwsRoleArn ?? "(none)", plan.NewAwsRoleArn ?? "(none)");
+        }
+
         logger?.LogInformation("Server edited through edit_server: id {ServerId}, fields {Fields}", serverId, string.Join(",", plan.ChangedFields));
 
         return JsonSerializer.Serialize(new
@@ -377,6 +425,8 @@ public sealed partial class DarlingMcpServerAdminTools
             display_name = plan.NewName,
             server_id = serverId,
             changed = plan.ChangedFields,
+            old_aws_role_arn = plan.ChangedFields.Contains("aws_role_arn") ? row.AwsRoleArn : null,
+            new_aws_role_arn = plan.ChangedFields.Contains("aws_role_arn") ? plan.NewAwsRoleArn : null,
             reconnects = plan.Reconnects,
             tested,
             modified_at = ModifiedAtToken(write.ModifiedAt),
@@ -387,8 +437,8 @@ public sealed partial class DarlingMcpServerAdminTools
     /// <summary>The answer for an edit whose connected database another definition already covers: the add refusal's text
     /// with "Not added" turned into "Not saved", the secret redacted. One shape for the check before the write and the
     /// check under the lock.</summary>
-    private static string ActualCollisionOutcome(string collisionText, string? plaintextSecret) =>
-        Outcome(EditStatus.Collides, RedactEditSecret(collisionText.Replace("Not added:", "Not saved:", StringComparison.Ordinal), plaintextSecret));
+    private static string ActualCollisionOutcome(string collisionText, params string?[] secrets) =>
+        Outcome(EditStatus.Collides, RedactEditSecret(collisionText.Replace("Not added:", "Not saved:", StringComparison.Ordinal), secrets));
 
     private static string OccupiedAnswer(string storageKey) =>
         JsonSerializer.Serialize(new
@@ -424,6 +474,8 @@ public sealed partial class DarlingMcpServerAdminTools
         trust_server_certificate = row.TrustServerCertificate,
         multi_subnet_failover = row.MultiSubnetFailover,
         monthly_cost_usd = row.MonthlyCostUsd,
+        aws_role_arn = row.AwsRoleArn,
+        aws_external_id_set = row.AwsExternalIdSet,
         modified_at = ModifiedAtToken(row.ModifiedAt),
     };
 
@@ -439,8 +491,19 @@ public sealed partial class DarlingMcpServerAdminTools
     /// survive a trip through a client that cannot hold them in a date type.</summary>
     internal static string ModifiedAtToken(DateTime modifiedAt) => modifiedAt.ToString("o", CultureInfo.InvariantCulture);
 
-    private static string RedactEditSecret(string text, string? secret) =>
-        string.IsNullOrEmpty(secret) ? text : text.Replace(secret, "[redacted]", StringComparison.Ordinal);
+    /// <summary>The text with every typed secret removed: the password and the AWS external ID (#5452).</summary>
+    private static string RedactEditSecret(string text, params string?[] secrets)
+    {
+        foreach (var secret in secrets)
+        {
+            if (!string.IsNullOrEmpty(secret))
+            {
+                text = text.Replace(secret, "[redacted]", StringComparison.Ordinal);
+            }
+        }
+
+        return text;
+    }
 
     /* ─────────────────────────────── parse (pure) ─────────────────────────────── */
 
@@ -461,6 +524,15 @@ public sealed partial class DarlingMcpServerAdminTools
         public bool? TrustServerCertificate { get; set; }
         public bool? MultiSubnetFailover { get; set; }
         public decimal? MonthlyCostUsd { get; set; }
+
+        /// <summary>True when the request names the role: null in <see cref="AwsRoleArn"/> then means "remove it". A role left
+        /// out or sent blank keeps the stored one (#5452).</summary>
+        public bool HasAwsRole { get; set; }
+        public string? AwsRoleArn { get; set; }
+
+        /// <summary>True when the request names the external ID: null in <see cref="AwsExternalId"/> then means "clear it".</summary>
+        public bool HasAwsExternalId { get; set; }
+        public string? AwsExternalId { get; set; }
         public string? ExpectedModifiedAt { get; set; }
     }
 
@@ -641,6 +713,45 @@ public sealed partial class DarlingMcpServerAdminTools
 
                     changes.MonthlyCostUsd = cost;
                     break;
+                case "aws_role_arn":
+                    if (node is not null && !TryEditString(node, out _))
+                    {
+                        return (null, "aws_role_arn must be text, or null to remove the role.");
+                    }
+
+                    /* Absent or blank keeps the stored role; only an explicit null removes it. */
+                    var roleText = node is null ? null : AwsRoleSettings.Normalize(TryGetString(body, "aws_role_arn"));
+                    if (node is null || roleText is not null)
+                    {
+                        if (AwsRoleSettings.ValidateRole(roleText) is { } roleError)
+                        {
+                            return (null, roleError);
+                        }
+
+                        changes.HasAwsRole = true;
+                        changes.AwsRoleArn = roleText;
+                    }
+
+                    break;
+                case "aws_external_id":
+                    if (node is not null && !TryEditString(node, out _))
+                    {
+                        return (null, "aws_external_id must be text, or null to clear it.");
+                    }
+
+                    var idText = node is null ? null : AwsRoleSettings.Normalize(TryGetString(body, "aws_external_id"));
+                    if (node is null || idText is not null)
+                    {
+                        if (AwsRoleSettings.ValidateExternalId(idText) is { } idError)
+                        {
+                            return (null, idError);
+                        }
+
+                        changes.HasAwsExternalId = true;
+                        changes.AwsExternalId = idText;
+                    }
+
+                    break;
                 case "expected_modified_at":
                     if (!TryEditString(node, out var token) || string.IsNullOrWhiteSpace(token))
                     {
@@ -702,6 +813,12 @@ public sealed partial class DarlingMcpServerAdminTools
         public bool NeedsProbe { get; set; }
         public bool Reconnects { get; set; }
         public string? PlaintextSecret { get; set; }
+
+        /// <summary>The external ID the request typed (null when it sent none), kept only so an answer can redact it (#5452).</summary>
+        public string? PlaintextExternalId { get; set; }
+
+        /// <summary>The role the row holds after the edit, null when none.</summary>
+        public string? NewAwsRoleArn { get; set; }
         public MonitoredServer ProbeConfig { get; set; } = new();
     }
 
@@ -719,8 +836,9 @@ public sealed partial class DarlingMcpServerAdminTools
     /// (probe rule b) or when the row switches INTO one of those modes, and it is never reused across modes; a
     /// switch out of them clears the stored secret; a row that stores no secret needs none.
     /// </summary>
-    internal static (ServerEditPlan? Plan, string? Error) PlanEdit(ServerEditRow row, ServerEditChanges c, PasswordKeyStatus key)
+    internal static (ServerEditPlan? Plan, string? Error) PlanEdit(ServerEditRow row, ServerEditChanges c, PasswordKeyStatus key, AwsRoleAllowlist? allowlist = null)
     {
+        allowlist ??= AwsRoleAllowlist.Current;
         var host = c.Host ?? row.Host;
         var port = c.Port ?? row.Port;
         var database = c.HasDatabase ? c.Database : row.Database;
@@ -747,6 +865,30 @@ public sealed partial class DarlingMcpServerAdminTools
         if (!isPostgres && c.Port is not null)
         {
             return (null, "A SQL Server port goes in host, as host,port.");
+        }
+
+        /* #5452: the AWS role. Absent or blank keeps the stored role (the parse left HasAwsRole false); an explicit null
+           removes it, always allowed, and takes the external ID with it. A role set or changed must be on darling.json's
+           list; the same role as stored is no change and is not checked. */
+        var newRole = c.HasAwsRole ? c.AwsRoleArn : row.AwsRoleArn;
+        if (!isPostgres && (c.AwsRoleArn is not null || c.AwsExternalId is not null))
+        {
+            return (null, AwsRoleSettings.RoleNeedsPostgresMessage);
+        }
+
+        if (newRole is null && c.HasAwsExternalId && c.AwsExternalId is not null)
+        {
+            return (null, AwsRoleSettings.ExternalIdNeedsRoleMessage);
+        }
+
+        if (AwsRoleListRefusal(newRole, row.AwsRoleArn, allowlist) is { } roleRefusal)
+        {
+            return (null, roleRefusal);
+        }
+
+        if (AwsRoleSettings.RoleChangeNeedsExternalId(row.AwsRoleArn, newRole, row.AwsExternalIdSet, c.HasAwsExternalId))
+        {
+            return (null, AwsRoleSettings.RoleChangeNeedsExternalIdMessage);
         }
 
         if (secretMode)
@@ -792,6 +934,8 @@ public sealed partial class DarlingMcpServerAdminTools
             NewStorageKey = ServerIdHelper.BuildStorageName(host, database, readOnly, row.Engine, port),
             NewName = name,
             PlaintextSecret = secretMode ? c.Password : null,
+            PlaintextExternalId = c.AwsExternalId,
+            NewAwsRoleArn = newRole,
         };
         var oldKey = ServerIdHelper.BuildStorageName(row.Host, row.Database, row.ReadOnlyIntent, row.Engine, row.Port);
         plan.AddressChanged = !string.Equals(plan.NewStorageKey, oldKey, StringComparison.Ordinal);
@@ -818,6 +962,15 @@ public sealed partial class DarlingMcpServerAdminTools
         Set("trust_server_certificate", NpgsqlDbType.Boolean, trust, trust != row.TrustServerCertificate);
         Set("multi_subnet_failover", NpgsqlDbType.Boolean, multi, multi != row.MultiSubnetFailover);
         Set("monthly_cost_usd", NpgsqlDbType.Numeric, cost, cost != row.MonthlyCostUsd);
+
+        Set("aws_role_arn", NpgsqlDbType.Text, newRole, !string.Equals(newRole, row.AwsRoleArn, StringComparison.Ordinal));
+
+        /* The external ID rides with a role that stays: a typed one replaces the stored one (it cannot be compared, so it
+           always counts as a change), null clears it, and a cleared role takes it along inside the store's function. */
+        if (newRole is not null && c.HasAwsExternalId && (c.AwsExternalId is not null || row.AwsExternalIdSet))
+        {
+            Set("aws_external_id", NpgsqlDbType.Text, c.AwsExternalId, true);
+        }
 
         /* The secret column: a new secret is written (the core encrypts it after the probe); a switch OUT of a secret
            mode clears the old one so it can never be reused as another mode's secret; otherwise it is not in the SET
@@ -847,6 +1000,8 @@ public sealed partial class DarlingMcpServerAdminTools
             MultiSubnetFailover = multi,
             Engine = row.Engine,
             Port = port,
+            AwsRoleArn = newRole,
+            AwsExternalId = c.AwsExternalId,
         };
 
         /* Whether the running service drops and re-opens its connection: the worker's own comparison, over the held
@@ -876,6 +1031,7 @@ public sealed partial class DarlingMcpServerAdminTools
         ReadOnlyIntent = c.ReadOnlyIntent, StoreAuth = c.StoreAuth, HasUsername = c.HasUsername, Username = c.Username,
         Password = null, EncryptMode = c.EncryptMode, TrustServerCertificate = c.TrustServerCertificate,
         MultiSubnetFailover = c.MultiSubnetFailover, MonthlyCostUsd = c.MonthlyCostUsd, ExpectedModifiedAt = c.ExpectedModifiedAt,
+        HasAwsRole = c.HasAwsRole, AwsRoleArn = c.AwsRoleArn, HasAwsExternalId = c.HasAwsExternalId, AwsExternalId = c.AwsExternalId,
     };
 
     /* ─────────────────────────────── store seam ─────────────────────────────── */
@@ -884,12 +1040,12 @@ public sealed partial class DarlingMcpServerAdminTools
     internal sealed record ServerEditRow(
         int ServerId, string Name, string Host, int Port, string? Database, bool ReadOnlyIntent, string Engine, string Auth,
         string? Username, string EncryptMode, bool TrustServerCertificate, bool MultiSubnetFailover, decimal MonthlyCostUsd,
-        DateTime ModifiedAt);
+        DateTime ModifiedAt, string? AwsRoleArn = null, bool AwsExternalIdSet = false);
 
     /// <summary><c>Occupied</c>: another definition holds the address the edit moves to. <c>ActualOccupied</c>: another
     /// definition holds the storage key the probe's connected database gives (#5240), the refusal
     /// <see cref="ActualIdentityCollision"/> gives before the write. Neither commits.</summary>
-    internal enum ServerEditWriteKind { Written, NotFound, Conflict, Occupied, PasswordNeeded, ActualOccupied, ReferenceRefused, RemediationKept }
+    internal enum ServerEditWriteKind { Written, NotFound, Conflict, Occupied, PasswordNeeded, ActualOccupied, ReferenceRefused, RemediationKept, ExternalIdNeeded, ExternalIdNeedsRole }
 
     internal sealed record ServerEditWrite(ServerEditWriteKind Kind, DateTime ModifiedAt);
 
@@ -919,7 +1075,7 @@ public sealed partial class DarlingMcpServerAdminTools
     /// <summary>The columns <see cref="ReadEditRowSql"/> reads, and the only ones an edit may name in a SET list.</summary>
     internal const string ReadEditRowSql = @"
 SELECT server_id, name, host, port, database, read_only_intent, engine, auth, username, encrypt_mode,
-       trust_server_certificate, multi_subnet_failover, monthly_cost_usd, modified_at
+       trust_server_certificate, multi_subnet_failover, monthly_cost_usd, modified_at, aws_role_arn, aws_external_id_set
 FROM config_monitored_servers WHERE server_id = $1";
 
     internal const string OtherServersSql =
@@ -933,7 +1089,7 @@ FROM config_monitored_servers WHERE server_id = $1";
     /// <see cref="EditFunctionColumns"/> order (null for a column not listed): the new secret rides at <c>$11</c>.
     /// </summary>
     internal const string EditFunctionSql =
-        "SELECT outcome, new_modified_at FROM config.edit_monitored_server($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)";
+        "SELECT outcome, new_modified_at FROM config.edit_monitored_server($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)";
 
     /// <summary>The editable columns in the order the function takes their values (<c>$4</c> onwards).</summary>
     internal static readonly (string Column, NpgsqlDbType DbType)[] EditFunctionColumns =
@@ -943,6 +1099,7 @@ FROM config_monitored_servers WHERE server_id = $1";
         ("encrypted_password", NpgsqlDbType.Text), ("encrypt_mode", NpgsqlDbType.Text),
         ("trust_server_certificate", NpgsqlDbType.Boolean), ("multi_subnet_failover", NpgsqlDbType.Boolean),
         ("monthly_cost_usd", NpgsqlDbType.Numeric),
+        ("aws_role_arn", NpgsqlDbType.Text), ("aws_external_id", NpgsqlDbType.Text),
     ];
 
     /// <summary>
@@ -1001,7 +1158,8 @@ FROM config_monitored_servers WHERE server_id = $1";
                 reader.IsDBNull(6) ? EngineSqlServer : reader.GetString(6), reader.IsDBNull(7) ? ServerStoreAuth.Integrated : reader.GetString(7),
                 reader.IsDBNull(8) ? null : reader.GetString(8), reader.IsDBNull(9) ? "Mandatory" : reader.GetString(9),
                 !reader.IsDBNull(10) && reader.GetBoolean(10), !reader.IsDBNull(11) && reader.GetBoolean(11),
-                reader.IsDBNull(12) ? 0m : reader.GetDecimal(12), reader.GetDateTime(13));
+                reader.IsDBNull(12) ? 0m : reader.GetDecimal(12), reader.GetDateTime(13),
+                reader.IsDBNull(14) ? null : reader.GetString(14), !reader.IsDBNull(15) && reader.GetBoolean(15));
         }
 
         public async Task<List<string>> LoadOtherStorageKeysAsync(int serverId, CancellationToken cancellationToken)
@@ -1083,6 +1241,10 @@ FROM config_monitored_servers WHERE server_id = $1";
                     return new ServerEditWrite(ServerEditWriteKind.ReferenceRefused, expectedModifiedAt);
                 case "remediation_kept":
                     return new ServerEditWrite(ServerEditWriteKind.RemediationKept, expectedModifiedAt);
+                case "external_id_needed":
+                    return new ServerEditWrite(ServerEditWriteKind.ExternalIdNeeded, expectedModifiedAt);
+                case "external_id_needs_role":
+                    return new ServerEditWrite(ServerEditWriteKind.ExternalIdNeedsRole, expectedModifiedAt);
                 case "saved":
                     break;
                 default:
