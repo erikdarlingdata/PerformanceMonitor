@@ -320,11 +320,19 @@ public sealed class CaggGroupIndexDropLiveTests
     {
         if (simulatedVersion < LegacyPinCandidateTables.RungVersion)
         {
-            /* V166 (#5456) - the table that records the old-format values present at the upgrade;
+            /* V167 (#5456) - the table that records the old-format values present at the upgrade;
                config.legacy_secret_pin_candidate is the probe's sentinel. It goes before the V165 arm below, because its
                triggers use the function that arm drops. */
             await using var dropCandidates = new NpgsqlCommand("DROP TABLE IF EXISTS config.legacy_secret_pin_candidate", connection);
             await dropCandidates.ExecuteNonQueryAsync(ct);
+        }
+
+        if (simulatedVersion < 166)
+        {
+            /* V166 - the PagerDuty auto-resolve column on config_notification; the column is the probe's sentinel. */
+            await using var dropAutoResolve = new NpgsqlCommand(
+                "ALTER TABLE config.config_notification DROP COLUMN IF EXISTS pagerduty_auto_resolve", connection);
+            await dropAutoResolve.ExecuteNonQueryAsync(ct);
         }
 
         if (simulatedVersion < PasswordKeyTables.RungVersion)

@@ -107,7 +107,7 @@ WHERE NOT t.tgisinternal
             : null;
     }
 
-    // The V165 key tables' eight triggers, then the V166 candidate table's two.
+    // The V165 key tables' eight triggers, then the V167 candidate table's two.
     private static IEnumerable<(string Table, string Trigger)> ExpectedTriggers()
     {
         foreach (var trigger in PasswordKeyTables.OwnerOnlyTriggers)
@@ -217,7 +217,7 @@ RETURNING key_id;", c);
     /// <c>skipped</c> (a Linux host set <c>skipped</c> and left the step to a Windows machine); on anything else it sets
     /// <c>skipped</c> from <c>pending</c> and pins nothing.
     ///
-    /// <para>The step pins from the record the V166 rung took of the old-format values present at the upgrade
+    /// <para>The step pins from the record the V167 rung took of the old-format values present at the upgrade
     /// (<see cref="LegacyPinCandidateTables"/>). A live value matches a candidate only when its stored text and the
     /// connection it is saved for both hash to what the record holds (both compared in fixed time); only a match is
     /// offered to <paramref name="canOpen"/>, which says whether this machine opens it and never returns the value. Four

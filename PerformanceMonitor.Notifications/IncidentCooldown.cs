@@ -26,6 +26,16 @@ namespace PerformanceMonitor.Notifications;
 public sealed class IncidentCooldown
 {
     private readonly ConcurrentDictionary<string, DateTime> _cooldowns = new();
+
+    /* ClearMetric's sticky half: the clear instant per metric-level key. Written ONLY by ClearMetric
+       (the key shape is exactly the "{prefix}{server}:{metric}" fallback key — a fingerprinted key is
+       never found here, and the seed's lookup of one is a miss feeding the "no clear" answer). Read by
+       EvaluateAsync to keep a pre-clear history row from re-seeding an entry the clear just removed:
+       the PR review's point 2, which reproduced as "down, back, down" where the DOWN that follows a
+       delivered resolve still met the first outage's in-memory stamp that ClearMetric deleted — until
+       the seed rebuilt it from the alert history. */
+    private readonly ConcurrentDictionary<string, DateTime> _clearedAtUtc = new();
+
     private readonly string _keyPrefix;
     private readonly Func<string, string, string?, Task<DateTime?>>? _seedLastSentUtc;
 
@@ -75,7 +85,14 @@ public sealed class IncidentCooldown
             if (_seedLastSentUtc is not null && !_cooldowns.ContainsKey(key))
             {
                 var lastSent = await _seedLastSentUtc(serverId, metricName, dedupKey);
-                if (lastSent.HasValue)
+
+                /* A row older than the recorded clear is the row the clear was FOR — re-seeding it would
+                   undo ClearMetric whenever the map entry is gone from memory but the history row is not
+                   (the pair-of-points this fix exists for). A seed newer than the clear still applies: a
+                   genuinely new send happened after the resolve, and that send's row re-arms the window
+                   normally. */
+                if (lastSent.HasValue &&
+                    (!_clearedAtUtc.TryGetValue(key, out var clearedAtUtc) || lastSent.Value > clearedAtUtc))
                     _cooldowns.TryAdd(key, lastSent.Value);
             }
 
@@ -127,6 +144,39 @@ public sealed class IncidentCooldown
             _cooldowns[key] = decision.EvaluatedAtUtc;
     }
 
+    /// <summary>
+    /// Forgets the metric-level fallback entry for (<paramref name="serverId"/>, <paramref name="metricName"/>)
+    /// on THIS cooldown's key space. The PagerDuty auto-resolve recovery calls this for its pair's FIRING
+    /// metric after a delivered close: the stamp sitting on that key is a relic of an incident that no longer
+    /// exists, and without the clear the next firing of the same metric meets the old window and never
+    /// announces. Call only on a DELIVERED close — evaluating (not sending) a recovery must not re-arm
+    /// anything.
+    /// <para>
+    /// The clear is sticky across history re-seeds for PRE-clear rows only: the clear instant is recorded
+    /// beside the removal, and EvaluateAsync's seed branch ignores any history row older than it — without
+    /// that the PagerDuty close's next firing would read the pre-clear send straight back out of the alert
+    /// history (both production paths seed) and be throttled against the incident that no longer exists. A
+    /// seeded time ending up NEWER than the clear still applies — a genuinely new send happened after the
+    /// resolve, and it re-arms the window normally. A restart discards the record along with the in-memory
+    /// cooldown and the seed re-arms from history; that is the restart class the seed deliberately accepts,
+    /// not a reopened window.
+    /// </para>
+    /// <para>
+    /// The clear is METRIC-level — one key per server and pair — not per replica. For the AG pair (whose
+    /// per-replica identity lives in the PagerDuty dedup key, not in these keys) one replica's reconnect
+    /// therefore also re-arms a sibling replica that is still down on the same server. Accepted: the
+    /// re-armed entry is only consulted by a new firing — the sibling's incident stays open in PagerDuty
+    /// under its own per-replica key, and a per-replica clear shape here would duplicate that identity
+    /// into a map whose keys the cooldown already keeps coarse on purpose.
+    /// </para>
+    /// </summary>
+    public void ClearMetric(string serverId, string metricName)
+    {
+        var key = $"{_keyPrefix}{serverId}:{metricName}";
+        _clearedAtUtc[key] = DateTime.UtcNow;
+        _cooldowns.TryRemove(key, out _);
+    }
+
     // Distinct non-blank fingerprints -> one "{prefix}{server}:{metric}:{dedupKey}" key each; no
     // fingerprint -> the single "{prefix}{server}:{metric}" fallback key (pre-#1154 behavior). A blank
     // DedupKey can't occur (AlertFingerprint returns null incidents, filtered upstream) but is excluded
@@ -151,7 +201,11 @@ public sealed class IncidentCooldown
     /* Drop entries past 2x the window so the per-fingerprint dict stays bounded — any entry past 1x is
        already re-fire-eligible, so doubling only adds clock-skew margin and can never evict a key that
        could still suppress. A key dropped here that later recurs is re-seeded from history on next touch;
-       that's a wash, not a bug. Mirrors AnalysisNotificationService's prune idiom. */
+       that's a wash, not a bug. Mirrors AnalysisNotificationService's prune idiom.
+       The cleared-at map lives under the same rule: a clear at least two windows old names an incident
+       that cannot still be re-seeding from inside the window, so both maps face the same pruneBefore.
+       Pruning a CLEAR can un-cover a history row (the seed would apply again) — but only for a row at
+       least two windows old by the same measure, which re-fires anyway. */
     private void Evict(DateTime now, TimeSpan window)
     {
         var pruneBefore = now - TimeSpan.FromTicks(window.Ticks * 2);
@@ -160,10 +214,19 @@ public sealed class IncidentCooldown
             if (entry.Value < pruneBefore)
                 _cooldowns.TryRemove(entry.Key, out _);
         }
+
+        foreach (var entry in _clearedAtUtc)
+        {
+            if (entry.Value < pruneBefore)
+                _clearedAtUtc.TryRemove(entry.Key, out _);
+        }
     }
 
     /// <summary>Live key count, for tests asserting eviction keeps the dict bounded.</summary>
     internal int TrackedKeyCount => _cooldowns.Count;
+
+    /// <summary>Live cleared-entry count, for tests asserting the clear record faces the same eviction bound.</summary>
+    internal int TrackedClearCount => _clearedAtUtc.Count;
 
     /// <summary>The send decision plus the candidate keys to stamp on a successful send.</summary>
     /// <param name="DeliverableDedupKeys">

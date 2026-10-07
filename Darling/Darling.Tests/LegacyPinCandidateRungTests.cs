@@ -21,14 +21,14 @@ using Xunit;
 namespace Darling.Tests;
 
 /// <summary>
-/// Pins the rung that records which old-format saved passwords were in the store at the upgrade (V166, #5456): its place
+/// Pins the rung that records which old-format saved passwords were in the store at the upgrade (V167, #5456): its place
 /// at the top of a dense ladder, its owner-only table, the gate on its capture statement, and the schema-version probe's
 /// newest sentinel. The live fact mints its own scratch store.
 /// </summary>
 [Collection("live-postgres")]
 public sealed class LegacyPinCandidateRungTests
 {
-    private const int ProbeOrdinal = 141;
+    private const int ProbeOrdinal = 142;
 
     private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
 
@@ -43,7 +43,7 @@ public sealed class LegacyPinCandidateRungTests
         Assert.Equal(StorageVersion.SchemaVersion, Rung.Version);
         Assert.Equal(Rung.Version, PgMigrations.Scripts[^1].Version);
         Assert.Equal(versions.Distinct().OrderBy(v => v), versions);
-        Assert.Equal(PasswordKeyTables.RungVersion, Rung.Version - 1);
+        Assert.Contains(Rung.Version - 1, versions);
         Assert.Equal(LegacyPinCandidateTables.CreateSql + "\n\n" + LegacyPinCandidateTables.CaptureSql, Rung.Sql);
 
         /* V165 does not change: a store already at 165 never runs it again, so this is a rung of its own. */
@@ -134,7 +134,7 @@ public sealed class LegacyPinCandidateRungTests
         var parameters = method.GetParameters();
         Assert.Equal(ProbeOrdinal, parameters.Length - 1);
         Assert.Equal("hasLegacyPinCandidates", parameters[ProbeOrdinal].Name);
-        Assert.Equal("hasPasswordKey", parameters[ProbeOrdinal - 1].Name);
+        Assert.Equal("hasPagerDutyAutoResolve", parameters[ProbeOrdinal - 1].Name);
 
         var all = Enumerable.Repeat((object)true, parameters.Length).ToArray();
         Assert.Equal(PgMigrations.Scripts[^1].Version, (int)method.Invoke(null, all)!);
@@ -145,11 +145,11 @@ public sealed class LegacyPinCandidateRungTests
         Assert.Equal(PgMigrations.Scripts[^1].Version - 1, (int)method.Invoke(null, behind)!);
 
         var thisArm = viewer.IndexOf("if (hasLegacyPinCandidates)", StringComparison.Ordinal);
-        var previousArm = viewer.IndexOf("if (hasPasswordKey)", StringComparison.Ordinal);
+        var previousArm = viewer.IndexOf("if (hasPagerDutyAutoResolve)", StringComparison.Ordinal);
         Assert.True(thisArm >= 0 && thisArm < previousArm, "this arm sits above the previous rung's");
         Assert.Contains($"return {Rung.Version};", viewer[thisArm..previousArm], StringComparison.Ordinal);
 
-        var armProseStart = viewer.LastIndexOf("/* V166 (#5456)", thisArm, StringComparison.Ordinal);
+        var armProseStart = viewer.LastIndexOf("/* V167 (#5456)", thisArm, StringComparison.Ordinal);
         Assert.True(armProseStart >= 0, "the arm has no comment block saying why it exists");
         Assert.DoesNotContain("legacy_secret_pin_candidate", viewer[armProseStart..thisArm], StringComparison.Ordinal);
     }

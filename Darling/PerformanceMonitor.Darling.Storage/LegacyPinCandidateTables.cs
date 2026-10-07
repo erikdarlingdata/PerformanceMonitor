@@ -11,7 +11,7 @@ using System.Collections.Generic;
 namespace PerformanceMonitor.Darling.Storage;
 
 /// <summary>
-/// The record of which old-format saved passwords were in the store when the store reached V166 (#5456), its creating
+/// The record of which old-format saved passwords were in the store when the store reached V167 (#5456), its creating
 /// script and the statement that fills it. The one-time pin step (<c>DarlingPasswordKeyStore.SnapshotLegacyPinsAsync</c>)
 /// works from this record: it pins a saved value only when the value and the connection it is saved for both still equal
 /// what was recorded here. Nothing in this class writes: the table is changed by the store owner only, and the
@@ -19,8 +19,8 @@ namespace PerformanceMonitor.Darling.Storage;
 /// </summary>
 public static class LegacyPinCandidateTables
 {
-    /// <summary>The store schema version of the rung that creates the table and records the values (V166).</summary>
-    public const int RungVersion = 166;
+    /// <summary>The store schema version of the rung that creates the table and records the values (V167).</summary>
+    public const int RungVersion = 167;
 
     /// <summary>
     /// The table, its two owner-only triggers and row-level security. The triggers are made before
@@ -29,7 +29,7 @@ public static class LegacyPinCandidateTables
     /// text (never the text) and the connection columns the pin binds the value to, copied as the source row holds them:
     /// for a server's own or remediation password the server's connection settings, for the mail server the host, port,
     /// SSL flag and user name (in <c>host</c>, <c>port</c>, <c>smtp_use_ssl</c> and <c>username</c>). Idempotent. The
-    /// rung embeds this text, so once V166 has shipped, editing it edits a shipped rung: add a new rung instead.
+    /// rung embeds this text, so once V167 has shipped, editing it edits a shipped rung: add a new rung instead.
     /// </summary>
     public const string CreateSql = @"
 CREATE TABLE IF NOT EXISTS config.legacy_secret_pin_candidate

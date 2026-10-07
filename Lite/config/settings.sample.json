@@ -200,6 +200,7 @@
   "pagerduty_webhook_enabled": false,
   "pagerduty_use_eu_region": false,
   "pagerduty_proxy_address": "",
+  "pagerduty_auto_resolve": false,
 
   // ---- Legacy plaintext webhook URLs (#1506) — read once, then migrated ---------------------------------
   // DO NOT ADD THESE. They are here because settings.json files written before #1506 have

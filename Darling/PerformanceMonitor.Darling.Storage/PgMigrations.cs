@@ -672,7 +672,25 @@ CREATE TABLE IF NOT EXISTS config.store_statement_baseline
     private const string V165Sql = PasswordKeyTables.CreateSql;
 
     /// <summary>
-    /// V166 (#5456) — the record of which old-format saved passwords were in the store at the upgrade:
+    /// V166 — the PagerDuty auto-resolve opt-in. Adds <c>pagerduty_auto_resolve</c> to
+    /// <c>config.config_notification</c>: non-null with a FALSE default, so every existing row keeps the
+    /// shipped behaviour of NOT auto-resolving incidents with PagerDuty (the closing edge of an edge-type
+    /// pair stays an info-severity trigger; with the toggle on it becomes a <c>resolve</c> — see
+    /// <c>WebhookAlertService.BuildPagerDutyPayload</c>, which reads the column through
+    /// <c>IAlertSettings.PagerDutyAutoResolve</c>). Non-secret (a behaviour toggle, not a credential), so
+    /// unlike the routing key beside it, it stays in the read-only roles' SELECT grants —
+    /// <c>DarlingManagedRoles.ViewerRestrictedConfigTables</c> and <c>Darling/tools/provision-roles.sql</c>.
+    ///
+    /// <para><b>Numbered 166, the ladder's next free version</b> (the top was 165): the migration ladder is
+    /// applied and stamped in version order, so ANY free number >= 166 would apply on every store — but the
+    /// convention is dense, consecutive versions, and a gap would trip the ladder-density census.</para>
+    /// </summary>
+    private const string V166Sql = @"
+ALTER TABLE config.config_notification
+    ADD COLUMN IF NOT EXISTS pagerduty_auto_resolve boolean NOT NULL DEFAULT FALSE;";
+
+    /// <summary>
+    /// V167 (#5456) - the record of which old-format saved passwords were in the store at the upgrade:
     /// <c>config.legacy_secret_pin_candidate</c>, with the hash of each stored value and the connection columns it is
     /// saved for. The text and the reasoning are on <see cref="LegacyPinCandidateTables"/>, which the rung embeds. The
     /// table and its two owner-only triggers are made first and the values are recorded after them in the same
@@ -681,7 +699,7 @@ CREATE TABLE IF NOT EXISTS config.store_statement_baseline
     ///
     /// <para><b>No Lite twin.</b> Lite keeps its secrets in its own local store.</para>
     /// </summary>
-    private const string V166Sql = LegacyPinCandidateTables.CreateSql + "\n\n" + LegacyPinCandidateTables.CaptureSql;
+    private const string V167Sql = LegacyPinCandidateTables.CreateSql + "\n\n" + LegacyPinCandidateTables.CaptureSql;
 
     public static IReadOnlyList<Migration> Scripts { get; } = new[]
     {
@@ -886,7 +904,8 @@ CREATE TABLE IF NOT EXISTS config.store_statement_baseline
         new Migration(163, "store-statement-history", V163Sql),
         new Migration(164, "query-stats-hour-ledger", V164Sql),
         new Migration(165, "password-key", V165Sql),
-        new Migration(166, "legacy-pin-candidates", V166Sql),
+        new Migration(166, "pagerduty-auto-resolve", V166Sql),
+        new Migration(167, "legacy-pin-candidates", V167Sql),
     };
 
     /// <summary>

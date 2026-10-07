@@ -917,7 +917,7 @@ ON CONFLICT (id) DO UPDATE SET smtp_host = EXCLUDED.smtp_host, smtp_port = EXCLU
     smtp_username = EXCLUDED.smtp_username, smtp_encrypted_password = EXCLUDED.smtp_encrypted_password;");
         }
 
-        /// <summary>Records the old-format values now in the store, as the V166 rung does at the upgrade.</summary>
+        /// <summary>Records the old-format values now in the store, as the V167 rung does at the upgrade.</summary>
         public Task CaptureCandidatesAsync() => ExecAsync(LegacyPinCandidateTables.CaptureSql);
 
         /// <summary>The store as an upgrade finds it: <see cref="SeedServersAsync"/>, then <paramref name="rowsBeforeTheUpgrade"/>
