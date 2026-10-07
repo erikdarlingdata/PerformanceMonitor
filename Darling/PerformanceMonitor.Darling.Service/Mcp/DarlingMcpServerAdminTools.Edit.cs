@@ -149,7 +149,7 @@ public sealed partial class DarlingMcpServerAdminTools
 
     [McpServerTool(Name = "edit_server"), Description(
         "Edits one monitored server's settings in place, no confirm step: name, address, database, authentication, " +
-        "TLS posture, monthly cost or (PostgreSQL on Amazon RDS or Aurora) the AWS role. The server keeps its id, tags and history. A change to how it is reached is " +
+        "TLS posture or monthly cost. The server keeps its id, tags and history. A change to how it is reached is " +
         "probed first and saved only if the server answers; the service applies it within one sweep. Engine, " +
         "enabled state and excluded databases cannot change. Returns updated, unchanged, or " +
         "invalid/not_found/ambiguous/conflict/collides/connection_failed with nothing written." +
