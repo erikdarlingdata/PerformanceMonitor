@@ -196,6 +196,10 @@ namespace PerformanceMonitor.Common
                state-only dash. */
             "Collection Gap At Start" => $"{value:F0} m",
 
+            /* #5450: "Collection Gaps In History" carries the whole hours of the audited day that were flagged,
+               a count with its unit; the threshold arrives as 0, so it renders "0 h" like the other counts. */
+            "Collection Gaps In History" => $"{value:F0} h",
+
             /* #1839 total blocked wait — seconds, whole (the numeric is already seconds, not ms). */
             "Blocking Wait Time" => $"{value:F0} s",
 

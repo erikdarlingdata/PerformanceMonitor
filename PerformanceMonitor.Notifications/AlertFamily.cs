@@ -118,6 +118,8 @@ public static class AlertFamily
         ["Store Runtime Upgrade"] = SelfMonitor,
         /* #5450: raised once per service start when the store shows the service was not collecting. */
         ["Collection Gap At Start"] = SelfMonitor,
+        /* #5450: the daily retained-history audit: hours of a past day the store's rollups hold under half of usual. */
+        ["Collection Gaps In History"] = SelfMonitor,
         ["Store Job Over Cadence"] = SelfMonitor,
         ["Retention Held"] = SelfMonitor,
         ["Custom Alert Rules Unhealthy"] = SelfMonitor,

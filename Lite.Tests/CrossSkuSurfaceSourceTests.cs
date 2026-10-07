@@ -226,8 +226,9 @@ public sealed class CrossSkuSurfaceSourceTests
            pressure read, the two informational store self-alerts that PR added — Darling-only for the same
            reason, and the pair that shipped un-inventoried because that PR's own build check was cancelled
            rather than red. Twelfth since #4215: the store settings self-alert's managed-conf verdicts read,
-           Darling-only like the other store self-alerts. */
-        Assert.Equal(12, nullKeyReads.Count);
+           Darling-only like the other store self-alerts. Thirteenth since #5450: the daily
+           collection-history audit's rollup read, Darling-only for the same reason. */
+        Assert.Equal(13, nullKeyReads.Count);
 
         var inventory = AlertReadFailureCounter.FleetScopedReads;
 
@@ -248,12 +249,13 @@ public sealed class CrossSkuSurfaceSourceTests
         Assert.Contains(nullKeyReads, r => r.Contains("TOAST slack", StringComparison.Ordinal));
         Assert.Contains(nullKeyReads, r => r.Contains("checkpointer pressure", StringComparison.Ordinal));
         Assert.Contains(nullKeyReads, r => r.Contains("managed-conf verdicts", StringComparison.Ordinal));
+        Assert.Contains(nullKeyReads, r => r.Contains("collection-history audit", StringComparison.Ordinal));
         /* #3354: config_mute_rules belongs to the store, not to any monitored server, so its failed read
            lands in the instance total and in no server's count — exactly the case a per-server-only
            surface would have given no home. Recorded TWICE across the tree, once per SKU, and that is the
            point rather than a duplicate: both SKUs perform this read, the counters are per-process, and a
-           SKU that named it without recording it would promise a reading it cannot produce. The other ten
-           entries are Darling-only with no Lite equivalent — nine store self-alerts and the background-job
+           SKU that named it without recording it would promise a reading it cannot produce. The other eleven
+           entries are Darling-only with no Lite equivalent — ten store self-alerts and the background-job
            health read. */
         Assert.Equal(
             2,
@@ -269,6 +271,7 @@ public sealed class CrossSkuSurfaceSourceTests
         Assert.Contains("TOAST slack", inventory, StringComparison.Ordinal);
         Assert.Contains("checkpointer pressure", inventory, StringComparison.Ordinal);
         Assert.Contains("managed-conf verdicts", inventory, StringComparison.Ordinal);
+        Assert.Contains("collection-history audit", inventory, StringComparison.Ordinal);
 
         /* And the phantom stays gone. Disk pressure's feed reads are exempt — a local filesystem read and a
            recorded-store-size lookup that is context for the alert text — so naming it here would send an

@@ -2735,6 +2735,301 @@ internal sealed class DarlingSelfAlertEvaluator
             delivery, FleetSweepRollupInterval, now, "fleet-sweep rollup", cancellationToken);
     }
 
+    /* ------------------------- #5450: the daily retained-history audit ------------------------- */
+
+    /// <summary>
+    /// The alert metric name for the daily retained-history audit (#5450, proposal 3). A WEBHOOK AUTOMATION KEY
+    /// like its siblings, so it is a const and must stay stable across releases.
+    /// </summary>
+    internal const string CollectionGapsInHistoryMetric = "Collection Gaps In History";
+
+    /// <summary>Fleet-level key, non-numeric so it never collides with a real server_id (the DiskKey shape).</summary>
+    private const string CollectionHistoryAuditKey = "collectionhistoryaudit";
+
+    /// <summary>The audit's day grid: one slot a day, at <see cref="CollectionHistoryAudit.DueTimeOfDay"/>.</summary>
+    internal static readonly TimeSpan HistoryAuditInterval = TimeSpan.FromDays(1);
+
+    /// <summary>The slot of the latest audit pass, the <see cref="_lastSweepRollup"/> idiom: a cache of the stamp.</summary>
+    private readonly ConcurrentDictionary<string, DateTime> _lastHistoryAudit = new();
+
+    /// <summary>Reads one rollup's hour buckets between the bounds; null when the relation does not exist.</summary>
+    internal delegate Task<IReadOnlyList<CollectionHistoryAudit.HourBucket>?> HistoryRollupReader(
+        CollectionHistoryAudit.Rollup rollup, DateTime fromUtc, DateTime toUtc, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// FLEET-level (#5450): the DAILY RETAINED-HISTORY AUDIT. Once per UTC day, on the first pass at or after 03:00Z,
+    /// reads each source's per-hour counts for the previous UTC day and the seven days before it, and raises at most
+    /// ONE "Collection Gaps In History" Warning naming the flagged hour ranges. The self-monitor alerts run inside
+    /// the service, so an outage the service was not alive for, and a degraded collection whose rows still arrive
+    /// every hour, are only visible afterwards, in what the store retained. Quiet when nothing is flagged. The
+    /// sources, the tests and why they are these are on <see cref="CollectionHistoryAudit"/>.
+    ///
+    /// <para><b>Once a day, across restarts.</b> The <see cref="DocumentDeliveredInsideIntervalAsync"/> gate over the
+    /// delivery stamp store, as the daily documents use, with the slot pinned to 03:00Z of the day: a restart later
+    /// that day reads the stamp and does nothing. A quiet day and a delivered one both stamp; only a delivery the
+    /// deliverer reported failed does not, so the next tick retries.</para>
+    ///
+    /// <para><b>Every source read, or absent, before the day is done (M2 of the #5461 review).</b> A source whose read
+    /// failed, or that has no bucket at or after the audited day's 23:00 bucket (not ready; the read runs up to the
+    /// current hour, so a hole across midnight is judged as soon as collection resumes), is retried on the later
+    /// ticks, and only those sources are re-read; the findings so far are held in memory and nothing is raised or
+    /// stamped until every source has been read or is absent. The audit gives up on a source at the next day's 03:00Z
+    /// slot, with one warning naming it, and raises what it has, the alert text naming each source not read. A source
+    /// that was read but never became ready keeps its flagged hours (an hour with no rows counts as 0): they reach
+    /// the give-up alert, marked as not complete. A give-up with no flagged hours at all raises nothing and leaves the
+    /// warning in the log. The held state is process memory: a restart starts the day over, and a day whose retries a
+    /// restart ended is not audited again.</para>
+    ///
+    /// <para><b>One alert per audited day (M1 of the #5461 round 2 review).</b> The audit day is in the alert's
+    /// delivery key, so the give-up alert for day D and the audit of day D+1 in the same tick are two incidents: the
+    /// deliverer's cooldown falls back to the (server key, metric) pair for a self-alert, and with one key for both
+    /// days it would throttle the second.</para>
+    ///
+    /// <para><b>Days missed while the service was down are not audited (L4).</b> Only the previous UTC day is. Down
+    /// from late evening to the next morning leaves the earlier day unaudited, which is accepted: Collection Gap At
+    /// Start reports that down window itself on the restart.</para>
+    ///
+    /// <para><b>Cost.</b> One aggregate per source, with a range predicate on <c>bucket</c> and a 60 s deadline. A read
+    /// that times out or fails logs one warning, is counted in the alert-read-failure census, and leaves THAT source
+    /// unread; the audit goes on with the others.</para>
+    /// </summary>
+    public Task EvaluateCollectionHistoryAuditAsync(NpgsqlDataSource postgres, CancellationToken cancellationToken)
+        => ApplyCollectionHistoryAuditAsync(
+            (rollup, from, to, token) => CollectionHistoryAudit.ReadAsync(postgres, rollup, from, to, token),
+            CollectionHistoryAudit.Rollups, cancellationToken);
+
+    /// <summary>One audit day's held state: the sources read so far and the findings of the ones that flagged.</summary>
+    private sealed class HistoryAuditDay
+    {
+        public HistoryAuditDay(DateTime day) => Day = day;
+
+        public DateTime Day { get; }
+
+        public HashSet<string> Done { get; } = new(StringComparer.Ordinal);
+
+        public Dictionary<string, IReadOnlyList<CollectionHistoryAudit.FlaggedRange>> Findings { get; } = new(StringComparer.Ordinal);
+
+        /// <summary>The ranges of a source that was read but not ready, from its latest read: raised only if the
+        /// audit gives up on it (H1 of the #5461 round 2 review).</summary>
+        public Dictionary<string, IReadOnlyList<CollectionHistoryAudit.FlaggedRange>> Unsettled { get; } = new(StringComparer.Ordinal);
+    }
+
+    /// <summary>The day being retried: set while a source of the audited day is unread, null otherwise.</summary>
+    private HistoryAuditDay? _historyAuditDay;
+
+    /// <summary>
+    /// The audit with its reads handed in, so the gate, the one-alert rule and the failure isolation are
+    /// unit-testable with a controllable clock and fixture buckets.
+    /// </summary>
+    internal async Task ApplyCollectionHistoryAuditAsync(
+        HistoryRollupReader read, IReadOnlyList<CollectionHistoryAudit.Rollup> rollups, CancellationToken cancellationToken)
+    {
+        if (!_settings.AlertsEnabled)
+        {
+            return;
+        }
+
+        var now = _utcNow();
+
+        /* A day with unread sources is retried until the next day's slot, then given up on. */
+        var held = _historyAuditDay;
+        if (held is not null && now >= held.Day.AddDays(2) + CollectionHistoryAudit.DueTimeOfDay)
+        {
+            await GiveUpOnHistoryAuditDayAsync(held, rollups, cancellationToken);
+            held = null;
+            _historyAuditDay = null;
+        }
+
+        if (held is null)
+        {
+            if (now.TimeOfDay < CollectionHistoryAudit.DueTimeOfDay)
+            {
+                return;
+            }
+
+            if (await DocumentDeliveredInsideIntervalAsync(
+                    _lastHistoryAudit, CollectionHistoryAuditKey, PgSelfAlertDeliveryStampStore.HistoryAuditStateKey,
+                    HistoryAuditInterval, now, "collection-history audit", cancellationToken))
+            {
+                return;
+            }
+
+            /* Nothing known (no stamp, or none readable) anchors the slot grid on 03:00Z of today instead of on this
+               instant, so the next day's audit is due at 03:00Z and not a day after whenever this one happened to run. */
+            if (!_lastHistoryAudit.TryGetValue(CollectionHistoryAuditKey, out var known) || known == NoDeliveryKnown)
+            {
+                _lastHistoryAudit[CollectionHistoryAuditKey] =
+                    now.Date + CollectionHistoryAudit.DueTimeOfDay - HistoryAuditInterval;
+            }
+
+            held = new HistoryAuditDay(now.Date.AddDays(-1));
+            _historyAuditDay = held;
+        }
+
+        var auditDay = held.Day;
+        var from = CollectionHistoryAudit.ReadFrom(auditDay);
+        var to = CollectionHistoryAudit.ReadTo(auditDay, now);
+
+        foreach (var rollup in rollups)
+        {
+            if (held.Done.Contains(rollup.Relation))
+            {
+                continue;
+            }
+
+            IReadOnlyList<CollectionHistoryAudit.HourBucket>? buckets;
+            var readClock = Stopwatch.StartNew();
+            try
+            {
+                buckets = await read(rollup, from, to, cancellationToken);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                /* One warning, one count, and on to the next source; this one is retried on a later tick. */
+                _logger?.LogWarning(ex,
+                    "Collection-history audit could not read {Rollup} after {ElapsedMs} ms; it is retried on a later tick",
+                    rollup.Relation, readClock.ElapsedMilliseconds);
+                _readFailures?.RecordReadFailure(null, "collection-history audit read", readClock.ElapsedMilliseconds);
+                continue;
+            }
+
+            if (buckets is null)
+            {
+                held.Done.Add(rollup.Relation);
+                continue;
+            }
+
+            var ranges = CollectionHistoryAudit.Analyze(auditDay, buckets);
+            if (ranges is null)
+            {
+                held.Done.Add(rollup.Relation);
+                continue;
+            }
+
+            if (!CollectionHistoryAudit.IsSettled(auditDay, buckets))
+            {
+                /* Not ready: no bucket at or after the day's 23:00 bucket yet. Like a failed read, but its ranges are
+                   kept: if the audit gives up on it they reach the alert (H1 of the #5461 round 2 review). */
+                held.Unsettled[rollup.Relation] = ranges;
+                _logger?.LogInformation(
+                    "Collection-history audit: {Rollup} has no bucket at or after {Hour:u} yet; it is retried on a later tick",
+                    rollup.Relation, auditDay.AddHours(23));
+                continue;
+            }
+
+            held.Done.Add(rollup.Relation);
+            held.Unsettled.Remove(rollup.Relation);
+            if (ranges.Count > 0)
+            {
+                held.Findings[rollup.Relation] = ranges;
+            }
+        }
+
+        if (rollups.Any(r => !held.Done.Contains(r.Relation)))
+        {
+            return;
+        }
+
+        AlertDelivery? delivery = null;
+        var alert = HistoryAuditAlert(held, rollups, Array.Empty<CollectionHistoryAudit.Rollup>());
+        if (alert is not null)
+        {
+            delivery = await FireAsync(
+                StoreKey(HistoryAuditDayKey(held.Day)), _storeLabel, CollectionGapsInHistoryMetric,
+                alert.ValueText, "half of usual",
+                detail: alert.Detail,
+                severity: AlertSeverityLevel.Warning,
+                shortMessage: alert.ShortMessage,
+                numericCurrentValue: alert.Hours, numericThresholdValue: 0,
+                cancellationToken);
+        }
+
+        _historyAuditDay = null;
+        await RecordDocumentDeliveredAsync(
+            _lastHistoryAudit, CollectionHistoryAuditKey, PgSelfAlertDeliveryStampStore.HistoryAuditStateKey,
+            delivery, HistoryAuditInterval, now, "collection-history audit", cancellationToken);
+    }
+
+    /// <summary>
+    /// The retries ran out at the next day's slot: one warning naming each source never read, and the one alert for
+    /// whatever was read, with the unread sources named in its text. The send keeps no answer and is not retried: the
+    /// day is given up on, and the stamp that matters is the new slot's own.
+    /// </summary>
+    private async Task GiveUpOnHistoryAuditDayAsync(
+        HistoryAuditDay held, IReadOnlyList<CollectionHistoryAudit.Rollup> rollups, CancellationToken cancellationToken)
+    {
+        var unread = rollups.Where(r => !held.Done.Contains(r.Relation)).ToArray();
+        _logger?.LogWarning(
+            "Collection-history audit gave up on {Rollups} for {Day:yyyy-MM-dd}: they could not be read, or had not caught up, by the next day's slot",
+            string.Join(", ", unread.Select(r => r.Relation)), held.Day);
+
+        /* The master switch, consulted here as the sibling applies do (#3464): the caller gated at its top, but this
+           member fires on its own and the switch can go off between that check and here. Off: the warning above is
+           logged, nothing is raised, and the caller still clears the held day so it is not given up on again. */
+        if (!_settings.AlertsEnabled)
+        {
+            return;
+        }
+
+        var alert = HistoryAuditAlert(held, rollups, unread);
+        if (alert is null)
+        {
+            return;
+        }
+
+        await FireAsync(
+            StoreKey(HistoryAuditDayKey(held.Day)), _storeLabel, CollectionGapsInHistoryMetric,
+            alert.ValueText, "half of usual",
+            detail: alert.Detail,
+            severity: AlertSeverityLevel.Warning,
+            shortMessage: alert.ShortMessage,
+            numericCurrentValue: alert.Hours, numericThresholdValue: 0,
+            cancellationToken);
+    }
+
+    /// <summary>
+    /// The family key of one audited day's alert, qualified by <see cref="StoreKey"/> at the fire site: the audit day on the fleet key (M1 of the #5461 round 2 review).
+    /// Non-numeric like its siblings, so it never parses as a server_id; a self-alert has no incidents, so the
+    /// cooldown key is this plus the metric, and two days are two keys.
+    /// </summary>
+    private static string HistoryAuditDayKey(DateTime auditDay) =>
+        CollectionHistoryAuditKey + ":" + auditDay.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+
+    /// <summary>The audit alert's pieces, shared by the day's one alert and the give-up alert.</summary>
+    private sealed record HistoryAuditAlertText(int Hours, string ValueText, string Detail, string ShortMessage);
+
+    /// <summary>Null when no source flagged an hour: nothing to raise.</summary>
+    private static HistoryAuditAlertText? HistoryAuditAlert(
+        HistoryAuditDay held, IReadOnlyList<CollectionHistoryAudit.Rollup> rollups,
+        IReadOnlyList<CollectionHistoryAudit.Rollup> unread)
+    {
+        /* A source given up on that was read but never ready contributes what it flagged, marked as not complete. */
+        var incomplete = unread
+            .Where(r => held.Unsettled.TryGetValue(r.Relation, out var ranges) && ranges.Count > 0)
+            .Select(r => r.Relation)
+            .ToHashSet(StringComparer.Ordinal);
+        var findings = rollups
+            .Where(r => held.Findings.ContainsKey(r.Relation) || incomplete.Contains(r.Relation))
+            .Select(r => (Rollup: r, Ranges: held.Findings.TryGetValue(r.Relation, out var done) ? done : held.Unsettled[r.Relation]))
+            .ToList();
+        if (findings.Count == 0)
+        {
+            return null;
+        }
+
+        var hours = CollectionHistoryAudit.FlaggedHours(findings);
+        return new HistoryAuditAlertText(
+            hours,
+            string.Create(CultureInfo.InvariantCulture, $"{hours} hours"),
+            CollectionHistoryAudit.Render(held.Day, findings, unread, incomplete),
+            string.Create(CultureInfo.InvariantCulture,
+                $"{hours} thin hour(s) in retained history on {held.Day:yyyy-MM-dd}"));
+    }
+
     /* ------------------------- #3712: the analysis singles digest ------------------------- */
 
     /// <summary>
