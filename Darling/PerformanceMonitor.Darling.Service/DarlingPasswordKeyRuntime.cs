@@ -12,6 +12,7 @@ using System.Security.Cryptography;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
 using PerformanceMonitor.Darling.Storage;
 
@@ -55,14 +56,22 @@ internal sealed class DarlingPasswordKeyRuntime
     private readonly IPasswordKeyRing? _held;
     private readonly byte[]? _heldSpki;
     private readonly string? _heldKeyId;
+    private readonly bool _windows;
+    private readonly Func<string, bool> _canOpen;
     private string? _sweepState;
     private bool _sweepReadFailed;
+    private volatile bool _pinsWaiting;
+    private bool _pinFailureWarned;
+    private bool _pinNotHereWarned;
 
     private DarlingPasswordKeyRuntime(
         NpgsqlDataSource postgres, ILogger logger, Action<IPasswordKeyRing> setRing, string serviceHost,
-        IPasswordKeyRing ring, IPasswordKeyRing? held, byte[]? heldSpki, string? heldKeyId, string state, string? note)
+        IPasswordKeyRing ring, IPasswordKeyRing? held, byte[]? heldSpki, string? heldKeyId, string state, string? note,
+        bool windows, Func<string, bool> canOpen)
     {
         _postgres = postgres;
+        _windows = windows;
+        _canOpen = canOpen;
         _logger = logger;
         _setRing = setRing;
         _serviceHost = serviceHost;
@@ -83,6 +92,13 @@ internal sealed class DarlingPasswordKeyRuntime
     /// <summary>The note written with <see cref="State"/>: the refusal reason, or the open-directory warning, or null.</summary>
     public string? Note { get; }
 
+    /// <summary>
+    /// True while the one-time pin step is open and has not been able to run (a failed attempt, or a key table whose
+    /// protection is incomplete), so <see cref="SweepCheckAsync"/> tries it again. False once it ran, or when it is left
+    /// for another machine. The worker hands this to the configuration provider so the re-enter line says to wait.
+    /// </summary>
+    public bool PinsWaiting => _pinsWaiting;
+
     /// <summary>Starts the runtime for the service: resolves the directory beside the other credentials, then
     /// <see cref="StartAsync(string, NpgsqlDataSource, ILogger, CancellationToken, PasswordKeyStartOptions?)"/>.</summary>
     public static async Task<DarlingPasswordKeyRuntime> StartForServiceAsync(
@@ -99,8 +115,11 @@ internal sealed class DarlingPasswordKeyRuntime
             logger.LogError("{Reason}", reason);
             var ring = DarlingPasswordKey.Refusing(reason);
             DarlingPasswordKey.Current = ring;
-            return new DarlingPasswordKeyRuntime(
-                postgres, logger, r => DarlingPasswordKey.Current = r, Environment.MachineName, ring, null, null, null, "refused", reason);
+            var refused = new DarlingPasswordKeyRuntime(
+                postgres, logger, r => DarlingPasswordKey.Current = r, Environment.MachineName, ring, null, null, null, "refused", reason,
+                OperatingSystem.IsWindows(), WindowsCanOpen);
+            await refused.RunPinStepAsync(ServiceCommandDeadlines.BootstrapSeconds, ct).ConfigureAwait(false);
+            return refused;
         }
 
         return await StartAsync(directory, postgres, logger, ct).ConfigureAwait(false);
@@ -121,6 +140,8 @@ internal sealed class DarlingPasswordKeyRuntime
         var setRing = options.SetRing ?? (r => DarlingPasswordKey.Current = r);
         var host = options.ServiceHost ?? Environment.MachineName;
         var selfTest = options.SelfTest ?? SelfTest;
+        var windows = options.IsWindows ?? OperatingSystem.IsWindows();
+        var canOpen = options.CanOpen ?? WindowsCanOpen;
 
         PasswordPrivateKey? held = null;
         try
@@ -145,8 +166,8 @@ internal sealed class DarlingPasswordKeyRuntime
 
             var runtime = new DarlingPasswordKeyRuntime(
                 postgres, logger, setRing, host, ring, held is null ? null : ring, held?.PublicKey.Spki, held?.PublicKey.KeyId,
-                outcome.State, outcome.Note);
-            await SnapshotPinsAsync(postgres, logger, options, outcome.TriggersOk, ct).ConfigureAwait(false);
+                outcome.State, outcome.Note, windows, canOpen);
+            await runtime.RunPinStepAsync(ServiceCommandDeadlines.BootstrapSeconds, ct).ConfigureAwait(false);
             return runtime;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -157,7 +178,10 @@ internal sealed class DarlingPasswordKeyRuntime
             var ring = DarlingPasswordKey.Refusing(reason);
             setRing(ring);
             await WriteStateAsync(postgres, logger, host, null, "refused", reason, ct).ConfigureAwait(false);
-            return new DarlingPasswordKeyRuntime(postgres, logger, setRing, host, ring, null, null, null, "refused", reason);
+            var refused = new DarlingPasswordKeyRuntime(
+                postgres, logger, setRing, host, ring, null, null, null, "refused", reason, windows, canOpen);
+            await refused.RunPinStepAsync(ServiceCommandDeadlines.BootstrapSeconds, ct).ConfigureAwait(false);
+            return refused;
         }
     }
 
@@ -192,6 +216,12 @@ internal sealed class DarlingPasswordKeyRuntime
     /// </summary>
     public async Task SweepCheckAsync(CancellationToken ct)
     {
+        // The one-time pin step is tried again on every sweep while it is waiting, whether or not the start loaded a key.
+        if (_pinsWaiting)
+        {
+            await RunPinStepAsync(ServiceCommandDeadlines.SerialLoopSeconds, ct).ConfigureAwait(false);
+        }
+
         if (_held is null || _heldSpki is null)
         {
             return;
@@ -476,28 +506,68 @@ internal sealed class DarlingPasswordKeyRuntime
         logger.LogError("Password key not loaded ({State}): {Reason}", outcome.State, outcome.Note);
     }
 
-    private static async Task SnapshotPinsAsync(
-        NpgsqlDataSource postgres, ILogger logger, PasswordKeyStartOptions options, bool triggersOk, CancellationToken ct)
+    /// <summary>
+    /// Runs the one-time pin step (#5387, #5456) and records whether it is still waiting. Only a cancellation escapes: a
+    /// failure, or a key table whose protection is incomplete, leaves the step open and <see cref="PinsWaiting"/> true
+    /// so the next sweep tries again. A step that matches values but opens none on this machine, or one a Linux host left
+    /// open, is not waiting: it stays open for the machine that can.
+    /// </summary>
+    private async Task RunPinStepAsync(int timeoutSeconds, CancellationToken ct)
     {
-        if (!triggersOk)
-        {
-            return;
-        }
-
+        // After the first failure the store's own notes are left out of a retry: the runtime's Warning and Debug lines say it.
+        ILogger storeLogger = _pinFailureWarned ? NullLogger.Instance : _logger;
         try
         {
-            var windows = options.IsWindows ?? OperatingSystem.IsWindows();
-            var canOpen = options.CanOpen ?? WindowsCanOpen;
             var snapshot = await DarlingPasswordKeyStore.SnapshotLegacyPinsAsync(
-                postgres, windows, canOpen, ServiceCommandDeadlines.BootstrapSeconds, logger, ct).ConfigureAwait(false);
-            if (windows && string.Equals(snapshot.MarkerState, "done", StringComparison.Ordinal))
+                _postgres, _windows, _canOpen, timeoutSeconds, storeLogger, ct).ConfigureAwait(false);
+            switch (snapshot.MarkerState)
             {
-                logger.LogInformation("Legacy password pins: {Pinned} saved password(s) pinned to their connection.", snapshot.Pinned);
+                case "unprotected":
+                    NoteWaiting("a key table's protection is not as expected");
+                    return;
+                case "not-here":
+                    _pinsWaiting = false;
+                    if (!_pinNotHereWarned)
+                    {
+                        _pinNotHereWarned = true;
+                        _logger.LogWarning(
+                            "Old-format saved passwords still match the store, but this machine cannot open them. " +
+                            "The one-time pin step stays open for the machine that saved them.");
+                    }
+
+                    return;
+                case "done":
+                    _pinsWaiting = false;
+                    if (_windows)
+                    {
+                        _logger.LogInformation("Legacy password pins: {Pinned} saved password(s) pinned to their connection.", snapshot.Pinned);
+                    }
+
+                    return;
+                default:
+                    _pinsWaiting = false;
+                    return;
             }
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            logger.LogWarning("The legacy password pin snapshot could not run, and will be tried again at the next start: {Message}", ex.Message);
+            NoteWaiting(ex.Message);
+        }
+    }
+
+    private void NoteWaiting(string message)
+    {
+        _pinsWaiting = true;
+        if (!_pinFailureWarned)
+        {
+            _pinFailureWarned = true;
+            _logger.LogWarning(
+                "Old-format saved passwords wait for the one-time pin step, which could not run ({Message}). " +
+                "The service tries it again on every sweep.", message);
+        }
+        else
+        {
+            _logger.LogDebug("The one-time pin step still could not run ({Message}).", message);
         }
     }
 

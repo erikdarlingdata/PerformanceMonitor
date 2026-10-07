@@ -2934,6 +2934,10 @@ LIMIT 1";
            Never throws; a key that cannot be used is a refusing ring with the reason logged and recorded in the store. */
         _passwordKeyRuntime = await DarlingPasswordKeyRuntime.StartForServiceAsync(
             config, DarlingConfig.ResolveConfigPath(), postgres, _logger, stoppingToken);
+        /* #5456: a pin step that could not run is tried again on every sweep, and until it does the re-enter line says to wait.
+           Set before the first view so that view's line already knows; the pins it takes bump config_version, which every
+           host's reload beacon picks up. */
+        configProvider.LegacyPinsWaiting = () => _passwordKeyRuntime?.PinsWaiting == true;
         var initialView = await configProvider.LoadViewAsync(config, stoppingToken);
         IReadOnlyList<MonitoredServer> initialServers = config.Servers;
         if (initialView is not null)

@@ -661,11 +661,18 @@ VALUES (1, 'alpha-example', 'evil-example', '', 'sql', 'monitor_login', 'legacy-
             await store.SeedServersAtUpgradeAsync();
             var before = await store.ConfigVersionAsync();
 
-            await store.StartAsync(isWindows: true, canOpen: static _ => false);
+            var opens = 0;
+            var runtime = await store.StartAsync(isWindows: true, canOpen: _ => { opens++; return false; });
             Assert.Equal("pending", await store.MarkerAsync());
             Assert.Empty(await store.ReadPinsAsync());
             Assert.Equal(3L, await store.CandidatesAsync());
             Assert.Equal(before, await store.ConfigVersionAsync());
+
+            // Nothing failed: a host that opens none leaves the step for another machine, and its sweep does not retry.
+            Assert.False(runtime.PinsWaiting);
+            var opensAtStart = opens;
+            await runtime.SweepCheckAsync(TestContext.Current.CancellationToken);
+            Assert.Equal(opensAtStart, opens);
 
             await store.StartAsync(isWindows: true, canOpen: OpensLegacy);
             Assert.Equal("done", await store.MarkerAsync());
@@ -699,6 +706,95 @@ UPDATE config.config_notification SET smtp_encrypted_password = 'sealed:v1:01234
             Assert.Empty(await store.ReadPinsAsync());
             Assert.Equal(0L, await store.CandidatesAsync());
             Assert.Equal(before, await store.ConfigVersionAsync());
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await store.CleanupAsync(bodySucceeded);
+        }
+    }
+
+    [Fact]
+    public async Task WhenTheKeyStepThrows_ThePinsAreStillTaken()
+    {
+        await using var store = await StoreFixture.CreateAsync();
+        var bodySucceeded = false;
+        try
+        {
+            await store.SeedServersAtUpgradeAsync();
+            var before = await store.ConfigVersionAsync();
+
+            // A NUL character is refused by the store when the host's state row is written, so the key step throws.
+            var runtime = await store.StartAsync(isWindows: true, canOpen: OpensLegacy, serviceHost: "example\0host");
+
+            Assert.Equal("refused", runtime.State);
+            Assert.False(runtime.Ring.Status.CanSeal);
+            Assert.Equal("done", await store.MarkerAsync());
+            Assert.Equal(3, (await store.ReadPinsAsync()).Count);
+            Assert.Equal(0L, await store.CandidatesAsync());
+            Assert.Equal(before + 1, await store.ConfigVersionAsync());
+            Assert.False(runtime.PinsWaiting);
+
+            var view = await new StoreConfigProvider(store.Source).LoadViewAsync(new DarlingConfig(), TestContext.Current.CancellationToken);
+            Assert.NotNull(view);
+            Assert.NotNull(Assert.Single(view.EnabledServers, s => s.Name == "alpha-example").SecretPin);
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await store.CleanupAsync(bodySucceeded);
+        }
+    }
+
+    [Fact]
+    public async Task AFailedFirstPinStep_IsRetriedOnTheSweep()
+    {
+        await using var store = await StoreFixture.CreateAsync();
+        var bodySucceeded = false;
+        try
+        {
+            await store.SeedServersAtUpgradeAsync();
+            var ct = TestContext.Current.CancellationToken;
+            var before = await store.ConfigVersionAsync();
+            var failed = false;
+            var opens = 0;
+            bool FailsOnce(string stored)
+            {
+                if (!failed)
+                {
+                    failed = true;
+                    throw new InvalidOperationException("the machine's store could not be read");
+                }
+
+                opens++;
+                return OpensLegacy(stored);
+            }
+
+            var runtime = await store.StartAsync(isWindows: true, canOpen: FailsOnce);
+
+            // The first try failed: the step is open, nothing is pinned, and the runtime says it is waiting.
+            Assert.Equal("pending", await store.MarkerAsync());
+            Assert.Empty(await store.ReadPinsAsync());
+            Assert.Equal(3L, await store.CandidatesAsync());
+            Assert.Equal(before, await store.ConfigVersionAsync());
+            Assert.True(runtime.PinsWaiting);
+
+            await runtime.SweepCheckAsync(ct);
+
+            Assert.False(runtime.PinsWaiting);
+            Assert.Equal("done", await store.MarkerAsync());
+            Assert.Equal(3, (await store.ReadPinsAsync()).Count);
+            Assert.Equal(0L, await store.CandidatesAsync());
+            Assert.Equal(before + 1, await store.ConfigVersionAsync());
+            var view = await new StoreConfigProvider(store.Source).LoadViewAsync(new DarlingConfig(), ct);
+            Assert.NotNull(view);
+            Assert.NotNull(Assert.Single(view.EnabledServers, s => s.Name == "alpha-example").SecretPin);
+
+            // The next sweep opens nothing and changes nothing.
+            var opensAfterRetry = opens;
+            await runtime.SweepCheckAsync(ct);
+            Assert.Equal(opensAfterRetry, opens);
+            Assert.Equal(before + 1, await store.ConfigVersionAsync());
             bodySucceeded = true;
         }
         finally

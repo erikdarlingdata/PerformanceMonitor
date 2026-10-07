@@ -102,18 +102,38 @@ public sealed class DarlingPasswordKeyRuntimeTests
     }
 
     [Fact]
-    public void TheWorker_TakesThePinsAfterTheSeed_AndBeforeTheFirstConfigView()
+    public void TheWorker_StartUpCalls_AreEachOnce_InsideRunCollectionLoopAsync_InOrder()
     {
-        // #5455: the first view reads the legacy pins, so a view built before the pin snapshot leaves every saved
-        // old-format password unpinned for the whole run.
-        var worker = ReadSource("Darling/PerformanceMonitor.Darling.Service/DarlingWorker.cs");
-        var seed = worker.IndexOf("configProvider.SeedIfEmptyAsync(", StringComparison.Ordinal);
-        var start = worker.IndexOf("DarlingPasswordKeyRuntime.StartForServiceAsync(", StringComparison.Ordinal);
-        var firstView = worker.IndexOf("configProvider.LoadViewAsync(", StringComparison.Ordinal);
+        // #5455, #5456: the first view reads the legacy pins, so the key start (and its pin step) comes first, then the
+        // worker hands the provider the pins-waiting answer, and only then is the first view built. Start-up lives in
+        // RunCollectionLoopAsync, not ExecuteAsync, so the bounds are that method's.
+        var worker = ReadSource("Darling/PerformanceMonitor.Darling.Service/DarlingWorker.cs").Replace("\r\n", "\n", StringComparison.Ordinal);
+        var begin = worker.IndexOf("private async Task RunCollectionLoopAsync(", StringComparison.Ordinal);
+        Assert.True(begin > 0, "RunCollectionLoopAsync must exist.");
+        var end = worker.IndexOf("\n    }\n", begin, StringComparison.Ordinal);
+        Assert.True(end > begin, "RunCollectionLoopAsync's end was not found.");
+        var loop = worker[begin..end];
 
-        Assert.True(seed > 0, "The seed call must exist.");
-        Assert.True(start > seed, "The key starts after the seed, so seeded rows are pinned.");
-        Assert.True(firstView > start, "The key and its pin snapshot start before the first config view reads the pins.");
+        var calls = new[]
+        {
+            "configProvider.SeedIfEmptyAsync(",
+            "DarlingPasswordKeyRuntime.StartForServiceAsync(",
+            "configProvider.LegacyPinsWaiting =",
+            "configProvider.LoadViewAsync(",
+        };
+        var last = -1;
+        foreach (var call in calls)
+        {
+            Assert.Single(System.Text.RegularExpressions.Regex.Matches(worker, System.Text.RegularExpressions.Regex.Escape(call)));
+            var at = loop.IndexOf(call, StringComparison.Ordinal);
+            Assert.True(at > last, $"{call} must come once inside RunCollectionLoopAsync, after the call before it.");
+            last = at;
+        }
+
+        // The worker never reads the pins or the pin tables itself: the store step and the provider do.
+        Assert.DoesNotContain("ReadMonitoredServersAsync", worker, StringComparison.Ordinal);
+        Assert.DoesNotContain("ReadLegacyPinsAsync", worker, StringComparison.Ordinal);
+        Assert.DoesNotContain("legacy_secret_pin", worker, StringComparison.Ordinal);
     }
 
     [Fact]
