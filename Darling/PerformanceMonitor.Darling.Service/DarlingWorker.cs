@@ -9937,12 +9937,17 @@ AND   j.hypertable_name = '{relation}'", connection))
     /// rethrown, so the budget and shutdown reach the pass's own catches rather than being recorded as a
     /// failure of every step.</para>
     ///
-    /// <para>#5444: a step whose failure made Npgsql close the connection (an ERROR in SQLSTATE classes XX, 58 or 53)
-    /// would leave every later step on the pass's one connection throwing "Connection is not open", each logged as
-    /// a second, misleading failure until the next hourly pass. The catch therefore reopens the same connection
-    /// through <see cref="TimescaleSupport.ReopenBrokenConnectionAsync"/> (the #5439 helper) before returning, and
-    /// writes ONE warning naming the step. A failed reopen is logged and never thrown: the pass's own catches
-    /// decide what a failure degrades to. A connection that is still Open is left alone.</para>
+    /// <para>#5444: a statement whose failure made Npgsql close the connection (an ERROR in SQLSTATE classes XX, 58
+    /// or 53) would leave every later step on the pass's one connection throwing "Connection is not open", each
+    /// logged as a second, misleading failure until the next hourly pass. So after EVERY step, whether it threw or
+    /// returned, a connection that is no longer Open is reopened through
+    /// <see cref="TimescaleSupport.ReopenBrokenConnectionAsync"/> (the #5439 helper), with one additional warning
+    /// naming the step. It runs after a normal return too because most steps isolate their own statements: a
+    /// <c>DROP MATERIALIZED VIEW ... CASCADE</c> that breaks the connection inside
+    /// <see cref="TimescaleSupport.DropStaleContinuousAggregatesAsync"/> is caught and logged there, and the step
+    /// returns normally with the connection closed. A failed reopen is logged and never thrown: the pass's own
+    /// catches decide what a failure degrades to, and the next step tries again. A connection that is still Open is
+    /// left alone, and cancellation skips the check because it propagates.</para>
     ///
     /// <para><see cref="StoreObjectChangeSignal"/> is what keeps the changed count honest: only the six
     /// steps whose return value IS a change count can contribute to it, and the rest are counted as steps
@@ -9982,17 +9987,19 @@ AND   j.hypertable_name = '{relation}'", connection))
             logger.LogWarning(
                 "Store object convergence step '{Step}' failed — whatever it had not yet ensured stays unbuilt until the next hourly pass or the next start retries it (the step's own lines above name any individual object it did isolate): {Message}",
                 step.Name, ex.Message);
+        }
 
-            if (connection is not null && connection.State != System.Data.ConnectionState.Open)
+        /* #5444: after every step, thrown OR returned, because most steps swallow their own per-statement errors
+           and return normally with the connection already closed. A null connection is the behaviour tests' fake. */
+        if (connection is not null && connection.State != System.Data.ConnectionState.Open)
+        {
+            if (await TimescaleSupport.ReopenBrokenConnectionAsync(
+                    connection, logger, cancellationToken,
+                    "Store object convergence: the store connection is closed and could not be reopened, so this step's successors fail; the next step tries the reopen again: {Message}"))
             {
-                if (await TimescaleSupport.ReopenBrokenConnectionAsync(
-                        connection, logger, cancellationToken,
-                        "Store object convergence: the store connection broke and could not be reopened, so the steps after it fail until the next hourly pass or the next start retries them: {Message}"))
-                {
-                    logger.LogWarning(
-                        "Store object convergence step '{Step}' broke the store connection; it was reopened so the steps after it still run",
-                        step.Name);
-                }
+                logger.LogWarning(
+                    "Store object convergence step '{Step}' left the store connection closed; it was reopened so the steps after it still run",
+                    step.Name);
             }
         }
     }

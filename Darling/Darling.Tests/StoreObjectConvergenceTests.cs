@@ -960,4 +960,52 @@ public sealed class StoreObjectConvergenceReopenLiveTests
             await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, (_, _) => Task.CompletedTask);
         }
     }
+
+    /// <summary>
+    /// The common shape: a step that isolates its own statements (as the reshape drop does) catches the
+    /// connection-breaking error and RETURNS normally with the connection closed. The runner must reopen it
+    /// anyway, so the next step runs, and the step is not counted failed because it did not throw.
+    /// </summary>
+    [Fact]
+    public async Task AStepThatSwallowsAConnectionBreakingError_StillLeavesAnOpenConnectionForTheNextStep_AgainstDevPostgres()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live convergence reopen test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        var bodySucceeded = false;
+        try
+        {
+            using var connection = new NpgsqlConnection(connectionString);
+            await connection.OpenAsync(ct);
+            var logger = new CapturingTestLogger();
+            var tally = new DarlingWorker.StoreObjectConvergenceTally();
+            var stateAfterA = (System.Data.ConnectionState?)null;
+
+            var a = Step("step A", async c =>
+            {
+                try { await ExecAsync(c, "DO $$ BEGIN RAISE EXCEPTION 'planted #5444' USING ERRCODE = 'XX000'; END $$"); }
+                catch (PostgresException) { stateAfterA = c.State; }
+            });
+            var bRan = false;
+            var b = Step("step B", async c => { await ExecAsync(c, "SELECT 1"); bRan = true; });
+
+            await DarlingWorker.RunStoreObjectConvergenceStepAsync(connection, a, tally, logger, ct);
+            await DarlingWorker.RunStoreObjectConvergenceStepAsync(connection, b, tally, logger, ct);
+
+            Assert.NotEqual(System.Data.ConnectionState.Open, stateAfterA);
+            Assert.True(bRan, "step B must run on the reopened connection: " + logger.Joined);
+            Assert.Empty(tally.Failed);
+            Assert.Equal(2, tally.Steps);
+            Assert.Equal(System.Data.ConnectionState.Open, connection.State);
+            Assert.Equal(1, logger.Lines.Count(l => l.Contains("step 'step A' left the store connection closed; it was reopened", StringComparison.Ordinal)));
+            Assert.DoesNotContain("Connection is not open", logger.Joined, StringComparison.Ordinal);
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, (_, _) => Task.CompletedTask);
+        }
+    }
 }
