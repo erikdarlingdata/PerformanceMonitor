@@ -1715,6 +1715,7 @@ LIMIT 1";
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        _executeStartedUtc = DateTime.UtcNow;
         /* #2185: an install directory the service account cannot read is diagnosed HERE — first, ahead of
            reading darling.json, and a long way ahead of the managed-Postgres bootstrap. Order is the whole
            point. Every message the reporter saw was downstream of this one: an unreadable tree takes out
@@ -2197,6 +2198,48 @@ LIMIT 1";
         }
     }
 
+    /* #5450: captured at the very top of ExecuteAsync, before any store work; the fallback when the process
+       start time cannot be read. */
+    private DateTime _executeStartedUtc = DateTime.UtcNow;
+
+    /// <summary>The service PROCESS start in UTC, so migrations and a runtime upgrade are not counted as downtime.</summary>
+    private DateTime ProcessStartUtc()
+    {
+        try
+        {
+            using var process = Process.GetCurrentProcess();
+            return process.StartTime.ToUniversalTime();
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return _executeStartedUtc;
+        }
+    }
+
+    /// <summary>
+    /// Reads the newest pre-start collection time (#5450) and pairs it with the process start. Null for a store with no
+    /// collection rows (a first install) or when the read fails.
+    /// </summary>
+    internal async Task<DarlingSelfAlertEvaluator.CollectionGapReport?> ReadCollectionGapAsync(
+        NpgsqlConnection connection, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await using var command = new NpgsqlCommand(DarlingSelfAlertEvaluator.NewestCollectionTimeSql, connection);
+            command.CommandTimeout = 30;
+            var value = await command.ExecuteScalarAsync(cancellationToken);
+            return value is DateTime last
+                ? new DarlingSelfAlertEvaluator.CollectionGapReport(
+                    DateTime.SpecifyKind(last, DateTimeKind.Utc), ProcessStartUtc())
+                : null;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning("Could not read the newest collection time at start ({Message}); the start-up gap alert is skipped.", ex.Message);
+            return null;
+        }
+    }
+
     /// <summary>
     /// Maps the Windows-only bootstrap's upgrade outcome to the platform-neutral alert payload (#1706).
     /// Null for the ordinary case where the runtime did not move, and null for an extension-only update,
@@ -2414,6 +2457,7 @@ LIMIT 1";
            result rather than the two being one call), so the census below only has to look for the
            pin on the Create line itself — no reassignment in between for a future edit to slip
            an unpinned read behind. */
+        DarlingSelfAlertEvaluator.CollectionGapReport? collectionGapReport = null;
         await using var postgres = NpgsqlDataSource.Create(
             DarlingStoreConnection.PinSessionTimeZoneUtc(
                 DarlingStoreConnection.WithApplicationName(
@@ -2469,6 +2513,10 @@ LIMIT 1";
                    like a failed migration. The CLI and the Viewer only read the row. */
                 _installId = await StoreInstallId.EnsureAsync(migrateConnection, _logger, stoppingToken);
                 _logger.LogInformation("Install id {InstallId}", _installId);
+                /* #5450: the newest collection time already in the store, read NOW — the schema is current and no
+                   collector has written yet — so the gap the service was down for can be raised once the alert
+                   engine exists. Best effort: a failed read loses one alert and must not fail or retry the start. */
+                collectionGapReport = await ReadCollectionGapAsync(migrateConnection, stoppingToken);
                 break;
             }
             catch (Exception ex) when (ex is not OperationCanceledException
@@ -3135,6 +3183,9 @@ LIMIT 1";
         {
             await _selfAlerts.EvaluateStoreUpgradeAsync(storeUpgradeReport, stoppingToken);
         }
+
+        /* #5450: the gap before this start, the same once-per-start event. The evaluator holds the 15-minute gate. */
+        await _selfAlerts.EvaluateCollectionGapAtStartAsync(collectionGapReport, stoppingToken);
 
         /* #3908: the store's TimescaleDB extension, the same once-per-start event. */
         if (storeTimescaleReport is not null)
