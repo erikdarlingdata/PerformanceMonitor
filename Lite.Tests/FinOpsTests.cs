@@ -31,10 +31,12 @@ public class FinOpsTests : IClassFixture<SharedDuckDbFixture>
     [Fact]
     public async Task OverProvisionedEnterprise_CpuRightSizingFires()
     {
-        var recs = await RunRecommendationsAsync(s => s.SeedOverProvisionedEnterpriseAsync());
+        var recs = await RunRecommendationsAsync(WithADayOfCpuHistory(s => s.SeedOverProvisionedEnterpriseAsync()));
         PrintRecommendations("OVER-PROVISIONED ENTERPRISE (CPU)", recs);
 
-        Assert.Contains(recs, r => r.Category == "Compute" && r.Finding.Contains("CPU", StringComparison.OrdinalIgnoreCase));
+        // One CPU row per server: of the compute rule's ~4 cores and the prescriptive rule's 8, the 8-core row stays.
+        var cpu = Assert.Single(recs, r => r.Finding.StartsWith("CPU", StringComparison.Ordinal));
+        Assert.Equal("Hardware", cpu.Category);
     }
 
     [Fact]
@@ -72,13 +74,101 @@ public class FinOpsTests : IClassFixture<SharedDuckDbFixture>
         Assert.Contains(recs, r => r.Finding.StartsWith("Memory over-provisioned", StringComparison.Ordinal));
     }
 
+    /* ── One CPU right-sizing row per server, and none from minutes of data ── */
+
+    [Fact]
+    public async Task CpuRightSizing_FromMinutesOfSamples_AdvisesNothing_ButMemoryStillAdvises()
+    {
+        // 16 samples 15 minutes apart: under four hours, the ring-buffer backfill of a first collect, not a day of load.
+        var recs = await RunRecommendationsAsync(s => s.SeedRightSizingScenarioAsync(engineEdition: 3, withCpuSamples: true));
+        PrintRecommendations("CPU FROM MINUTES OF SAMPLES", recs);
+
+        Assert.DoesNotContain(recs, r => r.Finding.StartsWith("CPU over-provisioned", StringComparison.Ordinal));
+        Assert.DoesNotContain(recs, r => r.Finding.StartsWith("CPU: reduce", StringComparison.Ordinal));
+        Assert.Contains(recs, r => r.Finding.StartsWith("Memory over-provisioned", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task CpuRightSizing_BothRulesFire_ThirtyTwoCores_KeepsOnlyTheRowThatKeepsMoreCores()
+    {
+        // P95 8%: the compute rule says ~4 of 32 cores, the prescriptive rule says 8. Both spoke before; now only the 8-core row.
+        var recs = await RunRecommendationsAsync(WithADayOfCpuHistory(s => s.SeedRightSizingScenarioAsync(engineEdition: 3, withCpuSamples: true)));
+        PrintRecommendations("CPU BOTH RULES, 32 CORES", recs);
+
+        var cpu = Assert.Single(recs, r => r.Finding.StartsWith("CPU over-provisioned", StringComparison.Ordinal)
+                                         || r.Finding.StartsWith("CPU: reduce", StringComparison.Ordinal));
+        Assert.StartsWith("CPU: reduce from 32 to 8 cores", cpu.Finding, StringComparison.Ordinal);
+        // The memory row beside it is not a CPU row and stays.
+        Assert.Contains(recs, r => r.Finding.StartsWith("Memory: reduce from 256GB", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task CpuRightSizing_BothRulesFire_EightCores_KeepsTheComputeRow_BecauseItKeepsMoreCores()
+    {
+        // P95 8% on 8 cores: the compute rule says ~4, the prescriptive rule says 2. The compute row keeps more cores and stays.
+        var recs = await RunRecommendationsAsync(WithADayOfCpuHistory(s => s.SeedRightSizingScenarioAsync(engineEdition: 3, withCpuSamples: true, cpuCount: 8)));
+        PrintRecommendations("CPU BOTH RULES, 8 CORES", recs);
+
+        var cpu = Assert.Single(recs, r => r.Finding.StartsWith("CPU over-provisioned", StringComparison.Ordinal)
+                                         || r.Finding.StartsWith("CPU: reduce", StringComparison.Ordinal));
+        Assert.StartsWith("CPU over-provisioned (8 cores", cpu.Finding, StringComparison.Ordinal);
+        Assert.Contains("Consider reducing to ~4 cores", cpu.Detail, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(null, 8, true)]   // no compute row: the prescriptive row stands alone
+    [InlineData(4, 8, true)]      // it keeps more cores
+    [InlineData(4, 4, false)]     // a tie keeps the compute row
+    [InlineData(4, 2, false)]     // it keeps fewer
+    public void PrescriptiveCpuRow_ReplacesTheComputeRow_OnlyWhenItKeepsMoreCores(int? computeTarget, int prescriptiveTarget, bool wins)
+    {
+        Assert.Equal(wins, LocalDataService.PrescriptiveCpuRowWins(computeTarget, prescriptiveTarget));
+    }
+
+    [Theory]
+    [InlineData(0, false)]
+    [InlineData(4 * 60, false)]          // the four minutes (here four hours) of a first collect
+    [InlineData(23 * 3600, false)]
+    [InlineData(24 * 3600, true)]
+    [InlineData(9 * 24 * 3600, true)]
+    public void CpuSamplesSpanEnough_NeedsAFullDay(int seconds, bool enough)
+    {
+        Assert.Equal(enough, LocalDataService.CpuSamplesSpanEnough(TimeSpan.FromSeconds(seconds)));
+    }
+
+    /* ── No licensing advice for a free edition ── */
+
+    [Theory]
+    [InlineData("Enterprise Edition (64-bit)", true)]
+    [InlineData("Enterprise Edition: Core-based Licensing (64-bit)", true)]
+    [InlineData("Enterprise Developer Edition (64-bit)", false)]
+    [InlineData("Developer Edition (64-bit)", false)]
+    [InlineData("Enterprise Evaluation Edition (64-bit)", false)]
+    [InlineData("Express Edition (64-bit)", false)]
+    [InlineData("Standard Edition (64-bit)", false)]
+    [InlineData("", false)]
+    [InlineData(null, false)]
+    public void LicensingAdvice_IsForPaidEnterpriseOnly(string? edition, bool advice)
+    {
+        Assert.Equal(advice, LocalDataService.EditionNeedsLicensingAdvice(edition));
+    }
+
+    [Fact]
+    public void LicensingCheck_AsksTheEditionRule_NotABareContainsEnterprise()
+    {
+        var src = global::Lite.Tests.ParitySource.ReadFile("Lite/Services/LocalDataService.FinOps.Recommendations.cs");
+
+        Assert.Contains("if (EditionNeedsLicensingAdvice(edition))", src, StringComparison.Ordinal);
+        Assert.DoesNotContain("if (edition.Contains(\"Enterprise\"", src, StringComparison.Ordinal);
+    }
+
     [Fact]
     public async Task AzureSqlDatabase_MemoryAndVmRightSizingAdviseNothing_BecauseItsMemoryComesWithItsServiceObjective()
     {
         // The database uses 40,960 MB of its own 167,117 MB memory limit, a share that advises on any other edition. Its
         // service objective names 32 vCores, which is the CPU it is given. Its memory cannot be resized on its own,
         // so the memory and VM rules have nothing to recommend.
-        var recs = await RunRecommendationsAsync(s => s.SeedRightSizingScenarioAsync(engineEdition: 5, withCpuSamples: true, vcoreCount: 32));
+        var recs = await RunRecommendationsAsync(WithADayOfCpuHistory(s => s.SeedRightSizingScenarioAsync(engineEdition: 5, withCpuSamples: true, vcoreCount: 32)));
         PrintRecommendations("AZURE SQL DATABASE MEMORY AND VM RULES", recs);
 
         Assert.DoesNotContain(recs, r => r.Finding.StartsWith("Memory over-provisioned", StringComparison.Ordinal));
@@ -110,17 +200,17 @@ public class FinOpsTests : IClassFixture<SharedDuckDbFixture>
     [InlineData(8)]   // Azure SQL Managed Instance: its memory is its own
     public async Task WithCpuSamplesOffAzureSqlDatabase_CpuMemoryAndVmRightSizingStillAdvise(int engineEdition)
     {
-        var recs = await RunRecommendationsAsync(s => s.SeedRightSizingScenarioAsync(engineEdition, withCpuSamples: true));
+        var recs = await RunRecommendationsAsync(WithADayOfCpuHistory(s => s.SeedRightSizingScenarioAsync(engineEdition, withCpuSamples: true)));
         PrintRecommendations($"RIGHT-SIZING UNCHANGED (edition {engineEdition})", recs);
 
-        // Off an Azure SQL Database the count is a CPU count and the word is the one it always was.
-        var cpu = Assert.Single(recs, r => r.Finding.StartsWith("CPU over-provisioned", StringComparison.Ordinal));
-        Assert.StartsWith("CPU over-provisioned (32 cores, P95 = ", cpu.Finding, StringComparison.Ordinal);
-        Assert.Contains("across 32 cores. Consider reducing to ~", cpu.Detail, StringComparison.Ordinal);
-        Assert.EndsWith(" cores.", cpu.Detail, StringComparison.Ordinal);
+        // Off an Azure SQL Database the count is a CPU count and the word is the one it always was. Of the two CPU rules (the
+        // compute row's ~4 cores, the prescriptive row's 8) one row stays, the one that keeps more cores.
+        var cpu = Assert.Single(recs, r => r.Finding.StartsWith("CPU over-provisioned", StringComparison.Ordinal)
+                                         || r.Finding.StartsWith("CPU: reduce", StringComparison.Ordinal));
+        Assert.Equal("Hardware", cpu.Category);
+        Assert.StartsWith("CPU: reduce from 32 to 8 cores (P95 CPU ", cpu.Finding, StringComparison.Ordinal);
         Assert.DoesNotContain("vCores", cpu.Finding + cpu.Detail, StringComparison.Ordinal);
         Assert.Contains(recs, r => r.Finding.StartsWith("Memory over-provisioned", StringComparison.Ordinal));
-        Assert.Contains(recs, r => r.Category == "Hardware" && r.Finding.StartsWith("CPU: reduce from 32", StringComparison.Ordinal));
         Assert.Contains(recs, r => r.Category == "Hardware" && r.Finding.StartsWith("Memory: reduce from 256GB", StringComparison.Ordinal));
     }
 
@@ -166,9 +256,20 @@ public class FinOpsTests : IClassFixture<SharedDuckDbFixture>
     }
 
     [Fact]
-    public async Task IdleDatabases_SixAndAHalfDaysOfHistory_AdviseNothing()
+    public async Task IdleDatabases_FourAndAHalfDaysOfHistory_AdviseNothing()
     {
-        var recs = await RunRecommendationsAsync(s => s.SeedIdleDatabasesWithSixAndAHalfDaysOfHistoryAsync());
+        var recs = await RunRecommendationsAsync(s => s.SeedIdleDatabasesWithFourAndAHalfDaysOfHistoryAsync());
+
+        Assert.DoesNotContain(recs, r => r.Category == "Databases" && r.Finding.Contains("idle", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public async Task IdleDatabases_AfterANineDayCollectionGap_AdviseNothing_BecauseNothingWatchedTheDaysBetween()
+    {
+        // The oldest query-stats sample is 9 days old, so "history reaches back 7 days" is true, but no sample falls on the days
+        // between it and today. Every database with no fresh sample read as idle, High confidence, for a server that was simply
+        // not being watched.
+        var recs = await RunRecommendationsAsync(s => s.SeedIdleDatabasesAfterANineDayCollectionGapAsync());
 
         Assert.DoesNotContain(recs, r => r.Category == "Databases" && r.Finding.Contains("idle", StringComparison.OrdinalIgnoreCase));
     }
@@ -362,12 +463,13 @@ public class FinOpsTests : IClassFixture<SharedDuckDbFixture>
     }
 
     [Fact]
-    public async Task VmRightSizing_TwoHoursOfSamples_StatesTwoHours_NotSevenDays()
+    public async Task VmRightSizing_TwoHoursOfSamples_CpuAdvisesNothing_AndMemoryStatesItsWindow_NotSevenDays()
     {
         var recs = await RunRecommendationsAsync(RightSizingSeed(262_144, 9, 15));
 
-        var cpu = Assert.Single(recs, r => r.Finding.StartsWith("CPU: reduce from 32", StringComparison.Ordinal));
-        Assert.StartsWith("From 9 samples over 2 hours, P95 CPU", cpu.Detail, StringComparison.Ordinal);
+        // Two hours of CPU samples are not a day of load: neither CPU rule speaks.
+        Assert.DoesNotContain(recs, r => r.Finding.StartsWith("CPU: reduce", StringComparison.Ordinal)
+                                      || r.Finding.StartsWith("CPU over-provisioned", StringComparison.Ordinal));
         var memory = Assert.Single(recs, r => r.Finding.StartsWith("Memory: reduce from 256GB", StringComparison.Ordinal));
         Assert.DoesNotContain("7 days", memory.Detail, StringComparison.Ordinal);
         // 16 memory samples 15 minutes apart span 225 minutes: three whole hours, never rounded up to four.
@@ -427,8 +529,8 @@ public class FinOpsTests : IClassFixture<SharedDuckDbFixture>
     {
         // The same idle seed: a user database keeps its CPU advice, master has nothing to resize. Master is seeded with 32 vCores
         // too (its real count is 4): the CPU rule needs more than 4, so only the stand-down can keep the advice away.
-        var recs = await RunRecommendationsAsync(s => s.SeedRightSizingScenarioAsync(
-            engineEdition: 5, withCpuSamples: true, vcoreCount: vcoreCount, serviceObjective: serviceObjective, edition: edition));
+        var recs = await RunRecommendationsAsync(WithADayOfCpuHistory(s => s.SeedRightSizingScenarioAsync(
+            engineEdition: 5, withCpuSamples: true, vcoreCount: vcoreCount, serviceObjective: serviceObjective, edition: edition)));
         PrintRecommendations($"AZURE SQL DATABASE ({edition})", recs);
 
         if (isMaster)
@@ -453,16 +555,24 @@ public class FinOpsTests : IClassFixture<SharedDuckDbFixture>
     [Fact]
     public async Task SqlServer_WithAServiceObjectiveNamedSystem_IsUnchanged()
     {
-        var recs = await RunRecommendationsAsync(s => s.SeedRightSizingScenarioAsync(
-            engineEdition: 3, withCpuSamples: true, serviceObjective: "System", edition: "Enterprise Edition (System)"));
+        var recs = await RunRecommendationsAsync(WithADayOfCpuHistory(s => s.SeedRightSizingScenarioAsync(
+            engineEdition: 3, withCpuSamples: true, serviceObjective: "System", edition: "Enterprise Edition (System)")));
 
-        Assert.Contains(recs, r => r.Finding.StartsWith("CPU over-provisioned", StringComparison.Ordinal));
+        Assert.Contains(recs, r => r.Finding.StartsWith("CPU: reduce from 32", StringComparison.Ordinal));
         var util = await new LocalDataService(_duckDb).GetUtilizationEfficiencyAsync(TestDataSeeder.TestServerId);
         Assert.NotNull(util);
         Assert.NotEqual(ProvisioningVerdict.NotApplicable, util.ProvisioningStatus);
     }
 
     /* ── Helpers ── */
+
+    /// <summary>The scenario, plus CPU samples from two days ago: the server's CPU samples then span more than a day, which the CPU right-sizing rules need.</summary>
+    private static Func<TestDataSeeder, Task> WithADayOfCpuHistory(Func<TestDataSeeder, Task> scenario) =>
+        async s =>
+        {
+            await scenario(s);
+            await s.SeedOlderCpuHistoryAsync(8, 2);
+        };
 
     private async Task<List<RecommendationRow>> RunRecommendationsAsync(
         Func<TestDataSeeder, Task> seedAction, decimal monthlyCost = 10000m)
