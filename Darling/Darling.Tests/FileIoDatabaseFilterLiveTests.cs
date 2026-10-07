@@ -112,10 +112,14 @@ public sealed class FileIoDatabaseFilterLiveTests
             Assert.Equal("empty", emptyOne.GetProperty("status").GetString());
             Assert.Contains("for the database " + DbB, emptyOne.GetProperty("message").GetString(), StringComparison.Ordinal);
             Assert.Equal(DbB, emptyOne.GetProperty("database_name").GetString());
+            /* The advice word follows the count: one name says "The name", two or more say "The names". */
+            Assert.Contains("The name must match", emptyOne.GetProperty("message").GetString(), StringComparison.Ordinal);
             var emptyMany = JsonDocument.Parse(await DarlingMcpDataTools.GetFileIoStats(postgres, ServerName, DatabaseFilter.Of([DbB, "NoSuchDb"]), ct)).RootElement;
             Assert.Equal("empty", emptyMany.GetProperty("status").GetString());
             Assert.Contains("for the chosen databases", emptyMany.GetProperty("message").GetString(), StringComparison.Ordinal);
             Assert.Equal("the chosen databases", emptyMany.GetProperty("database_name").GetString());
+            Assert.Contains("The names must match", emptyMany.GetProperty("message").GetString(), StringComparison.Ordinal);
+            Assert.DoesNotContain("The name must match", emptyMany.GetProperty("message").GetString(), StringComparison.Ordinal);
 
             /* Unavailable path: a server with no file I/O row at all stays "not collected" under a filter, and says which
                databases the call was limited to. */

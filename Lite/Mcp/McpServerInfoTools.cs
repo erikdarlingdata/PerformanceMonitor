@@ -169,10 +169,10 @@ public sealed class McpServerInfoTools
             return JsonSerializer.Serialize(new
             {
                 server = serverName,
+                database_name = databaseEcho,
                 /* #3653: captured_at - see GetServerProperties above for why it is a cut-over, not an alias. */
                 captured_at = rows[0].CollectionTime.ToString("o"),
                 file_count = rows.Count,
-                database_name = databaseEcho,
                 note,
                 databases
             }, McpHelpers.JsonOptions);
@@ -181,10 +181,10 @@ public sealed class McpServerInfoTools
         return JsonSerializer.Serialize(new
         {
             server = serverName,
+            database_name = databaseEcho,
             /* #3653: captured_at - see GetServerProperties above for why it is a cut-over, not an alias. */
             captured_at = rows[0].CollectionTime.ToString("o"),
             file_count = rows.Count,
-            database_name = databaseEcho,
             databases
         }, McpHelpers.JsonOptions);
     }

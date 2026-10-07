@@ -466,7 +466,8 @@ public sealed class DarlingMcpDataTools
                         return McpHelpers.StatusForDatabase(
                             "empty",
                             $"The newest file I/O snapshot for {resolved.ServerName} (captured_at {capturedAt.Value.ToString("o")}) holds no files{DarlingMcpBlockingTools.ForChosenDatabases(databases)}. "
-                            + "The name must match a collected database exactly; omit database_name for every database.",
+                            + $"The {(databases.Names.Count == 1 ? "name" : "names")}"
+                            + " must match a collected database exactly; omit database_name for every database.",
                             databases.Describe());
                     }
                 }
