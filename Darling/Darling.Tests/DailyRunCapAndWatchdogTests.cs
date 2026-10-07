@@ -306,6 +306,35 @@ public sealed class DailyRunCapTests
     public void TheCap_IsThePoolLessTheSweepWidthLessTheReserve_BetweenOneAndSixteen(int pool, int sweepWidth, int expected) =>
         Assert.Equal(expected, DarlingWorker.DailyRunCapFor(pool, sweepWidth));
 
+    /// <summary>
+    /// M1 (#5481 round 2): the fleet self-alert pass's store reads come out of the reserve, at most half of it. At every
+    /// sweep width on the managed pool of 24, the bodies, the capped pass and the daily runs leave at least half the
+    /// reserve free for the web viewer's and the MCP tools' reads. With the pass at the full sweep width, width 16
+    /// needed 16 + 16 + 1 = 33 connections of 24.
+    /// </summary>
+    [Theory]
+    [InlineData(24, 1)]
+    [InlineData(24, 4)]
+    [InlineData(24, 9)]
+    [InlineData(24, 16)]
+    [InlineData(40, 16)]
+    public void TheCappedSelfAlertPass_LeavesHalfTheReserveFree(int pool, int sweepWidth)
+    {
+        var pass = DarlingWorker.SelfAlertPassWidthFor(sweepWidth);
+        var daily = DarlingWorker.DailyRunCapFor(pool, sweepWidth);
+
+        var free = pool - sweepWidth - pass - daily;
+
+        /* Never over the pool, whatever the width. */
+        Assert.True(free >= 0, $"pool {pool}, width {sweepWidth}: bodies {sweepWidth} + pass {pass} + daily {daily} is over the pool");
+
+        /* The daily cap never goes below one, so only a pool with room for more than that is held to the half reserve. */
+        if (daily > 1)
+        {
+            Assert.True(free >= DarlingWorker.DailyRunPoolReserve / 2, $"pool {pool}, width {sweepWidth}: only {free} connections left free");
+        }
+    }
+
     [Fact]
     public void APoolThatBoundsNothing_LeavesTheCeiling() =>
         Assert.Equal(DarlingWorker.MaxConcurrentDailyRuns, DarlingWorker.DailyRunCapFor(null, 9));
