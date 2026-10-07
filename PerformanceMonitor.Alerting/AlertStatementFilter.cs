@@ -86,7 +86,7 @@ public static class AlertStatementFilter
             return outcome;
         }
 
-        SensitiveStatements.WaitForWarmUp(JudgedChars(outcome));
+        SensitiveStatements.WaitForWarmUp(() => JudgedChars(outcome));
         try
         {
             var budget = new SensitiveStatements.JudgeBudget(SensitiveStatements.ReadBudget);
@@ -167,7 +167,7 @@ public static class AlertStatementFilter
             return null;
         }
 
-        SensitiveStatements.WaitForWarmUp(JudgedChars(context));
+        SensitiveStatements.WaitForWarmUp(() => JudgedChars(context));
         try
         {
             return ApplyCore(context, new SensitiveStatements.JudgeBudget(SensitiveStatements.ReadBudget));
@@ -187,7 +187,7 @@ public static class AlertStatementFilter
     public static FindingAlert Apply(FindingAlert alert)
     {
         ArgumentNullException.ThrowIfNull(alert);
-        SensitiveStatements.WaitForWarmUp(JudgedChars(alert));
+        SensitiveStatements.WaitForWarmUp(() => JudgedChars(alert));
         return ApplyFinding(alert, new SensitiveStatements.JudgeBudget(SensitiveStatements.ReadBudget));
     }
 
@@ -196,13 +196,16 @@ public static class AlertStatementFilter
     {
         ArgumentNullException.ThrowIfNull(alerts);
 
-        long judgedChars = 0;
-        for (var i = 0; i < alerts.Count; i++)
+        SensitiveStatements.WaitForWarmUp(() =>
         {
-            judgedChars += JudgedChars(alerts[i]);
-        }
+            long judgedChars = 0;
+            for (var i = 0; i < alerts.Count; i++)
+            {
+                judgedChars += JudgedChars(alerts[i]);
+            }
 
-        SensitiveStatements.WaitForWarmUp(judgedChars);
+            return judgedChars;
+        });
         var budget = new SensitiveStatements.JudgeBudget(SensitiveStatements.ReadBudget);
         List<FindingAlert>? result = null;
         for (var i = 0; i < alerts.Count; i++)

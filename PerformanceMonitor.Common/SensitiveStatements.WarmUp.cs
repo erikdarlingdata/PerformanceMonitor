@@ -88,6 +88,37 @@ public static partial class SensitiveStatements
         Volatile.Write(ref s_warmUpState, warmUp is null ? null : new WarmUpState(warmUp, startedTimestamp));
 
     /// <summary>
+    /// True only while a call could still be made to wait: a warm-up is registered, it has not completed, the caller is
+    /// not the warm-up itself, and its single deadline has not passed. A cheap read (no sizing, no wait): the callers
+    /// size a document only when this is true, so after the first seconds of the process no sweep or alert pays for
+    /// sizing (#5484). Shares <see cref="IsWarmUpPending"/> with the waits, so the two never drift.
+    /// </summary>
+    internal static bool WarmUpPending
+    {
+        get
+        {
+            var state = Volatile.Read(ref s_warmUpState);
+            return state is not null && IsWarmUpPending(state.Task, state.StartedTimestamp, WarmUpWaitLimit, out _);
+        }
+    }
+
+    /// <summary>
+    /// The one definition of "a wait could still happen": a warm-up exists, it has not completed, the caller is not the
+    /// warm-up, and time is left before start + <paramref name="limit"/>. <paramref name="remaining"/> is the time left.
+    /// </summary>
+    private static bool IsWarmUpPending(Task? warmUp, long startedTimestamp, TimeSpan limit, out TimeSpan remaining)
+    {
+        remaining = TimeSpan.Zero;
+        if (warmUp is null || warmUp.IsCompleted || s_insideWarmUp.Value)
+        {
+            return false;
+        }
+
+        remaining = limit - Stopwatch.GetElapsedTime(startedTimestamp);
+        return remaining > TimeSpan.Zero;
+    }
+
+    /// <summary>
     /// Blocks while a warm-up is running, when this call will judge <paramref name="judgedChars"/> characters in total
     /// and that is at least <see cref="WarmUpWaitGateChars"/>; never past the single deadline. For callers that already
     /// run on a pool thread (the MCP and web sweep) or that carry small text (an alert). Never throws.
@@ -107,6 +138,21 @@ public static partial class SensitiveStatements
     }
 
     /// <summary>
+    /// The sized form: <paramref name="sizeOfCall"/> (a walk of the whole result or context, which for an MCP result can
+    /// copy megabytes) runs only while <see cref="WarmUpPending"/> is true. Otherwise there is no sizing and no wait.
+    /// Never throws from the wait; a throw from <paramref name="sizeOfCall"/> is the caller's.
+    /// </summary>
+    internal static void WaitForWarmUp(Func<long> sizeOfCall)
+    {
+        ArgumentNullException.ThrowIfNull(sizeOfCall);
+
+        if (WarmUpPending)
+        {
+            WaitForWarmUp(sizeOfCall());
+        }
+    }
+
+    /// <summary>
     /// True when there is nothing to wait for or the warm-up finished; false when the deadline (start + limit) passed
     /// first or the wait failed. Nothing waits when there is no warm-up, it already finished, the caller is the warm-up,
     /// or the deadline has passed. Never throws.
@@ -118,8 +164,7 @@ public static partial class SensitiveStatements
             return true;
         }
 
-        var remaining = limit - Stopwatch.GetElapsedTime(startedTimestamp);
-        if (remaining <= TimeSpan.Zero)
+        if (!IsWarmUpPending(warmUp, startedTimestamp, limit, out var remaining))
         {
             return false;
         }
@@ -149,13 +194,9 @@ public static partial class SensitiveStatements
 
     internal static Task WhenWarmAsync(Task? warmUp, long startedTimestamp, TimeSpan limit)
     {
-        if (warmUp is null || warmUp.IsCompleted || s_insideWarmUp.Value)
-        {
-            return Task.CompletedTask;
-        }
-
-        var remaining = limit - Stopwatch.GetElapsedTime(startedTimestamp);
-        return remaining <= TimeSpan.Zero ? Task.CompletedTask : WaitUpToAsync(warmUp, remaining);
+        return IsWarmUpPending(warmUp, startedTimestamp, limit, out var remaining)
+            ? WaitUpToAsync(warmUp!, remaining)
+            : Task.CompletedTask;
     }
 
     private static async Task WaitUpToAsync(Task warmUp, TimeSpan remaining)

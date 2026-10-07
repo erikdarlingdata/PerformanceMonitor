@@ -382,4 +382,103 @@ public sealed class StatementFilterWarmUpWaitTests
         Assert.InRange(watch.ElapsedMilliseconds, 300, 2900);
         Assert.Same(large, swept);
     }
+
+    // ---- #5484: sizing runs only while a warm-up can still make the call wait ----
+
+    [Fact]
+    public async Task WarmUpPending_IsTrueOnlyWhileAWarmUpRunsInsideItsDeadline()
+    {
+        await StatementFilterWarmUp.EnsureAsync();
+
+        // No warm-up registered.
+        SensitiveStatements.SetWarmUp(null, 0);
+        Assert.False(SensitiveStatements.WarmUpPending);
+
+        // One running before its 3 s deadline.
+        using (var staged = new StagedWarmUp(TimeSpan.Zero))
+        {
+            Assert.True(SensitiveStatements.WarmUpPending);
+
+            // The same warm-up once it finished.
+            staged.Source.SetResult();
+            Assert.False(SensitiveStatements.WarmUpPending);
+        }
+
+        // One still running, but past the deadline.
+        using (var late = new StagedWarmUp(TimeSpan.FromSeconds(4)))
+        {
+            Assert.False(late.Source.Task.IsCompleted);
+            Assert.False(SensitiveStatements.WarmUpPending);
+        }
+
+        // Inside the warm-up itself: it never waits on itself, so it is never pending there.
+        var insideSaw = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var started = SensitiveStatements.StartWarmUp(() =>
+        {
+            insideSaw.SetResult(SensitiveStatements.WarmUpPending);
+            return Task.CompletedTask;
+        });
+        Assert.False(await insideSaw.Task);
+        await started;
+        SensitiveStatements.SetWarmUp(null, 0);
+    }
+
+    [Fact]
+    public void TheSizedWait_SizesTheCallOnlyWhileAWarmUpIsPending()
+    {
+        var sized = 0;
+        long Size() { sized++; return 10; }
+
+        SensitiveStatements.SetWarmUp(null, 0);
+        SensitiveStatements.WaitForWarmUp(Size);
+        Assert.Equal(0, sized);
+
+        using (var staged = new StagedWarmUp(TimeSpan.Zero))
+        {
+            SensitiveStatements.WaitForWarmUp(Size);
+            Assert.Equal(1, sized);
+
+            staged.Source.SetResult();
+            SensitiveStatements.WaitForWarmUp(Size);
+            Assert.Equal(1, sized);
+        }
+
+        using (var late = new StagedWarmUp(TimeSpan.FromSeconds(4)))
+        {
+            SensitiveStatements.WaitForWarmUp(Size);
+            Assert.Equal(1, sized);
+        }
+    }
+
+    [Fact]
+    public async Task TheSweep_SizesTheResultOnlyWhileAWarmUpIsPending()
+    {
+        await StatementFilterWarmUp.EnsureAsync();
+        var result = LargeToolResult();
+
+        // Seam: SensitiveStatementOutputFilter.SizingCalls counts SweptChars calls, because the structured content's
+        // GetRawText (the copy that matters) is not observable from a test. The collection is serial, so no other
+        // test moves the counter.
+        SensitiveStatements.SetWarmUp(null, 0);
+        var before = SensitiveStatementOutputFilter.SizingCalls;
+        SensitiveStatementOutputFilter.Sweep(result);
+        Assert.Equal(before, SensitiveStatementOutputFilter.SizingCalls);
+
+        using (var staged = new StagedWarmUp(TimeSpan.Zero))
+        {
+            _ = Task.Run(async () => { await Task.Delay(100); staged.Source.SetResult(); });
+            SensitiveStatementOutputFilter.Sweep(result);
+            Assert.Equal(before + 1, SensitiveStatementOutputFilter.SizingCalls);
+
+            // Finished: sized no more.
+            SensitiveStatementOutputFilter.Sweep(result);
+            Assert.Equal(before + 1, SensitiveStatementOutputFilter.SizingCalls);
+        }
+
+        using (var late = new StagedWarmUp(TimeSpan.FromSeconds(4)))
+        {
+            SensitiveStatementOutputFilter.Sweep(result);
+            Assert.Equal(before + 1, SensitiveStatementOutputFilter.SizingCalls);
+        }
+    }
 }
