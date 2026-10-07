@@ -13,6 +13,7 @@ namespace PerformanceMonitorLite.Tests;
 /// keeps its OWN copy on purpose (<c>PerformanceMonitorDashboard.Analysis</c>) — this pin is
 /// Lite&lt;-&gt;Darling only. Darling.Tests carries the mirror-image pin for the Darling half.
 /// </summary>
+[Trait("Stage", "Guard")]
 public class SharedBaselineModelPinTests
 {
     private const string SharedAssembly = "PerformanceMonitor.Analysis";

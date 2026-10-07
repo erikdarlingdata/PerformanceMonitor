@@ -30,6 +30,7 @@ namespace Darling.Tests;
 /// blocking_query_plan_xml; deadlocks victim_sql_text, deadlock_graph_xml, victim_query_plan_xml; dmv_blocking_snapshot
 /// blocked_sql_text, blocking_sql_text.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed partial class StatementCollectionCensusTests
 {
     private static readonly DateTime EventTime = new(2026, 10, 6, 11, 59, 0, DateTimeKind.Utc);

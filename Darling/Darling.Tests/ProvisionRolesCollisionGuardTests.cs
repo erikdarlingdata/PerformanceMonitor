@@ -22,6 +22,7 @@ namespace Darling.Tests;
 /// <c>temp_file_limit</c> line, before it had made a single grant. The script saves the caller's own value before the
 /// guard and puts it back after, so a caller who ran psql with <c>-v ON_ERROR_STOP=1</c> (or set it in psqlrc) keeps it.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class ProvisionRolesCollisionGuardTests
 {
     private const string GuardRaise = "RAISE EXCEPTION 'Role \"";

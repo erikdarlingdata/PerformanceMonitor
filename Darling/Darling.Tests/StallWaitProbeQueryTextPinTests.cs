@@ -25,6 +25,7 @@ namespace Darling.Tests;
 /// pins the same facts, but CI does not run Lite.Tests on a Darling-only change, so this class is what stops a
 /// bad entry added to the shared set from reaching a release.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class StallWaitProbeQueryTextPinTests
 {
     /// <summary>

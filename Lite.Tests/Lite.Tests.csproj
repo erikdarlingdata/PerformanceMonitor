@@ -48,6 +48,8 @@
     <Compile Include="..\Darling\Darling.Tests\McpArgumentTypeRows.cs" Link="McpArgumentTypeRows.cs" />
     <!-- #4348: the statement-filter canary plan and its needles, shared so both SKUs' plan tools are held to the same text. -->
     <Compile Include="..\Darling\Darling.Tests\StatementScrubCanary.cs" Link="StatementScrubCanary.cs" />
+    <!-- #5459: the guard-stage scanner, so both suites tag their guard classes by one detector. -->
+    <Compile Include="..\Darling\Darling.Tests\GuardStageScanner.cs" Link="GuardStageScanner.cs" />
   </ItemGroup>
 
   <ItemGroup>

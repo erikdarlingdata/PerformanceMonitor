@@ -37,6 +37,7 @@ namespace Darling.Tests;
 /// so the list cannot rot. PostgreSQL definitions are out of scope: they are a separate engine with their own
 /// filter (<c>PgSensitiveStatementFilter</c>).
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class StatementColumnCensusTests
 {
     private static readonly Regex PayloadPattern = new(

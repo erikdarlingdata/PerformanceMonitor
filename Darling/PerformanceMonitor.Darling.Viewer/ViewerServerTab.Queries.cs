@@ -175,16 +175,17 @@ public partial class ViewerServerTab
     private async Task LoadTopQueriesAsync(DateTime startUtc, DateTime endUtc)
     {
         var floorTask = _dataService.GetQueryStatsWindowFloorAsync(_server.ServerId, startUtc, endUtc);
-        var dataReadTask = _dataService.GetTopQueriesByCpuTierAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter);
+        var dataReadTask = _dataService.GetTopQueriesByCpuRoutedAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter);
         await AwaitReadWatchingProbeAsync(dataReadTask, floorTask, "Query Stats");
-        var (rows, tier) = dataReadTask.Result;
+        var read = dataReadTask.Result;
+        var rows = read.Rows;
         _queryStatsFilterMgr!.UpdateData(rows);
         SetDefaultSortIfNone(QueryStatsGrid, "TotalElapsedMs", ListSortDirection.Descending);
         /* #4231 stage 3: an hourly-routed page holds no per-caller detail (see
            ViewerDataService.GetTopQueriesByCpuTierAsync) — the raw-floor banner (#4231 stage 1/2) and this
            tier disclosure are independent facts, so both may show at once (a window aged past raw AND
            routed to hourly). */
-        UpdateTruncationBanner(QueryStatsTruncationBanner, await DataStartOrNullAsync(floorTask, "Query Stats"), startUtc, tier == "hourly" ? HourlyTierSuffix : null);
+        UpdateTruncationBanner(QueryStatsTruncationBanner, await DataStartOrNullAsync(floorTask, "Query Stats"), startUtc, HourlyBannerSuffix(read.Tier, read.IoRoute, read.HourlyEdgesNote), HourlyServedOf(read.Tier, read.HourlyFirstBucket));
         await LoadQueryStatsSlicerAsync(startUtc, endUtc);
         await RefreshQueryStatsComparisonAsync(startUtc, endUtc);
     }
@@ -193,17 +194,50 @@ public partial class ViewerServerTab
     /// existing "Showing since" banner (#4278) rather than a new widget, per the lane's ruling.</summary>
     private const string HourlyTierSuffix = " — aggregated hourly: per-caller detail, reads, writes, spills and min/max CPU and duration are not kept, so they show blank";
 
+    /// <summary>#5329: the same disclosure when the io hourly rollup served the grid: it keeps logical reads, physical reads
+    /// and logical writes (the grid fills them), so those are not named as blank.</summary>
+    private const string HourlyIoTierSuffix = " — aggregated hourly: per-caller detail, spills and min/max CPU and duration are not kept, so they show blank";
+
+    /// <summary>
+    /// #5329: the banner suffix an hourly-routed grid carries: <see cref="HourlyTierSuffix"/> plus the window's real edges
+    /// (<see cref="ViewerDataService.HourlyEdgesNote"/>, the MCP tools' own text: the hourly rollup starts on the hour, a
+    /// rollup that starts after the window's start, and a materialization ceiling before its end). Null for a raw read, so
+    /// the raw route's banner is unchanged. A hourly read whose edges did not move carries the tier suffix alone.
+    /// </summary>
+    internal static string? HourlyBannerSuffix(string tier, bool ioRoute, string? edgesNote)
+    {
+        if (tier != "hourly")
+        {
+            return null;
+        }
+
+        var suffix = ioRoute ? HourlyIoTierSuffix : HourlyTierSuffix;
+        return string.IsNullOrEmpty(edgesNote) ? suffix : $"{suffix}. Window edges: {edgesNote}";
+    }
+
+    /// <summary>
+    /// #5329: what an hourly-routed grid really covers, for <see cref="UpdateTruncationBanner"/>. The grid sums the rollup
+    /// buckets this server holds, so its start is <paramref name="FirstBucket"/> (per server, null when none), not the raw
+    /// table's floor, which only the slicer and the comparison read.
+    /// </summary>
+    internal readonly record struct HourlyServed(DateTime? FirstBucket);
+
+    /// <summary>The <see cref="HourlyServed"/> of a routed read, or null for a raw one (whose banner names raw's floor).</summary>
+    internal static HourlyServed? HourlyServedOf(string tier, DateTime? firstBucket) =>
+        tier == "hourly" ? new HourlyServed(firstBucket) : null;
+
     private async Task LoadTopProceduresAsync(DateTime startUtc, DateTime endUtc)
     {
         var floorTask = _dataService.GetProcedureStatsWindowFloorAsync(_server.ServerId, startUtc, endUtc);
-        var dataReadTask = _dataService.GetTopProceduresByCpuTierAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter);
+        var dataReadTask = _dataService.GetTopProceduresByCpuRoutedAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter);
         await AwaitReadWatchingProbeAsync(dataReadTask, floorTask, "Procedure Stats");
-        var (rows, tier) = dataReadTask.Result;
+        var read = dataReadTask.Result;
+        var rows = read.Rows;
         _procStatsFilterMgr!.UpdateData(rows);
         SetDefaultSortIfNone(ProcedureStatsGrid, "TotalElapsedMs", ListSortDirection.Descending);
         /* #4231 stage 3b: an hourly-routed page holds no object_type/sql_handle/plan_handle — the raw-floor
            banner and this tier disclosure are independent facts, same reasoning as the Queries sub-tab. */
-        UpdateTruncationBanner(ProcStatsTruncationBanner, await DataStartOrNullAsync(floorTask, "Procedure Stats"), startUtc, tier == "hourly" ? HourlyTierSuffix : null);
+        UpdateTruncationBanner(ProcStatsTruncationBanner, await DataStartOrNullAsync(floorTask, "Procedure Stats"), startUtc, HourlyBannerSuffix(read.Tier, read.IoRoute, read.HourlyEdgesNote), HourlyServedOf(read.Tier, read.HourlyFirstBucket));
         await LoadProcStatsSlicerAsync(startUtc, endUtc);
         await RefreshProcStatsComparisonAsync(startUtc, endUtc);
     }
@@ -234,14 +268,26 @@ public partial class ViewerServerTab
     /// invariant culture (<see cref="BannerTime"/>).
     /// </summary>
     internal static void UpdateTruncationBanner(TextBlock banner, DateTime? floor, DateTime requestedStartUtc, string? tierSuffix = null,
-        QueryStoreIntervalWide.WideReadPlan? widePlan = null)
+        HourlyServed? hourly = null, QueryStoreIntervalWide.WideReadPlan? widePlan = null)
     {
         /* #4689: when the interval table served, the rows start at the plan's EffectiveStart, not at raw's
            floor. The banner names that start and the bound that set it; the slicer still reads raw, so a
-           truncated raw floor is named beside it. The raw route's banner below is unchanged. */
-        if (widePlan?.EffectiveStart is DateTime wideStart)
+           truncated raw floor is named beside it. The raw route's banner below is unchanged.
+           #5329: the same shape when the HOURLY rollups served: the grid starts at this server's first bucket
+           (the Query Stats / Procedure Stats arms' per-server probe), so "Showing since" names that start and raw's
+           floor is named as the slicer's. An hourly read that found no bucket has no start to name (the grid is
+           empty), and an hourly start inside the slack is the hour alignment alone, which the edges note states. */
+        DateTime? servedStart = widePlan?.EffectiveStart;
+        var startReason = servedStart is null ? string.Empty : QueryStoreIntervalWide.BannerReason(widePlan!.Value.StartBound);
+        var hourlyServed = servedStart is null && hourly is not null;
+        if (hourlyServed)
         {
-            var wideTruncated = RawWindowFloor.IsTruncated(wideStart, requestedStartUtc);
+            servedStart = hourly!.Value.FirstBucket;
+        }
+
+        if (servedStart is not null || hourlyServed)
+        {
+            var wideTruncated = RawWindowFloor.IsTruncated(servedStart, requestedStartUtc);
             /* The slicer and comparison read raw whatever tier served the grid, so a truncated raw floor is
                named whether or not the grid itself was cut. */
             var slicerTruncated = RawWindowFloor.IsTruncated(floor, requestedStartUtc);
@@ -250,12 +296,30 @@ public partial class ViewerServerTab
                 var slicerSince = slicerTruncated
                     ? BannerTime(RawWindowFloor.EffectiveStart(floor, requestedStartUtc))
                     : null;
-                var text = wideTruncated
-                    ? $"Showing since {BannerTime(wideStart)}{QueryStoreIntervalWide.BannerReason(widePlan.Value.StartBound)}"
-                        + (slicerSince is null ? string.Empty : $" · slicer since {slicerSince}")
-                    : slicerSince is null
+                /* #5329: "the grid shows the full window" is the wide plan's claim and is true only there. On the hourly
+                   route the edges note in the suffix says where the grid really starts and stops, so the claim would
+                   contradict it, and an empty grid (no bucket) has no start to name at all. */
+                string text;
+                if (wideTruncated)
+                {
+                    text = $"Showing since {BannerTime(servedStart!.Value)}{startReason}"
+                        + (slicerSince is null ? string.Empty : $" · slicer since {slicerSince}");
+                }
+                else if (hourlyServed && hourly!.Value.FirstBucket is null)
+                {
+                    text = slicerSince is null ? "No rollup bucket in the window" : $"Slicer since {slicerSince}";
+                }
+                else if (hourlyServed)
+                {
+                    text = $"Showing {BannerTime(requestedStartUtc)}"
+                        + (slicerSince is null ? string.Empty : $" · slicer since {slicerSince}");
+                }
+                else
+                {
+                    text = slicerSince is null
                         ? $"Showing {BannerTime(requestedStartUtc)}"
                         : $"Slicer since {slicerSince} (the grid shows the full window)";
+                }
 
                 banner.Text = text + tierSuffix;
                 banner.Visibility = Visibility.Visible;
@@ -410,11 +474,12 @@ public partial class ViewerServerTab
         try
         {
             var floorTask = _dataService.GetQueryStatsWindowFloorAsync(_server.ServerId, e.StartUtc, e.EndUtc);
-            var dataReadTask = _dataService.GetTopQueriesByCpuTierAsync(_server.ServerId, e.StartUtc, e.EndUtc, databaseNames: SelectedDatabaseFilter);
+            var dataReadTask = _dataService.GetTopQueriesByCpuRoutedAsync(_server.ServerId, e.StartUtc, e.EndUtc, databaseNames: SelectedDatabaseFilter);
             await AwaitReadWatchingProbeAsync(dataReadTask, floorTask, "Query Stats");
-            var (rows, tier) = dataReadTask.Result;
+            var read = dataReadTask.Result;
+            var rows = read.Rows;
             _queryStatsFilterMgr!.UpdateData(rows);
-            UpdateTruncationBanner(QueryStatsTruncationBanner, await DataStartOrNullAsync(floorTask, "Query Stats"), e.StartUtc, tier == "hourly" ? HourlyTierSuffix : null);
+            UpdateTruncationBanner(QueryStatsTruncationBanner, await DataStartOrNullAsync(floorTask, "Query Stats"), e.StartUtc, HourlyBannerSuffix(read.Tier, read.IoRoute, read.HourlyEdgesNote), HourlyServedOf(read.Tier, read.HourlyFirstBucket));
             await RefreshQueryStatsComparisonAsync(e.StartUtc, e.EndUtc);
         }
         catch (Exception ex)
@@ -437,11 +502,12 @@ public partial class ViewerServerTab
         try
         {
             var floorTask = _dataService.GetProcedureStatsWindowFloorAsync(_server.ServerId, e.StartUtc, e.EndUtc);
-            var dataReadTask = _dataService.GetTopProceduresByCpuTierAsync(_server.ServerId, e.StartUtc, e.EndUtc, databaseNames: SelectedDatabaseFilter);
+            var dataReadTask = _dataService.GetTopProceduresByCpuRoutedAsync(_server.ServerId, e.StartUtc, e.EndUtc, databaseNames: SelectedDatabaseFilter);
             await AwaitReadWatchingProbeAsync(dataReadTask, floorTask, "Procedure Stats");
-            var (rows, tier) = dataReadTask.Result;
+            var read = dataReadTask.Result;
+            var rows = read.Rows;
             _procStatsFilterMgr!.UpdateData(rows);
-            UpdateTruncationBanner(ProcStatsTruncationBanner, await DataStartOrNullAsync(floorTask, "Procedure Stats"), e.StartUtc, tier == "hourly" ? HourlyTierSuffix : null);
+            UpdateTruncationBanner(ProcStatsTruncationBanner, await DataStartOrNullAsync(floorTask, "Procedure Stats"), e.StartUtc, HourlyBannerSuffix(read.Tier, read.IoRoute, read.HourlyEdgesNote), HourlyServedOf(read.Tier, read.HourlyFirstBucket));
             await RefreshProcStatsComparisonAsync(e.StartUtc, e.EndUtc);
         }
         catch (Exception ex)

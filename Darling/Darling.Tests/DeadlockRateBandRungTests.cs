@@ -34,6 +34,7 @@ namespace Darling.Tests;
 /// about being NEWEST. Keeping a copy of those would assert this rung is still the top, which is how the
 /// NEXT rung's build goes red — the note V119's file left for this one.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class DeadlockRateBandRungTests
 {
     private const int RungVersion = 120;

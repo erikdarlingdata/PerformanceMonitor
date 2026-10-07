@@ -18,6 +18,7 @@ namespace PerformanceMonitorLite.Tests;
 /// How the Overview's blocking chart is wired to say where its data starts (#4966), read from the source because the control needs a
 /// window to run. The choice is in <c>OverviewBlockingLaneDataStartTests</c>, the notice in <c>OverviewBlockingLaneDataStartLiveTests</c>.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class OverviewBlockingLaneDataStartPinTests
 {
     private static string Code() => Read("CorrelatedTimelineLanesControl.xaml.cs");

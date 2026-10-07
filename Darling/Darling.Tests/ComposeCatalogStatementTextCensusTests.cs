@@ -22,6 +22,7 @@ namespace Darling.Tests;
 /// their own. This census pins that: a catalog column named like a statement or XML column fails the build until the
 /// read behind it is judged.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class ComposeCatalogStatementTextCensusTests
 {
     private static readonly Regex StatementColumn = new(

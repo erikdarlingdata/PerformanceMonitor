@@ -195,6 +195,7 @@ public sealed class RawWindowFloorMcpLiveTests
 /// their window floor through the ONE shared probe (<see cref="RawWindowFloor"/>), never a hand-copied SQL
 /// constant per table — the defect #2364 would have repeated twice more.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class RawWindowFloorSharedHelperSourcePinTests
 {
     private static string ReaderSource => RepoFile.ReadRepoFile(

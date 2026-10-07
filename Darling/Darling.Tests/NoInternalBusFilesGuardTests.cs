@@ -20,6 +20,7 @@ namespace Darling.Tests;
 /// <para>Deliberately in Darling.Tests rather than Lite.Tests: Lite.Tests cannot build or run on a
 /// Mac, so a guard placed there could not be verified by the seat that needs it most.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public class NoInternalBusFilesGuardTests
 {
     /* Nothing from the coordination bus belongs in this tree: lane reports, design notes, seat

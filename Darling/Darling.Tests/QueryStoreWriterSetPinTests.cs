@@ -23,6 +23,7 @@ namespace Darling.Tests;
 /// (<c>{table}</c>, <c>collect.{Table}</c>, the collector's <c>TargetTable</c>), so a search for the literal table
 /// name finds none of them; <see cref="FindWriters"/> keys on the spellings the writers actually use.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class QueryStoreWriterSetPinTests
 {
     /// <summary>How a source names the table: the literal, a run-time spelling, or a sweep over every collector's

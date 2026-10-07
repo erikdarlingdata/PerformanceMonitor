@@ -20,6 +20,7 @@ namespace Darling.Tests;
 /// <c>@@SERVERNAME</c> decides whether one registration's drop would stop the trace another one keeps. These pin the pure
 /// decision both apps share, and the read of the name from a carrier's persisted identity row.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class LongQueryTraceInstanceGuardTests
 {
     private static LongQueryTraceInstance Other(string? name, bool enabled = true, bool traceOn = true) => new(enabled, traceOn, name);

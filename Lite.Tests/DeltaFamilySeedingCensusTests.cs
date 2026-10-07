@@ -41,6 +41,7 @@ namespace PerformanceMonitorLite.Tests;
 /// follow.</para>
 /// </summary>
 [Trait("Reads", "Darling")]
+[Trait("Stage", "Guard")]
 public sealed class DeltaFamilySeedingCensusTests
 {
     private const string LiteSeeder = "Lite/Services/DeltaCalculator.cs";

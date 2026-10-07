@@ -38,6 +38,7 @@ namespace Darling.Tests;
 /// A tool could pass either check alone — a dispatch entry that passes a token to a method with nowhere to put
 /// it, or a method with a token parameter nothing ever fills in — so both run.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class WebReadCancellationPinTests
 {
     /// <summary>

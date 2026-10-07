@@ -572,16 +572,18 @@ public sealed class RefreshCeilingStalenessTests
     /// existence is the concrete demonstration that the recorded ceiling was overtaken from inside the
     /// routine band (#3182).
     ///
-    /// <para><b>This case was written to EXPIRE, expired at #3653 (Q12), and was RESTORED at #3653 (A6).</b>
-    /// At Q12 the watch line fell from 1,050 s to 900 s — below this 952 s run — so the run classified
-    /// <see cref="TimescaleSupport.RefreshSlotHeadroom.ApproachingSlot"/> and was no longer invisible to the
-    /// slot watch. The A6 freeze re-derived the heaviest window back to 21 minutes, raising the five-sixths
-    /// line to 1,050 s again, so the 952 s run is back BELOW the watch line and back in
-    /// <see cref="TimescaleSupport.RefreshSlotHeadroom.InsideSlot"/> — invisible to the slot watch again.
-    /// The staleness line still fires on it (the ceiling finding is unchanged), and the band in which a run
-    /// can overtake the constant while the slot watch stays at Debug is <c>[896, 1,050)</c>: 154 seconds wide,
-    /// the same width as at #3174 (before Q12 narrowed it to 4 s). The mechanism this file guards is still
-    /// reachable and this run still demonstrates it.</para>
+    /// <para><b>This case was written to EXPIRE, expired at #3653 (Q12), was RESTORED at #3653 (A6), and
+    /// expires AGAIN at #5329.</b>
+    /// At Q12 the watch line fell from 1,050 s to 900 s, below this 952 s run, so the run classified
+    /// <see cref="TimescaleSupport.RefreshSlotHeadroom.ApproachingSlot"/>. The A6 freeze raised the line back to
+    /// 1,050 s and the run went back to <see cref="TimescaleSupport.RefreshSlotHeadroom.InsideSlot"/>. The two io
+    /// hourlies (#5329) joined the phase grid as light members, which re-derived the heaviest window from 21 to
+    /// 19 minutes and the five-sixths line from 1,050 s to 950 s, so the 952 s run is 2 s ABOVE the watch line
+    /// and visible to the slot watch again, still 188 s inside the 1,140 s wall. The staleness line still fires
+    /// on it (the ceiling finding is unchanged), and the band in which a run can overtake the constant while the
+    /// slot watch stays at Debug is <c>[896, 950)</c>: 54 seconds wide (154 at A6, 4 at Q12). The mechanism this
+    /// file guards is still reachable, through a DERIVED reading inside that band, and this run still
+    /// demonstrates it from the other side: a ceiling-falsifying run that the slot watch also reports.</para>
     /// </summary>
     [Fact]
     public void TheMeasuredRunThatDemonstratedTheDefect_StillFalsifiesTheRecordedCeiling()
@@ -596,16 +598,16 @@ public sealed class RefreshCeilingStalenessTests
             + "still outside it, or drop this case and keep the derived ones — or the reading is being "
             + "cited against a constant it was not measured against (#3182)");
 
-        /* #3653 A6: the A6 freeze raised the watch line back to 1,050 s, so the run is again BELOW it and
-           invisible to the slot watch — the InsideSlot case restored. Pinned in this direction with the
-           margin; a grid that moves the line BELOW 952 s (a narrower window) has to re-read this case. */
+        /* #5329: the two io hourlies re-derived the watch line to 950 s, so the 952 s run is 2 s ABOVE it and
+           the slot watch sees it: the Q12 state, the ApproachingSlot case. Pinned in this direction with the
+           margin; a grid that moves the line back ABOVE 952 s (a wider window) has to re-read this case. */
         Assert.True(
-            MeasuredCleanRunSeconds < WatchLine,
-            $"the quoted {MeasuredCleanRunSeconds} s run is now ABOVE the {WatchLine} s watch line — the "
-            + "run is no longer invisible to the slot watch; re-read this case for the ApproachingSlot band");
-        Assert.Equal(98, WatchLine - MeasuredCleanRunSeconds);
+            MeasuredCleanRunSeconds > WatchLine,
+            $"the quoted {MeasuredCleanRunSeconds} s run is at or below the {WatchLine} s watch line, so the "
+            + "run is invisible to the slot watch again; re-read this case for the InsideSlot band");
+        Assert.Equal(2, MeasuredCleanRunSeconds - WatchLine);
         Assert.Equal(
-            TimescaleSupport.RefreshSlotHeadroom.InsideSlot,
+            TimescaleSupport.RefreshSlotHeadroom.ApproachingSlot,
             TimescaleSupport.ClassifyRefreshSlotHeadroom(MeasuredCleanRunSeconds));
         Assert.True(
             MeasuredCleanRunSeconds < TimescaleSupport.RefreshPhaseSlotSeconds,
@@ -626,13 +628,13 @@ public sealed class RefreshCeilingStalenessTests
         Assert.StartsWith("Warning:", log.Joined, StringComparison.Ordinal);
 
         /* THE BAND THAT IS LEFT for #3182's mechanism — overtaking the constant while the slot watch logs at
-           Debug — is the gap between the two constants: 1,050 - 896 = 154 s at A6's grid (was 4 s at Q12).
+           Debug — is the gap between the two constants: 950 - 896 = 54 s at #5329's grid (154 s at A6, 4 s at Q12).
            A DERIVED reading one second above the ceiling still sits inside it, still classifies InsideSlot,
            and still falsifies the constant, so the mechanism this file guards is reachable and not vacuous;
            a grid that closed the band entirely (watch line at or below the ceiling) is red in
            TimescaleSupportTests, not here. */
         var invisibleBandSeconds = WatchLine - Ceiling;
-        Assert.Equal(154, invisibleBandSeconds);
+        Assert.Equal(54, invisibleBandSeconds);
         Assert.True(invisibleBandSeconds > 0, "the watch line is at or below the recorded ceiling (#3653)");
 
         var insideTheBand = Ceiling + 1d;

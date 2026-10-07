@@ -30,6 +30,7 @@ namespace Darling.Tests;
 /// assert the guard is the FIRST <c>_app.Use</c> after <c>builder.Build()</c> and sits AHEAD of the
 /// <c>if (networkMode)</c> gates — i.e. it runs in loopback mode too, which is the mode that was exposed.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class HostHeaderGuardTests
 {
     /* ---------------- the pure decision, both modes ---------------- */

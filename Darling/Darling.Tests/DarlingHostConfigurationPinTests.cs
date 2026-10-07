@@ -38,6 +38,7 @@ namespace Darling.Tests;
 /// <c>DarlingWebFailureHandlingTests.BothWebHosts_PinEnvironmentNameToProduction_OnTheirOwnCreateBuilderCall</c>
 /// reads the same two files, so prose in a comment can neither satisfy nor break one.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class DarlingHostConfigurationPinTests
 {
     private static string HostCode(string fileName)

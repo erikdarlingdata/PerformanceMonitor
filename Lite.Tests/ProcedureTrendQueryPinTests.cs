@@ -20,6 +20,7 @@ namespace Lite.Tests;
 /// #5449, line endings normalised) so a change to the shared builders cannot move <c>v_query_stats</c>, and pin the procedure
 /// statements' shape: both tables read from an hour before the window, and none of the removed span term.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class ProcedureTrendQueryPinTests
 {
     private static string Sha(string sql) =>

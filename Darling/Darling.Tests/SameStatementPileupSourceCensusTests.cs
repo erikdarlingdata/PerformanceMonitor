@@ -34,6 +34,7 @@ namespace Darling.Tests;
 /// follow-on enrichment where QS happens to be readable. That is a different code path on the
 /// scheduled pass, and nothing here restricts it.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class SameStatementPileupSourceCensusTests
 {
     /// <summary>

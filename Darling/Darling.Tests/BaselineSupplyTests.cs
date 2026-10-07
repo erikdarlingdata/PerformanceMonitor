@@ -514,14 +514,19 @@ public class BaselineSupplyTests
         Assert.Equal(TimescaleSupport.WaitStatsIntervalBaselineView, TimescaleSupport.BaselineAggregates[1].View);
 
         /* The order's count is the hourly registry plus the seven baselines — 6 + 7 = 13 since #3653's LC
-           freeze (was 9 + 7 = 16 during Q12) — and the baseline pair contributes exactly its two positions to
-           it, no more. */
+           freeze (was 9 + 7 = 16 during Q12, and
+           8 + 7 = 15 at #5329) — and the baseline pair contributes exactly its two positions to it, no more. */
         Assert.Equal(TimescaleSupport.HourlyAggregates.Length + 7, TimescaleSupport.HourlyRefreshPhaseOrder.Count);
-        Assert.Equal(13, TimescaleSupport.HourlyRefreshPhaseOrder.Count);
-        Assert.Equal(3, TimescaleSupport.RefreshPhaseMinutesFor(TimescaleSupport.PerfmonIntervalBaselineView));
-        Assert.Equal(5, TimescaleSupport.RefreshPhaseMinutesFor(TimescaleSupport.WaitStatsIntervalBaselineView));
-        Assert.Equal(15, TimescaleSupport.HeaviestRefreshStartMinute);
-        Assert.Equal(1050, TimescaleSupport.RefreshSlotWarningSeconds);
+        /* #5329: 8 + 7 = 15 now that the two io hourlies joined the registry, so the grid re-derives: 14 light
+           members spread over a 13-minute band, the heaviest refresh at :17 with a 19-minute window, so the watch
+           line is 950 s. The light band is re-laid (the unbounded-cardinality members sit a guard's width apart in
+           it, and the band now has 14 positions), which moves the baseline pair from minutes 3 and 5 to 5 and 6; the minute map stays
+           injective (TimescaleSupportTests pins that and carries the derivation). */
+        Assert.Equal(15, TimescaleSupport.HourlyRefreshPhaseOrder.Count);
+        Assert.Equal(5, TimescaleSupport.RefreshPhaseMinutesFor(TimescaleSupport.PerfmonIntervalBaselineView));
+        Assert.Equal(6, TimescaleSupport.RefreshPhaseMinutesFor(TimescaleSupport.WaitStatsIntervalBaselineView));
+        Assert.Equal(17, TimescaleSupport.HeaviestRefreshStartMinute);
+        Assert.Equal(950, TimescaleSupport.RefreshSlotWarningSeconds);
     }
 
     /// <summary>
