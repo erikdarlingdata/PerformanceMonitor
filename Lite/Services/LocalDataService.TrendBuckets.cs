@@ -381,13 +381,14 @@ ORDER BY 1";
         var windowHasRows = dbClause.Length == 0 ? "" : "\nWHERE EXISTS (SELECT 1 FROM rated WHERE matched_rows > 0)";
 
         /* #5449: v_procedure_stats stores no row for an idle cycle, so its bucket's seconds are the bucket's span, not just
-           the stored collections' intervals (see IdleSpanSecondsSql). The width is this statement's $4. */
+           the stored collections' intervals (see IdleSpanSecondsSql), and the collector's runs that stored nothing are zero-work
+           collections (IdleRunCollectionsSql), so a quiet bucket is a 0 point. The width is this statement's $4. */
         var coverIdleSpan = relation == "v_procedure_stats";
         var idleCols = coverIdleSpan ? IdleSpanColumnsSql("$4") : "";
         var seconds = coverIdleSpan ? IdleSpanSecondsSql("$4") : "SUM(rated_seconds)";
 
         command.CommandText = $@"
-WITH raw AS
+WITH stored AS
 (
     SELECT
         collection_time,
@@ -402,6 +403,10 @@ WITH raw AS
     AND   collection_time >= $2
     AND   collection_time <= $3
     GROUP BY collection_time
+),
+raw AS
+(
+    SELECT * FROM stored{(coverIdleSpan ? IdleRunCollectionsSql(dbClause.Length != 0) : "")}
 ),
 rated AS
 (

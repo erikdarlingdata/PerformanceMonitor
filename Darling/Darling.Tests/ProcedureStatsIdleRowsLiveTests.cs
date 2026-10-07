@@ -53,8 +53,24 @@ public sealed class ProcedureStatsIdleRowsLiveTests
         /* 1,200 ms of work over the bucket's 600 s, not over the two stored one-minute collections' 120 s (which read 10). */
         Assert.Equal(2.0, newRows[0].ElapsedMsPerSecond, precision: 6);
         Assert.Equal(1.0, newRows[1].ElapsedMsPerSecond, precision: 6);
-        /* The last bucket holds only the series' final collection: its own 60 s. */
-        Assert.Equal(10.0, newRows[2].ElapsedMsPerSecond, precision: 6);
+        /* The last bucket: 600 ms over the six collections (minute 20 and five quiet runs) it holds, 360 s. */
+        Assert.Equal(600.0 / 360.0, newRows[2].ElapsedMsPerSecond, precision: 6);
+    }
+
+    [Fact]
+    public async Task ChartPoints_AQuietRunPlotsZero_OnBothStores()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var store = await SeededStore.CreateAsync(ct);
+
+        var oldRows = await ReadTrendAsync(store, OldServer, ct, bucketMinutes: 1);
+        var newRows = await ReadTrendAsync(store, NewServer, ct, bucketMinutes: 1);
+
+        /* Every run from minute 0 to 25 is a point (26), the quiet ones at 0: no line drawn across a gap. */
+        Assert.Equal(26, oldRows.Count);
+        Assert.Equal(oldRows.Select(r => (r.Bucket, r.ElapsedMsPerSecond)), newRows.Select(r => (r.Bucket, r.ElapsedMsPerSecond)));
+        Assert.Equal(0.0, newRows.Single(r => r.Bucket == store.WorkStart.AddMinutes(3)).ElapsedMsPerSecond, precision: 6);
+        Assert.Equal(10.0, newRows.Single(r => r.Bucket == store.WorkStart.AddMinutes(15)).ElapsedMsPerSecond, precision: 6);
     }
 
     [Fact]
@@ -82,17 +98,35 @@ public sealed class ProcedureStatsIdleRowsLiveTests
         var floor = await RawWindowFloor.GetAsync(store.DataSource, RawWindowFloor.Table.ProcedureStats, NewServer, start, store.End, cancellationToken: ct);
 
         Assert.NotNull(floor);
-        Assert.Equal(store.WorkStart.AddMinutes(1), floor);
+        /* The collector's first run, a minute before the first stored row: coverage starts with the runs. */
+        Assert.Equal(store.WorkStart, floor);
+    }
+
+    [Fact]
+    public async Task ProcedureWindowFloor_ARunsOnlyStoreHasAFloor_AsItsFirstRun()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var store = await SeededStore.CreateAsync(ct);
+        /* A server the collector has run against but that has no procedure_stats row at all yet. */
+        await using (var delete = store.DataSource.CreateCommand("DELETE FROM collect.procedure_stats WHERE server_id = $1"))
+        {
+            delete.Parameters.AddWithValue(NewServer);
+            await delete.ExecuteNonQueryAsync(ct);
+        }
+
+        var floor = await RawWindowFloor.GetAsync(store.DataSource, RawWindowFloor.Table.ProcedureStats, NewServer, store.WorkStart.AddHours(1), store.End, cancellationToken: ct);
+
+        Assert.Equal(store.WorkStart, floor);
     }
 
     private static async Task<List<(DateTime Bucket, double ElapsedMsPerSecond, double ExecutionsPerSecond)>> ReadTrendAsync(
-        SeededStore store, int serverId, CancellationToken ct)
+        SeededStore store, int serverId, CancellationToken ct, int bucketMinutes = 10)
     {
         await using var command = store.DataSource.CreateCommand(DurationTrendRouting.BuildBucketedRawTrendSql("procedure_stats", withDatabaseFilter: false));
         command.Parameters.AddWithValue(serverId);
         command.Parameters.AddWithValue(DateTime.SpecifyKind(store.WorkStart.AddMinutes(-5), DateTimeKind.Unspecified));
-        command.Parameters.AddWithValue(DateTime.SpecifyKind(store.WorkStart.AddMinutes(30), DateTimeKind.Unspecified));
-        command.Parameters.AddWithValue(10);
+        command.Parameters.AddWithValue(DateTime.SpecifyKind(store.WorkStart.AddMinutes(25), DateTimeKind.Unspecified));
+        command.Parameters.AddWithValue(bucketMinutes);
         var rows = new List<(DateTime, double, double)>();
         await using var reader = await command.ExecuteReaderAsync(ct);
         while (await reader.ReadAsync(ct))
@@ -189,6 +223,12 @@ VALUES ((SELECT COALESCE(MAX(collection_id), 0) + 1 FROM collect.procedure_stats
                     "INSERT INTO collect.collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, rows_collected) "
                     + "SELECT row_number() OVER (), $1, $2, 'procedure_stats', t, 12, 'SUCCESS', 0 FROM generate_series($3::timestamp, $4::timestamp, interval '1 minute') AS t",
                     NewServer, "idle-rows-new", DateTime.SpecifyKind(workStart, DateTimeKind.Unspecified), DateTime.SpecifyKind(end, DateTimeKind.Unspecified));
+                /* The old store ran the collector on the same cadence; it just kept a row for every run. */
+                await DarlingMcpTestData.ExecAsync(
+                    connection, ct,
+                    "INSERT INTO collect.collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, rows_collected) "
+                    + "SELECT 1000000 + row_number() OVER (), $1, $2, 'procedure_stats', t, 12, 'SUCCESS', 1 FROM generate_series($3::timestamp, $4::timestamp, interval '1 minute') AS t",
+                    OldServer, "idle-rows-old", DateTime.SpecifyKind(workStart, DateTimeKind.Unspecified), DateTime.SpecifyKind(end, DateTimeKind.Unspecified));
 
                 return new SeededStore(scratch, NpgsqlDataSource.Create(scratch.ConnectionString), workStart, end);
             }

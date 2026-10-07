@@ -261,8 +261,13 @@ public static class DurationTrendRouting
             : "SUM(delta_elapsed_time) / 1000.0 AS total_elapsed_ms,\n"
               + "        SUM(delta_execution_count) AS total_executions,";
 
+        /* #5449: procedure_stats keeps no row for a cycle in which nothing ran, so its collections are the stored ones plus the
+           collector's idle runs; every other table stores every cycle and reads its own rows as before. */
+        var name = rawTable == "procedure_stats" ? "stored" : "raw";
+        var idleRuns = rawTable == "procedure_stats" ? IdleRunCollectionsSql(withDatabaseFilter) : "";
+
         return $"""
-        raw AS
+        {name} AS
         (
             SELECT
                 collection_time,
@@ -276,9 +281,53 @@ public static class DurationTrendRouting
             AND   collection_time >= $2
             AND   collection_time <= $3
             GROUP BY collection_time
-        )
+        ){idleRuns}
         """;
     }
+
+    /// <summary>
+    /// #5449: the collector runs that stored no row (a minute in which no procedure did work), as zero-work collections after the
+    /// <c>stored</c> CTE, so a chart or an MCP bucket plots a measured 0 for a quiet minute the way an old store, which kept the
+    /// idle rows, does. The time axis is the collector's own SUCCESS runs in <c>collect.collection_log</c> inside the window
+    /// ($2/$3); a run is idle when no stored collection falls in [its time, the next run's time), which holds whether the log
+    /// stamps a run at the same instant as its rows or a moment before them. An idle run's interval is the gap to the previous run
+    /// (the next run's gap for the first), the cadence an old store's idle row would have recorded, so its rate is 0 over real
+    /// seconds and never NULL. An old store has a row for every run, so it has no idle run and its answer is unchanged.
+    /// </summary>
+    internal static string IdleRunCollectionsSql(bool withDatabaseFilter) => $"""
+        ,
+        raw AS
+        (
+            SELECT collection_time, total_elapsed_ms, total_executions, interval_seconds{(withDatabaseFilter ? ", matched_rows" : "")}
+            FROM stored
+            UNION ALL
+            SELECT
+                r.t,
+                CAST(0 AS numeric),
+                CAST(0 AS numeric),
+                CAST(extract(epoch FROM COALESCE(r.t - r.prev_t, r.next_t - r.t)) AS numeric){(withDatabaseFilter ? ", CAST(0 AS bigint)" : "")}
+            FROM
+            (
+                SELECT
+                    collection_time AS t,
+                    LAG(collection_time) OVER (ORDER BY collection_time) AS prev_t,
+                    LEAD(collection_time) OVER (ORDER BY collection_time) AS next_t
+                FROM {PgSchemaGenerator.CollectSchema}.collection_log
+                WHERE server_id = $1
+                AND   collector_name = 'procedure_stats'
+                AND   status = 'SUCCESS'
+                AND   collection_time >= $2
+                AND   collection_time <= $3
+            ) AS r
+            WHERE NOT EXISTS
+            (
+                SELECT 1
+                FROM stored AS s
+                WHERE s.collection_time >= r.t
+                AND   (r.next_t IS NULL OR s.collection_time < r.next_t)
+            )
+        )
+        """;
 
     /// <summary>
     /// #5449: the seconds a bucketed raw rate divides by, for a table whose collector stores no row for an idle cycle

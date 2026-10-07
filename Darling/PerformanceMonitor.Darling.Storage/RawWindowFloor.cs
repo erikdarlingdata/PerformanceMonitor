@@ -69,12 +69,7 @@ public static class RawWindowFloor
         SELECT o.t
         FROM
         (
-            SELECT f.collection_time AS t
-            FROM {PgSchemaGenerator.CollectSchema}.{TableName(table)} AS f
-            WHERE f.server_id = $1
-            AND   f.collection_time <= $3
-            ORDER BY f.collection_time
-            LIMIT 1
+            SELECT {OldestSql(table)} AS t
         ) AS o
         WHERE EXISTS
         (
@@ -85,6 +80,30 @@ public static class RawWindowFloor
             AND   w.collection_time <= $3
         ){CoverageByRunsSql(table)}
         """;
+
+    /// <summary>
+    /// The oldest instant the floor can start at. Every table but <c>procedure_stats</c>: its oldest <c>collection_time</c> at or
+    /// before the window's end. #5449: <c>procedure_stats</c> also counts the collector's own runs, so a store that holds runs and no
+    /// row yet (a new server whose procedures have all been idle) still has a floor, the first run, the way Lite's floor reads it;
+    /// where both exist the floor is the earlier of the oldest row and the oldest run.
+    /// </summary>
+    private static string OldestSql(Table table) => table != Table.ProcedureStats
+        ? $"""
+          (
+              SELECT f.collection_time
+              FROM {PgSchemaGenerator.CollectSchema}.{TableName(table)} AS f
+              WHERE f.server_id = $1
+              AND   f.collection_time <= $3
+              ORDER BY f.collection_time
+              LIMIT 1
+          )
+          """
+        : $"""
+          LEAST(
+              (SELECT MIN(f.collection_time) FROM {PgSchemaGenerator.CollectSchema}.{TableName(table)} AS f WHERE f.server_id = $1 AND f.collection_time <= $3),
+              (SELECT MIN(c.collection_time) FROM {PgSchemaGenerator.CollectSchema}.collection_log AS c
+               WHERE c.server_id = $1 AND c.collector_name = 'procedure_stats' AND c.status = 'SUCCESS' AND c.collection_time <= $3))
+          """;
 
     /// <summary>
     /// #5449: <c>procedure_stats</c> stores a row only for a procedure that did work in a cycle (or a first sighting or a counter
@@ -101,6 +120,7 @@ public static class RawWindowFloor
             FROM {PgSchemaGenerator.CollectSchema}.collection_log AS c
             WHERE c.server_id = $1
             AND   c.collector_name = 'procedure_stats'
+            AND   c.status = 'SUCCESS'
             AND   c.collection_time >= $2
             AND   c.collection_time <= $3
         )

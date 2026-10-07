@@ -141,6 +141,23 @@ public sealed class ProcedureStatsIdleRowsReaderTests : IClassFixture<SharedDuck
     }
 
     [Fact]
+    public async Task BucketedProcedureTrend_AQuietBucketIsAZeroPoint_OnBothStores()
+    {
+        var t0 = await SeedTwentyMinutesAsync();
+        await SeedRunsAsync(OldServer, "procedure_stats", t0.AddMinutes(1), t0.AddMinutes(20));
+        await SeedRunsAsync(NewServer, "procedure_stats", t0.AddMinutes(1), t0.AddMinutes(20));
+        var asOf = t0.AddMinutes(25);
+
+        /* One-minute buckets: the minutes between the work are whole buckets with no stored row. */
+        var oldPoints = await _dataService.GetBucketedProcedureDurationTrendAsync(OldServer, 1, asOf, 1);
+        var newPoints = await _dataService.GetBucketedProcedureDurationTrendAsync(NewServer, 1, asOf, 1);
+
+        Assert.Equal(20, oldPoints.Count);
+        Assert.Equal(oldPoints.Select(p => p.CollectionTime), newPoints.Select(p => p.CollectionTime));
+        Assert.Equal(oldPoints.Select(p => p.Value), newPoints.Select(p => p.Value));
+    }
+
+    [Fact]
     public async Task ProcedureChartPoints_AFailedRunIsNotAQuietPoint()
     {
         var t0 = TenMinuteFloor(DateTime.UtcNow.AddMinutes(-40));
