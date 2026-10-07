@@ -33,6 +33,17 @@ internal static class DiagnosticsBundleRunner
 SELECT name, host, database, username, excluded_databases
 FROM config_monitored_servers";
 
+    /// <summary>
+    /// The registry's AWS role columns (#5452, store version 168), for the name set: the role ARN, whose account id is
+    /// aliased too, and the external ID, a secret. The CLI reads with the service's own store login, which reads
+    /// every column of this table (the service's config provider reads the same two). A store older than 168 has no such
+    /// columns; that read adds nothing instead of refusing the bundle.
+    /// </summary>
+    internal const string RegistryAwsSql = @"
+SELECT aws_role_arn, aws_external_id
+FROM config_monitored_servers
+WHERE aws_role_arn IS NOT NULL OR aws_external_id IS NOT NULL";
+
     /// <summary>Both spellings the collected-data tables use for a server, for the name set.</summary>
     internal const string CollectServersSql = @"
 SELECT server_id, server_name, display_name
@@ -349,6 +360,7 @@ SELECT to_regclass('collect.store_statement_history') IS NOT NULL AND to_regclas
     /// </summary>
     internal sealed record NameSourceSql(
         string Registry = RegistryNamesSql,
+        string RegistryAws = RegistryAwsSql,
         string Servers = CollectServersSql,
         string Roles = StoreRolesSql,
         string Databases = StoreDatabasesSql,
@@ -384,6 +396,17 @@ SELECT to_regclass('collect.store_statement_history') IS NOT NULL AND to_regclas
         }, ct))
         {
             failedNameSource ??= "config_monitored_servers";
+        }
+
+        if (!await TryReadAsync(postgres, sql.RegistryAws, reader =>
+        {
+            DiagnosticsBundle.SeedAwsRole(
+                aliaser,
+                reader.IsDBNull(0) ? null : reader.GetString(0),
+                reader.IsDBNull(1) ? null : reader.GetString(1));
+        }, ct, missingColumnIsEmpty: true))
+        {
+            failedNameSource ??= "config_monitored_servers (aws role)";
         }
 
         /* Servers by id first so the alias order follows server_id; display names share their server's alias. */
@@ -432,7 +455,7 @@ SELECT to_regclass('collect.store_statement_history') IS NOT NULL AND to_regclas
     }
 
     /// <summary>One bounded read for the name set. Returns false when the read failed; the caller refuses, since a name source that cannot be read leaves its names unaliased.</summary>
-    private static async Task<bool> TryReadAsync(NpgsqlDataSource postgres, string sql, Action<NpgsqlDataReader> each, CancellationToken ct)
+    private static async Task<bool> TryReadAsync(NpgsqlDataSource postgres, string sql, Action<NpgsqlDataReader> each, CancellationToken ct, bool missingColumnIsEmpty = false)
     {
         try
         {
@@ -444,6 +467,11 @@ SELECT to_regclass('collect.store_statement_history') IS NOT NULL AND to_regclas
                 each(reader);
             }
 
+            return true;
+        }
+        catch (PostgresException ex) when (missingColumnIsEmpty && ex.SqlState == PostgresErrorCodes.UndefinedColumn)
+        {
+            /* A store older than the column this read asks for: no such rows exist, so there is nothing to alias. */
             return true;
         }
         catch (Exception ex) when (ex is NpgsqlException or InvalidOperationException or InvalidCastException)
