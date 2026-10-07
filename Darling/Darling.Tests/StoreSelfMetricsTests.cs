@@ -386,6 +386,8 @@ public sealed class StoreSelfMetricsTests
             ["collect.store_statement_history"] = "internal self-telemetry (the store's statement history), pruned to 90 days by its own writer, not collected monitoring data (V163 doc)",
             ["collect.slow_reads"] = "internal self-telemetry (the slow-read record), not collected monitoring data (V162 doc)",
             ["collect.query_store_top_daily"] = "the daily summary the Query Store top read uses, approximate by design and rebuilt from the interval table (V161 doc)",
+            ["collect.plan_regression_daily"] = "the per-day plan totals PLAN_REGRESSION reads for closed days, rebuilt from the interval table (V167 doc)",
+            ["collect.plan_regression_daily_built"] = "per-day build and validity bookkeeping for the per-day plan totals, bytes too small to matter (V167 doc)",
             ["collect.query_store_top_daily_built"] = "per-day build bookkeeping for the daily summary, bytes too small to matter (V161 doc)",
             ["collect.plan_force_actions"] = "the force-plan bot's append-only audit ledger, not collected monitoring data (V107 doc)",
         };

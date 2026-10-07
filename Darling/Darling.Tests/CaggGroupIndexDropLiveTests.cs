@@ -318,6 +318,17 @@ public sealed class CaggGroupIndexDropLiveTests
     /// A future rung that adds a new probe sentinel must add its artifact's removal here.</summary>
     private static async Task DropArtifactsOfLaterRungsAsync(NpgsqlConnection connection, int simulatedVersion, CancellationToken ct)
     {
+        if (simulatedVersion < 167)
+        {
+            /* V167 (#5448) - the PLAN_REGRESSION per-day totals; the built table is the probe's sentinel. The trigger on
+               query_store_interval_latest goes first, then the function it calls, then the two tables. */
+            await using var dropPlanRegressionDaily = new NpgsqlCommand(
+                "DROP TRIGGER IF EXISTS trg_plan_regression_daily_late ON collect.query_store_interval_latest;"
+                + " DROP FUNCTION IF EXISTS collect.plan_regression_daily_mark_late();"
+                + " DROP TABLE IF EXISTS collect.plan_regression_daily, collect.plan_regression_daily_built", connection);
+            await dropPlanRegressionDaily.ExecuteNonQueryAsync(ct);
+        }
+
         if (simulatedVersion < 166)
         {
             /* V166 - the PagerDuty auto-resolve column on config_notification; the column is the probe's sentinel. */

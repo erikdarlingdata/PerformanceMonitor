@@ -689,6 +689,94 @@ CREATE TABLE IF NOT EXISTS config.store_statement_baseline
 ALTER TABLE config.config_notification
     ADD COLUMN IF NOT EXISTS pagerduty_auto_resolve boolean NOT NULL DEFAULT FALSE;";
 
+    /// <summary>
+    /// V167 (#5448) — <c>collect.plan_regression_daily</c> and <c>collect.plan_regression_daily_built</c>: the per-day
+    /// per-plan totals PLAN_REGRESSION reads for CLOSED days instead of re-aggregating 14 days of
+    /// <c>collect.query_store_interval_latest</c> on every run, plus the trigger that marks a day stale when a late row
+    /// lands in it.
+    ///
+    /// <para><b>Totals, not averages.</b> A day's row holds the plan's execution count and the SUMS of
+    /// <c>avg_cpu_time_us * execution_count</c> and <c>avg_duration_us * execution_count</c>, which is what the read's
+    /// <c>plan_agg</c> step computes before it divides, so summing days and then dividing returns the same per-exec cost
+    /// as the single 14-day aggregate. Row day is the day of <c>last_execution_time</c> (naive UTC), the column the
+    /// read's window filters on. <c>query_plan_hash</c> is part of the unique key (the read's <c>any_value</c> picks one
+    /// hash per plan, and a day's rows keep each one), and the index is <c>NULLS NOT DISTINCT</c> because
+    /// <c>database_name</c>, <c>replica_role</c> and the others are NULL for some rows.</para>
+    ///
+    /// <para><b>The built table is the validity record.</b> <c>late_seq</c> counts the late rows the trigger saw for a
+    /// day, and <c>built_seq</c> is the value the builder read BEFORE it aggregated: a day is valid only while the two
+    /// are equal, so a late row that lands after the build (even one that races it) leaves the day invalid and the
+    /// builder rebuilds it. The trigger marks the day of <c>first_execution_time</c> and the day after it, because
+    /// <c>last_execution_time</c> (the row's day) can cross midnight. It fires only for rows whose first execution is
+    /// at least a day old and no more than 16 days old: today and yesterday are always read live, and a row older
+    /// than the window can never be read. The <c>WHEN</c> condition reads <c>NEW</c> only, because PostgreSQL does
+    /// not allow a subquery there.</para>
+    ///
+    /// <para><b>Plain tables, SECURITY INVOKER function, no GRANT</b>: the builder deletes and re-inserts whole days,
+    /// which a compressed hypertable chunk would not allow; the trigger function runs with the writer's own
+    /// privileges and pins <c>search_path</c> to <c>pg_catalog, pg_temp</c>, so it names every object schema-qualified;
+    /// and the <c>collect</c> schema's blanket <c>GRANT SELECT ON ALL TABLES</c> covers a table a migration introduces.
+    /// Every statement is idempotent, so a second run changes nothing. No index on
+    /// <c>query_store_interval_latest</c> is added here: if the big-store EXPLAIN says the per-day builds need one,
+    /// it goes at the top of this rung in V153's shape.</para>
+    /// </summary>
+    private const string V167Sql = @"
+/* V167 (#5448): per-day per-plan totals for PLAN_REGRESSION's closed days, and the trigger that marks a day stale when
+   a late row lands in it. Naive UTC throughout. The builder (the service) owns every write to the first table; the
+   function writes only plan_regression_daily_built, the rung's own bookkeeping table. */
+CREATE TABLE IF NOT EXISTS collect.plan_regression_daily
+(
+    server_id integer NOT NULL,
+    day date NOT NULL,
+    database_name text,
+    query_id bigint,
+    plan_id bigint,
+    replica_role text,
+    query_plan_hash text,
+    execs numeric,
+    cpu_us_sum numeric,
+    dur_us_sum numeric,
+    last_exec timestamp,
+    is_forced_plan boolean,
+    force_failure_count bigint
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS ux_plan_regression_daily
+ON collect.plan_regression_daily (server_id, day, database_name, query_id, plan_id, replica_role, query_plan_hash)
+NULLS NOT DISTINCT;
+
+CREATE TABLE IF NOT EXISTS collect.plan_regression_daily_built
+(
+    server_id integer NOT NULL,
+    day date NOT NULL,
+    late_seq bigint NOT NULL DEFAULT 0,
+    built_seq bigint,
+    built_at timestamp,
+    source_rows bigint,
+    CONSTRAINT pk_plan_regression_daily_built PRIMARY KEY (server_id, day)
+);
+
+CREATE OR REPLACE FUNCTION collect.plan_regression_daily_mark_late() RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog, pg_temp
+AS $f$
+BEGIN
+    INSERT INTO collect.plan_regression_daily_built AS b (server_id, day, late_seq)
+    SELECT NEW.server_id, v.d::date, 1
+    FROM (VALUES (date_trunc('day', NEW.first_execution_time)), (date_trunc('day', NEW.first_execution_time) + interval '1 day')) AS v (d)
+    ON CONFLICT (server_id, day) DO UPDATE SET late_seq = b.late_seq + 1;
+    RETURN NULL;
+END
+$f$;
+
+DROP TRIGGER IF EXISTS trg_plan_regression_daily_late ON collect.query_store_interval_latest;
+CREATE TRIGGER trg_plan_regression_daily_late
+    AFTER INSERT OR UPDATE ON collect.query_store_interval_latest
+    FOR EACH ROW
+    WHEN (NEW.first_execution_time < date_trunc('day', now() AT TIME ZONE 'UTC') - interval '1 day'
+          AND NEW.first_execution_time >= now() AT TIME ZONE 'UTC' - interval '16 days')
+    EXECUTE FUNCTION collect.plan_regression_daily_mark_late();";
+
     public static IReadOnlyList<Migration> Scripts { get; } = new[]
     {
         new Migration(1, "collector-tables", PgSchemaGenerator.GenerateFullSchema()),
@@ -893,6 +981,7 @@ ALTER TABLE config.config_notification
         new Migration(164, "query-stats-hour-ledger", V164Sql),
         new Migration(165, "password-key", V165Sql),
         new Migration(166, "pagerduty-auto-resolve", V166Sql),
+        new Migration(167, "plan-regression-daily", V167Sql),
     };
 
     /// <summary>
