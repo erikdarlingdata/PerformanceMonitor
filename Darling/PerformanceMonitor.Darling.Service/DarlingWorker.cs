@@ -955,6 +955,15 @@ public sealed class DarlingWorker : BackgroundService
        a best-effort errand and there is nothing in it that a later hour cannot do. */
     private Task? _oversizedPlanSweep;
 
+    /* #5479: the in-flight per-server self-alert pass (Collection Stopped and the other store-polled self-alerts, and the
+       custom-alert rules), fire-and-tracked from the sweep loop whether or not any collection body launches. One at a
+       time: a pass still running at the next tick makes that tick skip, so a server is never evaluated by two threads. */
+    private Task? _selfAlertPass;
+
+    /* Set when a tick skipped because the previous pass was still running, cleared by the pass's end: one Warning per
+       overrun, not one per 15-second tick. */
+    private bool _selfAlertPassOverranWarned;
+
     /* #4130: the in-flight daily retention purge, fire-and-tracked like the per-server sweeps and the
        oversized-plan backlog above rather than awaited inline. Measured at 346-400s deleting ~839k rows;
        awaited on this loop, that is 346-400s in which NO server's sweep body launches and the whole fleet
@@ -1439,6 +1448,10 @@ LIMIT 1";
            record, a reload's recompute and the pass's seeds never leave the two maps describing different slots.
            Never held across an await (the C# compiler refuses an await inside a lock block). */
         public object ScheduleLock { get; } = new();
+
+        /* #5479: the held-slot watermarks, one per collector, while the memory launch guard holds collection off. Read and
+           written ONLY by the sweep loop's own thread (CountHeldSlots), so a plain map is enough. */
+        public Dictionary<string, HeldSlotMark> HeldSlotMarks { get; } = new(StringComparer.OrdinalIgnoreCase);
 
         private ServerClockStamp _clock = ServerClockStamp.Utc;
 
@@ -3320,6 +3333,9 @@ LIMIT 1";
         /* #4732: true from a pass that found collection paused until the first pass that runs it again. */
         var pausedSinceLastRun = false;
 
+        /* #5479: true from a pass that the memory launch guard held off until the first pass that launches bodies again. */
+        var heldSinceLastLaunch = false;
+
         while (!stoppingToken.IsCancellationRequested)
         {
             /* #4732: tells the skipped-slot count when this loop was not running. First thing in the pass and on the
@@ -3430,6 +3446,15 @@ LIMIT 1";
                 sweepTargets = servers.ToArray();
             }
 
+            /* #5479: the per-server self-alerts (Collection Stopped and its siblings) and the custom-alert rules, evaluated
+               by ONE tracked task per pass over this snapshot, launched without awaiting it and skipped while the previous
+               pass still runs. They live here, after the operator-pause `continue` above (a deliberate pause stays silent,
+               as it always did) and BEFORE the launch loop below, so they run whether or not any collection body launches:
+               a launch guard that holds the bodies off, or a body that never finishes, no longer silences them. Each
+               server keeps its own cadence stamps, which only this pass reads and writes, so no server is evaluated by two
+               threads at once. */
+            TryStartSelfAlertPass(sweepTargets, stoppingToken);
+
             /* Fire-and-track launch loop (#1553 D2/D2b): LAUNCH each server's collection body WITHOUT awaiting
                it, so one slow or hung server can no longer stall the fleet or the fleet-level steps below (the
                old foreach awaited every step inline — the 24-server field incident). At most N=4 bodies open a
@@ -3478,7 +3503,22 @@ LIMIT 1";
                    loop, so the decision applies uniformly to every server this sweep). */
                 if (!mayLaunchSweeps)
                 {
+                    /* #5479: a held pass records no slot, so the slots that come due while the guard holds are counted
+                       here, once each within a pass of their due time (a held slot is a skipped slot). Without it the
+                       hour's count read "0 ran, 0 skipped" and Collection Falling Behind cleared an hour into an outage. */
+                    heldSinceLastLaunch = true;
+                    CountHeldSlots(sweepTargets, DateTime.UtcNow);
                     break;
+                }
+
+                /* #5479: the first launch after a hold. The held slots were counted above as they came due, and no due
+                   stamp moved, so the first bodies would step over every one of them again (101,774 of 101,881 in the
+                   field). Raise the floor to now, exactly as the first pass after an operator pause does (#4732). Before
+                   any body launches: this is the first statement the launch loop runs once the guard lets it. */
+                if (heldSinceLastLaunch)
+                {
+                    _skipCreditFloor.Resume(DateTime.UtcNow);
+                    heldSinceLastLaunch = false;
                 }
 
                 /* #1581 cold-start stagger: hold this server's FIRST sweep body (InFlightSweep still null) until
@@ -3923,6 +3963,12 @@ LIMIT 1";
             inFlightSweeps.Add(_storeMetricsTick);
         }
 
+        /* #5479: the self-alert pass is tracked like the ticks above, and ends on the same cancellation. */
+        if (_selfAlertPass is { IsCompleted: false })
+        {
+            inFlightSweeps.Add(_selfAlertPass);
+        }
+
         /* #4938: the daily runs detached from those bodies join the wait inside DrainInFlightAsync. */
         await DrainInFlightAsync(inFlightSweeps);
 
@@ -4172,40 +4218,13 @@ LIMIT 1";
                 return;
             }
 
-            /* Stage 4 service self-alerts (store-polled): collection-stopped is evaluated for EVERY server —
-               connected or not, and whether or not it has been seen online since this service started (#4757)
-               — because an unreachable server has stopped collecting, which is exactly the case a headless
-               service must page on. The evaluator judges its staleness from the later of the last success and
-               the service start, so a restart's stale rows do not false-alarm a healthy server. Capture-down
-               is evaluated only for a connected server. Own
-               30s cadence; the master alerts gate + edge-trigger live inside the evaluator. Runs ABOVE the
-               Runtime-null connect gate so a disconnected server is still checked. Connection lost/restored fire
-               on the connect edges in TryConnectAsync. (Uses the _postgres field — the loop-local `postgres` of
-               RunCollectionLoopAsync is out of scope in this extracted body.) */
-            if (StampIsDue(server.NextSelfAlertSweep, s_alertSweepInterval, DateTime.UtcNow))
-            {
-                server.NextSelfAlertSweep = DateTime.UtcNow.Add(s_alertSweepInterval);
-                await _selfAlerts!.EvaluateStoreAlertsAsync(
-                    _postgres!,
-                    server.Config.ServerId,
-                    server.Config.DisplayName,
-                    connected: server.Runtime is not null,
-                    stoppingToken);
-            }
-
-            /* #3285: user-authored custom-alert rules, above the connect gate (like the self-alerts) so a rule
-               reading the collected store still evaluates for a currently-disconnected server. Its own cadence;
-               null on deployments that cannot supply a viewer-role pool. */
-            if (_customAlertEvaluator is not null && StampIsDue(server.NextCustomAlertSweep, s_customAlertSweepInterval, DateTime.UtcNow))
-            {
-                server.NextCustomAlertSweep = DateTime.UtcNow.Add(s_customAlertSweepInterval);
-                await _customAlertEvaluator.EvaluateServerAsync(
-                    server.Config.ServerId,
-                    server.Config.StorageName,
-                    server.Config.DisplayName,
-                    stoppingToken);
-            }
-
+            /* #5479: the Stage 4 store-polled self-alerts (Collection Stopped, capture down, ...) and the custom-alert
+               rules (#3285) no longer run here. They ran at the top of this body, so a body the memory launch guard held
+               off, or one that never finished, silenced them: a fleet that had stopped collecting paged nobody for 25
+               hours. They are evaluated by the fleet-level pass the sweep loop launches every tick whether or not any body
+               launches (RunSelfAlertPassAsync), which is now the ONLY place that reads or writes a server's two alert
+               cadence stamps and calls the two evaluators for a server. Connection lost/restored still fire on the
+               connect edges in TryConnectAsync. */
             if (server.Runtime is null)
             {
                 await TryConnectAsync(server, runner, config, connectAttempt, stoppingToken);
@@ -11212,6 +11231,150 @@ AND   j.hypertable_name = '{relation}'", connection))
                     _logger.LogDebug(ex, "collection-history audit evaluation failed");
                 }
             }
+    }
+
+    /// <summary>
+    /// Test seam for the per-server self-alert evaluation (#5479): stands in for the evaluator's store-polled pass for one
+    /// server, so a test can see which servers the fleet pass evaluates, when, and on which thread. Null in production.
+    /// </summary>
+    internal Func<ServerLoopState, CancellationToken, Task>? SelfAlertServerOverride { get; set; }
+
+    /// <summary>
+    /// The per-server self-alert pass's launcher (#5479): Collection Stopped and the other store-polled self-alerts, and
+    /// the custom-alert rules, for every server in this tick's snapshot. They ran at the top of each server's collection
+    /// body, so a body the memory launch guard held off, or one that never finished, silenced them; a fleet that had
+    /// stopped collecting paged nobody for 25 hours. Called by the sweep loop every tick whether or not any body
+    /// launches, fire-and-tracked like the per-server bodies and the hourly ticks, never awaited. One pass at a time: a
+    /// pass still running at the next tick makes that tick skip (one Warning per overrun), so no server is ever
+    /// evaluated by two threads at once, and the stamps in <see cref="ServerLoopState"/> are written by this pass only.
+    /// </summary>
+    internal bool TryStartSelfAlertPass(ServerLoopState[] targets, CancellationToken stoppingToken)
+    {
+        if (_selfAlertPass is { IsCompleted: false })
+        {
+            if (!_selfAlertPassOverranWarned)
+            {
+                _selfAlertPassOverranWarned = true;
+                _logger.LogWarning(
+                    "the previous per-server self-alert pass is still running at this tick — skipping the tick; no server's Collection Stopped is judged until it ends");
+            }
+
+            return false;
+        }
+
+        _selfAlertPassOverranWarned = false;
+        _selfAlertPass = RunTrackedTickAsync("per-server self-alert pass", token => RunSelfAlertPassAsync(targets, token), stoppingToken);
+        return true;
+    }
+
+    /// <summary>
+    /// The pass itself (#5479): each non-retired server in turn, on its own cadence stamps. Collection-stopped is
+    /// evaluated for EVERY server, connected or not and whether or not it has been seen online since this service started
+    /// (#4757), because an unreachable server has stopped collecting, which is exactly the case a headless service must
+    /// page on; the evaluator judges its staleness from the later of the last success and the service start, so a
+    /// restart's stale rows do not false-alarm a healthy server, and capture-down only for a connected one. The master
+    /// alerts gate and the edge trigger live inside the evaluator. The custom-alert rules (#3285) read the collected
+    /// store, so they evaluate for a disconnected server too. One server's throw is logged and does not skip the rest.
+    /// </summary>
+    private async Task RunSelfAlertPassAsync(ServerLoopState[] targets, CancellationToken stoppingToken)
+    {
+        foreach (var server in targets)
+        {
+            stoppingToken.ThrowIfCancellationRequested();
+
+            if (server.Retired)
+            {
+                continue;
+            }
+
+            try
+            {
+                if (StampIsDue(server.NextSelfAlertSweep, s_alertSweepInterval, DateTime.UtcNow))
+                {
+                    server.NextSelfAlertSweep = DateTime.UtcNow.Add(s_alertSweepInterval);
+                    if (SelfAlertServerOverride is { } evaluate)
+                    {
+                        await evaluate(server, stoppingToken);
+                    }
+                    else if (_selfAlerts is not null && _postgres is not null)
+                    {
+                        await _selfAlerts.EvaluateStoreAlertsAsync(
+                            _postgres,
+                            server.Config.ServerId,
+                            server.Config.DisplayName,
+                            connected: server.Runtime is not null,
+                            stoppingToken);
+                    }
+                }
+
+                if (_customAlertEvaluator is not null && StampIsDue(server.NextCustomAlertSweep, s_customAlertSweepInterval, DateTime.UtcNow))
+                {
+                    server.NextCustomAlertSweep = DateTime.UtcNow.Add(s_customAlertSweepInterval);
+                    await _customAlertEvaluator.EvaluateServerAsync(
+                        server.Config.ServerId,
+                        server.Config.StorageName,
+                        server.Config.DisplayName,
+                        stoppingToken);
+                }
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                _logger.LogError(ex, "[{Server}] self-alert pass failed; the remaining servers are still evaluated", server.Config.DisplayName);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Counts the collector slots that came due while the memory launch guard held collection off (#5479), once each,
+    /// within a pass of their due time, and adds them to the fleet gate's skipped count: a held slot is a skipped slot. A
+    /// held pass launches no body, so without this the hour's count read "0 ran, 0 skipped" and Collection Falling Behind
+    /// cleared an hour into an outage. The due stamps do not move during a hold, so each (server, collector) keeps a
+    /// <see cref="HeldSlotMark"/> and <see cref="HeldSlots.Newly"/> adds only what came due since the last pass. The pass
+    /// that launches again raises the skip-credit floor first, so the first bodies count none of these a second time.
+    /// A server with a body still in flight is left to that body, which counts what it steps over. Runs on the sweep
+    /// loop's thread. Returns the slots counted.
+    /// </summary>
+    internal long CountHeldSlots(ServerLoopState[] targets, DateTime nowUtc)
+    {
+        long counted = 0;
+        var floor = _skipCreditFloor.Floor;
+        foreach (var server in targets)
+        {
+            var runtime = server.Runtime;
+            if (runtime is null || server.Retired || server.InFlightSweep is { IsCompleted: false })
+            {
+                continue;
+            }
+
+            foreach (var name in CollectorScheduleDefaults.All.Keys)
+            {
+                /* The same filters RunDueCollectorsAsync puts before its slot count: a collector that does not run on this
+                   target, or is disabled, or has no stamp, has no slot to lose. */
+                if (!CollectorCatalog.EngineMatches(name, runtime.Target)
+                    || !CollectorCatalog.AppliesTo(name, runtime.Target))
+                {
+                    continue;
+                }
+
+                var effective = StoreConfigProvider.ResolveSchedule(name, runtime.ServerId, _scheduleOverrides);
+                if (!effective.Enabled || !server.NextDue.TryGetValue(name, out var due))
+                {
+                    continue;
+                }
+
+                var interval = TimeSpan.FromMinutes(CollectorScheduleDefaults.EffectiveRecurringIntervalMinutes(effective.FrequencyMinutes));
+
+                /* A grid collector's slot is lost when the next one comes due (what a late run steps over); a collector
+                   with a run time loses its day once the grace after the stamp has passed (StepRunTimeCollector). */
+                var serveWindow = effective.RunAtMinute is not null ? CollectorRunTime.Grace : interval;
+                server.HeldSlotMarks.TryGetValue(name, out var mark);
+                counted += HeldSlots.Newly(due, nowUtc, floor, interval, serveWindow, ref mark);
+                server.HeldSlotMarks[name] = mark;
+            }
+        }
+
+        _fleetGateStats?.RecordSkippedSlots(counted);
+        return counted;
     }
 
     /// <summary>
