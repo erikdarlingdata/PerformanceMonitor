@@ -71,11 +71,12 @@ public sealed class DarlingMcpObjectStatsToolsSurfaceAndSqlTests
     [Theory]
     [InlineData("get_table_index_sizes")]
     [InlineData("get_database_sizes")]
-    public void ParamContract_ServerNameOnly_Optional(string toolName)
+    public void ParamContract_ServerNameThenDatabaseName_Optional(string toolName)
     {
+        /* #5244 PR5: database_name is appended LAST (the Lite twin's order), and optional. */
         var p = McpParams(toolName);
-        Assert.Equal(new[] { "server_name" }, p.Select(x => x.Name).ToArray());
-        Assert.True(p.Single().Optional);
+        Assert.Equal(new[] { "server_name", "database_name" }, p.Select(x => x.Name).ToArray());
+        Assert.All(p, x => Assert.True(x.Optional));
     }
 
     /// <summary>

@@ -3963,7 +3963,7 @@ public sealed class ComposeQueryStoreLivePostgresTests
         await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
         await DeleteAsync(connection, TestContext.Current.CancellationToken);
 
-        var end = new DateTime(DateTime.UtcNow.Ticks - (DateTime.UtcNow.Ticks % TimeSpan.TicksPerSecond), DateTimeKind.Utc);
+        var end = new DateTime(DateTime.UtcNow.Ticks / TimeSpan.TicksPerSecond * TimeSpan.TicksPerSecond, DateTimeKind.Utc);
         var bucket = end.AddHours(-2);
         var firstExecA = bucket.AddMinutes(1);
         var firstExecB = bucket.AddMinutes(2);
@@ -4037,7 +4037,7 @@ public sealed class ComposeQueryStoreLivePostgresTests
         await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
         await DeleteAsync(connection, TestContext.Current.CancellationToken);
 
-        var end = new DateTime(DateTime.UtcNow.Ticks - (DateTime.UtcNow.Ticks % TimeSpan.TicksPerSecond), DateTimeKind.Utc);
+        var end = new DateTime(DateTime.UtcNow.Ticks / TimeSpan.TicksPerSecond * TimeSpan.TicksPerSecond, DateTimeKind.Utc);
         var bucket = end.AddHours(-2);
         var firstExecA = bucket.AddMinutes(1);
         var firstExecB = bucket.AddMinutes(2);
@@ -4313,7 +4313,7 @@ public sealed class ComposeAdHocModuleLivePostgresTests
         await PgMigrations.MigrateAsync(connection, ct);
         await DeleteAsync(connection, ct);
 
-        var end = new DateTime(DateTime.UtcNow.Ticks - (DateTime.UtcNow.Ticks % TimeSpan.TicksPerSecond), DateTimeKind.Utc);
+        var end = new DateTime(DateTime.UtcNow.Ticks / TimeSpan.TicksPerSecond * TimeSpan.TicksPerSecond, DateTimeKind.Utc);
         var collectionTime = end.AddHours(-1);
 
         var bodySucceeded = false;

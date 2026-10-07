@@ -804,12 +804,24 @@ function rankedCard(kind, build) {
 }
 
 /**
+ * What a File I/O Latency line is, for the subtitle (#5244 PR5): exactly one chosen database draws one line per file ("per
+ * file"); every database, or two or more, draw one line per database and file type. It follows the same rule as the route
+ * (one name: per file), and only for the active server on a server page, as the chip does.
+ */
+export function fileIoGrain(server) {
+  const filter = getActiveDatabaseFilter();
+  const hash = typeof location !== "undefined" && location && typeof location.hash === "string" ? location.hash : "";
+  const one = filter && filter.server === server && hash.startsWith("#/server/") && filter.databases.length === 1;
+  return one ? "per file" : "per database and file type";
+}
+
+/**
  * File I/O latency: pivot the flat trend into one read-latency series per line. #3897: a line is a (database, file
  * type) pair — or the one "(other)" line pooling everything past the top five — so the label names both; before
  * #3897 the read projected only the database, and nine tempdb files wrote over each other in this pivot.
  */
 export function fileIoPanel(server, ctx) {
-  const { panel, body } = panelShell("File I/O Latency", "avg read and write latency per database and file type, " + ctx.label, 2, "get_file_io_trend");
+  const { panel, body } = panelShell("File I/O Latency", "avg read and write latency " + fileIoGrain(server) + ", " + ctx.label, 2, "get_file_io_trend");
   (async () => {
     const res = await readToolWithinKeptHistory("get_file_io_trend", { server, hours: ctx.hours });
     if (res.kind === "error") return mount(body, readErrorStrip(res.message));

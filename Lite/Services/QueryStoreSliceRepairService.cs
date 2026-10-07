@@ -525,7 +525,9 @@ FROM (SELECT COUNT(*) AS c FROM {Table} GROUP BY {string.Join(", ", hotKey)} HAV
     /// <summary>
     /// The archived Query Store parquet files, oldest name first: the whole-month files and the part files
     /// (<c>YYYYMM_query_store_stats_ptNNN.parquet</c>) compaction splits a month into when its input is too big
-    /// for one merge (#4721). The archive views read both shapes, so the repair must too. Each part is a file in
+    /// for one merge (#4721), and, since compaction merges this table one day at a time (#5410), the day files
+    /// (<c>YYYYMMDD_query_store_stats.parquet</c>) and their parts. The archive views read these shapes, so the
+    /// repair must too (the same two globs match all of them). Each part is a file in
     /// its own right, surveyed and rewritten on its own with the same checks as a whole-month file.
     /// </summary>
     private IEnumerable<string> ArchiveFiles()

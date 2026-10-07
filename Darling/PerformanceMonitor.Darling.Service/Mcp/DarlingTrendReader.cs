@@ -607,7 +607,8 @@ internal static class DarlingTrendReader
     /// The ranking of the file I/O series (#3897): <see cref="FileIoSeriesSql"/> aggregates it here, and
     /// <see cref="FileIoTrendSql"/> numbers the series with the same ordering as window sums (#5425), so the series
     /// the first counts are exactly the series the second charts. A series is a (database, file type) pair — the per-database, data-versus-log
-    /// view the tool promises — or, when <c>$4</c> names a database, each of that database's files. Ranked by the
+    /// view the tool promises — or, when <c>$4</c> holds exactly one database, each of that database's files (#5244: two or
+    /// more databases keep the per-database grain, limited to the set). Ranked by the
     /// window's summed stall (read + write ms), because the read exists to find where storage is SLOW: ranking on
     /// operations, the viewer's order, put nine tempdb data files ahead of a user database whose writes averaged
     /// 190 ms on DARLING01's SQL2022. Operations break a stall tie, then the names, so the order is total.
@@ -617,14 +618,14 @@ internal static class DarlingTrendReader
     /// Pre-#3897 the read took the ten busiest FILES, projected only the database name, and so returned nine
     /// indistinguishable "tempdb" rows per collection; the grain is now named in every row.</para>
     ///
-    /// <para>$1 server_id, $2/$3 window (naive UTC), $4 the database to scope to (NULL = every database).</para>
+    /// <para>$1 server_id, $2/$3 window (naive UTC), $4 the chosen databases (#5244: one text[], NULL = every database).</para>
     /// </summary>
     private const string FileIoRankedCte = """
         ranked AS (
             SELECT
                 database_name,
                 file_type,
-                CASE WHEN $4::text IS NULL THEN NULL ELSE file_name END AS file_name,
+                CASE WHEN cardinality($4::text[]) = 1 THEN file_name END AS file_name,
                 COUNT(DISTINCT file_name) AS files,
                 CAST(SUM(delta_stall_read_ms + delta_stall_write_ms) AS bigint) AS stall_ms,
                 CAST(SUM(delta_reads + delta_writes) AS bigint) AS ops,
@@ -633,18 +634,18 @@ internal static class DarlingTrendReader
                              SUM(delta_reads + delta_writes) DESC,
                              database_name,
                              file_type,
-                             CASE WHEN $4::text IS NULL THEN NULL ELSE file_name END
+                             CASE WHEN cardinality($4::text[]) = 1 THEN file_name END
                 ) AS series_rank
             FROM v_file_io_stats
             WHERE server_id = $1
             AND   collection_time >= $2
             AND   collection_time <= $3
-            AND   ($4::text IS NULL OR database_name = $4)
+            AND   ($4::text[] IS NULL OR database_name = ANY($4))
             AND   (delta_reads > 0 OR delta_writes > 0)
             /* #3540: a restart row's delta is not knowable, and the trend below drops it — so it must not rank a
                series either, or a restart's garbage delta could chart a series ahead of the ones that worked. */
             AND   sample_interval_seconds IS DISTINCT FROM 0
-            GROUP BY database_name, file_type, CASE WHEN $4::text IS NULL THEN NULL ELSE file_name END
+            GROUP BY database_name, file_type, CASE WHEN cardinality($4::text[]) = 1 THEN file_name END
         )
         """;
 
@@ -652,7 +653,7 @@ internal static class DarlingTrendReader
     /// The first of get_file_io_trend's two reads (#3897): every series the window saw activity on, in rank
     /// order, with what it was ranked by. The tool reads its length before choosing a bucket width — five charted
     /// series and one "(other)" line need a coarser width than two series do — and its rows name what the
-    /// "(other)" line pools. $1 server_id, $2/$3 window (naive UTC), $4 database (NULL = all).
+    /// "(other)" line pools. $1 server_id, $2/$3 window (naive UTC), $4 the chosen databases (NULL = all).
     /// </summary>
     public const string FileIoSeriesSql = $"""
         WITH {FileIoRankedCte}
@@ -680,7 +681,7 @@ internal static class DarlingTrendReader
     /// <para>Rows whose stored <c>sample_interval_seconds</c> is 0 — no delta knowable, a restart — are
     /// dropped, exactly as before (#3540); <c>IS DISTINCT FROM 0</c> keeps pre-V127 rows (NULL). Each point is
     /// stamped at its bucket's start, the first at the window's start (<c>GREATEST</c>), so no point claims time
-    /// the window did not ask for. $1 server_id, $2/$3 window (naive UTC), $4 database (NULL = all), $5 how many
+    /// the window did not ask for. $1 server_id, $2/$3 window (naive UTC), $4 the chosen databases (NULL = all), $5 how many
     /// ranked series keep their own line, $6 the bucket width in minutes.</para>
     ///
     /// <para><b>No join to the ranking (#5425).</b> This statement used to join every row to the
@@ -697,7 +698,7 @@ internal static class DarlingTrendReader
                 collection_time,
                 database_name,
                 file_type,
-                CASE WHEN $4::text IS NULL THEN NULL ELSE file_name END AS file_name,
+                CASE WHEN cardinality($4::text[]) = 1 THEN file_name END AS file_name,
                 delta_reads,
                 delta_writes,
                 delta_stall_read_ms,
@@ -707,7 +708,7 @@ internal static class DarlingTrendReader
             WHERE server_id = $1
             AND   collection_time >= $2
             AND   collection_time <= $3
-            AND   ($4::text IS NULL OR database_name = $4)
+            AND   ($4::text[] IS NULL OR database_name = ANY($4))
             AND   sample_interval_seconds IS DISTINCT FROM 0
         ),
         totalled AS (
@@ -746,8 +747,8 @@ internal static class DarlingTrendReader
                 CASE WHEN series_rank <= $5 THEN file_type ELSE '(other)' END AS file_type,
                 CASE
                     WHEN series_rank <= $5 THEN file_name
-                    WHEN $4::text IS NULL THEN NULL
-                    ELSE '(other)'
+                    WHEN cardinality($4::text[]) = 1 THEN '(other)'
+                    ELSE NULL
                 END AS file_name,
                 delta_reads,
                 delta_writes,
@@ -792,14 +793,14 @@ internal static class DarlingTrendReader
 
     /// <summary>Runs <see cref="FileIoSeriesSql"/>: the window's active series, in rank order.</summary>
     public static async Task<List<FileIoSeries>> GetFileIoSeriesAsync(
-        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, string? databaseName,
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, DatabaseFilter databases,
         CancellationToken cancellationToken = default)
     {
         var items = new List<FileIoSeries>();
         await using var command = postgres.CreateCommand(FileIoSeriesSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddWindow(command, serverId, startUtc, endUtc);
-        DarlingMcpReadParameters.AddNullableText(command, databaseName);
+        command.Parameters.Add(databases.Parameter());
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -819,14 +820,14 @@ internal static class DarlingTrendReader
     /// <summary>Runs <see cref="FileIoTrendSql"/>: the top <paramref name="chartedSeries"/> series and the
     /// "(other)" fold, bucketed at <paramref name="bucketMinutes"/>.</summary>
     public static async Task<List<FileIoPoint>> GetFileIoTrendAsync(
-        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, string? databaseName,
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, DatabaseFilter databases,
         int chartedSeries, int bucketMinutes, CancellationToken cancellationToken = default)
     {
         var items = new List<FileIoPoint>();
         await using var command = postgres.CreateCommand(FileIoTrendSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddWindow(command, serverId, startUtc, endUtc);
-        DarlingMcpReadParameters.AddNullableText(command, databaseName);
+        command.Parameters.Add(databases.Parameter());
         DarlingMcpReadParameters.AddInt(command, chartedSeries);
         DarlingMcpReadParameters.AddInt(command, bucketMinutes);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -958,7 +959,7 @@ internal static class DarlingTrendReader
     /// there. $1 server_id, $2/$3 window (naive UTC), $4 bucket width in minutes.
     /// </summary>
     public static readonly string ProcedureDurationTrendHourlySql =
-        DurationTrendRouting.BuildBucketedHourlyTrendSql(TimescaleSupport.ProcedureStatsHourlyView);
+        DurationTrendRouting.BuildBucketedHourlyTrendSql(TimescaleSupport.ProcedureStatsHourlyView, coverIdleHours: true);
 
     /// <summary>
     /// Which tier one unkeyed duration trend read serves from, and the evidence the choice rests on (#3541 A2)
@@ -1342,7 +1343,10 @@ internal static class DarlingTrendReader
         await using var command = postgres.CreateCommand(
             route.Tier == RetentionTier.Raw
                 ? rawSql
-                : DurationTrendRouting.BuildBucketedHourlyTrendSql(route.HourlyFromClauseOrDefault, withDatabaseFilter: true));
+                : DurationTrendRouting.BuildBucketedHourlyTrendSql(
+                    route.HourlyFromClauseOrDefault, withDatabaseFilter: true,
+                    /* #5449: the procedure rollups hold no row for an hour in which no procedure worked. */
+                    coverIdleHours: route.RawTable == "procedure_stats"));
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddWindow(command, serverId, startUtc, endUtc);
         /* #5244: $4 the database set (SQL NULL for every database), then $5 the bucket width, on both tiers. */

@@ -253,7 +253,7 @@ public sealed class DarlingMcpTrendToolsSurfaceAndSqlTests
         Assert.Contains("(delta_reads > 0 OR delta_writes > 0) AS active", trend, StringComparison.Ordinal);
         Assert.Contains("PARTITION BY database_name, file_type, file_name", trend, StringComparison.Ordinal);
         Assert.Contains("WHERE active_rows > 0", trendRanked, StringComparison.Ordinal);
-        Assert.Contains("CASE WHEN $4::text IS NULL THEN NULL ELSE file_name END AS file_name", trend, StringComparison.Ordinal);
+        Assert.Contains("CASE WHEN cardinality($4::text[]) = 1 THEN file_name END AS file_name", trend, StringComparison.Ordinal);
         Assert.Contains("FROM v_file_io_stats", ranked, StringComparison.Ordinal);
         Assert.Contains("ORDER BY SUM(delta_stall_read_ms + delta_stall_write_ms) DESC,", ranked, StringComparison.Ordinal);
         Assert.Contains("SUM(delta_reads + delta_writes) DESC,", ranked, StringComparison.Ordinal);
@@ -261,11 +261,11 @@ public sealed class DarlingMcpTrendToolsSurfaceAndSqlTests
         /* A restart row ranks nothing: the trend drops it (#3540), so it must not chart a series ahead of the
            ones whose deltas were knowable. */
         Assert.Contains("AND   sample_interval_seconds IS DISTINCT FROM 0", ranked, StringComparison.Ordinal);
-        Assert.Contains("AND   ($4::text IS NULL OR database_name = $4)", ranked, StringComparison.Ordinal);
+        Assert.Contains("AND   ($4::text[] IS NULL OR database_name = ANY($4))", ranked, StringComparison.Ordinal);
         Assert.Contains("collection_time >= $2", ranked, StringComparison.Ordinal);
         Assert.Contains("collection_time <= $3", ranked, StringComparison.Ordinal);
         /* The grain: (database, file type) unless a database is named, then its files. */
-        Assert.Contains("CASE WHEN $4::text IS NULL THEN NULL ELSE file_name END AS file_name", ranked, StringComparison.Ordinal);
+        Assert.Contains("CASE WHEN cardinality($4::text[]) = 1 THEN file_name END AS file_name", ranked, StringComparison.Ordinal);
         Assert.DoesNotContain("LIMIT", ranked, StringComparison.Ordinal);
 
         /* The fold: past $5 every ranked series takes the composer's residual label, pooled per collection. */
@@ -284,7 +284,7 @@ public sealed class DarlingMcpTrendToolsSurfaceAndSqlTests
         /* The restart rule survives (#3540), and the bucket is the shared width on the shared origin, the first
            point clamped to the window's start. */
         Assert.Contains("AND   sample_interval_seconds IS DISTINCT FROM 0", trend, StringComparison.Ordinal);
-        Assert.Contains("AND   ($4::text IS NULL OR database_name = $4)", trend, StringComparison.Ordinal);
+        Assert.Contains("AND   ($4::text[] IS NULL OR database_name = ANY($4))", trend, StringComparison.Ordinal);
         Assert.Contains("collection_time >= $2", trend, StringComparison.Ordinal);
         Assert.Contains("collection_time <= $3", trend, StringComparison.Ordinal);
         Assert.Contains("GREATEST(date_bin(CAST($6 AS integer) * INTERVAL '1 minute', collection_time, " + TrendBucketSql.OriginSql + "), $2) AS bucket_start", trend, StringComparison.Ordinal);
@@ -354,12 +354,25 @@ public sealed class DarlingMcpTrendToolsSurfaceAndSqlTests
     public void ProcedureDurationTrendSql_PrefersTheStoredInterval_NeverFabricatesZero_AndMirrorsTheViewer()
     {
         var sql = DarlingTrendReader.ProcedureDurationTrendFilteredSql;
-        Assert.Contains("CASE WHEN MAX(sample_interval_seconds) IS NULL", sql, StringComparison.Ordinal);
-        Assert.Contains("ELSE NULLIF(MAX(sample_interval_seconds), 0)", sql, StringComparison.Ordinal);
-        Assert.DoesNotContain("ELSE 0", sql, StringComparison.Ordinal);
+        /* #5449: the procedure statement does not read the stored interval with a LAG fallback as the query views do. Its time
+           axis is the collector's SUCCESS runs (ProcedureCollectionsCte): a point's seconds are the gap to the previous point,
+           unrated past the collector's one-hour policy, and the stored interval answers only for a restart (all rows 0: unrated)
+           and for the series' first point. The old span term and the idle-run union are gone. */
+        Assert.Contains("CASE WHEN is_stored AND max_interval_seconds = 0 THEN NULL", sql, StringComparison.Ordinal);
+        Assert.Contains($"CASE WHEN gap_seconds <= {CollectorDeltaCalculator.DefaultMaxGapSeconds} THEN gap_seconds END", sql, StringComparison.Ordinal);
+        Assert.Contains("WHEN is_stored THEN NULLIF(max_interval_seconds, 0)", sql, StringComparison.Ordinal);
+        Assert.Equal(2, System.Text.RegularExpressions.Regex.Matches(sql, @"collection_time >= \$2 - INTERVAL '3600 seconds'").Count);
+        Assert.Contains("FROM gapped\nWHERE collection_time >= $2", string.Join('\n', Lines(sql)), StringComparison.Ordinal);
+        /* A run is logged after it finishes, so one that began inside the window can be logged just past its end: the runs are read
+           an hour past $3 (once), the stored rows and the final points stop at $3 (twice). */
+        Assert.Single(System.Text.RegularExpressions.Regex.Matches(sql, @"collection_time <= \$3 \+ INTERVAL '3600 seconds'"));
+        Assert.Equal(2, System.Text.RegularExpressions.Regex.Matches(sql, @"collection_time <= \$3\r?\n").Count);
+        Assert.DoesNotContain("COALESCE(MAX(", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("series_first", sql, StringComparison.Ordinal);
         Assert.Contains("CASE WHEN interval_seconds > 0 THEN total_elapsed_ms / interval_seconds END AS elapsed_ms_per_second", sql, StringComparison.Ordinal);
+        Assert.Contains("SUM(rated_elapsed_ms) / SUM(rated_seconds) AS elapsed_ms_per_second", sql, StringComparison.Ordinal);
 
-        /* The viewer's per-collection CTE minus its database-filter lines is the MCP statement's, whitespace aside (since
+        /* The viewer's per-collection CTEs minus their database-filter lines are the MCP statement's (whitespace aside; since
            #5244 both run the filtered statement).
            #5414 M1: the filter is inside the aggregates, so the lines that differ are the two sums (FILTERed in the
            viewer's) and the matched-rows count; everything else, the stored-interval CASE and the FROM / WHERE (which
@@ -367,11 +380,17 @@ public sealed class DarlingMcpTrendToolsSurfaceAndSqlTests
         static bool IsFilteredSumLine(string l) =>
             l.Contains("delta_elapsed_time", StringComparison.Ordinal) || l.Contains("delta_execution_count", StringComparison.Ordinal)
             || l.Contains("matched_rows", StringComparison.Ordinal);
-        var viewerCte = Cte(Lf(ViewerDataService.ProcedureDurationTrendSql), "raw AS\n(");
-        Assert.Equal(3, viewerCte.Split('\n').Count(l => l.Contains("FILTER (WHERE $4::text[] IS NULL OR database_name = ANY($4))", StringComparison.Ordinal)));
-        var viewer = string.Join('\n', viewerCte.Split('\n').Where(l => !IsFilteredSumLine(l)).Select(l => l.Trim()));
-        var mcp = string.Join('\n', Cte(Lf(sql), "raw AS\n(").Split('\n').Where(l => !IsFilteredSumLine(l)).Select(l => l.Trim()));
-        Assert.Equal(viewer, mcp);
+        foreach (var cte in new[] { "stored AS\n(", "runs AS\n(", "events AS\n(", "sequenced AS\n(", "points AS\n(", "gapped AS\n(", "raw AS\n(" })
+        {
+            var viewerCte = Cte(Lf(ViewerDataService.ProcedureDurationTrendSql), cte);
+            if (cte == "stored AS\n(")
+            {
+                Assert.Equal(3, viewerCte.Split('\n').Count(l => l.Contains("FILTER (WHERE $4::text[] IS NULL OR database_name = ANY($4))", StringComparison.Ordinal)));
+            }
+            var viewer = string.Join('\n', viewerCte.Split('\n').Where(l => !IsFilteredSumLine(l)).Select(l => l.Trim()));
+            var mcp = string.Join('\n', Cte(Lf(sql), cte).Split('\n').Where(l => !IsFilteredSumLine(l)).Select(l => l.Trim()));
+            Assert.Equal(viewer, mcp);
+        }
 
         /* And the shared readers KEEP a NULL-rate row as an unrated point rather than reading it as 0 or
            dropping it — the C# half of the idiom (#3541 A12): the bucketed one the duration pair has read
@@ -431,11 +450,30 @@ public sealed class DarlingMcpTrendToolsSurfaceAndSqlTests
     [InlineData(nameof(DarlingTrendReader.ProcedureDurationTrendHourlySql), TimescaleSupport.ProcedureStatsHourlyView, "procedure_stats")]
     public void DurationTrendHourlySql_ReadsTheRollup_BucketsByIt_ProjectsTheSharedShape(string sqlName, string view, string rawTable)
     {
-        var sql = SqlByName(sqlName);
+        /* Line endings normalized: the source files are checked out with CRLF (.gitattributes eol=crlf), so the builder's raw
+           string carries CRLF and a "\n" probe found nothing. (The query_stats branch's DoesNotContain below passed on that
+           mismatch alone; with LF it is a real guard.) */
+        var sql = Lf(SqlByName(sqlName));
 
         Assert.Contains("FROM " + view, sql, StringComparison.Ordinal);
-        Assert.DoesNotContain("FROM " + rawTable + "\n", sql, StringComparison.Ordinal);
-        Assert.DoesNotContain("collection_time >=", sql, StringComparison.Ordinal);
+        if (rawTable == "procedure_stats")
+        {
+            /* #5449: the procedure read adds the hours a collector run fell in with no raw row. The raw table is read only to test
+               that one hour holds no row: a single NOT EXISTS probe that projects no work, never the hour's sums. */
+            var probeAt = sql.IndexOf("FROM " + rawTable + "\n", StringComparison.Ordinal);
+            Assert.True(probeAt > 0, "the idle-hours raw probe is gone");
+            Assert.Equal(probeAt, sql.LastIndexOf("FROM " + rawTable + "\n", StringComparison.Ordinal));
+            Assert.Contains("NOT EXISTS", sql[..probeAt], StringComparison.Ordinal);
+            Assert.Contains("SELECT 1", sql[(probeAt - 40)..probeAt], StringComparison.Ordinal);
+            Assert.Contains("collect.collection_log", sql, StringComparison.Ordinal);
+            Assert.Contains("status = 'SUCCESS'", sql, StringComparison.Ordinal);
+        }
+        else
+        {
+            Assert.DoesNotContain("FROM " + rawTable + "\n", sql, StringComparison.Ordinal);
+            Assert.DoesNotContain("collection_time >=", sql, StringComparison.Ordinal);
+        }
+
         Assert.Contains("bucket >= $2", sql, StringComparison.Ordinal);
         /* A bucket is stamped at its START, so the window end is exclusive: `bucket <= $3` would take the whole
            hour that begins at an end falling on the hour (RollupWindowEndBoundTests pins the same for every rollup read). */
@@ -618,7 +656,9 @@ public sealed class DarlingMcpTrendToolsSurfaceAndSqlTests
         Assert.Contains("public static readonly string ProcedureDurationTrendFilteredSql =\n        DurationTrendRouting.BuildBucketedRawTrendSql(\"procedure_stats\", withDatabaseFilter: true);", reader, StringComparison.Ordinal);
         // LA-4a routed the builder call off the stitched from-clause instead of the bare view name, so the pin
         // follows the builder call site, not the old constant. #5244 adds the filter to that call.
-        Assert.Contains("DurationTrendRouting.BuildBucketedHourlyTrendSql(route.HourlyFromClauseOrDefault, withDatabaseFilter: true)", reader, StringComparison.Ordinal);
+        /* #5449: the procedure rollups hold no row for an hour in which no procedure worked, so that grain's call also fills the quiet hours in. */
+        Assert.Contains("DurationTrendRouting.BuildBucketedHourlyTrendSql(\n                    route.HourlyFromClauseOrDefault, withDatabaseFilter: true,", Lf(reader), StringComparison.Ordinal);
+        Assert.Contains("coverIdleHours: route.RawTable == \"procedure_stats\"", reader, StringComparison.Ordinal);
     }
 
     private static string Lf(string s) => s.Replace("\r\n", "\n", StringComparison.Ordinal);

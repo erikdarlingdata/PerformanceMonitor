@@ -1002,7 +1002,9 @@ LIMIT 5";
 
         /* #3953: the source the fact read this pass, so the drill-down can reproduce it; when the fact did not
            decide, the same decision the fact makes, over the same bound. */
-        var windowStart = AsNaive(context.TimeRangeStart.AddDays(-14));
+        /* #5448: when the fact read per-day totals its window edge was moved to the start of the day, so the drill-down
+           starts there too and its best plan is one the fact saw; otherwise the exact edge, as before. */
+        var windowStart = context.PlanRegressionWindowStart ?? AsNaive(context.TimeRangeStart.AddDays(-14));
         var readsTable = context.PlanRegressionReadsIntervalTable
             ?? await QueryStoreIntervalLatest.ReadsTableAsync(
                 connection, context.ServerId, windowStart.AddDays(-1), DrillDownCommandTimeoutSeconds, null, context.CancellationToken);

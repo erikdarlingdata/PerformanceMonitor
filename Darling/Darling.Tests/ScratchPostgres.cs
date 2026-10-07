@@ -158,8 +158,94 @@ internal sealed class ScratchPostgres : IAsyncDisposable
         }
     }
 
+    /// <summary>Total time <see cref="QuiesceTimescaleJobsAsync"/> may spend before it lets the drop go ahead.</summary>
+    internal static readonly TimeSpan QuiesceCap = TimeSpan.FromSeconds(10);
+
+    /// <summary>
+    /// Unschedules every TimescaleDB job in <paramref name="databaseName"/>, then waits (up to
+    /// <see cref="QuiesceCap"/>) for the job workers already running there to finish, so the
+    /// <c>DROP DATABASE ... WITH (FORCE)</c> that follows does not SIGTERM a policy worker mid-run. CI saw the
+    /// PostgreSQL postmaster log "terminated by exception 0xC0000005" for a TimescaleDB worker, twice, both times
+    /// with a scratch-database FORCE drop in flight (PR #5480); no worker is running in the dropped database
+    /// once this returns, so the drop has nothing to kill.
+    /// <para>Best-effort and bounded: it never throws, never fails a test, and never skips the drop. A database
+    /// without the extension, or one already gone, returns at once. It does NOT call
+    /// <c>_timescaledb_functions.stop_background_workers()</c>, which SIGTERMs running jobs, the very kill this
+    /// avoids.</para>
+    /// </summary>
+    internal static async Task QuiesceTimescaleJobsAsync(string adminConnectionString, string databaseName)
+    {
+        using var cap = new CancellationTokenSource(QuiesceCap);
+        try
+        {
+            var scratchBuilder = new NpgsqlConnectionStringBuilder(adminConnectionString)
+            {
+                Database = databaseName,
+                Pooling = false,
+                Timeout = 5,
+            };
+            var adminBuilder = new NpgsqlConnectionStringBuilder(adminConnectionString) { Pooling = false, Timeout = 5 };
+
+            await using (var scratch = new NpgsqlConnection(scratchBuilder.ConnectionString))
+            {
+                await scratch.OpenAsync(cap.Token);
+                await using var probe = new NpgsqlCommand("SELECT to_regclass('_timescaledb_config.bgw_job') IS NOT NULL", scratch);
+                if (!(bool)(await probe.ExecuteScalarAsync(cap.Token))!)
+                {
+                    return;
+                }
+
+                await using var unschedule = new NpgsqlCommand(
+                    "SELECT alter_job(job_id, scheduled => false) FROM timescaledb_information.jobs", scratch);
+                await unschedule.ExecuteNonQueryAsync(cap.Token);
+            }
+
+            await using var admin = new NpgsqlConnection(adminBuilder.ConnectionString);
+            await admin.OpenAsync(cap.Token);
+            /* Two empty polls in a row: a worker the scheduler registered just before the unschedule can still be
+               starting up and not yet show in pg_stat_activity on the first look. */
+            var emptyPolls = 0;
+            while (!cap.IsCancellationRequested)
+            {
+                emptyPolls = await JobWorkerCountAsync(admin, databaseName, cap.Token) == 0 ? emptyPolls + 1 : 0;
+                if (emptyPolls >= 2)
+                {
+                    return;
+                }
+
+                await Task.Delay(TimeSpan.FromMilliseconds(100), cap.Token);
+            }
+        }
+        catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.InvalidCatalogName)
+        {
+            /* The database is already gone: nothing to quiesce, and the drop below is IF EXISTS. */
+        }
+        catch (Exception ex)
+        {
+            /* The cap, a missing database or a refused connect all land here. The drop that follows is the
+               test's cleanup and it still runs; the retries behind it are unchanged. */
+            Console.Error.WriteLine($"Scratch database {databaseName}: TimescaleDB jobs not quiesced before the drop ({ex.GetType().Name}: {ex.Message}).");
+        }
+    }
+
+    /// <summary>
+    /// How many TimescaleDB job workers (and any other non-client, non-scheduler, non-autovacuum backend) are
+    /// attached to <paramref name="databaseName"/>. Job workers show up as e.g. <c>Retention Policy [1038]</c>.
+    /// </summary>
+    internal static async Task<long> JobWorkerCountAsync(NpgsqlConnection admin, string databaseName, CancellationToken cancellationToken)
+    {
+        await using var count = new NpgsqlCommand(
+            @"SELECT count(*) FROM pg_stat_activity
+              WHERE datname = $1
+                AND backend_type NOT IN ('client backend', 'TimescaleDB Background Worker Scheduler', 'autovacuum worker')",
+            admin);
+        count.Parameters.AddWithValue(databaseName);
+        return (long)(await count.ExecuteScalarAsync(cancellationToken))!;
+    }
+
     private static async Task DropAsync(string adminConnectionString, string databaseName)
     {
+        await QuiesceTimescaleJobsAsync(adminConnectionString, databaseName);
         await using var admin = new NpgsqlConnection(adminConnectionString);
         await admin.OpenAsync();
         await using var drop = new NpgsqlCommand($"DROP DATABASE IF EXISTS \"{databaseName}\" WITH (FORCE)", admin);
@@ -271,6 +357,8 @@ internal sealed class ScratchPostgres : IAsyncDisposable
                     throw;
                 }
 
+                /* Process exit has no async context; the helper is bounded (10 s) and never throws. */
+                QuiesceTimescaleJobsAsync(ExitDrainConnectionString(db.AdminConnectionString), db.Name).GetAwaiter().GetResult();
                 using var drop = new NpgsqlCommand($"DROP DATABASE IF EXISTS \"{db.Name}\" WITH (FORCE)", admin);
                 drop.ExecuteNonQuery();
                 Remembered.TryRemove(db.Name, out _);

@@ -1116,20 +1116,20 @@ public sealed class ProcedureStatsPlanReuseTests
         PlanIdentityColumns = identity,
     };
 
-    [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public void TheShadowQuery_IsTheInlineQuery_PlusOnlyTheIdentityFragments(bool azure)
+    private static readonly byte[][] s_phaseHandles = { new byte[] { 0x05, 0x00, 0xAB } };
+
+    [Fact]
+    public void TheShadowPlanPhase_IsTheInlinePlanPhase_PlusOnlyTheIdentityFragments()
     {
-        var inline = ProcedureStatsCollector.Instance.BuildQuery(Context(true, false, azure: azure)).Text;
-        var shadow = ProcedureStatsCollector.Instance.BuildQuery(Context(true, true, azure: azure)).Text;
-        var deferred = ProcedureStatsCollector.Instance.BuildQuery(Context(true, true, defer: true, azure: azure)).Text;
+        var inline = ProcedureStatsCollector.BuildPlanPhaseQuery(Context(true, false), s_phaseHandles).Text;
+        var shadow = ProcedureStatsCollector.BuildPlanPhaseQuery(Context(true, true), s_phaseHandles).Text;
+        var deferred = ProcedureStatsCollector.BuildPlanPhaseQuery(Context(true, true, defer: true), s_phaseHandles).Text;
 
         Assert.NotEqual(inline, shadow);
         Assert.Contains("dm_exec_text_query_plan", shadow, StringComparison.Ordinal);
         Assert.Contains("plan_statement_count", shadow, StringComparison.Ordinal);
         Assert.Contains("dm_exec_query_stats", shadow, StringComparison.Ordinal);
-        /* the plan columns come first, so their ordinals (27, 28) are those of the inline query */
+        /* the plan columns come first, so their ordinals (1, 2) are those of the inline phase */
         Assert.True(
             shadow.IndexOf("query_plan_xml_bytes", StringComparison.Ordinal) < shadow.IndexOf("plan_statement_count", StringComparison.Ordinal));
         /* the shadow text is the inline text plus the two identity fragments and nothing else */
@@ -1143,9 +1143,9 @@ public sealed class ProcedureStatsPlanReuseTests
     }
 
     [Fact]
-    public void AGatedOnCycle_ShipsTheNoPlanForm_PlusTheIdentity_AndNoPlanRender()
+    public void AGatedOnCycle_ShipsTheIdentityAlone_AndNoPlanRender()
     {
-        var sql = ProcedureStatsCollector.Instance.BuildQuery(Context(capture: false, identity: true)).Text;
+        var sql = ProcedureStatsCollector.BuildPlanPhaseQuery(Context(capture: false, identity: true), s_phaseHandles).Text;
 
         Assert.DoesNotContain("dm_exec_text_query_plan", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("query_plan_xml", sql, StringComparison.Ordinal);
@@ -1162,21 +1162,12 @@ public sealed class ProcedureStatsPlanReuseTests
     }
 
     [Theory]
-    [InlineData(true, 29)]    /* shadow: after the inline plan columns at 27 and 28 */
-    [InlineData(false, 27)]   /* a gated cycle: identity alone */
-    public async Task ReadAsync_FindsTheIdentity_WhereTheQueryPutIt(bool capture, int firstIdentityOrdinal)
+    [InlineData(true, 3)]    /* shadow: after the plan columns at 1 and 2 */
+    [InlineData(false, 1)]   /* a gated cycle: identity alone */
+    public async Task ReadPlanPhaseAsync_FindsTheIdentity_WhereTheQueryPutIt(bool capture, int firstIdentityOrdinal)
     {
         using var table = new DataTable();
-        for (var i = 0; i < 27; i++)
-        {
-            table.Columns.Add("c" + i.ToString(CultureInfo.InvariantCulture), i switch
-            {
-                4 or 5 => typeof(DateTime),
-                0 or 1 or 2 or 3 or 25 or 26 => typeof(string),
-                _ => typeof(long),
-            });
-        }
-
+        table.Columns.Add("ord", typeof(int));
         if (capture)
         {
             table.Columns.Add("query_plan_xml", typeof(string));
@@ -1188,15 +1179,11 @@ public sealed class ProcedureStatsPlanReuseTests
         table.Columns.Add("plan_generation_sum", typeof(long));
 
         var values = new object[table.Columns.Count];
-        for (var i = 0; i < 27; i++)
-        {
-            values[i] = table.Columns[i].DataType == typeof(long) && i is 6 or 7 or 8 or 9 or 10 or 11 or 22 or 23 or 24 ? 1L : DBNull.Value;
-        }
-
+        values[0] = 0;
         if (capture)
         {
-            values[27] = "<plan/>";
-            values[28] = 7L;
+            values[1] = "<plan/>";
+            values[2] = 7L;
         }
 
         values[firstIdentityOrdinal] = 4L;
@@ -1205,13 +1192,107 @@ public sealed class ProcedureStatsPlanReuseTests
         table.Rows.Add(values);
 
         await using var reader = table.CreateDataReader();
-        var rows = await ProcedureStatsCollector.Instance.ReadAsync(reader, Context(capture, identity: true), CancellationToken.None);
+        var results = await ProcedureStatsCollector.ReadPlanPhaseAsync(reader, Context(capture, identity: true), CancellationToken.None);
 
-        var row = Assert.Single(rows);
-        Assert.Equal(4L, row.PlanStatementCount);
-        Assert.Equal(s_compile, row.PlanLastStatementCompile);
-        Assert.Equal(11L, row.PlanGenerationSum);
-        Assert.Equal(capture ? "<plan/>" : null, row.QueryPlanXml);
+        var result = Assert.Single(results).Value;
+        Assert.Equal(4L, result.StatementCount);
+        Assert.Equal(s_compile, result.LastStatementCompile);
+        Assert.Equal(11L, result.GenerationSum);
+        Assert.Equal(capture ? "<plan/>" : null, result.PlanXml);
+    }
+
+    // ---- the runner's plan phase (#5449) -------------------------------------------------------
+
+    /// <summary>A target whose plan-phase query throws what <paramref name="fail"/> returns, so the runner's catch is what a test sees.</summary>
+    private sealed class FailingPlanQueryProvider(Func<CancellationToken, Exception> fail) : ITargetProvider
+    {
+        public CollectorTargetEngine Engine => CollectorTargetEngine.SqlServer;
+
+        public System.Data.Common.DbConnection CreateConnection(string connectionString) => throw new NotSupportedException();
+
+        public System.Data.Common.DbCommand CreateCommand(CollectorQuery query, System.Data.Common.DbConnection connection, int commandTimeoutSeconds) =>
+            new FailingCommand(fail);
+
+        public CollectorTargetFault Classify(Exception exception, bool yieldsOnLockTimeout) => CollectorTargetFault.Unclassified;
+
+        public string WithDatabase(string connectionString, string databaseName) => databaseName;
+
+        public (string ConnectionString, CollectorQuery Query) BuildDatabaseListPlan(
+            string connectionString, IReadOnlyList<string>? excludedDatabases, IReadOnlyList<string>? databaseScope) =>
+            throw new NotSupportedException();
+    }
+
+    private sealed class FailingCommand(Func<CancellationToken, Exception> fail) : System.Data.Common.DbCommand
+    {
+        [System.Diagnostics.CodeAnalysis.AllowNull]
+        public override string CommandText { get; set; } = string.Empty;
+        public override int CommandTimeout { get; set; }
+        public override CommandType CommandType { get; set; }
+        public override bool DesignTimeVisible { get; set; }
+        public override UpdateRowSource UpdatedRowSource { get; set; }
+        protected override System.Data.Common.DbConnection? DbConnection { get; set; }
+        protected override System.Data.Common.DbParameterCollection DbParameterCollection => throw new NotSupportedException();
+        protected override System.Data.Common.DbTransaction? DbTransaction { get; set; }
+        public override void Cancel() { }
+        public override int ExecuteNonQuery() => throw new NotSupportedException();
+        public override object? ExecuteScalar() => throw new NotSupportedException();
+        public override void Prepare() { }
+        protected override System.Data.Common.DbParameter CreateDbParameter() => throw new NotSupportedException();
+        protected override System.Data.Common.DbDataReader ExecuteDbDataReader(CommandBehavior behavior) => throw fail(CancellationToken.None);
+        protected override Task<System.Data.Common.DbDataReader> ExecuteDbDataReaderAsync(CommandBehavior behavior, CancellationToken cancellationToken) =>
+            throw fail(cancellationToken);
+    }
+
+    private static (List<ProcedureStatsCollector.Row> Rows, System.Data.Common.DbDataReader MainReader) PlanPhaseInputs()
+    {
+        var table = new DataTable();
+        table.Columns.Add("x", typeof(int));
+        return (new List<ProcedureStatsCollector.Row> { RowFor(1), RowFor(2) }, table.CreateDataReader());
+    }
+
+    [Fact]
+    public async Task APlanQueryThatFails_ShipsTheRowsWithoutPlans_LogsOneWarning_AndStampsTheCounters()
+    {
+        var flipper = new FlippableRunner("off");
+        var context = StampedContext(flipper.Runner, capture: true);
+        var (rows, reader) = PlanPhaseInputs();
+        await using var _ = reader;
+
+        var ms = await flipper.Runner.RunProcedureStatsPlanPhaseAsync(
+            new FailingPlanQueryProvider(_ => new InvalidOperationException("the plan query failed")),
+            reader, null!, ServerFor(), context, rows, CancellationToken.None);
+
+        Assert.True(ms >= 1, "a failed phase still reports its time, so the run stamps it");
+        Assert.All(rows, row =>
+        {
+            Assert.Null(row.QueryPlanXml);
+            Assert.Null(row.QueryPlanXmlBytes);
+            Assert.True(row.PlanPhaseSkipped, "every row is marked skipped so the reuse pass counts no miss");
+        });
+        Assert.Equal(1, flipper.Log.CountAtLevel(LogLevel.Warning));
+
+        DarlingCollectorRunner.StampProcedureStatsOffPlanPhase(context, rows, ms);
+        Assert.Equal(0, context.Measurements.First(m => m.Label == "plans_rendered").Value);
+        Assert.Equal(0, context.Measurements.First(m => m.Label == "plans_rendered_bytes").Value);
+        Assert.Equal(ms, context.Measurements.First(m => m.Label == "plan_fetch_ms").Value);
+    }
+
+    [Fact]
+    public async Task AStopDuringThePlanQuery_EscapesRatherThanBecomingAWarning()
+    {
+        var flipper = new FlippableRunner("off");
+        var context = StampedContext(flipper.Runner, capture: true);
+        var (rows, reader) = PlanPhaseInputs();
+        await using var _ = reader;
+        using var cts = new CancellationTokenSource();
+        await cts.CancelAsync();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => flipper.Runner.RunProcedureStatsPlanPhaseAsync(
+            new FailingPlanQueryProvider(token => new OperationCanceledException(token)),
+            reader, null!, ServerFor(), context, rows, cts.Token));
+
+        Assert.Equal(0, flipper.Log.CountAtLevel(LogLevel.Warning));
+        Assert.All(rows, row => Assert.False(row.PlanPhaseSkipped));
     }
 
     private sealed class NoDeltas : ICollectorDeltaCalculator

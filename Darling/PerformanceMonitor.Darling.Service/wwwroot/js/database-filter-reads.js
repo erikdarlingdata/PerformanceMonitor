@@ -11,7 +11,7 @@
    UNFILTERED to here. */
 
 /** Reads whose route takes the chosen databases: readTool adds one `database_name` key per chosen database to each. The six
- *  top-query reads are here; each later page moves its reads out of UNFILTERED into this list. */
+ *  top-query reads are here, and the later pages' reads after them. */
 export const FILTERED = new Set([
   // Top queries, procedures, active queries, Query Store and the heatmap.
   "get_top_queries_by_cpu", "get_top_procedures_by_cpu", "get_active_queries", "get_query_store_top",
@@ -29,15 +29,16 @@ export const FILTERED = new Set([
   // Configuration, Query Store health, configuration changes, severe errors and the default trace (#5244 PR6).
   "get_database_config", "get_database_scoped_config", "get_query_store_health", "get_database_config_changes",
   "get_health_parser_severe_errors", "get_default_trace_events",
+  // File I/O, sizes and the persistent version store (#5244 PR5). get_file_io_stats and get_file_io_trend chart one file
+  // per line for exactly one chosen database and one line per database otherwise.
+  "get_file_io_trend", "get_file_io_stats", "get_database_sizes", "get_table_index_sizes", "get_pvs_stats",
 ]);
 
 /** Database-scoped reads that cannot take the filter yet, so they show every database and say so (the "All databases"
- *  chip). 34 database-scoped reads in all: this list shrinks as FILTERED grows, and what is left at the end is the three
+ *  chip). 34 database-scoped reads in all: this list shrank as FILTERED grew, and what is left is the three
  *  deadlock reads, which stay unfiltered on purpose (as on the desktop): a deadlock spans several databases, and they are
  *  inside each deadlock graph. The groups follow the page that moves each read into FILTERED. */
 export const UNFILTERED = new Set([
-  // File I/O, sizes and the persistent version store.
-  "get_file_io_trend", "get_file_io_stats", "get_database_sizes", "get_table_index_sizes", "get_pvs_stats",
   // The deadlock reads: they stay here.
   "get_deadlock_trend", "get_deadlocks", "get_deadlock_detail",
 ]);

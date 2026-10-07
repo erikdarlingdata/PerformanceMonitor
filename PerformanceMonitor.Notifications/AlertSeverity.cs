@@ -101,6 +101,8 @@ internal static class AlertSeverity
             "Compression Job Stuck" => ("#DC2626", "CRITICAL", "\U0001F534"),
             /* #5450: fires Warning at its one site. */
             "Collection Gap At Start" => ("#D97706", "WARNING", "\U0001F7E0"),
+            /* #5450: fires Warning at its one site. */
+            "Collection Gaps In History" => ("#D97706", "WARNING", "\U0001F7E0"),
             /* #3816: the other two policy families page under their own names, and each name has exactly ONE
                tier at its fire site — so these arms are the faithful replay colour for every row they will
                ever style, rather than the #3635 defect of a row wearing the colour its NAME implies. A dead

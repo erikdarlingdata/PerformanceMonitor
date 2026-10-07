@@ -28,8 +28,10 @@ public sealed class IncidentCooldown
     private readonly ConcurrentDictionary<string, DateTime> _cooldowns = new();
 
     /* ClearMetric's sticky half: the clear instant per metric-level key. Written ONLY by ClearMetric
-       (the key shape is exactly the "{prefix}{server}:{metric}" fallback key — a fingerprinted key is
-       never found here, and the seed's lookup of one is a miss feeding the "no clear" answer). Read by
+       (the key shape is "{prefix}{server}:{metric}" for the fallback key, or "{prefix}{server}:{metric}:{scope}"
+       for a #5469 replica-scoped one; a scoped key is never seeded, so the seed never reads it back. A
+       fingerprinted key shares the scoped shape and is never found here either: the pairs carry no
+       incidents, and the seed's lookup of one is a miss feeding the "no clear" answer). Read by
        EvaluateAsync to keep a pre-clear history row from re-seeding an entry the clear just removed:
        the PR review's point 2, which reproduced as "down, back, down" where the DOWN that follows a
        delivered resolve still met the first outage's in-memory stamp that ClearMetric deleted — until
@@ -67,13 +69,36 @@ public sealed class IncidentCooldown
     /// posting is still all-or-nothing per alert — but the render no longer has to treat it as the only
     /// answer available.</para>
     /// </summary>
+    /// <param name="scope">
+    /// #5469: an identity folded into the metric-level fallback key only ("{server}:{metric}:{scope}"), so
+    /// two incidents of one metric on one server hold separate windows. Null (every caller but the AG pair
+    /// under PagerDuty auto-resolve) leaves the key byte-identical to today's. A scoped key is never seeded
+    /// from the alert history: the history answers per (server, metric, fingerprint) and carries no scope,
+    /// so a seed would hand one replica's send time to its siblings. After a restart a scoped key therefore
+    /// starts as a first notice, which can re-post once inside a window and never swallows a notice.
+    /// </param>
+    /// <param name="pairedEdge">
+    /// #5469: the OTHER edge of the recovery pair <paramref name="metricName"/> belongs to ("Server Restored"
+    /// for "Server Unreachable" and the reverse), passed only under PagerDuty auto-resolve AND when PagerDuty is
+    /// routed for the alert. When set, the
+    /// metric-level seed also reads that edge's last send and skips its own seed if the other edge sent
+    /// MORE RECENTLY: the other edge opened (or closed) a newer incident, so this edge's older row describes
+    /// the incident before it and must not throttle the first notice of the new one. That is what
+    /// <see cref="ClearMetric"/> does in memory, made to survive a restart. Null (every caller but the pairs
+    /// under auto-resolve) seeds exactly as before. The seed is looser than the in-memory clear: it counts ANY
+    /// delivered webhook row of the other edge (Teams, Slack or the generic webhook), while the clear needs a
+    /// delivered PagerDuty post. So after a restart that follows a failed PagerDuty close (the chat channels
+    /// delivered the recovery, PagerDuty returned an error), the seed skips and the next outage posts, where
+    /// without a restart it would stay throttled. That is one extra notice, never a swallowed one.
+    /// </param>
     public async Task<Decision> EvaluateAsync(
-        string serverId, string metricName, IReadOnlyList<AlertIncident>? incidents, TimeSpan window)
+        string serverId, string metricName, IReadOnlyList<AlertIncident>? incidents, TimeSpan window,
+        string? scope = null, string? pairedEdge = null)
     {
         var now = DateTime.UtcNow;
         Evict(now, window);
 
-        var keys = BuildKeys(serverId, metricName, incidents);
+        var keys = BuildKeys(serverId, metricName, incidents, scope);
 
         bool anyFresh = false;
         bool anyFirstNotice = false;
@@ -82,7 +107,8 @@ public sealed class IncidentCooldown
 
         foreach (var (key, dedupKey) in keys)
         {
-            if (_seedLastSentUtc is not null && !_cooldowns.ContainsKey(key))
+            var scopedFallback = scope is not null && dedupKey is null;
+            if (_seedLastSentUtc is not null && !scopedFallback && !_cooldowns.ContainsKey(key))
             {
                 var lastSent = await _seedLastSentUtc(serverId, metricName, dedupKey);
 
@@ -93,7 +119,21 @@ public sealed class IncidentCooldown
                    normally. */
                 if (lastSent.HasValue &&
                     (!_clearedAtUtc.TryGetValue(key, out var clearedAtUtc) || lastSent.Value > clearedAtUtc))
-                    _cooldowns.TryAdd(key, lastSent.Value);
+                {
+                    /* #5469: a restart loses the in-memory clears, so the history stands in for them. The
+                       pair's other edge sending after this one is the same fact a clear records (the next
+                       firing or recovery opens a new incident), so this edge's row is not seeded. Equal
+                       times seed, like the clear comparison above: only a strictly newer send wins. */
+                    var supersededByOtherEdge = false;
+                    if (pairedEdge is not null && dedupKey is null)
+                    {
+                        var otherSent = await _seedLastSentUtc(serverId, pairedEdge, null);
+                        supersededByOtherEdge = otherSent.HasValue && otherSent.Value > lastSent.Value;
+                    }
+
+                    if (!supersededByOtherEdge)
+                        _cooldowns.TryAdd(key, lastSent.Value);
+                }
             }
 
             /* Read once and keep BOTH halves. The absence of an entry after the seed attempt is the only
@@ -149,8 +189,9 @@ public sealed class IncidentCooldown
     /// on THIS cooldown's key space. The PagerDuty auto-resolve recovery calls this for its pair's FIRING
     /// metric after a delivered close: the stamp sitting on that key is a relic of an incident that no longer
     /// exists, and without the clear the next firing of the same metric meets the old window and never
-    /// announces. Call only on a DELIVERED close — evaluating (not sending) a recovery must not re-arm
-    /// anything.
+    /// announces. The same call (#5469) also names the pair's RECOVERY metric after a DELIVERED firing: the
+    /// new incident has not been closed yet, so its recovery is a first notice again. Call only on a
+    /// DELIVERED send — evaluating (not sending) must not re-arm anything.
     /// <para>
     /// The clear is sticky across history re-seeds for PRE-clear rows only: the clear instant is recorded
     /// beside the removal, and EvaluateAsync's seed branch ignores any history row older than it — without
@@ -158,21 +199,23 @@ public sealed class IncidentCooldown
     /// history (both production paths seed) and be throttled against the incident that no longer exists. A
     /// seeded time ending up NEWER than the clear still applies — a genuinely new send happened after the
     /// resolve, and it re-arms the window normally. A restart discards the record along with the in-memory
-    /// cooldown and the seed re-arms from history; that is the restart class the seed deliberately accepts,
-    /// not a reopened window.
+    /// cooldown. For the recovery pairs under auto-resolve the seed then rebuilds the answer from history: it
+    /// skips an edge's row when the other edge of the pair sent after it (see the <c>pairedEdge</c>
+    /// parameter of <see cref="EvaluateAsync"/>), so a restart in the middle of an outage does not bring the
+    /// old window back. A replica-scoped key is not seeded at all and starts as a first notice.
     /// </para>
     /// <para>
-    /// The clear is METRIC-level — one key per server and pair — not per replica. For the AG pair (whose
-    /// per-replica identity lives in the PagerDuty dedup key, not in these keys) one replica's reconnect
-    /// therefore also re-arms a sibling replica that is still down on the same server. Accepted: the
-    /// re-armed entry is only consulted by a new firing — the sibling's incident stays open in PagerDuty
-    /// under its own per-replica key, and a per-replica clear shape here would duplicate that identity
-    /// into a map whose keys the cooldown already keeps coarse on purpose.
+    /// The clear is METRIC-level — one key per server and metric — unless <paramref name="scope"/> names
+    /// the same identity <see cref="EvaluateAsync"/> keyed the entry with (#5469: the AG pair's replica,
+    /// under PagerDuty auto-resolve). Then it forgets only that replica's entry, so one replica's reconnect
+    /// does not re-arm a sibling that is still down.
     /// </para>
     /// </summary>
-    public void ClearMetric(string serverId, string metricName)
+    public void ClearMetric(string serverId, string metricName, string? scope = null)
     {
-        var key = $"{_keyPrefix}{serverId}:{metricName}";
+        var key = scope is null
+            ? $"{_keyPrefix}{serverId}:{metricName}"
+            : $"{_keyPrefix}{serverId}:{metricName}:{scope}";
         _clearedAtUtc[key] = DateTime.UtcNow;
         _cooldowns.TryRemove(key, out _);
     }
@@ -182,7 +225,7 @@ public sealed class IncidentCooldown
     // DedupKey can't occur (AlertFingerprint returns null incidents, filtered upstream) but is excluded
     // defensively so it never produces a "…::" key.
     private List<(string Key, string? DedupKey)> BuildKeys(
-        string serverId, string metricName, IReadOnlyList<AlertIncident>? incidents)
+        string serverId, string metricName, IReadOnlyList<AlertIncident>? incidents, string? scope)
     {
         var dedupKeys = incidents?
             .Select(i => i.DedupKey)
@@ -195,7 +238,13 @@ public sealed class IncidentCooldown
                 .Select(d => ($"{_keyPrefix}{serverId}:{metricName}:{d}", (string?)d))
                 .ToList();
 
-        return new List<(string, string?)> { ($"{_keyPrefix}{serverId}:{metricName}", (string?)null) };
+        /* #5469: the scope joins the fallback key only. The AG pair is stateless (no incidents), so it always
+           lands here; a null scope is the pre-existing key byte for byte. */
+        return new List<(string, string?)>
+        {
+            (scope is null ? $"{_keyPrefix}{serverId}:{metricName}" : $"{_keyPrefix}{serverId}:{metricName}:{scope}",
+             (string?)null)
+        };
     }
 
     /* Drop entries past 2x the window so the per-fingerprint dict stays bounded — any entry past 1x is

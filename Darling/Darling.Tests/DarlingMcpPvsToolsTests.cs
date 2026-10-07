@@ -56,7 +56,9 @@ public sealed class DarlingMcpPvsToolsTests
             .Select(p => (p.Name, p.HasDefaultValue, p.DefaultValue))
             .ToArray();
 
-        Assert.Equal(new[] { "server_name", "trend_hours_back" }, mcpParams.Select(p => p.Name).ToArray());
+        /* #5244 PR5: database_name is appended LAST (the Lite twin's order), and optional. */
+        Assert.Equal(new[] { "server_name", "trend_hours_back", "database_name" }, mcpParams.Select(p => p.Name).ToArray());
+        Assert.True(mcpParams.Single(p => p.Name == "database_name").HasDefaultValue, "database_name must be optional");
         Assert.True(mcpParams.Single(p => p.Name == "server_name").HasDefaultValue, "server_name must be optional");
 
         /* The trend is an OPT-IN: 0 means snapshot-only, so a default call stays one cheap read. */
@@ -128,7 +130,8 @@ public sealed class DarlingMcpPvsToolsTests
         Assert.DoesNotContain("@", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("N'", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("getdate", sql.ToLowerInvariant());
-        Assert.DoesNotContain("[", sql, StringComparison.Ordinal);
+        /* #5244: the database filter binds a text[] ("::text[]"), the one Postgres use of a bracket; T-SQL [identifiers] stay banned. */
+        Assert.DoesNotContain("[", sql.Replace("::text[]", "", StringComparison.Ordinal), StringComparison.Ordinal);
     }
 
     [Fact]

@@ -1105,7 +1105,10 @@ public sealed class CollectorRunTimeStartupSeedTests : IDisposable
         manager.GetDueCollectorsForServer(server.Id, atUtc).Select(s => s.Name).ToList();
 
     /* A run time about twelve hours from now on the UTC clock, so a test never starts inside a slot's grace. */
-    private static int RunAtTwelveHoursOff() => (DateTime.UtcNow.Hour * 60 + DateTime.UtcNow.Minute + 12 * 60) % 1440;
+    private static int RunAtTwelveHoursOff() => RunAtTwelveHoursOff(DateTime.UtcNow);
+
+    // One clock read: hour and minute from two reads could straddle an hour boundary.
+    private static int RunAtTwelveHoursOff(DateTime now) => (now.Hour * 60 + now.Minute + 12 * 60) % 1440;
 
     /* The latest date whose slot is at or before the instant, found the way the run-time rule finds it. */
     private static DateOnly LatestSlotDate(DateTime utc, int runAtMinute, int storageId)

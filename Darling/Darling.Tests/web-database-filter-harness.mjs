@@ -174,7 +174,7 @@ const scenarios = {
     out.explicitArray = await sent("get_top_queries_by_cpu", { server: "SRV1", hours: 4, database_name: ["X", "Y"] });
     out.otherServer = await sent("get_top_queries_by_cpu", { server: "SRV2", hours: 4 });
     out.noServer = await sent("get_top_queries_by_cpu", { hours: 4 });
-    out.unfilteredRead = await sent("get_database_sizes", { server: "SRV1", hours: 4 });
+    out.unfilteredRead = await sent("get_deadlocks", { server: "SRV1", hours: 4 });
     out.serverWideRead = await sent("get_cpu_utilization", { server: "SRV1", hours: 4 });
     out.identityRead = await sent("get_query_trend", { server: "SRV1", query_hash: "0x1", database_name: "Sales" });
     out.identityNoName = await sent("get_query_trend", { server: "SRV1", query_hash: "0x1" });
@@ -237,7 +237,7 @@ const scenarios = {
     withNames(["SalesDb"]);
     out.one = {
       filtered: describe(util.dbScopeChip("get_top_queries_by_cpu")),
-      unfiltered: describe(util.dbScopeChip("get_database_sizes")),
+      unfiltered: describe(util.dbScopeChip("get_database_sizes", "unfiltered")),
       deadlock: describe(util.dbScopeChip("get_deadlocks")),
       server: describe(util.dbScopeChip("get_cpu_utilization")),
       identity: describe(util.dbScopeChip("get_query_trend")),
@@ -248,7 +248,7 @@ const scenarios = {
       overrideUnfiltered: describe(util.dbScopeChip("get_blocking_stats", "unfiltered")),
       overrideDeadlock: describe(util.dbScopeChip("get_deadlock_detail", "unfiltered")),
       processRows: describe(util.dbScopeChip("get_deadlock_detail", "process-rows")),
-      unknownOverride: describe(util.dbScopeChip("get_database_sizes", "nonsense")),
+      unknownOverride: describe(util.dbScopeChip("get_deadlocks", "nonsense")),
     };
     withNames(["SalesDb", "Orders", AWKWARD[5]]);
     out.three = {
@@ -262,7 +262,7 @@ const scenarios = {
     util.setActiveDatabaseFilter(null);
     out.none = {
       filtered: describe(util.dbScopeChip("get_top_queries_by_cpu")),
-      unfiltered: describe(util.dbScopeChip("get_database_sizes")),
+      unfiltered: describe(util.dbScopeChip("get_database_sizes", "unfiltered")),
       server: describe(util.dbScopeChip("get_cpu_utilization", "server")),
       processRows: describe(util.dbScopeChip("get_deadlock_detail", "process-rows")),
     };
@@ -275,7 +275,7 @@ const scenarios = {
     withNames(["SalesDb"]);
     out.state = {
       filtered: util.dbScopeState("get_top_queries_by_cpu"),
-      unfiltered: util.dbScopeState("get_database_sizes"),
+      unfiltered: util.dbScopeState("get_database_sizes", "unfiltered"),
       server: util.dbScopeState("get_cpu_utilization"),
       identity: util.dbScopeState("get_query_trend"),
       processRows: util.dbScopeState("get_deadlock_detail", "process-rows"),

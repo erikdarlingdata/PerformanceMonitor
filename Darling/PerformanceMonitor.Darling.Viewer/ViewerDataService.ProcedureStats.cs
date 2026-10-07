@@ -540,7 +540,9 @@ public sealed partial class ViewerDataService
     public const string ProcStatsSlicerSql = """
         SELECT
             date_trunc('hour', collection_time) AS bucket,
-            COUNT(DISTINCT object_name) AS proc_count,
+            /* #5449: a procedure that did no work in a cycle has no stored row now (old data still has its zero-delta row),
+               so the count is of procedures WITH work: the same number on both. */
+            COUNT(DISTINCT object_name) FILTER (WHERE COALESCE(delta_execution_count, 0) > 0 OR COALESCE(delta_worker_time, 0) > 0 OR COALESCE(delta_elapsed_time, 0) > 0) AS proc_count,
             COALESCE(SUM(delta_worker_time), 0) / 1000.0 AS total_cpu_ms,
             COALESCE(SUM(delta_elapsed_time), 0) / 1000.0 AS total_elapsed_ms,
             COALESCE(SUM(delta_logical_reads), 0) AS total_reads,

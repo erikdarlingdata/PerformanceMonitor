@@ -1503,6 +1503,26 @@ jobs:
           if ($failedChunks -gt 0) { Write-Host "shard ${{ matrix.shard }}: $failedChunks of $($chunks.Count) chunks failed"; exit 1 }
           exit 0
 
+      # PR #5480: a TimescaleDB job worker died with 0xC0000005 in two CI runs and both runs read "success",
+      # because the postmaster restarts and the tests retry. The crash shows only in the PostgreSQL log, as
+      # "terminated by exception", so this step turns it into a warning on the run. It only warns: it never
+      # fails the job, and it runs when the tests failed too.
+      - name: Warn if a PostgreSQL worker crashed
+        if: always() && steps.filter.outputs.darling == 'true'
+        shell: pwsh
+        run: |
+          $log = "$env:RUNNER_TEMP\darling-pg.log"
+          if (Test-Path $log) {
+            $hits = @(Select-String -Path $log -Pattern 'terminated by exception' -SimpleMatch)
+            foreach ($hit in ($hits | Select-Object -First 5)) {
+              $line = $hit.Line
+              if ($line.Length -gt 300) { $line = $line.Substring(0, 300) }
+              Write-Host "::warning title=PostgreSQL worker terminated by exception (shard ${{ matrix.shard }})::$line"
+            }
+            if ($hits.Count -gt 0) { Write-Host "$($hits.Count) 'terminated by exception' line(s) in darling-pg.log" }
+          }
+          exit 0
+
       # #4160: stop all four clusters (the 5541 store plus the three 5542/5543/5544 log-format
       # clusters started above). Each stop is independent and best-effort: a cluster that never
       # started (an earlier step threw) has no data dir to stop, and one shard's stop failing must

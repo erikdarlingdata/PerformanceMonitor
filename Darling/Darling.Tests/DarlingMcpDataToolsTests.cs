@@ -130,7 +130,7 @@ public sealed class DarlingMcpDataToolsSurfaceAndSqlTests
     [InlineData("get_wait_types", "server_name,hours_back,as_of")]
     [InlineData("get_memory_stats", "server_name")]
     [InlineData("get_memory_clerks", "server_name")]
-    [InlineData("get_file_io_stats", "server_name")]
+    [InlineData("get_file_io_stats", "server_name,database_name")]
     [InlineData("get_tempdb_trend", "server_name,hours_back,as_of")]
     [InlineData("get_perfmon_stats", "server_name,counter_name,instance_name")]
     [InlineData("get_top_queries_by_cpu", "server_name,hours_back,top,database_name,parallel_only,min_dop,as_of")]

@@ -15,6 +15,7 @@ using System.Threading.Tasks;
 using ModelContextProtocol.Server;
 using Npgsql;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
 
@@ -33,11 +34,27 @@ public sealed class DarlingMcpPvsTools
 {
     [McpServerTool(Name = "get_pvs_stats"), Description(
         "ADR PVS state per database: size, % of database, aborted-txn count, cleaner times (a start with no end = mid-run). LATEST IS A TIME: the newest snapshot, not a window; as_of is when it was taken. trend_hours_back (0 = off) looks back from now, not from as_of, over the top-5 databases by current size. Cleaner times are de-skewed to UTC, like as_of. pct_of_database is null only if PVS size is unmeasured (pvs_measured false) or database size is missing or 0 (pct_of_database_reason says why); else measured 0 MB = 0.00. No rows: not_collected if this engine can't collect PVS, else empty. <<GUIDE>> Gets the Accelerated Database Recovery (ADR) persistent version store state per database: PVS size and percent-of-database, online-index version store size, aborted transaction count, version-cleaner run state (a start time without an end time means the cleaner is mid-run), and the oldest active/aborted transaction ids. Use when a database's size is growing without table growth, when ADR cleanup looks stuck, or alongside the PVS pressure alert. A large PVS is pinned by long-running or aborted transactions; the id gap shows how far cleanup is behind. Optionally returns the size trend for the top-5 databases over a window. Every timestamp here is UTC, the four cleaner times included - the DMV reports those in the monitored server's local clock and this read de-skews them - so a cleaner time compares directly against as_of. pvs_measured says whether the DMV reported a size for that database at all; a measured 0 MB is published as pvs_size_mb 0 and pct_of_database 0.00 (the healthy, fully-cleaned state), and pct_of_database is null only when the numerator was not measured or the denominator is absent or zero, with pct_of_database_reason saying which.")]
-    public static async Task<string> GetPvsStats(
+    public static Task<string> GetPvsStats(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of size-trend history for the top-5 databases; 0 (default) returns the latest snapshot only.")] int trend_hours_back = 0,
-        CancellationToken cancellationToken = default)
+        [Description("Limit to one database. Omit for all databases.")] string? database_name = null,
+        CancellationToken cancellationToken = default) =>
+        GetPvsStats(postgres, server_name, trend_hours_back, DatabaseFilter.One(database_name), cancellationToken);
+
+    /// <summary>
+    /// #5244: get_pvs_stats over a SET of databases (<see cref="DatabaseFilter.All"/> = every database): the chosen databases'
+    /// rows at the server's newest snapshot (<c>as_of</c> is the server's snapshot, so it does not move with the filter), and a
+    /// trend over the top five of the CHOSEN databases (the cap applies after the filter).
+    /// <para>One-name consumers made list-aware (#5244 M4), on the empty path: when the server has a PVS snapshot and the chosen
+    /// databases are not in it, the answer is <c>empty</c> for the chosen databases, with how many databases the snapshot does
+    /// hold. It never says "no PVS data collected for this server", which would be a verdict about the server. The
+    /// <c>not_collected</c> and unfiltered <c>empty</c> envelopes keep their words. Every answer shape carries the
+    /// <c>database_name</c> echo (the name, "the chosen databases", or null for every database), including those two.
+    /// The read has no truncation sentence.</para>
+    /// </summary>
+    internal static async Task<string> GetPvsStats(
+        NpgsqlDataSource postgres, string? server_name, int trend_hours_back, DatabaseFilter databaseFilter, CancellationToken cancellationToken = default)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
@@ -50,13 +67,32 @@ public sealed class DarlingMcpPvsTools
 
         try
         {
-            var rows = await DarlingPvsReader.GetPvsStatsLatestAsync(postgres, resolved.ServerId, cancellationToken);
+            var rows = await DarlingPvsReader.GetPvsStatsLatestAsync(postgres, resolved.ServerId, databaseFilter, cancellationToken);
             if (rows.Count == 0)
             {
-                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "pvs_stats", cancellationToken)
-                    ?? McpHelpers.Status("empty",
+                /* #5244: a filter that matches no database is a different answer from a server with no PVS data. The probe is the
+                   same newest-snapshot read, unfiltered, so "there is a snapshot, just not for these databases" is observed. */
+                if (!databaseFilter.IsAll)
+                {
+                    var serverRows = await DarlingPvsReader.GetPvsStatsLatestAsync(postgres, resolved.ServerId, DatabaseFilter.All, cancellationToken);
+                    if (serverRows.Count > 0)
+                    {
+                        return McpHelpers.StatusForDatabase("empty",
+                            $"No PVS rows for {DarlingMcpObjectStatsTools.DescribeScope(databaseFilter)} on {resolved.ServerName} in the snapshot taken at "
+                            + $"{serverRows[0].CollectionTime:o}, though it holds {serverRows.Count:N0} other database(s). Check the database "
+                            + $"{(databaseFilter.Names.Count == 1 ? "name" : "names")}: the filter matches exactly, and a database with no row at that "
+                            + "snapshot looks identical to one that does not exist.",
+                            databaseFilter.Describe());
+                    }
+                }
+
+                return McpHelpers.WithDatabase(
+                           await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "pvs_stats", cancellationToken),
+                           databaseFilter.Describe())
+                    ?? McpHelpers.StatusForDatabase("empty",
                         "No PVS data collected for this server. The collector reads sys.dm_tran_persistent_version_store_stats " +
-                        "(SQL Server 2019+); a server with no rows either predates ADR or has not completed a pvs_stats cycle yet.");
+                        "(SQL Server 2019+); a server with no rows either predates ADR or has not completed a pvs_stats cycle yet.",
+                        databaseFilter.Describe());
             }
 
             var databases = rows.Select(r => new
@@ -110,7 +146,7 @@ public sealed class DarlingMcpPvsTools
             if (trend_hours_back > 0)
             {
                 var points = await DarlingPvsReader.GetPvsTrendAsync(
-                    postgres, resolved.ServerId, DateTime.UtcNow.AddHours(-trend_hours_back), cancellationToken);
+                    postgres, resolved.ServerId, DateTime.UtcNow.AddHours(-trend_hours_back), databaseFilter, cancellationToken);
                 trend = points
                     .GroupBy(p => p.DatabaseName)
                     .Select(g => new
@@ -132,6 +168,7 @@ public sealed class DarlingMcpPvsTools
             return JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
+                database_name = databaseFilter.Describe(),
                 as_of = rows[0].CollectionTime.ToString("o"),
                 databases,
                 trend_hours_back = trend_hours_back > 0 ? trend_hours_back : (int?)null,
