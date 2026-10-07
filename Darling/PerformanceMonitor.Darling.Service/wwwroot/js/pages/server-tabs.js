@@ -39,7 +39,7 @@
  * touches innerHTML.
  */
 
-import { el, makeActivatable, readTool, readToolWithinKeptHistory, keptWindowStrip, windowFloorStrip, mount, truncate, loadingStrip, errorStrip, readErrorStrip, emptyStrip, disclosure, noticeStrip, getPath, fmtMs, fmtRate, localTime, parseUtc, windowFromHours, daysText, dbScopeChip, sourceStrip, getActiveDatabaseFilter, queryWaitFilter, setQueryWaitFilter, waitIsLinked } from "../util.js";
+import { el, makeActivatable, readTool, readToolWithinKeptHistory, keptWindowStrip, windowFloorStrip, mount, truncate, loadingStrip, errorStrip, readErrorStrip, emptyStrip, disclosure, noticeStrip, getPath, fmtMs, fmtRate, localTime, parseUtc, windowFromHours, daysText, dbScopeChip, dbFilteredEmptyText, sourceStrip, getActiveDatabaseFilter, queryWaitFilter, setQueryWaitFilter, waitIsLinked } from "../util.js";
 import { renderPanel, setPanelSignal, getPanelSignal, VIZ } from "../panels.js";
 import { zoomableLineChart, chartZoomScope, SERIES_COLORS, CATEGORICAL_COLORS } from "../charts.js";
 import { multiPicker, mergeSeriesRows } from "../multi-picker.js";
@@ -4415,7 +4415,7 @@ function scopedConfigPanel(server) {
     for (const db of res.data.databases || [])
       for (const st of db.settings || [])
         rows.push({ database_name: db.database_name, ...st, captured_at: res.data.captured_at });
-    mount(body, VIZ.table({ rows }, { rowsKey: "rows", columns: SCOPED_CONFIG_COLUMNS, emptyText: "No database-scoped configuration snapshot yet." }));
+    mount(body, VIZ.table({ rows }, { rowsKey: "rows", columns: SCOPED_CONFIG_COLUMNS, emptyText: dbFilteredEmptyText("get_database_scoped_config", "No database-scoped configuration snapshot yet.") }));
   })();
   return panel;
 }
