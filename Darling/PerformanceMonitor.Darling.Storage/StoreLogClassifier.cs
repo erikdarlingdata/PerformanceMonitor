@@ -436,7 +436,7 @@ public static class StoreLogClassifier
     /// classified, because a fixture legitimately ends that way and dropping it would make the pin's own
     /// last case silently untested.</para>
     /// </summary>
-    public static Census Classify(string? slab)
+    public static Census Classify(string? slab, bool detailInEnglish = true)
     {
         var entries = new List<Entry>();
         var lines = 0;
@@ -466,7 +466,7 @@ public static class StoreLogClassifier
                 var raw = currentRaw.ToString();
                 if (retained)
                 {
-                    (eventClass, retained, message, raw) = MaskRetained(eventClass, currentMessage, raw);
+                    (eventClass, retained, message, raw) = MaskRetained(eventClass, currentMessage, raw, detailInEnglish: detailInEnglish);
                 }
 
                 entries.Add(new Entry(
@@ -1180,7 +1180,7 @@ public static class StoreLogClassifier
     /// plan falls to <see cref="RoutineClass"/>, counted and keeping no text.
     /// </summary>
     internal static (string EventClass, bool Retained, string Message, string RawText) MaskRetained(
-        string eventClass, string message, string rawText, bool cut = false)
+        string eventClass, string message, string rawText, bool cut = false, bool detailInEnglish = true)
     {
         if (eventClass == SlowStatementClass)
         {
@@ -1206,7 +1206,7 @@ public static class StoreLogClassifier
            pairs with nothing. Read off the kept entry's first line, not off the raw first line alone (#4006): a
            catalogue that writes the token first (`"$$ BEGIN` ... `"またはその近辺で...`) names its form only after
            the token, which can run past that line, and the first line alone named no form to withhold it by. */
-        var masked = MaskEntry(rawText, cut);
+        var masked = MaskEntry(rawText, cut, detailInEnglish);
         var kept = PrimaryMessageOf(masked) ?? PgLogTextRedactor.RedactMessage(message, cut) ?? message;
         return (eventClass, true, GroupingKeyOf(kept), masked);
     }
@@ -1275,7 +1275,7 @@ public static class StoreLogClassifier
     /// the same function. <paramref name="cut"/> says the entry's end may be missing, and is passed to
     /// <see cref="PgLogTextRedactor.RedactMessage"/>.
     /// </summary>
-    internal static string MaskEntry(string rawText, bool cut = false)
+    internal static string MaskEntry(string rawText, bool cut = false, bool detailInEnglish = true)
     {
         var lines = rawText.Split('\n');
         var result = new StringBuilder(rawText.Length);
@@ -1327,7 +1327,8 @@ public static class StoreLogClassifier
                 var masked = field.Name switch
                 {
                     "STATEMENT" or "QUERY" => PgLogTextRedactor.RedactStoredStatement(text) ?? WithheldStatement,
-                    "DETAIL" => PgLogTextRedactor.RedactDetail(text, detailComplete) ?? string.Empty,
+                    "DETAIL" when !detailInEnglish => WithheldDetail,
+                    "DETAIL" => MaskRowValues(PgLogTextRedactor.RedactDetail(text, detailComplete) ?? string.Empty),
                     _ => PgLogTextRedactor.RedactContext(text) ?? string.Empty,
                 };
 
@@ -1346,6 +1347,61 @@ public static class StoreLogClassifier
         }
 
         return result.ToString();
+    }
+
+    /* The failing-row label in any case (`Failing row contains`, `Partition key of the failing row contains`). */
+    private static readonly Regex FailingRowPattern = new(
+        @"(failing row contains) \(.*",
+        RegexOptions.CultureInvariant | RegexOptions.IgnoreCase | RegexOptions.Singleline, TimeSpan.FromSeconds(1));
+
+    /* The key's column list takes one level of parentheses, so an expression index's key
+       (`Key (COALESCE(parent_id, 0), lower(name))=(0, prod)`) reads like a plain column list. */
+    private static readonly Regex KeyValuePattern = new(
+        @"Key \(((?:[^()]|\([^()]*\))*)\)=\(.*\)(?= (?:already exists|is not present|is still referenced))",
+        RegexOptions.CultureInvariant | RegexOptions.Singleline, TimeSpan.FromSeconds(1));
+
+    private static readonly Regex KeyValueUnterminatedPattern = new(
+        @"Key \(((?:[^()]|\([^()]*\))*)\)=\((?!\.\.\.\))(.*)",
+        RegexOptions.CultureInvariant | RegexOptions.Singleline, TimeSpan.FromSeconds(1));
+
+    /// <summary>The DETAIL a retained entry keeps when the store's <c>lc_messages</c> is not English: the row-carrying
+    /// forms are worded by the catalogue in use, so the patterns of <see cref="MaskRowValues"/> would not read them.</summary>
+    public const string WithheldDetail = "<detail withheld: the store's lc_messages is not English>";
+
+    /// <summary>
+    /// Whether a store's <c>lc_messages</c> setting writes PostgreSQL's English wording: <c>C</c> (also <c>C.UTF-8</c>),
+    /// <c>POSIX</c>, or an <c>en</c> locale (<c>en_US.UTF-8</c>, <c>English_United States.1252</c>). A setting that could
+    /// not be read (null or blank) counts as not English.
+    /// </summary>
+    public static bool IsEnglishLcMessages(string? lcMessages)
+    {
+        if (string.IsNullOrWhiteSpace(lcMessages))
+        {
+            return false;
+        }
+
+        var value = lcMessages.Trim();
+        return value.Equals("C", StringComparison.OrdinalIgnoreCase)
+            || value.Equals("POSIX", StringComparison.OrdinalIgnoreCase)
+            || value.StartsWith("C.", StringComparison.OrdinalIgnoreCase)
+            || value.StartsWith("en", StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// A DETAIL's row values withheld (#5452): the tuple in <c>Failing row contains (...)</c> and the value in
+    /// <c>Key (columns)=(value)</c> are replaced by <c>...</c>, so the stored text names the constraint and the
+    /// columns and holds no stored value. Idempotent, like <see cref="MaskEntry"/>.
+    /// </summary>
+    internal static string MaskRowValues(string detail)
+    {
+        if (detail.Length == 0)
+        {
+            return detail;
+        }
+
+        detail = FailingRowPattern.Replace(detail, "$1 (...).");
+        detail = KeyValuePattern.Replace(detail, "Key ($1)=(...)");
+        return KeyValueUnterminatedPattern.Replace(detail, "Key ($1)=(...)");
     }
 
     /// <summary>A field's text (<see cref="MaskEntry"/>): its first line from <paramref name="from"/>, and the

@@ -57,6 +57,16 @@ public sealed class DarlingConfig
     public List<MonitoredServer> Servers { get; set; } = new();
 
     /// <summary>
+    /// Which AWS roles the web and MCP may set for an Amazon RDS or Aurora target (#5452): IAM role ARNs, or 12-digit
+    /// AWS account ids that allow every role in the account (a bare id is an account in the <c>aws</c> partition;
+    /// <c>aws-cn:123456789012</c> and <c>aws-us-gov:123456789012</c> name the others). The service assumes a saved role only if it is listed
+    /// here or a <c>servers[]</c> entry in this file names it in <c>awsRoleArn</c>. Read at start, so an edit applies
+    /// on restart. Empty by default: only the roles the file's own servers name run.
+    /// </summary>
+    [JsonPropertyName("allowedAwsRoles")]
+    public List<string> AllowedAwsRoles { get; set; } = new();
+
+    /// <summary>
     /// Capture execution-plan text. Default TRUE for Darling. Since #1767 a query_stats plan is
     /// stored ONCE per distinct plan in <c>query_plan_dim</c> and the fact row carries only its
     /// content digest (<c>query_plan_digest</c>), so re-collecting the same cached plan every cycle
@@ -501,6 +511,17 @@ public sealed class DarlingConfig
 
         /* Peer-disclosure problems are checked BEFORE the servers early-return so a broken peers block is
            reported even on a config that has no servers yet. */
+        /* The AWS role allowlist (#5452): an entry is a role ARN or a 12-digit account id. Fatal like the server
+           entries: a typo here would silently leave a role off the list. */
+        for (var i = 0; i < (AllowedAwsRoles?.Count ?? 0); i++)
+        {
+            var entryProblem = Targets.AwsRoleAllowlist.ValidateEntry(AllowedAwsRoles![i]);
+            if (entryProblem is not null)
+            {
+                problems.Add($"allowedAwsRoles[{i}]: {entryProblem}");
+            }
+        }
+
         problems.AddRange(PeersConfig.Validate(Peers));
         /* #5450: the heartbeat block, for the same reason (a broken one is reported even with no servers yet). */
         problems.AddRange(HeartbeatConfig.Validate(Heartbeat));
@@ -566,6 +587,19 @@ public sealed class DarlingConfig
             if (server.Port is not 0 && server.Port is < 1 or > 65535)
             {
                 problems.Add($"{label}: port must be between 1 and 65535 (got {server.Port}).");
+            }
+
+            /* The AWS role (#5452): each value's format, an external ID needs a role, and a role needs a
+               PostgreSQL target. The texts come from the one validator every surface shares. */
+            var awsRole = AwsRoleSettings.Normalize(server.AwsRoleArn);
+            var awsProblem = AwsRoleSettings.ValidatePair(awsRole, AwsRoleSettings.Normalize(server.AwsExternalId));
+            if (awsProblem is not null)
+            {
+                problems.Add($"{label}: {awsProblem}");
+            }
+            else if (awsRole is not null && !server.IsPostgres)
+            {
+                problems.Add($"{label}: {AwsRoleSettings.RoleNeedsPostgresMessage}");
             }
         }
 
@@ -2396,6 +2430,40 @@ public sealed class MonitoredServer
     /// </summary>
     [JsonPropertyName("remediationEncryptedPassword")]
     public string? RemediationEncryptedPassword { get; set; }
+
+    /// <summary>
+    /// The AWS IAM role Darling assumes to reach this Amazon RDS or Aurora target (#5452), as a role ARN such as
+    /// <c>arn:aws:iam::123456789012:role/darling-monitor</c>. Unset (the default) means the process's own AWS
+    /// credentials, exactly as before. PostgreSQL targets only.
+    ///
+    /// <para><b>darling.json seeds only a NEW row.</b> The store is authoritative once a server is registered
+    /// (the seed is <c>ON CONFLICT DO NOTHING</c>, <c>StoreConfigProvider</c>), so changing this in the file
+    /// does not move a server that is already stored: edit it from the web, the MCP tool or the desktop
+    /// viewer.</para>
+    /// </summary>
+    [JsonPropertyName("awsRoleArn")]
+    public string? AwsRoleArn { get; set; }
+
+    /// <summary>
+    /// The external ID sent with the AssumeRole call for <see cref="AwsRoleArn"/> (#5452), when the role's trust policy
+    /// asks for one. Needs a role. Seeds a new row only, like the role.
+    /// </summary>
+    [JsonPropertyName("awsExternalId")]
+    public string? AwsExternalId { get; set; }
+
+    /// <summary>
+    /// The role and external ID as one value, trimmed, or null when no role is set (an external ID with no role is
+    /// never used). Two servers with the same key share one assumed-role session.
+    /// </summary>
+    [JsonIgnore]
+    public Targets.AwsRoleKey? AwsRoleKey
+    {
+        get
+        {
+            var role = AwsRoleSettings.Normalize(AwsRoleArn);
+            return role is null ? null : new Targets.AwsRoleKey(role, AwsRoleSettings.Normalize(AwsExternalId));
+        }
+    }
 
     /// <summary>
     /// Whether this server is armed for operator-initiated remediation: BOTH halves of the credential are

@@ -165,13 +165,21 @@ public static class DarlingManagedRoles
                    learns a server is armed at all: the phase-1 surface exists when this is non-null, so a
                    `viewer` seat that could not read it would see no surface on an armed server. */
                 "remediation_username",
+                /* V169 (#5452): the AWS role Darling assumes for an RDS or Aurora target, and whether an external
+                   ID is stored with it. Non-secret: an account id is an identifier, not a credential, and the
+                   viewer has to be able to SHOW which role a target uses. The flag lets it show that an
+                   external ID is set without ever being able to read the ID. */
+                "aws_role_arn", "aws_external_id_set",
             },
             /* remediation_encrypted_password is the same kind of thing as encrypted_password beside it: a
                DPAPI blob whose whole purpose is to authenticate a WRITE to a monitored server, so if
                anything in this table is secret it is. Named explicitly rather than left unclassified
                because unclassified is only invisible until someone "fixes" the failing security gate by
                adding the column to whichever list is nearer. */
-            SecretColumns: new[] { "encrypted_password", "remediation_encrypted_password" }),
+            /* aws_external_id (V169, #5452) is write-only for these roles. AWS does not treat an external ID as
+               a secret, but a role that trusts a whole account plus an external ID is only as closed as that ID
+               is private, so it is named here rather than left unclassified. */
+            SecretColumns: new[] { "encrypted_password", "remediation_encrypted_password", "aws_external_id" }),
 
         new ViewerSecretTableAcl(
             "config_command",
@@ -1118,7 +1126,13 @@ GRANT UPDATE (enabled, modified_at), DELETE ON {config}.config_notification_rout
 --    config_monitored_servers write fires trg_bump_monitored_servers -> config_bump_version (SECURITY INVOKER),
 --    which UPDATEs config_service.config_version AS mcp, and section 8 already granted mcp
 --    UPDATE (config_version, updated_at) ON config_service -- so no additional config_service grant is needed here.
-GRANT INSERT, UPDATE, DELETE ON {config}.config_monitored_servers TO {mcp};
+GRANT INSERT, DELETE ON {config}.config_monitored_servers TO {mcp};
+REVOKE UPDATE ON {config}.config_monitored_servers FROM {mcp};
+-- The role and external ID of a server are set only through the edit function (and an INSERT): mcp's UPDATE
+-- names every other column of the table and leaves out aws_role_arn, aws_external_id and the generated
+-- aws_external_id_set. A column added to the table later is added to this list.
+GRANT UPDATE ({McpMonitoredServerUpdateColumns})
+   ON {config}.config_monitored_servers TO {mcp};
 
 -- 10. Custom-alert resolve-on-delete privileged write (#3334). The recovery/resolution row a caller-initiated
 --     rule DELETE writes (CustomAlertEvaluator.WriteTeardownResolutionAsync) lands in config.config_alert_log,
@@ -1152,6 +1166,11 @@ GRANT EXECUTE ON FUNCTION {config}.record_custom_alert_resolution(integer, text,
 --     tools/provision-roles.sql, and is told to re-run it when the function is missing.
 {BuildEditMonitoredServerFunctionSql(config)}
 GRANT EXECUTE ON FUNCTION {config}.edit_monitored_server({EditMonitoredServerSignature}) TO {viewer}, {mcp};
+-- #5452: the 15-argument edit function stays as a permanent wrapper over the 17-argument one, for a caller that
+--     was built before the AWS role columns. It passes NULL for both and strips the two AWS column names from
+--     p_columns, so a caller of the old signature can neither change nor clear a role. Same grants, same owner.
+{BuildEditMonitoredServerLegacyWrapperSql(config)}
+GRANT EXECUTE ON FUNCTION {config}.edit_monitored_server({EditMonitoredServerLegacySignature}) TO {viewer}, {mcp};
 -- The store's own password rules for every role but the owner (see BuildServerPasswordRulesSql): a trigger on
 --     config_monitored_servers that refuses a password reference (env: or file:) and a move that keeps the stored
 --     password. Created here, not in a migration: CREATE OR REPLACE is idempotent and owner-run every start. A
@@ -1277,9 +1296,20 @@ AS $fn$
 $fn$;
 REVOKE ALL ON FUNCTION {config}.record_custom_alert_resolution(integer, text, text, text) FROM PUBLIC;";
 
+    // A new column on config.config_monitored_servers is added to this list. A column that holds a secret goes into the
+    // exclusion list of ServerEditLiveTests (the NOT IN (...) beside the column-set check) instead, and stays out of the grant.
+    /// <summary>The columns of <c>config.config_monitored_servers</c> the <c>mcp</c> login may UPDATE directly (#5452): every column except the AWS role, the external ID and the generated external-ID flag, which change only through <c>config.edit_monitored_server</c>. <c>tools/provision-roles.sql</c> carries the same list.</summary>
+    internal const string McpMonitoredServerUpdateColumns =
+        "server_id, name, host, database, auth, username, encrypted_password, encrypt_mode, trust_server_certificate, read_only_intent, multi_subnet_failover, excluded_databases, monthly_cost_usd, capture_plans, is_enabled, created_at, modified_at, alert_delivery_mode_override, engine, port, plan_force_bot_enabled, remediation_username, remediation_encrypted_password";
+
     /// <summary>The argument types of <c>config.edit_monitored_server</c> (#5240), in order. The one place the signature is
     /// spelled for the <c>GRANT EXECUTE</c>, so a changed parameter list cannot leave the grant naming another function.</summary>
-    internal const string EditMonitoredServerSignature = "integer, timestamp, text[], text, text, integer, text, boolean, text, text, text, text, boolean, boolean, numeric";
+    internal const string EditMonitoredServerSignature = "integer, timestamp, text[], text, text, integer, text, boolean, text, text, text, text, boolean, boolean, numeric, text, text";
+
+    /// <summary>The argument types of the 15-argument <c>config.edit_monitored_server</c> that callers built before the AWS
+    /// role columns (#5452) still call: a permanent wrapper over <see cref="EditMonitoredServerSignature"/>'s function
+    /// (<see cref="BuildEditMonitoredServerLegacyWrapperSql"/>).</summary>
+    internal const string EditMonitoredServerLegacySignature = "integer, timestamp, text[], text, text, integer, text, boolean, text, text, text, text, boolean, boolean, numeric";
 
     /// <summary>
     /// The <c>SECURITY DEFINER</c> function (#5240) that is the one write of a monitored-server edit, for the web edit route
@@ -1289,7 +1319,8 @@ REVOKE ALL ON FUNCTION {config}.record_custom_alert_resolution(integer, text, te
     /// itself from the stored row, answers <c>remediation_kept</c> instead of writing when the row holds a remediation login,
     /// and answers <c>password_needed</c> instead of writing when that change, or a switch
     /// of authentication mode, would keep the stored secret on a SQL or service-principal row. A row whose
-    /// authentication stores no secret never keeps one. Same builder for the managed batch, the script's text and the
+    /// authentication stores no secret never keeps one. A missing value for a required column, or a value the table's
+    /// checks refuse, answers <c>invalid_value</c> instead of writing. Same builder for the managed batch, the script's text and the
     /// live tests, so none drifts. Pinned <c>search_path</c>, fixed statements, no dynamic SQL.
     /// </summary>
     internal static string BuildEditMonitoredServerFunctionSql(string config) => $@"
@@ -1308,7 +1339,9 @@ CREATE OR REPLACE FUNCTION {config}.edit_monitored_server(
    p_encrypt_mode text,
    p_trust_server_certificate boolean,
    p_multi_subnet_failover boolean,
-   p_monthly_cost_usd numeric)
+   p_monthly_cost_usd numeric,
+   p_aws_role_arn text,
+   p_aws_external_id text)
 RETURNS TABLE (outcome text, new_modified_at timestamp)
 LANGUAGE plpgsql
 SECURITY DEFINER
@@ -1340,14 +1373,19 @@ DECLARE
    v_secret text;
    v_remediation_held boolean;
    v_connection_changed boolean;
+   v_old_role text;
+   v_old_ext text;
+   v_role text;
+   v_ext text;
 BEGIN
    p_columns := COALESCE(p_columns, ARRAY[]::text[]);
 
    SELECT s.modified_at, s.host, s.port, s.auth, s.database, s.read_only_intent, s.username, s.encrypt_mode,
-          s.trust_server_certificate, s.multi_subnet_failover, COALESCE(s.remediation_encrypted_password, '') <> ''
+          s.trust_server_certificate, s.multi_subnet_failover, COALESCE(s.remediation_encrypted_password, '') <> '',
+          s.aws_role_arn, s.aws_external_id
    INTO v_old_modified_at, v_old_host, v_old_port, v_old_auth, v_old_database, v_old_read_only_intent,
         v_old_username, v_old_encrypt_mode, v_old_trust_server_certificate, v_old_multi_subnet_failover,
-        v_remediation_held
+        v_remediation_held, v_old_role, v_old_ext
    FROM {config}.config_monitored_servers AS s
    WHERE s.server_id = p_server_id
    FOR UPDATE OF s;
@@ -1372,14 +1410,43 @@ BEGIN
    v_encrypt_mode := CASE WHEN 'encrypt_mode' = ANY (p_columns) THEN p_encrypt_mode ELSE v_old_encrypt_mode END;
    v_trust_server_certificate := CASE WHEN 'trust_server_certificate' = ANY (p_columns) THEN p_trust_server_certificate ELSE v_old_trust_server_certificate END;
    v_multi_subnet_failover := CASE WHEN 'multi_subnet_failover' = ANY (p_columns) THEN p_multi_subnet_failover ELSE v_old_multi_subnet_failover END;
+   -- The AWS role (#5452). Left out of p_columns, the stored role and external ID are kept. A role named in p_columns
+   -- with a NULL value clears it, and a cleared role takes its external ID with it.
+   v_role := CASE WHEN 'aws_role_arn' = ANY (p_columns) THEN p_aws_role_arn ELSE v_old_role END;
+   v_ext := CASE WHEN v_role IS NULL THEN NULL
+                 WHEN 'aws_external_id' = ANY (p_columns) THEN p_aws_external_id
+                 ELSE v_old_ext END;
    v_secret_auth := lower(v_auth) IN ('sql', 'serviceprincipal');
    v_new_secret := 'encrypted_password' = ANY (p_columns) AND COALESCE(p_secret, '') <> '';
+
+   -- A NULL for a column the table requires is refused with a plain outcome: the edit sends nothing the table would
+   -- have to turn away.
+   IF ('name' = ANY (p_columns) AND p_name IS NULL)
+      OR v_host IS NULL OR v_port IS NULL OR v_auth IS NULL OR v_encrypt_mode IS NULL
+      OR v_read_only_intent IS NULL OR v_trust_server_certificate IS NULL OR v_multi_subnet_failover IS NULL
+      OR ('monthly_cost_usd' = ANY (p_columns) AND p_monthly_cost_usd IS NULL) THEN
+      RETURN QUERY SELECT 'invalid_value'::text, NULL::timestamp;
+      RETURN;
+   END IF;
 
    -- The store takes the password itself from these roles: a secret that starts with env: or file: (a reference,
    -- compared as the service reads one, case-sensitive and at the start of the text) is refused. References are set
    -- in the configuration file.
    IF v_new_secret AND (left(p_secret, 4) = 'env:' OR left(p_secret, 5) = 'file:') THEN
       RETURN QUERY SELECT 'reference_refused'::text, NULL::timestamp;
+      RETURN;
+   END IF;
+
+   -- A new role would take the stored external ID with it unseen; the caller sends the ID again or clears it.
+   IF v_role IS NOT NULL AND v_role IS DISTINCT FROM v_old_role AND v_old_ext IS NOT NULL
+      AND NOT ('aws_external_id' = ANY (p_columns)) THEN
+      RETURN QUERY SELECT 'external_id_needed'::text, NULL::timestamp;
+      RETURN;
+   END IF;
+
+   -- An external ID with no role is refused (the table's check would refuse it too).
+   IF v_role IS NULL AND 'aws_external_id' = ANY (p_columns) AND p_aws_external_id IS NOT NULL THEN
+      RETURN QUERY SELECT 'external_id_needs_role'::text, NULL::timestamp;
       RETURN;
    END IF;
 
@@ -1420,28 +1487,76 @@ BEGIN
       v_secret := NULL;
    END IF;
 
-   UPDATE {config}.config_monitored_servers AS s
-   SET name = CASE WHEN 'name' = ANY (p_columns) THEN p_name ELSE s.name END,
-       host = v_host,
-       port = v_port,
-       database = v_database,
-       read_only_intent = v_read_only_intent,
-       auth = v_auth,
-       username = v_username,
-       encrypted_password = CASE WHEN v_secret_set THEN v_secret ELSE s.encrypted_password END,
-       encrypt_mode = v_encrypt_mode,
-       trust_server_certificate = v_trust_server_certificate,
-       multi_subnet_failover = v_multi_subnet_failover,
-       monthly_cost_usd = CASE WHEN 'monthly_cost_usd' = ANY (p_columns) THEN p_monthly_cost_usd ELSE s.monthly_cost_usd END,
-       modified_at = (now() AT TIME ZONE 'UTC')
-   WHERE s.server_id = p_server_id
-   RETURNING s.modified_at INTO new_modified_at;
+   -- A value the table's own checks refuse (a required column, a format, a duplicate) answers invalid_value too:
+   -- the table's error text is not passed on.
+   BEGIN
+      UPDATE {config}.config_monitored_servers AS s
+      SET name = CASE WHEN 'name' = ANY (p_columns) THEN p_name ELSE s.name END,
+          host = v_host,
+          port = v_port,
+          database = v_database,
+          read_only_intent = v_read_only_intent,
+          auth = v_auth,
+          username = v_username,
+          encrypted_password = CASE WHEN v_secret_set THEN v_secret ELSE s.encrypted_password END,
+          encrypt_mode = v_encrypt_mode,
+          trust_server_certificate = v_trust_server_certificate,
+          multi_subnet_failover = v_multi_subnet_failover,
+          monthly_cost_usd = CASE WHEN 'monthly_cost_usd' = ANY (p_columns) THEN p_monthly_cost_usd ELSE s.monthly_cost_usd END,
+          aws_role_arn = v_role,
+          aws_external_id = v_ext,
+          modified_at = (now() AT TIME ZONE 'UTC')
+      WHERE s.server_id = p_server_id
+      RETURNING s.modified_at INTO new_modified_at;
+   EXCEPTION WHEN integrity_constraint_violation THEN
+      RETURN QUERY SELECT 'invalid_value'::text, NULL::timestamp;
+      RETURN;
+   END;
 
    outcome := 'saved';
    RETURN NEXT;
 END;
 $fn$;
-REVOKE ALL ON FUNCTION {config}.edit_monitored_server(integer, timestamp, text[], text, text, integer, text, boolean, text, text, text, text, boolean, boolean, numeric) FROM PUBLIC;";
+REVOKE ALL ON FUNCTION {config}.edit_monitored_server({EditMonitoredServerSignature}) FROM PUBLIC;";
+
+    /// <summary>
+    /// The 15-argument <c>config.edit_monitored_server</c> (#5452), kept for good as a wrapper over the 17-argument
+    /// function, for a caller built before the AWS role columns existed (the web route, the MCP tool and the service's
+    /// own call all name the shorter list until they are moved). It passes NULL for the role and the external ID, and
+    /// removes both AWS column names from <c>p_columns</c> first, so a caller of this signature cannot change or clear a
+    /// role, however it builds its list. <c>SECURITY DEFINER</c> with a pinned <c>search_path</c>, revoked from PUBLIC;
+    /// the caller adds the <c>GRANT EXECUTE</c>. Must run after <see cref="BuildEditMonitoredServerFunctionSql"/>.
+    /// </summary>
+    internal static string BuildEditMonitoredServerLegacyWrapperSql(string config) => $@"
+CREATE OR REPLACE FUNCTION {config}.edit_monitored_server(
+   p_server_id integer,
+   p_expected_modified_at timestamp,
+   p_columns text[],
+   p_name text,
+   p_host text,
+   p_port integer,
+   p_database text,
+   p_read_only_intent boolean,
+   p_auth text,
+   p_username text,
+   p_secret text,
+   p_encrypt_mode text,
+   p_trust_server_certificate boolean,
+   p_multi_subnet_failover boolean,
+   p_monthly_cost_usd numeric)
+RETURNS TABLE (outcome text, new_modified_at timestamp)
+LANGUAGE sql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $fn$
+   SELECT e.outcome, e.new_modified_at
+   FROM {config}.edit_monitored_server(
+      p_server_id, p_expected_modified_at,
+      array_remove(array_remove(COALESCE(p_columns, ARRAY[]::text[]), 'aws_role_arn'), 'aws_external_id'),
+      p_name, p_host, p_port, p_database, p_read_only_intent, p_auth, p_username, p_secret, p_encrypt_mode,
+      p_trust_server_certificate, p_multi_subnet_failover, p_monthly_cost_usd, NULL::text, NULL::text) AS e;
+$fn$;
+REVOKE ALL ON FUNCTION {config}.edit_monitored_server({EditMonitoredServerLegacySignature}) FROM PUBLIC;";
 
     /// <summary>
     /// The store's own password rules for every role but the owner: a <c>BEFORE INSERT OR UPDATE</c> trigger on
@@ -1533,6 +1648,15 @@ BEGIN
       AND COALESCE(OLD.encrypted_password, '') <> ''
       AND NEW.encrypted_password IS NOT DISTINCT FROM OLD.encrypted_password THEN
       RAISE EXCEPTION '%', 'Changing how this server is reached needs its password again: it is stored encrypted and this surface cannot read it back.' USING ERRCODE = 'PW002';
+   END IF;
+
+   -- A new AWS role (#5452) never inherits an external ID stored for the old one, unseen: the update names the ID
+   -- again, or clears it. The owner is not held to this; edit_monitored_server answers it first.
+   IF NEW.aws_role_arn IS NOT NULL
+      AND NEW.aws_role_arn IS DISTINCT FROM OLD.aws_role_arn
+      AND OLD.aws_external_id IS NOT NULL
+      AND NEW.aws_external_id IS NOT DISTINCT FROM OLD.aws_external_id THEN
+      RAISE EXCEPTION '%', 'Changing the AWS role needs the external ID with it: send the external ID again, or clear it.' USING ERRCODE = 'PW004';
    END IF;
 
    RETURN NEW;

@@ -441,10 +441,94 @@ public sealed class AdminServerEditBehaviourTests
         Assert.Equal(expected, probe.GetBoolean());
     }
 
+    // ------------------------------------------------------------------ the AWS role (#5452)
+
+    private const string AwsRole = "arn:aws:iam::123456789012:role/darling-monitor";
+    private const string AwsOtherRole = "arn:aws:iam::123456789012:role/darling-other";
+
+    private static JsonObject PgWithRole(bool idSet)
+    {
+        var form = Base("postgres");
+        form["aws_role_arn"] = AwsRole;
+        form["aws_external_id_set"] = idSet;
+        return form;
+    }
+
+    private static JsonObject PgEdited(bool idSet, string overrides)
+    {
+        var form = PgWithRole(idSet);
+        foreach (var (key, value) in JsonNode.Parse(overrides)!.AsObject().ToList())
+        {
+            form[key] = value?.DeepClone();
+        }
+
+        return form;
+    }
+
+    [Fact]
+    public void AnUntouchedRole_AndABlankRoleBox_SendNothing_ButRemoveRoleSendsNull_Pure()
+    {
+        Assert.Equal(JsonValueKind.Null, Pure("buildEditBody", PgWithRole(false), PgEdited(false, "{}"), Token, "", "").ValueKind);
+        Assert.Equal(JsonValueKind.Null, Pure("buildEditBody", PgWithRole(false), PgEdited(false, """{"aws_role_arn":""}"""), Token, "", "").ValueKind);
+
+        var removed = Pure("buildEditBody", PgWithRole(true), PgEdited(true, """{"aws_remove_role":true}"""), Token, "", "");
+        Assert.Equal(JsonValueKind.Null, removed.GetProperty("aws_role_arn").ValueKind);
+        Assert.False(removed.TryGetProperty("aws_external_id", out _));
+    }
+
+    [Fact]
+    public void ATypedRoleAndExternalId_AreSent_AndClearExternalIdSendsNull_Pure()
+    {
+        var typed = Pure("buildEditBody", PgWithRole(true), PgEdited(true, $$"""{"aws_role_arn":"  {{AwsOtherRole}} "}"""), Token, "", "ext-id-7f3a9c");
+        Assert.Equal(AwsOtherRole, typed.GetProperty("aws_role_arn").GetString());
+        Assert.Equal("ext-id-7f3a9c", typed.GetProperty("aws_external_id").GetString());
+
+        var cleared = Pure("buildEditBody", PgWithRole(true), PgEdited(true, """{"aws_clear_external_id":true}"""), Token, "", "");
+        Assert.Equal(JsonValueKind.Null, cleared.GetProperty("aws_external_id").ValueKind);
+        Assert.False(cleared.TryGetProperty("aws_role_arn", out _));
+    }
+
+    [Fact]
+    public void ARoleEdit_IsChecked_WithTheServicesOwnSentences_Pure()
+    {
+        var original = PgWithRole(true);
+        Assert.Equal(
+            "The AWS role must be an IAM role ARN, such as arn:aws:iam::123456789012:role/darling-monitor.",
+            Pure("validateEdit", original, PgEdited(true, """{"aws_role_arn":"nope"}"""), "", "").GetString());
+        foreach (var path in new[] { "<svg/onload=alert(1)>/x", "a<b>/x", "a&b/x", "a`b/x", "a'b/x" })
+        {
+            Assert.Equal(
+                "The AWS role must be an IAM role ARN, such as arn:aws:iam::123456789012:role/darling-monitor.",
+                Pure("validateEdit", original, PgEdited(true, "{\"aws_role_arn\":\"arn:aws:iam::123456789012:role/" + path + "\"}"), "", "").GetString());
+        }
+        Assert.Equal(
+            "The external ID must be 2 to 1224 characters: letters, digits and _ + = , . @ : / - with no spaces.",
+            Pure("validateEdit", original, PgEdited(true, "{}"), "", "has space").GetString());
+        Assert.Equal(
+            "An external ID needs an AWS role ARN. Set the role, or clear the external ID.",
+            Pure("validateEdit", original, PgEdited(true, """{"aws_remove_role":true}"""), "", "ext-id-7f3a9c").GetString());
+        Assert.Equal(
+            "Changing the AWS role needs the external ID with it: send the external ID again, or clear it.",
+            Pure("validateEdit", original, PgEdited(true, $$"""{"aws_role_arn":"{{AwsOtherRole}}"}"""), "", "").GetString());
+        Assert.Equal(JsonValueKind.Null, Pure("validateEdit", original, PgEdited(true, $$"""{"aws_role_arn":"{{AwsOtherRole}}"}"""), "", "ext-id-7f3a9c").ValueKind);
+        Assert.Equal(JsonValueKind.Null, Pure("validateEdit", original, PgEdited(true, $$"""{"aws_role_arn":"{{AwsOtherRole}}","aws_clear_external_id":true}"""), "", "").ValueKind);
+    }
+
+    [Fact]
+    public void AConflict_ShowsTheExternalIdOnlyAsSetOrNotSet_AndRedactionTakesSeveralSecrets_Pure()
+    {
+        var current = PgWithRole(false);
+        var changes = Pure("conflictChanges", PgWithRole(true), current, PgEdited(true, "{}"));
+        var line = Assert.Single(changes.EnumerateArray(), c => c.GetProperty("key").GetString() == "aws_external_id_set");
+        Assert.Equal("AWS external ID: was set, now not set", line.GetProperty("text").GetString());
+
+        Assert.Equal("a [redacted] b [redacted]", Pure("redactPassword", "a pw1 b ext1", "pw1", "ext1").GetString());
+    }
+
     // ------------------------------------------------------------------ the rest of the exports
 
     [Fact]
-    public void TheEditFields_AreTheElevenEditableKeysInFormOrder_AndNeverTheSecretOrTheToken_Pure()
+    public void TheEditFields_AreTheTwelveEditableKeysInFormOrder_AndNeverTheSecretOrTheToken_Pure()
     {
         var fields = Pure("EDIT_FIELDS").EnumerateArray().Select(f => (f.GetProperty("key").GetString(), f.GetProperty("label").GetString())).ToArray();
 
@@ -454,7 +538,7 @@ public sealed class AdminServerEditBehaviourTests
                 ("host", "Server Name / Address"), ("display_name", "Display Name"), ("port", "Port"), ("auth", "Authentication"),
                 ("username", "Username"), ("encrypt_mode", "Encryption"), ("trust_server_certificate", "Trust server certificate"),
                 ("database", "Database"), ("read_only_intent", "Read-only intent"), ("multi_subnet_failover", "Multi-subnet failover"),
-                ("monthly_cost_usd", "Monthly Cost ($)"),
+                ("monthly_cost_usd", "Monthly Cost ($)"), ("aws_role_arn", "AWS role ARN"),
             },
             fields);
         Assert.Equal(new[] { "Windows", "SQL", "ServicePrincipal", "ManagedIdentity" }, Pure("EDIT_AUTHS").EnumerateArray().Select(a => a.GetString()).ToArray());
@@ -466,18 +550,18 @@ public sealed class AdminServerEditBehaviourTests
     // true only when exactly true, and no secret, id or token comes along.
     [InlineData(
         """{"server_id":7,"display_name":"Orders","engine":"sqlserver","host":"sql-a","port":0,"database":null,"read_only_intent":true,"auth":"SQL","username":"sa","encrypt_mode":"mandatory","trust_server_certificate":true,"multi_subnet_failover":false,"monthly_cost_usd":1234.5,"modified_at":"2026-01-02T03:04:05.1234567Z"}""",
-        """{"engine":"sqlserver","host":"sql-a","display_name":"Orders","port":"","auth":"SQL","username":"sa","encrypt_mode":"Mandatory","trust_server_certificate":true,"database":"","read_only_intent":true,"multi_subnet_failover":false,"monthly_cost_usd":"1234.5"}""")]
+        """{"engine":"sqlserver","host":"sql-a","display_name":"Orders","port":"","auth":"SQL","username":"sa","encrypt_mode":"Mandatory","trust_server_certificate":true,"database":"","read_only_intent":true,"multi_subnet_failover":false,"monthly_cost_usd":"1234.5","aws_role_arn":"","aws_external_id_set":false,"aws_remove_role":false,"aws_clear_external_id":false}""")]
     // PostgreSQL always shows auth "SQL" and its port; an engine that is not sqlserver is PostgreSQL, whatever its case or spelling.
     [InlineData(
         """{"display_name":"Pg","engine":"postgres","host":"pg-a","port":5433,"database":"mon","read_only_intent":false,"auth":"Windows","username":"pgmon","encrypt_mode":"Optional","trust_server_certificate":"true","multi_subnet_failover":1,"monthly_cost_usd":0}""",
-        """{"engine":"postgres","host":"pg-a","display_name":"Pg","port":"5433","auth":"SQL","username":"pgmon","encrypt_mode":"Optional","trust_server_certificate":false,"database":"mon","read_only_intent":false,"multi_subnet_failover":false,"monthly_cost_usd":"0"}""")]
+        """{"engine":"postgres","host":"pg-a","display_name":"Pg","port":"5433","auth":"SQL","username":"pgmon","encrypt_mode":"Optional","trust_server_certificate":false,"database":"mon","read_only_intent":false,"multi_subnet_failover":false,"monthly_cost_usd":"0","aws_role_arn":"","aws_external_id_set":false,"aws_remove_role":false,"aws_clear_external_id":false}""")]
     [InlineData(
         """{"display_name":"X","engine":"MySQL","host":"h","port":3306,"auth":"SQL","username":"u","encrypt_mode":"Optional"}""",
-        """{"engine":"postgres","host":"h","display_name":"X","port":"3306","auth":"SQL","username":"u","encrypt_mode":"Optional","trust_server_certificate":false,"database":"","read_only_intent":false,"multi_subnet_failover":false,"monthly_cost_usd":"0"}""")]
+        """{"engine":"postgres","host":"h","display_name":"X","port":"3306","auth":"SQL","username":"u","encrypt_mode":"Optional","trust_server_certificate":false,"database":"","read_only_intent":false,"multi_subnet_failover":false,"monthly_cost_usd":"0","aws_role_arn":"","aws_external_id_set":false,"aws_remove_role":false,"aws_clear_external_id":false}""")]
     // An auth the list does not know shows as Windows, as the service's own word for it does; an unknown encryption mode stays as text.
     [InlineData(
         """{"display_name":"X","engine":"SQLServer","host":"h","auth":"Kerberos","username":null,"encrypt_mode":"Weird","monthly_cost_usd":12}""",
-        """{"engine":"sqlserver","host":"h","display_name":"X","port":"","auth":"Windows","username":"","encrypt_mode":"Weird","trust_server_certificate":false,"database":"","read_only_intent":false,"multi_subnet_failover":false,"monthly_cost_usd":"12"}""")]
+        """{"engine":"sqlserver","host":"h","display_name":"X","port":"","auth":"Windows","username":"","encrypt_mode":"Weird","trust_server_certificate":false,"database":"","read_only_intent":false,"multi_subnet_failover":false,"monthly_cost_usd":"12","aws_role_arn":"","aws_external_id_set":false,"aws_remove_role":false,"aws_clear_external_id":false}""")]
     public void TheFormValues_AreTheReadAsTheFormHoldsIt_Pure(string read, string expected)
     {
         var values = Pure("editFormValues", JsonNode.Parse(read));
@@ -679,7 +763,7 @@ public sealed class AdminServerEditBehaviourTests
         Assert.Equal("PostgreSQL", form.GetProperty("engine").GetString());
         // No auth radios, no read-only intent and no multi-subnet failover; the port is there, blank when stored as 0.
         Assert.Equal(
-            new[] { "engine", "host", "display_name", "port", "username", "password", "encrypt_mode", "trust_server_certificate", "database", "monthly_cost_usd" },
+            new[] { "engine", "host", "display_name", "port", "username", "password", "encrypt_mode", "trust_server_certificate", "database", "monthly_cost_usd", "aws_role_arn", "aws_remove_role", "aws_external_id", "aws_clear_external_id" },
             Strings(form.GetProperty("keys")));
         Assert.Empty(form.GetProperty("auth").EnumerateArray());
         Assert.Equal(port, form.GetProperty("values").GetProperty("port").GetString());

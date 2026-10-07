@@ -204,7 +204,7 @@ public sealed class ServerEditCoreTests : IDisposable
         };
 
         Assert.Empty(Edit.EditColumnOfField.Values.Intersect(forbidden));
-        Assert.Equal(12, Edit.EditColumnOfField.Count);
+        Assert.Equal(14, Edit.EditColumnOfField.Count);
     }
 
     [Fact]
@@ -218,7 +218,7 @@ public sealed class ServerEditCoreTests : IDisposable
                 new Edit.EditColumnValue("password", "encrypted_password", NpgsqlDbType.Text, "blob"),
             ]);
 
-        Assert.Equal(15, parameters.Count);
+        Assert.Equal(17, parameters.Count);
         Assert.Equal(["name", "encrypted_password"], (string[])parameters[2].Value!);
         Assert.Equal(token, (DateTime)parameters[1].Value!);
         Assert.Equal("x", parameters[3].Value);

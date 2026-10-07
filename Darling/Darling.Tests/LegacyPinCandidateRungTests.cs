@@ -22,8 +22,8 @@ namespace Darling.Tests;
 
 /// <summary>
 /// Pins the rung that records which old-format saved passwords were in the store at the upgrade (V167, #5456): its place
-/// in a dense ladder (V168's rung sits above it), its owner-only table, the gate on its capture statement, and the schema-version probe's
-/// newest sentinel. The live fact mints its own scratch store.
+/// in a dense ladder (V168's and V169's rungs sit above it), its owner-only table, the gate on its capture statement, and the schema-version probe's
+/// sentinel. The live fact mints its own scratch store.
 /// </summary>
 [Collection("live-postgres")]
 public sealed class LegacyPinCandidateRungTests
@@ -40,7 +40,7 @@ public sealed class LegacyPinCandidateRungTests
         var versions = PgMigrations.Scripts.Select(s => s.Version).ToList();
 
         Assert.Equal(LegacyPinCandidateTables.RungVersion, Rung.Version);
-        /* No longer the top rung: V168 (the PLAN_REGRESSION per-day totals) landed above it. */
+        /* No longer the top rung: V168 (the PLAN_REGRESSION per-day totals) and V169 (the per-server AWS role) landed above it. */
         Assert.True(Rung.Version < StorageVersion.SchemaVersion);
         Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
         Assert.Contains(Rung.Version + 1, versions);
@@ -120,7 +120,7 @@ public sealed class LegacyPinCandidateRungTests
     }
 
     [Fact]
-    public void TheProbeCarriesTheTable_AsTheNewestArm()
+    public void TheProbeCarriesTheTable_AtItsOwnOrdinal()
     {
         var probe = ViewerDataService.StoreSchemaProbeSql.Replace("\r\n", "\n", StringComparison.Ordinal);
         var arm = "to_regclass('config.legacy_secret_pin_candidate') IS NOT NULL";
@@ -131,11 +131,12 @@ public sealed class LegacyPinCandidateRungTests
         var viewer = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.cs");
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal})", viewer, StringComparison.Ordinal);
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 1})", viewer, StringComparison.Ordinal);
-        Assert.DoesNotContain($"reader.GetBoolean({ProbeOrdinal + 2})", viewer, StringComparison.Ordinal);
+        Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 2})", viewer, StringComparison.Ordinal);
+        Assert.DoesNotContain($"reader.GetBoolean({ProbeOrdinal + 3})", viewer, StringComparison.Ordinal);
 
         var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
         var parameters = method.GetParameters();
-        Assert.Equal(ProbeOrdinal + 1, parameters.Length - 1);
+        Assert.Equal(ProbeOrdinal + 2, parameters.Length - 1);
         Assert.Equal("hasLegacyPinCandidates", parameters[ProbeOrdinal].Name);
         Assert.Equal("hasPagerDutyAutoResolve", parameters[ProbeOrdinal - 1].Name);
 
@@ -143,9 +144,12 @@ public sealed class LegacyPinCandidateRungTests
         Assert.Equal(PgMigrations.Scripts[^1].Version, (int)method.Invoke(null, all)!);
         Assert.Equal(StorageVersion.SchemaVersion, ViewerDataService.RequiredStoreSchemaVersion);
 
-        var behind = (object[])all.Clone();
-        behind[ProbeOrdinal + 1] = false;
-        Assert.Equal(Rung.Version, (int)method.Invoke(null, behind)!);
+        /* A store that stopped at this rung answers this rung; the same store without its sentinel answers the one before. */
+        var atThisRung = Enumerable.Range(0, parameters.Length).Select(i => (object)(i <= ProbeOrdinal)).ToArray();
+        Assert.Equal(Rung.Version, (int)method.Invoke(null, atThisRung)!);
+        var behind = (object[])atThisRung.Clone();
+        behind[ProbeOrdinal] = false;
+        Assert.Equal(Rung.Version - 1, (int)method.Invoke(null, behind)!);
 
         var thisArm = viewer.IndexOf("if (hasLegacyPinCandidates)", StringComparison.Ordinal);
         var previousArm = viewer.IndexOf("if (hasPagerDutyAutoResolve)", StringComparison.Ordinal);

@@ -219,6 +219,9 @@ public sealed class RepoFileAdoptionTests
         /* #4427: its wiring pins slice RunPurgeNowBackgroundAsync's body by brace balance and matches calls that span line breaks. */
         "RawPurgeNowWiringTests.cs",
         "RawWindowFloorViewerPortTests.cs",
+        /* #5452: its worker pin anchors the general catch arm on the line break and indent that follow `catch (Exception ex)`,
+           so the role arm is proven to come before it. */
+        "RdsAssumeRoleSeamTests.cs",
         /* #3653 item 3: its twin pin extracts the multi-line GetPriorOccurrencesSql const body from BOTH finding
            stores' sources and asserts them equal up to one token, and its wiring pin slices each pass method by
            call sites that sit on their own lines — anchors spanning line breaks on every arm. */

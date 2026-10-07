@@ -33,6 +33,7 @@ public sealed class ViewerMonitoredServerSqlTests
         "server_id", "name", "host", "database", "auth", "username", "encrypted_password", "encrypt_mode",
         "trust_server_certificate", "read_only_intent", "multi_subnet_failover", "excluded_databases",
         "monthly_cost_usd", "capture_plans", "is_enabled", "alert_delivery_mode_override", "engine", "port",
+        "aws_role_arn", "aws_external_id",
     };
 
     [Fact]
@@ -46,9 +47,10 @@ public sealed class ViewerMonitoredServerSqlTests
             Assert.Contains(column, sql, StringComparison.Ordinal);
         }
 
-        /* Every value is a $N parameter (18 columns incl. the V18 alert_delivery_mode_override and the #3499
-           engine + port — the V70 columns the MCP tool wrote and the viewer silently defaulted), never inlined. */
-        for (var i = 1; i <= 18; i++)
+        /* Every value is a $N parameter (20 columns incl. the V18 alert_delivery_mode_override, the #3499
+           engine + port — the V70 columns the MCP tool wrote and the viewer silently defaulted — and the #5452
+           aws_role_arn + aws_external_id), never inlined. */
+        for (var i = 1; i <= 20; i++)
         {
             Assert.Contains("$" + i.ToString(System.Globalization.CultureInfo.InvariantCulture), sql, StringComparison.Ordinal);
         }

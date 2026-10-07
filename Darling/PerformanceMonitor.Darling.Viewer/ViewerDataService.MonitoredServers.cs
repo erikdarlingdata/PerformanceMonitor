@@ -53,10 +53,13 @@ public sealed partial class ViewerDataService
     private const string MonitoredServerColumns =
         "server_id, name, host, database, auth, username, encrypted_password, encrypt_mode, " +
         "trust_server_certificate, read_only_intent, multi_subnet_failover, excluded_databases, " +
-        "monthly_cost_usd, capture_plans, is_enabled, alert_delivery_mode_override, engine, port";
+        "monthly_cost_usd, capture_plans, is_enabled, alert_delivery_mode_override, engine, port, " +
+        "aws_role_arn, aws_external_id";
 
+    /* #5452: aws_role_arn and aws_external_id ($19, $20) are the per-server AWS role. aws_external_id_set is NOT a
+       column a write names: the store computes it (a stored generated column), so an INSERT that listed it would fail. */
     private const string MonitoredServerValues =
-        "$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, " +
+        "$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, " +
         "(now() AT TIME ZONE 'UTC'), (now() AT TIME ZONE 'UTC')";
 
     /// <summary>Upsert by <c>server_id</c> — the Edit save. ON CONFLICT rewrites every field but
@@ -84,6 +87,15 @@ ON CONFLICT (server_id) DO UPDATE SET
     alert_delivery_mode_override = EXCLUDED.alert_delivery_mode_override,
     engine = EXCLUDED.engine,
     port = EXCLUDED.port,
+    aws_role_arn = EXCLUDED.aws_role_arn,
+    /* The stored external ID is never read back to this seat: it is replaced only when $21 says one was typed or the
+       box was cleared, and a cleared role takes it along (the table's check needs a role for an ID). A role that
+       changes with nothing typed clears it too, because an external ID belongs to the role it was set for. */
+    aws_external_id = CASE
+        WHEN EXCLUDED.aws_role_arn IS NULL THEN NULL
+        WHEN $21 THEN EXCLUDED.aws_external_id
+        WHEN EXCLUDED.aws_role_arn IS DISTINCT FROM config_monitored_servers.aws_role_arn THEN NULL
+        ELSE config_monitored_servers.aws_external_id END,
     modified_at = (now() AT TIME ZONE 'UTC')";
 
     /// <summary>Insert only when the <c>server_id</c> is absent — the Add save (#4789) and the one-time
@@ -131,17 +143,20 @@ ON CONFLICT (server_id) DO NOTHING";
     public const string MonitoredServersSelectSql = @"
 SELECT server_id, name, host, database, auth, username, encrypt_mode,
        trust_server_certificate, read_only_intent, multi_subnet_failover, excluded_databases,
-       monthly_cost_usd, capture_plans, is_enabled, created_at, alert_delivery_mode_override, engine, port
+       monthly_cost_usd, capture_plans, is_enabled, created_at, alert_delivery_mode_override, engine, port,
+       aws_role_arn, aws_external_id_set
 FROM config_monitored_servers
 ORDER BY name";
 
     /// <summary>One configured server by id (the Edit prefill, incl. the DPAPI blob for the password box). $1 server_id.
     /// An <c>admin</c>-role action — the read-only <c>viewer</c> role is column-denied <c>encrypted_password</c>
-    /// (#1416), so a viewer seat uses <see cref="MonitoredServerByIdNoSecretSql"/> instead.</summary>
+    /// (#1416), so a viewer seat uses <see cref="MonitoredServerByIdNoSecretSql"/> instead. It is the one read that
+    /// reads <c>aws_external_id_set</c> (#5452), never the external ID itself.</summary>
     public const string MonitoredServerByIdSql = @"
 SELECT server_id, name, host, database, auth, username, encrypted_password, encrypt_mode,
        trust_server_certificate, read_only_intent, multi_subnet_failover, excluded_databases,
-       monthly_cost_usd, capture_plans, is_enabled, created_at, alert_delivery_mode_override, engine, port
+       monthly_cost_usd, capture_plans, is_enabled, created_at, alert_delivery_mode_override, engine, port,
+       aws_role_arn, aws_external_id_set
 FROM config_monitored_servers
 WHERE server_id = $1";
 
@@ -153,7 +168,8 @@ WHERE server_id = $1";
     public const string MonitoredServerByIdNoSecretSql = @"
 SELECT server_id, name, host, database, auth, username, encrypt_mode,
        trust_server_certificate, read_only_intent, multi_subnet_failover, excluded_databases,
-       monthly_cost_usd, capture_plans, is_enabled, created_at, alert_delivery_mode_override, engine, port
+       monthly_cost_usd, capture_plans, is_enabled, created_at, alert_delivery_mode_override, engine, port,
+       aws_role_arn, aws_external_id_set
 FROM config_monitored_servers
 WHERE server_id = $1";
 
@@ -192,7 +208,8 @@ WHERE server_id = $1";
     public const string MonitoredServerByAddressSql = @"
 SELECT server_id, name, host, database, auth, username, encrypt_mode,
        trust_server_certificate, read_only_intent, multi_subnet_failover, excluded_databases,
-       monthly_cost_usd, capture_plans, is_enabled, created_at, alert_delivery_mode_override, engine, port
+       monthly_cost_usd, capture_plans, is_enabled, created_at, alert_delivery_mode_override, engine, port,
+       aws_role_arn, aws_external_id_set
 FROM config_monitored_servers
 WHERE host = $1
 AND   database IS NOT DISTINCT FROM $2
@@ -457,6 +474,7 @@ ORDER BY COALESCE(s.display_name, c.name)";
         await using var command = new NpgsqlCommand(MonitoredServerUpsertSql, connection, transaction);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         BindMonitoredServer(command, row);
+        command.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = row.AwsExternalIdSent });       // $21
         try
         {
             await ExecuteWriteAsync(command, cancellationToken);
@@ -472,9 +490,20 @@ ORDER BY COALESCE(s.display_name, c.name)";
             /* The store's rule for a row that holds a remediation login: a connection change by this role is refused. */
             throw new MonitoredServerPasswordNeededException(RemediationKeptText);
         }
+        catch (PostgresException ex) when (ex.SqlState == StoreAwsRoleNeedsExternalIdSqlState)
+        {
+            /* #5452: the store's rule that a new AWS role never keeps the external ID stored for the old one unseen. The
+               admin seat does not own the table, so the trigger holds it to this; the dialog checks first, so this is
+               the answer for a row that changed between that check and the write. */
+            throw new MonitoredServerPasswordNeededException(AwsRoleSettings.RoleChangeNeedsExternalIdMessage);
+        }
 
         await transaction.CommitAsync(cancellationToken);
     }
+
+    /// <summary>The SQLSTATE the store's trigger raises for a new AWS role that keeps the external ID stored for the old
+    /// one (#5452).</summary>
+    internal const string StoreAwsRoleNeedsExternalIdSqlState = "PW004";
 
     /// <summary>The SQLSTATE the store's trigger on <c>config_monitored_servers</c> raises for a change of how a server is
     /// reached that keeps its stored password.</summary>
@@ -804,7 +833,7 @@ WHERE server_id = $1";
         await ExecuteWriteAsync(command, cancellationToken);
     }
 
-    /// <summary>Binds the 18 upsert/insert parameters ($1..$18) from a row (created_at/modified_at are server-side).</summary>
+    /// <summary>Binds the 20 upsert/insert parameters ($1..$20) from a row (created_at/modified_at are server-side).</summary>
     private static void BindMonitoredServer(NpgsqlCommand command, MonitoredServerRow row)
     {
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = row.ServerId });                 // $1
@@ -828,6 +857,9 @@ WHERE server_id = $1";
            MonitoredServer.TargetEngine stays the only interpreter; port 0 = the driver's default (5432). */
         command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = row.Engine });                 // $17
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = row.Port });                     // $18
+        /* #5452: the per-server AWS role and its optional external ID; null = "use the service's own credentials". */
+        AddNullableText(command, row.AwsRoleArn);                                                        // $19
+        AddNullableText(command, row.AwsExternalId);                                                     // $20
     }
 
     private static MonitoredServerRow ReadMonitoredServerRow(NpgsqlDataReader reader) => new()
@@ -851,6 +883,8 @@ WHERE server_id = $1";
         AlertDeliveryModeOverride = ParseDeliveryOverride(reader.IsDBNull(16) ? null : reader.GetString(16)),
         Engine = reader.GetString(17),
         Port = reader.GetInt32(18),
+        AwsRoleArn = reader.IsDBNull(19) ? null : reader.GetString(19),
+        AwsExternalIdSet = reader.GetBoolean(20),
     };
 
     /// <summary>
@@ -882,6 +916,9 @@ WHERE server_id = $1";
         AlertDeliveryModeOverride = ParseDeliveryOverride(reader.IsDBNull(15) ? null : reader.GetString(15)),
         Engine = reader.GetString(16),
         Port = reader.GetInt32(17),
+        /* #5452: the role and whether an external ID is stored; never the ID itself, which the read-only roles cannot select. */
+        AwsRoleArn = reader.IsDBNull(18) ? null : reader.GetString(18),
+        AwsExternalIdSet = reader.GetBoolean(19),
     };
 
     private static void AddTextArray(NpgsqlCommand command, IEnumerable<string>? values) =>
@@ -972,6 +1009,24 @@ public sealed class MonitoredServerRow
     public AlertNotificationMode? AlertDeliveryModeOverride { get; set; }
 
     public bool IsEnabled { get; set; } = true;
+
+    /// <summary>The IAM role the service assumes to reach an Amazon RDS or Aurora PostgreSQL target (#5452), or null
+    /// to use the service's own credentials. Stored in <c>aws_role_arn</c>; the service uses it only if it is
+    /// allowed (<c>allowedAwsRoles</c> or a darling.json server).</summary>
+    public string? AwsRoleArn { get; set; }
+
+    /// <summary>The external ID to store with the role, or null. Write-only: no read fills it, and a stored ID
+    /// is never read back. An insert stores it as given; the upsert stores it only when
+    /// <see cref="AwsExternalIdSent"/> is set (typed, or null for "cleared") and keeps the stored one otherwise.</summary>
+    public string? AwsExternalId { get; set; }
+
+    /// <summary>The edit typed a new external ID, or cleared it: the upsert then writes <see cref="AwsExternalId"/>
+    /// (null clears). Not set, the stored ID stays.</summary>
+    public bool AwsExternalIdSent { get; set; }
+
+    /// <summary>Whether an external ID is stored (<c>aws_external_id_set</c>, which the store computes). It is not
+    /// written.</summary>
+    public bool AwsExternalIdSet { get; set; }
 
     /// <summary>Server-set creation time (read-only, from the store's <c>created_at</c>); null when not read.</summary>
     public DateTime? CreatedAt { get; set; }

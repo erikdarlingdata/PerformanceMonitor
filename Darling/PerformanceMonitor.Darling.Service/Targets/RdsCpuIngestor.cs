@@ -218,8 +218,8 @@ public sealed class RdsCpuIngestor
     }
 
     private readonly NpgsqlDataSource _postgres;
-    private readonly Func<string, IAmazonRDS> _rdsClientFactory;
-    private readonly Func<string, IAmazonPI> _piClientFactory;
+    private readonly Func<string, AwsRoleKey?, IAmazonRDS> _rdsClientFactory;
+    private readonly Func<string, AwsRoleKey?, IAmazonPI> _piClientFactory;
     private readonly ILogger? _logger;
     private readonly RdsEndpointVerifier _verifier;
 
@@ -228,12 +228,15 @@ public sealed class RdsCpuIngestor
         Func<string, IAmazonRDS>? rdsClientFactory = null,
         Func<string, IAmazonPI>? piClientFactory = null,
         ILogger? logger = null,
-        RdsEndpointVerifier? verifier = null)
+        RdsEndpointVerifier? verifier = null,
+        AwsRoleCredentialCache? roles = null,
+        Func<string, AwsRoleKey?, IAmazonRDS>? roleRdsClientFactory = null,
+        Func<string, AwsRoleKey?, IAmazonPI>? rolePiClientFactory = null)
     {
         _verifier = verifier ?? new RdsEndpointVerifier();
         _postgres = postgres ?? throw new ArgumentNullException(nameof(postgres));
-        _rdsClientFactory = rdsClientFactory ?? (region => new AmazonRDSClient(RegionEndpoint.GetBySystemName(region)));
-        _piClientFactory = piClientFactory ?? (region => new AmazonPIClient(RegionEndpoint.GetBySystemName(region)));
+        _rdsClientFactory = roleRdsClientFactory ?? AwsRoleClients.Rds(rdsClientFactory, roles);
+        _piClientFactory = rolePiClientFactory ?? AwsRoleClients.Pi(piClientFactory, roles);
         _logger = logger;
     }
 
@@ -251,6 +254,7 @@ public sealed class RdsCpuIngestor
         string storageName,
         string host,
         string? loginConnectionString = null,
+        AwsRoleKey? role = null,
         CancellationToken cancellationToken = default)
     {
         var endpoint = RdsEndpoint.TryParse(host);
@@ -282,11 +286,14 @@ public sealed class RdsCpuIngestor
 
         try
         {
-            using var rds = _rdsClientFactory(parsed.Region);
+            /* #5452: a server with its own role reads under it from here on, host check included; a server with no role
+               gets the process credentials exactly as before. */
+            using var rds = _rdsClientFactory(parsed.Region, role);
 
             /* The host must be the endpoint AWS reports for the id parsed from it before any RDS or Performance
                Insights read is made. */
-            await _verifier.EnsureAsync(rds, parsed, host, serverId, cancellationToken, loginConnectionString);
+            await _verifier.EnsureAsync(
+                rds, parsed, host, serverId, cancellationToken, loginConnectionString, AwsRoleKey.ScopeOf(role));
 
             var instanceId = parsed.Kind == RdsEndpointKind.ClusterWriter
                 ? await ResolveWriterAsync(rds, parsed.Identifier, cancellationToken)
@@ -300,7 +307,7 @@ public sealed class RdsCpuIngestor
                 ? watermark.Value
                 : now - LookbackWindow;
 
-            using var pi = _piClientFactory(parsed.Region);
+            using var pi = _piClientFactory(parsed.Region, role);
 
             /* All nine names in one call — see RequestedMetrics for why that is the whole cost of #3281's
                fix, HostMemoryMetrics for V136's five, and for why neither prefix can be paraphrased —
@@ -335,6 +342,13 @@ public sealed class RdsCpuIngestor
             /* Propagated UNWRAPPED so DarlingWorker records the PERMISSIONS outcome with this message, not the IAM
                text the wrapped type carries. */
             throw;
+        }
+        catch (Exception ex) when (AwsRoleAssumeException.Find(ex) is { } assume)
+        {
+            /* #5452: the server's AWS role could not be used. Propagated as the role exception itself, not wrapped in the
+               unavailable type: DarlingWorker's role arm records its message (PERMISSIONS for a configuration refusal,
+               ERROR for the rest), and the wrapper's text scan for an authorization refusal must not reclassify it. */
+            throw assume;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

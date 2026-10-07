@@ -3035,6 +3035,10 @@ LIMIT 1";
         /* #4004 review, round 3: a key that replaced one the directory check discarded is noted on the collection-log
            row of the first pg_log_events run after this, and only that run (RunOneAsync takes it). */
         _logHashKeyRotation.Arm(DarlingLogHashKeyFile.RotationNote(logHashKeyLoad));
+        /* #5452: which AWS roles this run may assume, set once here and read by the RDS path, the way the password key's
+           ring is. darling.json's allowedAwsRoles plus every role a darling.json server names; config.Servers is the
+           file's list (the store view never replaces it), and the file is read at start, so an edit applies on restart. */
+        Targets.AwsRoleAllowlist.Current = Targets.AwsRoleAllowlist.FromConfig(config);
         var runner = new DarlingCollectorRunner(postgres, deltas, _logger, () => config.CapturePlans, () => config.CollectSchemaChangeEvents,
             () => StoreConfigProvider.ClampTextBudgetMb(config.QueryStoreTextBudgetMb),
             /* #2171: live provider like its siblings — a store reload flipping plan_xml_compression
@@ -6160,6 +6164,9 @@ LIMIT 1";
                drop below needs (the definition, the runtime, the long-query latch) is taken first. */
             removedServers = DarlingRemovedServerSessions.Capture(servers, view.EnabledServers, runner);
             ReconcileServers(servers, view.EnabledServers);
+
+            /* #5452: an assumed-role session is kept only while an enabled server names its role and external ID. */
+            runner.RetainAwsRoles(servers.Select(state => state.Config.AwsRoleKey).OfType<Targets.AwsRoleKey>());
         }
 
         /* #4961: a removed server's sessions of this install's go with it, awaited here, after the lock is released: the
@@ -6531,8 +6538,28 @@ LIMIT 1";
     }
 
     /// <summary>
+    /// #5452: the AWS role exception behind <paramref name="ex"/> when it is one an operator can act on (the allow list does
+    /// not list the role, its partition is not the target's, STS refused it, the region is disabled), found through any
+    /// wrapper; otherwise null. The role arm of the collector run filters on this.
+    /// </summary>
+    internal static AwsRoleAssumeException? AwsRoleConfigurationFault(Exception ex)
+        => AwsRoleAssumeException.Find(ex) is { IsConfiguration: true } found ? found : null;
+
+    /// <summary>
+    /// #5452: writes the warning line for a server whose AWS role cannot be used and returns the text for its
+    /// <c>collection_log</c> row. Both are the exception's own message, which names the role ARN and whether an external ID is
+    /// set and never the ID. One method so the two outputs cannot differ, and so a test can read both.
+    /// </summary>
+    internal static string AwsRoleFaultNote(ILogger logger, string serverName, string collectorName, AwsRoleAssumeException fault)
+    {
+        logger.LogWarning("  [{Server}] {Collector} => PERMISSIONS: {Message}", serverName, collectorName, fault.Message);
+        return fault.Message;
+    }
+
+    /// <summary>
     /// Whether two server definitions are identical for the collection loop — the connection-relevant fields
-    /// (host, port, engine, database, auth, credentials, intent) plus the collection-affecting excluded databases. A difference triggers a reconnect on reconcile so the
+    /// (host, port, engine, database, auth, credentials, intent), the server's own AWS role and external ID (#5452: a role-only edit
+    /// reconnects, so the runtime reads under the new role and the host check starts over), plus the collection-affecting excluded databases. A difference triggers a reconnect on reconcile so the
     /// new definition takes effect. <c>MonthlyCostUsd</c> is deliberately NOT compared: it does not affect
     /// collection at all, and the reload's <see cref="DarlingObservability.SyncServerEnabledStatesAsync"/>
     /// mirrors a cost change straight onto <c>collect.servers</c> (which the FinOps display reads) with no
@@ -6553,6 +6580,7 @@ LIMIT 1";
         && a.MultiSubnetFailover == b.MultiSubnetFailover
         && a.Port == b.Port
         && a.TargetEngine == b.TargetEngine
+        && a.AwsRoleKey == b.AwsRoleKey
         && a.ExcludedDatabases.SequenceEqual(b.ExcludedDatabases, StringComparer.OrdinalIgnoreCase);
 
     /// <summary>
@@ -14724,6 +14752,23 @@ LIMIT 1";
 
             await DarlingObservability.LogCollectionAsync(
                 _postgres!, runtime, collectorName, "SESSION_MISSING", 0, runClock.ElapsedMilliseconds, 0, ex.Message, fanout: null, phases: null, drain: null, fetchPhases: null, sweepPeerMaxMs: peerMaxAtDispatchMs, _logger, cancellationToken);
+            return 0;
+        }
+        catch (Exception ex) when (AwsRoleConfigurationFault(ex) is { } assume)
+        {
+            /* #5452: the AWS role on this server cannot be used: the allow list does not list it, its partition is not the
+               target's, or STS refused to hand it out. FIRST of the RDS arms, and ahead of every arm that reads the text of an
+               AWS failure: an STS denial says "is not authorized to perform", which the log and Performance Insights arms
+               below would read as the monitoring host's own IAM role missing a grant, and tell an operator to fix the wrong
+               role. PERMISSIONS, like the other refused-source outcomes, with the exception's own message, which names the role
+               ARN and whether an external ID is set and never the ID. Nothing was read this cycle. Written on every sweep so
+               collection health keeps reading it. The other kinds (the host's credentials, no source identity, a transient
+               STS failure) carry no operator-fixable setting and fall through to the general ERROR arm with the same message. */
+            var roleNote = AwsRoleFaultNote(_logger, server.Config.DisplayName, collectorName, assume);
+
+            await DarlingObservability.LogCollectionAsync(
+                _postgres!, runtime, collectorName, "PERMISSIONS", 0, 0, runClock.ElapsedMilliseconds, roleNote,
+                fanout: null, phases: null, drain: null, fetchPhases: null, sweepPeerMaxMs: peerMaxAtDispatchMs, _logger, cancellationToken);
             return 0;
         }
         catch (RdsEndpointMismatchException ex)

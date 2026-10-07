@@ -318,6 +318,16 @@ public sealed class CaggGroupIndexDropLiveTests
     /// A future rung that adds a new probe sentinel must add its artifact's removal here.</summary>
     private static async Task DropArtifactsOfLaterRungsAsync(NpgsqlConnection connection, int simulatedVersion, CancellationToken ct)
     {
+        if (simulatedVersion < 169)
+        {
+            /* V169 (#5452) - the per-server AWS role on config_monitored_servers; the role column is the probe's sentinel.
+               Dropping the columns drops the table's check on them too. */
+            await using var dropAwsRole = new NpgsqlCommand(
+                "ALTER TABLE config.config_monitored_servers DROP COLUMN IF EXISTS aws_external_id_set, "
+                + "DROP COLUMN IF EXISTS aws_external_id, DROP COLUMN IF EXISTS aws_role_arn", connection);
+            await dropAwsRole.ExecuteNonQueryAsync(ct);
+        }
+
         if (simulatedVersion < 168)
         {
             /* V168 (#5448) - the PLAN_REGRESSION per-day totals; the built table is the probe's sentinel. The trigger on

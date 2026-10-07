@@ -142,4 +142,76 @@ public sealed class DiagnosticsBundleSecretTests
             Assert.DoesNotContain(forbidden, text, StringComparison.OrdinalIgnoreCase);
         }
     }
+
+    private const string RoleArn = "arn:aws:iam::123456789012:role/darling-monitor";
+    private const string ExternalId = "ext-7Hq2mZ9vLx";
+
+    /* #5452: the text a collection_log row or a log line may carry about a server's AWS role. */
+    private static string RoleText() =>
+        $"The AWS role {RoleArn} on this server is not in allowedAwsRoles in darling.json (account 123456789012, external id {ExternalId}).";
+
+    private static void AssertRoleRemoved(string text)
+    {
+        Assert.DoesNotContain(ExternalId, text, StringComparison.Ordinal);
+        Assert.DoesNotContain("123456789012", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("darling-monitor", text, StringComparison.Ordinal);
+        Assert.Contains("role-", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void SeedFromConfig_AServersAwsRoleIsNamedAndItsExternalIdIsASecret()
+    {
+        var a = new BundleAliaser();
+        var config = new DarlingConfig
+        {
+            Servers = { new MonitoredServer { Name = "alpha-pg-01", Engine = "postgresql", AwsRoleArn = RoleArn, AwsExternalId = ExternalId } },
+        };
+        DiagnosticsBundle.SeedFromConfig(a, config, storeConnectionString: null);
+        AssertRoleRemoved(a.Alias(RoleText()));
+    }
+
+    [Fact]
+    public void SeedFromConfig_AllowedAwsRolesEntriesAreNamed_AnArnAndAnAccountId()
+    {
+        var a = new BundleAliaser();
+        var config = new DarlingConfig { AllowedAwsRoles = { RoleArn, "210987654321" } };
+        DiagnosticsBundle.SeedFromConfig(a, config, storeConnectionString: null);
+        var text = a.Alias("allowed " + RoleArn + " and account 210987654321 and 123456789012");
+        Assert.DoesNotContain("123456789012", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("210987654321", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("darling-monitor", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void SeedAwsRole_AStoreOnlyServersRoleAndExternalIdAreRemoved_AndTheVerifierBlocksOneThatSurvives()
+    {
+        /* The store-only path: the registry read hands the same two values to the same seed. */
+        var a = new BundleAliaser();
+        DiagnosticsBundle.SeedAwsRole(a, RoleArn, ExternalId);
+        AssertRoleRemoved(a.Alias(RoleText()));
+
+        var root = new JsonObject { ["sections"] = new JsonObject { ["x"] = new JsonObject { ["msg"] = "id " + ExternalId } } };
+        var (leaks, text) = a.Finish(root, DiagnosticsBundle.WriteOptions);
+        Assert.Null(text);
+        Assert.Equal("secret", Assert.Single(leaks).Class);
+    }
+
+    [Theory]
+    [InlineData("aws_external_id")]
+    [InlineData("awsExternalId")]
+    [InlineData("ExternalId")]
+    public void ExternalIdKeys_AreSecretKeys(string key) => Assert.True(SecretTextGuard.IsSecretKey(key));
+
+    [Fact]
+    public void ConfigShape_CarriesNeitherTheRoleNorItsExternalId()
+    {
+        var config = new DarlingConfig
+        {
+            Servers = { new MonitoredServer { Name = "alpha-pg-01", Engine = "postgresql", AwsRoleArn = RoleArn, AwsExternalId = ExternalId } },
+            AllowedAwsRoles = { RoleArn },
+        };
+        var text = DiagnosticsBundle.BuildConfigShape(config).ToJsonString();
+        Assert.DoesNotContain(ExternalId, text, StringComparison.Ordinal);
+        Assert.DoesNotContain("123456789012", text, StringComparison.Ordinal);
+    }
 }

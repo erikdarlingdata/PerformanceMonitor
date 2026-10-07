@@ -223,7 +223,10 @@ GRANT SELECT (server_id, name, host, database, auth, username, encrypt_mode, tru
               plan_force_bot_enabled,
               -- V113 (#2138 phase 1): the remediation credential's login name. Non-secret, exactly like
               -- username; remediation_encrypted_password is deliberately NOT granted.
-              remediation_username)
+              remediation_username,
+              -- V169 (#5452): the AWS role a target uses, and whether an external ID is stored with it.
+              -- Non-secret; the external ID itself (aws_external_id) is deliberately NOT granted.
+              aws_role_arn, aws_external_id_set)
     ON config.config_monitored_servers TO viewer;
 REVOKE SELECT ON config.config_command FROM viewer;
 GRANT SELECT (command_id, created_at, requested_by, command_type, target_server_id, status, claimed_at,
@@ -254,7 +257,8 @@ GRANT SELECT (server_id, name, host, database, auth, username, encrypt_mode, tru
               is_enabled, created_at, modified_at, alert_delivery_mode_override,
               engine, port,
               plan_force_bot_enabled,
-              remediation_username)
+              remediation_username,
+              aws_role_arn, aws_external_id_set)
     ON config.config_monitored_servers TO mcp;
 REVOKE SELECT ON config.config_command FROM mcp;
 GRANT SELECT (command_id, created_at, requested_by, command_type, target_server_id, status, claimed_at,
@@ -364,7 +368,9 @@ CREATE OR REPLACE FUNCTION config.edit_monitored_server(
    p_encrypt_mode text,
    p_trust_server_certificate boolean,
    p_multi_subnet_failover boolean,
-   p_monthly_cost_usd numeric)
+   p_monthly_cost_usd numeric,
+   p_aws_role_arn text,
+   p_aws_external_id text)
 RETURNS TABLE (outcome text, new_modified_at timestamp)
 LANGUAGE plpgsql
 SECURITY DEFINER
@@ -396,14 +402,19 @@ DECLARE
    v_secret text;
    v_remediation_held boolean;
    v_connection_changed boolean;
+   v_old_role text;
+   v_old_ext text;
+   v_role text;
+   v_ext text;
 BEGIN
    p_columns := COALESCE(p_columns, ARRAY[]::text[]);
 
    SELECT s.modified_at, s.host, s.port, s.auth, s.database, s.read_only_intent, s.username, s.encrypt_mode,
-          s.trust_server_certificate, s.multi_subnet_failover, COALESCE(s.remediation_encrypted_password, '') <> ''
+          s.trust_server_certificate, s.multi_subnet_failover, COALESCE(s.remediation_encrypted_password, '') <> '',
+          s.aws_role_arn, s.aws_external_id
    INTO v_old_modified_at, v_old_host, v_old_port, v_old_auth, v_old_database, v_old_read_only_intent,
         v_old_username, v_old_encrypt_mode, v_old_trust_server_certificate, v_old_multi_subnet_failover,
-        v_remediation_held
+        v_remediation_held, v_old_role, v_old_ext
    FROM config.config_monitored_servers AS s
    WHERE s.server_id = p_server_id
    FOR UPDATE OF s;
@@ -428,14 +439,43 @@ BEGIN
    v_encrypt_mode := CASE WHEN 'encrypt_mode' = ANY (p_columns) THEN p_encrypt_mode ELSE v_old_encrypt_mode END;
    v_trust_server_certificate := CASE WHEN 'trust_server_certificate' = ANY (p_columns) THEN p_trust_server_certificate ELSE v_old_trust_server_certificate END;
    v_multi_subnet_failover := CASE WHEN 'multi_subnet_failover' = ANY (p_columns) THEN p_multi_subnet_failover ELSE v_old_multi_subnet_failover END;
+   -- The AWS role (#5452). Left out of p_columns, the stored role and external ID are kept. A role named in p_columns
+   -- with a NULL value clears it, and a cleared role takes its external ID with it.
+   v_role := CASE WHEN 'aws_role_arn' = ANY (p_columns) THEN p_aws_role_arn ELSE v_old_role END;
+   v_ext := CASE WHEN v_role IS NULL THEN NULL
+                 WHEN 'aws_external_id' = ANY (p_columns) THEN p_aws_external_id
+                 ELSE v_old_ext END;
    v_secret_auth := lower(v_auth) IN ('sql', 'serviceprincipal');
    v_new_secret := 'encrypted_password' = ANY (p_columns) AND COALESCE(p_secret, '') <> '';
+
+   -- A NULL for a column the table requires is refused with a plain outcome: the edit sends nothing the table would
+   -- have to turn away.
+   IF ('name' = ANY (p_columns) AND p_name IS NULL)
+      OR v_host IS NULL OR v_port IS NULL OR v_auth IS NULL OR v_encrypt_mode IS NULL
+      OR v_read_only_intent IS NULL OR v_trust_server_certificate IS NULL OR v_multi_subnet_failover IS NULL
+      OR ('monthly_cost_usd' = ANY (p_columns) AND p_monthly_cost_usd IS NULL) THEN
+      RETURN QUERY SELECT 'invalid_value'::text, NULL::timestamp;
+      RETURN;
+   END IF;
 
    -- The store takes the password itself from these roles: a secret that starts with env: or file: (a reference,
    -- compared as the service reads one, case-sensitive and at the start of the text) is refused. References are set
    -- in the configuration file.
    IF v_new_secret AND (left(p_secret, 4) = 'env:' OR left(p_secret, 5) = 'file:') THEN
       RETURN QUERY SELECT 'reference_refused'::text, NULL::timestamp;
+      RETURN;
+   END IF;
+
+   -- A new role would take the stored external ID with it unseen; the caller sends the ID again or clears it.
+   IF v_role IS NOT NULL AND v_role IS DISTINCT FROM v_old_role AND v_old_ext IS NOT NULL
+      AND NOT ('aws_external_id' = ANY (p_columns)) THEN
+      RETURN QUERY SELECT 'external_id_needed'::text, NULL::timestamp;
+      RETURN;
+   END IF;
+
+   -- An external ID with no role is refused (the table's check would refuse it too).
+   IF v_role IS NULL AND 'aws_external_id' = ANY (p_columns) AND p_aws_external_id IS NOT NULL THEN
+      RETURN QUERY SELECT 'external_id_needs_role'::text, NULL::timestamp;
       RETURN;
    END IF;
 
@@ -476,26 +516,69 @@ BEGIN
       v_secret := NULL;
    END IF;
 
-   UPDATE config.config_monitored_servers AS s
-   SET name = CASE WHEN 'name' = ANY (p_columns) THEN p_name ELSE s.name END,
-       host = v_host,
-       port = v_port,
-       database = v_database,
-       read_only_intent = v_read_only_intent,
-       auth = v_auth,
-       username = v_username,
-       encrypted_password = CASE WHEN v_secret_set THEN v_secret ELSE s.encrypted_password END,
-       encrypt_mode = v_encrypt_mode,
-       trust_server_certificate = v_trust_server_certificate,
-       multi_subnet_failover = v_multi_subnet_failover,
-       monthly_cost_usd = CASE WHEN 'monthly_cost_usd' = ANY (p_columns) THEN p_monthly_cost_usd ELSE s.monthly_cost_usd END,
-       modified_at = (now() AT TIME ZONE 'UTC')
-   WHERE s.server_id = p_server_id
-   RETURNING s.modified_at INTO new_modified_at;
+   -- A value the table's own checks refuse (a required column, a format, a duplicate) answers invalid_value too:
+   -- the table's error text is not passed on.
+   BEGIN
+      UPDATE config.config_monitored_servers AS s
+      SET name = CASE WHEN 'name' = ANY (p_columns) THEN p_name ELSE s.name END,
+          host = v_host,
+          port = v_port,
+          database = v_database,
+          read_only_intent = v_read_only_intent,
+          auth = v_auth,
+          username = v_username,
+          encrypted_password = CASE WHEN v_secret_set THEN v_secret ELSE s.encrypted_password END,
+          encrypt_mode = v_encrypt_mode,
+          trust_server_certificate = v_trust_server_certificate,
+          multi_subnet_failover = v_multi_subnet_failover,
+          monthly_cost_usd = CASE WHEN 'monthly_cost_usd' = ANY (p_columns) THEN p_monthly_cost_usd ELSE s.monthly_cost_usd END,
+          aws_role_arn = v_role,
+          aws_external_id = v_ext,
+          modified_at = (now() AT TIME ZONE 'UTC')
+      WHERE s.server_id = p_server_id
+      RETURNING s.modified_at INTO new_modified_at;
+   EXCEPTION WHEN integrity_constraint_violation THEN
+      RETURN QUERY SELECT 'invalid_value'::text, NULL::timestamp;
+      RETURN;
+   END;
 
    outcome := 'saved';
    RETURN NEXT;
 END;
+$fn$;
+REVOKE ALL ON FUNCTION config.edit_monitored_server(integer, timestamp, text[], text, text, integer, text, boolean, text, text, text, text, boolean, boolean, numeric, text, text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION config.edit_monitored_server(integer, timestamp, text[], text, text, integer, text, boolean, text, text, text, text, boolean, boolean, numeric, text, text) TO viewer, mcp;
+
+-- #5452: the 15-argument edit function stays as a permanent wrapper over the 17-argument one, for a caller that
+--     was built before the AWS role columns. It passes NULL for both and strips the two AWS column names from
+--     p_columns, so a caller of the old signature can neither change nor clear a role. Same grants, same owner.
+CREATE OR REPLACE FUNCTION config.edit_monitored_server(
+   p_server_id integer,
+   p_expected_modified_at timestamp,
+   p_columns text[],
+   p_name text,
+   p_host text,
+   p_port integer,
+   p_database text,
+   p_read_only_intent boolean,
+   p_auth text,
+   p_username text,
+   p_secret text,
+   p_encrypt_mode text,
+   p_trust_server_certificate boolean,
+   p_multi_subnet_failover boolean,
+   p_monthly_cost_usd numeric)
+RETURNS TABLE (outcome text, new_modified_at timestamp)
+LANGUAGE sql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $fn$
+   SELECT e.outcome, e.new_modified_at
+   FROM config.edit_monitored_server(
+      p_server_id, p_expected_modified_at,
+      array_remove(array_remove(COALESCE(p_columns, ARRAY[]::text[]), 'aws_role_arn'), 'aws_external_id'),
+      p_name, p_host, p_port, p_database, p_read_only_intent, p_auth, p_username, p_secret, p_encrypt_mode,
+      p_trust_server_certificate, p_multi_subnet_failover, p_monthly_cost_usd, NULL::text, NULL::text) AS e;
 $fn$;
 REVOKE ALL ON FUNCTION config.edit_monitored_server(integer, timestamp, text[], text, text, integer, text, boolean, text, text, text, text, boolean, boolean, numeric) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION config.edit_monitored_server(integer, timestamp, text[], text, text, integer, text, boolean, text, text, text, text, boolean, boolean, numeric) TO viewer, mcp;
@@ -591,6 +674,15 @@ BEGIN
       RAISE EXCEPTION '%', 'Changing how this server is reached needs its password again: it is stored encrypted and this surface cannot read it back.' USING ERRCODE = 'PW002';
    END IF;
 
+   -- A new AWS role (#5452) never inherits an external ID stored for the old one, unseen: the update names the ID
+   -- again, or clears it. The owner is not held to this; edit_monitored_server answers it first.
+   IF NEW.aws_role_arn IS NOT NULL
+      AND NEW.aws_role_arn IS DISTINCT FROM OLD.aws_role_arn
+      AND OLD.aws_external_id IS NOT NULL
+      AND NEW.aws_external_id IS NOT DISTINCT FROM OLD.aws_external_id THEN
+      RAISE EXCEPTION '%', 'Changing the AWS role needs the external ID with it: send the external ID again, or clear it.' USING ERRCODE = 'PW004';
+   END IF;
+
    RETURN NEW;
 END;
 $rules$;
@@ -618,7 +710,13 @@ GRANT INSERT ON config.analysis_muted TO mcp;
 GRANT UPDATE ON config.config_alert_settings TO mcp;
 GRANT UPDATE (email_cooldown_minutes) ON config.config_notification TO mcp;
 GRANT UPDATE (enabled, modified_at), DELETE ON config.config_notification_routes TO mcp;
-GRANT INSERT, UPDATE, DELETE ON config.config_monitored_servers TO mcp;
+GRANT INSERT, DELETE ON config.config_monitored_servers TO mcp;
+REVOKE UPDATE ON config.config_monitored_servers FROM mcp;
+-- The role and external ID of a server are set only through the edit function (and an INSERT): mcp's UPDATE
+-- names every other column of the table and leaves out aws_role_arn, aws_external_id and the generated
+-- aws_external_id_set. A column added to the table later is added to this list.
+GRANT UPDATE (server_id, name, host, database, auth, username, encrypted_password, encrypt_mode, trust_server_certificate, read_only_intent, multi_subnet_failover, excluded_databases, monthly_cost_usd, capture_plans, is_enabled, created_at, modified_at, alert_delivery_mode_override, engine, port, plan_force_bot_enabled, remediation_username, remediation_encrypted_password)
+   ON config.config_monitored_servers TO mcp;
 
 -- 3g. The password key tables (V165, #5366): written only by the store owner (the service, its command line and the
 --     migration runner); a trigger on each table refuses every other writer. This is the grant side of the same rule,

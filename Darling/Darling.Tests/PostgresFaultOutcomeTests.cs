@@ -1268,8 +1268,10 @@ public class PostgresFaultOutcomeTests
         Assert.Single(Regex.Matches(worker, @"collectorName, status, 0, runClock\.ElapsedMilliseconds, 0"));
 
         /* Never queried the target - the RDS log API and Performance Insights are both HTTPS. The third is the
-           RDS endpoint-check arm, which stops before any of those calls and so also spent its time off the target. */
-        Assert.Equal(3, Regex.Matches(worker, @"""PERMISSIONS"", 0, 0, runClock\.ElapsedMilliseconds").Count);
+           RDS endpoint-check arm, which stops before any of those calls and so also spent its time off the target.
+           The fourth is the AWS role arm (#5452): a server's role the service cannot use stops the run before any RDS
+           call, so its time is off the target too. */
+        Assert.Equal(4, Regex.Matches(worker, @"""PERMISSIONS"", 0, 0, runClock\.ElapsedMilliseconds").Count);
 
         /* And exactly ONE arm still writes three zeros: the log_timezone arm, whose two transports
            disagree about which slot is correct, documented at the arm itself. Counted rather than asserted

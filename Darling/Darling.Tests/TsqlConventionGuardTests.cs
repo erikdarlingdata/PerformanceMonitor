@@ -1458,6 +1458,13 @@ public sealed class TsqlConventionGuardTests
         "Darling/PerformanceMonitor.Darling.Service/Hosting/DarlingWebFailureLog.cs IsStatementTimeout",
         "Darling/PerformanceMonitor.Darling.Service/DarlingConfig.cs ToSettings",
         "Darling/PerformanceMonitor.Darling.Service/DarlingConfig.cs IsConfigured",
+        /* #5452: two expression-bodied members that open with a property pattern (`is { IsConfiguration: true } found`,
+           `role is { } key`) before a ternary, the shape of ListLongQueryTraceDatabasesAsync below. The walk's brace match
+           closes each range at the pattern's own closing brace, stranding the ternary's arms (`found : null`,
+           `key.CredentialScope : string.Empty`). Neither arm holds a string literal, so no census reads a site of that
+           kind here; the stranded text is not T-SQL and not a tempdb label. */
+        "Darling/PerformanceMonitor.Darling.Service/DarlingWorker.cs AwsRoleConfigurationFault",
+        "Darling/PerformanceMonitor.Darling.Service/Targets/AwsRoleKey.cs ScopeOf",
         /* The long-query trace's database listing: an expression-bodied member whose body opens with a property
            pattern (`LongQueryTraceListOverrideForTests is { } listOverride`) before its ternary. The walk's brace
            match closes the range at the pattern's own closing brace, stranding the ternary's arms, which are calls

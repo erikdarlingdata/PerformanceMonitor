@@ -357,13 +357,14 @@ public class CollectionLogDrainForensicsStoreTests
            long-query PERMISSIONS arm is the fourteenth: the session's create was denied (the login lacks
            ALTER ANY EVENT SESSION), so the run is an early return that read and drained nothing. The RDS
            endpoint-check arm is the fifteenth: the run stops before any RDS or Performance Insights call, so it read and
-           drained nothing either. */
-        Assert.Equal(15, Regex.Matches(worker, @"drain: null").Count);
+           drained nothing either. The AWS role arm (#5452) is the sixteenth, for the same reason: a role the service cannot
+           use stops the run before any RDS call. */
+        Assert.Equal(16, Regex.Matches(worker, @"drain: null").Count);
 
-        /* And V110's fetch sums stay null on those same fifteen arms and for the same reason: no item
+        /* And V110's fetch sums stay null on those same sixteen arms and for the same reason: no item
            completed, so no fetch was performed. Counted rather than merely present, so an arm that starts
            passing a real value - which would mean attributing another run's fetch to a failure row - is a red. */
-        Assert.Equal(15, Regex.Matches(worker, @"fetchPhases: null").Count);
+        Assert.Equal(16, Regex.Matches(worker, @"fetchPhases: null").Count);
     }
 
     /// <summary>
