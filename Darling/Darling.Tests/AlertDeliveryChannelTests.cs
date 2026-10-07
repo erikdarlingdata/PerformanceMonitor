@@ -1021,23 +1021,7 @@ public sealed class AlertDeliveryChannelTests
         string firing, string recovery, bool replica)
     {
         var capture = new CapturingPagerDuty();
-
-        var config = new DarlingConfig();
-        config.Webhooks.PagerDutyRoutingKey = "rk-test";
-        config.Webhooks.PagerDutyAutoResolve = true;
-        config.Smtp.Host = "";
-        config.Smtp.To = "";
-
-        var settings = new DarlingAlertSettings(config);
-        var history = new DiscardingHistoryStore();
-        var webhooks = new WebhookAlertService(
-            settings, DarlingAlertDeliverer.Branding, NullLogger<WebhookAlertService>.Instance, history);
-        webhooks.PostPagerDutyAsyncOverride = (endpoint, payload) =>
-        {
-            capture.Bodies.Add(payload);
-            return Task.FromResult<string?>(null);
-        };
-        var deliverer = new DarlingAlertDeliverer(settings, history, webhooks, NullLogger.Instance);
+        var (deliverer, _) = DelivererFor(autoResolve: true, capture);
 
         var context = replica ? AgAlertContexts.ForReplica("OrdersAG", "REPLICA-A") : null;
         var down = new AlertOutcome(
@@ -1065,23 +1049,7 @@ public sealed class AlertDeliveryChannelTests
     public async Task TheDeliverer_KeepsTheShippedThrottling_WhenTheRecoveryFlapsInsideTheCooldown_WithTheFlagOff()
     {
         var capture = new CapturingPagerDuty();
-
-        var config = new DarlingConfig();
-        config.Webhooks.PagerDutyRoutingKey = "rk-test";
-        config.Webhooks.PagerDutyAutoResolve = false;
-        config.Smtp.Host = "";
-        config.Smtp.To = "";
-
-        var settings = new DarlingAlertSettings(config);
-        var history = new DiscardingHistoryStore();
-        var webhooks = new WebhookAlertService(
-            settings, DarlingAlertDeliverer.Branding, NullLogger<WebhookAlertService>.Instance, history);
-        webhooks.PostPagerDutyAsyncOverride = (endpoint, payload) =>
-        {
-            capture.Bodies.Add(payload);
-            return Task.FromResult<string?>(null);
-        };
-        var deliverer = new DarlingAlertDeliverer(settings, history, webhooks, NullLogger.Instance);
+        var (deliverer, _) = DelivererFor(autoResolve: false, capture);
 
         var down = new AlertOutcome(
             "13", "PROD01", "Server Unreachable", "Login timeout expired", "Online",
@@ -1169,11 +1137,60 @@ public sealed class AlertDeliveryChannelTests
             Assert.Equal("trigger", System.Text.Json.JsonDocument.Parse(body).RootElement.GetProperty("event_action").GetString()));
     }
 
-    private static (DarlingAlertDeliverer Deliverer, WebhookAlertService Webhooks) DelivererFor(bool autoResolve, CapturingPagerDuty capture)
+    /// <summary>
+    /// #5469 scope rule: the per-replica cooldown applies only when auto-resolve is on AND PagerDuty is set up
+    /// and routed for the alert. Two replicas go down inside the cooldown, Teams is the only channel that can
+    /// post, and the flag is on: with no PagerDuty key, and with a PagerDuty key routed to some OTHER metric,
+    /// every key is dev's per-server key, so replica B's firing is throttled behind replica A's (one Teams
+    /// post). With PagerDuty routed for the alert, each replica holds its own window (two Teams posts).
+    /// </summary>
+    [Theory]
+    [InlineData("none", 1)]
+    [InlineData("other-metric-route", 1)]
+    [InlineData("routed", 2)]
+    public async Task TheDeliverer_ScopesTheReplicaCooldown_OnlyWhenPagerDutyIsRoutedForTheAlert(string pagerDuty, int teamsPosts)
+    {
+        using var teams = new CapturingWebhookEndpoint();
+        var capture = new CapturingPagerDuty();
+        var (deliverer, _) = pagerDuty switch
+        {
+            "none" => DelivererFor(autoResolve: true, capture, pagerDutyKey: "", teamsUrl: teams.Url),
+            "other-metric-route" => DelivererFor(
+                autoResolve: true, capture, pagerDutyKey: "", teamsUrl: teams.Url,
+                routes: new[] { new NotificationRoute(1, "High CPU", "", "", "", "rk-other", "", true) }),
+            _ => DelivererFor(autoResolve: true, capture, teamsUrl: teams.Url),
+        };
+
+        foreach (var replica in new[] { "REPLICA-A", "REPLICA-B" })
+        {
+            var outcome = new AlertOutcome(
+                "13", "PROD01", "AG Replica Disconnected", "Replica state change", "Online",
+                Context: AgAlertContexts.ForReplica("OrdersAG", replica), DetailText: null,
+                NumericCurrentValue: 0, NumericThresholdValue: 0, Muted: false,
+                Severity: AlertSeverityLevel.Critical);
+            await deliverer.DeliverAsync(outcome, TestContext.Current.CancellationToken);
+        }
+
+        Assert.Equal(teamsPosts, teams.Bodies.Count);
+    }
+
+    private static (DarlingAlertDeliverer Deliverer, WebhookAlertService Webhooks) DelivererFor(
+        bool autoResolve, CapturingPagerDuty capture, string pagerDutyKey = "rk-test", string? teamsUrl = null,
+        IReadOnlyList<NotificationRoute>? routes = null)
     {
         var config = new DarlingConfig();
-        config.Webhooks.PagerDutyRoutingKey = "rk-test";
+        config.Webhooks.PagerDutyRoutingKey = pagerDutyKey;
         config.Webhooks.PagerDutyAutoResolve = autoResolve;
+        if (teamsUrl is not null)
+        {
+            config.Webhooks.TeamsUrl = teamsUrl;
+        }
+
+        if (routes is not null)
+        {
+            config.NotificationRoutes = routes;
+        }
+
         config.Smtp.Host = "";
         config.Smtp.To = "";
 

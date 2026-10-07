@@ -189,6 +189,21 @@ public static class AlertFamily
     }
 
     /// <summary>
+    /// The OTHER edge of the pair <paramref name="metricName"/> belongs to (#5469): the closing edge for a
+    /// firing metric, the firing metric for a closing edge. False for a metric outside the pairs.
+    /// </summary>
+    public static bool TryGetPairedEdge(string metricName, out string other)
+    {
+        if (RecoveryPairs.TryGetValue(metricName, out var firing))
+        {
+            other = firing;
+            return true;
+        }
+
+        return TryGetRecoveryOf(metricName, out other);
+    }
+
+    /// <summary>
     /// Whether <paramref name="metricName"/> belongs to the paired lifecycle on EITHER side: a closing edge
     /// (<see cref="RecoveryPairs"/> key) or a firing whose close re-keys onto it (a value). A future pair
     /// joins the checks that read this by naming its value — no second census, so the two directions of

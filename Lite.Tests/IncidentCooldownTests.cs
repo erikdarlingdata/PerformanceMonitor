@@ -421,4 +421,45 @@ public class IncidentCooldownTests
         // And the clear record was pruned by the same sweep (a clear's instant is two windows old here).
         Assert.Equal(0, cd.TrackedClearCount);
     }
+
+    /// <summary>
+    /// #5469: the history seed is pair-aware across a restart. A pair edge's stored send is skipped when the
+    /// pair's OTHER edge sent more recently (that edge opened or closed a newer incident), and applied when it
+    /// is the newest. Models "down, up, down, restart, up" (the recovery must be a first notice) and "down,
+    /// up, restart, down" (the firing must be one), each on a FRESH cooldown over the same history.
+    /// </summary>
+    [Fact]
+    public async Task PairedEdge_Seed_SkipsAnEdgeTheOtherEdgeHasSupersededAcrossARestart()
+    {
+        var now = DateTime.UtcNow;
+        var history = new Dictionary<string, DateTime>
+        {
+            ["Server Unreachable"] = now.AddMinutes(-3),
+            ["Server Restored"] = now.AddMinutes(-2),
+        };
+        Task<DateTime?> Seed(string server, string metric, string? dedup) =>
+            Task.FromResult<DateTime?>(history.TryGetValue(metric, out var at) ? at : null);
+
+        // down, up, then a restart, then down: the recovery (t-2) is newer than the firing (t-3), so the
+        // firing's stored send describes a closed incident and the new outage announces.
+        var afterUp = new IncidentCooldown("webhook:", Seed);
+        Assert.True((await afterUp.EvaluateAsync(
+            "1", "Server Unreachable", null, Window, null, "Server Restored")).ShouldSend);
+
+        // down, up, down, then a restart, then up: the second firing (t-1) is newer than the recovery (t-2).
+        history["Server Unreachable"] = now.AddMinutes(-1);
+        var afterDown = new IncidentCooldown("webhook:", Seed);
+        Assert.True((await afterDown.EvaluateAsync(
+            "1", "Server Restored", null, Window, null, "Server Unreachable")).ShouldSend);
+
+        // The newest edge still seeds: the firing (t-1) itself is inside its window after a restart.
+        var firingAgain = new IncidentCooldown("webhook:", Seed);
+        Assert.False((await firingAgain.EvaluateAsync(
+            "1", "Server Unreachable", null, Window, null, "Server Restored")).ShouldSend);
+
+        // Without the pair (every caller but auto-resolve) the seed is today's: the older row still seeds.
+        history["Server Unreachable"] = now.AddMinutes(-3);
+        var unpaired = new IncidentCooldown("webhook:", Seed);
+        Assert.False((await unpaired.EvaluateAsync("1", "Server Unreachable", null, Window)).ShouldSend);
+    }
 }
