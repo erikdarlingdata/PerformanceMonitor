@@ -493,6 +493,66 @@ public class PagerDutyWebhookTests
     }
 
     /// <summary>
+    /// #5469 part 2: TWO replicas of ONE availability group on one server, all four edges inside
+    /// <c>EmailCooldownMinutes</c>, auto-resolve on: A down, B down, A up, B up. Each replica is its own
+    /// PagerDuty incident (the dedup key carries the replica), so each must post and each resolve must reach
+    /// PagerDuty on ITS replica's key. With a cooldown key per server + metric, A's recovery stamp throttled
+    /// B's resolve and B's incident stayed open.
+    /// </summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task SendPath_AutoResolveOn_TwoReplicasDownThenUpInsideTheCooldown_ResolvesBothIncidents(bool withHistory)
+    {
+        var endpoint = new CapturingPagerDuty();
+        var history = withHistory ? new FakeHistoryStore() : null;
+        var settings = new WebhookSettings { PagerDutyRoutingKey = "rk-test", PagerDutyAutoResolve = true, Capture = endpoint };
+        var service = ServiceFor(settings, endpoint, history);
+
+        var steps = new[]
+        {
+            ("AG Replica Disconnected", "REPLICA-A"),
+            ("AG Replica Disconnected", "REPLICA-B"),
+            ("AG Replica Reconnected", "REPLICA-A"),
+            ("AG Replica Reconnected", "REPLICA-B"),
+        };
+
+        foreach (var (metric, replica) in steps)
+        {
+            Assert.Equal(
+                AlertChannelOutcome.Delivered,
+                await SendSingleAlertAsync(service, metric, "261742202", AgAlertContexts.ForReplica("OrdersAG", replica)));
+            history?.SentRow(metric, "261742202", DateTime.UtcNow);
+        }
+
+        Assert.Equal(4, endpoint.Bodies.Count);
+        Assert.Equal(new[] { "trigger", "trigger", "resolve", "resolve" }, endpoint.Bodies.Select(WireAction).ToArray());
+        Assert.Equal("261742202:AG Replica Disconnected:OrdersAG:REPLICA-A", WireDedupKey(endpoint.Bodies[2]));
+        Assert.Equal("261742202:AG Replica Disconnected:OrdersAG:REPLICA-B", WireDedupKey(endpoint.Bodies[3]));
+    }
+
+    /// <summary>
+    /// The control: the same two-replica sequence with auto-resolve OFF keeps what shipped. The cooldown
+    /// key stays per server + metric and the dedup keys stay per state, so the second down and the second
+    /// up meet the first one's stamp and only the first down and the first up post.
+    /// </summary>
+    [Fact]
+    public async Task SendPath_AutoResolveOff_TwoReplicasDownThenUpInsideTheCooldown_KeepsTheShippedThrottling()
+    {
+        var endpoint = new CapturingPagerDuty();
+        var settings = new WebhookSettings { PagerDutyRoutingKey = "rk-test", PagerDutyAutoResolve = false, Capture = endpoint };
+        var service = ServiceFor(settings, endpoint);
+
+        Assert.Equal(AlertChannelOutcome.Delivered, await SendSingleAlertAsync(service, "AG Replica Disconnected", "261742202", AgAlertContexts.ForReplica("OrdersAG", "REPLICA-A")));
+        Assert.NotEqual(AlertChannelOutcome.Delivered, await SendSingleAlertAsync(service, "AG Replica Disconnected", "261742202", AgAlertContexts.ForReplica("OrdersAG", "REPLICA-B")));
+        Assert.Equal(AlertChannelOutcome.Delivered, await SendSingleAlertAsync(service, "AG Replica Reconnected", "261742202", AgAlertContexts.ForReplica("OrdersAG", "REPLICA-A")));
+        Assert.NotEqual(AlertChannelOutcome.Delivered, await SendSingleAlertAsync(service, "AG Replica Reconnected", "261742202", AgAlertContexts.ForReplica("OrdersAG", "REPLICA-B")));
+
+        Assert.Equal(2, endpoint.Bodies.Count);
+        Assert.All(endpoint.Bodies, body => Assert.Equal("trigger", WireAction(body)));
+    }
+
+    /// <summary>
     /// One alert through the real <see cref="WebhookAlertService"/> fan-out with the PagerDuty post
     /// captured. Each <see cref="WebhookAlertService"/> is constructed per send (no shared state leaks
     /// between the sends an A/B case sequences); the shared per-test cooldown is the POINT of the

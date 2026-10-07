@@ -1100,6 +1100,96 @@ public sealed class AlertDeliveryChannelTests
     }
 
     /// <summary>
+    /// #5469 part 2 through the Darling deliverer: two replicas of ONE availability group, all four edges
+    /// inside the cooldown, auto-resolve on. Each replica is its own PagerDuty incident, so both must post
+    /// and each resolve must carry ITS replica's dedup key. With a cooldown key per server + metric, A's
+    /// recovery stamp throttled B's resolve and B's incident stayed open.
+    /// </summary>
+    [Fact]
+    public async Task TheDeliverer_ResolvesBothReplicaIncidents_WhenTwoReplicasFlapInsideTheCooldown_WithTheFlagOn()
+    {
+        var capture = new CapturingPagerDuty();
+        var (deliverer, _) = DelivererFor(autoResolve: true, capture);
+
+        var steps = new[]
+        {
+            ("AG Replica Disconnected", "REPLICA-A"),
+            ("AG Replica Disconnected", "REPLICA-B"),
+            ("AG Replica Reconnected", "REPLICA-A"),
+            ("AG Replica Reconnected", "REPLICA-B"),
+        };
+
+        foreach (var (metric, replica) in steps)
+        {
+            var outcome = new AlertOutcome(
+                "13", "PROD01", metric, "Replica state change", "Online",
+                Context: AgAlertContexts.ForReplica("OrdersAG", replica), DetailText: null,
+                NumericCurrentValue: 0, NumericThresholdValue: 0, Muted: false,
+                Severity: metric == "AG Replica Disconnected" ? AlertSeverityLevel.Critical : null);
+            await deliverer.DeliverAsync(outcome, TestContext.Current.CancellationToken);
+        }
+
+        var bodies = capture.Bodies.Select(body => System.Text.Json.JsonDocument.Parse(body).RootElement).ToArray();
+        Assert.Equal(
+            new[] { "trigger", "trigger", "resolve", "resolve" },
+            bodies.Select(root => root.GetProperty("event_action").GetString()).ToArray());
+        Assert.Equal("13:AG Replica Disconnected:OrdersAG:REPLICA-A", bodies[2].GetProperty("dedup_key").GetString());
+        Assert.Equal("13:AG Replica Disconnected:OrdersAG:REPLICA-B", bodies[3].GetProperty("dedup_key").GetString());
+    }
+
+    /// <summary>
+    /// The control: the same two-replica sequence with auto-resolve OFF keeps what shipped. The cooldown
+    /// key stays per server + metric, so the second down and the second up meet the first one's stamp and
+    /// only the first down and the first up post.
+    /// </summary>
+    [Fact]
+    public async Task TheDeliverer_KeepsTheShippedThrottling_WhenTwoReplicasFlapInsideTheCooldown_WithTheFlagOff()
+    {
+        var capture = new CapturingPagerDuty();
+        var (deliverer, _) = DelivererFor(autoResolve: false, capture);
+
+        foreach (var (metric, replica) in new[]
+        {
+            ("AG Replica Disconnected", "REPLICA-A"),
+            ("AG Replica Disconnected", "REPLICA-B"),
+            ("AG Replica Reconnected", "REPLICA-A"),
+            ("AG Replica Reconnected", "REPLICA-B"),
+        })
+        {
+            var outcome = new AlertOutcome(
+                "13", "PROD01", metric, "Replica state change", "Online",
+                Context: AgAlertContexts.ForReplica("OrdersAG", replica), DetailText: null,
+                NumericCurrentValue: 0, NumericThresholdValue: 0, Muted: false,
+                Severity: metric == "AG Replica Disconnected" ? AlertSeverityLevel.Critical : null);
+            await deliverer.DeliverAsync(outcome, TestContext.Current.CancellationToken);
+        }
+
+        Assert.Equal(2, capture.Bodies.Count);
+        Assert.All(capture.Bodies, body =>
+            Assert.Equal("trigger", System.Text.Json.JsonDocument.Parse(body).RootElement.GetProperty("event_action").GetString()));
+    }
+
+    private static (DarlingAlertDeliverer Deliverer, WebhookAlertService Webhooks) DelivererFor(bool autoResolve, CapturingPagerDuty capture)
+    {
+        var config = new DarlingConfig();
+        config.Webhooks.PagerDutyRoutingKey = "rk-test";
+        config.Webhooks.PagerDutyAutoResolve = autoResolve;
+        config.Smtp.Host = "";
+        config.Smtp.To = "";
+
+        var settings = new DarlingAlertSettings(config);
+        var history = new DiscardingHistoryStore();
+        var webhooks = new WebhookAlertService(
+            settings, DarlingAlertDeliverer.Branding, NullLogger<WebhookAlertService>.Instance, history);
+        webhooks.PostPagerDutyAsyncOverride = (endpoint, payload) =>
+        {
+            capture.Bodies.Add(payload);
+            return Task.FromResult<string?>(null);
+        };
+        return (new DarlingAlertDeliverer(settings, history, webhooks, NullLogger.Instance), webhooks);
+    }
+
+    /// <summary>
     /// The payloads one test's PagerDuty sends captured, in send order. Plain list, no socket: the
     /// service's test-only post override answers the send (see its own remarks) and hands the payload
     /// here, so nothing leaves the process and the assertions read the exact JSON the wire would have

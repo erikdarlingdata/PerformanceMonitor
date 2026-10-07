@@ -225,8 +225,14 @@ public class WebhookAlertService
                incidents -> the metric-level fallback key (today's behavior). WHETHER to post only;
                #3313's filter below decides WHICH incidents the post contains. */
             var window = TimeSpan.FromMinutes(_settings.EmailCooldownMinutes);
+
+            /* #5469: with PagerDuty auto-resolve on, each AG replica is its own incident, so its cooldown
+               window is its own too. Read ONCE: the evaluate, the stamp and both clears below must name
+               one key even if the flag is saved between them. Null (flag off, not the AG pair, or no
+               identity) is the per-server key of today. */
+            var cooldownScope = PairedReplicaScope(metricName, context, _settings.PagerDutyAutoResolve);
             var decision = await _cooldown.EvaluateAsync(
-                serverId, metricName, context?.Incidents, window);
+                serverId, metricName, context?.Incidents, window, cooldownScope);
 
             if (!decision.ShouldSend)
             {
@@ -374,13 +380,11 @@ public class WebhookAlertService
                     && delivery.PagerDutyAutoResolve
                     && AlertFamily.RecoveryPairs.TryGetValue(metricName, out var clearedFiring))
                 {
-                    /* Accepted (review point on the AG pair): this clear is per SERVER + pair — the
-                       metric-level key — not per replica, so one replica's reconnect also re-arms a
-                       sibling replica that is still down on the same server. Cost accepted and bounded:
-                       the re-armed entry only bites a NEW firing, and the sibling's open incident is still
-                       its own per-replica PagerDuty incident (the dedup key carries the identity), so the
-                       worst case is a re-post inside that sibling's window, not a lost resolve. */
-                    _cooldown.ClearMetric(serverId, clearedFiring);
+                    /* The AG pair's clear is per REPLICA (#5469 part 2): the firing and recovery keys carry
+                       the replica identity under this same flag, so one replica's reconnect forgets only
+                       its own firing entry and a sibling that is still down keeps its window. The server
+                       pair, and an AG edge without the identity, clear the per-server key as before. */
+                    _cooldown.ClearMetric(serverId, clearedFiring, cooldownScope);
                 }
 
                 /* #5469: the other half of the same re-arm. The recovery stamps ITS OWN key on its first send,
@@ -388,14 +392,14 @@ public class WebhookAlertService
                    the window met the first recovery's stamp: its resolve was throttled and PagerDuty's
                    second incident stayed open. A DELIVERED firing of the pair, under the same condition as
                    the clear above, therefore forgets its closing edge's entry — the new incident has not
-                   been closed yet, so the next recovery is a first notice again. Like the clear above it is
-                   per server + pair, not per replica: a sibling replica's pending recovery is re-armed too,
-                   which only ever lets a resolve through that the stamp would have throttled. */
+                   been closed yet, so the next recovery is a first notice again. Like the clear above it names
+                   the replica's own key for the AG pair (cooldownScope), so a sibling replica's recovery
+                   window is left alone. */
                 if (pagerDutyError is null
                     && delivery.PagerDutyAutoResolve
                     && AlertFamily.TryGetRecoveryOf(metricName, out var recoveryOfFiring))
                 {
-                    _cooldown.ClearMetric(serverId, recoveryOfFiring);
+                    _cooldown.ClearMetric(serverId, recoveryOfFiring, cooldownScope);
                 }
             }
 
@@ -2755,6 +2759,29 @@ public class WebhookAlertService
         DerivePagerDutyDedupKey(serverId, metricName, context, settings.PagerDutyAutoResolve);
 
     /// <summary>
+    /// The per-replica identity of an AG pair edge, or null (#5469): non-null only with auto-resolve on, for
+    /// either edge of the AG Replica Disconnected / Reconnected pair, and only when the alert carries
+    /// <see cref="AlertContext.AgReplicaIdentity"/>. The ONE place the rule lives: the PagerDuty dedup key
+    /// appends it so each replica is its own incident, and the webhook cooldown folds it into the metric-level
+    /// key so each replica's window is its own too. Null leaves both keys exactly as they were, so a flag off,
+    /// the server pair and an AG edge without the identity are all byte-identical to the per-server shape.
+    /// The AG firing literal is spelled here rather than read from PerformanceMonitor.Common's AG consts: this
+    /// assembly must not take that dependency.
+    /// </summary>
+    internal static string? PairedReplicaScope(string metricName, AlertContext? context, bool autoResolve)
+    {
+        if (!autoResolve
+            || !AlertFamily.IsPairedEdge(metricName)
+            || !string.Equals(AlertFamily.Canonical(metricName), "AG Replica Disconnected", StringComparison.Ordinal)
+            || string.IsNullOrWhiteSpace(context?.AgReplicaIdentity))
+        {
+            return null;
+        }
+
+        return context.AgReplicaIdentity;
+    }
+
+    /// <summary>
     /// Derives the PagerDuty dedup_key from the same fingerprint the cooldown uses, so repeated alerts for
     /// the same ongoing incident correlate into one PagerDuty alert. Falls back to a stable server+incident
     /// key when there is no incident (mirrors the cooldown's own "no incidents → metric-level fallback key"
@@ -2807,10 +2834,10 @@ public class WebhookAlertService
         if (autoResolve && AlertFamily.IsPairedEdge(metricName))
         {
             var firing = AlertFamily.Canonical(metricName);
-            if (string.Equals(firing, "AG Replica Disconnected", StringComparison.Ordinal)
-                && !string.IsNullOrWhiteSpace(context?.AgReplicaIdentity))
+            var replica = PairedReplicaScope(metricName, context, autoResolve);
+            if (replica is not null)
             {
-                return $"{serverId}:{firing}:{context!.AgReplicaIdentity}";
+                return $"{serverId}:{firing}:{replica}";
             }
 
             return $"{serverId}:{firing}";

@@ -182,6 +182,35 @@ public class IncidentCooldownTests
     }
 
     /// <summary>
+    /// #5469 part 2: a scope folds into the metric-level key, so two scopes of one metric on one server hold
+    /// separate windows, a scoped clear forgets only its own, and a null scope is the unscoped key. A scoped
+    /// key is not seeded from the history (it carries no scope), so a sibling's history row never throttles it.
+    /// </summary>
+    [Fact]
+    public async Task Scope_SplitsTheMetricLevelKey_ClearsAndSeedsPerScope()
+    {
+        var seedCalls = 0;
+        var cd = new IncidentCooldown("", (_, _, _) => { seedCalls++; return Task.FromResult<DateTime?>(DateTime.UtcNow); });
+
+        // The unscoped key seeds from history (a row in the window), the scoped keys do not.
+        Assert.False((await cd.EvaluateAsync("1", "AG Replica Disconnected", null, Window)).ShouldSend);
+        Assert.Equal(1, seedCalls);
+        var a = await cd.EvaluateAsync("1", "AG Replica Disconnected", null, Window, "AG:A");
+        Assert.True(a.ShouldSend);
+        Assert.Equal(1, seedCalls);
+        cd.Stamp(a);
+
+        Assert.False((await cd.EvaluateAsync("1", "AG Replica Disconnected", null, Window, "AG:A")).ShouldSend);
+        var b = await cd.EvaluateAsync("1", "AG Replica Disconnected", null, Window, "AG:B");
+        Assert.True(b.ShouldSend);
+        cd.Stamp(b);
+
+        cd.ClearMetric("1", "AG Replica Disconnected", "AG:A");
+        Assert.True((await cd.EvaluateAsync("1", "AG Replica Disconnected", null, Window, "AG:A")).ShouldSend);
+        Assert.False((await cd.EvaluateAsync("1", "AG Replica Disconnected", null, Window, "AG:B")).ShouldSend);
+    }
+
+    /// <summary>
     /// The clear must survive the history seed (the review's point 2): both production paths construct the
     /// cooldown with a history store, so the entry <see cref="ClearMetric"/> removed gets RE-SEEDED from the
     /// alert history on the next evaluation — and the next "Server Unreachable" was throttled against the

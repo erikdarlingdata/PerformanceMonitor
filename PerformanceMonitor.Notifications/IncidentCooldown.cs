@@ -67,13 +67,22 @@ public sealed class IncidentCooldown
     /// posting is still all-or-nothing per alert — but the render no longer has to treat it as the only
     /// answer available.</para>
     /// </summary>
+    /// <param name="scope">
+    /// #5469: an identity folded into the metric-level fallback key only ("{server}:{metric}:{scope}"), so
+    /// two incidents of one metric on one server hold separate windows. Null (every caller but the AG pair
+    /// under PagerDuty auto-resolve) leaves the key byte-identical to today's. A scoped key is never seeded
+    /// from the alert history: the history answers per (server, metric, fingerprint) and carries no scope,
+    /// so a seed would hand one replica's send time to its siblings. After a restart a scoped key therefore
+    /// starts as a first notice, which can re-post once inside a window and never swallows a notice.
+    /// </param>
     public async Task<Decision> EvaluateAsync(
-        string serverId, string metricName, IReadOnlyList<AlertIncident>? incidents, TimeSpan window)
+        string serverId, string metricName, IReadOnlyList<AlertIncident>? incidents, TimeSpan window,
+        string? scope = null)
     {
         var now = DateTime.UtcNow;
         Evict(now, window);
 
-        var keys = BuildKeys(serverId, metricName, incidents);
+        var keys = BuildKeys(serverId, metricName, incidents, scope);
 
         bool anyFresh = false;
         bool anyFirstNotice = false;
@@ -82,7 +91,8 @@ public sealed class IncidentCooldown
 
         foreach (var (key, dedupKey) in keys)
         {
-            if (_seedLastSentUtc is not null && !_cooldowns.ContainsKey(key))
+            var scopedFallback = scope is not null && dedupKey is null;
+            if (_seedLastSentUtc is not null && !scopedFallback && !_cooldowns.ContainsKey(key))
             {
                 var lastSent = await _seedLastSentUtc(serverId, metricName, dedupKey);
 
@@ -162,17 +172,17 @@ public sealed class IncidentCooldown
     /// not a reopened window.
     /// </para>
     /// <para>
-    /// The clear is METRIC-level — one key per server and pair — not per replica. For the AG pair (whose
-    /// per-replica identity lives in the PagerDuty dedup key, not in these keys) one replica's reconnect
-    /// therefore also re-arms a sibling replica that is still down on the same server. Accepted: the
-    /// re-armed entry is only consulted by a new firing — the sibling's incident stays open in PagerDuty
-    /// under its own per-replica key, and a per-replica clear shape here would duplicate that identity
-    /// into a map whose keys the cooldown already keeps coarse on purpose.
+    /// The clear is METRIC-level — one key per server and metric — unless <paramref name="scope"/> names
+    /// the same identity <see cref="EvaluateAsync"/> keyed the entry with (#5469: the AG pair's replica,
+    /// under PagerDuty auto-resolve). Then it forgets only that replica's entry, so one replica's reconnect
+    /// does not re-arm a sibling that is still down.
     /// </para>
     /// </summary>
-    public void ClearMetric(string serverId, string metricName)
+    public void ClearMetric(string serverId, string metricName, string? scope = null)
     {
-        var key = $"{_keyPrefix}{serverId}:{metricName}";
+        var key = scope is null
+            ? $"{_keyPrefix}{serverId}:{metricName}"
+            : $"{_keyPrefix}{serverId}:{metricName}:{scope}";
         _clearedAtUtc[key] = DateTime.UtcNow;
         _cooldowns.TryRemove(key, out _);
     }
@@ -182,7 +192,7 @@ public sealed class IncidentCooldown
     // DedupKey can't occur (AlertFingerprint returns null incidents, filtered upstream) but is excluded
     // defensively so it never produces a "…::" key.
     private List<(string Key, string? DedupKey)> BuildKeys(
-        string serverId, string metricName, IReadOnlyList<AlertIncident>? incidents)
+        string serverId, string metricName, IReadOnlyList<AlertIncident>? incidents, string? scope)
     {
         var dedupKeys = incidents?
             .Select(i => i.DedupKey)
@@ -195,7 +205,13 @@ public sealed class IncidentCooldown
                 .Select(d => ($"{_keyPrefix}{serverId}:{metricName}:{d}", (string?)d))
                 .ToList();
 
-        return new List<(string, string?)> { ($"{_keyPrefix}{serverId}:{metricName}", (string?)null) };
+        /* #5469: the scope joins the fallback key only. The AG pair is stateless (no incidents), so it always
+           lands here; a null scope is the pre-existing key byte for byte. */
+        return new List<(string, string?)>
+        {
+            (scope is null ? $"{_keyPrefix}{serverId}:{metricName}" : $"{_keyPrefix}{serverId}:{metricName}:{scope}",
+             (string?)null)
+        };
     }
 
     /* Drop entries past 2x the window so the per-fingerprint dict stays bounded — any entry past 1x is
