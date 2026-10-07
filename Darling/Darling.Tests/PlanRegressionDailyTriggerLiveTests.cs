@@ -23,14 +23,14 @@ namespace Darling.Tests;
 /// against a real PostgreSQL store (<c>DARLING_TEST_PG</c>). The trigger is what keeps a built day total honest: a row
 /// whose interval started before yesterday's midnight can only arrive late (a backfill, a lagging collector, a replay),
 /// so each one bumps <c>late_seq</c> on the day it started and the next day, and the builder's day stays invalid until it
-/// is rebuilt. The cases the design (plan v2, lane 2) pins:
+/// is rebuilt. The cases the design pins:
 ///
 /// <para>(1) steady rows never run the function (<c>pg_stat_user_functions.calls = 0</c>), so the steady write path pays
 /// only the <c>WHEN</c> test; (2) a late row marks day(first) and the next day, one bump per (server, day) per
-/// transaction (lane 6: a bump per row made a big late apply quadratic), and a rolled-back savepoint undoes both the bump
+/// transaction (a bump per row made a big late apply quadratic), and a rolled-back savepoint undoes both the bump
 /// and the record of it; (3) an
-/// <c>ON CONFLICT</c> winner marks and a <c>WHERE</c>-rejected loser does not; (4) a first older than 16 days marks
-/// nothing; (5) COPY and (6) a plain INSERT both mark; (8) the table converted to a hypertable with
+/// <c>ON CONFLICT</c> winner marks and a <c>WHERE</c>-rejected loser does not; (4) a first before the start of the day 17 days back marks
+/// nothing, and a first on that day or after it marks; (5) COPY and (6) a plain INSERT both mark; (8) the table converted to a hypertable with
 /// <c>migrate_data => true</c> keeps the trigger and later inserts still mark; (9) the trigger leaves
 /// <c>n_tup_hot_upd / n_tup_upd</c> alone, because it writes another table and touches no indexed column. The fault
 /// case (7), which needs the real writer, is in <see cref="QueryStoreIntervalLatestWriterTests"/>.</para>
@@ -100,8 +100,8 @@ public sealed class PlanRegressionDailyTriggerLiveTests
         var d9 = today.AddDays(-9);
 
         /* Three rows whose first falls on d5 (one statement, so one transaction: one bump, not three), one at 23:30 of d9
-           (its last can cross midnight, so d9 + 1 is marked). A bump per row was lane 1's shape, and it made a big late
-           apply quadratic (#5448 lane 6). */
+           (its last can cross midnight, so d9 + 1 is marked). A bump per row was the first shape, and it made a big late
+           apply quadratic (#5448). */
         await UpsertAsync(connection, ServerA, new[] { d5.AddHours(1), d5.AddHours(2), d5.AddHours(23).AddMinutes(30) }, 1, 1, ct);
         await UpsertAsync(connection, ServerA, new[] { d9.AddHours(23).AddMinutes(30) }, 1, 1, ct);
 
@@ -130,7 +130,7 @@ public sealed class PlanRegressionDailyTriggerLiveTests
     }
 
     /// <summary>
-    /// #5448 lane 6: the bump is once per (server, day) per TRANSACTION. Late rows keep running the function (the function
+    /// #5448: the bump is once per (server, day) per TRANSACTION. Late rows keep running the function (the function
     /// statistics count every one), but only the first for a pair writes the built table. Three statements in one
     /// transaction, with the third row's pair overlapping the first's on one day (its first day is the first row's next
     /// day), bump each of the three days once; the same rows' pairs in two transactions bump twice.
@@ -181,7 +181,7 @@ public sealed class PlanRegressionDailyTriggerLiveTests
     }
 
     /// <summary>
-    /// #5448 lane 6: the transaction-local record of marked pairs is undone with a rolled-back savepoint, together with
+    /// #5448: the transaction-local record of marked pairs is undone with a rolled-back savepoint, together with
     /// the bump it recorded, so a later late row for that day in the same transaction marks again instead of being
     /// skipped. A record that survived the rollback would drop the day's bump and leave a stale built total valid.
     /// </summary>
@@ -292,7 +292,7 @@ SET search_path = decoy, pg_catalog;", ct);
     }
 
     [Fact]
-    public async Task AFirstOlderThanSixteenDays_MarksNothing_AndTheEdgesAreExact()
+    public async Task AFirstBeforeTheDayAlignedSeventeenDayEdge_MarksNothing_AndTheEdgesAreExact()
     {
         var baseCs = BaseConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #5448 trigger test.");
@@ -304,12 +304,29 @@ SET search_path = decoy, pg_catalog;", ct);
         var now = DateTime.UtcNow;
         var today = now.Date;
 
-        /* Past the 16 day clamp: nothing marked (L1b: the builder never builds days that old, so a mark would be a row
-           the garbage collector deletes at once). */
-        await UpsertAsync(connection, ServerA, new[] { now.AddDays(-17), now.AddDays(-30) }, 1, 1, ct);
+        /* The clamp is a whole-day edge: the start of the day 17 days back, one day wider than the cleanup's 16, so every day
+           the cleanup keeps can be marked. Before it nothing is marked (a first that old has its day past the cleanup). */
+        await UpsertAsync(connection, ServerA, new[] { today.AddDays(-17).AddSeconds(-1), now.AddDays(-30) }, 1, 1, ct);
         Assert.Equal(0, await ScalarLongAsync(connection, "SELECT COUNT(*) FROM collect.plan_regression_daily_built", ct));
 
+        /* On the edge day's first second: marked, the day and the next. */
+        await UpsertAsync(connection, ServerA, new[] { today.AddDays(-17) }, 1, 1, ct);
+        var edge = await BuiltAsync(connection, ServerA, ct);
+        Assert.Equal(2, edge.Count);
+        Assert.Equal(1L, edge[today.AddDays(-17)]);
+        Assert.Equal(1L, edge[today.AddDays(-16)]);
+
+        /* A late row for T-16 at 00:30 UTC: its first is earlier than "now minus 16 days" at any time of day after 00:30, which
+           the old clamp left unmarked, and its day T-16 survives the cleanup. Marked, with the day after. */
+        await ExecAsync(connection, "TRUNCATE collect.plan_regression_daily_built", ct);
+        await UpsertAsync(connection, ServerA, new[] { today.AddDays(-16).AddMinutes(30) }, 1, 1, ct);
+        var late = await BuiltAsync(connection, ServerA, ct);
+        Assert.Equal(2, late.Count);
+        Assert.Equal(1L, late[today.AddDays(-16)]);
+        Assert.Equal(1L, late[today.AddDays(-15)]);
+
         /* Inside the clamp: marked. */
+        await ExecAsync(connection, "TRUNCATE collect.plan_regression_daily_built", ct);
         await UpsertAsync(connection, ServerA, new[] { now.AddDays(-15) }, 1, 1, ct);
         Assert.Equal(2, await ScalarLongAsync(connection, "SELECT COUNT(*) FROM collect.plan_regression_daily_built", ct));
 

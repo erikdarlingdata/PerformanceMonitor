@@ -117,6 +117,35 @@ public sealed class PlanRegressionBuiltDaysFallbackLiveTests
     /// <c>plan_regression</c> / <c>timeout</c>, and a clean pass clears it.
     /// </summary>
     [Fact]
+    public async Task WhenTheDailyReadThrows_TheWindowStartStaysUnset_ForTheDrillDown()
+    {
+        var baseCs = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #5448 fallback caveat test.");
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        var (periodStart, periodEnd) = await SeedAndBuildAsync(connection, ct);
+        await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        /* The built days still read (they come from the built and coverage tables), so the fact chooses the daily statement;
+           that statement then fails on the missing totals table (42P01). The edge M is recorded only once a read has
+           succeeded, so the drill-down is not told to start from an edge no fact read from. */
+        await ExecAsync(connection, "ALTER TABLE collect.plan_regression_daily RENAME TO plan_regression_daily_gone", ct);
+
+        var pass = NewContext(periodStart, periodEnd);
+        await new PgFactCollector(postgres).CollectFactsAsync(pass);
+
+        Assert.True(pass.PlanRegressionReadsIntervalTable);
+        Assert.Null(pass.PlanRegressionOffenders);
+        Assert.Null(pass.PlanRegressionWindowStart);
+        var failure = Assert.Single(PlanRegressionFailures(pass));
+        Assert.Contains("42P01", failure.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task AServerWhoseEveryScheduledRunTimesOut_KeepsItsStoredCaveat_UntilACleanPassClearsIt()
     {
         var baseCs = BaseConnectionString;

@@ -467,8 +467,8 @@ WHERE t.server_id = $1;";
     }
 
     /// <summary>
-    /// The built days of the PLAN_REGRESSION window for one server (#5448), or none when the read fails. <paramref name="sql"/>
-    /// is the fact's own built-days statement ($1 server_id, $2 the window floor); <paramref name="isExpectedAbandon"/> is
+    /// The built days of the PLAN_REGRESSION window for one server (#5448), or none when the read fails. It runs
+    /// <see cref="PlanRegressionDaily.BuiltDaysSql"/> ($1 server_id, $2 the window floor); <paramref name="isExpectedAbandon"/> is
     /// the pass's abandon filter, so a cancelled or shut-down pass is not swallowed here.
     ///
     /// <para><b>Why this is not a caveat.</b> A failure answers "none built", and the fact then runs the exact-bound read,
@@ -481,7 +481,6 @@ WHERE t.server_id = $1;";
     /// </summary>
     public static async Task<List<DateOnly>> ReadBuiltDaysAsync(
         NpgsqlConnection connection,
-        string sql,
         int serverId,
         DateTime windowFloor,
         int commandTimeoutSeconds,
@@ -492,7 +491,7 @@ WHERE t.server_id = $1;";
         var days = new List<DateOnly>();
         try
         {
-            await using var cmd = new NpgsqlCommand(sql, connection) { CommandTimeout = commandTimeoutSeconds };
+            await using var cmd = new NpgsqlCommand(PlanRegressionDaily.BuiltDaysSql, connection) { CommandTimeout = commandTimeoutSeconds };
             cmd.Parameters.AddWithValue(serverId);
             cmd.Parameters.AddWithValue(NpgsqlDbType.Timestamp, windowFloor);
             await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);

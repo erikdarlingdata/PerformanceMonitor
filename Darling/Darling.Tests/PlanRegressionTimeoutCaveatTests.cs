@@ -43,10 +43,11 @@ public sealed class PlanRegressionTimeoutCaveatTests
         var builtDays = Slice(storage, "public static async Task<List<DateOnly>> ReadBuiltDaysAsync(", "private readonly ConcurrentDictionary<int, byte> _coverageEnsured");
 
         /* The fact's own read carries the deadline, and the built-days read is handed it (it builds its command in the
-           storage helper, from the same constant). */
+           storage helper, from the storage tenant's own SQL constant). */
         Assert.Single(Regex.Matches(fact, @"new NpgsqlCommand\("));
         Assert.Single(Regex.Matches(fact, @"CommandTimeout = FactCommandTimeoutSeconds"));
-        Assert.Contains("PlanRegressionBuiltDaysSql, context.ServerId, windowFloor, FactCommandTimeoutSeconds", fact, StringComparison.Ordinal);
+        Assert.Contains("context.ServerId, windowFloor, FactCommandTimeoutSeconds", fact, StringComparison.Ordinal);
+        Assert.Contains("new NpgsqlCommand(PlanRegressionDaily.BuiltDaysSql, connection)", builtDays, StringComparison.Ordinal);
         Assert.Single(Regex.Matches(builtDays, @"new NpgsqlCommand\("));
         Assert.Single(Regex.Matches(builtDays, @"CommandTimeout = commandTimeoutSeconds"));
 

@@ -285,16 +285,18 @@ ORDER BY worker_ratio DESC";
     }
 
     /// <summary>The PLAN_REGRESSION comparison window, in days — how far back a query's "best known" plan
-    /// may have been observed.</summary>
-    internal const int PlanRegressionWindowDays = 14;
+    /// may have been observed. One definition with the builder's (<see cref="PlanRegressionDaily.WindowDays"/>): a window
+    /// that outgrew the days the builder fills would leave every read short of built days and on the full scan.</summary>
+    internal const int PlanRegressionWindowDays = PlanRegressionDaily.WindowDays;
 
     /// <summary>
     /// How far BELOW the comparison window the chunk-exclusion bound sits (#2387). `last_execution_time`
     /// is the monitored server's clock and `collection_time` is the store's; a monitored server running
     /// ahead can report an execution time later than the collection that carried it. A day absorbs any
-    /// plausible drift while still excluding all but ~15 days of a store that may hold months.
+    /// plausible drift while still excluding all but ~15 days of a store that may hold months. One definition with the
+    /// builder's (<see cref="PlanRegressionDaily.PlanRegressionSkewMarginDays"/>), which closes a day by the same margin.
     /// </summary>
-    internal const int PlanRegressionSkewMarginDays = 1;
+    internal const int PlanRegressionSkewMarginDays = PlanRegressionDaily.PlanRegressionSkewMarginDays;
 
     /* PG port: any_value() below is standard SQL:2023, in Postgres since 16 — the product's
        minimum supported PG is 16, so it stays verbatim (DuckDB and PG agree on its semantics:
@@ -445,30 +447,18 @@ WITH plan_agg AS
 ";
 
     /// <summary>
-    /// The closed days of the PLAN_REGRESSION window that are fully built (#5448): $1 server_id, $2 M (the window's
-    /// day-aligned start). A day is valid when its build saw every late row (<c>built_seq = late_seq</c>) and the
-    /// interval table's coverage claim reaches the whole day, which is <c>day &gt;= filled_since::date + 1</c>: the
-    /// first day after the one <c>filled_since</c> falls in, because that day may be only partly covered. Run only
-    /// when the fact reads the interval table; an empty or failed answer sends the read to
-    /// <see cref="PlanRegressionTableSql"/> unchanged.
-    /// </summary>
-    internal const string PlanRegressionBuiltDaysSql = @"
-SELECT b.day
-FROM collect.plan_regression_daily_built AS b
-JOIN collect.query_store_interval_latest_coverage AS c
-  ON c.server_id = b.server_id
-WHERE b.server_id = $1::integer
-AND   b.day >= $2::date
-AND   b.built_seq = b.late_seq
-AND   b.day >= c.filled_since::date + 1
-ORDER BY b.day;";
-
-    /// <summary>
     /// PLAN_REGRESSION over per-day totals for the closed days and the interval table for the rest (#5448):
     /// <see cref="PlanRegressionTableSql"/> with its <c>plan_agg</c> replaced by the sum of two reads, so everything from
-    /// <c>plan_dedup</c> down is the shared <see cref="PlanRegressionSuffix"/> and cannot drift. $1 server_id, $2 M, $3 the
-    /// built days (<see cref="PlanRegressionBuiltDaysSql"/>, date[]), $4 the live floor and $5 M - 1 day, both
-    /// timestamps (see <see cref="PlanRegressionLiveFloor"/>).
+    /// <c>plan_dedup</c> down is the shared <see cref="PlanRegressionSuffix"/> and cannot drift. $1 server_id, $2 M (a
+    /// timestamp), $3 M - 1 day (a timestamp, the collection bound, bare for #2387).
+    ///
+    /// <para><b>One snapshot for both halves.</b> The built days are a CTE of this statement
+    /// (<see cref="PlanRegressionDaily.BuiltDaysSelect"/>, the text the fact's own built-days read runs), and the live
+    /// half's day filter and its <c>first_execution_time</c> floor are worked out from that CTE, so the two halves cannot
+    /// disagree about which days are built. The floor is one day below the first day, from M on, that is NOT built: a live
+    /// row's day is that day or later, and one Query Store interval spans at most a day, so its first execution is at or
+    /// above the floor. With every day from M built up to some last one, the floor sits one day below the day after it,
+    /// so the read still sees whatever comes after the built days (a skewed server's future-dated rows).</para>
     ///
     /// <para><b>The window edge moves in whole days.</b> This read's edge is M, the start of the day the exact edge falls
     /// in, for both halves; the exact-bound read it replaces cut mid-day. It is the same function of the same snapshots
@@ -477,18 +467,37 @@ ORDER BY b.day;";
     /// <c>last_execution_time</c> in the day, <c>first_execution_time</c> and <c>collection_time</c> a day below it, so the
     /// two routes differ only for a snapshot collected more than a day before its interval's last execution.</para>
     ///
-    /// <para>The built days and this read are two statements, and the trigger can mark a day late between them. A pass can
-    /// therefore see a day's totals from before a late row, once; the next builder pass rebuilds the day and the read
-    /// after it is whole.</para>
+    /// <para>The fact first runs <see cref="PlanRegressionDaily.BuiltDaysSql"/> only to choose between this statement and
+    /// the exact-bound one, and to know the edge M it reads from. A late row can mark a day between that read and this
+    /// statement: this statement then sees the day as not built and reads it live, which is exact, so a stale pre-read
+    /// costs nothing. A late row that lands after this statement's snapshot is not in it, and the next builder pass
+    /// rebuilds the day.</para>
     /// </summary>
     internal const string PlanRegressionDailySql = PlanRegressionDailyPrefix + PlanRegressionSuffix;
 
+    /// <summary>
+    /// The <c>live_floor</c> CTE of <see cref="PlanRegressionDailySql"/> (#5448), over its <c>built_days</c> CTE and $2 = M:
+    /// one row, <c>floor_ts</c>, one day below the first day from M on that is not built. The series is longer than the
+    /// window, so some day in it is always unbuilt (the three newest days are never built). Its own constant so a test can
+    /// run it over made-up built days.
+    /// </summary>
+    internal const string PlanRegressionLiveFloorCte = @"live_floor AS
+(
+    SELECT ($2::date + COALESCE(MIN(g.n), 61) - 1)::timestamp AS floor_ts
+    FROM generate_series(0, 60) AS g (n)
+    WHERE NOT EXISTS (SELECT 1 FROM built_days AS bd WHERE bd.day = $2::date + g.n)
+)";
+
     private const string PlanRegressionDailyPrefix = @"
-WITH plan_agg AS
+WITH built_days AS
+(" + PlanRegressionDaily.BuiltDaysSelect + @"
+),
+" + PlanRegressionLiveFloorCte + @",
+plan_agg AS
 (
     -- #5448: closed days from collect.plan_regression_daily (summed totals, so days recombine exactly), every other day
     -- from the interval table with the daily builder's own aggregate. A row is in exactly one half: its day
-    -- (last_execution_time::date) is in the built set or it is not.
+    -- (last_execution_time::date) is in the built set or it is not, and both halves read that one CTE.
     SELECT
         database_name,
         query_id,
@@ -508,7 +517,7 @@ WITH plan_agg AS
             d.execs, d.cpu_us_sum, d.dur_us_sum, d.last_exec, d.is_forced_plan, d.force_failure_count
         FROM plan_regression_daily AS d
         WHERE d.server_id = $1::integer
-        AND   d.day = ANY($3::date[])
+        AND   d.day IN (SELECT bd.day FROM built_days AS bd)
 
         UNION ALL
 
@@ -523,9 +532,9 @@ WITH plan_agg AS
         FROM query_store_interval_latest AS l
         WHERE l.server_id = $1::integer
         AND   l.last_execution_time >= $2::timestamp
-        AND   l.collection_time >= $5::timestamp
-        AND   l.first_execution_time >= $4::timestamp
-        AND   l.last_execution_time::date <> ALL($3::date[])
+        AND   l.collection_time >= $3::timestamp
+        AND   l.first_execution_time >= (SELECT lf.floor_ts FROM live_floor AS lf)
+        AND   l.last_execution_time::date NOT IN (SELECT bd.day FROM built_days AS bd)
         GROUP BY l.database_name, l.query_id, l.plan_id, l.replica_role, l.query_plan_hash
     ) AS u
     GROUP BY database_name, query_id, plan_id, replica_role
@@ -537,25 +546,6 @@ WITH plan_agg AS
     /// </summary>
     internal static DateTime PlanRegressionWindowFloor(DateTime rawWindowStart) =>
         DateTime.SpecifyKind(rawWindowStart.Date, DateTimeKind.Unspecified);
-
-    /// <summary>
-    /// The live read's <c>first_execution_time</c> floor (#5448): one day below the first day, from
-    /// <paramref name="windowFloor"/> on, that is NOT built. A live row's day is that day or later, and one Query Store
-    /// interval spans at most a day, so its first execution is at or above the floor. With every day from the window's
-    /// start built up to some last one, the floor sits one day below the day after it, so a read still sees whatever
-    /// comes after the built days (a skewed server's future-dated rows).
-    /// </summary>
-    internal static DateTime PlanRegressionLiveFloor(DateTime windowFloor, IReadOnlyCollection<DateOnly> builtDays)
-    {
-        var built = new HashSet<DateOnly>(builtDays);
-        var day = DateOnly.FromDateTime(windowFloor);
-        while (built.Contains(day))
-        {
-            day = day.AddDays(1);
-        }
-
-        return DateTime.SpecifyKind(day.ToDateTime(TimeOnly.MinValue).AddDays(-1), DateTimeKind.Unspecified);
-    }
 
     /// <summary>Everything from <c>plan_dedup</c> down, shared by both PLAN_REGRESSION reads.</summary>
     private const string PlanRegressionSuffix = @"plan_dedup AS
@@ -696,11 +686,10 @@ LIMIT 20";
             var windowFloor = PlanRegressionWindowFloor(rawWindowStart);
             var builtDays = readsTable
                 ? await QueryStoreIntervalLatest.ReadBuiltDaysAsync(
-                    connection, PlanRegressionBuiltDaysSql, context.ServerId, windowFloor, FactCommandTimeoutSeconds, _logger,
+                    connection, context.ServerId, windowFloor, FactCommandTimeoutSeconds, _logger,
                     ex => AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken), context.CancellationToken)
                 : new List<DateOnly>();
             var readsDays = builtDays.Count > 0;
-            context.PlanRegressionWindowStart = readsDays ? windowFloor : null;
 
             using var cmd = new NpgsqlCommand(
                 readsDays ? PlanRegressionDailySql : readsTable ? PlanRegressionTableSql : PlanRegressionSql, connection)
@@ -708,14 +697,9 @@ LIMIT 20";
             cmd.Parameters.AddWithValue(context.ServerId);
             if (readsDays)
             {
-                /* $2 M, $3 the built days, $4 the live floor, $5 M - 1 day (the collection bound, bare for #2387). */
+                /* $2 M, $3 M - 1 day (the collection bound, bare for #2387). The statement works out the built days itself,
+                   from the same text the pre-read ran, so both of its halves see one snapshot of them. */
                 cmd.Parameters.AddWithValue(NpgsqlTypes.NpgsqlDbType.Timestamp, windowFloor);
-                cmd.Parameters.Add(new NpgsqlParameter
-                {
-                    NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Array | NpgsqlTypes.NpgsqlDbType.Date,
-                    Value = builtDays.ToArray()
-                });
-                cmd.Parameters.AddWithValue(NpgsqlTypes.NpgsqlDbType.Timestamp, PlanRegressionLiveFloor(windowFloor, builtDays));
                 cmd.Parameters.AddWithValue(NpgsqlTypes.NpgsqlDbType.Timestamp, windowFloor.AddDays(-1));
             }
             else
@@ -772,6 +756,10 @@ LIMIT 20";
             }
 
             context.PlanRegressionOffenders = offenders;
+
+            /* #5448: M is recorded only now, after the read has succeeded. A read that threw leaves "not known" (null), as the
+               AnalysisContext doc says, so the drill-down does not start at an edge no fact read from. */
+            context.PlanRegressionWindowStart = readsDays ? windowFloor : null;
 
             if (offenderCount == 0) return;
 

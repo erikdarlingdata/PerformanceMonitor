@@ -722,8 +722,9 @@ ALTER TABLE config.config_notification
     /// are equal, so a late row that lands after the build (even one that races it) leaves the day invalid and the
     /// builder rebuilds it. The trigger marks the day of <c>first_execution_time</c> and the day after it, because
     /// <c>last_execution_time</c> (the row's day) can cross midnight. It fires only for rows whose first execution is
-    /// at least a day old and no more than 16 days old: today and yesterday are always read live, and a row older
-    /// than the window can never be read. The <c>WHEN</c> condition reads <c>NEW</c> only, because PostgreSQL does
+    /// at least a day old and no earlier than the start of the day 17 days back (a whole-day edge, so every day the
+    /// hourly cleanup still keeps can be marked): today and yesterday are always read live, and a row older than that
+    /// can never be read. The <c>WHEN</c> condition reads <c>NEW</c> only, because PostgreSQL does
     /// not allow a subquery there.</para>
     ///
     /// <para><b>Plain tables, SECURITY INVOKER function, no GRANT</b>: the builder deletes and re-inserts whole days,
@@ -731,8 +732,8 @@ ALTER TABLE config.config_notification
     /// privileges and pins <c>search_path</c> to <c>pg_catalog, pg_temp</c>, so it names every object schema-qualified;
     /// and the <c>collect</c> schema's blanket <c>GRANT SELECT ON ALL TABLES</c> covers a table a migration introduces.
     /// Every statement is idempotent, so a second run changes nothing. No index on
-    /// <c>query_store_interval_latest</c> is added here: if the big-store EXPLAIN says the per-day builds need one,
-    /// it goes at the top of this rung in V153's shape.</para>
+    /// <c>query_store_interval_latest</c> is added here: V153's index on <c>first_execution_time</c> serves the per-day
+    /// builds, whose predicate bounds that column.</para>
     /// </summary>
     private const string V168Sql = @"
 /* V168 (#5448): per-day per-plan totals for PLAN_REGRESSION's closed days, and the trigger that marks a day stale when
@@ -774,15 +775,15 @@ CREATE OR REPLACE FUNCTION collect.plan_regression_daily_mark_late() RETURNS tri
 LANGUAGE plpgsql
 SET search_path = pg_catalog, pg_temp
 AS $f$
-/* A (server, day) is bumped at most once per transaction (#5448 lane 6). The apply is one statement, so tens of
+/* A (server, day) is bumped at most once per transaction. The apply is one statement, so tens of
    thousands of late rows would otherwise run ON CONFLICT DO UPDATE on the same one or two built rows, and each update
    leaves another version of that tuple inside the one transaction: every conflict check after it walks the whole chain
    (166 buffers at 30,000 versions against 4 on a fresh row), and the batch grows quadratically. One bump is enough:
    the builder reads late_seq before it aggregates, and the batch's rows commit together with the bump. The pairs
    already bumped are kept in a transaction-local setting (set_config(.., true)), which a rolled-back savepoint undoes
    together with the bump it recorded, and which the function's own SET search_path does not touch. Each key is
-   server_id:day-number between commas, so one lookup is a substring test; the 16-day clamp keeps the list to about
-   17 pairs per server. After a commit the setting reads back as an empty string, not NULL. */
+   server_id:day-number between commas, so one lookup is a substring test; the 17-day clamp keeps the list to about
+   19 pairs per server. After a commit the setting reads back as an empty string, not NULL. */
 DECLARE
     d integer := NEW.first_execution_time::date - DATE '2000-01-01';
     marked text := coalesce(nullif(current_setting('darling.plan_regression_marked', true), ''), ',');
@@ -812,7 +813,7 @@ CREATE TRIGGER trg_plan_regression_daily_late
     AFTER INSERT OR UPDATE ON collect.query_store_interval_latest
     FOR EACH ROW
     WHEN (NEW.first_execution_time < date_trunc('day', now() AT TIME ZONE 'UTC') - interval '1 day'
-          AND NEW.first_execution_time >= now() AT TIME ZONE 'UTC' - interval '16 days')
+          AND NEW.first_execution_time >= date_trunc('day', now() AT TIME ZONE 'UTC') - interval '17 days')
     EXECUTE FUNCTION collect.plan_regression_daily_mark_late();";
 
     public static IReadOnlyList<Migration> Scripts { get; } = new[]

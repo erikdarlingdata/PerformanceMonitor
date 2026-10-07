@@ -107,7 +107,7 @@ public sealed class PlanRegressionDailyParityLiveTests
             ct, ("a", WindowStart.AddDays(-2)));
 
         /* ---- a late interval into a closed day: the trigger's bump (done here by hand, the seed is older than the
-           trigger's 16-day reach) leaves the day and the one after it invalid ---- */
+           trigger's 17-day reach) leaves the day and the one after it invalid ---- */
         var lateStart = T0.AddDays(2).AddHours(14);
         await WriteAsync(runner, [(1.0, Row("qsA", 100, 1001, 5000, lateStart, lateStart.AddMinutes(30), 4000, 10))], lateStart.AddMinutes(40), ct);
         await ExecAsync(connection, "UPDATE collect.query_store_interval_latest_coverage SET filled_since = @a WHERE server_id = @s",
@@ -123,8 +123,12 @@ public sealed class PlanRegressionDailyParityLiveTests
         Assert.Equal(afterLate, await DailyRowsAsync(connection, ct));
 
         /* Not vacuous: had the stale day been read from its old totals, the answer would be wrong. */
-        var withStale = await DailyRowsAsync(connection, ct, stale.Concat([allDays[2]]).OrderBy(d => d).ToList());
+        await ExecAsync(connection, "UPDATE collect.plan_regression_daily_built SET built_seq = late_seq WHERE server_id = @s AND day = @d",
+            ct, ("d", allDays[2].ToDateTime(TimeOnly.MinValue)));
+        var withStale = await DailyRowsAsync(connection, ct);
         Assert.NotEqual(afterLate, withStale);
+        await ExecAsync(connection, "UPDATE collect.plan_regression_daily_built SET built_seq = late_seq - 1 WHERE server_id = @s AND day = @d",
+            ct, ("d", allDays[2].ToDateTime(TimeOnly.MinValue)));
 
         /* ---- rebuilt: valid again, and equal ---- */
         await BuildDayAsync(connection, allDays[2], ct);
@@ -265,7 +269,7 @@ public sealed class PlanRegressionDailyParityLiveTests
     private static async Task<List<DateOnly>> BuiltDaysAsync(NpgsqlConnection connection, CancellationToken ct)
     {
         var days = new List<DateOnly>();
-        await using var command = new NpgsqlCommand(PgFactCollector.PlanRegressionBuiltDaysSql, connection);
+        await using var command = new NpgsqlCommand(PlanRegressionDaily.BuiltDaysSql, connection);
         command.Parameters.AddWithValue(ServerId);
         command.Parameters.AddWithValue(NpgsqlDbType.Timestamp, PgFactCollector.PlanRegressionWindowFloor(WindowStart));
         await using var reader = await command.ExecuteReaderAsync(ct);
@@ -273,20 +277,17 @@ public sealed class PlanRegressionDailyParityLiveTests
         return days;
     }
 
-    private static async Task<List<string>> DailyRowsAsync(NpgsqlConnection connection, CancellationToken ct, List<DateOnly>? days = null)
+    private static async Task<List<string>> DailyRowsAsync(NpgsqlConnection connection, CancellationToken ct)
     {
-        days ??= await BuiltDaysAsync(connection, ct);
         var floor = PgFactCollector.PlanRegressionWindowFloor(WindowStart);
         await using var command = new NpgsqlCommand(PgFactCollector.PlanRegressionDailySql, connection);
         command.Parameters.AddWithValue(ServerId);
         command.Parameters.AddWithValue(NpgsqlDbType.Timestamp, floor);
-        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Date, Value = days.ToArray() });
-        command.Parameters.AddWithValue(NpgsqlDbType.Timestamp, PgFactCollector.PlanRegressionLiveFloor(floor, days));
         command.Parameters.AddWithValue(NpgsqlDbType.Timestamp, floor.AddDays(-1));
         return await RowsAsync(command, ct);
     }
 
-    /// <summary>What the builder does for one day (lane 3's tick, minus its lock and timeout): replace the day's rows, then
+    /// <summary>What the builder does for one day (the builder's tick, minus its lock and timeout): replace the day's rows, then
     /// stamp the built row at the sequence read before the build.</summary>
     private static async Task BuildDayAsync(NpgsqlConnection connection, DateOnly day, CancellationToken ct)
     {

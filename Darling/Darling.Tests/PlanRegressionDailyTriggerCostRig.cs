@@ -23,7 +23,7 @@ using Xunit;
 namespace Darling.Tests;
 
 /// <summary>
-/// #5448 cost rig (plan v2, lane 2 (e)): what the late-row trigger costs the interval table's apply, measured, not
+/// #5448 cost rig: what the late-row trigger costs the interval table's apply, measured, not
 /// asserted. It is a MEASUREMENT, so it skips unless <c>DARLING_COST_RIG_RUNS</c> is set (runs per mode; the plan says 50),
 /// and it writes its numbers to <c>DARLING_COST_RIG_OUT</c> (a file path) rather than passing or failing on them.
 ///

@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -312,7 +313,7 @@ public sealed class PlanRegressionDailyBuilderLiveTests
     }
 
     [Fact]
-    public async Task TheGc_RemovesOldDaysAndDisabledServersFromBothTables_InOneStatement()
+    public async Task TheGc_RemovesOldDaysAndDisabledServersFromBothTables_InOneTransaction()
     {
         await RunLiveAsync(async (scratch, connection, ct) =>
         {
@@ -332,6 +333,118 @@ public sealed class PlanRegressionDailyBuilderLiveTests
 
             Assert.Equal("1|2026-03-04;1|2026-03-10", await ScalarAsync(connection, "SELECT string_agg(server_id || '|' || day, ';' ORDER BY server_id, day) FROM collect.plan_regression_daily", ct));
             Assert.Equal("1|2026-03-04;1|2026-03-10", await ScalarAsync(connection, "SELECT string_agg(server_id || '|' || day, ';' ORDER BY server_id, day) FROM collect.plan_regression_daily_built", ct));
+        });
+    }
+
+    [Fact]
+    public async Task TheGc_ProbesTheTotalsByIndex_NeverScansThem_AndRemovesExpiredDaysWhileLiveDaysStay()
+    {
+        await RunLiveAsync(async (scratch, connection, ct) =>
+        {
+            await CoverAsync(connection, 1, ct);
+            await CoverAsync(connection, 9, ct, enabled: false);
+
+            /* Enough totals rows that a sequential scan would be the cheap plan if the delete had a predicate of its own:
+               3 live days of one enabled server, 30,000 rows each, and one expired day of a disabled server. */
+            await ExecAsync(connection, @"
+INSERT INTO collect.plan_regression_daily_built (server_id, day, built_seq)
+SELECT 1, d::date, 0 FROM generate_series(DATE '2026-03-10', DATE '2026-03-12', interval '1 day') AS d;
+INSERT INTO collect.plan_regression_daily (server_id, day, database_name, query_id, plan_id, replica_role, query_plan_hash, execs)
+SELECT 1, d::date, 'db1', q, 1, NULL, 'h', 1
+FROM generate_series(DATE '2026-03-10', DATE '2026-03-12', interval '1 day') AS d, generate_series(1, 30000) AS q;
+INSERT INTO collect.plan_regression_daily_built (server_id, day, built_seq) VALUES (9, DATE '2026-03-10', 0);
+INSERT INTO collect.plan_regression_daily (server_id, day, database_name, query_id, plan_id, replica_role, query_plan_hash, execs)
+SELECT 9, DATE '2026-03-10', 'db1', q, 1, NULL, 'h', 1 FROM generate_series(1, 10) AS q;
+ANALYZE collect.plan_regression_daily;
+ANALYZE collect.plan_regression_daily_built;", ct);
+
+            /* The plan of the statement that removes one due key: executed inside a transaction that is rolled back, so the
+               next case starts from the same rows. Every access to the totals table is an index probe, on the unique index,
+               and it reads only that day's ten rows of the 90,010. */
+            var due = await TotalsScansOfGcAsync(connection, 9, new DateOnly(2026, 3, 10), ct);
+            Assert.NotEmpty(due);
+            Assert.All(due, node => Assert.True(node.Index == "ux_plan_regression_daily", $"{node.NodeType} on {node.Index ?? "no index"}"));
+            Assert.True(due.Sum(node => node.RowsRead) <= 10, $"the cleanup read {due.Sum(node => node.RowsRead)} totals rows for ten due ones");
+
+            /* Nothing is read when nothing is due: the built-row delete returns no key, so no totals statement runs and the
+               totals table is not touched. After the disabled server's day goes, a second pass removes nothing. */
+            Assert.Equal(1L, await PlanRegressionDaily.GcAsync(connection, Now, ct));
+            Assert.Equal(90000L, await ScalarAsync(connection, "SELECT count(*) FROM collect.plan_regression_daily", ct));
+            Assert.Equal(0L, await PlanRegressionDaily.GcAsync(connection, Now, ct));
+            Assert.Equal(90000L, await ScalarAsync(connection, "SELECT count(*) FROM collect.plan_regression_daily", ct));
+
+            /* The live days stay, and an expired day of an enabled server goes with its totals. */
+            await ExecAsync(connection, "INSERT INTO collect.plan_regression_daily_built (server_id, day, built_seq) VALUES (1, DATE '2026-03-03', 0)", ct);
+            await ExecAsync(connection, "INSERT INTO collect.plan_regression_daily (server_id, day, database_name, query_id, plan_id, replica_role, query_plan_hash, execs) VALUES (1, DATE '2026-03-03', 'db1', 1, 1, NULL, 'h', 1)", ct);
+            Assert.Equal(1L, await PlanRegressionDaily.GcAsync(connection, Now, ct));
+            Assert.Equal(90000L, await ScalarAsync(connection, "SELECT count(*) FROM collect.plan_regression_daily", ct));
+            Assert.Equal(3L, await ScalarAsync(connection, "SELECT count(*) FROM collect.plan_regression_daily_built", ct));
+        });
+    }
+
+    private readonly record struct TotalsScan(string NodeType, string? Index, double RowsRead);
+
+    /// <summary>Runs <see cref="PlanRegressionDaily.GcTotalsSql"/> for one key under EXPLAIN ANALYZE in a transaction that is
+    /// rolled back, and returns every access to the totals table: its node type, index and rows read (rows returned,
+    /// times loops).</summary>
+    private static async Task<List<TotalsScan>> TotalsScansOfGcAsync(NpgsqlConnection connection, int serverId, DateOnly day, CancellationToken ct)
+    {
+        await using var transaction = await connection.BeginTransactionAsync(ct);
+        string json;
+        await using (var command = new NpgsqlCommand("EXPLAIN (ANALYZE, FORMAT JSON) " + PlanRegressionDaily.GcTotalsSql, connection, transaction))
+        {
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = serverId });
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Date, Value = day });
+            json = (string)(await command.ExecuteScalarAsync(ct))!;
+        }
+
+        await transaction.RollbackAsync(ct);
+
+        var found = new List<TotalsScan>();
+        void Walk(System.Text.Json.JsonElement node)
+        {
+            if (node.TryGetProperty("Relation Name", out var relation) && relation.GetString() == "plan_regression_daily"
+                && node.GetProperty("Node Type").GetString()!.Contains("Scan", StringComparison.Ordinal))
+            {
+                var loops = node.GetProperty("Actual Loops").GetDouble();
+                var rows = node.GetProperty("Actual Rows").GetDouble() * loops;
+                found.Add(new TotalsScan(node.GetProperty("Node Type").GetString()!, node.TryGetProperty("Index Name", out var index) ? index.GetString() : null, rows));
+            }
+
+            if (node.TryGetProperty("Plans", out var plans))
+            {
+                foreach (var child in plans.EnumerateArray()) Walk(child);
+            }
+
+            if (node.TryGetProperty("Plan", out var plan)) Walk(plan);
+        }
+
+        using var document = System.Text.Json.JsonDocument.Parse(json);
+        Walk(document.RootElement[0]);
+        return found;
+    }
+
+    [Fact]
+    public async Task ABuildWhoseBuiltRowIsGoneByTheStamp_ThrowsAndRollsBack_LeavingNoOrphanTotals()
+    {
+        await RunLiveAsync(async (scratch, connection, ct) =>
+        {
+            await CoverAsync(connection, 1, ct);
+            await SeedAsync(connection, 1, "db1", 1, Day.AddHours(2), 10, 100, 1000, false, ct);
+
+            await using var builder = new NpgsqlConnection(scratch.ConnectionString);
+            await builder.OpenAsync(ct);
+
+            /* A second service's cleanup removes the built row (the server was just disabled) after the build read its
+               sequence and before it stamps. The stamp then updates nothing. */
+            var thrown = await Assert.ThrowsAsync<InvalidOperationException>(() => PlanRegressionDaily.BuildDayAsync(
+                builder, 1, DateOnly.FromDateTime(Day), Now, ct,
+                afterSeqRead: async token => await ExecAsync(connection, "DELETE FROM collect.plan_regression_daily_built WHERE server_id = 1", token)));
+            Assert.Contains("is gone", thrown.Message, StringComparison.Ordinal);
+
+            /* Rolled back: no totals for a day no built row owns, and no built row. */
+            Assert.Equal(0L, await ScalarAsync(connection, "SELECT count(*) FROM collect.plan_regression_daily", ct));
+            Assert.Equal(0L, await ScalarAsync(connection, "SELECT count(*) FROM collect.plan_regression_daily_built", ct));
         });
     }
 
@@ -385,10 +498,10 @@ public sealed class PlanRegressionDailyBuilderLiveTests
         Assert.Contains("- 14)::timestamp", PlanRegressionDaily.PlanSql, StringComparison.Ordinal);
         Assert.Contains("- 3)::timestamp", PlanRegressionDaily.PlanSql, StringComparison.Ordinal);
 
-        /* One statement, both tables (L2b). */
-        Assert.Equal(2, PlanRegressionDaily.GcSql.Split("DELETE FROM collect.plan_regression_daily", StringSplitOptions.None).Length - 1);
-        Assert.Contains("DELETE FROM collect.plan_regression_daily_built", PlanRegressionDaily.GcSql, StringComparison.Ordinal);
-        Assert.Equal(1, PlanRegressionDaily.GcSql.Count(c => c == ';'));
+        /* Both tables in one transaction: the built rows first, then the totals by key. */
+        Assert.Contains("DELETE FROM collect.plan_regression_daily_built", PlanRegressionDaily.GcBuiltSql, StringComparison.Ordinal);
+        Assert.Contains("RETURNING server_id, day", PlanRegressionDaily.GcBuiltSql, StringComparison.Ordinal);
+        Assert.Contains("DELETE FROM collect.plan_regression_daily\nWHERE server_id = $1::integer\nAND   day = $2::date;", PlanRegressionDaily.GcTotalsSql.Replace("\r\n", "\n", StringComparison.Ordinal), StringComparison.Ordinal);
     }
 
     private static string Body(string source, string signature)

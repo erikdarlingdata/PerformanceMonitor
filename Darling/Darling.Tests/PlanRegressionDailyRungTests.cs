@@ -200,7 +200,7 @@ public sealed class PlanRegressionDailyRungTests
     }
 
     /// <summary>
-    /// #5448 lane 6: the function bumps a (server, day) once per transaction. The apply is one statement, so a bump per
+    /// #5448: the function bumps a (server, day) once per transaction. The apply is one statement, so a bump per
     /// late row updates the same built tuple tens of thousands of times inside one transaction, and each conflict check
     /// after the first walks the whole version chain (quadratic: 17 s for 50,000 late rows). The pairs already bumped are
     /// kept in a transaction-local setting, and a row whose days are both in it returns before any write. A pin on the
@@ -231,16 +231,46 @@ public sealed class PlanRegressionDailyRungTests
         Assert.True(trigger.Success, "the rung has no row trigger named trg_plan_regression_daily_late on the interval table");
         Assert.Contains("DROP TRIGGER IF EXISTS trg_plan_regression_daily_late ON collect.query_store_interval_latest;", sql, StringComparison.Ordinal);
 
-        /* The WHEN condition reads NEW only (PostgreSQL forbids a subquery there), at least a day old and at most 16. */
+        /* The WHEN condition reads NEW only (PostgreSQL forbids a subquery there), at least a day old and no earlier than the start of the day 17 back. */
         var condition = Regex.Replace(trigger.Groups["when"].Value, @"\s+", " ");
         Assert.Contains("NEW.first_execution_time < date_trunc('day', now() AT TIME ZONE 'UTC') - interval '1 day'", condition, StringComparison.Ordinal);
-        Assert.Contains("NEW.first_execution_time >= now() AT TIME ZONE 'UTC' - interval '16 days'", condition, StringComparison.Ordinal);
+        /* A whole-day edge, one day wider than the cleanup's 16 days, so every day the cleanup keeps can be marked: a late row
+           for T-16 has its first execution on T-17, and a clamp at now() minus 16 days would miss it between midnight and
+           the time of day. */
+        Assert.Contains("NEW.first_execution_time >= date_trunc('day', now() AT TIME ZONE 'UTC') - interval '17 days'", condition, StringComparison.Ordinal);
         Assert.DoesNotContain("SELECT", condition, StringComparison.OrdinalIgnoreCase);
         Assert.Equal(PlanRegressionDaily.MarkLateWindowDays, 16);
 
-        /* Branch A: no index on the interval table in this rung. If the big-store EXPLAIN says to add one, it goes at
-           the top of this rung in V153's shape and this pin changes with it. */
+        /* No index on the interval table in this rung: V153's first_execution_time index serves the per-day builds. */
         Assert.DoesNotContain("CREATE INDEX", sql, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void TheRungAndTheBuilderCarryNoProcessWording_BecauseTheFunctionBodyIsStoredInEveryStore()
+    {
+        /* The function body is kept in pg_proc.prosrc on every store, and the doc comments ship with the product: neither
+           names a work lane or a hand-over step. */
+        var storage = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Storage", "PlanRegressionDaily.cs");
+        foreach (var text in new[] { Rung.Sql, storage })
+        {
+            Assert.DoesNotMatch(@"\blane\b", text);
+            Assert.DoesNotMatch(@"big-store EXPLAIN", text);
+        }
+    }
+
+    [Fact]
+    public void TheCleanup_IsDrivenFromTheSmallBuiltTable_SoTheTotalsDeleteIsAnIndexProbeByKey()
+    {
+        var built = Regex.Replace(PlanRegressionDaily.GcBuiltSql, @"\s+", " ");
+        Assert.StartsWith("DELETE FROM collect.plan_regression_daily_built", built.TrimStart(), StringComparison.Ordinal);
+        Assert.Contains("RETURNING server_id, day", built, StringComparison.Ordinal);
+
+        /* The totals delete is the two leading columns of the unique index with constants: no OR of a day test and a NOT IN
+           on the totals table, which could not use that index and would read every totals row every hour. */
+        var totals = Regex.Replace(PlanRegressionDaily.GcTotalsSql, @"\s+", " ");
+        Assert.Contains("DELETE FROM collect.plan_regression_daily WHERE server_id = $1::integer AND day = $2::date;", totals, StringComparison.Ordinal);
+        Assert.DoesNotContain(" OR ", totals, StringComparison.Ordinal);
+        Assert.DoesNotContain("NOT IN", totals, StringComparison.Ordinal);
     }
 
     [Fact]

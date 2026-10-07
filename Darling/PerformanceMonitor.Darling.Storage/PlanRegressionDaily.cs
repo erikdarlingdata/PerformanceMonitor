@@ -22,12 +22,13 @@ namespace PerformanceMonitor.Darling.Storage;
 /// (<c>collect.plan_regression_daily</c>, #5448), which PLAN_REGRESSION reads for CLOSED days so a run no longer
 /// re-aggregates 14 days of the interval table. This file is the storage half: the rung that creates the tables and the
 /// trigger is V168 (<see cref="PgMigrations"/>), the builder is the hourly-tick tenant at the bottom of this file
-/// (<see cref="RunTickAsync(NpgsqlDataSource, DateTime, ILogger, CancellationToken)"/>), and the read follows in its own lane.
+/// (<see cref="RunTickAsync(NpgsqlDataSource, DateTime, ILogger, CancellationToken)"/>), and the read is <c>PgFactCollector.PlanRegressionDailySql</c> in the Analysis project.
 ///
 /// <para><b>Row day is the day of <c>last_execution_time</c></b> (naive UTC), the column PLAN_REGRESSION's window filters
 /// on. A day's row is the plan's totals over the interval rows whose <c>last_execution_time</c> falls in that day, so
-/// summing the closed days and the live days reproduces the 14-day aggregate. Gain is about 4-5x fewer blocks read, not
-/// 14x: the last three days stay live (see <see cref="ClosedDayLagDays"/>), and they hold about a fifth of the rows.</para>
+/// summing the closed days and the live days reproduces the 14-day aggregate. The measured gain is about 3x fewer blocks
+/// read (986K to 338K) and about 6x less time, not 14x: the last three days stay live (see
+/// <see cref="ClosedDayLagDays"/>), and they hold about a fifth of the rows.</para>
 ///
 /// <para><b>Closing a day.</b> A day D is closed, and so built and read from the table, once <c>D &lt;= T - 3</c> for
 /// today T: one day for D to have passed, <see cref="PlanRegressionSkewMarginDays"/> for a monitored server whose clock
@@ -48,8 +49,10 @@ public static class PlanRegressionDaily
     /// </summary>
     public const int ClosedDayLagDays = 1 + PlanRegressionSkewMarginDays + 1;
 
-    /// <summary>How far back (in days) V168's trigger marks a day stale: a row older than this can never be read, because
-    /// the read's window is <see cref="WindowDays"/> and a row's day can be a day after the day of its first execution.</summary>
+    /// <summary>How many days back the hourly cleanup keeps built days: a day older than this can never be read, because
+    /// the read's window is <see cref="WindowDays"/> and a row's day can be a day after the day of its first execution.
+    /// V168's trigger clamps on the whole day 17 days back, one day wider, so it can mark every day this keeps (a late row
+    /// for T-16 has its first execution on T-17).</summary>
     public const int MarkLateWindowDays = WindowDays + 2;
 
     /// <summary>
@@ -99,8 +102,8 @@ WITH built AS
 )
 SELECT count(*)::bigint FROM built;";
 
-    /// <summary>The most (server, day) builds one tick runs. The first fill of a store is about 520 builds (a handful of
-    /// ticks); until it is done a read pays today's cost for the days not yet built.</summary>
+    /// <summary>The most (server, day) builds one tick runs. The first fill of a store is 12 builds per server (T-14 through T-3), so a
+    /// store with many servers takes several ticks; until it is done a read pays today's cost for the days not yet built.</summary>
     public const int MaxBuildsPerTick = 120;
 
     /// <summary>The wall-clock budget of one tick: no new build starts once this much time has passed since the tick
@@ -157,6 +160,28 @@ AND   day = $2::date;";
 SELECT pg_try_advisory_xact_lock(hashtextextended('plan_regression_daily:' || $1::integer::text, 0));";
 
     /// <summary>
+    /// The built days of one server that the PLAN_REGRESSION read may take its totals from (#5448), as a bare
+    /// <c>SELECT</c> so the read's own statement embeds the very same text as a CTE. $1 server_id, $2 M (the window's
+    /// day-aligned start). A day is valid when its build saw every late row (<c>built_seq = late_seq</c>) and the interval
+    /// table's coverage claim reaches the whole day, which is <c>day &gt;= filled_since::date + 1</c>: the first day after
+    /// the one <c>filled_since</c> falls in, because that day may be only partly covered.
+    /// </summary>
+    public const string BuiltDaysSelect = @"
+SELECT b.day
+FROM collect.plan_regression_daily_built AS b
+JOIN collect.query_store_interval_latest_coverage AS c
+  ON c.server_id = b.server_id
+WHERE b.server_id = $1::integer
+AND   b.day >= $2::date
+AND   b.built_seq = b.late_seq
+AND   b.day >= c.filled_since::date + 1";
+
+    /// <summary><see cref="BuiltDaysSelect"/>, ordered, for the read that chooses which statement the fact runs. A failed or
+    /// empty answer sends the read to the exact-bound statement unchanged.</summary>
+    public const string BuiltDaysSql = BuiltDaysSelect + @"
+ORDER BY b.day;";
+
+    /// <summary>
     /// The builds due now, oldest day first. $1 now (timestamp), $2 the cap. Servers are the enabled ones with an interval
     /// coverage claim and no pending batch: a pending batch means some raw rows are not yet applied, so the day's totals
     /// could not be trusted. A server's days start the day after its <c>filled_since</c>, since the table cannot speak for
@@ -187,26 +212,34 @@ ORDER BY d.day, s.server_id
 LIMIT $2::integer;";
 
     /// <summary>
-    /// Removes days older than the largest day the trigger can mark (<see cref="MarkLateWindowDays"/>), and every row of a
-    /// server that is not enabled, from both tables in ONE statement (two data-modifying CTEs), so the totals and their
-    /// built rows never disagree about which days exist. $1 now (timestamp). Returns the built rows removed.
+    /// Removes the expired built rows (days older than <see cref="MarkLateWindowDays"/>, and every row of a server that is not
+    /// enabled) and returns their keys. $1 now (timestamp). The first of the cleanup's two steps; see
+    /// <see cref="GcTotalsSql"/> for the second and for why the cleanup is driven from this small table.
     /// </summary>
-    public static readonly string GcSql = $@"
-WITH totals AS
-(
-    DELETE FROM collect.plan_regression_daily
-    WHERE day < ($1::timestamp - interval '{MarkLateWindowDays} days')::date
-       OR server_id NOT IN (SELECT server_id FROM collect.servers WHERE is_enabled)
-    RETURNING 1
-),
-built AS
-(
-    DELETE FROM collect.plan_regression_daily_built
-    WHERE day < ($1::timestamp - interval '{MarkLateWindowDays} days')::date
-       OR server_id NOT IN (SELECT server_id FROM collect.servers WHERE is_enabled)
-    RETURNING 1
-)
-SELECT (SELECT count(*) FROM built)::bigint;";
+    public static readonly string GcBuiltSql = $@"
+DELETE FROM collect.plan_regression_daily_built
+WHERE day < ($1::timestamp - interval '{MarkLateWindowDays} days')::date
+   OR server_id NOT IN (SELECT server_id FROM collect.servers WHERE is_enabled)
+RETURNING server_id, day;";
+
+    /// <summary>
+    /// Removes one expired (server, day) of totals: $1 server_id, $2 day. The predicate is the two leading columns of
+    /// <c>ux_plan_regression_daily</c> with constants, so each is an index probe and reads nothing but that day's rows.
+    ///
+    /// <para><b>Why two steps, driven from the built table.</b> The built table holds one row per server and day (a few
+    /// hundred), the totals table holds every plan of every day. A delete on the totals table with its own
+    /// <c>day &lt; X OR server_id NOT IN (...)</c> predicate cannot use the unique index and reads every totals row on every
+    /// hourly tick, even when nothing is due. Joining the totals delete to the expired built rows in ONE statement does not
+    /// fix that: the planner cannot know how few rows the first delete returns and picks a hash join with a sequential scan
+    /// of the totals. So the cleanup deletes the built rows first, then removes each returned key with this statement, in
+    /// one transaction. When nothing has expired no totals statement runs at all. This relies on every totals day having
+    /// a built row, which <see cref="BuildDayAsync"/> keeps true: the stamp that ends a build throws when the built row is
+    /// gone, and the build's transaction rolls its totals back with it.</para>
+    /// </summary>
+    public const string GcTotalsSql = @"
+DELETE FROM collect.plan_regression_daily
+WHERE server_id = $1::integer
+AND   day = $2::date;";
 
     /// <summary>One planned build.</summary>
     public readonly record struct Build(int ServerId, DateOnly Day);
@@ -235,15 +268,34 @@ SELECT (SELECT count(*) FROM built)::bigint;";
         return builds;
     }
 
-    /// <summary>Removes the expired days and the days of servers that are not enabled from both tables; returns how many
-    /// built (server, day) rows went.</summary>
+    /// <summary>Removes the expired days and the days of servers that are not enabled from both tables, in ONE transaction
+    /// (the totals and their built rows never disagree about which days exist); returns how many built (server, day) rows
+    /// went. The built rows go first and name the totals to remove (<see cref="GcTotalsSql"/>).</summary>
     public static async Task<long> GcAsync(NpgsqlConnection connection, DateTime nowUtc, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(connection);
 
-        await using var command = new NpgsqlCommand(GcSql, connection) { CommandTimeout = CommandTimeoutSeconds };
-        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = Unspecified(nowUtc) });
-        return Convert.ToInt64(await command.ExecuteScalarAsync(cancellationToken));
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        var expired = new List<(int ServerId, DateOnly Day)>();
+        await using (var command = new NpgsqlCommand(GcBuiltSql, connection, transaction) { CommandTimeout = CommandTimeoutSeconds })
+        {
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = Unspecified(nowUtc) });
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                expired.Add((reader.GetInt32(0), reader.GetFieldValue<DateOnly>(1)));
+            }
+        }
+
+        foreach (var (serverId, day) in expired)
+        {
+            await using var totals = new NpgsqlCommand(GcTotalsSql, connection, transaction) { CommandTimeout = CommandTimeoutSeconds };
+            AddServerDay(totals, serverId, day);
+            await totals.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        await transaction.CommitAsync(cancellationToken);
+        return expired.Count;
     }
 
     /// <summary>
@@ -319,7 +371,16 @@ SELECT (SELECT count(*) FROM built)::bigint;";
             mark.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Bigint, Value = seq });
             mark.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = Unspecified(nowUtc) });
             mark.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Bigint, Value = sourceRows });
-            await mark.ExecuteNonQueryAsync(cancellationToken);
+
+            /* The built row is made before the transaction (see EnsureBuiltSql), so a second service's cleanup can remove it
+               in between, for a server that was just disabled. Then the stamp updates nothing, and committing would leave
+               totals no built row owns, which the cleanup (driven by built rows) would never remove. Throwing rolls the
+               build back; the tick logs a failed build and the next tick plans it again. */
+            if (await mark.ExecuteNonQueryAsync(cancellationToken) != 1)
+            {
+                throw new InvalidOperationException(
+                    $"The built row for server {serverId} day {day:yyyy-MM-dd} is gone, so the build is rolled back.");
+            }
         }
 
         await transaction.CommitAsync(cancellationToken);
