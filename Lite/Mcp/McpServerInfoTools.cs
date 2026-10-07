@@ -88,17 +88,31 @@ public sealed class McpServerInfoTools
     public static async Task<string> GetDatabaseSizes(
         LocalDataService dataService,
         ServerManager serverManager,
-        [Description("Server name or display name.")] string? server_name = null)
+        [Description("Server name or display name.")] string? server_name = null,
+        [Description("Limit to one database. Omit for all databases.")] string? database_name = null)
     {
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
         if (error != null) return error;
 
         try
         {
-            var rows = await dataService.GetLatestDatabaseSizeStatsAsync(resolved.ServerId);
+            /* #5244: database_name appended LAST (H1). A blank is "no filter"; any other value is kept exactly (no trim) and matches
+               exactly, as on Darling. The filter is on the newest snapshot's ROWS, so captured_at is the server's whatever the filter. */
+            var names = string.IsNullOrWhiteSpace(database_name) ? null : new[] { database_name };
+            var rows = await dataService.GetLatestDatabaseSizeStatsAsync(resolved.ServerId, names);
             if (rows.Count == 0)
+            {
+                /* A filter that matches no database in a snapshot that exists is an answer about the chosen database, not about
+                   collection: the probe is the same newest-snapshot read, unfiltered (Darling's twin words it the same). */
+                if (names != null && await dataService.GetLatestDatabaseSizeStatsAsync(resolved.ServerId) is { Count: > 0 } snapshot)
+                    return McpHelpers.Status("empty",
+                        $"No database size rows for {McpDatabaseSelection.Scope(names)} on {resolved.ServerName} in the snapshot captured at "
+                        + $"{snapshot[0].CollectionTime:o}. Check the database name against the server's unfiltered get_database_sizes: the filter "
+                        + "matches exactly, and an excluded or renamed database looks identical to one with no files.");
+
                 return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "database_size_stats")
                     ?? McpHelpers.Status("unavailable", "No database size data available. The size collector may not have run yet.");
+            }
 
             return DatabaseSizesPayload(resolved.ServerName, rows);
         }

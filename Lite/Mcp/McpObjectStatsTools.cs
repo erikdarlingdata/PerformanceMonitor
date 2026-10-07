@@ -33,7 +33,8 @@ public sealed class McpObjectStatsTools
     public static async Task<string> GetTableIndexSizes(
         LocalDataService dataService,
         ServerManager serverManager,
-        [Description("Server name or display name.")] string? server_name = null)
+        [Description("Server name or display name.")] string? server_name = null,
+        [Description("Limit to one database. Omit for all databases.")] string? database_name = null)
     {
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
         if (error != null) return error;
@@ -41,9 +42,23 @@ public sealed class McpObjectStatsTools
         try
         {
             /* Over-fetch by one so truncation is observed, not inferred from a full page (#3541 A3's rule). */
-            var rows = await dataService.GetObjectSizeGrowthAsync(resolved.ServerId, TableSizesTop + 1);
+            /* #5244: database_name appended LAST (H1). A blank is "no filter"; any other value is kept exactly (no trim). The cap and the
+               over-fetch row follow the filter, so the page is the largest tables of the chosen database; the history block stays the
+               server's own span. */
+            var names = string.IsNullOrWhiteSpace(database_name) ? null : new[] { database_name };
+            var rows = await dataService.GetObjectSizeGrowthAsync(resolved.ServerId, TableSizesTop + 1, names);
             if (rows.Count == 0)
             {
+                /* A filter that matches no table is a different answer from a server that collects no index stats (Darling's twin
+                   words it the same, minus the count of the server's other rows, which Lite has no read for). */
+                if (names != null && (await dataService.GetObjectSizeGrowthAsync(resolved.ServerId, 1)).Count > 0)
+                {
+                    return McpHelpers.Status("empty",
+                        $"No table size rows for {McpDatabaseSelection.Scope(names)} on {resolved.ServerName} at the latest snapshot, "
+                        + "though the server has index rows in its other databases. Check the database name against get_database_sizes: "
+                        + "the filter matches exactly, and an excluded or renamed database looks identical to one with no tables.");
+                }
+
                 return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "index_object_stats")
                     ?? McpHelpers.Status("unavailable", "No object size data available. Index/object stats are collected daily.");
             }

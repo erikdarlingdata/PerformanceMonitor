@@ -10,4 +10,5 @@ param get_object_locking.limit 35
 param get_object_locking.server_name 28
 
 tool get_table_index_sizes 794
+param get_table_index_sizes.database_name 46
 param get_table_index_sizes.server_name 28
