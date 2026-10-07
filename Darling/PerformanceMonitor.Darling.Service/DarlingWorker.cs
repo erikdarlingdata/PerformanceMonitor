@@ -14419,6 +14419,19 @@ LIMIT 1";
                 _postgres!, runtime, collectorName, "SESSION_MISSING", 0, runClock.ElapsedMilliseconds, 0, ex.Message, fanout: null, phases: null, drain: null, fetchPhases: null, sweepPeerMaxMs: peerMaxAtDispatchMs, _logger, cancellationToken);
             return 0;
         }
+        catch (RdsEndpointMismatchException ex)
+        {
+            /* The host is not the endpoint AWS reports for the id parsed from it, so no RDS or Performance Insights
+               call was made for this target. PERMISSIONS, like the other refused-source outcomes, and the message
+               names the host and the id. Written on every sweep so collection health keeps reading it. */
+            _logger.LogWarning("  [{Server}] {Collector} => PERMISSIONS: the host does not match the endpoint AWS reports",
+                server.Config.DisplayName, collectorName);
+
+            await DarlingObservability.LogCollectionAsync(
+                _postgres!, runtime, collectorName, "PERMISSIONS", 0, 0, runClock.ElapsedMilliseconds, ex.Message,
+                fanout: null, phases: null, drain: null, fetchPhases: null, sweepPeerMaxMs: peerMaxAtDispatchMs, _logger, cancellationToken);
+            return 0;
+        }
         catch (RdsLogUnavailableException ex) when (ex.IsAuthorizationFailure)
         {
             /* #2633: the AWS call was DENIED, so nothing was read. Degraded to PERMISSIONS rather than

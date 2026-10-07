@@ -187,8 +187,15 @@ public sealed class RdsLogSource
 
     private static readonly TimeSpan ListingCapWarnInterval = TimeSpan.FromHours(1);
 
-    public RdsLogSource(Func<string, IAmazonRDS>? clientFactory = null, Func<DateTime>? clock = null, ILogger? logger = null)
+    private readonly RdsEndpointVerifier _verifier;
+
+    public RdsLogSource(
+        Func<string, IAmazonRDS>? clientFactory = null,
+        Func<DateTime>? clock = null,
+        ILogger? logger = null,
+        RdsEndpointVerifier? verifier = null)
     {
+        _verifier = verifier ?? new RdsEndpointVerifier(clock);
         _clientFactory = clientFactory
             ?? (region => new AmazonRDSClient(RegionEndpoint.GetBySystemName(region)));
         _clock = clock ?? (() => DateTime.UtcNow);
@@ -423,7 +430,15 @@ public sealed class RdsLogSource
     /// behaviour — the writer resolution, the marker discipline, the bounded first read — is unchanged; only
     /// which file name <see cref="LogFilesNewestFirstAsync"/> picks differs.
     /// </summary>
-    public async Task<LogChunk?> ReadNewestAsync(string host, LogFileKind kind, CancellationToken cancellationToken = default)
+    public Task<LogChunk?> ReadNewestAsync(string host, LogFileKind kind, CancellationToken cancellationToken = default)
+        => ReadNewestAsync(host, kind, 0, cancellationToken);
+
+    /// <summary>
+    /// The same read for the server <paramref name="serverId"/>, which keys the cached endpoint check
+    /// (<see cref="RdsEndpointVerifier"/>) together with the host and the parsed id.
+    /// </summary>
+    public async Task<LogChunk?> ReadNewestAsync(
+        string host, LogFileKind kind, int serverId, CancellationToken cancellationToken)
     {
         var endpoint = RdsEndpoint.TryParse(host);
 
@@ -444,6 +459,9 @@ public sealed class RdsLogSource
         }
 
         using var client = _clientFactory(parsed.Region);
+
+        /* The host must be the endpoint AWS reports for the id parsed from it before any log call is made. */
+        await _verifier.EnsureAsync(client, parsed, host, serverId, cancellationToken);
 
         var instanceId = parsed.Kind == RdsEndpointKind.ClusterWriter
             ? await ResolveWriterAsync(client, parsed.Identifier, cancellationToken)

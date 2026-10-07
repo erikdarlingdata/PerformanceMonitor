@@ -130,7 +130,13 @@ public sealed class RdsDeadlockIngestor
 
         try
         {
-            chunk = await _logs.ReadNewestAsync(host, kind, cancellationToken);
+            chunk = await _logs.ReadNewestAsync(host, kind, serverId, cancellationToken);
+        }
+        catch (RdsEndpointMismatchException)
+        {
+            /* The host is not the endpoint AWS reports for this id: propagated UNWRAPPED so DarlingWorker records
+               the PERMISSIONS outcome with this message, not the IAM text the wrapped type carries. */
+            throw;
         }
         catch (PgNoCsvlogFileException)
         {
