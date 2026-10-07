@@ -66,6 +66,23 @@ public sealed class AzureSiblingSizePayloadTests : IClassFixture<SharedDuckDbFix
         return doc.RootElement.TryGetProperty("note", out var note) ? note.GetString() : null;
     }
 
+    /* #5244: the database_name echo sits right after server, the place Darling's twin writes it, on both answer shapes
+       (with and without the top-level note). The key order is the wire shape the twin promises. */
+    [Fact]
+    public void TheDatabaseNameEcho_SitsRightAfterServer_OnBothDataShapes_AsDarlingWritesIt()
+    {
+        var plain = new[] { Row("appdb", 1, "appdb_data", "ROWS", 100, 10) };
+        var withNote = new[] { Row("sibdb", null, AzureSiblingDatabaseSize.FileName, "ROWS", 10_240, 119) };
+
+        foreach (var rows in new[] { plain, withNote })
+        {
+            using var doc = JsonDocument.Parse(McpServerInfoTools.DatabaseSizesPayload("srv", rows, "appdb"));
+            var keys = doc.RootElement.EnumerateObject().Select(p => p.Name).ToList();
+            Assert.Equal(new[] { "server", "database_name", "captured_at", "file_count" }, keys.Take(4));
+            Assert.Equal("databases", keys[^1]);
+        }
+    }
+
     [Fact]
     public void ASiblingRow_CarriesTheLogNoteAndItsUsedSize_OnItsFileAndItsDatabase_AndANormalFileRowDoesNot()
     {

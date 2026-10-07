@@ -34,11 +34,17 @@ public partial class LocalDataService
     /// once in <c>boundaries</c> with <c>FILTER</c> so the baseline CTEs and the projected snapshot times
     /// cannot disagree about which capture was used. Darling's <c>DarlingObjectStatsReader.ObjectSizeGrowthSql</c>
     /// is the twin.</para>
+    /// <para>#5244: <paramref name="databaseNames"/> (null or empty = every database, the statement as it always read) limits the four
+    /// snapshot CTEs, and NOT <c>boundaries</c>, so the snapshot anchors and the store's span stay the server's and a filtered and an
+    /// unfiltered call describe the same snapshots. The cap follows the filter: the page is the largest <paramref name="topN"/> tables
+    /// of the chosen databases. Darling's twin binds the same names as one <c>text[]</c> on the same four CTEs.</para>
     /// </summary>
-    public async Task<List<ObjectSizeGrowthBaselineRow>> GetObjectSizeGrowthAsync(int serverId, int topN = 100)
+    public async Task<List<ObjectSizeGrowthBaselineRow>> GetObjectSizeGrowthAsync(
+        int serverId, int topN = 100, IReadOnlyList<string>? databaseNames = null)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
+        var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
 
         var now = DateTime.UtcNow;
         var cutoff7d = now.AddDays(-7);
@@ -62,25 +68,25 @@ latest AS (
         MAX(total_rows) AS total_rows,
         COUNT(*) AS index_count
     FROM v_index_object_stats
-    WHERE server_id = $1 AND collection_time = (SELECT latest_time FROM boundaries)
+    WHERE server_id = $1 AND collection_time = (SELECT latest_time FROM boundaries){dbClause}
     GROUP BY database_name, schema_name, table_name
 ),
 past_7d AS (
     SELECT database_name, schema_name, table_name, SUM(reserved_mb) AS reserved_mb
     FROM v_index_object_stats
-    WHERE server_id = $1 AND collection_time = (SELECT snapshot_7d_time FROM boundaries)
+    WHERE server_id = $1 AND collection_time = (SELECT snapshot_7d_time FROM boundaries){dbClause}
     GROUP BY database_name, schema_name, table_name
 ),
 past_30d AS (
     SELECT database_name, schema_name, table_name, SUM(reserved_mb) AS reserved_mb
     FROM v_index_object_stats
-    WHERE server_id = $1 AND collection_time = (SELECT snapshot_30d_time FROM boundaries)
+    WHERE server_id = $1 AND collection_time = (SELECT snapshot_30d_time FROM boundaries){dbClause}
     GROUP BY database_name, schema_name, table_name
 ),
 oldest AS (
     SELECT database_name, schema_name, table_name, SUM(reserved_mb) AS reserved_mb
     FROM v_index_object_stats
-    WHERE server_id = $1 AND collection_time = (SELECT earliest_time FROM boundaries)
+    WHERE server_id = $1 AND collection_time = (SELECT earliest_time FROM boundaries){dbClause}
     GROUP BY database_name, schema_name, table_name
 )
 SELECT
@@ -110,6 +116,8 @@ LIMIT {topN}";
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = cutoff7d });
         command.Parameters.Add(new DuckDBParameter { Value = cutoff30d });
+        foreach (var db in dbValues)
+            command.Parameters.Add(new DuckDBParameter { Value = db });
 
         var items = new List<ObjectSizeGrowthBaselineRow>();
         using var reader = await command.ExecuteReaderAsync();

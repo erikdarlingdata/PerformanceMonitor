@@ -193,7 +193,7 @@ public sealed class DesktopDatabaseFilterLiveTests
 
             /* Parity: the MCP's series for one database names the same database the viewer draws for that one database. */
             var viewerA = await viewer.GetFileIoLatencyTrendAsync(ServerId, start, end, new[] { DbA }, ct);
-            var mcpA = await DarlingTrendReader.GetFileIoSeriesAsync(postgres, ServerId, start, end, DbA, ct);
+            var mcpA = await DarlingTrendReader.GetFileIoSeriesAsync(postgres, ServerId, start, end, DatabaseFilter.One(DbA), ct);
             Assert.Equal(mcpA.Select(s => s.DatabaseName).Distinct().ToArray(), viewerA.Select(p => p.DatabaseName).Distinct().ToArray());
 
             bodySucceeded = true;

@@ -14,18 +14,36 @@ public sealed class McpIoTools
     public static async Task<string> GetFileIoStats(
         LocalDataService dataService,
         ServerManager serverManager,
-        [Description("Server name or display name.")] string? server_name = null)
+        [Description("Server name or display name.")] string? server_name = null,
+        [Description("Limit to one database. Omit for all databases.")] string? database_name = null)
     {
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
         if (error != null) return error;
 
         try
         {
-            var rows = await dataService.GetLatestFileIoStatsAsync(resolved.ServerId);
+            /* #5244: database_name appended LAST (H1). A blank is "no filter"; any other value is kept exactly (no trim). The filter is
+               on the newest capture's ROWS, so captured_at is the server's whatever the filter, and every answer says which database it
+               was limited to (the database_name echo), as Darling's twin does. */
+            var names = string.IsNullOrWhiteSpace(database_name) ? null : new[] { database_name };
+            var echo = McpDatabaseSelection.Describe(names);
+            var rows = await dataService.GetLatestFileIoStatsAsync(resolved.ServerId, names);
             if (rows.Count == 0)
             {
-                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "file_io_stats")
-                    ?? McpHelpers.Status("unavailable", "No file I/O stats available.");
+                /* A filtered read whose newest capture exists but holds none of the chosen database is empty, not unavailable
+                   ("nothing was ever collected"): the probe is the same newest-capture read, unfiltered. */
+                if (names != null && await dataService.GetLatestFileIoStatsAsync(resolved.ServerId) is { Count: > 0 } capture)
+                {
+                    return McpHelpers.StatusForDatabase("empty",
+                        $"The newest file I/O snapshot for {resolved.ServerName} (captured_at {capture[0].CollectionTime:o}) holds no files{McpDatabaseSelection.ForChosen(names)}. "
+                        + "The name must match a collected database exactly; omit database_name for every database.",
+                        echo);
+                }
+
+                return McpHelpers.WithDatabase(
+                           await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "file_io_stats"),
+                           echo)
+                    ?? McpHelpers.StatusForDatabase("unavailable", "No file I/O stats available.", echo);
             }
 
             var result = rows.Select(r => new
@@ -57,6 +75,7 @@ public sealed class McpIoTools
             return JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
+                database_name = echo,
                 /* #3541 A10: every file row shares this stamp (the read is every file at MAX(collection_time)). */
                 captured_at = rows[0].CollectionTime.ToString("o"),
                 files = result
@@ -96,7 +115,9 @@ public sealed class McpIoTools
                bucketed read charts exactly the series the ranking counted. The desktop chart's own read
                (GetFileIoLatencyTrendAsync) is ALSO bucketed now (#4234), to its own per-call budget — a
                separate read, on a separate clock, from this tool's ranking-driven GetFileIoTrendAsync. */
-            var scope = string.IsNullOrWhiteSpace(database_name) ? null : database_name.Trim();
+            /* #5244: a blank is "every database" and any other value is kept exactly, never trimmed, so a padded name matches nothing, as on
+               Darling (its twin stopped trimming in the same change, one rule for the whole filter family). */
+            var scope = string.IsNullOrWhiteSpace(database_name) ? null : database_name;
             var series = await dataService.GetFileIoSeriesAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd, scope);
 
             if (series.Count == 0)
@@ -105,7 +126,9 @@ public sealed class McpIoTools
                    The quiet-window sentence carries one extra clause the others do not need: the ranking
                    counts only series that read or wrote, so a genuinely idle file set is empty here even on a
                    server whose file_io_stats collector ran every cycle. */
-                var gated = await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "file_io_stats");
+                /* #5244: every answer shape says which database it was limited to (null for every database), as Darling's twin does. */
+                var gated = McpHelpers.WithDatabase(
+                    await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "file_io_stats"), scope);
                 if (gated != null)
                 {
                     return gated;
@@ -116,16 +139,16 @@ public sealed class McpIoTools
                 /* A scoped read that found nothing is first a question about the NAME — Darling's twin's rule. */
                 if (scope is not null && everCollected)
                 {
-                    return McpHelpers.Status("empty", TrendPayloads.FileIoScopeEmptyMessage(resolved.ServerName, scope, hours_back));
+                    return McpHelpers.StatusForDatabase("empty", TrendPayloads.FileIoScopeEmptyMessage(resolved.ServerName, scope, hours_back), scope);
                 }
 
                 return everCollected
-                    ? McpHelpers.Status(
+                    ? McpHelpers.StatusForDatabase(
                         "empty",
-                        $"No file I/O samples recorded for {resolved.ServerName} in the last {hours_back} hour(s). This server HAS collected file I/O stats before, so this window is genuinely quiet rather than broken — widen hours_back, or read it as no measurable read or write activity on any file in this window.")
-                    : McpHelpers.Status(
+                        $"No file I/O samples recorded for {resolved.ServerName} in the last {hours_back} hour(s). This server HAS collected file I/O stats before, so this window is genuinely quiet rather than broken — widen hours_back, or read it as no measurable read or write activity on any file in this window.", scope)
+                    : McpHelpers.StatusForDatabase(
                         "unavailable",
-                        $"No file I/O stats have EVER been recorded for {resolved.ServerName}. This is not an empty window — the file_io_stats collector has stored nothing at all for this server. Check that collection is running and that the server is enabled; get_file_io_stats will be equally empty until it does.");
+                        $"No file I/O stats have EVER been recorded for {resolved.ServerName}. This is not an empty window — the file_io_stats collector has stored nothing at all for this server. Check that collection is running and that the server is enabled; get_file_io_stats will be equally empty until it does.", scope);
             }
 
             var budget = TrendBudget.Mcp(TrendBuckets.FileIoMaxPoints);

@@ -157,7 +157,10 @@ public sealed class McpToolsListBudgetTests
     // #5244 PR6: get_database_config_changes, get_default_trace_events and get_health_parser_severe_errors gain database_name (appended last, the
     // 46-character sentence the other Lite database_name parameters use; the served heads are unchanged), +97 bytes each (+291). The ceiling is the
     // measured total on this tree, not a hand sum.
-    private const int TotalCeilingBytes = 94_041;
+    // #5244 PR5: get_database_sizes, get_table_index_sizes, get_pvs_stats and get_file_io_stats gain database_name (appended last, the same
+    // 46-character sentence; the served heads are unchanged), +97 bytes each (+388). The ceiling is the measured total on this tree: 94,429
+    // (94,041 before).
+    private const int TotalCeilingBytes = 94_429;
 
     private const int ConvertedHeadCap = 1_000;
     private const int ConvertedParameterCap = 200;

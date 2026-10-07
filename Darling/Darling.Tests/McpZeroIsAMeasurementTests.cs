@@ -453,7 +453,7 @@ public sealed class McpZeroIsAMeasurementTests
         Assert.DoesNotContain("growth_7d_mb", darling, StringComparison.Ordinal);
 
         var lite = ReadRepoFile("Lite", "Services", "LocalDataService.FinOps.IndexObjects.cs");
-        var read = lite[lite.IndexOf("GetObjectSizeGrowthAsync(int serverId", StringComparison.Ordinal)..];
+        var read = lite[lite.IndexOf("GetObjectSizeGrowthAsync(", StringComparison.Ordinal)..];
         read = read[..read.IndexOf("return items;", StringComparison.Ordinal)];
         Assert.DoesNotMatch(FoldedBaseline, read);
         Assert.Contains("MAX(collection_time) FILTER (WHERE collection_time <= $2) AS snapshot_7d_time", read, StringComparison.Ordinal);
