@@ -910,6 +910,115 @@ public sealed class AlertDeliveryChannelTests
         Assert.Equal(2, CountOccurrences(message, "before raising MAXDOP"));
     }
 
+    /* ────── the PagerDuty paired lifecycle, on the wire ────── */
+
+    /// <summary>
+    /// The review's paired lifecycle, on the wire rather than at the payload builder. PagerDuty's own send
+    /// is captured at the test-only override (below), and the same settings seam drives the whole Darling
+    /// path — <see cref="DarlingAlertDeliverer.DeliverAsync"/> through the shared send core, the fan-out
+    /// and the PagerDuty payload builder — so the flag the payload resolved with is the one the SEND read,
+    /// not one the test handed a builder directly. With the flag OFF the closing edge posts an
+    /// info-severity TRIGGER on its own state-named key (shipped behavior); with the flag ON it posts a
+    /// RESOLVE on the pair's shared incident, and a second firing afterward is NOT throttled by the first
+    /// incident's cooldown (the clear its resolve carried re-armed it).
+    /// </summary>
+    [Fact]
+    public async Task TheDeliverer_SendsThePagerDutyPairedLifecycle_OnTheWire_WithTheFlagOn()
+    {
+        var capture = new CapturingPagerDuty();
+
+        var config = new DarlingConfig();
+        config.Webhooks.PagerDutyRoutingKey = "rk-test";
+        config.Webhooks.PagerDutyAutoResolve = true;
+        config.Smtp.Host = "";
+        config.Smtp.To = "";
+
+        var settings = new DarlingAlertSettings(config);
+        var history = new DiscardingHistoryStore();
+        var webhooks = new WebhookAlertService(
+            settings, DarlingAlertDeliverer.Branding, NullLogger<WebhookAlertService>.Instance, history);
+        webhooks.PostPagerDutyAsyncOverride = (endpoint, payload) =>
+        {
+            Assert.Equal("https://events.pagerduty.com/v2/enqueue", endpoint);
+            capture.Bodies.Add(payload);
+            return Task.FromResult<string?>(null);
+        };
+        var deliverer = new DarlingAlertDeliverer(settings, history, webhooks, NullLogger.Instance);
+
+        var outcome = new AlertOutcome(
+            "13", "PROD01", "Server Unreachable", "Login timeout expired", "Online",
+            Context: null, DetailText: null, NumericCurrentValue: 0, NumericThresholdValue: 0,
+            Muted: false, Severity: AlertSeverityLevel.Critical);
+
+        await deliverer.DeliverAsync(outcome, TestContext.Current.CancellationToken);
+        await deliverer.DeliverAsync(
+            outcome with { MetricName = "Server Restored", Severity = null },
+            TestContext.Current.CancellationToken);
+        await deliverer.DeliverAsync(outcome, TestContext.Current.CancellationToken);
+
+        /* Unreachable, Restored, Unreachable again: three posts, the middle one a resolve of the first's
+           incident, the third unthrottled by the recovery that closed it (item 2's cooldown clear). */
+        Assert.Equal(3, capture.Bodies.Count);
+
+        var trigger = System.Text.Json.JsonDocument.Parse(capture.Bodies[0]).RootElement;
+        var resolve = System.Text.Json.JsonDocument.Parse(capture.Bodies[1]).RootElement;
+        var second = System.Text.Json.JsonDocument.Parse(capture.Bodies[2]).RootElement;
+
+        Assert.Equal("trigger", trigger.GetProperty("event_action").GetString());
+        Assert.Equal("resolve", resolve.GetProperty("event_action").GetString());
+        Assert.Equal(trigger.GetProperty("dedup_key").GetString(), resolve.GetProperty("dedup_key").GetString());
+        Assert.Equal("trigger", second.GetProperty("event_action").GetString());
+    }
+
+    /// <summary>
+    /// The OFF half of the same pin: the same wire, the same pair, the shipped behavior — an info-severity
+    /// trigger on the closing edge's OWN key. This is what the generic <c>{{dedup_key}}</c> token and the
+    /// triage link also did before the flag existed, and why the rename must stay gated on it (item 3).
+    /// </summary>
+    [Fact]
+    public async Task TheDeliverer_LeavesThePagerDutyPairedLifecycleAlone_OnTheWire_WithTheFlagOff()
+    {
+        var capture = new CapturingPagerDuty();
+
+        var config = new DarlingConfig();
+        config.Webhooks.PagerDutyRoutingKey = "rk-test";
+        config.Webhooks.PagerDutyAutoResolve = false;
+
+        var settings = new DarlingAlertSettings(config);
+        var history = new DiscardingHistoryStore();
+        var webhooks = new WebhookAlertService(
+            settings, DarlingAlertDeliverer.Branding, NullLogger<WebhookAlertService>.Instance, history);
+        webhooks.PostPagerDutyAsyncOverride = (endpoint, payload) =>
+        {
+            capture.Bodies.Add(payload);
+            return Task.FromResult<string?>(null);
+        };
+        var deliverer = new DarlingAlertDeliverer(settings, history, webhooks, NullLogger.Instance);
+
+        var restored = new AlertOutcome(
+            "13", "PROD01", "Server Restored", "Online", "Online",
+            Context: null, DetailText: null, NumericCurrentValue: 0, NumericThresholdValue: 0,
+            Muted: false, Severity: null);
+
+        await deliverer.DeliverAsync(restored, TestContext.Current.CancellationToken);
+
+        var body = System.Text.Json.JsonDocument.Parse(Assert.Single(capture.Bodies)).RootElement;
+        Assert.Equal("trigger", body.GetProperty("event_action").GetString());
+        Assert.Equal("info", body.GetProperty("payload").GetProperty("severity").GetString());
+        Assert.Equal("13:Server Restored", body.GetProperty("dedup_key").GetString());
+    }
+
+    /// <summary>
+    /// The payloads one test's PagerDuty sends captured, in send order. Plain list, no socket: the
+    /// service's test-only post override answers the send (see its own remarks) and hands the payload
+    /// here, so nothing leaves the process and the assertions read the exact JSON the wire would have
+    /// seen.
+    /// </summary>
+    private sealed class CapturingPagerDuty
+    {
+        public List<string> Bodies { get; } = new();
+    }
+
     /* ────── #3302 regression: a finding's Diagnosis facts, delivered once and stored in full ────── */
 
     /// <summary>
