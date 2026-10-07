@@ -164,7 +164,8 @@ This is a **different axis from the grant above** — it authorizes the **monito
 not the PostgreSQL login. On Aurora/RDS there is no local log directory a SQL session can read with
 `pg_read_file()`; plan capture, deadlock detection and the log-event pipeline instead pull the log tail
 through the RDS control plane. The CPU and host-memory collector also calls AWS, to read Performance Insights.
-Attach this to the instance role/profile the Darling service actually runs as:
+Attach this to the instance role/profile the Darling service actually runs as, or, for a server that has its own
+role, to that role (see the next subsection):
 
 ```json
 {
@@ -204,19 +205,88 @@ collectors log the missing action by name (see step 10).
 #### The cluster is in a different AWS account
 
 The service asks AWS for the cluster in the account that its credentials belong to. If the cluster is in
-another account, the host's own role cannot see it, and the calls fail with `is not authorized to perform`.
-Use a role in the cluster's account instead:
+another account, the host's own identity cannot see it, and the calls fail with `is not authorized to perform`.
+Each server can use its own AWS role instead, set on that server alone:
 
-1. In `<cluster-account>`, create a role that carries the policies above and trusts the host's role in
-   `<host-account>`.
-2. In `<host-account>`, allow the host's role to call `sts:AssumeRole` on the role from step 1.
-3. On the host, define an AWS profile that has `role_arn` and `credential_source = Ec2InstanceMetadata`.
-   Set `AWS_CONFIG_FILE` to the file that holds the profile, and set `AWS_PROFILE` to the profile name.
-   On Windows, set both as machine-level environment variables, because the service does not run as your user.
-4. Restart the service, so that it reads the new environment variables.
+```json
+{
+  "name": "aurora-orders-writer",
+  "engine": "postgres",
+  "host": "orders.cluster-abc123.us-east-1.rds.amazonaws.com",
+  "awsRoleArn": "arn:aws:iam::123456789012:role/darling-monitor",
+  "awsExternalId": "orders-prod-7f3a"
+}
+```
 
-`AWS_PROFILE` applies to the whole service process. Every RDS and Performance Insights call that the
-service makes then uses the role in `<cluster-account>`, including calls for targets in `<host-account>`.
+`awsRoleArn` is an IAM role ARN. `awsExternalId` is optional, needs the role, and is 2 to 1224 characters
+(letters, digits and `_ + = , . @ : / -`). Both apply to a PostgreSQL target only. Darling assumes the role
+through AWS STS and uses it for every AWS call it makes for that server. Those calls are the Describe calls
+that check the host, instance CPU and host memory (`pg_cpu_utilization`, through RDS and Performance Insights),
+and the log reads behind `pg_plan_capture`, `pg_deadlocks` and `pg_log_events`. A server with no `awsRoleArn` uses the
+process's own AWS credentials, exactly as before. Two servers can name two different roles, and a server's
+role is never used for another server.
+
+To set it up:
+
+1. In `123456789012` (the cluster's account), create the role and attach the policies from the IAM section above.
+   Leave its maximum session duration at one hour or more. Darling asks for one-hour sessions and renews them
+   itself, about 15 minutes before they expire.
+2. Give the role a trust policy that names the AWS identity the Darling service runs as. If you use an external
+   ID, require it with an `sts:ExternalId` condition that matches `awsExternalId`:
+
+   ```json
+   {
+     "Effect": "Allow",
+     "Principal": { "AWS": "arn:aws:iam::<host-account-id>:role/<darling-host-role>" },
+     "Action": "sts:AssumeRole",
+     "Condition": { "StringEquals": { "sts:ExternalId": "orders-prod-7f3a" } }
+   }
+   ```
+
+3. In the host's account, allow the host's identity to call `sts:AssumeRole` on
+   `arn:aws:iam::123456789012:role/darling-monitor`.
+4. Add `awsRoleArn` (and `awsExternalId`) to the server, by one of the paths below.
+
+The session name is `darling-` and the first 12 hex digits of the install id, so the assumed sessions can be
+told apart in CloudTrail. Darling calls STS in the region of the target it is reading.
+
+A role is a server setting like `host`. You can put it in the
+`darling.json` entry (the file seeds the registry once, see step 2), through `add_servers` and `edit_server`
+(`aws_role_arn`, `aws_external_id`), on the web Servers page, in the desktop viewer's Add and Edit server
+dialog, and with `--add-server`. The service runs a role only if it is allowed:
+
+- `allowedAwsRoles` in `darling.json` is a list of role ARNs (matched exactly) and 12-digit account ids (every
+  role in that account):
+
+  ```json
+  "allowedAwsRoles": [ "arn:aws:iam::123456789012:role/darling-monitor", "123456789012" ]
+  ```
+
+- The effective list is that list plus the `awsRoleArn` of every entry in `darling.json`'s own `servers[]`. A role
+  you write in the file is allowed by being there. `allowedAwsRoles` is what lets the web, MCP, the desktop
+  viewer and `--add-server` set a role.
+- With no list, the web and MCP cannot set a role. A role set through them has to be on the list when you save,
+  and the answer says so: `The web and MCP cannot set an AWS role until darling.json lists the roles they may
+  use. Add allowedAwsRoles to darling.json, then restart the service.` (no list) or `That AWS role is not on the
+  list of roles the web and MCP may set. Add it to allowedAwsRoles in darling.json and restart the service.`
+  (a list without that role). `--add-server` runs on the host and is not held to the list when it saves, but the
+  service still runs only a listed role.
+- The list is read when the service starts. Restart the service after you change `allowedAwsRoles`.
+- A role the list does not allow is never assumed, even if a stored row already names it. Remove the role (or
+  list it) to clear the message in step 10.
+
+On the web and in `edit_server`, leaving the role blank (or omitting it) keeps the stored role.
+Sending `null` removes it, and the external ID goes with it. Removing a role is always allowed. Changing the role on a
+server that has an external ID stored needs the external ID in the same request (a new one, or `null`):
+`Changing the AWS role needs the external ID with it: send the external ID again, or clear it.` The web and
+MCP never return the external ID. They show only whether one is set (`aws_external_id_set`). Omitting the external ID keeps
+the stored one. The desktop viewer's dialog is filled with the stored role, so
+emptying that box removes the role, and it holds the external ID in a masked box. A role-only change takes
+effect at the next sweep, with no restart: the server's connection is rebuilt with the new role.
+
+The service logs and records the role ARN and `ExternalId = set` or `ExternalId = none`. It never writes the
+external ID itself. A diagnostics bundle replaces the role ARN and account id with aliases and removes the
+external ID.
 
 ## 2. Register the target
 
@@ -748,7 +818,13 @@ says which kind it is. A missing extension a collector declares gets its own `EX
 | `EXTENSION_MISSING` | names the extension, "NOT a missing grant" | that extension never created where the collector connects | `CREATE EXTENSION` per the message (step 1's optional half), or leave it uninstalled and accept the gap |
 | `PERMISSIONS` | "NOT a missing grant", not implemented | reading something this engine lacks | nothing — expected off Aurora |
 | `PERMISSIONS` | "NOT a missing grant", feature disabled | switched off in the parameter group | enable it, or accept the gap |
-| `PERMISSIONS` | `is not authorized to perform: rds:Describe...`/`rds:Download...`, names an IAM role ARN | the **monitoring host's IAM role** lacks the AWS-level grant plan capture/deadlocks need on Aurora/RDS | attach the IAM policy in step 1's IAM subsection — a DB-side grant cannot fix this, it's a different identity entirely |
+| `PERMISSIONS` | `is not authorized to perform: rds:Describe...`/`rds:Download...`, names an IAM role ARN | the **monitoring host's IAM role** (or the server's own AWS role, once assumed) lacks the AWS-level grant plan capture/deadlocks need on Aurora/RDS | attach the IAM policy in step 1's IAM subsection to the role the message names. A DB-side grant cannot fix this, because it is a different identity entirely |
+| `PERMISSIONS` | `The AWS role <arn> on this server is not in allowedAwsRoles in darling.json, so it was not used. Nothing was read this cycle. Add the role or its account id to the list and restart the service, or clear the role on this server.` | the server names a role the list does not allow, so Darling never assumed it | list the role ARN or its account id in `allowedAwsRoles` and restart the service, or remove the role from the server |
+| `PERMISSIONS` | `Role <arn> is in AWS partition aws-cn, but this target's region <region> is in partition aws. A role can be assumed only inside its own partition. Nothing was read this cycle.` | the role and the target's region are in different AWS partitions | use a role from the region's partition |
+| `PERMISSIONS` | `AWS refused to let the monitoring host assume role <arn> (with the external ID set on this server)`, or `(without an external ID)`, then `One of these is wrong: the role does not exist, its trust policy does not trust the host's AWS identity, the external ID does not match the trust policy's sts:ExternalId condition, or the host's identity has no sts:AssumeRole permission on the role. AWS gives the same answer for all four.` | STS denied the assume-role call | check the four named things in step 1's cross-account subsection. The message never shows the external ID, only whether one is set |
+| `PERMISSIONS` | `AWS STS is not active in region <region> for the monitoring host's AWS account, so role <arn> could not be assumed. Activate STS for that region in the host account's IAM settings. Nothing was read this cycle.` | the host's account has STS switched off for that region | activate STS for the region |
+| `ERROR` | `AWS rejected the monitoring host's own credentials while it assumed role <arn>`, then `The credentials the service runs with are expired or wrong, or the host's clock is off. Nothing was read this cycle. Fix the host's credentials or clock; a new attempt is made within a minute.` | the host's own credentials, not the role, are the problem | fix the host's credentials or clock |
+| `ERROR` | `The monitoring host has no AWS credentials to assume role <arn> with: ...`, or `Assuming role <arn>: AWS STS did not answer within <n> seconds.` | the host has no AWS identity to assume the role from, or STS did not answer in time | give the service an AWS identity (step 1's IAM subsection). A timeout is retried on the next cycle |
 | `ERROR` | a statement timeout | the query was too slow **once** | usually transient; deliberately does *not* drop the connection, so a slow query cannot cause a reconnect storm |
 | `ERROR` | anything else | unclassified | read `error_message`; this is the bucket that wants a bug report |
 | `YIELDED` | lock contention | the collector stepped aside | none today — no PostgreSQL collector opts into the lock-timeout yield |
@@ -817,5 +893,8 @@ What genuinely remains, re-checked against `dev` at the time of this revision:
 - **The `pg_stats` helper-function route.** Step 8 documents `pg_read_all_data` and the
   `SECURITY DEFINER` alternative; only the grant is implemented. A fleet that will not widen the role
   gets measured sizes and suppressed estimates, exactly as step 8 describes.
+- **What a per-server AWS role covers, and what it does not.** `awsRoleArn` changes which AWS identity makes the
+  RDS and Performance Insights calls for that server (step 1's cross-account subsection). It does not change the
+  database login, which stays the SQL login from step 2, and it does not apply to SQL Server targets.
 - **Charts on the PostgreSQL tabs.** Both UIs render tables over the window — no correlated timeline,
   and no drill-down from a blocking root to the sessions behind it.
