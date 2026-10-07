@@ -236,12 +236,14 @@ public class WebhookAlertService
             var route = NotificationRouter.Resolve(metricName, delivery.NotificationRoutes, delivery);
 
             /* #5469: the PagerDuty auto-resolve behaviour reaches the cooldown only when PagerDuty will
-               actually be sent this alert: the flag on AND a destination for this metric. Read ONCE, here: the
-               scope, the seed and both clears use this one value, so they name one key even if the
-               flag is saved while the post is in flight. The send's own dedup key and the triage link read
-               the same delivery snapshot (the live settings in Lite, which does not freeze one). With the flag off, or PagerDuty unset or
-               not routed for the metric, every key is the one dev has always used. */
-            var pagerDutyAutoResolve = delivery.PagerDutyAutoResolve && route.PagerDuty.Destination is not null;
+               actually be sent this alert: the flag on AND a destination for this metric. The flag is read
+               ONCE, here, into autoResolveFlag. The scope, the seed, both clears, the triage link and the
+               PagerDuty send (its dedup key and its event action) all use that one value, so they name one
+               key and one action even if the flag is saved while the post is in flight (Lite, which does not
+               freeze a snapshot, included). With the flag off, or PagerDuty unset or not routed for the
+               metric, every key is the one dev has always used. */
+            var autoResolveFlag = delivery.PagerDutyAutoResolve;
+            var pagerDutyAutoResolve = autoResolveFlag && route.PagerDuty.Destination is not null;
 
             /* Each AG replica is its own incident, so its cooldown window is its own too (Teams, Slack and the
                generic webhook share it: one notice per replica per window). Null (not applying, not the AG
@@ -350,8 +352,8 @@ public class WebhookAlertService
                auto-resolve a paired edge's link and PagerDuty key are the pair's, the token is per state. */
             var triageUrl = TriageLink.Build(
                 _settings.TriageBaseUrl, serverName, metricName, nowUtc,
-                DerivePagerDutyDedupKeyForSend(
-                    string.IsNullOrEmpty(serverId) ? serverName : serverId, metricName, renderContext, delivery));
+                DerivePagerDutyDedupKey(
+                    string.IsNullOrEmpty(serverId) ? serverName : serverId, metricName, renderContext, autoResolveFlag));
 
             /* #3598: WHERE each channel posts, resolved ONCE for the whole fan-out (see the snapshot and the route
                at the top of this method: the cooldown key needs the PagerDuty answer, and the resolution is pure
@@ -388,7 +390,7 @@ public class WebhookAlertService
             if (route.PagerDuty.Destination is { } pagerDutyKey)
             {
                 attempted = true;
-                var pagerDutyError = await TrySendPagerDutyAlertAsync(delivery, pagerDutyKey, metricName, serverName, currentValue, thresholdValue, serverId, renderContext, triageUrl, prose, nowUtc, displayName, cancellationToken);
+                var pagerDutyError = await TrySendPagerDutyAlertAsync(delivery, autoResolveFlag, pagerDutyKey, metricName, serverName, currentValue, thresholdValue, serverId, renderContext, triageUrl, prose, nowUtc, displayName, cancellationToken);
                 Record(NotificationRouter.PagerDutyChannel, pagerDutyError);
 
                 /* With auto-resolve on, a DELIVERED close re-opens the lifecycle: the cooldown entry the
@@ -2509,6 +2511,7 @@ public class WebhookAlertService
     /// — see <see cref="TrySendTeamsAlertAsync"/>.</summary>
     private async Task<string?> TrySendPagerDutyAlertAsync(
         IAlertSettings settings,
+        bool autoResolve,
         string routingKey,
         string metricName,
         string serverName,
@@ -2527,7 +2530,7 @@ public class WebhookAlertService
             /* Derive the dedup_key from the same fingerprint the cooldown uses, so repeated alerts for
                the same ongoing incident correlate into one PagerDuty alert. Falls back to a stable
                metric+server key when there is no incident. */
-            var dedupKey = DerivePagerDutyDedupKeyForSend(serverId, metricName, context, settings);
+            var dedupKey = DerivePagerDutyDedupKey(serverId, metricName, context, autoResolve);
 
             /* #3598: the routed routing key (a PagerDuty SERVICE is a destination); the EU-region flag and
                proxy stay the parent's. */
@@ -2535,7 +2538,7 @@ public class WebhookAlertService
                 metricName, serverName, currentValue, thresholdValue, _branding,
                 routingKey, context: context, dedupKey: dedupKey, triageUrl: triageUrl,
                 detailText: detailText, displayName: displayName, nowUtc: nowUtc,
-                autoResolve: settings.PagerDutyAutoResolve);
+                autoResolve: autoResolve);
 
             /* #4752: test-only override for the PagerDuty send above (below). A test funneling an
                alert THROUGH the service must read the payload the wire saw — which a real post won't let

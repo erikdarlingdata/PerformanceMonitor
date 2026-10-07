@@ -734,7 +734,7 @@
                     <TextBlock Grid.Row="2" Grid.Column="0" Text="" VerticalAlignment="Center" Margin="0,0,8,4"/>
                     <CheckBox Grid.Row="2" Grid.Column="1" x:Name="PagerDutyAutoResolveCheckBox" Content="Auto-resolve the incident when the alert's condition clears"
                               Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,0,4"
-                              ToolTip="Sends a PagerDuty 'resolve' event when an edge-type alert's condition clears (a server comes back, a replica reconnects), closing the incident the firing edge's trigger opened. Off by default: the closing edge is sent as an info-level alert and the incident stays open. This applies when PagerDuty is set up for the alert. Then Teams, Slack and the generic webhook also keep one cooldown window per replica for replica alerts. Each replica gets its own recovery notice."/>
+                              ToolTip="Sends a PagerDuty 'resolve' event when an edge-type alert's condition clears (a server comes back, a replica reconnects), closing the incident the firing edge's trigger opened. Off by default: the closing edge is sent as an info-level alert and the incident stays open. Replica cooldowns: when PagerDuty is set up for the alert, Teams, Slack and the generic webhook keep one cooldown per replica, so each replica gets its own outage and recovery notices. Email stays per server."/>
 
                     <TextBlock Grid.Row="3" Grid.Column="0" Text="Proxy Address:" VerticalAlignment="Center"
                                Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,8,4"/>

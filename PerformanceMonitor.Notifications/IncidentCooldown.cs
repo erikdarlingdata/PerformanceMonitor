@@ -79,12 +79,17 @@ public sealed class IncidentCooldown
     /// </param>
     /// <param name="pairedEdge">
     /// #5469: the OTHER edge of the recovery pair <paramref name="metricName"/> belongs to ("Server Restored"
-    /// for "Server Unreachable" and the reverse), passed only under PagerDuty auto-resolve. When set, the
+    /// for "Server Unreachable" and the reverse), passed only under PagerDuty auto-resolve AND when PagerDuty is
+    /// routed for the alert. When set, the
     /// metric-level seed also reads that edge's last send and skips its own seed if the other edge sent
     /// MORE RECENTLY: the other edge opened (or closed) a newer incident, so this edge's older row describes
     /// the incident before it and must not throttle the first notice of the new one. That is what
     /// <see cref="ClearMetric"/> does in memory, made to survive a restart. Null (every caller but the pairs
-    /// under auto-resolve) seeds exactly as before.
+    /// under auto-resolve) seeds exactly as before. The seed is looser than the in-memory clear: it counts ANY
+    /// delivered webhook row of the other edge (Teams, Slack or the generic webhook), while the clear needs a
+    /// delivered PagerDuty post. So after a restart that follows a failed PagerDuty close (the chat channels
+    /// delivered the recovery, PagerDuty returned an error), the seed skips and the next outage posts, where
+    /// without a restart it would stay throttled. That is one extra notice, never a swallowed one.
     /// </param>
     public async Task<Decision> EvaluateAsync(
         string serverId, string metricName, IReadOnlyList<AlertIncident>? incidents, TimeSpan window,

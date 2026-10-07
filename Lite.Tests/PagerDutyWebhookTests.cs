@@ -606,6 +606,30 @@ public class PagerDutyWebhookTests
     }
 
     /// <summary>
+    /// The flag is read ONCE per delivery. Lite's settings are the live ones, so the operator can untick
+    /// auto-resolve while a post is in flight. Here the flag reads true for the cooldown and false for every
+    /// later read: the PagerDuty post must still be the resolve under the pair's key, because the cooldown
+    /// already cleared the outage's key on the strength of the first read.
+    /// </summary>
+    [Fact]
+    public async Task SendPath_AutoResolveFlagChangesAfterTheCooldownRead_PostsWithTheValueReadFirst()
+    {
+        var endpoint = new CapturingPagerDuty();
+        var settings = new WebhookSettings { PagerDutyRoutingKey = "rk-test", PagerDutyAutoResolve = true, Capture = endpoint };
+        var service = ServiceFor(settings, endpoint);
+
+        Assert.Equal(AlertChannelOutcome.Delivered, await SendSingleAlertAsync(service, "Server Unreachable"));
+
+        // From here the flag reads true once, then false: the first read is the delivery's one value.
+        settings.AutoResolveTrueForReads = settings.AutoResolveReads + 1;
+        Assert.Equal(AlertChannelOutcome.Delivered, await SendSingleAlertAsync(service, "Server Restored"));
+
+        Assert.Equal(2, endpoint.Bodies.Count);
+        Assert.Equal("resolve", WireAction(endpoint.Bodies[1]));
+        Assert.Equal(WireDedupKey(endpoint.Bodies[0]), WireDedupKey(endpoint.Bodies[1]));
+    }
+
+    /// <summary>
     /// The control for the restart seed: auto-resolve OFF seeds exactly as it always did. The same history
     /// (down, up) re-seeds the firing from its own older row after a restart and the second outage stays
     /// throttled.
@@ -770,7 +794,24 @@ public class PagerDutyWebhookTests
     private sealed class WebhookSettings : IAlertSettings
     {
         public string PagerDutyRoutingKey { get; set; } = "";
-        public bool PagerDutyAutoResolve { get; set; }
+        private bool _pagerDutyAutoResolve;
+
+        /// <summary>Counts every read of the flag, so a test can make the flag change mid-delivery.</summary>
+        public int AutoResolveReads { get; private set; }
+
+        /// <summary>When set, the flag reads as set only up to this many total reads and as false after.</summary>
+        public int? AutoResolveTrueForReads { get; set; }
+
+        public bool PagerDutyAutoResolve
+        {
+            get
+            {
+                AutoResolveReads++;
+                return _pagerDutyAutoResolve && (AutoResolveTrueForReads is null || AutoResolveReads <= AutoResolveTrueForReads);
+            }
+            set => _pagerDutyAutoResolve = value;
+        }
+
         public CapturingPagerDuty? Capture { get; set; }
 
         public bool PagerDutyEnabled => !string.IsNullOrWhiteSpace(PagerDutyRoutingKey);

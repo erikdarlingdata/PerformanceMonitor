@@ -1174,9 +1174,78 @@ public sealed class AlertDeliveryChannelTests
         Assert.Equal(teamsPosts, teams.Bodies.Count);
     }
 
+    /// <summary>
+    /// #5469 restart case, Darling's pin: the pair-aware history seed (the other edge sent more recently, so
+    /// this edge's own row is not seeded) applies only when PagerDuty is routed for the alert, because only
+    /// then do the in-memory clears exist for it to stand in for. Down at t-3 and up at t-2 are already in the
+    /// history, then a NEW service starts (a restart) and the second outage arrives, auto-resolve on, Teams
+    /// the only chat channel. With PagerDuty not routed for the metric, nothing was ever cleared, so the
+    /// firing seeds from its own row and stays throttled (no Teams post, as on dev). With PagerDuty routed,
+    /// the recovery closed the first incident, so the second outage announces (one Teams post).
+    /// </summary>
+    [Theory]
+    [InlineData("none", 0)]
+    [InlineData("other-metric-route", 0)]
+    [InlineData("routed", 1)]
+    public async Task TheDeliverer_AfterARestart_SkipsTheSupersededSeed_OnlyWhenPagerDutyIsRoutedForTheAlert(string pagerDuty, int teamsPosts)
+    {
+        using var teams = new CapturingWebhookEndpoint();
+        var capture = new CapturingPagerDuty();
+        var now = DateTime.UtcNow;
+        var history = new SeededHistoryStore();
+        history.SentRow("Server Unreachable", "13", now.AddMinutes(-3));
+        history.SentRow("Server Restored", "13", now.AddMinutes(-2));
+
+        var (deliverer, _) = pagerDuty switch
+        {
+            "none" => DelivererFor(autoResolve: true, capture, pagerDutyKey: "", teamsUrl: teams.Url, history: history),
+            "other-metric-route" => DelivererFor(
+                autoResolve: true, capture, pagerDutyKey: "", teamsUrl: teams.Url, history: history,
+                routes: new[] { new NotificationRoute(1, "High CPU", "", "", "", "rk-other", "", true) }),
+            _ => DelivererFor(autoResolve: true, capture, teamsUrl: teams.Url, history: history),
+        };
+
+        var secondOutage = new AlertOutcome(
+            "13", "PROD01", "Server Unreachable", "Login timeout expired", "Online",
+            Context: null, DetailText: null, NumericCurrentValue: 0, NumericThresholdValue: 0,
+            Muted: false, Severity: AlertSeverityLevel.Critical);
+        await deliverer.DeliverAsync(secondOutage, TestContext.Current.CancellationToken);
+
+        Assert.Equal(teamsPosts, teams.Bodies.Count);
+    }
+
+    /// <summary>
+    /// The seeding history store for the restart pin above: the last WEBHOOK send time per (metric, server),
+    /// answered the way the real stores answer the cooldown's seed. Scoped by metric, so one edge's question
+    /// is never answered with the other edge's row. Everything else is the discarding store's no-op.
+    /// </summary>
+    private sealed class SeededHistoryStore : IAlertHistoryStore
+    {
+        private readonly List<(string Metric, string ServerId, DateTime AtUtc)> _rows = new();
+
+        public void SentRow(string metricName, string serverId, DateTime atUtc) => _rows.Add((metricName, serverId, atUtc));
+
+        public Task<DateTime?> GetLastWebhookSentUtcAsync(string serverId, string metricName, string? dedupKey = null)
+        {
+            DateTime? max = null;
+            foreach (var row in _rows)
+            {
+                if (row.Metric == metricName && row.ServerId == serverId && (max is null || row.AtUtc > max.Value))
+                    max = row.AtUtc;
+            }
+
+            return Task.FromResult(max);
+        }
+
+        public Task RecordAlertAsync(AlertHistoryRecord record) => Task.CompletedTask;
+        public Task<DateTime?> GetLastEmailSentUtcAsync(string serverId, string metricName, string? dedupKey = null) => Task.FromResult<DateTime?>(null);
+        public Task<DateTime?> GetLastAlertTimeAsync(string serverId, string metricName, string? dedupKey = null) => Task.FromResult<DateTime?>(null);
+        public Task<DateTime?> GetLastDeliveredPageUtcAsync(string serverId, string metricName) => Task.FromResult<DateTime?>(null);
+    }
+
     private static (DarlingAlertDeliverer Deliverer, WebhookAlertService Webhooks) DelivererFor(
         bool autoResolve, CapturingPagerDuty capture, string pagerDutyKey = "rk-test", string? teamsUrl = null,
-        IReadOnlyList<NotificationRoute>? routes = null)
+        IReadOnlyList<NotificationRoute>? routes = null, IAlertHistoryStore? history = null)
     {
         var config = new DarlingConfig();
         config.Webhooks.PagerDutyRoutingKey = pagerDutyKey;
@@ -1195,7 +1264,7 @@ public sealed class AlertDeliveryChannelTests
         config.Smtp.To = "";
 
         var settings = new DarlingAlertSettings(config);
-        var history = new DiscardingHistoryStore();
+        history ??= new DiscardingHistoryStore();
         var webhooks = new WebhookAlertService(
             settings, DarlingAlertDeliverer.Branding, NullLogger<WebhookAlertService>.Instance, history);
         webhooks.PostPagerDutyAsyncOverride = (endpoint, payload) =>

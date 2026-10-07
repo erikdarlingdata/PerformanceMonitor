@@ -462,4 +462,23 @@ public class IncidentCooldownTests
         var unpaired = new IncidentCooldown("webhook:", Seed);
         Assert.False((await unpaired.EvaluateAsync("1", "Server Unreachable", null, Window)).ShouldSend);
     }
+
+    /// <summary>
+    /// #5469 tie rule: only a STRICTLY newer send on the other edge supersedes this edge's row. Both edges
+    /// stored at the same instant (a same-tick pair) seed as on dev, so each edge stays throttled.
+    /// </summary>
+    [Fact]
+    public async Task PairedEdge_Seed_TreatsEqualTimesAsNotSuperseded()
+    {
+        var at = DateTime.UtcNow.AddMinutes(-2);
+        Task<DateTime?> Seed(string server, string metric, string? dedup) => Task.FromResult<DateTime?>(at);
+
+        var firing = new IncidentCooldown("webhook:", Seed);
+        Assert.False((await firing.EvaluateAsync(
+            "1", "Server Unreachable", null, Window, null, "Server Restored")).ShouldSend);
+
+        var recovery = new IncidentCooldown("webhook:", Seed);
+        Assert.False((await recovery.EvaluateAsync(
+            "1", "Server Restored", null, Window, null, "Server Unreachable")).ShouldSend);
+    }
 }
