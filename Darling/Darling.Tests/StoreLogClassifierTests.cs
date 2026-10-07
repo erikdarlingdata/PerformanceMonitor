@@ -1884,10 +1884,75 @@ public class StoreLogClassifierTests
     [InlineData("Key (server_id)=(5) is not present in table \"config_monitored_servers\".", "Key (server_id)=(...) is not present in table \"config_monitored_servers\".")]
     [InlineData("Key (name)=(a) already exists. and more (b) already exists.", "Key (name)=(...) already exists.")]
     [InlineData("Key (name)=(...) already exists.", "Key (name)=(...) already exists.")]
+    [InlineData("Key (COALESCE(parent_id, 0), lower(name))=(0, prod) already exists.", "Key (COALESCE(parent_id, 0), lower(name))=(...) already exists.")]
+    [InlineData("Key (COALESCE(parent_id, 0), lower(name))=(0, prod", "Key (COALESCE(parent_id, 0), lower(name))=(...)")]
+    [InlineData("Key (COALESCE(parent_id, 0), lower(name))=(...) already exists.", "Key (COALESCE(parent_id, 0), lower(name))=(...) already exists.")]
+    [InlineData("Failing row contains (1, x, host-1).", "Failing row contains (...).")]
+    [InlineData("Partition key of the failing row contains (ts) = (2026-10-07 00:00:00).", "Partition key of the failing row contains (...).")]
+    [InlineData("FAILING ROW CONTAINS (1, x).", "FAILING ROW CONTAINS (...).")]
     [InlineData("Process 12 waits for ShareLock on transaction 99; blocked by process 13.", "Process 12 waits for ShareLock on transaction 99; blocked by process 13.")]
     public void MaskRowValues_ReplacesTheKeyValue_AndLeavesOtherProseAlone(string detail, string expected)
     {
         Assert.Equal(expected, StoreLogClassifier.MaskRowValues(detail));
+    }
+
+    [Fact]
+    public void MaskEntry_KeepsNoDetail_WhenTheStoresMessagesAreNotEnglish()
+    {
+        var raw = DefaultPrefix + "ERROR:  duplicate key value violates unique constraint \"config_monitored_servers_name_key\"\n"
+            + DefaultPrefix + "DETAIL:  Key (name)=(prod-1) already exists.\n"
+            + DefaultPrefix + "STATEMENT:  SELECT 1";
+
+        var english = StoreLogClassifier.MaskEntry(raw, cut: false, detailInEnglish: true);
+        Assert.Contains("DETAIL:  Key (name)=(...) already exists.", english, StringComparison.Ordinal);
+        Assert.Equal(StoreLogClassifier.MaskEntry(raw), english);
+
+        var other = StoreLogClassifier.MaskEntry(raw, cut: false, detailInEnglish: false);
+        Assert.DoesNotContain("prod-1", other, StringComparison.Ordinal);
+        Assert.Contains("DETAIL:  " + StoreLogClassifier.WithheldDetail, other, StringComparison.Ordinal);
+        Assert.Contains("violates unique constraint", other, StringComparison.Ordinal);
+        Assert.Equal(other, StoreLogClassifier.MaskEntry(other, cut: false, detailInEnglish: false));
+    }
+
+    [Fact]
+    public void Classify_KeepsNoDetailInTheSample_WhenTheStoresMessagesAreNotEnglish()
+    {
+        var slab = DefaultPrefix + "ERROR:  duplicate key value violates unique constraint \"config_monitored_servers_name_key\"\n"
+            + DefaultPrefix + "DETAIL:  Key (name)=(prod-1) already exists.\n";
+
+        var english = StoreLogClassifier.Classify(slab);
+        var other = StoreLogClassifier.Classify(slab, detailInEnglish: false);
+
+        Assert.Contains(english.Groups, g => g.SampleLine?.Contains("Key (name)=(...)", StringComparison.Ordinal) == true);
+        Assert.DoesNotContain(other.Groups, g => g.SampleLine?.Contains("prod-1", StringComparison.Ordinal) == true);
+        Assert.Contains(other.Groups, g => g.SampleLine?.Contains(StoreLogClassifier.WithheldDetail, StringComparison.Ordinal) == true);
+    }
+
+    [Theory]
+    [InlineData("C", true)]
+    [InlineData("POSIX", true)]
+    [InlineData("C.UTF-8", true)]
+    [InlineData("en_US.UTF-8", true)]
+    [InlineData("English_United States.1252", true)]
+    [InlineData("ja_JP.UTF-8", false)]
+    [InlineData("es_ES.UTF-8", false)]
+    [InlineData("German_Germany.1252", false)]
+    [InlineData("", false)]
+    [InlineData(null, false)]
+    public void IsEnglishLcMessages_ReadsTheLocaleName(string? value, bool expected)
+    {
+        Assert.Equal(expected, StoreLogClassifier.IsEnglishLcMessages(value));
+    }
+
+    [Fact]
+    public void TheSweep_ReadsTheStoresMessageLocaleOnce_AndPassesItToTheClassifier()
+    {
+        var sweep = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Storage", "StoreLogSweep.cs");
+
+        Assert.Single(System.Text.RegularExpressions.Regex.Matches(sweep, "SHOW lc_messages"));
+        Assert.Contains("StoreLogClassifier.Classify(slab.Text, detailInEnglish)", sweep, StringComparison.Ordinal);
+        Assert.Contains("StoreLogClassifier.IsEnglishLcMessages(value as string)", sweep, StringComparison.Ordinal);
+        Assert.Contains("catch (Exception ex) when (ex is not OperationCanceledException)", sweep[sweep.IndexOf("SHOW lc_messages", StringComparison.Ordinal)..], StringComparison.Ordinal);
     }
 
     private static string Render(string prefix, IEnumerable<string> messages)

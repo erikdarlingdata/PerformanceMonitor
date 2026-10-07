@@ -232,4 +232,17 @@ public sealed class AwsRoleRunbookMessagesTests
         Assert.Contains(rejected[..split], runbook, StringComparison.Ordinal);
         Assert.Contains(rejected[(split + " (ExpiredToken)".Length)..], runbook, StringComparison.Ordinal);
     }
+
+    [Fact]
+    public void TheRunbooksSampleExternalId_IsOneTheExternalIdCheckRefuses()
+    {
+        var runbook = Runbook();
+        var samples = Regex.Matches(runbook, "\"(?:awsExternalId|sts:ExternalId)\": \"([^\"]*)\"");
+
+        Assert.NotEmpty(samples);
+        foreach (Match sample in samples)
+        {
+            Assert.NotNull(PerformanceMonitor.Darling.Storage.AwsRoleSettings.ValidateExternalId(sample.Groups[1].Value));
+        }
+    }
 }

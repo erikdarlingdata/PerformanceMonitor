@@ -252,7 +252,7 @@ public sealed class AwsPerServerRoleRungTests
             Assert.Contains("'name' = ANY (p_columns) AND p_name IS NULL", body, StringComparison.Ordinal);
             Assert.Contains("OR v_host IS NULL OR v_port IS NULL OR v_auth IS NULL OR v_encrypt_mode IS NULL", body, StringComparison.Ordinal);
             Assert.Contains("'invalid_value'::text", body, StringComparison.Ordinal);
-            Assert.Contains("EXCEPTION WHEN not_null_violation OR check_violation OR unique_violation THEN", body, StringComparison.Ordinal);
+            Assert.Contains("EXCEPTION WHEN integrity_constraint_violation THEN", body, StringComparison.Ordinal);
         }
     }
 

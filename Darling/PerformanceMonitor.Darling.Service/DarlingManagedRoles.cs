@@ -1296,6 +1296,8 @@ AS $fn$
 $fn$;
 REVOKE ALL ON FUNCTION {config}.record_custom_alert_resolution(integer, text, text, text) FROM PUBLIC;";
 
+    // A new column on config.config_monitored_servers is added to this list. A column that holds a secret goes into the
+    // exclusion list of ServerEditLiveTests (the NOT IN (...) beside the column-set check) instead, and stays out of the grant.
     /// <summary>The columns of <c>config.config_monitored_servers</c> the <c>mcp</c> login may UPDATE directly (#5452): every column except the AWS role, the external ID and the generated external-ID flag, which change only through <c>config.edit_monitored_server</c>. <c>tools/provision-roles.sql</c> carries the same list.</summary>
     internal const string McpMonitoredServerUpdateColumns =
         "server_id, name, host, database, auth, username, encrypted_password, encrypt_mode, trust_server_certificate, read_only_intent, multi_subnet_failover, excluded_databases, monthly_cost_usd, capture_plans, is_enabled, created_at, modified_at, alert_delivery_mode_override, engine, port, plan_force_bot_enabled, remediation_username, remediation_encrypted_password";
@@ -1506,7 +1508,7 @@ BEGIN
           modified_at = (now() AT TIME ZONE 'UTC')
       WHERE s.server_id = p_server_id
       RETURNING s.modified_at INTO new_modified_at;
-   EXCEPTION WHEN not_null_violation OR check_violation OR unique_violation THEN
+   EXCEPTION WHEN integrity_constraint_violation THEN
       RETURN QUERY SELECT 'invalid_value'::text, NULL::timestamp;
       RETURN;
    END;

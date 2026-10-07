@@ -537,7 +537,7 @@ BEGIN
           modified_at = (now() AT TIME ZONE 'UTC')
       WHERE s.server_id = p_server_id
       RETURNING s.modified_at INTO new_modified_at;
-   EXCEPTION WHEN not_null_violation OR check_violation OR unique_violation THEN
+   EXCEPTION WHEN integrity_constraint_violation THEN
       RETURN QUERY SELECT 'invalid_value'::text, NULL::timestamp;
       RETURN;
    END;

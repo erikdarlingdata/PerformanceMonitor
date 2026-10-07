@@ -89,10 +89,12 @@ ON CONFLICT (server_id) DO UPDATE SET
     port = EXCLUDED.port,
     aws_role_arn = EXCLUDED.aws_role_arn,
     /* The stored external ID is never read back to this seat: it is replaced only when $21 says one was typed or the
-       box was cleared, and a cleared role takes it along (the table's check needs a role for an ID). */
+       box was cleared, and a cleared role takes it along (the table's check needs a role for an ID). A role that
+       changes with nothing typed clears it too, because an external ID belongs to the role it was set for. */
     aws_external_id = CASE
         WHEN EXCLUDED.aws_role_arn IS NULL THEN NULL
         WHEN $21 THEN EXCLUDED.aws_external_id
+        WHEN EXCLUDED.aws_role_arn IS DISTINCT FROM config_monitored_servers.aws_role_arn THEN NULL
         ELSE config_monitored_servers.aws_external_id END,
     modified_at = (now() AT TIME ZONE 'UTC')";
 

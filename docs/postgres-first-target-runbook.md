@@ -214,12 +214,12 @@ Each server can use its own AWS role instead, set on that server alone:
   "engine": "postgres",
   "host": "orders.cluster-abc123.us-east-1.rds.amazonaws.com",
   "awsRoleArn": "arn:aws:iam::123456789012:role/darling-monitor",
-  "awsExternalId": "d3b7f1c2-9a4e-4c85-b0a6-5e1f7a2c8d94"
+  "awsExternalId": "REPLACE with your external ID"
 }
 ```
 
 `awsRoleArn` is an IAM role ARN. `awsExternalId` is optional, needs the role, and is 2 to 1224 characters
-(letters, digits and `_ + = , . @ : / -`). Use a random value that cannot be guessed, such as a UUID. The store keeps
+(letters, digits and `_ + = , . @ : / -`). Use a random value that cannot be guessed, such as a UUID. The sample value above is a placeholder with spaces in it, which the service refuses as written, so it has to be replaced with your own. The store keeps
 the external ID as plain text, unlike the passwords, which it seals. The web, MCP and the desktop viewer never show it
 back; they show only whether one is set. AWS does not treat the external ID as a secret either: it is not a
 credential, it can be seen by anyone with permission to view the role, and its job is to keep a role from being
@@ -245,7 +245,7 @@ To set it up:
      "Effect": "Allow",
      "Principal": { "AWS": "arn:aws:iam::<host-account-id>:role/<darling-host-role>" },
      "Action": "sts:AssumeRole",
-     "Condition": { "StringEquals": { "sts:ExternalId": "d3b7f1c2-9a4e-4c85-b0a6-5e1f7a2c8d94" } }
+     "Condition": { "StringEquals": { "sts:ExternalId": "REPLACE with your external ID" } }
    }
    ```
 
