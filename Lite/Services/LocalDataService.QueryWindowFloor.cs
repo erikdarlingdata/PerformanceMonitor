@@ -111,10 +111,15 @@ public partial class LocalDataService
     /// <summary>
     /// The collector whose runs <c>collection_log</c> records for a relation the probe reads by coverage
     /// (<see cref="QueryWindowRelation.QuerySnapshots"/>, <see cref="QueryWindowRelation.WaitingTasks"/>,
-    /// <see cref="QueryWindowRelation.PlanCorrection"/>, <see cref="QueryWindowRelation.MemoryPressureEvents"/>, and #4966's
-    /// System Events, Config Changes, Long Queries and Job History relations), or null for the three Queries-tab relations (the Query
-    /// Heatmap reads the first of them) and <see cref="QueryWindowRelation.CollectionLog"/>, which keep the row-only
-    /// probe. A closed map, so nothing a caller passes reaches the probe's SQL.
+    /// <see cref="QueryWindowRelation.PlanCorrection"/>, <see cref="QueryWindowRelation.MemoryPressureEvents"/>,
+    /// <see cref="QueryWindowRelation.ProcedureStats"/> (#5449: the collector stores a row only for a procedure that did
+    /// work in a cycle), and #4966's System Events, Config Changes, Long Queries and Job History relations), or null for
+    /// the two Queries-tab relations that store every cycle (<see cref="QueryWindowRelation.QueryStats"/>, which the Query
+    /// Heatmap reads, and <see cref="QueryWindowRelation.QueryStoreStats"/>) and
+    /// <see cref="QueryWindowRelation.CollectionLog"/>, which keep the row-only probe. A closed map, so nothing a caller
+    /// passes reaches the probe's SQL. For ProcedureStats the floor is the earlier of the first row and the first run in the
+    /// window: the log and the table share one archive horizon, so a run can never lie before rows retention already
+    /// dropped, and the earlier of the two cannot report coverage the table lost.
     /// </summary>
     internal static string? QueryWindowRelationCollector(QueryWindowRelation relation) => relation switch
     {
@@ -254,17 +259,18 @@ public partial class LocalDataService
     /// quiet first stretch puts the window's own first row far past its start while older rows are stored, and a
     /// probe that read only the window would raise a false banner).</para>
     ///
-    /// <para><b>Active Queries, Current Waits, Plan Corrections and Memory Pressure Events read coverage, not
-    /// rows.</b> query_snapshots and waiting_tasks hold a row only while something runs or waits, plan_correction only
+    /// <para><b>Active Queries, Current Waits, Plan Corrections, Memory Pressure Events and Procedure Stats read
+    /// coverage, not rows.</b> procedure_stats holds a row only for a procedure that did work in a cycle (#5449),
+    /// query_snapshots and waiting_tasks hold a row only while something runs or waits, plan_correction only
     /// while the engine has a recommendation, and memory_pressure_events only where the ring buffer logged an event
     /// (windowed on <c>sample_time</c>, see <see cref="QueryWindowRelationTimeColumn"/>), so a server idle overnight, or
     /// one whose first waiting task came days after it was added, has no row near the window's start though the store
-    /// covered it. For these four the collector's runs in <c>v_collection_log</c> count as well as rows: a run proves the collector was collecting
+    /// covered it. For these the collector's runs in <c>v_collection_log</c> count as well as rows: a run proves the collector was collecting
     /// then. The log survives exactly as long as the table: it is archived and deleted by the same single horizon
     /// (<see cref="RetentionService.ArchiveRetentionMonths"/>, the same monthly files), so a run older than the
     /// window means the table's rows from then on are still held, and the first run inside the window is where
     /// coverage starts, whether that is the server's first collection or the retention edge, whichever is later.
-    /// For these four the probe answers NULL when the window holds no row and no run, the window's start when a
+    /// For these the probe answers NULL when the window holds no row and no run, the window's start when a
     /// row or run sits at or before it, and otherwise the first row or run inside the window, whichever is
     /// earlier. A covered window that holds no row (the collector ran, nothing waited) answers the start, so it
     /// shows no banner.</para>

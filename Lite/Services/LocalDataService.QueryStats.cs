@@ -1323,7 +1323,7 @@ LEFT JOIN texts t ON t.sql_handle = j.text_handle;";
         var widthParamIndex = 4 + dbValues.Count;
         var bucketMinutes = AutoChartBucketMinutes(startTime, endTime);
 
-        command.CommandText = DurationTrendChartSql(relation, dbClause, widthParamIndex, coverIdleSpan: relation == "v_procedure_stats");
+        command.CommandText = DurationTrendChartSql(relation, dbClause, widthParamIndex);
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = startTime });
@@ -1390,72 +1390,8 @@ LEFT JOIN texts t ON t.sql_handle = j.text_handle;";
     /// width is appended as its OWN trailing parameter at <paramref name="widthParamIndex"/> so that numbering
     /// never shifts, mirroring the wait/perfmon trend reads' own width parameter.
     /// </summary>
-    internal static string DurationTrendChartSql(string relation, string dbClause, int widthParamIndex) =>
-        DurationTrendChartSql(relation, dbClause, widthParamIndex, coverIdleSpan: false);
-
-    /// <summary>
-    /// #5449: the denominator of a bucketed duration-trend rate for a relation whose collector stores no row for an idle
-    /// cycle (<c>v_procedure_stats</c>). A bucket's rate is its summed work over its summed seconds, and the seconds were
-    /// the stored collections' own intervals: with no row for a quiet minute the quiet minutes drop out of the denominator
-    /// and the rate rises, where old data (which stores the idle rows) reads the same bucket lower. The seconds are the
-    /// larger of the stored intervals' sum and the bucket's own span, clipped to where the series has collections (its
-    /// first collection less that collection's own interval, and its last collection), so a store younger than the window,
-    /// or a window that ends mid-bucket, is not read low. Old data, whose intervals already fill the span, keeps its answer.
-    /// NULL stays NULL: a bucket with no rated collection is the unrated point, never a fabricated rate.
-    /// <paramref name="widthExpr"/> is the bucket width in minutes, as the statement's own parameter.
-    /// </summary>
-    internal static string IdleSpanSecondsSql(string widthExpr) => $@"CASE WHEN SUM(rated_seconds) IS NULL THEN NULL ELSE GREATEST(
-        SUM(rated_seconds),
-        extract(epoch FROM (
-            LEAST(MIN(raw_bucket) + to_minutes(CAST({widthExpr} AS INTEGER)), MAX(series_last))
-          - GREATEST(GREATEST(MIN(raw_bucket), $2), MIN(series_first) - to_seconds(CAST(MIN(first_interval) AS BIGINT)))))) END";
-
-    /// <summary>The rated-CTE columns <see cref="IdleSpanSecondsSql"/> reads (#5449).</summary>
-    internal static string IdleSpanColumnsSql(string widthExpr) => $@",
-        time_bucket(to_minutes(CAST({widthExpr} AS INTEGER)), collection_time, {TrendBuckets.OriginSql}) AS raw_bucket,
-        MIN(collection_time) OVER () AS series_first,
-        MAX(collection_time) OVER () AS series_last,
-        FIRST_VALUE(COALESCE(interval_seconds, 0)) OVER (ORDER BY collection_time) AS first_interval";
-
-    /// <summary>
-    /// #5449: the collector runs that stored no row (a minute in which no procedure did work), as zero-work collections, so the
-    /// chart plots a measured 0 for a quiet minute the way an old store, which kept the idle rows, does. The time axis is the
-    /// collector's own SUCCESS runs in <c>v_collection_log</c> inside the window; a run is idle when no stored collection
-    /// (<c>stored</c>, the per-collection CTE) falls in [its time, the next run's time), which holds whether the log stamps a
-    /// run at the same instant as its rows or a moment before them. An idle run's interval is the gap to the previous run (the
-    /// next run's gap for the first), the cadence an old store's idle row would have recorded, so its rate is 0 over real
-    /// seconds, never NULL. Old data never has an idle run (every run has a row), so its answer is unchanged.
-    /// </summary>
-    internal static string IdleRunCollectionsSql(bool withMatchedRows) => $@"
-    UNION ALL
-    SELECT
-        r.t AS collection_time,
-        CAST(0 AS DOUBLE PRECISION) AS total_elapsed_ms,
-        CAST(0 AS BIGINT) AS total_executions,
-        extract(epoch FROM COALESCE(r.t - r.prev_t, r.next_t - r.t)) AS interval_seconds{(withMatchedRows ? ",\n        CAST(0 AS BIGINT) AS matched_rows" : "")}
-    FROM
-    (
-        SELECT
-            collection_time AS t,
-            LAG(collection_time) OVER (ORDER BY collection_time) AS prev_t,
-            LEAD(collection_time) OVER (ORDER BY collection_time) AS next_t
-        FROM v_collection_log
-        WHERE server_id = $1
-        AND   collector_name = 'procedure_stats'
-        AND   status = 'SUCCESS'
-        AND   collection_time >= $2
-        AND   collection_time <= $3
-    ) AS r
-    WHERE NOT EXISTS
-    (
-        SELECT 1
-        FROM stored AS s
-        WHERE s.collection_time >= r.t
-        AND   (r.next_t IS NULL OR s.collection_time < r.next_t)
-    )";
-
-    internal static string DurationTrendChartSql(string relation, string dbClause, int widthParamIndex, bool coverIdleSpan) => $@"
-WITH stored AS
+    internal static string DurationTrendChartSql(string relation, string dbClause, int widthParamIndex) => $@"
+WITH {(relation == "v_procedure_stats" ? ProcedureCollectionsSql(dbClause) : $@"raw AS
 (
     SELECT
         collection_time,
@@ -1472,31 +1408,126 @@ WITH stored AS
     AND   collection_time >= $2
     AND   collection_time <= $3
     GROUP BY collection_time
-),
-raw AS
-(
-    SELECT * FROM stored{(coverIdleSpan ? IdleRunCollectionsSql(dbClause.Length != 0) : "")}
-),
+),")}
 rated AS
 (
     SELECT
         collection_time,
         CASE WHEN interval_seconds > 0 THEN total_elapsed_ms END AS rated_elapsed_ms,
         CASE WHEN interval_seconds > 0 THEN total_executions END AS rated_executions,
-        CASE WHEN interval_seconds > 0 THEN interval_seconds END AS rated_seconds{(coverIdleSpan ? IdleSpanColumnsSql("$" + widthParamIndex) : "")}{(dbClause.Length == 0 ? "" : ",\n        matched_rows")}
+        CASE WHEN interval_seconds > 0 THEN interval_seconds END AS rated_seconds{(dbClause.Length == 0 ? "" : ",\n        matched_rows")}
     FROM raw
 )
 SELECT
     GREATEST(time_bucket(to_minutes(CAST(${widthParamIndex} AS INTEGER)), collection_time, {TrendBuckets.OriginSql}), $2) AS bucket_start,
     /* No ELSE, no HAVING: a bucket whose every collection is unrated sums to NULL over NULL and keeps its row
        — never a fabricated 0 (#3541 A12 at the bucket level). */
-    SUM(rated_elapsed_ms) / {(coverIdleSpan ? IdleSpanSecondsSql("$" + widthParamIndex) : "SUM(rated_seconds)")} AS elapsed_ms_per_second,
-    CAST(SUM(rated_executions) AS DOUBLE PRECISION) / {(coverIdleSpan ? IdleSpanSecondsSql("$" + widthParamIndex) : "SUM(rated_seconds)")} AS executions_per_second,
+    SUM(rated_elapsed_ms) / SUM(rated_seconds) AS elapsed_ms_per_second,
+    CAST(SUM(rated_executions) AS DOUBLE PRECISION) / SUM(rated_seconds) AS executions_per_second,
     MIN(collection_time) AS first_collection_time,
     COUNT(*) AS collection_count
 FROM rated{(dbClause.Length == 0 ? "" : "\nWHERE EXISTS (SELECT 1 FROM rated WHERE matched_rows > 0)")}
 GROUP BY 1
 ORDER BY 1";
+
+    /// <summary>
+    /// #5449: the collections of the procedure grain, as the leading CTEs of both bucketed duration-trend reads, ending in
+    /// <c>raw</c> with the query grain's columns (<c>collection_time</c>, <c>total_elapsed_ms</c>, <c>total_executions</c>,
+    /// <c>interval_seconds</c>, and <c>matched_rows</c> under a database filter). The collector stores no row for a procedure
+    /// that did no work in a cycle, so the grain's time axis is the collector's SUCCESS runs: a run that stored rows is a point
+    /// at its stored collection_time, a run that stored none is an idle point (work 0) at its log time. The log stamps a run's
+    /// start and the rows follow it, so run k owns [t_k, t_k+1): it is idle when no stored collection falls there, and a slip
+    /// adds or drops a 0, never double-counts seconds. A point's seconds are its gap to the previous point, NULL (unrated) past
+    /// <see cref="CollectorDeltaCalculator.DefaultMaxGapSeconds"/> (the collector's own limit, so a point it measured is rated).
+    /// A restart collection (every stored interval 0) stays unrated whatever the gap (#3540), the store's first point keeps its
+    /// stored interval, and an idle point with no previous point is unrated. A collection that returns after a quiet stretch
+    /// carries its whole delta in the run that stored it, over that run's gap, never its own long interval: bucket totals are
+    /// exact. Both tables are read from an hour before <c>$2</c> so the first in-window point has its previous point, and the
+    /// points before <c>$2</c> are dropped after the LAG. With no log (an imported or old store) the axis is the stored
+    /// collections alone. The database filter stays inside the sums; an idle point has 0 matched rows.
+    /// </summary>
+    internal static string ProcedureCollectionsSql(string dbClause)
+    {
+        var withFilter = dbClause.Length != 0;
+        var storedMatched = withFilter ? $",\n        COUNT(*) FILTER (WHERE {DbInPredicate(dbClause)}) AS matched_rows" : "";
+        var axisMatched = withFilter ? ",\n        matched_rows" : "";
+        var idleMatched = withFilter ? ",\n        CAST(0 AS BIGINT) AS matched_rows" : "";
+        const int gap = CollectorDeltaCalculator.DefaultMaxGapSeconds;
+        return $@"stored AS
+(
+    SELECT
+        collection_time,
+        {FilteredSum("delta_elapsed_time", dbClause)} / 1000.0 AS total_elapsed_ms,
+        {FilteredSum("delta_execution_count", dbClause)} AS total_executions,
+        MAX(sample_interval_seconds) AS stored_interval,
+        TRUE AS is_stored{storedMatched}
+    FROM v_procedure_stats
+    WHERE server_id = $1
+    AND   collection_time >= $2 - to_seconds({gap})
+    AND   collection_time <= $3
+    GROUP BY collection_time
+),
+axis AS
+(
+    SELECT
+        collection_time,
+        total_elapsed_ms,
+        total_executions,
+        stored_interval,
+        is_stored{axisMatched}
+    FROM stored
+    UNION ALL
+    SELECT
+        r.t AS collection_time,
+        CAST(0 AS DOUBLE PRECISION) AS total_elapsed_ms,
+        CAST(0 AS BIGINT) AS total_executions,
+        CAST(NULL AS BIGINT) AS stored_interval,
+        FALSE AS is_stored{idleMatched}
+    FROM
+    (
+        SELECT
+            collection_time AS t,
+            LEAD(collection_time) OVER (ORDER BY collection_time) AS next_t
+        FROM v_collection_log
+        WHERE server_id = $1
+        AND   collector_name = 'procedure_stats'
+        AND   status = 'SUCCESS'
+        AND   collection_time >= $2 - to_seconds({gap})
+        AND   collection_time <= $3
+    ) AS r
+    WHERE NOT EXISTS
+    (
+        SELECT 1
+        FROM stored AS s
+        WHERE s.collection_time >= r.t
+        AND   (r.next_t IS NULL OR s.collection_time < r.next_t)
+    )
+),
+raw AS
+(
+    SELECT
+        collection_time,
+        total_elapsed_ms,
+        total_executions,
+        CASE
+            WHEN is_stored AND stored_interval = 0 THEN NULL
+            WHEN prev_t IS NOT NULL
+            THEN CASE
+                     WHEN extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', prev_t))) <= {gap}
+                     THEN extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', prev_t)))
+                 END
+            WHEN is_stored THEN NULLIF(stored_interval, 0)
+        END AS interval_seconds{axisMatched}
+    FROM
+    (
+        SELECT
+            *,
+            LAG(collection_time) OVER (ORDER BY collection_time) AS prev_t
+        FROM axis
+    ) AS a
+    WHERE collection_time >= $2
+),";
+    }
 
     /// <summary>
     /// Whether this server has EVER recorded a query-stats sample, ignoring any window.
