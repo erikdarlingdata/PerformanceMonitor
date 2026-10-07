@@ -2926,6 +2926,14 @@ LIMIT 1";
            reload baseline, so the seed's own version bumps do not trigger a spurious first-sweep reload. */
         var configProvider = new StoreConfigProvider(postgres, _logger);
         await configProvider.SeedIfEmptyAsync(config, stoppingToken);
+        /* #5366: the service's password key, after migrations, role provisioning and the seed, and before the first config view (#5455:
+           that view reads the legacy pins this start takes, and a view built before them leaves every saved old-format password
+           unpinned for the whole run). It reads only config.Postgres, which the view never changes. Before any collection or reload
+           can need it: loaded (or made and published) here, with the legacy pin snapshot, and the ring every writer and
+           the resolver seal and open through is set. Until this returns the ring refuses with the "still loading" reason.
+           Never throws; a key that cannot be used is a refusing ring with the reason logged and recorded in the store. */
+        _passwordKeyRuntime = await DarlingPasswordKeyRuntime.StartForServiceAsync(
+            config, DarlingConfig.ResolveConfigPath(), postgres, _logger, stoppingToken);
         var initialView = await configProvider.LoadViewAsync(config, stoppingToken);
         IReadOnlyList<MonitoredServer> initialServers = config.Servers;
         if (initialView is not null)
@@ -2968,12 +2976,6 @@ LIMIT 1";
            users, by whichever look found it so (role provisioning above, a host, or this load), which removes the key
            there and then: null means the file could not be used, the reason is already logged, and those runs refuse
            rather than hash without it. */
-        /* #5366: the service's password key, after migrations and role provisioning and before any collection or reload
-           can need it: loaded (or made and published) here, with the legacy pin snapshot, and the ring every writer and
-           the resolver seal and open through is set. Until this returns the ring refuses with the "still loading" reason.
-           Never throws; a key that cannot be used is a refusing ring with the reason logged and recorded in the store. */
-        _passwordKeyRuntime = await DarlingPasswordKeyRuntime.StartForServiceAsync(
-            config, DarlingConfig.ResolveConfigPath(), postgres, _logger, stoppingToken);
         var logHashKeyLoad = DarlingLogHashKeyFile.LoadForService(config, DarlingConfig.ResolveConfigPath(), _logger);
         var logHashKey = logHashKeyLoad.Key;
         /* #4004 review, round 3: a key that replaced one the directory check discarded is noted on the collection-log

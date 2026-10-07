@@ -102,6 +102,21 @@ public sealed class DarlingPasswordKeyRuntimeTests
     }
 
     [Fact]
+    public void TheWorker_TakesThePinsAfterTheSeed_AndBeforeTheFirstConfigView()
+    {
+        // #5455: the first view reads the legacy pins, so a view built before the pin snapshot leaves every saved
+        // old-format password unpinned for the whole run.
+        var worker = ReadSource("Darling/PerformanceMonitor.Darling.Service/DarlingWorker.cs");
+        var seed = worker.IndexOf("configProvider.SeedIfEmptyAsync(", StringComparison.Ordinal);
+        var start = worker.IndexOf("DarlingPasswordKeyRuntime.StartForServiceAsync(", StringComparison.Ordinal);
+        var firstView = worker.IndexOf("configProvider.LoadViewAsync(", StringComparison.Ordinal);
+
+        Assert.True(seed > 0, "The seed call must exist.");
+        Assert.True(start > seed, "The key starts after the seed, so seeded rows are pinned.");
+        Assert.True(firstView > start, "The key and its pin snapshot start before the first config view reads the pins.");
+    }
+
+    [Fact]
     public void TheVerb_IsDispatchedFromProgram()
     {
         var program = ReadSource("Darling/PerformanceMonitor.Darling.Service/Program.cs");
