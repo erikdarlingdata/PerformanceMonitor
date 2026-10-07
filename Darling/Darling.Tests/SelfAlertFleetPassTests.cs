@@ -103,6 +103,56 @@ public sealed class SelfAlertFleetPassTests
     }
 
     /// <summary>
+    /// The two halves of #5479 together: the memory launch guard is forced to hold (through its test seam, a sampler that
+    /// reads over the line and a collection that frees nothing), a server has had no success for longer than the
+    /// Collection Stopped window, and Collection Stopped fires from the fleet pass while the guard still holds and no body
+    /// has been launched or called. On the old shape the alert was the first statement of the body the guard held off.
+    /// The store read is the one piece stood in for: the evaluator's own judgement and edge apply run on a last success
+    /// three hours back, as the evaluator's restart pins do.
+    /// </summary>
+    [Fact]
+    public async Task CollectionStopped_FiresFromTheFleetPass_WhileTheLaunchGuardStillHolds_AndNoBodyRuns()
+    {
+        var harness = new DarlingSelfAlertTests.Harness();
+        var start = harness.Now;
+        var evaluator = harness.Build();
+        var lastSuccess = start.AddHours(-3);
+
+        var worker = MakeWorker();
+        var clock = TimeSpan.Zero;
+        worker.LaunchGuard = new LaunchMemoryGuard(
+            () => new LaunchMemoryReading(1500L * 1024 * 1024, 1536L * 1024 * 1024, "test metric", "test limit"),
+            () => { },
+            () => clock,
+            NullLogger.Instance);
+        const int serverId = 424242;
+        worker.SelfAlertServerOverride = async (server, ct) =>
+        {
+            var stopped = evaluator.JudgeCollectionStopped(serverId, lastSuccess, 10, 9, out var reason);
+            await evaluator.ApplyCollectionStoppedAsync(serverId, server.Config.DisplayName, stopped, reason, ct);
+        };
+        var servers = new[] { MakeServer("example-sql-01", connected: true) };
+
+        /* The window has not passed after the start: silent. Then it has, and the guard has held the whole time. */
+        Assert.False(worker.LaunchGuard.MayLaunch(0));
+        Assert.True(worker.TryStartSelfAlertPass(servers, TestContext.Current.CancellationToken));
+        Assert.True(await BecomesTrueAsync(() => worker.TryStartSelfAlertPass(servers, TestContext.Current.CancellationToken)));
+        Assert.Empty(harness.Deliverer.Outcomes);
+
+        harness.Now = start.AddMinutes(30);
+        servers[0].NextSelfAlertSweep = DateTime.MinValue;
+        clock = TimeSpan.FromMinutes(30);
+        Assert.False(worker.LaunchGuard.MayLaunch(0));
+        Assert.True(await BecomesTrueAsync(() => worker.TryStartSelfAlertPass(servers, TestContext.Current.CancellationToken)));
+
+        Assert.True(await BecomesTrueAsync(() => harness.Deliverer.Outcomes.Any(o => o.MetricName == "Collection Stopped")));
+        var fired = Assert.Single(harness.Deliverer.Outcomes, o => o.MetricName == "Collection Stopped");
+        Assert.StartsWith("No successful collection in 30 minutes", fired.CurrentValue, StringComparison.Ordinal);
+        Assert.True(worker.LaunchGuard.IsHolding, "the guard must still be holding when the alert fires");
+        Assert.Null(servers[0].InFlightSweep);
+    }
+
+    /// <summary>
     /// A server whose body never finishes is evaluated on its cadence all the same: the pass does not look at the body.
     /// </summary>
     [Fact]
@@ -227,7 +277,7 @@ public sealed class SelfAlertFleetPassTests
         var pause = source.IndexOf("if (!ShouldRunCollection(_paused))", loop, StringComparison.Ordinal);
         var pauseContinue = source.IndexOf("continue;", pause, StringComparison.Ordinal);
         var launch = source.IndexOf("TryStartSelfAlertPass(sweepTargets, stoppingToken);", loop, StringComparison.Ordinal);
-        var guard = source.IndexOf("var mayLaunchSweeps = ShouldLaunchSweeps(", loop, StringComparison.Ordinal);
+        var guard = source.IndexOf("var mayLaunchSweeps = _launchMemoryGuard.MayLaunch(", loop, StringComparison.Ordinal);
         var launchLoop = source.IndexOf("foreach (var server in sweepTargets)", loop, StringComparison.Ordinal);
         Assert.True(pause > 0 && pauseContinue > pause, "the pause gate was not found");
         Assert.True(launch > pauseContinue, "the self-alert pass must sit after the operator pause's continue");
