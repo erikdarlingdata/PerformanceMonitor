@@ -2981,6 +2981,10 @@ LIMIT 1";
         /* #4004 review, round 3: a key that replaced one the directory check discarded is noted on the collection-log
            row of the first pg_log_events run after this, and only that run (RunOneAsync takes it). */
         _logHashKeyRotation.Arm(DarlingLogHashKeyFile.RotationNote(logHashKeyLoad));
+        /* #5452: which AWS roles this run may assume, set once here and read by the RDS path, the way the password key's
+           ring is. darling.json's allowedAwsRoles plus every role a darling.json server names; config.Servers is the
+           file's list (the store view never replaces it), and the file is read at start, so an edit applies on restart. */
+        Targets.AwsRoleAllowlist.Current = Targets.AwsRoleAllowlist.FromConfig(config);
         var runner = new DarlingCollectorRunner(postgres, deltas, _logger, () => config.CapturePlans, () => config.CollectSchemaChangeEvents,
             () => StoreConfigProvider.ClampTextBudgetMb(config.QueryStoreTextBudgetMb),
             /* #2171: live provider like its siblings — a store reload flipping plan_xml_compression
