@@ -956,7 +956,7 @@ AND   sqlserver_cpu_utilization IS NOT NULL";
     /// a clean bill.</summary>
     internal static string IdleDatabasesEmptyText(bool hasCoverage) => hasCoverage
         ? "No idle databases detected"
-        : "Idle databases can't be judged yet: query stats don't cover each of the last 7 days";
+        : "Idle databases cannot be judged yet: query stats do not cover each of the last 7 days";
 
     /// <summary>
     /// True once the server's query stats hold a sample on each of the last 7 UTC days (today and the six before it). The advice
