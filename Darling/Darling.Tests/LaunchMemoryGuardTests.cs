@@ -22,6 +22,7 @@ namespace Darling.Tests;
 /// line for 25 hours. These tests drive <see cref="LaunchMemoryGuard"/> through an injected sampler, collection and
 /// clock, so they need no real memory and no particular host OS.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class LaunchMemoryGuardTests
 {
     private const long Mb = 1024L * 1024;
@@ -41,7 +42,7 @@ public sealed class LaunchMemoryGuardTests
     /// <summary>A guard over scripted memory: <see cref="Reading"/> is what the sampler returns, <see cref="Collections"/>
     /// counts the collections run, <see cref="Now"/> is the clock, and <see cref="OnCollect"/> lets a test say what a
     /// collection does to the memory.</summary>
-    private sealed class Rig
+    private sealed class LaunchGuardRig
     {
         public LaunchMemoryReading Reading = Over();
         public int Collections;
@@ -52,7 +53,7 @@ public sealed class LaunchMemoryGuardTests
         public CapturingTestLogger Logger { get; } = new();
         public LaunchMemoryGuard Guard { get; }
 
-        public Rig()
+        public LaunchGuardRig()
         {
             Guard = new LaunchMemoryGuard(
                 () =>
@@ -94,7 +95,7 @@ public sealed class LaunchMemoryGuardTests
     [Fact]
     public void AGuardWhoseMemoryOnlyFallsAfterACollection_ReleasesAfterIt()
     {
-        var rig = new Rig();
+        var rig = new LaunchGuardRig();
         rig.OnCollect = () => rig.Reading = Under();
 
         Assert.True(rig.Pass(inFlight: 2));
@@ -121,7 +122,7 @@ public sealed class LaunchMemoryGuardTests
     [Fact]
     public void AGuardWhoseMemoryFallsJustAfterTheCollection_ReleasesOnTheNextPass()
     {
-        var rig = new Rig();
+        var rig = new LaunchGuardRig();
 
         Assert.False(rig.Pass());
         Assert.Equal(1, rig.Collections);
@@ -142,7 +143,7 @@ public sealed class LaunchMemoryGuardTests
     [Fact]
     public void AGuardStillOverAfterTheCollection_RunsItAgainEachMinuteAndWarnsEveryFiveMinutes()
     {
-        var rig = new Rig();
+        var rig = new LaunchGuardRig();
 
         Assert.False(rig.Pass(inFlight: 3));
         Assert.Equal(1, rig.Collections);
@@ -189,7 +190,7 @@ public sealed class LaunchMemoryGuardTests
     [Fact]
     public void AGuardUnderTheLine_LogsNothingAndRunsNothing()
     {
-        var rig = new Rig { Reading = Under() };
+        var rig = new LaunchGuardRig { Reading = Under() };
 
         for (var i = 0; i < 50; i++)
         {
@@ -205,7 +206,7 @@ public sealed class LaunchMemoryGuardTests
     [Fact]
     public void TheTripAndTheCollectionLogTheMetricTheFigureTheLimitAndItsSource()
     {
-        var rig = new Rig { Reading = Over("resident memory", "cgroup memory limit") };
+        var rig = new LaunchGuardRig { Reading = Over("resident memory", "cgroup memory limit") };
         rig.OnCollect = () => rig.Reading = new LaunchMemoryReading(1300 * Mb, Limit, "resident memory", "cgroup memory limit");
 
         rig.Pass();
@@ -230,7 +231,7 @@ public sealed class LaunchMemoryGuardTests
     [Fact]
     public void AReleasedGuardThatTripsAgain_StartsANewEpisodeOnlyWhenACollectionCannotClearIt()
     {
-        var rig = new Rig();
+        var rig = new LaunchGuardRig();
 
         /* Episode one: held, then released when the memory falls. */
         Assert.False(rig.Pass());
@@ -259,7 +260,7 @@ public sealed class LaunchMemoryGuardTests
     [Fact]
     public void AFigureHoveringAtTheLine_CollectsAtMostOncePerMinuteAndNeverLogsCritical()
     {
-        var rig = new Rig { Now = TimeSpan.Zero };
+        var rig = new LaunchGuardRig { Now = TimeSpan.Zero };
         rig.OnCollect = () => rig.Reading = Under();
 
         for (var pass = 0; pass < 40; pass++)
@@ -279,7 +280,7 @@ public sealed class LaunchMemoryGuardTests
     [Fact]
     public void TheFirstCollectionAfterStart_IsNeverSkipped()
     {
-        var rig = new Rig { Now = TimeSpan.Zero };
+        var rig = new LaunchGuardRig { Now = TimeSpan.Zero };
         rig.OnCollect = () => rig.Reading = Under();
 
         Assert.True(rig.Pass());
@@ -293,7 +294,7 @@ public sealed class LaunchMemoryGuardTests
     [Fact]
     public void ACrossingTheRateLimitKeptFromCollecting_HoldsQuietlyUntilTheNextCollection()
     {
-        var rig = new Rig { Now = TimeSpan.FromSeconds(100) };
+        var rig = new LaunchGuardRig { Now = TimeSpan.FromSeconds(100) };
         rig.OnCollect = () => rig.Reading = Under();
         rig.Pass();
         rig.Reading = Over();
@@ -312,7 +313,7 @@ public sealed class LaunchMemoryGuardTests
     [Fact]
     public void ASamplerFaultWhileHolding_EndsTheHoldAndTheLaterReleaseCountsNoRunningTime()
     {
-        var rig = new Rig();
+        var rig = new LaunchGuardRig();
         Assert.False(rig.Pass());
         Assert.True(rig.Guard.IsHolding);
 
@@ -335,7 +336,7 @@ public sealed class LaunchMemoryGuardTests
     [Fact]
     public void AGuardThatCannotReadMemory_LetsCollectionLaunchAndWarnsOnce()
     {
-        var rig = new Rig { SamplerFault = new InvalidOperationException("no /proc") };
+        var rig = new LaunchGuardRig { SamplerFault = new InvalidOperationException("no /proc") };
 
         for (var i = 0; i < 5; i++)
         {
@@ -352,7 +353,7 @@ public sealed class LaunchMemoryGuardTests
     [Fact]
     public void ACollectionThatFails_KeepsTheHoldAndLogsIt()
     {
-        var rig = new Rig();
+        var rig = new LaunchGuardRig();
         rig.OnCollect = () => throw new InvalidOperationException("collection refused");
 
         Assert.False(rig.Pass());
@@ -367,7 +368,7 @@ public sealed class LaunchMemoryGuardTests
     [Fact]
     public void ACollectionThatFails_IsNotReportedAsAFullCollectionTheFigureSurvived()
     {
-        var rig = new Rig();
+        var rig = new LaunchGuardRig();
         rig.OnCollect = () => throw new InvalidOperationException("collection refused");
 
         Assert.False(rig.Pass());
@@ -383,7 +384,7 @@ public sealed class LaunchMemoryGuardTests
     [Fact]
     public void ACollectionThatCompletes_StillSaysTheFigureSurvivedIt()
     {
-        var rig = new Rig();
+        var rig = new LaunchGuardRig();
 
         Assert.False(rig.Pass());
 
@@ -406,7 +407,7 @@ public sealed class LaunchMemoryGuardTests
     [Fact]
     public void TheThresholdRuleIsTheSameForAnySampler()
     {
-        var rig = new Rig { Reading = new LaunchMemoryReading((long)(0.79 * Limit), Limit, "private bytes", "the GC memory budget") };
+        var rig = new LaunchGuardRig { Reading = new LaunchMemoryReading((long)(0.79 * Limit), Limit, "private bytes", "the GC memory budget") };
         Assert.True(rig.Pass());
 
         rig.Reading = new LaunchMemoryReading((long)(0.81 * Limit), Limit, "private bytes", "the GC memory budget");

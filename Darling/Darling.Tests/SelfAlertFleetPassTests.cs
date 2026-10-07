@@ -32,7 +32,11 @@ namespace Darling.Tests;
 /// </summary>
 public sealed class SelfAlertFleetPassTests
 {
-    private static readonly TimeSpan Patience = TimeSpan.FromSeconds(5);
+    /* Only ever the limit on something that never happens: no assertion reads how long a step took. */
+    private static readonly TimeSpan Patience = TimeSpan.FromSeconds(30);
+
+    /* A gate that waits for the fleet pass to reach its width: generous, because it only ever fails a pass that never gets there. */
+    private static readonly TimeSpan GatePatience = TimeSpan.FromSeconds(30);
 
     private sealed class WorkerLogger(CapturingTestLogger inner) : ILogger<DarlingWorker>
     {
@@ -220,7 +224,7 @@ public sealed class SelfAlertFleetPassTests
 
         /* On its cadence: a tick inside the 30 second window evaluates nothing. */
         Assert.True(worker.TryStartSelfAlertPass([server], TestContext.Current.CancellationToken));
-        await Task.Delay(100, TestContext.Current.CancellationToken);
+        await WaitForPassToEndAsync(worker, 4);
         Assert.Equal(3, Volatile.Read(ref evaluations));
     }
 
@@ -265,37 +269,72 @@ public sealed class SelfAlertFleetPassTests
     }
 
     /// <summary>
-    /// The fleet pass runs the servers at the fleet gate's width, not one at a time (#5481 round 1): twenty servers whose
-    /// evaluation takes 100 ms each finish in about a fifth of the serial 2 seconds at width 4, each evaluated once, never
-    /// more than the width at a time. At 500 servers the one-at-a-time pass overran every tick.
+    /// Runs 20 servers through the fleet pass at <paramref name="sweepWidth"/>, where every evaluation counts itself in
+    /// flight, records the peak, and waits at a gate that opens once <paramref name="expectedPeak"/> evaluations are in
+    /// flight together. The test asserts concurrency, never elapsed time: a loaded runner stretches every evaluation
+    /// and cannot change the peak. A pass that never reaches the width fails the test with a message after
+    /// <see cref="GatePatience"/>, and a pass that exceeds it shows in the peak.
     /// </summary>
-    [Fact]
-    public async Task TheFleetPass_EvaluatesAtTheSweepWidth_NotOneServerAtATime()
+    private static async Task<(int Peak, Dictionary<string, int> PerServer, string? GateFailure)> RunTwentyServersAsync(
+        int sweepWidth, int expectedPeak)
     {
         var worker = MakeWorker();
         var concurrent = 0;
         var maxConcurrent = 0;
-        var perServer = new System.Collections.Concurrent.ConcurrentDictionary<string, int>();
-        var finished = 0;
+        var perServer = new Dictionary<string, int>();
+        var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        string? gateFailure = null;
         worker.SelfAlertServerOverride = async (server, ct) =>
         {
-            InterlockedMax(ref maxConcurrent, Interlocked.Increment(ref concurrent));
-            perServer.AddOrUpdate(server.Config.DisplayName, 1, (_, n) => n + 1);
-            await Task.Delay(100, ct);
+            var inFlight = Interlocked.Increment(ref concurrent);
+            InterlockedMax(ref maxConcurrent, inFlight);
+            lock (perServer)
+            {
+                perServer[server.Config.DisplayName] = perServer.GetValueOrDefault(server.Config.DisplayName) + 1;
+            }
+
+            if (inFlight >= expectedPeak)
+            {
+                gate.TrySetResult();
+            }
+
+            try
+            {
+                await gate.Task.WaitAsync(GatePatience, ct);
+            }
+            catch (TimeoutException)
+            {
+                gateFailure = $"only {Volatile.Read(ref maxConcurrent)} evaluations were in flight together; the width is {expectedPeak}";
+                gate.TrySetResult();
+            }
+
             Interlocked.Decrement(ref concurrent);
-            Interlocked.Increment(ref finished);
         };
         var servers = Enumerable.Range(1, 20).Select(i => MakeServer($"example-sql-{i:00}")).ToArray();
 
-        var clock = System.Diagnostics.Stopwatch.StartNew();
-        Assert.True(worker.TryStartSelfAlertPass(servers, TestContext.Current.CancellationToken, sweepWidth: 4));
-        Assert.True(await BecomesTrueAsync(() => Volatile.Read(ref finished) == 20));
-        clock.Stop();
+        Assert.True(worker.TryStartSelfAlertPass(servers, TestContext.Current.CancellationToken, sweepWidth: sweepWidth));
+        await WaitForPassToEndAsync(worker, 1);
 
+        lock (perServer)
+        {
+            return (Volatile.Read(ref maxConcurrent), new Dictionary<string, int>(perServer), gateFailure);
+        }
+    }
+
+    /// <summary>
+    /// The fleet pass runs the servers at the fleet gate's width, not one at a time (#5481 round 1): twenty servers at
+    /// width 4 are evaluated four at a time, each exactly once. The test counts what is in flight together, not how long
+    /// the pass takes. At 500 servers the one-at-a-time pass overran every tick.
+    /// </summary>
+    [Fact]
+    public async Task TheFleetPass_EvaluatesAtTheSweepWidth_NotOneServerAtATime()
+    {
+        var (peak, perServer, gateFailure) = await RunTwentyServersAsync(sweepWidth: 4, expectedPeak: 4);
+
+        Assert.Null(gateFailure);
         Assert.Equal(20, perServer.Count);
         Assert.All(perServer.Values, n => Assert.Equal(1, n));
-        Assert.InRange(Volatile.Read(ref maxConcurrent), 3, 4);
-        Assert.True(clock.ElapsedMilliseconds < 1300, $"20 servers at 100 ms and width 4 took {clock.ElapsedMilliseconds} ms; serial is 2000 ms");
+        Assert.Equal(DarlingWorker.SelfAlertPassWidthFor(4), peak);
     }
 
     /// <summary>
@@ -324,23 +363,15 @@ public sealed class SelfAlertFleetPassTests
     [Fact]
     public async Task TheFleetPass_AtSweepWidthSixteen_NeverEvaluatesMoreThanTheCappedWidthAtOnce()
     {
-        var worker = MakeWorker();
-        var concurrent = 0;
-        var maxConcurrent = 0;
-        var finished = 0;
-        worker.SelfAlertServerOverride = async (_, ct) =>
-        {
-            InterlockedMax(ref maxConcurrent, Interlocked.Increment(ref concurrent));
-            await Task.Delay(100, ct);
-            Interlocked.Decrement(ref concurrent);
-            Interlocked.Increment(ref finished);
-        };
-        var servers = Enumerable.Range(1, 20).Select(i => MakeServer($"example-sql-{i:00}")).ToArray();
+        var capped = DarlingWorker.SelfAlertPassWidthFor(16);
+        Assert.Equal(DarlingWorker.DailyRunPoolReserve / 2, capped);
 
-        Assert.True(worker.TryStartSelfAlertPass(servers, TestContext.Current.CancellationToken, sweepWidth: 16));
-        Assert.True(await BecomesTrueAsync(() => Volatile.Read(ref finished) == 20));
+        var (peak, perServer, gateFailure) = await RunTwentyServersAsync(sweepWidth: 16, expectedPeak: capped);
 
-        Assert.InRange(Volatile.Read(ref maxConcurrent), 3, DarlingWorker.DailyRunPoolReserve / 2);
+        Assert.Null(gateFailure);
+        Assert.Equal(20, perServer.Count);
+        Assert.All(perServer.Values, n => Assert.Equal(1, n));
+        Assert.Equal(capped, peak);
     }
 
     /// <summary>
