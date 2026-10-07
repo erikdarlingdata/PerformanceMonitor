@@ -703,8 +703,10 @@ ALTER TABLE config.config_notification
     /// hash per plan, and a day's rows keep each one), and the index is <c>NULLS NOT DISTINCT</c> because
     /// <c>database_name</c>, <c>replica_role</c> and the others are NULL for some rows.</para>
     ///
-    /// <para><b>The built table is the validity record.</b> <c>late_seq</c> counts the late rows the trigger saw for a
-    /// day, and <c>built_seq</c> is the value the builder read BEFORE it aggregated: a day is valid only while the two
+    /// <para><b>The built table is the validity record.</b> <c>late_seq</c> counts the transactions that landed a late
+    /// row on a day (the trigger bumps a (server, day) once per transaction, not once per row, because a whole apply
+    /// is one transaction and tens of thousands of bumps of the same tuple inside it cost quadratic time), and
+    /// <c>built_seq</c> is the value the builder read BEFORE it aggregated: a day is valid only while the two
     /// are equal, so a late row that lands after the build (even one that races it) leaves the day invalid and the
     /// builder rebuilds it. The trigger marks the day of <c>first_execution_time</c> and the day after it, because
     /// <c>last_execution_time</c> (the row's day) can cross midnight. It fires only for rows whose first execution is
@@ -760,11 +762,35 @@ CREATE OR REPLACE FUNCTION collect.plan_regression_daily_mark_late() RETURNS tri
 LANGUAGE plpgsql
 SET search_path = pg_catalog, pg_temp
 AS $f$
+/* A (server, day) is bumped at most once per transaction (#5448 lane 6). The apply is one statement, so tens of
+   thousands of late rows would otherwise run ON CONFLICT DO UPDATE on the same one or two built rows, and each update
+   leaves another version of that tuple inside the one transaction: every conflict check after it walks the whole chain
+   (166 buffers at 30,000 versions against 4 on a fresh row), and the batch grows quadratically. One bump is enough:
+   the builder reads late_seq before it aggregates, and the batch's rows commit together with the bump. The pairs
+   already bumped are kept in a transaction-local setting (set_config(.., true)), which a rolled-back savepoint undoes
+   together with the bump it recorded, and which the function's own SET search_path does not touch. Each key is
+   server_id:day-number between commas, so one lookup is a substring test; the 16-day clamp keeps the list to about
+   17 pairs per server. After a commit the setting reads back as an empty string, not NULL. */
+DECLARE
+    d integer := NEW.first_execution_time::date - DATE '2000-01-01';
+    marked text := coalesce(nullif(current_setting('darling.plan_regression_marked', true), ''), ',');
+    k0 text := ',' || NEW.server_id || ':' || d || ',';
+    k1 text := ',' || NEW.server_id || ':' || (d + 1) || ',';
+    new0 boolean := position(k0 in marked) = 0;
+    new1 boolean := position(k1 in marked) = 0;
 BEGIN
+    IF NOT (new0 OR new1) THEN
+        RETURN NULL;
+    END IF;
+
     INSERT INTO collect.plan_regression_daily_built AS b (server_id, day, late_seq)
-    SELECT NEW.server_id, v.d::date, 1
-    FROM (VALUES (date_trunc('day', NEW.first_execution_time)), (date_trunc('day', NEW.first_execution_time) + interval '1 day')) AS v (d)
+    SELECT NEW.server_id, v.d, 1
+    FROM (VALUES (NEW.first_execution_time::date, new0), (NEW.first_execution_time::date + 1, new1)) AS v (d, fresh)
+    WHERE v.fresh
     ON CONFLICT (server_id, day) DO UPDATE SET late_seq = b.late_seq + 1;
+
+    PERFORM set_config('darling.plan_regression_marked',
+        marked || CASE WHEN new0 THEN substr(k0, 2) ELSE '' END || CASE WHEN new1 THEN substr(k1, 2) ELSE '' END, true);
     RETURN NULL;
 END
 $f$;

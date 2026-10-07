@@ -196,7 +196,30 @@ public sealed class PlanRegressionDailyRungTests
         Assert.Contains("INSERT INTO collect.plan_regression_daily_built AS b", function.Value, StringComparison.Ordinal);
         Assert.Contains("ON CONFLICT (server_id, day) DO UPDATE SET late_seq = b.late_seq + 1", function.Value, StringComparison.Ordinal);
         /* Marks the day of first_execution_time and the day after it (last_execution_time can cross midnight). */
-        Assert.Contains("(date_trunc('day', NEW.first_execution_time) + interval '1 day')", function.Value, StringComparison.Ordinal);
+        Assert.Contains("(NEW.first_execution_time::date, new0), (NEW.first_execution_time::date + 1, new1)", function.Value, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #5448 lane 6: the function bumps a (server, day) once per transaction. The apply is one statement, so a bump per
+    /// late row updates the same built tuple tens of thousands of times inside one transaction, and each conflict check
+    /// after the first walks the whole version chain (quadratic: 17 s for 50,000 late rows). The pairs already bumped are
+    /// kept in a transaction-local setting, and a row whose days are both in it returns before any write. A pin on the
+    /// shape, because the live tests need a server: the setting is read, the guard returns early, only the unmarked days
+    /// are written, and the setting is written with is_local true (false would leak the marks to the next transaction of
+    /// the session and silently drop its bumps).
+    /// </summary>
+    [Fact]
+    public void TheMarkFunction_BumpsAPairOncePerTransaction_ThroughATransactionLocalSetting()
+    {
+        var sql = Statements();
+        var function = Regex.Match(sql, @"CREATE OR REPLACE FUNCTION collect\.plan_regression_daily_mark_late\(\).*?\$f\$;", RegexOptions.Singleline).Value;
+
+        Assert.Contains("current_setting('darling.plan_regression_marked', true)", function, StringComparison.Ordinal);
+        Assert.Contains("nullif(current_setting('darling.plan_regression_marked', true), '')", function, StringComparison.Ordinal);
+        Assert.Contains("IF NOT (new0 OR new1) THEN", function, StringComparison.Ordinal);
+        Assert.Contains("WHERE v.fresh", function, StringComparison.Ordinal);
+        Assert.Matches(@"set_config\('darling\.plan_regression_marked',[^;]*, true\);", function);
+        Assert.DoesNotContain(", false)", function, StringComparison.Ordinal);
     }
 
     [Fact]

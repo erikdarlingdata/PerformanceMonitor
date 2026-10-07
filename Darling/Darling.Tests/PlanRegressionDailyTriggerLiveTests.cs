@@ -26,7 +26,9 @@ namespace Darling.Tests;
 /// is rebuilt. The cases the design (plan v2, lane 2) pins:
 ///
 /// <para>(1) steady rows never run the function (<c>pg_stat_user_functions.calls = 0</c>), so the steady write path pays
-/// only the <c>WHEN</c> test; (2) a late row marks day(first) and the next day, one bump per row; (3) an
+/// only the <c>WHEN</c> test; (2) a late row marks day(first) and the next day, one bump per (server, day) per
+/// transaction (lane 6: a bump per row made a big late apply quadratic), and a rolled-back savepoint undoes both the bump
+/// and the record of it; (3) an
 /// <c>ON CONFLICT</c> winner marks and a <c>WHERE</c>-rejected loser does not; (4) a first older than 16 days marks
 /// nothing; (5) COPY and (6) a plain INSERT both mark; (8) the table converted to a hypertable with
 /// <c>migrate_data => true</c> keeps the trigger and later inserts still mark; (9) the trigger leaves
@@ -84,7 +86,7 @@ public sealed class PlanRegressionDailyTriggerLiveTests
     }
 
     [Fact]
-    public async Task ALateRow_MarksItsDayAndTheNext_AndEveryRowBumpsLateSeq()
+    public async Task ALateRow_MarksItsDayAndTheNext_OncePerServerDayPerTransaction()
     {
         var baseCs = BaseConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #5448 trigger test.");
@@ -97,7 +99,9 @@ public sealed class PlanRegressionDailyTriggerLiveTests
         var d5 = today.AddDays(-5);
         var d9 = today.AddDays(-9);
 
-        /* Three rows whose first falls on d5, one at 23:30 of d9 (its last can cross midnight, so d9 + 1 is marked). */
+        /* Three rows whose first falls on d5 (one statement, so one transaction: one bump, not three), one at 23:30 of d9
+           (its last can cross midnight, so d9 + 1 is marked). A bump per row was lane 1's shape, and it made a big late
+           apply quadratic (#5448 lane 6). */
         await UpsertAsync(connection, ServerA, new[] { d5.AddHours(1), d5.AddHours(2), d5.AddHours(23).AddMinutes(30) }, 1, 1, ct);
         await UpsertAsync(connection, ServerA, new[] { d9.AddHours(23).AddMinutes(30) }, 1, 1, ct);
 
@@ -105,8 +109,8 @@ public sealed class PlanRegressionDailyTriggerLiveTests
         Assert.Equal(
             new Dictionary<DateTime, long>
             {
-                [d5] = 3,
-                [d5.AddDays(1)] = 3,
+                [d5] = 1,
+                [d5.AddDays(1)] = 1,
                 [d9] = 1,
                 [d9.AddDays(1)] = 1,
             },
@@ -122,7 +126,140 @@ public sealed class PlanRegressionDailyTriggerLiveTests
         /* A second server's late row on the same day is a separate pair of rows. */
         await UpsertAsync(connection, ServerB, new[] { d5.AddHours(4) }, 1, 1, ct);
         Assert.Equal(1L, (await BuiltAsync(connection, ServerB, ct))[d5]);
-        Assert.Equal(3L, (await BuiltAsync(connection, ServerA, ct))[d5]);
+        Assert.Equal(1L, (await BuiltAsync(connection, ServerA, ct))[d5]);
+    }
+
+    /// <summary>
+    /// #5448 lane 6: the bump is once per (server, day) per TRANSACTION. Late rows keep running the function (the function
+    /// statistics count every one), but only the first for a pair writes the built table. Three statements in one
+    /// transaction, with the third row's pair overlapping the first's on one day (its first day is the first row's next
+    /// day), bump each of the three days once; the same rows' pairs in two transactions bump twice.
+    /// </summary>
+    [Fact]
+    public async Task TwoLateRowsForOneDay_InOneTransaction_BumpOnce_AndInTwoTransactions_BumpTwice()
+    {
+        var baseCs = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #5448 trigger test.");
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var connection = await OpenMigratedAsync(scratch, ct);
+        await ExecAsync(connection, "SET track_functions = 'all'", ct);
+
+        var today = DateTime.UtcNow.Date;
+        var d5 = today.AddDays(-5);
+        var d8 = today.AddDays(-8);
+
+        await ExecAsync(connection, "BEGIN", ct);
+        await UpsertAsync(connection, ServerA, new[] { d5.AddHours(1), d5.AddHours(2) }, 1, 1, ct);
+        await UpsertAsync(connection, ServerA, new[] { d5.AddHours(3) }, 1, 1, ct);
+        await UpsertAsync(connection, ServerA, new[] { d5.AddDays(1).AddHours(4) }, 1, 1, ct);
+        await ExecAsync(connection, "COMMIT", ct);
+
+        Assert.Equal(4, await ScalarLongAsync(connection, "SELECT COUNT(*) FROM collect.query_store_interval_latest", ct));
+        Assert.Equal(
+            new Dictionary<DateTime, long> { [d5] = 1, [d5.AddDays(1)] = 1, [d5.AddDays(2)] = 1 },
+            await BuiltAsync(connection, ServerA, ct));
+
+        /* Two transactions, two late rows each, all four on one day: one bump per transaction. */
+        await ExecAsync(connection, "BEGIN", ct);
+        await UpsertAsync(connection, ServerB, new[] { d8.AddHours(1), d8.AddHours(2) }, 1, 1, ct);
+        await ExecAsync(connection, "COMMIT", ct);
+        await ExecAsync(connection, "BEGIN", ct);
+        await UpsertAsync(connection, ServerB, new[] { d8.AddHours(3), d8.AddHours(4) }, 1, 1, ct);
+        await ExecAsync(connection, "COMMIT", ct);
+
+        Assert.Equal(
+            new Dictionary<DateTime, long> { [d8] = 2, [d8.AddDays(1)] = 2 },
+            await BuiltAsync(connection, ServerB, ct));
+
+        /* The function itself still ran for each of the eight late rows: the saving is the write, not the call. */
+        Assert.Equal(8, await FunctionCallsAsync(connection, ct));
+
+        /* Nothing is left behind for the next transaction of the session. */
+        Assert.Equal(string.Empty, await ScalarStringAsync(connection, "SELECT coalesce(current_setting('darling.plan_regression_marked', true), '')", ct));
+    }
+
+    /// <summary>
+    /// #5448 lane 6: the transaction-local record of marked pairs is undone with a rolled-back savepoint, together with
+    /// the bump it recorded, so a later late row for that day in the same transaction marks again instead of being
+    /// skipped. A record that survived the rollback would drop the day's bump and leave a stale built total valid.
+    /// </summary>
+    [Fact]
+    public async Task ALateRowInARolledBackSavepoint_IsUnmarked_SoTheNextLateRowMarksAgain()
+    {
+        var baseCs = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #5448 trigger test.");
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var connection = await OpenMigratedAsync(scratch, ct);
+
+        var today = DateTime.UtcNow.Date;
+        var d5 = today.AddDays(-5);
+        var d9 = today.AddDays(-9);
+
+        await ExecAsync(connection, "BEGIN", ct);
+        await UpsertAsync(connection, ServerA, new[] { d5.AddHours(1) }, 1, 1, ct);
+        await ExecAsync(connection, "SAVEPOINT late_apply", ct);
+        await UpsertAsync(connection, ServerA, new[] { d9.AddHours(1) }, 1, 1, ct);
+        Assert.Equal(1L, (await BuiltAsync(connection, ServerA, ct))[d9]);
+        await ExecAsync(connection, "ROLLBACK TO SAVEPOINT late_apply", ct);
+        Assert.False((await BuiltAsync(connection, ServerA, ct)).ContainsKey(d9), "the rolled-back bump must be gone");
+
+        /* d9 was unmarked with the savepoint, so this marks it again; d5 was marked outside the savepoint, so this does not
+           bump it a second time. */
+        await UpsertAsync(connection, ServerA, new[] { d9.AddHours(2) }, 1, 1, ct);
+        await UpsertAsync(connection, ServerA, new[] { d5.AddHours(5) }, 1, 1, ct);
+        await ExecAsync(connection, "COMMIT", ct);
+
+        Assert.Equal(
+            new Dictionary<DateTime, long> { [d5] = 1, [d5.AddDays(1)] = 1, [d9] = 1, [d9.AddDays(1)] = 1 },
+            await BuiltAsync(connection, ServerA, ct));
+
+        /* A whole rolled-back transaction leaves no bump and no record behind either. */
+        await ExecAsync(connection, "BEGIN", ct);
+        await UpsertAsync(connection, ServerA, new[] { d9.AddHours(6) }, 1, 1, ct);
+        await ExecAsync(connection, "ROLLBACK", ct);
+        await UpsertAsync(connection, ServerA, new[] { d9.AddHours(7) }, 1, 1, ct);
+        Assert.Equal(2L, (await BuiltAsync(connection, ServerA, ct))[d9]);
+    }
+
+    /// <summary>
+    /// The function's <c>SET search_path = pg_catalog, pg_temp</c> pin still holds with the transaction-local setting in it:
+    /// <c>set_config</c> and <c>current_setting</c> are called unqualified, so they would resolve to a caller's decoy if the
+    /// function inherited the session's path. The session here puts a schema with raising decoys of both FIRST. With the pin
+    /// the apply works; with the pin removed (the control, in this scratch database only) the same apply fails on the decoy,
+    /// so the first half proves something.
+    /// </summary>
+    [Fact]
+    public async Task TheSearchPathPin_StillHolds_AgainstADecoySchemaFirstInTheSessionPath()
+    {
+        var baseCs = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #5448 trigger test.");
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var connection = await OpenMigratedAsync(scratch, ct);
+
+        Assert.Equal("{\"search_path=pg_catalog, pg_temp\"}", await ScalarStringAsync(connection,
+            "SELECT p.proconfig::text FROM pg_proc p WHERE p.pronamespace = 'collect'::regnamespace AND p.proname = '" + FunctionName + "'", ct));
+
+        await ExecAsync(connection, @"
+CREATE SCHEMA decoy;
+CREATE FUNCTION decoy.set_config(text, text, boolean) RETURNS text LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'decoy set_config ran'; END $$;
+CREATE FUNCTION decoy.current_setting(text, boolean) RETURNS text LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'decoy current_setting ran'; END $$;
+SET search_path = decoy, pg_catalog;", ct);
+
+        var d5 = DateTime.UtcNow.Date.AddDays(-5);
+        await UpsertAsync(connection, ServerA, new[] { d5.AddHours(1) }, 1, 1, ct);
+        Assert.Equal(1L, (await BuiltAsync(connection, ServerA, ct))[d5]);
+
+        /* The control: without the pin the function inherits the decoy path and fails. */
+        await ExecAsync(connection, "ALTER FUNCTION collect." + FunctionName + "() RESET search_path", ct);
+        var failure = await Assert.ThrowsAsync<PostgresException>(
+            async () => await UpsertAsync(connection, ServerA, new[] { d5.AddHours(2) }, 1, 1, ct));
+        Assert.Contains("decoy", failure.MessageText, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -223,9 +360,10 @@ public sealed class PlanRegressionDailyTriggerLiveTests
             await import.CompleteAsync(ct);
         }
 
+        /* One COPY is one transaction, so its 25 late rows bump each of their two days once. */
         var built = await BuiltAsync(connection, ServerA, ct);
-        Assert.Equal(25L, built[dCopy]);
-        Assert.Equal(25L, built[dCopy.AddDays(1)]);
+        Assert.Equal(1L, built[dCopy]);
+        Assert.Equal(1L, built[dCopy.AddDays(1)]);
 
         /* (6) a plain multi-row INSERT with no ON CONFLICT. */
         await ExecAsync(connection,
@@ -233,9 +371,9 @@ public sealed class PlanRegressionDailyTriggerLiveTests
             + "SELECT " + ServerA.ToString(CultureInfo.InvariantCulture) + ", 'db', g, g, g, '" + dInsert.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture) + " 05:00'::timestamp, now() AT TIME ZONE 'UTC', 1 FROM generate_series(1, 7) AS g", ct);
 
         built = await BuiltAsync(connection, ServerA, ct);
-        Assert.Equal(7L, built[dInsert]);
-        Assert.Equal(7L, built[dInsert.AddDays(1)]);
-        Assert.Equal(25L, built[dCopy]);
+        Assert.Equal(1L, built[dInsert]);
+        Assert.Equal(1L, built[dInsert.AddDays(1)]);
+        Assert.Equal(1L, built[dCopy]);
     }
 
     [Fact]
@@ -259,7 +397,7 @@ public sealed class PlanRegressionDailyTriggerLiveTests
 
         /* Rows exist before the conversion, so migrate_data moves them into chunks with the trigger already attached. */
         await UpsertAsync(connection, ServerA, new[] { dBefore.AddHours(2), dBefore.AddHours(3) }, 1, 1, ct);
-        Assert.Equal(2L, (await BuiltAsync(connection, ServerA, ct))[dBefore]);
+        Assert.Equal(1L, (await BuiltAsync(connection, ServerA, ct))[dBefore]);
 
         await ExecAsync(connection,
             "SELECT create_hypertable('collect.query_store_interval_latest', by_range('first_execution_time', INTERVAL '1 day'), if_not_exists => true, migrate_data => true)", ct);
@@ -269,13 +407,13 @@ public sealed class PlanRegressionDailyTriggerLiveTests
             "SELECT COUNT(*) FROM pg_trigger WHERE tgname = '" + TriggerName + "' AND NOT tgisinternal", ct) >= 1,
             "the trigger must survive create_hypertable (on the table, and on its chunks)");
 
-        /* migrate_data moves each row into its chunk with an INSERT, which fires the trigger: the conversion itself bumps
-           late_seq once per migrated row. That is safe (an extra bump only invalidates a day, and the builder rebuilds it),
-           so the pin is that the marks never go backwards. */
+        /* migrate_data moves each row into its chunk with an INSERT, which fires the trigger: the conversion itself may bump
+           late_seq (once per day for its whole transaction now). That is safe (an extra bump only invalidates a day, and
+           the builder rebuilds it), so the pin is that the marks never go backwards. */
         var afterMigration = (await BuiltAsync(connection, ServerA, ct))[dBefore];
-        Assert.True(afterMigration >= 2, "the pre-conversion marks must survive create_hypertable, got " + afterMigration);
+        Assert.True(afterMigration >= 1, "the pre-conversion marks must survive create_hypertable, got " + afterMigration);
 
-        /* Later inserts (new chunks) and re-collections of migrated rows (old chunks) both mark, one bump per row. */
+        /* Later inserts (new chunks) and re-collections of migrated rows (old chunks) both mark, one bump per transaction. */
         await UpsertAsync(connection, ServerA, new[] { dAfter.AddHours(4) }, 1, 1, ct);
         await UpsertAsync(connection, ServerA, new[] { dBefore.AddHours(2) }, executionCount: 2, collectionOffsetSeconds: 500, ct);
 
@@ -322,7 +460,8 @@ public sealed class PlanRegressionDailyTriggerLiveTests
         var on = await UpdateCountersAsync(connection, async () =>
             await UpsertAsync(connection, ServerA, setB, executionCount: 2, collectionOffsetSeconds: 10, ct), ct);
 
-        Assert.Equal(2000, await ScalarLongAsync(connection, "SELECT COALESCE(SUM(late_seq), 0) FROM collect.plan_regression_daily_built", ct));
+        /* One upsert is one transaction, and all 1000 rows start on one day: one bump of that day and of the next. */
+        Assert.Equal(2, await ScalarLongAsync(connection, "SELECT COALESCE(SUM(late_seq), 0) FROM collect.plan_regression_daily_built", ct));
         Assert.Equal(1000, off.Updates);
         Assert.Equal(1000, on.Updates);
         Assert.True(off.Hot > 0, "the baseline pass produced no HOT updates, so the comparison would prove nothing");
@@ -436,5 +575,11 @@ WHERE (EXCLUDED.collection_time, EXCLUDED.execution_count) > (t.collection_time,
     {
         await using var command = new NpgsqlCommand(sql, connection);
         return Convert.ToInt64(await command.ExecuteScalarAsync(ct), CultureInfo.InvariantCulture);
+    }
+
+    private static async Task<string> ScalarStringAsync(NpgsqlConnection connection, string sql, CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand(sql, connection);
+        return Convert.ToString(await command.ExecuteScalarAsync(ct), CultureInfo.InvariantCulture) ?? string.Empty;
     }
 }

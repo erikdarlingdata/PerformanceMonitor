@@ -429,19 +429,19 @@ GROUP BY database_name, query_id, plan_id, replica_role, runtime_stats_interval_
         Assert.Empty(await BuiltDaysAsync(connection, ServerId, ct));
 
         /* A late batch (COPY into raw, then the apply's upsert, one transaction): two rows, one per interval, mark
-           day(first) and the next day, once per row. */
+           day(first) and the next day, once per (server, day) per transaction, not once per row (#5448 lane 6). */
         await WriteAsync(runner, now, context, ct,
             Row("qsA", 7, 71, 90, late, late.AddMinutes(30), 3, 900),
             Row("qsA", 8, 81, 91, late.AddMinutes(5), late.AddMinutes(35), 2, 800));
         Assert.Equal(0, context.QueryStoreIntervalMisses);
         var built = await BuiltDaysAsync(connection, ServerId, ct);
         Assert.Equal(2, built.Count);
-        Assert.Equal(2L, built[dayBefore]);
-        Assert.Equal(2L, built[dayBefore.AddDays(1)]);
+        Assert.Equal(1L, built[dayBefore]);
+        Assert.Equal(1L, built[dayBefore.AddDays(1)]);
 
-        /* A newer snapshot of one interval wins its ON CONFLICT and marks once more. */
+        /* A newer snapshot of one interval wins its ON CONFLICT, in a transaction of its own, and marks once more. */
         await WriteAsync(runner, now.AddSeconds(5), context, ct, Row("qsA", 7, 71, 90, late, late.AddMinutes(40), 6, 900));
-        Assert.Equal(3L, (await BuiltDaysAsync(connection, ServerId, ct))[dayBefore]);
+        Assert.Equal(2L, (await BuiltDaysAsync(connection, ServerId, ct))[dayBefore]);
         await AssertTableEqualsRawDedupAsync(connection, ct);
     }
 

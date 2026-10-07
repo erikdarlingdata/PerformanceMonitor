@@ -52,6 +52,11 @@ public sealed class PlanRegressionDailyTriggerCostRig
 
     private static readonly DateTime CollectionBase = new(2026, 2, 1, 0, 0, 0, DateTimeKind.Unspecified);
 
+    /* The hour every case measures from, taken once. The seed takes minutes, and a case that re-read now() would see a new
+       hour when the seed straddled an hour boundary and find fewer rows than a batch (the S1 failure at 14:59 UTC, 41,627
+       rows). The trigger's own late test still reads the real clock, which is what is being measured. */
+    private static readonly string AnchorHour = "'" + DateTime.UtcNow.ToString("yyyy-MM-dd HH:00:00", CultureInfo.InvariantCulture) + "'::timestamp";
+
     [Fact]
     public async Task Measure()
     {
@@ -79,9 +84,9 @@ INSERT INTO collect.query_store_interval_latest
      collection_time, query_plan_hash, query_hash, execution_count, avg_cpu_time_us, avg_duration_us,
      last_execution_time, is_forced_plan, force_failure_count, query_text)
 SELECT {ServerId}, 'db', g % {RowsPerHour}, g % {RowsPerHour}, NULL, g / {RowsPerHour},
-       date_trunc('hour', now() AT TIME ZONE 'UTC') - ((359 - g / {RowsPerHour}) * interval '1 hour'),
+       {AnchorHour} - ((359 - g / {RowsPerHour}) * interval '1 hour'),
        '2026-01-01'::timestamp, '0xAB', '0xCD', 10, 500, 1000,
-       date_trunc('hour', now() AT TIME ZONE 'UTC') - ((359 - g / {RowsPerHour}) * interval '1 hour') + interval '30 minutes',
+       {AnchorHour} - ((359 - g / {RowsPerHour}) * interval '1 hour') + interval '30 minutes',
        false, 0, NULL
 FROM generate_series(0, {SeedRows - 1}) AS g", ct);
         await ExecAsync(connection, "ANALYZE collect.query_store_interval_latest", ct);
@@ -91,13 +96,13 @@ FROM generate_series(0, {SeedRows - 1}) AS g", ct);
         var cases = new (string Name, string Note, Func<int, string> Source)[]
         {
             ("S1", "steady: intervals from the last 4 hours",
-                run => RawFromTable("first_execution_time >= date_trunc('hour', now() AT TIME ZONE 'UTC') - interval '3 hours'", run)),
+                run => RawFromTable($"first_execution_time >= {AnchorHour} - interval '3 hours'", run)),
             ("S2", "steady, 1-day intervals: rows 24-48 h old refreshed each pass",
-                run => RawFromTable("first_execution_time >= date_trunc('hour', now() AT TIME ZONE 'UTC') - interval '47 hours' AND first_execution_time < date_trunc('hour', now() AT TIME ZONE 'UTC') - interval '23 hours' AND query_id % 6 = 0", run)),
+                run => RawFromTable($"first_execution_time >= {AnchorHour} - interval '47 hours' AND first_execution_time < {AnchorHour} - interval '23 hours' AND query_id % 6 = 0", run)),
             ("S3", "backfill: 50,000 NEW rows, all late",
                 run => RawNewLate(run)),
             ("S3u", "extra: every row an UPDATE of a late row",
-                run => RawFromTable("first_execution_time >= date_trunc('hour', now() AT TIME ZONE 'UTC') - interval '59 hours' AND first_execution_time < date_trunc('hour', now() AT TIME ZONE 'UTC') - interval '47 hours'", run)),
+                run => RawFromTable($"first_execution_time >= {AnchorHour} - interval '59 hours' AND first_execution_time < {AnchorHour} - interval '47 hours'", run)),
         };
 
         var only = Environment.GetEnvironmentVariable("DARLING_COST_RIG_CASES")?.Split(',');
@@ -140,6 +145,11 @@ FROM generate_series(0, {SeedRows - 1}) AS g", ct);
             var msPct = (Median(on.Select(s => s.Ms)) / Median(off.Select(s => s.Ms)) - 1) * 100;
             var walPct = (Median(on.Select(s => (double)s.Wal)) / Median(off.Select(s => (double)s.Wal)) - 1) * 100;
             report.AppendLine(CultureInfo.InvariantCulture, $"  delta: {msPct:+0.0;-0.0} % time, {walPct:+0.0;-0.0} % WAL; built.late_seq total so far {built}");
+            /* The machine this runs on is rarely quiet, and a median of wall times moves with it. The off and on runs alternate,
+               so each adjacent pair saw nearly the same load: the median of the pairs' ratios and the fastest run of each mode
+               are steadier than the two medians, and are reported beside them. */
+            var pairs = off.Zip(on, (o, n) => (n.Ms / o.Ms - 1) * 100).ToList();
+            report.AppendLine(CultureInfo.InvariantCulture, $"  steadier: fastest run off {off.Min(s => s.Ms):F1} ms, on {on.Min(s => s.Ms):F1} ms ({(on.Min(s => s.Ms) / off.Min(s => s.Ms) - 1) * 100:+0.0;-0.0} %); median of {pairs.Count} adjacent-pair deltas {Median(pairs):+0.0;-0.0} %");
 
             /* After every case, so a long run that is stopped early still leaves the cases it finished. */
             await File.WriteAllTextAsync(outPath, report.ToString(), ct);
@@ -166,8 +176,8 @@ INSERT INTO collect.query_store_stats
      first_execution_time, last_execution_time, execution_type_desc, execution_count, avg_cpu_time_us, avg_duration_us,
      query_plan_hash, query_hash, is_forced_plan, force_failure_count)
 SELECT g, {ServerId}, 'rig', '{CollectionBase:yyyy-MM-dd HH:mm:ss}'::timestamp + make_interval(secs => {run}), 'db', g, g, NULL, 100000 + {run},
-       date_trunc('hour', now() AT TIME ZONE 'UTC') - ((48 + g % 300) * interval '1 hour'),
-       date_trunc('hour', now() AT TIME ZONE 'UTC') - ((48 + g % 300) * interval '1 hour') + interval '30 minutes',
+       {AnchorHour} - ((48 + g % 300) * interval '1 hour'),
+       {AnchorHour} - ((48 + g % 300) * interval '1 hour') + interval '30 minutes',
        'Regular', 5, 500, 1000, '0xAB', '0xCD', false, 0
 FROM generate_series(1, {BatchRows}) AS g";
 
