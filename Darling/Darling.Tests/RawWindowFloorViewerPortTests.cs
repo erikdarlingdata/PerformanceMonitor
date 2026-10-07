@@ -171,7 +171,7 @@ public sealed class RawWindowFloorViewerPortTests
 
         var tab = ViewerFile("ViewerServerTab.Queries.cs");
         Assert.Contains("GetQueryStoreTopQueriesWithReachAsync(", tab, StringComparison.Ordinal);
-        Assert.Contains("UpdateTruncationBanner(QueryStoreTruncationBanner, await floorTask, startUtc, widePlan: widePlan)", tab, StringComparison.Ordinal);
+        Assert.Contains("UpdateTruncationBanner(QueryStoreTruncationBanner, await DataStartOrNullAsync(floorTask, \"Query Store\"), startUtc, widePlan: widePlan)", tab, StringComparison.Ordinal);
         Assert.Contains("QueryStoreIntervalWide.BannerReason(widePlan.Value.StartBound)", tab, StringComparison.Ordinal);
         Assert.DoesNotContain("interval table keeps 9 days", tab, StringComparison.Ordinal);
         Assert.Contains(" · slicer since ", tab, StringComparison.Ordinal);

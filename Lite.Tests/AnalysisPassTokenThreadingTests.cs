@@ -330,7 +330,7 @@ public sealed class AnalysisPassTokenThreadingTests
     [Fact]
     public async Task TheReadLockWaitIsAbandonableWhileAWriterHoldsIt()
     {
-        var initializer = new DuckDbInitializer(Path.Combine(Path.GetTempPath(), $"pm-lock-{Guid.NewGuid():N}.db"));
+        using var initializer = new DuckDbInitializer(Path.Combine(Path.GetTempPath(), $"pm-lock-{Guid.NewGuid():N}.db"));
 
         var writerHasIt = new ManualResetEventSlim(false);
         var releaseWriter = new ManualResetEventSlim(false);

@@ -156,7 +156,7 @@ public sealed class FinOpsServerInventoryTests : IDisposable
     [Fact]
     public async Task ACollectedServerThatIsNoLongerListed_NeverAppearsInTheInventory()
     {
-        var initializer = new DuckDbInitializer(Path.Combine(_tempDir, "inventory.duckdb"));
+        using var initializer = new DuckDbInitializer(Path.Combine(_tempDir, "inventory.duckdb"));
         await initializer.InitializeAsync();
 
         var listed = Server("inv-still-listed");

@@ -90,6 +90,20 @@ public sealed class DarlingMcpPvsTools
                 /* The lag between these ids is how far cleanup is behind — the gap itself, never a verdict. */
                 oldest_active_transaction_id = r.OldestActiveTransactionId,
                 oldest_aborted_transaction_id = r.OldestAbortedTransactionId,
+                /* How far the oldest aborted transaction trails the oldest active one, the desktop grid's
+                   "Aborted Lag". Null unless BOTH ids are non-zero: zero is the DMV's "none tracked"
+                   sentinel, not a low value, so subtracting through it would invent a huge gap. */
+                aborted_transaction_lag = AbortedLag(r.OldestActiveTransactionId, r.OldestAbortedTransactionId),
+                /* The desktop grid's "Cleanup": Running when either cleaner has a start and no end, Idle when
+                   one has finished, Never run when neither has. Computed from the UTC pair above. */
+                cleanup_state = CleanupState(r),
+                /* Off-row pages the cleaner skipped, by reason: skipped_low_water_mark is "Skipped: Secondary"
+                   (a query on a secondary replica), skipped_min_useful_xts is "Skipped: Snapshot" (a long
+                   snapshot scan), skipped_oldest_aborted is "Skipped: Aborted" (space held by aborted
+                   transactions). Null = the server never reported the counter; 0 is a reported zero. */
+                skipped_low_water_mark = r.SkippedLowWaterMark,
+                skipped_min_useful_xts = r.SkippedMinUsefulXts,
+                skipped_oldest_aborted = r.SkippedOldestAborted,
             });
 
             object? trend = null;
@@ -128,6 +142,19 @@ public sealed class DarlingMcpPvsTools
         {
             return McpHelpers.FormatError("get_pvs_stats", ex);
         }
+    }
+
+    /// <summary>Oldest active minus oldest aborted transaction id; null unless both are non-zero.</summary>
+    internal static long? AbortedLag(long? oldestActive, long? oldestAborted) =>
+        oldestAborted > 0 && oldestActive > 0 ? oldestActive - oldestAborted : null;
+
+    /// <summary>Running / Idle / Never run, from the two cleaners' start and end pairs.</summary>
+    internal static string CleanupState(DarlingPvsReader.PvsStatsRow r)
+    {
+        var running = (r.AbortedCleanerStartTimeUtc.HasValue && !r.AbortedCleanerEndTimeUtc.HasValue)
+            || (r.OffrowCleanerStartTimeUtc.HasValue && !r.OffrowCleanerEndTimeUtc.HasValue);
+        if (running) return "Running";
+        return r.AbortedCleanerEndTimeUtc.HasValue || r.OffrowCleanerEndTimeUtc.HasValue ? "Idle" : "Never run";
     }
 
     /// <summary>

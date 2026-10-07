@@ -36,7 +36,8 @@ public partial class FinOpsTab
     /// </summary>
     private async Task LoadFinOpsIndexAnalysisAsync()
     {
-        var result = await _dataService.GetIndexAnalysisAsync(_server.ServerId);
+        var read = await _dataService.GetIndexAnalysisWithSnapshotTimesAsync(_server.ServerId);
+        var result = read.Result;
 
         var nothingCollected = result.DatabaseRollups.Count == 0;
 
@@ -51,8 +52,8 @@ public partial class FinOpsTab
             return;
         }
 
-        var recs = ViewerDataService.ProjectRecommendations(result);
-        var rollups = ViewerDataService.ProjectRollups(result);
+        var recs = ViewerDataService.ProjectRecommendations(result, read.SnapshotTimes);
+        var rollups = ViewerDataService.ProjectRollups(result, read.SnapshotTimes);
 
         _finopsIndexAnalysisRollupFilterMgr!.UpdateData(rollups);
         _finopsIndexAnalysisFilterMgr!.UpdateData(recs);

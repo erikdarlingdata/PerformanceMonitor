@@ -97,6 +97,18 @@ internal sealed class RdsDeadlockCarryBook
 {
     private readonly Dictionary<string, (string Report, string? FileName)> _held = new(StringComparer.Ordinal);
 
+    /// <summary>#5003: the ingestor, and so this book, is shared by every RDS target of a collector, and the targets'
+    /// runs overlap. Each access to <see cref="_held"/> takes this lock; none of them awaits while it is held.</summary>
+    private readonly object _lock = new();
+
+    private bool TryGetHeld(string key, out (string Report, string? FileName) held)
+    {
+        lock (_lock)
+        {
+            return _held.TryGetValue(key, out held);
+        }
+    }
+
     /// <summary>The report held for this chunk's file (empty for none), the key and file name the eventual
     /// <see cref="Commit"/> needs, and the report held for ANOTHER file of the instance (empty for none).
     ///
@@ -108,7 +120,7 @@ internal sealed class RdsDeadlockCarryBook
         var carryKey = RdsCsvlogCarryBook.InstanceKey(resumeKey);
         var fileName = RdsCsvlogCarryBook.ResumeFileName(resumeKey);
 
-        if (!string.IsNullOrEmpty(carryKey) && _held.TryGetValue(carryKey, out var held))
+        if (!string.IsNullOrEmpty(carryKey) && TryGetHeld(carryKey, out var held))
         {
             return string.Equals(held.FileName, fileName, StringComparison.Ordinal)
                 ? (held.Report, carryKey, fileName, string.Empty)
@@ -127,13 +139,16 @@ internal sealed class RdsDeadlockCarryBook
             return;
         }
 
-        if (next.Length == 0)
+        lock (_lock)
         {
-            _held.Remove(carryKey);
-        }
-        else
-        {
-            _held[carryKey] = (next, fileName);
+            if (next.Length == 0)
+            {
+                _held.Remove(carryKey);
+            }
+            else
+            {
+                _held[carryKey] = (next, fileName);
+            }
         }
     }
 }

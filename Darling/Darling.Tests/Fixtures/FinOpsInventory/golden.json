@@ -1,0 +1,146 @@
+{
+  "serverMetrics": [
+    {
+      "Server": "darling-finops-inv-golden-a",
+      "Metrics": {
+        "AvgCpuPct": 38.7500000000000000,
+        "StorageTotalGb": 3.0488281250000000,
+        "IdleDbCount": 1,
+        "ProvisioningStatus": "UNDER_PROVISIONED"
+      }
+    },
+    {
+      "Server": "darling-finops-inv-golden-b",
+      "Metrics": {
+        "AvgCpuPct": null,
+        "StorageTotalGb": null,
+        "IdleDbCount": 0,
+        "ProvisioningStatus": null
+      }
+    },
+    {
+      "Server": "darling-finops-inv-golden-c",
+      "Metrics": {
+        "AvgCpuPct": 7.0000000000000000,
+        "StorageTotalGb": null,
+        "IdleDbCount": 0,
+        "ProvisioningStatus": "OVER_PROVISIONED"
+      }
+    },
+    {
+      "Server": "darling-finops-inv-golden-d",
+      "Metrics": {
+        "AvgCpuPct": 10.3333333333333333,
+        "StorageTotalGb": 0.50000000000000000000,
+        "IdleDbCount": 0,
+        "ProvisioningStatus": "OVER_PROVISIONED"
+      }
+    }
+  ],
+  "serverInventory": [
+    {
+      "ServerId": 713491758,
+      "ServerName": "darling-finops-inv-golden-a",
+      "Edition": "Enterprise Edition",
+      "ProductVersion": "16.0.4100.1 - CU9",
+      "HostOsVersion": "Windows Server 2022",
+      "EngineEdition": 3,
+      "CpuCount": 8,
+      "PhysicalMemoryMb": 65536,
+      "SocketCount": 2,
+      "CoresPerSocket": 4,
+      "SqlServerStartTime": "anchor-2.7083d",
+      "InventoryAsOfUtc": "anchor-0.875d",
+      "LastCollectedUtc": "anchor-0.2083d",
+      "IsHadrEnabled": true,
+      "IsClustered": false,
+      "AgReplicaRole": "PRIMARY",
+      "IsEnabled": true,
+      "AvgCpuPct": null,
+      "StorageTotalGb": null,
+      "IdleDbCount": null,
+      "ProvisioningStatus": null,
+      "HardwareUnavailableReason": null,
+      "MonthlyCost": 1234.5,
+      "HealthScore": 0
+    },
+    {
+      "ServerId": 679936520,
+      "ServerName": "darling-finops-inv-golden-c",
+      "Edition": "Standard Edition",
+      "ProductVersion": "14.0.1000.169 - SP1",
+      "HostOsVersion": "",
+      "EngineEdition": 2,
+      "CpuCount": 0,
+      "PhysicalMemoryMb": 0,
+      "SocketCount": null,
+      "CoresPerSocket": null,
+      "SqlServerStartTime": null,
+      "InventoryAsOfUtc": "anchor-4d",
+      "LastCollectedUtc": null,
+      "IsHadrEnabled": null,
+      "IsClustered": null,
+      "AgReplicaRole": "Standalone",
+      "IsEnabled": true,
+      "AvgCpuPct": null,
+      "StorageTotalGb": null,
+      "IdleDbCount": null,
+      "ProvisioningStatus": null,
+      "HardwareUnavailableReason": "Hardware inventory (CPU, memory, sockets) unavailable - the monitoring login likely lacks VIEW SERVER STATE (VIEW DATABASE STATE on Azure SQL DB) on this server.",
+      "MonthlyCost": 0,
+      "HealthScore": 0
+    },
+    {
+      "ServerId": 797379853,
+      "ServerName": "darling-finops-inv-golden-d",
+      "Edition": "Standard Edition",
+      "ProductVersion": "15.0.4000.1 - RTM",
+      "HostOsVersion": "",
+      "EngineEdition": 2,
+      "CpuCount": 4,
+      "PhysicalMemoryMb": 16384,
+      "SocketCount": 1,
+      "CoresPerSocket": 4,
+      "SqlServerStartTime": null,
+      "InventoryAsOfUtc": "anchor-5d",
+      "LastCollectedUtc": null,
+      "IsHadrEnabled": false,
+      "IsClustered": false,
+      "AgReplicaRole": "Standalone",
+      "IsEnabled": true,
+      "AvgCpuPct": null,
+      "StorageTotalGb": null,
+      "IdleDbCount": null,
+      "ProvisioningStatus": null,
+      "HardwareUnavailableReason": null,
+      "MonthlyCost": 0,
+      "HealthScore": 0
+    },
+    {
+      "ServerId": 696714139,
+      "ServerName": "Golden Disabled B",
+      "Edition": "SQL Azure",
+      "ProductVersion": "12.0.2000.8 - RTM",
+      "HostOsVersion": "",
+      "EngineEdition": 5,
+      "CpuCount": 2,
+      "PhysicalMemoryMb": null,
+      "SocketCount": null,
+      "CoresPerSocket": null,
+      "SqlServerStartTime": null,
+      "InventoryAsOfUtc": "anchor-2d",
+      "LastCollectedUtc": null,
+      "IsHadrEnabled": null,
+      "IsClustered": null,
+      "AgReplicaRole": "Standalone",
+      "IsEnabled": false,
+      "AvgCpuPct": null,
+      "StorageTotalGb": null,
+      "IdleDbCount": null,
+      "ProvisioningStatus": null,
+      "HardwareUnavailableReason": "Azure SQL Database: memory, sockets, cores per socket and hyperthread ratio are the host\u0027s, not this database\u0027s. Logical CPUs is the database\u0027s own scheduler count; see its service objective for its vCores.",
+      "MonthlyCost": 0,
+      "HealthScore": 0
+    }
+  ]
+}

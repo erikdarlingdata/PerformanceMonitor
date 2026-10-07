@@ -15,6 +15,8 @@ using System.Runtime.CompilerServices;
 using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.AspNetCore.Http;
+using Microsoft.Extensions.DependencyInjection;
 using ModelContextProtocol.Server;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service;
@@ -65,6 +67,9 @@ public sealed class DarlingWebEndpointsTests
         var endpoints = DarlingWebEndpoints.BuildReadDispatch().Keys.ToHashSet(StringComparer.Ordinal);
 
         var expected = catalog.Except(DarlingWebEndpoints.ExcludedToolNames).ToHashSet(StringComparer.Ordinal);
+
+        /* The web page's own keyed reads (#5241) have no tool behind them, by design: exactly this set is added. */
+        expected.UnionWith(DarlingWebEndpoints.WebOnlyReadNames);
 
         /* Symmetric-difference messages so a miss names the exact tool. */
         var missing = expected.Except(endpoints).OrderBy(n => n, StringComparer.Ordinal).ToArray();
@@ -120,6 +125,18 @@ public sealed class DarlingWebEndpointsTests
     }
 
     [Fact]
+    public void WebOnlyReads_AreNotMcpTools_AndAreServedAndCataloged()
+    {
+        var catalog = ReflectToolCatalog();
+        foreach (var name in DarlingWebEndpoints.WebOnlyReadNames)
+        {
+            Assert.DoesNotContain(name, catalog);
+            Assert.Contains(name, DarlingWebEndpoints.BuildReadDispatch().Keys);
+            Assert.Contains(name, DarlingWebEndpoints.CatalogDescriptors.Keys);
+        }
+    }
+
+    [Fact]
     public void ExcludedToolNames_AreAllRealToolsInTheCatalog()
     {
         /* Guards against a typo in the exclusion list silently dropping a real tool from the parity check. */
@@ -149,10 +166,10 @@ public sealed class DarlingWebEndpointsTests
             new[]
             {
                 "add_servers", "analyze_plan_xml", "analyze_procedure_plan", "analyze_query_plan", "analyze_query_store_plan",
-                "analyze_server", "create_custom_alert_rule", "create_custom_view", "create_mute_rule", "delete_custom_alert_rule",
-                "delete_custom_view", "delete_mute_rule", "delete_notification_route", "describe_custom_view_catalog", "get_custom_alert_rule", "get_custom_view", "get_tool_guide",
+                "analyze_server", "assign_server_tag", "create_custom_alert_rule", "create_custom_view", "create_mute_rule", "create_server_tag", "delete_custom_alert_rule",
+                "delete_custom_view", "delete_mute_rule", "delete_notification_route", "delete_server_tag", "describe_custom_view_catalog", "edit_server", "get_custom_alert_rule", "get_custom_view", "get_tool_guide",
                 "list_custom_alert_rules", "list_custom_alert_templates", "list_custom_views", "mute_analysis_finding", "remove_server", "run_custom_view_panel",
-                "set_mute_rule_enabled", "set_notification_route_enabled", "test_custom_alert_rule", "update_alert_settings", "update_custom_alert_rule", "update_custom_view", "update_mute_rule", "validate_custom_alert_rule", "validate_custom_view",
+                "set_mute_rule_enabled", "set_notification_route_enabled", "test_custom_alert_rule", "unassign_server_tag", "update_alert_settings", "update_custom_alert_rule", "update_custom_view", "update_mute_rule", "update_server_tag", "validate_custom_alert_rule", "validate_custom_view",
             },
             DarlingWebEndpoints.ExcludedToolNames.OrderBy(n => n, StringComparer.Ordinal).ToArray());
     }
@@ -178,19 +195,160 @@ public sealed class DarlingWebEndpointsTests
     [Fact]
     public void ReadEndpoints_ActiveQueries_KeepsTheTwoThousandCharacterWebPreview()
     {
-        /* #4198 lane W2: the MCP default fell to a 500-char query_text preview (QueryTextPreviewLength), but
+        /* #4198 lane W2: the MCP default fell to a 500-char (now 400) query_text preview (QueryTextPreviewLength), but
            the web viewer isn't that budget's caller — its /api/read row calls the internal budget-taking
            overload with an explicit 2000, the pre-#4198 McpHelpers.Truncate budget every caller got, so the
            Active Queries tab doesn't shrink under it. A regression here (dropping the overload, or the literal
-           2000) silently starves that tab's query text down to 500 characters. Source-text pin rather than a
-           live call: no rig in this lane. */
+           2000) silently starves that tab's query text down to the MCP preview (400 characters). Source-text pin rather than a
+           live call: no rig in this lane. #5245: the entry now binds the chosen databases (DatabaseNames(c)), so the pin
+           matches the call and not the whole entry; the 2000 is what it guards. */
         var source = RepoFile.ReadRepoFileLf("Darling", "PerformanceMonitor.Darling.Service", "DarlingWebEndpoints.cs");
         Assert.Contains(
-            "[\"get_active_queries\"] = (c, pg, an) => DarlingMcpSessionTools.GetActiveQueries(pg, Server(c), Hours(c, 1), Str(c, \"database_name\"), QueryBool(c, \"blocking_only\", false), Rows(c, \"limit\", 50), 2000, AsOf(c), c.RequestAborted),",
+            "DarlingMcpSessionTools.GetActiveQueries(pg, Server(c), Hours(c, 1), databases, QueryBool(c, \"blocking_only\", false), Str(c, \"wait_type\"), Rows(c, \"limit\", 50), 2000, AsOf(c), logger, c.RequestAborted)",
             source, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// #5235: the Active Queries page sends <c>?wait_type=</c> to <c>/api/read/get_active_queries</c>, so the web read
+    /// has to declare it and pass it on. The catalog row lists it as optional text between blocking_only and limit (the
+    /// tool's own order, so the catalog picker and the MCP signature agree), and the dispatch row hands the raw query
+    /// value to the tool, which trims it and treats a blank as none. Without the catalog row the picker never offers
+    /// the parameter; without the dispatch argument the page's filter is silently ignored and shows every wait.
+    /// </summary>
+    [Fact]
+    public void ReadEndpoints_ActiveQueries_DeclaresWaitType()
+    {
+        var read = DarlingWebEndpoints.CatalogDescriptors["get_active_queries"];
+        Assert.Equal(
+            new[] { "server", "hours", "database_name", "blocking_only", "wait_type", "limit", "as_of" },
+            read.Params.Select(p => p.Name).ToArray());
+        var waitType = Assert.Single(read.Params, p => p.Name == "wait_type");
+        Assert.Equal("text", waitType.Type);
+        Assert.False(waitType.Required);
+        Assert.Null(waitType.Default);
+
+        var source = RepoFile.ReadRepoFileLf("Darling", "PerformanceMonitor.Darling.Service", "DarlingWebEndpoints.cs");
+        Assert.Contains("Str(c, \"wait_type\"), Rows(c, \"limit\", 50), 2000, AsOf(c)", source, StringComparison.Ordinal);
+    }
+
     /* ── response-kind mapping (the error envelope -> 500, the invalid envelope -> 400 as the body, the '{'-sniff -> 200, miss envelope -> 200) ── */
+
+    /// <summary>A stored plan arrives from the tool as bare XML; the web route answers it as 200 JSON (the
+    /// classifier would otherwise file a leading "&lt;" as a 400), with the truncation flag decided from the tool's
+    /// own cut marker. Envelopes pass through unchanged.</summary>
+    [Fact]
+    public void WrapPlanXml_AWholePlan_IsJsonThatClassifiesAsPassthrough()
+    {
+        const string xml = "<ShowPlanXML><x a=\"1\"/></ShowPlanXML>";
+        var wrapped = DarlingWebEndpoints.WrapPlanXml(xml, "0xABC", "db1");
+        Assert.Equal(DarlingWebEndpoints.ToolResponseKind.JsonPassthrough, DarlingWebEndpoints.ClassifyToolResponse(wrapped));
+        using var doc = System.Text.Json.JsonDocument.Parse(wrapped);
+        Assert.Equal(xml, doc.RootElement.GetProperty("plan_xml").GetString());
+        Assert.Equal("0xABC", doc.RootElement.GetProperty("query_hash").GetString());
+        Assert.Equal("db1", doc.RootElement.GetProperty("database_name").GetString());
+        Assert.False(doc.RootElement.GetProperty("truncated").GetBoolean());
+    }
+
+    [Fact]
+    public void WrapPlanXml_ACutPlan_IsFlaggedTruncated_FromTheRealTruncateMarker()
+    {
+        var cut = McpHelpers.Truncate("<ShowPlanXML>" + new string('x', 100) + "</ShowPlanXML>", 20)!;
+        using var doc = System.Text.Json.JsonDocument.Parse(DarlingWebEndpoints.WrapPlanXml(cut, "H", null));
+        Assert.True(doc.RootElement.GetProperty("truncated").GetBoolean());
+        Assert.DoesNotContain("(truncated)", doc.RootElement.GetProperty("plan_xml").GetString());
+        Assert.Equal(System.Text.Json.JsonValueKind.Null, doc.RootElement.GetProperty("database_name").ValueKind);
+    }
+
+    [Theory]
+    [InlineData("{\"status\":\"unavailable\",\"message\":\"No stored plan found.\"}")]
+    [InlineData("{\"status\":\"not_collected\",\"message\":\"Not collected.\"}")]
+    public void WrapPlanXml_AnEnvelope_PassesThroughUnchanged(string envelope) =>
+        Assert.Equal(envelope, DarlingWebEndpoints.WrapPlanXml(envelope, "H", null));
+
+    /// <summary>#5228: the identity overload echoes the caller's key in the order given, then plan_xml and
+    /// truncated; the original (query_hash, database_name) overload is that same wrap with those two keys.</summary>
+    [Fact]
+    public void WrapPlanXml_TheIdentityOverload_EchoesTheKeyInOrder_AndMatchesTheHashOverload()
+    {
+        const string xml = "<ShowPlanXML><x a=\"1\"/></ShowPlanXML>";
+        var identity = new Dictionary<string, object?>(StringComparer.Ordinal)
+        {
+            ["collection_time"] = "2026-03-04T05:06:07.1234560",
+            ["session_id"] = 51,
+            ["request_id"] = 0,
+            ["live"] = false,
+        };
+        using var doc = System.Text.Json.JsonDocument.Parse(DarlingWebEndpoints.WrapPlanXml(xml, identity));
+        var names = doc.RootElement.EnumerateObject().Select(p => p.Name).ToArray();
+        Assert.Equal(new[] { "collection_time", "session_id", "request_id", "live", "plan_xml", "truncated" }, names);
+        Assert.Equal(51, doc.RootElement.GetProperty("session_id").GetInt32());
+        Assert.Equal(xml, doc.RootElement.GetProperty("plan_xml").GetString());
+
+        var byHash = DarlingWebEndpoints.WrapPlanXml(xml, "0xABC", "db1");
+        var byIdentity = DarlingWebEndpoints.WrapPlanXml(xml, new Dictionary<string, object?>(StringComparer.Ordinal)
+        {
+            ["query_hash"] = "0xABC",
+            ["database_name"] = "db1",
+        });
+        Assert.Equal(byHash, byIdentity);
+    }
+
+    /// <summary>#5228: the three row plan reads refuse a missing or unparseable key BEFORE touching the store
+    /// (the store argument is never used on these paths), with the dispatch's own <c>invalid</c> envelope.</summary>
+    [Theory]
+    [InlineData("get_active_query_plan_xml", "session_id=1", "collection_time")]
+    [InlineData("get_active_query_plan_xml", "collection_time=not-a-time&session_id=1", "collection_time")]
+    [InlineData("get_active_query_plan_xml", "collection_time=2026-03-04T05:06:07.1234560Z", "session_id")]
+    [InlineData("get_active_query_plan_xml", "collection_time=2026-03-04T05:06:07.1234560Z&session_id=abc", "session_id")]
+    [InlineData("get_active_query_plan_xml", "collection_time=2026-03-04T05:06:07.1234560Z&session_id=1&request_id=x", "request_id")]
+    [InlineData("get_query_store_plan_xml", "query_id=1", "database_name")]
+    [InlineData("get_query_store_plan_xml", "database_name=db1", "query_id")]
+    [InlineData("get_query_store_plan_xml", "database_name=db1&query_id=abc", "query_id")]
+    [InlineData("get_query_store_plan_xml", "database_name=db1&query_id=1&plan_id=abc", "plan_id")]
+    [InlineData("get_query_store_query_history", "query_id=1", "database_name")]
+    [InlineData("get_query_store_query_history", "database_name=db1", "query_id")]
+    [InlineData("get_query_store_query_history", "database_name=db1&query_id=abc", "query_id")]
+    [InlineData("get_active_query_plan_xml", "collection_time=2026-03-04&session_id=1", "collection_time")]
+    [InlineData("get_active_query_plan_xml", "collection_time=3/4/2026&session_id=1", "collection_time")]
+    [InlineData("get_active_query_plan_xml", "collection_time=2026-03-04T05:06:07.1234560Z&session_id=1&live=yes", "live")]
+    [InlineData("get_procedure_plan_xml", "sql_handle=abc", "sql_handle")]
+    [InlineData("get_procedure_plan_xml", "sql_handle=0x", "sql_handle")]
+    [InlineData("get_procedure_plan_xml", "sql_handle=0x03%27%3BDROP", "sql_handle")]
+    [InlineData("get_procedure_plan_xml", "", "sql_handle")]
+    [InlineData("get_query_repro_script", "", "kind")]
+    [InlineData("get_query_repro_script", "kind=procedure", "kind")]
+    [InlineData("get_query_repro_script", "kind=bogus", "kind")]
+    [InlineData("get_query_repro_script", "kind=query_hash", "query_hash")]
+    [InlineData("get_query_repro_script", "kind=query_store&query_id=1", "database_name")]
+    [InlineData("get_query_repro_script", "kind=query_store&database_name=d", "query_id")]
+    [InlineData("get_query_repro_script", "kind=query_store&database_name=d&query_id=x", "query_id")]
+    [InlineData("get_query_repro_script", "kind=query_store&database_name=d&query_id=1&plan_id=x", "plan_id")]
+    [InlineData("get_query_repro_script", "kind=active_snapshot&session_id=1", "collection_time")]
+    [InlineData("get_query_repro_script", "kind=active_snapshot&collection_time=2026-03-04T05:06:07.1234560Z", "session_id")]
+    [InlineData("get_query_repro_script", "kind=active_snapshot&collection_time=bad&session_id=1", "collection_time")]
+    [InlineData("get_query_repro_script", "kind=active_snapshot&collection_time=2026-03-04T05:06:07.1234560Z&session_id=1&request_id=x", "request_id")]
+    [InlineData("get_blocking_plan_xml", "blocked_spid=1&blocking_spid=2", "event_time")]
+    [InlineData("get_blocking_plan_xml", "event_time=2026-03-04T05:06:07.1234560Z&blocking_spid=2", "blocked_spid")]
+    [InlineData("get_blocking_plan_xml", "event_time=2026-03-04T05:06:07.1234560Z&blocked_spid=1", "blocking_spid")]
+    [InlineData("get_blocking_plan_xml", "event_time=2026-03-04T05:06:07.1234560Z&blocked_spid=abc&blocking_spid=2", "blocked_spid")]
+    [InlineData("get_blocking_plan_xml", "event_time=2026-03-04T05:06:07.1234560Z&blocked_spid=1&blocking_spid=2&blocked_ecid=x", "blocked_ecid")]
+    [InlineData("get_blocking_plan_xml", "event_time=2026-03-04T05:06:07.1234560Z&blocked_spid=1&blocking_spid=2&blocking_ecid=x", "blocking_ecid")]
+    [InlineData("get_blocking_plan_xml", "event_time=2026-03-04&blocked_spid=1&blocking_spid=2", "event_time")]
+    [InlineData("get_blocking_plan_xml", "event_time=not-a-time&blocked_spid=1&blocking_spid=2", "event_time")]
+    [InlineData("get_blocking_plan_xml", "event_time=2026-03-04T05:06:07.1234560Z&blocked_spid=1&blocking_spid=2&side=sideways", "side")]
+    [InlineData("get_deadlock_plan_xml", "deadlock_time=2026-03-04T05:06:07.1234560Z", "collection_time")]
+    [InlineData("get_deadlock_plan_xml", "collection_time=2026-03-04T05:06:07.1234560Z", "deadlock_time")]
+    [InlineData("get_deadlock_plan_xml", "collection_time=2026-03-04&deadlock_time=2026-03-04T05:06:07.1234560Z", "collection_time")]
+    [InlineData("get_deadlock_plan_xml", "collection_time=2026-03-04T05:06:07.1234560Z&deadlock_time=3/4/2026", "deadlock_time")]
+    public async Task TheRowPlanReads_RefuseAMissingOrUnparseableKey_BeforeTheStore(string tool, string query, string key)
+    {
+        var context = new Microsoft.AspNetCore.Http.DefaultHttpContext();
+        context.Request.QueryString = new Microsoft.AspNetCore.Http.QueryString("?" + query);
+        var result = await DarlingWebEndpoints.BuildReadDispatch()[tool](context, null!, null!);
+        using var doc = System.Text.Json.JsonDocument.Parse(result);
+        Assert.Equal("invalid", doc.RootElement.GetProperty("status").GetString());
+        Assert.Contains(key, result, StringComparison.Ordinal);
+    }
 
     [Theory]
     [InlineData("{\"cpu_percent\":42}")]
@@ -413,6 +571,44 @@ public sealed class DarlingWebEndpointsTests
     public void MuteRuleEnvelopeStatus_MapsTheVerbEnvelopeOntoHttp(string envelope, int successStatus, int expected) =>
         Assert.Equal(expected, DarlingWebEndpoints.MuteRuleEnvelopeStatus(envelope, successStatus));
 
+    /* ── the server-tag envelope → HTTP status mapping (#5085): the mute-rule mapping plus conflict and
+       confirm_required as 409, the body untouched. ── */
+
+    [Theory]
+    [InlineData("{\"status\":\"created\",\"tag\":{}}", 201, 201)]
+    [InlineData("{\"status\":\"updated\",\"tag\":{}}", 201, 201)]
+    [InlineData("{\"status\":\"updated\",\"tag\":{}}", 200, 200)]
+    [InlineData("{\"status\":\"unchanged\",\"tag\":{}}", 200, 200)]
+    [InlineData("{\"status\":\"deleted\",\"tag_id\":7}", 200, 200)]
+    [InlineData("{\"status\":\"assigned\",\"tag_id\":7}", 200, 200)]
+    [InlineData("{\"status\":\"unassigned\",\"tag_id\":7}", 200, 200)]
+    [InlineData("{\"status\":\"some_future_status\"}", 200, 500)]   // N2: an unmapped status is a 500, never a silent 2xx
+    [InlineData("{\"status\":\"some_future_status\"}", 201, 500)]
+    [InlineData("{\"status\":\"invalid\",\"refusal\":\"bad_name\",\"message\":\"x\"}", 201, 400)]
+    [InlineData("{\"status\":\"not_found\",\"message\":\"x\"}", 200, 404)]
+    [InlineData("{\"status\":\"conflict\",\"refusal\":\"duplicate_name\",\"message\":\"x\"}", 201, 409)]
+    [InlineData("{\"status\":\"confirm_required\",\"refusal\":\"rules_affected\",\"affected_rules\":[{\"rule_id\":1}]}", 200, 409)]
+    public void ServerTagEnvelopeStatus_MapsTheVerbEnvelopeOntoHttp(string envelope, int successStatus, int expected) =>
+        Assert.Equal(expected, DarlingWebEndpoints.ServerTagEnvelopeStatus(envelope, successStatus));
+
+    [Fact]
+    public void ServerTagEnvelopeStatus_TheCoresCaughtException_IsAServerError() =>
+        Assert.Equal(500, DarlingWebEndpoints.ServerTagEnvelopeStatus(
+            McpHelpers.FormatError("create_server_tag", new InvalidOperationException("connection reset")), 201));
+
+    [Fact]
+    public async Task ServerTagToolResult_ConfirmRequired_KeepsTheEnvelopeAsTheBodyUnder409()
+    {
+        var envelope = "{\"status\":\"confirm_required\",\"refusal\":\"rules_affected\",\"affected_rules\":[{\"rule_id\":1}]}";
+        var result = DarlingWebEndpoints.ServerTagToolResult(envelope, "/api/server-tags/{id}", Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance, 5);
+        var context = new Microsoft.AspNetCore.Http.DefaultHttpContext { RequestServices = new Microsoft.Extensions.DependencyInjection.ServiceCollection().AddLogging().BuildServiceProvider() };
+        context.Response.Body = new System.IO.MemoryStream();
+        await result.ExecuteAsync(context);
+        Assert.Equal(409, context.Response.StatusCode);
+        context.Response.Body.Position = 0;
+        Assert.Contains("affected_rules", await new System.IO.StreamReader(context.Response.Body).ReadToEndAsync(), StringComparison.Ordinal);
+    }
+
     /// <summary>The refusal a shared producer builds reaches the write surface's status mapping through the
     /// same classifier arm the read surface uses (#3739): one recognizer, one word, one code — executed
     /// against the real builder rather than a literal.</summary>
@@ -588,5 +784,52 @@ public sealed class DarlingWebEndpointsTests
 
         Assert.NotNull(dir);
         return dir!;
+    }
+
+    /* ---- #5245: a single-value query key sent more than once is refused, never read as the joined "a,b" ---- */
+
+    private static DefaultHttpContext Ask(string query)
+    {
+        var context = new DefaultHttpContext();
+        context.Request.QueryString = new QueryString(query);
+        return context;
+    }
+
+    [Theory]
+    [InlineData("", "", true)]
+    [InlineData("?confirm=true", "true", true)]
+    [InlineData("?confirm=", "", true)]
+    [InlineData("?confirm=true&confirm=true", "", false)]
+    [InlineData("?confirm=&confirm=true", "", false)]
+    public void TrySingleQueryValue_ReturnsTheOneValue_AndRefusesARepeatedKey(string query, string expected, bool accepted)
+    {
+        var context = Ask(query);
+
+        Assert.Equal(accepted, DarlingWebEndpoints.TrySingleQueryValue(context.Request.Query, "confirm", out var value));
+        Assert.Equal(expected, value);
+    }
+
+    [Theory]
+    [InlineData("", false)]
+    [InlineData("?confirm=true", true)]
+    public void ParseConfirm_SingleValue_BehavesAsBefore(string query, bool expectedConfirm)
+    {
+        var (confirm, refusal) = DarlingWebEndpoints.ParseConfirm(Ask(query).Request.Query);
+
+        Assert.Equal(expectedConfirm, confirm);
+        Assert.Null(refusal);
+    }
+
+    [Theory]
+    [InlineData("?confirm=1", "confirm must be true, or omitted.")]
+    [InlineData("?confirm=TRUE", "confirm must be true, or omitted.")]
+    [InlineData("?confirm=true&confirm=true", "confirm must be given once, as true, or omitted.")]
+    [InlineData("?confirm=true&confirm=1", "confirm must be given once, as true, or omitted.")]
+    public void ParseConfirm_RefusesAWrongValue_AndARepeatedKey(string query, string expectedRefusal)
+    {
+        var (confirm, refusal) = DarlingWebEndpoints.ParseConfirm(Ask(query).Request.Query);
+
+        Assert.False(confirm);
+        Assert.Equal(expectedRefusal, refusal);
     }
 }

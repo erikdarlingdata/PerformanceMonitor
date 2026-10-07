@@ -323,6 +323,12 @@ public partial class App : Application
     public static bool PagerDutyUseEuRegion { get; set; } = false;
     public static string PagerDutyProxyAddress { get; set; } = "";
 
+    /* Opt-in, PagerDuty-only (the interface member's DIM default false): the closing edge of an edge-type
+       alert pair is delivered as a resolve that CLOSES the PagerDuty incident its firing edge's trigger
+       opened. Off (the shipped default), the closing edge is an info-level trigger and the incident stays
+       open — the tool does not auto-resolve incidents with third parties unless the operator asks. */
+    public static bool PagerDutyAutoResolve { get; set; } = false;
+
     private const string TeamsWebhookCredentialKey = "TeamsWebhook";
     private const string SlackWebhookCredentialKey = "SlackWebhook";
     private const string GenericWebhookCredentialKey = "GenericWebhook";
@@ -448,6 +454,10 @@ public partial class App : Application
         _instanceSignal = new SingleInstanceSignal(ShowWindowEventName, OnSurfaceWindowRequested);
 
         base.OnStartup(e);
+
+        /* #5320 N1: the statement filter's judge takes 250-900 ms to build, and the first connection or AG alert
+           would build it on the UI thread. Build it now, off the UI thread (the in-process MCP server shares it). */
+        _ = Task.Run(SensitiveStatements.WarmUp);
 
         // Right-click selects the DataGrid row under the cursor app-wide, so context-menu actions
         // (e.g. View Plan) act on the clicked row even after an auto-refresh cleared the selection.
@@ -1332,6 +1342,7 @@ public partial class App : Application
             if (read.TryGetProperty("pagerduty_webhook_enabled", out v)) PagerDutyWebhookEnabled = v.Bool(PagerDutyWebhookEnabled);
             if (read.TryGetProperty("pagerduty_use_eu_region", out v)) PagerDutyUseEuRegion = v.Bool(PagerDutyUseEuRegion);
             if (read.TryGetProperty("pagerduty_proxy_address", out v)) PagerDutyProxyAddress = v.Text(PagerDutyProxyAddress);
+            if (read.TryGetProperty("pagerduty_auto_resolve", out v)) PagerDutyAutoResolve = v.Bool(PagerDutyAutoResolve);
 
             /* Migrate webhook URLs from plaintext settings.json to Credential Manager. A legacy plaintext
                URL still wins over whatever the store held, matching the old order (save, then read back);

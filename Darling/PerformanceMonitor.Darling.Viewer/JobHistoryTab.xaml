@@ -59,6 +59,7 @@
     <Grid>
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
         </Grid.RowDefinitions>
 
@@ -107,8 +108,17 @@
                        FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}"/>
         </StackPanel>
 
+        <!-- #4966: "Showing since <time>" when the runs below start after the range does. Job history is an event
+             surface: the first collection copies the server's msdb history, so a run's own time can sit long before
+             the collection that stored it. The note names the earlier of the collector's coverage (DataWindowFloor)
+             and the earliest run shown, or the oldest run of a full page of the newest 2,000 (the read's cap). -->
+        <TextBlock Grid.Row="1" x:Name="JobHistoryTruncationBanner" Visibility="Collapsed"
+                   Margin="10,0,10,4" Padding="8,4" FontWeight="Bold"
+                   Foreground="{DynamicResource ForegroundBrush}"
+                   Background="#22FFAA00"/>
+
         <!-- DataGrid -->
-        <Grid Grid.Row="1" Margin="10,0,10,10">
+        <Grid Grid.Row="2" Margin="10,0,10,10">
             <DataGrid x:Name="JobHistoryDataGrid"
                       AutoGenerateColumns="False"
                       IsReadOnly="True"

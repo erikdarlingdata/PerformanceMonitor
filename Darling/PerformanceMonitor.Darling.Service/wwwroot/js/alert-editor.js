@@ -37,6 +37,7 @@ import {
   labeledBlock,
 } from "./editor.js";
 import { formatComposedValue } from "./compose.js";
+import { gridTable } from "./panels.js";
 import { takePendingAlertSeed, metricSpecFromDesc } from "./alert-seed.js";
 import * as api from "./alerts-api.js";
 
@@ -108,6 +109,9 @@ export async function renderAlertEditor(main, id, templateKey) {
 
   let model;
   let editingId = null;
+  /* The record this editor is on, so the test table's sort and filters do not follow you to another rule. Every
+     new draft shares #/alert-rule/new, so each opening of it counts as its own. */
+  const draftNo = ++alertDraftSeq;
   let loadedVersion = null;
 
   if (id != null && id !== "new") {
@@ -136,7 +140,7 @@ export async function renderAlertEditor(main, id, templateKey) {
     model = seed ? seededModel(seed) : blankModel();
   }
 
-  buildAlertEditor(main, { model, editingId, loadedVersion, catalog, fleet, tags });
+  buildAlertEditor(main, { model, editingId, loadedVersion, catalog, fleet, tags, recordKey: editingId != null ? "rule-" + editingId : "draft-" + draftNo });
 }
 
 /* ─────────────────────────── model <-> definition ─────────────────────────── */
@@ -445,7 +449,7 @@ function buildAlertEditor(main, ctx) {
     }
 
     const tres = await api.testAlertRule({ definition: def });
-    mount(previewBox, renderTestResult(tres, model.metric.unit));
+    mount(previewBox, renderTestResult(tres, model.metric.unit, ctx.recordKey));
   }
 
   const deleteBtn = ctx.editingId != null ? buildDeleteButton(ctx.editingId, saveStatus) : null;
@@ -764,12 +768,14 @@ function advancedSection(model, onChange) {
   ]);
 }
 
+let alertDraftSeq = 0;
+
 /* ─────────────────────────── test result (current value / would-fire) ─────────────────────────── */
 
 /* The POST /api/alerts/test result: per-server CURRENT value + whether it would breach right now, in a table, with
    the hysteresis caveat above it. This is the instantaneous predicate only — the running evaluator also gates on
    hysteresis + per-server streak, which the note spells out. Every value reaches the DOM as text (R4). */
-function renderTestResult(res, unit) {
+export function renderTestResult(res, unit, recordKey = "") {
   if (res.kind === "empty") {
     /* An invalid/not-found draft comes back as {status, message}; surface the message (validate already ran, so
        this is the belt-and-suspenders path). */
@@ -789,27 +795,35 @@ function renderTestResult(res, unit) {
     return el("div", {}, nodes);
   }
 
-  const head = el("tr", {}, [
-    el("th", { text: "Server" }),
-    el("th", { class: "num", text: "Current value" }),
-    el("th", { text: "Would fire now" }),
-  ]);
-  const rows = results.map((r) => {
-    let verdict;
-    if (r.no_data) verdict = el("span", { class: "muted", text: "no data" });
-    else if (r.breaching) {
-      const sev = r.severity || "Warning";
-      verdict = el("span", { class: "status-cell sev-" + sev }, [el("span", { class: "glyph", text: "●" }), el("span", { text: "Yes — " + sev })]);
-    } else {
-      verdict = el("span", { class: "status-cell sev-Healthy" }, [el("span", { class: "glyph", text: "○" }), el("span", { text: "No" })]);
-    }
-    return el("tr", {}, [
-      el("td", { text: r.server }),
-      el("td", { class: "num", text: r.no_data ? "—" : formatComposedValue(r.current_value, unit || "") }),
-      el("td", {}, [verdict]),
-    ]);
-  });
-  nodes.push(el("div", { class: "table-wrap" }, [el("table", { class: "data" }, [el("thead", {}, [head]), el("tbody", {}, rows)])]));
+  /* The grid shares its sort, filter and picked cell across the editor's re-tests (module scope, keyed by the route,
+     which carries the rule being edited). Sort reads the raw value; the verdict column sorts, filters and copies as
+     its text ("Yes — Critical", "No", "no data"). */
+  const verdictText = (r) => (r.no_data ? "no data" : r.breaching ? "Yes — " + (r.severity || "Warning") : "No");
+  const columns = [
+    { key: "server", label: "Server" },
+    {
+      key: "current_value",
+      label: "Current value",
+      align: "right",
+      display: (r) => (r.no_data ? "—" : formatComposedValue(r.current_value, unit || "")),
+      sortValue: (r) => (r.no_data ? null : r.current_value),
+    },
+    {
+      key: "verdict",
+      label: "Would fire now",
+      sortValue: verdictText,
+      copyValue: verdictText,
+      render: (r) => {
+        if (r.no_data) return el("span", { class: "muted", text: "no data" });
+        if (r.breaching) {
+          const sev = r.severity || "Warning";
+          return el("span", { class: "status-cell sev-" + sev }, [el("span", { class: "glyph", text: "●" }), el("span", { text: "Yes — " + sev })]);
+        }
+        return el("span", { class: "status-cell sev-Healthy" }, [el("span", { class: "glyph", text: "○" }), el("span", { text: "No" })]);
+      },
+    },
+  ];
+  nodes.push(gridTable(results, { id: "alert-test|" + recordKey, title: "Alert rule test result", columns }));
   return el("div", {}, nodes);
 }
 

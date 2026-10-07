@@ -74,7 +74,7 @@ FROM range(500) AS r(i)";
     /// <summary>A Lite store whose last rows are committed to the WAL only, closed the way a crash closes it.</summary>
     private async System.Threading.Tasks.Task<string> StoreClosedWithRowsOnlyInTheWalAsync()
     {
-        var lite = new DuckDbInitializer(_dbPath);
+        using var lite = new DuckDbInitializer(_dbPath);
         await lite.InitializeAsync();
         var connectionString = lite.ConnectionString;
         lite.Dispose();
@@ -98,7 +98,7 @@ FROM range(500) AS r(i)";
 
         /* Lite opens the file, which replays the WAL, and closes it normally: the shutdown checkpoint is the one
            that loses the replayed rows' index entries. */
-        var lite = new DuckDbInitializer(_dbPath);
+        using var lite = new DuckDbInitializer(_dbPath);
         await lite.InitializeAsync();
         lite.Dispose();
 
@@ -125,7 +125,7 @@ FROM range(500) AS r(i)";
             other.Open();
         }
 
-        var lite = new DuckDbInitializer(_dbPath);
+        using var lite = new DuckDbInitializer(_dbPath);
         await lite.InitializeAsync();
         try
         {
@@ -143,7 +143,7 @@ FROM range(500) AS r(i)";
     [Fact]
     public async System.Threading.Tasks.Task TheRebuild_RunsAtEveryOpen_AndLeavesEveryDefinitionAsItWas()
     {
-        var lite = new DuckDbInitializer(_dbPath);
+        using var lite = new DuckDbInitializer(_dbPath);
         await lite.InitializeAsync();
         var connectionString = lite.ConnectionString;
         lite.Dispose();
@@ -154,7 +154,7 @@ FROM range(500) AS r(i)";
         for (var open = 1; open <= 2; open++)
         {
             var log = new CapturingLogger();
-            var reopened = new DuckDbInitializer(_dbPath, log);
+            using var reopened = new DuckDbInitializer(_dbPath, log);
             await reopened.InitializeAsync();
             reopened.Dispose();
 
@@ -197,7 +197,7 @@ FROM range(500) AS r(i)";
     [Fact]
     public async System.Threading.Tasks.Task ADeclaredIndexThatCannotBeBuilt_IsLogged_AndTheOpenCarriesOn()
     {
-        var lite = new DuckDbInitializer(_dbPath);
+        using var lite = new DuckDbInitializer(_dbPath);
         await lite.InitializeAsync();
         var connectionString = lite.ConnectionString;
         lite.Dispose();
@@ -218,7 +218,7 @@ FROM range(500) AS r(i)";
         }
 
         var log = new CapturingLogger();
-        var reopened = new DuckDbInitializer(_dbPath, log);
+        using var reopened = new DuckDbInitializer(_dbPath, log);
         await reopened.InitializeAsync();
         try
         {
@@ -243,7 +243,7 @@ FROM range(500) AS r(i)";
     [Fact]
     public async System.Threading.Tasks.Task AnExistingFileWhoseSchemaVersionCannotBeRead_StillOpens_PastAnIndexThatCannotBeBuilt()
     {
-        var lite = new DuckDbInitializer(_dbPath);
+        using var lite = new DuckDbInitializer(_dbPath);
         await lite.InitializeAsync();
         var connectionString = lite.ConnectionString;
         lite.Dispose();
@@ -259,7 +259,7 @@ FROM range(500) AS r(i)";
         }
 
         var log = new CapturingLogger();
-        var reopened = new DuckDbInitializer(_dbPath, log);
+        using var reopened = new DuckDbInitializer(_dbPath, log);
         await reopened.InitializeAsync();
         try
         {
@@ -280,14 +280,14 @@ FROM range(500) AS r(i)";
     [Fact]
     public async System.Threading.Tasks.Task AFatalCheckpointAtTheOpen_StopsTheOpen_WithAnErrorThatNamesTheCheckpoint()
     {
-        var lite = new DuckDbInitializer(_dbPath);
+        using var lite = new DuckDbInitializer(_dbPath);
         await lite.InitializeAsync();
         lite.Dispose();
 
         /* DuckDB's checkpoint-abort setting makes the open's own CHECKPOINT fail with FATAL, which invalidates the
            database. The open cannot carry on, and its error must say what failed rather than leave the next
            statement to report "database has been invalidated". */
-        var reopened = new DuckDbInitializer(_dbPath)
+        using var reopened = new DuckDbInitializer(_dbPath)
         {
             BeforeOpenCheckpointForTests = connection =>
             {

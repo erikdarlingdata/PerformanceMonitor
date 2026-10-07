@@ -334,6 +334,10 @@ public sealed class EngineCapabilityReadWiringTests
     private static readonly Regex HelperDeclaration = new(
         @"private static async Task<string> (\w+)(?:<\w+>)?\(", RegexOptions.Compiled);
 
+    // The lookbehind excludes the helper's own declaration, which a joined part file puts inside a tool body.
+    private static string HelperCallPattern(string helperName) =>
+        $@"(?<!Task<string> )\b{Regex.Escape(helperName)}\(";
+
     /// <summary>
     /// Every collector name a shipped read asks the capability question about, across both SKUs. Exposed so
     /// <see cref="CollectorEngineCapabilityTests.EveryCapturePathEntry_NamesARealCollectorThatIsActuallyGatedSomewhere"/>
@@ -359,9 +363,20 @@ public sealed class EngineCapabilityReadWiringTests
     {
         var wired = new SortedDictionary<string, SortedSet<string>>(StringComparer.Ordinal);
 
-        foreach (var file in RepoFilesIn(mcpDirectory))
+        /* A partial class split across files (X.cs plus X.*.cs) is one source: a helper in one part is
+           called by a tool in another. X.cs comes first, the rest in ordinal order. */
+        var groups = RepoFilesIn(mcpDirectory)
+            .GroupBy(f => Path.GetFileName(f).Split('.')[0], StringComparer.Ordinal)
+            .OrderBy(g => g.Key, StringComparer.Ordinal);
+
+        foreach (var group in groups)
         {
-            var source = File.ReadAllText(file).Replace("\r\n", "\n", StringComparison.Ordinal);
+            var parts = group
+                .OrderBy(f => Path.GetFileName(f).Equals(group.Key + ".cs", StringComparison.Ordinal) ? 0 : 1)
+                .ThenBy(f => Path.GetFileName(f), StringComparer.Ordinal)
+                .ToList();
+            var file = string.Join("+", parts.Select(Path.GetFileName));
+            var source = string.Join("\n", parts.Select(f => File.ReadAllText(f).Replace("\r\n", "\n", StringComparison.Ordinal)));
             var consts = CollectorConst.Matches(source)
                 .ToDictionary(m => m.Groups[1].Value, m => m.Groups[2].Value, StringComparer.Ordinal);
             var marks = ToolMark.Matches(source);
@@ -390,7 +405,7 @@ public sealed class EngineCapabilityReadWiringTests
                     continue;
                 }
 
-                Assert.True(owner is not null, $"{Path.GetFileName(file)}: a capability call sits outside any MCP tool");
+                Assert.True(owner is not null, $"{file}: a capability call sits outside any MCP tool");
 
                 if (!wired.TryGetValue(owner!.Groups[1].Value, out var collectors))
                 {
@@ -407,7 +422,7 @@ public sealed class EngineCapabilityReadWiringTests
                 var body = source[marks[i].Index..end];
                 foreach (var (helperName, helperCollectors) in viaHelper)
                 {
-                    if (!Regex.IsMatch(body, $@"\b{Regex.Escape(helperName)}\("))
+                    if (!Regex.IsMatch(body, HelperCallPattern(helperName)))
                     {
                         continue;
                     }
@@ -428,9 +443,9 @@ public sealed class EngineCapabilityReadWiringTests
                     Enumerable.Range(0, marks.Count).Any(i =>
                     {
                         var end = i + 1 < marks.Count ? marks[i + 1].Index : source.Length;
-                        return Regex.IsMatch(source[marks[i].Index..end], $@"\b{Regex.Escape(helperName)}\(");
+                        return Regex.IsMatch(source[marks[i].Index..end], HelperCallPattern(helperName));
                     }),
-                    $"{Path.GetFileName(file)}: helper {helperName} asks the capability question but no tool calls it");
+                    $"{file}: helper {helperName} asks the capability question but no tool calls it");
             }
         }
 
@@ -513,6 +528,24 @@ public sealed class EngineCapabilityReadWiringTests
 
         return kinds.Any(kind => editions.Any(edition =>
             CollectorEngineCapability.NotCollectedMessage("probe", edition, kind, collectorName) is not null));
+    }
+
+    /// <summary>get_finops lives in DarlingMcpFinOpsTools.cs and its views ask their questions through helpers in the
+    /// partials DarlingMcpFinOpsTools.Utilization.cs (set A) and DarlingMcpFinOpsTools.HighImpact.cs and DarlingMcpFinOpsTools.DatabaseResources.cs and DarlingMcpFinOpsTools.ApplicationConnections.cs and DarlingMcpFinOpsTools.Optimization.cs and DarlingMcpFinOpsTools.StorageGrowth.cs (set B); the scan
+    /// reads all the parts as one source.</summary>
+    [Fact]
+    public void GetFinOps_IsWiredToItsViewsCollectors_AcrossThePartialClass()
+    {
+        var wired = WiredReads(DarlingMcp);
+
+        Assert.True(wired.TryGetValue("get_finops", out var collectors), "get_finops has no wired read");
+        /* Set A views: append their collectors here. */
+        var setA = new[] { "memory_stats", "index_object_stats" };
+        /* Set B views: append their collectors here. */
+        var setB = new[] { "database_size_stats", "file_io_stats", "memory_grant_stats", "query_stats", "session_stats", "tempdb_stats", "wait_stats" };
+
+        /* Exact: the sorted union of the per-set lists equals the scanned set, so an unlisted collector still fails. */
+        Assert.Equal(setA.Concat(setB).Distinct().OrderBy(c => c, StringComparer.Ordinal).ToArray(), collectors!.OrderBy(c => c, StringComparer.Ordinal).ToArray());
     }
 
     /// <summary>
@@ -829,6 +862,43 @@ public sealed class EngineCapabilityMissLivePostgresTests
         }
         finally
         {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
+    [Fact]
+    public async Task ANotCollectedAnswer_StartsNoCoverageProbe_AgainstDevPostgres()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live engine-capability test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+        await using var postgres = NpgsqlDataSource.Create(cs!);
+
+        var bodySucceeded = false;
+        try
+        {
+            await RegisterAsync(connection, ct, AzureServerId, AzureServerName, engineEdition: 5);
+            var probes = 0;
+            DarlingMcpWindowNotice.TestOnlyProbe = () => { probes++; return Task.FromResult<DateTime?>(null); };
+
+            /* A 168-hour empty window is always probed; a not_collected answer carries no notice, so it must not be. */
+            var config = await DarlingMcpConfigHistoryTools.GetServerConfigChanges(postgres, AzureServerName);
+            var pressure = await DarlingMcpMemoryGrantTools.GetMemoryPressureEvents(postgres, AzureServerName);
+
+            Assert.Equal("not_collected", DarlingMcpTestData.StatusOf(config));
+            Assert.Equal("not_collected", DarlingMcpTestData.StatusOf(pressure));
+            Assert.Equal(0, probes);
+            bodySucceeded = true;
+        }
+        finally
+        {
+            DarlingMcpWindowNotice.TestOnlyProbe = null;
             await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
                 await DeleteRowsAsync(cleanup, cleanupCt));
         }

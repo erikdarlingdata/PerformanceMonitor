@@ -62,7 +62,10 @@ SELECT
     aborted_version_cleaner_end_time,
     offrow_version_cleaner_start_time,
     offrow_version_cleaner_end_time,
-    collection_time
+    collection_time,
+    pvs_off_row_page_skipped_low_water_mark,
+    pvs_off_row_page_skipped_min_useful_xts,
+    pvs_off_row_page_skipped_oldest_aborted_xdesid
 FROM v_pvs_stats
 WHERE server_id = $1
 AND   collection_time = (
@@ -114,7 +117,10 @@ ORDER BY p.database_name, p.collection_time";
         DateTime? AbortedCleanerEndTimeUtc,
         DateTime? OffrowCleanerStartTimeUtc,
         DateTime? OffrowCleanerEndTimeUtc,
-        DateTime CollectionTime);
+        DateTime CollectionTime,
+        long? SkippedLowWaterMark,
+        long? SkippedMinUsefulXts,
+        long? SkippedOldestAborted);
 
     /// <summary>One trend point (per database, per collection). <see cref="PvsSizeMb"/> is null for an
     /// UNMEASURED collection (#3653) — the DMV reported no size that pass — never coerced to 0. The first
@@ -147,7 +153,7 @@ ORDER BY p.database_name, p.collection_time";
         return rows;
     }
 
-    /// <summary>Maps one row of <see cref="PvsStatsLatestSql"/> (13 columns, in the SELECT's order).</summary>
+    /// <summary>Maps one row of <see cref="PvsStatsLatestSql"/> (16 columns, in the SELECT's order).</summary>
     internal static PvsStatsRow MapPvsStatsRow(DbDataReader reader, ServerClock clock) =>
         new(
             reader.IsDBNull(0) ? "" : reader.GetString(0),
@@ -162,7 +168,10 @@ ORDER BY p.database_name, p.collection_time";
             DarlingServerClockReader.ToUtc(clock, reader, 9),
             DarlingServerClockReader.ToUtc(clock, reader, 10),
             DarlingServerClockReader.ToUtc(clock, reader, 11),
-            reader.GetDateTime(12));
+            reader.GetDateTime(12),
+            reader.IsDBNull(13) ? null : reader.GetInt64(13),
+            reader.IsDBNull(14) ? null : reader.GetInt64(14),
+            reader.IsDBNull(15) ? null : reader.GetInt64(15));
 
     public static async Task<List<PvsTrendPoint>> GetPvsTrendAsync(
         NpgsqlDataSource postgres, int serverId, DateTime sinceUtc, CancellationToken cancellationToken = default)

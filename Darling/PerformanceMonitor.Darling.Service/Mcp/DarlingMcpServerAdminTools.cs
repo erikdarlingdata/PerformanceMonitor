@@ -18,6 +18,7 @@ using ModelContextProtocol.Server;
 using Npgsql;
 using NpgsqlTypes;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Storage;
 
 #pragma warning disable CA1707 // MCP tools use snake_case naming convention
 
@@ -36,8 +37,8 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// which holds the network path + credentials — unlike the Viewer, whose dialogs enqueue a <c>test_connect</c>
 /// command for the service to run); the case-folded dedupe gate is the shared <see cref="ServerIdHelper.BuildStorageName"/>
 /// identity in a <c>HashSet&lt;string&gt;(OrdinalIgnoreCase)</c> exactly as the bulk dialog (#1549) uses; the SQL
-/// password is DPAPI-encrypted through <see cref="DarlingSecrets.Protect"/> (the SAME service identity that
-/// decrypts it during collection, so it round-trips) and NEVER stored, logged, or echoed in plaintext; and the
+/// password is sealed with the service's password key (<see cref="ProtectPasswordForStorage"/>, for the connection
+/// settings the row is saved with; the service opens it during collection, so it round-trips) and NEVER stored, logged, or echoed in plaintext; and the
 /// INSERT mirrors <c>StoreConfigProvider.SeedMonitoredServersAsync</c>'s exact column set + <c>server_id =
 /// ServerIdHelper.GetDeterministicHashCode(StorageName)</c> identity, so a tool-written row JOINs the collected
 /// data and the service's reconcile matches it.</para>
@@ -45,13 +46,13 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// <para><b>add_servers</b> processes its JSON array SEQUENTIALLY (mirroring #1549's Darling bulk probe, which is
 /// serial to avoid a probe storm): for each server it validates the fields, skips an exact/case-variant DUPLICATE
 /// of an existing or earlier-in-batch server (<c>status:"duplicate"</c>), probes the connection (a failure is
-/// <c>status:"connection_failed"</c> and does NOT abort the batch), DPAPI-encrypts the SQL password or the service-
+/// <c>status:"connection_failed"</c> and does NOT abort the batch), seals the SQL password or the service-
 /// principal client secret, and INSERTs the row (<c>status:"added"</c>). A save that throws is caught PER ENTRY: that
 /// entry and every one after it are <c>status:"not_saved"</c> (the rest are not probed), and the entries before it
 /// stay <c>added</c> in the results (#4734). An INSERT that changes no rows (its <c>server_id</c> is taken) is
 /// answered from the row that holds the id — <c>collides</c> for a different identity, <c>duplicate</c> for the same
-/// one — and never as <c>added</c>. A LITERAL password or client secret is <c>invalid</c> off Windows, where DPAPI is
-/// not available (#4734). Windows/integrated and managed-identity
+/// one — and never as <c>added</c>. A LITERAL password or client secret is <c>invalid</c> while the service's password key
+/// cannot seal it, and an <c>env:</c>/<c>file:</c> reference always is (#4734, #5366). Windows/integrated and managed-identity
 /// auth store no secret; a service principal stores its client secret exactly like a SQL password; the INTERACTIVE
 /// Entra modes (MFA / device-code / default-credential) are rejected (<c>status:"invalid"</c>) — they need a broker
 /// or a signed-in user and cannot run headless, whereas ServicePrincipal and ManagedIdentity are non-interactive
@@ -71,16 +72,17 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 ///
 /// <para><b>Security.</b> These tools connect (like every MCP tool) as the least-privilege <c>mcp</c> role, granted
 /// (see <see cref="DarlingManagedRoles"/>) INSERT/UPDATE/DELETE on <c>config.config_monitored_servers</c> — a single
-/// non-secret-key table (the DPAPI password blob is written but the <c>encrypted_password</c> column is SELECT-
+/// non-secret-key table (the sealed password is written but the <c>encrypted_password</c> column is SELECT-
 /// carved from <c>mcp</c>, so a token-holder can WRITE a credential but never READ one back) — and nothing else, so
 /// it still cannot reach the <c>config_command</c> service-credential pivot or the carved secret columns. The
 /// <c>config_monitored_servers</c> write fires the existing <c>trg_bump_monitored_servers → config_bump_version</c>
 /// trigger (SECURITY INVOKER), which the #1608 <c>config_service</c> beacon column-grant already covers, so the
 /// running service hot-reloads the monitored set within one sweep. <b>The SQL password transits the MCP endpoint in
-/// the request JSON</b>; on a LAN deployment front the endpoint with the documented TLS reverse proxy.</para>
+/// the request JSON</b>; on a LAN deployment serve the endpoint over HTTPS with <c>mcp.network.tls</c> (#5288), or
+/// front it with a TLS reverse proxy.</para>
 /// </summary>
 [McpServerToolType]
-public sealed class DarlingMcpServerAdminTools
+public sealed partial class DarlingMcpServerAdminTools
 {
     /// <summary>The connect-and-probe seam — <see cref="DefaultProbeAsync"/> in production
     /// (<see cref="DarlingServerConnector.ProbeAsync"/> in-process), a stub in the unit tests so the store-write /
@@ -124,9 +126,9 @@ public sealed class DarlingMcpServerAdminTools
         "covers (it names one database but connects to a different one, e.g. a wrong Initial Catalog) is refused as " +
         "status \"collides\" — adding it would store one database's history under two identities and alert twice. " +
         "So is a server whose id is already held by a different server (two identities that hash to one id). " +
-        "A SQL password or service-principal client secret is encrypted at rest (DPAPI, the service identity) and " +
-        "is never returned. Where DPAPI is not available (Linux) a literal password or client secret is rejected as " +
-        "\"invalid\": give an env:NAME or file:/run/secrets/<name> reference instead. " +
+        "A SQL password or service-principal client secret is sealed with the service's password key before it is " +
+        "stored, and is never returned. password is the password itself: a value that starts with env: or file: is " +
+        "rejected as \"invalid\", because references are set in the configuration file. " +
         "Returns {requested:N, added:N, skipped:N, collided:N, failed:N, results:[{server, " +
         "status:\"added\"|\"duplicate\"|\"collides\"|\"connection_failed\"|\"not_saved\"|\"invalid\", detail}]}. requested is " +
         "the number of entries you sent and the four counters SUM to it — every entry lands in exactly one: " +
@@ -134,7 +136,8 @@ public sealed class DarlingMcpServerAdminTools
         "\"not_saved\" and \"invalid\" → failed. Only added servers are monitored; read the other three counters before treating " +
         "the batch as done. An added server's detail reports what the probe found — for a PostgreSQL target that " +
         "includes writer-vs-reader, Aurora-vs-not, and how many of the PostgreSQL collectors apply to it. NOTE: the " +
-        "password travels to this endpoint in the request; on a LAN use the documented TLS reverse proxy. " +
+        "password travels to this endpoint in the request. MCP serves HTTPS on its network listener when mcp.network.tls " +
+        "is set, so on a LAN set it; a TLS reverse proxy in front of the endpoint also works. " +
         "servers_json is a JSON ARRAY of server objects to add (see above for the per-object fields), e.g. " +
         "[{\"host\":\"sql01\",\"auth\":\"SQL\",\"username\":\"monitor\",\"password\":\"...\",\"encrypt_mode\":\"Mandatory\"," +
         "\"trust_server_certificate\":true},{\"host\":\"aurora.cluster-abc.us-east-1.rds.amazonaws.com\",\"engine\":" +
@@ -149,17 +152,30 @@ public sealed class DarlingMcpServerAdminTools
     /// runs BEFORE any store access, and when NO structurally-valid candidate remains the store is never opened —
     /// so a call whose entries are all invalid (bad field, MFA auth) returns without a connection or a probe.</summary>
     internal static Task<string> AddServersAsync(
-        NpgsqlDataSource postgres, string servers_json, ServerProbe probe, CancellationToken cancellationToken) =>
-        AddServersAsync(new PostgresServerDefinitions(postgres), servers_json, probe, cancellationToken);
+        NpgsqlDataSource postgres, string servers_json, ServerProbe probe, CancellationToken cancellationToken,
+        IPasswordKeyRing? ring = null) =>
+        AddServersAsync(new PostgresServerDefinitions(postgres), servers_json, probe, cancellationToken, ring: ring);
+
+    /// <summary>
+    /// The add the <c>--add-server</c> verb runs: the same core with the one difference that a password may be an
+    /// <c>env:</c>/<c>file:</c> reference. The verb is typed at the service host's own command line by the person who
+    /// can edit the configuration file, which is where references are set; it is not a request, and off Windows it is
+    /// the only way to register a server whose password cannot be encrypted. A reference to Darling's own configuration
+    /// or secrets is still refused (<see cref="ValidateSecret"/>).
+    /// </summary>
+    internal static Task<string> AddServersFromHostCommandLineAsync(NpgsqlDataSource postgres, string servers_json, IPasswordKeyRing? ring = null) =>
+        AddServersAsync(new PostgresServerDefinitions(postgres), servers_json, DefaultProbeAsync, CancellationToken.None, allowSecretReferences: true, ring: ring);
 
     /// <summary>The same flow over an injected <see cref="IServerDefinitions"/>, so a test can stand in a
     /// definitions table that faults on a chosen write or swallows one without a live database.</summary>
     internal static async Task<string> AddServersAsync(
-        IServerDefinitions definitions, string servers_json, ServerProbe probe, CancellationToken cancellationToken)
+        IServerDefinitions definitions, string servers_json, ServerProbe probe, CancellationToken cancellationToken,
+        bool allowSecretReferences = false, IPasswordKeyRing? ring = null)
     {
+        ring ??= DarlingPasswordKey.Current;
         try
         {
-            var (entries, invalidResults, wholeError) = ParseRequest(servers_json);
+            var (entries, invalidResults, wholeError) = ParseRequest(servers_json, ring.Status, allowSecretReferences);
             if (wholeError != null)
             {
                 return Outcome("invalid", wholeError);
@@ -234,16 +250,38 @@ public sealed class DarlingMcpServerAdminTools
                     continue;
                 }
 
-                /* DPAPI-encrypt the SQL password for storage (the service identity encrypts here and decrypts it
-                   during collection, so it round-trips); Windows-auth servers store no secret. The plaintext never
-                   leaves this method — it is not logged, not echoed in a result. */
+                /* Seal the SQL password for storage with the service's password key, for the connection settings this
+                   row is inserted with (the service opens it for that connection during collection, so it round-trips);
+                   Windows-auth servers store no secret. The plaintext never leaves this method: it is not logged, not
+                   echoed in a result. */
                 try
                 {
-                    var encryptedPassword = ProtectPasswordForStorage(entry.PlaintextPassword);
-                    var rowsWritten = await definitions.InsertAsync(entry, encryptedPassword, cancellationToken);
+                    var encryptedPassword = ProtectPasswordForStorage(entry.PlaintextPassword, BindingOf(entry.ProbeConfig), ring);
+
+                    /* #5240: the key the check above compared (the database the probe reached), handed to the write so
+                       it is compared again under the identity lock: a definition at that key may have been committed
+                       during the probe, after the claimed set was read. Null when the probe named nothing new. */
+                    var actualStorageKey = ActualStorageKeyOf(entry, probeResult.ConnectedDatabase);
+                    var rowsWritten = await definitions.InsertAsync(entry, encryptedPassword, actualStorageKey, cancellationToken);
                     if (rowsWritten > 0)
                     {
                         results.Add(new ServerResult(entry.Order, entry.DisplayName, AddStatus.Added, DescribeProbe(probeResult)));
+                    }
+                    else if (rowsWritten == InsertKeyClaimed)
+                    {
+                        /* #5240: under the identity lock the store showed another definition already holding this
+                           entry's address: an edit or another add claimed it during the probe above, after the
+                           duplicate gate read the table. Nothing was written; the entry is the duplicate it would
+                           have been had the other write landed a moment sooner. */
+                        results.Add(new ServerResult(entry.Order, entry.DisplayName, AddStatus.Duplicate,
+                            "Already monitored: another change to the server list claimed this address while this call ran; skipped."));
+                    }
+                    else if (rowsWritten == InsertActualKeyClaimed)
+                    {
+                        /* #5240: the same refusal the check above gives, reached under the lock: the database the probe
+                           reached was claimed by another definition while the probe ran. Nothing was written. */
+                        results.Add(new ServerResult(entry.Order, entry.DisplayName, AddStatus.Collides,
+                            ActualIdentityCollisionText(entry, probeResult.ConnectedDatabase!)));
                     }
                     else
                     {
@@ -288,7 +326,8 @@ public sealed class DarlingMcpServerAdminTools
         "several servers contain — NOTHING is deleted and the response is {status:\"ambiguous\", candidates:[{server, " +
         "display_name, ever_connected}], message}; re-issue with one candidate's full name. Deletes the server's " +
         "definition from the central monitoring store; the running service drops it from its collection set within " +
-        "one sweep. Already-collected historical data is NOT deleted. Returns {status:\"removed\", server, " +
+        "one sweep and drops this install's own Extended Events sessions on the server, leaving the shared ones and " +
+        "any session another registration of this install keeps. Already-collected historical data is NOT deleted. Returns {status:\"removed\", server, " +
         "display_name, matched_by:\"exact\"|\"partial\", matched_in:\"config_monitored_servers\", ever_connected} on " +
         "success — ever_connected says whether the connected-servers registry (populated on a server's first " +
         "successful connection) also had a row for it, i.e. whether any history exists under its id; " +
@@ -386,10 +425,33 @@ public sealed class DarlingMcpServerAdminTools
             var resolved = target.Candidates[0];
             var resolvedDefinition = definitions.First(d => d.Server.ServerId == resolved.ServerId);
 
-            await using var command = postgres.CreateCommand("DELETE FROM config_monitored_servers WHERE server_id = $1");
-            command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
-            command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = resolved.ServerId });
-            var affected = await command.ExecuteNonQueryAsync();
+            /* The server's tag assignments go in the same transaction as its definition: server_id is a fixed hash
+               of the connection, so a re-added server would otherwise get its old tags back and rejoin
+               tag-scoped alert rules. */
+            int affected;
+            await using (var connection = await postgres.OpenConnectionAsync())
+            await using (var transaction = await connection.BeginTransactionAsync())
+            {
+                /* Two-arg on the store connection with the transaction ASSIGNED, and the SQL hoisted to a local:
+                   the shape McpReadCommandTimeoutTests recognises as a store command (see the same note in
+                   DarlingMcpAlertTools); the three-arg form is the monitored-target shape. */
+                const string deleteSql = "DELETE FROM config_monitored_servers WHERE server_id = $1";
+                await using (var command = new NpgsqlCommand(deleteSql, connection) { Transaction = transaction })
+                {
+                    command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+                    command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = resolved.ServerId });
+                    affected = await command.ExecuteNonQueryAsync();
+                }
+
+                await using (var clear = new NpgsqlCommand(ServerTagStore.ClearForServerSql, connection) { Transaction = transaction })
+                {
+                    clear.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+                    clear.Parameters.Add(new NpgsqlParameter<int> { TypedValue = resolved.ServerId });
+                    await clear.ExecuteNonQueryAsync();
+                }
+
+                await transaction.CommitAsync();
+            }
 
             return affected > 0
                 ? RemovedAnswer(resolvedDefinition, target.MatchedBy)
@@ -407,7 +469,7 @@ public sealed class DarlingMcpServerAdminTools
     /// <summary>One structurally-valid server ready for dedupe → probe → insert. <see cref="StorageKey"/> is the
     /// shared case-folded identity (<see cref="ServerIdHelper.BuildStorageName"/>); <see cref="ProbeConfig"/> is the
     /// <see cref="MonitoredServer"/> the in-process probe connects with (carrying the plaintext password for the
-    /// connect); <see cref="PlaintextPassword"/> is retained ONLY until the post-probe DPAPI encrypt, never stored
+    /// connect); <see cref="PlaintextPassword"/> is retained ONLY until the post-probe seal, never stored
     /// or echoed. <see cref="Order"/> is the entry's index in the input array, so the aggregated results echo input
     /// order.</summary>
     internal sealed record ParsedServerEntry(
@@ -521,7 +583,8 @@ public sealed class DarlingMcpServerAdminTools
             ever_connected = resolved.EverConnected,
             note = resolved.EverConnected
                 ? "The definition is deleted; the running service drops the server from collection within one sweep. Its connected-servers registry row and already-collected history are kept. "
-                    + "Its Extended Events sessions (" + DarlingXeSessionCleanup.SessionNamesPhrase() + ", whichever exist) are not dropped and stay on the server. "
+                    + "The service also drops this install's own Extended Events sessions on the server, with one attempt within 15 seconds, except a session another registration of this install keeps. "
+                    + "The shared sessions (" + DarlingXeSessionCleanup.SessionNamesPhrase() + ", whichever exist) stay on the server, and so does a session that drop could not reach. "
                     + "For a server nothing else monitors, an operator runs PerformanceMonitor.Darling.Service.exe --drop-xe-sessions --print-sql, which prints the DROP statements, and runs them on that server. "
                     + "The named form (--drop-xe-sessions <server>) works only for a server this service still monitors, so it had to run before this removal."
                 : "The definition is deleted. This server had never connected (no connected-servers registry row), so no history exists under its id and nothing else references it.",
@@ -653,12 +716,12 @@ ORDER BY d.host, d.database";
     /// returns a single <c>{status:"invalid"}</c> without opening the store.
     /// </summary>
     internal static (List<ParsedServerEntry> Entries, List<ServerResult> Invalid, string? WholeError) ParseRequest(string servers_json) =>
-        ParseRequest(servers_json, OperatingSystem.IsWindows());
+        ParseRequest(servers_json, DarlingPasswordKey.Current.Status);
 
-    /// <summary><see cref="ParseRequest(string)"/> with the platform named, so a test can ask what either platform
-    /// answers for a literal password without running on it.</summary>
+    /// <summary><see cref="ParseRequest(string)"/> with the password key's status named, so a test can ask what a
+    /// healthy key and a key that is not ready each answer for a literal password.</summary>
     internal static (List<ParsedServerEntry> Entries, List<ServerResult> Invalid, string? WholeError) ParseRequest(
-        string servers_json, bool isWindows)
+        string servers_json, PasswordKeyStatus key, bool allowSecretReferences = false)
     {
         var entries = new List<ParsedServerEntry>();
         var invalid = new List<ServerResult>();
@@ -685,7 +748,7 @@ ORDER BY d.host, d.database";
 
         for (var i = 0; i < array.Count; i++)
         {
-            var (entry, result) = ParseEntry(i, array[i], isWindows);
+            var (entry, result) = ParseEntry(i, array[i], key, allowSecretReferences);
             if (entry != null)
             {
                 entries.Add(entry);
@@ -703,7 +766,7 @@ ORDER BY d.host, d.database";
     /// problem. The service honors Windows, SQL, and the two non-interactive Entra modes (ServicePrincipal,
     /// ManagedIdentity); the interactive Entra modes (MFA/device-code/default-credential) are rejected — they
     /// cannot run headless (#3484).</summary>
-    private static (ParsedServerEntry? Entry, ServerResult? Result) ParseEntry(int index, JsonNode? node, bool isWindows)
+    private static (ParsedServerEntry? Entry, ServerResult? Result) ParseEntry(int index, JsonNode? node, PasswordKeyStatus key, bool allowSecretReferences)
     {
         if (node is not JsonObject obj)
         {
@@ -729,32 +792,10 @@ ORDER BY d.host, d.database";
            and ManagedIdentity (#3484). Absent defaults to Windows. The interactive Entra modes (MFA,
            device-code, default-credential) are refused: they need a broker or a signed-in user and cannot run
            unattended. */
-        var authRaw = TryGetString(obj, "auth");
-        var authTrim = authRaw?.Trim();
-        string storeAuth;
-        if (string.IsNullOrWhiteSpace(authTrim) || authTrim.Equals("Windows", StringComparison.OrdinalIgnoreCase))
+        var (storeAuth, authError) = ResolveAuth(TryGetString(obj, "auth"));
+        if (authError != null)
         {
-            storeAuth = ServerStoreAuth.Integrated;
-        }
-        else if (authTrim.Equals("SQL", StringComparison.OrdinalIgnoreCase))
-        {
-            storeAuth = ServerStoreAuth.Sql;
-        }
-        else if (authTrim.Equals("ServicePrincipal", StringComparison.OrdinalIgnoreCase))
-        {
-            storeAuth = ServerStoreAuth.ServicePrincipal;
-        }
-        else if (authTrim.Equals("ManagedIdentity", StringComparison.OrdinalIgnoreCase))
-        {
-            storeAuth = ServerStoreAuth.ManagedIdentity;
-        }
-        else
-        {
-            return (null, Invalid(
-                "auth must be \"Windows\", \"SQL\", \"ServicePrincipal\", or \"ManagedIdentity\". The interactive " +
-                "Microsoft Entra modes (MFA, device-code, default-credential) are not supported for a headless " +
-                "collector — they need a broker or a signed-in user. Use ServicePrincipal (client id + secret) or " +
-                "ManagedIdentity, both non-interactive, for Entra-authenticated Azure SQL targets."));
+            return (null, Invalid(authError));
         }
 
         string? username = null;
@@ -762,7 +803,7 @@ ORDER BY d.host, d.database";
         if (storeAuth == ServerStoreAuth.Sql || storeAuth == ServerStoreAuth.ServicePrincipal)
         {
             /* Service principal takes the same two fields as SQL auth — the application/client id as username,
-               the client secret as the password (DPAPI-encrypted after a successful probe, exactly like a SQL
+               the client secret as the password (sealed after a successful probe, exactly like a SQL
                password) — so the requirement and the storage are identical; only the wording differs. */
             var isSp = storeAuth == ServerStoreAuth.ServicePrincipal;
             username = TryGetString(obj, "username");
@@ -782,12 +823,17 @@ ORDER BY d.host, d.database";
                     : "password is required for SQL authentication."));
             }
 
-            /* #4734: refuse a literal where it cannot be encrypted, HERE, before the probe and the write. Left to
-               ProtectPasswordForStorage it threw after the probe, in the middle of the batch. */
-            var refusal = LiteralSecretRefusal(plaintextPassword, isWindows, isSp);
-            if (refusal != null)
+            /* The password a request carries is the password itself: a reference is refused HERE, before the probe
+               resolves anything and before the write (ValidateSecret). Then #4734: a literal while the password key
+               cannot seal it, before the probe and the write; left to ProtectPasswordForStorage it threw after the probe, in
+               the middle of the batch. Add and edit share the helper, so the two cannot disagree. */
+            var secretRefusal = ValidateSecret(plaintextPassword, key, isSp, allowSecretReferences)
+                ?? (DarlingSecretSource.IsReference(plaintextPassword)
+                    ? null
+                    : SealableTextRefusal(plaintextPassword, host, database, username));
+            if (secretRefusal != null)
             {
-                return (null, Invalid(refusal));
+                return (null, Invalid(secretRefusal));
             }
         }
         else if (storeAuth == ServerStoreAuth.ManagedIdentity)
@@ -854,7 +900,7 @@ ORDER BY d.host, d.database";
             Auth = storeAuth,
             Username = username,
             /* Plaintext for the probe's connect (ResolvePassword's dev-plaintext fallback); the stored blob is the
-               DPAPI encryption of this, produced only AFTER a successful probe. */
+               sealed form of this, produced only AFTER a successful probe. */
             Password = plaintextPassword,
             EncryptMode = encryptMode,
             TrustServerCertificate = trustCert,
@@ -894,7 +940,27 @@ ORDER BY d.host, d.database";
     internal static string? ActualIdentityCollision(
         ParsedServerEntry entry, string? connectedDatabase, ISet<string> claimedKeys)
     {
-        if (entry is null || claimedKeys is null || string.IsNullOrWhiteSpace(connectedDatabase))
+        if (claimedKeys is null)
+        {
+            return null;
+        }
+
+        var actualKey = ActualStorageKeyOf(entry, connectedDatabase);
+        return actualKey is null || !claimedKeys.Contains(actualKey)
+            ? null
+            : ActualIdentityCollisionText(entry, connectedDatabase!);
+    }
+
+    /// <summary>
+    /// The storage key this entry would have if it were keyed on the database the probe ACTUALLY reached, or null when
+    /// there is nothing to check: no entry, a probe that reported no database, a connected database equal to the
+    /// declared one, or a key equal to the entry's own. <see cref="ActualIdentityCollision"/> compares it against the keys
+    /// read before the probe, and the write (<see cref="InsertServerAsync"/>, the edit store's <c>WriteAsync</c>) is
+    /// given the same key and compares it again under the identity lock (#5240), so one rule decides both reads.
+    /// </summary>
+    internal static string? ActualStorageKeyOf(ParsedServerEntry entry, string? connectedDatabase)
+    {
+        if (entry is null || string.IsNullOrWhiteSpace(connectedDatabase))
         {
             return null;
         }
@@ -910,12 +976,14 @@ ORDER BY d.host, d.database";
             entry.ProbeConfig.Host, connectedDatabase.Trim(), entry.ProbeConfig.ReadOnlyIntent,
             entry.ProbeConfig.Engine, entry.ProbeConfig.Port);
 
-        if (string.Equals(actualKey, entry.StorageKey, StringComparison.OrdinalIgnoreCase)
-            || !claimedKeys.Contains(actualKey))
-        {
-            return null;
-        }
+        return string.Equals(actualKey, entry.StorageKey, StringComparison.OrdinalIgnoreCase) ? null : actualKey;
+    }
 
+    /// <summary>The refusal for an entry whose connected database is already covered by another definition: the one
+    /// text the check before the probe's write and the check under the lock both give.</summary>
+    internal static string ActualIdentityCollisionText(ParsedServerEntry entry, string connectedDatabase)
+    {
+        var declared = entry.ProbeConfig.Database;
         var declaredText = string.IsNullOrWhiteSpace(declared) ? "no database" : $"database '{declared}'";
         return $"Not added: this registration names {declaredText} but its connection lands in " +
                $"'{connectedDatabase.Trim()}', which another monitored server already covers. Adding it would " +
@@ -929,7 +997,9 @@ ORDER BY d.host, d.database";
     /// the insert is <c>ON CONFLICT (server_id) DO NOTHING</c>, so a write can save nothing without throwing: two
     /// different keys can hash to one id, and a concurrent add of the same server can land between the duplicate
     /// gate's read and this write. <paramref name="holderStorageKey"/> is the storage key of the row that holds the id
-    /// now, or null when none does.
+    /// now, or null when none does. (#5240: the store's write reads the keys again under the identity lock first, so
+    /// a same-key add or edit that committed during the probe is answered there as <see cref="InsertKeyClaimed"/>;
+    /// the same-key arm below is for a write that still returns 0, and for a definitions seam that is not the store.)
     ///
     /// <list type="bullet">
     /// <item>A DIFFERENT key holds the id: <c>collides</c>. The entry is not a duplicate — its identity is not
@@ -1007,8 +1077,11 @@ ORDER BY d.host, d.database";
     /// (the seed authority), so a tool-added row is byte-identical to a seeded one. <c>capture_plans</c> and
     /// <c>alert_delivery_mode_override</c> default to NULL (inherit the globals), <c>monthly_cost_usd</c>/
     /// <c>excluded_databases</c> are the neutral defaults, and <c>is_enabled</c> is TRUE (collection starts at
-    /// once). ON CONFLICT DO NOTHING guards a race with a concurrent writer — the dedupe gate is the primary
-    /// guard. DO NOTHING is silent, so the caller checks the rows changed (#4734): 0 means nothing was saved.</summary>
+    /// once). The dedupe gate is the first guard and <see cref="IdentityLockSql"/> the second: the INSERT runs in a
+    /// transaction that holds the identity lock, after the storage keys were read again under it (#5240). ON CONFLICT
+    /// DO NOTHING stays as the last: <c>server_id</c> is a hash of the key, so two different keys can share an id,
+    /// and a lock does not change that. DO NOTHING is silent, so the caller checks the rows changed (#4734): 0 means
+    /// nothing was saved.</summary>
     public const string InsertServerSql = @"
 INSERT INTO config_monitored_servers (
     server_id, name, host, database, auth, username, encrypted_password, encrypt_mode,
@@ -1016,6 +1089,33 @@ INSERT INTO config_monitored_servers (
     monthly_cost_usd, capture_plans, alert_delivery_mode_override, engine, port, is_enabled, created_at, modified_at)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NULL, NULL, $15, $16, TRUE, $14, $14)
 ON CONFLICT (server_id) DO NOTHING";
+
+    /// <summary>
+    /// The one lock every write that gives a definition an ADDRESS takes (#5240): <see cref="InsertServerAsync"/> and
+    /// the edit store's <c>WriteAsync</c>. <c>server_id</c> is the hash of the storage key, an edit keeps its row's
+    /// old id, and the table has no unique index on the key, so nothing in the database stops two writers from each
+    /// finding an address free and each taking it: an add's INSERT lands under <c>hash(K)</c> while an edit moves
+    /// another row onto K, or two edits move two rows onto K. Taken first inside the write's transaction, the lock
+    /// makes the occupancy check that follows it a check against a table no other identity write is changing, and
+    /// the transaction's end (commit or rollback) releases it, so no path can leave it held.
+    ///
+    /// <para>Transaction-scoped on purpose: a session lock would outlive a pooled connection's return. It covers the
+    /// re-check and the write only; the connection probe (up to about 45 seconds) runs before the write opens its
+    /// transaction. <c>pg_advisory_xact_lock</c> and <c>hashtext</c> are executable by PUBLIC, so the <c>viewer</c>
+    /// and <c>mcp</c> roles need no grant. The wait for the lock is bounded by the command's own deadline.</para>
+    /// </summary>
+    internal const string IdentityLockSql = "SELECT pg_advisory_xact_lock(hashtext('config_monitored_servers.identity'))";
+
+    /// <summary>What <see cref="IServerDefinitions.InsertAsync"/> returns when, under the identity lock, another
+    /// definition already holds the entry's storage key: nothing was written, and the answer is <c>duplicate</c>.
+    /// Not a row count, so it cannot be mistaken for one: 1 is saved, 0 is "the id was taken".</summary>
+    internal const int InsertKeyClaimed = -1;
+
+    /// <summary>What <see cref="IServerDefinitions.InsertAsync"/> returns when, under the identity lock, another
+    /// definition already holds the storage key the probe's connected database gives
+    /// (<see cref="ActualStorageKeyOf"/>): nothing was written, and the answer is the same <c>collides</c> refusal
+    /// <see cref="ActualIdentityCollision"/> gives before the write.</summary>
+    internal const int InsertActualKeyClaimed = -2;
 
     private static async Task<List<string>> LoadExistingStorageKeysAsync(NpgsqlDataSource postgres, CancellationToken cancellationToken)
     {
@@ -1059,13 +1159,59 @@ ON CONFLICT (server_id) DO NOTHING";
         return await reader.ReadAsync(cancellationToken) ? StorageKeyOf(reader) : null;
     }
 
+    /// <summary>
+    /// Writes one entry in its own short transaction (#5240): the identity lock first, then the storage keys read
+    /// again under it, then the INSERT. When the entry's key is now claimed by a definition the duplicate gate did not
+    /// see (an edit or another add committed during the probe), nothing is written and the answer is
+    /// <see cref="InsertKeyClaimed"/>. The same read also looks for <paramref name="actualStorageKey"/>, the key the
+    /// probe's connected database gives when it differs from the entry's own (null otherwise): a definition holding it
+    /// answers <see cref="InsertActualKeyClaimed"/>, the refusal the pre-probe check gives, so a definition committed
+    /// during the probe cannot leave two rows collecting one database. The entry's own key is judged first. Each entry
+    /// of a batch takes and releases the lock in its own transaction, so a long batch never holds it across a probe.
+    /// </summary>
     private static async Task<int> InsertServerAsync(
-        NpgsqlDataSource postgres, ParsedServerEntry entry, string? encryptedPassword, CancellationToken cancellationToken)
+        NpgsqlDataSource postgres, ParsedServerEntry entry, string? encryptedPassword, string? actualStorageKey, CancellationToken cancellationToken)
     {
         var config = entry.ProbeConfig;
         var now = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
 
-        await using var command = postgres.CreateCommand(InsertServerSql);
+        await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+
+        /* Two-arg on the store connection with the transaction set on it: the shape McpReadCommandTimeoutTests
+           recognises as a store command (see remove_server). */
+        await using (var identityLock = new NpgsqlCommand(IdentityLockSql, connection) { Transaction = transaction })
+        {
+            identityLock.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+            await identityLock.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        var actualKeyHeld = false;
+        await using (var keys = new NpgsqlCommand(ExistingServersSql, connection) { Transaction = transaction })
+        {
+            keys.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+            await using var reader = await keys.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                /* Case-folded, as the duplicate gate is. The rollback on this return releases the lock. */
+                var held = StorageKeyOf(reader);
+                if (string.Equals(held, entry.StorageKey, StringComparison.OrdinalIgnoreCase))
+                {
+                    return InsertKeyClaimed;
+                }
+
+                actualKeyHeld |= actualStorageKey is not null && string.Equals(held, actualStorageKey, StringComparison.OrdinalIgnoreCase);
+            }
+        }
+
+        if (actualKeyHeld)
+        {
+            /* The entry's own key is free but the database its probe reached is held: the same refusal, and the
+               rollback on this return releases the lock. */
+            return InsertActualKeyClaimed;
+        }
+
+        await using var command = new NpgsqlCommand(InsertServerSql, connection) { Transaction = transaction };
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = ServerIdOf(entry) });                                   // $1
         command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = config.Name });                                            // $2
@@ -1083,7 +1229,9 @@ ON CONFLICT (server_id) DO NOTHING";
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = now });                           // $14
         command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = config.Engine });                                           // $15
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = config.Port });                                                // $16
-        return await command.ExecuteNonQueryAsync(cancellationToken);
+        var written = await command.ExecuteNonQueryAsync(cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
+        return written;
     }
 
     /// <summary>The <c>server_id</c> an entry is stored under: the deterministic hash of its storage key, the same
@@ -1101,8 +1249,12 @@ ON CONFLICT (server_id) DO NOTHING";
         Task<List<string>> LoadStorageKeysAsync(CancellationToken cancellationToken);
 
         /// <summary>Writes one entry and returns how many rows the write changed: 1 when it was saved, 0 when
-        /// <c>ON CONFLICT (server_id) DO NOTHING</c> found the id already taken and wrote nothing.</summary>
-        Task<int> InsertAsync(ParsedServerEntry entry, string? encryptedPassword, CancellationToken cancellationToken);
+        /// <c>ON CONFLICT (server_id) DO NOTHING</c> found the id already taken and wrote nothing, and
+        /// <see cref="InsertKeyClaimed"/> when another definition already holds the entry's storage key (read under the
+        /// identity lock, #5240) and nothing was written. <paramref name="actualStorageKey"/> is the key the probe's
+        /// connected database gives when it differs from the entry's own, else null; a definition holding it, read under
+        /// the same lock, answers <see cref="InsertActualKeyClaimed"/> with nothing written.</summary>
+        Task<int> InsertAsync(ParsedServerEntry entry, string? encryptedPassword, string? actualStorageKey, CancellationToken cancellationToken);
 
         /// <summary>The storage key of the row that holds <paramref name="serverId"/>, or null when none does.</summary>
         Task<string?> ReadStorageKeyAsync(int serverId, CancellationToken cancellationToken);
@@ -1118,8 +1270,8 @@ ON CONFLICT (server_id) DO NOTHING";
         public Task<List<string>> LoadStorageKeysAsync(CancellationToken cancellationToken) =>
             LoadExistingStorageKeysAsync(_postgres, cancellationToken);
 
-        public Task<int> InsertAsync(ParsedServerEntry entry, string? encryptedPassword, CancellationToken cancellationToken) =>
-            InsertServerAsync(_postgres, entry, encryptedPassword, cancellationToken);
+        public Task<int> InsertAsync(ParsedServerEntry entry, string? encryptedPassword, string? actualStorageKey, CancellationToken cancellationToken) =>
+            InsertServerAsync(_postgres, entry, encryptedPassword, actualStorageKey, cancellationToken);
 
         public Task<string?> ReadStorageKeyAsync(int serverId, CancellationToken cancellationToken) =>
             ReadStorageKeyByIdAsync(_postgres, serverId, cancellationToken);
@@ -1128,37 +1280,143 @@ ON CONFLICT (server_id) DO NOTHING";
     /* ─────────────────────────────── helpers ─────────────────────────────── */
 
     /// <summary>
-    /// PURE platform check for a SQL password or service-principal client secret (#4734): null when the value can be
-    /// stored on this platform, otherwise the refusal sentence. A LITERAL is encrypted with DPAPI, which is Windows-
-    /// only, so off Windows it cannot be saved; an <c>env:</c>/<c>file:</c> reference (#1804) is stored as given and
-    /// needs no encryption, so it is accepted everywhere. <see cref="ParseEntry"/> asks this before any probe or
-    /// write, which makes the entry <c>invalid</c> up front instead of throwing from
-    /// <see cref="ProtectPasswordForStorage"/> after the probe, in the middle of a batch.
+    /// Maps the <c>auth</c> text of an add entry or an edit to the store's auth value: Windows (integrated), SQL, or
+    /// the two non-interactive Entra modes. Blank is Windows. Anything else, the interactive Entra modes included,
+    /// is the refusal sentence. One mapping for add and edit, so the two accept the same words.
     /// </summary>
-    internal static string? LiteralSecretRefusal(string? secret, bool isWindows, bool isServicePrincipal)
+    internal static (string StoreAuth, string? Error) ResolveAuth(string? authRaw)
     {
-        if (isWindows || string.IsNullOrEmpty(secret) || DarlingSecretSource.IsReference(secret))
+        var authTrim = authRaw?.Trim();
+        if (string.IsNullOrWhiteSpace(authTrim) || authTrim.Equals("Windows", StringComparison.OrdinalIgnoreCase))
+        {
+            return (ServerStoreAuth.Integrated, null);
+        }
+
+        if (authTrim.Equals("SQL", StringComparison.OrdinalIgnoreCase))
+        {
+            return (ServerStoreAuth.Sql, null);
+        }
+
+        if (authTrim.Equals("ServicePrincipal", StringComparison.OrdinalIgnoreCase))
+        {
+            return (ServerStoreAuth.ServicePrincipal, null);
+        }
+
+        if (authTrim.Equals("ManagedIdentity", StringComparison.OrdinalIgnoreCase))
+        {
+            return (ServerStoreAuth.ManagedIdentity, null);
+        }
+
+        return (ServerStoreAuth.Integrated,
+            "auth must be \"Windows\", \"SQL\", \"ServicePrincipal\", or \"ManagedIdentity\". The interactive " +
+            "Microsoft Entra modes (MFA, device-code, default-credential) are not supported for a headless " +
+            "collector — they need a broker or a signed-in user. Use ServicePrincipal (client id + secret) or " +
+            "ManagedIdentity, both non-interactive, for Entra-authenticated Azure SQL targets.");
+    }
+
+    /// <summary>
+    /// The refusals every SQL password or service-principal client secret meets before it is probed or stored: a
+    /// reference when it came in a request (<see cref="DarlingSecretSource.RequestReferenceRefusal"/>, the one place
+    /// web add, web edit, <c>add_servers</c> and <c>edit_server</c> all ask it), then a literal while the password key
+    /// cannot seal it (<see cref="LiteralSecretRefusal"/>), then a reference to Darling's own configuration or secrets
+    /// (<see cref="DarlingOwnedSecrets.ReferenceRefusal(string?)"/>), which only the host command line can reach
+    /// (<paramref name="allowSecretReferences"/>, set by <see cref="AddServersFromHostCommandLineAsync"/> alone).
+    /// Null when the secret may be used. Add and edit both call it.
+    /// </summary>
+    internal static string? ValidateSecret(string? secret, PasswordKeyStatus key, bool isServicePrincipal, bool allowSecretReferences = false) =>
+        (allowSecretReferences ? null : DarlingSecretSource.RequestReferenceRefusal(secret))
+        ?? LiteralSecretRefusal(secret, key, isServicePrincipal)
+        ?? DarlingOwnedSecrets.ReferenceRefusal(secret);
+
+    /// <summary>
+    /// PURE check of a SQL password or service-principal client secret against the service's password key (#4734,
+    /// #5366): null when the value can be stored now, otherwise the key's own reason. A LITERAL is sealed with the key, so
+    /// it is accepted wherever the key is ready, on any platform; an <c>env:</c>/<c>file:</c> reference (#1804) is stored as
+    /// given and needs no key, so it is accepted always. <see cref="ParseEntry"/> asks this before any probe or write,
+    /// which makes the entry <c>invalid</c> up front instead of throwing from <see cref="ProtectPasswordForStorage"/>
+    /// after the probe, in the middle of a batch.
+    /// </summary>
+    internal static string? LiteralSecretRefusal(string? secret, PasswordKeyStatus key, bool isServicePrincipal)
+    {
+        if (key.CanSeal || string.IsNullOrEmpty(secret) || DarlingSecretSource.IsReference(secret))
         {
             return null;
         }
 
         var noun = isServicePrincipal ? "client secret" : "password";
-        return $"A literal {noun} cannot be saved on this platform: encrypting it needs Windows DPAPI. Give the " +
-               $"{noun} as an env:NAME or file:/run/secrets/<name> reference instead (for example " +
-               "file:/run/secrets/sql_password).";
+        return $"A literal {noun} cannot be saved. {key.Reason ?? DarlingPasswordKey.NotReadyReason}";
     }
 
+    /// <summary>The refusal for a password that is not valid text (a lone surrogate); never echoes the value.</summary>
+    internal const string PasswordCharactersText = "The password contains characters that cannot be stored.";
+
+    /// <summary>The refusal for a password longer than a sealed value can hold.</summary>
+    internal const string PasswordTooLongText = "The password is longer than can be stored.";
+
+    /// <summary>The refusal for a connection field that is not valid text, naming the field and never its value.</summary>
+    internal static string FieldCharactersText(string field) => $"The {field} contains characters that cannot be stored.";
+
+    private static readonly System.Text.UTF8Encoding s_strictUtf8 = new(false, true);
+
+    private static bool IsValidText(string? text)
+    {
+        if (text is null)
+        {
+            return true;
+        }
+
+        try
+        {
+            _ = s_strictUtf8.GetByteCount(text);
+            return true;
+        }
+        catch (System.Text.EncoderFallbackException)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Null when a literal secret and the connection fields it is bound to are valid UTF-16 text and the secret fits a
+    /// sealed value; otherwise the plain sentence to refuse with (#5366). A lone surrogate cannot be sealed, so it is
+    /// refused before the probe, naming the field and never echoing the value.
+    /// </summary>
+    internal static string? SealableTextRefusal(string? secret, string? host, string? database, string? username)
+    {
+        if (!IsValidText(secret))
+        {
+            return PasswordCharactersText;
+        }
+
+        if (secret is not null && s_strictUtf8.GetByteCount(secret) > PasswordSeal.MaxPlaintextBytes)
+        {
+            return PasswordTooLongText;
+        }
+
+        foreach (var (name, text) in new (string, string?)[] { ("host", host), ("database name", database), ("username", username) })
+        {
+            if (!IsValidText(text))
+            {
+                return FieldCharactersText(name);
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>The binding a server's password is sealed for: the connection settings the row holds (or is written
+    /// with), read the one way every stored row is read.</summary>
+    internal static PasswordBinding BindingOf(MonitoredServer server) =>
+        PasswordBinding.ForServer(server.ConnectionIdentity);
+
     /// <summary>Prepares a SQL password for storage: an <c>env:</c>/<c>file:</c> secret REFERENCE (#1804) is
-    /// stored VERBATIM — a reference is a pointer, not a secret; the secret stays in the mounted file or
-    /// environment variable, which is the whole Linux/compose contract and needs no DPAPI (#2087: before this,
-    /// <c>add_servers</c> refused ALL SQL-auth passwords off-Windows, dead-ending the designed onboarding path
-    /// for compose deployments — the store-authoritative control plane means darling.json edits do not add
-    /// servers after first seed). A LITERAL password is DPAPI-encrypted and therefore Windows-only, with the
-    /// refusal now pointing at references as the cross-platform alternative. <see cref="ParseEntry"/> refuses a literal
-    /// off Windows first (<see cref="LiteralSecretRefusal"/>, #4734), so a request never reaches this throw; it stays as
-    /// the backstop for any other caller. Null for Windows auth (no secret).
-    /// The plaintext is not logged and never leaves this method.</summary>
-    internal static string? ProtectPasswordForStorage(string? plaintextPassword)
+    /// stored VERBATIM (a reference is a pointer, not a secret; the secret stays in the mounted file or environment
+    /// variable, #2087). A LITERAL password is sealed with the service's password key for
+    /// <paramref name="binding"/>, the connection settings it is saved with, on any platform (#5366).
+    /// <see cref="ParseEntry"/> refuses a literal while the key cannot seal (<see cref="LiteralSecretRefusal"/>, #4734), so a
+    /// request never reaches the throw; it stays as the backstop for any other caller. Null for Windows auth (no
+    /// secret). The plaintext is not logged and never leaves this method.</summary>
+    internal static string? ProtectPasswordForStorage(string? plaintextPassword, PasswordBinding binding, IPasswordKeyRing ring)
     {
         if (string.IsNullOrEmpty(plaintextPassword))
         {
@@ -1170,15 +1428,7 @@ ON CONFLICT (server_id) DO NOTHING";
             return plaintextPassword;
         }
 
-        if (!OperatingSystem.IsWindows())
-        {
-            throw new PlatformNotSupportedException(
-                "Storing a LITERAL SQL-auth password requires Windows (DPAPI). On Linux, pass an env:/file: " +
-                "secret reference instead (e.g. file:/run/secrets/sql_password) — it is stored as-is and " +
-                "resolved at connect time (#1804).");
-        }
-
-        return DarlingSecrets.Protect(plaintextPassword);
+        return ring.Seal(plaintextPassword, binding);
     }
 
     /// <summary>

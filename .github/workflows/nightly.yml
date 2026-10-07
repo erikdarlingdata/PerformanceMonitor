@@ -130,7 +130,12 @@ jobs:
     # Full pipeline (restore, tests, four publishes, cold pg-runtime fetch, vpk pack,
     # release upload) is well under an hour; 90 minutes means hung-not-slow. Nightly ships
     # unsigned, so unlike build.yml's release path there is no manual signing gate to wait on.
-    timeout-minutes: 90
+    #
+    # Raised from 90 to 150 (#5208). The unsharded "Run tests" step alone went 45 -> 64 -> over 89
+    # minutes on hosted runners and hit this cap, so no nightly published. The one-log design is
+    # kept on purpose. This is a guard, not a fix: the slowdown is tracked in #5208, and this value
+    # should come back down to 90 when it is fixed.
+    timeout-minutes: 150
 
     steps:
       - uses: actions/checkout@v7
@@ -193,7 +198,23 @@ jobs:
           dotnet restore Darling/PerformanceMonitor.Darling.Viewer/PerformanceMonitor.Darling.Viewer.csproj --locked-mode
 
       - name: Run tests
-        run: dotnet run --project Lite.Tests/Lite.Tests.csproj -c Release
+        run: dotnet run --project Lite.Tests/Lite.Tests.csproj -c Release -- -xml TestResults/lite-timing-nightly.xml
+
+      # #5208: where the time goes. Informational; a parse problem must never turn the job red.
+      - name: Lite test timing summary
+        if: always()
+        continue-on-error: true
+        run: python .github/scripts/lite-timing-top.py TestResults
+
+      - name: Upload Lite test timings
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v6
+        with:
+          name: lite-tests-timing-nightly
+          path: TestResults/lite-timing-*.xml
+          retention-days: 7
+          if-no-files-found: ignore
 
       # #2501: -r win-x64 --self-contained, and it makes the portable ZIP SMALLER, not bigger.
       # The RID-agnostic framework-dependent publish this replaced copied every platform its

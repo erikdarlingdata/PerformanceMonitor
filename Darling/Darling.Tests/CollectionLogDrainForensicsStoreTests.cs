@@ -236,37 +236,40 @@ public class CollectionLogDrainForensicsStoreTests
     }
 
     /// <summary>
-    /// The session id is captured AFTER the open round trip, exactly once, and the helper normalizes the
-    /// provider's not-populated 0 to null (#2884).
-    ///
-    /// <para>SqlConnection.ServerProcessId is not reliably populated until the connection has round-tripped
-    /// a command. The original capture sat before ExecuteReaderAsync, so the runs it mattered most for —
-    /// budget-abandoned cycles, where the id is the join key to waiting_tasks and the peer snapshots —
-    /// recorded a literal 0. Ordering is pinned on the source because it IS a source property: the capture
-    /// call must come after the ExecuteReaderAsync await it depends on, and a refactor that hoists it back
-    /// above the open reintroduces #2884 while compiling clean and passing every behavioral test that
-    /// cannot construct a real SqlConnection.</para>
+    /// The session id is resolved right after the target connection opens and BEFORE any reader exists on
+    /// it, through the per-connection cache (#5132). Under MultipleActiveResultSets
+    /// <c>SqlConnection.ServerProcessId</c> is 0 at every point, so the old capture after
+    /// <c>ExecuteReaderAsync</c> recorded nothing; the open-time lookup is the only source. The ordering and
+    /// the single call site are source properties, pinned here.
     /// </summary>
     [Fact]
-    public void TheSessionIdIsCapturedAfterTheOpenRoundTrip()
+    public void TheSessionIdIsResolvedRightAfterTheOpen_BeforeAnyReader()
     {
         var runner = ReadSource("Darling/PerformanceMonitor.Darling.Service/DarlingCollectorRunner.cs");
 
-        const string openCall = "opened = await command.ExecuteReaderAsync(";
-        const string captureCall = "context.TargetSessionId = TryReadTargetSessionId(";
-
+        const string openCall = "await targetConnection.OpenAsync(cancellationToken);";
+        const string captureCall = "await TargetSessionIdCache.Shared.ResolveAsync(targetConnection";
         var open = runner.IndexOf(openCall, StringComparison.Ordinal);
         var capture = runner.IndexOf(captureCall, StringComparison.Ordinal);
 
         Assert.True(open >= 0, "the server-scoped open call moved; re-anchor this pin");
-        Assert.True(capture >= 0, "the session-id capture is gone entirely");
-        Assert.True(capture > open,
-            "the session id must be captured AFTER ExecuteReaderAsync has round-tripped (#2884) — " +
-            "before it, SqlConnection.ServerProcessId reads 0 on exactly the abandoned cycles it exists to explain");
+        Assert.True(capture > open, "the session-id lookup must follow the open");
+
+        /* BOTH reader call sites on the connection come after the capture: the enumerated path's list
+           reader and the plain path's reader. */
+        foreach (var readerCall in new[] { "ExecuteReaderAsync(cancellationToken)", "opened = await command.ExecuteReaderAsync(itemToken)" })
+        {
+            var reader = runner.IndexOf(readerCall, open, StringComparison.Ordinal);
+            Assert.True(reader > 0, $"the reader call '{readerCall}' moved; re-anchor this pin");
+            Assert.True(capture < reader, $"the session-id lookup must precede '{readerCall}'");
+        }
+
         Assert.Equal(capture, runner.LastIndexOf(captureCall, StringComparison.Ordinal));
 
-        /* The helper's own normalization: 0 is not a session id and must become null at the source. */
-        Assert.Contains("return raw > 0 ? raw : null;", runner, StringComparison.Ordinal);
+        /* The reconnect check sits right after the plain path's first reader, never before it. */
+        var plainReader = runner.IndexOf("opened = await command.ExecuteReaderAsync(itemToken)", StringComparison.Ordinal);
+        var discard = runner.IndexOf("TargetSessionIdCache.Shared.DiscardIfReplaced(", StringComparison.Ordinal);
+        Assert.True(discard > plainReader && plainReader > 0, "the replaced-connection check must follow the first reader's open");
     }
 
     /// <summary>
@@ -302,7 +305,7 @@ public class CollectionLogDrainForensicsStoreTests
         var worker = ReadSource("Darling/PerformanceMonitor.Darling.Service/DarlingWorker.cs");
 
         Assert.Contains("var peerMaxAtDispatchMs = PeerMaxOrNull(server);", worker, StringComparison.Ordinal);
-        Assert.Contains("RunDetachedAsync(server, runner, name, peerMaxAtDispatchMs, cancellationToken)", worker, StringComparison.Ordinal);
+        Assert.Contains("RunDetachedAsync(server, runner, name, peerMaxAtDispatchMs, cancellationToken", worker, StringComparison.Ordinal);
 
         /* The write uses the captured parameter. Re-reading live server state here is the defect.
 
@@ -317,6 +320,15 @@ public class CollectionLogDrainForensicsStoreTests
            no pin. This form is adjacency-independent on the left and still pinned on the right. */
         Assert.Contains("result.FetchPhases, peerMaxAtDispatchMs, _logger", worker, StringComparison.Ordinal);
         Assert.DoesNotContain("PeerMaxOrNull(server), _logger", worker, StringComparison.Ordinal);
+
+        /* #5320: the statement text refresh is not a scheduled body either - it rides the statistics collector's run and
+           writes its own failure and success rows from outside RunOneAsync, with no dispatch mark to carry and no
+           drain to describe. The counts below are about the rows RunOneAsync writes, so that method is cut out of
+           the text they read; the live-re-read pin above still reads the whole file. */
+        var refreshStart = worker.IndexOf("private async Task TryRefreshPgStatementTextAsync(", StringComparison.Ordinal);
+        var refreshEnd = worker.IndexOf("private static async Task<(List<long> QueryIds", refreshStart, StringComparison.Ordinal);
+        Assert.True(refreshStart > 0 && refreshEnd > refreshStart, "#5320: the text refresh method moved; update this carve-out");
+        worker = worker.Remove(refreshStart, refreshEnd - refreshStart);
 
         /* The two callers that are not a scheduled body pass null rather than folding a previous body's
            bookkeeping into their rows. */
@@ -341,13 +353,15 @@ public class CollectionLogDrainForensicsStoreTests
            route can read. The pin is what turned that into a merge conflict to resolve rather than a
            wrong number nobody noticed. #4053's no-csvlog-file arm is the twelfth, the csvlog route's twin of
            the eleventh: the collector is on and csvlog is configured, but no .csv file exists yet. #4053's
-           no-jsonlog-file arm is the thirteenth, the jsonlog route's twin of the twelfth. */
-        Assert.Equal(13, Regex.Matches(worker, @"drain: null").Count);
+           no-jsonlog-file arm is the thirteenth, the jsonlog route's twin of the twelfth. #5378's
+           long-query PERMISSIONS arm is the fourteenth: the session's create was denied (the login lacks
+           ALTER ANY EVENT SESSION), so the run is an early return that read and drained nothing. */
+        Assert.Equal(14, Regex.Matches(worker, @"drain: null").Count);
 
-        /* And V110's fetch sums stay null on those same thirteen arms and for the same reason: no item
+        /* And V110's fetch sums stay null on those same fourteen arms and for the same reason: no item
            completed, so no fetch was performed. Counted rather than merely present, so an arm that starts
            passing a real value - which would mean attributing another run's fetch to a failure row - is a red. */
-        Assert.Equal(13, Regex.Matches(worker, @"fetchPhases: null").Count);
+        Assert.Equal(14, Regex.Matches(worker, @"fetchPhases: null").Count);
     }
 
     /// <summary>

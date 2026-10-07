@@ -256,7 +256,7 @@ WHERE e.extname = 'pg_stat_statements'";
             WHEN s.query IS NULL THEN NULL
             WHEN s.query = {QuoteLiteral(InsufficientPrivilegeText)} THEN s.query
             WHEN s.query ~* {QuoteLiteral(ReadableStatementPattern)}
-             AND s.query !~* {QuoteLiteral(SensitiveStatementPattern)}
+             AND s.query !~* {RegexOperand(SensitiveStatementPattern)}
              AND NOT (pg_catalog.current_setting('server_version_num')::integer < 160000
                       AND s.query ~* {QuoteLiteral(SelectIntoPattern)}) THEN s.query
             ELSE {QuoteLiteral(WithheldText)}
@@ -661,6 +661,19 @@ FROM
 
         return "\"" + identifier.Replace("\"", "\"\"", StringComparison.Ordinal) + "\"";
     }
+
+    /// <summary>
+    /// A regular expression as the right-hand side of <c>~*</c> / <c>!~*</c> in DDL, with its text hex-encoded
+    /// and decoded by the server (an InitPlan, so once per call). The reader function is a utility statement, and
+    /// pg_stat_statements records a utility statement's body as typed while <c>track_utility</c> is on; the shared
+    /// statement filter names a few procedure and function names on their own (the keyword-only alternatives), so
+    /// a body that carried the pattern as a literal was named by the very pattern it carries. Every pass then
+    /// re-created the function, recorded it, and removed it again with the removal step's warning
+    /// (#5320). Hex digits spell none of the filter's words, so the recorded text stays clean whatever the pattern
+    /// holds, and the regular expression the function evaluates is byte-identical to the shared one.
+    /// </summary>
+    private static string RegexOperand(string pattern) =>
+        $"(SELECT pg_catalog.convert_from(pg_catalog.decode('{Convert.ToHexStringLower(Encoding.UTF8.GetBytes(pattern))}', 'hex'), 'UTF8'))";
 
     private static string QuoteLiteral(string value)
     {

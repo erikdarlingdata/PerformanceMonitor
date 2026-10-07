@@ -67,8 +67,19 @@ public class XeSessionEnsureException : Exception
 {
     public string SessionKind { get; }
 
+    /// <summary>
+    /// True when the always-on deadlock or blocked-process ensure that raised this had already failed, and logged its lines at
+    /// their full levels, on an earlier cycle of that session on that server, with no success since (#4964). The ensure sets it
+    /// from the state it keeps, so <c>RunCollectorAsync</c> logs its own line for the failure at Debug instead of Warning or
+    /// Error. The type, the message and the inner error are the same either way, so the run is classified and recorded the
+    /// same. False for every other raise: the first failing cycle, the reads (<see cref="ForFailedRead"/>) and the
+    /// long-query trace. The trace's kept failure can be any type, so its repeat travels on the run's own telemetry
+    /// (<see cref="RunTelemetry.TraceFaultRepeatsAtDebug"/>) rather than on this exception.
+    /// </summary>
+    public bool RepeatsAtDebug { get; internal set; }
+
     public XeSessionEnsureException(string sessionKind, SqlException inner)
-        : this(sessionKind, inner, $"Failed to ensure {sessionKind} XE session: {inner.Message}")
+        : this(sessionKind, inner, $"Failed to ensure {sessionKind} XE session: {PerformanceMonitor.Collectors.AlwaysOnXeSessions.DescribeFailure(inner)}")
     {
     }
 
@@ -123,9 +134,52 @@ public partial class RemoteCollectorService
     /// <see cref="ArchiveWatermarkCache"/> and <see cref="ReadArchiveViewAsync"/>.
     /// </summary>
     private readonly ArchiveWatermarkCache _archiveWatermarks = new();
+
+    /// <summary>
+    /// The shared limit on expensive archive reads (#5377); see <see cref="ArchiveReadLimiter"/> for the lock
+    /// order. A test swaps in its own instance so it never holds a slot of the process-wide one.
+    /// </summary>
+    private ArchiveReadLimiter _archiveReadLimiter = ArchiveReadLimiter.Shared;
+
+    /// <summary>Test seam (#5377): replaces the process-wide limiter for this service.</summary>
+    internal ArchiveReadLimiter ArchiveReadLimiterForTests { set => _archiveReadLimiter = value; }
+
+    /// <summary>
+    /// Test seam (#5377): called with <c>"limiter"</c> once an archive read holds its slot, <c>"readlock"</c>
+    /// once it also holds the database read lock, and <c>"read"</c> as its SQL is about to run. A test records
+    /// the order to pin limiter-then-read-lock without reading source. Production leaves it null.
+    /// </summary>
+    internal Action<string>? ArchiveReadStepForTests { get; set; }
+
+    /// <summary>
+    /// Test seam (#5377, review F3): called right after an archive read samples the archive generation, on a
+    /// cache hit as well as a miss and before the cache is consulted. A test runs the archive-and-reset here to
+    /// pin that every caller's live read came BEFORE this point (see <see cref="ReadArchiveViewAsync"/>).
+    /// Production leaves it null.
+    /// </summary>
+    internal Action? ArchiveGenerationSampledForTests { get; set; }
+
+    private int _archiveViewReads;
+
+    /// <summary>Test seam (#5377): how many archive-view reads have run (cache misses that reached DuckDB).</summary>
+    internal int ArchiveViewReadsForTests => Volatile.Read(ref _archiveViewReads);
+
     private readonly ServerManager _serverManager;
     private readonly ScheduleManager _scheduleManager;
     private readonly ILogger<RemoteCollectorService>? _logger;
+    private readonly InstallIdStore? _installIdStore;
+
+    /// <summary>
+    /// This install's id (#4961), or null when the service was built without a store, or its store cannot give one right now
+    /// (its file exists and cannot be read, or a new id cannot be saved: <see cref="InstallIdFailure"/> says which). Resolved
+    /// from the store on first use rather than at construction, so the first sweeps that need it, running in parallel, share
+    /// one resolve. A cycle with no id creates, starts and drops no session; the store goes back to the disk on a later cycle.
+    /// </summary>
+    internal string? GetInstallId() => _installIdStore?.GetId();
+
+    /// <summary>Why the store has no id right now, or null: there is none to explain (an id is held, or the service has no store).</summary>
+    internal string? InstallIdFailure() => _installIdStore?.Failure;
+
     private readonly DeltaCalculator _deltaCalculator;
     public DeltaCalculator DeltaCalculator => _deltaCalculator;
 
@@ -211,6 +265,15 @@ public partial class RemoteCollectorService
         /// </summary>
         public bool Abandoned { get; set; }
 
+        /// <summary>
+        /// True when this run's collector rethrew a long-query trace failure that an earlier run on this server had already
+        /// logged at its full level, with the trace not created since (#4964). <c>RunCollectorAsync</c> then logs its own
+        /// lines for the failure at Debug instead of Warning or Error, whatever the failure's type. The long-query read sets
+        /// it before it rethrows, from state kept per server beside the create's own; every run resets it. It changes
+        /// nothing about how the run is classified or recorded.
+        /// </summary>
+        public bool TraceFaultRepeatsAtDebug { get; set; }
+
         /// <summary>The per-database rollup for a run that fanned out, null for one that did not (#2472).
         /// Lives beside the fetch/store split for the same reason it does: both are things one run has to
         /// hand its own collection_log row, and both are meaningless once the next run resets the slot.</summary>
@@ -275,12 +338,14 @@ public partial class RemoteCollectorService
         DuckDbInitializer duckDb,
         ServerManager serverManager,
         ScheduleManager scheduleManager,
-        ILogger<RemoteCollectorService>? logger = null)
+        ILogger<RemoteCollectorService>? logger = null,
+        InstallIdStore? installIdStore = null)
     {
         _duckDb = duckDb;
         _serverManager = serverManager;
         _scheduleManager = scheduleManager;
         _logger = logger;
+        _installIdStore = installIdStore;
         _deltaCalculator = new DeltaCalculator(logger);
         _ignoredWaitTypes = new Lazy<HashSet<string>>(LoadIgnoredWaitTypes);
     }
@@ -541,6 +606,10 @@ public partial class RemoteCollectorService
                changed (state-tracked); creates on enable, drops on disable. */
             await ReconcileLongQueryCompletionsXeSessionAsync(server, cancellationToken);
 
+            /* #4938: the last runs and the server's clock are read once before the first due check, so a restart does not
+               make a daily collector due and a run time reads the server's clock. */
+            await EnsureRunTimeReadyAsync(server, cancellationToken);
+
             var dueCollectors = _scheduleManager.GetDueCollectorsForServer(server.Id, cycleStartUtc);
             foreach (var collector in dueCollectors)
             {
@@ -557,27 +626,49 @@ public partial class RemoteCollectorService
             return;
         }
 
-        /* Run CHECKPOINT here after all collector connections are closed.
-           Write lock ensures no UI readers have stale file offsets when
-           CHECKPOINT reorganizes/truncates the database file. */
+        await RunPostCollectionCheckpointAsync(LocalDataService.WriteLockBudget, cancellationToken);
+    }
+
+    /// <summary>
+    /// Runs CHECKPOINT after a collection round, once all collector connections are closed. The write lock ensures no
+    /// UI readers have stale file offsets when CHECKPOINT reorganizes/truncates the database file.
+    ///
+    /// <para>#5371: the wait for that lock is bounded by <paramref name="writeLockBudget"/> (the same budget every
+    /// other store write uses). The process-wide lock is a <see cref="System.Threading.ReaderWriterLockSlim"/>, and a
+    /// waiting writer makes every NEW reader wait, so an unbounded wait behind one slow read parked every UI read and
+    /// the next collector behind it. On a timeout this round's CHECKPOINT is skipped and the next round retries.</para>
+    /// </summary>
+    /// <returns>True when CHECKPOINT ran; false when it was skipped (lock budget spent) or failed.</returns>
+    internal async Task<bool> RunPostCollectionCheckpointAsync(TimeSpan writeLockBudget, CancellationToken cancellationToken)
+    {
         try
         {
-            using var writeLock = _duckDb.AcquireWriteLock();
+            using var writeLock = _duckDb.AcquireWriteLock(timeout: writeLockBudget);
             using var conn = _duckDb.CreateConnection();
             await conn.OpenAsync(cancellationToken);
             using var cmd = conn.CreateCommand();
             cmd.CommandText = "CHECKPOINT";
             await cmd.ExecuteNonQueryAsync(cancellationToken);
+            return true;
+        }
+        catch (TimeoutException)
+        {
+            AppLogger.Debug("Collector", $"Post-collection checkpoint skipped: the database lock was not free within {writeLockBudget.TotalSeconds:0.###}s (a read is in flight); the next round retries");
+            return false;
         }
         catch (Exception ex)
         {
             AppLogger.Debug("Collector", $"Post-collection checkpoint failed (non-critical): {ex.Message}");
+            return false;
         }
     }
 
     /// <summary>
-    /// Runs all enabled collectors for a single server immediately (ignoring schedule).
-    /// Used for initial data population when a server tab is first opened.
+    /// Runs the collectors a newly opened server tab needs, immediately, for initial data population: every enabled
+    /// on-load and sub-daily collector, and a collector that runs once a day or less often only when it is due (#4938).
+    /// A collector with a run time is left to its time, so opening a tab does not run it; an on-load collector with a
+    /// run time still runs, because the run time moves only its daily re-run, not its connect capture. See
+    /// <see cref="ScheduleManager.GetCollectorsForTabOpen"/>.
     /// </summary>
     public async Task RunAllCollectorsForServerAsync(ServerConnection server, CancellationToken cancellationToken = default)
     {
@@ -591,9 +682,11 @@ public partial class RemoteCollectorService
             return;
         }
 
-        var enabledSchedules = _scheduleManager.GetSchedulesForServer(server.Id)
-            .Where(s => s.Enabled)
-            .ToList();
+        /* #4938: the tab-open run does not start a collector that has a run time or a daily collector that is not
+           due; on-load collectors still run (their connect capture). The last runs are read first, so a tab opened
+           at launch sees the same state as the scheduled sweep. */
+        await EnsureRunTimeReadyAsync(server, cancellationToken);
+        var enabledSchedules = _scheduleManager.GetCollectorsForTabOpen(server.Id, DateTime.UtcNow).ToList();
 
         AppLogger.Info("Collector", $"Running {enabledSchedules.Count} collectors for '{server.DisplayName}' (serverId={GetServerId(server)}, initial load)");
 
@@ -648,6 +741,7 @@ public partial class RemoteCollectorService
         telemetry.StorageMs = 0;
         telemetry.ResetNote();
         telemetry.Abandoned = false;
+        telemetry.TraceFaultRepeatsAtDebug = false;
 
         try
         {
@@ -762,6 +856,12 @@ public partial class RemoteCollectorService
 
             _scheduleManager.MarkCollectorRunForServer(server.Id, collectorName, scheduledAtUtc ?? startTime);
 
+            /* #4938: a new server_properties row is the server's clock arriving or changing; a run time reads it from the next check. */
+            if (string.Equals(collectorName, "server_properties", StringComparison.Ordinal))
+            {
+                await RefreshRunTimeClockAsync(server, cancellationToken);
+            }
+
             /* #3653 A5: the identity-epoch account, if this run's definition saw one — the twin of the drain
                in DarlingWorker.RunOneAsync, for the same reason: the definition composed the sentence (old
                and new start time, old and new @@SERVERNAME, what was forgotten) and has no logger; this is
@@ -827,14 +927,25 @@ public partial class RemoteCollectorService
                session. Logging that at Error made a deliberate posture read as a fault: a field log showed
                three consecutive Error lines - two from the XE layer, one from here - for a login that was
                simply not granted ALTER ANY EVENT SESSION, while every other permission denial in this method
-               logs at Warn. Only a genuine ERROR status stays at Error. */
-            if (status == "PERMISSIONS")
+               logs at Warn. Only a genuine ERROR status stays at Error.
+
+               #4964: the always-on ensures run on every cycle, so a session that cannot be ensured raises this on every
+               cycle. The first failing cycle logs this line at the level above; the cycles after it log it at Debug, the
+               same rule as the ensure's own lines (the ensure sets RepeatsAtDebug from its state; the long-query read, whose
+               ensure runs outside the run, sets it on the run's telemetry). The classification, the run row and the health
+               record above and below are the same on every cycle. */
+            var ensureFailure = $"  [{server.DisplayName}] {collectorName} {ex.Message}";
+            if (ex.RepeatsAtDebug || telemetry.TraceFaultRepeatsAtDebug)
             {
-                AppLogger.Warn("Collector", $"  [{server.DisplayName}] {collectorName} {ex.Message}");
+                AppLogger.Debug("Collector", ensureFailure);
+            }
+            else if (status == "PERMISSIONS")
+            {
+                AppLogger.Warn("Collector", ensureFailure);
             }
             else
             {
-                AppLogger.Error("Collector", $"  [{server.DisplayName}] {collectorName} {ex.Message}");
+                AppLogger.Error("Collector", ensureFailure);
             }
         }
         catch (SqlException ex) when (ex.Number == 1222 && CollectorCatalog.YieldsOnLockTimeout(collectorName))
@@ -856,15 +967,17 @@ public partial class RemoteCollectorService
             errorMessage = $"SQL Error #{ex.Number}: {ex.Message}"
                 + AzureDmvPermissionHint.For(
                     ex.Number, _serverManager.GetConnectionStatus(server.Id).SqlEngineEdition == 5, ex.Message);
-            AppLogger.Error("Collector", $"  [{server.DisplayName}] {collectorName} SQL Error #{ex.Number}: {ex.Message}");
+            /* #4964: a long-query trace failure that an earlier run already logged is logged again at Debug (LogRunError and
+               LogRunWarning); every other run's lines are at the levels below. The classification does not depend on it. */
+            LogRunError(telemetry, $"  [{server.DisplayName}] {collectorName} SQL Error #{ex.Number}: {ex.Message}");
 
             if (RetryHelper.IsTransient(ex))
             {
-                AppLogger.Warn("Collector", $"Collector '{collectorName}' transient SQL error #{ex.Number} for server '{server.DisplayName}': {ex.Message}");
+                LogRunWarning(telemetry, $"Collector '{collectorName}' transient SQL error #{ex.Number} for server '{server.DisplayName}': {ex.Message}");
             }
             else if (ex.Number == 207) /* Invalid column name - likely version incompatibility */
             {
-                AppLogger.Warn("Collector", $"Collector '{collectorName}' column not found for server '{server.DisplayName}' (possible version incompatibility): {ex.Message}");
+                LogRunWarning(telemetry, $"Collector '{collectorName}' column not found for server '{server.DisplayName}' (possible version incompatibility): {ex.Message}");
             }
             else if (SqlServerPermissionErrors.IsPermissionDenied(ex.Number))
             {
@@ -875,11 +988,11 @@ public partial class RemoteCollectorService
                    transcription — it IS Darling's classifier, and 262 (the tempdb denial behind the
                    collector's old Azure SQL DB gate) reaches both SKUs at once. */
                 status = "PERMISSIONS";
-                AppLogger.Warn("Collector", $"Collector '{collectorName}' permission denied for server '{server.DisplayName}': {ex.Message}");
+                LogRunWarning(telemetry, $"Collector '{collectorName}' permission denied for server '{server.DisplayName}': {ex.Message}");
             }
             else
             {
-                AppLogger.Error("Collector", $"Collector '{collectorName}' SQL error #{ex.Number} for server '{server.DisplayName}'", ex);
+                LogRunError(telemetry, $"Collector '{collectorName}' SQL error #{ex.Number} for server '{server.DisplayName}'", ex);
             }
         }
         catch (InvalidOperationException ex) when (ex.Message.Contains("MFA authentication cancelled"))
@@ -899,8 +1012,11 @@ public partial class RemoteCollectorService
         {
             status = "ERROR";
             errorMessage = ex.Message;
-            AppLogger.Error("Collector", $"  [{server.DisplayName}] {collectorName} {ex.GetType().Name}: {ex.Message}");
-            AppLogger.Error("Collector", $"Collector '{collectorName}' failed for server '{server.DisplayName}'", ex);
+
+            /* #4964: the same rule as the SQL error arm above, for a long-query trace failure that is not a SQL error (an
+               install with no id, a connection that would not open) and that an earlier run already logged. */
+            LogRunError(telemetry, $"  [{server.DisplayName}] {collectorName} {ex.GetType().Name}: {ex.Message}");
+            LogRunError(telemetry, $"Collector '{collectorName}' failed for server '{server.DisplayName}'", ex);
 
             /* A fatal DuckDB error invalidates the whole local database, and every later write fails until it is
                reopened. This starts the reopen; any other error is left alone. */
@@ -910,8 +1026,48 @@ public partial class RemoteCollectorService
         // Track collector health
         RecordCollectorResult(GetServerId(server), collectorName, status, errorMessage, xeSessionUnavailable);
 
+        /* #4938: a run that did not succeed still wrote a collection_log row below, and the start-up read counts that
+           row as the last run whatever its status. For a daily-or-longer collector, with or without a run time, the
+           session counts it too, so a failing collector runs once and waits for its next period instead of running on
+           every sweep. A collector with a shorter interval keeps trying on the next sweep. A success was recorded
+           above, right after its collection. An early return that wrote no row never reaches here, so it stays due. */
+        if (status != "SUCCESS")
+        {
+            _scheduleManager.MarkCollectorAttemptForServer(server.Id, collectorName, scheduledAtUtc ?? startTime);
+        }
+
         // Log the collection attempt
         await LogCollectionAsync(GetServerId(server), server.DisplayName, collectorName, startTime, status, errorMessage, rowsCollected, telemetry.SqlMs, telemetry.StorageMs, telemetry.Fanout);
+    }
+
+    /// <summary>
+    /// A failed run's Error line, or its Debug line when the run replayed a long-query trace failure that an earlier run
+    /// already logged at its full level (<see cref="RunTelemetry.TraceFaultRepeatsAtDebug"/>, #4964). The exception is
+    /// logged with the Error line only.
+    /// </summary>
+    private static void LogRunError(RunTelemetry telemetry, string message, Exception? exception = null)
+    {
+        if (telemetry.TraceFaultRepeatsAtDebug)
+        {
+            AppLogger.Debug("Collector", message);
+        }
+        else
+        {
+            AppLogger.Error("Collector", message, exception);
+        }
+    }
+
+    /// <summary>A failed run's Warning line, or its Debug line for a repeated long-query trace failure (<see cref="LogRunError"/>).</summary>
+    private static void LogRunWarning(RunTelemetry telemetry, string message)
+    {
+        if (telemetry.TraceFaultRepeatsAtDebug)
+        {
+            AppLogger.Debug("Collector", message);
+        }
+        else
+        {
+            AppLogger.Warn("Collector", message);
+        }
     }
 
     /// <summary>
@@ -1049,7 +1205,15 @@ public partial class RemoteCollectorService
     /// server into whichever registration ran the sweep — N registrations of N databases meant N² collection
     /// with every registration's history contaminated by its siblings'.</para>
     /// </summary>
-    protected async Task<List<string>> GetAzureDatabaseListAsync(ServerConnection server, CancellationToken cancellationToken)
+    protected Task<List<string>> GetAzureDatabaseListAsync(ServerConnection server, CancellationToken cancellationToken) =>
+        GetAzureDatabaseListAsync(server, applyExclusions: true, cancellationToken);
+
+    /// <summary>
+    /// <see cref="GetAzureDatabaseListAsync(ServerConnection, CancellationToken)"/>, with a choice about the server's
+    /// excluded databases. The long-query trace's drop passes <paramref name="applyExclusions"/> false: a session
+    /// created before a database was excluded must still be dropped there.
+    /// </summary>
+    protected async Task<List<string>> GetAzureDatabaseListAsync(ServerConnection server, bool applyExclusions, CancellationToken cancellationToken)
     {
         var serverId = GetServerId(server);
         var baseConnStr = _serverManager.CredentialResolver.GetConnectionString(server);
@@ -1105,14 +1269,12 @@ public partial class RemoteCollectorService
             return await RetryHelper.ExecuteWithRetryAsync(
                 async () =>
                 {
-                    var (exclusionClause, exclusionParams) = BuildDatabaseExclusionFilter(server.ExcludedDatabases, "name");
+                    var (listSql, exclusionParams) = BuildAzureDatabaseListQuery(server, applyExclusions);
 
                     var databases = new List<string>();
                     using var conn = new SqlConnection(connStr);
                     await conn.OpenAsync(cancellationToken);
-                    using var cmd = new SqlCommand(
-                        $"SELECT name FROM sys.databases WHERE state_desc = N'ONLINE' AND database_id > 0 {exclusionClause} ORDER BY name;",
-                        conn)
+                    using var cmd = new SqlCommand(listSql, conn)
                     { CommandTimeout = CommandTimeoutSeconds };
                     foreach (var p in exclusionParams) cmd.Parameters.Add(p);
                     using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
@@ -1132,6 +1294,20 @@ public partial class RemoteCollectorService
 
             return FallbackDatabaseList(server, targetDb, reason: $"master DB inaccessible (SQL error {ex.Number})");
         }
+    }
+
+    /// <summary>
+    /// The enumeration query behind <see cref="GetAzureDatabaseListAsync(ServerConnection, bool, CancellationToken)"/>, with its
+    /// parameters. The server's excluded databases are in it only when <paramref name="applyExclusions"/> is true, so a drop that
+    /// passes false lists the databases the registration excludes too. Built fresh on each call: a SqlParameter cannot be added
+    /// to a second SqlCommand, so the retry builds its own. Its own member so a test reads the query, not a stand-in for the list.
+    /// </summary>
+    internal static (string Sql, List<SqlParameter> Parameters) BuildAzureDatabaseListQuery(ServerConnection server, bool applyExclusions)
+    {
+        var (exclusionClause, exclusionParams) = BuildDatabaseExclusionFilter(applyExclusions ? server.ExcludedDatabases : null, "name");
+        return (
+            $"SELECT name FROM sys.databases WHERE state_desc = N'ONLINE' AND database_id > 0 {exclusionClause} ORDER BY name;",
+            exclusionParams);
     }
 
     /// <summary>
@@ -1284,6 +1460,28 @@ public partial class RemoteCollectorService
         SqlErrorClassification.ShouldFallBackToSingleDatabase(errorNumber);
 
     /// <summary>
+    /// The connection string for one database on an Azure SQL DB logical server: the registration's own, so a registration
+    /// with read-only intent opens a read-only connection. <paramref name="withoutReadOnlyIntent"/> forces the intent off:
+    /// the long-query trace creates its session's definition over such a connection, because a session cannot be created on
+    /// a read-only replica (#4961). The one place the string is built, so a test that reads it sees what is opened.
+    /// </summary>
+    protected string AzureDatabaseConnectionString(ServerConnection server, string databaseName, bool withoutReadOnlyIntent = false)
+    {
+        var builder = new SqlConnectionStringBuilder(RegistrationConnectionString(server))
+        {
+            ConnectTimeout = ConnectionTimeoutSeconds,
+            InitialCatalog = databaseName
+        };
+
+        if (withoutReadOnlyIntent)
+        {
+            builder.ApplicationIntent = ApplicationIntent.ReadWrite;
+        }
+
+        return builder.ConnectionString;
+    }
+
+    /// <summary>
     /// Opens a SQL connection to a specific database on an Azure SQL DB logical server.
     ///
     /// Deliberately NOT retried. This runs once per database per database-scoped collector, and the
@@ -1293,27 +1491,78 @@ public partial class RemoteCollectorService
     /// every minute. The next cycle is the retry, and it costs one minute of that database's data
     /// rather than delaying every other server's.
     /// </summary>
-    protected async Task<SqlConnection> OpenAzureDatabaseConnectionAsync(ServerConnection server, string databaseName, CancellationToken cancellationToken)
+    protected async Task<SqlConnection> OpenAzureDatabaseConnectionAsync(ServerConnection server, string databaseName, CancellationToken cancellationToken, bool withoutReadOnlyIntent = false)
     {
-        var baseConnStr = _serverManager.CredentialResolver.GetConnectionString(server);
-        var connStr = new SqlConnectionStringBuilder(baseConnStr)
-        {
-            ConnectTimeout = ConnectionTimeoutSeconds,
-            InitialCatalog = databaseName
-        }.ConnectionString;
+        var connStr = AzureDatabaseConnectionString(server, databaseName, withoutReadOnlyIntent);
+        var builder = new SqlConnectionStringBuilder(connStr);
 
-        var conn = new SqlConnection(connStr);
+        /* A registration that signs in interactively does so over this connection as it does over CreateConnectionAsync's
+           (#4961). The long-query trace creates its session's definition over a connection with the read-only intent forced
+           off, and any open here can be the first of a run to raise a prompt. So the opens get CreateConnectionAsync's
+           treatment, asked of the mode and not of the connection string's keyword: the sign-in lock, so two opens starting
+           together raise one window and not two, and a refusal once that server's sign-in was declined. Both interactive modes
+           need it. Begin hands the prompt window its attempt and returns null for every mode but device code, which opens
+           exactly as it did; for device code it also refuses a second sign-in while one is in flight. A mode that cannot show
+           a window takes no lock. */
+        var signsInInteractively = AuthenticationTypes.RequiresInteractiveSignIn(server.AuthenticationType);
+        var signInLockHeld = false;
+
         try
         {
-            await conn.OpenAsync(cancellationToken);
-            return conn;
+            if (signsInInteractively)
+            {
+                await s_mfaAuthLock.WaitAsync(cancellationToken);
+                signInLockHeld = true;
+
+                if (_serverManager.GetConnectionStatus(server.Id).UserCancelledMfa)
+                {
+                    throw new InvalidOperationException("Interactive authentication cancelled by user. Please connect to the server explicitly to retry.");
+                }
+            }
+
+            using var deviceCode = EntraDeviceCodeAuth.Begin(builder);
+            using var openCancellation = deviceCode is null
+                ? null
+                : CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, deviceCode.Token);
+
+            var conn = new SqlConnection(connStr);
+            try
+            {
+                await conn.OpenAsync(openCancellation?.Token ?? cancellationToken);
+                return conn;
+            }
+            catch (Exception ex)
+            {
+                conn.Dispose();
+
+                /* A declined sign-in is flagged so the opens queued behind this one stop instead of each raising a prompt of
+                   its own, and it is decided as CreateConnectionAsync decides it, by the same helper, for either interactive
+                   mode: an Entra MFA sign-in the user cancelled in the browser is as much a decline as a closed code window. */
+                if (signsInInteractively && UserDeclinedSignIn(ex, deviceCode, cancellationToken))
+                {
+                    _serverManager.GetConnectionStatus(server.Id).UserCancelledMfa = true;
+                    AppLogger.Info("Collector", $"  [{server.DisplayName}] interactive authentication cancelled by user - flagging to abort other pending connections");
+                }
+
+                throw;
+            }
         }
-        catch
+        finally
         {
-            conn.Dispose();
-            throw;
+            if (signInLockHeld)
+            {
+                s_mfaAuthLock.Release();
+            }
         }
     }
+
+    /// <summary>
+    /// The registration's own connection string. It is resolved here, in the file whose opens handle a device-code sign-in, so a
+    /// partial that needs the string beside a connection it does not open reads it through here instead of resolving it again
+    /// (#4961). The long-query trace's test seam is one.
+    /// </summary>
+    protected string RegistrationConnectionString(ServerConnection server) =>
+        _serverManager.CredentialResolver.GetConnectionString(server);
 
     /// <summary>
     /// Creates a SQL connection to a remote server.
@@ -1384,22 +1633,10 @@ public partial class RemoteCollectorService
                     if (isInteractiveServer)
                     {
                         /* Mark a user-declined sign-in immediately, so the other connections queued
-                           behind the lock abort instead of each raising their own prompt.
-
-                           Two detections, because the two interactive modes fail differently. Entra
-                           MFA reports cancellation in the exception MESSAGE, which is all the broker
-                           gives. Device code reports it as the cancellation of the token above - and
-                           the collector's own token is linked into that same source, so the token
-                           alone cannot say which side fired. A shutdown is not a decline: flagging
-                           one would leave the server skipped for the rest of the session over an app
-                           restart nobody chose. */
-                        var userDeclined =
-                            MfaAuthenticationHelper.IsMfaCancelledException(ex) ||
-                            (deviceCode is not null
-                                && deviceCode.Token.IsCancellationRequested
-                                && !cancellationToken.IsCancellationRequested);
-
-                        if (userDeclined)
+                           behind the lock abort instead of each raising their own prompt. What counts
+                           as a decline is decided in UserDeclinedSignIn, which the per-database open
+                           asks too. */
+                        if (UserDeclinedSignIn(ex, deviceCode, cancellationToken))
                         {
                             var serverStatus = _serverManager.GetConnectionStatus(server.Id);
                             serverStatus.UserCancelledMfa = true;
@@ -1424,6 +1661,25 @@ public partial class RemoteCollectorService
                 s_mfaAuthLock.Release();
             }
         }
+    }
+
+    /// <summary>
+    /// Whether an interactive open that failed failed because the user declined the sign-in. Both opens that can raise a prompt,
+    /// <see cref="CreateConnectionAsync"/> and <see cref="OpenAzureDatabaseConnectionAsync"/>, ask it here, so what counts as a
+    /// decline cannot differ between them (#4961).
+    ///
+    /// Two detections, because the two interactive modes fail differently. Entra MFA reports cancellation in the exception
+    /// MESSAGE, which is all the broker gives. Device code reports it as the cancellation of the prompt's own token - and the
+    /// collector's own token is linked into the same source the open waits on, so the token the open threw on cannot say which
+    /// side fired. A shutdown is not a decline: flagging one would leave the server skipped for the rest of the session over an
+    /// app restart nobody chose.
+    /// </summary>
+    private static bool UserDeclinedSignIn(Exception ex, EntraDeviceCodeAttempt? deviceCode, CancellationToken cancellationToken)
+    {
+        return MfaAuthenticationHelper.IsMfaCancelledException(ex) ||
+            (deviceCode is not null
+                && deviceCode.Token.IsCancellationRequested
+                && !cancellationToken.IsCancellationRequested);
     }
 
     /// <summary>
@@ -1530,19 +1786,23 @@ public partial class RemoteCollectorService
     {
         try
         {
-            // Read lock (#4343): a plain SELECT, cancelable since this method already carries the token.
-            using var readLock = _duckDb.AcquireReadLock(cancellationToken);
-            using var conn = _duckDb.CreateConnection();
-            await conn.OpenAsync(cancellationToken);
-            using var cmd = conn.CreateCommand();
-            cmd.CommandText = $"SELECT MAX({columnName}) FROM {tableName} WHERE server_id = $1";
-            cmd.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = serverId });
-            var result = await cmd.ExecuteScalarAsync(cancellationToken);
-            var live = result is DateTime dt ? dt : (DateTime?)null;
+            DateTime? live;
+            // Read lock (#4343): a plain SELECT, cancelable since this method already carries the token. Its
+            // scope ends before the archive read (#5377): that read takes the limiter first, then its own lock.
+            using (var readLock = _duckDb.AcquireReadLock(cancellationToken))
+            {
+                using var conn = _duckDb.CreateConnection();
+                await conn.OpenAsync(cancellationToken);
+                using var cmd = conn.CreateCommand();
+                cmd.CommandText = $"SELECT MAX({columnName}) FROM {tableName} WHERE server_id = $1";
+                cmd.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = serverId });
+                var result = await cmd.ExecuteScalarAsync(cancellationToken);
+                live = result is DateTime dt ? dt : (DateTime?)null;
+            }
 
             // The archive's maximum (cached per generation) always joins the live one: a hole fill or a late
             // row can leave live non-null but OLDER than what the reset moved into Parquet.
-            var archived = await ReadArchiveViewAsync(conn,
+            var archived = await ReadArchiveViewAsync(
                 $"time|{tableName}|{columnName}|{serverId}",
                 $"SELECT MAX({columnName}) FROM v_{tableName} WHERE server_id = $1",
                 [serverId], cancellationToken);
@@ -1619,16 +1879,17 @@ public partial class RemoteCollectorService
     {
         try
         {
-            // Read lock (#4343): a plain SELECT, cancelable since this method already carries the token.
-            using var readLock = _duckDb.AcquireReadLock(cancellationToken);
-            using var conn = _duckDb.CreateConnection();
-            await conn.OpenAsync(cancellationToken);
-            using var cmd = conn.CreateCommand();
-            cmd.CommandText = $"SELECT MAX({utcColumnName}), MAX({columnName}) FROM {tableName} WHERE server_id = $1";
-            cmd.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = serverId });
             DateTime? liveUtc = null, liveLocal = null;
-            using (var reader = await cmd.ExecuteReaderAsync(cancellationToken))
+            // Read lock (#4343): a plain SELECT, cancelable since this method already carries the token. Its
+            // scope ends before the archive read (#5377): that read takes the limiter first, then its own lock.
+            using (var readLock = _duckDb.AcquireReadLock(cancellationToken))
             {
+                using var conn = _duckDb.CreateConnection();
+                await conn.OpenAsync(cancellationToken);
+                using var cmd = conn.CreateCommand();
+                cmd.CommandText = $"SELECT MAX({utcColumnName}), MAX({columnName}) FROM {tableName} WHERE server_id = $1";
+                cmd.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = serverId });
+                using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
                 if (await reader.ReadAsync(cancellationToken))
                 {
                     liveUtc = reader.IsDBNull(0) ? null : reader.GetDateTime(0);
@@ -1637,7 +1898,7 @@ public partial class RemoteCollectorService
             }
 
             // The archive's pair (cached per generation) joins the live pair column by column.
-            var archived = await ReadArchiveViewAsync(conn,
+            var archived = await ReadArchiveViewAsync(
                 $"frame|{tableName}|{columnName}|{utcColumnName}|{serverId}",
                 $"SELECT MAX({utcColumnName}), MAX({columnName}) FROM v_{tableName} WHERE server_id = $1",
                 [serverId], cancellationToken, readRow: ReadDatePair);
@@ -1676,13 +1937,31 @@ public partial class RemoteCollectorService
     /// <para>The floor is a SEMANTIC bound, not only a performance one: #2344's contract is that a database with
     /// no row newer than the floor reads NULL. The callers act on the raw value (a clamp warning and a recorded
     /// backfill hole whenever it differs from the clamped one), so an idle database must not return an old
-    /// non-NULL value every cycle. The live read keeps the bound. The archive side first reads the cached
-    /// unbounded per-database maximum A over <c>v_{table}</c> (one entry per (server, database) and archive
-    /// generation; a floor in the key would grow the cache without bound). With no floor, or A above the floor,
-    /// the GREATER of the live and A is returned, which is exact: the row reaching A has collection_time at or
-    /// above last_execution_time = A, which is above the floor. When A is at or below the floor, or absent, the
-    /// floored view SQL runs uncached and its result competes with the live one, which is exactly the floored
-    /// answer over live and archived rows.</para>
+    /// non-NULL value every cycle. The live read keeps the bound.</para>
+    ///
+    /// <para><b>The archive side (#5377).</b> One grouped read per (table, column, database column) and archive
+    /// generation, <c>SELECT server_id, db, MAX(col), MAX(collection_time) FROM v_{table} GROUP BY server_id, db</c>,
+    /// is cached as a map and serves every database of every server: N databases cost one archive scan, not N,
+    /// and concurrent first callers share it. (It is whole-table rather than per-server because the scan reads
+    /// the same columns either way and a store with several servers pays for it once instead of once each.) A
+    /// database the map lacks reads NULL, exactly what the per-database MAX returned. Call the map's maximum A
+    /// and its newest collection C. With no floor, or A above the floor, the GREATER of the live and A is
+    /// returned, which is exact: the row reaching A has collection_time at or above last_execution_time = A,
+    /// which is above the floor.</para>
+    ///
+    /// <para><b>The floored archive read cannot always be dropped.</b> When A is at or below the floor, the
+    /// floored answer is the greatest value among archived rows with collection_time above the floor, and such a
+    /// row can exist: a value is at or below its own collection_time, not the other way round, so a row
+    /// collected just after the floor can carry an older value (A is below the floor, the row's value lower
+    /// still), and the live read returns that same non-NULL value for a live row. Dropping the archive read
+    /// would make the answer depend on whether the reset had run. It IS redundant in two cases, and those skip
+    /// the read: A is NULL (no archived row carries a value at all, and Parquet only changes with the
+    /// generation), and C is at or below the floor (no archived row is that recent). Only the remaining band
+    /// reads (an archived row collected within the floor's window whose value is older than the floor, which a
+    /// database that went idle shortly before an archive can leave for a few hours): the view's rows collected
+    /// after the floor rounded down to the hour, as (collection_time, value) pairs, cached per generation with
+    /// the hour as the entry's variant, so the entry is overwritten each hour rather than growing. The exact
+    /// floor is then applied in memory, so the answer is exactly the floored one.</para>
     /// </summary>
     protected async Task<DateTime?> GetLastCollectedTimeForDatabaseAsync(
         int serverId, string tableName, string columnName, string databaseColumnName, string databaseName,
@@ -1690,42 +1969,44 @@ public partial class RemoteCollectorService
     {
         try
         {
-            // Read lock (#4343): a plain SELECT, cancelable since this method already carries the token.
-            using var readLock = _duckDb.AcquireReadLock(cancellationToken);
-            using var conn = _duckDb.CreateConnection();
-            await conn.OpenAsync(cancellationToken);
-            using var cmd = conn.CreateCommand();
-            cmd.CommandText = collectedSince is null
-                ? $"SELECT MAX({columnName}) FROM {tableName} WHERE server_id = $1 AND {databaseColumnName} = $2"
-                : $"SELECT MAX({columnName}) FROM {tableName} WHERE server_id = $1 AND {databaseColumnName} = $2 AND collection_time > $3";
-            cmd.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = serverId });
-            cmd.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = databaseName });
-            if (collectedSince is DateTime floor)
+            DateTime? live;
+            // Read lock (#4343): a plain SELECT, cancelable since this method already carries the token. Its
+            // scope ends before the archive reads (#5377): they take the limiter first, then their own lock.
+            using (var readLock = _duckDb.AcquireReadLock(cancellationToken))
             {
-                cmd.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = floor });
+                using var conn = _duckDb.CreateConnection();
+                await conn.OpenAsync(cancellationToken);
+                using var cmd = conn.CreateCommand();
+                cmd.CommandText = collectedSince is null
+                    ? $"SELECT MAX({columnName}) FROM {tableName} WHERE server_id = $1 AND {databaseColumnName} = $2"
+                    : $"SELECT MAX({columnName}) FROM {tableName} WHERE server_id = $1 AND {databaseColumnName} = $2 AND collection_time > $3";
+                cmd.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = serverId });
+                cmd.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = databaseName });
+                if (collectedSince is DateTime floor)
+                {
+                    cmd.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = floor });
+                }
+
+                var result = await cmd.ExecuteScalarAsync(cancellationToken);
+                live = result is DateTime dt ? dt : (DateTime?)null;
             }
 
-            var result = await cmd.ExecuteScalarAsync(cancellationToken);
-            var live = result is DateTime dt ? dt : (DateTime?)null;
+            // The archive side (#5377): this database's entry in the per-table map, one grouped archive read per
+            // generation for every database. A database the map lacks has no archived row: NULL, as before.
+            var map = await ReadArchivedDatabaseMapAsync(tableName, columnName, databaseColumnName, cancellationToken);
+            map.TryGetValue((serverId, databaseName), out var entry);
+            var archived = entry.Maximum;
 
-            // The archive side: the cached unbounded per-database maximum A, one entry per (server, database)
-            // however the floor moves. A above the floor (or no floor) is exact for the floored question too:
-            // the row that reaches A has collection_time >= last_execution_time = A > floor, so the floored
-            // MAX is A. A at or below the floor (or no archive value) means the floored answer over live ∪
-            // archive is NULL or no better than the live floored read, so run the floored view SQL uncached.
-            var archived = await ReadArchiveViewAsync(conn,
-                $"db|{tableName}|{columnName}|{databaseColumnName}|{serverId}|{databaseName}",
-                $"SELECT MAX({columnName}) FROM v_{tableName} WHERE server_id = $1 AND {databaseColumnName} = $2",
-                [serverId, databaseName], cancellationToken) as DateTime?;
-            if (collectedSince is DateTime since && (archived is null || archived.Value <= since))
+            // A above the floor (or no floor) is exact for the floored question too: the row that reaches A has
+            // collection_time >= last_execution_time = A > floor, so the floored MAX is A. A NULL, or a newest
+            // archived collection at or below the floor, means no archived row can qualify (Parquet changes only
+            // with the generation, and live rows are the live read's). Only A at or below the floor with a row
+            // collected after it needs the floored rows; see the method remarks.
+            if (collectedSince is DateTime since && archived is not null && archived.Value <= since)
             {
-                using var floored = conn.CreateCommand();
-                floored.CommandText = $"SELECT MAX({columnName}) FROM v_{tableName} WHERE server_id = $1 AND {databaseColumnName} = $2 AND collection_time > $3";
-                floored.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = serverId });
-                floored.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = databaseName });
-                floored.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = since });
-                var flooredResult = await floored.ExecuteScalarAsync(cancellationToken);
-                archived = flooredResult is DateTime fdt ? fdt : null;
+                archived = entry.NewestCollection is DateTime newest && (newest > since)
+                    ? await ReadFlooredArchiveAsync(serverId, tableName, columnName, databaseColumnName, databaseName, since, cancellationToken)
+                    : null;
             }
             return GreaterOf(live, archived);
         }
@@ -1735,6 +2016,88 @@ public partial class RemoteCollectorService
             LogWatermarkReadFailure($"Watermark read for database {databaseName}", tableName, serverId, ex);
         }
         return null;
+    }
+
+    /// <summary>One database's archived watermark: its newest value and the newest collection time of its rows,
+    /// plus the oldest of each, which the Query Store backfill's floor read takes from the same grouped read.</summary>
+    private readonly record struct ArchivedDatabaseWatermark(
+        DateTime? Maximum, DateTime? NewestCollection, DateTime? OldestCollection, DateTime? OldestValue);
+
+    /// <summary>
+    /// The per-table map behind <see cref="GetLastCollectedTimeForDatabaseAsync"/> (#5377): for every (server,
+    /// database) in <c>v_{table}</c>, the maximum of the watermark column and the newest collection time, from
+    /// ONE grouped read per archive generation, cached under a key with no server or database in it. Keys compare
+    /// ordinally, like DuckDB's VARCHAR equality; a NULL database never matches a lookup, so it is not stored.
+    /// </summary>
+    private async Task<Dictionary<(int ServerId, string Database), ArchivedDatabaseWatermark>> ReadArchivedDatabaseMapAsync(
+        string tableName, string columnName, string databaseColumnName, CancellationToken cancellationToken)
+    {
+        var map = await ReadArchiveAsync(
+            $"dbmap|{tableName}|{columnName}|{databaseColumnName}", 0,
+            async (conn, token) =>
+            {
+                using var cmd = conn.CreateCommand();
+                cmd.CommandText =
+                    $"SELECT server_id, {databaseColumnName}, MAX({columnName}), MAX(collection_time), MIN(collection_time), MIN({columnName}) FROM v_{tableName} GROUP BY server_id, {databaseColumnName}";
+                var rows = new Dictionary<(int ServerId, string Database), ArchivedDatabaseWatermark>();
+                using var reader = await cmd.ExecuteReaderAsync(token);
+                while (await reader.ReadAsync(token))
+                {
+                    if (reader.IsDBNull(0) || reader.IsDBNull(1))
+                        continue;
+                    rows[(Convert.ToInt32(reader.GetValue(0)), reader.GetString(1))] = new ArchivedDatabaseWatermark(
+                        reader.GetValue(2) is DateTime maximum ? maximum : null,
+                        reader.GetValue(3) is DateTime newest ? newest : null,
+                        reader.GetValue(4) is DateTime oldestCollection ? oldestCollection : null,
+                        reader.GetValue(5) is DateTime oldestValue ? oldestValue : null);
+                }
+
+                return rows;
+            }, cancellationToken);
+        return (Dictionary<(int ServerId, string Database), ArchivedDatabaseWatermark>)map!;
+    }
+
+    /// <summary>
+    /// The floored archive answer for the one band the map cannot settle (#5377): the greatest value among the
+    /// view's rows for this database collected after <paramref name="since"/>. The read takes the rows after the
+    /// floor ROUNDED DOWN to the hour, as (collection_time, value) pairs, and caches them per generation under a
+    /// key with no floor in it, the hour as the entry's variant; the exact floor then filters them in memory, so
+    /// the answer is exactly what the floored view SQL returned each cycle, while the read itself runs once per
+    /// database per hour and generation.
+    /// </summary>
+    private async Task<DateTime?> ReadFlooredArchiveAsync(
+        int serverId, string tableName, string columnName, string databaseColumnName, string databaseName,
+        DateTime since, CancellationToken cancellationToken)
+    {
+        var bucket = new DateTime(since.Ticks - since.Ticks % TimeSpan.TicksPerHour, since.Kind);
+        var rows = await ReadArchiveAsync(
+            $"dbfloor|{tableName}|{columnName}|{databaseColumnName}|{serverId}|{databaseName}", bucket.Ticks,
+            async (conn, token) =>
+            {
+                using var cmd = conn.CreateCommand();
+                cmd.CommandText =
+                    $"SELECT collection_time, MAX({columnName}) FROM v_{tableName} WHERE server_id = $1 AND {databaseColumnName} = $2 AND collection_time > $3 GROUP BY collection_time";
+                cmd.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = serverId });
+                cmd.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = databaseName });
+                cmd.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = bucket });
+                var pairs = new List<(DateTime Collected, DateTime Value)>();
+                using var reader = await cmd.ExecuteReaderAsync(token);
+                while (await reader.ReadAsync(token))
+                {
+                    if (!reader.IsDBNull(0) && reader.GetValue(1) is DateTime value)
+                        pairs.Add((reader.GetDateTime(0), value));
+                }
+
+                return pairs.ToArray();
+            }, cancellationToken);
+
+        DateTime? greatest = null;
+        foreach (var (collected, value) in (rows as (DateTime Collected, DateTime Value)[]) ?? [])
+        {
+            if (collected > since && (greatest is null || value > greatest.Value))
+                greatest = value;
+        }
+        return greatest;
     }
 
     /// <summary>
@@ -1762,23 +2125,24 @@ public partial class RemoteCollectorService
     {
         try
         {
-            // Read lock (#4343): a plain SELECT, cancelable since this method already carries the token.
-            using var readLock = _duckDb.AcquireReadLock(cancellationToken);
-            using var conn = _duckDb.CreateConnection();
-            await conn.OpenAsync(cancellationToken);
-            using var cmd = conn.CreateCommand();
-            cmd.CommandText = $"SELECT collection_time, MAX({columnName}) FROM {tableName} WHERE server_id = $1 "
-                + $"AND collection_time = (SELECT MAX(collection_time) FROM {tableName} WHERE server_id = $1) GROUP BY collection_time";
-            cmd.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = serverId });
             (DateTime BatchTime, long Id)? live = null;
-            using (var reader = await cmd.ExecuteReaderAsync(cancellationToken))
+            // Read lock (#4343): a plain SELECT, cancelable since this method already carries the token. Its
+            // scope ends before the archive read (#5377): that read takes the limiter first, then its own lock.
+            using (var readLock = _duckDb.AcquireReadLock(cancellationToken))
             {
+                using var conn = _duckDb.CreateConnection();
+                await conn.OpenAsync(cancellationToken);
+                using var cmd = conn.CreateCommand();
+                cmd.CommandText = $"SELECT collection_time, MAX({columnName}) FROM {tableName} WHERE server_id = $1 "
+                    + $"AND collection_time = (SELECT MAX(collection_time) FROM {tableName} WHERE server_id = $1) GROUP BY collection_time";
+                cmd.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = serverId });
+                using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
                 if (await reader.ReadAsync(cancellationToken) && !reader.IsDBNull(0) && !reader.IsDBNull(1))
                     live = (reader.GetDateTime(0), Convert.ToInt64(reader.GetValue(1)));
             }
 
             // The archive's newest batch (cached per generation) competes with the live one on batch time.
-            var archivedRow = await ReadArchiveViewAsync(conn,
+            var archivedRow = await ReadArchiveViewAsync(
                 $"id|{tableName}|{columnName}|{serverId}",
                 $"SELECT collection_time, MAX({columnName}) FROM v_{tableName} WHERE server_id = $1 "
                     + $"AND collection_time = (SELECT MAX(collection_time) FROM v_{tableName} WHERE server_id = $1) GROUP BY collection_time",
@@ -1814,20 +2178,23 @@ public partial class RemoteCollectorService
     {
         try
         {
-            // Read lock (#4343): a plain SELECT, cancelable since this method already carries the token.
-            using var readLock = _duckDb.AcquireReadLock(cancellationToken);
-            using var conn = _duckDb.CreateConnection();
-            await conn.OpenAsync(cancellationToken);
-            using var cmd = conn.CreateCommand();
-            cmd.CommandText = "SELECT COUNT(*) FROM collection_log WHERE server_id = $1 AND collector_name = $2 AND status = 'SUCCESS'";
-            cmd.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = serverId });
-            cmd.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = collectorName });
-            var result = await cmd.ExecuteScalarAsync(cancellationToken);
-            if (result is not null && result != DBNull.Value && Convert.ToInt64(result) > 0)
-                return true;
+            // Read lock (#4343): a plain SELECT, cancelable since this method already carries the token. Its
+            // scope ends before the archive read (#5377): that read takes the limiter first, then its own lock.
+            using (var readLock = _duckDb.AcquireReadLock(cancellationToken))
+            {
+                using var conn = _duckDb.CreateConnection();
+                await conn.OpenAsync(cancellationToken);
+                using var cmd = conn.CreateCommand();
+                cmd.CommandText = "SELECT COUNT(*) FROM collection_log WHERE server_id = $1 AND collector_name = $2 AND status = 'SUCCESS'";
+                cmd.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = serverId });
+                cmd.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = collectorName });
+                var result = await cmd.ExecuteScalarAsync(cancellationToken);
+                if (result is not null && result != DBNull.Value && Convert.ToInt64(result) > 0)
+                    return true;
+            }
 
             // No SUCCESS row in the live log: the reset archives collection_log too, so ask its view.
-            var archived = await ReadArchiveViewAsync(conn,
+            var archived = await ReadArchiveViewAsync(
                 $"success|{serverId}|{collectorName}",
                 "SELECT COUNT(*) FROM v_collection_log WHERE server_id = $1 AND collector_name = $2 AND status = 'SUCCESS'",
                 [serverId, collectorName], cancellationToken);
@@ -1860,16 +2227,26 @@ public partial class RemoteCollectorService
     /// <para><b>The generation rule:</b> the answer is cached per archive generation
     /// (<see cref="DuckDbInitializer.ArchiveViewGeneration"/>), including a null answer, so the Parquet files
     /// are not scanned every cycle. Callers key it by the read's identity, never by a moving bound, so the
-    /// cache stays bounded. The generation is sampled before the view is
-    /// queried. The caller holds the read lock and passes its open connection. <paramref name="readRow"/>
-    /// turns the first row of a multi-column read into the cached value.</para>
+    /// cache stays bounded. The generation is sampled before the view is queried.</para>
+    ///
+    /// <para><b>Lock order (#5377): the caller holds NO lock when it calls this.</b> A cache hit takes none. A
+    /// miss takes a slot of the shared <see cref="ArchiveReadLimiter"/> FIRST, then the database read lock,
+    /// opens its own connection, reads, and releases the read lock and then the slot. A read that waits for a
+    /// slot therefore never holds the read lock, which a held read lock would turn into a stall for the
+    /// CHECKPOINT writer and every reader parked behind it. Callers do their live read in a lock scope of its
+    /// own and call this after it ends. <b>Every caller reads live FIRST</b> (the archive generation is sampled
+    /// in here, after it): the archive-and-reset moves rows from the live table to Parquet and bumps the
+    /// generation inside ONE write lock, so a move that lands before the live read has bumped the generation
+    /// before the sample (the view is re-read and holds the rows), and a move that lands after the sample was
+    /// already seen by the live read. No row is missing from both answers. Reading live AFTER this call loses
+    /// that guarantee (the cache-hit path takes no lock). Concurrent misses on one key share one read (see
+    /// <see cref="ArchiveWatermarkCache"/>).
+    /// <paramref name="readRow"/> turns the first row of a multi-column read into the cached value.</para>
     /// </summary>
-    private async Task<object?> ReadArchiveViewAsync(
-        DuckDB.NET.Data.DuckDBConnection conn, string cacheKey, string viewSql, object[] parameters,
-        CancellationToken cancellationToken, Func<System.Data.Common.DbDataReader, object?>? readRow = null)
-    {
-        var generation = _duckDb.ArchiveViewGeneration;
-        return await _archiveWatermarks.GetOrReadAsync(cacheKey, generation, async () =>
+    private Task<object?> ReadArchiveViewAsync(
+        string cacheKey, string viewSql, object[] parameters,
+        CancellationToken cancellationToken, Func<System.Data.Common.DbDataReader, object?>? readRow = null) =>
+        ReadArchiveAsync(cacheKey, 0, async (conn, token) =>
         {
             using var cmd = conn.CreateCommand();
             cmd.CommandText = viewSql;
@@ -1878,13 +2255,38 @@ public partial class RemoteCollectorService
             if (readRow is not null)
             {
                 // A multi-column read: the delegate turns the first row (or none) into the cached value.
-                using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
-                return await reader.ReadAsync(cancellationToken) ? readRow(reader) : null;
+                using var reader = await cmd.ExecuteReaderAsync(token);
+                return await reader.ReadAsync(token) ? readRow(reader) : null;
             }
 
-            var result = await cmd.ExecuteScalarAsync(cancellationToken);
+            var result = await cmd.ExecuteScalarAsync(token);
             return result == DBNull.Value ? null : result;
-        });
+        }, cancellationToken);
+
+    /// <summary>
+    /// The lock-taking core of <see cref="ReadArchiveViewAsync"/>: serves <paramref name="cacheKey"/> from the
+    /// cache, or runs <paramref name="read"/> on an open connection once, under the limiter and then the read
+    /// lock. <paramref name="variant"/> is the bucket of a slowly moving bound the answer depends on (see
+    /// <see cref="ArchiveWatermarkCache"/>).
+    /// </summary>
+    private async Task<object?> ReadArchiveAsync(
+        string cacheKey, long variant,
+        Func<DuckDB.NET.Data.DuckDBConnection, CancellationToken, Task<object?>> read, CancellationToken cancellationToken)
+    {
+        var generation = _duckDb.ArchiveViewGeneration;
+        ArchiveGenerationSampledForTests?.Invoke();
+        return await _archiveWatermarks.GetOrReadAsync(cacheKey, generation, async () =>
+        {
+            using var slot = await _archiveReadLimiter.EnterAsync(cancellationToken);
+            ArchiveReadStepForTests?.Invoke("limiter");
+            using var readLock = _duckDb.AcquireReadLock(cancellationToken);
+            ArchiveReadStepForTests?.Invoke("readlock");
+            using var conn = _duckDb.CreateConnection();
+            await conn.OpenAsync(cancellationToken);
+            ArchiveReadStepForTests?.Invoke("read");
+            Interlocked.Increment(ref _archiveViewReads);
+            return await read(conn, cancellationToken);
+        }, variant, cancellationToken);
     }
 
     /// <summary>Row shape for the two-column twin read: (UTC twin maximum, declared column maximum), either may be null.</summary>

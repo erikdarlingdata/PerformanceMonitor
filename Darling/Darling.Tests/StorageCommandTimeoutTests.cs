@@ -272,13 +272,52 @@ public sealed class StorageCommandTimeoutTests
 
         Assert.True(Directory.Exists(dir), $"storage project directory not found: {dir}");
 
-        var paths = Directory.EnumerateFiles(dir, "*.cs", SearchOption.TopDirectoryOnly)
+        var paths = Directory.EnumerateFiles(dir, "*.cs", SearchOption.AllDirectories)
+            .Where(p => !IsBuildOutput(dir, p))
             .OrderBy(p => p, System.StringComparer.Ordinal)
             .ToArray();
 
         Assert.True(paths.Length >= 30, $"the storage sweep found only {paths.Length} files — the project has moved");
 
         return paths;
+    }
+
+    /// <summary>
+    /// True when a path sits under the project's <c>bin</c> or <c>obj</c> tree. Compared as PATH
+    /// SEGMENTS, so a source file that merely has "obj" in its name is not excluded.
+    /// </summary>
+    private static bool IsBuildOutput(string projectDir, string path)
+    {
+        var relative = Path.GetRelativePath(projectDir, path);
+        var segments = relative.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+
+        return segments.Any(s =>
+            string.Equals(s, "bin", System.StringComparison.OrdinalIgnoreCase)
+            || string.Equals(s, "obj", System.StringComparison.OrdinalIgnoreCase));
+    }
+
+    /// <summary>The sweep descends into Storage subfolders, so the FinOps readers' commands are covered.</summary>
+    [Fact]
+    public void TheStorageSweep_IncludesTheSubfolders_AndTheFinOpsReader()
+    {
+        var dir = Path.Combine(RepoRoot(), "Darling", "PerformanceMonitor.Darling.Storage");
+        var swept = StorageSources().Select(p => p.Replace('\\', '/')).ToArray();
+
+        Assert.Contains(swept, p => p.EndsWith("/FinOps/DarlingFinOpsHighImpactReader.cs", System.StringComparison.Ordinal));
+        Assert.DoesNotContain(StorageSources(), p => IsBuildOutput(dir, p));
+    }
+
+    /// <summary>The bin/obj rule compares whole path segments, relative to the project folder.</summary>
+    [Theory]
+    [InlineData("obj/Debug/x.cs", true)]
+    [InlineData("bin/Release/x.cs", true)]
+    [InlineData("Robj/x.cs", false)]
+    [InlineData("FinOps/objects.cs", false)]
+    public void IsBuildOutput_MatchesWholeSegmentsOnly(string relative, bool expected)
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "proj");
+
+        Assert.Equal(expected, IsBuildOutput(dir, Path.Combine(dir, relative)));
     }
 
     private static string RepoRoot([CallerFilePath] string thisFile = "")

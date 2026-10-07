@@ -319,7 +319,8 @@ public class WebhookAlertService
                reads the RENDERED incidents, so the anchor names an incident the card actually shows. */
             var triageUrl = TriageLink.Build(
                 _settings.TriageBaseUrl, serverName, metricName, nowUtc,
-                DerivePagerDutyDedupKey(string.IsNullOrEmpty(serverId) ? serverName : serverId, metricName, renderContext));
+                DerivePagerDutyDedupKeyForSend(
+                    string.IsNullOrEmpty(serverId) ? serverName : serverId, metricName, renderContext, _settings));
 
             /* #3598: WHERE each channel posts, resolved ONCE for the whole fan-out and AFTER the cooldown and
                the budget above (design point 2) — so one firing is one delivery decision regardless of where
@@ -328,18 +329,23 @@ public class WebhookAlertService
                IS the settings member the four gates above read, so the fan-out is the pre-routes one byte
                for byte. A channel that resolves to nothing is not attempted, exactly as an unconfigured one
                was not. The decision rides the result so the deliverer can record it on the history row. */
-            var route = NotificationRouter.Resolve(metricName, _settings.NotificationRoutes, _settings);
+            /* #5366: ONE snapshot of the webhook settings for this whole delivery. The routing decision above and
+               every channel's URL, headers, body template and proxy below read from it, so a saved setting that
+               changes while the posts are in flight cannot send a later channel somewhere the decision did not
+               name. With an adapter that does not override SnapshotForDelivery (Lite) it is the live settings. */
+            var delivery = _settings.SnapshotForDelivery();
+            var route = NotificationRouter.Resolve(metricName, delivery.NotificationRoutes, delivery);
 
             if (route.Teams.Destination is { } teamsUrl)
             {
                 attempted = true;
-                Record(NotificationRouter.TeamsChannel, await TrySendTeamsAlertAsync(teamsUrl, metricName, serverName, currentValue, thresholdValue, renderContext, triageUrl, prose, nowUtc, displayName, cancellationToken));
+                Record(NotificationRouter.TeamsChannel, await TrySendTeamsAlertAsync(delivery, teamsUrl, metricName, serverName, currentValue, thresholdValue, renderContext, triageUrl, prose, nowUtc, displayName, cancellationToken));
             }
 
             if (route.Slack.Destination is { } slackUrl)
             {
                 attempted = true;
-                Record(NotificationRouter.SlackChannel, await TrySendSlackAlertAsync(slackUrl, metricName, serverName, currentValue, thresholdValue, renderContext, triageUrl, prose, nowUtc, displayName, cancellationToken));
+                Record(NotificationRouter.SlackChannel, await TrySendSlackAlertAsync(delivery, slackUrl, metricName, serverName, currentValue, thresholdValue, renderContext, triageUrl, prose, nowUtc, displayName, cancellationToken));
             }
 
             if (route.Generic.Destination is { } genericUrl)
@@ -348,13 +354,34 @@ public class WebhookAlertService
                    so it stays the immutable metric name — the display name is a human-title concern only, and
                    this channel has no title. The prose detail DOES go, because it is alert content. */
                 attempted = true;
-                Record(NotificationRouter.GenericChannel, await TrySendGenericAlertAsync(genericUrl, metricName, serverName, currentValue, thresholdValue, serverId, renderContext, triageUrl, prose, nowUtc, cancellationToken));
+                Record(NotificationRouter.GenericChannel, await TrySendGenericAlertAsync(delivery, genericUrl, metricName, serverName, currentValue, thresholdValue, serverId, renderContext, triageUrl, prose, nowUtc, cancellationToken));
             }
 
             if (route.PagerDuty.Destination is { } pagerDutyKey)
             {
                 attempted = true;
-                Record(NotificationRouter.PagerDutyChannel, await TrySendPagerDutyAlertAsync(pagerDutyKey, metricName, serverName, currentValue, thresholdValue, serverId, renderContext, triageUrl, prose, nowUtc, displayName, cancellationToken));
+                var pagerDutyError = await TrySendPagerDutyAlertAsync(delivery, pagerDutyKey, metricName, serverName, currentValue, thresholdValue, serverId, renderContext, triageUrl, prose, nowUtc, displayName, cancellationToken);
+                Record(NotificationRouter.PagerDutyChannel, pagerDutyError);
+
+                /* With auto-resolve on, a DELIVERED close re-opens the lifecycle: the cooldown entry the
+                   pair's FIRING left behind describes an incident PagerDuty just closed, so without the
+                   clear the NEXT firing replays against that stamp and never posts (and the seeded
+                   history row keeps the pattern alive across a restart until the entry lapses). The clear
+                   runs only here — a resolve that actually posts — not on throttle, fold, or error paths,
+                   and it names exactly the pair's firing metric, so a failed close never re-arms an outage
+                   whose incident may still be open in PagerDuty. */
+                if (pagerDutyError is null
+                    && delivery.PagerDutyAutoResolve
+                    && AlertFamily.RecoveryPairs.TryGetValue(metricName, out var clearedFiring))
+                {
+                    /* Accepted (review point on the AG pair): this clear is per SERVER + pair — the
+                       metric-level key — not per replica, so one replica's reconnect also re-arms a
+                       sibling replica that is still down on the same server. Cost accepted and bounded:
+                       the re-armed entry only bites a NEW firing, and the sibling's open incident is still
+                       its own per-replica PagerDuty incident (the dedup key carries the identity), so the
+                       worst case is a re-post inside that sibling's window, not a lost resolve. */
+                    _cooldown.ClearMetric(serverId, clearedFiring);
+                }
             }
 
             if (sent)
@@ -554,6 +581,7 @@ public class WebhookAlertService
     /// (#3598) — the parent's URL when no route touched this firing — while the proxy stays the parent's:
     /// a route says where a family lands, not how the channel type is reached.</summary>
     private async Task<string?> TrySendTeamsAlertAsync(
+        IAlertSettings settings,
         string webhookUrl,
         string metricName,
         string serverName,
@@ -570,7 +598,7 @@ public class WebhookAlertService
         {
             var payload = BuildTeamsPayload(metricName, serverName, currentValue, thresholdValue, _branding, context: context, triageUrl: triageUrl,
                 detailText: detailText, displayName: displayName, nowUtc: nowUtc);
-            var error = await PostWebhookAsync(webhookUrl, payload, _settings.TeamsProxyAddress, cancellationToken: cancellationToken);
+            var error = await PostWebhookAsync(webhookUrl, payload, settings.TeamsProxyAddress, cancellationToken: cancellationToken);
 
             if (error != null)
             {
@@ -870,6 +898,7 @@ public class WebhookAlertService
     /// <summary>Posts to Slack. Null when the post succeeded, the error text when it did not — see
     /// <see cref="TrySendTeamsAlertAsync"/>, including for the routed <paramref name="webhookUrl"/>.</summary>
     private async Task<string?> TrySendSlackAlertAsync(
+        IAlertSettings settings,
         string webhookUrl,
         string metricName,
         string serverName,
@@ -886,7 +915,7 @@ public class WebhookAlertService
         {
             var payload = BuildSlackPayload(metricName, serverName, currentValue, thresholdValue, _branding, context: context, triageUrl: triageUrl,
                 detailText: detailText, displayName: displayName, nowUtc: nowUtc);
-            var error = await PostWebhookAsync(webhookUrl, payload, _settings.SlackProxyAddress, cancellationToken: cancellationToken);
+            var error = await PostWebhookAsync(webhookUrl, payload, settings.SlackProxyAddress, cancellationToken: cancellationToken);
 
             if (error != null)
             {
@@ -1872,6 +1901,7 @@ public class WebhookAlertService
     /// too: an operator config error still delivers nothing, and naming it is the difference between a
     /// fixable row and a bare "failed".</summary>
     private async Task<string?> TrySendGenericAlertAsync(
+        IAlertSettings settings,
         string webhookUrl,
         string metricName,
         string serverName,
@@ -1889,15 +1919,23 @@ public class WebhookAlertService
             /* A malformed headers JSON / body template is an operator config error, not a transport
                failure — but it still counts as a failure so the health surface and the log throttle
                report a channel that is delivering nothing, and it must never throw into the alert loop. */
-            if (!TryParseHeaders(_settings.GenericWebhookHeadersJson, out var headers, out var headerError))
+            if (!TryParseHeaders(settings.GenericWebhookHeadersJson, out var headers, out var headerError))
             {
                 RecordGenericFailure(headerError!);
                 return headerError;
             }
 
+            /* #5366: the configured headers go only to the generic URL itself or a path under it on the same
+               scheme, host and port. A route to any other URL gets the body but not the headers. */
+            if (headers.Count > 0 && !HeadersApplyTo(webhookUrl, settings.GenericWebhookUrl))
+            {
+                headers = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                _logger.LogInformation("Generic webhook headers were not sent: the routed endpoint is not the generic URL or a path under it");
+            }
+
             var payload = BuildGenericPayload(
                 metricName, serverName, currentValue, thresholdValue, _branding,
-                context: context, bodyTemplate: _settings.GenericWebhookBodyTemplate, serverId: serverId,
+                context: context, bodyTemplate: settings.GenericWebhookBodyTemplate, serverId: serverId,
                 triageUrl: triageUrl, detailText: detailText, nowUtc: nowUtc);
 
             if (!IsWellFormedJson(payload, out var bodyError))
@@ -1909,7 +1947,7 @@ public class WebhookAlertService
             /* #3598: the routed endpoint; headers, body template and proxy stay the parent's — a route
                redirects the POST, it does not re-author it. */
             var error = await PostWebhookAsync(
-                webhookUrl, payload, _settings.GenericWebhookProxyAddress, headers, cancellationToken);
+                webhookUrl, payload, settings.GenericWebhookProxyAddress, headers, cancellationToken);
 
             if (error != null)
             {
@@ -1937,6 +1975,47 @@ public class WebhookAlertService
             _logger.LogError($"Generic webhook error: {ex.Message}");
             return ex.Message;
         }
+    }
+
+    /// <summary>Whether the generic headers go to <paramref name="routeUrl"/> (#5366): it has the same scheme, host
+    /// and port as <paramref name="genericUrl"/>, and its path is the generic path or continues it at a "/"
+    /// boundary, so "/alerts" covers "/alerts" and "/alerts/team-a" but not "/alerts2" or "/other". Paths compare
+    /// case-sensitively after URI parsing; the query string is ignored. A generic URL whose path is "/" covers
+    /// only a route whose path is exactly "/", and a route path containing %2F or %5C (any case) matches nothing.
+    /// Text that is not an absolute URL matches nothing, not even itself.</summary>
+    internal static bool HeadersApplyTo(string? routeUrl, string? genericUrl)
+    {
+        if (!Uri.TryCreate(routeUrl?.Trim(), UriKind.Absolute, out var a) || !Uri.TryCreate(genericUrl?.Trim(), UriKind.Absolute, out var b))
+        {
+            return false;
+        }
+
+        if (!string.Equals(a.Scheme, b.Scheme, StringComparison.OrdinalIgnoreCase)
+            || !string.Equals(a.IdnHost, b.IdnHost, StringComparison.OrdinalIgnoreCase)
+            || a.Port != b.Port)
+        {
+            return false;
+        }
+
+        var genericPath = b.AbsolutePath.TrimEnd('/');
+        var routePath = a.AbsolutePath;
+
+        /* A route path with an encoded slash or backslash does not take the headers: the "/" boundary below is for
+           plain paths only. */
+        if (routePath.Contains("%2F", StringComparison.OrdinalIgnoreCase) || routePath.Contains("%5C", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        /* A generic URL at the site root has an empty path here: it covers only the root itself, not every path
+           on the host. */
+        if (genericPath.Length == 0)
+        {
+            return routePath == "/";
+        }
+
+        return routePath.Equals(genericPath, StringComparison.Ordinal)
+            || routePath.StartsWith(genericPath + "/", StringComparison.Ordinal);
     }
 
     /* The Teams/Slack log-throttle shape (loud for the first 3, then every 50th) — factored out only
@@ -2381,9 +2460,12 @@ public class WebhookAlertService
 
     #region PagerDuty
 
+    internal Func<string, string, Task<string?>>? PostPagerDutyAsyncOverride { get; set; }
+
     /// <summary>Posts to PagerDuty Events v2. Null when the post succeeded, the error text when it did not
     /// — see <see cref="TrySendTeamsAlertAsync"/>.</summary>
     private async Task<string?> TrySendPagerDutyAlertAsync(
+        IAlertSettings settings,
         string routingKey,
         string metricName,
         string serverName,
@@ -2402,17 +2484,26 @@ public class WebhookAlertService
             /* Derive the dedup_key from the same fingerprint the cooldown uses, so repeated alerts for
                the same ongoing incident correlate into one PagerDuty alert. Falls back to a stable
                metric+server key when there is no incident. */
-            var dedupKey = DerivePagerDutyDedupKey(serverId, metricName, context);
+            var dedupKey = DerivePagerDutyDedupKeyForSend(serverId, metricName, context, settings);
 
             /* #3598: the routed routing key (a PagerDuty SERVICE is a destination); the EU-region flag and
                proxy stay the parent's. */
             var payload = BuildPagerDutyPayload(
                 metricName, serverName, currentValue, thresholdValue, _branding,
                 routingKey, context: context, dedupKey: dedupKey, triageUrl: triageUrl,
-                detailText: detailText, displayName: displayName, nowUtc: nowUtc);
+                detailText: detailText, displayName: displayName, nowUtc: nowUtc,
+                autoResolve: settings.PagerDutyAutoResolve);
 
-            var endpoint = PagerDutyEndpoint(_settings.PagerDutyUseEuRegion);
-            var error = await PostWebhookAsync(endpoint, payload, _settings.PagerDutyProxyAddress, cancellationToken: cancellationToken);
+            /* #4752: test-only override for the PagerDuty send above (below). A test funneling an
+               alert THROUGH the service must read the payload the wire saw — which a real post won't let
+               it, because the only POST the PagerDuty body has ever taken spells the fixed Events v2
+               production endpoint (it is not routed, unlike the token channels). The override answers the
+               send and captures the payload instead; it is on the instance (not static), so one test's
+               capture can never leak into another's run. Production construction sites never set it. */
+            var endpoint = PagerDutyEndpoint(settings.PagerDutyUseEuRegion);
+            var error = PostPagerDutyAsyncOverride is not null
+                ? await PostPagerDutyAsyncOverride(endpoint, payload)
+                : await PostWebhookAsync(endpoint, payload, settings.PagerDutyProxyAddress, cancellationToken: cancellationToken);
 
             if (error != null)
             {
@@ -2450,9 +2541,13 @@ public class WebhookAlertService
     }
 
     /// <summary>
-    /// Builds a PagerDuty Events API v2 payload. Always sends event_action: "trigger" (no resolve wiring —
-    /// matches Teams/Slack/Generic which also don't deliver "Cleared" notifications). The dedup_key correlates
-    /// repeated triggers for the same ongoing incident into one PagerDuty alert.
+    /// Builds a PagerDuty Events API v2 payload. Firing conditions send event_action: "trigger". The CLOSING
+    /// edge of an edge-type alert pair (<see cref="AlertFamily.RecoveryPairs"/> — "Server Restored",
+    /// "AG Replica Reconnected") sends "resolve" ONLY when <paramref name="autoResolve"/> is set — an opt-in,
+    /// PagerDuty-only auto-close of the incident its firing edge's trigger opened — otherwise it is an
+    /// info-severity trigger on the same dedup_key and the incident stays open. Teams/Slack/Generic still
+    /// deliver no "Cleared" notifications; this is PagerDuty's own incident lifecycle. The dedup_key
+    /// correlates repeated triggers for the same ongoing incident into one PagerDuty alert.
     /// <para>#2710: a non-null <paramref name="triageUrl"/> rides in BOTH the Events v2 <c>links</c> array
     /// (which PD renders as a first-class link on the alert) and <c>custom_details["Triage"]</c> (so an
     /// integration reading only the details table still gets it). Null renders the pre-#2710 payload — no
@@ -2476,7 +2571,8 @@ public class WebhookAlertService
         string? triageUrl = null,
         string? detailText = null,
         string? displayName = null,
-        DateTime? nowUtc = null)
+        DateTime? nowUtc = null,
+        bool autoResolve = false)
     {
         var (_, badgeText, _) = AlertSeverity.ForMetric(metricName, context?.SeverityOverride);
         var severity = MapToPagerDutySeverity(badgeText);
@@ -2484,6 +2580,16 @@ public class WebhookAlertService
            dedup_key below stay on the immutable metric name so correlation/dedup are rename-safe. */
         var titleName = string.IsNullOrEmpty(displayName) ? metricName : displayName;
         var utcNow = nowUtc ?? DateTime.UtcNow;
+
+        /* Auto-resolve is opt-in and PagerDuty-only: the closing edge of an edge-type pair (the
+           <see cref="AlertFamily.RecoveryPairs"/> census — connection restore, replica reconnect) closes the
+           incident its firing edge's trigger opened, via event_action "resolve" on the SAME dedup_key. Off
+           (the default), the closing edge is an info-severity trigger and the incident stays open, so the
+           tool never auto-resolves a third-party incident unasked. A test notification always triggers (it
+           carries a throwaway key and has no incident to close). */
+        var eventAction = !isTest && autoResolve && AlertFamily.RecoveryPairs.ContainsKey(metricName)
+            ? "resolve"
+            : "trigger";
 
         /* PD-CEF caps summary at 1024 chars — no truncation needed given the source strings, but document
            the constraint matching this codebase's habit of documenting limits even when unreachable. */
@@ -2499,8 +2605,11 @@ public class WebhookAlertService
             isTest, branding, context, triageUrl, AlertDetailText.ProseForDelivery(detailText, context));
 
         /* Derive dedup_key from the incident fingerprint when not explicitly provided, falling back to a
-           stable metric+server key. This ensures PagerDuty correlates repeated alerts for the same incident. */
-        var effectiveDedupKey = dedupKey ?? DerivePagerDutyDedupKey(serverId ?? serverName, metricName, context);
+           stable metric+server key. This ensures PagerDuty correlates repeated alerts for the same incident.
+           Carries the operator's auto-resolve choice so the resolve lands on the same key the trigger opened:
+           the paired-lifecycle rename only applies when the flag is on (off keeps the shipped keys). */
+        var effectiveDedupKey = dedupKey ?? DerivePagerDutyDedupKey(serverId ?? serverName, metricName, context,
+            autoResolve: autoResolve);
 
         /* A string-keyed dictionary rather than the previous anonymous type, so the #2710 links array can be
            present-or-absent (Events v2 accepts links: [] but an absent key is the honest "no link" shape and
@@ -2509,7 +2618,7 @@ public class WebhookAlertService
         var payload = new Dictionary<string, object>
         {
             ["routing_key"] = routingKey,
-            ["event_action"] = "trigger",
+            ["event_action"] = eventAction,
             ["dedup_key"] = effectiveDedupKey,
             ["payload"] = new
             {
@@ -2619,15 +2728,76 @@ public class WebhookAlertService
     }
 
     /// <summary>
+    /// The send-path twin of <see cref="DerivePagerDutyDedupKey"/>: the same key derivation, with the
+    /// operator's PagerDutyAutoResolve choice already read from <paramref name="settings"/>, so the live
+    /// call sites stay one-liners rather than each repeating it. Static: it reads a settings parameter,
+    /// not the service's own — this is also what lets the email path (which holds a WebhookAlertService
+    /// only for the fan-out) and the test path pass their own.
+    /// </summary>
+    internal static string DerivePagerDutyDedupKeyForSend(string serverId, string metricName, AlertContext? context, IAlertSettings settings) =>
+        DerivePagerDutyDedupKey(serverId, metricName, context, settings.PagerDutyAutoResolve);
+
+    /// <summary>
     /// Derives the PagerDuty dedup_key from the same fingerprint the cooldown uses, so repeated alerts for
-    /// the same ongoing incident correlate into one PagerDuty alert. Falls back to a stable metric+server
-    /// key when there is no incident (mirrors the cooldown's own "no incidents → metric-level fallback key" rule).
+    /// the same ongoing incident correlate into one PagerDuty alert. Falls back to a stable server+incident
+    /// key when there is no incident (mirrors the cooldown's own "no incidents → metric-level fallback key"
+    /// rule).
+    ///
+    /// <para><b>Edge pairs are renamed to their incident — but only when the operator asked for the paired
+    /// lifecycle.</b> The edge-type alerts ("Server Unreachable" / "Server Restored", "AG Replica
+    /// Disconnected" / "AG Replica Reconnected") are two halves of ONE incident, so when
+    /// <paramref name="autoResolve"/> is on both edges derive the key from the pair's canonical FIRING name
+    /// (<see cref="AlertFamily.RecoveryPairs"/>) instead of keying on the metric name: the name encodes the
+    /// current STATE, so using it minted a distinct dedup_key per edge and PagerDuty showed two incidents for
+    /// one outage (and a closing edge could never resolve the open one — its key named a different
+    /// incident). Every future pair added to that census joins this by construction. With the default off,
+    /// each edge keeps its own state-named key, so the generic <c>{{dedup_key}}</c> token and the triage link
+    /// read exactly as they did before this rung: correlation is an opt-in behaviour change, scoped entirely
+    /// to the operator who switched it on.</para>
+    ///
+    /// <para>The AG pair's key is also scoped per replica: "{serverId}:AG Replica Disconnected:{ag}:{replica}"
+    /// from <see cref="AlertContext.AgReplicaIdentity"/>. Without that there is still one key per SERVER for
+    /// the whole group: with auto-resolve on, one replica's reconnect would resolve the incident a
+    /// still-disconnected sibling is still holding open (and with the re-fire defaulting to 0, nothing opens
+    /// it again). The identity is a single "AG:replica" member (not two) so it can't be set half-way; a pair
+    /// that arrives WITHOUT the identity keeps the old server-level key rather than failing the render —
+    /// the per-replica key is the better incident, not a contract, and a deploy that hasn't applied the new
+    /// fire sites yet still converges to one key per server per firing.</para>
+    ///
+    /// <para>The rename runs before the incident-fingerprint path on purpose: a closing edge that ever
+    /// carried incident fingerprints would hash them under its own state name and split the pair again, and
+    /// the deliverable recovery set is pinned to stateless notices — the incident identity IS the firing's
+    /// canonical name. All three consumers of this helper (PagerDuty, the generic <c>{{dedup_key}}</c>
+    /// token, and the triage link) share the normalized key, which is the cross-channel correlation those
+    /// call sites document.</para>
     ///
     /// <para>Internal (#4220), not private: <see cref="EmailSendCore"/> reads it too, so the triage link's
     /// dedup key agrees with PagerDuty's for the same firing across every channel, email included.</para>
     /// </summary>
-    internal static string DerivePagerDutyDedupKey(string serverId, string metricName, AlertContext? context)
+    internal static string DerivePagerDutyDedupKey(string serverId, string metricName, AlertContext? context, bool autoResolve = false)
     {
+        /* The paired lifecycle, gated on the operator's opt-in: when on, BOTH edges of a pair derive the
+           firing's identity (so the pair is one incident); when off, each edge keeps its own state-named
+           key, byte-identical to the shipped behavior. IsPairedEdge covers the recovery's own name AND the
+           firing's: the closing edge's TryGetValue binds its pair's firing, and the firing edge's name is
+           recognized as the pair's incident directly — so both sides converge on it. The connection pair
+           needs no identity member (one connection state per server). The AG pair appends the "AG:replica"
+           identity its fire sites carry — one replica's reconnect must resolve only ITS incident. An AG edge
+           with no identity cannot happen from the shipped fire sites, so it keeps the per-server key rather
+           than failing the render. The AG firing literal is spelled here rather than read from
+           PerformanceMonitor.Common's AG consts: this assembly must not take that dependency. */
+        if (autoResolve && AlertFamily.IsPairedEdge(metricName))
+        {
+            var firing = AlertFamily.Canonical(metricName);
+            if (string.Equals(firing, "AG Replica Disconnected", StringComparison.Ordinal)
+                && !string.IsNullOrWhiteSpace(context?.AgReplicaIdentity))
+            {
+                return $"{serverId}:{firing}:{context!.AgReplicaIdentity}";
+            }
+
+            return $"{serverId}:{firing}";
+        }
+
         var incidents = context?.Incidents;
         if (incidents is { Count: > 0 })
         {
@@ -2704,6 +2874,15 @@ public class WebhookAlertService
 
     private static readonly ConcurrentDictionary<string, HttpClient> s_proxyClients = new();
 
+    /* #5366: a send that carries the generic headers does not follow redirects, so the headers go to the URL they
+       were set up for and nowhere else. These two clients serve only those sends; sends without headers keep the
+       clients above. */
+    private static readonly HttpClient s_defaultNoRedirectClient =
+        new(new SocketsHttpHandler { PooledConnectionLifetime = TimeSpan.FromMinutes(5), AllowAutoRedirect = false })
+        { Timeout = TimeSpan.FromSeconds(30) };
+
+    private static readonly ConcurrentDictionary<string, HttpClient> s_proxyNoRedirectClients = new();
+
     /* #4752: how long ONE webhook post may take, from the send to the last byte of the response. The pooled
        clients' 30-second Timeout stays as the outer bound and is not what a post normally meets. A delivery
        posts to up to four channels one after another, so an endpoint that accepts the connection and never
@@ -2712,17 +2891,18 @@ public class WebhookAlertService
        slower one is reported as failed, with the timeout as the reason, instead of being waited on. */
     internal static readonly TimeSpan WebhookPostTimeout = TimeSpan.FromSeconds(10);
 
-    private static HttpClient GetHttpClient(string? proxyAddress)
+    private static HttpClient GetHttpClient(string? proxyAddress, bool followRedirects = true)
     {
         if (string.IsNullOrWhiteSpace(proxyAddress))
-            return s_defaultClient;
+            return followRedirects ? s_defaultClient : s_defaultNoRedirectClient;
 
-        return s_proxyClients.GetOrAdd(proxyAddress, addr =>
+        return (followRedirects ? s_proxyClients : s_proxyNoRedirectClients).GetOrAdd(proxyAddress, addr =>
             new HttpClient(new SocketsHttpHandler
             {
                 Proxy = new WebProxy(addr),
                 UseProxy = true,
-                PooledConnectionLifetime = TimeSpan.FromMinutes(5)
+                PooledConnectionLifetime = TimeSpan.FromMinutes(5),
+                AllowAutoRedirect = followRedirects
             })
             { Timeout = TimeSpan.FromSeconds(30) });
     }
@@ -2759,7 +2939,8 @@ public class WebhookAlertService
         TimeSpan postTimeout,
         CancellationToken cancellationToken)
     {
-        var client = GetHttpClient(proxyAddress);
+        var sendsHeaders = headers is { Count: > 0 };
+        var client = GetHttpClient(proxyAddress, followRedirects: !sendsHeaders);
         using var content = new StringContent(jsonPayload, Encoding.UTF8, "application/json");
         using var request = new HttpRequestMessage(HttpMethod.Post, webhookUrl) { Content = content };
 
@@ -2781,6 +2962,13 @@ public class WebhookAlertService
 
             if (response.IsSuccessStatusCode)
                 return null;
+
+            /* #5366: a redirect is not followed on a send with headers. The message names no URL and no header. */
+            if (sendsHeaders && (int)response.StatusCode is >= 300 and < 400)
+            {
+                return string.Create(CultureInfo.InvariantCulture,
+                    $"HTTP {(int)response.StatusCode}: the endpoint answered with a redirect. Set the webhook URL to the final address.");
+            }
 
             /* Cap the destination's error body: it goes into the log + the health getter, and an unbounded read
                lets a hostile/misconfigured endpoint bloat both (and, if it echoes request headers, spill more of

@@ -14,6 +14,7 @@ using Npgsql;
 using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Notifications;
 
 namespace PerformanceMonitor.Darling.Viewer;
@@ -256,34 +257,14 @@ LIMIT $2";
        the two-phase live+sidecar dismiss collapses to one atomic UPDATE — no explicit transaction
        needed. Every match is keyed the same way Lite keyed it: (alert_time, server_id, metric_name). */
 
-    /// <summary>
-    /// Dismiss the given rows by (alert_time, server_id, metric_name). One set-based UPDATE keyed off
-    /// unnested arrays (so the whole batch dismisses in a single round-trip). Already-dismissed rows are
-    /// left alone by the <c>dismissed = FALSE</c> guard.
-    /// </summary>
-    public const string DismissAlertsSql = @"
-UPDATE config_alert_log
-SET    dismissed = TRUE
-WHERE  dismissed = FALSE
-AND    (alert_time, server_id, metric_name) IN (
-    SELECT t.alert_time, t.server_id, t.metric_name
-    FROM   unnest($1::timestamp[], $2::integer[], $3::text[]) AS t(alert_time, server_id, metric_name)
-)";
+    /// <summary>The keyed dismiss UPDATE; the statement lives in <see cref="AlertDismissStore"/>, the one copy the web route shares.</summary>
+    public const string DismissAlertsSql = AlertDismissStore.DismissAlertsSql;
 
     /// <summary>Dismiss all visible rows in the window across every server. $1 window start.</summary>
-    public const string DismissAllAlertsSql = @"
-UPDATE config_alert_log
-SET    dismissed = TRUE
-WHERE  alert_time >= $1
-AND    dismissed = FALSE";
+    public const string DismissAllAlertsSql = AlertDismissStore.DismissAllAlertsSql;
 
     /// <summary>Dismiss all visible rows in the window for one server. $1 window start, $2 server_id.</summary>
-    public const string DismissAllAlertsForServerSql = @"
-UPDATE config_alert_log
-SET    dismissed = TRUE
-WHERE  alert_time >= $1
-AND    server_id = $2
-AND    dismissed = FALSE";
+    public const string DismissAllAlertsForServerSql = AlertDismissStore.DismissAllAlertsForServerSql;
 
     /// <summary>
     /// Marks the given alerts dismissed. Returns how many live rows the UPDATE actually changed
@@ -301,21 +282,14 @@ AND    dismissed = FALSE";
             return 0;
         }
 
-        var times = new DateTime[alerts.Count];
-        var ids = new int[alerts.Count];
-        var metrics = new string[alerts.Count];
+        var keys = new AlertDismissKey[alerts.Count];
         for (var i = 0; i < alerts.Count; i++)
         {
-            times[i] = DateTime.SpecifyKind(alerts[i].AlertTime, DateTimeKind.Unspecified);
-            ids[i] = alerts[i].ServerId;
-            metrics[i] = alerts[i].MetricName;
+            keys[i] = new AlertDismissKey(alerts[i].AlertTime, alerts[i].ServerId, alerts[i].MetricName);
         }
 
-        await using var command = _dataSource.CreateCommand(DismissAlertsSql);
-        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
-        command.Parameters.Add(new NpgsqlParameter { Value = times });
-        command.Parameters.Add(new NpgsqlParameter { Value = ids });
-        command.Parameters.Add(new NpgsqlParameter { Value = metrics });
+        await using var command = AlertDismissStore.CreateDismissCommand(
+            _dataSource, keys, ViewerCommandDeadlines.CurrentInteractiveReadSeconds);
 
         return await ExecuteWriteAsync(command, cancellationToken);
     }
@@ -328,17 +302,8 @@ AND    dismissed = FALSE";
     public async Task<int> DismissAllVisibleAlertsAsync(
         DateTime sinceUtc, int? serverId = null, CancellationToken cancellationToken = default)
     {
-        await using var command = _dataSource.CreateCommand(
-            serverId.HasValue ? DismissAllAlertsForServerSql : DismissAllAlertsSql);
-        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
-        command.Parameters.Add(new NpgsqlParameter<DateTime>
-        {
-            TypedValue = DateTime.SpecifyKind(sinceUtc, DateTimeKind.Unspecified),
-        });
-        if (serverId.HasValue)
-        {
-            command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId.Value });
-        }
+        await using var command = AlertDismissStore.CreateDismissAllCommand(
+            _dataSource, sinceUtc, serverId, ViewerCommandDeadlines.CurrentInteractiveReadSeconds);
 
         return await ExecuteWriteAsync(command, cancellationToken);
     }

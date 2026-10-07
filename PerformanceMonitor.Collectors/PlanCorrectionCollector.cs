@@ -12,6 +12,7 @@ using System.Data.Common;
 using System.Globalization;
 using System.Threading;
 using System.Threading.Tasks;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Collectors;
 
@@ -531,9 +532,12 @@ EXECUTE [{item.Replace("]", "]]", StringComparison.Ordinal)}].sys.sp_executesql
         ArgumentNullException.ThrowIfNull(reader);
         ArgumentNullException.ThrowIfNull(rows);
 
+        /* #4348: statement text and the implementation script are judged where they first enter a Row. */
+        var scrub = context.BeginStatementScrub();
+
         while (await reader.ReadAsync(cancellationToken))
         {
-            rows.Add(ReadRow(reader, item));
+            rows.Add(ReadRow(reader, item, scrub));
         }
     }
 
@@ -545,17 +549,18 @@ EXECUTE [{item.Replace("]", "]]", StringComparison.Ordinal)}].sys.sp_executesql
 
         var rows = new List<Row>();
         var databaseName = context.CurrentDatabaseName ?? "";
+        var scrub = context.BeginStatementScrub();
 
         while (await reader.ReadAsync(cancellationToken))
         {
-            rows.Add(ReadRow(reader, databaseName));
+            rows.Add(ReadRow(reader, databaseName, scrub));
         }
 
         return rows;
     }
 
     /// <summary>Ordinals follow <see cref="PayloadBodyText"/>'s SELECT list, which follows PayloadColumns.</summary>
-    private static Row ReadRow(DbDataReader reader, string databaseName) =>
+    private static Row ReadRow(DbDataReader reader, string databaseName, SensitiveStatements.Session scrub) =>
         new()
         {
             DbName = databaseName,
@@ -573,7 +578,7 @@ EXECUTE [{item.Replace("]", "]]", StringComparison.Ordinal)}].sys.sp_executesql
             LastRefresh = NullableDateTime(reader, 11),
             Score = NullableInt(reader, 12),
             QueryId = NullableLong(reader, 13),
-            QueryText = NullableString(reader, 14),
+            QueryText = scrub.Text(NullableString(reader, 14)),
             RegressedPlanId = NullableLong(reader, 15),
             LastGoodPlanId = NullableLong(reader, 16),
             LastGoodPlanForcingType = NullableString(reader, 17),
@@ -596,7 +601,7 @@ EXECUTE [{item.Replace("]", "]]", StringComparison.Ordinal)}].sys.sp_executesql
             RevertActionInitiatedTime = NullableDateTime(reader, 34),
             RevertActionStartTime = NullableDateTime(reader, 35),
             RevertActionDurationSeconds = NullableDouble(reader, 36),
-            ImplementationScript = NullableString(reader, 37),
+            ImplementationScript = scrub.Text(NullableString(reader, 37)),
         };
 
     private static string? NullableString(DbDataReader reader, int ordinal) =>

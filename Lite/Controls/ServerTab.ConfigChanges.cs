@@ -67,6 +67,7 @@ public partial class ServerTab : UserControl
         _serverConfigChangesFilterMgr!.UpdateData(data);
         ShowEngineGap(ServerConfigChangesNoDataMessage, "server_config", data.Count, keepsOwnEmptyText: true);
         ServerConfigChangesCountIndicator.Text = data.Count > 0 ? $"{data.Count} change(s)" : "";
+        await RefreshStoredWindowBannerAsync(QueryWindowRelation.ServerConfig, ServerConfigChangesWindowTruncatedBanner, hoursBack, fromDate, toDate);
     }
 
     private async System.Threading.Tasks.Task LoadDatabaseConfigChangesAsync(int hoursBack, DateTime? fromDate, DateTime? toDate)
@@ -75,6 +76,7 @@ public partial class ServerTab : UserControl
         _databaseConfigChangesFilterMgr!.UpdateData(data);
         DatabaseConfigChangesNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
         DatabaseConfigChangesCountIndicator.Text = data.Count > 0 ? $"{data.Count} change(s)" : "";
+        await RefreshStoredWindowBannerAsync(QueryWindowRelation.DatabaseConfig, DatabaseConfigChangesWindowTruncatedBanner, hoursBack, fromDate, toDate);
     }
 
     private async System.Threading.Tasks.Task LoadTraceFlagChangesAsync(int hoursBack, DateTime? fromDate, DateTime? toDate)
@@ -83,6 +85,7 @@ public partial class ServerTab : UserControl
         _traceFlagChangesFilterMgr!.UpdateData(data);
         ShowEngineGap(TraceFlagChangesNoDataMessage, "trace_flags", data.Count, keepsOwnEmptyText: true);
         TraceFlagChangesCountIndicator.Text = data.Count > 0 ? $"{data.Count} change(s)" : "";
+        await RefreshStoredWindowBannerAsync(QueryWindowRelation.TraceFlags, TraceFlagChangesWindowTruncatedBanner, hoursBack, fromDate, toDate);
     }
 
     /// <summary>The per-sub-tab Refresh button reloads the active Configuration Changes sub-tab over the

@@ -156,6 +156,45 @@ public sealed class DarlingSweepSchedulingTests
     }
 
     /// <summary>
+    /// #4938: known (id, period) pairs keep their offsets, as literal whole seconds worked out on paper from
+    /// <c>(uint)id % period</c>, so a change of formula, cast or home cannot move a server's phase unseen. The
+    /// shared run-time rules take their per-server spread from this same function at a 3600-second period, a period
+    /// the other pins here do not reach. Negative and extreme ids are the ones a signed modulo would get wrong.
+    /// </summary>
+    [Theory]
+    [InlineData(1, 150, 1)]
+    [InlineData(59, 150, 59)]
+    [InlineData(3599, 150, 149)]
+    [InlineData(123456789, 150, 39)]
+    [InlineData(-1, 150, 45)]
+    [InlineData(-123456789, 150, 7)]
+    [InlineData(int.MaxValue, 150, 97)]
+    [InlineData(int.MinValue, 150, 98)]
+    [InlineData(1, 1800, 1)]
+    [InlineData(59, 1800, 59)]
+    [InlineData(3599, 1800, 1799)]
+    [InlineData(123456789, 1800, 189)]
+    [InlineData(-1, 1800, 1695)]
+    [InlineData(-123456789, 1800, 1507)]
+    [InlineData(int.MaxValue, 1800, 847)]
+    [InlineData(int.MinValue, 1800, 848)]
+    [InlineData(1, 3600, 1)]
+    [InlineData(59, 3600, 59)]
+    [InlineData(3599, 3600, 3599)]
+    [InlineData(123456789, 3600, 1989)]
+    [InlineData(-1, 3600, 1695)]
+    [InlineData(-123456789, 3600, 3307)]
+    [InlineData(int.MaxValue, 3600, 847)]
+    [InlineData(int.MinValue, 3600, 848)]
+    public void CadencePhaseOffset_KnownIdsAndPeriods_KeepTheirValues(int serverId, int periodSeconds, int expectedSeconds)
+    {
+        Assert.Equal(TimeSpan.FromSeconds(expectedSeconds), CollectorCadence.CadencePhaseOffset(serverId, periodSeconds));
+
+        /* The worker's own member forwards to the shared one, so the seams that call it keep the same values. */
+        Assert.Equal(TimeSpan.FromSeconds(expectedSeconds), DarlingWorker.CadencePhaseOffset(serverId, periodSeconds));
+    }
+
+    /// <summary>
     /// The bounded per-server sweep concurrency is pinned at 4 (a cheap drift tripwire). Hardcoded by design —
     /// defaults-over-config, no control-plane knob: 4 clears a 24-server worst case in ~6 waves while the 120s
     /// analysis budget stays de-clustered by the cadence jitter (the plan's N=4 rationale). A change here is a

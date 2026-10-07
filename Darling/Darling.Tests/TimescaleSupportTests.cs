@@ -150,10 +150,29 @@ public sealed class TimescaleSupportTests
                 TimescaleSupport.AddCompressionPolicySql(schema), StringComparison.Ordinal);
         }
 
-        /* collection_log gets the identical compression via the raw-name overloads (the runtime path). */
+        /* collection_log gets its compression via the raw-name overloads (the runtime path), segmented by
+           collector as well as by server (#4951): its reads ask for one collector on one server, so a
+           server_id-only segment made every such read decompress every collector's runs on that server. */
         Assert.Equal(
-            "ALTER TABLE collection_log SET (timescaledb.compress, timescaledb.compress_segmentby = 'server_id')",
+            "ALTER TABLE collection_log SET (timescaledb.compress, timescaledb.compress_segmentby = 'server_id, collector_name')",
             TimescaleSupport.EnableCompressionSql(TimescaleSupport.CollectionLogTable));
+
+        /* The one lookup behind both the statement and the convergence read: collection_log alone gets the
+           collector column, every collector table keeps server_id, and collection_log's ALTER waits a bounded
+           time for its lock. */
+        Assert.Equal("server_id, collector_name", TimescaleSupport.CollectionLogSegmentBy);
+        Assert.Equal(TimescaleSupport.CollectionLogSegmentBy, TimescaleSupport.CompressionSegmentByFor(TimescaleSupport.CollectionLogTable));
+        Assert.All(CollectorCatalog.All, schema => Assert.Equal("server_id", TimescaleSupport.CompressionSegmentByFor(schema.TargetTable)));
+
+        /* Callers spell tables both ways ("collect.x" and bare "x"). A schema-qualified collection_log must get the
+           same value as the bare name the convergence read compares against, or the read never sees the table as
+           converged and every hourly pass issues the ALTER (#3817's divergence, reached through a spelling). */
+        Assert.Equal(TimescaleSupport.CollectionLogSegmentBy, TimescaleSupport.CompressionSegmentByFor("collect." + TimescaleSupport.CollectionLogTable));
+        Assert.Equal(
+            "ALTER TABLE collect.collection_log SET (timescaledb.compress, timescaledb.compress_segmentby = 'server_id, collector_name')",
+            TimescaleSupport.EnableCompressionSql("collect." + TimescaleSupport.CollectionLogTable));
+        Assert.All(CollectorCatalog.All, schema => Assert.Equal("server_id", TimescaleSupport.CompressionSegmentByFor("collect." + schema.TargetTable)));
+        Assert.Equal("3s", TimescaleSupport.HourlyDdlLockTimeout);
         Assert.True(TimescaleSupport.TryCompressionPhaseMinutesFor(TimescaleSupport.CollectionLogTable, out var logPhase));
         Assert.Equal(
             "SELECT add_compression_policy('collection_log', compress_after => INTERVAL '1 days', schedule_interval => INTERVAL '1 hour', if_not_exists => true, "
@@ -287,6 +306,40 @@ public sealed class TimescaleSupportTests
            the point is that last_run_started_at is never read raw. */
         Assert.Contains("NULLIF(js.last_run_started_at, '-infinity'::timestamptz)",
             TimescaleSupport.StuckPolicyJobsSql, StringComparison.Ordinal);
+    }
+
+    /* ---------------- collection_log's settings change, by TimescaleDB version (#4951) ---------------- */
+
+    [Theory]
+    [InlineData("2.13.0")]
+    [InlineData("2.13.1")]
+    [InlineData("2.13.1-dev")]
+    public void CollectionLogSettingsChange_BelowTheRelease_WaitsWhileAChunkIsCompressed(string extversion)
+    {
+        /* Before 2.14 TimescaleDB refuses a compression-settings change while any chunk is compressed, so the
+           ensure skips it there; with no compressed chunk, any 2.x takes the ALTER. */
+        var version = TimescaleSupport.ParseTimescaleVersion(extversion);
+        Assert.NotNull(version);
+        Assert.True(TimescaleSupport.CompressionSettingsChangeBlocked(version, hasCompressedChunks: true));
+        Assert.False(TimescaleSupport.CompressionSettingsChangeBlocked(version, hasCompressedChunks: false));
+    }
+
+    [Theory]
+    [InlineData("2.14")]
+    [InlineData("2.14.0")]
+    [InlineData("2.17.2")]
+    [InlineData("2.30.1")]
+    [InlineData(null)]
+    [InlineData("not-a-version")]
+    public void CollectionLogSettingsChange_FromTheRelease_OrUnknown_IsAttempted(string? extversion)
+    {
+        /* From 2.14 the change applies to chunks compressed after it. An unknown version is attempted too: skipping
+           it would keep a new store on the old setting forever, and a refused ALTER only rolls back and logs. A
+           two-part "2.14" must not rank below the floor, which is why the floor has two parts. */
+        Assert.Equal(new Version(2, 14), TimescaleSupport.CompressionSettingsChangeWithCompressedChunksFrom);
+        var version = TimescaleSupport.ParseTimescaleVersion(extversion);
+        Assert.False(TimescaleSupport.CompressionSettingsChangeBlocked(version, hasCompressedChunks: true));
+        Assert.False(TimescaleSupport.CompressionSettingsChangeBlocked(version, hasCompressedChunks: false));
     }
 
     /* ---------------- the -infinity arm's sentence, by TimescaleDB version (#3591) ---------------- */

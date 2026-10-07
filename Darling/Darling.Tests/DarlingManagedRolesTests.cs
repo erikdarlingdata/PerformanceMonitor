@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Text.RegularExpressions;
 using PerformanceMonitor.Darling.Service;
+using PerformanceMonitor.Darling.Storage;
 using Xunit;
 
 namespace Darling.Tests;
@@ -25,6 +26,149 @@ namespace Darling.Tests;
 /// </summary>
 public sealed class DarlingManagedRolesTests
 {
+    /// <summary>The EXECUTE grant of the edit function (#5240), as the managed batch and <c>Darling/tools/provision-roles.sql</c>
+    /// both carry it. The edit's one write goes through that function; viewer holds no UPDATE on the table.</summary>
+    private static readonly string EditGrant =
+        "GRANT EXECUTE ON FUNCTION config.edit_monitored_server(" + DarlingManagedRoles.EditMonitoredServerSignature + ") TO viewer, mcp;";
+
+    /// <summary>The REVOKE (#5240): revoking the table privilege also revokes every column privilege, so each run leaves viewer
+    /// with no UPDATE on the table and strips one granted by an earlier build or by hand.</summary>
+    private const string EditRevoke = "REVOKE UPDATE ON config.config_monitored_servers FROM viewer;";
+
+    /// <summary>
+    /// The census of viewer grants on <c>config.config_monitored_servers</c> (#4843, #5240): every uncommented GRANT that names
+    /// viewer on it, except the column-level SELECT carve, which is a read and not a write. The skip is exactly that shape, a
+    /// SELECT list in parentheses straight onto ON: a bare <c>(?!SELECT )</c> skipped every statement that merely STARTED with
+    /// SELECT, so a table-level UPDATE behind a column SELECT, or a table-level SELECT that undoes the
+    /// <c>encrypted_password</c> carve, passed the census unseen.
+    /// </summary>
+    private static string[] ViewerGrantsOnMonitoredServers(string sql) =>
+        Regex.Matches(
+                Regex.Replace(sql, @"(?m)^\s*--.*$", ""),
+                @"GRANT (?!SELECT \([^)]*\) ON )[^;]*? ON config\.config_monitored_servers TO [^;]*viewer[^;]*;")
+            .Select(m => m.Value).ToArray();
+
+    /// <summary>
+    /// The census must SEE each statement that is not a pure column-level SELECT. Each line is appended to the real batch as one
+    /// more viewer grant, and the census must then list it. Against the old <c>(?!SELECT )</c> skip the first two cases were
+    /// invisible: both start with SELECT.
+    /// </summary>
+    [Theory]
+    [InlineData("GRANT SELECT (name), UPDATE ON config.config_monitored_servers TO viewer;")]
+    [InlineData("GRANT SELECT ON config.config_monitored_servers TO viewer;")]
+    [InlineData("GRANT SELECT, UPDATE (name) ON config.config_monitored_servers TO viewer;")]
+    [InlineData("GRANT UPDATE ON config.config_monitored_servers TO viewer;")]
+    [InlineData("GRANT DELETE ON config.config_monitored_servers TO admin, viewer;")]
+    public void TheMonitoredServersCensus_ListsAnyViewerGrantThatIsNotThePureColumnSelectCarve(string extraGrant)
+    {
+        var sql = DarlingManagedRoles.BuildProvisioningSql(ProvisioningTestSecrets.Admin, ProvisioningTestSecrets.Viewer, ProvisioningTestSecrets.Mcp);
+        var shipped = ViewerGrantsOnMonitoredServers(sql);
+
+        Assert.Equal(shipped.Append(extraGrant).ToArray(), ViewerGrantsOnMonitoredServers(sql + "\n" + extraGrant));
+    }
+
+    /// <summary>The other half: the column-level SELECT carve itself stays out of the census, whatever columns it lists, so
+    /// narrowing the census did not turn the carve (a read) into a counted write.</summary>
+    [Fact]
+    public void TheMonitoredServersCensus_SkipsThePureColumnLevelSelectCarve()
+    {
+        var sql = DarlingManagedRoles.BuildProvisioningSql(ProvisioningTestSecrets.Admin, ProvisioningTestSecrets.Viewer, ProvisioningTestSecrets.Mcp);
+
+        Assert.Equal(
+            ViewerGrantsOnMonitoredServers(sql),
+            ViewerGrantsOnMonitoredServers(sql + "\nGRANT SELECT (server_id, name, host) ON config.config_monitored_servers TO viewer;"));
+    }
+
+    private static string NormalizeSql(string sql) =>
+        Regex.Replace(Regex.Replace(sql, @"(?m)^\s*--.*$", ""), @"\s+", " ").Trim();
+
+    /// <summary>
+    /// A store that is not managed is told to RE-RUN <c>Darling/tools/provision-roles.sql</c>, so that script is what it gets,
+    /// and nothing tied it to the managed batch's: the script carries the SAME edit function the batch does (text compared
+    /// with comments and spacing set aside), the same EXECUTE grant, the REVOKE of any viewer UPDATE, and never a viewer
+    /// grant on the table beyond INSERT.
+    /// </summary>
+    [Fact]
+    public void TheByoScript_CarriesTheSameEditFunction_AsTheManagedBatch()
+    {
+        var byo = Regex.Replace(RepoFile.ReadRepoFile("Darling", "tools", "provision-roles.sql"), @"(?m)^\s*--.*$", "");
+
+        Assert.Contains(NormalizeSql(DarlingManagedRoles.BuildEditMonitoredServerFunctionSql("config")), NormalizeSql(byo), StringComparison.Ordinal);
+        Assert.Contains(EditGrant, byo, StringComparison.Ordinal);
+        Assert.Contains("GRANT INSERT ON config.config_monitored_servers TO viewer;", byo, StringComparison.Ordinal);
+        Assert.DoesNotMatch(@"GRANT[^;]*\bUPDATE\b[^;]*ON config\.config_monitored_servers TO [^;]*viewer", byo);
+        Assert.Single(Regex.Matches(byo, @"REVOKE UPDATE ON config\.config_monitored_servers FROM [^;]*viewer[^;]*;"));
+        Assert.Contains(EditRevoke, byo, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The store's password rules (a trigger on <c>config_monitored_servers</c> and its function) are provisioning, not a
+    /// migration, so a managed store gets them from the batch on every start and a self-managed store from the script: the
+    /// same text in both, created idempotently, and nothing in the migrations that would move the schema version.
+    /// </summary>
+    [Fact]
+    public void TheByoScript_CarriesTheSamePasswordRules_AsTheManagedBatch()
+    {
+        var byo = Regex.Replace(RepoFile.ReadRepoFile("Darling", "tools", "provision-roles.sql"), @"(?m)^\s*--.*$", "");
+        var rules = DarlingManagedRoles.BuildServerPasswordRulesSql("config");
+        var batch = DarlingManagedRoles.BuildProvisioningSql(ProvisioningTestSecrets.Admin, ProvisioningTestSecrets.Viewer, ProvisioningTestSecrets.Mcp);
+
+        Assert.Contains(NormalizeSql(rules), NormalizeSql(byo), StringComparison.Ordinal);
+        Assert.Contains(rules, batch, StringComparison.Ordinal);
+        Assert.Contains("CREATE OR REPLACE FUNCTION config.monitored_server_password_rules()", rules, StringComparison.Ordinal);
+        Assert.Contains("CREATE OR REPLACE TRIGGER trg_monitored_server_password_rules", rules, StringComparison.Ordinal);
+        Assert.Contains("BEFORE INSERT OR UPDATE ON config.config_monitored_servers", rules, StringComparison.Ordinal);
+        Assert.DoesNotContain("monitored_server_password_rules", PgMigrations.Scripts.Aggregate("", (all, script) => all + script.Sql), StringComparison.Ordinal);
+
+        /* The edit function refuses a reference in the same two spellings the service reads. */
+        var function = DarlingManagedRoles.BuildEditMonitoredServerFunctionSql("config");
+        Assert.Contains("left(p_secret, 4) = 'env:' OR left(p_secret, 5) = 'file:'", function, StringComparison.Ordinal);
+        Assert.Contains("'reference_refused'", function, StringComparison.Ordinal);
+
+        /* The rules read the catalog by its schema and keep the temporary schema last; the two definer functions pin it the
+           same way. Each string is in the batch's text and, by the comparison above, in the script's. */
+        Assert.Contains("FROM pg_catalog.pg_class AS c", rules, StringComparison.Ordinal);
+        Assert.Contains("SET search_path = pg_catalog, pg_temp", rules, StringComparison.Ordinal);
+        Assert.Contains("SET search_path = pg_catalog, pg_temp", function, StringComparison.Ordinal);
+        Assert.Contains("SET search_path = pg_catalog, pg_temp", DarlingManagedRoles.BuildCustomAlertResolveFunctionSql("config"), StringComparison.Ordinal);
+        Assert.DoesNotContain("FROM pg_class", rules, StringComparison.Ordinal);
+
+        /* The edit function names its table by schema in both statements, so the pinned path needs nothing from config. */
+        Assert.Contains("FROM config.config_monitored_servers AS s", function, StringComparison.Ordinal);
+        Assert.Contains("UPDATE config.config_monitored_servers AS s", function, StringComparison.Ordinal);
+
+        /* A change to how a row is reached while it holds a remediation login has its own outcome and its own state. */
+        Assert.Contains("'remediation_kept'", function, StringComparison.Ordinal);
+        Assert.Contains("USING ERRCODE = 'PW003'", rules, StringComparison.Ordinal);
+        Assert.Contains("This server has a remediation login stored. Change how it is reached on the service host, in the configuration file or with --add-server.", rules, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The rules' three refusal sentences are literal in the managed batch and in the script, and each is the one in
+    /// <see cref="ServerConnectionRule"/> that the web, MCP and viewer answers use: every message the rules raise is one of
+    /// the three, and each of the three is raised.
+    /// </summary>
+    [Fact]
+    public void TheRulesRefusalSentences_AreTheSharedConstants_InTheManagedBatchAndTheScript()
+    {
+        var expected = new[]
+        {
+            ServerConnectionRule.PasswordNeededOnMoveText,
+            ServerConnectionRule.ReferenceRefusedText,
+            ServerConnectionRule.RemediationKeptText,
+        };
+        var byo = Regex.Replace(RepoFile.ReadRepoFile("Darling", "tools", "provision-roles.sql"), @"(?m)^\s*--.*$", "");
+        var rules = DarlingManagedRoles.BuildServerPasswordRulesSql("config");
+        var pattern = new Regex(@"RAISE EXCEPTION '%', '([^']*)'");
+
+        foreach (var text in new[] { rules, byo })
+        {
+            var raised = pattern.Matches(text).Select(match => match.Groups[1].Value).ToList();
+            Assert.All(raised, sentence => Assert.Contains(sentence, expected));
+            Assert.Equal(expected.OrderBy(s => s, StringComparer.Ordinal), raised.Distinct().OrderBy(s => s, StringComparer.Ordinal));
+        }
+    }
+
     [Fact]
     public void BuildProvisioningSql_CreatesRolesIdempotently_LoginNoSuperuser()
     {
@@ -131,6 +275,28 @@ public sealed class DarlingManagedRolesTests
         Assert.Contains("GRANT INSERT, UPDATE, DELETE ON config.config_mute_rules TO viewer;", sql, StringComparison.Ordinal);
         Assert.Contains("GRANT UPDATE (config_version, updated_at) ON config.config_service TO viewer;", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("GRANT UPDATE ON config.config_service TO viewer", sql, StringComparison.Ordinal);
+
+        /* #5085: the web server-tag endpoints run as viewer: the same two single-table writes mcp holds, and no
+           default-privileges shortcut. */
+        Assert.Contains("GRANT INSERT, UPDATE, DELETE ON config.server_tags TO viewer;", sql, StringComparison.Ordinal);
+        Assert.Contains("GRANT INSERT, UPDATE, DELETE ON config.server_tag_map TO viewer;", sql, StringComparison.Ordinal);
+
+        /* #4843: the web add-server route runs the add_servers core as viewer: INSERT on config_monitored_servers and nothing
+           else on it: no UPDATE (#5240: the edit's write is the config.edit_monitored_server function, granted EXECUTE below),
+           no DELETE. The census is the whole set of viewer grants on the table. The credential column stays SELECT-carved. */
+        Assert.Contains("GRANT INSERT ON config.config_monitored_servers TO viewer;", sql, StringComparison.Ordinal);
+        Assert.Equal(new[] { "GRANT INSERT ON config.config_monitored_servers TO viewer;" }, ViewerGrantsOnMonitoredServers(sql));
+
+        /* The REVOKE takes away any UPDATE an earlier build granted viewer; it is not a GRANT, so the census never sees it. */
+        Assert.Single(Regex.Matches(Regex.Replace(sql, @"(?m)^\s*--.*$", ""), @"REVOKE UPDATE ON config\.config_monitored_servers FROM [^;]*viewer[^;]*;"));
+        Assert.Contains(EditRevoke, sql, StringComparison.Ordinal);
+
+        /* The edit function (#5240): created, REVOKEd from PUBLIC, then EXECUTE to viewer and mcp only. */
+        Assert.Contains("CREATE OR REPLACE FUNCTION config.edit_monitored_server(", sql, StringComparison.Ordinal);
+        Assert.Contains(DarlingManagedRoles.BuildEditMonitoredServerFunctionSql("config"), sql, StringComparison.Ordinal);
+        Assert.Contains(EditGrant, sql, StringComparison.Ordinal);
+        var functionRevokeAt = sql.IndexOf("REVOKE ALL ON FUNCTION config.edit_monitored_server(", StringComparison.Ordinal);
+        Assert.True(functionRevokeAt >= 0 && functionRevokeAt < sql.IndexOf(EditGrant, StringComparison.Ordinal), "the PUBLIC revoke must precede the EXECUTE grant.");
 
         /* It must NOT widen the schema-wide config write to viewer (that grant stays admin-only, pinned here). */
         Assert.Contains("GRANT INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA config TO admin;", sql, StringComparison.Ordinal);
@@ -348,6 +514,9 @@ public sealed class DarlingManagedRolesTests
            alert-settings row (never INSERT/DELETE — the row is a fixed singleton the service seeds). */
         Assert.Contains("GRANT INSERT, UPDATE, DELETE ON config.config_mute_rules TO mcp;", sql, StringComparison.Ordinal);
         Assert.Contains("GRANT UPDATE ON config.config_alert_settings TO mcp;", sql, StringComparison.Ordinal);
+        /* The fleet server-tag write tools (#5085): the admin gate is exactly these two single-table grants. */
+        Assert.Contains("GRANT INSERT, UPDATE, DELETE ON config.server_tags TO mcp;", sql, StringComparison.Ordinal);
+        Assert.Contains("GRANT INSERT, UPDATE, DELETE ON config.server_tag_map TO mcp;", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("INSERT, UPDATE, DELETE ON config.config_alert_settings", sql, StringComparison.Ordinal);
 
         /* The beacon caveat: a config_alert_settings write fires the SECURITY INVOKER bump trigger, which UPDATEs
@@ -524,9 +693,9 @@ public sealed class DarlingManagedRolesTests
         Assert.Contains("CREATE OR REPLACE FUNCTION config.record_custom_alert_resolution(", sql, StringComparison.Ordinal);
         Assert.Contains("SECURITY DEFINER", sql, StringComparison.Ordinal);
 
-        /* The pinned search_path (config first, then pg_catalog) is what makes injection impossible — no caller
-           path can redirect the unqualified config_alert_log or now(). */
-        Assert.Contains("SET search_path = config, pg_catalog", sql, StringComparison.Ordinal);
+        /* The pinned search_path (pg_catalog, the temporary schema last) and the table named by its
+           schema keep a caller's temporary objects and search path from redirecting the config_alert_log write or now(). */
+        Assert.Contains("SET search_path = pg_catalog, pg_temp", sql, StringComparison.Ordinal);
 
         /* A fresh function is EXECUTE-able by PUBLIC by default, so the REVOKE is mandatory and must precede the
            narrow grant; EXECUTE is the ONLY privilege the least-privilege roles get. */
@@ -538,11 +707,16 @@ public sealed class DarlingManagedRolesTests
 
         /* The body writes ONE config_alert_log row, shape-LOCKED to a no-channel resolution (alert_sent false,
            notification_type 'none', zeroed values, unmuted) — so a grantee can page nothing and forge no fire. */
-        Assert.Contains("INSERT INTO config_alert_log", sql, StringComparison.Ordinal);
+        Assert.Contains("INSERT INTO config.config_alert_log", sql, StringComparison.Ordinal);
         Assert.Contains("false, 'none', NULL, false,", sql, StringComparison.Ordinal);
 
-        /* NOT the rejected blanket grant: viewer/mcp never get a direct write on the history table. */
-        Assert.DoesNotContain("ON config.config_alert_log TO viewer", sql, StringComparison.Ordinal);
+        /* NOT the rejected blanket grant: viewer/mcp never get a table-level write on the history table. The one
+           privilege on it that viewer holds is the single-column dismiss grant (#4843), so every statement naming
+           the table TO viewer must be exactly that one. */
+        Assert.Equal(
+            new[] { "GRANT UPDATE (dismissed) ON config.config_alert_log TO viewer;" },
+            System.Text.RegularExpressions.Regex.Matches(sql, @"GRANT [^;]*? ON config\.config_alert_log TO [^;]*viewer[^;]*;")
+                .Select(m => m.Value).ToArray());
         Assert.DoesNotContain("ON config.config_alert_log TO mcp", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("ON config_alert_log TO viewer", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("ON config_alert_log TO mcp", sql, StringComparison.Ordinal);

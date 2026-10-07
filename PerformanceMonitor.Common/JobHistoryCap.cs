@@ -22,4 +22,22 @@ public static class JobHistoryCap
     /// the cap knows there could be more outside the window.</summary>
     public static string Label(int rowCount, int cap) =>
         rowCount >= cap ? $"showing the newest {cap:N0}" : "";
+
+    /// <summary>
+    /// The count text beside the grid (#4966): "N run(s)", with the cap label in brackets whenever the READ reached the cap,
+    /// and empty when the grid shows nothing. <paramref name="shownCount"/> is what the grid shows now, after the Status,
+    /// Category and column filters; <paramref name="readCount"/> is what the read returned before any of them. The cap
+    /// belongs to the read, so a column filter that narrows the grid must not take the label away while the read is still
+    /// cut at the cap: every writer of the count text, the load and the column-filter handler alike, builds it here.
+    /// </summary>
+    public static string CountText(int shownCount, int readCount, int cap)
+    {
+        if (shownCount <= 0)
+        {
+            return "";
+        }
+
+        var label = Label(readCount, cap);
+        return label.Length > 0 ? $"{shownCount} run(s) ({label})" : $"{shownCount} run(s)";
+    }
 }

@@ -145,7 +145,14 @@ public partial class MainWindow : Window
         // Coupling stays acyclic: ServerManager → IProfileLookup ← ProfileManager, ProfileManager → ServerManager.
         _profileManager = new ProfileManager(_serverManager, new AppLoggerAdapter<ProfileManager>());
         _serverManager.ProfileLookup = _profileManager;
-        _scheduleManager = new ScheduleManager(App.ConfigDirectory);
+        /* #4938: with the app's logger, a run time that is ignored (a value that is not HH:MM, or a time on an hourly collector)
+           is written to the log as a warning that names the collector, not dropped without a word. */
+        _scheduleManager = new ScheduleManager(App.ConfigDirectory, new AppLoggerAdapter<ScheduleManager>());
+        /* #4999: every LocalDataService judges a collector by the interval it is scheduled at on that server, whoever
+           builds it (the Collection Health tab builds its own, as do five other places), not only the MCP host's
+           instance. Wired once here, beside the managers it answers from, and read by each instance where it is used. */
+        LocalDataService.DefaultCollectorFrequencyMinutes = (serverId, collector) =>
+            _scheduleManager.GetFrequencyForStorageServer(_serverManager, serverId, collector);
 
         // Status bar update timer
         _statusTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(30) };
@@ -211,7 +218,10 @@ public partial class MainWindow : Window
                 _databaseInitializer,
                 _serverManager,
                 _scheduleManager,
-                new AppLoggerAdapter<RemoteCollectorService>());
+                new AppLoggerAdapter<RemoteCollectorService>(),
+                /* #4961: the install id lives at the data root. The store resolves it on the first collector's
+                   first ask, so parallel first sweeps share one resolve. */
+                InstallIdStore.ForCurrentUser(App.DataDirectory));
 
             var archiveService = new ArchiveService(_databaseInitializer, App.ArchiveDirectory, new AppLoggerAdapter<ArchiveService>());
             var retentionService = new RetentionService(App.ArchiveDirectory, new AppLoggerAdapter<RetentionService>());
@@ -369,7 +379,7 @@ public partial class MainWindow : Window
                         s.DisplayNameWithIntent;
                 }
                 return map;
-            });
+            }, OpenTabClocks);
 
             // Availability Groups (#991): self-loading, and its tab stays hidden until a load finds AG rows.
             AvailabilityGroupsContent.Initialize(_dataService);
@@ -981,6 +991,14 @@ public partial class MainWindow : Window
         OverviewItemsControl.ItemsSource = ServerOverviewSort.Order(
             filtered, App.OverviewSortMode,
             s => s.CpuPercentForAlert, s => s.DisplayName, s => s.ServerId);
+
+        /* #5352: a search that matched nothing says so (same sentence as the viewer) rather than leaving a blank grid. */
+        var noMatch = _overviewSummaries.Count > 0 && filtered.Count == 0;
+        if (OverviewNoMatchText != null)
+        {
+            OverviewNoMatchText.Text = noMatch ? ServerOverviewFilter.NoMatchText : string.Empty;
+            OverviewNoMatchText.Visibility = noMatch ? Visibility.Visible : Visibility.Collapsed;
+        }
     }
 
     /// <summary>The fields a search term matches against for a card: its display and instance names, plus each
@@ -1413,6 +1431,25 @@ public partial class MainWindow : Window
     }
 
     /// <summary>
+    /// The clock of every open server tab, by server id (#4966): the snapshot the Job History tab hands its read, so a server with
+    /// no collected clock yet is windowed on its open tab's clock before the machine's, as <see cref="OpenTabClockFor"/> gives the
+    /// Alerts History list. Taken on the UI thread (the open tabs are UI objects) and read off it as a plain dictionary.
+    /// </summary>
+    private IReadOnlyDictionary<int, ServerClock> OpenTabClocks()
+    {
+        var clocks = new Dictionary<int, ServerClock>();
+        foreach (var tab in _openServerTabs.Values)
+        {
+            if (tab.Content is ServerTab st)
+            {
+                clocks[st.ServerId] = st.ServerClock;
+            }
+        }
+
+        return clocks;
+    }
+
+    /// <summary>
     /// When alerts are cleared from Alert History via "Dismiss All", acknowledge the matching
     /// server tab badge(s) so the at-a-glance indicator stays consistent with the cleared list
     /// (issue #1092). The argument is the DB server_id filter that was in effect; null means the
@@ -1681,30 +1718,11 @@ public partial class MainWindow : Window
                 }
             }
 
-            // Copy config files that don't already exist in the current install
-            var settingsFiles = new[] { "settings.json", "collection_schedule.json", "ignored_wait_types.json" };
-            int settingsCopied = 0;
-
-            foreach (var fileName in settingsFiles)
-            {
-                var source = System.IO.Path.Combine(oldConfigDir, fileName);
-                var target = System.IO.Path.Combine(App.ConfigDirectory, fileName);
-
-                if (System.IO.File.Exists(source) && !System.IO.File.Exists(target))
-                {
-                    System.IO.File.Copy(source, target);
-                    settingsCopied++;
-                }
-            }
-
-            // Copy alert_state.json from old root directory
-            var oldAlertState = System.IO.Path.Combine(dialog.FolderName, "alert_state.json");
-            var currentAlertState = System.IO.Path.Combine(App.DataDirectory, "alert_state.json");
-            if (System.IO.File.Exists(oldAlertState) && !System.IO.File.Exists(currentAlertState))
-            {
-                System.IO.File.Copy(oldAlertState, currentAlertState);
-                settingsCopied++;
-            }
+            /* Copy the config files and alert_state.json that don't already exist in the current install. The lists
+               live in SettingsImport (#4961), which a test reads: the previous install's install-id.json is never
+               among them, because two installs that shared an id would drop each other's Extended Events sessions. */
+            int settingsCopied = SettingsImport.CopyMissing(
+                oldConfigDir, dialog.FolderName, App.ConfigDirectory, App.DataDirectory);
 
             var message = $"Imported {imported} server connection(s).";
             if (skipped > 0)
@@ -1930,6 +1948,15 @@ public partial class MainWindow : Window
             {
                 AppLogger.Info("Tags", $"Failed to clear tags for removed server: {ex.Message}");
             }
+        }
+
+        /* #4961: the server's long-query trace session is this install's, so it goes with the server. Awaited here, with the
+           tag clear, so the block below still awaits nothing: one attempt for the whole step, and a failure or the timeout
+           is logged by the drop and never stops the removal. */
+        if (_collectorService != null)
+        {
+            using var sessionDrop = new System.Threading.CancellationTokenSource(RemoteCollectorService.LongQueryTraceRemovalTimeout);
+            await _collectorService.DropLongQueryTraceOfRemovedServerAsync(server, sessionDrop.Token);
         }
 
         /* #4795: from the first drop to the delete nothing is awaited, so this runs on the UI thread without a

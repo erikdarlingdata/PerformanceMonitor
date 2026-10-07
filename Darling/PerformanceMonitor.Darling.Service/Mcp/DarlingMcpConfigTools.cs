@@ -102,7 +102,9 @@ public sealed class DarlingMcpConfigTools
                 database_name = r.DatabaseName,
                 state = r.StateDesc,
                 compatibility_level = r.CompatibilityLevel,
+                collation = r.CollationName,
                 recovery_model = r.RecoveryModel,
+                read_only = r.IsReadOnly,
                 rcsi = r.IsRcsiOn,
                 snapshot_isolation = r.SnapshotIsolationState,
                 auto_close = r.IsAutoCloseOn,
@@ -116,7 +118,13 @@ public sealed class DarlingMcpConfigTools
                 delayed_durability = r.DelayedDurability,
                 target_recovery_time_seconds = r.TargetRecoveryTimeSeconds,
                 encrypted = r.IsEncrypted,
+                trustworthy = r.IsTrustworthyOn,
+                db_chaining = r.IsDbChainingOn,
+                broker_enabled = r.IsBrokerEnabled,
+                cdc_enabled = r.IsCdcEnabled,
+                mixed_page_allocation = r.IsMixedPageAllocationOn,
                 accelerated_database_recovery = r.IsAcceleratedDatabaseRecoveryOn,
+                memory_optimized = r.IsMemoryOptimizedEnabled,
                 optimized_locking = r.IsOptimizedLockingOn,
                 log_reuse_wait = r.LogReuseWaitDesc
             }).ToList();

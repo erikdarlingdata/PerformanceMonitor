@@ -118,7 +118,7 @@ public sealed class McpToolsListBudgetTests
        41,669 bytes (measured, every field on every collector) to 20,707 bytes, under the shared 32 KB budget. */
 
     /* #4198 (lane TH): +193 bytes for get_active_queries' new full_query_text opt-in parameter and its
-       limit description's #4198 note (query_text, the wide field, is now a 500-char preview by default;
+       limit description's #4198 note (query_text, the wide field, is now a 500-char (now 400) preview by default;
        limit is 25, down from 50); the preview note itself moved after <<GUIDE>> to stay under the head's
        own 620-char target, so the served head is unchanged at 616. */
     /* #4198 (lane W2): -6 bytes for renaming get_active_queries' full_query_text opt-in to full_text — the
@@ -195,7 +195,61 @@ public sealed class McpToolsListBudgetTests
     // create_mute_rule gains its optional server_id parameter (a mute rule keyed on the server's store id); its
     // reading guidance sits after the tool's <<GUIDE>> marker, so the head grows by the parameter alone.
     // Constant set to the value McpToolsListBudgetTests itself measured on this tree.
-    private const int TotalCeilingBytes = 176_643;
+    // get_finops (the grouped FinOps tool, first view high_impact) adds 843 bytes: 176,643 -> 177,486.
+    // get_finops view utilization adds 78 bytes: 177,486 -> 177,564.
+    // get_finops_inventory (the FinOps fleet tool) adds 461 bytes: 177,564 -> 178,025.
+    // get_finops_inventory head says which time is not UTC, with the merged tree re-measured: 178,025 -> 178,170.
+    // get_finops application_connections view, with the merged tree re-measured: 178,170 -> 178,258.
+    // get_finops optimization view, with the merged tree re-measured: 178,258 -> 178,341.
+    // get_finops optimization guide gains the cost-attribution and mixed-status sentences after the guide marker, re-measured: 178,341 -> 178,341 (the head is unchanged).
+    // get_finops view index_analysis (view line, view name, database_name and full_text parameters), re-measured on the tree merged with dev: 178,258 -> 178,563.
+    // get_finops optimization view, with dev merged (index_analysis already in) and the tree re-measured: 178,563 -> 178,646; tool get_finops 481 -> 550, view 113 -> 127.
+    // get_finops storage_growth view (view line, view name, object_name parameter, database_name wording), re-measured: 178,646 -> 178,855; tool get_finops 550 -> 614, view 127 -> 143, database_name 52 -> 63, new object_name 69.
+    // get_finops storage_growth review answers (guide sentences after the marker, a rename, a switch arm), re-measured: 178,855 -> 178,855; tool get_finops 614, view 143, database_name 63, object_name 69 unchanged.
+    // get_finops_recommendations (the FinOps recommendations tool) adds 547 bytes: 178,855 -> 179,402.
+    // get_job_history (the job history read) adds 1,296 bytes: 179,402 -> 180,698.
+    // The fleet server-tag write tools (#5085, five tools: create, update, delete, assign and unassign) add 4,174 bytes on their own base: 179,402 -> 183,576.
+    // #5085 (server-tag tools, merge): re-measured after merging origin/dev (dev now includes #5095); combined total 184,872 bytes, 170 tools
+    // get_server_trend (#5117), get_finops view database_sizes (#5121) and get_deadlock_detail processes (deadlock rows) re-measured together on dev 0032cfa6d: 184,872 -> 186,010.
+    // get_server_trend gains latch, spinlock, session_stats and collector_duration (#4843): 186,010 -> 186,158.
+    // get_slow_reads (#5097, the slow-read record's read tool) adds one tool, re-measured on the tree merged with dev 85a522f0b: 186,158 -> 186,917, 171 -> 172 tools (unchanged by dev's later commits).
+    // get_store_query_history (#5097, the store statement history read) adds one tool, measured on this tree: 187,122 -> 188,119, 172 -> 173 tools.
+    // edit_server (#5240) adds one tool, measured on this tree: 188,119 -> 189,171, 173 -> 174 tools (+1,052 bytes).
+    /* #5228: the three raw-plan reads behind the web grids' plan buttons (get_query_store_plan_xml, get_procedure_plan_xml,
+       get_active_query_plan_xml), measured on the tree merged with dev 94aa5e755: 188,119 -> 190,004 (+1,885), 173 -> 176 tools. Each head
+       is under 160 characters. */
+    // Both additions above together (edit_server #5240 plus the three raw-plan reads #5228), as McpToolsListBudgetTests measured the tree
+    // merged with dev c1679bcdd: 188,119 -> 191,056 (= 188,119 + 1,052 + 1,885), 173 -> 177 tools. The ceiling now covers all 177 served tools.
+    /* #5234: get_query_store_query_history, the per-plan history behind the web Query Store grid's History button,
+       measured on the tree merged with dev c1679bcdd and the raw-plan reads: 191,056 -> 191,824 (+768), 177 -> 178 tools. The ceiling
+       now covers all 178 served tools. Re-measured after merging dev 9a089ff8e (#5260 landed there squashed): 191,814 bytes, 178 tools,
+       so the ceiling is 191,814. */
+    /* #5233: get_query_repro_script, the store-only repro script behind the web plan panel's Repro button, measured on the tree merged with dev c9b924ce2:
+       191,814 -> 192,981 (+1,167), 178 -> 179 tools. Its head is at most 160 characters. */
+    // get_active_queries gains its wait_type parameter (#5235, a 190-character description; the served head is unchanged). Constant set to the
+    // value McpToolsListBudgetTests itself measured on this tree: +227 bytes. Merged with dev's #5234 (the per-plan Query Store history tool), as
+    // the test measured the merged tree: 192,050, against dev's previous ceiling of 191,814.
+    /* #5236: get_blocking_plan_xml and get_deadlock_plan_xml (the Blocking and Deadlocks grids' plan reads), measured on this tree:
+       191,056 -> 192,755 (+1,699), 177 -> 179 tools. Each head is under 160 characters. */
+    /* #5236 (the plan reads' optional database_name, so two databases under one server_id each read their own plan): both reads gain one
+       parameter with a 52-byte description (108 bytes each with its schema entry), measured on this tree: 192,755 -> 192,971 (+216), 179 tools. */
+    /* #5236 merged with dev d27eb46f7 (#5299 order_by, #5300 get_query_store_query_history growth): re-measured on the merged tree: 193,738 bytes,
+       180 tools (dev's own 178 plus the two plan reads). Constant set to the measured value, not the deltas added by hand. */
+    /* #5236 (merge with dev f82222c73, which carries #5235's get_active_queries wait_type): re-measured on the merged tree: 193,975 bytes, 180 tools.
+       Dev's ceiling was 192,050 and this PR's own was 193,738, so neither side's number was taken. Constant set to the measured value, not the deltas added by hand. */
+    /* #5233 merged with dev 2c60dcae2 (#5236 plan reads, #5301, #5322): both sides added a tool, so neither ceiling was taken.
+       Re-measured on the merged tree by ToolsList_TotalBytes_IsAtOrUnderTheCeiling: 195,143 bytes, 181 tools (dev 180 plus get_query_repro_script; dev's ceiling was 193,975, this PR's was 192,981). The repro tool's own pre-merge delta was
+       191,814 -> 192,981 (+1,167), 178 -> 179 tools. Constant set to the measured value, not the deltas added by hand. */
+    /* #5231 PR2 (W2): get_object_locking gains database_name (the 46-character shared sentence, as Lite's twin): 195,143 -> 195,240 bytes (+97), 181 tools.
+       Constant set to the measured value. */
+    /* #5244 PR3 (W3): get_blocked_process_xml, get_blocking, get_blocking_trend and get_waiting_tasks gain database_name (the 46-character shared sentence, as Lite's twins) and get_blocking_stats gains its 66-character partial-scope form: 195,240 -> 195,745 bytes (+505), 181 tools.
+       get_current_waits_trend already took one. Constant set to the measured value. */
+    /* #5244 PR3 (r1 M1): get_blocking_trend and get_blocking_stats each gain the one sentence that says which collector answered (the source key and when the DMV snapshot is used): 195,745 -> 196,205 bytes (+460), 181 tools.
+       Lite carries the identical sentence on its twins. */
+    /* #5244 PR4 (W4): get_query_duration_trend, get_procedure_duration_trend, get_query_store_duration_trend, get_long_query_completions,
+       get_plan_corrections and get_query_store_clutter gain database_name (the 46-character shared sentence, as Lite's twins where they exist):
+       196,205 -> 196,787 bytes (+582), measured. */
+    private const int TotalCeilingBytes = 196_787;
 
 
 

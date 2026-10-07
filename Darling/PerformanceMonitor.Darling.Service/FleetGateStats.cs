@@ -84,6 +84,26 @@ internal sealed class FleetGateStats
         }
     }
 
+    /// <summary>
+    /// #4938: records slots that were skipped and never ran, with no slot that ran beside them. A collector with a run time
+    /// that the pass could not hand off inside its hour loses that day's run, and <see cref="RecordSlot"/> would count a run
+    /// that did not happen. Pass <see cref="DarlingWorker.StepRunTimeCollector"/>'s count: 1 for a day lost while the
+    /// sweep loop was running, 0 after a sleep, a pause or a stopped service, which records nothing.
+    /// </summary>
+    public void RecordSkippedSlots(long skipped)
+    {
+        if (skipped <= 0)
+        {
+            return;
+        }
+
+        lock (_lock)
+        {
+            ref var bucket = ref BucketFor(_utcNow());
+            bucket.Skipped += skipped;
+        }
+    }
+
     /// <summary>Records how long one collection body waited for a fleet gate slot.</summary>
     public void RecordQueueWait(TimeSpan wait)
     {

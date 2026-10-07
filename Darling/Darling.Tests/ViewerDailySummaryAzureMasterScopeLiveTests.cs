@@ -156,10 +156,10 @@ public sealed class ViewerDailySummaryAzureMasterScopeLiveTests
     {
         var name = host + "/" + (database ?? "-");
         await DarlingMcpTestData.ExecAsync(connection, ct,
-            "INSERT INTO servers (server_id, server_name, display_name, is_enabled, sql_engine_edition, sql_major_version, created_date, modified_date) VALUES ($1, $2, $2, TRUE, $3, 16, now()::timestamp, now()::timestamp)",
+            "INSERT INTO servers (server_id, server_name, display_name, is_enabled, sql_engine_edition, sql_major_version, created_date, modified_date) VALUES ($1, $2, $2, TRUE, $3, 16, now() AT TIME ZONE 'UTC', now() AT TIME ZONE 'UTC')",
             id, name, edition);
         await DarlingMcpTestData.ExecAsync(connection, ct,
-            "INSERT INTO server_properties (collection_id, collection_time, server_id, server_name, engine_edition) VALUES ($1, now()::timestamp, $2, 's', $3)",
+            "INSERT INTO server_properties (collection_id, collection_time, server_id, server_name, engine_edition) VALUES ($1, now() AT TIME ZONE 'UTC', $2, 's', $3)",
             CollectionIdGenerator.Next(), id, edition);
         await DarlingMcpTestData.ExecAsync(connection, ct,
             "INSERT INTO config.config_monitored_servers (server_id, name, host, database, is_enabled) VALUES ($1, $2, $3, $4, TRUE)",

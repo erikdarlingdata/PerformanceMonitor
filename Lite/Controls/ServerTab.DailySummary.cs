@@ -104,7 +104,10 @@ public partial class ServerTab : UserControl
             }
 
             // One targeted load of the tab we just switched to, over the day window (grid + slicer + comparison).
-            await RefreshVisibleTabAsync(GetHoursBack(), startUtc, endUtc, subTabOnly: true);
+            /* #5371: through the refresh coordinator like every other load, so a timer tick cannot start a second read
+               beside it. SetDrillDownTimeRange just held this day as the toolbar's custom range, so the pass's own
+               GetCurrentWindowUtc is exactly (startUtc, endUtc). */
+            await RefreshVisibleTabOnlyAsync();
         }
         catch (Exception ex)
         {

@@ -408,12 +408,20 @@ LIMIT 1";
     /// open-transaction blocker sys.dm_exec_requests never lists; <c>blocker_in_population</c> false is a
     /// blocker the caller's own database filter excluded.</para>
     ///
-    /// <para>The predicates are composed as SQL text from two booleans (a database name is still bound), the
-    /// <see cref="BuildDbInClause"/> way, because DuckDB cannot infer a type for a bare <c>$N IS NULL</c>
-    /// parameter the way PostgreSQL's <c>$N::text</c> cast lets Darling's twin do it.</para>
+    /// <para><b>The wait_type filter (#5235)</b> is one more population predicate, so the count and the cap see it
+    /// and it ANDs with the other two. It matches the request's own wait at the capture by exact name with the case
+    /// ignored (one equality, so a <c>%</c> or <c>_</c> in the input is literal), and a NULL wait never matches. The
+    /// stored value may carry the one trailing space <c>sys.dm_os_wait_stats</c> reports and an older collector kept,
+    /// so the match takes the name with and without it: the same rule as Darling's twin (a copy of its wait trend
+    /// read), <c>upper(w.wait_type) IN (upper($7), upper($7) || ' ')</c>.</para>
+    ///
+    /// <para>The predicates are composed as SQL text from the booleans and the optional wait filter (a database
+    /// name and the wait value are still bound), the <see cref="BuildDbInClause"/> way, because DuckDB cannot infer a
+    /// type for a bare <c>$N IS NULL</c> parameter the way PostgreSQL's <c>$N::text</c> cast lets Darling's twin do
+    /// it. The wait value's index follows the database values, so it is <c>5 + dbValues.Count</c>.</para>
     /// </summary>
     public async Task<(List<QuerySnapshotRow> Rows, long PopulationCount)> GetActiveQueriesPageAsync(
-        int serverId, int hoursBack, int cap, string? databaseName = null, bool blockingOnly = false, DateTime? asOfUtc = null)
+        int serverId, int hoursBack, int cap, string? databaseName = null, bool blockingOnly = false, string? waitType = null, DateTime? asOfUtc = null)
     {
         using var _q = TimeQuery("GetActiveQueriesPageAsync", "v_query_snapshots filtered page (MCP)");
         using var connection = await OpenConnectionAsync();
@@ -423,6 +431,8 @@ LIMIT 1";
         var dbClause = BuildDbInClause(
             string.IsNullOrWhiteSpace(databaseName) ? null : new[] { databaseName.Trim() }, "w.database_name", 5, out var dbValues);
         var blockingClause = blockingOnly ? " AND (w.blocking_session_id > 0 OR h.session_id IS NOT NULL)" : "";
+        var waitFilter = string.IsNullOrWhiteSpace(waitType) ? null : waitType.Trim();
+        var waitClause = waitFilter == null ? "" : $" AND upper(w.wait_type) IN (upper(${5 + dbValues.Count}), upper(${5 + dbValues.Count}) || ' ')";
 
         command.CommandText = @"
 WITH window_rows AS (
@@ -477,7 +487,7 @@ population AS (
     LEFT JOIN heads h
       ON  h.collection_time = w.collection_time
       AND h.session_id = w.session_id
-    WHERE (w.query_text NOT LIKE 'WAITFOR%' OR h.session_id IS NOT NULL)" + dbClause + blockingClause + @"
+    WHERE (w.query_text NOT LIKE 'WAITFOR%' OR h.session_id IS NOT NULL)" + dbClause + blockingClause + waitClause + @"
 )
 SELECT
     p.session_id,
@@ -524,6 +534,8 @@ LIMIT $4";
         command.Parameters.Add(new DuckDBParameter { Value = cap });
         foreach (var db in dbValues)
             command.Parameters.Add(new DuckDBParameter { Value = db });
+        if (waitFilter != null)
+            command.Parameters.Add(new DuckDBParameter { Value = waitFilter });
 
         var items = new List<QuerySnapshotRow>();
         long populationCount = 0;
@@ -636,7 +648,27 @@ SELECT
     /// DMV arm entirely (a DMV snapshot never has one) — the population <c>get_blocked_process_xml</c> pages
     /// over, so its <c>limit</c> counts reports rather than rows it would have to discard.</para>
     /// </summary>
-    public async Task<List<BlockedProcessReportRow>> GetRecentBlockedProcessReportsAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null, int limit = BlockedProcessReportMerge.DefaultCap, bool xmlOnly = false, bool windowOnCollectionTime = false)
+    public async Task<List<BlockedProcessReportRow>> GetRecentBlockedProcessReportsAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null, int limit = BlockedProcessReportGridCap, bool xmlOnly = false, bool windowOnCollectionTime = false) =>
+        (await ReadRecentBlockedProcessReportsAsync(serverId, hoursBack, fromDate, toDate, databaseNames, asOfUtc, limit, xmlOnly, windowOnCollectionTime)).Rows;
+
+    /// <summary>The Blocked Process Reports grid's row cap: the default <c>limit</c> of
+    /// <see cref="GetRecentBlockedProcessReportsAsync"/> and <see cref="ReadRecentBlockedProcessReportsAsync"/>, and the
+    /// cap the grid's "Showing since" notice judges the page by (#4966), so the read's <c>LIMIT</c> and the notice
+    /// cannot drift apart. The same 200 as the Darling viewer's grid.</summary>
+    public const int BlockedProcessReportGridCap = BlockedProcessReportMerge.DefaultCap;
+
+    /// <summary>
+    /// <see cref="GetRecentBlockedProcessReportsAsync"/>'s rows and where a read that filled its own cap stops the grid being
+    /// complete (#4966): the Lite twin of the Darling viewer's <c>ReadRecentBlockedProcessReportsAsync</c>. The grid is fed by
+    /// two reads, the XE reports (cap = <paramref name="limit"/>) and the always-on DMV snapshots (cap =
+    /// <paramref name="limit"/> plus the XE rows in hand), and the merge then drops the DMV rows an XE report already covers and
+    /// the DMV rows that repeat a pair within a minute, so the merged list can hold FEWER than <paramref name="limit"/> rows
+    /// while the DMV read stopped at its LIMIT and left older snapshots out: a DMV read of 200 + <c>n</c> rows made of
+    /// repeated pairs merges to a handful. The count of the merged list cannot show that, so each read's own count is checked
+    /// before the merge (<see cref="FilledPageStart"/>) and <see cref="BlockedProcessReportsRead.CappedSourceStartUtc"/> names
+    /// the oldest event time of the read that filled its page (the later one when both did).
+    /// </summary>
+    public async Task<BlockedProcessReportsRead> ReadRecentBlockedProcessReportsAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null, int limit = BlockedProcessReportGridCap, bool xmlOnly = false, bool windowOnCollectionTime = false)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
@@ -755,14 +787,45 @@ LIMIT $4";
             }
         }
 
+        /* An XE read that returned a whole page (its LIMIT) left older reports out, whatever the merge below keeps. */
+        var xeFilledPageStart = FilledPageStart(items, limit);
+
         // Always-on DMV blocking snapshot: surface its rows in the grid too, so the block-chain viewer is
         // reachable when the blocked-process-report XE captured nothing (AWS RDS). Same connection/lock.
         // Skipped under xmlOnly: a DMV snapshot never carries a report, so it has nothing to add to that page.
+        DateTime? dmvFilledPageStart = null;
         if (!xmlOnly)
-            await AppendDmvBlockedProcessGridRowsAsync(connection.CreateCommand, items, serverId, startTime, endTime, databaseNames, limit);
+            dmvFilledPageStart = await AppendDmvBlockedProcessGridRowsAsync(connection.CreateCommand, items, serverId, startTime, endTime, databaseNames, limit);
 
-        return items;
+        return new BlockedProcessReportsRead(items, LaterOf(xeFilledPageStart, dmvFilledPageStart));
     }
+
+    /// <summary>
+    /// The oldest event time of a newest-first <paramref name="page"/> that is as long as the <paramref name="fetched"/> rows its
+    /// read asked for (its LIMIT), or null when it is shorter: a page under its LIMIT holds everything the store has in the
+    /// window. A row with no event time never names a start. See <see cref="ReadRecentBlockedProcessReportsAsync"/>.
+    /// </summary>
+    internal static DateTime? FilledPageStart(IReadOnlyCollection<BlockedProcessReportRow> page, int fetched)
+    {
+        if (fetched <= 0 || page.Count < fetched)
+        {
+            return null;
+        }
+
+        DateTime? oldest = null;
+        foreach (var row in page)
+        {
+            if (row.EventTime is DateTime time && (oldest is null || time < oldest))
+            {
+                oldest = time;
+            }
+        }
+
+        return oldest;
+    }
+
+    private static DateTime? LaterOf(DateTime? first, DateTime? second) =>
+        first is DateTime a && second is DateTime b ? (a >= b ? a : b) : first ?? second;
 
     /// <summary>
     /// Fetches always-on DMV blocking-snapshot rows for the blocked-process grid and merges them into the
@@ -772,10 +835,12 @@ LIMIT $4";
     /// always exists. The DMV fetch is <paramref name="cap"/> plus the XE rows already in
     /// <paramref name="items"/> — see <see cref="GetRecentBlockedProcessReportsAsync"/> for why.
     /// </summary>
-    private static async Task AppendDmvBlockedProcessGridRowsAsync(
+    private static async Task<DateTime?> AppendDmvBlockedProcessGridRowsAsync(
         Func<DuckDBCommand> createCommand, List<BlockedProcessReportRow> items, int serverId, DateTime startTime, DateTime endTime, IReadOnlyList<string>? databaseNames, int cap)
     {
         var dmvItems = new List<BlockedProcessReportRow>();
+        /* The DMV read's own cap: the grid's cap plus the XE rows in hand. */
+        var dmvFetch = cap + items.Count;
         var dbClause = BuildDbInClause(databaseNames, "database_name", 5, out var dbValues);
         using (var command = createCommand())
         {
@@ -795,7 +860,7 @@ LIMIT $4";
             command.Parameters.Add(new DuckDBParameter { Value = serverId });
             command.Parameters.Add(new DuckDBParameter { Value = startTime });
             command.Parameters.Add(new DuckDBParameter { Value = endTime });
-            command.Parameters.Add(new DuckDBParameter { Value = cap + items.Count });
+            command.Parameters.Add(new DuckDBParameter { Value = dmvFetch });
             foreach (var db in dbValues)
                 command.Parameters.Add(new DuckDBParameter { Value = db });
 
@@ -835,7 +900,9 @@ LIMIT $4";
 
         /* Dedup + re-cap moved verbatim to the shared BlockedProcessReportMerge (Phase-5 slice B)
            so the Darling Postgres adapter reproduces EXACTLY these XE-preferred fallback semantics. */
+        var dmvFilledPageStart = FilledPageStart(dmvItems, dmvFetch);
         BlockedProcessReportMerge.AppendDmvFallbackRows(items, dmvItems, cap);
+        return dmvFilledPageStart;
     }
 
     /// <summary>
@@ -994,6 +1061,111 @@ ORDER BY bucket";
     }
 
     /// <summary>
+    /// #5098: whether the XE blocked process reports have a row in the window, with the SAME predicate (and database filter) as the
+    /// <c>bpr</c> arm of <see cref="GetBlockingTrendAsync"/> and <see cref="GetBlockingDurationStatsAsync"/>. When true those reads drew
+    /// the XE rows alone (the DMV arm is skipped), so the note must name the XE start, not a DMV-covered one.
+    /// </summary>
+    public async Task<bool> HasBlockedProcessReportsInWindowAsync(int serverId, DateTime startUtc, DateTime endUtc, IReadOnlyList<string>? databaseNames = null)
+    {
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+
+        var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
+        command.CommandText = "SELECT 1 FROM " + StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time >= $2 AND event_time <= $3" + dbClause) + " AS ev LIMIT 1";
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        command.Parameters.Add(new DuckDBParameter { Value = startUtc });
+        command.Parameters.Add(new DuckDBParameter { Value = endUtc });
+        foreach (var db in dbValues)
+            command.Parameters.Add(new DuckDBParameter { Value = db });
+
+        using var reader = await command.ExecuteReaderAsync();
+        return await reader.ReadAsync();
+    }
+
+    /// <summary>
+    /// #5098: the earliest XE blocked process report in the window, with the SAME predicate and database filter as
+    /// <see cref="HasBlockedProcessReportsInWindowAsync"/>. Null when there is none. Opens its own connection.
+    /// </summary>
+    public async Task<DateTime?> GetEarliestBlockedProcessReportInWindowAsync(int serverId, DateTime startUtc, DateTime endUtc, IReadOnlyList<string>? databaseNames = null)
+    {
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+
+        var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
+        command.CommandText = "SELECT MIN(ev.event_time) FROM " + StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time >= $2 AND event_time <= $3" + dbClause) + " AS ev";
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        command.Parameters.Add(new DuckDBParameter { Value = startUtc });
+        command.Parameters.Add(new DuckDBParameter { Value = endUtc });
+        foreach (var db in dbValues)
+            command.Parameters.Add(new DuckDBParameter { Value = db });
+
+        return await command.ExecuteScalarAsync() is DateTime first ? first : null;
+    }
+
+    /// <summary>
+    /// #5098: the blocked process threshold's history over the window, the same three outputs as the Darling viewer's
+    /// <c>BlockedProcessThresholdOnSql</c>: on at the window's start (the newest snapshot at or before it is above zero), the
+    /// earliest snapshot inside (start, end] that is above zero, and whether a snapshot read zero before the threshold was seen on (the newest one at or before the start, or one in the window dated before that first nonzero one).
+    /// <c>capture_time</c> is UTC, like every Lite store column. No snapshots reads as (false, null, false), which
+    /// <see cref="PerformanceMonitor.Common.BlockingThresholdCoverage.Combine"/> leaves unchanged. Opens its own connection.
+    /// </summary>
+    public async Task<(bool OnAtWindowStart, DateTime? FirstOnInWindow, bool SawZeroSnapshot)> GetBlockedProcessThresholdOnAsync(int serverId, DateTime startUtc, DateTime endUtc)
+    {
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+        command.CommandText = @"
+WITH before AS (
+    SELECT c.value_in_use
+    FROM v_server_config AS c
+    WHERE c.server_id = $1 AND c.configuration_name = 'blocked process threshold (s)' AND c.capture_time <= $2
+    ORDER BY c.capture_time DESC
+    LIMIT 1),
+inside AS (
+    SELECT c.capture_time, c.value_in_use
+    FROM v_server_config AS c
+    WHERE c.server_id = $1 AND c.configuration_name = 'blocked process threshold (s)' AND c.capture_time > $2 AND c.capture_time <= $3),
+first_on AS (
+    SELECT MIN(i.capture_time) AS capture_time FROM inside AS i WHERE i.value_in_use > 0)
+SELECT
+    COALESCE((SELECT b.value_in_use > 0 FROM before AS b), FALSE),
+    (SELECT f.capture_time FROM first_on AS f),
+    EXISTS (SELECT 1 FROM before AS b WHERE b.value_in_use = 0)
+        OR EXISTS (SELECT 1 FROM inside AS i CROSS JOIN first_on AS f
+                   WHERE i.value_in_use = 0 AND (f.capture_time IS NULL OR i.capture_time < f.capture_time))";
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        command.Parameters.Add(new DuckDBParameter { Value = startUtc });
+        command.Parameters.Add(new DuckDBParameter { Value = endUtc });
+
+        using var reader = await command.ExecuteReaderAsync();
+        await reader.ReadAsync();
+        return (reader.GetBoolean(0), reader.IsDBNull(1) ? null : reader.GetDateTime(1), reader.GetBoolean(2));
+    }
+
+    /// <summary>
+    /// #5098: where the XE blocked process report data starts: the collector's coverage floor (<paramref name="collectorFloorOf"/>,
+    /// the <c>includeAlsoCovered: false</c> probe), the earliest report, and the threshold's history, through
+    /// <see cref="PerformanceMonitor.Common.BlockingThresholdCoverage.Combine"/> (the rule the Darling viewer uses). The three reads run
+    /// one after the other, each on its own connection; a throw from any of them is the caller's, so a failed probe costs only the note.
+    /// </summary>
+    public static async Task<DateTime?> CombineBlockingXeStartAsync(
+        Func<Task<DateTime?>> collectorFloorOf, Func<Task<DateTime?>> earliestReportOf,
+        Func<Task<(bool OnAtWindowStart, DateTime? FirstOnInWindow, bool SawZeroSnapshot)>> thresholdOf)
+    {
+        var collector = await collectorFloorOf();
+        var report = await earliestReportOf();
+        var threshold = await thresholdOf();
+        return PerformanceMonitor.Common.BlockingThresholdCoverage.Combine(
+            collector, report, threshold.OnAtWindowStart, threshold.FirstOnInWindow, threshold.SawZeroSnapshot);
+    }
+
+    /// <summary>#5098: the Blocking tab's XE start for a window: <see cref="CombineBlockingXeStartAsync"/> over this store.</summary>
+    public Task<DateTime?> GetBlockingXeDataStartAsync(int serverId, DateTime startUtc, DateTime endUtc, IReadOnlyList<string>? databaseNames = null) =>
+        CombineBlockingXeStartAsync(
+            () => GetQueryWindowFloorAsync(QueryWindowRelation.BlockedProcessReports, serverId, startUtc, endUtc, includeAlsoCovered: false),
+            () => GetEarliestBlockedProcessReportInWindowAsync(serverId, startUtc, endUtc, databaseNames),
+            () => GetBlockedProcessThresholdOnAsync(serverId, startUtc, endUtc));
+
+    /// <summary>
     /// Gets blocking incident trend (count of distinct blocking events per time bucket).
     /// Uses blocked_process_reports from Extended Events for more reliable detection.
     /// Falls back to blocking_snapshots if no XE data available.
@@ -1012,19 +1184,19 @@ ORDER BY bucket";
            window (AWS RDS) — so a server with both sources never double-counts. */
         command.CommandText = @"
 WITH bpr AS (
-    SELECT DATE_TRUNC('minute', event_time) AS bucket, COUNT(*) AS incident_count
+    SELECT DATE_TRUNC('minute', event_time) AS bucket, COUNT(*) AS incident_count, 'blocked-process-report' AS source
     FROM " + StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time >= $2 AND event_time <= $3" + dbClause) + @" AS ev
     GROUP BY DATE_TRUNC('minute', event_time)
 ),
 dmv AS (
-    SELECT DATE_TRUNC('minute', event_time) AS bucket, COUNT(*) AS incident_count
+    SELECT DATE_TRUNC('minute', event_time) AS bucket, COUNT(*) AS incident_count, 'DMV snapshot' AS source
     FROM v_dmv_blocking_snapshots
     WHERE server_id = $1 AND event_time >= $2 AND event_time <= $3" + dbClause + @"
     GROUP BY DATE_TRUNC('minute', event_time)
 )
-SELECT bucket, incident_count FROM bpr
+SELECT bucket, incident_count, source FROM bpr
 UNION ALL
-SELECT bucket, incident_count FROM dmv WHERE NOT EXISTS (SELECT 1 FROM bpr)
+SELECT bucket, incident_count, source FROM dmv WHERE NOT EXISTS (SELECT 1 FROM bpr)
 ORDER BY bucket";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
@@ -1040,7 +1212,8 @@ ORDER BY bucket";
             items.Add(new TrendPoint
             {
                 Time = reader.GetDateTime(0),
-                Count = reader.IsDBNull(1) ? 0 : Convert.ToInt32(reader.GetValue(1))
+                Count = reader.IsDBNull(1) ? 0 : Convert.ToInt32(reader.GetValue(1)),
+                Source = reader.IsDBNull(2) ? null : reader.GetString(2)
             });
         }
         return items;
@@ -1330,6 +1503,9 @@ public class TrendPoint
 {
     public DateTime Time { get; set; }
     public int Count { get; set; }
+
+    /// <summary>#5244: which collector answered, "blocked-process-report" or "DMV snapshot", set only by the blocking trend read.</summary>
+    public string? Source { get; set; }
 }
 
 /// <summary>
@@ -1379,6 +1555,17 @@ public class DeadlockProcessDetail : DeadlockProcessInfo
         => DeadlockGraphProcessParser.Parse<DeadlockProcessDetail>(
             rows.Select(r => new DeadlockGraphInput(r.DeadlockGraphXml, r.DeadlockTime, r.VictimSqlText, null))).ToList();
 }
+
+/// <summary>
+/// The Blocked Process Reports grid's rows and where a read that filled its own cap stops the grid being complete
+/// (<see cref="LocalDataService.ReadRecentBlockedProcessReportsAsync"/>, #4966).
+/// </summary>
+/// <param name="Rows">The merged rows, newest first, at most <see cref="LocalDataService.BlockedProcessReportGridCap"/> of them
+/// for a grid read.</param>
+/// <param name="CappedSourceStartUtc">The oldest event time the XE read or the DMV read returned, for the one that returned a
+/// full page (the later, when both did): the older reports of that read are not in the grid, whatever the merged count is.
+/// Null when neither read filled its cap.</param>
+public sealed record BlockedProcessReportsRead(List<BlockedProcessReportRow> Rows, DateTime? CappedSourceStartUtc);
 
 /// <summary>
 /// Lite's blocked-process grid row. The alert-consumed members (event time, database, SPID pair,

@@ -13,6 +13,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Viewer;
 
@@ -165,6 +166,33 @@ public sealed partial class ViewerDataService
             .Select(c => new TraceFlagChangeRow(c))
             .ToList();
     }
+
+    /* ─────────────────────────── data-start probes (#4966): where each change history's snapshots start ─────────────────────────── */
+
+    /// <summary>
+    /// Where this server's <c>server_config</c> coverage starts for the window (#4966), through the shared probe
+    /// (<see cref="DataWindowFloor"/>): the later of its first collection and the table's retention edge, or its first
+    /// snapshot in the window if that is earlier. The three change grids are DIFFS of the snapshots their collector writes,
+    /// so a change's own time is a snapshot's capture time and can never come before the table's coverage: the caller names
+    /// the earlier of this and the earliest change shown (<see cref="ViewerEventDataStart.Of"/>), and the diff keeps no row
+    /// cap (every snapshot up to the window's end is read), so no cap rule applies. Null when the window holds no snapshot
+    /// and no logged run of the collector, when it lies wholly before the coverage, and for a window of 90 minutes or less
+    /// (<see cref="DataWindowFloor.GetForServerAsync"/> starts no query for one).
+    /// </summary>
+    public Task<DateTime?> GetServerConfigChangesDataStartAsync(int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default) =>
+        DataWindowFloor.GetForServerAsync(_dataSource, DataWindowFloor.Source.ForCollectorTable("server_config"), serverId, startUtc, endUtc,
+            ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
+
+    /// <summary>The <c>database_config</c> twin of <see cref="GetServerConfigChangesDataStartAsync"/> (the Database Config Changes grid).
+    /// It asks about the server, not about the databases the grid's filter names: coverage belongs to the table's collector.</summary>
+    public Task<DateTime?> GetDatabaseConfigChangesDataStartAsync(int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default) =>
+        DataWindowFloor.GetForServerAsync(_dataSource, DataWindowFloor.Source.ForCollectorTable("database_config"), serverId, startUtc, endUtc,
+            ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
+
+    /// <summary>The <c>trace_flags</c> twin of <see cref="GetServerConfigChangesDataStartAsync"/> (the Trace Flag Changes grid).</summary>
+    public Task<DateTime?> GetTraceFlagChangesDataStartAsync(int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default) =>
+        DataWindowFloor.GetForServerAsync(_dataSource, DataWindowFloor.Source.ForCollectorTable("trace_flags"), serverId, startUtc, endUtc,
+            ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
 
     private async Task<List<ConfigChangeDiff.ServerConfigSnapshot>> ReadServerConfigSnapshotsAsync(
         int serverId, DateTime endUtc, CancellationToken cancellationToken)

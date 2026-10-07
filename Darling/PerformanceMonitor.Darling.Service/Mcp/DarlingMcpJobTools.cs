@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.ComponentModel;
 using System.Linq;
 using System.Text.Json;
@@ -16,6 +17,7 @@ using ModelContextProtocol.Server;
 using Npgsql;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Storage;
 
 #pragma warning disable CA1707 // MCP tools use snake_case naming convention
 
@@ -102,4 +104,169 @@ public sealed class DarlingMcpJobTools
             return McpHelpers.FormatError("get_running_jobs", ex);
         }
     }
+
+    /// <summary>The run statuses <c>get_job_history</c> accepts, by their <c>sysjobhistory</c> codes 0 to 3.</summary>
+    private static readonly string[] HistoryStatuses = ["Failed", "Succeeded", "Retry", "Canceled"];
+
+    [McpServerTool(Name = "get_job_history"), Description("Gets retained SQL Agent job runs ending at as_of, newest first, for a server or fleet. Filters apply before limit. Times UTC. Empty: none matched; not_collected: this engine has no Agent. window_truncated: floor, not limit; effective_start: reach; truncated: limit cut. Agent: agent_running, agent_status_desc, next_run, captured_at (empty: hints); fleet: agents_total/_running (servers with a snapshot), agents_not_running (stopped or unknown).")]
+    public static async Task<string> GetJobHistory(
+        NpgsqlDataSource postgres,
+        [Description("Server name or display name. Omit for every server.")] string? server_name = null,
+        [Description("Hours of history to retrieve. Default 24.")] int hours_back = 24,
+        [Description("Exact job name, case-insensitive.")] string? job_name = null,
+        [Description("Run status: Failed, Succeeded, Retry or Canceled.")] string? status = null,
+        [Description("Exact job category name, case-insensitive.")] string? category = null,
+        [Description("Maximum number of runs to return. Default 100.")] int limit = 100,
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        CancellationToken cancellationToken = default)
+    {
+        var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd)
+            ?? McpHelpers.ValidateTop(limit)
+            ?? McpHelpers.ValidateChoice(status, HistoryStatuses, "status");
+        if (validation != null) return validation;
+
+        try
+        {
+            /* Fleet-wide when no server is named: the resolver would auto-pick or refuse, and neither is the
+               answer to "every server". A named server resolves through the registry as everywhere else. */
+            (int ServerId, string ServerName)? scope = null;
+            if (!string.IsNullOrWhiteSpace(server_name))
+            {
+                var (servers, fault) = await DarlingServerResolver.LoadEnabledOrFaultAsync(postgres, cancellationToken);
+                if (fault != null) return fault;
+                var (resolved, error) = DarlingServerResolver.ResolveOrError(servers, server_name);
+                if (error != null) return error;
+                scope = resolved;
+            }
+
+            var filter = new JobHistoryFilter(
+                string.IsNullOrWhiteSpace(job_name) ? null : job_name.Trim(),
+                string.IsNullOrWhiteSpace(status) ? null : Array.FindIndex(HistoryStatuses, s => string.Equals(s, status.Trim(), StringComparison.OrdinalIgnoreCase)),
+                string.IsNullOrWhiteSpace(category) ? null : category.Trim(),
+                windowEnd);
+
+            var requestedStart = windowEnd.AddHours(-hours_back);
+            var fetched = await DarlingJobHistoryReader.GetAsync(
+                postgres, requestedStart, scope?.ServerId, limit + 1, McpCommandDeadlines.ReadSeconds, filter, cancellationToken);
+            var truncated = fetched.Count > limit;
+            var rows = fetched.Take(limit).ToList();
+
+            var source = DataWindowFloor.Source.ForCollectorTable("job_history");
+            var floor = scope is { } one
+                ? await DataWindowFloor.GetForServerAsync(postgres, source, one.ServerId, requestedStart, windowEnd, McpCommandDeadlines.ReadSeconds, cancellationToken)
+                : await DataWindowFloor.GetAsync(postgres, [source], null, requestedStart, windowEnd, McpCommandDeadlines.ReadSeconds, cancellationToken);
+            /* Job history is an event surface: a run's own time can sit long before the collection that stored it,
+               so coverage starts at the earlier of the probe's floor and the oldest run shown. */
+            if (rows.Count > 0 && rows[^1].RunDateTimeUtc is { } oldest && (floor is null || oldest < floor))
+                floor = oldest;
+            var effectiveStart = RawWindowFloor.EffectiveStart(floor, requestedStart);
+            var windowTruncated = RawWindowFloor.IsTruncated(floor, requestedStart);
+
+            if (rows.Count == 0)
+            {
+                if (scope is { } s1)
+                {
+                    var notCollected = await DarlingEngineCapability.NotCollectedStatusAsync(postgres, s1.ServerId, s1.ServerName, "job_history", cancellationToken);
+                    if (notCollected != null) return notCollected;
+                }
+
+                /* An empty answer is where "the Agent was stopped" matters most, so its hints carry the Agent state too. */
+                var emptyHints = new Dictionary<string, object?>();
+                emptyHints["effective_start"] = McpHelpers.FormatEffectiveStart(effectiveStart);
+                emptyHints["window_truncated"] = windowTruncated;
+                AddAgentState(emptyHints, scope, await TryReadAgentStatesAsync(postgres, scope?.ServerId, windowEnd, cancellationToken));
+                return McpHelpers.Status("empty", "No job runs matched in the requested time range.", emptyHints);
+            }
+
+            var runs = rows.Select(r => new
+            {
+                run_time = McpHelpers.FormatEffectiveStart(r.RunDateTimeUtc),
+                server = r.ServerName,
+                job_name = r.JobName,
+                category = r.CategoryName,
+                step = r.StepId == 0 ? "(Job outcome)" : $"{r.StepId}: {r.StepName}",
+                status = r.RunStatus >= 0 && r.RunStatus < HistoryStatuses.Length ? HistoryStatuses[r.RunStatus] : r.RunStatusDesc,
+                duration_seconds = r.RunDurationSeconds,
+                duration_formatted = DarlingJobReader.FormatDuration(r.RunDurationSeconds),
+                retries = r.RetriesAttempted,
+                last_success = McpHelpers.FormatEffectiveStart(r.LastSuccessfulRunUtc),
+                is_long_running = r.IsLongRunning,
+                message = McpHelpers.Truncate(r.Message, 500)
+            }).ToList();
+
+            var envelope = new Dictionary<string, object?>();
+            envelope["server"] = scope?.ServerName;
+            envelope["hours_back"] = hours_back;
+            envelope["effective_start"] = McpHelpers.FormatEffectiveStart(effectiveStart);
+            envelope["window_truncated"] = windowTruncated;
+            envelope["shown"] = runs.Count;
+            envelope["truncated"] = truncated;
+            AddAgentState(envelope, scope, await TryReadAgentStatesAsync(postgres, scope?.ServerId, windowEnd, cancellationToken));
+            envelope["runs"] = runs;
+            return JsonSerializer.Serialize(envelope, McpHelpers.JsonOptions);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return McpHelpers.FormatError("get_job_history", ex);
+        }
+    }
+
+    /// <summary>
+    /// The Agent state as of the window's end (<paramref name="windowEnd"/>: the <c>as_of</c> anchor, or the resolved now
+    /// when it is omitted), so a past <c>as_of</c> reads what the Agent was doing then, not what it is doing now (#5242).
+    /// The Agent read is an addition to the runs the caller asked for, so its failure must not cost them the runs: any
+    /// error but cancellation reads as "no Agent state" (null), and the answer goes out without the Agent fields, which
+    /// the page already draws as no line (the desktop treats the same read as best-effort).
+    /// </summary>
+    private static async Task<List<DarlingJobReader.AgentState>?> TryReadAgentStatesAsync(
+        NpgsqlDataSource postgres, int? serverId, DateTime windowEnd, CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await DarlingJobReader.ReadLatestAgentStatesAsync(postgres, serverId, windowEnd, cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Adds the SQL Agent state to an answer's envelope. One named server gets the four fields flat. The fleet gets
+    /// <c>agents_total</c> and <c>agents_running</c>, and <c>agents_not_running</c> lists each server whose Agent is stopped or
+    /// unknown (no next run, so the list stays small). A server with no Agent service is listed there with
+    /// <see cref="DarlingJobReader.NoAgentServiceDescription"/> and a null flag: it is not counted as stopped. The counts cover
+    /// the servers that have a snapshot at or before the window's end. A named server with none reads as unknown, the same
+    /// as one whose snapshot is stale at that instant. A null <paramref name="states"/> (the read failed) adds nothing.
+    /// </summary>
+    private static void AddAgentState(
+        Dictionary<string, object?> envelope, (int ServerId, string ServerName)? scope, List<DarlingJobReader.AgentState>? states)
+    {
+        if (states is null) return;
+        if (scope is null)
+        {
+            /* Counts for every server, detail only for the ones that are not known to be running: a healthy fleet adds
+               a few bytes however many servers it has, and a stopped or unknown Agent is named. */
+            envelope["agents_total"] = states.Count;
+            envelope["agents_running"] = states.Count(a => a.AgentRunning == true);
+            envelope["agents_not_running"] = states.Where(a => a.AgentRunning != true).Select(a => AgentFields(a)).ToList();
+            return;
+        }
+
+        var one = states.Count > 0
+            ? states[0]
+            : new DarlingJobReader.AgentState(scope.Value.ServerName, null, DarlingJobReader.AgentUnknownDescription, null, default);
+        envelope["agent_running"] = one.AgentRunning;
+        envelope["agent_status_desc"] = one.AgentStatusDesc;
+        envelope["next_run"] = McpHelpers.FormatEffectiveStart(one.NextRunUtc);
+        envelope["captured_at"] = states.Count > 0 ? McpHelpers.FormatEffectiveStart(one.CapturedAtUtc) : null;
+    }
+
+    private static Dictionary<string, object?> AgentFields(DarlingJobReader.AgentState a) => new()
+    {
+        ["server"] = a.Server,
+        ["agent_running"] = a.AgentRunning,
+        ["agent_status_desc"] = a.AgentStatusDesc,
+        ["captured_at"] = McpHelpers.FormatEffectiveStart(a.CapturedAtUtc)
+    };
 }

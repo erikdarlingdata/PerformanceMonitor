@@ -56,7 +56,7 @@ namespace PerformanceMonitor.Darling.Analysis;
 /// No query used <c>NOW()</c>/<c>CURRENT_TIMESTAMP</c> (every window bound is a parameter), no
 /// <c>QUALIFY</c> appears (that lives in BaselineProvider, a different slice), and the one
 /// <c>any_value()</c> use is standard SQL:2023, in Postgres since 16 (the product's minimum PG
-/// is 17) — all pinned by <c>PgFactCollectorTests</c>.
+/// is 16) — all pinned by <c>PgFactCollectorTests</c>.
 /// </para>
 /// </summary>
 public sealed partial class PgFactCollector : IFactCollector

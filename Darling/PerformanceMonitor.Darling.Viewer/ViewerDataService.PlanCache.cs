@@ -43,7 +43,7 @@ public sealed record PlanCacheSnapshotRow(
 /// the oldest cached plan's create time — matching the Dashboard, which computes these over the full latest
 /// snapshot. <see cref="SingleUsePlans"/> feeds the derived bloat-level badge
 /// (<see cref="ViewerDataService.ClassifyPlanCacheBloat"/>).</summary>
-public sealed record PlanCacheSummary(long TotalPlans, long SingleUsePlans, DateTime? OldestPlanCreateTime);
+public sealed record PlanCacheSummary(long TotalPlans, long SingleUsePlans, DateTime? OldestPlanCreateTime, DateTime? CollectionTime = null);
 
 /// <summary>The plan-cache bloat classification for the summary badge: the banded severity level plus the
 /// paired recommendation, mirroring install/47's report.plan_cache_bloat.</summary>
@@ -64,29 +64,7 @@ public sealed partial class ViewerDataService
     /// nothing at its one collection's own raw time (ruling item 3). $1 server_id, $2 window start, $3
     /// window end (all naive UTC), $4 the bucket width in minutes.
     /// </summary>
-    public static readonly string PlanCacheTrendSql = $"""
-        WITH per_collection AS
-        (
-            SELECT
-                collection_time,
-                CAST(SUM(single_use_size_mb) AS double precision) AS single_use_mb,
-                CAST(SUM(multi_use_size_mb) AS double precision) AS multi_use_mb
-            FROM v_plan_cache_stats
-            WHERE server_id = $1
-            AND   collection_time >= $2
-            AND   collection_time <= $3
-            GROUP BY collection_time
-        )
-        SELECT
-            GREATEST(date_bin(CAST($4 AS integer) * INTERVAL '1 minute', collection_time, {TrendBucketSql.OriginSql}), $2) AS bucket_start,
-            AVG(single_use_mb) AS single_use_mb,
-            AVG(multi_use_mb) AS multi_use_mb,
-            MIN(collection_time) AS first_collection_time,
-            COUNT(*) AS collection_count
-        FROM per_collection
-        GROUP BY 1
-        ORDER BY 1
-        """;
+    public static readonly string PlanCacheTrendSql = ServerTrendSql.PlanCache;
 
     /// <summary>
     /// The Plan Cache latest-snapshot composition read: every (cacheobjtype, objtype) group captured at
@@ -141,7 +119,8 @@ public sealed partial class ViewerDataService
         SELECT
             COALESCE(SUM(total_plans), 0) AS total_plans,
             COALESCE(SUM(single_use_plans), 0) AS single_use_plans,
-            MIN(oldest_plan_create_time) AS oldest_plan_create_time
+            MIN(oldest_plan_create_time) AS oldest_plan_create_time,
+            MAX(collection_time) AS collection_time
         FROM v_plan_cache_stats
         WHERE server_id = $1
         AND   collection_time = (SELECT mx FROM latest)
@@ -266,6 +245,7 @@ public sealed partial class ViewerDataService
         return new PlanCacheSummary(
             reader.IsDBNull(0) ? 0 : reader.GetInt64(0),
             reader.IsDBNull(1) ? 0 : reader.GetInt64(1),
-            reader.IsDBNull(2) ? null : reader.GetDateTime(2));
+            reader.IsDBNull(2) ? null : reader.GetDateTime(2),
+            reader.IsDBNull(3) ? null : reader.GetDateTime(3));
     }
 }

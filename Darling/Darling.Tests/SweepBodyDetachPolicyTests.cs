@@ -25,8 +25,10 @@ namespace Darling.Tests;
 ///
 /// <list type="table">
 ///   <item><description><c>query_store</c> — p50 3,350ms, <b>p90 65,053ms</b>, max 364,202ms</description></item>
-///   <item><description><c>index_object_stats</c> — p90 15,640ms, but 1440-minute cadence (42 runs/day
-///     fleet-wide, one per server per day), so its body impact is amortised to nil</description></item>
+///   <item><description><c>index_object_stats</c> — p90 15,640ms, 1440-minute cadence (42 runs/day
+///     fleet-wide, one per server per day). Its run is detached from the body too (#4938), by cadence rather
+///     than by name, so it is not in the by-name set pinned below. How rarely it runs says nothing about how
+///     long the body would wait on it when it does (43 minutes across 72 databases in a field case)</description></item>
 ///   <item><description><c>procedure_stats</c> — p50 5,982ms, p90 11,964ms, but <b>1-minute tier</b></description></item>
 ///   <item><description><c>query_stats</c> — p50 2,070ms, p90 5,062ms, 1-minute tier</description></item>
 ///   <item><description><c>plan_correction</c> — p50 2,681ms, <b>max 133,934ms</b> — the same bimodal

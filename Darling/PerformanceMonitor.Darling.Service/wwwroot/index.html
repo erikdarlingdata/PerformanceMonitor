@@ -21,6 +21,7 @@
           <div class="sub">SQL Server fleet monitor</div>
           <!-- Shell-level master pause (#4222d, #4666): one button that stops every page's auto-refresh.
                js/app.js sets the label/aria-label/title and the pressed state; see initAutoRefreshToggle(). -->
+          <button id="sidebar-collapse" class="sidebar-collapse" type="button" aria-expanded="true" title="Hide the sidebar"></button>
           <button id="auto-refresh-toggle" class="auto-refresh-toggle" type="button" aria-pressed="false"></button>
         </div>
         <nav class="nav">
@@ -28,15 +29,22 @@
           <!-- Revealed by js/app.js only once the store has Availability Group data (#991); the #/ag route works
                regardless, so a deep link is never broken by the entry being hidden. -->
           <a data-route="ag" href="#/ag" hidden>Availability Groups</a>
+          <a data-route="finops" href="#/finops">FinOps</a>
           <a data-route="sweeps" href="#/sweeps">Fleet Sweeps</a>
           <a data-route="alerts" href="#/alerts">Alert History</a>
           <a data-route="alert-rules" href="#/alert-rules">Alert Rules</a>
+          <a data-route="admin" href="#/admin">Admin</a>
           <a data-route="views" href="#/views">Custom Views</a>
+          <a data-route="mute-rules" href="#/mute-rules">Mute Rules</a>
+          <a data-route="manage-tags" href="#/manage-tags">Manage Tags</a>
+          <a data-route="job-history" href="#/job-history">Job History</a>
         </nav>
         <div class="server-list-header">Servers</div>
+        <div id="server-search" class="server-search"></div>
         <div id="server-list"></div>
         <div class="server-list-header">Views</div>
         <div id="view-list"></div>
+        <div id="viewer-settings"></div>
       </aside>
       <main id="main"></main>
     </div>

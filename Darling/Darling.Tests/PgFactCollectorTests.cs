@@ -243,7 +243,7 @@ public sealed class PgFactCollectorTests
     [Fact]
     public void AllSql_AnyValue_OnlyInThePlanRegressionQuery()
     {
-        /* any_value() is standard SQL:2023, in Postgres since 16 (product minimum PG is 17).
+        /* any_value() is standard SQL:2023, in Postgres since 16 (product minimum PG is 16).
            It is deliberate in the plan-regression aggregation and nowhere else. */
         Assert.Contains("any_value(query_plan_hash)", PgFactCollector.PlanRegressionSql, StringComparison.Ordinal);
         Assert.Contains("any_value(query_plan_hash)", PgFactCollector.PlanRegressionTableSql, StringComparison.Ordinal);

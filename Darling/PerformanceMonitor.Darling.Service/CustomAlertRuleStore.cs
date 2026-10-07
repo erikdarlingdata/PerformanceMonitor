@@ -127,8 +127,8 @@ LIMIT $1";
     /// A well-formed tree terminates on its own — leaf tags have no children, so the recursion frontier empties
     /// (long before the cap). The guaranteed terminator for a MALFORMED tree is <c>depth &lt; 64</c>: a cycle
     /// (A→B→A, or a self-parent A→A) keeps the frontier non-empty forever, and the depth predicate stops it after
-    /// at most 64 iterations rather than looping or crashing. 64 is far above the 4-level nesting the Viewer
-    /// enforces app-side, so a legitimate subtree is never truncated; the cap only ever bites a malformed cycle.
+    /// at most 64 iterations rather than looping or crashing. 64 is far above the 4-level nesting that
+    /// <c>ServerTagRules</c> enforces for every writer, so a legitimate subtree is never truncated; the cap only ever bites a malformed cycle.
     /// A <c>parent_id</c> pointing at a missing or unrelated row needs no special handling — the child-join finds
     /// no match, so that branch ends. <c>UNION</c> (not <c>UNION ALL</c>) collapses duplicate walk rows.</para></summary>
     public const string ListTagMembersSql = @"

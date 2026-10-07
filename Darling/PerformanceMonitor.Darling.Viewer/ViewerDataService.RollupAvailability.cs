@@ -72,4 +72,15 @@ public sealed partial class ViewerDataService
         _rollupProbeAtUtc = DateTime.UtcNow;
         return (_rollups, _rollupCoverage);
     }
+
+    /// <summary>
+    /// #4957: measures each rollup's coverage floor in the background shortly after the Viewer opens its store, so
+    /// the first routed read (Overview, Queries, FinOps and the rest all go through
+    /// <see cref="GetRollupAvailabilityAsync"/>) does not wait on the cold <c>min(bucket)</c> sort of each rollup's
+    /// oldest compressed chunk. The Viewer is its own process, so the service's warm does not reach it. Fire and
+    /// forget: <see cref="RollupCoverageWarmup.RunDelayedAsync"/> never throws, and a failed warm changes nothing
+    /// here (this method does not touch the Viewer's own cached availability answer).
+    /// </summary>
+    internal Task WarmRollupCoverageAsync(CancellationToken cancellationToken = default)
+        => RollupCoverageWarmup.RunDelayedAsync(_dataSource, logger: null, RollupCoverageWarmup.ViewerStartDelay, cancellationToken);
 }

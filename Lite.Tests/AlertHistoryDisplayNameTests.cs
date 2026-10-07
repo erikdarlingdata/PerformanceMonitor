@@ -46,7 +46,7 @@ public sealed class AlertHistoryDisplayNameTests : IDisposable
 
     private async Task<List<AlertHistoryRow>> ReadAsync(bool withNames)
     {
-        var initializer = new DuckDbInitializer(_dbPath);
+        using var initializer = new DuckDbInitializer(_dbPath);
         await initializer.InitializeAsync();
 
         var server = Server();

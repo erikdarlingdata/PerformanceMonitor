@@ -66,6 +66,8 @@ public sealed class CollectionCaveatsTests : IDisposable
 
     public void Dispose()
     {
+        _seedConn?.Dispose();
+        _duckDb?.Dispose();
         try { if (Directory.Exists(_tempDir)) Directory.Delete(_tempDir, recursive: true); }
         catch { /* best-effort cleanup */ }
     }

@@ -125,6 +125,8 @@ internal static class DarlingTriageEndpoint
         (DarlingSelfAlertEvaluator.RetentionJobRecoveredMetric, DarlingSelfAlertEvaluator.RetentionJobStuckMetric),
         (DarlingSelfAlertEvaluator.StaleMuteResolvedMetric, DarlingSelfAlertEvaluator.StaleMuteMetric),
         (DarlingSelfAlertEvaluator.WebTlsCertRenewedMetric, DarlingSelfAlertEvaluator.WebTlsCertExpiryMetric),
+        /* #5288: the MCP endpoint's certificate alert and its own resolution title. */
+        (DarlingSelfAlertEvaluator.McpTlsCertRenewedMetric, DarlingSelfAlertEvaluator.McpTlsCertExpiryMetric),
         /* #4732: the fleet-gate self-alert's resolution. */
         (DarlingSelfAlertEvaluator.FleetGateClearedMetric, DarlingSelfAlertEvaluator.FleetGateMetric),
         /* The store families that landed AFTER #2768 (#3833). Their resolution titles are triage entry
@@ -289,6 +291,8 @@ internal static class DarlingTriageEndpoint
                and collector cost is what DRIVES the volume all three are downstream of. */
             [DarlingSelfAlertEvaluator.DiskPressureMetric] = StoreSections(),
             [DarlingSelfAlertEvaluator.StoreUpgradeMetric] = StoreSections(),
+            /* #5450: a fleet-level event about the whole store's collection, so the same fleet-level sections. */
+            [DarlingSelfAlertEvaluator.CollectionGapAtStartMetric] = StoreSections(),
             [DarlingSelfAlertEvaluator.JobCadenceMetric] = StoreSections(),
             [DarlingSelfAlertEvaluator.CompressionJobMetric] = StoreSections(),
             /* #3816: the same shape for the two families the self-heal now covers and for the failure arm —
@@ -319,6 +323,14 @@ internal static class DarlingTriageEndpoint
                not-yet-valid arm of the same metric, the date the window opens) are in the alert detail; the
                history is the firing trail, so the operator can see when the warning began. */
             [DarlingSelfAlertEvaluator.WebTlsCertExpiryMetric] = new[]
+            {
+                F("Recent alerts (the certificate's subject, thumbprint and validity dates are in the alert detail)", "get_alert_history", ("hours", "168"), ("limit", "50")),
+            },
+
+            /* #5288: the MCP endpoint's certificate alert is the web one's twin (mcp.network.tls instead of
+               web.network.tls), and answers the same way: renewing the certificate is an out-of-band step on the
+               service host, the facts are in the alert detail, and the history is the firing trail. */
+            [DarlingSelfAlertEvaluator.McpTlsCertExpiryMetric] = new[]
             {
                 F("Recent alerts (the certificate's subject, thumbprint and validity dates are in the alert detail)", "get_alert_history", ("hours", "168"), ("limit", "50")),
             },
@@ -733,7 +745,8 @@ internal static class DarlingTriageEndpoint
                 ["sections"] = sections,
             };
 
-            return Results.Text(body.ToJsonString(), "application/json");
+            /* #4348: the page's own body holds the alert row and every section's read, so it is swept whole. */
+            return DarlingWebStatementSweep.JsonText(body, "/api/triage", logger, 0);
         });
     }
 
@@ -865,9 +878,8 @@ internal static class DarlingTriageEndpoint
         ["detail_text"] = row.DetailText,
     };
 
-    private static string? Query(HttpContext context, string key)
-    {
-        var value = context.Request.Query[key].ToString();
-        return string.IsNullOrEmpty(value) ? null : value;
-    }
+    /// <summary>The first non-empty value for a query key, or null — the read surface's binding rule, which this
+    /// calls rather than restates (#5245: a repeated key is its first value, not the values joined by a comma).</summary>
+    internal static string? Query(HttpContext context, string key) =>
+        DarlingWebEndpoints.First(context, key);
 }

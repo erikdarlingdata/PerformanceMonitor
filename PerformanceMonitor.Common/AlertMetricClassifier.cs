@@ -191,6 +191,11 @@ namespace PerformanceMonitor.Common
             "Poison Wait" => $"{value:F0} ms",
             "Long-Running Query" => $"{value:F0} m",
 
+            /* #5450: "Collection Gap At Start" carries the whole minutes the service was not collecting before
+               this start, and the 15 that gates it: a measurement, so a number with its unit rather than a
+               state-only dash. */
+            "Collection Gap At Start" => $"{value:F0} m",
+
             /* #1839 total blocked wait — seconds, whole (the numeric is already seconds, not ms). */
             "Blocking Wait Time" => $"{value:F0} s",
 
@@ -321,11 +326,15 @@ namespace PerformanceMonitor.Common
 
                        "Web TLS Certificate Expiring" (#3514) — the current value is the certificate's expiry
                        DATE ("expires 2026-... (in 10 days)" / "expired 2026-..."), a date rather than a
-                       measurement, and the fire site passes the 0 sentinel for both numeric columns. */
+                       measurement, and the fire site passes the 0 sentinel for both numeric columns.
+
+                       "MCP TLS Certificate Expiring" (#5288) — the same alert for the MCP endpoint's
+                       certificate, fired by the same code over the same shape of value. */
                     or "Collection Stopped"
                     or "Compression Job Stuck"
                     or "Store Runtime Upgrade"
                     or "Web TLS Certificate Expiring"
+                    or "MCP TLS Certificate Expiring"
 
                     /* #3816, the same split as "Compression Job Stuck" one family over: a refresh or
                        retention policy's stuck reason is elapsed minutes when a run HUNG and a scheduler

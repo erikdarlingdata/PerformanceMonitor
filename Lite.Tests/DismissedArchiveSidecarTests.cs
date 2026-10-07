@@ -43,7 +43,7 @@ public class DismissedArchiveSidecarTests : IDisposable
 
     private async Task<DuckDBConnection> InitializeDatabaseAsync()
     {
-        var initializer = new DuckDbInitializer(_dbPath);
+        using var initializer = new DuckDbInitializer(_dbPath);
         await initializer.InitializeAsync();
 
         var connection = new DuckDBConnection($"Data Source={_dbPath}");
@@ -286,7 +286,8 @@ AND    NOT EXISTS (
         await InsertSidecarRowAsync(connection, DateTime.UtcNow.AddDays(-2), 1, "Recent");
         connection.Close();
 
-        var service = new LocalDataService(new DuckDbInitializer(_dbPath));
+        using var initializer = new DuckDbInitializer(_dbPath);
+        var service = new LocalDataService(initializer);
         var purged = await service.PurgeOldDismissedArchiveAlertsAsync();
 
         Assert.Equal(1, purged);
@@ -331,7 +332,8 @@ AND    NOT EXISTS (
         await InsertSidecarRowAsync(connection, DateTime.UtcNow.AddDays(-1), 1, "Recent");
         connection.Close();
 
-        var service = new LocalDataService(new DuckDbInitializer(_dbPath));
+        using var initializer = new DuckDbInitializer(_dbPath);
+        var service = new LocalDataService(initializer);
         Assert.Equal(0, await service.PurgeOldDismissedArchiveAlertsAsync());
     }
 

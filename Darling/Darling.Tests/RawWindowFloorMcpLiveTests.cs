@@ -98,6 +98,77 @@ public sealed class RawWindowFloorMcpLiveTests
         }
     }
 
+    /// <summary>
+    /// #4966: <c>effective_start</c> names its instant as UTC, with the trailing Z, on a cut window and on a covered
+    /// one alike. A cut window serves from the floor read off the store (a naive instant), a covered one from the
+    /// requested start (already UTC), and the zone marker used to come and go with <c>window_truncated</c>. Both
+    /// tools are read through the code path a caller reaches, so the text is the one a client parses.
+    /// </summary>
+    [Fact]
+    public async Task RawTopReads_PrintEffectiveStartInUtc_ForACutWindowAndACoveredOne()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live raw-window-floor test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+        await using var postgres = NpgsqlDataSource.Create(cs!);
+
+        var bodySucceeded = false;
+        try
+        {
+            await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+            var now = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow).AddMinutes(-2);
+
+            /* Cut: the raw tier holds one row from five minutes ago, so a 24-hour ask is served from that floor. The
+               instant is the row's own, never shifted, and it is named as UTC. */
+            var recent = now.AddMinutes(-5);
+            await PlantQueryAsync(connection, ct, recent);
+            await PlantProcedureAsync(connection, ct, recent);
+            var floorText = DateTime.SpecifyKind(recent, DateTimeKind.Utc).ToString("o");
+
+            var cutQueries = JsonDocument.Parse(await DarlingMcpDataTools.GetTopQueriesByCpu(postgres, ServerName, 24)).RootElement;
+            Assert.True(cutQueries.GetProperty("window_truncated").GetBoolean());
+            Assert.Equal(floorText, cutQueries.GetProperty("effective_start").GetString());
+
+            var cutProcedures = JsonDocument.Parse(await DarlingMcpDataTools.GetTopProceduresByCpu(postgres, ServerName, 24)).RootElement;
+            Assert.True(cutProcedures.GetProperty("window_truncated").GetBoolean());
+            Assert.Equal(floorText, cutProcedures.GetProperty("effective_start").GetString());
+
+            /* Covered: a row from before the window's start (three hours back, a two-hour ask) means the window was
+               served whole, so the served start is the requested one. */
+            var older = now.AddHours(-3);
+            await PlantQueryAsync(connection, ct, older);
+            await PlantProcedureAsync(connection, ct, older);
+
+            var coveredQueries = JsonDocument.Parse(await DarlingMcpDataTools.GetTopQueriesByCpu(postgres, ServerName, 2)).RootElement;
+            Assert.False(coveredQueries.GetProperty("window_truncated").GetBoolean());
+            AssertUtcStamp(coveredQueries.GetProperty("effective_start").GetString());
+
+            var coveredProcedures = JsonDocument.Parse(await DarlingMcpDataTools.GetTopProceduresByCpu(postgres, ServerName, 2)).RootElement;
+            Assert.False(coveredProcedures.GetProperty("window_truncated").GetBoolean());
+            AssertUtcStamp(coveredProcedures.GetProperty("effective_start").GetString());
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
+    /// <summary>A round-trip ISO-8601 stamp that names UTC: it ends in Z and reads back as a UTC instant.</summary>
+    private static void AssertUtcStamp(string? stamp)
+    {
+        Assert.NotNull(stamp);
+        Assert.EndsWith("Z", stamp, StringComparison.Ordinal);
+        Assert.Equal(DateTimeKind.Utc, DateTime.Parse(stamp, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.RoundtripKind).Kind);
+    }
+
     private static Task PlantQueryAsync(NpgsqlConnection connection, CancellationToken ct, DateTime at) =>
         DarlingMcpTestData.ExecAsync(connection, ct,
             @"INSERT INTO query_stats (collection_id, collection_time, server_id, server_name, database_name, query_hash, query_plan_hash, sql_handle, plan_handle, query_text, delta_execution_count, delta_worker_time, delta_elapsed_time, delta_logical_reads, min_dop, max_dop)

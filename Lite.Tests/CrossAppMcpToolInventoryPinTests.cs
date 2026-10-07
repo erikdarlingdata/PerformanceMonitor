@@ -38,6 +38,7 @@ namespace Lite.Tests;
 /// miss a tool that relied on framework-derived naming.
 /// </para>
 /// </summary>
+[Trait("Reads", "Darling")]
 public sealed class CrossAppMcpToolInventoryPinTests
 {
     private const string LiteMcpDir = "Lite/Mcp";
@@ -64,6 +65,8 @@ public sealed class CrossAppMcpToolInventoryPinTests
            nothing for a Lite twin to read. If Lite ever gains a PostgreSQL target, port these and delete
            them from here; the ratchet only shrinks. */
         "get_pg_wait_stats",
+        /* #4843: fleet-wide Agent job history. Lite has a Job History tab but no MCP read of it yet. */
+        "get_job_history",
         /* #2719: instance CPU via AWS Performance Insights. Same reason again, and doubly so — this reads
            the AWS RDS/Aurora SDK directly rather than a database connection at all, which Lite (a
            standalone desktop app with no AWS credentials of its own) has no route to regardless of target. */
@@ -180,6 +183,11 @@ public sealed class CrossAppMcpToolInventoryPinTests
            pg_stat_statements to read. A SKU boundary rather than a porting to-do. */
         "get_store_query_stats",
 
+        /* #5097: the store's own hourly statement history (get_store_query_history), the deltas of the same
+           pg_stat_statements the line above reads. Darling-ONLY for the same reason: Lite's DuckDB store has no
+           server, roles or pg_stat_statements. */
+        "get_store_query_history",
+
         /* #4214 part 2: the store HOST profile read (get_store_host) — platform/RAM/data volume, PostgreSQL
            and TimescaleDB facts, and a per-setting verdict against the managed sizing this store's host was
            derived from. Darling-ONLY by architecture, the get_store_metrics reason: Lite has no managed
@@ -209,6 +217,10 @@ public sealed class CrossAppMcpToolInventoryPinTests
            loop of this shape) has no twin of. */
         "get_read_latency",
 
+        /* #5097: the slow-read record's read (get_slow_reads) over collect.slow_reads - the monitoring tool's own
+           slow or failed reads. Darling-ONLY by architecture, the get_read_latency reason. */
+        "get_slow_reads",
+
         /* #3398: the oversized-plan backlog read (get_oversized_plan_backlog) over
            collect.oversized_plan_backlog - which cached plans the capture cap declined, and what the
            out-of-band sweep has since done about each one. Darling-ONLY by architecture rather than a porting
@@ -221,6 +233,32 @@ public sealed class CrossAppMcpToolInventoryPinTests
            ever gains the backlog table and a sweep, port this and delete the entry; the ratchet only
            shrinks. */
         "get_oversized_plan_backlog",
+
+        /* #5228: the raw-plan reads behind the web grids' plan buttons - get_query_store_plan_xml,
+           get_procedure_plan_xml and get_active_query_plan_xml. Darling-ONLY by architecture, the get_plan_xml
+           reason (#4871): Lite keeps no Query Store or procedure plan text to hand back (its plan tools answer
+           not_collected, PlanToolsNotKeptTests), and its Active Queries plan is fetched by the desktop grid
+           itself rather than over MCP. The /api/read mirror of these three is the web seat's, which Lite has
+           none of. If Lite ever serves stored plans over MCP, port these and delete the entries; the ratchet
+           only shrinks. */
+        "get_query_store_plan_xml",
+        "get_procedure_plan_xml",
+        "get_active_query_plan_xml",
+        /* #5233: the repro script behind the web plan panel's Repro button. Lite builds repro scripts in the desktop grid, not over MCP. */
+        "get_query_repro_script",
+
+        /* #5236: the blocking and deadlock plan reads behind the web grids' plan buttons - get_blocking_plan_xml and
+           get_deadlock_plan_xml. Darling-ONLY, and for a plainer reason than the three above: Lite never captures a
+           blocked-process or deadlock plan (its collectors never set CapturePlanXml, so the plan columns are written
+           NULL) and it has no UI that opens one. The /api/read mirror of these two is the web
+           seat's, which Lite has none of. If Lite ever captures these plans and serves them over MCP, port these and
+           delete the entries; the ratchet only shrinks. */
+        "get_blocking_plan_xml",
+        "get_deadlock_plan_xml",
+
+        /* #5234: get_query_store_query_history, the per-plan history behind the web Query Store grid's History
+           button. Darling-ONLY: Lite's history window reads DuckDB directly and has no MCP twin. */
+        "get_query_store_query_history",
 
         /* #3797: the Query Store clutter view (get_query_store_clutter) - per database the query_store
            collector's read cost off collection_log's fan-out rollup, plan churn off the raw query_store_stats
@@ -302,11 +340,12 @@ public sealed class CrossAppMcpToolInventoryPinTests
 
         /* Darling MCP server-onboarding write tools — add/remove the monitored servers in the CENTRAL store the
            whole fleet shares (config.config_monitored_servers). add_servers bulk-onboards (validate + in-process
-           probe + case-folded dedupe + DPAPI-encrypt + INSERT); remove_server DELETEs by the shared resolver.
+           probe + case-folded dedupe + seal the password + INSERT); remove_server DELETEs by the shared resolver.
            Darling-ONLY by architecture, not "not ported yet": Lite is a single-instance WPF app that monitors
            servers from its own local config + DuckDB, with no central service-honored monitored-server store, so
            there is no Lite twin to port (same reasoning as the Custom Views + alert-tuning tools above). */
         "add_servers",
+        "edit_server",
         "remove_server",
 
         /* #3285: the custom-alert-rule tools — the Darling MCP server's write surface for user-authored alert
@@ -328,6 +367,31 @@ public sealed class CrossAppMcpToolInventoryPinTests
         "validate_custom_alert_rule",
         "test_custom_alert_rule",
         "list_custom_alert_templates",
+        /* #4843: Darling-only for now, not by architecture: the per-server trend reads (waits, CPU scheduler,
+           memory clerks, plan cache) have local DuckDB twins, so Lite could serve this tool later. */
+        "get_server_trend",
+        /* #5085: the fleet server-tag write tools (create/update/delete/assign/unassign_server_tag) write
+           config.server_tags and config.server_tag_map in the central Postgres store, the same Darling-ONLY kind
+           of entry as the custom-alert-rule tools above: Lite keeps its tags in its own local config. */
+        "create_server_tag",
+        "update_server_tag",
+        "delete_server_tag",
+        "assign_server_tag",
+        "unassign_server_tag",
+        // FinOps web parity (#4843), set A: append new FinOps entries below this line only.
+        "get_finops_inventory",
+        "get_finops_recommendations",
+        // FinOps web parity (#4843), set A ends.
+        // Each set belongs to one series of changes. Append to your own set only,
+        // so the two series never edit the same lines of this allow-list.
+        // Entries keep the allow-list's existing order and form.
+        // Set A and set B are separated on purpose: keep this gap.
+        //
+        //
+        //
+        // FinOps web parity (#4843), set B: append new FinOps entries below this line only.
+        "get_finops",
+        // FinOps web parity (#4843), set B ends.
     };
 
     [Fact]

@@ -208,6 +208,47 @@ public sealed class DarlingConfig
     public int ProcedureStatsPlanCycleInterval { get; set; } = 4;
 
     /// <summary>
+    /// #5158: whether <c>query_stats</c> fetches plan XML only for statement plans this host has not already
+    /// committed. On (the default), the main query carries no plan and a second target query renders just the
+    /// plans the host has not stored; rows for plans it has stored carry the existing digest, so every reader
+    /// sees what it saw before. Off restores the inline capture, which renders and ships every row's plan every run.
+    ///
+    /// <para><b>Why.</b> On one large store the inline capture rendered 54 GB of plan XML an hour on the monitored
+    /// servers and shipped 29 GB of it, against 1.1 GB an hour of distinct plans: about 47 times the plans there
+    /// are, and the reason the slowest <c>query_stats</c> runs are almost entirely time spent draining plan text.</para>
+    ///
+    /// <para>A file-only knob like <see cref="ProcedureStatsPlanCycleInterval"/>: an edit takes effect on the next
+    /// restart, and it needs no schema rung. Only meaningful while <see cref="CapturePlans"/> is on.</para>
+    /// </summary>
+    [JsonPropertyName("queryStatsDeferredPlanFetch")]
+    public bool QueryStatsDeferredPlanFetch { get; set; } = true;
+
+    /// <summary>
+    /// #5158: whether <c>procedure_stats</c> fetches plan XML only for module plans this host has not already
+    /// committed. <c>off</c> (the default) keeps the inline capture. <c>shadow</c> keeps the inline capture and every
+    /// stored row exactly as <c>off</c> writes it, and in addition recognizes each module plan by its identity (the
+    /// plan handle, its cached time and a fingerprint of its statements) and checks that identity against the plans
+    /// this host has committed, recording in the run's collection-log note how many it would have skipped and how
+    /// many of those the identity got wrong (<c>deferred_would_hit</c>, <c>deferred_false_hit</c> when the plan's shape changed;
+    /// a render whose shape held, in the field only the memory grant moved, counts as <c>deferred_same_shape</c>, not a false hit). <c>on</c> skips
+    /// the render for a recognized plan, sends its stored digest instead, and renders only the rest, at most 150 a run.
+    /// An unrecognized value logs a warning and means <c>off</c>.
+    ///
+    /// <para><b>Why a shadow mode.</b> A module plan changes in place when one statement recompiles, with the same
+    /// plan handle and cached time, so an identity that missed that would send a stale plan's digest. Shadow measures
+    /// the identity against the plans it just rendered before <c>on</c> trusts it. The cadence of
+    /// <see cref="ProcedureStatsPlanCycleInterval"/> still decides which runs may render: an <c>on</c> run between
+    /// captures sends digests for recognized plans and renders nothing.</para>
+    ///
+    /// <para>A file-only knob like <see cref="QueryStatsDeferredPlanFetch"/>: an edit takes effect on the next restart,
+    /// and it needs no schema rung. Because it cannot change while the service runs, the plan cache starts empty under
+    /// whichever mode the service started in, so nothing needs clearing on a change. Only meaningful while
+    /// <see cref="CapturePlans"/> is on; Azure SQL Database keeps <c>off</c>.</para>
+    /// </summary>
+    [JsonPropertyName("procedureStatsDeferredPlanFetch")]
+    public string ProcedureStatsDeferredPlanFetch { get; set; } = "off";
+
+    /// <summary>
     /// The shared alert engine's enabled flags and thresholds (Phase-5 slice D). Every default
     /// mirrors Lite's <c>App.*</c> alert defaults exactly, so an empty section alerts like a
     /// fresh Lite install. Optional — omit it entirely for the defaults.
@@ -320,6 +361,18 @@ public sealed class DarlingConfig
         return Path.Combine(AppContext.BaseDirectory, "darling.json");
     }
 
+    /// <summary>Every env:/file: reference found in the deserialized config, exactly as written, captured
+    /// in <see cref="Parse"/> before any resolution. Feeds <see cref="DarlingOwnedSecrets"/>.</summary>
+    [JsonIgnore]
+    internal List<string> SecretReferencesAsWritten { get; set; } = new();
+
+    /// <summary>#5307: the paths (never the values) of keys under <c>web.network</c> and <c>mcp.network</c>, their
+    /// <c>tls</c> blocks and <c>web.network.oidc</c> that no config class declares, e.g. <c>mcp.network.ssl</c>,
+    /// found by <see cref="DarlingUnknownKeys"/> in <see cref="Parse"/>. Internal and <c>[JsonIgnore]</c>, so a
+    /// serialized config (the diagnostics bundle) never carries it.</summary>
+    [JsonIgnore]
+    internal List<string> UnknownNetworkKeys { get; set; } = new();
+
     public static DarlingConfig Load(string? explicitPath = null)
     {
         var path = ResolveConfigPath(explicitPath);
@@ -329,7 +382,9 @@ public sealed class DarlingConfig
                 $"Configuration file not found: {path}. Copy darling.sample.json to darling.json and edit it.", path);
         }
 
-        return Parse(File.ReadAllText(path));
+        var loaded = Parse(File.ReadAllText(path));
+        DarlingOwnedSecrets.Set(DarlingOwnedSecrets.Compute(loaded, path));
+        return loaded;
     }
 
     public static DarlingConfig Parse(string json)
@@ -338,6 +393,29 @@ public sealed class DarlingConfig
         if (config is null)
         {
             throw new InvalidDataException("Configuration file parsed to null.");
+        }
+
+        /* Capture every env:/file: reference AS WRITTEN, before the resolution below overwrites any slot
+           with the secret it points at. */
+        config.SecretReferencesAsWritten = DarlingOwnedSecrets.CollectReferences(config);
+        config.UnknownNetworkKeys = DarlingUnknownKeys.Find(json);
+
+        /* #5240: a reference in a server's own secret slot is one the file declares for that server, so the entry read from
+           the file may resolve it even when it is owned. The flags are set here and nowhere from a stored value. */
+        foreach (var server in config.Servers ?? new List<MonitoredServer>())
+        {
+            if (server is null)
+            {
+                continue;
+            }
+
+            server.EncryptedPasswordDeclaredByFile = DarlingSecrets.DeclaresSecretText(server.EncryptedPassword);
+            server.RemediationEncryptedPasswordDeclaredByFile = DarlingSecrets.DeclaresSecretText(server.RemediationEncryptedPassword);
+        }
+
+        if (config.Smtp is not null)
+        {
+            config.Smtp.EncryptedPasswordDeclaredByFile = DarlingSecrets.DeclaresSecretText(config.Smtp.EncryptedPassword);
         }
 
         /* #1804: postgres.connectionString also takes an env:/file: reference — for the WHOLE string,
@@ -1115,6 +1193,19 @@ public sealed class SmtpConfig
     [JsonPropertyName("encryptedPassword")]
     public string? EncryptedPassword { get; set; }
 
+    /// <summary>Whether darling.json itself declares <see cref="EncryptedPassword"/> as it stands (the
+    /// <see cref="MonitoredServer.EncryptedPasswordDeclaredByFile"/> rule, for the SMTP slot, #5366).</summary>
+    [JsonIgnore]
+    internal bool EncryptedPasswordDeclaredByFile { get; set; }
+
+    /// <summary>The pin taken at upgrade for the SMTP slot, when the store holds one (#5366).</summary>
+    [JsonIgnore]
+    internal LegacyPin? SecretPin { get; set; }
+
+    /// <summary>The binding a sealed SMTP password must have been sealed for.</summary>
+    [JsonIgnore]
+    internal PasswordBinding SecretBinding => PasswordBinding.ForSmtp(Host, Port, UseSsl, Username);
+
     /// <summary>
     /// The SMTP password as a literal or an <c>env:</c>/<c>file:</c> reference (#1804 —
     /// <see cref="DarlingSecretSource"/>). Before this, SMTP had ONLY the DPAPI field, so non-Windows
@@ -1162,9 +1253,10 @@ public sealed class McpConfig
     /// <summary>
     /// Opt-in network exposure for the MCP server (darling-network-endpoints). Omit for the secure
     /// default = loopback-only, tokenless HTTP (today's behavior). Managed-mode only; ignored in BYO
-    /// with a caller warning. Any missing precondition (token / valid allowFrom / managed) keeps MCP
-    /// loopback-only + LogCritical — enforced in the MCP host, NEVER in the all-fatal
-    /// <see cref="DarlingConfig.Validate"/> (D-validate). See <see cref="McpNetworkConfig"/>.
+    /// with a caller warning. Any missing precondition (token / valid allowFrom / managed, and a usable
+    /// certificate when <c>tls</c> is set, #5288) keeps MCP loopback-only + LogCritical — enforced in the MCP
+    /// host, NEVER in the all-fatal <see cref="DarlingConfig.Validate"/> (D-validate). See
+    /// <see cref="McpNetworkConfig"/>.
     /// </summary>
     [JsonPropertyName("network")]
     public McpNetworkConfig? Network { get; set; }
@@ -1230,8 +1322,13 @@ public sealed class PostgresNetworkConfig
 /// with a non-loopback <see cref="Listen"/> AND managed mode AND a token AND a valid
 /// <see cref="AllowFrom"/>, the MCP host binds the network interface behind a required bearer token +
 /// an in-app CIDR check (D3); any missing precondition keeps MCP loopback-only + LogCritical
-/// (fail-closed, enforced in the MCP host). No TLS on MCP (a self-signed cert breaks real clients; the
-/// named MITM control is a TLS reverse proxy in front of the endpoint).
+/// (fail-closed, enforced in the MCP host).
+///
+/// <para><b>TLS is opt-in via <see cref="Tls"/> (#5288).</b> Without it the network listener is plain HTTP, and
+/// the bearer token and every tool result cross the segment in the clear — the MCP host warns about exactly
+/// that at every exposed start, and a TLS-terminating reverse proxy in front of the port is the other way to
+/// close the gap. <see cref="HostName"/> names the one DNS name clients reach the endpoint by. Both are
+/// file-only and restart-only, like the rest of this block, and both are null by default.</para>
 /// </summary>
 public sealed class McpNetworkConfig
 {
@@ -1243,10 +1340,19 @@ public sealed class McpNetworkConfig
     public string? Listen { get; set; }
 
     /// <summary>
-    /// The CIDR the in-app <c>RemoteIpAddress</c> check and the firewall rule allow (e.g.
+    /// The CIDR(s) the in-app <c>RemoteIpAddress</c> check and the firewall rule allow (e.g.
     /// <c>192.168.1.0/24</c>); loopback is always allowed regardless. Required when exposed.
+    ///
+    /// <para>#5288: a JSON string holding one CIDR, or several separated by commas
+    /// (<c>"10.8.0.0/16,192.168.1.5/32"</c>), or a JSON array of CIDR strings
+    /// (<c>["10.8.0.0/16", "192.168.1.5/32"]</c>). The property stays a string: the converter joins an array
+    /// with commas, and <see cref="Hosting.CidrAllowList"/> is the one parser. Every entry must be CIDR form
+    /// (<c>/32</c> for one address) and of the SAME address family as <see cref="Listen"/> (a <c>::</c> listen
+    /// takes IPv6 entries only); host bits are masked rather than refused. One bad entry degrades the whole
+    /// listener to loopback-only with a Critical line — an entry is never dropped quietly.</para>
     /// </summary>
     [JsonPropertyName("allowFrom")]
+    [JsonConverter(typeof(Hosting.CidrListJsonConverter))]
     public string? AllowFrom { get; set; }
 
     /// <summary>
@@ -1265,6 +1371,37 @@ public sealed class McpNetworkConfig
     public string? Token { get; set; }
 
     /// <summary>
+    /// Opt-in TLS for the MCP network listener (#5288). Omit for plain HTTP, which is the zero-config default and
+    /// the right answer on loopback; supply a certificate before exposing MCP on a segment where the bearer
+    /// token and the tool results crossing in the clear matter. The SAME type as <c>web.network.tls</c>
+    /// (<see cref="WebTlsConfig"/>), but its OWN block with its own fail-closed decision: no shared block and no
+    /// precedence rule between the two listeners. To serve one certificate on both, point both blocks at the
+    /// same files. A bad, expired or not-yet-valid certificate keeps MCP loopback-only with a Critical line,
+    /// never plain HTTP on the LAN. File-only and restart-only: a renewed certificate file is served after a
+    /// service restart.
+    /// </summary>
+    [JsonPropertyName("tls")]
+    public WebTlsConfig? Tls { get; set; }
+
+    /// <summary>
+    /// The ONE DNS name clients reach the MCP endpoint by (#5288), e.g. <c>mcp.corp.example</c>: a bare name with
+    /// no scheme, port, path, wildcard or IP address (see <see cref="NormalizeHostName"/> for the exact rules).
+    /// In NETWORK mode the Host-header guard admits that one exact name, compared ignoring case, beside the
+    /// names it always admits; it never admits a name the operator did not write here. In loopback-only mode,
+    /// and in every mode that degrades to it (an unreadable token, a refused certificate), the guard does NOT
+    /// admit it: that surface is tokenless, and the name exists for the network listener's clients. With
+    /// <see cref="Tls"/> set it is also the name the certificate should carry as a dNSName SAN, and the host
+    /// warns (never refuses) when it does not. A value that is set but is not a bare DNS name is ignored with one
+    /// Warning at start. A name written in Unicode is admitted as the ASCII (punycode) name a client sends in
+    /// its Host header; a punycode (<c>xn--</c>) label that does not decode, such as <c>xn--a</c>, is refused the
+    /// same way. Unlike <c>web.publicBaseUrl</c> (admitted in both modes) this is a bare host rather than
+    /// a URL, because MCP has no link builder: a scheme, port and path would be unused fields that could
+    /// disagree with the listener. File-only and restart-only.
+    /// </summary>
+    [JsonPropertyName("hostName")]
+    public string? HostName { get; set; }
+
+    /// <summary>
     /// True when any field is set — used only for the BYO "network.* is ignored" caller warning (D-BYO);
     /// NOT the same as "exposed".
     /// </summary>
@@ -1273,7 +1410,132 @@ public sealed class McpNetworkConfig
         !string.IsNullOrWhiteSpace(Listen)
         || !string.IsNullOrWhiteSpace(AllowFrom)
         || !string.IsNullOrWhiteSpace(EncryptedToken)
-        || !string.IsNullOrWhiteSpace(Token);
+        || !string.IsNullOrWhiteSpace(Token)
+        || !string.IsNullOrWhiteSpace(HostName)
+        || (Tls?.IsConfigured ?? false);
+
+    /// <summary>
+    /// The bare DNS name a raw <see cref="HostName"/> stands for, or null when there is none to use (#5288). PURE:
+    /// no DNS lookup, no config, no logger. The rules, in this order:
+    ///
+    /// <list type="number">
+    /// <item>A null, empty or blank value is "not set": null.</item>
+    /// <item>Surrounding whitespace is trimmed.</item>
+    /// <item>ONE trailing dot is stripped (<c>mcp.corp.example.</c> is the same name written fully qualified).
+    /// A name that still ends in a dot after that (<c>host..</c>) is refused: an empty label is a typo, not a
+    /// name.</item>
+    /// <item>A name with any non-ASCII character is an internationalized name. A client sends its ASCII
+    /// (punycode) form in the Host header, never the Unicode form, so a Unicode name could never match: it is
+    /// mapped with <c>IdnMapping.GetAscii</c> (<c>b&#252;cher.example</c> becomes <c>xn--bcher-kva.example</c>,
+    /// folded to lower case as IDNA does), and every rule below runs on that ASCII form. A name the mapping
+    /// refuses (an empty label, a label over 63 characters once encoded, a lone surrogate) is refused: null. So
+    /// is a mapped name that ends in a dot, which the mapping can produce from an ideographic full stop. An
+    /// all-ASCII name is never mapped, so it keeps its spelling, and its case too unless it has an <c>xn--</c>
+    /// label (see the last rule).</item>
+    /// <item>Only a DNS name survives: <c>Uri.CheckHostName</c> must say <c>Dns</c>, on the ASCII form. An IP
+    /// address (the guard admits the listen IP by itself, and a fullwidth <c>10.1.2.3</c> maps to one), a port
+    /// (<c>host:5152</c>), a scheme or path (<c>https://host/</c>), a wildcard (<c>*.corp.example</c>) and
+    /// anything with whitespace inside are refused: null.</item>
+    /// <item>A name with an <c>xn--</c> label must decode: <c>IdnMapping.GetUnicode</c> must not throw for it. The
+    /// MCP host decodes the name the same way before the Host-header guard compares it, and a malformed label
+    /// (<c>xn--a</c>) is a valid DNS name to <c>Uri.CheckHostName</c> yet makes that decode throw, so it is refused
+    /// here: null. A name that decodes is never rewritten to Unicode, but it is folded to lower case: IDNA names
+    /// are case-insensitive, and the framework decodes a Host header's <c>xn--</c> labels only when the prefix is
+    /// lower case (the form a client sends), so every spelling of one punycode name has to reach the guard in that
+    /// one form.</item>
+    /// </list>
+    ///
+    /// <para>An ASCII name keeps its case as written, because the Host-header guard compares ignoring case; the one
+    /// exception is a name with an <c>xn--</c> label, which is folded to lower case (the last rule above). A
+    /// caller tells "not set" from "set but refused" by testing <see cref="HostName"/> for blank first: a refused
+    /// value is ignored with one Warning at start, never an error, and never a reason to degrade a listener.</para>
+    /// </summary>
+    /// <param name="value">The raw <see cref="HostName"/>.</param>
+    /// <returns>The trimmed name without its trailing dot (its ASCII form when it was written in Unicode, folded to
+    /// lower case when it has an <c>xn--</c> label), or null when unset or refused.</returns>
+    public static string? NormalizeHostName(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return null;
+        }
+
+        var name = value.Trim();
+        if (name.EndsWith('.'))
+        {
+            name = name[..^1];
+        }
+
+        /* "host.." had two dots: stripping one leaves an empty label that CheckHostName may let through, and no
+           client sends it as a Host. A bare "." strips to nothing. Both are refused. */
+        if (name.Length == 0 || name.EndsWith('.'))
+        {
+            return null;
+        }
+
+        /* A client sends the punycode (xn--) form of an internationalized name in its Host header, so a Unicode
+           value could never match what the guard compares it with. Map it to that form first; the DNS test below
+           then runs on the ASCII form, which is also what refuses a fullwidth "10.1.2.3" (it maps to an IPv4
+           address) or a "host:5152" the mapping let through. Only a name with a non-ASCII character is mapped:
+           an ASCII name is left exactly as written (an xn-- label folds the case further down). The mapping throws ArgumentException for a
+           name that is not a valid IDN (an empty label, a label too long once encoded, a lone surrogate): refused,
+           never an exception out of a start-up config read. */
+        if (!System.Text.Ascii.IsValid(name))
+        {
+            try
+            {
+                name = new System.Globalization.IdnMapping().GetAscii(name);
+            }
+            catch (ArgumentException)
+            {
+                return null;
+            }
+
+            /* The mapping folds the ideographic full stops (U+3002, U+FF0E, U+FF61) into dots, so a name can end in
+               a dot only now: refused, as the same typo written with an ASCII dot is above. */
+            if (name.Length == 0 || name.EndsWith('.'))
+            {
+                return null;
+            }
+        }
+
+        if (Uri.CheckHostName(name) != UriHostNameType.Dns)
+        {
+            return null;
+        }
+
+        /* #5288: the MCP host runs this name through HostString.FromUriComponent (it decodes every xn-- label with
+           IdnMapping.GetUnicode) so the guard compares it in the form the framework gives the middleware. A
+           malformed label such as "xn--a" is ASCII letters and a hyphen, so it passes the DNS test above, then makes
+           that decode throw ArgumentException, which stopped MCP from starting. A name the framework cannot decode
+           could never equal a decoded Host anyway: it is refused here, so the host logs its one "set but refused"
+           Warning and admits nothing for it (fail closed). Only the check runs, on the ASCII form: the decoded
+           result is dropped, so the name is never rewritten to Unicode. A name with no xn-- label is never decoded. */
+        if (name.Contains("xn--", StringComparison.OrdinalIgnoreCase))
+        {
+            try
+            {
+                _ = new System.Globalization.IdnMapping().GetUnicode(name);
+            }
+            catch (ArgumentException)
+            {
+                return null;
+            }
+
+            /* IDNA names are case-insensitive, and the framework decodes a Host header's xn-- labels only when the
+               prefix is lower case, which is the form a client sends. The guard decodes this name the same way, so
+               an upper-case spelling would stay undecoded while the client's header is decoded, and the two would
+               not compare equal. A name with an xn-- label is therefore folded to lower case here (it is all ASCII
+               by now), which is also the form the mapping above gives a Unicode name. A name with no xn-- label
+               keeps its case as written. */
+            if (Array.Exists(name.Split('.'), label => label.StartsWith("xn--", StringComparison.OrdinalIgnoreCase)))
+            {
+                name = name.ToLowerInvariant();
+            }
+        }
+
+        return name;
+    }
 
     /// <summary>
     /// The bearer token, preferring <see cref="EncryptedToken"/> (DPAPI-decrypted; Windows-only) over
@@ -1364,9 +1626,8 @@ public sealed class WebConfig
 ///
 /// <para><b>TLS is opt-in via <see cref="Tls"/> (#2562).</b> Without it the network listener is plain HTTP and
 /// the token and session cookie cross the segment in the clear — the web host warns about exactly that at
-/// every exposed start. MCP still has no TLS of its own on the older rationale that a self-signed certificate
-/// breaks real MCP clients; that argument is about MCP clients rather than about the wire, and it does not
-/// carry to a surface whose only client is a browser.</para>
+/// every exposed start. The MCP endpoint has its own <c>mcp.network.tls</c> block of the same type (#5288);
+/// the two listeners never share a block.</para>
 /// </summary>
 public sealed class WebNetworkConfig
 {
@@ -1378,10 +1639,19 @@ public sealed class WebNetworkConfig
     public string? Listen { get; set; }
 
     /// <summary>
-    /// The CIDR the in-app <c>RemoteIpAddress</c> check and the firewall rule allow (e.g.
+    /// The CIDR(s) the in-app <c>RemoteIpAddress</c> check and the firewall rule allow (e.g.
     /// <c>192.168.1.0/24</c>); loopback is always allowed regardless. Required when exposed.
+    ///
+    /// <para>#5288: a JSON string holding one CIDR, or several separated by commas
+    /// (<c>"10.8.0.0/16,192.168.1.5/32"</c>), or a JSON array of CIDR strings
+    /// (<c>["10.8.0.0/16", "192.168.1.5/32"]</c>). The property stays a string: the converter joins an array
+    /// with commas, and <see cref="Hosting.CidrAllowList"/> is the one parser. Every entry must be CIDR form
+    /// (<c>/32</c> for one address) and of the SAME address family as <see cref="Listen"/> (a <c>::</c> listen
+    /// takes IPv6 entries only); host bits are masked rather than refused. One bad entry degrades the whole
+    /// listener to loopback-only with a Critical line — an entry is never dropped quietly.</para>
     /// </summary>
     [JsonPropertyName("allowFrom")]
+    [JsonConverter(typeof(Hosting.CidrListJsonConverter))]
     public string? AllowFrom { get; set; }
 
     /// <summary>
@@ -1589,11 +1859,14 @@ public sealed class WebOidcConfig
 }
 
 /// <summary>
-/// Opt-in TLS for the web dashboard's network listener (#2562). Omit the whole <c>tls</c> object for plain
-/// HTTP — the zero-config default, and the correct one for a loopback-only dashboard, which has nothing to
-/// encrypt. Supply a certificate to close the gap the exposure block otherwise leaves open: the access token
-/// and the HMAC session cookie it is exchanged for both cross the segment in the clear over HTTP, and the
-/// in-app CIDR check bounds who can ROUTE to the port, never what an on-path attacker can read off the wire.
+/// Opt-in TLS for a network listener (#2562, #5288). This one type backs BOTH <c>web.network.tls</c> (the web
+/// dashboard) and <c>mcp.network.tls</c> (the MCP endpoint): two separate blocks, each its own fail-closed
+/// decision, with no shared block and no precedence rule. To serve one certificate on both, point both blocks at
+/// the same files. Omit the whole <c>tls</c> object for plain HTTP — the zero-config default, and the correct
+/// one for a loopback-only listener, which has nothing to encrypt. Supply a certificate to close the gap the
+/// exposure block otherwise leaves open: the access token (and, on the web, the HMAC session cookie it is
+/// exchanged for; on MCP, every tool result) crosses the segment in the clear over HTTP, and the in-app CIDR
+/// check bounds who can ROUTE to the port, never what an on-path attacker can read off the wire.
 ///
 /// <para><b>Two forms, exactly one at a time.</b> A PKCS#12 bundle (<see cref="PfxPath"/>, with the password
 /// in whichever of the three slots suits the platform) or a PEM pair (<see cref="CertPath"/> +
@@ -1606,7 +1879,7 @@ public sealed class WebOidcConfig
 /// replaces. An internal CA is the normal answer on the LAN this feature is for.</para>
 ///
 /// <para><b>Fail-closed, like every other exposure precondition.</b> A missing, unreadable, mismatched or
-/// EXPIRED certificate keeps the dashboard loopback-only and logs Critical. It never falls back to serving
+/// EXPIRED certificate keeps the listener loopback-only and logs Critical. It never falls back to serving
 /// the LAN over HTTP: an operator who configured TLS and silently got cleartext would be in precisely the
 /// state this block exists to prevent.</para>
 /// </summary>
@@ -1665,7 +1938,11 @@ public sealed class WebTlsConfig
     /// over <see cref="PfxPassword"/> — the same shape as <see cref="WebNetworkConfig.ResolveToken"/>.
     /// Returns null when neither is set, which is correct for a bundle with no password rather than an error.
     /// </summary>
-    public string? ResolvePfxPassword(out bool usedPlaintext)
+    /// <param name="usedPlaintext">True when the plaintext <see cref="PfxPassword"/> literal was used (an
+    /// <c>env:</c>/<c>file:</c> reference is not plaintext), so the caller can warn.</param>
+    /// <param name="section">Which listener's block this is, <c>"web"</c> (the default) or <c>"mcp"</c>; it only
+    /// names the setting in the messages (<c>{section}.network.tls.pfxPassword</c>).</param>
+    public string? ResolvePfxPassword(out bool usedPlaintext, string section = "web")
     {
         usedPlaintext = false;
 
@@ -1677,7 +1954,7 @@ public sealed class WebTlsConfig
             if (!OperatingSystem.IsWindows())
             {
                 throw new PlatformNotSupportedException(
-                    "web.network.tls.encryptedPfxPassword requires Windows (DPAPI); use \"pfxPassword\" with a "
+                    $"{section}.network.tls.encryptedPfxPassword requires Windows (DPAPI); use \"pfxPassword\" with a "
                     + "file:/env: reference on other platforms.");
             }
 
@@ -1688,7 +1965,7 @@ public sealed class WebTlsConfig
         {
             /* An env:/file: reference (#1804) is not plaintext-in-config — no warning for it. */
             usedPlaintext = !DarlingSecretSource.IsReference(PfxPassword);
-            return DarlingSecretSource.Resolve(PfxPassword, "web.network.tls.pfxPassword");
+            return DarlingSecretSource.Resolve(PfxPassword, $"{section}.network.tls.pfxPassword");
         }
 
         return null;
@@ -1877,6 +2154,16 @@ public sealed class WebhooksConfig
 
     [JsonPropertyName("pagerDutyProxy")]
     public string PagerDutyProxy { get; set; } = "";
+
+    /// <summary>
+    /// Opt-in (V166, <c>config_notification.pagerduty_auto_resolve</c>): the closing edge of an edge-type
+    /// alert pair is delivered to PagerDuty as a <c>resolve</c> event that CLOSES the incident its firing
+    /// edge's trigger opened, instead of the shipped info-severity trigger that leaves it open. Stored on
+    /// the singleton notification row (authoritative in the store; the Viewer's Settings window authors it),
+    /// so a store reload applies the operator's choice live like the sibling knobs on this row.
+    /// </summary>
+    [JsonPropertyName("pagerDutyAutoResolve")]
+    public bool PagerDutyAutoResolve { get; set; } = false;
 }
 
 public sealed class MonitoredServer
@@ -2100,6 +2387,59 @@ public sealed class MonitoredServer
     public bool HasRemediationCredential =>
         !string.IsNullOrWhiteSpace(RemediationUsername) &&
         !string.IsNullOrWhiteSpace(RemediationEncryptedPassword);
+
+    /// <summary>
+    /// Whether darling.json itself declares <see cref="EncryptedPassword"/> as it stands: the same <c>env:</c>/<c>file:</c>
+    /// reference or old-format (DPAPI) value, in this same slot, for this same server id (#5240, #5366). It is the one thing
+    /// that lets such a reference resolve when it names one of the service's own configuration files or secrets
+    /// (<see cref="DarlingSecrets.ResolvePassword(MonitoredServer, out bool, IPasswordKeyRing?)"/>), and lets an old-format
+    /// value open without a pin; every other owned reference is refused where it resolves, and an old-format value with no
+    /// pin is not opened. A sealed value is never marked: it opens through the key ring only.
+    ///
+    /// <para>Set in two places, and never from a stored value. <see cref="DarlingConfig.Parse"/> sets it on an entry read from
+    /// the file, since the file declares what it holds. <c>StoreConfigProvider.BuildServerFromRow</c> sets it on a server
+    /// built from a store row only when a file entry with the same server id declares the same text in this slot, so a store
+    /// row that names another server's reference, or whose slot was changed, is not marked. <see cref="JsonIgnore"/>:
+    /// the file cannot set it, and it is not stored.</para>
+    /// </summary>
+    [JsonIgnore]
+    internal bool EncryptedPasswordDeclaredByFile { get; set; }
+
+    /// <summary><see cref="EncryptedPasswordDeclaredByFile"/> for <see cref="RemediationEncryptedPassword"/>.</summary>
+    [JsonIgnore]
+    internal bool RemediationEncryptedPasswordDeclaredByFile { get; set; }
+
+    /// <summary>
+    /// The connection as the store row holds it, read once by <see cref="ServerConnectionIdentity.FromStoredColumns"/> from the raw
+    /// columns (null text and a null port are not defaulted any further). Null for an entry read from darling.json, whose
+    /// own properties are the connection (#5366).
+    /// </summary>
+    [JsonIgnore]
+    internal ServerConnectionIdentity? StoredIdentity { get; set; }
+
+    /// <summary>The pin taken at upgrade for the <c>encryptedPassword</c> slot, when the store holds one (#5366).</summary>
+    [JsonIgnore]
+    internal LegacyPin? SecretPin { get; set; }
+
+    /// <summary>The pin taken at upgrade for the remediation slot, when the store holds one (#5366).</summary>
+    [JsonIgnore]
+    internal LegacyPin? RemediationPin { get; set; }
+
+    /// <summary>
+    /// The connection settings this server's saved password is bound to (#5366). Throws <see cref="ArgumentException"/> when a
+    /// field is not valid text; the resolver treats that as the saved password not matching this connection.
+    /// </summary>
+    [JsonIgnore]
+    internal ServerConnectionIdentity ConnectionIdentity => StoredIdentity ?? ServerConnectionIdentity.FromStoredColumns(
+        Host, Port, Engine, Database, ReadOnlyIntent, Auth, Username, EncryptMode, TrustServerCertificate, MultiSubnetFailover);
+
+    /// <summary>The binding a sealed <c>encryptedPassword</c> must have been sealed for.</summary>
+    [JsonIgnore]
+    internal PasswordBinding SecretBinding => PasswordBinding.ForServer(ConnectionIdentity);
+
+    /// <summary>The binding a sealed remediation password must have been sealed for.</summary>
+    [JsonIgnore]
+    internal PasswordBinding RemediationBinding => PasswordBinding.ForRemediation(ConnectionIdentity, RemediationUsername);
 
     /// <summary>
     /// This server's <c>server_id</c>: the stored value when there is one, otherwise derived from

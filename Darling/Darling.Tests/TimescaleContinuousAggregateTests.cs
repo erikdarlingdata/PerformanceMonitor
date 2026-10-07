@@ -1326,24 +1326,46 @@ public sealed class TimescaleContinuousAggregateTests
     }
 
     /// <summary>
-    /// PIN (#4300): when the stitched slot's fallback fires (no successor bucket above the legacy's last),
-    /// the probe's upper bound must be <c>now() - HourlyRefreshStartOffset</c>, not a bare <c>now()</c>.
-    /// A bare <c>now()</c> lets a healthy, upgrading store with an EMPTY successor read every hour back
-    /// to the legacy's freeze as unprobed and therefore Short, RE-HOLDING the raw purge for rows the
-    /// successor's own first refresh will reach within <see cref="TimescaleSupport.HourlyRefreshStartOffset"/>
-    /// anyway. RED on dev: the fallback ends at a bare <c>time_bucket(INTERVAL '1 hour', now()::timestamp))</c>
-    /// with no offset subtraction.
+    /// PIN (#4300, #4981): when the stitched slot's fallback fires (no successor bucket above the legacy's
+    /// last), the probe's upper bound must be the service clock minus
+    /// <see cref="TimescaleSupport.HourlyRefreshStartOffset"/>, not a bare <c>now()</c>. A bare <c>now()</c>
+    /// lets a healthy, upgrading store with an EMPTY successor read every hour back to the legacy's freeze as
+    /// unprobed and therefore Short, RE-HOLDING the raw purge for rows the successor's own first refresh will
+    /// reach within the offset anyway. And the clock is BOUND (<c>$1</c>), never <c>now()</c> in the text:
+    /// <c>now()::timestamp</c> renders in the store session's time zone against buckets that are naive UTC.
+    /// RED at <c>9441f6b6c</c>: the fallback ends at
+    /// <c>time_bucket(INTERVAL '1 hour', now()::timestamp - INTERVAL '1 day')</c>, so the statement carries a
+    /// session clock and no placeholder.
     /// </summary>
     [Fact]
-    public void RetentionArmSafetySql_StitchedSlot_FallbackUpperBoundUsesHourlyRefreshStartOffset()
+    public void RetentionArmSafetySql_StitchedSlot_FallbackUpperBoundIsTheBoundHorizon_NotTheSessionClock()
     {
         var sql = TimescaleSupport.RetentionArmSafetySql(
             "query_stats", "collection_time", new[] { TimescaleSupport.QueryStatsIntervalHourlyView });
 
+        Assert.Equal("$1", TimescaleSupport.RetentionArmSafetyHorizonPlaceholder);
         Assert.Contains(
-            $"time_bucket(INTERVAL '1 hour', now()::timestamp - INTERVAL '{TimescaleSupport.HourlyRefreshStartOffset}')",
+            $"time_bucket(INTERVAL '1 hour', {TimescaleSupport.RetentionArmSafetyHorizonPlaceholder})) - INTERVAL '1 hour'",
             sql, StringComparison.Ordinal);
-        Assert.DoesNotContain("time_bucket(INTERVAL '1 hour', now()::timestamp))", sql, StringComparison.Ordinal);
+
+        /* No session clock anywhere in the statement, in any spelling. */
+        Assert.DoesNotContain("now()", sql, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("localtimestamp", sql, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("current_timestamp", sql, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("clock_timestamp", sql, StringComparison.OrdinalIgnoreCase);
+
+        /* What is bound: the UTC clock minus the same offset the SQL used to subtract, as a naive timestamp, so
+           Npgsql sends timestamp and not timestamptz. */
+        var utcNow = new DateTime(2026, 10, 3, 6, 30, 0, DateTimeKind.Utc);
+        var horizon = TimescaleSupport.RetentionArmSafetyHorizon(utcNow);
+        Assert.Equal(utcNow - TimescaleSupport.HourlyRefreshStartSpan, horizon);
+        Assert.Equal(DateTimeKind.Unspecified, horizon.Kind);
+
+        /* A statement with no stitched slot never names the placeholder. */
+        var plainSql = TimescaleSupport.RetentionArmSafetySql(
+            "query_store_stats", "collection_time",
+            new[] { TimescaleSupport.QueryStoreStatsHourlyView, TimescaleSupport.QueryStoreStatsIntervalHourlyView });
+        Assert.DoesNotContain(TimescaleSupport.RetentionArmSafetyHorizonPlaceholder, plainSql, StringComparison.Ordinal);
     }
 
     /// <summary>

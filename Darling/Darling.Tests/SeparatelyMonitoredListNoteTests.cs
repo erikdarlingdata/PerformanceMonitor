@@ -63,8 +63,8 @@ public sealed class SeparatelyMonitoredListNoteTests
             var end = js.IndexOf("),", at, StringComparison.Ordinal);
             Assert.Contains("\"separately_monitored_note\"", js.Substring(at, end - at), StringComparison.Ordinal);
         }
-        Assert.Contains("WebSqlTextPreviewLength, registryState, c.RequestAborted)", web, StringComparison.Ordinal);
-        Assert.Contains("as_of: AsOf(c), registryState: registryState, cancellationToken: c.RequestAborted)", web, StringComparison.Ordinal);
+        Assert.Contains("WebSqlTextPreviewLength, registryState, logger, c.RequestAborted)", web, StringComparison.Ordinal);
+        Assert.Contains("as_of: AsOf(c), registryState: registryState, logger: logger, cancellationToken: c.RequestAborted)", web, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -180,7 +180,7 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE, sql_engine_edition = $3
         Assert.Contains("getPath(res.data, desc.noteKey)", panels, StringComparison.Ordinal);
         Assert.Contains("desc.moreNoteKeys", panels, StringComparison.Ordinal);
         var web = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingWebEndpoints.cs");
-        Assert.Contains("Rows(c, \"limit\", 200), registryState, c.RequestAborted)", web, StringComparison.Ordinal);
+        Assert.Contains("Rows(c, \"limit\", 200), registryState, ", web, StringComparison.Ordinal);
         var viewer = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "FinOpsTab.Locking.cs");
         Assert.Contains("SeparatelyMonitoredListNoteFor(await _dataService.GetSeparatelyMonitoredAsync(", viewer, StringComparison.Ordinal);
         Assert.Contains("FinOpsSeparatelyMonitoredNote.Visibility", viewer, StringComparison.Ordinal);

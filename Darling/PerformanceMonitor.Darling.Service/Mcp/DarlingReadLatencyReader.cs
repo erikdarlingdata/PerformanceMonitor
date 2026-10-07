@@ -48,7 +48,9 @@ internal static class DarlingReadLatencyReader
         long TotalMs,
         long MaxMs,
         long[] BucketCounts,
-        long Timeouts)
+        long Timeouts,
+        long Fallbacks,
+        long GateFailures)
     {
         /// <summary>Zero when nothing ran, matching how <c>get_collector_cost</c> reports its average.</summary>
         public long MeanMs => RunCount > 0 ? TotalMs / RunCount : 0;
@@ -81,7 +83,9 @@ totals AS
         sum(run_count)                                        AS run_count,
         sum(total_ms)                                         AS total_ms,
         max(max_ms)                                           AS max_ms,
-        coalesce(sum(run_count) FILTER (WHERE outcome = 'timeout'), 0) AS timeouts
+        coalesce(sum(run_count) FILTER (WHERE outcome = 'timeout'), 0) AS timeouts,
+        coalesce(sum(run_count) FILTER (WHERE outcome = 'fallback_raw'), 0) AS fallbacks,
+        coalesce(sum(run_count) FILTER (WHERE outcome = 'gate_failed'), 0) AS gate_failures
     FROM windowed
     GROUP BY surface, route
 ),
@@ -98,7 +102,7 @@ bucket_arrays AS
     FROM buckets
     GROUP BY surface, route
 )
-SELECT t.surface, t.route, t.run_count, t.total_ms, t.max_ms, ba.bucket_counts, t.timeouts
+SELECT t.surface, t.route, t.run_count, t.total_ms, t.max_ms, ba.bucket_counts, t.timeouts, t.fallbacks, t.gate_failures
 FROM totals AS t
 JOIN bucket_arrays AS ba ON ba.surface = t.surface AND ba.route = t.route
 ORDER BY t.surface, t.route";
@@ -126,7 +130,9 @@ ORDER BY t.surface, t.route";
                 reader.GetInt64(3),
                 reader.GetInt64(4),
                 (long[])reader.GetValue(5),
-                reader.GetInt64(6)));
+                reader.GetInt64(6),
+                reader.GetInt64(7),
+                reader.GetInt64(8)));
         }
 
         return rows;

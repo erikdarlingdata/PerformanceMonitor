@@ -56,6 +56,8 @@ public sealed class SelfAlertFailedSendCensusTests
             ["ApplyAgReplicaHealthAsync"] = (1, RestoreNotice),
             ["EvaluateStoreUpgradeAsync"] =
                 (2, "one notice per service start about the start's own upgrade: an event, never re-evaluated, so nothing to fire again"),
+            ["EvaluateCollectionGapAtStartAsync"] =
+                (1, "one notice per service start about the gap before the start: an event, never re-evaluated, so nothing to fire again"),
             ["EvaluateStoreTimescaleAsync"] =
                 (1, "one notice per service start about the start's own extension update: an event, never re-evaluated"),
             ["ApplyNotificationChannelsAsync"] =
@@ -422,7 +424,10 @@ public sealed class SelfAlertFailedSendCensusTests
     [InlineData("ApplyCustomRuleHealthAsync", 0, "CustomRuleHealthMetric", "SharedCooldown")]
     [InlineData("ApplyStaleMuteRulesAsync", 0, "StaleMuteMetric", "StaleMuteRefire")]
     [InlineData("ApplyStoreSettingsAsync", 0, "StoreSettingsMetric", "StoreSettingsRefire")]
-    [InlineData("ApplyWebTlsCertificateAsync", 0, "WebTlsCertExpiryMetric", "WebTlsCertRefire")]
+    /* #5288: the web and MCP certificate alerts are one body, ApplyListenerTlsCertificateAsync, which fires and
+       reports under its listener descriptor's metric (the band.Metric precedent below), so ONE row covers both
+       listeners. The interval is still the shared daily WebTlsCertRefire. */
+    [InlineData("ApplyListenerTlsCertificateAsync", 0, "tls.ExpiryMetric", "WebTlsCertRefire")]
     [InlineData("ApplyFleetGateAsync", 0, "FleetGateMetric", "SharedCooldown")]
     [InlineData("ApplyStoreJobCadenceAsync", 0, "JobCadenceMetric", "SharedCooldown")]
     [InlineData("ApplyRetentionHoldsAsync", 0, "RetentionHoldMetric", "SharedCooldown")]

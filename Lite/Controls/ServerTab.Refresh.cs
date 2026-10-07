@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Controls;
 using PerformanceMonitor.Analysis.Baselines;
@@ -20,6 +21,8 @@ using PerformanceMonitorLite.Models;
 using PerformanceMonitorLite.Services;
 using PerformanceMonitor.Common;
 using CollectorEngineCapability = PerformanceMonitor.Collectors.CollectorEngineCapability;
+using RefreshCoordinator = PerformanceMonitor.Ui.RefreshCoordinator;
+using RefreshScope = PerformanceMonitor.Ui.RefreshScope;
 
 namespace PerformanceMonitorLite.Controls;
 
@@ -109,24 +112,83 @@ public partial class ServerTab : UserControl
         noteText.Visibility = note is null ? System.Windows.Visibility.Collapsed : System.Windows.Visibility.Visible;
     }
 
-    private async System.Threading.Tasks.Task RefreshAllDataAsync()
+    /* #5371: one refresh pass in flight per tab, and the newest request that arrives meanwhile runs when it ends. The
+       tab switch, the toolbar's time-range and filter changes, the manual button and the timer all go through this one
+       coordinator. Before it, MainTabControl_SelectionChanged checked _isRefreshing but never set it, so a timer tick
+       that fired while a tab-switch read was waiting started a second full refresh on top (a field trace ran 484 s),
+       and the same check dropped a tab switch or range change that arrived during a refresh. */
+    private RefreshCoordinator? _refreshCoordinator;
+
+    private RefreshCoordinator Refresher => _refreshCoordinator ??= new RefreshCoordinator(
+        RunRefreshPassAsync,
+        ex =>
+        {
+            ConnectionStatusText.Text = $"Error: {ex.Message}";
+            AppLogger.Info("ServerTab", $"[{_server.DisplayName}] refresh failed: {ex}");
+        });
+
+    /// <summary>A user gesture (range or filter change, manual refresh, tab became visible): refresh everything, latest request wins.</summary>
+    private Task RefreshAllDataAsync()
     {
-        if (_isRefreshing) return;
+        /* #5371: a manual refresh, a range or filter change and the return to a tab that went stale while hidden ask for a
+           fresh answer, so they drop the Collection Health memo. */
+        _dataService.InvalidateCollectionHealthMemo();
+        return Refresher.RequestAsync(RefreshScope.Full);
+    }
+
+    /// <summary>The timer tick: refresh everything unless a pass is already running or waiting, which makes it redundant.</summary>
+    private Task RefreshAllDataOnTimerAsync()
+    {
+        /* #5371: a tick at ANY auto-refresh setting (30, 60 or 300 seconds) reads fresh Collection Health data, so it drops the
+           memo first. The memo is for a second request inside one refresh interval from a different trigger: a tab switch,
+           or the coordinator's replay of a pass a newer request superseded. */
+        _dataService.InvalidateCollectionHealthMemo();
+        return Refresher.PollAsync();
+    }
+
+    /// <summary>A tab or sub-tab switch (or a drill that loaded a tab): reload just the tab now showing, latest request wins.</summary>
+    private Task RefreshVisibleTabOnlyAsync()
+    {
+        /* #5371: a tab or sub-tab switch does NOT drop the Collection Health memo: the tick that read it is at most one
+           refresh interval old, and the switch is the second request the memo exists to absorb. */
+        return Refresher.RequestAsync(RefreshScope.VisibleTab);
+    }
+
+    private async Task RunRefreshPassAsync(RefreshScope scope, CancellationToken ct)
+    {
+        if (scope == RefreshScope.VisibleTab)
+        {
+            /* The window and the selected tab are read now, at the pass's own start, so a replay loads whatever is
+               selected when it runs, not what was selected when the request was made. */
+            var (tabHoursBack, tabFromDate, tabToDate) = GetCurrentWindowUtc();
+            await RefreshVisibleTabAsync(tabHoursBack, tabFromDate, tabToDate, subTabOnly: true, ct);
+            return;
+        }
+
+        await RefreshEverythingAsync(ct);
+    }
+
+    private async Task RefreshEverythingAsync(CancellationToken ct)
+    {
+        /* _isRefreshing now only means "this pass is repainting": the grids' selection handlers read it so a refresh
+           does not clear a slicer overlay. It no longer
+           doubles as the in-flight guard (the coordinator is that), and everything that can throw sits inside the try,
+           so the flag cannot be left set by a failed clock read or picker render. */
         _isRefreshing = true;
-
-        /* Read the clock again first: every conversion below (the pickers' rendering, the chart X values) goes
-           through it, and it is never cached for the life of the tab (#4766). Never throws. */
-        await RefreshServerClockAsync();
-
-        /* The server's zone can change under the held range (its clock was just read again, or another tab switched
-           the display mode), so the pickers are shown again from the held instants before the window is read. */
-        RenderCustomRange();
-
-        /* The window is the held range as UTC instants (#4766): every read below takes the same two instants. */
-        var (hoursBack, fromDate, toDate) = GetCurrentWindowUtc();
-
         try
         {
+            /* Read the clock again first: every conversion below (the pickers' rendering, the chart X values) goes
+               through it, and it is never cached for the life of the tab (#4766). Never throws. */
+            await RefreshServerClockAsync();
+            if (ct.IsCancellationRequested) return;
+
+            /* The server's zone can change under the held range (its clock was just read again, or another tab switched
+               the display mode), so the pickers are shown again from the held instants before the window is read. */
+            RenderCustomRange();
+
+            /* The window is the held range as UTC instants (#4766): every read below takes the same two instants. */
+            var (hoursBack, fromDate, toDate) = GetCurrentWindowUtc();
+
             using var _profiler = Helpers.MethodProfiler.StartTiming($"ServerTab-{_server?.DisplayName}");
 
             /* When this server tab isn't the selected one, its charts/grids aren't on screen —
@@ -134,20 +196,26 @@ public partial class ServerTab : UserControl
                dirty so the sub-tab is refreshed when the tab is selected again (IsVisibleChanged). */
             if (IsVisible)
             {
-                await RefreshVisibleTabAsync(hoursBack, fromDate, toDate, subTabOnly: true);
+                await RefreshVisibleTabAsync(hoursBack, fromDate, toDate, subTabOnly: true, ct);
             }
             else
             {
                 _refreshPendingWhileHidden = true;
             }
+
+            /* A newer request superseded this pass (a tab switch, a range change): it carries this pass's scope, so the
+               badges and the status line below are done by its replay, and writing them now would only be stale. */
+            if (ct.IsCancellationRequested) return;
+
             /* Always keep the alert badge current even when the Blocking tab is not visible.
                RefreshAlertCountsAsync reads this tab's own held UTC window (GetCurrentWindowUtc). */
             if (MainTabControl.SelectedIndex != 8)
                 await RefreshAlertCountsAsync();
 
-            /* #1591: same reasoning as the alert badge above — a permission-denied collector is only visible on
-               the Collection Health tab, which is precisely why it went unnoticed. Badge it from every tab. */
+            /* #1591: same reasoning as the alert badge above — a permission-denied collector is only visible on the Collection
+               Health tab, which is precisely why it went unnoticed. Badge it from every tab. */
             await RefreshPermissionDeniedBadgeAsync();
+            if (ct.IsCancellationRequested) return;
 
             /* #4766: the time is the refresh instant read in the tab's display zone, and the label beside it names that
                zone at that same instant on the TAB's own clock, so the two agree in all three display modes and on
@@ -209,13 +277,18 @@ public partial class ServerTab : UserControl
         RunningJobsMsdbWarning.Visibility = RunningJobsMsdbWarningVisibility(_hasMsdbAccess, _isAzureSqlDatabase, _isAwsRds);
     }
 
-    private async System.Threading.Tasks.Task RefreshVisibleTabAsync(int hoursBack, DateTime? fromDate, DateTime? toDate, bool subTabOnly = false)
+    private async System.Threading.Tasks.Task RefreshVisibleTabAsync(int hoursBack, DateTime? fromDate, DateTime? toDate, bool subTabOnly = false, CancellationToken ct = default)
     {
         await RefreshEngineEditionAsync();
+
+        /* #5371: the token is the pass's "a newer request superseded me" signal. The tab loaders below take none, so the
+           stage boundaries are where a superseded pass stops: it does not start a read for a tab nobody is looking at. */
+        if (ct.IsCancellationRequested) return;
 
         if (TabReadsCollectorRuns(MainTabControl.SelectedIndex))
         {
             await RefreshCollectorRunsAsync();
+            if (ct.IsCancellationRequested) return;
         }
 
         switch (MainTabControl.SelectedIndex)
@@ -237,7 +310,7 @@ public partial class ServerTab : UserControl
             case 14: await RefreshCpuSchedulerAsync(hoursBack, fromDate, toDate); break;
             case 15: await RefreshPlanCacheAsync(hoursBack, fromDate, toDate); break;
             case 16: await RefreshSessionStatsAsync(hoursBack, fromDate, toDate); break;
-            case 17: await RefreshCollectionHealthAsync(hoursBack, fromDate, toDate); break;
+            case 17: await RefreshCollectionHealthAsync(hoursBack, fromDate, toDate, ct); break;
             case 18: await RefreshSystemEventsAsync(hoursBack, fromDate, toDate); break;
             case 19: await RefreshConfigChangesAsync(hoursBack, fromDate, toDate); break;
             case 20: await RefreshLongQueriesAsync(hoursBack, fromDate, toDate); break;
@@ -344,6 +417,12 @@ public partial class ServerTab : UserControl
                         _querySnapshotsFilterMgr!.UpdateData(snapshots);
                         LiveSnapshotIndicator.Text = "";
                         _ = LoadActiveQueriesSlicerAsync();
+                        {
+                            /* Where the stored snapshots start, over the SAME UTC window the grid just read
+                               (GetLatestQuerySnapshotsAsync goes through GetTimeRange like the three grids below). */
+                            var (windowStart4, windowEnd4) = LocalDataService.GetQueriesTabWindowUtc(hoursBack, fromDate, toDate);
+                            await RefreshWindowTruncatedBannerAsync(QueryWindowRelation.QuerySnapshots, ActiveQueriesWindowTruncatedBanner, windowStart4, windowEnd4);
+                        }
                         break;
                     case 2: // Top Queries by Duration
                         var queryStats = await Task.Run(() => _dataService.GetTopQueriesByCpuAsync(_serverId, hoursBack, 50, fromDate, toDate, ServerClock, SelectedDatabaseFilter));
@@ -389,12 +468,17 @@ public partial class ServerTab : UserControl
                         var planCorrections = await Task.Run(() => SafeQueryAsync(() => _dataService.GetPlanCorrectionsAsync(_serverId, hoursBack, fromDate, toDate, SelectedDatabaseFilter)));
                         _planCorrectionFilterMgr!.UpdateData(planCorrections);
                         SetDefaultSortIfNone(PlanCorrectionGrid, "Score", ListSortDirection.Descending);
+                        /* #4966: where the stored plan corrections start, over the SAME UTC window the grid read. */
+                        await RefreshPlanCorrectionsBannerAsync(planCorrections, hoursBack, fromDate, toDate);
                         break;
                     case 6: // Query Heatmap
                         var hmMetric = (HeatmapMetric)HeatmapMetricCombo.SelectedIndex;
                         var hmData = await Task.Run(() => _dataService.GetQueryHeatmapAsync(_serverId, hmMetric, hoursBack, fromDate, toDate, SelectedDatabaseFilter));
                         AppLogger.Info("ServerTab", $"[{_server.DisplayName}] Heatmap: {hmData.TimeBuckets.Length} time buckets, {hmData.Intensities.GetLength(0)}x{hmData.Intensities.GetLength(1)} grid");
                         UpdateQueryHeatmapChart(hmData);
+                        /* #4966: where the stored query_stats rows start, over the SAME UTC window the heatmap read, worded from the
+                           first column of the chart just drawn. */
+                        await RefreshQueryHeatmapBannerAsync(hmData, hoursBack, fromDate, toDate);
                         break;
                 }
                 return;
@@ -427,6 +511,12 @@ public partial class ServerTab : UserControl
             LiveSnapshotIndicator.Text = "";
 
             _ = LoadActiveQueriesSlicerAsync();
+            {
+                /* Where the stored snapshots start, over the SAME UTC window the grid read -- see the Active
+                   Queries case of the sub-tab switch above. */
+                var (windowStart4, windowEnd4) = LocalDataService.GetQueriesTabWindowUtc(hoursBack, fromDate, toDate);
+                await RefreshWindowTruncatedBannerAsync(QueryWindowRelation.QuerySnapshots, ActiveQueriesWindowTruncatedBanner, windowStart4, windowEnd4);
+            }
 
             _queryStatsFilterMgr!.UpdateData(queryStatsTask.Result);
             SetDefaultSortIfNone(QueryStatsGrid, "TotalElapsedMs", ListSortDirection.Descending);
@@ -460,12 +550,16 @@ public partial class ServerTab : UserControl
             }
             _planCorrectionFilterMgr!.UpdateData(planCorrectionTask.Result);
             SetDefaultSortIfNone(PlanCorrectionGrid, "Score", ListSortDirection.Descending);
+            /* #4966: see the Plan Corrections case of the sub-tab switch above. */
+            await RefreshPlanCorrectionsBannerAsync(planCorrectionTask.Result, hoursBack, fromDate, toDate);
 
             UpdateQueryDurationTrendChart(queryDurationTrendTask.Result, hoursBack, fromDate, toDate, discontinuitiesTask.Result);
             UpdateProcDurationTrendChart(procDurationTrendTask.Result, hoursBack, fromDate, toDate, discontinuitiesTask.Result);
             UpdateQueryStoreDurationTrendChart(queryStoreDurationTrendTask.Result, hoursBack, fromDate, toDate, discontinuitiesTask.Result);
             UpdateExecutionCountTrendChart(executionCountTrendTask.Result, hoursBack, fromDate, toDate, discontinuitiesTask.Result);
             UpdateQueryHeatmapChart(heatmapTask.Result);
+            /* #4966: see the Query Heatmap case of the sub-tab switch above. */
+            await RefreshQueryHeatmapBannerAsync(heatmapTask.Result, hoursBack, fromDate, toDate);
         }
         catch (Exception ex)
         {
@@ -475,26 +569,207 @@ public partial class ServerTab : UserControl
 
     /// <summary>
     /// #4231: probes the shared window-floor helper (<see cref="LocalDataService.GetQueryWindowFloorAsync"/>)
-    /// for one of the three raw-only relations and updates that tab's "Showing since &lt;time&gt;" banner —
+    /// for one of the <see cref="QueryWindowRelation"/> relations and updates that
+    /// surface's "Showing since &lt;time&gt;" banner —
     /// the SAME probe and the same truncation verdict (<see cref="McpQueryTools.IsWindowTruncated"/>) the
     /// matching MCP tool uses, so the grid and the tool never disagree about whether a window was cut short.
-    /// Called from the sub-tab switch and full-refresh paths below AND from the three OnXSlicerChanged
-    /// handlers in ServerTab.Slicers.cs — a slicer drag re-reads the same grid over a narrower window, which
-    /// can itself start after the raw table's floor, so it needs the same disclosure. No try/catch here: every
-    /// caller already runs inside its own (ServerTabCapabilityPinTests pins that every OnXSlicerChanged keeps
-    /// its own try/catch; RefreshQueriesAsync has one around the whole sub-tab switch).
+    /// Every surface that carries the banner reaches it here: the three Queries grids, Active Queries, Current Waits,
+    /// the Query Heatmap, Memory Pressure Events and Plan Corrections (the last one through
+    /// <see cref="RefreshCappedGridBannerAsync{T}"/>, when its read is under its cap), and, over the toolbar's window, the
+    /// System Events, Default Trace and Config Changes grids (through <c>RefreshStoredWindowBannerAsync</c>) and the two
+    /// grids that read a capped page, the Collection Log and Long Queries (through the cap-aware step, like Plan
+    /// Corrections). Called from the sub-tab switch
+    /// and full-refresh paths below, from the slicer handlers in ServerTab.Slicers.cs, from the Active Queries
+    /// drill-downs in ServerTab.DrillDown.cs and from the helpers in ServerTab.QueriesDataStart.cs — a slicer drag
+    /// re-reads the same grid over a narrower window, which
+    /// can itself start after the raw table's floor, so it needs the same disclosure. A probe that throws costs
+    /// only the banner (<see cref="ProbeWindowFloorOrNullAsync"/> hides it and logs): the callers' own try/catch
+    /// would otherwise skip whatever follows the probe, such as the Query Stats grid bind after the Active Queries
+    /// banner, or the Locking tab's slicers and tab-badge counts after the Current Waits banner.
     ///
     /// <para>#4279: <paramref name="startUtc"/>/<paramref name="endUtc"/> MUST be the same UTC window the
     /// matching grid read (<see cref="LocalDataService.GetQueriesTabWindowUtc"/>, or a slicer's own
     /// <c>SlicerRangeEventArgs.StartUtc</c>/<c>EndUtc</c>) -- <see cref="LocalDataService.GetQueryWindowFloorAsync"/>
     /// compares them straight against UTC <c>collection_time</c>, with no offset conversion of its own. A
     /// server-local pair here silently shifts the probed window by the server's UTC offset.</para>
+    ///
+    /// <para>#4966: a window no longer than the 90-minute slack (<see cref="McpQueryTools.CanWindowBeTruncated"/>) can
+    /// never get a coverage note, so the probe is not called for it: the banner is hidden and its text cleared, as for
+    /// any window the probe finds nothing to report on.</para>
+    ///
+    /// <para>#4989: a capped grid under its cap hands <paramref name="earliestRowShownUtc"/>, the oldest of its rows by the
+    /// time each is shown on. The notice then names the earlier of the probe's floor and that row
+    /// (<see cref="EarlierOfFloorAndRowShown"/>): the Long Queries grid shows each completion at its event time, which on a
+    /// server's first run can be up to <see cref="PerformanceMonitor.Collectors.CollectorContext.EventFallbackWindow"/> before the run that stored it,
+    /// and the probe measures the run's time. The Query Heatmap hands the start of the first column it drew
+    /// (<see cref="FirstColumnDrawn"/>, #4966), which holds the data start and so starts up to one column before it.
+    /// Every other caller leaves it out and gets the probe's floor as before.</para>
     /// </summary>
-    private async System.Threading.Tasks.Task RefreshWindowTruncatedBannerAsync(QueryWindowRelation relation, TextBlock banner, DateTime startUtc, DateTime endUtc)
+    private async System.Threading.Tasks.Task RefreshWindowTruncatedBannerAsync(QueryWindowRelation relation, TextBlock banner, DateTime startUtc, DateTime endUtc, DateTime? earliestRowShownUtc = null, bool includeAlsoCovered = true, CancellationToken ct = default)
     {
-        var floor = await Task.Run(() => _dataService.GetQueryWindowFloorAsync(relation, _serverId, startUtc, endUtc));
+        var floor = await ProbeWindowFloorOrNullAsync(
+            () => Task.Run(() => _dataService.GetQueryWindowFloorAsync(relation, _serverId, startUtc, endUtc, includeAlsoCovered: includeAlsoCovered, cancellationToken: ct)),
+            $"[{_server.DisplayName}] {relation}", startUtc, endUtc, ct);
+        ApplyWindowFloorToBanner(banner, EarlierOfFloorAndRowShown(floor, earliestRowShownUtc), startUtc, GetPickerZone());
+    }
+
+    /// <summary>
+    /// #4989: the floor a capped grid's notice is worded from when its read stayed UNDER its cap: the probe's floor
+    /// (<paramref name="probedFloor"/>), or the oldest row the grid shows (<paramref name="earliestRowShownUtc"/>) when that is
+    /// earlier, so a notice never names a time later than a row on the screen. The Query Heatmap passes the start of its
+    /// first column (#4966), so a notice never names a time later than a column on the screen either. The same rule as the
+    /// Darling viewer's event grids and heatmap (<c>ViewerEventDataStart.Of</c>). A null floor stays null: the probe found nothing to report on, its failure
+    /// hides the banner, and a window no longer than the slack never gets one, and a row shown does not change any of those.
+    /// For a grid whose rows are shown on the probe's own column (the Collection Log and Plan Corrections) the probe's floor is
+    /// never later than its oldest row, so this returns the floor unchanged.
+    /// </summary>
+    internal static DateTime? EarlierOfFloorAndRowShown(DateTime? probedFloor, DateTime? earliestRowShownUtc) =>
+        probedFloor is DateTime floor && earliestRowShownUtc is DateTime shown && shown < floor ? shown : probedFloor;
+
+    /// <summary>The oldest of a capped grid's <paramref name="rows"/> by <paramref name="rowTimeUtc"/>, or null when it shows none.</summary>
+    internal static DateTime? EarliestRowShown<T>(IReadOnlyCollection<T> rows, Func<T, DateTime> rowTimeUtc) =>
+        rows.Count == 0 ? null : rows.Min(rowTimeUtc);
+
+    /// <summary>
+    /// The answer of a window-floor probe, or null when the probe throws, or when the window is no longer than the
+    /// slack (<see cref="McpQueryTools.CanWindowBeTruncated"/>): such a window can never get a coverage note, so the
+    /// probe is not called at all (#4966). The probe is only the banner's disclosure, so
+    /// its failure must not unwind the refresh past what follows it: the null goes on to
+    /// <see cref="ApplyWindowFloorToBanner"/>, for which a null floor hides the banner and clears its text (a "Showing
+    /// since" from the last read does not outlive the answer it came from), the failure is logged at Warn, and the
+    /// refresh goes on. <c>internal static</c> with the probe passed in so the tests drive a throwing probe, and count
+    /// the calls a short window makes, without building the UserControl.
+    /// </summary>
+    internal static async System.Threading.Tasks.Task<DateTime?> ProbeWindowFloorOrNullAsync(
+        Func<System.Threading.Tasks.Task<DateTime?>> probe, string what, DateTime startUtc, DateTime endUtc, CancellationToken ct = default)
+    {
+        if (!McpQueryTools.CanWindowBeTruncated(startUtc, endUtc))
+        {
+            return null;
+        }
+
+        try
+        {
+            return await probe();
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            /* #5371: the pass was superseded and its token stopped the probe; that is not a failed probe to log and hide the banner for. */
+            throw;
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Warn("ServerTab", $"{what} data-start probe failed, so no \"Showing since\" banner is shown: {ex.Message}");
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// #4966: the floor a CAPPED grid's "Showing since" banner is worded from. A read that returned as many rows as
+    /// its cap (<paramref name="rowCap"/>, newest first) is cut short, so its reach is its oldest row,
+    /// by time, not by position, whatever the store holds: that is where the grid starts, even when the store covers
+    /// the whole range. Below its cap a read holds everything the store has in the range, and the probed floor
+    /// (<see cref="LocalDataService.GetQueryWindowFloorAsync"/>, null included) stands. A <paramref name="rowCap"/> of
+    /// zero or less means the read has no cap. A capped floor gets NO slack: the read dropped rows for certain, so its
+    /// verdict is <see cref="ApplyCappedWindowFloorToBanner"/>'s (the banner shows whenever the oldest row shown is later
+    /// than the window's start), while a probed floor keeps <see cref="ApplyWindowFloorToBanner"/>'s 90-minute slack,
+    /// which absorbs a first collection that lands a little after the window starts. The ONE
+    /// decision for every capped grid: <see cref="RefreshCappedGridBannerAsync{T}"/> calls it, and the grids that read
+    /// the newest N rows (Plan Corrections, the Collection Log and Long Queries now; Blocked Process Reports and
+    /// Deadlocks as they adopt it) pass their rows, their cap and the time their rows are shown and capped on.
+    /// </summary>
+    internal static DateTime? CapAwareWindowFloor<T>(DateTime? probedFloor, IReadOnlyCollection<T> rows, int rowCap, Func<T, DateTime> rowTimeUtc, DateTime? cappedSourceOldestUtc = null)
+    {
+        DateTime? capStart = rowCap > 0 && rows.Count >= rowCap ? rows.Min(rowTimeUtc) : null;
+
+        /* #4966: a grid fed by two reads (Blocked Process Reports: XE reports and DMV snapshots) can hold fewer rows than its
+           cap while ONE of its reads filled its own, because the merge drops rows. That read's oldest event time bounds the
+           grid the same way, and when both name one the later wins, since the grid is complete only from there. */
+        if (cappedSourceOldestUtc is DateTime sourceOldest && (capStart is not DateTime named || sourceOldest > named))
+        {
+            capStart = sourceOldest;
+        }
+
+        return capStart ?? probedFloor;
+    }
+
+    /// <summary>
+    /// #4966: the banner step for a grid whose read is capped at its newest <paramref name="rowCap"/> rows. A read that
+    /// reached its cap (<see cref="CapAwareWindowFloor{T}"/> answers its oldest row) is worded from that row and needs
+    /// no probe, and no slack: its reach is what the grid shows, whatever the store holds, and the banner shows whenever
+    /// that oldest row is later than the window's start (<see cref="ApplyCappedWindowFloorToBanner"/>), even on a range
+    /// of an hour. Below its cap it is the shared step,
+    /// <see cref="RefreshWindowTruncatedBannerAsync"/>, with its probe, as for every other grid, handed the oldest row the
+    /// grid shows so that the notice never names a time later than it (<see cref="EarlierOfFloorAndRowShown"/>, #4989). The decision itself is
+    /// <see cref="CappedGridBannerAsync{T}"/>, which this hands the two ways out: the banner worded in the tab's picker
+    /// zone from the oldest row, and that shared step.
+    /// </summary>
+    private System.Threading.Tasks.Task RefreshCappedGridBannerAsync<T>(
+        QueryWindowRelation relation, TextBlock banner, DateTime startUtc, DateTime endUtc,
+        IReadOnlyCollection<T> rows, int rowCap, Func<T, DateTime> rowTimeUtc, DateTime? cappedSourceOldestUtc = null, CancellationToken ct = default) =>
+        CappedGridBannerAsync(rows, rowCap, rowTimeUtc,
+            oldestRowShown => ApplyCappedWindowFloorToBanner(banner, oldestRowShown, startUtc, GetPickerZone()),
+            () => RefreshWindowTruncatedBannerAsync(relation, banner, startUtc, endUtc, EarliestRowShown(rows, rowTimeUtc), ct: ct),
+            cappedSourceOldestUtc);
+
+    /// <summary>
+    /// #4966: the decision inside <see cref="RefreshCappedGridBannerAsync{T}"/>. A read that reached its cap
+    /// (<see cref="CapAwareWindowFloor{T}"/>) hands its oldest row to <paramref name="wordFromOldestRow"/> and never
+    /// calls <paramref name="probeStep"/>; a read under its cap returns what <paramref name="probeStep"/> returns and
+    /// words nothing itself. <c>internal static</c> with the two ways out passed in, as
+    /// <see cref="ProbeWindowFloorOrNullAsync"/> takes its probe, so the tests run this body without building the
+    /// UserControl. The banner stays out of it: every <see cref="ApplyWindowFloorToBanner"/> and
+    /// <see cref="ApplyCappedWindowFloorToBanner"/> call in the tab files is handed the tab's own picker zone, and this
+    /// is not a tab.
+    /// </summary>
+    internal static System.Threading.Tasks.Task CappedGridBannerAsync<T>(
+        IReadOnlyCollection<T> rows, int rowCap, Func<T, DateTime> rowTimeUtc,
+        Action<DateTime> wordFromOldestRow, Func<System.Threading.Tasks.Task> probeStep, DateTime? cappedSourceOldestUtc = null)
+    {
+        if (CapAwareWindowFloor(null, rows, rowCap, rowTimeUtc, cappedSourceOldestUtc) is DateTime oldestRowShown)
+        {
+            wordFromOldestRow(oldestRowShown);
+            return System.Threading.Tasks.Task.CompletedTask;
+        }
+
+        return probeStep();
+    }
+
+    /// <summary>
+    /// The verdict and the banner for one PROBE result: the SAME 90-minute slack
+    /// (<see cref="McpQueryTools.IsWindowTruncated"/>) the MCP tools use, which absorbs a first collection that lands a
+    /// little after the window starts, then the "Showing since" text. A floor at or
+    /// before the window's start (the store reaches back to it, however quiet the window's own start was) and a null
+    /// floor both hide the banner. Null means the window holds nothing to report: no row for the three Queries grids
+    /// and the Query Heatmap, and for Active Queries, Current Waits, Plan Corrections and Memory Pressure Events no row
+    /// and no logged run of the collector either (a covered window
+    /// in which nothing ran or waited answers the start, not null, so it too shows no banner). The same step serves
+    /// every surface that carries the banner (the three Queries grids, Plan Corrections, the Query Heatmap, Active
+    /// Queries, Current Waits and Memory Pressure Events). A capped grid whose read hit its cap does not come through
+    /// here: it is judged by <see cref="ApplyCappedWindowFloorToBanner"/>, with no slack (a capped grid under its cap
+    /// does come through here, by way of its probe). <c>internal static</c> so the tests drive it, with a real probe
+    /// result, without building the UserControl.
+    /// </summary>
+    internal static bool ApplyWindowFloorToBanner(TextBlock banner, DateTime? floor, DateTime startUtc, TimeZoneInfo zone)
+    {
         var truncated = McpQueryTools.IsWindowTruncated(floor, startUtc);
-        SetWindowTruncatedBanner(banner, truncated, floor ?? startUtc, GetPickerZone());
+        SetWindowTruncatedBanner(banner, truncated, floor ?? startUtc, zone);
+        return truncated;
+    }
+
+    /// <summary>
+    /// #4966: the verdict and the banner for a CAPPED read's oldest row (<see cref="CapAwareWindowFloor{T}"/>), with NO
+    /// slack. The 90-minute slack of <see cref="ApplyWindowFloorToBanner"/> belongs to the coverage probe: it absorbs a
+    /// first collection that lands a little after the window starts. A grid that filled its row cap dropped rows for
+    /// certain, so its banner shows whenever the oldest row it shows is later than the window's start (on a range of an
+    /// hour too), and an oldest row at or before the start hides it. Worded from that row, in <paramref name="zone"/>.
+    /// <c>internal static</c> so the tests drive it without building the UserControl.
+    /// </summary>
+    internal static bool ApplyCappedWindowFloorToBanner(TextBlock banner, DateTime oldestRowShown, DateTime startUtc, TimeZoneInfo zone)
+    {
+        var truncated = oldestRowShown > startUtc;
+        SetWindowTruncatedBanner(banner, truncated, oldestRowShown, zone);
+        return truncated;
     }
 
     /// <summary>
@@ -583,6 +858,8 @@ public partial class ServerTab : UserControl
                     case 3: // Memory Pressure Events
                         var pressureEvents = await Task.Run(() => _dataService.GetMemoryPressureEventsAsync(_serverId, hoursBack, fromDate, toDate));
                         UpdateMemoryPressureEventsChart(pressureEvents, hoursBack, fromDate, toDate);
+                        /* #4966: where the stored events start, over the SAME UTC window the chart read. */
+                        await RefreshMemoryPressureEventsBannerAsync(hoursBack, fromDate, toDate);
                         break;
                 }
                 return;
@@ -602,6 +879,8 @@ public partial class ServerTab : UserControl
             UpdateMemoryChart(memoryTrendTask.Result, memoryGrantTrendTask.Result, hoursBack, fromDate, toDate);
             UpdateMemoryGrantCharts(memoryGrantChartTask.Result, hoursBack, fromDate, toDate);
             UpdateMemoryPressureEventsChart(memoryPressureEventsTask.Result, hoursBack, fromDate, toDate);
+            /* #4966: see the Memory Pressure Events case of the timer's sub-tab refresh above. */
+            await RefreshMemoryPressureEventsBannerAsync(hoursBack, fromDate, toDate);
             PopulateMemoryClerkPicker(memoryClerkTypesTask.Result);
             await UpdateMemoryClerksChartFromPickerAsync();
         }
@@ -616,8 +895,8 @@ public partial class ServerTab : UserControl
     {
         try
         {
-            var fileIoTrendTask = Helpers.MethodProfiler.TimeAsync("FileIo.LatencyTrend", () => Task.Run(() => _dataService.GetFileIoLatencyTrendAsync(_serverId, hoursBack, fromDate, toDate)));
-            var fileIoThroughputTask = Helpers.MethodProfiler.TimeAsync("FileIo.ThroughputTrend", () => Task.Run(() => _dataService.GetFileIoThroughputTrendAsync(_serverId, hoursBack, fromDate, toDate)));
+            var fileIoTrendTask = Helpers.MethodProfiler.TimeAsync("FileIo.LatencyTrend", () => Task.Run(() => _dataService.GetFileIoLatencyTrendAsync(_serverId, hoursBack, fromDate, toDate, databaseNames: SelectedDatabaseFilter)));
+            var fileIoThroughputTask = Helpers.MethodProfiler.TimeAsync("FileIo.ThroughputTrend", () => Task.Run(() => _dataService.GetFileIoThroughputTrendAsync(_serverId, hoursBack, fromDate, toDate, databaseNames: SelectedDatabaseFilter)));
 
             await System.Threading.Tasks.Task.WhenAll(fileIoTrendTask, fileIoThroughputTask);
 
@@ -668,6 +947,7 @@ public partial class ServerTab : UserControl
                         UpdateLockWaitTrendChart(lwt.Result, hoursBack, fromDate, toDate);
                         UpdateBlockingTrendChart(bt.Result, hoursBack, fromDate, toDate);
                         UpdateDeadlockTrendChart(dt.Result, hoursBack, fromDate, toDate);
+                        await RefreshBlockingTrendsBannersAsync(lwt.Result, bt.Result, dt.Result, hoursBack, fromDate, toDate, SelectedDatabaseFilter);
                         break;
                     case 1: // Current Waits — 2 charts
                         var cwd = Helpers.MethodProfiler.TimeAsync("Locking.WaitingTaskTrend", () => Task.Run(() => SafeQueryAsync(() => _dataService.GetWaitingTaskTrendAsync(_serverId, hoursBack, fromDate, toDate))));
@@ -675,12 +955,25 @@ public partial class ServerTab : UserControl
                         await System.Threading.Tasks.Task.WhenAll(cwd, cwb);
                         UpdateCurrentWaitsDurationChart(cwd.Result, hoursBack, fromDate, toDate);
                         UpdateCurrentWaitsBlockedChart(cwb.Result, hoursBack, fromDate, toDate);
+                        {
+                            /* Where the stored waiting-task rows start, over the SAME UTC window both charts read
+                               (GetWaitingTaskTrendAsync and GetBlockedSessionTrendAsync both take it from GetTimeRange). */
+                            var (windowStart5, windowEnd5) = LocalDataService.GetQueriesTabWindowUtc(hoursBack, fromDate, toDate);
+                            await RefreshWindowTruncatedBannerAsync(QueryWindowRelation.WaitingTasks, CurrentWaitsWindowTruncatedBanner, windowStart5, windowEnd5);
+                        }
                         break;
                     case 2: // Blocked Process Reports
-                        var bpr = await Task.Run(() => _dataService.GetRecentBlockedProcessReportsAsync(_serverId, hoursBack, fromDate, toDate, SelectedDatabaseFilter));
+                        var bprRead = await Task.Run(() => _dataService.ReadRecentBlockedProcessReportsAsync(_serverId, hoursBack, fromDate, toDate, SelectedDatabaseFilter));
+                        var bpr = bprRead.Rows;
                         using (Helpers.MethodProfiler.StartTiming("Locking.BindBlockedGrid"))
                             _blockedProcessFilterMgr!.UpdateData(bpr);
                         ApplySeparatelyMonitoredListNote(BlockedProcessReportNoteText);
+                        {
+                            /* Where the stored blocked-process coverage starts (#4966), over the SAME UTC window the grid read
+                               resolves from GetTimeRange. */
+                            var (windowStart6, windowEnd6) = LocalDataService.GetQueriesTabWindowUtc(hoursBack, fromDate, toDate);
+                            await RefreshCappedGridBannerAsync(QueryWindowRelation.BlockedProcessReports, BlockedProcessReportsWindowTruncatedBanner, windowStart6, windowEnd6, bpr, LocalDataService.BlockedProcessReportGridCap, BlockedProcessRowTimeUtc, bprRead.CappedSourceStartUtc);
+                        }
                         await LoadBlockingSlicerAsync();
                         break;
                     case 3: // Deadlocks
@@ -689,6 +982,12 @@ public partial class ServerTab : UserControl
                         using (Helpers.MethodProfiler.StartTiming("Locking.BindDeadlockGrid"))
                             _deadlockFilterMgr!.UpdateData(dlrDetails);
                         ApplySeparatelyMonitoredListNote(DeadlockNoteText);
+                        {
+                            /* Where the stored deadlock coverage starts (#4966), over the SAME UTC window the grid read
+                               resolves from GetTimeRange. */
+                            var (windowStart7, windowEnd7) = LocalDataService.GetQueriesTabWindowUtc(hoursBack, fromDate, toDate);
+                            await RefreshCappedGridBannerAsync(QueryWindowRelation.Deadlocks, DeadlocksWindowTruncatedBanner, windowStart7, windowEnd7, dlr, LocalDataService.DeadlockGridCap, DeadlockRowTimeUtc);
+                        }
                         await LoadDeadlockSlicerAsync();
                         break;
                     case 4: // Blocking Stats — blocking + deadlock severity (4 charts + summary strip)
@@ -701,6 +1000,7 @@ public partial class ServerTab : UserControl
                         UpdateDeadlockWaitChart(bdsSeverity.Result, hoursBack, fromDate, toDate);
                         UpdateDeadlockTotalWaitChart(bdsSeverity.Result, hoursBack, fromDate, toDate);
                         UpdateBlockingStatsSummary(bdsStats.Result, bdsCount.Result, bdsSeverity.Result);
+                        await RefreshBlockingStatsBannersAsync(bdsStats.Result, bdsSeverity.Result, hoursBack, fromDate, toDate, SelectedDatabaseFilter);
                         break;
                 }
                 /* Always keep alert badge current when Blocking tab is visible */
@@ -709,7 +1009,7 @@ public partial class ServerTab : UserControl
             }
 
             /* Full refresh: load all sub-tabs */
-            var blockedProcessTask = Helpers.MethodProfiler.TimeAsync("Locking.BlockedProcessReports", () => Task.Run(() => _dataService.GetRecentBlockedProcessReportsAsync(_serverId, hoursBack, fromDate, toDate, SelectedDatabaseFilter)));
+            var blockedProcessTask = Helpers.MethodProfiler.TimeAsync("Locking.BlockedProcessReports", () => Task.Run(() => _dataService.ReadRecentBlockedProcessReportsAsync(_serverId, hoursBack, fromDate, toDate, SelectedDatabaseFilter)));
             var deadlockTask = Helpers.MethodProfiler.TimeAsync("Locking.Deadlocks", () => Task.Run(() => _dataService.GetRecentDeadlocksAsync(_serverId, hoursBack, fromDate, toDate)));
             var lockWaitTrendTask = Helpers.MethodProfiler.TimeAsync("Locking.LockWaitTrend", () => Task.Run(() => SafeQueryAsync(() => _dataService.GetLockWaitTrendAsync(_serverId, hoursBack, fromDate, toDate))));
             var blockingTrendTask = Helpers.MethodProfiler.TimeAsync("Locking.BlockingTrend", () => Task.Run(() => SafeQueryAsync(() => _dataService.GetBlockingTrendAsync(_serverId, hoursBack, fromDate, toDate, SelectedDatabaseFilter))));
@@ -729,7 +1029,7 @@ public partial class ServerTab : UserControl
                remaining UI-thread render steps so any new hot spot is pinpointed (bind vs charts). */
             var deadlockDetails = await ParseDeadlocksOffUiThreadAsync(deadlockTask.Result);
             using (Helpers.MethodProfiler.StartTiming("Locking.BindBlockedGrid"))
-                _blockedProcessFilterMgr!.UpdateData(blockedProcessTask.Result);
+                _blockedProcessFilterMgr!.UpdateData(blockedProcessTask.Result.Rows);
             using (Helpers.MethodProfiler.StartTiming("Locking.BindDeadlockGrid"))
                 _deadlockFilterMgr!.UpdateData(deadlockDetails);
 
@@ -750,16 +1050,35 @@ public partial class ServerTab : UserControl
                 UpdateBlockingStatsSummary(blockingDurationStatsTask.Result, deadlockTrendTask.Result, deadlockSeverityStatsTask.Result);
             }
 
+            /* #4966: the notes of the Trends and Blocking Stats charts, after the charts are drawn. */
+            await RefreshBlockingTrendsBannersAsync(lockWaitTrendTask.Result, blockingTrendTask.Result, deadlockTrendTask.Result, hoursBack, fromDate, toDate, SelectedDatabaseFilter);
+            await RefreshBlockingStatsBannersAsync(blockingDurationStatsTask.Result, deadlockSeverityStatsTask.Result, hoursBack, fromDate, toDate, SelectedDatabaseFilter);
+
+            {
+                /* Where the stored waiting-task rows start, over the SAME UTC window the Current Waits charts read --
+                   see the Current Waits case of the sub-tab switch above. */
+                var (windowStart5, windowEnd5) = LocalDataService.GetQueriesTabWindowUtc(hoursBack, fromDate, toDate);
+                await RefreshWindowTruncatedBannerAsync(QueryWindowRelation.WaitingTasks, CurrentWaitsWindowTruncatedBanner, windowStart5, windowEnd5);
+            }
+
+            {
+                /* Where the stored blocked-process and deadlock coverage starts (#4966), over the SAME UTC window the two
+                   grids read (both resolve it from GetTimeRange); after both grids are bound above. */
+                var (windowStart8, windowEnd8) = LocalDataService.GetQueriesTabWindowUtc(hoursBack, fromDate, toDate);
+                await RefreshCappedGridBannerAsync(QueryWindowRelation.BlockedProcessReports, BlockedProcessReportsWindowTruncatedBanner, windowStart8, windowEnd8, blockedProcessTask.Result.Rows, LocalDataService.BlockedProcessReportGridCap, BlockedProcessRowTimeUtc, blockedProcessTask.Result.CappedSourceStartUtc);
+                await RefreshCappedGridBannerAsync(QueryWindowRelation.Deadlocks, DeadlocksWindowTruncatedBanner, windowStart8, windowEnd8, deadlockTask.Result, LocalDataService.DeadlockGridCap, DeadlockRowTimeUtc);
+            }
+
             await LoadBlockingSlicerAsync();
             await LoadDeadlockSlicerAsync();
 
             /* Notify parent of alert counts for tab badge */
-            var blockingCount = blockedProcessTask.Result.Count;
+            var blockingCount = blockedProcessTask.Result.Rows.Count;
             var deadlockCount = deadlockTask.Result.Count;
             DateTime? latestEventTime = null;
             if (blockingCount > 0 || deadlockCount > 0)
             {
-                var latestBlocking = blockedProcessTask.Result.Max(r => (DateTime?)r.EventTime);
+                var latestBlocking = blockedProcessTask.Result.Rows.Max(r => (DateTime?)r.EventTime);
                 var latestDeadlock = deadlockTask.Result.Max(r => (DateTime?)r.DeadlockTime);
                 latestEventTime = latestBlocking > latestDeadlock ? latestBlocking : latestDeadlock;
             }
@@ -886,14 +1205,21 @@ public partial class ServerTab : UserControl
     }
 
     /// <summary>Tab 17 — Collection Health</summary>
-    private async System.Threading.Tasks.Task RefreshCollectionHealthAsync(int hoursBack, DateTime? fromDate, DateTime? toDate)
+    private async System.Threading.Tasks.Task RefreshCollectionHealthAsync(int hoursBack, DateTime? fromDate, DateTime? toDate, CancellationToken ct = default)
     {
         try
         {
-            var collectionHealthTask = Helpers.MethodProfiler.TimeAsync("CollectionHealth.Health", () => Task.Run(() => SafeQueryAsync(() => _dataService.GetCollectionHealthAsync(_serverId))));
-            var collectionLogTask = Helpers.MethodProfiler.TimeAsync("CollectionHealth.Log", () => Task.Run(() => SafeQueryAsync(() => _dataService.GetRecentCollectionLogAsync(_serverId, hoursBack, fromDate, toDate))));
+            var collectionHealthTask = Helpers.MethodProfiler.TimeAsync("CollectionHealth.Health", readLogsOwnCancellation: true, operation: () => Task.Run(() => SafeQueryAsync(() => _dataService.GetCollectionHealthAsync(_serverId, allowMemo: true, memoLifetime: TimeSpan.FromSeconds(App.AutoRefreshIntervalSeconds), cancellationToken: ct), ct)));
+            var collectionLogTask = Helpers.MethodProfiler.TimeAsync("CollectionHealth.Log", readLogsOwnCancellation: true, operation: () => Task.Run(() => SafeQueryAsync(() => _dataService.GetRecentCollectionLogAsync(_serverId, hoursBack, fromDate, toDate, cancellationToken: ct), ct)));
+            /* #4989: the Duration Trends chart reads its own buckets over the whole range, beside the grid's read. The grid's
+               page is the newest CollectionLogGridCap runs, a sliver of a long range, so the chart is not fed from it. */
+            var collectorDurationTask = Helpers.MethodProfiler.TimeAsync("CollectionHealth.DurationTrends", () => Task.Run(() => SafeQueryAsync(() => _dataService.GetCollectorDurationTrendAsync(_serverId, hoursBack, fromDate, toDate, cancellationToken: ct), ct)));
 
-            await System.Threading.Tasks.Task.WhenAll(collectionHealthTask, collectionLogTask);
+            await System.Threading.Tasks.Task.WhenAll(collectionHealthTask, collectionLogTask, collectorDurationTask);
+
+            /* #5371: a pass a newer request superseded while only one of the three reads was still running ends here: the replay
+               loads the tab, so repainting the grids and the chart, and probing the data start, would only be overwritten. */
+            ct.ThrowIfCancellationRequested();
 
             /* #4766: every row reads its time on THIS tab's server clock, not on whichever clock is active when the
                grid renders. Both grids sit in this server's own tab, so the two are the same while the tab is showing,
@@ -904,7 +1230,14 @@ public partial class ServerTab : UserControl
 
             _collectionHealthFilterMgr!.UpdateData(collectionHealthTask.Result);
             _collectionLogFilterMgr!.UpdateData(collectionLogTask.Result);
-            UpdateCollectorDurationChart(collectionLogTask.Result, hoursBack, fromDate, toDate);
+            UpdateCollectorDurationChart(collectorDurationTask.Result, hoursBack, fromDate, toDate);
+            /* #4989: the grid reads only the newest CollectionLogGridCap runs, so its notice goes through the cap-aware step. */
+            var (windowStart, windowEnd) = LocalDataService.GetQueriesTabWindowUtc(hoursBack, fromDate, toDate);
+            await RefreshCappedGridBannerAsync(QueryWindowRelation.CollectionLog, CollectionLogWindowTruncatedBanner, windowStart, windowEnd, collectionLogTask.Result, LocalDataService.CollectionLogGridCap, row => row.CollectionTime, ct: ct);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            /* #5371: a newer request superseded this pass and its token interrupted the Health or Log read; the replay loads the tab. */
         }
         catch (Exception ex)
         {
@@ -915,11 +1248,16 @@ public partial class ServerTab : UserControl
     /// <summary>
     /// Wraps a query in a try/catch so it returns an empty list on failure instead of faulting.
     /// </summary>
-    private static async Task<List<T>> SafeQueryAsync<T>(Func<Task<List<T>>> query)
+    internal static async Task<List<T>> SafeQueryAsync<T>(Func<Task<List<T>>> query, CancellationToken ct = default)
     {
         try
         {
             return await query();
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            /* #5371: the pass was superseded and its read stopped on purpose; that is not a failed query to swallow into an empty list. */
+            throw;
         }
         catch (Exception ex)
         {

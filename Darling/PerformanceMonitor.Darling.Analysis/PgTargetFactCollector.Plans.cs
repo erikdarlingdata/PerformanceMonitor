@@ -222,7 +222,8 @@ SELECT (SELECT is_satisfied FROM readiness) AS auto_explain_loaded,
        (SELECT state FROM qualstats)        AS pg_qualstats_state";
 
     /// <summary>
-    /// Every statement captured under at least two distinct <c>plan_hash</c> values in the window, with its stored
+    /// Every statement captured under at least two distinct plan shapes (<c>plan_hash</c> is a hash of the plan's
+    /// shape, so estimates and runtime counters never make a second one, #5114) in the window, with its stored
     /// <c>pg_statement_stats</c> deltas split at the flip — the read behind <c>PG_PLAN_REGRESSION</c>. <c>$1</c>
     /// server_id, <c>$2</c>/<c>$3</c> window (naive UTC), <c>$4</c> the row cap (<see cref="PlanFlipCandidateCount"/>),
     /// <c>$5</c>/<c>$6</c>/<c>$7</c> the scorer's bars (calls per side, delta ms, concerning ratio).
@@ -376,7 +377,8 @@ ORDER BY CASE
 LIMIT $4";
 
     /// <summary>
-    /// Every statement captured under at least <c>$6</c> distinct <c>plan_hash</c> values in the window, with the most
+    /// Every statement captured under at least <c>$6</c> distinct plan shapes (<c>plan_hash</c> values, a hash of the
+    /// plan's shape, #5114) in the window, with the most
     /// skewed of the predicate columns <c>pg_qualstats</c> recorded for it — the read behind
     /// <c>PG_PARAMETER_SENSITIVITY</c>. <c>$1</c> server_id, <c>$2</c>/<c>$3</c> window (naive UTC), <c>$4</c> the
     /// state lookback days (<see cref="PlanStateLookbackDays"/>), <c>$5</c> the row cap

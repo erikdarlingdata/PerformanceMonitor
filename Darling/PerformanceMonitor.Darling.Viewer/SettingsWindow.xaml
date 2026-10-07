@@ -864,6 +864,7 @@
                         <RowDefinition Height="Auto"/>
                         <RowDefinition Height="Auto"/>
                         <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
                     </Grid.RowDefinitions>
                     <TextBlock Grid.Row="0" Grid.Column="0" Text="Routing Key:" VerticalAlignment="Center"
                                Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,8,4"/>
@@ -874,12 +875,17 @@
                     <CheckBox Grid.Row="1" Grid.Column="1" x:Name="PagerDutyEuRegionCheckBox" Content="Use EU data center (events.eu.pagerduty.com)"
                               Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,0,4"/>
 
-                    <TextBlock Grid.Row="2" Grid.Column="0" Text="Proxy Address:" VerticalAlignment="Center"
+                    <TextBlock Grid.Row="2" Grid.Column="0" Text="" VerticalAlignment="Center" Margin="0,0,8,4"/>
+                    <CheckBox Grid.Row="2" Grid.Column="1" x:Name="PagerDutyAutoResolveCheckBox" Content="Auto-resolve the incident when the alert's condition clears"
+                              Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,0,4"
+                              ToolTip="Sends a PagerDuty 'resolve' event when an edge-type alert's condition clears (a server comes back, a replica reconnects), closing the incident the firing edge's trigger opened. Off by default: the closing edge is sent as an info-level alert and the incident stays open."/>
+
+                    <TextBlock Grid.Row="3" Grid.Column="0" Text="Proxy Address:" VerticalAlignment="Center"
                                Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,8,4"/>
-                    <TextBox Grid.Row="2" Grid.Column="1" x:Name="PagerDutyProxyAddressBox" Margin="0,0,0,4"
+                    <TextBox Grid.Row="3" Grid.Column="1" x:Name="PagerDutyProxyAddressBox" Margin="0,0,0,4"
                              ToolTip="Optional. HTTP proxy for reaching PagerDuty (e.g. http://proxy.corp.local:8080). Leave blank to connect directly."/>
 
-                    <StackPanel Grid.Row="3" Grid.Column="1" Orientation="Horizontal" Margin="0,4,0,0">
+                    <StackPanel Grid.Row="4" Grid.Column="1" Orientation="Horizontal" Margin="0,4,0,0">
                         <Button x:Name="TestPagerDutyButton" Content="Send Test Notification" Click="TestPagerDutyButton_Click"/>
                         <TextBlock x:Name="PagerDutyStatusText" FontSize="11" FontStyle="Italic"
                                    Foreground="{DynamicResource ForegroundMutedBrush}" VerticalAlignment="Center" Margin="8,0,0,0"/>

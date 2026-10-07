@@ -231,6 +231,14 @@ public sealed class ProvisionRolesAclDriftTests
     }
 
     [Fact]
+    public void ProvisionRolesSql_GrantsMcpReadOnTheCollectorRunTimes()
+    {
+        var script = StripComments(ReadProvisionRolesSql());
+
+        Assert.Contains("GRANT SELECT ON config.config_collector_run_times TO mcp;", script, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void ParsedViewerAcl_Comparison_FailsOnAnInjectedDrift()
     {
         /* Guard the guard. A drift test that cannot fail is worthless, and the ways this one could silently

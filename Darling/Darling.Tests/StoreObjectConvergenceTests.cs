@@ -617,6 +617,12 @@ public sealed class CompressionEnableGuardTests
         Assert.Contains("cs.segmentby_column_index IS NOT NULL", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("hypertable_compression_settings", sql, StringComparison.Ordinal);
 
+        /* The columns are joined with the separator the statement writes them with (#4951: collection_log's
+           segmentby has two columns), so a converged two-column setting reads back exactly as it was written.
+           Any other separator would read every converged pass as "not converged" and re-issue the ALTER, and its
+           ACCESS EXCLUSIVE lock, every hour. */
+        Assert.Contains("string_agg(cs.attname, ', ' ORDER BY cs.segmentby_column_index)", sql, StringComparison.Ordinal);
+
         /* Scoped, for the reason CompressionPolicyStateSql gives: a bring-your-own store may carry its own
            wait_stats hypertable in another schema, and this product must not read — let alone ALTER — it. */
         Assert.Contains("h.hypertable_schema = 'collect'", sql, StringComparison.Ordinal);
@@ -642,6 +648,12 @@ public sealed class CompressionEnableGuardTests
             TimescaleSupport.EnableCompressionSql("query_stats"),
             StringComparison.Ordinal);
 
+        /* #4951: collection_log alone segments by collector as well, and every other table keeps server_id. */
+        Assert.Contains(
+            "timescaledb.compress_segmentby = 'server_id, collector_name'",
+            TimescaleSupport.EnableCompressionSql("collection_log"),
+            StringComparison.Ordinal);
+
         /* The two halves are tied THROUGH the constant, not through a shared spelling: the statement
            interpolates it, and the guard compares against it. Both are asserted on the SOURCE, because a
            rendered statement cannot tell you whether the name came from the constant or from a literal that
@@ -652,11 +664,13 @@ public sealed class CompressionEnableGuardTests
         var raw = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Storage", "TimescaleSupport.cs");
         /* The statement's half is read off the RAW source: the interpolation lives inside a string literal,
            which StripCommentsAndStrings blanks by design. */
-        Assert.Contains("timescaledb.compress_segmentby = '{CompressionSegmentByColumn}'", raw, StringComparison.Ordinal);
+        /* #4951: the value is per table now (collection_log has its own), so both halves go through the one
+           per-table lookup rather than the shared column constant. */
+        Assert.Contains("timescaledb.compress_segmentby = '{CompressionSegmentByFor(table)}'", raw, StringComparison.Ordinal);
         /* The guard's half is code, so it is read off the stripped source — prose about the comparison is not
            the comparison. */
         Assert.Contains(
-            "string.Equals(segmentBy, CompressionSegmentByColumn, StringComparison.Ordinal)",
+            "string.Equals(segmentBy, CompressionSegmentByFor(table), StringComparison.Ordinal)",
             CSharpSourceWalker.StripCommentsAndStrings(raw),
             StringComparison.Ordinal);
     }
@@ -705,6 +719,29 @@ public sealed class CompressionEnableGuardTests
         Assert.False(string.IsNullOrEmpty(collectionLog));
         Assert.Contains("ReadTablesNeedingCompressionEnableAsync(connection, logger, cancellationToken);", collectionLog, StringComparison.Ordinal);
         Assert.Contains("if (converged is null || !converged.Contains(CollectionLogTable))", collectionLog, StringComparison.Ordinal);
+
+        /* #4951: and collection_log's ALTER goes only through the bounded helper, which runs it inside its own
+           transaction and treats a lock it could not get as "try next pass" (the live
+           CollectionLogSegmentByLiveTests prove the wait is bounded; this keeps the shape in the unit tier). */
+        Assert.Contains("TryRunBoundedDdlAsync(", collectionLog, StringComparison.Ordinal);
+        Assert.Contains("new[] { EnableCompressionSql(CollectionLogTable) }", collectionLog, StringComparison.Ordinal);
+        Assert.DoesNotContain("new NpgsqlCommand(EnableCompressionSql(CollectionLogTable)", collectionLog, StringComparison.Ordinal);
+
+        /* Below TimescaleDB 2.14 the change cannot run while compressed chunks exist, so the version check comes
+           first and the ALTER is not attempted there. No live tier here runs a TimescaleDB that old, so the order
+           is pinned in this one. */
+        var versionCheckAt = collectionLog.IndexOf("CollectionLogSettingsChangeBlockedAsync(connection, logger, cancellationToken)", StringComparison.Ordinal);
+        var alterAt = collectionLog.IndexOf("TryRunBoundedDdlAsync(", StringComparison.Ordinal);
+        Assert.True(versionCheckAt >= 0 && versionCheckAt < alterAt,
+            "EnsureCollectionLogHypertableAsync must check the TimescaleDB version and compressed chunks before it attempts the settings change");
+        Assert.Contains("BoundedDdlOutcome.LockBusy", collectionLog, StringComparison.Ordinal);
+        /* The label is a string literal, which the stripped text above cannot hold: read it from the raw source of the same method. */
+        var rawStorage = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Storage", "TimescaleSupport.cs").Replace("\r\n", "\n", StringComparison.Ordinal);
+        var rawStart = rawStorage.IndexOf("public static async Task<bool> EnsureCollectionLogHypertableAsync(", StringComparison.Ordinal);
+        Assert.True(rawStart >= 0, "could not locate EnsureCollectionLogHypertableAsync in the raw source");
+        var rawEnd = rawStorage.IndexOf("\n    }\n", rawStart, StringComparison.Ordinal);
+        Assert.True(rawEnd > rawStart, "could not find the end of EnsureCollectionLogHypertableAsync in the raw source");
+        Assert.Contains("\"collection_log's compression settings\"", rawStorage[rawStart..rawEnd], StringComparison.Ordinal);
 
         /* A read failure must issue every ALTER rather than skip every ALTER: the conservative direction,
            because a needless ALTER costs one lock and a skipped one costs a table that never compresses.
@@ -859,5 +896,116 @@ public sealed class CompressionEnableGuardLiveTests
     {
         using var command = new NpgsqlCommand(sql, connection) { CommandTimeout = ReadTimeoutSeconds };
         await command.ExecuteNonQueryAsync(ct);
+    }
+}
+
+/// <summary>
+/// #5444, live: a convergence step whose failure makes Npgsql close the shared connection (XX000 is in the
+/// classes Npgsql 10 closes on) must not fail the steps behind it on the same connection.
+/// </summary>
+[Collection("live-postgres")]
+public sealed class StoreObjectConvergenceReopenLiveTests
+{
+    private static DarlingWorker.StoreObjectConvergenceStep Step(string name, Func<NpgsqlConnection, Task> body) =>
+        new(name, DarlingWorker.StoreObjectConvergenceStage.Timescale, DarlingWorker.StoreObjectChangeSignal.Delta,
+            async (c, _, _) => { await body(c); return 0; });
+
+    private static async Task ExecAsync(NpgsqlConnection c, string sql)
+    {
+        await using var cmd = new NpgsqlCommand(sql, c);
+        await cmd.ExecuteNonQueryAsync();
+    }
+
+    [Theory]
+    [InlineData("XX000", true)]
+    [InlineData("P0001", false)]
+    public async Task AStepThatBreaksTheConnection_DoesNotFailTheStepAfterIt_AgainstDevPostgres(string sqlState, bool breaksConnection)
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live convergence reopen test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        var bodySucceeded = false;
+        try
+        {
+            using var connection = new NpgsqlConnection(connectionString);
+            await connection.OpenAsync(ct);
+            var logger = new CapturingTestLogger();
+            var tally = new DarlingWorker.StoreObjectConvergenceTally();
+            var stateAfterA = (System.Data.ConnectionState?)null;
+
+            var a = Step("step A", async c =>
+            {
+                try { await ExecAsync(c, $"DO $$ BEGIN RAISE EXCEPTION 'planted #5444' USING ERRCODE = '{sqlState}'; END $$"); }
+                catch { stateAfterA = c.State; throw; }
+            });
+            var bRan = false;
+            var b = Step("step B", async c => { await ExecAsync(c, "SELECT 1"); bRan = true; });
+
+            await DarlingWorker.RunStoreObjectConvergenceStepAsync(connection, a, tally, logger, ct);
+            await DarlingWorker.RunStoreObjectConvergenceStepAsync(connection, b, tally, logger, ct);
+
+            Assert.Equal(breaksConnection, stateAfterA != System.Data.ConnectionState.Open);
+            Assert.True(bRan, "step B must run on the reopened connection: " + logger.Joined);
+            Assert.Equal(new[] { "step A" }, tally.Failed);
+            Assert.Equal(2, tally.Steps);
+            Assert.Equal(System.Data.ConnectionState.Open, connection.State);
+            Assert.Equal(breaksConnection ? 1 : 0, logger.Lines.Count(l => l.Contains("it was reopened", StringComparison.Ordinal)));
+            Assert.DoesNotContain("Connection is not open", logger.Joined, StringComparison.Ordinal);
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, (_, _) => Task.CompletedTask);
+        }
+    }
+
+    /// <summary>
+    /// The common shape: a step that isolates its own statements (as the reshape drop does) catches the
+    /// connection-breaking error and RETURNS normally with the connection closed. The runner must reopen it
+    /// anyway, so the next step runs, and the step is not counted failed because it did not throw.
+    /// </summary>
+    [Fact]
+    public async Task AStepThatSwallowsAConnectionBreakingError_StillLeavesAnOpenConnectionForTheNextStep_AgainstDevPostgres()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live convergence reopen test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        var bodySucceeded = false;
+        try
+        {
+            using var connection = new NpgsqlConnection(connectionString);
+            await connection.OpenAsync(ct);
+            var logger = new CapturingTestLogger();
+            var tally = new DarlingWorker.StoreObjectConvergenceTally();
+            var stateAfterA = (System.Data.ConnectionState?)null;
+
+            var a = Step("step A", async c =>
+            {
+                try { await ExecAsync(c, "DO $$ BEGIN RAISE EXCEPTION 'planted #5444' USING ERRCODE = 'XX000'; END $$"); }
+                catch (PostgresException) { stateAfterA = c.State; }
+            });
+            var bRan = false;
+            var b = Step("step B", async c => { await ExecAsync(c, "SELECT 1"); bRan = true; });
+
+            await DarlingWorker.RunStoreObjectConvergenceStepAsync(connection, a, tally, logger, ct);
+            await DarlingWorker.RunStoreObjectConvergenceStepAsync(connection, b, tally, logger, ct);
+
+            Assert.NotEqual(System.Data.ConnectionState.Open, stateAfterA);
+            Assert.True(bRan, "step B must run on the reopened connection: " + logger.Joined);
+            Assert.Empty(tally.Failed);
+            Assert.Equal(2, tally.Steps);
+            Assert.Equal(System.Data.ConnectionState.Open, connection.State);
+            Assert.Equal(1, logger.Lines.Count(l => l.Contains("step 'step A' left the store connection closed; it was reopened", StringComparison.Ordinal)));
+            Assert.DoesNotContain("Connection is not open", logger.Joined, StringComparison.Ordinal);
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, (_, _) => Task.CompletedTask);
+        }
     }
 }

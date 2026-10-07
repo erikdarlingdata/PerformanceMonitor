@@ -801,6 +801,30 @@
                                         <TextBlock x:Name="OverviewAttentionCountText" FontSize="11" VerticalAlignment="Center"
                                                    Foreground="{DynamicResource WarningBrush}" Margin="0,0,14,0"
                                                    Visibility="Collapsed"/>
+                                        <!-- #5352: Lite's Overview search, ported. Filters the cards by server name or tag
+                                             and composes with the toggle and sort here through
+                                             ApplyOverviewCardFilter. The hit-test-invisible watermark shows the placeholder
+                                             while the box is empty. -->
+                                        <TextBlock Text="Search:" FontSize="11" VerticalAlignment="Center"
+                                                   Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,0,6,0"/>
+                                        <Grid Width="180" VerticalAlignment="Center" Margin="0,0,14,0">
+                                            <TextBox x:Name="OverviewSearchBox" TextChanged="OverviewSearchBox_TextChanged"
+                                                     ToolTip="Filter the Overview by server name or tag"/>
+                                            <TextBlock Text="server name / tag…" FontSize="11" IsHitTestVisible="False"
+                                                       Foreground="{DynamicResource ForegroundMutedBrush}"
+                                                       VerticalAlignment="Center" HorizontalAlignment="Left" Margin="6,0,0,0">
+                                                <TextBlock.Style>
+                                                    <Style TargetType="TextBlock">
+                                                        <Setter Property="Visibility" Value="Collapsed"/>
+                                                        <Style.Triggers>
+                                                            <DataTrigger Binding="{Binding Text, ElementName=OverviewSearchBox}" Value="">
+                                                                <Setter Property="Visibility" Value="Visible"/>
+                                                            </DataTrigger>
+                                                        </Style.Triggers>
+                                                    </Style>
+                                                </TextBlock.Style>
+                                            </TextBlock>
+                                        </Grid>
                                         <TextBlock Text="Sort:" FontSize="11" VerticalAlignment="Center"
                                                    Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,0,6,0"/>
                                         <ComboBox x:Name="OverviewSortSelector" Width="120" VerticalAlignment="Center"

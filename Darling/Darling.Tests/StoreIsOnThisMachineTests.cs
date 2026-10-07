@@ -129,37 +129,16 @@ public sealed class StoreIsOnThisMachineTests
     }
 
     /// <summary>
-    /// The dialog surfaces the machine-bound-secret hint for the two secret-bearing modes — SQL auth and (as of
-    /// #3484) a service principal — on a non-local store, and CLEARS its own message when the mode changes away,
-    /// the same self-clearing discipline the interactive-Entra arm uses, which stops a stale hint sitting under
-    /// an unrelated auth mode.
-    ///
-    /// <para>Pinned at the source: the alternative is standing up a WPF dialog with a live store.</para>
+    /// A password is sealed to the service's published key (#5366), so it can be saved from a viewer on any machine: the
+    /// dialog no longer warns that a secret is readable only on the machine that wrote it.
     /// </summary>
     [Fact]
-    public void TheDialogShowsTheHintForSecretBearingModesOnANonLocalStore()
+    public void TheDialogDoesNotWarnThatASecretIsBoundToThisMachine()
     {
         var source = ReadDialogSource();
 
-        Assert.Contains("SqlAuthRadio.IsChecked == true || ServicePrincipalAuthRadio.IsChecked == true", source, StringComparison.Ordinal);
-        Assert.Contains("_dataService is { StoreIsOnThisMachine: false }", source, StringComparison.Ordinal);
-        Assert.Contains("StatusText.Text = SqlCredentialMachineBoundHint;", source, StringComparison.Ordinal);
-        /* Self-clearing, exactly like the interactive-Entra message above it. */
-        Assert.Contains("else if (StatusText.Text == SqlCredentialMachineBoundHint)", source, StringComparison.Ordinal);
-    }
-
-    /// <summary>
-    /// The hint has to be actionable, not just alarming: it names all three ways to produce a credential the
-    /// service can use, which is what turns it from a warning into an instruction.
-    /// </summary>
-    [Fact]
-    public void TheHintNamesEveryWayToProduceAUsableCredential()
-    {
-        var source = ReadDialogSource();
-
-        Assert.Contains("viewer on the service's host", source, StringComparison.Ordinal);
-        Assert.Contains("--add-server", source, StringComparison.Ordinal);
-        Assert.Contains("env:/file:", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("SqlCredentialMachineBoundHint", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("StoreIsOnThisMachine", source, StringComparison.Ordinal);
     }
 
     private static string ReadDialogSource([CallerFilePath] string thisFile = "")

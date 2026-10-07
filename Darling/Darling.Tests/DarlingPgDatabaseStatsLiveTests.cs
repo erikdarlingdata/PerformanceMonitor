@@ -67,6 +67,8 @@ public sealed class DarlingPgDatabaseStatsLiveTests
         try
         {
             await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+            /* #4966: registered long before the window, so the window is covered and the all-clear below keeps its claim. */
+            await DarlingMcpTestData.ExecAsync(connection, ct, "UPDATE servers SET created_date = $2 WHERE server_id = $1", ServerId, DarlingMcpTestData.Naive(DateTime.UtcNow.AddDays(-30)));
 
             /* ── a SQL Server target: the gap is the ENGINE, and it is permanent ──
 
@@ -113,6 +115,8 @@ public sealed class DarlingPgDatabaseStatsLiveTests
                honest answer is "nothing happened". A probe that carried the read's own HAVING filter would
                find no rows here and call the server uncollected, sending someone to fix collection that is
                working perfectly. */
+            /* #4966: an older capture, outside the 4-hour window, so the store's coverage reaches back past its start: this window is covered and keeps its claim. */
+            await SeedAsync(connection, ct, MinutesAgo(60 * 24 * 10), "idledb", 1_000, 10, 100, 9_900, 0, 0, 0, null);
             var t1 = t0.AddSeconds(60);
             await SeedAsync(connection, ct, t1, "idledb", 1_000, 10, 100, 9_900, 0, 0, 0, null);
 

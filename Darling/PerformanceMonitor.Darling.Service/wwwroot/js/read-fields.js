@@ -90,6 +90,7 @@ export const READ_FIELDS = {
         { key: "avg_duration_ms", label: "Avg Dur", format: "ms" },
         { key: "last_success", label: "Last Success", format: "time" },
         { key: "note_summary", label: "Note", wrap: true },
+        { key: "message", label: "Why not collected", wrap: true },
       ],
     },
   },
@@ -114,6 +115,7 @@ export const READ_FIELDS = {
   get_cpu_scheduler_pressure: {
     table: {
       rowsKey: ".",
+      tools: false,
       emptyText: "No scheduler snapshot in this window.",
       columns: [
         { key: "pressure_level", label: "Pressure" },
@@ -500,6 +502,7 @@ export const READ_FIELDS = {
     /* One object, so the table draws it as one row (rowsKey "."); the stat part is the same keys as tiles. */
     table: {
       rowsKey: ".",
+      tools: false,
       emptyText: "No server summary is available.",
       columns: [
         { key: "cpu_percent", label: "CPU", format: "pct" },
@@ -697,6 +700,22 @@ export const READ_FIELDS = {
         { key: "duration_regression_percent", label: "Duration change %", format: "num1" },
         { key: "additional_duration_ms", label: "Added time", format: "ms" },
         { key: "query_text", label: "Query", wrap: true },
+      ],
+    },
+  },
+  get_slow_reads: {
+    table: {
+      rowsKey: "reads",
+      emptyText: "No slow reads were recorded.",
+      columns: [
+        { key: "read_time", label: "Time", format: "time" },
+        { key: "surface", label: "Surface" },
+        { key: "route", label: "Route" },
+        { key: "outcome", label: "Outcome" },
+        { key: "total_ms", label: "Total", format: "ms" },
+        { key: "source", label: "Source" },
+        { key: "server_name", label: "Server" },
+        { key: "statement_summary", label: "Statements", wrap: true },
       ],
     },
   },

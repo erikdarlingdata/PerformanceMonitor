@@ -62,6 +62,7 @@ public sealed class StoreConfigProvider
     /// once-per-call warning rather than to silence.</para>
     /// </summary>
     private int _viewReadFailureStreak;
+    private int _lastReenterCountLogged = -1;
 
     public StoreConfigProvider(NpgsqlDataSource postgres, ILogger? logger = null)
     {
@@ -331,16 +332,18 @@ public sealed class StoreConfigProvider
                 ? " Note --test-connection reads darling.json, so it probes the FILE's settings and can report "
                   + "PASS for a connection the service will never make."
                 : "";
+            var passwordNote = DescribePasswordNotUsed(live, MaxDriftedServersLogged);
 
             _logger?.LogWarning(
                 "darling.json disagrees with the registry about {Count} monitored server(s), and the registry is "
                 + "what the service uses: {Details}. The store is authoritative after the first seed, so editing a "
                 + "registered server's settings in the file changes nothing and a restart cannot change that — "
                 + "edit them in the Viewer's Manage Servers window (the MCP add_servers tool cannot: an "
-                + "already-registered server is skipped as a duplicate).{ConnectionCaveat}",
+                + "already-registered server is skipped as a duplicate).{ConnectionCaveat}{PasswordNote}",
                 live.Count,
                 FormatSettingDrift(live, MaxDriftedServersLogged),
-                connectionCaveat);
+                connectionCaveat,
+                passwordNote);
         }
 
         if (paused.Count > 0)
@@ -353,6 +356,29 @@ public sealed class StoreConfigProvider
                 paused.Count,
                 FormatSettingDrift(paused, MaxDriftedServersLogged));
         }
+    }
+
+    /// <summary>
+    /// The clause for the drift warning about a password: a server whose darling.json entry carries a password or a
+    /// reference gets the file's password only while the entry and the registry row agree on every connection setting
+    /// (<see cref="BackfillSecretFromFile"/>), so for a drifted connection setting the file's password is not used until
+    /// the two agree. Empty when no such server is listed. Pure, so the text is pinned by a test.
+    /// </summary>
+    internal static string DescribePasswordNotUsed(IReadOnlyList<ServerSettingDrift> drifted, int maxServers)
+    {
+        var names = drifted
+            .Where(d => d.FileEntryCarriesPassword && d.Fields.Any(f => f.AffectsConnection))
+            .Select(d => d.Server)
+            .ToList();
+        if (names.Count == 0)
+        {
+            return "";
+        }
+
+        var shown = maxServers > 0 && names.Count > maxServers ? maxServers : names.Count;
+        var listed = string.Join(", ", names.Take(shown)) + (shown < names.Count ? $" and {names.Count - shown} more" : "");
+        return $" For a drifted connection setting on an entry that carries a password or a reference ({listed}), "
+            + "its password from darling.json is not used until the two agree.";
     }
 
     /// <summary>
@@ -491,8 +517,11 @@ FROM config_monitored_servers", connection) { CommandTimeout = ServiceCommandDea
     /// </summary>
     internal sealed record RegisteredServer(MonitoredServer Config, bool IsEnabled);
 
-    /// <summary>One registered server and every field its darling.json entry disagrees with (#2552).</summary>
-    internal sealed record ServerSettingDrift(string Server, bool IsEnabled, IReadOnlyList<SettingDrift> Fields);
+    /// <summary>One registered server and every field its darling.json entry disagrees with (#2552).
+    /// <paramref name="FileEntryCarriesPassword"/> is whether the entry holds a password or a reference, which decides
+    /// whether the warning says that password is not used while a connection setting differs.</summary>
+    internal sealed record ServerSettingDrift(
+        string Server, bool IsEnabled, IReadOnlyList<SettingDrift> Fields, bool FileEntryCarriesPassword = false);
 
     /// <summary>
     /// Pairs each darling.json entry with its registry row and reports the fields they disagree on (#2552).
@@ -556,7 +585,9 @@ FROM config_monitored_servers", connection) { CommandTimeout = ServiceCommandDea
             var fields = CompareServerSettings(entry, match.Config);
             if (fields.Count > 0)
             {
-                drifted.Add(new ServerSettingDrift(match.Config.DisplayName, match.IsEnabled, fields));
+                drifted.Add(new ServerSettingDrift(
+                    match.Config.DisplayName, match.IsEnabled, fields,
+                    !string.IsNullOrWhiteSpace(entry.EncryptedPassword) || !string.IsNullOrWhiteSpace(entry.Password)));
             }
         }
 
@@ -1146,9 +1177,48 @@ ON CONFLICT (id) DO NOTHING", connection) { CommandTimeout = ServiceCommandDeadl
     private static async Task SeedMonitoredServersAsync(NpgsqlConnection connection, DarlingConfig config, DateTime now, CancellationToken ct)
     {
         /* Guarded by the caller's COUNT == 0 check — only reached when the registry is empty, so a later
-           Viewer deletion (Stage 3) is never resurrected by a re-seed. */
+           Viewer deletion (Stage 3) is never resurrected by a re-seed.
+
+           #5240: this does NOT always finish before the web and MCP listeners can accept a write, so its INSERTs take
+           the identity lock like every other write that gives a server an address. Program.cs registers the worker,
+           the MCP host and the web host as three independent hosted services; the MCP host's supervisor starts its
+           listener from the file's mcp.enabled (or the store's published toggle) without waiting for this seed
+           (DarlingMcpHostService.ExecuteAsync), and a managed store's mcp credential, the only thing it does wait for,
+           appears when role provisioning ends, which DarlingWorker runs BEFORE SeedIfEmptyAsync. So an add_servers
+           (or a web add, then an edit of it) can land between the COUNT above and these INSERTs. The lock alone is not
+           enough: a writer that finished before this transaction took it is only seen by reading the addresses again,
+           so an entry whose address is already held is skipped, as the add core skips a key claimed in the meantime. */
+        await using var transaction = await connection.BeginTransactionAsync(ct);
+
+        /* Two-arg on the store connection with the transaction set on it, as the other identity writers' commands are. */
+        await using (var identityLock = new NpgsqlCommand(Mcp.DarlingMcpServerAdminTools.IdentityLockSql, connection, transaction)
+                     { CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds })
+        {
+            await identityLock.ExecuteNonQueryAsync(ct);
+        }
+
+        var heldAddresses = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        await using (var existing = new NpgsqlCommand(Mcp.DarlingMcpServerAdminTools.ExistingServersSql, connection, transaction)
+                     { CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds })
+        await using (var reader = await existing.ExecuteReaderAsync(ct))
+        {
+            while (await reader.ReadAsync(ct))
+            {
+                heldAddresses.Add(ServerIdHelper.BuildStorageName(
+                    reader.GetString(0), reader.IsDBNull(1) ? null : reader.GetString(1), !reader.IsDBNull(2) && reader.GetBoolean(2),
+                    reader.IsDBNull(3) ? null : reader.GetString(3), reader.IsDBNull(4) ? 0 : reader.GetInt32(4)));
+            }
+        }
+
         foreach (var server in config.Servers)
         {
+            /* Add also records this entry's own address, so two file entries with one address seed one row, as the
+               INSERT's ON CONFLICT (server_id) did when both derived the same id. */
+            if (!heldAddresses.Add(server.StorageName))
+            {
+                continue;
+            }
+
             using var command = new NpgsqlCommand(@"
 INSERT INTO config_monitored_servers (
     server_id, name, host, database, auth, username, encrypted_password, encrypt_mode,
@@ -1156,7 +1226,7 @@ INSERT INTO config_monitored_servers (
     monthly_cost_usd, capture_plans, alert_delivery_mode_override, engine, port, is_enabled, plan_force_bot_enabled,
     remediation_username, remediation_encrypted_password, created_at, modified_at)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NULL, $14, $16, $17, TRUE, FALSE, $18, $19, $15, $15)
-ON CONFLICT (server_id) DO NOTHING", connection) { CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds };
+ON CONFLICT (server_id) DO NOTHING", connection, transaction) { CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds };
             /* THE ALLOCATION SITE. A darling.json entry has no StoredServerId, so this is the derivation —
                and this is where it is minted and made permanent. When new rows stop being hash-keyed
                (#2218), this is the write that changes; every READ already goes through the stored value. */
@@ -1197,6 +1267,10 @@ ON CONFLICT (server_id) DO NOTHING", connection) { CommandTimeout = ServiceComma
             AddNullableText(command, server.RemediationEncryptedPassword);
             await command.ExecuteNonQueryAsync(ct);
         }
+
+        /* Ends the transaction and with it the lock; a throw above rolls back, so the registry is seeded whole or
+           not at all and SeedIfEmptyAsync (which warns and carries on) re-seeds on the next start. */
+        await transaction.CommitAsync(ct);
     }
 
     /* ---------------- read (store -> in-memory view) ---------------- */
@@ -1264,13 +1338,38 @@ ON CONFLICT (server_id) DO NOTHING", connection) { CommandTimeout = ServiceComma
                the skip parameter is gone with its last caller. */
             var (smtp, webhooks) = await ReadNotificationAsync(connection, cancellationToken);
 
+            /* #5366: the pins taken at upgrade for the old-format passwords, read once for the SMTP slot and every server. */
+            var pins = await ReadLegacyPinsAsync(connection, cancellationToken);
+            smtp.SecretPin = pins.GetValueOrDefault((0, "smtp"));
+            MarkSmtpTheFileDeclares(smtp, bootstrap);
+
             /* #3598 (V131): the routes layered over that row, read on the same privileged connection for the
                same reason — four of its five destination columns are the same bearer secrets. Zero rows is the
                ordinary state and resolves to the parent row exactly. */
             var routes = await ReadNotificationRoutesAsync(connection, cancellationToken);
 
-            var servers = await ReadMonitoredServersAsync(connection, bootstrap, cancellationToken);
-            var schedules = await ReadScheduleOverridesAsync(connection, cancellationToken);
+            var servers = await ReadMonitoredServersAsync(connection, bootstrap, cancellationToken, pins);
+
+            /* Once per change, not once per reload: the count is the same on every reload until someone enters a password. */
+            var enterAgain = CountPasswordsToEnterAgain(servers, smtp, LegacyDpapi.Current);
+            if (enterAgain == 1 && _lastReenterCountLogged != 1)
+            {
+                _logger?.LogWarning("1 saved password needs to be entered again. It is in the old format and cannot be opened here, or it no longer matches its server's connection settings");
+            }
+            else if (enterAgain > 1 && enterAgain != _lastReenterCountLogged)
+            {
+                _logger?.LogWarning(
+                    "{Count} saved passwords need to be entered again. They are in the old format and cannot be opened here, or they no longer match their server's connection settings",
+                    enterAgain);
+            }
+
+            _lastReenterCountLogged = enterAgain;
+            var schedules = await ReadScheduleOverridesAsync(connection, _logger, cancellationToken);
+
+            /* #4938: ResolveSchedule drops a run time that cannot apply, and it runs every sweep, so it stays pure and
+               silent. The one warning is raised here instead: once per load of the schedules, which happens only on a
+               config_version bump (the V137 uncorroborated-route warning above is the same shape). */
+            LogDroppedRunTimes(_logger, servers, schedules);
 
             /* Recovery is reported once, and only if something was actually reported broken — otherwise
                every ordinary reload would announce that the store is reachable. */
@@ -1596,7 +1695,7 @@ FROM config_alert_settings WHERE id = 1", connection) { CommandTimeout = Service
 SELECT smtp_host, smtp_port, smtp_use_ssl, smtp_username, smtp_encrypted_password, smtp_from_address,
        smtp_recipients, email_cooldown_minutes, teams_url, teams_proxy, slack_url, slack_proxy,
        generic_url, generic_headers, generic_body_template, generic_proxy,
-       pagerduty_routing_key, pagerduty_use_eu_region, pagerduty_proxy
+       pagerduty_routing_key, pagerduty_use_eu_region, pagerduty_proxy, pagerduty_auto_resolve
 FROM config_notification WHERE id = 1", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoopSeconds };
         using var reader = await command.ExecuteReaderAsync(ct);
         if (!await reader.ReadAsync(ct))
@@ -1628,6 +1727,8 @@ FROM config_notification WHERE id = 1", connection) { CommandTimeout = ServiceCo
             PagerDutyRoutingKey = reader.GetString(16),
             PagerDutyUseEuRegion = reader.GetBoolean(17),
             PagerDutyProxy = reader.GetString(18),
+            /* V166: appended last — the only addition that cannot re-map an existing column's ordinal. */
+            PagerDutyAutoResolve = reader.GetBoolean(19),
         };
         return (smtp, webhooks);
     }
@@ -1636,8 +1737,10 @@ FROM config_notification WHERE id = 1", connection) { CommandTimeout = ServiceCo
     /// directly with its own connection, rather than the file's darling.json list, so it tests the servers the
     /// store will actually collect from.</summary>
     internal static async Task<IReadOnlyList<MonitoredServer>> ReadMonitoredServersAsync(
-        NpgsqlConnection connection, DarlingConfig bootstrap, CancellationToken ct)
+        NpgsqlConnection connection, DarlingConfig bootstrap, CancellationToken ct,
+        IReadOnlyDictionary<(int ServerId, string Slot), LegacyPin>? pins = null)
     {
+        pins ??= await ReadLegacyPinsAsync(connection, ct);
         var servers = new List<MonitoredServer>();
         /* server_id is LAST rather than first (#2218): every ordinal in BuildServerFromRow is positional, so
            appending is the only addition that cannot silently re-map an existing column onto the wrong
@@ -1655,7 +1758,94 @@ ORDER BY name", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoo
             servers.Add(BuildServerFromRow(reader, bootstrap));
         }
 
+        /* #5366: the pins taken when this service was upgraded, matched to each server by id and slot. */
+        foreach (var server in servers)
+        {
+            server.SecretPin = pins.GetValueOrDefault((server.ServerId, "server"));
+            server.RemediationPin = pins.GetValueOrDefault((server.ServerId, "remediation"));
+        }
+
         return servers;
+    }
+
+    /// <summary>
+    /// The pins in <c>config.legacy_secret_pin</c>, read on the store owner's connection (row-level security hides every
+    /// row from any other role, so a different role finds none and an old-format value is then not opened). SMTP is
+    /// server id 0. A store that has no such table yet, or a role that may not read it, has none.
+    /// </summary>
+    internal static async Task<IReadOnlyDictionary<(int ServerId, string Slot), LegacyPin>> ReadLegacyPinsAsync(
+        NpgsqlConnection connection, CancellationToken ct)
+    {
+        var pins = new Dictionary<(int ServerId, string Slot), LegacyPin>();
+        try
+        {
+            using var command = new NpgsqlCommand(
+                "SELECT server_id, slot, value_sha256, binding_sha256 FROM config.legacy_secret_pin", connection)
+            { CommandTimeout = ServiceCommandDeadlines.SerialLoopSeconds };
+            using var reader = await command.ExecuteReaderAsync(ct);
+            while (await reader.ReadAsync(ct))
+            {
+                pins[(reader.GetInt32(0), reader.GetString(1))] = new LegacyPin((byte[])reader[2], (byte[])reader[3]);
+            }
+        }
+        catch (PostgresException ex) when (ex.SqlState is PostgresErrorCodes.UndefinedTable or PostgresErrorCodes.InsufficientPrivilege)
+        {
+            pins.Clear();
+        }
+
+        return pins;
+    }
+
+    /// <summary>
+    /// Marks the SMTP slot when darling.json declares the same text for the same SMTP connection (host, port, TLS and
+    /// username), the <see cref="MarkSlotsTheFileDeclares"/> rule for the one slot that has no server id (#5366).
+    /// </summary>
+    internal static void MarkSmtpTheFileDeclares(SmtpConfig smtp, DarlingConfig bootstrap)
+    {
+        var declared = bootstrap.Smtp;
+        if (declared is not null
+            && declared.EncryptedPasswordDeclaredByFile
+            && DarlingSecrets.DeclaresSecretText(smtp.EncryptedPassword)
+            && string.Equals(declared.EncryptedPassword, smtp.EncryptedPassword, StringComparison.Ordinal)
+            && string.Equals(declared.Host, smtp.Host, StringComparison.Ordinal)
+            && declared.Port == smtp.Port
+            && declared.UseSsl == smtp.UseSsl
+            && string.Equals(declared.Username ?? "", smtp.Username ?? "", StringComparison.Ordinal))
+        {
+            smtp.EncryptedPasswordDeclaredByFile = true;
+        }
+    }
+
+    /// <summary>
+    /// How many saved old-format passwords this service cannot open and the operator must enter again: a value in a
+    /// server slot, a remediation slot or the SMTP slot that is not a reference or a sealed value, on a machine that cannot
+    /// open it or with no declaration or matching pin (#5366).
+    /// </summary>
+    internal static int CountPasswordsToEnterAgain(IEnumerable<MonitoredServer> servers, SmtpConfig? smtp, LegacyDpapi dpapi)
+    {
+        var count = 0;
+        foreach (var server in servers)
+        {
+            if (server.RequiresResolvedSecret && DarlingSecrets.IsLegacyDpapi(server.EncryptedPassword)
+                && !DarlingSecrets.LegacyValueUsable(server.EncryptedPassword!, server.EncryptedPasswordDeclaredByFile, server.SecretPin, () => server.SecretBinding, dpapi))
+            {
+                count++;
+            }
+
+            if (server.HasRemediationCredential && DarlingSecrets.IsLegacyDpapi(server.RemediationEncryptedPassword)
+                && !DarlingSecrets.LegacyValueUsable(server.RemediationEncryptedPassword!, server.RemediationEncryptedPasswordDeclaredByFile, server.RemediationPin, () => server.RemediationBinding, dpapi))
+            {
+                count++;
+            }
+        }
+
+        if (smtp is not null && DarlingSecrets.IsLegacyDpapi(smtp.EncryptedPassword)
+            && !DarlingSecrets.LegacyValueUsable(smtp.EncryptedPassword!, smtp.EncryptedPasswordDeclaredByFile, smtp.SecretPin, () => smtp.SecretBinding, dpapi))
+        {
+            count++;
+        }
+
+        return count;
     }
 
     /// <summary>
@@ -1708,23 +1898,92 @@ ORDER BY name", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoo
             RemediationEncryptedPassword = reader.IsDBNull(18) ? null : reader.GetString(18),
         };
 
-        if (server.RequiresResolvedSecret && string.IsNullOrWhiteSpace(server.EncryptedPassword))
-        {
-            /* Service principal keeps its client secret in the same EncryptedPassword slot as a SQL password,
-               so the bootstrap backfill (store row minted without the secret) covers it identically. #3484. */
-            var matches = bootstrap.Servers.Where(s =>
-                s.RequiresResolvedSecret
-                && string.Equals(s.StorageName, server.StorageName, StringComparison.OrdinalIgnoreCase)
-                && string.Equals(s.Username, server.Username, StringComparison.Ordinal)).ToList();
+        /* #5366: the identity a sealed password is bound to is the row's own text, read through the one raw-row mapping
+           (a NULL column is not given the property's default here). */
+        server.StoredIdentity = ServerConnectionIdentity.FromStoredColumns(
+            reader.GetString(1), reader.IsDBNull(14) ? null : reader.GetInt32(14), reader.IsDBNull(13) ? null : reader.GetString(13),
+            reader.IsDBNull(2) ? null : reader.GetString(2), reader.GetBoolean(8), reader.GetString(3),
+            reader.IsDBNull(4) ? null : reader.GetString(4), reader.GetString(6), reader.GetBoolean(7), reader.GetBoolean(9));
 
-            if (matches.Count == 1)
-            {
-                server.EncryptedPassword = matches[0].EncryptedPassword;
-                server.Password = matches[0].Password;
-            }
+        BackfillSecretFromFile(server, bootstrap);
+        MarkSlotsTheFileDeclares(server, bootstrap);
+        return server;
+    }
+
+    /// <summary>The connection settings of a server definition, mapped the way a stored row is (<see cref="ServerConnectionIdentity.FromStoredColumns"/>).</summary>
+    internal static ServerConnectionIdentity ConnectionIdentityOf(MonitoredServer server) =>
+        ServerConnectionIdentity.FromStoredColumns(
+            server.Host, server.Port, server.Engine, server.Database, server.ReadOnlyIntent, server.Auth, server.Username,
+            server.EncryptMode, server.TrustServerCertificate, server.MultiSubnetFailover);
+
+    /// <summary>
+    /// Copies the darling.json secret into a server built from a store row that carries none, when exactly one file entry
+    /// holds the same connection: the storage name and username, and all ten connection settings plus engine
+    /// (<see cref="ServerConnectionIdentity.Differ"/>, authentication compared ignoring case). A row that differs in any
+    /// of them is left without the file's secret.
+    /// </summary>
+    internal static void BackfillSecretFromFile(MonitoredServer server, DarlingConfig bootstrap)
+    {
+        if (!server.RequiresResolvedSecret || !string.IsNullOrWhiteSpace(server.EncryptedPassword))
+        {
+            return;
         }
 
-        return server;
+        /* Service principal keeps its client secret in the same EncryptedPassword slot as a SQL password,
+           so the bootstrap backfill (store row minted without the secret) covers it identically. #3484. */
+        var rowSettings = ConnectionIdentityOf(server);
+        var matches = bootstrap.Servers.Where(s =>
+            s is not null
+            && s.RequiresResolvedSecret
+            && string.Equals(s.StorageName, server.StorageName, StringComparison.OrdinalIgnoreCase)
+            && string.Equals(s.Username, server.Username, StringComparison.Ordinal)
+            && !ServerConnectionIdentity.Differ(ConnectionIdentityOf(s), rowSettings)).ToList();
+
+        if (matches.Count == 1)
+        {
+            server.EncryptedPassword = matches[0].EncryptedPassword;
+            server.Password = matches[0].Password;
+        }
+    }
+
+    /// <summary>
+    /// #5240: marks a secret slot of a server built from a store row when darling.json itself declares that same
+    /// reference, in that same slot, for the same server id, which is the one case where an owned reference may resolve
+    /// (<see cref="DarlingSecrets.ResolvePassword"/>). Nothing in the row can set a mark: it takes a file entry (itself
+    /// marked when the file was read) with this server's id and exactly this text. A store row for another server id, or a
+    /// row whose slot was changed to another reference, finds no such entry and is left unmarked. The row must also agree with
+    /// the entry on all ten connection settings plus engine (the edit core's own rule, authentication compared ignoring case), so a
+    /// reference the file declares for one connection is never sent to another: an operator who moves a file server updates its darling.json entry too (the file
+    /// then declares the reference for the new address), or uses a reference that is not owned.
+    /// </summary>
+    internal static void MarkSlotsTheFileDeclares(MonitoredServer server, DarlingConfig bootstrap)
+    {
+        foreach (var declared in bootstrap.Servers)
+        {
+            /* A null element is skipped, as DarlingConfig.Parse's own loop skips it (#5240). */
+            if (declared is null
+                || declared.ServerId != server.ServerId
+                || ServerConnectionIdentity.Differ(ConnectionIdentityOf(declared), ConnectionIdentityOf(server)))
+            {
+                continue;
+            }
+
+            if (declared.EncryptedPasswordDeclaredByFile
+                && DarlingSecrets.DeclaresSecretText(server.EncryptedPassword)
+                && string.Equals(declared.EncryptedPassword, server.EncryptedPassword, StringComparison.Ordinal))
+            {
+                server.EncryptedPasswordDeclaredByFile = true;
+            }
+
+            /* #5366: a remediation reference is declared for one remediation login, so the row must name that same login (null as empty). */
+            if (declared.RemediationEncryptedPasswordDeclaredByFile
+                && string.Equals(declared.RemediationUsername ?? string.Empty, server.RemediationUsername ?? string.Empty, StringComparison.Ordinal)
+                && DarlingSecrets.DeclaresSecretText(server.RemediationEncryptedPassword)
+                && string.Equals(declared.RemediationEncryptedPassword, server.RemediationEncryptedPassword, StringComparison.Ordinal))
+            {
+                server.RemediationEncryptedPasswordDeclaredByFile = true;
+            }
+        }
     }
 
     /// <summary>The routes SELECT, public-const so the viewer's writer and the tests can pin column parity
@@ -1756,7 +2015,21 @@ ORDER BY name", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoo
         return routes;
     }
 
-    private static async Task<IReadOnlyList<ScheduleOverride>> ReadScheduleOverridesAsync(NpgsqlConnection connection, CancellationToken ct)
+    /// <summary>
+    /// The sparse schedule rows, with the collectors' run times layered onto them (#4938). The run times are read from
+    /// their own table, <c>config.config_collector_run_times</c>, and not from a column here: the viewer's schedule Save
+    /// deletes a scope's rows in <c>config_collector_schedules</c> and inserts them again with a fixed column list, so a
+    /// run time kept on these rows would be cleared by every Save from a viewer that does not know it. The rows are read
+    /// and closed before the run-time read starts, because one connection cannot hold two open readers.
+    /// </summary>
+    private static async Task<IReadOnlyList<ScheduleOverride>> ReadScheduleOverridesAsync(NpgsqlConnection connection, ILogger? logger, CancellationToken ct)
+    {
+        var overrides = await ReadScheduleRowsAsync(connection, ct);
+        var runTimes = await ReadRunTimesAsync(connection, logger, ct);
+        return MergeRunTimes(overrides, runTimes);
+    }
+
+    private static async Task<List<ScheduleOverride>> ReadScheduleRowsAsync(NpgsqlConnection connection, CancellationToken ct)
     {
         var overrides = new List<ScheduleOverride>();
         using var command = new NpgsqlCommand(
@@ -1778,6 +2051,79 @@ ORDER BY name", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoo
         }
 
         return overrides;
+    }
+
+    /// <summary>The run-time SELECT (#4938): one row per fleet-wide or per-server run time, fleet-wide first so the order is
+    /// a statement about the table. Schema-qualified, so a 42P01 from it can only mean the table itself is missing.</summary>
+    public const string RunTimesSelectSql =
+        "SELECT server_id, collector_name, run_at_minute FROM config.config_collector_run_times ORDER BY server_id NULLS FIRST, collector_name";
+
+    /// <summary>
+    /// Reads every run time (#4938). A store still at version 159 has no such table: that is "no run times", which is what
+    /// every collector had before the table existed, and not a failed load, so the 42P01 is answered with an empty list
+    /// and one debug line (the load runs once per configuration change, not per sweep). Any other error is the load's
+    /// to fail on, as for every other read in the view.
+    /// </summary>
+    private static async Task<IReadOnlyList<RunTimeOverride>> ReadRunTimesAsync(NpgsqlConnection connection, ILogger? logger, CancellationToken ct)
+    {
+        var rows = new List<RunTimeOverride>();
+        try
+        {
+            using var command = new NpgsqlCommand(RunTimesSelectSql, connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoopSeconds };
+            using var reader = await command.ExecuteReaderAsync(ct);
+            while (await reader.ReadAsync(ct))
+            {
+                rows.Add(new RunTimeOverride(
+                    reader.IsDBNull(0) ? null : reader.GetInt32(0),
+                    reader.GetString(1),
+                    reader.GetInt16(2)));
+            }
+        }
+        catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.UndefinedTable)
+        {
+            logger?.LogDebug("The collector run-time table does not exist in this store yet (below schema version 160): no run times are set.");
+            return Array.Empty<RunTimeOverride>();
+        }
+
+        return rows;
+    }
+
+    /// <summary>
+    /// Layers the run-time rows onto the schedule rows (#4938), one entry per scope and collector. A run time for a scope
+    /// and collector that has a schedule row is carried on that row. One without a schedule row gets an entry of its own
+    /// that sets nothing else: no frequency, no retention, no database scope, and no enabled state (a null
+    /// <see cref="ScheduleOverride.Enabled"/>), so the collector's enabled state still comes from the other levels or its
+    /// default and the entry cannot switch a collector on or off. Pure. The collector name matches without regard to case,
+    /// as the resolver does.
+    /// </summary>
+    public static IReadOnlyList<ScheduleOverride> MergeRunTimes(IReadOnlyList<ScheduleOverride> schedules, IReadOnlyList<RunTimeOverride> runTimes)
+    {
+        if (runTimes is null || runTimes.Count == 0)
+        {
+            return schedules;
+        }
+
+        var merged = new List<ScheduleOverride>(schedules);
+        foreach (var runTime in runTimes)
+        {
+            var carried = false;
+            for (var i = 0; i < merged.Count; i++)
+            {
+                if (merged[i].ServerId == runTime.ServerId
+                    && string.Equals(merged[i].CollectorName, runTime.CollectorName, StringComparison.OrdinalIgnoreCase))
+                {
+                    merged[i] = merged[i] with { RunAtMinute = runTime.RunAtMinute };
+                    carried = true;
+                }
+            }
+
+            if (!carried)
+            {
+                merged.Add(new ScheduleOverride(runTime.ServerId, runTime.CollectorName, null, null, null, null, runTime.RunAtMinute));
+            }
+        }
+
+        return merged;
     }
 
     /* ---------------- apply (view -> held config, in place) ---------------- */
@@ -1829,36 +2175,124 @@ ORDER BY name", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoo
 
     /* ---------------- schedule resolution (pure) ---------------- */
 
-    /// <summary>
-    /// The effective schedule for one collector on one server: a per-server override wins over a fleet-wide
-    /// override (<c>server_id</c> NULL) wins over the <see cref="CollectorScheduleDefaults"/> code default,
-    /// per column (a NULL override column falls through to the next level). Pure — unit-testable without a store.
-    /// </summary>
-    public static EffectiveSchedule ResolveSchedule(string collectorName, int serverId, IReadOnlyList<ScheduleOverride> overrides)
-    {
-        var def = CollectorScheduleDefaults.All[collectorName];
+    /// <summary>The value of a run time that means "no fixed time on this server": it stops a fleet-wide time.</summary>
+    private const int NoFixedRunTime = -1;
 
-        ScheduleOverride? perServer = null;
-        ScheduleOverride? fleet = null;
-        if (overrides is not null)
+    /// <summary>The last minute of the day, the top of the run-time table's CHECK.</summary>
+    private const int LastRunAtMinute = 1439;
+
+    /// <summary>A stored run time, or null when there is none at that level or it holds a value the table's CHECK would
+    /// refuse (a store whose CHECK was dropped by hand): either way it counts as not set at that level and falls through.
+    /// This runs every sweep and stays silent; <see cref="LogDroppedRunTimes"/> names such a value once per load.</summary>
+    private static int? ValidRunAt(int? minute) =>
+        minute is >= NoFixedRunTime and <= LastRunAtMinute ? minute : null;
+
+    /// <summary>
+    /// #4938: every configured run time that resolves to none because the collector's effective interval is not a whole
+    /// number of days, one entry per enabled server it was configured for. Judged per server and not per row, because a
+    /// per-server frequency override changes the effective interval: a fleet-wide run time can be fine on one server and
+    /// refused on another. A collector the server's engine never runs is skipped. Pure.
+    /// </summary>
+    public static IReadOnlyList<DroppedRunTime> FindDroppedRunTimes(IReadOnlyList<MonitoredServer> servers, IReadOnlyList<ScheduleOverride> overrides)
+    {
+        var dropped = new List<DroppedRunTime>();
+        if (servers is null || overrides is null)
         {
-            foreach (var o in overrides)
+            return dropped;
+        }
+
+        var collectors = overrides
+            .Where(o => o.RunAtMinute is >= 0 && CollectorScheduleDefaults.All.ContainsKey(o.CollectorName))
+            .Select(o => o.CollectorName)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        foreach (var name in collectors)
+        {
+            var definition = CollectorCatalog.Find(name);
+            foreach (var server in servers)
             {
-                if (!string.Equals(o.CollectorName, collectorName, StringComparison.OrdinalIgnoreCase))
+                if (definition is not null && definition.TargetEngine != server.TargetEngine)
                 {
                     continue;
                 }
 
-                if (o.ServerId == serverId)
+                var schedule = ResolveScheduleCore(name, server.ServerId, overrides, out var droppedRunAt, out var fromServerRow);
+                if (droppedRunAt is int minute)
                 {
-                    perServer = o;
-                }
-                else if (o.ServerId is null)
-                {
-                    fleet = o;
+                    dropped.Add(new DroppedRunTime(
+                        name, server.ServerId, server.DisplayName, minute,
+                        CollectorScheduleDefaults.EffectiveRecurringIntervalMinutes(schedule.FrequencyMinutes), fromServerRow));
                 }
             }
         }
+
+        return dropped;
+    }
+
+    /// <summary>
+    /// #4938: warns once for each run time <see cref="FindDroppedRunTimes"/> finds, naming the collector, the server and
+    /// the reason, and once for each stored value outside the range the table's CHECK allows, naming the collector, the
+    /// scope and the value. The second cannot happen through SQL (the CHECK refuses it), but a store whose CHECK was dropped
+    /// by hand can hold one, and <see cref="ResolveSchedule"/> then treats it as not set, so the operator is told here
+    /// instead of finding the collector on its old schedule with no word why. Called once per load of the schedules (see
+    /// <see cref="LoadViewAsync"/>), never per sweep.
+    /// </summary>
+    public static void LogDroppedRunTimes(ILogger? logger, IReadOnlyList<MonitoredServer> servers, IReadOnlyList<ScheduleOverride> overrides)
+    {
+        if (logger is null)
+        {
+            return;
+        }
+
+        foreach (var d in FindDroppedRunTimes(servers, overrides))
+        {
+            logger.LogWarning(
+                "Collector run time ignored: collector '{Collector}' on server '{Server}' (id {ServerId}), {Scope} run time {RunAt}. {Reason}",
+                d.CollectorName, d.ServerName, d.ServerId, d.FromServerRow ? "server" : "fleet-wide",
+                CollectorRunTime.Format(d.RunAtMinute), CollectorRunTime.IntervalRefusalMessage(d.CollectorName, d.IntervalMinutes));
+        }
+
+        if (overrides is null)
+        {
+            return;
+        }
+
+        foreach (var o in overrides)
+        {
+            if (o.RunAtMinute is int stored && ValidRunAt(stored) is null)
+            {
+                logger.LogWarning(
+                    "Collector run time ignored: collector '{Collector}', {Scope} run time value {Value} is outside 0 to 1439 minutes after midnight (or -1 on a server), so it counts as not set.",
+                    o.CollectorName, o.ServerId is int serverId ? "server id " + serverId.ToString(System.Globalization.CultureInfo.InvariantCulture) : "fleet-wide", stored);
+            }
+        }
+    }
+
+    /// <summary>
+    /// The effective schedule for one collector on one server: a per-server override wins over a fleet-wide
+    /// override (<c>server_id</c> NULL) wins over the <see cref="CollectorScheduleDefaults"/> code default,
+    /// per column (a NULL override column falls through to the next level). Pure — unit-testable without a store.
+    ///
+    /// <para>#4938: the run time layers the same way, with one more rule. It comes from the run-time table, merged onto the
+    /// rows by <see cref="MergeRunTimes"/> when the schedules load. The server's run time wins when it has one, else the
+    /// fleet's, else none; -1 is "no fixed time" and, on the server's, stops the fleet's value. A value then applies only
+    /// if the collector's effective interval is a whole number of days
+    /// (<see cref="CollectorRunTime.AllowsRunAt"/>, on <see cref="CollectorScheduleDefaults.EffectiveRecurringIntervalMinutes"/>
+    /// so an on-load collector counts as daily); otherwise it resolves to none. That refusal is silent here because this
+    /// runs every sweep: the warning is <see cref="LogDroppedRunTimes"/>, raised once per load.</para>
+    /// </summary>
+    public static EffectiveSchedule ResolveSchedule(string collectorName, int serverId, IReadOnlyList<ScheduleOverride> overrides) =>
+        ResolveScheduleCore(collectorName, serverId, overrides, out _, out _);
+
+    private static EffectiveSchedule ResolveScheduleCore(
+        string collectorName, int serverId, IReadOnlyList<ScheduleOverride>? overrides, out int? droppedRunAt, out bool droppedFromServerRow)
+    {
+        var def = CollectorScheduleDefaults.All[collectorName];
+
+        /* #4999: the rows are picked where every collection-health surface picks them, so a surface that judges a
+           collector against its interval cannot pick a different row than the one this schedules it by. */
+        var (perServer, fleet) = CollectorScheduleDefaults.SelectScheduleOverrides(collectorName, serverId, overrides);
 
         /* Sanitize operator-supplied overrides before they drive scheduling / a destructive purge: a
            negative frequency, a retention < 1 (0 would invert the purge cutoff and wipe the table), or a
@@ -1875,7 +2309,21 @@ ORDER BY name", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoo
            to def.DefaultEnabled (not a bare true) is what makes "reset to defaults" — which DELETES the
            override rows — return a default-off collector to OFF instead of silently re-enabling it. */
         var enabled = perServer?.Enabled ?? fleet?.Enabled ?? def.DefaultEnabled;
-        return new EffectiveSchedule(frequency, retention, enabled);
+
+        var layered = ValidRunAt(perServer?.RunAtMinute);
+        var fromServerRow = layered is not null;
+        layered ??= ValidRunAt(fleet?.RunAtMinute);
+        int? runAt = layered is >= 0 ? layered : null;
+        droppedRunAt = null;
+        droppedFromServerRow = false;
+        if (runAt is not null && !CollectorRunTime.AllowsRunAt(CollectorScheduleDefaults.EffectiveRecurringIntervalMinutes(frequency)))
+        {
+            droppedRunAt = runAt;
+            droppedFromServerRow = fromServerRow;
+            runAt = null;
+        }
+
+        return new EffectiveSchedule(frequency, retention, enabled, runAt);
     }
 
     /// <summary>
@@ -2000,11 +2448,27 @@ ORDER BY name", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoo
 /// <see cref="Databases"/> is the V125 per-collector allow-list (#3477): null = the column was NULL
 /// (no scope at this level, fall through), an empty list = the EXPLICIT "no scope" that stops the
 /// fall-through; the null/empty distinction is load-bearing and <see cref="StoreConfigProvider.ResolveDatabaseScope"/>
-/// documents it. Defaulted so every pre-V125 construction reads as "no scope column written".</summary>
-public sealed record ScheduleOverride(int? ServerId, string CollectorName, int? FrequencyMinutes, int? RetentionDays, bool Enabled, IReadOnlyList<string>? Databases = null);
+/// documents it. Defaulted so every pre-V125 construction reads as "no scope column written". <see cref="RunAtMinute"/>
+/// is the V160 run time (#4938), carried here from <c>config_collector_run_times</c> by
+/// <see cref="StoreConfigProvider.MergeRunTimes"/> and not read from this table: minutes after midnight on the server's
+/// clock, -1 = no fixed time at this level (it stops a fleet-wide time), null = no run time at this level, which falls
+/// through; defaulted for the same reason. <see cref="Enabled"/> is null only on the entry a run time makes for a scope and
+/// collector that has no schedule row: such an entry sets no enabled state, so it falls through like the other nulls.</summary>
+public sealed record ScheduleOverride(int? ServerId, string CollectorName, int? FrequencyMinutes, int? RetentionDays, bool? Enabled, IReadOnlyList<string>? Databases = null, int? RunAtMinute = null) : IScheduleFrequencyOverride;
 
-/// <summary>The resolved per-collector schedule (override layered on <see cref="CollectorScheduleDefaults"/>).</summary>
-public sealed record EffectiveSchedule(int FrequencyMinutes, int RetentionDays, bool Enabled);
+/// <summary>One row of <c>config_collector_run_times</c> (#4938): a run time for a collector, fleet-wide when
+/// <see cref="ServerId"/> is null. <see cref="RunAtMinute"/> is minutes after midnight on the server's clock, or -1 on a
+/// server's row for "no fixed time on this server".</summary>
+public sealed record RunTimeOverride(int? ServerId, string CollectorName, int RunAtMinute);
+
+/// <summary>The resolved per-collector schedule (override layered on <see cref="CollectorScheduleDefaults"/>).
+/// <see cref="RunAtMinute"/> is the collector's run time in minutes after midnight on the server's clock, or null when it
+/// has none (#4938); a value is present only where the effective interval is a whole number of days.</summary>
+public sealed record EffectiveSchedule(int FrequencyMinutes, int RetentionDays, bool Enabled, int? RunAtMinute = null);
+
+/// <summary>One configured run time that resolves to none for a server, because the collector's effective interval there is
+/// not a whole number of days (#4938). <see cref="FromServerRow"/> says which row set it: the server's or the fleet-wide one.</summary>
+public sealed record DroppedRunTime(string CollectorName, int ServerId, string ServerName, int RunAtMinute, int IntervalMinutes, bool FromServerRow);
 
 /// <summary>
 /// The in-memory snapshot of the <c>config.*</c> tables the worker applies on a reload. Sub-configs are

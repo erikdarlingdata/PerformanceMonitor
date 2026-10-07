@@ -23,6 +23,7 @@ public sealed class McpToolGuideHeadsAgStoreTests
     [
         "get_ag_health",
         "get_store_query_stats",
+        "get_store_query_history",
     ];
 
     [Fact]
@@ -87,5 +88,17 @@ public sealed class McpToolGuideHeadsAgStoreTests
         Assert.Contains(
             "Gated: status precondition, with the remedy, when pg_stat_statements is missing, not loaded or too old, its reader isn't built yet, or this role has no grant.",
             served, StringComparison.Ordinal);
+    }
+
+    /// <summary>#5097: the history tool's head names its subject (the store, not a monitored server), its two modes and
+    /// its gate.</summary>
+    [Fact]
+    public void StoreQueryHistoryHead_CarriesTheSubjectTheTwoModesAndTheGate()
+    {
+        var served = McpToolGuideTests.Served("get_store_query_history").Served;
+        Assert.Contains("not a monitored server's queries. No server_name.", served, StringComparison.Ordinal);
+        Assert.Contains("Without query_id: top statements", served, StringComparison.Ordinal);
+        Assert.Contains("With query_id: that statement's hourly series, oldest first.", served, StringComparison.Ordinal);
+        Assert.Contains("Gated: status precondition before the first snapshot.", served, StringComparison.Ordinal);
     }
 }

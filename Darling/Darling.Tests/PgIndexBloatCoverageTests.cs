@@ -1024,7 +1024,7 @@ public sealed class PgIndexBloatCoverageTests
 
         /* The helper forwards it to the descriptor, or the panel below configures something nothing reads. */
         Assert.Contains("noteKey = null", tabs, StringComparison.Ordinal);
-        Assert.Contains("span, noteKey }", tabs, StringComparison.Ordinal);
+        Assert.Contains("span, noteKey, dbScope }", tabs, StringComparison.Ordinal);
 
         /* And THIS panel asks for it. Scoped to a window after its own title so a noteKey on some other
            panel cannot satisfy the claim. */

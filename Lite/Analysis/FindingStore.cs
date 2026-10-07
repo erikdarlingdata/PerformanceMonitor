@@ -899,7 +899,9 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
         cmd.Parameters.Add(new DuckDBParameter { Value = finding.Category });
         cmd.Parameters.Add(new DuckDBParameter { Value = finding.StoryPath });
         cmd.Parameters.Add(new DuckDBParameter { Value = finding.StoryPathHash });
-        cmd.Parameters.Add(new DuckDBParameter { Value = finding.StoryText });
+        // #4348/#5320 Layer 0b: the story is judged where it is written, because the rows it was built from may
+        // predate the collection-time filter. Clean text is the same instance, so the stored row is unchanged.
+        cmd.Parameters.Add(new DuckDBParameter { Value = DerivedStoreScrub.Text(finding.StoryText) });
         cmd.Parameters.Add(new DuckDBParameter { Value = finding.RootFactKey });
         cmd.Parameters.Add(new DuckDBParameter { Value = finding.RootFactValue ?? (object)DBNull.Value });
         cmd.Parameters.Add(new DuckDBParameter { Value = finding.LeafFactKey ?? (object)DBNull.Value });
@@ -911,7 +913,8 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
         cmd.Parameters.Add(new DuckDBParameter { Value = (object?)AlertContextSerializer.SerializeAction(finding.Remediation) ?? DBNull.Value });
         // #2060: the CAPPED drill-down beside the built action — same rationale (the evidence rows
         // exist only on the write path), same degrade-to-NULL discipline.
-        cmd.Parameters.Add(new DuckDBParameter { Value = (object?)DrillDownSerializer.Serialize(finding.DrillDown) ?? DBNull.Value });
+        // #4348/#5320 Layer 0b: the evidence rows quote statement text from the source rows.
+        cmd.Parameters.Add(new DuckDBParameter { Value = (object?)DerivedStoreScrub.Json(DrillDownSerializer.Serialize(finding.DrillDown)) ?? DBNull.Value });
 
         await cmd.ExecuteNonQueryAsync();
     }

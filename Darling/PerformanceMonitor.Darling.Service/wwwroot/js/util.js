@@ -8,13 +8,16 @@
 
 /*
  * Shared leaf utilities for Darling Web (#1562): DOM builders, UTC->local time, value formatters, and the API
- * fetch helper. This module imports nothing (it is the base of the module DAG: app/panels/charts/pages all
- * import it, so there is no import cycle). Two rules are enforced HERE so every caller inherits them:
+ * fetch helper. This module imports only database-filter-reads.js, which is pure data and imports nothing (so it is
+ * still the base of the module DAG: app/panels/charts/pages all import it, so there is no import cycle). Two rules are
+ * enforced HERE so every caller inherits them:
  *   R4 (XSS): the el() builder assigns untrusted text ONLY through textContent / text nodes; it throws if a
  *     caller ever tries to pass raw HTML, so no data path can reach innerHTML.
  *   R5 (time): every timestamp from the API is naive UTC ISO-8601 (no zone suffix) — parseUtc() appends 'Z'
  *     so the browser reads it as UTC, then formatting localizes it to the viewer's zone.
  */
+
+import { FILTERED, readScope } from "./database-filter-reads.js";
 
 /* ─────────────────────────── DOM builders (textContent-only) ─────────────────────────── */
 
@@ -44,7 +47,7 @@ export function el(tag, props = {}, children = []) {
  * activate it exactly like a click. Used by the clickable-div affordances (fleet cards, band rows, sidebar
  * servers) so they get a keyboard path + a :focus-visible ring without becoming real <button>s (a11y).
  */
-function makeActivatable(node, handler) {
+export function makeActivatable(node, handler) {
   node.setAttribute("role", "button");
   node.setAttribute("tabindex", "0");
   node.addEventListener("click", handler);
@@ -136,17 +139,36 @@ export function noticeStrip(message) {
   return el("div", { class: "strip notice", role: "status" }, [message]);
 }
 /**
+ * The two collectors the blocking reads draw from (#5244): the blocked-process-report XE session when it holds a row in the window
+ * for the chosen databases, and the DMV snapshot only when it holds none. The MCP answers name the one that answered in `source`;
+ * these are the same two tags.
+ */
+export const BLOCKING_SOURCES = ["blocked-process-report", "DMV snapshot"];
+
+/**
+ * Which collector answered a blocking read, as a line above the chart (#5244). A filter of [A] can draw A's DMV-only event that
+ * [A, B] drops, and nothing on the chart said which collector it was reading. `desc.sourceKey` names the answer's field (`source`
+ * on get_blocking_trend and get_blocking_stats). Null when the descriptor names no field, when the answer carries no source (no
+ * rows: the empty answer and the zero-row answer both leave it null), or when the value is not one of the two tags. The tag is
+ * text, never markup (R4).
+ */
+export function sourceStrip(data, desc) {
+  if (!desc || !desc.sourceKey) return null;
+  const tag = getPath(data, desc.sourceKey);
+  return BLOCKING_SOURCES.includes(tag) ? el("div", { class: "strip source", role: "status" }, ["Source: " + tag]) : null;
+}
+/**
  * Render a read error, degrading the "window too wide" case to a notice (#2780). A range wider than a read can
  * serve comes back as a raw `hours_back value 'N' exceeds maximum of M hours (D days)...` validation string
  * (McpHelpers.ValidateHoursBack); that is a range choice, not a fault, so it becomes a status notice naming the
- * window the view keeps rather than a red error carrying the API's own wording. Every other message stays an
+ * widest window the read takes rather than a red error carrying the API's own wording. Every other message stays an
  * error. SHARED by every read-error site — the descriptor loader AND the hand-built server-tab composites — so
  * a tab cannot show a friendly notice on one panel and the raw string on its neighbour.
  */
 export function readErrorStrip(message) {
   const hours = keptHoursOf(message);
   if (hours != null) {
-    return noticeStrip(keptHistoryText(hours) + " — pick a shorter range.");
+    return noticeStrip(readLimitText(hours) + ". Pick a shorter range.");
   }
   return errorStrip(message);
 }
@@ -158,20 +180,22 @@ function keptHoursOf(message) {
   return m ? Number(m[1]) : null;
 }
 
-function daysText(hours) {
+export function daysText(hours) {
   const days = Math.round(hours / 24);
   return days + " day" + (days === 1 ? "" : "s");
 }
 
-function keptHistoryText(hours) {
-  return "This view keeps up to " + hours + " hours (" + daysText(hours) + ") of history";
+/* The read's own limit, not the store's history: most tables keep far longer than the 7 days most reads take. */
+function readLimitText(hours) {
+  return "This view reads at most " + hours + " hours (" + daysText(hours) + ") at a time";
 }
 
 /**
- * Run a read, and when it refuses the page's window because it keeps less history than that, ask it again ONCE
- * for the history it does keep. The Range select offers 30 days, and most reads keep 7: before this, each of
- * those panels showed only readErrorStrip's "pick a shorter range" notice and no data, beside panels whose reads
- * accept 30 days. Now the panel shows the last M hours with keptWindowStrip's notice saying so.
+ * Run a read, and when it refuses the page's window as wider than it takes, ask it again ONCE for the widest window
+ * it does take. Most reads take at most 7 days. The server page's Range stops there, but a Custom View's
+ * read panel stores its own hours and can still ask for more: before this, such a panel showed only
+ * readErrorStrip's "pick a shorter range" notice and no data. Now it shows the last M hours with keptWindowStrip's
+ * notice saying so.
  *
  * `fetchWith(params)` is the read itself (readTool, or apiGet over a raw path), so the descriptor loader and the
  * hand-built server-tab composites share this one rule. The retry happens only for the window refusal and only
@@ -185,7 +209,9 @@ export async function readWithinKeptHistory(fetchWith, params) {
   const kept = keptHoursOf(res.message);
   const asked = Number(params && params.hours);
   if (kept == null || !(kept >= 1 && asked > kept)) return res;
-  const retry = await fetchWith({ ...params, hours: kept });
+  /* The narrowed ask remembers the hours it replaces (NARROWED_FROM, a symbol, so it never reaches the query string):
+     a custom range on the server page carries through the retry instead of the read falling back to "ending now". */
+  const retry = await fetchWith({ ...params, hours: kept, [NARROWED_FROM]: asked });
   return retry.kind === "data" || retry.kind === "empty" ? { ...retry, keptHours: kept } : retry;
 }
 
@@ -194,11 +220,106 @@ export function readToolWithinKeptHistory(tool, params, signal) {
   return readWithinKeptHistory((p) => readTool(tool, p, signal), params);
 }
 
-/** The notice for a read readWithinKeptHistory narrowed to the history it keeps, or null for any other result. */
+/** The notice for a read readWithinKeptHistory narrowed to the widest window it takes, or null for any other result. */
 export function keptWindowStrip(res) {
+  if (res && !res.keptHours && res.presetHours) {
+    return noticeStrip("This panel shows the last " + res.presetHours + " hours, not the custom range: its read takes no end time.");
+  }
   if (!res || !res.keptHours) return null;
-  return noticeStrip(keptHistoryText(res.keptHours) + ", so it shows the last " + daysText(res.keptHours) + ".");
+  if (res.keptCustom) {
+    return noticeStrip(readLimitText(res.keptHours) + ", so it shows the part of the custom range the store still holds.");
+  }
+  return noticeStrip(readLimitText(res.keptHours) + ", so it shows the last " + daysText(res.keptHours) + ".");
 }
+
+/**
+ * The notice for a grid whose table starts covering the server after the window does (#4966): the response says so with
+ * `window_truncated: true` and a `truncation_note` naming where the data starts (in the browser's zone by the time a
+ * read reaches here: readTool composes it with windowNoteText). Null for any other response,
+ * which is every window the table covered, a quiet start included. `desc` is the panel's descriptor: a grid or a stat
+ * tile draws the note, a chart does not (its time axis already spans the asked range and shows the empty span), and a grid that names
+ * `truncation_note` as its own note (the Queries tab's grids, #4231) draws it there, not twice. A stat is safe to draw: a tile over a
+ * snapshot read that takes no `hours` never gets the fields from the server. A panel over the NEWEST snapshot of a read that also
+ * serves a window (the `grants` half of the memory reads, Automatic Tuning) sets `windowNote: false`, because its rows are a moment,
+ * not the window. A read that measures its own floor in a nested block (the Query Store clutter read's `window`) names it in
+ * `floorKey`, and the fields are read from there instead of from the top level. The note is text, never markup (R4).
+ */
+export function windowFloorStrip(data, desc) {
+  if (!desc || desc.windowNote === false || (desc.viz !== "table" && desc.viz !== "stat")) return null;
+  if (desc.noteKey === "truncation_note" || (desc.moreNoteKeys || []).includes("truncation_note")) return null;
+  const source = desc.floorKey ? getPath(data, desc.floorKey) : data;
+  if (!source || source.window_truncated !== true) return null;
+  const note = source.truncation_note;
+  return typeof note === "string" && note.trim() ? noticeStrip(note) : null;
+}
+
+/**
+ * A read's window note (`truncation_note`) in the page's own clock (#4966). The server writes the sentence with its
+ * instants in UTC, which is all an MCP client can use, but every time this page prints is in the browser's zone
+ * (localTime): a note above a grid that said "2026-01-02 00:00 UTC" mixed two clocks. So the answer also carries the
+ * instants as fields (`data_start_utc` or `oldest_shown_utc`, with `window_start_utc` and `window_end_utc`), and this
+ * composes the sentence again from them with localTime, the way keptWindowStrip composes its strip from `keptHours`.
+ * The Queries tab's notes (#4231) carry no such fields: the Query Store note names an instant only as the
+ * `effective_start` the answer already carries, so that instant is shown in the browser's zone inside the sentence.
+ * A field that is missing or unreadable, or a note that names no instant, draws the sentence as sent. Null when the
+ * answer carries no note.
+ */
+export function windowNoteText(data) {
+  if (!data || typeof data !== "object" || Array.isArray(data)) return null;
+  const sent = data.truncation_note;
+  if (typeof sent !== "string" || !sent.trim()) return null;
+  if (data.window_truncated !== true) return sent;
+
+  const at = (value) => (typeof value === "string" && parseUtc(value) ? localTime(value) : null);
+  const start = at(data.window_start_utc);
+  const end = at(data.window_end_utc);
+  const oldest = at(data.oldest_shown_utc);
+  const first = at(data.data_start_utc);
+  if (start && end && oldest) {
+    return (
+      "partial window: this grid shows only the newest rows, back to " + oldest + ", because it stops at its row limit. " +
+      "The window started at " + start + ". The grid covers " + oldest + " to " + end + "."
+    );
+  }
+  if (start && end && first) {
+    return (
+      "partial window: this panel's data starts at " + first + ", after the window's start at " + start + ". " +
+      "The panel covers " + first + " to " + end + "."
+    );
+  }
+
+  const effective = data.effective_start;
+  if (typeof effective === "string" && effective && parseUtc(effective) && sent.includes(effective)) {
+    return sent.split(effective).join(localTime(effective));
+  }
+  return sent;
+}
+
+/* The retention notice a Top Queries or Top Procedures answer carries for the Reads ranking (#5226), or null. Reads can only be ranked from
+   raw (the hourly rollups keep no logical reads), so over a window past what raw keeps the answer says so in `retention_notice`: the raw
+   route's partial-window sentence, with the store's measured raw reach. It says what the answer's `truncation_note` says (the older part of
+   the window was not read), and it carries the figures. */
+function retentionNoticeOf(data) {
+  if (!data || typeof data !== "object" || Array.isArray(data)) return null;
+  const sent = data.retention_notice;
+  return typeof sent === "string" && sent.trim() ? sent : null;
+}
+
+/* A read's answer with its window note composed in the browser's zone (windowNoteText), so every strip that draws
+   `truncation_note` (the grids' floor note, the Queries tab's noteKey notes, the hand-built composites) shows one
+   clock. An empty envelope carries the note too, in its `data` (#4966: a grid that looked and found nothing says where its
+   data starts, so a new server's empty week does not read as a quiet one). Anything but a data or empty answer, and an answer
+   whose note is already as it should be, comes back as it is.
+
+   #5299: an answer that carries a `retention_notice` (the Reads ranking past raw's reach) has ONE window note, and it is that sentence:
+   it stands in the `truncation_note`'s place, so the grid draws it once instead of two near-identical lines (the floor sentence and the
+   retention notice both said the older part of the window was not read). Whoever draws `truncation_note` draws it, as text. */
+function localizeWindowNote(res) {
+  if (!res || (res.kind !== "data" && res.kind !== "empty")) return res;
+  const note = retentionNoticeOf(res.data) ?? windowNoteText(res.data);
+  return note === null || note === res.data.truncation_note ? res : { ...res, data: { ...res.data, truncation_note: note } };
+}
+
 export function loadingStrip(label) {
   return el("div", { class: "strip loading" }, [label || "Loading…"]);
 }
@@ -267,6 +388,12 @@ export function axisTime(date, withDate) {
 export function windowFromHours(hours) {
   const h = Number(hours);
   if (!isFinite(h) || h < 1) return null;
+  /* A custom range's own reads span the exact pair the reader picked, not the whole hours they were fetched over. */
+  if (liveRange() && h === activeRange.hours) return { windowStart: activeRange.startMs, windowEnd: activeRange.endMs };
+  /* A read narrowed to the kept history draws the part of the custom range that history holds. */
+  if (liveRange() && h === activeRange.narrowedTo) {
+    return { windowStart: Math.max(activeRange.startMs, activeRange.endMs - h * 3600000), windowEnd: activeRange.endMs };
+  }
   const windowEnd = Date.now();
   return { windowStart: windowEnd - h * 3600000, windowEnd };
 }
@@ -376,11 +503,19 @@ export function getPath(obj, path) {
 
 /* ─────────────────────────── API fetch ─────────────────────────── */
 
-/** Build a query string from a params object, skipping null/undefined/empty values. */
+/** Build a query string from a params object, skipping null/undefined/empty values. An array is written as repeated keys
+ *  (`database_name=A&database_name=B`), one encodeURIComponent per item, and as nothing at all when it is empty (#5245):
+ *  a name that holds a comma, a bracket or a space is one key holding exactly that name, never several. Its items are
+ *  written as given, with no trim and no dropping, so a value the server cannot use is refused there instead of being
+ *  read as "all". An array used to serialize as ONE comma-joined value, and no caller passed one before this. */
 export function buildQuery(params) {
   if (!params) return "";
   const parts = [];
   for (const [k, v] of Object.entries(params)) {
+    if (Array.isArray(v)) {
+      for (const item of v) parts.push(encodeURIComponent(k) + "=" + encodeURIComponent(item));
+      continue;
+    }
     if (v == null || v === "") continue;
     parts.push(encodeURIComponent(k) + "=" + encodeURIComponent(v));
   }
@@ -391,8 +526,9 @@ export function buildQuery(params) {
    the poll loop (app.js refresh()) can tell whether the page it is about to re-render has already settled
    before firing a whole new set of the same reads on top of it. apiSendRead (a read that must travel as a POST,
    the composed-panel run) IS counted, so a slow panel holds the poll off and the refresh back-off measures it.
-   apiGetFleet and apiSend are deliberately NOT counted here — the fleet read is the one request every caller
-   already shares regardless of render (#3895), and a mutation is not a "page read" a poll tick should wait out. */
+   apiGetFleet IS counted too (each caller counts its own wait on the shared request), so a render whose reads are
+   fleet reads is timed for as long as it ran. apiSend is deliberately NOT counted: a mutation is not a "page read"
+   a poll tick should wait out. */
 let inFlightReads = 0;
 
 /** True while at least one apiGet/readTool call is outstanding — see the counter comment above. */
@@ -442,15 +578,20 @@ let fleetRequest = null;
  * classifies (so parses) the shared body for itself, so every page still owns the cards it was handed.
  */
 export async function apiGetFleet() {
-  if (!fleetRequest) {
-    fleetRequest = fetchBody("/api/fleet").finally(() => {
-      fleetRequest = null;
-    });
-  }
+  inFlightReads++;
+  try {
+    if (!fleetRequest) {
+      fleetRequest = fetchBody("/api/fleet").finally(() => {
+        fleetRequest = null;
+      });
+    }
 
-  const shared = await fleetRequest;
-  if (shared.transportError) return { kind: "error", message: shared.transportError };
-  return classifyResponse({ ok: shared.ok, status: shared.status, text: async () => shared.raw });
+    const shared = await fleetRequest;
+    if (shared.transportError) return { kind: "error", message: shared.transportError };
+    return classifyResponse({ ok: shared.ok, status: shared.status, text: async () => shared.raw });
+  } finally {
+    inFlightReads--;
+  }
 }
 
 /** Fetch a path and read its whole body once, for a response several callers classify. A failure comes back as a
@@ -488,6 +629,55 @@ export async function apiSend(method, path, body) {
   return classifyResponse(resp);
 }
 
+/**
+ * Send a MUTATING request and hand back what the server said, the HTTP status and the parsed body both, for a caller
+ * that branches on the status AND the body's status word (#5240: the Admin page's server edit answers a stale token
+ * and a taken address with the same 409 and tells them apart by the word; apiSend drops a non-2xx body, so it cannot).
+ * It is the transport Manage Tags' write always had, lifted here with its behaviour unchanged:
+ *   { status, body }                    - the answer. `body` is the parsed JSON, or null when the text is not JSON (an
+ *                                         empty body included). A 400, 404, 409, 429, 500 and the rest come back this way.
+ *   { status: 0, body: null, message }  - no answer at all (a network error); `message` is "Network error: ..."
+ *   { status, body, expired: true }     - the session is gone: a 401, or a 2xx whose text is not JSON at all (a sign-in
+ *                                         page in front of the API, or an empty body). The shell has been told once
+ *                                         (reportSessionExpired, with the house message and "/", never the body's own
+ *                                         login), so the caller drops what it has open and shows no success. This is
+ *                                         stricter than apiGet, which reads an empty 2xx as data.
+ *   { status, body, unexpected: true }  - a 2xx whose text IS JSON but not a JSON object (an array, a string, a number, null).
+ *                                         A sign-in page is never valid JSON, so this is not the session going; it is an
+ *                                         answer no write of this service gives (#5356). The shell is NOT told: the caller
+ *                                         keeps what it has open and says so, and shows no success.
+ * Like apiSend it ALWAYS declares Content-Type: application/json, which the server demands of a mutation (a 415
+ * otherwise; it is what forces a CORS preflight on a cross-origin write), and it counts as no in-flight read.
+ * An undefined body sends none.
+ */
+export async function apiWrite(method, path, body) {
+  let resp;
+  try {
+    resp = await fetch(path, {
+      method,
+      headers: { Accept: "application/json", "Content-Type": "application/json" },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+  } catch (e) {
+    return { status: 0, body: null, message: "Network error: " + (e && e.message ? e.message : String(e)) };
+  }
+  let parsed = null;
+  let isJson = false;
+  try {
+    parsed = JSON.parse(await resp.text());
+    isJson = true;
+  } catch {
+    parsed = null;
+  }
+  const succeeded = resp.status >= 200 && resp.status < 300;
+  if (resp.status === 401 || (succeeded && !isJson)) {
+    reportSessionExpired("Your session has expired. Sign in again.", "/");
+    return { status: resp.status, body: parsed, expired: true };
+  }
+  if (succeeded && (parsed === null || typeof parsed !== "object" || Array.isArray(parsed))) return { status: resp.status, body: parsed, unexpected: true };
+  return { status: resp.status, body: parsed };
+}
+
 /** #4666: a READ that has to travel as a POST (the composed-panel run, /api/compose/run). Counted in inFlightReads
     exactly like apiGet, so the poll's overlap guard (#4191) waits it out and the refresh back-off measures the render
     that contains it. Mutations (saves, deletes, alert validate/test) keep using apiSend, uncounted. */
@@ -518,7 +708,7 @@ export function onSessionExpired(fn) {
   sessionExpiredListeners.push(fn);
 }
 
-function reportSessionExpired(message, login) {
+export function reportSessionExpired(message, login) {
   if (sessionExpired) return;
   sessionExpired = true;
   for (const fn of sessionExpiredListeners) fn(message, login);
@@ -634,5 +824,218 @@ export function alertDeliveryState(a) {
 
 /** GET a read-only tool by its MCP name with query-string params. `signal` — see apiGet (#4191). */
 export function readTool(tool, params, signal) {
-  return apiGet("/api/read/" + tool + buildQuery(params), signal);
+  const plan = planCustomRange(tool, params);
+  return apiGet("/api/read/" + tool + buildQuery(withDatabaseFilter(tool, plan.params)), signal)
+    .then(localizeWindowNote)
+    .then((res) => finishCustomRange(res, plan));
+}
+
+/* ─────────────────────────── custom range (server page) ─────────────────────────── */
+
+/* The server page's custom start/end, or null for a preset. The page sets it before it builds a tab and clears it for
+   a preset and when the reader leaves the server page. It is applied here, to every read, so the ~100 `hours: ctx.hours`
+   call sites on the server tabs need no change: a read of the active server whose `hours` is the range's own whole-hour
+   count and that names no `as_of` is anchored at the range's end (`as_of`), and its rows are trimmed to the exact pair
+   afterwards. The window the read covers is then [end - hours, end], which starts at or before the picked start. */
+let activeRange = null;
+
+/** `{ server, hours, startMs, endMs, asOf }` for the page's custom range, or null to go back to the presets. `asOf` is
+ *  null for a range that ends now: its reads then name no `as_of` and the server anchors them at its own clock, and only
+ *  the start of the trim applies. */
+export function setActiveRange(range) {
+  activeRange = range || null;
+}
+
+/* The wait the Active Queries grid is filtered to, per server (#5235): set when a wait row or the wait trend chart opens
+   Active Queries at that wait. In memory only, like activeRange: not persisted and not in the URL, so a reload or a pasted
+   link shows every active query. A blank wait deletes the entry. */
+const queryWaitFilters = new Map();
+
+/** The wait type server `server`'s Active Queries grid is filtered to, or "" when it shows every query. */
+export function queryWaitFilter(server) {
+  return queryWaitFilters.get(server) || "";
+}
+
+/** Filter server `server`'s Active Queries to wait `w`; a blank (or non-text) `w` clears the filter. */
+export function setQueryWaitFilter(server, w) {
+  const v = typeof w === "string" ? w.trim() : "";
+  if (v === "") queryWaitFilters.delete(server);
+  else queryWaitFilters.set(server, v);
+}
+
+/** Whether wait `w` gets a link to Active Queries (#5235): any named wait except Query Store's QDS_* waits, which are the
+ *  background tasks' own and never a request's wait at a capture. The wait rows and the wait trend chart's menu item both
+ *  ask this, so the two cannot disagree. */
+export function waitIsLinked(w) {
+  const v = typeof w === "string" ? w.trim() : "";
+  return v !== "" && !/^QDS_/i.test(v);
+}
+
+/* The windowed reads that take no `as_of` (the catalog's `hours` without an `as_of`): they keep answering "the last N
+   hours ending now", and say so. Every other windowed read takes `as_of`. WebServerPageRangeTests pins this list
+   against the read catalog. */
+const READS_WITHOUT_AS_OF = new Set(["get_fleet_overview", "get_read_latency", "get_slow_reads", "get_finops", "get_store_query_history"]);
+
+/* The row fields that stamp one sample, event or run at an instant. A list under a read's answer whose rows carry one of
+   these is cut to the exact range. Fields that say when something last happened (last_execution_time and its kin, and
+   the captured_at / measured_at that some aggregate reads stamp with their LAST sample) are left alone: those rows are
+   totals over the window, not points in it. */
+const INSTANT_FIELDS = ["sample_time", "time", "collection_time", "event_time", "occurred_at", "deadlock_time", "change_time", "time_bucket", "run_time"];
+
+/* The range belongs to the server page: a read from any other page is never anchored by it. */
+function liveRange() {
+  const hash = typeof location !== "undefined" && location && typeof location.hash === "string" ? location.hash : "";
+  return activeRange && (hash === "" || hash.startsWith("#/server/")) ? activeRange : null;
+}
+
+/** A string that changes when the page's custom range does (its end and span), for a panel that caches a read per window. */
+export function activeRangeStamp() {
+  const range = liveRange();
+  return range ? [range.server, range.hours, range.asOf || ""].join("|") : "";
+}
+
+/* Marks the retry readWithinKeptHistory sends for fewer hours, with the hours the read first asked for. */
+const NARROWED_FROM = Symbol("narrowedFrom");
+
+function planCustomRange(tool, params) {
+  const range = liveRange();
+  const narrowedFrom = params ? params[NARROWED_FROM] : undefined;
+  const asked = narrowedFrom != null ? Number(narrowedFrom) : Number(params && params.hours);
+  if (!range || !params || params.server !== range.server || asked !== range.hours || params.as_of != null) {
+    return { params, range: null, ignored: false };
+  }
+  if (READS_WITHOUT_AS_OF.has(tool)) return { params, range: null, ignored: true };
+  const withEnd = range.asOf ? { ...params, as_of: range.asOf } : params;
+  if (narrowedFrom == null) return { params: withEnd, range, ignored: false };
+  /* The kept-history retry: the same end, the hours the store keeps, and only the part of the range those hours reach. */
+  const kept = Number(params.hours);
+  range.narrowedTo = kept;
+  return { params: withEnd, range: { ...range, startMs: Math.max(range.startMs, range.endMs - kept * 3600000) }, ignored: false, narrowed: true };
+}
+
+function finishCustomRange(res, plan) {
+  if (plan.ignored) return res && (res.kind === "data" || res.kind === "empty") ? { ...res, presetHours: Number(plan.params.hours) } : res;
+  if (plan.narrowed && res && (res.kind === "data" || res.kind === "empty")) res = { ...res, keptCustom: true };
+  if (!plan.range || !res || res.kind !== "data") return res;
+  return { ...res, data: trimToRange(res.data, plan.range.startMs, plan.range.asOf ? plan.range.endMs : Infinity, 0) };
+}
+
+function trimToRange(node, startMs, endMs, depth) {
+  if (!node || typeof node !== "object" || Array.isArray(node) || depth > 2) return node;
+  let out = node;
+  for (const [key, value] of Object.entries(node)) {
+    let next = value;
+    if (Array.isArray(value)) {
+      const first = value.find((r) => r && typeof r === "object");
+      const field = first ? INSTANT_FIELDS.find((f) => f in first) : null;
+      if (field) {
+        next = value.filter((r) => {
+          const at = r && parseUtc(r[field]);
+          return !at || (at.getTime() >= startMs && at.getTime() <= endMs);
+        });
+        if (next.length === value.length) next = value;
+      }
+    } else {
+      next = trimToRange(value, startMs, endMs, depth + 1);
+    }
+    if (next !== value) {
+      if (out === node) out = { ...node };
+      out[key] = next;
+    }
+  }
+  return out;
+}
+
+/* ─────────────────────────── database filter (server page) ─────────────────────────── */
+
+/* The server page's database filter (#5244, #5245), or null for none: `{ server, databases }`. The page sets it before it
+   redraws a panel and clears it when the reader leaves the server page, as it does the custom range. It is applied here, to
+   every FILTERED read of the active server (database-filter-reads.js), so the page's ~100 `readTool` call sites need no
+   change: readTool adds one `database_name` key per chosen database. dbScopeChip below says, per panel, whether it applied. */
+let activeDatabaseFilter = null;
+
+/** `{ server, databases }` for the page's database filter. `databases` is a list of names, kept exactly as given (never
+ *  trimmed, case-folded or split on commas: a name may hold a comma). No list, an empty list or no server is no filter. */
+export function setActiveDatabaseFilter(filter) {
+  const databases = filter && Array.isArray(filter.databases) ? filter.databases.slice() : [];
+  const server = filter && typeof filter.server === "string" ? filter.server : "";
+  activeDatabaseFilter = databases.length > 0 && server !== "" ? { server, databases } : null;
+}
+
+/** A copy of the filter set by setActiveDatabaseFilter, or null for none. It does not look at the page: the server page's
+ *  own code asks it for the chosen names (readTool and dbScopeChip also need the page to be a server page). */
+export function getActiveDatabaseFilter() {
+  return activeDatabaseFilter ? { server: activeDatabaseFilter.server, databases: activeDatabaseFilter.databases.slice() } : null;
+}
+
+/* The filter belongs to the server page: a read or a panel on any other page is never touched by it. */
+function liveDatabaseFilter() {
+  const hash = typeof location !== "undefined" && location && typeof location.hash === "string" ? location.hash : "";
+  return activeDatabaseFilter && hash.startsWith("#/server/") ? activeDatabaseFilter : null;
+}
+
+/* Whether a read's own `database_name` names anything the query string would carry (buildQuery skips null, undefined, "" and
+   an empty array). */
+const namesADatabase = (value) => (Array.isArray(value) ? value.length > 0 : value != null && value !== "");
+
+/* The params a read goes out with: the chosen databases are added as an array (buildQuery writes it as repeated keys) only
+   when the page is a server page, the read is in FILTERED, `params.server` is the active server and the params name no
+   database of their own, so an explicit name wins. The caller's object is never changed. */
+function withDatabaseFilter(tool, params) {
+  const filter = liveDatabaseFilter();
+  if (!filter || !params || params.server !== filter.server || !FILTERED.has(tool) || namesADatabase(params.database_name)) return params;
+  return { ...params, database_name: filter.databases.slice() };
+}
+
+/* The deadlock reads are unfiltered by design: a deadlock spans several databases, and they are inside each graph. */
+const DEADLOCK_READS = new Set(["get_deadlock_trend", "get_deadlocks", "get_deadlock_detail"]);
+
+/**
+ * What a panel's database scope chip says, or null for no chip (#5244 D4). Only while a filter is active on the server page:
+ * an empty filter shows no chip anywhere. `read` is the panel's main read; `override` is the panel's own `dbScope` when one
+ * read feeds panels of different kinds ("server", "unfiltered" or "process-rows"), and wins over the read's class.
+ *   "filtered"     the read takes the filter
+ *   "unfiltered"   a database-scoped read that cannot take it, so it shows every database
+ *   "server"       the data has no database
+ *   "process-rows" the Deadlock Graphs panel: each graph whole, its process rows filtered in the browser
+ *   null           an identity read (the query drill and the seven plan-viewer reads), or a read no class names
+ */
+export function dbScopeState(read, override) {
+  if (!liveDatabaseFilter()) return null;
+  if (override === "server" || override === "unfiltered" || override === "process-rows") return override;
+  const scope = readScope(read);
+  return scope === "identity" ? null : scope;
+}
+
+/**
+ * The chip for dbScopeState(read, override), or null. It reuses the badge look (warning for "unfiltered", muted for "server")
+ * and tags itself with `data-db-scope`. A database name is only ever text here: the label is `el(..., { text })` and the
+ * title, which lists the names one per line, is set as an attribute, so no name is read as markup (R4).
+ */
+export function dbScopeChip(read, override) {
+  const state = dbScopeState(read, override);
+  if (state === null) return null;
+  const names = liveDatabaseFilter().databases;
+  const countText = (n) => (n === 1 ? "1 database" : n + " databases");
+  let text;
+  let title;
+  let look = "";
+  if (state === "filtered") {
+    text = names.length === 1 ? names[0] : countText(names.length);
+    title = names.join("\n");
+  } else if (state === "unfiltered") {
+    text = "All databases";
+    title =
+      "This panel's read cannot take the database filter, so it shows every database." +
+      (DEADLOCK_READS.has(read) ? " The databases are inside each deadlock graph." : "");
+    look = " band-Warning";
+  } else if (state === "process-rows") {
+    text = "Graphs: all; process rows: " + countText(names.length);
+    title = "Each graph is whole; process rows outside the chosen databases are hidden.";
+  } else {
+    text = "Server-wide";
+    title = "This data has no database, so the filter does not apply.";
+    look = " engine";
+  }
+  return el("span", { class: "badge db-scope db-scope-" + state + look, title, text, dataset: { dbScope: state } });
 }

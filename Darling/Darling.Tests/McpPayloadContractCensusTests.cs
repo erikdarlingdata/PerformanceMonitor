@@ -1035,6 +1035,16 @@ public sealed class McpPayloadContractCensusTests
     /// </summary>
     public static readonly (string File, string Tool)[] InlineDaysBackRefusals = [];
 
+    /// <summary>The tools whose only bounded parameter is a <c>limit</c> they refuse inline with the shared sentence
+    /// (<c>if (limit &lt; 1 || limit &gt; Max…)</c>), because the tool has no window to validate beside it.</summary>
+    public static readonly (string File, string Tool)[] InlineLimitRefusals =
+    [
+        ("DarlingMcpFinOpsInventoryTools.cs", "get_finops_inventory"),
+    ];
+
+    private static readonly Regex InlineLimitRefusal = new(
+        @"if \(limit < 1 \|\| limit > [\w.]+\)", RegexOptions.Compiled);
+
     private static readonly Regex SharedValidatorCall = new(
         @"\bMcpHelpers\.(ValidateWindow|ValidateUncappedWindow|ValidateHoursBack|ValidateDaysBack|ValidateTop|ResolveAsOf|ParseSummaryDate)\(",
         RegexOptions.Compiled);
@@ -1078,6 +1088,12 @@ public sealed class McpPayloadContractCensusTests
             if (inline)
             {
                 inlineSeen.Add((file, tool));
+            }
+
+            if (declared.SequenceEqual(["limit"]) && InlineLimitRefusal.IsMatch(code)
+                && InlineLimitRefusals.Contains((file, tool)))
+            {
+                continue;
             }
 
             if (inline || SharedValidatorCall.IsMatch(code) || CallsAValidatingHelper(code, source))
@@ -1269,11 +1285,17 @@ public sealed class McpPayloadContractCensusTests
     /// neighbours are unstamped too, and all three would leave together when A10 stamped the family.
     /// <b>Erik ruled the other way</b> (#3880): a read that has just become one honest instant can say WHICH
     /// instant, so stamp it rather than roster it. <c>IndexLockingSql</c> projects <c>ios.collection_time</c>,
-    /// <c>get_object_locking</c> publishes <c>captured_at</c> on both SKUs, and this list is back to the two
+    /// <c>get_object_locking</c> publishes <c>captured_at</c> on both SKUs, and this list went back to the two
     /// entries it held before #3879 — the shrink-only direction restored, with the growth episode kept on the
     /// record here rather than quietly erased.</para>
     ///
-    /// <para>The two survivors are not the same kind of gap. <c>IndexUsageSql</c> is a genuine A10 residual:
+    /// <para><b>It grew again in #5069, to three, and #5070 shrank it back to two.</b> The growth was not a read
+    /// becoming unstamped: the FinOps Storage Growth index drill (<c>ObjectIndexDetailSql</c>) moved into the Storage
+    /// <c>FinOps</c> subfolder in #5050, and this census could not see it until #5069 made the reader scan recursive.
+    /// #5070 projects its anchor and <c>get_finops</c> <c>storage_growth</c> publishes it at the indexes level as
+    /// <c>captured_at</c>, so the row left this list.</para>
+    ///
+    /// <para>The original two are not the same kind of gap. <c>IndexUsageSql</c> is a genuine A10 residual:
     /// projecting its anchor and stamping <c>get_index_usage</c> is the same small edit #3880 made next door,
     /// and it is available whenever the family is taken. <c>IndexUsageMatchCountSql</c> is structural — a
     /// scalar <c>COUNT(*)</c> has no row for a stamp to ride on, so it leaves this list only if it ever
@@ -1512,18 +1534,26 @@ public sealed class McpPayloadContractCensusTests
     /// </summary>
     public static readonly (string Key, string[] Files, string WhatWasCut)[] SecondBoundCutKeys =
     [
+        ("databases_truncated", ["DarlingMcpFinOpsTools.IndexAnalysis.cs"],
+            "get_finops index_analysis' per-database roll-up list is capped at MaxIndexAnalysisDatabases (13), beside the recommendation list's own truncated — two bounds in one payload, the second spelled <bound>_truncated"),
+        ("points_truncated", ["DarlingMcpQueryStoreHistoryTools.cs"],
+            "#5234: get_query_store_query_history's per-interval points[] is capped at MaxPoints (150) and a byte budget, keeping the NEWEST points, observed off the fetched row count; plans[] is capped separately (plans_truncated) — two bounds in one payload, the second spelled <bound>_truncated"),
+        ("plans_truncated", ["DarlingMcpQueryStoreHistoryTools.cs"],
+            "#5234: get_query_store_query_history's per-plan plans[] roll-up is capped at MaxPlans (20), the longest by total duration, beside the per-interval points[] bound (points_truncated) — two bounds in one payload, the second spelled <bound>_truncated"),
         ("scan_truncated", ["DarlingMcpBlockingTools.cs"],
             "the dedup_key fingerprint scan's ceiling (FingerprintScanCeiling), observed off a ceiling + 1 fetch, beside the page's own truncated — two bounds in one payload, the second spelled <bound>_truncated"),
-        ("window_truncated", ["DarlingMcpDataTools.cs", "DarlingMcpQueryStoreClutterTools.cs", "DarlingMcpTrendTools.cs", "McpQueryTools.cs"],
-            "the #2364 / #2353 WINDOW floor (#3653 item 17): the tier that answered did not hold the whole requested window, so the served series begins later than asked — beside effective_start / effective_hours_back, observed off the served head against the shared ninety-minute TruncationSlack, no cap involved; get_query_trend and get_query_store_top write it in their initializers, the duration-trend trio through TrendDisclosure.WriteTo (Darling) and WriteDisclosure (Lite); get_query_store_clutter (#3797) writes it in its initializer for its plan-churn and wait arms, which read the same raw tier get_query_store_top does, off the same window-floor read and the same ninety-minute slack"),
+        ("processes_truncated", ["DarlingMcpBlockingTools.cs"],
+            "get_deadlock_detail's processes[] is cut by two bounds, the per-deadlock cap DarlingDeadlockProcessRows.MaxProcessesPerDeadlock (12) and the default page's shared row budget (DefaultPageRowBudget, 24); the rows cut from one deadlock are counted beside it. Unlike the boolean <bound>_truncated keys around it, processes_truncated is a COUNT (0 when nothing was cut), kept under this name because it is the per-deadlock twin of the page's truncated and a reader looks for it beside processes"),
+        ("window_truncated", ["DarlingMcpBlockingTools.cs", "DarlingMcpConfigHistoryTools.cs", "DarlingMcpDataTools.cs", "DarlingMcpDefaultTraceTools.cs", "DarlingMcpHealthParserTools.cs", "DarlingMcpJobTools.cs", "DarlingMcpLatchSpinlockTools.cs", "DarlingMcpLongQueryTools.cs", "DarlingMcpMemoryGrantTools.cs", "DarlingMcpPgBlockingTools.cs", "DarlingMcpPgCpuUtilizationTools.cs", "DarlingMcpPgDatabaseTools.cs", "DarlingMcpPgDeadlockTools.cs", "DarlingMcpPgIndexUsageTools.cs", "DarlingMcpPgIoTools.cs", "DarlingMcpPgKernelStatsTools.cs", "DarlingMcpPgLogEventTools.cs", "DarlingMcpPgPlanTools.cs", "DarlingMcpPgPredicateTools.cs", "DarlingMcpPgReplicationStatsTools.cs", "DarlingMcpPgServerStateTools.cs", "DarlingMcpPgSessionStatesTools.cs", "DarlingMcpPgStatementTools.cs", "DarlingMcpPgWaitSamplingTools.cs", "DarlingMcpPgWaitTools.cs", "DarlingMcpPgXminTools.cs", "DarlingMcpPlanCorrectionTools.cs", "DarlingMcpQueryHeatmapTools.cs", "DarlingMcpQueryStoreClutterTools.cs", "DarlingMcpQueryStoreHistoryTools.cs", "DarlingMcpQueryStoreRegressionTools.cs", "DarlingMcpSessionTools.cs", "DarlingMcpStoreQueryHistoryTools.cs", "DarlingMcpTrendTools.cs", "McpBlockingTools.cs", "McpConfigHistoryTools.cs", "McpDefaultTraceTools.cs", "McpHealthParserTools.cs", "McpHealthTools.cs", "McpLongQueryTools.cs", "McpMemoryTools.cs", "McpPlanCorrectionTools.cs", "McpQueryTools.cs", "McpSessionTools.cs", "McpWaitTools.cs"],
+            "the #2364 / #2353 WINDOW floor (#3653 item 17): the tier that answered did not hold the whole requested window, so the served series begins later than asked — beside effective_start / effective_hours_back, observed off the served head against the shared ninety-minute TruncationSlack, no cap involved; get_query_trend and get_query_store_top write it in their initializers, the duration-trend trio through TrendDisclosure.WriteTo (Darling) and WriteDisclosure (Lite); get_store_query_history (#5097) writes it beside hours_back from the history's own first capture, not a collector probe; get_query_store_clutter (#3797) writes it in its initializer for its plan-churn and wait arms, which read the same raw tier get_query_store_top does, off the same window-floor read and the same ninety-minute slack; Lite's get_active_queries and get_waiting_tasks (QuerySnapshots / WaitingTasks, read by coverage), get_query_store_regressions (checked against the baseline's start, the earlier of its two windows) and get_query_heatmap (#4966) write it in their initializers through McpQueryTools.WindowNotice, beside a page cut of their own (truncated), so they publish effective_start without effective_hours_back, which the window-floor rule below holds apart for the window floor; Darling's get_server_config_changes, get_database_config_changes and get_trace_flag_changes (#4966) write them after hours_back from the coverage probe of server_config, database_config and trace_flags (the same rule as the viewer's and the web's Config Changes notes), and on their empty answer inside the hints; Darling's get_collection_log (one server), get_plan_corrections and get_memory_pressure_events (#4966) write them after hours_back too: the log from its own coverage probe, which ignores the collector, status and duration filters so the note says where the log starts, plan corrections from plan_correction's coverage, where an answer of only automatic-tuning rows is a data answer, and memory pressure from the events' sample_time with its edge at the purge cutoff, each on its empty answer inside the hints; Darling's get_active_queries, get_waiting_tasks, get_query_heatmap and get_query_store_regressions (#4966) write the same three keys after hours_back through DarlingMcpWindowNotice, with the same wording and the same absence of effective_hours_back (the regressions tool checks its baseline's start, as Lite's does); Darling's get_active_queries (DarlingMcpSessionTools.cs) writes them only when the window was cut, so a covered default call stays inside the response budget and a missing key there means covered (Lite's writes them always), and each of the four leaves them off when its coverage probe failed, since a failed probe costs the notice and never the rows; Darling's get_wait_stats, get_latch_stats and get_spinlock_stats (#4966) write it on a data answer only, and Lite's config-change, collection-log, plan-correction and memory-pressure tools write it as well; and Darling's six PostgreSQL reads get_pg_wait_stats, get_pg_wait_sampling, get_pg_kernel_stats, get_pg_lock_stats, get_pg_predicate_stats and get_pg_server_config_changes (#4966): the coverage of the web's probe source for each read did not reach the start of the requested window; and Darling's five PostgreSQL window reads get_pg_top_queries, get_pg_database_stats, get_pg_io_stats, get_pg_plans and get_pg_cpu_utilization (#4966): the store's coverage did not reach the start of the requested window; and Darling's get_pg_blocking, get_pg_session_states, get_pg_replication_stats and get_pg_xmin_horizon (#4966), the same floor read from the collector's logged runs (the xmin horizon from its table's schedule edge), because a row is stored only while a chain, a held transaction, a replica or a holder exists; Darling's nine get_health_parser_* tools and get_default_trace_events (#4966) write the same three keys after hours_back through DarlingMcpWindowNotice, always on a data answer, and leave them off when their coverage probe failed; so do Lite's get_default_trace_events, get_wait_stats and get_blocking_stats (#4966), the last one once for its two series, from the earlier of the blocked-process and deadlock coverages; Darling's get_blocking, get_deadlocks, get_deadlock_detail, get_blocked_process_xml and get_long_query_completions (#4966) write the three keys after hours_back through DarlingMcpWindowNotice.ReadEventAsync, beside a page cut of their own (truncated), and leave them off when the coverage probe failed; Darling's get_blocking_stats (#4966) writes them after hours_back as one notice for its two series (blocking and deadlock severity), at the later of the two series' floors (blocking: the earlier of blocked_process_reports and dmv_blocking_snapshots), and leaves them off when the probe failed"),
         ("findings_truncated", ["DarlingMcpTools.cs", "McpAnalysisTools.cs"],
             "#4198: get_analysis_findings' GROUP PAGE cut — limit caps the collapsed per-chain groups returned (default 18), independent of the pre-existing truncated above (the raw WindowCoveringLimit occurrence read, beside truncation_note): truncated warns occurrence stats may under-report, findings_truncated warns other diagnostic chains exist but are not on this page at all"),
     ];
 
     public static readonly (string Key, string[] Files, string WhatItExplains)[] CutNoteKeys =
     [
-        ("truncation_note", ["DarlingMcpDataTools.cs", "DarlingMcpQueryStoreClutterTools.cs", "DarlingMcpTools.cs", "McpAnalysisTools.cs", "McpQueryTools.cs"],
-            "the prose beside the flag: on get_analysis_findings (both SKUs) beside truncated, the WindowCoveringLimit read cap observed off a cap + 1 fetch; on get_query_store_top and get_query_store_clutter beside window_truncated, the #2364 window floor — the store's raw retention did not reach the whole requested window (on the clutter view, for the two arms that read the raw tier); on Lite's get_top_queries_by_cpu / get_top_procedures_by_cpu / get_query_store_top (#4231), the same window-floor note, from LocalDataService.GetQueryWindowFloorAsync"),
+        ("truncation_note", ["DarlingMcpBlockingTools.cs", "DarlingMcpConfigHistoryTools.cs", "DarlingMcpDataTools.cs", "DarlingMcpDefaultTraceTools.cs", "DarlingMcpHealthParserTools.cs", "DarlingMcpLatchSpinlockTools.cs", "DarlingMcpLongQueryTools.cs", "DarlingMcpMemoryGrantTools.cs", "DarlingMcpPgBlockingTools.cs", "DarlingMcpPgCpuUtilizationTools.cs", "DarlingMcpPgDatabaseTools.cs", "DarlingMcpPgDeadlockTools.cs", "DarlingMcpPgIndexUsageTools.cs", "DarlingMcpPgIoTools.cs", "DarlingMcpPgKernelStatsTools.cs", "DarlingMcpPgLogEventTools.cs", "DarlingMcpPgPlanTools.cs", "DarlingMcpPgPredicateTools.cs", "DarlingMcpPgReplicationStatsTools.cs", "DarlingMcpPgServerStateTools.cs", "DarlingMcpPgSessionStatesTools.cs", "DarlingMcpPgStatementTools.cs", "DarlingMcpPgWaitSamplingTools.cs", "DarlingMcpPgWaitTools.cs", "DarlingMcpPgXminTools.cs", "DarlingMcpPlanCorrectionTools.cs", "DarlingMcpQueryHeatmapTools.cs", "DarlingMcpQueryStoreClutterTools.cs", "DarlingMcpQueryStoreRegressionTools.cs", "DarlingMcpSessionTools.cs", "DarlingMcpStoreQueryHistoryTools.cs", "DarlingMcpTools.cs", "McpAnalysisTools.cs", "McpBlockingTools.cs", "McpConfigHistoryTools.cs", "McpDefaultTraceTools.cs", "McpHealthParserTools.cs", "McpHealthTools.cs", "McpLongQueryTools.cs", "McpMemoryTools.cs", "McpPlanCorrectionTools.cs", "McpQueryTools.cs", "McpSessionTools.cs", "McpWaitTools.cs"],
+            "the prose beside the flag: on get_analysis_findings (both SKUs) beside truncated, the WindowCoveringLimit read cap observed off a cap + 1 fetch; on get_query_store_top and get_query_store_clutter beside window_truncated, the #2364 window floor — the store's raw retention did not reach the whole requested window (on the clutter view, for the two arms that read the raw tier); on Lite's get_top_queries_by_cpu / get_top_procedures_by_cpu / get_query_store_top (#4231), the same window-floor note, from LocalDataService.GetQueryWindowFloorAsync; and on Lite's get_active_queries, get_waiting_tasks, get_query_store_regressions and get_query_heatmap (#4966), the same note beside window_truncated, built by McpQueryTools.WindowNotice with the table each one read; and on Darling's get_active_queries, get_waiting_tasks, get_query_heatmap and get_query_store_regressions (#4966), the same note beside window_truncated, built by DarlingMcpWindowNotice with the table each one read (query_snapshots, waiting_tasks, query_stats, query_store_stats); Darling's wait, latch and spinlock aggregates (#4966), and Lite's config-change, collection-log, plan-correction and memory-pressure tools, the same note from the coverage probe; and on Darling's six PostgreSQL wait, kernel, lock, predicate and config-change reads (#4966), the same note on the web's probe source for each read; and Darling's get_pg_top_queries, get_pg_database_stats, get_pg_io_stats, get_pg_plans and get_pg_cpu_utilization (#4966), the same note beside window_truncated, built by DarlingMcpWindowNotice over the table each one read, and carried under hints on an empty answer; and Darling's get_pg_blocking, get_pg_session_states, get_pg_replication_stats and get_pg_xmin_horizon (#4966), the same note and hints; and on Darling's nine get_health_parser_* tools and get_default_trace_events (#4966), the same note built by DarlingMcpWindowNotice with the table each one read (system_health_events, default_trace_events); and Lite's get_default_trace_events, get_wait_stats and get_blocking_stats (#4966), the same note over default_trace_events, wait_stats, and blocked_process_report and deadlocks; and Lite's nine get_health_parser_* tools (#4966), the same note over system_health_events; and Darling's get_blocking, get_deadlocks, get_deadlock_detail, get_blocked_process_xml and get_long_query_completions (#4966), the same note, built by DarlingMcpWindowNotice with the collector table each one read; and Darling's get_pg_index_usage (from coverage of pg_index_usage_stats) and get_pg_write_stats (derived from the one row's own first sample, with no probe on a data answer; its empty answer probes pg_write_stats) (#4966), the same note; and on Darling's get_pg_deadlocks and get_pg_log_events (#4966), the same note beside window_truncated on a sparse newest-first event list, from the earlier of the coverage floor and the oldest event shown, whether or not the cap cut the page (the answer reports the cap through truncated)"),
         ("findings_truncated_note", ["DarlingMcpTools.cs", "McpAnalysisTools.cs"],
             "#4198: the prose beside findings_truncated — how many diagnostic chains were active in the window and that raising limit or narrowing hours_back would show more of them"),
     ];
@@ -1531,6 +1561,10 @@ public sealed class McpPayloadContractCensusTests
 
     public static readonly (string Key, string[] Files, string WhatWasCut)[] SourceSideCutKeys =
     [
+        ("arguments_truncated", ["DarlingMcpSlowReadTools.cs"],
+            "get_slow_reads' arguments: the writer held the recorded arguments to 4,096 bytes and stored a truncated object naming the keys instead, a cut made when the row was written"),
+        ("statements_truncated", ["DarlingMcpSlowReadTools.cs"],
+            "get_slow_reads' statements: the writer stored at most 50 of the statements a read ran, a cut made when the row was written; statement_count is the whole number"),
         ("capture_was_truncated", ["DarlingMcpPgSessionStatesTools.cs"],
             "the pg_session_states collector's per-capture row cap bit at COLLECTION: the stored rows for that capture are a worst-first sample of the instance's sessions"),
         ("chain_may_be_truncated", ["DarlingMcpPgBlockingTools.cs"],
@@ -1543,6 +1577,10 @@ public sealed class McpPayloadContractCensusTests
 
     public static readonly (string Key, string[] Files, string WhatWasCut)[] FieldPreviewCutKeys =
     [
+        ("script_truncated", ["DarlingMcpFinOpsTools.IndexAnalysis.cs"],
+            "get_finops index_analysis' recommendation script — reconstructed T-SQL that can run long — previews to IndexAnalysisTextCap (300) characters by default; full_text returns it whole"),
+        ("definition_truncated", ["DarlingMcpFinOpsTools.IndexAnalysis.cs"],
+            "get_finops index_analysis' original_index_definition — the reconstructed CREATE statement — previews to IndexAnalysisTextCap (300) characters by default; full_text returns it whole"),
         ("confidence_basis_truncated", ["DarlingMcpTools.cs", "McpAnalysisTools.cs"],
             "#4198: get_analysis_findings' confidence_basis — a near-fixed methodology sentence repeated on every finding (StoryConfidence.DescribeBasis) — previews to 160 characters (FindingTextPreviewLength) by default; full_text returns it whole"),
         ("advice_truncated", ["DarlingMcpTools.cs", "McpAnalysisTools.cs"],
@@ -1550,7 +1588,7 @@ public sealed class McpPayloadContractCensusTests
         ("deadlock_graph_xml_truncated", ["DarlingMcpBlockingTools.cs", "McpBlockingTools.cs"],
             "#4198: get_deadlock_detail's own wide field — deadlock_graph_xml is a 2000-character preview by default (a busy production store measured 120,454 bytes for 3 graphs), full_graph or a dedup_key call gets the whole XML"),
         ("query_text_truncated", ["DarlingMcpDataTools.cs", "DarlingMcpPlanCorrectionTools.cs", "DarlingMcpQueryStoreRegressionTools.cs", "DarlingMcpSessionTools.cs", "McpPlanCorrectionTools.cs", "McpQueryTools.cs", "McpSessionTools.cs"],
-            "#4198: query_text is previewed at read time by four tools: get_active_queries at 500 chars (full_text gets the whole text; a synthetic 50-row page measured 81,489 bytes), get_query_store_regressions at 240 chars (full_text opts back in; a busy production store measured 211 KB at default arguments), get_plan_corrections at 150 chars (full_text gets the whole text; the full text IS in the store, not collector-capped), get_query_store_top at 400 chars (full_text gets the whole text; query_store_stats.query_text is not collector-capped either). get_query_store_top's MCP signature forwards to an internal previewLength overload so the web viewer can keep the OLD 2000-char cap that field already had, rather than switching to full text the way get_deadlock_detail's never-capped field does"),
+            "#4198: query_text is previewed at read time by four tools: get_active_queries at 400 chars (500 until #4966's window-floor keys needed the room; full_text gets the whole text; a synthetic 50-row page measured 81,489 bytes), get_query_store_regressions at 240 chars (full_text opts back in; a busy production store measured 211 KB at default arguments), get_plan_corrections at 150 chars (full_text gets the whole text; the full text IS in the store, not collector-capped), get_query_store_top at 400 chars (full_text gets the whole text; query_store_stats.query_text is not collector-capped either). get_query_store_top's MCP signature forwards to an internal previewLength overload so the web viewer can keep the OLD 2000-char cap that field already had, rather than switching to full text the way get_deadlock_detail's never-capped field does"),
         ("error_message_truncated", ["DarlingMcpDataTools.cs", "McpHealthTools.cs"],
             "#4198: get_collection_log's own wide field — error_message is a 500-character preview by default (a seeded store measured 90,514 bytes for 200 rows at the old 200-row default), full_text opts back into the whole (up to 4000-character, DarlingObservability.LogCollectionAsync's own write-time ceiling) field"),
         ("last_error_truncated", ["DarlingMcpDataTools.cs", "McpHealthTools.cs"],
@@ -1573,7 +1611,7 @@ public sealed class McpPayloadContractCensusTests
 
     public static readonly (string Key, string[] Files, string WhyItSurvives)[] PageCountsUnderANeutralNoun =
     [
-        ("shown", ["DarlingMcpDefaultTraceTools.cs", "DarlingMcpHealthParserTools.cs", "DarlingMcpTools.cs", "McpAnalysisTools.cs", "McpDefaultTraceTools.cs", "McpHealthParserTools.cs"],
+        ("shown", ["DarlingMcpDefaultTraceTools.cs", "DarlingMcpHealthParserTools.cs", "DarlingMcpJobTools.cs", "DarlingMcpTools.cs", "McpAnalysisTools.cs", "McpDefaultTraceTools.cs", "McpHealthParserTools.cs"],
             "the page's count beside an honest WHOLE total (total_entries / total_events / total_facts, or a <noun>_count over the whole in-memory set) — the cut is exact and disclosed by the pair; the #3594 spelling is *_returned + truncated, and the rename is fenced tonight because four PgTarget* test files read shown off get_analysis_facts"),
     ];
 
@@ -1774,7 +1812,7 @@ public sealed class McpPayloadContractCensusTests
            holds; plus (#4231) get_top_queries_by_cpu's and get_top_procedures_by_cpu's payloads, the same
            disclosure over query_stats and procedure_stats; plus get_top_queries_by_cpu's
            empty min_dop/parallel_only status, which hands back the window it read. */
-        ("DarlingMcpDataTools.cs", "initializer", 6),
+        ("DarlingMcpDataTools.cs", "initializer", 7),
         ("DarlingMcpQueryStoreClutterTools.cs", "initializer", 1),
         ("DarlingMcpTrendTools.cs", "envelope", 1),
         ("DarlingMcpTrendTools.cs", "initializer", 1),
@@ -2248,19 +2286,22 @@ public sealed class McpPayloadContractCensusTests
 
     /// <summary>
     /// Every literal <c>LIMIT n</c> (<c>n &gt; 1</c>) that ENDS a reader statement on either SKU — the shape
-    /// #3541 A3 and #3659 found behind tools that advertised <c>limit</c>. Seven remain, all in Lite's
-    /// service layer, none behind a tool that takes a <c>limit</c>: six are viewer-only reads and one
+    /// #3541 A3 and #3659 found behind tools that advertised <c>limit</c>. Seven remain: six in Lite's
+    /// service layer plus one in the Darling FinOps recommendations reader (<c>MaintenanceWindowSql</c>, the top-10 long-running jobs, a ceiling over a short list; the scan reads Storage subfolders since the FinOps readers live there), none behind a tool that takes a <c>limit</c>: five are viewer-only reads and one
     /// (<c>GetPlanCacheSnapshotAsync</c>, behind <c>get_plan_cache_bloat</c>, which takes no cap) is a
     /// ceiling of 30 over a population of a dozen cache types. <c>LIMIT 1</c> is the latest-row idiom and is
-    /// not a page. Pinned so a new terminal literal has to say what it is, and so the Lite twin of
+    /// not a page. The Long Queries grid's read (<c>GetRecentLongQueryCompletionsAsync</c>) left the roster in
+    /// #4989: its cap is the named constant <c>LongQueryGridCap</c>, written into the statement as
+    /// <c>LIMIT {LongQueryGridCap}</c>, so no literal ends it, and the grid's "Showing since" notice reads the same
+    /// constant. Pinned so a new terminal literal has to say what it is, and so the Lite twin of
     /// <see cref="McpPageContractTests.EveryPagedRead_BindsItsCapAsAParameter_NeverALiteral"/> has a
     /// population to shrink.
     /// </summary>
     public static readonly (string File, string Member, int Limit)[] StatementTerminalLiteralLimits =
     [
+        ("DarlingFinOpsRecommendationsReader.cs", "(file scope)", 10),
         ("LocalDataService.Blocking.cs", "GetBlockingPairRowsAsync", 5000),
         ("LocalDataService.FinOps.Recommendations.cs", "GetRecommendationsAsync", 10),
-        ("LocalDataService.LongQueries.cs", "GetRecentLongQueryCompletionsAsync", 200),
         ("LocalDataService.PlanCache.cs", "GetPlanCacheSnapshotAsync", 30),
         ("LocalDataService.RunningJobs.cs", "GetAnomalousJobsAsync", 5),
         ("LocalDataService.WaitStats.cs", "GetAllQuerySnapshotsInRangeAsync", 2000),
@@ -2314,8 +2355,15 @@ public sealed class McpPayloadContractCensusTests
         })
         {
             var root = RepoFile.PathTo(directory);
-            foreach (var file in Directory.EnumerateFiles(root, pattern).Order(StringComparer.Ordinal))
+            foreach (var file in Directory.EnumerateFiles(root, pattern, SearchOption.AllDirectories).Order(StringComparer.Ordinal))
             {
+                /* Build output is not source: skip bin/ and obj/ so the scan and its file-count floor stay the same on every machine. */
+                var segments = Path.GetRelativePath(root, file).Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+                if (segments.Contains("bin", StringComparer.OrdinalIgnoreCase) || segments.Contains("obj", StringComparer.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
                 var name = Path.GetFileName(file);
                 if (name.Contains("ForcePlan", StringComparison.Ordinal))
                 {

@@ -40,6 +40,7 @@ namespace PerformanceMonitorLite.Tests;
 /// record of why it existed stays below so the next family that cannot be seeded has the idiom to
 /// follow.</para>
 /// </summary>
+[Trait("Reads", "Darling")]
 public sealed class DeltaFamilySeedingCensusTests
 {
     private const string LiteSeeder = "Lite/Services/DeltaCalculator.cs";

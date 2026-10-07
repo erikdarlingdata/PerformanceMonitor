@@ -18,6 +18,7 @@ using ModelContextProtocol.Server;
 using Npgsql;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
@@ -340,4 +341,131 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
         using var cleanup = new NpgsqlCommand(sql, connection);
         await cleanup.ExecuteNonQueryAsync(ct);
     }
+
+    /* #4966: the window-floor notice on get_memory_pressure_events. Rows are windowed on sample_time, which can sit well before
+       the collection that stored it (a ring-buffer read hands back history), so the probe takes the earlier of the server's
+       coverage and its first event in the window. */
+    private const string WindowCollector = "memory_pressure_events";
+
+    private static string WindowName(string window) => "memory-pressure-window-" + window;
+
+    private static Task<string> CallWindowAsync(NpgsqlDataSource ds, string window, int hours, DateTime end) =>
+        DarlingMcpMemoryGrantTools.GetMemoryPressureEvents(ds, WindowName(window), hours, as_of: WebDataStartNote.FormatWindowEnd(end));
+
+    private static Task RunWindowAsync(string window, Func<NpgsqlConnection, NpgsqlDataSource, DateTime, Task> body) =>
+        WindowFloorLiveHarness.RunAsync(ConnectionString, [WindowCollector], [WindowName(window)], ["memory_pressure_events"], body);
+
+    private static Task SeedWindowAsync(NpgsqlConnection c, string window, DateTime created, DateTime? runsFrom, int step, DateTime end) =>
+        WindowFloorLiveHarness.SeedServerAsync(c, WindowName(window), created, WindowCollector, runsFrom, step, end, ["memory_pressure_events"], TestContext.Current.CancellationToken);
+
+    /// <summary>An event sampled at <paramref name="sampleTime"/> and stored by a collection at <paramref name="collectedAt"/>.</summary>
+    private static Task SeedEventAsync(NpgsqlConnection c, string window, DateTime sampleTime, DateTime collectedAt) =>
+        DarlingMcpTestData.ExecAsync(c, TestContext.Current.CancellationToken,
+            @"INSERT INTO memory_pressure_events (collection_id, collection_time, server_id, server_name, sample_time, memory_notification, memory_indicators_process, memory_indicators_system)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
+            CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(collectedAt), ServerIdHelper.GetDeterministicHashCode(WindowName(window)), WindowName(window),
+            DarlingMcpTestData.Naive(sampleTime), "RESOURCE_MEMPHYSICAL_LOW", 3, 1);
+
+    [Fact]
+    public async Task ARowsAnswer_ForAServerAddedTwoDaysAgo_NamesWhereCoverageStarts_AgainstDevPostgres() =>
+        await RunWindowAsync("added", async (c, ds, end) =>
+        {
+            var added = end.AddDays(-2);
+            await SeedWindowAsync(c, "added", added, added, 30, end);
+            await SeedEventAsync(c, "added", end.AddHours(-3), end.AddHours(-3));
+
+            var root = WindowFloorLiveHarness.Parse(await CallWindowAsync(ds, "added", 168, end));
+
+            Assert.True(root.GetProperty("window_truncated").GetBoolean());
+            Assert.Equal(McpHelpers.FormatEffectiveStart(added), root.GetProperty("effective_start").GetString());
+            Assert.Equal(DarlingMcpWindowNotice.Build(added, end.AddHours(-168), "memory_pressure_events").TruncationNote, root.GetProperty("truncation_note").GetString());
+
+            var names = root.EnumerateObject().Select(p => p.Name).ToList();
+            Assert.Equal(["effective_start", "window_truncated", "truncation_note"], names.Skip(names.IndexOf("hours_back") + 1).Take(3));
+            Assert.True(names.IndexOf("truncation_note") < names.IndexOf("events"));
+        });
+
+    [Fact]
+    public async Task ARowsAnswer_WhoseFirstEventComesLate_IsCovered_AgainstDevPostgres() =>
+        await RunWindowAsync("quiet", async (c, ds, end) =>
+        {
+            await SeedWindowAsync(c, "quiet", end.AddDays(-30), end.AddDays(-8), 60, end);
+            await SeedEventAsync(c, "quiet", end.AddDays(-5), end.AddDays(-5));
+
+            var root = WindowFloorLiveHarness.Parse(await CallWindowAsync(ds, "quiet", 168, end));
+
+            Assert.False(root.GetProperty("window_truncated").GetBoolean());
+            Assert.Equal(System.Text.Json.JsonValueKind.Null, root.GetProperty("truncation_note").ValueKind);
+        });
+
+    [Fact]
+    public async Task AnEventOlderThanTheFirstCollection_GivesNoNotice_WhereTheSameWindowWithoutItDoes_AgainstDevPostgres() =>
+        await RunWindowAsync("early", async (c, ds, end) =>
+        {
+            /* Collection began ten hours ago; a twelve-hour window. Its one event was SAMPLED eleven and a half hours ago (ring-buffer
+               history) and stored by a collection at the end of the window, so sample_time and collection_time differ. */
+            await SeedWindowAsync(c, "early", end.AddHours(-10), end.AddHours(-10), 30, end);
+            await SeedEventAsync(c, "early", end.AddHours(-1), end.AddMinutes(-30));
+
+            var without = WindowFloorLiveHarness.Parse(await CallWindowAsync(ds, "early", 12, end));
+            Assert.True(without.GetProperty("window_truncated").GetBoolean());
+            Assert.Equal(McpHelpers.FormatEffectiveStart(end.AddHours(-10)), without.GetProperty("effective_start").GetString());
+
+            await SeedEventAsync(c, "early", end.AddHours(-11).AddMinutes(-30), end.AddMinutes(-30));
+
+            var with = WindowFloorLiveHarness.Parse(await CallWindowAsync(ds, "early", 12, end));
+            Assert.False(with.GetProperty("window_truncated").GetBoolean());
+            Assert.Equal(System.Text.Json.JsonValueKind.Null, with.GetProperty("truncation_note").ValueKind);
+        });
+
+    [Fact]
+    public async Task AnEmptyAnswer_PastCoverage_CarriesHints_AgainstDevPostgres() =>
+        await RunWindowAsync("empty", async (c, ds, end) =>
+        {
+            await SeedWindowAsync(c, "empty", end.AddDays(-30), null, 30, end);
+
+            var root = WindowFloorLiveHarness.Parse(await CallWindowAsync(ds, "empty", 1, end));
+
+            Assert.Equal("empty", root.GetProperty("status").GetString());
+            var hints = root.GetProperty("hints");
+            Assert.True(hints.GetProperty("window_truncated").GetBoolean());
+            Assert.Equal(System.Text.Json.JsonValueKind.Null, hints.GetProperty("effective_start").ValueKind);
+            Assert.Contains("no collection of memory_pressure_events", hints.GetProperty("truncation_note").GetString(), StringComparison.Ordinal);
+        });
+
+    [Fact]
+    public async Task AShortWindow_WithRows_StartsNoProbe_AgainstDevPostgres() =>
+        await RunWindowAsync("short", async (c, ds, end) =>
+        {
+            await SeedWindowAsync(c, "short", end.AddDays(-30), end.AddDays(-2), 30, end);
+            await SeedEventAsync(c, "short", end.AddMinutes(-20), end.AddMinutes(-20));
+            var calls = 0;
+            DarlingMcpWindowNotice.TestOnlyProbe = () => { calls++; return Task.FromResult<DateTime?>(null); };
+
+            var root = WindowFloorLiveHarness.Parse(await CallWindowAsync(ds, "short", 1, end));
+
+            Assert.Equal(0, calls);
+            Assert.False(root.GetProperty("window_truncated").GetBoolean());
+            Assert.Equal(1, root.GetProperty("events").GetArrayLength());
+        });
+
+    [Fact]
+    public async Task AFailedProbe_CostsTheNotice_NeverTheRows_AgainstDevPostgres() =>
+        await RunWindowAsync("probefail", async (c, ds, end) =>
+        {
+            await SeedWindowAsync(c, "probefail", end.AddDays(-2), end.AddDays(-2), 30, end);
+            await SeedEventAsync(c, "probefail", end.AddHours(-3), end.AddHours(-3));
+            DarlingMcpWindowNotice.TestOnlyProbe = () => throw new TimeoutException("the probe's deadline passed");
+
+            var root = WindowFloorLiveHarness.Parse(await CallWindowAsync(ds, "probefail", 168, end));
+            Assert.False(root.TryGetProperty("status", out _));
+            Assert.Equal(1, root.GetProperty("events").GetArrayLength());
+            Assert.False(root.TryGetProperty("effective_start", out _));
+            Assert.False(root.TryGetProperty("window_truncated", out _));
+            Assert.False(root.TryGetProperty("truncation_note", out _));
+
+            var empty = WindowFloorLiveHarness.Parse(await CallWindowAsync(ds, "probefail", 1, end.AddDays(-9)));
+            Assert.Equal("empty", empty.GetProperty("status").GetString());
+            Assert.False(empty.TryGetProperty("hints", out _));
+        });
 }

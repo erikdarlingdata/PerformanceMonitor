@@ -273,14 +273,22 @@ AND   collection_time = (SELECT MAX(collection_time) FROM v_index_object_stats W
     /// <c>MAX(collection_time)</c> read for the stamp: that one can resolve to the NEXT capture. The grid
     /// ignores the column; it costs the snapshot's own anchor value per row and buys the MCP surface a
     /// truthful age on a DAILY-collected read.</para>
+    /// <para>#5312: <paramref name="databaseNames"/> is the saved per-server database filter, and it ANDs with the one-database
+    /// box (<paramref name="databaseName"/>): both apply. Null or empty = no filter, the statement as it always read.</para>
     /// </summary>
-    public async Task<List<IndexLockingRow>> GetIndexLockingAsync(int serverId, int topN = 200, string? databaseName = null)
+    public async Task<List<IndexLockingRow>> GetIndexLockingAsync(int serverId, int topN = 200, string? databaseName = null, IReadOnlyList<string>? databaseNames = null)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
         // Build the optional DB filter as literal SQL so a NULL parameter never has to be typed by DuckDB.
         var dbFilter = databaseName == null ? "" : " AND ios.database_name = $2";
+        /* #5312: the saved filter's list follows the box's parameter, so it starts at $3 when the box is set, else $2. */
+        dbFilter += BuildDbInClause(databaseNames, "ios.database_name", databaseName == null ? 2 : 3, out var filterValues);
+
+        /* #5372 L1: the ORDER BY ends in a total order (promotions, then the four-part name, as get_index_usage does), so
+           two runs over a set that ties at the cap return the same rows; the rows listed only for a lock promotion all
+           sum to 0 and tie. */
 
         command.CommandText = $@"
 SELECT
@@ -315,12 +323,16 @@ AND (
 )
 ORDER BY
     COALESCE(ios.row_lock_wait_in_ms, 0) + COALESCE(ios.page_lock_wait_in_ms, 0)
-    + COALESCE(ios.page_latch_wait_in_ms, 0) + COALESCE(ios.page_io_latch_wait_in_ms, 0) DESC
+    + COALESCE(ios.page_latch_wait_in_ms, 0) + COALESCE(ios.page_io_latch_wait_in_ms, 0) DESC,
+    COALESCE(ios.index_lock_promotion_count, 0) DESC,
+    ios.database_name, ios.schema_name, ios.table_name, ios.index_name NULLS LAST
 LIMIT {topN}";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         if (databaseName != null)
             command.Parameters.Add(new DuckDBParameter { Value = databaseName });
+        foreach (var db in filterValues)
+            command.Parameters.Add(new DuckDBParameter { Value = db });
 
         var items = new List<IndexLockingRow>();
         using var reader = await command.ExecuteReaderAsync();
@@ -357,17 +369,28 @@ LIMIT {topN}";
     /// The shared optimized-locking note when any database's newest stored <c>is_optimized_locking_on</c> is true;
     /// null otherwise (false and unknown both show no note).
     /// </summary>
-    public async Task<string?> GetOptimizedLockingNoteAsync(int serverId)
+    public async Task<string?> GetOptimizedLockingNoteAsync(int serverId, string? databaseName = null, IReadOnlyList<string>? databaseNames = null)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        command.CommandText = @"
+        /* #5372 M2: with a database chosen only that database's flag counts, so the note never warns about a database
+           the page does not show (Darling's twin does the same). The anchor stays the server's newest capture. Literal
+           SQL, the way GetIndexLockingAsync builds its filter, so a NULL parameter is never typed. */
+        var dbFilter = databaseName == null ? "" : " AND database_name = $2";
+        /* #5312: the saved database filter narrows the flags too, so the note never warns about a database the grid hides. */
+        dbFilter += BuildDbInClause(databaseNames, "database_name", databaseName == null ? 2 : 3, out var filterValues);
+
+        command.CommandText = $@"
 SELECT is_optimized_locking_on
 FROM v_database_config
 WHERE server_id = $1
-AND   capture_time = (SELECT MAX(capture_time) FROM v_database_config WHERE server_id = $1)";
+AND   capture_time = (SELECT MAX(capture_time) FROM v_database_config WHERE server_id = $1){dbFilter}";
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        if (databaseName != null)
+            command.Parameters.Add(new DuckDBParameter { Value = databaseName });
+        foreach (var db in filterValues)
+            command.Parameters.Add(new DuckDBParameter { Value = db });
 
         var flags = new List<bool?>();
         using var reader = await command.ExecuteReaderAsync();
@@ -383,16 +406,18 @@ AND   capture_time = (SELECT MAX(capture_time) FROM v_database_config WHERE serv
     /// under #3876's per-name grouping both offered month-dead names (the selector is how the reporter's old
     /// names could still be PICKED, not merely displayed).
     /// </summary>
-    public async Task<List<string>> GetIndexLockingDatabasesAsync(int serverId)
+    public async Task<List<string>> GetIndexLockingDatabasesAsync(int serverId, IReadOnlyList<string>? databaseNames = null)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        command.CommandText = @"
+        /* #5312: only databases inside the saved filter are offered, so the box cannot pick a database the filter hides. */
+        var dbClause = BuildDbInClause(databaseNames, "ios.database_name", 2, out var dbValues);
+        command.CommandText = $@"
 SELECT DISTINCT ios.database_name
 FROM v_index_object_stats ios
 WHERE ios.server_id = $1
-AND   ios.collection_time = (SELECT MAX(collection_time) FROM v_index_object_stats WHERE server_id = $1)
+AND   ios.collection_time = (SELECT MAX(collection_time) FROM v_index_object_stats WHERE server_id = $1){dbClause}
 AND (
     COALESCE(ios.row_lock_wait_in_ms, 0) > 0
     OR COALESCE(ios.page_lock_wait_in_ms, 0) > 0
@@ -403,6 +428,8 @@ AND (
 ORDER BY ios.database_name";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        foreach (var db in dbValues)
+            command.Parameters.Add(new DuckDBParameter { Value = db });
 
         var items = new List<string>();
         using var reader = await command.ExecuteReaderAsync();
@@ -467,7 +494,7 @@ SELECT
     l.index_count,
     CASE
         WHEN (SELECT latest_time FROM bounds) = (SELECT earliest_time FROM bounds) THEN NULL
-        ELSE l.cur_reserved_mb - e.e_reserved_mb
+        ELSE l.cur_reserved_mb - COALESCE(e.e_reserved_mb, 0)
     END AS growth_mb
 FROM latest l
 LEFT JOIN earliest e ON e.schema_name = l.schema_name AND e.table_name = l.table_name
@@ -481,7 +508,7 @@ LIMIT {topN}";
             while (await reader.ReadAsync())
             {
                 var current = reader.IsDBNull(2) ? 0m : Convert.ToDecimal(reader.GetValue(2));
-                /* No earlier sample for this table (new table, or one snapshot only): null, not 0. */
+                /* One snapshot only: null, not 0. A table missing from the earliest snapshot was created since and counts its whole size (its percent stays null: it grew from nothing); an existing table whose earliest size is NULL also counts its whole current size, because COALESCE treats it like a new table, and that is rare. */
                 decimal? growth = reader.IsDBNull(6) ? null : Convert.ToDecimal(reader.GetValue(6));
                 objects.Add(new ObjectSizeGrowthRow
                 {
@@ -523,10 +550,10 @@ earliest AS (
 ),
 ranked AS (
     SELECT l.schema_name, l.table_name,
-        l.cur_reserved_mb - COALESCE(e.e_reserved_mb, l.cur_reserved_mb) AS growth_mb
+        l.cur_reserved_mb - COALESCE(e.e_reserved_mb, 0) AS growth_mb
     FROM latest l
     LEFT JOIN earliest e ON e.schema_name = l.schema_name AND e.table_name = l.table_name
-    ORDER BY growth_mb DESC, l.schema_name, l.table_name
+    ORDER BY growth_mb DESC NULLS LAST, l.schema_name, l.table_name
     LIMIT {topN}
 )
 SELECT
@@ -589,7 +616,8 @@ SELECT
         WHEN COALESCE(user_seeks, 0) + COALESCE(user_scans, 0) + COALESCE(user_lookups, 0) = 0
              AND COALESCE(user_updates, 0) > 0 THEN 'Write-only'
         ELSE 'Active'
-    END AS classification
+    END AS classification,
+    collection_time
 FROM v_index_object_stats
 WHERE server_id = $1
 AND   database_name = $2
@@ -624,7 +652,8 @@ ORDER BY index_id";
                 TotalReads = reader.IsDBNull(11) ? 0L : Convert.ToInt64(reader.GetValue(11)),
                 UserUpdates = reader.IsDBNull(12) ? 0L : Convert.ToInt64(reader.GetValue(12)),
                 LastUserAccess = reader.IsDBNull(13) ? null : reader.GetDateTime(13),
-                Classification = reader.IsDBNull(14) ? "" : reader.GetString(14)
+                Classification = reader.IsDBNull(14) ? "" : reader.GetString(14),
+                CollectionTime = reader.GetDateTime(15)
             });
         }
         return items;
@@ -720,6 +749,16 @@ public class IndexUsageRow
     public long UserUpdates { get; set; }
     public DateTime? LastUserAccess { get; set; }
     public string Classification { get; set; } = "";
+
+    /// <summary>The snapshot an index-drill row came from (<see cref="LocalDataService.GetObjectIndexDetailAsync"/>'s anchor,
+    /// projected on the row statement). Not set by the index-usage read, which does not project it.</summary>
+    public DateTime CollectionTime { get; set; }
+
+    /// <summary>When that snapshot was collected, to the second, in the display zone: the index drill's Collected column,
+    /// which sorts by <see cref="CollectionTime"/>. The drill reads the database's latest snapshot with no time bound,
+    /// so this is how old the figures can be. <c>collection_time</c> is the collector's own UTC stamp, so it is worded
+    /// from the instant like the other Collected columns. Empty when the row did not come from the index drill.</summary>
+    public string CollectionTimeLocal => CollectionTime == DateTime.MinValue ? "" : ServerTimeHelper.FormatServerTime(CollectionTime);
 }
 
 /// <summary>Per-index locking/latch contention.</summary>

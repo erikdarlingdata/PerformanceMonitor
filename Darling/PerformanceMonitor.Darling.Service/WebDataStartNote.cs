@@ -1,0 +1,906 @@
+/*
+ * Copyright (c) 2026 Erik Darling, Darling Data LLC
+ *
+ * This file is part of the SQL Server Performance Monitor.
+ *
+ * Licensed under the MIT License. See LICENSE file in the project root for full license information.
+ */
+
+using System;
+using System.Collections.Generic;
+using System.Globalization;
+using System.Linq;
+using System.Text.Json.Nodes;
+using System.Threading;
+using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
+using Npgsql;
+using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Service.Mcp;
+using PerformanceMonitor.Darling.Storage;
+
+namespace PerformanceMonitor.Darling.Service;
+
+/// <summary>
+/// Where the data starts, for the server page's grids (#4966). A grid or a list over a window hides a short history:
+/// a server added two days ago shows two days of rows under "last 7 days" with nothing saying so. This asks
+/// <see cref="DataWindowFloor"/> where the read's own table starts covering the server and, when that is after the
+/// window's start, adds the same three fields the tools that already carry the window floor use
+/// (<c>window_truncated</c>, <c>effective_start</c>, <c>truncation_note</c>) to the response the page reads.
+///
+/// <para><b>Why in the web layer.</b> The server page reads <c>/api/read/{tool}</c>, which returns the tool's own
+/// payload. The tools are shared with the MCP host, which gets its own notices later; this wraps the web mirror only,
+/// so no tool's payload changes. A read the tool already answers with <c>window_truncated</c> (the Queries tab's
+/// grids) is left as the tool wrote it.</para>
+///
+/// <para><b>Which reads.</b> Only a grid over one collector table whose rows are stamped with the collection time, the
+/// change histories over the config snapshot tables they diff, the memory grant and plan correction reads over their snapshot
+/// tables, or the collection log: <see cref="TableByRead"/>. The memory grant reads answer a window aggregate and the newest
+/// snapshot in one payload; the note is about the aggregate, and the page opts the newest-snapshot panels out. The PostgreSQL
+/// window aggregates (top queries, blocking, database stats, session states, I/O and replication stats) and the trend grids
+/// (database, query duration, wait and I/O trends) read one raw relation over the window, and Captured Plans reads the plan
+/// capture table by capture time. Every panel of their fanouts shows the window's own figures, so none opts out, and a stat
+/// tile draws the note beside its grid. The vacuum, horizon, slot and write tiles (freeze headroom, xmin horizon, autovacuum
+/// backlog, replication slots, checkpoints and WAL) draw it on the panels that show a window figure: a peak, a growing count, a
+/// first-to-last difference. A chart whose time axis spans the asked range already shows the empty span, a read of
+/// the newest snapshot has no window to cut, and an event surface (blocked process reports, deadlocks, system health
+/// events, the default trace) filters on the event's own time, which can reach before the first collection, so a
+/// coverage start could name a time later than the history it shows. Those are not in this list.</para>
+///
+/// <para><b>A capped list.</b> Six listed reads are LISTS over time, newest first, under a row cap; four read <c>collection_time</c>:
+/// <c>get_waiting_tasks</c>, <c>get_collection_log</c>, <c>get_pg_server_config_changes</c> and <c>get_plan_corrections</c>
+/// (<see cref="CappedByRead"/>, which adds the blocked process and Default Trace event reads). When one hits its cap the grid ends at the oldest row the read returned,
+/// whatever the store covers, so the note names that row (<c>effective_start</c> is the answer's
+/// <c>oldest_returned_collection_time</c>, or for the configuration changes the earliest <c>changed_at</c> on the page,
+/// and the text says the grid shows the newest rows back to it). The answer already carries the time, so this asks the
+/// store nothing. The note shows only when that oldest row is later than the window's start, by any amount: a page
+/// whose oldest row is at the start, or before it, shows the whole range and says nothing. The collection log keeps
+/// the coverage rule when a duration floor ranks its page slowest first, as it
+/// is then a sample of the whole window. The other reads keep the coverage rule: aggregates over the whole window,
+/// whose cap keeps the top rows and hides no time range; <c>get_pg_predicate_stats</c>, a list ranked by something
+/// other than time; and the SQL Server change histories, which carry no cap.</para>
+///
+/// <para><b>The instants as fields.</b> The note's sentence names its times in UTC. The page prints every time in the
+/// browser's zone, so the answer also carries the instants (<see cref="DataStartField"/> or
+/// <see cref="OldestShownField"/>, <see cref="WindowStartField"/>, <see cref="WindowEndField"/>) and the page composes
+/// the note from them in its own clock. The sentence stays for any other reader.</para>
+///
+/// <para><b>When it says nothing.</b> The window is covered (whether or not it holds rows: a quiet start is not a
+/// cut) and the read did not hit a row cap that cuts by time (or hit it, and its oldest row is at or before the
+/// window's start), nothing in scope holds a row or logged a run in it, the
+/// answer is an envelope other than the read's own "looked and found nothing" word (<see cref="NothingFoundStatusByRead"/>:
+/// <c>empty</c>, <c>no_changes</c> for the PostgreSQL changes, <c>no_blocking_sampled</c> for blocking and <c>no_io_activity</c> for the I/O summary, which are probed like rows; unavailable (the memory grant reads' no-snapshot word and top queries' no-statistics word), not_collected, not_sampled (blocking's "the collector never ran"), precondition (Captured Plans' "capture is not configured") and
+/// invalid are not) or an error rather than rows, the read cannot be resolved, the
+/// window is no longer than the 90-minute slack (a window that short can never be cut by the store's coverage, so the
+/// probe is not asked), or the probe fails. A failed probe costs the grid its notice, never its rows.</para>
+/// </summary>
+internal static class WebDataStartNote
+{
+    /// <summary>
+    /// The grid reads that carry the notice, each over the one collector table it reads. A closed list: each name is
+    /// a read <c>BuildReadDispatch</c> serves, each table one <see cref="DataWindowFloor.Source.TryForCollectorTable"/>
+    /// can probe, and a test holds both.
+    /// </summary>
+    internal static readonly IReadOnlyDictionary<string, string> TableByRead = new Dictionary<string, string>(StringComparer.Ordinal)
+    {
+        ["get_waiting_tasks"] = "waiting_tasks",
+        ["get_latch_stats"] = "latch_stats",
+        ["get_spinlock_stats"] = "spinlock_stats",
+        ["get_wait_stats"] = "wait_stats",
+        ["get_pg_wait_stats"] = "pg_wait_stats",
+        ["get_pg_wait_sampling"] = "pg_wait_sampling",
+        ["get_pg_kernel_stats"] = "pg_kernel_stats",
+        ["get_pg_lock_stats"] = "pg_lock_stats",
+        ["get_pg_predicate_stats"] = "pg_predicate_stats",
+
+        /* The change histories (#4966): each diffs the snapshots a config collector writes, so the rows' own times
+           can never come before the table's coverage, and the notice says how far back the snapshots go. The
+           trace-flag history is the third grid on the SQL Server Config Changes tab, and the PostgreSQL one is the
+           Configuration tab's Changes grid. */
+        ["get_server_config_changes"] = "server_config",
+        ["get_database_config_changes"] = "database_config",
+        ["get_trace_flag_changes"] = "trace_flags",
+        ["get_pg_server_config_changes"] = "pg_server_config",
+
+        /* The raw run log under Collection Health on a SQL Server page and on Overview for PostgreSQL (#4966): not a
+           collector table, so its source is the collection log's own (TryGetSource). */
+        ["get_collection_log"] = CollectionLogTable,
+
+        /* The SQL Server snapshot reads (#4966). Memory grants and the resource semaphore read the one memory_grant_stats
+           table; their page opts the newest-snapshot halves out (windowNote:false) and keeps the note on the window
+           aggregates. Plan corrections list recommendations by capture time, newest first. */
+        ["get_memory_grants"] = "memory_grant_stats",
+        ["get_resource_semaphore"] = "memory_grant_stats",
+        ["get_plan_corrections"] = "plan_correction",
+
+        /* The PostgreSQL window aggregates (#4966): each answers totals or per-key aggregates over the whole window from the one
+           raw relation named, so a short history reads as a quiet one. Every panel of their fanouts shows the window's own
+           figures (the stat tiles are window totals), so none opts out of the note. The row caps keep rows by rank, which hides
+           no time range: the coverage rule applies. */
+        ["get_pg_top_queries"] = "pg_statement_stats",
+        ["get_pg_blocking"] = "pg_blocking_edges",
+        ["get_pg_database_stats"] = "pg_database_stats",
+        ["get_pg_session_states"] = "pg_session_states",
+        ["get_pg_io_stats"] = "pg_io_stats",
+        ["get_pg_replication_stats"] = "pg_replication_stats",
+
+        /* The PostgreSQL trend grids and Captured Plans (#4966). The trend reads difference the same raw relations over [start, end]
+           (no rollup, no second tier), and the page draws each as a grid of points. Captured Plans windows on the capture's
+           collection_time and groups by plan shape under a cap ranked by total duration. */
+        ["get_pg_database_trend"] = "pg_database_stats",
+        ["get_pg_query_duration_trend"] = "pg_statement_stats",
+        ["get_pg_wait_trend"] = "pg_wait_sampling",
+        ["get_pg_io_trend"] = "pg_io_stats",
+        ["get_pg_plans"] = "pg_plan_capture",
+
+        /* The nine system_health reads (#4966): each parses events out of the one system_health_events table, so each follows the
+           event-time rule (EventTimeByRead) and the capped rule (CappedByRead). Their empty answers carry the window-floor keys
+           under hints, which the page does not read, so the web's own note is what an empty System Events panel shows. */
+        ["get_health_parser_system_health"] = "system_health_events",
+        ["get_health_parser_severe_errors"] = "system_health_events",
+        ["get_health_parser_io_issues"] = "system_health_events",
+        ["get_health_parser_scheduler_issues"] = "system_health_events",
+        ["get_health_parser_memory_conditions"] = "system_health_events",
+        ["get_health_parser_cpu_tasks"] = "system_health_events",
+        ["get_health_parser_memory_broker"] = "system_health_events",
+        ["get_health_parser_memory_node_oom"] = "system_health_events",
+        ["get_health_parser_significant_waits"] = "system_health_events",
+
+        /* The SQL Server event reads (#4966). Each lists EVENTS by the event's own time, so a row can predate the collection
+           that stored it and the notice follows the event-time rule (EventTimeByRead). Blocked process reports and the Default
+           Trace are newest first under a row cap (CappedByRead); the long query page is the slowest runs, ranked by duration,
+           so its cap names no reach; memory pressure has no cap. */
+        ["get_blocked_process_xml"] = "blocked_process_reports",
+        ["get_long_query_completions"] = "long_query_completions",
+        ["get_memory_pressure_events"] = MemoryPressureEventsTable,
+        ["get_default_trace_events"] = "default_trace_events",
+
+        /* The PostgreSQL event logs, SQL Server Blocking and Deadlocks (#4966). All are event lists on the event's own time, so
+           the event-time rule applies (EventTimeByRead) and a capped page names its oldest row (CappedByRead). get_blocking is fed
+           by two tables (CompositeSourcesByRead); this entry names the first. */
+        ["get_pg_deadlocks"] = "pg_deadlocks",
+        ["get_pg_log_events"] = "pg_log_events",
+        ["get_blocking"] = "blocked_process_reports",
+        ["get_deadlocks"] = "deadlocks",
+        ["get_deadlock_detail"] = "deadlocks",
+
+        /* The PostgreSQL vacuum, horizon, slot and write tiles (#4966). Each answers figures that need the window to mean
+           anything: the autovacuum backlog's growing count compares a table's newest dead tuples with its earliest in the window,
+           a slot's severity rests on its retained WAL growing across it, the horizon holders' peaks and win shares and the
+           per-database freeze peaks are window figures, and the checkpoint and WAL totals are first-to-last differences. A short
+           history would read as a calm one. The page opts out the panels that show only the newest values (the freeze headroom
+           and horizon-holder tiles and the thresholds): see server-tabs.js. The horizon, autovacuum and slot tables are sparse and are
+           probed on their collectors' runs (CollectorRunsByRead). */
+        ["get_pg_wraparound_risk"] = "pg_wraparound_stats",
+        ["get_pg_xmin_horizon"] = "pg_xmin_horizon",
+        ["get_pg_autovacuum_health"] = "pg_autovacuum_stats",
+        ["get_pg_replication_slots"] = "pg_replication_slot_stats",
+        ["get_pg_write_stats"] = "pg_write_stats",
+
+        /* The PostgreSQL index usage read (#4966). scans_in_window is the difference between an index's first and last sample in the
+           window, off a collector that runs DAILY, so a short history gives a small difference and an index can look unused only
+           because it has been watched briefly. Both panels of its fanout (the totals and the per-index grid) show window figures, so
+           the page draws the web's own note and the tool's UTC keys are stripped. */
+        ["get_pg_index_usage"] = "pg_index_usage_stats",
+    };
+
+    /// <summary>
+    /// The name <see cref="TableByRead"/> gives the collection log. It is not a collector table
+    /// (<see cref="DataWindowFloor.Source.TryForCollectorTable"/> refuses it), so <see cref="TryGetSource"/> answers
+    /// it with <see cref="DataWindowFloor.Source.ForCollectionLog"/>: its edge is the log's own fixed horizon.
+    /// </summary>
+    internal const string CollectionLogTable = "collection_log";
+
+    /// <summary>
+    /// The name <see cref="TableByRead"/> gives the memory pressure events. <see cref="DataWindowFloor.Source.TryForCollectorTable"/>
+    /// refuses it (its index leads with <c>sample_time</c>, not the prefix time column), so <see cref="TryGetSource"/> answers it with
+    /// <see cref="DataWindowFloor.Source.ForMemoryPressureEvents"/>.
+    /// </summary>
+    internal const string MemoryPressureEventsTable = "memory_pressure_events";
+
+    /// <summary>
+    /// The listed reads whose rows are SPARSE, probed on their collector's own logged runs instead of on the table (#4966). A
+    /// blocking chain, a long transaction behind a pinned horizon and a connected replica each store a row only while it exists,
+    /// so the table's oldest row says when the first one happened, not when collection began: on a server collected for a month
+    /// whose first chain came yesterday it would name yesterday and call a covered week partial. The collector's runs are logged
+    /// whether or not they stored a row, which is what the Captures tile beside the grid counts. Each name is a collector
+    /// <see cref="DataWindowFloor.Source.ForCollectorRuns"/> accepts (it throws on any other, and a test holds each). The read
+    /// stays in <see cref="TableByRead"/> too, for the table its tool reads; this map is consulted first.
+    /// </summary>
+    internal static readonly IReadOnlyDictionary<string, string> CollectorRunsByRead = new Dictionary<string, string>(StringComparer.Ordinal)
+    {
+        ["get_pg_blocking"] = "pg_blocking",
+        ["get_pg_session_states"] = "pg_session_states",
+        ["get_pg_replication_stats"] = "pg_replication_stats",
+
+        /* The horizon holders, the tables with pending vacuum work and the replication slots (#4966): each collector stores a row only
+           while one exists (PgXminHorizonCollector's holders query ends in WHERE xmin_age IS NOT NULL and the reader says an unheld
+           capture stores nothing; PgAutovacuumStatsCollector's WHERE keeps only tables with dead tuples, modifications, insert activity
+           or autovacuum off; PgReplicationSlotsCollector reads pg_replication_slots, which is empty on a server with no slot). The
+           slot collector is named pg_replication_slots and writes pg_replication_slot_stats. The freeze headroom table
+           (pg_database always lists every database) and the checkpoint and WAL table (single-row views) get a row every collection, so
+           they keep the table's own start. */
+        ["get_pg_xmin_horizon"] = "pg_xmin_horizon",
+        ["get_pg_autovacuum_health"] = "pg_autovacuum_stats",
+        ["get_pg_replication_slots"] = "pg_replication_slots",
+    };
+
+    /// <summary>
+    /// The reads fed by MORE than one table (#4966), each with the tables its tool probes, in the tool's order. get_blocking lists the
+    /// XE blocked process reports and the always-on DMV blocking snapshots that stand in for them (<c>BlockingPageSources</c> in
+    /// DarlingMcpBlockingTools). The probe passes both to <see cref="DataWindowFloor.GetAsync"/>, which answers the EARLIER start, as the
+    /// tool and the desktop viewer do. <see cref="TableByRead"/> names the first table, so a caller that wants one source still gets one.
+    /// </summary>
+    internal static readonly IReadOnlyDictionary<string, string[]> CompositeSourcesByRead = new Dictionary<string, string[]>(StringComparer.Ordinal)
+    {
+        ["get_blocking"] = ["blocked_process_reports", "dmv_blocking_snapshots"],
+    };
+
+    /// <summary>
+    /// Every probe source for a listed read: the composite's sources when <see cref="CompositeSourcesByRead"/> names the read, else the
+    /// one <see cref="TryGetReadSource"/> gives. False when any source cannot be resolved.
+    /// </summary>
+    internal static bool TryGetReadSources(string read, out IReadOnlyList<DataWindowFloor.Source> sources)
+    {
+        if (CompositeSourcesByRead.TryGetValue(read, out var tables))
+        {
+            var list = new List<DataWindowFloor.Source>(tables.Length);
+            foreach (var table in tables)
+            {
+                if (!TryGetSource(table, out var one))
+                {
+                    sources = [];
+                    return false;
+                }
+
+                list.Add(one);
+            }
+
+            sources = list;
+            return true;
+        }
+
+        if (TryGetReadSource(read, out var single))
+        {
+            sources = [single];
+            return true;
+        }
+
+        sources = [];
+        return false;
+    }
+
+    /// <summary>
+    /// The probe source for a listed read: its collector's runs when <see cref="CollectorRunsByRead"/> names one, else the source
+    /// of the table <see cref="TableByRead"/> gives it. False for a read in neither, or a table the probe cannot read by index.
+    /// </summary>
+    internal static bool TryGetReadSource(string read, out DataWindowFloor.Source source)
+    {
+        if (CollectorRunsByRead.TryGetValue(read, out var collector))
+        {
+            source = DataWindowFloor.Source.ForCollectorRuns(collector);
+            return true;
+        }
+
+        if (TableByRead.TryGetValue(read, out var table))
+        {
+            return TryGetSource(table, out source);
+        }
+
+        source = null!;
+        return false;
+    }
+
+    /// <summary>
+    /// The probe source for a table <see cref="TableByRead"/> names: the collection log's own source for
+    /// <see cref="CollectionLogTable"/>, the collector table's for every other name, false for a table the probe
+    /// cannot read by index.
+    /// </summary>
+    internal static bool TryGetSource(string table, out DataWindowFloor.Source source)
+    {
+        if (string.Equals(table, CollectionLogTable, StringComparison.Ordinal))
+        {
+            source = DataWindowFloor.Source.ForCollectionLog();
+            return true;
+        }
+
+        if (string.Equals(table, MemoryPressureEventsTable, StringComparison.Ordinal))
+        {
+            source = DataWindowFloor.Source.ForMemoryPressureEvents();
+            return true;
+        }
+
+        return DataWindowFloor.Source.TryForCollectorTable(table, out source);
+    }
+
+    /// <summary>
+    /// The <c>status</c> words a listed read answers its ROWS with. Any other <c>status</c> is an envelope
+    /// (<c>empty</c>, <c>unavailable</c>, <c>invalid</c>) and is left as it is. <c>get_pg_server_config_changes</c>
+    /// names its page <c>config_changes</c>, and the page reads an answer as an envelope only when it carries a
+    /// <c>message</c> too.
+    /// </summary>
+    private static readonly HashSet<string> RowStatuses = new(StringComparer.Ordinal)
+    {
+        "config_changes",
+        "blocking_sampled", "cycles_only", "database_activity", "session_states", "io_activity",
+        "database_trend", "query_duration_trend", "wait_trend", "io_trend",
+        "holder_present", "tables_with_pending_maintenance", "slots_present", "index_usage",
+    };
+
+    /// <summary>
+    /// The <c>status</c> word a listed read answers its ROWS with when the word is that read's alone (#4966). <c>events</c> and
+    /// <c>deadlocks</c> are not in <see cref="RowStatuses"/>: another read may use the word for an envelope.
+    /// </summary>
+    internal static readonly IReadOnlyDictionary<string, string> RowStatusByRead = new Dictionary<string, string>(StringComparer.Ordinal)
+    {
+        ["get_pg_deadlocks"] = "deadlocks",
+        ["get_pg_log_events"] = "events",
+    };
+
+    /// <summary>
+    /// The one <c>status</c> word each listed read answers with when it LOOKED and found nothing in the window (#4966): the
+    /// word a reader takes for "nothing happened". Over a short history an empty span reads as quiet when it is only short, and
+    /// empty is these grids' usual state, so an answer carrying the word goes through the coverage probe and gets the same
+    /// note rows do. Every other word (<c>unavailable</c>, <c>not_collected</c>, <c>invalid</c>) keeps its own message and gets
+    /// none: it says something other than "nothing happened".
+    ///
+    /// <para>The change histories and the collection log answer <c>empty</c> (the PostgreSQL changes read says
+    /// <c>no_changes</c>), as do waiting tasks, plan corrections, wait sampling, kernel stats, lock stats and predicate stats: each ran its
+    /// query and found no rows in the window. The collection log's <c>empty</c> covers a quiet window and a filter that matched
+    /// nothing, and the coverage fact holds for both; its <c>unavailable</c> (never collected) stays as it is. Latch stats,
+    /// spinlock stats, wait stats, PostgreSQL wait events and PostgreSQL top queries are left out: their no-rows answer is <c>unavailable</c>. A test
+    /// reads each tool's source and holds both halves.</para>
+    ///
+    /// <para>The PostgreSQL window reads (#4966): database stats, session states, replication stats, the four trends and Captured Plans
+    /// answer <c>empty</c>; a server with no row and no logged run in the window gets no note, whatever the word. (For the database
+    /// and wait trends <c>empty</c>, and for the I/O summary <c>no_io_activity</c>, a history too short to difference may also
+    /// answer it; the coverage fact holds for that case too.) Blocking answers <c>no_blocking_sampled</c> (captures exist and none held
+    /// a chain) and the I/O summary <c>no_io_activity</c>. Never admitted: <c>not_sampled</c> (blocking found no capture at all),
+    /// <c>precondition</c> (Captured Plans, capture is not configured) and <c>unavailable</c>.</para>
+    /// </summary>
+    internal static readonly IReadOnlyDictionary<string, string> NothingFoundStatusByRead = new Dictionary<string, string>(StringComparer.Ordinal)
+    {
+        ["get_waiting_tasks"] = "empty",
+        ["get_pg_wait_sampling"] = "empty",
+        ["get_pg_kernel_stats"] = "empty",
+        ["get_pg_lock_stats"] = "empty",
+        ["get_pg_predicate_stats"] = "empty",
+        ["get_server_config_changes"] = "empty",
+        ["get_database_config_changes"] = "empty",
+        ["get_trace_flag_changes"] = "empty",
+        ["get_pg_server_config_changes"] = "no_changes",
+        ["get_collection_log"] = "empty",
+        ["get_plan_corrections"] = "empty",
+
+        /* The PostgreSQL window reads (#4966). Blocking and the I/O summary name their own nothing-found word; the rest say empty.
+           Top queries has none: its empty answer is unavailable (no extension or no snapshot), which says nothing was captured.
+           Not admitted anywhere: unavailable, not_collected, not_sampled (blocking's "the collector never ran") and precondition
+           (Captured Plans' "capture is not configured"). */
+        ["get_pg_blocking"] = "no_blocking_sampled",
+        ["get_pg_database_stats"] = "empty",
+        ["get_pg_session_states"] = "empty",
+        ["get_pg_io_stats"] = "no_io_activity",
+        ["get_pg_replication_stats"] = "empty",
+        ["get_pg_database_trend"] = "empty",
+        ["get_pg_query_duration_trend"] = "empty",
+        ["get_pg_wait_trend"] = "empty",
+        ["get_pg_io_trend"] = "empty",
+        ["get_pg_plans"] = "empty",
+
+        /* The SQL Server event reads (#4966) answer empty when the window held no event; unavailable-style words do not exist
+           on them, and not_collected (no such trace on this engine) stays out. */
+        ["get_blocked_process_xml"] = "empty",
+        ["get_long_query_completions"] = "empty",
+        ["get_memory_pressure_events"] = "empty",
+        ["get_default_trace_events"] = "empty",
+
+        /* The nine system_health reads (#4966) answer empty when the window held no qualifying event (a gated read also counts what it
+           filtered out under events_in_window). unavailable with source_observed:false says nothing was captured, and is not admitted. */
+        ["get_health_parser_system_health"] = "empty",
+        ["get_health_parser_severe_errors"] = "empty",
+        ["get_health_parser_io_issues"] = "empty",
+        ["get_health_parser_scheduler_issues"] = "empty",
+        ["get_health_parser_memory_conditions"] = "empty",
+        ["get_health_parser_cpu_tasks"] = "empty",
+        ["get_health_parser_memory_broker"] = "empty",
+        ["get_health_parser_memory_node_oom"] = "empty",
+        ["get_health_parser_significant_waits"] = "empty",
+
+        /* The PostgreSQL event logs, Blocking and Deadlocks (#4966): the window held no event. */
+        ["get_pg_deadlocks"] = "no_deadlocks",
+        ["get_pg_log_events"] = "no_events",
+        ["get_blocking"] = "empty",
+        ["get_deadlocks"] = "empty",
+        ["get_deadlock_detail"] = "empty",
+
+        /* The horizon read answers no_holder only when the collector captured in the window and recorded none (it answers
+           unavailable when no capture is logged), so it is the one of the vacuum, horizon, slot and write reads that says "looked
+           and found nothing". Wraparound answers unavailable, autovacuum no_pending_maintenance and slots no_slots without asking the log
+           whether the collector ran, and write stats empty for a window too short to difference: none of them is admitted. */
+        ["get_pg_xmin_horizon"] = "no_holder",
+
+        /* Index usage (#4966): empty means collection ran and every index is under the size floor, a looked-and-found-nothing answer.
+           Its unavailable (one snapshot, or none in the window) says nothing was read, and is not admitted. */
+        ["get_pg_index_usage"] = "empty",
+    };
+
+    /// <summary>
+    /// The listed reads whose tool takes any window length (<see cref="McpHelpers.ValidateUncappedWindow"/>), not the
+    /// 168-hour ceiling: the collection log keeps 60 days, and its tool exists to look further back than the other
+    /// reads allow, so a note that checked the shared ceiling would stay silent on exactly those windows.
+    /// </summary>
+    private static readonly HashSet<string> UncappedWindowReads = new(StringComparer.Ordinal) { "get_collection_log" };
+
+    /// <summary>
+    /// A window end as an <c>as_of</c> anchor the tools parse back to the same instant (to the millisecond): the web route
+    /// takes the end of a newest-first capped read once and hands it to the read and to <see cref="AddAsync"/>.
+    /// </summary>
+    internal static string FormatWindowEnd(DateTime endUtc) =>
+        endUtc.ToUniversalTime().ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'", CultureInfo.InvariantCulture);
+
+    private static string? ValidateWindowFor(string tool, int hours, string? asOf, out DateTime endUtc) =>
+        UncappedWindowReads.Contains(tool)
+            ? McpHelpers.ValidateUncappedWindow(hours, asOf, out endUtc)
+            : McpHelpers.ValidateWindow(hours, asOf, out endUtc);
+
+    /// <summary>
+    /// The listed reads that LIST rows newest first under a row cap and read <c>collection_time</c>
+    /// (<c>get_waiting_tasks</c>: <c>ORDER BY collection_time DESC</c>, the cap read as <c>truncated</c> and
+    /// the end of the shown rows as <c>oldest_returned_collection_time</c>); <c>get_plan_corrections</c> pages its
+    /// recommendations the same way (<c>ORDER BY collection_time DESC</c>, the cap read as <c>truncated</c>, the same
+    /// oldest field and order word). This is a subset of <see cref="CappedByRead"/>, which also holds the two event reads that
+    /// are newest first under a cap (blocked process reports, the Default Trace). Every read in neither is an
+    /// aggregate over the whole window or a list ranked by something other than time, whose cap hides no time range;
+    /// a <c>truncated</c> flag on those answers is about rows kept by rank and does not name a time. A test holds
+    /// this list to these four reads, each name one <see cref="TableByRead"/> lists.
+    /// </summary>
+    internal static readonly IReadOnlySet<string> NewestFirstCappedReads = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "get_waiting_tasks",
+        "get_collection_log",
+        "get_pg_server_config_changes",
+        "get_plan_corrections",
+    };
+
+    /// <summary>
+    /// Reads whose tool writes the window-floor keys and whose page panel is a chart over the asked range: the page strips the
+    /// tool's keys and draws no note, because a chart shows its own empty span. They are not in <see cref="TableByRead"/>,
+    /// so nothing else would remove the tool's UTC sentence.
+    /// </summary>
+    internal static readonly IReadOnlySet<string> StripOnlyReads = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "get_pg_cpu_utilization",
+    };
+
+    /// <summary>
+    /// How to find the earliest event a listed event read shows (#4966): a top-level field that already holds the page's
+    /// minimum (<paramref name="Field"/>), or the minimum of <paramref name="TimeField"/> over the rows under
+    /// <paramref name="RowsKey"/>. The coverage rule then follows <see cref="ViewerEventDataStart.Of"/>, the rule the desktop
+    /// viewer applies: an event carries its own time, and a server's first collection stores history from before it, so the
+    /// notice names the earlier of the coverage start and the earliest event shown.
+    /// </summary>
+    /// <remarks><paramref name="PageIsRanked"/> marks a page ranked by something other than time (the long query page is the
+    /// slowest runs): when that page is cut (<c>truncated: true</c>) it is a sample, its earliest event says nothing about the
+    /// window's start, and only the coverage start is used. The desktop viewer's Long Queries grid keeps the newest 200 by event
+    /// time, so its cap names its oldest event; this page is not that one.</remarks>
+    internal sealed record EventTimeSpec(string? Field, string? RowsKey, string? TimeField, bool PageIsRanked = false);
+
+    /// <summary>The event reads and where each answers its earliest event shown. Memory pressure rows are stamped
+    /// <c>sample_time</c>; the others <c>event_time</c>.</summary>
+    internal static readonly IReadOnlyDictionary<string, EventTimeSpec> EventTimeByRead = new Dictionary<string, EventTimeSpec>(StringComparer.Ordinal)
+    {
+        ["get_blocked_process_xml"] = new("oldest_returned_event_time", null, null),
+        ["get_long_query_completions"] = new("oldest_returned_event_time", null, null, PageIsRanked: true),
+        ["get_memory_pressure_events"] = new(null, "events", "sample_time"),
+        ["get_default_trace_events"] = new(null, "events", "event_time"),
+
+        /* The nine system_health reads (#4966): rows under their own key, each stamped event_time. */
+        ["get_health_parser_system_health"] = new(null, "entries", "event_time"),
+        ["get_health_parser_severe_errors"] = new(null, "errors", "event_time"),
+        ["get_health_parser_io_issues"] = new(null, "issues", "event_time"),
+        ["get_health_parser_scheduler_issues"] = new(null, "issues", "event_time"),
+        ["get_health_parser_memory_conditions"] = new(null, "events", "event_time"),
+        ["get_health_parser_cpu_tasks"] = new(null, "events", "event_time"),
+        ["get_health_parser_memory_broker"] = new(null, "events", "event_time"),
+        ["get_health_parser_memory_node_oom"] = new(null, "events", "event_time"),
+        ["get_health_parser_significant_waits"] = new(null, "waits", "event_time"),
+
+        /* PostgreSQL event logs, Blocking and Deadlocks (#4966). The PG deadlock rows carry occurred_at; the log page names its
+           oldest row; get_blocking and the two deadlock tools name theirs in oldest_returned_event_time / _deadlock_time. */
+        ["get_pg_deadlocks"] = new(null, "deadlocks", "occurred_at"),
+        ["get_pg_log_events"] = new("oldest_returned_at", null, null),
+        ["get_blocking"] = new("oldest_returned_event_time", null, null),
+        ["get_deadlocks"] = new("oldest_returned_deadlock_time", null, null),
+        ["get_deadlock_detail"] = new("oldest_returned_deadlock_time", null, null),
+    };
+
+    /// <summary>
+    /// How a capped list says it was cut and where its shown rows end (#4966). The cap signal is <c>truncated: true</c>
+    /// (<paramref name="TotalKey"/> null), or a total (<paramref name="TotalKey"/>) greater than the count shown
+    /// (<paramref name="ShownKey"/>). The oldest row shown is <paramref name="OldestField"/>, or the minimum of
+    /// <paramref name="TimeField"/> over the rows under <paramref name="RowsKey"/>. <paramref name="NewestFirstOrderWord"/>, when
+    /// set, is the only <c>order</c> word the page may carry: any other means the page is ranked by something other than
+    /// time, so its oldest row names no reach and the coverage rule applies.
+    /// </summary>
+    internal sealed record CappedReadSpec(
+        string? TotalKey, string? ShownKey, string? OldestField, string? RowsKey, string? TimeField, string? NewestFirstOrderWord);
+
+    /// <summary>The listed reads that list rows newest first under a row cap, each with its spec. The four
+    /// <see cref="NewestFirstCappedReads"/> read <c>collection_time</c>; blocked process reports and the Default Trace
+    /// list events by their own time.</summary>
+    internal static readonly IReadOnlyDictionary<string, CappedReadSpec> CappedByRead = new Dictionary<string, CappedReadSpec>(StringComparer.Ordinal)
+    {
+        ["get_waiting_tasks"] = new(null, null, "oldest_returned_collection_time", null, null, McpHelpers.CollectionLogOrderNewestFirst),
+        ["get_collection_log"] = new(null, null, "oldest_returned_collection_time", null, null, McpHelpers.CollectionLogOrderNewestFirst),
+        ["get_plan_corrections"] = new(null, null, "oldest_returned_collection_time", null, null, McpHelpers.CollectionLogOrderNewestFirst),
+
+        /* The changes page names no oldest-returned field: its rows are the changes, newest first, each stamped changed_at. */
+        [PgConfigChangesRead] = new(null, null, null, "changes", "changed_at", McpHelpers.CollectionLogOrderNewestFirst),
+
+        /* Event reads (#4966). Blocked process reports: truncated + oldest_returned_event_time, order word event_time_desc. The
+           Default Trace has no flag and no oldest field: it is cut when total_events exceeds shown, and its oldest row is the
+           minimum event_time. */
+        ["get_blocked_process_xml"] = new(null, null, "oldest_returned_event_time", null, null, null),
+        ["get_default_trace_events"] = new("total_events", "shown", null, "events", "event_time", null),
+
+        /* The nine system_health reads (#4966): newest first, cut by the limit. Each answers its count of qualifying events beside
+           shown and no oldest field, so the oldest row shown is the minimum event_time. */
+        ["get_health_parser_system_health"] = new("total_entries", "shown", null, "entries", "event_time", null),
+        ["get_health_parser_severe_errors"] = new("error_count", "shown", null, "errors", "event_time", null),
+        ["get_health_parser_io_issues"] = new("issue_count", "shown", null, "issues", "event_time", null),
+        ["get_health_parser_scheduler_issues"] = new("issue_count", "shown", null, "issues", "event_time", null),
+        ["get_health_parser_memory_conditions"] = new("event_count", "shown", null, "events", "event_time", null),
+        ["get_health_parser_cpu_tasks"] = new("event_count", "shown", null, "events", "event_time", null),
+        ["get_health_parser_memory_broker"] = new("event_count", "shown", null, "events", "event_time", null),
+        ["get_health_parser_memory_node_oom"] = new("event_count", "shown", null, "events", "event_time", null),
+        ["get_health_parser_significant_waits"] = new("wait_count", "shown", null, "waits", "event_time", null),
+
+        /* PostgreSQL event logs, Blocking and Deadlocks (#4966). The PG deadlock page has truncated and the rows' occurred_at but
+           no oldest field and no order word; the log page says "newest first"; the three SQL Server tools carry their oldest
+           field and an order word. */
+        ["get_pg_deadlocks"] = new(null, null, null, "deadlocks", "occurred_at", null),
+        ["get_pg_log_events"] = new(null, null, "oldest_returned_at", null, null, "newest first"),
+        ["get_blocking"] = new(null, null, "oldest_returned_event_time", null, null, "event_time_desc"),
+        ["get_deadlocks"] = new(null, null, "oldest_returned_deadlock_time", null, null, "deadlock_time_desc"),
+        ["get_deadlock_detail"] = new(null, null, "oldest_returned_deadlock_time", null, null, "deadlock_time_desc"),
+    };
+
+    /// <summary>
+    /// The three window-floor keys a listed read's tool writes itself at the top level of a data answer (#4966).
+    /// </summary>
+    private static readonly string[] ToolWindowFloorKeys = ["effective_start", "window_truncated", "truncation_note"];
+
+    /// <summary>
+    /// Removes the tool's own window-floor keys from a data answer (an <c>empty</c> status keeps its copy under
+    /// <c>hints</c>, which the page does not read). The guard below then sees the payload as it was before the tool
+    /// wrote them, so a tool's <c>window_truncated: false</c> can neither hide the web's capped note nor stand in for it.
+    /// </summary>
+    private static void StripToolWindowFloor(JsonObject? payload)
+    {
+        if (payload is null)
+        {
+            return;
+        }
+
+        foreach (var key in ToolWindowFloorKeys)
+        {
+            payload.Remove(key);
+        }
+    }
+
+    /// <summary>
+    /// <paramref name="result"/> with the notice fields added when <paramref name="tool"/> is a listed grid read whose
+    /// window starts before its table's coverage, or is a newest-first list (<see cref="CappedByRead"/>) that
+    /// hit its row cap; otherwise <paramref name="result"/> itself, untouched.
+    /// <paramref name="hoursBack"/> is the window the page asked for (null or below 1: none was asked), and
+    /// <paramref name="asOf"/> the request's window anchor.
+    /// <para>A listed read's tool may write the same three keys itself (#4966: <c>effective_start</c>,
+    /// <c>window_truncated</c>, <c>truncation_note</c>, the MCP dialect, in UTC). The page draws its own note from the
+    /// fields this method adds, in the browser's zone, so the tool's three are removed first and the note is decided as
+    /// it was before the tool wrote them: the page gets the same answer, capped or coverage. When a note is added, the
+    /// payload that carries it is the stripped one. When no note is added (covered, a short window, a failed probe, a capped
+    /// page that reaches the start), the tool's three keys are stripped as well, so a listed read never hands the page the
+    /// tool's own UTC verdict: the page sees only the note this method writes, or none.</para>
+    /// </summary>
+    internal static async Task<string> AddAsync(
+        NpgsqlDataSource postgres, string tool, string? server, int? hoursBack, string? asOf, string result,
+        ILogger? logger, CancellationToken cancellationToken)
+    {
+        var answered = await AddNoteAsync(postgres, tool, server, hoursBack, asOf, result, logger, cancellationToken);
+        if (!ReferenceEquals(answered, result) || !(TableByRead.ContainsKey(tool) || StripOnlyReads.Contains(tool)))
+        {
+            return answered;
+        }
+
+        /* No note was added, and the answer is still the tool's own: its three window-floor keys (in UTC, the MCP dialect) are not
+           the page's, so a covered range reaches the page without them, as a tool that never wrote them would send it. */
+        try
+        {
+            if (JsonNode.Parse(result) is JsonObject own && ToolWindowFloorKeys.Any(own.ContainsKey))
+            {
+                StripToolWindowFloor(own);
+                return own.ToJsonString(McpHelpers.JsonOptions);
+            }
+        }
+        catch (System.Text.Json.JsonException)
+        {
+        }
+
+        return result;
+    }
+
+    private static async Task<string> AddNoteAsync(
+        NpgsqlDataSource postgres, string tool, string? server, int? hoursBack, string? asOf, string result,
+        ILogger? logger, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(server)
+            || hoursBack is not int hours
+            || hours < 1
+            || !TryGetReadSources(tool, out var sources))
+        {
+            return result;
+        }
+
+        JsonObject? payload;
+        try
+        {
+            payload = JsonNode.Parse(result) as JsonObject;
+        }
+        catch (System.Text.Json.JsonException)
+        {
+            return result;
+        }
+
+        /* Strips the parsed copy: a note goes out on it. The early returns below send `result` itself, and AddAsync strips the
+           tool's keys from that. */
+        StripToolWindowFloor(payload);
+
+        /* Rows, or the answer that says the read looked and found nothing (#4966, NothingFoundStatusByRead): an empty span
+           over a short history reads as "nothing happened" when it is only short, so that answer gets the note too. The
+           probe counts a server only when it holds a row or logged a run in the window, so a server that did neither is
+           left without one, as before. Any other envelope (unavailable, not_collected, invalid), an error, or a tool that
+           already reports its own window floor is left as it is. */
+        if (payload is null
+            || (payload.ContainsKey("status") && !IsRowStatus(tool, payload) && !IsNothingFoundStatus(tool, payload))
+            || payload.ContainsKey("error")
+            || payload.ContainsKey("window_truncated"))
+        {
+            return result;
+        }
+
+        /* A newest-first list that hit its row cap (#4966): the grid ends at the oldest row the read returned, which
+           the store's coverage cannot move, so the note names that row. The answer carries it, so no probe: a store
+           that covers the whole range still gets the note, and a store that does not names the same row, never an
+           earlier one the grid does not show. */
+        if (CappedByRead.TryGetValue(tool, out var cappedSpec) && TryReadCappedStart(cappedSpec, payload, out var oldestShown, out var oldestText))
+        {
+            if (ValidateWindowFor(tool, hours, asOf, out var cappedEnd) is not null)
+            {
+                return result;
+            }
+
+            /* Only a page that stops short of the window's start is cut by its row cap. One whose oldest row is at the
+               start, or before it, shows the whole range, so it says nothing: strictly later, with no slack (the
+               90-minute slack belongs to the coverage rule below), as Lite's capped grids judge it
+               (ServerTab.ApplyCappedWindowFloorToBanner). */
+            var cappedStart = cappedEnd.AddHours(-hours);
+            if (oldestShown <= cappedStart)
+            {
+                return result;
+            }
+
+            payload["window_truncated"] = true;
+            payload["effective_start"] = oldestText;
+            payload["truncation_note"] = ComposeStoreAvailability.BuildCappedListNotice(oldestShown, cappedStart, cappedEnd);
+            AddInstants(payload, OldestShownField, oldestShown, cappedStart, cappedEnd);
+            return payload.ToJsonString();
+        }
+
+        /* A window no longer than the slack can never be called cut by the store: the coverage rule needs a start more
+           than RawWindowFloor's 90 minutes after the window's own, and the probe reports none at or after the window's
+           end, so a window of an hour or less always comes back covered. Skip the registry read and the floor read that
+           would say so (the capped list above does not use the probe and keeps its note at any length). */
+        if (TimeSpan.FromHours(hours) <= DurationTrendRouting.TruncationSlack)
+        {
+            return result;
+        }
+
+        try
+        {
+            var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server, cancellationToken);
+            if (error is not null || ValidateWindowFor(tool, hours, asOf, out var windowEnd) is not null)
+            {
+                return result;
+            }
+
+            var windowStart = windowEnd.AddHours(-hours);
+            var dataStart = await DataWindowFloor.GetAsync(
+                postgres, sources, [resolved.ServerName], windowStart, windowEnd, StorageCommandDeadlines.McpReadSeconds, cancellationToken);
+
+            /* An event read follows the event-time rule (ViewerEventDataStart.Of): the earlier of the coverage start and the
+               earliest event the page shows, or that event alone when the probe found no coverage but rows exist. Any other
+               read keeps the coverage start, and a probe with no start says nothing. */
+            var start = dataStart;
+            if (EventTimeByRead.TryGetValue(tool, out var eventTime))
+            {
+                /* A cut page ranked by duration is a sample of the window: its earliest event is not the window's earliest, so
+                   only the coverage start applies. */
+                var sampled = eventTime.PageIsRanked && payload["truncated"] is JsonValue cut && cut.TryGetValue<bool>(out var wasCut) && wasCut;
+                start = sampled
+                    ? dataStart
+                    : ViewerEventDataStart.Of(dataStart, ReadEarliestEvent(payload, eventTime.Field, eventTime.RowsKey, eventTime.TimeField));
+            }
+
+            if (!RawWindowFloor.IsTruncated(start, windowStart))
+            {
+                return result;
+            }
+
+            payload["window_truncated"] = true;
+            payload["effective_start"] = start!.Value.ToString("o", CultureInfo.InvariantCulture);
+            payload["truncation_note"] = ComposeStoreAvailability.BuildDataStartNotice(start.Value, windowStart, windowEnd);
+            AddInstants(payload, DataStartField, start.Value, windowStart, windowEnd);
+            return payload.ToJsonString();
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            /* Debug, like the Custom Views runner's probe: the grid is still answered, and this runs once per grid
+               refresh, so a standing fault at Warning would put a line in the log on every one. */
+            logger?.LogDebug(ex, "The data-start probe for {Tool} failed; the grid is answered without a partial-window notice.", tool);
+            return result;
+        }
+    }
+
+    /// <summary>Where the data starts, as a UTC instant: the coverage note's first field (<see cref="AddAsync"/>).</summary>
+    internal const string DataStartField = "data_start_utc";
+
+    /// <summary>The oldest row a capped list shows, as a UTC instant: the capped note's first field.</summary>
+    internal const string OldestShownField = "oldest_shown_utc";
+
+    /// <summary>The window's start, as a UTC instant: on both notes.</summary>
+    internal const string WindowStartField = "window_start_utc";
+
+    /// <summary>The window's end, as a UTC instant: on both notes.</summary>
+    internal const string WindowEndField = "window_end_utc";
+
+    /// <summary>
+    /// The data-start sentence a Custom Views panel's answer carries (#4966), the one <c>notice</c> holds, so the page
+    /// can write that sentence again in the browser's zone and leave any row-cap sentence beside it as it is.
+    /// </summary>
+    internal const string DataStartNoteField = "data_start_note";
+
+    /// <summary>
+    /// The same three instants a grid's coverage note carries (<see cref="DataStartField"/>, <see cref="WindowStartField"/>,
+    /// <see cref="WindowEndField"/>), added to a Custom Views panel's answer beside <c>notice</c> (#4966). The panel's
+    /// <c>notice</c> names its times in UTC for any other reader; the page composes it again from these in the clock its
+    /// own times are printed in. <paramref name="sentence"/> is the data-start sentence inside <c>notice</c>.
+    /// </summary>
+    internal static void AddComposedPanelInstants(
+        JsonObject payload, string sentence, DateTime dataStartUtc, DateTime windowStartUtc, DateTime windowEndUtc)
+    {
+        payload[DataStartNoteField] = sentence;
+        AddInstants(payload, DataStartField, dataStartUtc, windowStartUtc, windowEndUtc);
+    }
+
+    /// <summary>
+    /// The note's instants as fields beside its sentence (#4966). The sentence names them in UTC, which is all an
+    /// MCP client or any other reader of the tool's answer can use; the page prints every time in the browser's zone
+    /// (<c>localTime</c>) and so composes the note again from these (<c>util.js</c>, the way <c>keptWindowStrip</c>
+    /// composes its strip from <c>keptHours</c>), so a note above a grid reads in the grid's own clock. Each is an
+    /// ISO instant with an explicit <c>Z</c>. A page that finds one missing draws the sentence as sent.
+    /// </summary>
+    private static void AddInstants(JsonObject payload, string startField, DateTime start, DateTime windowStart, DateTime windowEnd)
+    {
+        payload[startField] = Instant(start);
+        payload[WindowStartField] = Instant(windowStart);
+        payload[WindowEndField] = Instant(windowEnd);
+    }
+
+    /* Every instant here is UTC: the store's times carry no zone, and the window comes from DateTime.UtcNow or the
+       request's as_of. Stamped Utc, so the "o" form ends in Z. */
+    private static string Instant(DateTime utc) =>
+        DateTime.SpecifyKind(utc, DateTimeKind.Utc).ToString("o", CultureInfo.InvariantCulture);
+
+    /// <summary>
+    /// Whether a newest-first list's answer says its row cap cut it (<see cref="CappedReadSpec"/>: <c>truncated: true</c>, or a
+    /// total greater than the count shown), and the time of the oldest row it returned, as the tool wrote it and read as UTC (the
+    /// store's times carry no zone). False for an answer that did not hit its cap, that was ranked by something other than time, or
+    /// that names no readable time: those take the coverage rule.
+    /// </summary>
+    private static bool TryReadCappedStart(CappedReadSpec spec, JsonObject payload, out DateTime oldestShownUtc, out string oldestText)
+    {
+        oldestShownUtc = default;
+        oldestText = string.Empty;
+
+        if (!HitCap(spec, payload))
+        {
+            return false;
+        }
+
+        /* A read that can rank its page by something other than time says which order it answered in: a page ranked
+           slowest first (get_collection_log with a duration floor) is a sample of the whole window, so its oldest row
+           names no reach and the coverage rule applies. A page with no order field is the time-ordered one. */
+        if (spec.NewestFirstOrderWord is not null
+            && payload["order"] is JsonValue order
+            && order.TryGetValue<string>(out var orderText)
+            && !string.Equals(orderText, spec.NewestFirstOrderWord, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        var text = EarliestTimeText(payload, spec.OldestField, spec.RowsKey, spec.TimeField);
+        if (text is null
+            || !TryParseUtc(text, out oldestShownUtc))
+        {
+            return false;
+        }
+
+        oldestText = text;
+        return true;
+    }
+
+    private static bool HitCap(CappedReadSpec spec, JsonObject payload)
+    {
+        if (spec.TotalKey is null)
+        {
+            return payload["truncated"] is JsonValue cap && cap.TryGetValue<bool>(out var hit) && hit;
+        }
+
+        return payload[spec.TotalKey] is JsonValue total && total.TryGetValue<long>(out var all)
+            && payload[spec.ShownKey!] is JsonValue shown && shown.TryGetValue<long>(out var count)
+            && all > count;
+    }
+
+    private static bool TryParseUtc(string text, out DateTime utc) =>
+        DateTime.TryParse(text, CultureInfo.InvariantCulture, DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal, out utc);
+
+    /* The earliest event time an answer shows, as the text the tool wrote: the top-level field when one is named and readable,
+       else the earliest time field over the rows. Null when nothing readable is there. */
+    private static string? EarliestTimeText(JsonObject payload, string? field, string? rowsKey, string? timeField)
+    {
+        if (field is not null)
+        {
+            return payload[field] is JsonValue v && v.TryGetValue<string>(out var read) ? read : null;
+        }
+
+        if (rowsKey is null || timeField is null || payload[rowsKey] is not JsonArray rows)
+        {
+            return null;
+        }
+
+        string? oldestText = null;
+        DateTime oldest = default;
+        foreach (var row in rows)
+        {
+            if (row?[timeField] is JsonValue value
+                && value.TryGetValue<string>(out var text)
+                && TryParseUtc(text, out var at)
+                && (oldestText is null || at < oldest))
+            {
+                oldestText = text;
+                oldest = at;
+            }
+        }
+
+        return oldestText;
+    }
+
+    private static DateTime? ReadEarliestEvent(JsonObject payload, string? field, string? rowsKey, string? timeField) =>
+        EarliestTimeText(payload, field, rowsKey, timeField) is string text && TryParseUtc(text, out var at) ? at : null;
+
+    /// <summary>The PostgreSQL configuration changes read: a newest-first list of changes under <c>limit</c>, whose answer
+    /// says it was cut (<c>truncated</c>) but carries its rows' times only on the rows (<c>changes[].changed_at</c>).</summary>
+    internal const string PgConfigChangesRead = "get_pg_server_config_changes";
+
+    /* Whether the answer's status word is one a listed read puts on its ROWS (RowStatuses) rather than an envelope. */
+    private static bool IsRowStatus(string tool, JsonObject payload) =>
+        payload["status"] is JsonValue word && word.TryGetValue<string>(out var status)
+        && (RowStatuses.Contains(status) || (RowStatusByRead.TryGetValue(tool, out var own) && string.Equals(own, status, StringComparison.Ordinal)));
+
+    /* Whether the answer's status word is this read's own "looked and found nothing" one (NothingFoundStatusByRead). */
+    private static bool IsNothingFoundStatus(string tool, JsonObject payload) =>
+        NothingFoundStatusByRead.TryGetValue(tool, out var expected)
+        && payload["status"] is JsonValue word
+        && word.TryGetValue<string>(out var status)
+        && string.Equals(status, expected, StringComparison.Ordinal);
+}

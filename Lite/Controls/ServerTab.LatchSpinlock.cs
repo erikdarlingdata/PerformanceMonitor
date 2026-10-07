@@ -71,6 +71,11 @@ public partial class ServerTab : UserControl
             _latchStatsFilterMgr!.UpdateData(latchSnapshotTask.Result);
             UpdateSpinlockStatsChart(spinlockTrendTask.Result, hoursBack, fromDate, toDate);
             _spinlockStatsFilterMgr!.UpdateData(spinlockSnapshotTask.Result);
+
+            /* #4966: both trends draw a flat zero over an empty stretch, so each says where its collector's coverage starts.
+               The probes run after the charts and grids are bound; one that throws costs only its note. */
+            await RefreshStoredWindowBannerAsync(QueryWindowRelation.LatchStats, LatchStatsWindowTruncatedBanner, hoursBack, fromDate, toDate);
+            await RefreshStoredWindowBannerAsync(QueryWindowRelation.SpinlockStats, SpinlockStatsWindowTruncatedBanner, hoursBack, fromDate, toDate);
         }
         catch (Exception ex)
         {

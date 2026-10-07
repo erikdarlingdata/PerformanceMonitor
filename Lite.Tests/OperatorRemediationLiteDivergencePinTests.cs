@@ -41,6 +41,7 @@ namespace Lite.Tests;
 /// <para>It is deliberately NOT a claim that Lite should never act. It is a claim that today it does not,
 /// on a stated basis, and that changing either fact is a visible edit here.</para>
 /// </summary>
+[Trait("Reads", "Darling")]
 public sealed class OperatorRemediationLiteDivergencePinTests
 {
     /// <summary>

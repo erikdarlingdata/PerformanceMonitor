@@ -37,4 +37,12 @@ public static class AgAlertContexts
         context.Details.Add(new AlertDetailItem { Heading = database, Fields = fields });
         return context;
     }
+
+    /// <summary>
+    /// The incident identity for the AG disconnect/reconnect pair: one replica within one group. A single
+    /// "AG:replica" member (not two), so it can't be set half-way. Only this pair carries it — every other
+    /// grain's incidents answer through fingerprints already.
+    /// </summary>
+    public static AlertContext ForReplica(string agName, string replicaServerName) =>
+        new() { AgReplicaIdentity = $"{agName}:{replicaServerName}" };
 }

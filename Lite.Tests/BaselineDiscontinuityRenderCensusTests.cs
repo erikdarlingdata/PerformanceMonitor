@@ -31,6 +31,7 @@ namespace PerformanceMonitorLite.Tests;
 /// (Lite's tool descriptions, which the compiler concatenated), and both on the same names so a tool that
 /// leaves one SKU's roster reds the census rather than quietly narrowing "every".
 /// </summary>
+[Trait("Reads", "Darling")]
 public sealed class BaselineDiscontinuityRenderCensusTests
 {
     /// <summary>The trend tools that carry <c>discontinuities[]</c>, by SKU source file. Same eight names on each side.</summary>
@@ -186,9 +187,9 @@ public sealed class BaselineDiscontinuityRenderCensusTests
         Assert.Equal("#E8B21E", PerformanceMonitor.Common.ChartPalette.AccentColor("Discontinuity"));
     }
 
-    /// <summary>The web page: one sentence builder, the shared wording, applied to the four trend panels.</summary>
+    /// <summary>The web page: one sentence builder, the shared wording, applied to the eight trend-drawing functions.</summary>
     [Fact]
-    public void TheWebPage_RendersTheSentenceOnItsFourTrendPanels()
+    public void TheWebPage_RendersTheSentenceOnItsEightTrendPanels()
     {
         var js = File.ReadAllText(RepoPath("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server-tabs.js"));
 
@@ -196,10 +197,10 @@ public sealed class BaselineDiscontinuityRenderCensusTests
         Assert.Contains("\"baseline discontinuity at \" + localTime(d.at) + \" (\" + d.reason + \")\"", js, StringComparison.Ordinal);
         Assert.Contains("Array.isArray(data.discontinuities)", js, StringComparison.Ordinal);
 
-        /* One definition and one use per trend-drawing function: the wait, perfmon, per-query and file-I/O panels. */
+        /* One definition and one use per trend-drawing function: the wait, perfmon, per-query and file-I/O panels, plus the instance-trend, memory-clerk, latch/spinlock and session-stats panels. */
         var uses = Regex.Matches(js, @"discontinuityNotes\((trend\.data|res\.data)\)").Count;
-        Assert.Equal(4, uses);
-        foreach (var fn in new[] { "async function drawWaitTrend(", "async function drawPerfmonTrend(", "async function drawQueryTrend(", "export function fileIoPanel(" })
+        Assert.Equal(8, uses);
+        foreach (var fn in new[] { "export async function drawWaitTrends(", "export async function drawPerfmonTrends(", "async function drawQueryTrend(", "export function fileIoPanel(", "export function serverTrendPanel(", "export async function drawClerkTrends(", "export async function drawNamedTrends(", "export function sessionStatsTrendPanel(" })
         {
             var start = js.IndexOf(fn, StringComparison.Ordinal);
             Assert.True(start >= 0, fn);

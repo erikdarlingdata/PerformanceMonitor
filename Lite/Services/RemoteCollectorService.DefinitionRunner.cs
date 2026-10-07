@@ -35,6 +35,12 @@ public partial class RemoteCollectorService
     internal Func<string, CollectorQuery, DbDataReader>? AzureDatabaseReaderOverrideForTests { get; set; }
 
     /// <summary>
+    /// Supplies the primary reader of the server-wide (not per-database) single-query path instead of a live
+    /// connection (#5320, the twin of <see cref="AzureDatabaseReaderOverrideForTests"/>). Null in production.
+    /// </summary>
+    internal Func<CollectorQuery, DbDataReader>? ServerReaderOverrideForTests { get; set; }
+
+    /// <summary>
     /// One Azure database's open connection, command and reader, disposed in that order (reader,
     /// command, connection). The command and connection are null when a test supplied the reader.
     /// </summary>
@@ -251,6 +257,8 @@ public partial class RemoteCollectorService
             IgnoredWaitTypes = _ignoredWaitTypes.Value,
             ExcludedDatabases = server.ExcludedDatabases?.ToArray() ?? Array.Empty<string>(),
             PerfmonCounterOverride = GetPerfmonCounterOverride(),
+            /* #4961: the long-query definition reads this install's own session, so its context carries the name. */
+            LongQuerySessionName = definition is LongQueryCompletionsCollector ? LongQuerySessionName() : null,
         };
 
         /* Two accumulators, not one contiguous read-then-write pair: the enumeration and Azure paths now
@@ -279,6 +287,31 @@ public partial class RemoteCollectorService
             var databases = AzureDatabaseListOverrideForTests is { } databaseListOverride
                 ? await databaseListOverride(server, cancellationToken)
                 : await GetAzureDatabaseListAsync(server, cancellationToken);
+
+            /* The long-query trace leaves a database monitored as its own server to that registration, and never
+               keeps a session in master, so its read does too (LongQueryCompletionsCollector.SkipsSeparatelyMonitoredDatabases).
+               A logical server lists master beside its user databases. master goes first and is not counted as
+               listed: the note below speaks of user databases, and a list of master alone has none to blame it on
+               (#4961). Other collectors read the list as it came. */
+            var listedDatabaseCount = databases.Count;
+            if (definition.SkipsSeparatelyMonitoredDatabases)
+            {
+                databases = databases.FindAll(LongQueryTraceDatabases.CanHoldSession);
+                listedDatabaseCount = databases.Count;
+                databases = WithoutSeparatelyMonitoredDatabases(server, databases);
+            }
+
+            /* #4961: a list with nothing left to read used to record SUCCESS, 0 rows and no note, which reads as
+               "nothing ran". The note names why nothing was read (every user database monitored as its own server,
+               or every database excluded). The status stays SUCCESS: nothing failed. It is held here and merged
+               into the assignment that follows the loop, because that assignment is unconditional and would erase
+               a note put on the telemetry now. Lite has no database scope. Mirrors Darling. */
+            var emptyListNote = EmptyDatabaseListNote.For(
+                listedDatabaseCount,
+                databases.Count,
+                definition.SkipsSeparatelyMonitoredDatabases,
+                exclusionsConfigured: server.ExcludedDatabases is { Count: > 0 },
+                databaseScoped: false);
 
             var attempted = 0;
             var failed = 0;
@@ -327,6 +360,15 @@ public partial class RemoteCollectorService
                     /* The authoritative database_name for XE rows read on this path — see
                        CollectorContext.CurrentDatabaseName. */
                     context.CurrentDatabaseName = databaseName;
+
+                    /* #4961: the deadlock and blocked-process reads name the session the ensure chose for THIS database, so
+                       the name is set per database, beside the database name. Every other definition leaves it null. */
+                    context.AlwaysOnSessionName = definition switch
+                    {
+                        DeadlocksCollector => AlwaysOnReadSessionName(server, databaseName, AlwaysOnXeSessionKind.Deadlock),
+                        BlockedProcessReportCollector => AlwaysOnReadSessionName(server, databaseName, AlwaysOnXeSessionKind.BlockedProcess),
+                        _ => null,
+                    };
 
                     var dbPlan = plan;
                     if (dbPlan is null)
@@ -585,11 +627,14 @@ public partial class RemoteCollectorService
 
             /* #1875: ONE note for the cycle and ONE capped log burst, composed from every database's
                failures together. Assigned unconditionally — a cycle where nothing failed composes null,
-               which is exactly what this path carried before. */
+               which is exactly what this path carried before. The empty-list note (#4961) rides in this
+               assignment: it is the one place the note is set, so nothing assigned earlier can be erased. */
             telemetry.HostNote = EnumeratedCollectorDriver.MergeNotes(
-                cycleProbeFailures.Note,
-                EnumeratedCollectorDriver.BuildPartialFailureNote(
-                    failed, attempted, failedDatabases, firstFailure?.Message));
+                emptyListNote,
+                EnumeratedCollectorDriver.MergeNotes(
+                    cycleProbeFailures.Note,
+                    EnumeratedCollectorDriver.BuildPartialFailureNote(
+                        failed, attempted, failedDatabases, firstFailure?.Message)));
             LogEnumerationProbeFailures(definition, server, cycleProbeFailures.Failures);
 
             /* One database failing is routine (offline, mid-restore, a permissions oddity) and stays a
@@ -606,7 +651,10 @@ public partial class RemoteCollectorService
         }
         else
         {
-            using var sqlConnection = await CreateConnectionAsync(server, cancellationToken);
+            /* An unopened connection stands in when a test supplies the reader: nothing below touches it then. */
+            using var sqlConnection = ServerReaderOverrideForTests is null
+                ? await CreateConnectionAsync(server, cancellationToken)
+                : new SqlConnection();
 
             var enumerationPlan = definition.BuildEnumerationQuery(context);
             if (enumerationPlan is not null)
@@ -907,7 +955,9 @@ public partial class RemoteCollectorService
                 try
                 {
                     using var command = CreateCollectorCommand(plan, sqlConnection, definition.CommandTimeoutSecondsOverride ?? CommandTimeoutSeconds);
-                    using var reader = await command.ExecuteReaderAsync(itemToken);
+                    using var reader = ServerReaderOverrideForTests is { } serverReader
+                        ? serverReader(plan)
+                        : await command.ExecuteReaderAsync(itemToken);
                     rows = await definition.ReadAsync(reader, context, itemToken);
 
                     /* #1851: a definition that declares it may hand back an OPTIONAL trailing
@@ -1241,7 +1291,7 @@ public partial class RemoteCollectorService
     /// the earliest batch event time minus one day.
     /// </summary>
     internal static string StoredIdentitySql(string targetTable) =>
-        $"SELECT deadlock_time, deadlock_graph_xml FROM {targetTable} " +
+        $"SELECT deadlock_time, {DeadlocksCollector.StoredGraphIdentitySql} FROM {targetTable} " +
         "WHERE server_id = $1 AND deadlock_graph_xml IS NOT NULL AND deadlock_graph_xml <> '' " +
         "AND deadlock_time IN (SELECT UNNEST($2)) AND collection_time >= $3";
 

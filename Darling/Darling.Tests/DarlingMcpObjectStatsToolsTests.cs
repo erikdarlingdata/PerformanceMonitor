@@ -90,7 +90,8 @@ public sealed class DarlingMcpObjectStatsToolsSurfaceAndSqlTests
     {
         var p = McpParams("get_object_locking");
 
-        Assert.Equal(new[] { "server_name", "limit" }, p.Select(x => x.Name).ToArray());
+        /* #5231 PR2: database_name is appended LAST (Lite's twin has it too), and optional like the others. */
+        Assert.Equal(new[] { "server_name", "limit", "database_name" }, p.Select(x => x.Name).ToArray());
         Assert.All(p, x => Assert.True(x.Optional, $"{x.Name} must stay optional — existing callers pass neither"));
     }
 
@@ -179,6 +180,23 @@ public sealed class DarlingMcpObjectStatsToolsSurfaceAndSqlTests
             sql,
             "the read is no longer anchored on the server's latest capture — #3878's immortal per-name groups are back");
         Assert.DoesNotContain("GROUP BY database_name", sql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #5372 L1: the locking list's ORDER BY ends in a total order, lock promotions and then the four-part name, as
+    /// <c>get_index_usage</c> does, so a filtered page capped at the limit is the same rows on every poll. The rows listed
+    /// only for a lock promotion all sum to 0 and tie, which is the case the tiebreaker is for. Lite's twin pins the same
+    /// order by running it (<c>TiedRows_AtTheCap_ComeBackInAFixedOrder</c>).
+    /// </summary>
+    [Fact]
+    public void IndexLockingSql_OrderEndsInATotalOrder_SoATiedCappedPageIsStable()
+    {
+        var sql = DarlingObjectStatsReader.IndexLockingSql;
+        var order = sql[sql.LastIndexOf("ORDER BY", StringComparison.Ordinal)..];
+        SqlTextPin.AssertExpresses(
+            "DESC, COALESCE(ios.index_lock_promotion_count, 0) DESC, ios.database_name, ios.schema_name, ios.table_name, ios.index_name NULLS LAST LIMIT $3",
+            order,
+            "the locking list's order has no tiebreaker: tied rows at the cap can change between two polls");
     }
 
     /// <summary>
@@ -478,19 +496,19 @@ public sealed class DarlingIndexLockingRenamedDatabaseLivePostgresTests
             }
 
             /* 2. The Viewer's all-databases grid. */
-            var gridRows = await viewer.GetIndexLockingAsync(ServerId, 200, null, ct);
+            var gridRows = await viewer.GetIndexLockingAsync(ServerId, 200, null, cancellationToken: ct);
             Assert.Contains(gridRows, r => r.DatabaseName == NewName && r.RowLockWaitInMs == 70_000);
             Assert.DoesNotContain(gridRows, r => r.DatabaseName == OldName);
 
             /* 3. The DB selector: a name it does not offer cannot be picked. */
-            var selector = await viewer.GetIndexLockingDatabasesAsync(ServerId, ct);
+            var selector = await viewer.GetIndexLockingDatabasesAsync(ServerId, cancellationToken: ct);
             Assert.Contains(NewName, selector);
             Assert.DoesNotContain(OldName, selector);
 
             /* 4. The filtered arm, asked for the dead name directly — the one a stale bookmark or a
                hand-typed filter would still reach. */
-            Assert.Empty(await viewer.GetIndexLockingAsync(ServerId, 200, OldName, ct));
-            Assert.NotEmpty(await viewer.GetIndexLockingAsync(ServerId, 200, NewName, ct));
+            Assert.Empty(await viewer.GetIndexLockingAsync(ServerId, 200, OldName, cancellationToken: ct));
+            Assert.NotEmpty(await viewer.GetIndexLockingAsync(ServerId, 200, NewName, cancellationToken: ct));
 
             /* History is intact: the pre-rename rows are still there, at the capture that saw them. */
             using var history = new NpgsqlCommand(

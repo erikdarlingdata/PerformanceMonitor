@@ -420,7 +420,7 @@ public sealed class QueryStoreClutterTests
             .Where(p => p.GetCustomAttribute<DescriptionAttribute>() is not null)
             .ToArray();
 
-        Assert.Equal(new[] { "server_name", "hours_back", "limit", "include_fleet_median", "as_of" }, parameters.Select(p => p.Name).ToArray());
+        Assert.Equal(new[] { "server_name", "hours_back", "limit", "include_fleet_median", "as_of", "database_name" }, parameters.Select(p => p.Name).ToArray());
         Assert.All(parameters, p => Assert.True(p.HasDefaultValue, $"{p.Name} must be optional"));
         Assert.Equal(24, parameters.Single(p => p.Name == "hours_back").DefaultValue);
         Assert.Equal(DarlingMcpQueryStoreClutterTools.DefaultLimit, parameters.Single(p => p.Name == "limit").DefaultValue);
@@ -604,7 +604,7 @@ public sealed class QueryStoreClutterTests
 
         Assert.True(DarlingWebEndpoints.BuildReadDispatch().ContainsKey(ToolName));
         var descriptor = DarlingWebEndpoints.CatalogDescriptors[ToolName];
-        Assert.Equal(new[] { "server", "hours", "limit", "include_fleet_median", "as_of" }, descriptor.Params.Select(p => p.Name).ToArray());
+        Assert.Equal(new[] { "server", "hours", "limit", "include_fleet_median", "as_of", "database_name" }, descriptor.Params.Select(p => p.Name).ToArray());
         Assert.All(descriptor.Params, p => Assert.False(p.Required));
         Assert.Contains("Replicas excluded by architecture", descriptor.Description, StringComparison.Ordinal);
     }
@@ -651,12 +651,12 @@ public sealed class QueryStoreClutterTests
     public void TheToolBody_ReadsTheFleetOverTheSameAnchoredWindow()
     {
         var source = ReadRepoFile(ToolSource.Split('/'));
-        var body = source[source.IndexOf("public static async Task<string> GetQueryStoreClutter", StringComparison.Ordinal)..];
+        var body = source[source.IndexOf("internal static async Task<string> GetQueryStoreClutter", StringComparison.Ordinal)..];
         Assert.DoesNotContain("DateTime.UtcNow", body, StringComparison.Ordinal);
         /* #4203: cancellationToken threads to every store call, so the anchor pin matches the call text
            including the token rather than the pre-#4203 shape. */
-        Assert.Contains("GetReadCostAsync(postgres, fleetIds, requestedStart, now, cancellationToken)", body, StringComparison.Ordinal);
-        Assert.Contains("GetPlanChurnAsync(postgres, fleetIds, requestedStart, now, cancellationToken)", body, StringComparison.Ordinal);
+        Assert.Contains("GetReadCostAsync(postgres, fleetIds, requestedStart, now, cancellationToken: cancellationToken)", body, StringComparison.Ordinal);
+        Assert.Contains("GetPlanChurnAsync(postgres, fleetIds, requestedStart, now, cancellationToken: cancellationToken)", body, StringComparison.Ordinal);
         Assert.Contains("GetQdsWaitsAsync(postgres, fleetIds, requestedStart, now, cancellationToken)", body, StringComparison.Ordinal);
         /* the page is observed, never inferred */
         Assert.Contains("McpHelpers.BoundPage(composed, limit)", body, StringComparison.Ordinal);

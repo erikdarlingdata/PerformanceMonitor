@@ -13,6 +13,7 @@ using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
 
@@ -60,7 +61,7 @@ internal static class DarlingRuntimePrecondition
     /// answers first and a collector that ran recently is found there at once. Ordering by <c>log_id</c> instead would read
     /// the server's whole retained history on every call, because <c>collection_log</c> has no primary key and no index on
     /// <c>log_id</c>. Only the timestamp is returned, so two runs that share one give the same answer whichever comes first;
-    /// that is why this read does not need the id order <see cref="LatestCollectorOutcomeSql"/> uses, where the row's status
+    /// that is why this read does not need the <c>log_id</c> tiebreak that <see cref="LatestCollectorOutcomeSql"/> keeps, where the row's status
     /// is the answer. The server half uses <c>idx_collection_log_time (server_id, collection_time)</c>. The collector half
     /// filters with <c>idx_collection_log_watermark (server_id, collector_name, collection_time DESC)</c>. A collector that
     /// has never run has no row to find, so for it the read still goes through the server's whole retained history.
@@ -89,16 +90,32 @@ SELECT (
        ) AS server_first_collected";
 
     /// <summary>
-    /// The most recent run of one collector for one server. Ordered by <c>log_id</c> rather than
-    /// <c>collection_time</c> because the id is monotonic per insert while two runs inside the same cycle can
-    /// share a timestamp — and "the latest run" is the whole claim this makes. $1 server_id, $2 collector.
+    /// The most recent run of one collector for one server. Ordered by <c>collection_time DESC</c> first (#4974):
+    /// <c>idx_collection_log_watermark (server_id, collector_name, collection_time DESC)</c> serves that first key,
+    /// so ChunkAppend walks the chunks newest-first and stops at the first row the walk returns, where a
+    /// <c>log_id</c>-first order (no index on <c>log_id</c>) read every retained row of the pair. The trade: after
+    /// the wall clock steps back, this read can return a run from before the step, for as long as the step lasts.
+    ///
+    /// <para><c>, log_id DESC</c> only makes the order deterministic; two runs of one server and collector do not
+    /// share a microsecond in practice. No index carries <c>log_id</c>, so the tiebreak is a sort. In the plans a
+    /// test store gets, it sits inside each chunk the walk visits: a Sort of the pair's rows in that chunk, or an
+    /// Incremental Sort presorted on <c>collection_time</c> that reads the rows at the newest timestamp plus one
+    /// more to close that group. An Incremental Sort above the walk would instead take that extra row from the
+    /// next older chunk whenever the newest chunk holds a single row for the pair. The newest chunk answers a
+    /// collector that ran recently. A collector with no row in the newest chunk (a daily collector, or one that
+    /// never ran) walks back through older chunks, which are compressed.</para>
+    ///
+    /// <para><see cref="DarlingSelfAlertEvaluator.MissingCaptureSessionsSql"/>, a one-collector read of the same
+    /// table, leaves this tiebreak out: there it would decide nothing, and its <c>(server_id, collection_time)</c>
+    /// index cannot serve a second key, so the sort would cover the server's whole newest chunk (1,158 buffers
+    /// against 5). $1 server_id, $2 collector.</para>
     /// </summary>
     public const string LatestCollectorOutcomeSql = @"
 SELECT status, error_message, collection_time
 FROM collection_log
 WHERE server_id = $1
 AND   collector_name = $2
-ORDER BY log_id DESC
+ORDER BY collection_time DESC, log_id DESC
 LIMIT 1";
 
     /// <summary>
@@ -116,7 +133,7 @@ SELECT database_name, actual_state, capture_time
 FROM v_query_store_health
 WHERE server_id = $1
 AND   capture_time = (SELECT MAX(capture_time) FROM v_query_store_health WHERE server_id = $1)
-AND   ($2::text IS NULL OR database_name = $2)
+AND   ($2::text[] IS NULL OR database_name = ANY($2))
 ORDER BY database_name";
 
     /// <summary>
@@ -201,11 +218,26 @@ ORDER BY database_name";
     /// databases the read covered are not recording runtime statistics, or <c>null</c> when it says nothing
     /// of the kind (no snapshot yet, or at least one database in scope is READ_WRITE).
     /// </summary>
-    public static async Task<string?> QueryStoreStatusAsync(
+    public static Task<string?> QueryStoreStatusAsync(
         NpgsqlDataSource postgres,
         int serverId,
         string serverName,
         string? databaseName,
+        CancellationToken cancellationToken = default) =>
+        QueryStoreStatusAsync(postgres, serverId, serverName, DatabaseFilter.One(databaseName), cancellationToken);
+
+    /// <summary>
+    /// #5245: <see cref="QueryStoreStatusAsync(NpgsqlDataSource,int,string,string,CancellationToken)"/> over a SET of
+    /// databases. The existing rule is kept as it was, not turned into a per-database verdict: the answer is silent
+    /// (<c>null</c>) when at least one database in scope is READ_WRITE (Query Store is collecting somewhere the read could
+    /// have looked, so the emptiness has another cause), and the precondition envelope when every database in scope
+    /// reports not collecting. <see cref="DatabaseFilter.All"/> reads every database's state, as a null name did.
+    /// </summary>
+    public static async Task<string?> QueryStoreStatusAsync(
+        NpgsqlDataSource postgres,
+        int serverId,
+        string serverName,
+        DatabaseFilter databases,
         CancellationToken cancellationToken = default)
     {
         List<CollectorRuntimePrecondition.QueryStoreDatabaseState> states;
@@ -214,7 +246,7 @@ ORDER BY database_name";
         try
         {
             (states, observedUtc) =
-                await ReadQueryStoreStatesAsync(postgres, serverId, databaseName, cancellationToken);
+                await ReadQueryStoreStatesAsync(postgres, serverId, databases, cancellationToken);
         }
         catch (Exception)
         {
@@ -276,7 +308,7 @@ ORDER BY database_name";
         ReadQueryStoreStatesAsync(
             NpgsqlDataSource postgres,
             int serverId,
-            string? databaseName,
+            DatabaseFilter databases,
             CancellationToken cancellationToken)
     {
         var states = new List<CollectorRuntimePrecondition.QueryStoreDatabaseState>();
@@ -285,7 +317,7 @@ ORDER BY database_name";
         await using var command = postgres.CreateCommand(LatestQueryStoreStatesSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddInt(command, serverId);
-        DarlingMcpReadParameters.AddNullableText(command, string.IsNullOrWhiteSpace(databaseName) ? null : databaseName);
+        command.Parameters.Add(databases.Parameter());
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
 
         while (await reader.ReadAsync(cancellationToken))
