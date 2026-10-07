@@ -10,6 +10,7 @@ using System;
 using System.IO;
 using System.Runtime.CompilerServices;
 using PerformanceMonitor.Darling.Service.Mcp;
+using PerformanceMonitor.Darling.Storage;
 using Xunit;
 
 namespace Darling.Tests;
@@ -109,7 +110,7 @@ public sealed class TopQueriesHourlyRoutingTests
     [Fact]
     public void HourlyFirstBucketSql_IsLeastOfTwoOrderedFirstRowProbes_WithNoUnion()
     {
-        var sql = DarlingDataReader.HourlyFirstBucketSql;
+        var sql = RollupCoverage.HourlyFirstBucketSql;
         Assert.Contains("least(", sql, StringComparison.Ordinal);
         Assert.Contains("$LEGACY$", sql, StringComparison.Ordinal);
         Assert.Contains("$SUCCESSOR$", sql, StringComparison.Ordinal);
@@ -122,28 +123,39 @@ public sealed class TopQueriesHourlyRoutingTests
     [Fact]
     public void HourlyFirstBucketSingleRelationSql_ReadsThePlaceholderRelation_OrderedWithLimitOne()
     {
-        var sql = DarlingDataReader.HourlyFirstBucketSingleRelationSql;
+        var sql = RollupCoverage.HourlyFirstBucketSingleRelationSql;
         Assert.Contains(DarlingDataReader.TopQueriesHourlyFromPlaceholder, sql, StringComparison.Ordinal);
         Assert.Contains("ORDER BY f.bucket LIMIT 1", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("UNION", sql, StringComparison.OrdinalIgnoreCase);
     }
 
-    /// <summary>The seam splits at the same floor the stitch uses, and both hourly readers go through it.</summary>
+    /// <summary>The seam splits at the same floor the stitch uses, and the service's readers and the Viewer's grids go through
+    /// the ONE copy in Storage (#5329).</summary>
     [Fact]
     public void GetHourlyFirstBucketAsync_SplitsAtStitchFloor_AndBothReadersUseIt()
     {
-        var source = File.ReadAllText(FindReaderSourcePath());
-        var start = source.IndexOf("private static async Task<DateTime?> GetHourlyFirstBucketAsync(", StringComparison.Ordinal);
+        var storage = File.ReadAllText(Path.Combine(RepoRoot(), "Darling", "PerformanceMonitor.Darling.Storage", "TimescaleSupport.cs"));
+        var start = storage.IndexOf("public async Task<DateTime?> GetHourlyFirstBucketAsync(", StringComparison.Ordinal);
         Assert.True(start >= 0);
-        var end = source.IndexOf("return value is DateTime bucket", start, StringComparison.Ordinal);
-        var body = source[start..end];
-        Assert.Contains(".StitchFloor(", body, StringComparison.Ordinal);
+        var end = storage.IndexOf("return value is DateTime bucket", start, StringComparison.Ordinal);
+        var body = storage[start..end];
+        var source = File.ReadAllText(FindReaderSourcePath());
+        Assert.DoesNotContain("HourlyFirstBucketSql =", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("Task<DateTime?> GetHourlyFirstBucketAsync(", source, StringComparison.Ordinal);
+        foreach (var viewerFile in new[] { "ViewerDataService.QueryStats.cs", "ViewerDataService.ProcedureStats.cs" })
+        {
+            Assert.Contains("coverage.GetHourlyFirstBucketAsync(",
+                File.ReadAllText(Path.Combine(RepoRoot(), "Darling", "PerformanceMonitor.Darling.Viewer", viewerFile)), StringComparison.Ordinal);
+        }
+
+        Assert.Contains("StitchFloor(", body, StringComparison.Ordinal);
         Assert.Contains("SuccessorOf(", body, StringComparison.Ordinal);
         Assert.Contains("HourlyFirstBucketSingleRelationSql", body, StringComparison.Ordinal);
         Assert.Contains("\"UNION\"", body, StringComparison.Ordinal);
-        Assert.Contains("GetHourlyFirstBucketAsync(postgres, coverage, TimescaleSupport.QueryStatsHourlyView,", source, StringComparison.Ordinal);
+        Assert.Contains("coverage.GetHourlyFirstBucketAsync(", source, StringComparison.Ordinal);
+        Assert.Contains("postgres, io ? TimescaleSupport.QueryStatsIoHourlyView : TimescaleSupport.QueryStatsHourlyView,", source, StringComparison.Ordinal);
         /* #5329: the procedures arm picks its relation (io or the stitched legacy view) inside the call. */
-        Assert.Contains("postgres, coverage, io ? TimescaleSupport.ProcedureStatsIoHourlyView : TimescaleSupport.ProcedureStatsHourlyView,", source, StringComparison.Ordinal);
+        Assert.Contains("postgres, io ? TimescaleSupport.ProcedureStatsIoHourlyView : TimescaleSupport.ProcedureStatsHourlyView,", source, StringComparison.Ordinal);
     }
 
     private static string FindReaderSourcePath()
@@ -169,8 +181,11 @@ public sealed class TopQueriesHourlyRoutingTests
 
         var arm = source.Substring(source.IndexOf("private static async Task<(List<TopQueryRow> Rows, DateTime? FirstBucket)> GetTopQueriesByCpuHourlyAsync", StringComparison.Ordinal));
         arm = arm[..arm.IndexOf("/* ─────────────────────────── top procedures", StringComparison.Ordinal)];
-        Assert.Contains("collect.{TimescaleSupport.QueryStatsIoHourlyView} AS f", arm, StringComparison.Ordinal);
-        Assert.Contains("GetHourlyFirstBucketAsync(postgres, coverage, TimescaleSupport.QueryStatsIoHourlyView,", arm, StringComparison.Ordinal);
+        /* #5329: the io FROM goes through StitchedRelationSql like every other hourly relation (no literal relation name). */
+        Assert.Contains("coverage.StitchedRelationSql(\n            io ? TimescaleSupport.QueryStatsIoHourlyView : TimescaleSupport.QueryStatsHourlyView,", arm.Replace("\r\n", "\n"), StringComparison.Ordinal);
+        Assert.DoesNotContain("collect.{TimescaleSupport.QueryStatsIoHourlyView} AS f", arm, StringComparison.Ordinal);
+        Assert.Contains("io ? TimescaleSupport.QueryStatsIoHourlyView : TimescaleSupport.QueryStatsHourlyView,", arm, StringComparison.Ordinal);
+        Assert.Contains("coverage.GetHourlyFirstBucketAsync(", arm, StringComparison.Ordinal);
         Assert.Contains("TopRankings.HourlyIoSums", arm, StringComparison.Ordinal);
 
         var tool = File.ReadAllText(Path.Combine(RepoRoot(), "Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpDataTools.cs"));

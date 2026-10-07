@@ -97,7 +97,9 @@ public sealed class TopProceduresHourlyRoutingTests
 
         var arm = source.Substring(source.IndexOf("private static async Task<(List<TopProcedureRow> Rows, DateTime? FirstBucket)> GetTopProceduresByCpuHourlyAsync", StringComparison.Ordinal));
         arm = arm[..arm.IndexOf("/* ─────────────────────────── query store", StringComparison.Ordinal)];
-        Assert.Contains("collect.{TimescaleSupport.ProcedureStatsIoHourlyView} AS f", arm, StringComparison.Ordinal);
+        /* #5329: the io FROM goes through StitchedRelationSql like every other hourly relation (no literal relation name). */
+        Assert.Contains("coverage.StitchedRelationSql(\n            io ? TimescaleSupport.ProcedureStatsIoHourlyView : TimescaleSupport.ProcedureStatsHourlyView,", arm.Replace("\r\n", "\n"), StringComparison.Ordinal);
+        Assert.DoesNotContain("collect.{TimescaleSupport.ProcedureStatsIoHourlyView} AS f", arm, StringComparison.Ordinal);
         Assert.Contains("io ? TimescaleSupport.ProcedureStatsIoHourlyView : TimescaleSupport.ProcedureStatsHourlyView", arm, StringComparison.Ordinal);
         Assert.Contains("TopRankings.HourlyIoSums", arm, StringComparison.Ordinal);
 

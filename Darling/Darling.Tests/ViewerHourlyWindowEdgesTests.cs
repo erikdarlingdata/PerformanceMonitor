@@ -118,76 +118,76 @@ public sealed class ViewerHourlyWindowEdgesTests
     }
 
     [Fact]
-    public void HourlyServedFloor_IsTheOlderOfTheLegacyAndItsSuccessor_AndNullWhenNeitherHoldsABucket()
-    {
-        var floors = new Dictionary<string, DateTime>(StringComparer.Ordinal)
-        {
-            [TimescaleSupport.QueryStatsHourlyView] = Aligned.AddHours(4),
-            [TimescaleSupport.QueryStatsIntervalHourlyView] = Aligned.AddHours(2),
-            [TimescaleSupport.QueryStatsIoHourlyView] = Aligned.AddHours(6),
-        };
-        Assert.Equal(Aligned.AddHours(2), Coverage(floors).HourlyServedFloor(TimescaleSupport.QueryStatsHourlyView));
-        Assert.Equal(Aligned.AddHours(6), Coverage(floors).HourlyServedFloor(TimescaleSupport.QueryStatsIoHourlyView));
-        Assert.Null(Coverage().HourlyServedFloor(TimescaleSupport.QueryStatsHourlyView));
-    }
-
-    [Fact]
     public void HourlyEdgesNote_NamesACeilingTheFloorAndAnUnalignedEnd_AndSaysNothingWhenNoEdgeMoved()
     {
-        var io = TimescaleSupport.QueryStatsIoHourlyView;
         var end = new DateTime(2026, 1, 5, 12, 15, 0, DateTimeKind.Utc);
-        var noFloor = Coverage();
 
         /* Ceiling known and at or before the end: nothing after it was read, and the note names it. */
         var ceiling = new DateTime(2026, 1, 5, 11, 0, 0, DateTimeKind.Utc);
-        var cut = ViewerDataService.HourlyEdgesNote(noFloor, io, Aligned, end, ceiling);
+        var cut = ViewerDataService.HourlyEdgesNote(Aligned, end, null, ceiling);
         Assert.NotNull(cut);
         Assert.Contains("materialized only to " + Utc(ceiling), cut, StringComparison.Ordinal);
         Assert.Contains("nothing after it was read", cut, StringComparison.Ordinal);
         Assert.DoesNotContain("ceiling unknown", cut, StringComparison.Ordinal);
 
         /* Ceiling null: no bound, and no ceiling text beyond "unknown". */
-        var unknown = ViewerDataService.HourlyEdgesNote(noFloor, io, Aligned, end, null);
+        var unknown = ViewerDataService.HourlyEdgesNote(Aligned, end, null, null);
         Assert.Contains("materialization ceiling unknown", unknown, StringComparison.Ordinal);
         Assert.DoesNotContain("materialized only to", unknown, StringComparison.Ordinal);
 
         /* Ceiling past an unaligned end: the end's bucket is counted whole. */
-        var past = ViewerDataService.HourlyEdgesNote(noFloor, io, Aligned, end, end.AddHours(3));
+        var past = ViewerDataService.HourlyEdgesNote(Aligned, end, null, end.AddHours(3));
         Assert.Contains("is included whole", past, StringComparison.Ordinal);
 
         /* An unaligned start whose rollup starts later: the note names the floor and the data it leaves out. */
         var floor = new DateTime(2026, 1, 5, 12, 0, 0, DateTimeKind.Utc);
-        var floors = new Dictionary<string, DateTime>(StringComparer.Ordinal) { [io] = floor };
-        var late = ViewerDataService.HourlyEdgesNote(Coverage(floors), io, Unaligned, end, end.AddHours(3));
+        var late = ViewerDataService.HourlyEdgesNote(Unaligned, end, floor, end.AddHours(3));
         Assert.Contains("no bucket before " + Utc(floor), late, StringComparison.Ordinal);
         Assert.Contains($"the data from {Utc(Unaligned)} to {Utc(floor)} is not included", late, StringComparison.Ordinal);
 
         /* A floor after an ALIGNED start, with the end cut at the ceiling, names the span actually served. */
         var floor11 = new DateTime(2026, 1, 5, 11, 0, 0, DateTimeKind.Utc);
-        var servedFrom = ViewerDataService.HourlyEdgesNote(
-            Coverage(new Dictionary<string, DateTime>(StringComparer.Ordinal) { [io] = floor11 }), io, Aligned, end, floor);
+        var servedFrom = ViewerDataService.HourlyEdgesNote(Aligned, end, floor11, floor);
         Assert.Contains("served from " + Utc(floor11) + " to " + Utc(floor), servedFrom, StringComparison.Ordinal);
 
         /* A floor at or before the start moves no start edge: an aligned window with a known ceiling past an aligned end says nothing. */
         var alignedEnd = new DateTime(2026, 1, 5, 12, 0, 0, DateTimeKind.Utc);
-        var earlier = new Dictionary<string, DateTime>(StringComparer.Ordinal) { [io] = Aligned.AddDays(-2) };
-        Assert.Null(ViewerDataService.HourlyEdgesNote(Coverage(earlier), io, Aligned, alignedEnd, alignedEnd.AddHours(3)));
+        Assert.Null(ViewerDataService.HourlyEdgesNote(Aligned, alignedEnd, null, alignedEnd.AddHours(3)));
+        /* ... and a server whose first bucket IS the aligned start (the per-server probe's answer) moves none either. */
+        Assert.Null(ViewerDataService.HourlyEdgesNote(Aligned, alignedEnd, Aligned, alignedEnd.AddHours(3)));
     }
 
     [Fact]
     public void HourlyBannerSuffix_IsNullForRaw_TheTierSuffixAloneForHourlyWithoutANote_AndCarriesTheNoteOtherwise()
     {
-        Assert.Null(ViewerServerTab.HourlyBannerSuffix("raw", null));
-        Assert.Null(ViewerServerTab.HourlyBannerSuffix("raw", "a note a raw read never has"));
+        Assert.Null(ViewerServerTab.HourlyBannerSuffix("raw", false, null));
+        Assert.Null(ViewerServerTab.HourlyBannerSuffix("raw", true, "a note a raw read never has"));
 
-        var bare = ViewerServerTab.HourlyBannerSuffix("hourly", null);
+        var bare = ViewerServerTab.HourlyBannerSuffix("hourly", false, null);
         Assert.Contains("aggregated hourly", bare, StringComparison.Ordinal);
         Assert.DoesNotContain("Window edges", bare, StringComparison.Ordinal);
-        Assert.Equal(bare, ViewerServerTab.HourlyBannerSuffix("hourly", ""));
+        Assert.Equal(bare, ViewerServerTab.HourlyBannerSuffix("hourly", false, ""));
 
-        var withNote = ViewerServerTab.HourlyBannerSuffix("hourly", "the hourly rollup is materialized only to X; nothing after it was read");
+        var withNote = ViewerServerTab.HourlyBannerSuffix("hourly", false, "the hourly rollup is materialized only to X; nothing after it was read");
         Assert.StartsWith(bare, withNote, StringComparison.Ordinal);
         Assert.EndsWith("Window edges: the hourly rollup is materialized only to X; nothing after it was read", withNote, StringComparison.Ordinal);
+    }
+
+    /// <summary>#5329: on the io route the grid FILLS reads, physical reads and writes, so the banner must not call them
+    /// blank; the stitched route's text still does. Both keep what the rollup lacks (per-caller detail, spills, min/max).</summary>
+    [Fact]
+    public void HourlyBannerSuffix_OnTheIoRoute_DoesNotCallReadsAndWritesBlank_AndTheStitchedRouteStill_Does()
+    {
+        var stitched = ViewerServerTab.HourlyBannerSuffix("hourly", false, null)!;
+        var io = ViewerServerTab.HourlyBannerSuffix("hourly", true, null)!;
+
+        Assert.Contains("reads, writes, spills", stitched, StringComparison.Ordinal);
+        Assert.DoesNotContain("reads, writes", io, StringComparison.Ordinal);
+        Assert.Contains("per-caller detail, spills and min/max CPU and duration are not kept", io, StringComparison.Ordinal);
+
+        var withNote = ViewerServerTab.HourlyBannerSuffix("hourly", true, "an edge");
+        Assert.StartsWith(io, withNote, StringComparison.Ordinal);
+        Assert.EndsWith("Window edges: an edge", withNote, StringComparison.Ordinal);
     }
 
     /// <summary>Source pins: each hourly arm takes the ceiling from the shared rule (never a second copy), binds it, and
@@ -206,7 +206,11 @@ public sealed class ViewerHourlyWindowEdgesTests
         Assert.Contains("coverage.HourlyEndCeiling(answeringView, startUtc)", body, StringComparison.Ordinal);
         Assert.Contains(builder + "(fromClause, withIo: useIo, ceiling: ceiling)", body, StringComparison.Ordinal);
         Assert.Contains("AddHourlyCeilingParameter(command, ceiling)", body, StringComparison.Ordinal);
-        Assert.Contains("HourlyEdgesNote(coverage, answeringView, startUtc, endUtc, ceiling)", body, StringComparison.Ordinal);
+        /* #5329: the start edge is this SERVER's first bucket, from the one probe the service runs too (in Storage). */
+        Assert.Contains("coverage.GetHourlyFirstBucketAsync(", body, StringComparison.Ordinal);
+        Assert.Contains("_dataSource, answeringView, serverId, startUtc, endUtc, ceiling", body, StringComparison.Ordinal);
+        Assert.Contains("HourlyEdgesNote(startUtc, endUtc, firstBucket, ceiling)", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("HourlyServedFloor", body, StringComparison.Ordinal);
         Assert.Contains("coverage.StitchedRelationSql(answeringView", body, StringComparison.Ordinal);
     }
 
@@ -221,7 +225,8 @@ public sealed class ViewerHourlyWindowEdgesTests
         Assert.DoesNotContain("StitchFloor(", declaration, StringComparison.Ordinal);
 
         var tab = File.ReadAllText(FindSource("PerformanceMonitor.Darling.Viewer", "ViewerServerTab.Queries.cs"));
-        Assert.Equal(4, System.Text.RegularExpressions.Regex.Matches(tab, @"HourlyBannerSuffix\(read\.Tier, read\.HourlyEdgesNote\)").Count);
+        Assert.Equal(4, System.Text.RegularExpressions.Regex.Matches(
+            tab, @"HourlyBannerSuffix\(read\.Tier, read\.IoRoute, read\.HourlyEdgesNote\), HourlyServedOf\(read\.Tier, read\.HourlyFirstBucket\)").Count);
     }
 
     private static string FindSource(string project, string file)

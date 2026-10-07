@@ -108,16 +108,13 @@ public sealed partial class ViewerDataService
     /// <summary>
     /// #5329: the window's real edges for an hourly-routed grid, in the words the MCP tools use
     /// (<see cref="HourlyWindowEdges.Note"/>, the text <c>get_top_queries_by_cpu</c> and <c>get_top_procedures_by_cpu</c>
-    /// put in their precision note). <paramref name="legacyView"/> is the relation the read was served from (the io
-    /// rollup, or the interval one); the floor is <see cref="RollupCoverage.HourlyServedFloor"/> of it and counts only
-    /// when it lies after the window's start (a floor at or before the start moves no edge, which the note then
-    /// derives from the hour alignment alone, as the service does when its first-bucket probe finds the start).
+    /// put in their precision note). <paramref name="firstBucket"/> is the first rollup bucket THIS SERVER holds inside the
+    /// window, the answer of <see cref="RollupCoverage.GetHourlyFirstBucketAsync"/> (the one probe the service's tools run
+    /// too), so a server added after the store's oldest one names its own start and not the store's. Null when the server
+    /// holds no bucket in the window.
     /// </summary>
-    internal static string? HourlyEdgesNote(
-        RollupCoverage coverage, string legacyView, DateTime startUtc, DateTime endUtc, DateTime? ceiling)
+    internal static string? HourlyEdgesNote(DateTime startUtc, DateTime endUtc, DateTime? firstBucket, DateTime? ceiling)
     {
-        var floor = coverage.HourlyServedFloor(legacyView);
-        var firstBucket = floor is { } f && f > startUtc ? f : (DateTime?)null;
         var note = HourlyWindowEdges.Note(startUtc, firstBucket, endUtc, ceiling);
         return string.IsNullOrEmpty(note) ? null : note;
     }
@@ -137,6 +134,9 @@ public sealed partial class ViewerDataService
 /// <summary>
 /// #5329: a routed Top Queries / Top Procedures read: the rows, the tier that answered ("raw" or "hourly"), and, for an
 /// hourly read only, the window's real edges (<c>ViewerDataService.HourlyEdgesNote</c>: the text the MCP tools put in
-/// their precision note, null when no edge moved).
+/// their precision note, null when no edge moved), whether the rows came from the io rollup (which keeps reads and
+/// writes, so the banner must not call them blank) and the first bucket this server holds in the window (the start the
+/// grid really covers).
 /// </summary>
-public sealed record ViewerRoutedRead<TRow>(List<TRow> Rows, string Tier, string? HourlyEdgesNote);
+public sealed record ViewerRoutedRead<TRow>(
+    List<TRow> Rows, string Tier, string? HourlyEdgesNote, bool IoRoute = false, DateTime? HourlyFirstBucket = null);

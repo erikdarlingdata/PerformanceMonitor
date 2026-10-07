@@ -133,9 +133,11 @@ public sealed class RollupFloorCacheLiveTests
         var floorSecond = secondCall.FloorOf(TimescaleSupport.QueryStoreStatsIntervalHourlyView);
         Assert.Equal(floorFirst, floorSecond);
 
-        var minBucketExecutions = loggerFactory.Provider.CountContaining(
-            $"min(bucket) FROM collect.{TimescaleSupport.QueryStoreStatsIntervalHourlyView}");
+        /* #5329: counted by the probes' fixed markers (ColdFloorMarker, EarlierFloorMarker), not by how a statement spells
+           min(bucket): one cold probe across both calls, and the warm call's bounded earlier-floor read exactly once. */
+        var minBucketExecutions = loggerFactory.Provider.CountContaining(MinBucketStatement);
         Assert.Equal(1, minBucketExecutions);
+        Assert.Equal(1, loggerFactory.Provider.CountContaining(EarlierFloorStatement));
 
         /* ── (c) drop_chunks the oldest materialization chunk: the floor must RE-measure and move later.
                drop_chunks is called against the AGGREGATE VIEW (the only relation name that stays stable
@@ -166,7 +168,11 @@ public sealed class RollupFloorCacheLiveTests
     private static readonly string HourlyView = TimescaleSupport.QueryStoreStatsIntervalHourlyView;
 
     /// <summary>The statement text whose executions the #4957 tests count: the hourly rollup's <c>min(bucket)</c>.</summary>
-    private static readonly string MinBucketStatement = $"min(bucket) FROM collect.{TimescaleSupport.QueryStoreStatsIntervalHourlyView}";
+    private static readonly string MinBucketStatement = $"{TimescaleSupport.ColdFloorMarker} min(bucket) FROM collect.{TimescaleSupport.QueryStoreStatsIntervalHourlyView}";
+
+    /// <summary>The bounded earlier-floor probe's fixed marker (#5329); counted beside the cold one, so neither count leans on
+    /// how a statement spells <c>min(bucket)</c>.</summary>
+    private static readonly string EarlierFloorStatement = TimescaleSupport.EarlierFloorMarker;
 
     private static string? BaseConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
 

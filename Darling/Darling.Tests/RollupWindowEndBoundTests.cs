@@ -200,7 +200,7 @@ public sealed class RollupWindowEndBoundTests
     [Fact]
     public void FirstBucketProbes_AreUnchanged()
     {
-        Assert.Contains("f.bucket <= $3$CEIL$", DarlingDataReader.HourlyFirstBucketSql, StringComparison.Ordinal);
-        Assert.Contains("f.bucket <= $3$CEIL$", DarlingDataReader.HourlyFirstBucketSingleRelationSql, StringComparison.Ordinal);
+        Assert.Contains("f.bucket <= $3$CEIL$", RollupCoverage.HourlyFirstBucketSql, StringComparison.Ordinal);
+        Assert.Contains("f.bucket <= $3$CEIL$", RollupCoverage.HourlyFirstBucketSingleRelationSql, StringComparison.Ordinal);
     }
 }

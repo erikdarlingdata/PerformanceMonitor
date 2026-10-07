@@ -750,7 +750,7 @@ const TOP_RANKINGS = [
 const topRankingPick = { queries: "cpu", procedures: "cpu" };
 
 /* A reads ranking reads raw, or (#5329) the io hourly rollup (query_stats_io_hourly, procedure_stats_io_hourly) once that reaches the window's
-   start, and which of them answered is the tool's business, not the page's: the stitched hourly rollups keep no logical reads, but the io
+   start or reaches further back than raw, and which of them answered is the tool's business, not the page's: the stitched hourly rollups keep no logical reads, but the io
    ones do. So the card holds no sentence of its own about the source (the one it had named raw as the only source, which is
    false on the io route). What a reader needs from the answer is whether it covers the window, and that rides on the window note: over a
    window past what raw keeps, a raw-routed read says so in `retention_notice`, the retention notice the composed panels carry, and a

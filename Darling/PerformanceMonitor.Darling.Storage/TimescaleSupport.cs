@@ -9516,13 +9516,23 @@ AND   ca.view_name IN ({views})";
     {
         var columns = RollupViews
             .Select(r => availability.Has(r.View) && (measure is null || measure.Contains(r.View))
-                ? $"(SELECT min(bucket) FROM collect.{r.View})"
+                ? $"(SELECT {ColdFloorMarker} min(bucket) FROM collect.{r.View})"
                 : "NULL::timestamp")
             /* The raw tables are migration-created and always exist, so they need no availability gate. */
             .Concat(RolledRawTables.Select(t => $"(SELECT min(collection_time) FROM collect.{t})"));
 
         return "SELECT " + string.Join(", ", columns);
     }
+
+    /// <summary>The fixed marker the cold coverage probe (<see cref="RollupCoverageProbeSql(RollupAvailability,IReadOnlySet{string}?)"/>)
+    /// carries inside every rollup column it measures (#5329): <c>(SELECT marker min(bucket) FROM collect.&lt;view&gt;)</c>. The
+    /// floor-cache tests count the statements that carry the marker beside one view, so the count is of THIS probe and does not
+    /// depend on how any other statement spells its <c>min(bucket)</c>.</summary>
+    internal const string ColdFloorMarker = "/* coverage-floor:cold */";
+
+    /// <summary>The fixed marker the bounded earlier-floor probe (<see cref="RollupEarlierFloorProbeSql"/>) carries (#5329); see
+    /// <see cref="ColdFloorMarker"/>.</summary>
+    internal const string EarlierFloorMarker = "/* coverage-floor:earlier */";
 
     /// <summary>
     /// #4539: for each rollup PRESENT in <paramref name="availability"/>, its materialization's OLDEST chunk —
@@ -9820,13 +9830,14 @@ WHERE ca.view_schema = 'collect'
     /// bucket is at or after the cached floor is skipped without being decompressed, so a rollup with nothing earlier
     /// costs a metadata read, not the cold sort of <see cref="RollupCoverageProbeSql(RollupAvailability,IReadOnlySet{string}?)"/>.
     /// A non-NULL answer IS the new floor: everything at or after the cached floor is not smaller, so the smallest row
-    /// below it is the smallest row there is. NULL means the cached floor still stands. The alias form (<c>m.bucket</c>)
-    /// is deliberate: it keeps this statement apart from the cold <c>min(bucket) FROM collect.&lt;view&gt;</c> the
-    /// floor-cache tests count to prove that probe is not re-run.
+    /// below it is the smallest row there is. NULL means the cached floor still stands. The statement carries
+    /// <see cref="EarlierFloorMarker"/> and the cold probe <see cref="ColdFloorMarker"/>, which is what the floor-cache tests
+    /// count to prove the cold probe is not re-run (the alias spelling is no longer what keeps them apart).
     /// </summary>
     internal static string RollupEarlierFloorProbeSql(IReadOnlyList<string> views)
         => "SELECT " + string.Join(", ", views.Select((view, i) =>
-            string.Create(CultureInfo.InvariantCulture, $"(SELECT min(m.bucket) FROM collect.{view} AS m WHERE m.bucket < ${i + 1}::timestamp)")));
+            string.Create(CultureInfo.InvariantCulture, $"(SELECT min(m.bucket) FROM collect.{view} AS m WHERE m.bucket < ${i + 1}::timestamp)")))
+           + " " + EarlierFloorMarker;
 
     /// <summary>
     /// #5329: runs <see cref="RollupEarlierFloorProbeSql"/> for <paramref name="views"/> against their cached floors and
@@ -14388,17 +14399,96 @@ public sealed class RollupCoverage
     }
 
     /// <summary>
-    /// #5329: the oldest bucket an hourly read over <paramref name="legacyHourly"/> can serve: the older of the legacy
-    /// relation's floor and its successor's (a stitched read takes the legacy below the stitch floor and the successor
-    /// from it, and a single-relation read names the one that reaches back further), so the oldest of the two is where
-    /// the served data starts either way. Null when neither holds a bucket.
+    /// The hourly tier's per-server coverage probe when the read is stitched: the first bucket the ranked read's
+    /// window actually holds for this server. A stitched <c>UNION ALL</c> cannot give an ordered first row (the
+    /// planner cannot merge-append it in order, so <c>ORDER BY ... LIMIT 1</c> over it sorts every row the server
+    /// has), so the probe splits at the stitch floor F, the same F <see cref="StitchedRelationSql"/>
+    /// uses (<see cref="StitchFloor"/> is documented to agree with it exactly). The legacy relation
+    /// only holds rows below F, so the first bucket of the stitch is <c>least()</c> of the legacy relation's first
+    /// bucket below F and the successor's first bucket from F; <c>least()</c> ignores a null half. Each half is an
+    /// ordered <c>LIMIT 1</c> over one relation. $1 server_id, $2/$3 window (naive UTC), $4 F (naive UTC).
+    /// Null when the server has no bucket in the window. <c>$LEGACY$</c> and <c>$SUCCESSOR$</c> are relation names.
+    /// #5329: moved here from the service's reader so the Viewer's grids and the MCP tools run ONE copy of the probe
+    /// (the start edge is per server on both).
     /// </summary>
-    public DateTime? HourlyServedFloor(string legacyHourly)
+    public const string HourlyFirstBucketSql =
+        "SELECT least(" +
+        "(SELECT f.bucket FROM collect.$LEGACY$ AS f WHERE f.server_id = $1 AND f.bucket >= $2 AND f.bucket < $4 AND f.bucket <= $3$CEIL$ ORDER BY f.bucket LIMIT 1), " +
+        "(SELECT f.bucket FROM collect.$SUCCESSOR$ AS f WHERE f.server_id = $1 AND f.bucket >= $4 AND f.bucket >= $2 AND f.bucket <= $3$CEIL$ ORDER BY f.bucket LIMIT 1))";
+
+    /// <summary>
+    /// The coverage probe when <see cref="StitchFloor"/> answers null: the window is served by ONE
+    /// relation, and <c>$FROM$</c> is replaced with the exact single-relation splice
+    /// <see cref="StitchedRelationSql"/> returns. <c>ORDER BY ... LIMIT 1</c> stops at the first
+    /// bucket. Never used over a stitch (a <c>UNION ALL</c> cannot be read in order; see
+    /// <see cref="HourlyFirstBucketSql"/>). $1 server_id, $2/$3 window (naive UTC).
+    /// </summary>
+    public const string HourlyFirstBucketSingleRelationSql =
+        "SELECT f.bucket FROM $FROM$ WHERE f.server_id = $1 AND f.bucket >= $2 AND f.bucket <= $3$CEIL$ ORDER BY f.bucket LIMIT 1";
+
+    /// <summary>The placeholder <see cref="HourlyFirstBucketSingleRelationSql"/> (and the service's hourly top-N
+    /// statements) carry where the FROM splice goes.</summary>
+    public const string HourlyFromPlaceholder = "$FROM$";
+
+    /// <summary>Where the hourly reads carry the materialization-ceiling bound. Replaced with
+    /// <see cref="HourlyCeilingClause"/> when the ceiling is known and with the empty string when it is not.</summary>
+    public const string HourlyCeilingPlaceholder = "$CEIL$";
+
+    /// <summary>The ceiling bound: a bucket at or after the relation's materialization ceiling is never read, so
+    /// "nothing after the ceiling was read" holds by construction. <paramref name="ordinal"/> is the bound
+    /// parameter's position; the value is bound, never computed in SQL.</summary>
+    public static string HourlyCeilingClause(int ordinal) => " AND f.bucket < $" + ordinal.ToString(CultureInfo.InvariantCulture);
+
+    /// <summary>Runs the coverage probe for <paramref name="legacy"/>'s hourly tier: two ordered first-row probes
+    /// split at the stitch floor when the read is stitched (<see cref="HourlyFirstBucketSql"/>), one probe when a
+    /// single relation serves the window (<see cref="HourlyFirstBucketSingleRelationSql"/>). It is per SERVER: the
+    /// first bucket THIS server holds in the window, which is what a window that starts before the server was added
+    /// needs (the store-wide floor belongs to the oldest server). Null when the server has no bucket in the window.
+    /// The single seam the service's MCP reads and the Viewer's grids share (#5329).</summary>
+    public async Task<DateTime?> GetHourlyFirstBucketAsync(
+        NpgsqlDataSource dataSource, string legacy, int serverId, DateTime startUtc, DateTime endUtc,
+        DateTime? ceiling, int commandTimeoutSeconds, CancellationToken cancellationToken)
     {
-        var legacy = FloorOf(legacyHourly);
-        var successorName = TimescaleSupport.SuccessorOf(legacyHourly);
-        var successor = successorName is null ? null : FloorOf(successorName);
-        return legacy is null ? successor : successor is null ? legacy : (legacy < successor ? legacy : successor);
+        var floor = StitchFloor(legacy, StitchTier.Hourly, startUtc);
+        string sql;
+        if (floor is null)
+        {
+            var splice = StitchedRelationSql(legacy, "f", startUtc, StitchTier.Hourly);
+            if (splice.Contains("UNION", StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidOperationException(
+                    "The hourly coverage probe found a stitched relation where StitchFloor answered a single one.");
+            }
+
+            sql = HourlyFirstBucketSingleRelationSql
+                .Replace(HourlyFromPlaceholder, splice, StringComparison.Ordinal)
+                .Replace(HourlyCeilingPlaceholder, ceiling is null ? "" : HourlyCeilingClause(4), StringComparison.Ordinal);
+        }
+        else
+        {
+            sql = HourlyFirstBucketSql
+                .Replace(HourlyCeilingPlaceholder, ceiling is null ? "" : HourlyCeilingClause(5), StringComparison.Ordinal)
+                .Replace("$LEGACY$", legacy, StringComparison.Ordinal)
+                .Replace("$SUCCESSOR$", TimescaleSupport.SuccessorOf(legacy)!, StringComparison.Ordinal);
+        }
+
+        await using var command = dataSource.CreateCommand(sql);
+        command.CommandTimeout = commandTimeoutSeconds;
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(startUtc, DateTimeKind.Unspecified) });
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(endUtc, DateTimeKind.Unspecified) });
+        if (floor is not null)
+        {
+            command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(floor.Value, DateTimeKind.Unspecified) });
+        }
+
+        if (ceiling is not null)
+        {
+            command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(ceiling.Value, DateTimeKind.Unspecified) });
+        }
+
+        var value = await command.ExecuteScalarAsync(cancellationToken);
+        return value is DateTime bucket ? bucket : null;
     }
 
     /// <summary>Nothing measured — every lookup answers null, so the router keeps its pre-#1759 behaviour.

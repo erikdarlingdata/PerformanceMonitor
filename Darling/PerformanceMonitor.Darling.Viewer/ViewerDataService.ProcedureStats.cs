@@ -187,8 +187,8 @@ public sealed partial class ViewerDataService
 
         if (routedTier == RetentionTier.Hourly)
         {
-            var (hourlyRows, edgesNote) = await GetTopProceduresByCpuHourlyAsync(rollups, coverage, serverId, startUtc, endUtc, top, databaseNames, cancellationToken);
-            return new ViewerRoutedRead<ViewerProcedureStatsRow>(hourlyRows, "hourly", edgesNote);
+            var (hourlyRows, edgesNote, useIo, firstBucket) = await GetTopProceduresByCpuHourlyAsync(rollups, coverage, serverId, startUtc, endUtc, top, databaseNames, cancellationToken);
+            return new ViewerRoutedRead<ViewerProcedureStatsRow>(hourlyRows, "hourly", edgesNote, useIo, firstBucket);
         }
 
         return new ViewerRoutedRead<ViewerProcedureStatsRow>(await GetTopProceduresByCpuRawAsync(serverId, startUtc, endUtc, top, databaseNames, cancellationToken), "raw", null);
@@ -199,7 +199,7 @@ public sealed partial class ViewerDataService
     /// <c>(database_name, schema_name, object_name)</c> (the rollup has no object_type), and leaves
     /// <c>object_type</c>/<c>sql_handle</c>/<c>plan_handle</c>/reads/writes/spills at their defaults — the
     /// rollup has none of those columns.</summary>
-    private async Task<(List<ViewerProcedureStatsRow> Rows, string? EdgesNote)> GetTopProceduresByCpuHourlyAsync(
+    private async Task<(List<ViewerProcedureStatsRow> Rows, string? EdgesNote, bool UseIo, DateTime? FirstBucket)> GetTopProceduresByCpuHourlyAsync(
         RollupAvailability rollups, RollupCoverage coverage, int serverId, DateTime startUtc, DateTime endUtc, int top,
         IReadOnlyList<string>? databaseNames, CancellationToken cancellationToken)
     {
@@ -211,6 +211,9 @@ public sealed partial class ViewerDataService
         /* #5329: the materialization-ceiling bound and the window's real edges, as the queries arm and the service do. */
         var ceiling = coverage.HourlyEndCeiling(answeringView, startUtc);
         var sql = BuildTopProceduresHourlySql(fromClause, withIo: useIo, ceiling: ceiling);
+        /* #5329: this server's own first bucket in the window, from the shared per-server probe, beside the grid read. */
+        var firstBucketTask = coverage.GetHourlyFirstBucketAsync(
+            _dataSource, answeringView, serverId, startUtc, endUtc, ceiling, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
 
         var rows = new List<ViewerProcedureStatsRow>();
         await using var command = _dataSource.CreateCommand(sql);
@@ -240,7 +243,8 @@ public sealed partial class ViewerDataService
             });
         }
 
-        return (rows, HourlyEdgesNote(coverage, answeringView, startUtc, endUtc, ceiling));
+        var firstBucket = await firstBucketTask;
+        return (rows, HourlyEdgesNote(startUtc, endUtc, firstBucket, ceiling), useIo, firstBucket);
     }
 
     /// <summary>The hourly-rollup arm's SQL over <paramref name="fromClause"/>. A rollup bucket is stamped at

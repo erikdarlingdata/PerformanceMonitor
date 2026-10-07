@@ -1515,7 +1515,7 @@ internal static class DarlingDataReader
     /// <see cref="RollupCoverage.StitchedRelationSql"/>'s answer at call time. Never hardcode
     /// <c>query_stats_interval_hourly</c> or <c>query_stats_hourly</c> in its place; see
     /// <see cref="GetTopQueriesByCpuHourlyAsync"/>.</summary>
-    public const string TopQueriesHourlyFromPlaceholder = "$FROM$";
+    public const string TopQueriesHourlyFromPlaceholder = RollupCoverage.HourlyFromPlaceholder;
 
     /// <summary>#5329: the placeholder <see cref="TopQueriesHourlySql"/> carries for the three reads/writes sums —
     /// <see cref="TopRankings.HourlyIoSums"/> on <c>query_stats_io_hourly</c>, <see cref="TopRankings.HourlyNoIoSums"/>
@@ -1716,40 +1716,17 @@ internal static class DarlingDataReader
         ORDER BY p.page_ord
         """;
 
-    /// <summary>
-    /// The hourly tier's per-server coverage probe when the read is stitched: the first bucket the ranked read's
-    /// window actually holds for this server. A stitched <c>UNION ALL</c> cannot give an ordered first row (the
-    /// planner cannot merge-append it in order, so <c>ORDER BY … LIMIT 1</c> over it sorts every row the server
-    /// has), so the probe splits at the stitch floor F, the same F <see cref="RollupCoverage.StitchedRelationSql"/>
-    /// uses (<see cref="RollupCoverage.StitchFloor"/> is documented to agree with it exactly). The legacy relation
-    /// only holds rows below F, so the first bucket of the stitch is <c>least()</c> of the legacy relation's first
-    /// bucket below F and the successor's first bucket from F; <c>least()</c> ignores a null half. Each half is an
-    /// ordered <c>LIMIT 1</c> over one relation. $1 server_id, $2/$3 window (naive UTC), $4 F (naive UTC).
-    /// Null when the server has no bucket in the window. <c>$LEGACY$</c> and <c>$SUCCESSOR$</c> are relation names.
-    /// </summary>
-    public const string HourlyFirstBucketSql =
-        "SELECT least(" +
-        "(SELECT f.bucket FROM collect.$LEGACY$ AS f WHERE f.server_id = $1 AND f.bucket >= $2 AND f.bucket < $4 AND f.bucket <= $3$CEIL$ ORDER BY f.bucket LIMIT 1), " +
-        "(SELECT f.bucket FROM collect.$SUCCESSOR$ AS f WHERE f.server_id = $1 AND f.bucket >= $4 AND f.bucket >= $2 AND f.bucket <= $3$CEIL$ ORDER BY f.bucket LIMIT 1))";
-
-    /// <summary>
-    /// The coverage probe when <see cref="RollupCoverage.StitchFloor"/> answers null: the window is served by ONE
-    /// relation, and <c>$FROM$</c> is replaced with the exact single-relation splice
-    /// <see cref="RollupCoverage.StitchedRelationSql"/> returns. <c>ORDER BY … LIMIT 1</c> stops at the first
-    /// bucket. Never used over a stitch (a <c>UNION ALL</c> cannot be read in order; see
-    /// <see cref="HourlyFirstBucketSql"/>). $1 server_id, $2/$3 window (naive UTC).
-    /// </summary>
-    public const string HourlyFirstBucketSingleRelationSql =
-        "SELECT f.bucket FROM $FROM$ WHERE f.server_id = $1 AND f.bucket >= $2 AND f.bucket <= $3$CEIL$ ORDER BY f.bucket LIMIT 1";
+    /* #5329: HourlyFirstBucketSql, HourlyFirstBucketSingleRelationSql and the probe itself live in Storage
+       (RollupCoverage.GetHourlyFirstBucketAsync), so the Viewer's grids run the same per-server probe. */
 
     /// <summary>The placeholder the hourly reads carry where the materialization-ceiling bound goes. It is replaced
     /// with <see cref="CeilingClause"/> when the ceiling is known and with the empty string when it is not.</summary>
-    private const string CeilingPlaceholder = "$CEIL$";
+    private const string CeilingPlaceholder = RollupCoverage.HourlyCeilingPlaceholder;
 
     /// <summary>The ceiling bound: a bucket at or after the relation's materialization ceiling is never read, so
     /// "nothing after the ceiling was read" holds by construction. <paramref name="ordinal"/> is the bound
     /// parameter's position; the value is bound, never computed in SQL.</summary>
-    private static string CeilingClause(int ordinal) => " AND f.bucket < $" + ordinal.ToString(System.Globalization.CultureInfo.InvariantCulture);
+    private static string CeilingClause(int ordinal) => RollupCoverage.HourlyCeilingClause(ordinal);
 
     /// <summary>Awaits a probe task whose result is no longer wanted so its fault is observed, never thrown over
     /// the exception already in flight.</summary>
@@ -1765,54 +1742,6 @@ internal static class DarlingDataReader
     /// or an unknown coverage).</summary>
     private static DateTime? HourlyEndCeiling(RollupCoverage coverage, string legacy, DateTime startUtc)
         => coverage.HourlyEndCeiling(legacy, startUtc);
-
-    /// <summary>Runs the coverage probe for <paramref name="legacy"/>'s hourly tier: two ordered first-row probes
-    /// split at the stitch floor when the read is stitched (<see cref="HourlyFirstBucketSql"/>), one probe when a
-    /// single relation serves the window (<see cref="HourlyFirstBucketSingleRelationSql"/>). The single seam a
-    /// cache can wrap.</summary>
-    private static async Task<DateTime?> GetHourlyFirstBucketAsync(
-        NpgsqlDataSource postgres, RollupCoverage coverage, string legacy, int serverId, DateTime startUtc, DateTime endUtc,
-        DateTime? ceiling, CancellationToken cancellationToken)
-    {
-        var floor = coverage.StitchFloor(legacy, RollupCoverage.StitchTier.Hourly, startUtc);
-        string sql;
-        if (floor is null)
-        {
-            var splice = coverage.StitchedRelationSql(legacy, "f", startUtc, RollupCoverage.StitchTier.Hourly);
-            if (splice.Contains("UNION", StringComparison.OrdinalIgnoreCase))
-            {
-                throw new InvalidOperationException(
-                    "The hourly coverage probe found a stitched relation where StitchFloor answered a single one.");
-            }
-
-            sql = HourlyFirstBucketSingleRelationSql
-                .Replace(TopQueriesHourlyFromPlaceholder, splice, StringComparison.Ordinal)
-                .Replace(CeilingPlaceholder, ceiling is null ? "" : CeilingClause(4), StringComparison.Ordinal);
-        }
-        else
-        {
-            sql = HourlyFirstBucketSql
-                .Replace(CeilingPlaceholder, ceiling is null ? "" : CeilingClause(5), StringComparison.Ordinal)
-                .Replace("$LEGACY$", legacy, StringComparison.Ordinal)
-                .Replace("$SUCCESSOR$", TimescaleSupport.SuccessorOf(legacy)!, StringComparison.Ordinal);
-        }
-
-        await using var command = postgres.CreateCommand(sql);
-        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
-        AddWindow(command, serverId, startUtc, endUtc);
-        if (floor is not null)
-        {
-            AddTimestamp(command, floor.Value);
-        }
-
-        if (ceiling is not null)
-        {
-            AddTimestamp(command, ceiling.Value);
-        }
-
-        var value = await command.ExecuteScalarAsync(cancellationToken);
-        return value is DateTime bucket ? bucket : null;
-    }
 
     /// <summary>
     /// The top-N groups by CPU, ranked over the population that passes every filter. <paramref name="minMaxDop"/>
@@ -1857,7 +1786,11 @@ internal static class DarlingDataReader
         string? RetentionNotice = null,
         /* #5329: the hourly rows came from query_stats_io_hourly, so they carry logical reads, physical reads and
            logical writes (the stitched rollups carry none of them). */
-        bool IoRoute = false);
+        bool IoRoute = false,
+        /* #5329: true only when the reads ranking itself sent the read to raw, because the io rollup was absent, empty or
+           reached no further back than raw. A raw read forced by parallel_only / min_dop / host_object grouping leaves it
+           false: those filters are the reason, and the io rollup was never consulted. */
+        bool ReadsForcedRaw = false);
 
     /// <summary>
     /// #4231 stage 3: <see cref="GetTopQueriesByCpuAsync"/>'s routed form, exposing the tier it read so a
@@ -1909,6 +1842,7 @@ internal static class DarlingDataReader
            Any other ranking keeps today's stitched route untouched. A store without io, or with it empty, answers
            a null floor, which never covers. */
         var ioRoute = false;
+        var readsForcedRaw = false;
         if (tier == RetentionTier.Hourly)
         {
             switch (ChooseQueriesHourlyRoute(rollups, coverage, ranking, startUtc))
@@ -1919,6 +1853,7 @@ internal static class DarlingDataReader
                 case HourlyRoute.Raw:
                     tier = RetentionTier.Raw;
                     rawForced = true;
+                    readsForcedRaw = true;
                     break;
             }
         }
@@ -1998,7 +1933,7 @@ internal static class DarlingDataReader
         return (page, candidateCount);
         });
 
-        return new TopQueriesReadResult(rows, RetentionTier.Raw, rawForced, RetentionNotice: retentionNotice);
+        return new TopQueriesReadResult(rows, RetentionTier.Raw, rawForced, RetentionNotice: retentionNotice, ReadsForcedRaw: readsForcedRaw);
     }
 
     /// <summary>
@@ -2064,18 +1999,17 @@ internal static class DarlingDataReader
     {
         /* #5329: the io route names collect.query_stats_io_hourly itself — one relation, no successor, no stitch — and
            selects the three sums; every other read splices the stitched relation as before and projects typed NULLs. */
-        var fromClause = io
-            ? $"collect.{TimescaleSupport.QueryStatsIoHourlyView} AS f"
-            : coverage.StitchedRelationSql(
-                TimescaleSupport.QueryStatsHourlyView, "f", startUtc, RollupCoverage.StitchTier.Hourly);
+        var fromClause = coverage.StitchedRelationSql(
+            io ? TimescaleSupport.QueryStatsIoHourlyView : TimescaleSupport.QueryStatsHourlyView,
+            "f", startUtc, RollupCoverage.StitchTier.Hourly);
         var sql = TopRankings.Apply(TopQueriesHourlySql, ranking, hourly: true, io: io)
             .Replace(TopQueriesHourlyFromPlaceholder, fromClause, StringComparison.Ordinal)
             .Replace(TopQueriesHourlyIoSumsPlaceholder, io ? TopRankings.HourlyIoSums : TopRankings.HourlyNoIoSums, StringComparison.Ordinal)
             .Replace(CeilingPlaceholder, ceiling is null ? "" : CeilingClause(7), StringComparison.Ordinal);
 
-        var firstBucketTask = io
-            ? GetHourlyFirstBucketAsync(postgres, coverage, TimescaleSupport.QueryStatsIoHourlyView, serverId, startUtc, endUtc, ceiling, cancellationToken)
-            : GetHourlyFirstBucketAsync(postgres, coverage, TimescaleSupport.QueryStatsHourlyView, serverId, startUtc, endUtc, ceiling, cancellationToken);
+        var firstBucketTask = coverage.GetHourlyFirstBucketAsync(
+            postgres, io ? TimescaleSupport.QueryStatsIoHourlyView : TimescaleSupport.QueryStatsHourlyView,
+            serverId, startUtc, endUtc, ceiling, McpCommandDeadlines.ReadSeconds, cancellationToken);
         List<TopQueryRow> rows;
         try
         {
@@ -2439,18 +2373,17 @@ internal static class DarlingDataReader
     {
         /* #5329: the io route names collect.procedure_stats_io_hourly itself (one relation, no successor, no stitch) and
            selects the three sums; every other read splices the stitched relation as before and projects typed NULLs. */
-        var fromClause = io
-            ? $"collect.{TimescaleSupport.ProcedureStatsIoHourlyView} AS f"
-            : coverage.StitchedRelationSql(
-                TimescaleSupport.ProcedureStatsHourlyView, "f", startUtc, RollupCoverage.StitchTier.Hourly);
+        var fromClause = coverage.StitchedRelationSql(
+            io ? TimescaleSupport.ProcedureStatsIoHourlyView : TimescaleSupport.ProcedureStatsHourlyView,
+            "f", startUtc, RollupCoverage.StitchTier.Hourly);
         var sql = TopRankings.Apply(TopProceduresHourlySql, ranking, hourly: true, io: io)
             .Replace(TopProceduresHourlyFromPlaceholder, fromClause, StringComparison.Ordinal)
             .Replace(TopProceduresHourlyIoSumsPlaceholder, io ? TopRankings.HourlyIoSums : TopRankings.HourlyNoIoSums, StringComparison.Ordinal)
             .Replace(CeilingPlaceholder, ceiling is null ? "" : CeilingClause(6), StringComparison.Ordinal);
 
-        var firstBucketTask = GetHourlyFirstBucketAsync(
-            postgres, coverage, io ? TimescaleSupport.ProcedureStatsIoHourlyView : TimescaleSupport.ProcedureStatsHourlyView,
-            serverId, startUtc, endUtc, ceiling, cancellationToken);
+        var firstBucketTask = coverage.GetHourlyFirstBucketAsync(
+            postgres, io ? TimescaleSupport.ProcedureStatsIoHourlyView : TimescaleSupport.ProcedureStatsHourlyView,
+            serverId, startUtc, endUtc, ceiling, McpCommandDeadlines.ReadSeconds, cancellationToken);
         var rows = new List<TopProcedureRow>();
         try
         {

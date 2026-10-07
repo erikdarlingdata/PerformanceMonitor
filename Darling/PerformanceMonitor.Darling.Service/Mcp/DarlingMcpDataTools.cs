@@ -685,9 +685,9 @@ public sealed class DarlingMcpDataTools
                     forcedBy.Add("parallel_only / min_dop / group_by=host_object need per-row DOP and host_object, which only raw query_stats carries; this read stayed on raw, which reaches back to effective_start (window_truncated says whether that cut the window).");
                 }
 
-                if (ranking == TopRanking.Reads)
+                if (ranking == TopRanking.Reads && routed.ReadsForcedRaw)
                 {
-                    /* #5329: reads is answered from collect.query_stats_io_hourly when it reaches the window's start, and
+                    /* #5329: reads is answered from collect.query_stats_io_hourly when it reaches the window's start (or reaches further back than raw), and
                        from raw otherwise: this read is the raw one, so the io rollup was absent, empty or reached no
                        further back than raw does. The stitched rollups keep no logical reads. */
                     forcedBy.Add("order_by=reads needs per-query logical reads. Only raw query_stats and the io hourly rollup (query_stats_io_hourly) carry them, and that rollup was absent, empty or did not reach back further than raw on this store, so this read came from raw query_stats, which reaches back to effective_start (window_truncated says whether that cut the window). Rank by cpu, duration or executions to read the other hourly rollups.");
@@ -713,12 +713,15 @@ public sealed class DarlingMcpDataTools
             {
                 /* #5329: on the io route (query_stats_io_hourly) the rows carry logical reads, physical reads and logical
                    writes, so they are not in the null list; every other hourly read still has none of them. */
-                precisionNote = routed.IoRoute
+                /* ?: binds looser than +: the shared tail (the "does not carry them" sentence and the window edges) sits
+                   outside the conditional's parentheses so it lands on BOTH routes (#5329; unparenthesized, the io route
+                   lost the edges note). The sql_handle caveat is the stitched route's only: it exists because the legacy
+                   query_stats_hourly keeps zero-interval rows, which the io rollup's WHERE excludes. */
+                precisionNote = (routed.IoRoute
                     ? "hourly-rollup rows from query_stats_io_hourly, the rollup that keeps logical reads: total_logical_reads, total_physical_reads and total_logical_writes are the rollup's sums. There is no host-object split (proc-hosted callers sharing a query_hash are combined); query_plan_hash, plan_handle, DOP, rows/spills, distinct_texts and min/max cpu/elapsed are null — "
-                        + "the rollup does not carry them, and its min/max are per-collection sums, not per-execution extremes."
-                    : "hourly-rollup rows: no host-object split (proc-hosted callers sharing a query_hash are combined); query_plan_hash, plan_handle, DOP, reads/writes/physical reads/rows/spills, distinct_texts and min/max cpu/elapsed are null — "
-                        + "the rollup does not carry them, and its min/max are per-collection sums, not per-execution extremes."
-                    + " sql_handle is the rollup's MAX(sql_handle), which can name a handle seen only on a zero-interval collection that raw excludes; totals are unaffected."
+                    : "hourly-rollup rows: no host-object split (proc-hosted callers sharing a query_hash are combined); query_plan_hash, plan_handle, DOP, reads/writes/physical reads/rows/spills, distinct_texts and min/max cpu/elapsed are null — ")
+                    + "the rollup does not carry them, and its min/max are per-collection sums, not per-execution extremes."
+                    + (routed.IoRoute ? "" : " sql_handle is the rollup's MAX(sql_handle), which can name a handle seen only on a zero-interval collection that raw excludes; totals are unaffected.")
                     + " " + HourlyWindowEdges.Note(requestedStart, floor, now, routed.HourlyCeiling);
             }
 
@@ -743,7 +746,7 @@ public sealed class DarlingMcpDataTools
                     cannot.Add("apply parallel_only/min_dop/group_by=host_object");
                 }
 
-                if (ranking == TopRanking.Reads)
+                if (ranking == TopRanking.Reads && routed.ReadsForcedRaw)
                 {
                     cannot.Add("rank by reads (the stitched rollups carry no per-query logical reads, and the io hourly rollup, query_stats_io_hourly, does not reach this window's start on this store)");
                 }
@@ -1056,8 +1059,9 @@ public sealed class DarlingMcpDataTools
             if (rows.Count == 0)
                 return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "procedure_stats", cancellationToken)
                     ?? (routed.RawForced
-                        /* #5226: a reads ranking is raw-only, so an empty page here means raw holds nothing in the window while
-                           the hourly rollup (which cannot rank by reads) may — not that nothing was collected. */
+                        /* #5226: a reads ranking that read raw (the io rollup, procedure_stats_io_hourly, did not reach back further
+                           than raw), so an empty page here means raw holds nothing in the window while the stitched hourly rollups
+                           (which cannot rank by reads) may — not that nothing was collected. */
                         ? McpHelpers.Status(
                             "empty",
                             "raw procedure_stats holds nothing in this window; the hourly rollup, which covers this window, cannot rank by reads (the stitched rollups carry no per-procedure logical reads, and the io hourly rollup, procedure_stats_io_hourly, does not reach this window's start on this store). Rank by cpu, duration or executions to read the rollup.",
@@ -1079,7 +1083,7 @@ public sealed class DarlingMcpDataTools
             var windowTruncated = RawWindowFloor.IsTruncated(floor, requestedStart);
             if (routed.RawForced)
             {
-                /* #5329: reads is answered from collect.procedure_stats_io_hourly when it reaches the window's start, and
+                /* #5329: reads is answered from collect.procedure_stats_io_hourly when it reaches the window's start (or reaches further back than raw), and
                    from raw otherwise: this read is the raw one, so the io rollup was absent, empty or reached no further
                    back than raw does. The stitched rollups keep no logical reads. */
                 precisionNote = "order_by=reads needs per-procedure logical reads. Only raw procedure_stats and the io hourly rollup (procedure_stats_io_hourly) carry them, and that rollup was absent, empty or did not reach back further than raw on this store, so this read came from raw procedure_stats, which reaches back to effective_start (window_truncated says whether that cut the window). Rank by cpu, duration or executions to read the other hourly rollups.";

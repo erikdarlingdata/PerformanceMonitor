@@ -26,7 +26,7 @@ public enum TopRanking
     Duration = 1,
 
     /// <summary>Summed <c>delta_logical_reads</c>. The stitched hourly rollups carry no per-query or per-procedure reads (#5329: the io
-    /// hourly rollups, <c>query_stats_io_hourly</c> and <c>procedure_stats_io_hourly</c>, do, once they reach the window's start).</summary>
+    /// hourly rollups, <c>query_stats_io_hourly</c> and <c>procedure_stats_io_hourly</c>, do, once they reach the window's start or reach further back than raw).</summary>
     Reads = 2,
 
     /// <summary>Summed <c>delta_execution_count</c>.</summary>
@@ -218,7 +218,7 @@ public static class TopRankings
     };
 }
 
-/// <summary>#5329: the relation an Hourly-tier top-queries read names (see <see cref="TopRankings.ChooseHourlyRoute"/>).</summary>
+/// <summary>#5329: the relation an Hourly-tier top-queries or top-procedures read names (see <see cref="TopRankings.ChooseHourlyRoute"/>).</summary>
 public enum HourlyRoute
 {
     /// <summary>The stitched interval-honest rollups (<c>RollupCoverage.StitchedRelationSql</c>), today's route.</summary>

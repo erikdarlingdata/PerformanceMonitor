@@ -344,7 +344,7 @@ public sealed class RollupFloorCacheTests
 
         var sql = TimescaleSupport.RollupCoverageProbeSql(RollupAvailability.All, measure);
 
-        Assert.Contains($"(SELECT min(bucket) FROM collect.{TimescaleSupport.QueryStoreStatsHourlyView})", sql, StringComparison.Ordinal);
+        Assert.Contains($"(SELECT {TimescaleSupport.ColdFloorMarker} min(bucket) FROM collect.{TimescaleSupport.QueryStoreStatsHourlyView})", sql, StringComparison.Ordinal);
         Assert.DoesNotContain($"collect.{TimescaleSupport.QueryStatsHourlyView})", sql, StringComparison.Ordinal);
 
         /* Column count is unchanged — a non-measured present view still contributes a placeholder column,
@@ -371,7 +371,7 @@ public sealed class RollupFloorCacheTests
         /* A literal copy of today's (pre-#4539) output for RollupAvailability.All, so a change to this
            overload's SHAPE (not just its selectivity) cannot slip through unnoticed. */
         var expected = "SELECT " + string.Join(", ", TimescaleSupport.RollupViews
-                .Select(r => $"(SELECT min(bucket) FROM collect.{r.View})")
+                .Select(r => $"(SELECT /* coverage-floor:cold */ min(bucket) FROM collect.{r.View})")
                 .Concat(TimescaleSupport.RolledRawTables.Select(t => $"(SELECT min(collection_time) FROM collect.{t})")));
 
         Assert.Equal(expected, TimescaleSupport.RollupCoverageProbeSql(RollupAvailability.All), StringComparer.Ordinal);

@@ -203,7 +203,7 @@ public sealed class RollupCoverageRoutingTests
             TimescaleSupport.QueryStoreStatsHourlyView, TimescaleSupport.QueryStoreStatsDailyView,
         })
         {
-            Assert.Contains($"(SELECT min(bucket) FROM collect.{view})", sql, StringComparison.Ordinal);
+            Assert.Contains($"(SELECT {TimescaleSupport.ColdFloorMarker} min(bucket) FROM collect.{view})", sql, StringComparison.Ordinal);
 
             /* And every routed view must resolve to a raw table, or its ladder would have no floor to fall to. */
             Assert.NotNull(RollupCoverage.RawTableFor(view));

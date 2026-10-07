@@ -97,8 +97,62 @@ public sealed class TopQueriesIoRouteLiveTests
             var query = "?server=" + ServerName + "&hours=24&as_of=" + Uri.EscapeDataString(WindowEnd.ToString("o")) + "&order_by=reads";
             using var doc = JsonDocument.Parse(await TopRankingLiveTests.WebReadAsync(ioSource, "get_top_queries_by_cpu", query));
             Assert.Equal("hourly", doc.RootElement.GetProperty("tier_used").GetString());
-            Assert.Contains("query_stats_io_hourly", doc.RootElement.GetProperty("precision_note").GetString(), StringComparison.Ordinal);
+            var ioNote = doc.RootElement.GetProperty("precision_note").GetString()!;
+            Assert.Contains("query_stats_io_hourly", ioNote, StringComparison.Ordinal);
             Assert.NotEqual(JsonValueKind.Null, doc.RootElement.GetProperty("queries")[0].GetProperty("total_logical_reads").ValueKind);
+
+            /* The window-edges note rides on the io route too: ?: binds looser than +, and an unparenthesized form dropped it here,
+               leaving the answer silently cut at io's materialization ceiling. The expected text is the shared note over the same
+               read the tool made (24 hours back from as_of). The stitched route's sql_handle caveat is vacuous on io, whose WHERE
+               excludes the zero-interval rows, and is not claimed. */
+            var toolStart = WindowEnd.AddHours(-24);
+            var toolRead = await DarlingDataReader.GetTopQueriesByCpuRoutedAsync(
+                ioSource, ServerId, toolStart, WindowEnd, Top, databaseName: null, ranking: TopRanking.Reads, cancellationToken: ct);
+            Assert.True(toolRead.IoRoute);
+            var edges = HourlyWindowEdges.Note(toolStart, toolRead.HourlyFirstBucket, WindowEnd, toolRead.HourlyCeiling);
+            Assert.False(string.IsNullOrEmpty(edges), "the seed must leave an edge to note (a ceiling before the end), or this pin proves nothing");
+            Assert.Contains(edges, ioNote, StringComparison.Ordinal);
+            Assert.DoesNotContain("sql_handle is the rollup's MAX(sql_handle)", ioNote, StringComparison.Ordinal);
+        });
+
+    /* A reads ranking forced to raw by min_dop is forced by the FILTER: the io rollup covers the window and was never consulted, so the
+       answer must not say it was absent, empty or too shallow. ReadsForcedRaw is true only when the reads ranking itself sent the read to
+       raw. */
+    [Fact]
+    public Task ARaw_ForcedByMinDop_NamesTheFilter_NotAnAbsentIoRollup() =>
+        WithStoreAsync(async (scratch, connection, ct) =>
+        {
+            await IoRollupOracleSeed.PlantAsync(connection, ct, ServerId, ServerName, WindowStart);
+            await TopRankingLiveTests.PlantQueryAsync(connection, ct, "collect.query_stats", ServerId, ServerName, SurvivorAt, "QSURV", 1_000, 1_000, 7, 1);
+            await DarlingMcpTestData.ExecAsync(connection, ct, "UPDATE collect.query_stats SET max_dop = 8 WHERE query_hash = '0xQSURV'");
+            await RefreshAsync(connection, TimescaleSupport.QueryStatsIntervalHourlyView, WindowStart, ct);
+            await RefreshAsync(connection, TimescaleSupport.QueryStatsIoHourlyView, WindowStart, ct);
+
+            await using var ioSource = NpgsqlDataSource.Create(scratch.ConnectionString);
+            var forced = await DarlingDataReader.GetTopQueriesByCpuRoutedAsync(
+                ioSource, ServerId, WindowEnd.AddHours(-24), WindowEnd, Top, databaseName: null, minMaxDop: 4, ranking: TopRanking.Reads, cancellationToken: ct);
+            Assert.Equal(RetentionTier.Raw, forced.Tier);
+            Assert.True(forced.RawForced);
+            Assert.False(forced.ReadsForcedRaw);   /* the filter forced raw; io covers and was not consulted */
+            Assert.Equal("0xQSURV", Assert.Single(forced.Rows).QueryHash);
+
+            var json = await DarlingMcpDataTools.GetTopQueriesRanked(
+                ioSource, ServerName, 24, Top, null, false, 4, "query_hash", WindowEnd.ToString("o"), "summary", "reads", ct);
+            using (var doc = JsonDocument.Parse(json))
+            {
+                var note = doc.RootElement.GetProperty("precision_note").GetString()!;
+                Assert.Contains("parallel_only / min_dop / group_by=host_object", note, StringComparison.Ordinal);
+                Assert.DoesNotContain("absent, empty or did not reach back", note, StringComparison.Ordinal);
+                Assert.DoesNotContain("order_by=reads needs per-query logical reads", note, StringComparison.Ordinal);
+            }
+
+            /* Raw gone: the empty answer names the filter as the thing the rollup cannot apply, and does not claim the io rollup misses the window. */
+            await PurgeRawBeforeAsync(connection, WindowEnd.AddDays(1), ct);
+            var empty = await DarlingMcpDataTools.GetTopQueriesRanked(
+                ioSource, ServerName, 24, Top, null, false, 4, "query_hash", WindowEnd.ToString("o"), "summary", "reads", ct);
+            Assert.Contains("apply parallel_only/min_dop/group_by=host_object", empty, StringComparison.Ordinal);
+            Assert.DoesNotContain("does not reach this window's start", empty, StringComparison.Ordinal);
+            Assert.DoesNotContain("rank by reads", empty, StringComparison.Ordinal);
         });
 
     [Fact]
@@ -159,6 +213,7 @@ public sealed class TopQueriesIoRouteLiveTests
             var reads = await ReadAsync(scratch, TopRanking.Reads, ct);
             Assert.Equal(RetentionTier.Raw, reads.Tier);
             Assert.True(reads.RawForced);
+            Assert.True(reads.ReadsForcedRaw);   /* here the reads ranking itself sent the read to raw: no io rollup */
             Assert.Equal("0xQSURV", Assert.Single(reads.Rows).QueryHash);
 
             var cpu = await ReadAsync(scratch, TopRanking.Cpu, ct);

@@ -123,12 +123,17 @@ public sealed class ViewerHourlyWindowEdgesLiveTests
                 Assert.Equal(1_100L, queries.Rows.Sum(r => r.TotalLogicalReads));
                 Assert.Contains(ceilingText, queries.HourlyEdgesNote, StringComparison.Ordinal);
                 Assert.Contains("nothing after it was read", queries.HourlyEdgesNote, StringComparison.Ordinal);
+                /* The banner's inputs: the io route (reads and writes are filled) and this server's first bucket. */
+                Assert.True(queries.IoRoute);
+                Assert.Equal(H0, queries.HourlyFirstBucket);
 
                 var procedures = await viewer.GetTopProceduresByCpuRoutedAsync(ServerId, H0, end, cancellationToken: ct);
                 Assert.Equal("hourly", procedures.Tier);
                 Assert.Equal(11L, procedures.Rows.Sum(r => r.TotalExecutions));
                 Assert.Equal(1_100L, procedures.Rows.Sum(r => r.TotalLogicalReads));
                 Assert.Contains(ceilingText, procedures.HourlyEdgesNote, StringComparison.Ordinal);
+                Assert.True(procedures.IoRoute);
+                Assert.Equal(H0, procedures.HourlyFirstBucket);
             }
 
             /* ── interval relation: the window starts an hour before the first bucket (io does not cover), so the note
@@ -141,6 +146,8 @@ public sealed class ViewerHourlyWindowEdgesLiveTests
                 Assert.Equal(11L, queries.Rows.Sum(r => r.TotalExecutions));
                 Assert.Contains(ceilingText, queries.HourlyEdgesNote, StringComparison.Ordinal);
                 Assert.Contains(floorText, queries.HourlyEdgesNote, StringComparison.Ordinal);
+                Assert.False(queries.IoRoute);
+                Assert.Equal(H0, queries.HourlyFirstBucket);
 
                 var procedures = await viewer.GetTopProceduresByCpuRoutedAsync(ServerId, WindowStart, end, cancellationToken: ct);
                 Assert.Equal("hourly", procedures.Tier);
@@ -148,6 +155,49 @@ public sealed class ViewerHourlyWindowEdgesLiveTests
                 Assert.Equal(11L, procedures.Rows.Sum(r => r.TotalExecutions));
                 Assert.Contains(ceilingText, procedures.HourlyEdgesNote, StringComparison.Ordinal);
                 Assert.Contains(floorText, procedures.HourlyEdgesNote, StringComparison.Ordinal);
+                Assert.False(procedures.IoRoute);
+                Assert.Equal(H0, procedures.HourlyFirstBucket);
+            }
+
+            /* ── a server added AFTER the store's oldest one: the start edge is per SERVER. Server B's first bucket is H1 while the
+               store-wide floor (server A's) is H0, which is before the window's start; a store-wide floor would say nothing about
+               B's late start, and the banner would name nothing. The probe is the one the service's tools run. ── */
+            const int OtherServerId = ServerId - 1;
+            const string OtherServerName = ServerName + "-later";
+            await DarlingMcpTestData.RegisterServerAsync(connection, OtherServerId, OtherServerName, ct);
+            await PlantQueryAsync(connection, H1.AddMinutes(10), 4, ct, OtherServerId, OtherServerName);
+            await PlantProcedureAsync(connection, H1.AddMinutes(10), 4, ct, OtherServerId, OtherServerName);
+            foreach (var view in new[] { TimescaleSupport.QueryStatsIntervalHourlyView, TimescaleSupport.ProcedureStatsIntervalHourlyView })
+            {
+                await RefreshAsync(connection, view, H1, H2, ct);
+            }
+
+            foreach (var table in new[] { "query_stats", "procedure_stats" })
+            {
+                await using var purgeOther = new NpgsqlCommand($"DELETE FROM collect.{table} WHERE server_id = $1 AND collection_time < $2", connection);
+                purgeOther.Parameters.AddWithValue(OtherServerId);
+                purgeOther.Parameters.AddWithValue(H2);
+                await purgeOther.ExecuteNonQueryAsync(ct);
+            }
+
+            await using (var viewer = new ViewerDataService(scratch.ConnectionString))
+            {
+                var later = await viewer.GetTopQueriesByCpuRoutedAsync(OtherServerId, WindowStart, end, cancellationToken: ct);
+                Assert.Equal("hourly", later.Tier);
+                Assert.Equal(4L, later.Rows.Sum(r => r.TotalExecutions));
+                Assert.Equal(H1, later.HourlyFirstBucket);
+                Assert.Contains("served from " + DateTime.SpecifyKind(H1, DateTimeKind.Utc).ToString("o", CultureInfo.InvariantCulture),
+                    later.HourlyEdgesNote, StringComparison.Ordinal);
+
+                var laterProcedures = await viewer.GetTopProceduresByCpuRoutedAsync(OtherServerId, WindowStart, end, cancellationToken: ct);
+                Assert.Equal(4L, laterProcedures.Rows.Sum(r => r.TotalExecutions));
+                Assert.Equal(H1, laterProcedures.HourlyFirstBucket);
+                Assert.Contains("served from " + DateTime.SpecifyKind(H1, DateTimeKind.Utc).ToString("o", CultureInfo.InvariantCulture),
+                    laterProcedures.HourlyEdgesNote, StringComparison.Ordinal);
+
+                /* Server A, in the same store and the same viewer, still starts at its own first bucket. */
+                var first = await viewer.GetTopQueriesByCpuRoutedAsync(ServerId, WindowStart, end, cancellationToken: ct);
+                Assert.Equal(H0, first.HourlyFirstBucket);
             }
 
             /* ── a bucket materializes AFTER the viewer measured its ceiling (the coverage snapshot is cached per viewer):
@@ -200,7 +250,8 @@ public sealed class ViewerHourlyWindowEdgesLiveTests
     }
 
     /// <summary>One query_stats row: per execution 1,000 us CPU, 900 us elapsed, 100 reads, 10 writes, 1 physical read.</summary>
-    private static async Task PlantQueryAsync(NpgsqlConnection connection, DateTime at, long executions, CancellationToken ct)
+    private static async Task PlantQueryAsync(
+        NpgsqlConnection connection, DateTime at, long executions, CancellationToken ct, int serverId = ServerId, string serverName = ServerName)
     {
         await using var insert = new NpgsqlCommand(@"
 INSERT INTO collect.query_stats
@@ -211,8 +262,8 @@ INSERT INTO collect.query_stats
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)", connection);
         insert.Parameters.AddWithValue(CollectionIdGenerator.Next());
         insert.Parameters.AddWithValue(DarlingMcpTestData.TruncateToSeconds(at));
-        insert.Parameters.AddWithValue(ServerId);
-        insert.Parameters.AddWithValue(ServerName);
+        insert.Parameters.AddWithValue(serverId);
+        insert.Parameters.AddWithValue(serverName);
         insert.Parameters.AddWithValue(Db);
         insert.Parameters.AddWithValue(QueryHash);
         insert.Parameters.AddWithValue("0xHEQ1H");
@@ -229,7 +280,8 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
         await insert.ExecuteNonQueryAsync(ct);
     }
 
-    private static async Task PlantProcedureAsync(NpgsqlConnection connection, DateTime at, long executions, CancellationToken ct)
+    private static async Task PlantProcedureAsync(
+        NpgsqlConnection connection, DateTime at, long executions, CancellationToken ct, int serverId = ServerId, string serverName = ServerName)
     {
         await using var insert = new NpgsqlCommand(@"
 INSERT INTO collect.procedure_stats
@@ -240,8 +292,8 @@ INSERT INTO collect.procedure_stats
 VALUES ($1, $2, $3, $4, $5, 'dbo', $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)", connection);
         insert.Parameters.AddWithValue(CollectionIdGenerator.Next());
         insert.Parameters.AddWithValue(DarlingMcpTestData.TruncateToSeconds(at));
-        insert.Parameters.AddWithValue(ServerId);
-        insert.Parameters.AddWithValue(ServerName);
+        insert.Parameters.AddWithValue(serverId);
+        insert.Parameters.AddWithValue(serverName);
         insert.Parameters.AddWithValue(Db);
         insert.Parameters.AddWithValue(ProcName);
         insert.Parameters.AddWithValue("0x" + ProcName);
