@@ -85,7 +85,8 @@ public sealed class StoreServerPasswordRulesLiveTests
         return script[start..(end + triggerEnd.Length)];
     }
 
-    /// <summary>The edit function as the self-managed script carries it, cut out of the script's text.</summary>
+    /// <summary>The edit function as the self-managed script carries it, cut out of the script's text: the 17-argument
+    /// function and the 15-argument wrapper that follows it (#5452).</summary>
     private static string ByoEditFunctionSql()
     {
         var script = RepoFile.ReadRepoFile("Darling", "tools", "provision-roles.sql").Replace("\r\n", "\n", StringComparison.Ordinal);
@@ -94,7 +95,9 @@ public sealed class StoreServerPasswordRulesLiveTests
         const string functionEnd = "$fn$;";
         var end = script.IndexOf(functionEnd, start, StringComparison.Ordinal);
         Assert.True(end >= 0, "provision-roles.sql carries no end for the edit function");
-        return script[start..(end + functionEnd.Length)];
+        var wrapperEnd = script.IndexOf(functionEnd, end + functionEnd.Length, StringComparison.Ordinal);
+        Assert.True(wrapperEnd >= 0, "provision-roles.sql carries no end for the edit function's legacy wrapper");
+        return script[start..(wrapperEnd + functionEnd.Length)];
     }
 
     private static async Task InsertServerAsync(

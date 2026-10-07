@@ -47,7 +47,7 @@ public sealed class PagerDutyAutoResolveRungTests
     /* ---- the rung ------------------------------------------------------------------------------------ */
 
     [Fact]
-    public void TheRungIsRegisteredAtTheTopOfADenseLadder()
+    public void TheRungIsRegisteredInADenseLadder()
     {
         var versions = PgMigrations.Scripts.Select(s => s.Version).ToList();
 
@@ -57,7 +57,9 @@ public sealed class PagerDutyAutoResolveRungTests
 
         Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
         Assert.Equal(StorageVersion.SchemaVersion, versions.Max());
-        Assert.Equal(RungVersion, StorageVersion.SchemaVersion);
+        /* Not `RungVersion == StorageVersion.SchemaVersion` any more: that asserted this rung is the newest, which
+           stopped being true when V167 landed above it. The top and the declared version agreeing is the line above. */
+        Assert.True(RungVersion < StorageVersion.SchemaVersion);
 
         Assert.Equal(versions.Distinct().OrderBy(v => v), versions);
     }
@@ -106,13 +108,12 @@ public sealed class PagerDutyAutoResolveRungTests
     /// store that is in fact current — permanently, because no later upgrade changes the answer.</para>
     /// </summary>
     [Fact]
-    public void TheProbeMapsAFullyMigratedStoreToThisTopRung()
+    public void TheProbeCarriesThisSentinel_AndAStoreThatStoppedHereMapsToThisRung()
     {
         Assert.Contains($"column_name = '{ResolveColumn}'", ViewerDataService.StoreSchemaProbeSql, StringComparison.Ordinal);
 
         var viewer = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.cs");
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal})", viewer, StringComparison.Ordinal);
-        Assert.DoesNotContain($"reader.GetBoolean({ProbeOrdinal + 1})", viewer, StringComparison.Ordinal);
 
         Assert.Equal(StorageVersion.SchemaVersion, ViewerDataService.RequiredStoreSchemaVersion);
 
@@ -120,8 +121,9 @@ public sealed class PagerDutyAutoResolveRungTests
             .GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
         var arity = method.GetParameters().Length;
 
-        /* The top rung's sentinel IS the last argument. */
-        Assert.Equal(ProbeOrdinal, arity - 1);
+        /* A position within the signature, not its end: this rung stopped being the newest sentinel when V167
+           appended its own. */
+        Assert.True(ProbeOrdinal < arity - 1);
 
         /* Every sentinel true = a fully-migrated store, which must map to exactly this version. */
         var all = Enumerable.Repeat((object)true, arity).ToArray();
@@ -143,9 +145,7 @@ public sealed class PagerDutyAutoResolveRungTests
         Assert.True(v166 >= 0, "the viewer has no V166 sentinel arm — a fully-migrated store would map to 165");
         Assert.True(v165 >= 0, "the V165 arm is gone, so this pin is comparing against nothing");
         Assert.True(v166 < v165, "the V166 arm sits below V165's, so a current store maps one rung low");
-        Assert.Contains(
-            "return " + StorageVersion.SchemaVersion.ToString(CultureInfo.InvariantCulture) + ";",
-            viewer[v166..], StringComparison.Ordinal);
+        Assert.Contains("return 166;", viewer[v166..], StringComparison.Ordinal);
     }
 
     /* ---- every notification-row surface names the column ---------------------------------------------- */

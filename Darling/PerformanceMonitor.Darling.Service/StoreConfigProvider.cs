@@ -1224,8 +1224,8 @@ INSERT INTO config_monitored_servers (
     server_id, name, host, database, auth, username, encrypted_password, encrypt_mode,
     trust_server_certificate, read_only_intent, multi_subnet_failover, excluded_databases,
     monthly_cost_usd, capture_plans, alert_delivery_mode_override, engine, port, is_enabled, plan_force_bot_enabled,
-    remediation_username, remediation_encrypted_password, created_at, modified_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NULL, $14, $16, $17, TRUE, FALSE, $18, $19, $15, $15)
+    remediation_username, remediation_encrypted_password, aws_role_arn, aws_external_id, created_at, modified_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NULL, $14, $16, $17, TRUE, FALSE, $18, $19, $20, $21, $15, $15)
 ON CONFLICT (server_id) DO NOTHING", connection, transaction) { CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds };
             /* THE ALLOCATION SITE. A darling.json entry has no StoredServerId, so this is the derivation —
                and this is where it is minted and made permanent. When new rows stop being hash-keyed
@@ -1265,6 +1265,12 @@ ON CONFLICT (server_id) DO NOTHING", connection, transaction) { CommandTimeout =
                does not exist, deliberately. */
             AddNullableText(command, server.RemediationUsername);
             AddNullableText(command, server.RemediationEncryptedPassword);
+            /* V167 (#5452): the AWS role and its external ID, trimmed with blank as NULL. Seeded for a NEW row only,
+               like every other column here (ON CONFLICT DO NOTHING). An external ID with no role would break the
+               table's check, so it is dropped with the role it belonged to; Validate refuses that file earlier. */
+            var seedRole = AwsRoleSettings.Normalize(server.AwsRoleArn);
+            AddNullableText(command, seedRole);
+            AddNullableText(command, seedRole is null ? null : AwsRoleSettings.Normalize(server.AwsExternalId));
             await command.ExecuteNonQueryAsync(ct);
         }
 
@@ -1749,7 +1755,8 @@ FROM config_notification WHERE id = 1", connection) { CommandTimeout = ServiceCo
         using var command = new NpgsqlCommand(@"
 SELECT name, host, database, auth, username, encrypted_password, encrypt_mode, trust_server_certificate,
        read_only_intent, multi_subnet_failover, excluded_databases, monthly_cost_usd, alert_delivery_mode_override,
-       engine, port, server_id, plan_force_bot_enabled, remediation_username, remediation_encrypted_password
+       engine, port, server_id, plan_force_bot_enabled, remediation_username, remediation_encrypted_password,
+       aws_role_arn, aws_external_id
 FROM config_monitored_servers WHERE is_enabled = TRUE
 ORDER BY name", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoopSeconds };
         using var reader = await command.ExecuteReaderAsync(ct);
@@ -1896,6 +1903,10 @@ ORDER BY name", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoo
                about; it is the shipped state, and it means this server has no phase-1 surface. */
             RemediationUsername = reader.IsDBNull(17) ? null : reader.GetString(17),
             RemediationEncryptedPassword = reader.IsDBNull(18) ? null : reader.GetString(18),
+            /* V167 (#5452): the AWS role and its external ID. Nullable with no default: NULL is every server nobody
+               has pointed at a role, and it means the process's own credentials. */
+            AwsRoleArn = reader.IsDBNull(19) ? null : reader.GetString(19),
+            AwsExternalId = reader.IsDBNull(20) ? null : reader.GetString(20),
         };
 
         /* #5366: the identity a sealed password is bound to is the row's own text, read through the one raw-row mapping

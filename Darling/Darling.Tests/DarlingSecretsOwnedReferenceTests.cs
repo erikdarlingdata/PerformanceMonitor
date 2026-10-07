@@ -419,7 +419,8 @@ public sealed class DarlingSecretsOwnedReferenceTests : IDisposable
         await new StoreConfigProvider(owner).SeedIfEmptyAsync(config, ct);
 
         /* The edit goes through the store's edit function (the real one, from the shared builder). */
-        await using (var function = owner.CreateCommand(DarlingManagedRoles.BuildEditMonitoredServerFunctionSql("config")))
+        await using (var function = owner.CreateCommand(
+            DarlingManagedRoles.BuildEditMonitoredServerFunctionSql("config") + DarlingManagedRoles.BuildEditMonitoredServerLegacyWrapperSql("config")))
         {
             await function.ExecuteNonQueryAsync(ct);
         }

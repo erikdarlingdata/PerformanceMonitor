@@ -128,7 +128,9 @@ public sealed class ServerAddViewerRoleLiveTests : IDisposable
         if (!string.Equals(skip, MissingEditFunction, StringComparison.Ordinal))
         {
             await ExecAsync(owner, DarlingManagedRoles.BuildEditMonitoredServerFunctionSql("config"), ct);
+            await ExecAsync(owner, DarlingManagedRoles.BuildEditMonitoredServerLegacyWrapperSql("config"), ct);
             await ExecAsync(owner, $"GRANT EXECUTE ON FUNCTION config.edit_monitored_server({DarlingManagedRoles.EditMonitoredServerSignature}) TO {roleName}", ct);
+            await ExecAsync(owner, $"GRANT EXECUTE ON FUNCTION config.edit_monitored_server({DarlingManagedRoles.EditMonitoredServerLegacySignature}) TO {roleName}", ct);
         }
 
         return NpgsqlDataSource.Create(new NpgsqlConnectionStringBuilder(ownerString) { Username = roleName, Password = RolePassword }.ConnectionString);

@@ -689,6 +689,50 @@ CREATE TABLE IF NOT EXISTS config.store_statement_baseline
 ALTER TABLE config.config_notification
     ADD COLUMN IF NOT EXISTS pagerduty_auto_resolve boolean NOT NULL DEFAULT FALSE;";
 
+    /// <summary>
+    /// V167 — the per-server AWS role (#5452). Adds to <c>config.config_monitored_servers</c> the IAM role Darling
+    /// assumes to reach an Amazon RDS or Aurora target (<c>aws_role_arn</c>) and the optional external ID that
+    /// goes with it (<c>aws_external_id</c>), plus <c>aws_external_id_set</c>, a stored generated flag the
+    /// read-only roles can SELECT in place of the ID itself. Every existing row gets NULL for all three, which is
+    /// "use the process's own credentials", exactly as before.
+    ///
+    /// <para><b>The constraint is a coarse backstop.</b> It refuses an external ID with no role (no term of the
+    /// CHECK can be NULL, so a NULL role with a non-NULL ID is false, not unknown), a role that is not an IAM role
+    /// ARN, and an external ID outside AWS's character set and length. The lengths are separate <c>char_length</c>
+    /// terms because PostgreSQL's regular expressions refuse a repeat count above 255. The exact rules, with their messages, live
+    /// in <c>AwsRoleSettings</c>; this only stops a blind write from storing a value no surface would accept.
+    /// Added behind a <c>pg_constraint</c> guard, as V62 does, so a re-run is a no-op.</para>
+    ///
+    /// <para><b>Idempotent and non-data-moving:</b> <c>IF NOT EXISTS</c> columns and the guarded constraint, no
+    /// rows rewritten by the script itself (the stored generated column fills from the table's own rows).
+    /// The columns are classified in <c>DarlingManagedRoles.ViewerRestrictedConfigTables</c> (the role and the
+    /// flag readable, the external ID not) and in <c>Darling/tools/provision-roles.sql</c>.</para>
+    ///
+    /// <para><b>No Lite twin.</b> Lite makes no AWS call.</para>
+    ///
+    /// <para><b>Numbered 167, the ladder's next free version</b> (the top was 166); the convention is dense,
+    /// consecutive versions.</para>
+    /// </summary>
+    private const string V167Sql = @"
+ALTER TABLE config.config_monitored_servers ADD COLUMN IF NOT EXISTS aws_role_arn text;
+ALTER TABLE config.config_monitored_servers ADD COLUMN IF NOT EXISTS aws_external_id text;
+ALTER TABLE config.config_monitored_servers ADD COLUMN IF NOT EXISTS aws_external_id_set boolean
+    GENERATED ALWAYS AS (aws_external_id IS NOT NULL) STORED;
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint
+                   WHERE conname = 'config_monitored_servers_aws_role_check'
+                     AND conrelid = 'config.config_monitored_servers'::regclass) THEN
+        ALTER TABLE config.config_monitored_servers
+            ADD CONSTRAINT config_monitored_servers_aws_role_check CHECK (
+                (aws_external_id IS NULL OR aws_role_arn IS NOT NULL)
+                AND (aws_role_arn IS NULL OR (aws_role_arn ~ '^arn:aws(-[a-z]+)*:iam::[0-9]{12}:role/[!-~]+$'
+                                              AND char_length(aws_role_arn) <= 2048))
+                AND (aws_external_id IS NULL OR (aws_external_id ~ '^[A-Za-z0-9_+=,.@:/-]+$'
+                                                 AND char_length(aws_external_id) BETWEEN 2 AND 1224)));
+    END IF;
+END $$;";
+
     public static IReadOnlyList<Migration> Scripts { get; } = new[]
     {
         new Migration(1, "collector-tables", PgSchemaGenerator.GenerateFullSchema()),
@@ -893,6 +937,7 @@ ALTER TABLE config.config_notification
         new Migration(164, "query-stats-hour-ledger", V164Sql),
         new Migration(165, "password-key", V165Sql),
         new Migration(166, "pagerduty-auto-resolve", V166Sql),
+        new Migration(167, "aws-per-server-role", V167Sql),
     };
 
     /// <summary>

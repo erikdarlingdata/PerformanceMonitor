@@ -218,6 +218,14 @@ public sealed class MigrationDataMovingRungCensusPins
             + "creates the table EMPTY in this same migrate run and builds the index instantly; only a "
             + "nightly-build store already holds rows, and only for the few days since it picked up V145 - "
             + "nowhere near the horizon in practice"),
+        new(
+            167,
+            SetsTheFloor: false,
+            "ADD CONSTRAINT ... CHECK on config.config_monitored_servers (#5452) validates every existing row, and the "
+            + "stored generated aws_external_id_set column is filled for every existing row. Both scans are over the "
+            + "monitored-server registry, one row per configured server (about a hundred rows on the largest known "
+            + "store, and every aws_* value NULL at this rung), so each is instant and neither touches data an earlier "
+            + "rung created beyond that table. It does not move the lock-wait floor."),
     ];
 
     /// <summary>

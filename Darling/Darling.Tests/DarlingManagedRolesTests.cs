@@ -146,7 +146,7 @@ public sealed class DarlingManagedRolesTests
     /// <summary>
     /// The rules' three refusal sentences are literal in the managed batch and in the script, and each is the one in
     /// <see cref="ServerConnectionRule"/> that the web, MCP and viewer answers use: every message the rules raise is one of
-    /// the three, and each of the three is raised.
+    /// the three, and each of the three is raised, plus the AWS role rule's (#5452).
     /// </summary>
     [Fact]
     public void TheRulesRefusalSentences_AreTheSharedConstants_InTheManagedBatchAndTheScript()
@@ -156,6 +156,7 @@ public sealed class DarlingManagedRolesTests
             ServerConnectionRule.PasswordNeededOnMoveText,
             ServerConnectionRule.ReferenceRefusedText,
             ServerConnectionRule.RemediationKeptText,
+            AwsRoleSettings.RoleChangeNeedsExternalIdMessage,
         };
         var byo = Regex.Replace(RepoFile.ReadRepoFile("Darling", "tools", "provision-roles.sql"), @"(?m)^\s*--.*$", "");
         var rules = DarlingManagedRoles.BuildServerPasswordRulesSql("config");
@@ -354,7 +355,8 @@ public sealed class DarlingManagedRolesTests
         {
             foreach (var line in viewerGrantLines)
             {
-                Assert.DoesNotContain(secret, line, StringComparison.Ordinal);
+                /* A whole name, not a substring: aws_external_id_set (readable) contains aws_external_id (not). */
+                Assert.DoesNotMatch($"(?<![A-Za-z0-9_]){Regex.Escape(secret)}(?![A-Za-z0-9_])", line);
             }
         }
     }
@@ -367,7 +369,7 @@ public sealed class DarlingManagedRolesTests
             /* V113 (#2138 phase 1): the remediation credential's blob is the same kind of thing as the
                monitoring one beside it — a DPAPI secret — and it authenticates a WRITE, so if anything on
                this table is secret it is. */
-            ["config_monitored_servers"] = new[] { "encrypted_password", "remediation_encrypted_password" },
+            ["config_monitored_servers"] = new[] { "encrypted_password", "remediation_encrypted_password", "aws_external_id" },
             ["config_command"] = new[] { "args_json" },
             /* generic_url is a bearer secret like the sibling webhook URLs, and generic_headers holds the
                Authorization token itself (#1506 / V26). pagerduty_routing_key is the Events API v2 integration
@@ -579,7 +581,8 @@ public sealed class DarlingManagedRolesTests
         {
             foreach (var line in mcpGrantLines)
             {
-                Assert.DoesNotContain(secret, line, StringComparison.Ordinal);
+                /* A whole name, not a substring: aws_external_id_set (readable) contains aws_external_id (not). */
+                Assert.DoesNotMatch($"(?<![A-Za-z0-9_]){Regex.Escape(secret)}(?![A-Za-z0-9_])", line);
             }
         }
     }
