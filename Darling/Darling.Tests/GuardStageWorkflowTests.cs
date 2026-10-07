@@ -237,8 +237,6 @@ public sealed class GuardStageWorkflowTests
         Assert.Contains("exit 1", steps[1], StringComparison.Ordinal);
     }
 
-    /// <summary>Plant: the first of two stacked summaries, for the proof run of #5459.</summary>
-    /// <summary>The build workflow, read with LF line breaks.</summary>
     private static string Yaml() => RepoFile.ReadRepoFileLf(".github", "workflows", "build.yml");
 
     /// <summary>One top-level job, from its key line to the next job's key line.</summary>
