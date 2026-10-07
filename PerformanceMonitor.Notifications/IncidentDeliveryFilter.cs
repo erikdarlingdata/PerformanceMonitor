@@ -173,6 +173,7 @@ public static class IncidentDeliveryFilter
             SeverityOverride = context.SeverityOverride,
             AttachmentXml = attachment?.Xml,
             AttachmentFileName = attachment?.FileName,
+            AgReplicaIdentity = context.AgReplicaIdentity,
             Incidents = kept
         };
 
@@ -222,9 +223,12 @@ public static class IncidentDeliveryFilter
     /// <para>A null context with a roster becomes a context carrying only the roster. That is the metric-level
     /// fan-out — one CPU threshold breached on fifteen servers, or a self-alert, neither of which builds a
     /// context at all — and it is the case where the roster is the only thing naming the other fourteen. The
-    /// four members are enumerated rather than cloned wholesale because <see cref="AlertContext"/> has no copy
-    /// ctor; the filtered copy below enumerates the same four, so a fifth member arriving would be missing from
-    /// both, which is what <c>Lite.Tests</c>' member-count pin on this type is for.</para>
+    /// five members are enumerated rather than cloned wholesale because <see cref="AlertContext"/> has no copy
+    /// ctor; the filtered copy above enumerates the same five (<see cref="AlertContext.AgReplicaIdentity"/>
+    /// rides along so the PagerDuty key derived from THIS copy stays per replica — WebhookAlertService derives
+    /// it from <c>render.Context</c>, so a fold-carrying render that dropped the identity would re-key a paired
+    /// alert per server and the resolve would miss its incident), so a sixth member arriving would be missing
+    /// from both, which is what <c>Lite.Tests</c>' member-count pin on this type is for.</para>
     /// </summary>
     private static AlertContext? WithRoster(AlertContext? context, AlertDetailItem? roster)
     {
@@ -238,6 +242,7 @@ public static class IncidentDeliveryFilter
             SeverityOverride = context?.SeverityOverride,
             AttachmentXml = context?.AttachmentXml,
             AttachmentFileName = context?.AttachmentFileName,
+            AgReplicaIdentity = context?.AgReplicaIdentity,
             Incidents = context?.Incidents
         };
 

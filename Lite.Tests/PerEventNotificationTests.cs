@@ -177,6 +177,23 @@ public class PerEventNotificationTests
         Assert.Equal("7", msg.CurrentValue);
     }
 
+    /// <summary>
+    /// #5368: the per-replica identity rides along with the severity. It describes the FIRING a card
+    /// carries, not one incident, and the PagerDuty key is derived from the context the sender is handed —
+    /// so a card whose copy dropped the identity would re-key the AG pair per server. (The shipped AG state
+    /// edge is stateless and never splits; the pin holds the copy honest anyway, for the shape that does.)
+    /// </summary>
+    [Fact]
+    public void Split_KeepsThePerReplicaIdentity()
+    {
+        var ctx = new AlertContext { AgReplicaIdentity = "OrdersAG:REPLICA-A" };
+        AlertIncidentRenderer.Apply(ctx, new[] { new AlertIncident("k", new[] { "db.dbo.T" }) });
+
+        var msg = Assert.Single(PerEventNotification.Split(ctx, 10));
+
+        Assert.Equal("OrdersAG:REPLICA-A", msg.Context.AgReplicaIdentity);
+    }
+
     [Fact]
     public void Split_OverCap_CapsIndividualAndBatchesOverflow()
     {

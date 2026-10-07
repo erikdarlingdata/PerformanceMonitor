@@ -418,6 +418,8 @@ public sealed class DarlingAlertSettings : IAlertEngineSettings, IAlertSettings
     public string PagerDutyRoutingKey => Opened.Webhooks.PagerDutyRoutingKey;
     public bool PagerDutyUseEuRegion => Opened.Webhooks.PagerDutyUseEuRegion;
     public string PagerDutyProxyAddress => Opened.Webhooks.PagerDutyProxy;
+    /* V166: the store column (authoritative), so a Viewer save lands on the next firing without a restart. */
+    public bool PagerDutyAutoResolve => Opened.Webhooks.PagerDutyAutoResolve;
 
     /// <summary>#3598 (V131): the sparse notification routes, read live through the by-reference config seam
     /// like every sibling — <c>StoreConfigProvider.ApplyToConfig</c> swaps the list on every beacon change,

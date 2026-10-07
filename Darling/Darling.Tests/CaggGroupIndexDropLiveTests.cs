@@ -318,6 +318,14 @@ public sealed class CaggGroupIndexDropLiveTests
     /// A future rung that adds a new probe sentinel must add its artifact's removal here.</summary>
     private static async Task DropArtifactsOfLaterRungsAsync(NpgsqlConnection connection, int simulatedVersion, CancellationToken ct)
     {
+        if (simulatedVersion < 166)
+        {
+            /* V166 - the PagerDuty auto-resolve column on config_notification; the column is the probe's sentinel. */
+            await using var dropAutoResolve = new NpgsqlCommand(
+                "ALTER TABLE config.config_notification DROP COLUMN IF EXISTS pagerduty_auto_resolve", connection);
+            await dropAutoResolve.ExecuteNonQueryAsync(ct);
+        }
+
         if (simulatedVersion < PasswordKeyTables.RungVersion)
         {
             /* V165 (#5366) - the tables for the service's password key; config.password_key is the probe's sentinel.

@@ -1326,6 +1326,7 @@ public partial class SettingsWindow : Window
         PagerDutyRoutingKeyBox.Text = ViewerWebhookSealing.ShownText(r.PagerDutyRoutingKey);
         PagerDutyStatusText.Text = ViewerWebhookSealing.IsSaved(r.PagerDutyRoutingKey) ? ViewerWebhookSealing.KeepHint : "";
         PagerDutyEuRegionCheckBox.IsChecked = r.PagerDutyUseEuRegion;
+        PagerDutyAutoResolveCheckBox.IsChecked = r.PagerDutyAutoResolve;
         PagerDutyProxyAddressBox.Text = r.PagerDutyProxy;
 
         UpdateSmtpControlStates();
@@ -1405,6 +1406,7 @@ public partial class SettingsWindow : Window
         {
             row.PagerDutyRoutingKey = ViewerWebhookSealing.CarryKept(PagerDutyRoutingKeyBox.Text, _loadedNotification?.PagerDutyRoutingKey);
             row.PagerDutyUseEuRegion = PagerDutyEuRegionCheckBox.IsChecked == true;
+            row.PagerDutyAutoResolve = PagerDutyAutoResolveCheckBox.IsChecked == true;
             row.PagerDutyProxy = PagerDutyProxyAddressBox.Text?.Trim() ?? "";
         }
 
@@ -1641,6 +1643,7 @@ public partial class SettingsWindow : Window
         var enabled = PagerDutyWebhookEnabledCheckBox.IsChecked == true;
         PagerDutyRoutingKeyBox.IsEnabled = enabled;
         PagerDutyEuRegionCheckBox.IsEnabled = enabled;
+        PagerDutyAutoResolveCheckBox.IsEnabled = enabled;
         PagerDutyProxyAddressBox.IsEnabled = enabled;
         TestPagerDutyButton.IsEnabled = enabled;
     }
