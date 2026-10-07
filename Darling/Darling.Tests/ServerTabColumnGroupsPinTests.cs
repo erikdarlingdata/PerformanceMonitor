@@ -19,6 +19,7 @@ namespace Darling.Tests;
 /// group named in a grid's group list marks at least one column, every column group is named in the list, and the
 /// default groups are among the listed ones.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class ServerTabColumnGroupsPinTests
 {
     private static string Js() => File.ReadAllText(PathTo("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server-tabs.js"));

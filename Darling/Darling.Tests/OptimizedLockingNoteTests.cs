@@ -132,6 +132,7 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
 
 /// <summary>Source pins for the surfaces that show the optimized-locking note: the web descriptor and the two
 /// WPF loaders.</summary>
+[Trait("Stage", "Guard")]
 public sealed class OptimizedLockingNoteSurfacePinTests
 {
     [Fact]

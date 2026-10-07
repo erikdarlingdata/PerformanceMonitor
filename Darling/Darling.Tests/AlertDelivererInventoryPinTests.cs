@@ -25,6 +25,7 @@ namespace Darling.Tests;
 /// sender, requires the filter at each entry, and lists every file that reaches a notifier or writes an alert history
 /// row, so a new path that skips the deliverer fails here until someone has put the filter on it.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class AlertDelivererInventoryPinTests
 {
     private static readonly string[] SourceRoots =

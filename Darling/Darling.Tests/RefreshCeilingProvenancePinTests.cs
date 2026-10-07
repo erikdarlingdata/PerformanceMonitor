@@ -126,6 +126,7 @@ namespace Darling.Tests;
 /// file not to break the same rule. A rule stated in one paragraph binds nothing in the paragraphs a
 /// reader meets thousands of lines away, so where it is stated is not where it needs enforcing.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class RefreshCeilingProvenancePinTests
 {
     /// <summary>

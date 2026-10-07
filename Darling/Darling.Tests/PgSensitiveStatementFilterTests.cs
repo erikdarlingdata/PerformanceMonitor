@@ -25,6 +25,7 @@ namespace Darling.Tests;
 /// <c>RegexParseException</c> on the POSIX class syntax), so this file only proves the census, not the match
 /// behavior.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class PgSensitiveStatementFilterTests
 {
     /// <summary>

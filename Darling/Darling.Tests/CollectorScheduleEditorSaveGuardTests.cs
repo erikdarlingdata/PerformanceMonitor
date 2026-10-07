@@ -22,6 +22,7 @@ namespace Darling.Tests;
 /// never saw. The Save's contents come from a pure plan (<see cref="CollectorScheduleOverlay.BuildSavePlan"/>), tested here without
 /// a window or a store, and source pins on the window check that it records a failed read, keeps its warning and sends the plan.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class CollectorScheduleEditorSaveGuardTests
 {
     private const string Daily = "index_object_stats";

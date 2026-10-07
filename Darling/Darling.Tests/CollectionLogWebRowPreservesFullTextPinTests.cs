@@ -18,6 +18,7 @@ namespace Darling.Tests;
 /// old default through the row" contract #3897's trend tools pin for <c>TrendBudget.Chart</c>. No rig: a
 /// source-text pin, like <c>PgCappedReadSurfaceTests</c>.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class CollectionLogWebRowPreservesFullTextPinTests
 {
     private const string WebEndpoints =

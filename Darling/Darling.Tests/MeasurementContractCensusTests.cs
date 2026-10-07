@@ -75,6 +75,7 @@ namespace Darling.Tests;
 /// runs this suite on a change there.</description></item>
 /// </list>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class MeasurementContractCensusTests
 {
     /// <summary>The two trees the Lite census cannot reach; everything else is swept there.</summary>

@@ -48,6 +48,7 @@ namespace Darling.Tests;
 /// hazard if it were false. Case-insensitive matching is asserted too: it mirrors the binder, so the guard
 /// can only ever refuse a call the binder would already have mangled.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class McpUnknownArgumentGuardTests
 {
     /// <summary>

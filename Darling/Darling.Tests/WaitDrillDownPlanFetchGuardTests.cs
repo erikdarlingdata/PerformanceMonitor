@@ -40,6 +40,7 @@ namespace Darling.Tests;
 /// unguarded (the pre-fix shape) and running this pin alone fails at the "preceded by a try" assertion for
 /// that handler; restoring the guard turns it green again.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class WaitDrillDownPlanFetchGuardTests
 {
     private static readonly Regex TryKeyword = new(@"\btry\b");

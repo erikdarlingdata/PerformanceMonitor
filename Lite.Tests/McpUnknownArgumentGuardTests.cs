@@ -44,6 +44,7 @@ namespace Lite.Tests;
 /// is not implied by Darling's census: the schemas differ per SKU.</para>
 /// </summary>
 [Trait("Reads", "Darling")]
+[Trait("Stage", "Guard")]
 public sealed class McpUnknownArgumentGuardTests
 {
     /// <summary>All Lite MCP tool classes, discovered by their [McpServerToolType] attribute — the same

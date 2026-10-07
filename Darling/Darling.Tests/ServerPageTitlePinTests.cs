@@ -31,6 +31,7 @@ namespace Darling.Tests;
 /// <see cref="ChartWindowDomainTests"/> pattern). The browser tab title is the static "Darling Web" in
 /// <c>index.html</c> and no script sets <c>document.title</c>, so there is no second place that printed the key.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class ServerPageTitlePinTests
 {
     private static string ServerJs => ReadRepoFileLf(Path.Combine(

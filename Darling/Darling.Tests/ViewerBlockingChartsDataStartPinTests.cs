@@ -17,6 +17,7 @@ namespace Darling.Tests;
 /// How the Blocking tab's Trends and Blocking Stats charts are wired to say where their data starts (#4966): one probe per floor, started
 /// beside the reads and kept out of any join, one banner per floor, each fed from its own floor, and the fan-out width declared.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class ViewerBlockingChartsDataStartPinTests
 {
     private static string Tab => ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerServerTab.Blocking.cs").ReplaceLineEndings("\n");

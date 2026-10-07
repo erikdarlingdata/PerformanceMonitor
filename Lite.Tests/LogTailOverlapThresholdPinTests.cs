@@ -33,6 +33,7 @@ namespace Lite.Tests;
 /// is a claim nobody checks — a regex that silently matches nothing would "pass" while proving nothing,
 /// which is the same shape as the drift itself.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class LogTailOverlapThresholdPinTests
 {
     private static string RepoFile(string relativePath)

@@ -45,6 +45,7 @@ namespace Lite.Tests;
 /// too.</para>
 /// </summary>
 [Trait("Reads", "Darling")]
+[Trait("Stage", "Guard")]
 public sealed class DarlingReadsTraitGuardTests
 {
     private const string TraitText = "[Trait(\"Reads\", \"Darling\")]";

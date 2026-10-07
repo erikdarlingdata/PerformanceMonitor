@@ -17,6 +17,7 @@ namespace Darling.Tests;
 /// copy of the statement the viewer ran before the move, so the move cannot have changed the viewer's SQL, and pin the
 /// end-instant clauses to the filter that adds them.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class JobHistorySqlTextPinTests
 {
     private static string Normalize(string sql) => Regex.Replace(sql, @"\s+", " ").Trim();

@@ -22,6 +22,7 @@ namespace Darling.Tests;
 /// normalised, so a change meant for the procedure grain cannot reach them. A deliberate change to the query views updates the
 /// hash with its reason in the commit.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class ProcedureTrendHourlyQueryViewPinTests
 {
     public static TheoryData<string, string> Statements() => new()

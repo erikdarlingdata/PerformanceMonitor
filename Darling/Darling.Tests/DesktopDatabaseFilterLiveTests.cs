@@ -353,6 +353,7 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)",
 /// narrowed read, the file I/O tab hands it to both trends, and the Locking, PVS and database-size SQL carries the list-form predicate.
 /// A pin on the source, so a tab that stops passing the filter fails here.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class DesktopDatabaseFilterSourcePinTests
 {
     private static string ViewerFile(string name)

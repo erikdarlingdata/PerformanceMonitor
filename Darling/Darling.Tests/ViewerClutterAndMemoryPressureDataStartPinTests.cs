@@ -24,6 +24,7 @@ namespace Darling.Tests;
 /// the tab itself needs a window to run; the banner's behavior is in <c>ViewerClutterAndMemoryPressureDataStartTests</c> and the
 /// store-backed answers are in <c>ViewerClutterAndMemoryPressureDataStartLiveTests</c>.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class ViewerClutterAndMemoryPressureDataStartPinTests
 {
     private static string ViewerFile(string file) => ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", file);

@@ -104,6 +104,7 @@ public sealed class ScratchPostgresQuiesceLiveTests
 /// <c>QuiesceTimescaleJobsAsync</c>, so a new drop site cannot reintroduce the kill of a running TimescaleDB job worker.
 /// A statement is a string literal holding both <c>DROP DATABASE</c> and <c>WITH (FORCE)</c>; comments are blanked first by <see cref="CSharpSourceWalker"/>.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class ScratchPostgresQuiesceCensusTests
 {
     private const string Helper = "QuiesceTimescaleJobsAsync";

@@ -34,6 +34,7 @@ namespace Darling.Tests;
 /// <para>So the pins below come in pairs — what the store now SAYS about each of the three states, and what
 /// it leaves on disk. The second is the one that turns an annoyance into data loss.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class ViewerSettingsFileGuardTests : IDisposable
 {
     /// <summary>A viewer-settings.json a user would recognize: real keys, one trailing comma.</summary>

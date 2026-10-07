@@ -42,6 +42,7 @@ namespace Lite.Tests;
 /// on a stated basis, and that changing either fact is a visible edit here.</para>
 /// </summary>
 [Trait("Reads", "Darling")]
+[Trait("Stage", "Guard")]
 public sealed class OperatorRemediationLiteDivergencePinTests
 {
     /// <summary>

@@ -598,6 +598,7 @@ public sealed class StoreObjectConvergenceStepBehaviourTests
 /// (the positive control, without which "zero" could mean the log was not recording). The figures are in
 /// the PR body; what lives here is the shape that keeps them true.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class CompressionEnableGuardTests
 {
     /// <summary>

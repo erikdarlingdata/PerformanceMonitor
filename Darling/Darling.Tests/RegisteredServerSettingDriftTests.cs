@@ -38,6 +38,7 @@ namespace Darling.Tests;
 /// DPAPI blob, so comparing them would report a WORKING configuration as drift on every start — quite apart
 /// from putting a secret one string interpolation away from a log line.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class RegisteredServerSettingDriftTests
 {
     /// <summary>A darling.json entry: no stored id, so its <c>ServerId</c> is derived from its own address.</summary>

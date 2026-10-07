@@ -25,6 +25,7 @@ namespace PerformanceMonitorLite.Tests;
 /// Source pins, because the defect they hold off is a wiring omission: every tool would still answer, unfiltered.
 /// </summary>
 [Trait("Reads", "Darling")]
+[Trait("Stage", "Guard")]
 public sealed class CrossAppStatementFilterPinTests
 {
     private const string Registration = "AddCallToolFilter(SensitiveStatementOutputFilter.Instance)";

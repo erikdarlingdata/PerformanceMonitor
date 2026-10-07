@@ -71,6 +71,7 @@ namespace Darling.Tests;
 /// without a reader on top of it. That is the same duplication one layer down, it is a larger population
 /// than this one was, and it is deliberately not in scope.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class RepoFileAdoptionTests
 {
     private const string Authority = "RepoFile.cs";
@@ -172,6 +173,8 @@ public sealed class RepoFileAdoptionTests
            identical text; the clock-read twin pin likewise compares a multi-line const body one token apart. */
         /* #4961: its no-drop pin looks for a statement block that runs across a line break in DarlingXeSessions.cs. */
         "AlwaysOnXeSessionsTests.cs",
+        /* #5459: it cuts build.yml into jobs, steps and arms on the line breaks between them. */
+        "GuardStageWorkflowTests.cs",
         "LocalClockBucketKeyTests.cs",
         "LockedModeRestoreCoverageTests.cs",
         /* Its always-on guard pin slices EnsureDatabaseScopedAsync's body up to the method's closing brace, on an
