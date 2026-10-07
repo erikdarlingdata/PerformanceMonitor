@@ -420,7 +420,7 @@ public sealed class StoreConfigProvider
         using var command = new NpgsqlCommand(@"
 SELECT server_id, name, host, database, auth, username, encrypt_mode, trust_server_certificate,
        read_only_intent, multi_subnet_failover, excluded_databases, monthly_cost_usd,
-       alert_delivery_mode_override, engine, port, is_enabled
+       alert_delivery_mode_override, engine, port, is_enabled, aws_role_arn
 FROM config_monitored_servers", connection) { CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds };
         await using var reader = await command.ExecuteReaderAsync(ct);
         while (await reader.ReadAsync(ct))
@@ -445,6 +445,8 @@ FROM config_monitored_servers", connection) { CommandTimeout = ServiceCommandDea
                     AlertDeliveryModeOverride = ParseDeliveryOverride(reader.IsDBNull(12) ? null : reader.GetString(12)),
                     Engine = reader.IsDBNull(13) ? "sqlserver" : reader.GetString(13),
                     Port = reader.IsDBNull(14) ? 0 : reader.GetInt32(14),
+                    /* #5452: the role is compared; the external ID beside it is not read at all (a stored secret). */
+                    AwsRoleArn = reader.IsDBNull(16) ? null : reader.GetString(16),
                 },
                 /* NOT NULL DEFAULT TRUE in the table, so the guard is for a store mid-migration; an unknown
                    enablement reads as ENABLED, which is the direction that keeps the drift visible. */
@@ -768,6 +770,17 @@ FROM config_monitored_servers", connection) { CommandTimeout = ServiceCommandDea
                 EffectivePostgresPort(store.Port),
                 StringComparison.Ordinal,
                 true);
+
+            /* #5452: the AWS role a PostgreSQL server's RDS readers assume. Not a connection setting (the monitoring
+               connection does not use it), so a difference does not touch the password backfill. The external ID is
+               not compared: a stored secret is never read back for a compare. */
+            AddDrift(
+                drift,
+                "awsRoleArn",
+                NoneIfBlank(Trimmed(AwsRoleSettings.Normalize(file.AwsRoleArn))),
+                NoneIfBlank(Trimmed(AwsRoleSettings.Normalize(store.AwsRoleArn))),
+                StringComparison.Ordinal,
+                false);
         }
         else
         {

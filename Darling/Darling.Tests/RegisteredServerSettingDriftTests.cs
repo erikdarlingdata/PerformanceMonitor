@@ -67,6 +67,7 @@ public sealed class RegisteredServerSettingDriftTests
             AlertDeliveryModeOverride = like.AlertDeliveryModeOverride,
             Engine = like.Engine,
             Port = like.Port,
+            AwsRoleArn = like.AwsRoleArn,
         };
 
         copy.StoredServerId = ServerIdHelper.GetDeterministicHashCode(copy.StorageName);
@@ -195,6 +196,38 @@ public sealed class RegisteredServerSettingDriftTests
         Assert.Equal("database", drift.Field);
         Assert.Equal("somewhere-else", drift.FileValue);
         Assert.Equal(explicitName, drift.StoreValue);
+    }
+
+    /// <summary>
+    /// The AWS role a darling.json entry names is compared against the registered row's (#5452): a file role that differs
+    /// from the stored one shows as drift, a blank and an unset role agree, and the external ID beside it is never
+    /// compared or printed.
+    /// </summary>
+    [Fact]
+    public void TheAwsRole_IsCompared_AndTheExternalIdIsNot()
+    {
+        var file = FileEntry("pgtarget", "pgtarget-host");
+        file.Engine = "postgres";
+        file.Auth = "sql";
+        file.Username = "darling_monitor";
+        var store = StoreRow(file);
+
+        Assert.Empty(Compare(file, store));
+
+        file.AwsRoleArn = "  ";
+        Assert.Empty(Compare(file, store));
+
+        file.AwsRoleArn = "arn:aws:iam::123456789012:role/darling-monitor";
+        file.AwsExternalId = "file-external-id";
+        store.AwsExternalId = "stored-external-id";
+        var drift = Assert.Single(Compare(file, store));
+        Assert.Equal("awsRoleArn", drift.Field);
+        Assert.Equal("arn:aws:iam::123456789012:role/darling-monitor", drift.FileValue);
+        Assert.Equal("(none)", drift.StoreValue);
+        Assert.False(drift.AffectsConnection);
+
+        store.AwsRoleArn = file.AwsRoleArn;
+        Assert.Empty(Compare(file, store));
     }
 
     /// <summary>
@@ -886,6 +919,10 @@ public sealed class RegisteredServerSettingDriftTests
         {
             "password", "encryptedPassword",
             "remediationUsername", "remediationEncryptedPassword",
+            /* #5452: the external ID sent with a server's AWS role. Excluded for the credential's reasons: it is a
+               stored secret, and a stored secret is never read back for a compare (the comparison read does not
+               select it), so it cannot reach a log line. The role beside it, awsRoleArn, is compared. */
+            "awsExternalId",
         };
 
         var keys = typeof(MonitoredServer)
@@ -917,6 +954,7 @@ public sealed class RegisteredServerSettingDriftTests
                 AlertDeliveryModeOverride = null,
                 Engine = engine,
                 Port = 5432,
+                AwsRoleArn = "arn:aws:iam::123456789012:role/darling-store",
             };
             store.StoredServerId = ServerIdHelper.GetDeterministicHashCode(store.StorageName);
 
@@ -936,6 +974,8 @@ public sealed class RegisteredServerSettingDriftTests
                 AlertDeliveryModeOverride = AlertNotificationMode.PerEvent,
                 Engine = engine == "postgres" ? "sqlserver" : "postgres",
                 Port = 5433,
+                AwsRoleArn = "arn:aws:iam::123456789012:role/darling-file",
+                AwsExternalId = "file-external-id",
             };
 
             foreach (var d in StoreConfigProvider.CompareServerSettings(file, store))
@@ -961,9 +1001,10 @@ public sealed class RegisteredServerSettingDriftTests
         /* And that the exclusion list has not quietly grown past the credential. The literal IS the
            mechanism: an exclusion is only legitimate with an argument, and the argument belongs in the
            comment above beside the key, so growing this list has to show up in a diff. V113 (#2138 phase 1)
-           added the remediation credential's two keys, which is why it is four rather than two. */
+           added the remediation credential's two keys, and V169 (#5452) the AWS external ID, which is why it is
+           five rather than two. */
         Assert.Equal(
-            new[] { "encryptedPassword", "password", "remediationEncryptedPassword", "remediationUsername" },
+            new[] { "awsExternalId", "encryptedPassword", "password", "remediationEncryptedPassword", "remediationUsername" },
             excluded.OrderBy(k => k).ToArray());
 
         /* The property behind the literal, so this is not purely a frozen list that the next lane bumps
@@ -974,7 +1015,7 @@ public sealed class RegisteredServerSettingDriftTests
         {
             Assert.Matches(
                 new System.Text.RegularExpressions.Regex(
-                    "(?:password|username)$",
+                    "(?:password|username|externalid)$",
                     System.Text.RegularExpressions.RegexOptions.IgnoreCase
                         | System.Text.RegularExpressions.RegexOptions.CultureInvariant),
                 key);

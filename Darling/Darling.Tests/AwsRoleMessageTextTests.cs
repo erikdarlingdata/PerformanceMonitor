@@ -105,7 +105,7 @@ public sealed class AwsRoleMessageTextTests
     [Fact]
     public void ATransientMessage_NamesTheRole_AndHoldsNoneOfTheSdksOwnText()
     {
-        var raw = FakeSts.Error("Throttling", @"Rate exceeded for C:\ProgramData\aws\config on host build-07");
+        var raw = FakeSts.Error("Throttling", @"Rate exceeded for C:\ProgramData\aws\config on host alpha-07");
 
         var ex = AwsRoleAssumeException.ForStsFailure(new AwsRoleKey(Role, Sentinel), "us-east-1", raw);
 
@@ -113,8 +113,8 @@ public sealed class AwsRoleMessageTextTests
         Assert.Contains(Role, ex.Message, StringComparison.Ordinal);
         Assert.Contains("AWS error code Throttling", ex.Message, StringComparison.Ordinal);
         Assert.DoesNotContain("ProgramData", ex.Message, StringComparison.Ordinal);
-        Assert.DoesNotContain("build-07", ex.Message, StringComparison.Ordinal);
-        Assert.Contains("build-07", ex.SourceDetail, StringComparison.Ordinal);
+        Assert.DoesNotContain("alpha-07", ex.Message, StringComparison.Ordinal);
+        Assert.Contains("alpha-07", ex.SourceDetail, StringComparison.Ordinal);
     }
 }
 
