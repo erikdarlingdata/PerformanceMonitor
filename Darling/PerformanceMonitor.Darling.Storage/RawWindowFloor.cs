@@ -83,6 +83,26 @@ public static class RawWindowFloor
             WHERE w.server_id = $1
             AND   w.collection_time >= $2
             AND   w.collection_time <= $3
+        ){CoverageByRunsSql(table)}
+        """;
+
+    /// <summary>
+    /// #5449: <c>procedure_stats</c> stores a row only for a procedure that did work in a cycle (or a first sighting or a counter
+    /// reset), so a window the collector covered while every procedure sat idle holds no row, and the probe would answer null
+    /// (nothing was read) where an older store, which kept the idle rows, answered the table's oldest row. A run of the collector
+    /// in <c>collection_log</c> inside the window proves the store covered it, so it satisfies the existence check too. The floor
+    /// itself is still the oldest row at or before the window's end. Every other table stores every cycle and keeps the row-only check.
+    /// </summary>
+    private static string CoverageByRunsSql(Table table) => table != Table.ProcedureStats ? "" : $"""
+
+        OR EXISTS
+        (
+            SELECT 1
+            FROM {PgSchemaGenerator.CollectSchema}.collection_log AS c
+            WHERE c.server_id = $1
+            AND   c.collector_name = 'procedure_stats'
+            AND   c.collection_time >= $2
+            AND   c.collection_time <= $3
         )
         """;
 

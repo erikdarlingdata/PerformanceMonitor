@@ -281,6 +281,30 @@ public static class DurationTrendRouting
     }
 
     /// <summary>
+    /// #5449: the seconds a bucketed raw rate divides by, for a table whose collector stores no row for an idle cycle
+    /// (<c>procedure_stats</c>). The stored collections' intervals alone drop every quiet minute out of the denominator, so
+    /// the rate rises where an old store (which keeps the idle rows) reads lower. The seconds are the larger of the stored
+    /// intervals' sum and the bucket's own span, clipped to where the series has collections (its first collection less that
+    /// collection's own interval, and its last), so a store younger than the window or a window ending mid-bucket is not read
+    /// low. NULL stays NULL: a bucket with no rated collection is the unrated point. <paramref name="widthParam"/> is the
+    /// statement's own bucket-width parameter (minutes); $2 is the window start.
+    /// </summary>
+    internal static string IdleSpanSecondsSql(string widthParam) => $"""
+        CASE WHEN SUM(rated_seconds) IS NULL THEN NULL ELSE GREATEST(
+                    CAST(SUM(rated_seconds) AS double precision),
+                    CAST(extract(epoch FROM (
+                        LEAST(MIN(raw_bucket) + CAST({widthParam} AS integer) * INTERVAL '1 minute', MAX(series_last))
+                      - GREATEST(GREATEST(MIN(raw_bucket), $2), MIN(series_first) - CAST(MIN(first_interval) AS double precision) * INTERVAL '1 second'))) AS double precision)) END
+        """;
+
+    /// <summary>The <c>rated</c>-CTE columns <see cref="IdleSpanSecondsSql"/> reads (#5449).</summary>
+    internal static string IdleSpanColumnsSql(string widthParam) => $@",
+                    date_bin(CAST({widthParam} AS integer) * INTERVAL '1 minute', collection_time, {TrendBucketSql.OriginSql}) AS raw_bucket,
+                    MIN(collection_time) OVER () AS series_first,
+                    MAX(collection_time) OVER () AS series_last,
+                    FIRST_VALUE(COALESCE(interval_seconds, 0)) OVER (ORDER BY collection_time) AS first_interval";
+
+    /// <summary>
     /// The raw-tier duration trend BUCKETED (#3897): the per-collection CTE (see <c>RawCollectionsCte</c>: the same
     /// three-state interval, the same no-ELSE rate arms), with every collection then counted in the bucket of <c>$4</c>
     /// minutes its collection time falls in.
@@ -312,6 +336,11 @@ public static class DurationTrendRouting
         ArgumentException.ThrowIfNullOrWhiteSpace(rawTable);
 
         var widthParam = withDatabaseFilter ? "$5" : "$4";
+        /* #5449: procedure_stats stores no row for a cycle in which nothing ran, so its bucket's seconds are the bucket's span
+           and not only the stored collections' intervals (see IdleSpanSecondsSql). Every other table stores every cycle. */
+        var coverIdleSpan = rawTable == "procedure_stats";
+        var idleColumns = coverIdleSpan ? IdleSpanColumnsSql(widthParam) : "";
+        var seconds = coverIdleSpan ? IdleSpanSecondsSql(widthParam) : "SUM(rated_seconds)";
         /* #5414 M1: every bucket is read over EVERY collection in it. Round 2: whether the chosen databases had any
            row at all is decided once, for the whole window (the tool's empty), and never per bucket: a bucket the
            databases were quiet in is a measured 0 and a bucket the store covered, and dropping it made it read missing
@@ -331,13 +360,13 @@ public static class DurationTrendRouting
                     CASE WHEN interval_seconds > 0 THEN total_executions END AS rated_executions,
                     CASE WHEN interval_seconds > 0 THEN interval_seconds END AS rated_seconds,
                     CASE WHEN interval_seconds > 0 THEN total_elapsed_ms / interval_seconds END AS elapsed_ms_per_second,
-                    CASE WHEN interval_seconds > 0 THEN CAST(total_executions AS DOUBLE PRECISION) / interval_seconds END AS executions_per_second{matchedColumn}
+                    CASE WHEN interval_seconds > 0 THEN CAST(total_executions AS DOUBLE PRECISION) / interval_seconds END AS executions_per_second{idleColumns}{matchedColumn}
                 FROM raw
             )
             SELECT
                 GREATEST(date_bin(CAST({widthParam} AS integer) * INTERVAL '1 minute', collection_time, {TrendBucketSql.OriginSql}), $2) AS bucket_start,
-                SUM(rated_elapsed_ms) / SUM(rated_seconds) AS elapsed_ms_per_second,
-                CAST(SUM(rated_executions) AS DOUBLE PRECISION) / SUM(rated_seconds) AS executions_per_second,
+                SUM(rated_elapsed_ms) / {seconds} AS elapsed_ms_per_second,
+                CAST(SUM(rated_executions) AS DOUBLE PRECISION) / {seconds} AS executions_per_second,
                 MAX(elapsed_ms_per_second) AS peak_elapsed_ms_per_second,
                 MIN(collection_time) AS first_collection_time,
                 COUNT(*) - COUNT(rated_seconds) AS unrated_collections,
