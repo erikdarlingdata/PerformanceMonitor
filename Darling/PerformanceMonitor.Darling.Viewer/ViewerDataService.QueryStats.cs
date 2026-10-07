@@ -389,6 +389,16 @@ public sealed partial class ViewerDataService
     public async Task<(List<ViewerQueryStatsRow> Rows, string Tier)> GetTopQueriesByCpuTierAsync(
         int serverId, DateTime startUtc, DateTime endUtc, int top = TopQueriesPageSize, IReadOnlyList<string>? databaseNames = null, CancellationToken cancellationToken = default)
     {
+        var read = await GetTopQueriesByCpuRoutedAsync(serverId, startUtc, endUtc, top, databaseNames, cancellationToken);
+        return (read.Rows, read.Tier);
+    }
+
+    /// <summary>#5329: <see cref="GetTopQueriesByCpuTierAsync"/> with the window's real edges: an hourly-routed read also
+    /// answers <see cref="ViewerRoutedRead{TRow}.HourlyEdgesNote"/> (<see cref="HourlyEdgesNote"/>), the text the MCP tool
+    /// puts in its precision note; a raw read answers none.</summary>
+    public async Task<ViewerRoutedRead<ViewerQueryStatsRow>> GetTopQueriesByCpuRoutedAsync(
+        int serverId, DateTime startUtc, DateTime endUtc, int top = TopQueriesPageSize, IReadOnlyList<string>? databaseNames = null, CancellationToken cancellationToken = default)
+    {
         var (rollups, coverage) = await GetRollupAvailabilityAsync(cancellationToken);
         var routedTier = RetentionTierRouter.Resolve(
             DateTime.UtcNow, startUtc, rollups.QueryGrainHourly, dailyAvailable: false,
@@ -400,18 +410,18 @@ public sealed partial class ViewerDataService
 
         if (routedTier == RetentionTier.Hourly)
         {
-            var hourlyRows = await GetTopQueriesByCpuHourlyAsync(rollups, coverage, serverId, startUtc, endUtc, top, databaseNames, cancellationToken);
-            return (hourlyRows, "hourly");
+            var (hourlyRows, edgesNote) = await GetTopQueriesByCpuHourlyAsync(rollups, coverage, serverId, startUtc, endUtc, top, databaseNames, cancellationToken);
+            return new ViewerRoutedRead<ViewerQueryStatsRow>(hourlyRows, "hourly", edgesNote);
         }
 
-        return (await GetTopQueriesByCpuRawAsync(serverId, startUtc, endUtc, top, databaseNames, cancellationToken), "raw");
+        return new ViewerRoutedRead<ViewerQueryStatsRow>(await GetTopQueriesByCpuRawAsync(serverId, startUtc, endUtc, top, databaseNames, cancellationToken), "raw", null);
     }
 
     /// <summary>#4231 stage 3: the hourly-rollup arm — builds its FROM clause ONLY through
     /// <see cref="RollupCoverage.StitchedRelationSql"/> (never a literal rollup name), groups by
     /// <c>(database_name, query_hash)</c> (the rollup has no host_object_name), and resolves each row's
     /// <c>query_text</c> with a follow-up lookup mirroring <see cref="DarlingDataReader"/>'s MCP twin.</summary>
-    private async Task<List<ViewerQueryStatsRow>> GetTopQueriesByCpuHourlyAsync(
+    private async Task<(List<ViewerQueryStatsRow> Rows, string? EdgesNote)> GetTopQueriesByCpuHourlyAsync(
         RollupAvailability rollups, RollupCoverage coverage, int serverId, DateTime startUtc, DateTime endUtc, int top,
         IReadOnlyList<string>? databaseNames, CancellationToken cancellationToken)
     {
@@ -420,10 +430,12 @@ public sealed partial class ViewerDataService
            Otherwise today's route and today's blank columns. The io view is named only through StitchedRelationSql
            (it has no successor, so that answers just its own relation). */
         var useIo = IoHourlyCoversWindow(rollups, coverage, TimescaleSupport.QueryStatsIoHourlyView, startUtc);
-        var fromClause = useIo
-            ? coverage.StitchedRelationSql(TimescaleSupport.QueryStatsIoHourlyView, "f", startUtc, RollupCoverage.StitchTier.Hourly)
-            : coverage.StitchedRelationSql(TimescaleSupport.QueryStatsHourlyView, "f", startUtc, RollupCoverage.StitchTier.Hourly);
-        var sql = BuildTopQueriesHourlySql(fromClause, withIo: useIo);
+        var answeringView = useIo ? TimescaleSupport.QueryStatsIoHourlyView : TimescaleSupport.QueryStatsHourlyView;
+        var fromClause = coverage.StitchedRelationSql(answeringView, "f", startUtc, RollupCoverage.StitchTier.Hourly);
+        /* #5329: bound the read at the materialization ceiling of the relation that answers the window's END, as the
+           service's twin does (RollupCoverage.HourlyEndCeiling); null = no bound. */
+        var ceiling = coverage.HourlyEndCeiling(answeringView, startUtc);
+        var sql = BuildTopQueriesHourlySql(fromClause, withIo: useIo, ceiling: ceiling);
 
         var ranked = new List<(string Database, string QueryHash, long TotalExecutions, long TotalCpuUs, long TotalElapsedUs, long? Reads, long? PhysicalReads, long? Writes)>();
         await using (var command = _dataSource.CreateCommand(sql))
@@ -432,6 +444,7 @@ public sealed partial class ViewerDataService
             AddServerWindowParameters(command, serverId, startUtc, endUtc);
             command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = top });
             command.Parameters.Add(DatabaseFilterParameter(databaseNames));
+            AddHourlyCeilingParameter(command, ceiling);
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             while (await reader.ReadAsync(cancellationToken))
             {
@@ -483,7 +496,7 @@ public sealed partial class ViewerDataService
             });
         }
 
-        return rows;
+        return (rows, HourlyEdgesNote(coverage, answeringView, startUtc, endUtc, ceiling));
     }
 
     /// <summary>#5329: the three columns the io hourly rollups add, appended to the hourly arm's select list
@@ -496,11 +509,12 @@ public sealed partial class ViewerDataService
         """;
 
     /// <summary>The hourly-rollup arm's SQL over <paramref name="fromClause"/>. A rollup bucket is stamped at
-    /// its START, so the window end is EXCLUSIVE (<c>bucket &lt; $3</c>): a range whose To is 14:00 sums the
+    /// its START, so the window end is EXCLUSIVE (<c>bucket &lt; $3</c>), and (#5329) a known materialization
+    /// <paramref name="ceiling"/> adds <c>bucket &lt; $6</c> (see <see cref="HourlyCeilingSql"/>): a range whose To is 14:00 sums the
     /// hours up to 13:00-14:00 and does not add the 14:00-15:00 hour that only begins at the end. (The raw arm
     /// stamps a sample when it was taken, so it keeps <c>&lt;=</c> on <c>collection_time</c>.) Split out so a
     /// test can read the text.</summary>
-    internal static string BuildTopQueriesHourlySql(string fromClause, bool withIo = false) => $"""
+    internal static string BuildTopQueriesHourlySql(string fromClause, bool withIo = false, DateTime? ceiling = null) => $"""
         SELECT
             database_name,
             query_hash,
@@ -510,7 +524,7 @@ public sealed partial class ViewerDataService
         FROM {fromClause}
         WHERE server_id = $1
         AND   bucket >= $2
-        AND   bucket < $3
+        AND   bucket < $3{HourlyCeilingSql(ceiling)}
         AND   ($5::text[] IS NULL OR database_name = ANY($5))
         GROUP BY database_name, query_hash
         HAVING (SUM(execution_count_sum) > 0 OR SUM(elapsed_time_sum) > 0)

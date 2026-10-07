@@ -14246,6 +14246,36 @@ public sealed class RollupCoverage
     public string HourlyRelationNameFor(string legacyHourly, DateTime windowStartUtc) =>
         HourlyRelationFor(legacyHourly, windowStartUtc);
 
+    /// <summary>
+    /// #5329: the materialization ceiling of the relation that serves the END of an hourly window over
+    /// <paramref name="legacyHourly"/>: the successor when the read is stitched (the successor serves everything from
+    /// the stitch floor on), otherwise the one relation <see cref="HourlyRelationNameFor"/> names. Null when that
+    /// relation has no measured ceiling (nothing materialized, or an unknown coverage), which means no bound. The one
+    /// rule every hourly reader shares: the service's MCP reads and the Viewer's grids bind a bucket below this value,
+    /// so a bucket the rollup has not finished is never read.
+    /// </summary>
+    public DateTime? HourlyEndCeiling(string legacyHourly, DateTime windowStartUtc)
+    {
+        var relation = StitchFloor(legacyHourly, StitchTier.Hourly, windowStartUtc) is not null
+            ? TimescaleSupport.SuccessorOf(legacyHourly)!
+            : HourlyRelationNameFor(legacyHourly, windowStartUtc);
+        return CeilingOf(relation);
+    }
+
+    /// <summary>
+    /// #5329: the oldest bucket an hourly read over <paramref name="legacyHourly"/> can serve: the older of the legacy
+    /// relation's floor and its successor's (a stitched read takes the legacy below the stitch floor and the successor
+    /// from it, and a single-relation read names the one that reaches back further), so the oldest of the two is where
+    /// the served data starts either way. Null when neither holds a bucket.
+    /// </summary>
+    public DateTime? HourlyServedFloor(string legacyHourly)
+    {
+        var legacy = FloorOf(legacyHourly);
+        var successorName = TimescaleSupport.SuccessorOf(legacyHourly);
+        var successor = successorName is null ? null : FloorOf(successorName);
+        return legacy is null ? successor : successor is null ? legacy : (legacy < successor ? legacy : successor);
+    }
+
     /// <summary>Nothing measured — every lookup answers null, so the router keeps its pre-#1759 behaviour.
     /// The safe answer for a store with no rollups AND for a probe that failed.</summary>
     public static RollupCoverage Unknown { get; } = new(

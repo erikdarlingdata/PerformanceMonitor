@@ -182,7 +182,7 @@ public sealed class ViewerDataStartBannerTests : IDisposable
        same catch as the two surfaces above, so a probe that throws costs the grid its banner and not the slicer and the
        comparison loads that follow it. The tail is what the call passes after the start: the hourly-tier suffix on Top
        Queries and Top Procedures, the interval-table plan on a Query Store load, nothing on a Query Store slicer drag. */
-    private const string HourlyTail = @",\s*tier == ""hourly"" \? HourlyTierSuffix : null";
+    private const string HourlyTail = @",\s*HourlyBannerSuffix\(read\.Tier, read\.HourlyEdgesNote\)";
     private const string WidePlanTail = @",\s*widePlan: widePlan";
 
     [Theory]

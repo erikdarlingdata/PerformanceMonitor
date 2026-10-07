@@ -7,8 +7,10 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
+using Npgsql;
 using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Viewer;
@@ -87,6 +89,40 @@ public sealed partial class ViewerDataService
         => rollups.Has(ioView) && coverage.FloorOf(ioView) is { } floor && floor <= startUtc;
 
     /// <summary>
+    /// #5329: the SQL the hourly arms append for the materialization ceiling: <c>AND bucket &lt; $6</c> when the relation
+    /// that answers the window's end has a measured ceiling (<see cref="RollupCoverage.HourlyEndCeiling"/>, the one rule
+    /// the service's MCP reads bind too), the empty string when it has none (a null ceiling means no bound). A bucket at
+    /// or after the ceiling is never read, so "nothing after the ceiling was read" holds by construction.
+    /// </summary>
+    internal static string HourlyCeilingSql(DateTime? ceiling) => ceiling is null ? "" : "\n        AND   bucket < $6";
+
+    /// <summary>Binds the ceiling <see cref="HourlyCeilingSql"/> names, as a naive UTC instant, when there is one.</summary>
+    internal static void AddHourlyCeilingParameter(NpgsqlCommand command, DateTime? ceiling)
+    {
+        if (ceiling is not null)
+        {
+            command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(ceiling.Value, DateTimeKind.Unspecified) });
+        }
+    }
+
+    /// <summary>
+    /// #5329: the window's real edges for an hourly-routed grid, in the words the MCP tools use
+    /// (<see cref="HourlyWindowEdges.Note"/>, the text <c>get_top_queries_by_cpu</c> and <c>get_top_procedures_by_cpu</c>
+    /// put in their precision note). <paramref name="legacyView"/> is the relation the read was served from (the io
+    /// rollup, or the interval one); the floor is <see cref="RollupCoverage.HourlyServedFloor"/> of it and counts only
+    /// when it lies after the window's start (a floor at or before the start moves no edge, which the note then
+    /// derives from the hour alignment alone, as the service does when its first-bucket probe finds the start).
+    /// </summary>
+    internal static string? HourlyEdgesNote(
+        RollupCoverage coverage, string legacyView, DateTime startUtc, DateTime endUtc, DateTime? ceiling)
+    {
+        var floor = coverage.HourlyServedFloor(legacyView);
+        var firstBucket = floor is { } f && f > startUtc ? f : (DateTime?)null;
+        var note = HourlyWindowEdges.Note(startUtc, firstBucket, endUtc, ceiling);
+        return string.IsNullOrEmpty(note) ? null : note;
+    }
+
+    /// <summary>
     /// #4957: measures each rollup's coverage floor in the background shortly after the Viewer opens its store, so
     /// the first routed read (Overview, Queries, FinOps and the rest all go through
     /// <see cref="GetRollupAvailabilityAsync"/>) does not wait on the cold <c>min(bucket)</c> sort of each rollup's
@@ -97,3 +133,10 @@ public sealed partial class ViewerDataService
     internal Task WarmRollupCoverageAsync(CancellationToken cancellationToken = default)
         => RollupCoverageWarmup.RunDelayedAsync(_dataSource, logger: null, RollupCoverageWarmup.ViewerStartDelay, cancellationToken);
 }
+
+/// <summary>
+/// #5329: a routed Top Queries / Top Procedures read: the rows, the tier that answered ("raw" or "hourly"), and, for an
+/// hourly read only, the window's real edges (<c>ViewerDataService.HourlyEdgesNote</c>: the text the MCP tools put in
+/// their precision note, null when no edge moved).
+/// </summary>
+public sealed record ViewerRoutedRead<TRow>(List<TRow> Rows, string Tier, string? HourlyEdgesNote);

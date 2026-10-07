@@ -167,6 +167,15 @@ public sealed partial class ViewerDataService
     public async Task<(List<ViewerProcedureStatsRow> Rows, string Tier)> GetTopProceduresByCpuTierAsync(
         int serverId, DateTime startUtc, DateTime endUtc, int top = TopQueriesPageSize, IReadOnlyList<string>? databaseNames = null, CancellationToken cancellationToken = default)
     {
+        var read = await GetTopProceduresByCpuRoutedAsync(serverId, startUtc, endUtc, top, databaseNames, cancellationToken);
+        return (read.Rows, read.Tier);
+    }
+
+    /// <summary>#5329: <see cref="GetTopProceduresByCpuTierAsync"/> with the window's real edges (see
+    /// <see cref="GetTopQueriesByCpuRoutedAsync"/>).</summary>
+    public async Task<ViewerRoutedRead<ViewerProcedureStatsRow>> GetTopProceduresByCpuRoutedAsync(
+        int serverId, DateTime startUtc, DateTime endUtc, int top = TopQueriesPageSize, IReadOnlyList<string>? databaseNames = null, CancellationToken cancellationToken = default)
+    {
         var (rollups, coverage) = await GetRollupAvailabilityAsync(cancellationToken);
         var routedTier = RetentionTierRouter.Resolve(
             DateTime.UtcNow, startUtc, rollups.ProcedureGrainHourly, dailyAvailable: false,
@@ -178,11 +187,11 @@ public sealed partial class ViewerDataService
 
         if (routedTier == RetentionTier.Hourly)
         {
-            var hourlyRows = await GetTopProceduresByCpuHourlyAsync(rollups, coverage, serverId, startUtc, endUtc, top, databaseNames, cancellationToken);
-            return (hourlyRows, "hourly");
+            var (hourlyRows, edgesNote) = await GetTopProceduresByCpuHourlyAsync(rollups, coverage, serverId, startUtc, endUtc, top, databaseNames, cancellationToken);
+            return new ViewerRoutedRead<ViewerProcedureStatsRow>(hourlyRows, "hourly", edgesNote);
         }
 
-        return (await GetTopProceduresByCpuRawAsync(serverId, startUtc, endUtc, top, databaseNames, cancellationToken), "raw");
+        return new ViewerRoutedRead<ViewerProcedureStatsRow>(await GetTopProceduresByCpuRawAsync(serverId, startUtc, endUtc, top, databaseNames, cancellationToken), "raw", null);
     }
 
     /// <summary>#4231 stage 3b: the hourly-rollup arm — builds its FROM clause ONLY through
@@ -190,17 +199,18 @@ public sealed partial class ViewerDataService
     /// <c>(database_name, schema_name, object_name)</c> (the rollup has no object_type), and leaves
     /// <c>object_type</c>/<c>sql_handle</c>/<c>plan_handle</c>/reads/writes/spills at their defaults — the
     /// rollup has none of those columns.</summary>
-    private async Task<List<ViewerProcedureStatsRow>> GetTopProceduresByCpuHourlyAsync(
+    private async Task<(List<ViewerProcedureStatsRow> Rows, string? EdgesNote)> GetTopProceduresByCpuHourlyAsync(
         RollupAvailability rollups, RollupCoverage coverage, int serverId, DateTime startUtc, DateTime endUtc, int top,
         IReadOnlyList<string>? databaseNames, CancellationToken cancellationToken)
     {
         /* #5329: the io hourly rollup, when it reaches the window's start, in place of the interval rollup (same
            columns plus the three I/O sums); otherwise today's route and blank columns. See the queries arm. */
         var useIo = IoHourlyCoversWindow(rollups, coverage, TimescaleSupport.ProcedureStatsIoHourlyView, startUtc);
-        var fromClause = useIo
-            ? coverage.StitchedRelationSql(TimescaleSupport.ProcedureStatsIoHourlyView, "f", startUtc, RollupCoverage.StitchTier.Hourly)
-            : coverage.StitchedRelationSql(TimescaleSupport.ProcedureStatsHourlyView, "f", startUtc, RollupCoverage.StitchTier.Hourly);
-        var sql = BuildTopProceduresHourlySql(fromClause, withIo: useIo);
+        var answeringView = useIo ? TimescaleSupport.ProcedureStatsIoHourlyView : TimescaleSupport.ProcedureStatsHourlyView;
+        var fromClause = coverage.StitchedRelationSql(answeringView, "f", startUtc, RollupCoverage.StitchTier.Hourly);
+        /* #5329: the materialization-ceiling bound and the window's real edges, as the queries arm and the service do. */
+        var ceiling = coverage.HourlyEndCeiling(answeringView, startUtc);
+        var sql = BuildTopProceduresHourlySql(fromClause, withIo: useIo, ceiling: ceiling);
 
         var rows = new List<ViewerProcedureStatsRow>();
         await using var command = _dataSource.CreateCommand(sql);
@@ -208,6 +218,7 @@ public sealed partial class ViewerDataService
         AddServerWindowParameters(command, serverId, startUtc, endUtc);
         command.Parameters.Add(new Npgsql.NpgsqlParameter<int> { TypedValue = top });
         command.Parameters.Add(DatabaseFilterParameter(databaseNames));
+        AddHourlyCeilingParameter(command, ceiling);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -229,7 +240,7 @@ public sealed partial class ViewerDataService
             });
         }
 
-        return rows;
+        return (rows, HourlyEdgesNote(coverage, answeringView, startUtc, endUtc, ceiling));
     }
 
     /// <summary>The hourly-rollup arm's SQL over <paramref name="fromClause"/>. A rollup bucket is stamped at
@@ -237,7 +248,7 @@ public sealed partial class ViewerDataService
     /// hours up to 13:00-14:00 and does not add the 14:00-15:00 hour that only begins at the end. (The raw arm
     /// stamps a sample when it was taken, so it keeps <c>&lt;=</c> on <c>collection_time</c>.) Split out so a
     /// test can read the text.</summary>
-    internal static string BuildTopProceduresHourlySql(string fromClause, bool withIo = false) => $"""
+    internal static string BuildTopProceduresHourlySql(string fromClause, bool withIo = false, DateTime? ceiling = null) => $"""
         SELECT
             database_name,
             schema_name,
@@ -248,7 +259,7 @@ public sealed partial class ViewerDataService
         FROM {fromClause}
         WHERE server_id = $1
         AND   bucket >= $2
-        AND   bucket < $3
+        AND   bucket < $3{HourlyCeilingSql(ceiling)}
         AND   ($5::text[] IS NULL OR database_name = ANY($5))
         GROUP BY database_name, schema_name, object_name
         HAVING (SUM(execution_count_sum) > 0 OR SUM(elapsed_time_sum) > 0)

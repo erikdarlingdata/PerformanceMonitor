@@ -1764,12 +1764,7 @@ internal static class DarlingDataReader
     /// the one relation the splice names. Null when that relation has no measured ceiling (nothing materialized,
     /// or an unknown coverage).</summary>
     private static DateTime? HourlyEndCeiling(RollupCoverage coverage, string legacy, DateTime startUtc)
-    {
-        var relation = coverage.StitchFloor(legacy, RollupCoverage.StitchTier.Hourly, startUtc) is not null
-            ? TimescaleSupport.SuccessorOf(legacy)!
-            : coverage.HourlyRelationNameFor(legacy, startUtc);
-        return coverage.CeilingOf(relation);
-    }
+        => coverage.HourlyEndCeiling(legacy, startUtc);
 
     /// <summary>Runs the coverage probe for <paramref name="legacy"/>'s hourly tier: two ordered first-row probes
     /// split at the stitch floor when the read is stitched (<see cref="HourlyFirstBucketSql"/>), one probe when a

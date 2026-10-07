@@ -102,7 +102,9 @@ public sealed class ViewerIoRollupRouteTests
         var body = source.Substring(start, end - start);
 
         Assert.Contains("IoHourlyCoversWindow(rollups, coverage, TimescaleSupport." + viewConstant, body, StringComparison.Ordinal);
-        Assert.Contains("coverage.StitchedRelationSql(TimescaleSupport." + viewConstant, body, StringComparison.Ordinal);
+        /* #5329 C2: the answering view is picked once (io or interval) and spliced through the stitch, and the same name feeds the ceiling. */
+        Assert.Contains("answeringView = useIo ? TimescaleSupport." + viewConstant, body, StringComparison.Ordinal);
+        Assert.Contains("coverage.StitchedRelationSql(answeringView", body, StringComparison.Ordinal);
         Assert.DoesNotContain("_io_hourly", StripComments(body), StringComparison.Ordinal);
     }
 
