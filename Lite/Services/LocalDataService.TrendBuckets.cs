@@ -380,6 +380,12 @@ ORDER BY 1";
            the window read truncated. */
         var windowHasRows = dbClause.Length == 0 ? "" : "\nWHERE EXISTS (SELECT 1 FROM rated WHERE matched_rows > 0)";
 
+        /* #5449: v_procedure_stats stores no row for an idle cycle, so its bucket's seconds are the bucket's span, not just
+           the stored collections' intervals (see IdleSpanSecondsSql). The width is this statement's $4. */
+        var coverIdleSpan = relation == "v_procedure_stats";
+        var idleCols = coverIdleSpan ? IdleSpanColumnsSql("$4") : "";
+        var seconds = coverIdleSpan ? IdleSpanSecondsSql("$4") : "SUM(rated_seconds)";
+
         command.CommandText = $@"
 WITH raw AS
 (
@@ -405,13 +411,13 @@ rated AS
         CASE WHEN interval_seconds > 0 THEN total_executions END AS rated_executions,
         CASE WHEN interval_seconds > 0 THEN interval_seconds END AS rated_seconds,
         CASE WHEN interval_seconds > 0 THEN total_elapsed_ms / interval_seconds END AS elapsed_ms_per_second,
-        CASE WHEN interval_seconds > 0 THEN CAST(total_executions AS DOUBLE PRECISION) / interval_seconds END AS executions_per_second{matchedCarry}
+        CASE WHEN interval_seconds > 0 THEN CAST(total_executions AS DOUBLE PRECISION) / interval_seconds END AS executions_per_second{idleCols}{matchedCarry}
     FROM raw
 )
 SELECT
     GREATEST(time_bucket(to_minutes(CAST($4 AS INTEGER)), collection_time, {TrendBuckets.OriginSql}), $2) AS bucket_start,
-    SUM(rated_elapsed_ms) / SUM(rated_seconds) AS elapsed_ms_per_second,
-    CAST(SUM(rated_executions) AS DOUBLE PRECISION) / SUM(rated_seconds) AS executions_per_second,
+    SUM(rated_elapsed_ms) / {seconds} AS elapsed_ms_per_second,
+    CAST(SUM(rated_executions) AS DOUBLE PRECISION) / {seconds} AS executions_per_second,
     MAX(elapsed_ms_per_second) AS peak_elapsed_ms_per_second,
     MIN(collection_time) AS first_collection_time,
     COUNT(*) - COUNT(rated_seconds) AS unrated_collections

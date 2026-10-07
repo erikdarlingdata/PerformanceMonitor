@@ -161,8 +161,10 @@ public sealed class PerformanceTrendDurationBucketingTests : IClassFixture<Share
         var t2 = t1.AddMinutes(12);
         var excluded = t1.AddMinutes(5);
 
-        await SeedProcedureAsync(t1, "usp_A", "AppDb", deltaExecutions: 12, deltaElapsedUs: 360_000, interval: 30);
-        await SeedProcedureAsync(t2, "usp_B", "AppDb", deltaExecutions: 100, deltaElapsedUs: 250_000, interval: 25);
+        /* #5449: a bucket's seconds are at least its span now (a procedure collection that did no work stores no row), so the
+           fixture uses the collector's real cadence: an interval at least as long as the one-minute bucket. */
+        await SeedProcedureAsync(t1, "usp_A", "AppDb", deltaExecutions: 12, deltaElapsedUs: 360_000, interval: 60);
+        await SeedProcedureAsync(t2, "usp_B", "AppDb", deltaExecutions: 100, deltaElapsedUs: 250_000, interval: 100);
         await SeedProcedureAsync(excluded, "usp_C", "OtherDb", deltaExecutions: 999_999, deltaElapsedUs: 999_999_000, interval: 1);
 
         var points = await _dataService.GetProcedureDurationTrendAsync(ServerId, hoursBack: 1, databaseNames: new[] { "AppDb" });
@@ -173,11 +175,11 @@ public sealed class PerformanceTrendDurationBucketingTests : IClassFixture<Share
         Assert.Equal(new[] { t1, excluded, t2 }, points.Select(p => p.CollectionTime).ToArray());
         Assert.Equal(0.0, points[1].Value!.Value);
 
-        Assert.Equal(12.0, points[0].Value!.Value, precision: 6);
-        Assert.Equal(0.4, points[0].ExecutionsPerSecond!.Value, precision: 6);
+        Assert.Equal(6.0, points[0].Value!.Value, precision: 6);
+        Assert.Equal(0.2, points[0].ExecutionsPerSecond!.Value, precision: 6);
 
-        Assert.Equal(10.0, points[2].Value!.Value, precision: 6);
-        Assert.Equal(4.0, points[2].ExecutionsPerSecond!.Value, precision: 6);
+        Assert.Equal(2.5, points[2].Value!.Value, precision: 6);
+        Assert.Equal(1.0, points[2].ExecutionsPerSecond!.Value, precision: 6);
     }
 
     [Fact]
@@ -254,25 +256,26 @@ public sealed class PerformanceTrendDurationBucketingTests : IClassFixture<Share
         var m2 = m1.AddMinutes(3);
         var m3 = m1.AddMinutes(6);
 
-        await SeedProcedureAsync(m1.AddSeconds(5), "usp_M1a", "AppDb", deltaExecutions: 5, deltaElapsedUs: 100_000, interval: 10);
-        await SeedProcedureAsync(m1.AddSeconds(45), "usp_M1b", "AppDb", deltaExecutions: 40, deltaElapsedUs: 600_000, interval: 20);
+        /* #5449: the intervals add up to the one-minute bucket's span (20 + 40 = 60), the cadence's real shape. */
+        await SeedProcedureAsync(m1.AddSeconds(5), "usp_M1a", "AppDb", deltaExecutions: 5, deltaElapsedUs: 100_000, interval: 20);
+        await SeedProcedureAsync(m1.AddSeconds(45), "usp_M1b", "AppDb", deltaExecutions: 40, deltaElapsedUs: 600_000, interval: 40);
         await SeedProcedureAsync(m2.AddSeconds(10), "usp_M2", "AppDb", deltaExecutions: 777, deltaElapsedUs: 777_000, interval: 0);
         await SeedProcedureAsync(m3.AddSeconds(5), "usp_M3unrated", "AppDb", deltaExecutions: 999, deltaElapsedUs: 999_000, interval: 0);
-        await SeedProcedureAsync(m3.AddSeconds(45), "usp_M3rated", "AppDb", deltaExecutions: 30, deltaElapsedUs: 150_000, interval: 15);
+        await SeedProcedureAsync(m3.AddSeconds(45), "usp_M3rated", "AppDb", deltaExecutions: 30, deltaElapsedUs: 150_000, interval: 60);
 
         var points = await _dataService.GetProcedureDurationTrendAsync(ServerId, hoursBack: 1);
 
         Assert.Equal(3, points.Count);
         Assert.Equal(new[] { m1, m2, m3 }, points.Select(p => p.CollectionTime).ToArray());
 
-        Assert.Equal(700.0 / 30.0, points[0].Value!.Value, precision: 6);
-        Assert.Equal(45.0 / 30.0, points[0].ExecutionsPerSecond!.Value, precision: 6);
+        Assert.Equal(700.0 / 60.0, points[0].Value!.Value, precision: 6);
+        Assert.Equal(45.0 / 60.0, points[0].ExecutionsPerSecond!.Value, precision: 6);
 
         Assert.False(points[1].HasRate);
         Assert.Null(points[1].Value);
 
-        Assert.Equal(10.0, points[2].Value!.Value, precision: 6);
-        Assert.Equal(2.0, points[2].ExecutionsPerSecond!.Value, precision: 6);
+        Assert.Equal(2.5, points[2].Value!.Value, precision: 6);
+        Assert.Equal(0.5, points[2].ExecutionsPerSecond!.Value, precision: 6);
     }
 
     [Fact]

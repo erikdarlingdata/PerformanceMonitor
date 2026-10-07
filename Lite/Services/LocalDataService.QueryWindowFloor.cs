@@ -126,6 +126,10 @@ public partial class LocalDataService
         QueryWindowRelation.Deadlocks => "deadlocks",
         QueryWindowRelation.DmvBlockingSnapshots => "dmv_blocking_snapshot",
         QueryWindowRelation.WaitingTasks => "waiting_tasks",
+        /* #5449: procedure_stats stores a row only for a procedure that did work in a cycle (first sightings and counter resets
+           too), so a window that opens on an idle stretch has no row near its start though the store covered it. The collector's
+           runs are what show the coverage, as for the snapshot tables above. */
+        QueryWindowRelation.ProcedureStats => "procedure_stats",
         QueryWindowRelation.MemoryPressureEvents => "memory_pressure_events",
         /* Group C of #4966. Every event and snapshot table below holds a row only when something happened or changed
            (system_health and default trace events, long-query completions, and the config snapshots, which the
