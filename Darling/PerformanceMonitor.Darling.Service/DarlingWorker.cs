@@ -784,6 +784,12 @@ public sealed class DarlingWorker : BackgroundService
     /* #5366: the service's password key at run time, set once at start; null before it. */
     private DarlingPasswordKeyRuntime? _passwordKeyRuntime;
 
+    /// <summary>#5479: lets a live test give the fleet pass the production self-alert evaluator that ExecuteAsync builds.</summary>
+    internal DarlingSelfAlertEvaluator? SelfAlertsForTests
+    {
+        set => _selfAlerts = value;
+    }
+
     /// <summary>#5378: lets a live test give a worker the store ExecuteAsync would, so a run's row can be read back.</summary>
     internal NpgsqlDataSource? StoreForTests
     {
@@ -3471,7 +3477,7 @@ LIMIT 1";
                a launch guard that holds the bodies off, or a body that never finishes, no longer silences them. Each
                server keeps its own cadence stamps, which only this pass reads and writes, so no server is evaluated by two
                threads at once. */
-            TryStartSelfAlertPass(sweepTargets, stoppingToken);
+            TryStartSelfAlertPass(sweepTargets, stoppingToken, StoreConfigProvider.ClampConcurrentSweeps(config.MaxConcurrentSweeps));
 
             /* Fire-and-track launch loop (#1553 D2/D2b): LAUNCH each server's collection body WITHOUT awaiting
                it, so one slow or hung server can no longer stall the fleet or the fleet-level steps below (the
@@ -11256,7 +11262,9 @@ AND   j.hypertable_name = '{relation}'", connection))
     /// pass still running at the next tick makes that tick skip (one Warning per overrun), so no server is ever
     /// evaluated by two threads at once, and the stamps in <see cref="ServerLoopState"/> are written by this pass only.
     /// </summary>
-    internal bool TryStartSelfAlertPass(ServerLoopState[] targets, CancellationToken stoppingToken)
+    /// <param name="sweepWidth">How many servers the pass evaluates at once: the fleet gate's width
+    /// (<c>max_concurrent_sweeps</c>), because the same store reads used to run inside the bodies under that gate.</param>
+    internal bool TryStartSelfAlertPass(ServerLoopState[] targets, CancellationToken stoppingToken, int sweepWidth = MaxConcurrentServerSweeps)
     {
         if (_selfAlertPass is { IsCompleted: false })
         {
@@ -11264,35 +11272,45 @@ AND   j.hypertable_name = '{relation}'", connection))
             {
                 _selfAlertPassOverranWarned = true;
                 _logger.LogWarning(
-                    "the previous per-server self-alert pass is still running at this tick — skipping the tick; no server's Collection Stopped is judged until it ends");
+                    "the previous per-server self-alert pass is still running at this tick, so this tick starts no second one; the running pass is still judging the servers, and the next tick after it ends starts a new pass");
             }
 
             return false;
         }
 
         _selfAlertPassOverranWarned = false;
-        _selfAlertPass = RunTrackedTickAsync("per-server self-alert pass", token => RunSelfAlertPassAsync(targets, token), stoppingToken);
+        _selfAlertPass = RunTrackedTickAsync("per-server self-alert pass", token => RunSelfAlertPassAsync(targets, sweepWidth, token), stoppingToken);
         return true;
     }
 
     /// <summary>
-    /// The pass itself (#5479): each non-retired server in turn, on its own cadence stamps. Collection-stopped is
-    /// evaluated for EVERY server, connected or not and whether or not it has been seen online since this service started
-    /// (#4757), because an unreachable server has stopped collecting, which is exactly the case a headless service must
-    /// page on; the evaluator judges its staleness from the later of the last success and the service start, so a
-    /// restart's stale rows do not false-alarm a healthy server, and capture-down only for a connected one. The master
-    /// alerts gate and the edge trigger live inside the evaluator. The custom-alert rules (#3285) read the collected
-    /// store, so they evaluate for a disconnected server too. One server's throw is logged and does not skip the rest.
+    /// The pass itself (#5479): each non-retired server, up to <c>sweepWidth</c> at a time, on its own cadence stamps. A
+    /// fleet pass that walked the servers one at a time took 3 or more sequential store reads per server (50 to 100 s at
+    /// 500 servers), so every tick overran and Collection Stopped lagged the cadence several times over; the same calls
+    /// ran inside the bodies under the fleet gate before, and the pass is held to the same width. Each server is still
+    /// visited once per pass by one thread, so its stamps stay single-writer, and only one pass runs at a time.
+    /// Collection-stopped is evaluated for EVERY server, connected or not and whether or not it has been seen online
+    /// since this service started (#4757), because an unreachable server has stopped collecting, which is exactly the
+    /// case a headless service must page on; the evaluator judges its staleness from the later of the last success and
+    /// the service start, so a restart's stale rows do not false-alarm a healthy server, and capture-down only for a
+    /// connected one. The master alerts gate and the edge trigger live inside the evaluator. The custom-alert rules
+    /// (#3285) read the collected store, so they evaluate for a disconnected server too. One server's throw, or a
+    /// cancellation that is not the service shutting down, is logged and does not skip the rest.
     /// </summary>
-    private async Task RunSelfAlertPassAsync(ServerLoopState[] targets, CancellationToken stoppingToken)
+    private async Task RunSelfAlertPassAsync(ServerLoopState[] targets, int sweepWidth, CancellationToken stoppingToken)
     {
-        foreach (var server in targets)
+        var started = Stopwatch.StartNew();
+        var options = new ParallelOptions
         {
-            stoppingToken.ThrowIfCancellationRequested();
+            MaxDegreeOfParallelism = StoreConfigProvider.ClampConcurrentSweeps(sweepWidth),
+            CancellationToken = stoppingToken,
+        };
 
+        await Parallel.ForEachAsync(targets, options, async (server, _) =>
+        {
             if (server.Retired)
             {
-                continue;
+                return;
             }
 
             try
@@ -11325,10 +11343,20 @@ AND   j.hypertable_name = '{relation}'", connection))
                         stoppingToken);
                 }
             }
-            catch (Exception ex) when (ex is not OperationCanceledException)
+            catch (Exception ex) when (!stoppingToken.IsCancellationRequested)
             {
+                /* Any exception that is not the service shutting down, a cancellation inside one server's evaluator
+                   included (the custom-alert evaluator rethrows every OperationCanceledException): log it and go on, so
+                   the servers after it are still evaluated and a repeating one cannot starve them. */
                 _logger.LogError(ex, "[{Server}] self-alert pass failed; the remaining servers are still evaluated", server.Config.DisplayName);
             }
+        });
+
+        if (started.Elapsed > s_alertSweepInterval)
+        {
+            _logger.LogInformation(
+                "the per-server self-alert pass took {Elapsed:F1}s for {Servers} servers at {Width} at a time, longer than its {Cadence}s cadence",
+                started.Elapsed.TotalSeconds, targets.Length, options.MaxDegreeOfParallelism, s_alertSweepInterval.TotalSeconds);
         }
     }
 
@@ -11339,8 +11367,11 @@ AND   j.hypertable_name = '{relation}'", connection))
     /// cleared an hour into an outage. The due stamps do not move during a hold, so each (server, collector) keeps a
     /// <see cref="HeldSlotMark"/> and <see cref="HeldSlots.Newly"/> adds only what came due since the last pass. The pass
     /// that launches again raises the skip-credit floor first, so the first bodies count none of these a second time.
-    /// A server with a body still in flight is left to that body, which counts what it steps over. Runs on the sweep
-    /// loop's thread. Returns the slots counted.
+    /// A server with a body still in flight is left to that body, which counts what it steps over. That leaves a gap
+    /// on purpose: a body in flight for the whole hold adds no held slots, and slots that collector loses after the
+    /// release, before that body reaches it, go uncounted by the hold. Counting them here would race the body's own
+    /// slot record, and Collection Stopped pages for a server that long without collecting, so the gap stays. Runs on
+    /// the sweep loop's thread. Returns the slots counted.
     /// </summary>
     internal long CountHeldSlots(ServerLoopState[] targets, DateTime nowUtc)
     {

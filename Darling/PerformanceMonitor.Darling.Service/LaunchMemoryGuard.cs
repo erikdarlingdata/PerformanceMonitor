@@ -29,10 +29,13 @@ internal readonly record struct LaunchMemoryReading(long Bytes, long LimitBytes,
 /// <see cref="MayLaunch"/> whether it may start NEW collection bodies. Over the line the answer is no and the
 /// in-flight bodies drain, but a drained process allocates nothing, so no garbage collection ever runs to give the
 /// memory back, and a guard that only waited for the figure to fall held one fleet for 25 hours. So the guard does
-/// the releasing itself: at the trip, and at most once a minute while it holds, it runs a decommitting full
-/// collection and measures again in the same pass; under the line it releases at once. The guard has no other
-/// release path and no forced release: memory that is still over after the collection keeps the hold, and the
-/// stopped-collection alerts report the stop.
+/// the releasing itself: when the figure is over the line it runs a decommitting full collection (at most once a
+/// minute) and measures again in the same pass. A crossing the collection clears is no hold at all and logs nothing
+/// Critical. A figure still over after the collection holds new launches off, with one Critical per episode that
+/// names the figure after the collection, and the collection repeats at most once a minute while the hold lasts; a
+/// crossing the one-a-minute limit kept from collecting holds quietly until the next collection is due. A hold ends
+/// the pass the figure is under the line. The guard has no other release path and no forced release: memory that is
+/// still over after the collection keeps the hold, and the stopped-collection alerts report the stop.
 /// </summary>
 /// <remarks>
 /// The sampler, the collection and the clock are injected so a test drives every branch without real memory.
@@ -54,7 +57,8 @@ internal sealed class LaunchMemoryGuard
 
     private bool _holding;
     private TimeSpan _heldSince;
-    private TimeSpan _lastCollection;
+    private TimeSpan? _lastCollection;
+    private bool _criticalLogged;
     private TimeSpan _lastWarning;
     private bool _warnedSamplerFault;
 
@@ -129,10 +133,12 @@ internal sealed class LaunchMemoryGuard
         => GC.Collect(GC.MaxGeneration, GCCollectionMode.Aggressive, blocking: true, compacting: true);
 
     /// <summary>
-    /// Whether the fleet sweep may launch NEW collection bodies this pass, and the guard's whole state machine: the
-    /// trip (one Critical per episode, then a collection), a repeat collection at most once a minute while it holds,
-    /// a Warning every five minutes while it holds, and the release (an Information line). A pass that is under the
-    /// line and not holding logs nothing.
+    /// Whether the fleet sweep may launch NEW collection bodies this pass, and the guard's whole state machine. Over
+    /// the line it runs the collection first (at most once a minute; the first one after start is never skipped) and
+    /// holds only if the figure is still over, so a crossing the collection clears costs one Information line and no
+    /// Critical (#5479). Once a collection has left the figure over it logs one Critical per episode, then a Warning
+    /// every five minutes while it holds, and the release (an Information line). A pass that is under the line and not
+    /// holding logs nothing.
     /// </summary>
     /// <param name="inFlightBodies">How many collection bodies are still running, for the hold warning.</param>
     internal bool MayLaunch(int inFlightBodies)
@@ -146,8 +152,17 @@ internal sealed class LaunchMemoryGuard
         }
         catch (Exception ex)
         {
-            /* A guard that cannot read memory must not stop collection: fail open, once in the log. */
-            if (!_warnedSamplerFault)
+            /* A guard that cannot read memory must not stop collection: fail open. A hold ends here too, so a later
+             * release line never counts the time collection was running as time held. */
+            if (_holding)
+            {
+                _holding = false;
+                _criticalLogged = false;
+                _warnedSamplerFault = true;
+                _logger.LogWarning(
+                    ex, "The memory launch guard could not read the process memory ({Reason}) — it ends its hold and lets collection launch until it can.", ex.Message);
+            }
+            else if (!_warnedSamplerFault)
             {
                 _warnedSamplerFault = true;
                 _logger.LogWarning(
@@ -167,25 +182,39 @@ internal sealed class LaunchMemoryGuard
             return true;
         }
 
+        /* Over the line: collect first (the first collection after start is never rate-limited), then judge the
+         * figure the collection left. */
+        var collected = false;
+        if (_lastCollection is not { } last || now - last >= CollectionInterval)
+        {
+            reading = CollectAndMeasure(reading, now);
+            collected = true;
+        }
+
+        if (DarlingWorker.ShouldLaunchSweeps(reading.Bytes, reading.LimitBytes))
+        {
+            if (_holding)
+            {
+                Release(now, reading);
+            }
+
+            return true;
+        }
+
         if (!_holding)
         {
             _holding = true;
             _heldSince = now;
             _lastWarning = now;
-            _logger.LogCritical(
-                "Memory over the line: {Metric} {FigureMb}MB is over {Pct:P0} of the {LimitMb}MB limit ({LimitSource}) — PAUSING new collection-body launches so in-flight bodies drain (the #1556 commit-limit backstop). Purge/disk/analysis continue. A full garbage collection runs now, and about once a minute while the pause holds, and the pause ends when the figure is back under the line.",
-                reading.Metric, Mb(reading.Bytes), DarlingWorker.MemoryGuardFraction, Mb(reading.LimitBytes), reading.LimitSource);
-            reading = CollectAndMeasure(reading, now);
-        }
-        else if (now - _lastCollection >= CollectionInterval)
-        {
-            reading = CollectAndMeasure(reading, now);
+            _criticalLogged = false;
         }
 
-        if (DarlingWorker.ShouldLaunchSweeps(reading.Bytes, reading.LimitBytes))
+        if (collected && !_criticalLogged)
         {
-            Release(now, reading);
-            return true;
+            _criticalLogged = true;
+            _logger.LogCritical(
+                "Memory over the line even after a full garbage collection: {Metric} {FigureMb}MB is over {Pct:P0} of the {LimitMb}MB limit ({LimitSource}) — PAUSING new collection-body launches so in-flight bodies drain (the #1556 commit-limit backstop). Purge/disk/analysis continue. A full garbage collection runs about once a minute while the pause holds, and the pause ends when the figure is back under the line.",
+                reading.Metric, Mb(reading.Bytes), DarlingWorker.MemoryGuardFraction, Mb(reading.LimitBytes), reading.LimitSource);
         }
 
         if (now - _lastWarning >= HoldWarningInterval)
@@ -225,6 +254,7 @@ internal sealed class LaunchMemoryGuard
     private void Release(TimeSpan now, LaunchMemoryReading reading)
     {
         _holding = false;
+        _criticalLogged = false;
         _logger.LogInformation(
             "Memory recovered after a hold of {HeldFor}: {Metric} {FigureMb}MB of {LimitMb}MB ({LimitSource}) — resuming collection-body launches.",
             FormatHeld(now - _heldSince), reading.Metric, Mb(reading.Bytes), Mb(reading.LimitBytes), reading.LimitSource);
@@ -295,8 +325,8 @@ internal sealed class LinuxLaunchMemorySampler
         {
             _limit = ResolveLimit(
                 _readFile(DarlingStoreHostProfile.ProcMeminfoPath),
-                _readFile(DarlingStoreHostProfile.CgroupV2MemoryMaxPath),
-                _readFile(DarlingStoreHostProfile.CgroupV1MemoryLimitPath));
+                DarlingStoreHostProfile.ResolveCgroupMemoryLimitBytes(
+                    _readFile(DarlingStoreHostProfile.ProcSelfCgroupPath), _readFile));
             _limitResolved = true;
         }
 
@@ -327,16 +357,16 @@ internal sealed class LinuxLaunchMemorySampler
     }
 
     /// <summary>
-    /// The effective limit and where it came from, from the text of <c>/proc/meminfo</c> and the two cgroup files:
-    /// the cgroup limit when it is set and under total RAM, else total RAM (a cgroup v2 <c>max</c> and a v1
-    /// near-<see cref="long.MaxValue"/> both mean no limit). Null when neither is readable. The parsers and the
-    /// min-of-the-two rule are the store host profile's, so the guard and <c>--check-settings</c> agree on the limit.
+    /// The effective limit and where it came from, from the text of <c>/proc/meminfo</c> and the tightest cgroup limit
+    /// of this process's own cgroup and its parents (<see cref="DarlingStoreHostProfile.ResolveCgroupMemoryLimitBytes"/>):
+    /// the cgroup limit when it is set and under total RAM, else total RAM. Null when neither is known. The
+    /// resolver and the min-of-the-two rule are the store host profile's, so the guard and <c>--check-settings</c>
+    /// agree on the limit.
     /// </summary>
-    internal static (long Bytes, string Source)? ResolveLimit(string? meminfoText, string? cgroupV2MemoryMaxText, string? cgroupV1MemoryLimitText)
+    internal static (long Bytes, string Source)? ResolveLimit(string? meminfoText, long? cgroupLimitBytes)
     {
         var ram = DarlingStoreHostProfile.ParseProcMeminfoTotalBytes(meminfoText);
-        var cgroup = DarlingStoreHostProfile.ParseCgroupV2MemoryMaxBytes(cgroupV2MemoryMaxText)
-            ?? DarlingStoreHostProfile.ParseCgroupV1MemoryLimitBytes(cgroupV1MemoryLimitText);
+        var cgroup = cgroupLimitBytes;
 
         if (ram is not { } totalRam)
         {

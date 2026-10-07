@@ -200,6 +200,11 @@ internal static class DarlingStoreHostProfile
     internal const string CgroupV2MemoryMaxPath = "/sys/fs/cgroup/memory.max";
     internal const string CgroupV1MemoryLimitPath = "/sys/fs/cgroup/memory/memory.limit_in_bytes";
 
+    /// <summary>This process's own cgroup membership, and the two mount points the limit files live under (#5479).</summary>
+    internal const string ProcSelfCgroupPath = "/proc/self/cgroup";
+    internal const string CgroupV2MountPath = "/sys/fs/cgroup";
+    internal const string CgroupV1MemoryMountPath = "/sys/fs/cgroup/memory";
+
     /* ============================= Linux RAM / cgroup: pure parse functions ============================= *
      * Pure over already-read file TEXT (not a path), so every branch — meminfo present/absent/unparseable,
      * cgroup v2 "max", v2 a real number, v1's near-long.MaxValue "no limit" sentinel, v1 a real number — has
@@ -278,6 +283,124 @@ internal static class DarlingStoreHostProfile
         return bytes >= CgroupV1UnlimitedThreshold ? null : bytes;
     }
 
+    /* ======================= Linux cgroup: this process's own limit, nested-aware (#5479) ======================= *
+     * The root files above only hold a limit when the process is in the root cgroup (a container with a private
+     * cgroup namespace). A systemd unit with MemoryMax=2G, or a container started with --cgroupns=host, sits in a
+     * NESTED cgroup, and its limit is in memory.max at that path or at one of its parents. The runtime resolves it
+     * the same way, from /proc/self/cgroup. All of this is text-in, so a Windows test feeds it literal strings. */
+
+    /// <summary>The cgroup v2 path of this process from the text of <c>/proc/self/cgroup</c> (the <c>0::/path</c>
+    /// line), normalised to start with a slash. Null when there is no such line or the path is not usable.</summary>
+    internal static string? ParseProcSelfCgroupV2Path(string? procSelfCgroupText)
+        => ParseProcSelfCgroupPath(procSelfCgroupText, controller: null);
+
+    /// <summary>The cgroup v1 path of this process's <c>memory</c> controller from the text of
+    /// <c>/proc/self/cgroup</c> (a <c>N:memory:/path</c> line, or <c>N:cpu,memory:/path</c>). Null when there is none.</summary>
+    internal static string? ParseProcSelfCgroupV1MemoryPath(string? procSelfCgroupText)
+        => ParseProcSelfCgroupPath(procSelfCgroupText, controller: "memory");
+
+    private static string? ParseProcSelfCgroupPath(string? text, string? controller)
+    {
+        if (string.IsNullOrEmpty(text))
+        {
+            return null;
+        }
+
+        foreach (var rawLine in text.Split('\n'))
+        {
+            var line = rawLine.TrimEnd('\r');
+            var first = line.IndexOf(':');
+            var second = first < 0 ? -1 : line.IndexOf(':', first + 1);
+            if (second < 0)
+            {
+                continue;
+            }
+
+            var controllers = line[(first + 1)..second];
+            var matches = controller is null
+                ? line.StartsWith("0::", StringComparison.Ordinal)
+                : controllers.Split(',').Contains(controller, StringComparer.Ordinal);
+            if (!matches)
+            {
+                continue;
+            }
+
+            var path = line[(second + 1)..];
+            const string deleted = " (deleted)";
+            if (path.EndsWith(deleted, StringComparison.Ordinal))
+            {
+                path = path[..^deleted.Length];
+            }
+
+            /* A path that is not absolute, or tries to climb out of the mount, is not one to read files from. */
+            if (!path.StartsWith('/') || path.Split('/').Contains(".."))
+            {
+                return null;
+            }
+
+            path = path.TrimEnd('/');
+            return path.Length == 0 ? "/" : path;
+        }
+
+        return null;
+    }
+
+    /// <summary>A cgroup path and every parent of it up to the root: <c>/a/b</c> gives <c>/a/b</c>, <c>/a</c>, <c>/</c>.</summary>
+    internal static IReadOnlyList<string> CgroupPathAndAncestors(string cgroupPath)
+    {
+        var result = new List<string>();
+        var current = cgroupPath.Length == 0 ? "/" : cgroupPath;
+        while (true)
+        {
+            result.Add(current);
+            if (current == "/")
+            {
+                break;
+            }
+
+            var slash = current.LastIndexOf('/');
+            current = slash <= 0 ? "/" : current[..slash];
+        }
+
+        return result;
+    }
+
+    /// <summary>
+    /// The tightest finite memory limit that applies to this process: its own cgroup's <c>memory.max</c> (v2) or
+    /// <c>memory.limit_in_bytes</c> (v1, the <c>memory</c> controller), and every parent cgroup's up to the root, the
+    /// smallest finite value. The root files are always read, so a process whose <c>/proc/self/cgroup</c> cannot be
+    /// read behaves as before. Null means no finite limit anywhere, or nothing readable; the caller treats both as
+    /// "use total RAM".
+    /// </summary>
+    /// <param name="procSelfCgroupText">The text of <c>/proc/self/cgroup</c>, or null when unreadable.</param>
+    /// <param name="readFile">Reads a whole text file, or null when it cannot be read.</param>
+    internal static long? ResolveCgroupMemoryLimitBytes(string? procSelfCgroupText, Func<string, string?> readFile)
+    {
+        long? smallest = null;
+
+        void Consider(long? candidate)
+        {
+            if (candidate is { } value && (smallest is null || value < smallest))
+            {
+                smallest = value;
+            }
+        }
+
+        var v2Dirs = CgroupPathAndAncestors(ParseProcSelfCgroupV2Path(procSelfCgroupText) ?? "/");
+        foreach (var dir in v2Dirs)
+        {
+            Consider(ParseCgroupV2MemoryMaxBytes(readFile(CgroupV2MountPath + (dir == "/" ? "" : dir) + "/memory.max")));
+        }
+
+        var v1Dirs = CgroupPathAndAncestors(ParseProcSelfCgroupV1MemoryPath(procSelfCgroupText) ?? "/");
+        foreach (var dir in v1Dirs)
+        {
+            Consider(ParseCgroupV1MemoryLimitBytes(readFile(CgroupV1MemoryMountPath + (dir == "/" ? "" : dir) + "/memory.limit_in_bytes")));
+        }
+
+        return smallest;
+    }
+
     /// <summary>The smaller of total RAM and the cgroup limit (null cgroup = no limit) — what the process can
     /// actually use, and the figure the settings' "derived value for this host" is computed from.</summary>
     internal static long ComputeEffectiveMemoryLimitBytes(long memTotalBytes, long? cgroupLimitBytes)
@@ -330,8 +453,7 @@ internal static class DarlingStoreHostProfile
         if (OperatingSystem.IsLinux())
         {
             var memTotal = ParseProcMeminfoTotalBytes(TryReadFile(ProcMeminfoPath));
-            var cgroupLimit = ParseCgroupV2MemoryMaxBytes(TryReadFile(CgroupV2MemoryMaxPath))
-                ?? ParseCgroupV1MemoryLimitBytes(TryReadFile(CgroupV1MemoryLimitPath));
+            var cgroupLimit = ResolveCgroupMemoryLimitBytes(TryReadFile(ProcSelfCgroupPath), TryReadFile);
             var authoritative = memTotal.HasValue;
             var total = memTotal ?? GC.GetGCMemoryInfo().TotalAvailableMemoryBytes;
             var effective = ComputeEffectiveMemoryLimitBytes(total, cgroupLimit);

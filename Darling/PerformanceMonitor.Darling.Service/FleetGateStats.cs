@@ -344,9 +344,12 @@ internal sealed class SkipCreditFloor
 
 /// <summary>
 /// What a collector slot's watermark remembers while the memory launch guard holds collection off (#5479): the due stamp
-/// the count was made against and how many lost slots were already counted for it. Written only by the sweep loop thread.
+/// the count was made against, the interval it was counted at, how many lost slots were already counted for it, and the
+/// earliest slot the count may reach back to. An interval change mid-hold restarts the mark at the change (the due stamp
+/// keeps its place, so without that the new, shorter interval would count every slot of the hold so far at once). Written
+/// only by the sweep loop thread.
 /// </summary>
-internal readonly record struct HeldSlotMark(DateTime Due, long Counted);
+internal readonly record struct HeldSlotMark(DateTime Due, long Counted, TimeSpan Interval = default, DateTime Floor = default);
 
 /// <summary>
 /// #5479: the skipped-slot count while the launch guard holds collection off. A held pass launches no body, so no body
@@ -396,14 +399,33 @@ internal static class HeldSlots
     /// The slots to add to the skipped count on this pass: the lost total less what the mark already holds. The mark is
     /// moved to the new total, also when the total fell (the floor was raised by a sleep or a pause), so a slot is never
     /// counted twice and the count starts again from the raised floor. A mark made for another due stamp is dropped: the
-    /// stamp moved because a body ran, and that body counted its own slots.
+    /// stamp moved because a body ran, and that body counted its own slots. A mark made for another interval is restarted at
+    /// <paramref name="nowUtc"/>: the slots before the change were counted (or not) at the old interval, and counting them
+    /// again at the new one would invent them (60 minutes to 1 minute during a 2 hour hold made 119 slots at once).
     /// </summary>
     public static long Newly(
         DateTime due, DateTime nowUtc, DateTime floor, TimeSpan interval, TimeSpan serveWindow, ref HeldSlotMark mark)
     {
-        var counted = mark.Due == due ? mark.Counted : 0;
-        var total = Lost(due, nowUtc, floor, interval, serveWindow);
-        mark = new HeldSlotMark(due, total);
+        long counted;
+        DateTime markFloor;
+        if (mark.Due != due)
+        {
+            counted = 0;
+            markFloor = DateTime.MinValue;
+        }
+        else if (mark.Interval != interval)
+        {
+            counted = 0;
+            markFloor = nowUtc;
+        }
+        else
+        {
+            counted = mark.Counted;
+            markFloor = mark.Floor;
+        }
+
+        var total = Lost(due, nowUtc, floor > markFloor ? floor : markFloor, interval, serveWindow);
+        mark = new HeldSlotMark(due, total, interval, markFloor);
         return Math.Max(0, total - counted);
     }
 }

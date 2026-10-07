@@ -11,11 +11,14 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
+using Npgsql;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Analysis;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Mcp;
+using PerformanceMonitor.Darling.Storage;
 using Xunit;
 
 namespace Darling.Tests;
@@ -29,9 +32,20 @@ public sealed class SelfAlertFleetPassTests
 {
     private static readonly TimeSpan Patience = TimeSpan.FromSeconds(5);
 
-    private static DarlingWorker MakeWorker() =>
+    private sealed class WorkerLogger(CapturingTestLogger inner) : ILogger<DarlingWorker>
+    {
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+
+        public bool IsEnabled(LogLevel logLevel) => true;
+
+        public void Log<TState>(
+            LogLevel logLevel, EventId eventId, TState state, Exception? exception,
+            Func<TState, Exception?, string> formatter) => inner.Log(logLevel, eventId, state, exception, formatter);
+    }
+
+    internal static DarlingWorker MakeWorker(CapturingTestLogger? logger = null) =>
         new(
-            NullLogger<DarlingWorker>.Instance,
+            logger is null ? NullLogger<DarlingWorker>.Instance : new WorkerLogger(logger),
             NullLoggerFactory.Instance,
             new McpRuntimeState(),
             new WebRuntimeState(),
@@ -41,7 +55,7 @@ public sealed class SelfAlertFleetPassTests
             new BaselineCache(),
             new ReadLatencyAccumulator());
 
-    private static DarlingWorker.ServerLoopState MakeServer(string name, bool connected = false)
+    internal static DarlingWorker.ServerLoopState MakeServer(string name, bool connected = false)
     {
         var config = new MonitoredServer { Name = name, Host = name + ".invalid" };
         return new DarlingWorker.ServerLoopState
@@ -60,7 +74,7 @@ public sealed class SelfAlertFleetPassTests
         };
     }
 
-    private static async Task<bool> BecomesTrueAsync(Func<bool> condition)
+    internal static async Task<bool> BecomesTrueAsync(Func<bool> condition)
     {
         var deadline = DateTime.UtcNow + Patience;
         while (DateTime.UtcNow < deadline)
@@ -222,6 +236,76 @@ public sealed class SelfAlertFleetPassTests
         Assert.Equal(1, Volatile.Read(ref maxConcurrent));
     }
 
+    /// <summary>
+    /// The fleet pass runs the servers at the fleet gate's width, not one at a time (#5481 round 1): twenty servers whose
+    /// evaluation takes 100 ms each finish in about a fifth of the serial 2 seconds at width 4, each evaluated once, never
+    /// more than the width at a time. At 500 servers the one-at-a-time pass overran every tick.
+    /// </summary>
+    [Fact]
+    public async Task TheFleetPass_EvaluatesAtTheSweepWidth_NotOneServerAtATime()
+    {
+        var worker = MakeWorker();
+        var concurrent = 0;
+        var maxConcurrent = 0;
+        var perServer = new System.Collections.Concurrent.ConcurrentDictionary<string, int>();
+        var finished = 0;
+        worker.SelfAlertServerOverride = async (server, ct) =>
+        {
+            InterlockedMax(ref maxConcurrent, Interlocked.Increment(ref concurrent));
+            perServer.AddOrUpdate(server.Config.DisplayName, 1, (_, n) => n + 1);
+            await Task.Delay(100, ct);
+            Interlocked.Decrement(ref concurrent);
+            Interlocked.Increment(ref finished);
+        };
+        var servers = Enumerable.Range(1, 20).Select(i => MakeServer($"example-sql-{i:00}")).ToArray();
+
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        Assert.True(worker.TryStartSelfAlertPass(servers, TestContext.Current.CancellationToken, sweepWidth: 4));
+        Assert.True(await BecomesTrueAsync(() => Volatile.Read(ref finished) == 20));
+        clock.Stop();
+
+        Assert.Equal(20, perServer.Count);
+        Assert.All(perServer.Values, n => Assert.Equal(1, n));
+        Assert.InRange(Volatile.Read(ref maxConcurrent), 3, 4);
+        Assert.True(clock.ElapsedMilliseconds < 1300, $"20 servers at 100 ms and width 4 took {clock.ElapsedMilliseconds} ms; serial is 2000 ms");
+    }
+
+    /// <summary>
+    /// A cancellation inside one server's evaluation that is not the service shutting down (the custom-alert evaluator
+    /// rethrows every <see cref="OperationCanceledException"/>) is logged and the pass goes on to the servers after it
+    /// (#5481 round 1). It used to end the pass, and the servers behind it starved if it repeated.
+    /// </summary>
+    [Fact]
+    public async Task ANonShutdownCancellationInOneServer_IsLogged_AndTheRestOfThePassGoesOn()
+    {
+        var logger = new CapturingTestLogger();
+        var worker = MakeWorker(logger);
+        var evaluated = new List<string>();
+        worker.SelfAlertServerOverride = (server, _) =>
+        {
+            lock (evaluated)
+            {
+                evaluated.Add(server.Config.DisplayName);
+            }
+
+            if (server.Config.DisplayName == "example-sql-01")
+            {
+                throw new OperationCanceledException("a timeout inside one evaluator");
+            }
+
+            return Task.CompletedTask;
+        };
+
+        Assert.True(worker.TryStartSelfAlertPass(
+            [MakeServer("example-sql-01"), MakeServer("example-sql-02"), MakeServer("example-sql-03")],
+            TestContext.Current.CancellationToken, sweepWidth: 1));
+
+        Assert.True(await BecomesTrueAsync(() => { lock (evaluated) { return evaluated.Count == 3; } }));
+        Assert.Equal(["example-sql-01", "example-sql-02", "example-sql-03"], evaluated);
+        Assert.Equal(1, logger.CountAtLevel(LogLevel.Error));
+        Assert.Contains("self-alert pass failed", logger.Joined);
+    }
+
     private static void InterlockedMax(ref int target, int value)
     {
         int seen;
@@ -260,7 +344,10 @@ public sealed class SelfAlertFleetPassTests
         Assert.True(worker.TryStartSelfAlertPass([retired, MakeServer("example-sql-01"), MakeServer("example-sql-02")], TestContext.Current.CancellationToken));
 
         Assert.True(await BecomesTrueAsync(() => { lock (evaluated) { return evaluated.Count == 2; } }));
-        Assert.Equal(["example-sql-01", "example-sql-02"], evaluated);
+        lock (evaluated)
+        {
+            Assert.Equal(["example-sql-01", "example-sql-02"], evaluated.Order().ToArray());
+        }
     }
 
     /// <summary>
@@ -276,7 +363,7 @@ public sealed class SelfAlertFleetPassTests
 
         var pause = source.IndexOf("if (!ShouldRunCollection(_paused))", loop, StringComparison.Ordinal);
         var pauseContinue = source.IndexOf("continue;", pause, StringComparison.Ordinal);
-        var launch = source.IndexOf("TryStartSelfAlertPass(sweepTargets, stoppingToken);", loop, StringComparison.Ordinal);
+        var launch = source.IndexOf("TryStartSelfAlertPass(sweepTargets, stoppingToken, StoreConfigProvider.ClampConcurrentSweeps(config.MaxConcurrentSweeps));", loop, StringComparison.Ordinal);
         var guard = source.IndexOf("var mayLaunchSweeps = _launchMemoryGuard.MayLaunch(", loop, StringComparison.Ordinal);
         var launchLoop = source.IndexOf("foreach (var server in sweepTargets)", loop, StringComparison.Ordinal);
         Assert.True(pause > 0 && pauseContinue > pause, "the pause gate was not found");
@@ -401,6 +488,97 @@ public sealed class SelfAlertFleetPassTests
 }
 
 /// <summary>
+/// The live half of the fleet pass tests (#5479, #5481 round 1): the production evaluator reads a real store, so the
+/// class joins the shared-store collection instead of serializing the pure tests above with it.
+/// </summary>
+[Collection("live-postgres")]
+public sealed class SelfAlertFleetPassLiveTests
+{
+    private const int LivePassServerId = -770179;
+
+    /// <summary>
+    /// The production evaluator through the fleet pass, with the memory guard forced to hold (#5481 round 1). Every other
+    /// test here stands in for the evaluation; this one reads the store. A server's last SUCCESS collection_log row is
+    /// three hours old, the guard holds and no body is launched, and Collection Stopped is delivered.
+    /// </summary>
+    [Fact]
+    public async Task LiveStore_CollectionStopped_FiresFromTheProductionEvaluator_ThroughTheFleetPass_WhileTheGuardHolds()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live fleet pass.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteLivePassRowsAsync(connection, ct);
+
+        await using var postgres = NpgsqlDataSource.Create(connectionString!);
+        var bodySucceeded = false;
+        try
+        {
+            var utcNow = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
+            using (var insert = new NpgsqlCommand(@"
+INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, error_message, rows_collected, sql_duration_ms, duckdb_duration_ms)
+VALUES ($1, $2, 'example-sql-live', 'wait_stats', $3, 0, 'SUCCESS', NULL, 0, 0, 0)", connection))
+            {
+                insert.Parameters.AddWithValue(9_100_000L);
+                insert.Parameters.AddWithValue(LivePassServerId);
+                insert.Parameters.AddWithValue(utcNow.AddHours(-3));
+                await insert.ExecuteNonQueryAsync(ct);
+            }
+
+            var harness = new DarlingSelfAlertTests.Harness { Now = DateTime.UtcNow };
+            var worker = SelfAlertFleetPassTests.MakeWorker();
+            worker.StoreForTests = postgres;
+            worker.SelfAlertsForTests = harness.Build();
+            var clock = TimeSpan.Zero;
+            worker.LaunchGuard = new LaunchMemoryGuard(
+                () => new LaunchMemoryReading(1500L * 1024 * 1024, 1536L * 1024 * 1024, "test metric", "test limit"),
+                () => { },
+                () => clock,
+                NullLogger.Instance);
+            var server = SelfAlertFleetPassTests.MakeServer("example-sql-live");
+            server.Config.StoredServerId = LivePassServerId;
+
+            /* The service has just started: the stale row is judged from the start, so the first pass is silent. */
+            Assert.False(worker.LaunchGuard.MayLaunch(0));
+            Assert.True(worker.TryStartSelfAlertPass([server], ct));
+            Assert.True(await SelfAlertFleetPassTests.BecomesTrueAsync(() => worker.TryStartSelfAlertPass([server], ct)));
+            Assert.DoesNotContain(harness.Deliverer.Outcomes, o => o.MetricName == "Collection Stopped");
+
+            /* Past the window since the start, with the guard still holding and no body launched or called. */
+            harness.Now = harness.Now.AddMinutes(31);
+            clock = TimeSpan.FromMinutes(31);
+            server.NextSelfAlertSweep = DateTime.MinValue;
+            Assert.False(worker.LaunchGuard.MayLaunch(0));
+            Assert.True(await SelfAlertFleetPassTests.BecomesTrueAsync(() => worker.TryStartSelfAlertPass([server], ct)));
+
+            Assert.True(await SelfAlertFleetPassTests.BecomesTrueAsync(() => harness.Deliverer.Outcomes.Any(o => o.MetricName == "Collection Stopped")));
+            Assert.Single(harness.Deliverer.Outcomes, o => o.MetricName == "Collection Stopped");
+            Assert.True(worker.LaunchGuard.IsHolding, "the guard must still be holding when the alert fires");
+            Assert.Null(server.InFlightSweep);
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                await DeleteLivePassRowsAsync(cleanup, cleanupCt);
+            });
+        }
+    }
+
+    private static async Task DeleteLivePassRowsAsync(NpgsqlConnection connection, CancellationToken ct)
+    {
+        using var cleanup = new NpgsqlCommand(
+            $"DELETE FROM collection_log WHERE server_id = {LivePassServerId};", connection);
+        await cleanup.ExecuteNonQueryAsync(ct);
+    }
+}
+
+/// <summary>
 /// #5479: the pure rule behind the held-slot count.
 /// </summary>
 public sealed class HeldSlotsTests
@@ -452,6 +630,25 @@ public sealed class HeldSlotsTests
         var moved = T0.AddMinutes(6);
         Assert.Equal(0, HeldSlots.Newly(moved, T0.AddMinutes(6), DateTime.MinValue, Minute, Minute, ref mark));
         Assert.Equal(2, HeldSlots.Newly(moved, T0.AddMinutes(8), DateTime.MinValue, Minute, Minute, ref mark));
+    }
+
+    /// <summary>The interval changes mid-hold (a reload from 60 to 1 minute during a 2 hour hold): the due stamp stays, so
+    /// counting at the new interval from the stamp would invent 119 slots at once. The mark restarts at the change and only
+    /// slots after it count (#5481 round 1).</summary>
+    [Fact]
+    public void AnIntervalChangeMidHold_RestartsTheMark_AndInventsNoSlots()
+    {
+        var hour = TimeSpan.FromMinutes(60);
+        var mark = default(HeldSlotMark);
+        Assert.Equal(2, HeldSlots.Newly(T0, T0.AddHours(2), DateTime.MinValue, hour, hour, ref mark));
+
+        var change = T0.AddHours(2);
+        Assert.Equal(0, HeldSlots.Newly(T0, change, DateTime.MinValue, Minute, Minute, ref mark));
+        Assert.Equal(0, HeldSlots.Newly(T0, change.AddSeconds(59), DateTime.MinValue, Minute, Minute, ref mark));
+
+        /* From the change on: the slot at the change is lost a minute later, then one a minute. */
+        Assert.Equal(1, HeldSlots.Newly(T0, change.AddMinutes(1), DateTime.MinValue, Minute, Minute, ref mark));
+        Assert.Equal(4, HeldSlots.Newly(T0, change.AddMinutes(5), DateTime.MinValue, Minute, Minute, ref mark));
     }
 
     [Fact]

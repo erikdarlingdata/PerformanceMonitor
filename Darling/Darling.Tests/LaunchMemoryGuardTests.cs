@@ -104,7 +104,10 @@ public sealed class LaunchMemoryGuardTests
         }
 
         Assert.Equal(1, rig.Collections);
-        Assert.Equal(1, rig.Logger.CountAtLevel(LogLevel.Critical));
+
+        /* The collection cleared the crossing, so there was never a hold to announce (#5479). */
+        Assert.Equal(0, rig.Logger.CountAtLevel(LogLevel.Critical));
+        Assert.Equal(1, rig.Count(LogLevel.Information, "815MB after"));
     }
 
     /// <summary>The same latch with the release one pass LATER: the collection frees the memory, but the first
@@ -198,34 +201,129 @@ public sealed class LaunchMemoryGuardTests
     public void TheTripAndTheCollectionLogTheMetricTheFigureTheLimitAndItsSource()
     {
         var rig = new Rig { Reading = Over("resident memory", "cgroup memory limit") };
-        rig.OnCollect = () => rig.Reading = new LaunchMemoryReading(900 * Mb, Limit, "resident memory", "cgroup memory limit");
+        rig.OnCollect = () => rig.Reading = new LaunchMemoryReading(1300 * Mb, Limit, "resident memory", "cgroup memory limit");
 
         rig.Pass();
 
+        /* The collection left the figure over the line (1300MB of 1536MB), so the Critical names that figure. */
         var critical = rig.Logger.Lines.Single(l => l.StartsWith("Critical:", StringComparison.Ordinal));
-        Assert.Contains("resident memory 1426MB", critical);
+        Assert.Contains("resident memory 1300MB", critical);
         Assert.Contains("80", critical);
         Assert.Contains("1536MB limit (cgroup memory limit)", critical);
 
         var collection = rig.Logger.Lines.Single(l => l.Contains("ran a full garbage collection", StringComparison.Ordinal));
         Assert.StartsWith("Information:", collection, StringComparison.Ordinal);
-        Assert.Contains("resident memory 1426MB before, 900MB after", collection);
+        Assert.Contains("resident memory 1426MB before, 1300MB after", collection);
     }
 
-    /// <summary>A release and then a fresh climb is a new episode: a second Critical and a second collection.</summary>
+    /// <summary>
+    /// A release and then a climb the collection cannot clear is a new episode: a second Critical. The old test pinned
+    /// the flood (#5481 round 1): a figure hovering at the line got a Critical and an aggressive collection every
+    /// pass, 15 seconds apart. A crossing 15 seconds after a collection now holds quietly, and the next collection,
+    /// a minute after the last, is the one that decides.
+    /// </summary>
     [Fact]
-    public void AReleasedGuardThatTripsAgain_StartsANewEpisode()
+    public void AReleasedGuardThatTripsAgain_StartsANewEpisodeOnlyWhenACollectionCannotClearIt()
     {
         var rig = new Rig();
+
+        /* Episode one: held, then released when the memory falls. */
+        Assert.False(rig.Pass());
+        rig.Reading = Under();
+        Assert.True(rig.PassAfter(TimeSpan.FromSeconds(15)));
+        Assert.Equal(1, rig.Logger.CountAtLevel(LogLevel.Critical));
+
+        /* Over again 15 seconds later: the last collection was 30 seconds ago, so none may run and the guard holds
+         * without a Critical. */
+        rig.Reading = Over();
+        Assert.False(rig.PassAfter(TimeSpan.FromSeconds(15)));
+        Assert.Equal(1, rig.Collections);
+        Assert.Equal(1, rig.Logger.CountAtLevel(LogLevel.Critical));
+
+        /* A minute after the first collection one runs, cannot clear it, and the second episode is announced. */
+        Assert.False(rig.PassAfter(TimeSpan.FromSeconds(30)));
+        Assert.Equal(2, rig.Collections);
+        Assert.Equal(2, rig.Logger.CountAtLevel(LogLevel.Critical));
+    }
+
+    /// <summary>
+    /// A process that hovers at the line for ten minutes: over it on every 15-second pass, and under it again each
+    /// time a collection runs. At most ten collections (one a minute), no Critical, and never a hold that outlasts
+    /// the next collection.
+    /// </summary>
+    [Fact]
+    public void AFigureHoveringAtTheLine_CollectsAtMostOncePerMinuteAndNeverLogsCritical()
+    {
+        var rig = new Rig { Now = TimeSpan.Zero };
+        rig.OnCollect = () => rig.Reading = Under();
+
+        for (var pass = 0; pass < 40; pass++)
+        {
+            rig.Reading = Over();
+            rig.Guard.MayLaunch(0);
+            rig.Now += TimeSpan.FromSeconds(15);
+        }
+
+        Assert.Equal(10, rig.Collections);
+        Assert.Equal(0, rig.Logger.CountAtLevel(LogLevel.Critical));
+        Assert.Equal(0, rig.Logger.CountAtLevel(LogLevel.Warning));
+    }
+
+    /// <summary>The first collection after the process starts is never rate-limited: the monotonic clock starts near
+    /// zero, and a zero default for "the last collection" would skip it for the first minute (#5481 round 1).</summary>
+    [Fact]
+    public void TheFirstCollectionAfterStart_IsNeverSkipped()
+    {
+        var rig = new Rig { Now = TimeSpan.Zero };
         rig.OnCollect = () => rig.Reading = Under();
 
         Assert.True(rig.Pass());
-        rig.Reading = Over();
-        Assert.True(rig.PassAfter(TimeSpan.FromSeconds(15)));
 
+        Assert.Equal(1, rig.Collections);
+        Assert.False(rig.Guard.IsHolding);
+    }
+
+    /// <summary>A crossing the collection rate limit kept from collecting holds without a Critical: no collection has
+    /// yet failed to clear it, and the next one is due within the minute.</summary>
+    [Fact]
+    public void ACrossingTheRateLimitKeptFromCollecting_HoldsQuietlyUntilTheNextCollection()
+    {
+        var rig = new Rig { Now = TimeSpan.FromSeconds(100) };
+        rig.OnCollect = () => rig.Reading = Under();
+        rig.Pass();
+        rig.Reading = Over();
+
+        Assert.False(rig.PassAfter(TimeSpan.FromSeconds(15)));
+        Assert.True(rig.Guard.IsHolding);
+        Assert.Equal(0, rig.Logger.CountAtLevel(LogLevel.Critical));
+
+        Assert.True(rig.PassAfter(TimeSpan.FromSeconds(45)));
         Assert.Equal(2, rig.Collections);
+        Assert.False(rig.Guard.IsHolding);
+    }
+
+    /// <summary>A sampler that fails while the guard holds ends the hold (fail open) with a Warning, so a later release
+    /// line never counts the time collection was running as time held (#5481 round 1).</summary>
+    [Fact]
+    public void ASamplerFaultWhileHolding_EndsTheHoldAndTheLaterReleaseCountsNoRunningTime()
+    {
+        var rig = new Rig();
+        Assert.False(rig.Pass());
+        Assert.True(rig.Guard.IsHolding);
+
+        rig.SamplerFault = new InvalidOperationException("no /proc");
+        Assert.True(rig.PassAfter(TimeSpan.FromSeconds(15)));
+        Assert.False(rig.Guard.IsHolding);
+        Assert.Equal(1, rig.Count(LogLevel.Warning, "ends its hold"));
+
+        /* An hour of running, then a fresh episode: its own length is what the release line reports. */
+        rig.SamplerFault = null;
+        Assert.False(rig.PassAfter(TimeSpan.FromHours(1)));
+        rig.Reading = Under();
+        Assert.True(rig.PassAfter(TimeSpan.FromSeconds(15)));
+        var release = rig.Logger.Lines.Last(l => l.Contains("resuming collection-body launches", StringComparison.Ordinal));
+        Assert.Contains("hold of 15s", release);
         Assert.Equal(2, rig.Logger.CountAtLevel(LogLevel.Critical));
-        Assert.Equal(2, rig.Count(LogLevel.Information, "resuming collection-body launches"));
     }
 
     /// <summary>A guard that cannot read memory fails open, with one Warning, and keeps asking each pass.</summary>
@@ -282,45 +380,6 @@ public sealed class LaunchMemoryGuardTests
         /* An unknown limit never blocks. */
         rig.Reading = new LaunchMemoryReading(long.MaxValue, 0, "private bytes", "the GC memory budget");
         Assert.True(rig.PassAfter(TimeSpan.FromMinutes(2)));
-    }
-
-    /// <summary>
-    /// The real collection, on this process: garbage that nothing references still counts in the process's private
-    /// bytes until a collection decommits it, and the guard's collection gives it back. This is the premise the whole
-    /// release rests on (a drained process allocates nothing, so the figure never falls by itself), measured rather
-    /// than assumed. The garbage is made in its own method so no local keeps it alive.
-    /// </summary>
-    [Fact]
-    public void TheRealCollection_GivesDeadGarbageBackToTheProcess()
-    {
-        MakeGarbage();
-        var before = PrivateMegabytes();
-        Assert.True(before > 150, $"the test garbage should show in private bytes, read {before}MB");
-
-        LaunchMemoryGuard.CollectAndDecommit();
-
-        var after = PrivateMegabytes();
-        Assert.True(before - after >= 100, $"the collection should decommit the garbage: {before}MB before, {after}MB after");
-    }
-
-    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
-    private static void MakeGarbage()
-    {
-        var blocks = new List<byte[]>();
-        for (var i = 0; i < 20; i++)
-        {
-            var block = new byte[10_000_000];
-            Array.Fill(block, (byte)1);
-            blocks.Add(block);
-        }
-
-        GC.KeepAlive(blocks);
-    }
-
-    private static long PrivateMegabytes()
-    {
-        using var process = System.Diagnostics.Process.GetCurrentProcess();
-        return process.PrivateMemorySize64 / (1024 * 1024);
     }
 
     /// <summary>
@@ -540,6 +599,141 @@ public sealed class LaunchMemoryGuardTests
     public void ParseProcStatusBytes_ReadsOneKeyAsBytes(string? text, string key, long? expected)
         => Assert.Equal(expected, LinuxLaunchMemorySampler.ParseProcStatusBytes(text, key));
 
+    /* ============== this process's own cgroup, nested-aware (#5481 round 1): the guard and --check-settings ============== */
+
+    private const string MeminfoSixtyFourGb = "MemTotal:       67108864 kB\nMemFree:        1000000 kB\n";
+    private const string TwoGi = "2147483648";
+
+    [Theory]
+    [InlineData("0::/system.slice/darling.service\n", "/system.slice/darling.service")]
+    [InlineData("0::/\n", "/")]
+    [InlineData("12:memory:/old\n0::/new/leaf/\n", "/new/leaf")]
+    [InlineData("0::/system.slice/x.service (deleted)\n", "/system.slice/x.service")]
+    [InlineData("0::/a/../b\n", null)]
+    [InlineData("0::relative\n", null)]
+    [InlineData("4:memory:/docker/abc\n", null)]
+    [InlineData("", null)]
+    [InlineData(null, null)]
+    public void ParseProcSelfCgroupV2Path_ReadsTheUnifiedLine(string? text, string? expected)
+        => Assert.Equal(expected, DarlingStoreHostProfile.ParseProcSelfCgroupV2Path(text));
+
+    [Theory]
+    [InlineData("11:memory:/docker/abc\n10:cpu,cpuacct:/docker/abc\n", "/docker/abc")]
+    [InlineData("4:cpu,memory:/p\n", "/p")]
+    [InlineData("1:name=systemd:/x\n0::/y\n", null)]
+    [InlineData("", null)]
+    public void ParseProcSelfCgroupV1MemoryPath_ReadsTheMemoryControllerLine(string? text, string? expected)
+        => Assert.Equal(expected, DarlingStoreHostProfile.ParseProcSelfCgroupV1MemoryPath(text));
+
+    [Fact]
+    public void CgroupPathAndAncestors_WalksUpToTheRoot()
+    {
+        Assert.Equal(["/a/b/c", "/a/b", "/a", "/"], DarlingStoreHostProfile.CgroupPathAndAncestors("/a/b/c"));
+        Assert.Equal(["/"], DarlingStoreHostProfile.CgroupPathAndAncestors("/"));
+    }
+
+    private static long? Resolve(string? procSelfCgroup, params (string Path, string Text)[] files)
+    {
+        var map = files.ToDictionary(f => f.Path, f => f.Text);
+        return DarlingStoreHostProfile.ResolveCgroupMemoryLimitBytes(procSelfCgroup, path => map.GetValueOrDefault(path));
+    }
+
+    /// <summary>A systemd unit with <c>MemoryMax=2G</c> on a 64GB host: the limit is on the unit's cgroup, and the root
+    /// file reads <c>max</c>. The root-only read saw no limit and the guard measured against 64GB.</summary>
+    [Fact]
+    public void ASystemdUnitMemoryMax_IsFoundAtTheNestedPath()
+    {
+        var limit = Resolve(
+            "0::/system.slice/darling.service\n",
+            ("/sys/fs/cgroup/memory.max", "max\n"),
+            ("/sys/fs/cgroup/system.slice/darling.service/memory.max", TwoGi + "\n"));
+
+        Assert.Equal(2147483648L, limit);
+    }
+
+    /// <summary><c>max</c> on the process's own cgroup and a limit on a parent: the parent's limit applies.</summary>
+    [Fact]
+    public void MaxAtTheLeafWithALimitAtAParent_IsTheParentsLimit()
+    {
+        var limit = Resolve(
+            "0::/machine.slice/pod/leaf\n",
+            ("/sys/fs/cgroup/memory.max", "max"),
+            ("/sys/fs/cgroup/machine.slice/memory.max", "8589934592"),
+            ("/sys/fs/cgroup/machine.slice/pod/memory.max", "1073741824"),
+            ("/sys/fs/cgroup/machine.slice/pod/leaf/memory.max", "max"));
+
+        Assert.Equal(1073741824L, limit);
+    }
+
+    /// <summary>A container started with <c>--cgroupns=host</c> sees the host's tree, so its own path is a long one.</summary>
+    [Fact]
+    public void ACgroupnsHostContainer_ResolvesItsOwnLimitFromTheHostsTree()
+    {
+        var limit = Resolve(
+            "0::/docker/0123abcd\n",
+            ("/sys/fs/cgroup/memory.max", "max"),
+            ("/sys/fs/cgroup/docker/0123abcd/memory.max", TwoGi));
+
+        Assert.Equal(2147483648L, limit);
+    }
+
+    [Fact]
+    public void CgroupV1_TheMemoryControllersNestedLimit_IsFound()
+    {
+        var limit = Resolve(
+            "4:memory:/docker/abc\n3:cpu:/docker/abc\n",
+            ("/sys/fs/cgroup/memory/memory.limit_in_bytes", "9223372036854771712"),
+            ("/sys/fs/cgroup/memory/docker/abc/memory.limit_in_bytes", "536870912\n"));
+
+        Assert.Equal(536870912L, limit);
+    }
+
+    [Fact]
+    public void NoFiniteLimitAnywhere_IsNull_AndNothingReadableIsNull()
+    {
+        Assert.Null(Resolve("0::/a/b\n", ("/sys/fs/cgroup/memory.max", "max"), ("/sys/fs/cgroup/a/memory.max", "max")));
+        Assert.Null(Resolve(null));
+        Assert.Null(Resolve("garbage"));
+    }
+
+    /// <summary>A process whose <c>/proc/self/cgroup</c> cannot be read behaves as before: the root files are read.</summary>
+    [Fact]
+    public void AnUnreadableProcSelfCgroup_StillReadsTheRootFiles()
+    {
+        Assert.Equal(2147483648L, Resolve(null, ("/sys/fs/cgroup/memory.max", TwoGi)));
+        Assert.Equal(1073741824L, Resolve(null, ("/sys/fs/cgroup/memory/memory.limit_in_bytes", "1073741824")));
+    }
+
+    /// <summary>The guard's sampler through a nested cgroup on a 64GB host: the limit is the unit's 2GiB, not total RAM,
+    /// so 1800MB resident is over the line (1638MB) where the root-only read measured it against 64GB and never held.</summary>
+    [Fact]
+    public void Linux_ANestedCgroupLimit_IsTheGuardsLimit_NotTotalRam()
+    {
+        var files = new FakeFiles();
+        files.Files[LinuxLaunchMemorySampler.ProcStatusPath] = "VmRSS:\t 1843200 kB\n";
+        files.Files[DarlingStoreHostProfile.ProcMeminfoPath] = MeminfoSixtyFourGb;
+        files.Files[DarlingStoreHostProfile.ProcSelfCgroupPath] = "0::/system.slice/darling.service\n";
+        files.Files[DarlingStoreHostProfile.CgroupV2MemoryMaxPath] = "max\n";
+        files.Files["/sys/fs/cgroup/system.slice/darling.service/memory.max"] = TwoGi + "\n";
+        var sampler = new LinuxLaunchMemorySampler(files.Read, () => 700 * Mb, () => Limit, new CapturingTestLogger());
+
+        var reading = sampler.Sample();
+
+        Assert.Equal(2147483648L, reading.LimitBytes);
+        Assert.Equal("cgroup memory limit", reading.LimitSource);
+        Assert.False(DarlingWorker.ShouldLaunchSweeps(reading.Bytes, reading.LimitBytes));
+    }
+
+    /// <summary>The store host profile (<c>--check-settings</c>) reads the limit the same way the guard does.</summary>
+    [Fact]
+    public void TheStoreHostProfile_UsesTheSameNestedResolver()
+    {
+        var profile = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingStoreHostProfile.cs");
+
+        Assert.Contains("ResolveCgroupMemoryLimitBytes(TryReadFile(ProcSelfCgroupPath), TryReadFile)", profile, StringComparison.Ordinal);
+        Assert.DoesNotContain("ParseCgroupV2MemoryMaxBytes(TryReadFile(CgroupV2MemoryMaxPath))", profile, StringComparison.Ordinal);
+    }
+
     /// <summary>The same Linux rig, end to end through the guard: the issue's numbers launch with no log at all.</summary>
     [Fact]
     public void Linux_TheIssuesNumbers_ThroughTheGuard_NeverTrip()
@@ -550,4 +744,58 @@ public sealed class LaunchMemoryGuardTests
         Assert.True(guard.MayLaunch(0));
         Assert.Empty(logger.Lines);
     }
+}
+
+/// <summary>
+/// The real collection, on this process (#5479). It measures process-wide private bytes, so it runs alone: in a
+/// collection that disables parallelization, with no other test class allocating or collecting beside it. Skipped
+/// on Linux, where the private-bytes figure is <c>VmData</c> and the guard does not use it.
+/// </summary>
+[Collection("launch-guard-real-collection")]
+public sealed class LaunchMemoryGuardRealCollectionTests
+{
+    /// <summary>
+    /// The real collection, on this process: garbage that nothing references still counts in the process's private
+    /// bytes until a collection decommits it, and the guard's collection gives it back. This is the premise the whole
+    /// release rests on (a drained process allocates nothing, so the figure never falls by itself), measured rather
+    /// than assumed. The garbage is made in its own method so no local keeps it alive.
+    /// </summary>
+    [Fact]
+    public void TheRealCollection_GivesDeadGarbageBackToTheProcess()
+    {
+        Assert.SkipWhen(OperatingSystem.IsLinux(), "On Linux the guard's figure is resident memory, and this process's private bytes read VmData.");
+        MakeGarbage();
+        var before = PrivateMegabytes();
+        Assert.True(before > 150, $"the test garbage should show in private bytes, read {before}MB");
+
+        LaunchMemoryGuard.CollectAndDecommit();
+
+        var after = PrivateMegabytes();
+        Assert.True(before - after >= 100, $"the collection should decommit the garbage: {before}MB before, {after}MB after");
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static void MakeGarbage()
+    {
+        var blocks = new List<byte[]>();
+        for (var i = 0; i < 20; i++)
+        {
+            var block = new byte[10_000_000];
+            Array.Fill(block, (byte)1);
+            blocks.Add(block);
+        }
+
+        GC.KeepAlive(blocks);
+    }
+
+    private static long PrivateMegabytes()
+    {
+        using var process = System.Diagnostics.Process.GetCurrentProcess();
+        return process.PrivateMemorySize64 / (1024 * 1024);
+    }
+}
+
+[CollectionDefinition("launch-guard-real-collection", DisableParallelization = true)]
+public sealed class LaunchMemoryGuardRealCollectionDefinition
+{
 }
