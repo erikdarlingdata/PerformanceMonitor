@@ -3691,18 +3691,7 @@ public sealed class DarlingCollectorRunner
                     else if (procedureStatsPlanPhaseMs > 0 && (object)rows is List<ProcedureStatsCollector.Row> offRows)
                     {
                         /* Off mode renders the plans in the plan phase and has no reuse pass: stamp what it rendered. */
-                        var renderedRows = 0;
-                        long renderedBytes = 0;
-                        foreach (var row in offRows)
-                        {
-                            if (row.QueryPlanXml is not null || row.QueryPlanXmlBytes is not null)
-                            {
-                                renderedRows++;
-                                renderedBytes += row.QueryPlanXmlBytes ?? 0;
-                            }
-                        }
-
-                        StampPlanFetch(context, renderedRows, renderedBytes, procedureStatsPlanPhaseMs);
+                        StampProcedureStatsOffPlanPhase(context, offRows, procedureStatsPlanPhaseMs);
                     }
                 }
                 catch (Exception ex) when (EnumeratedCollectorDriver.ItemBudgetExpired(itemBudget, cancellationToken))
@@ -7343,7 +7332,7 @@ RETURNING s.state_key";
     /// cycle. A stop or the item budget expiring is not a phase failure and propagates. Returns the phase's milliseconds,
     /// 0 when no query ran.
     /// </summary>
-    private async Task<long> RunProcedureStatsPlanPhaseAsync(
+    internal async Task<long> RunProcedureStatsPlanPhaseAsync(
         ITargetProvider provider,
         DbDataReader mainReader,
         DbConnection targetConnection,
@@ -7380,6 +7369,28 @@ RETURNING s.state_key";
 
         ProcedureStatsCollector.ApplyPlanPhase(rows, indexes, results);
         return Math.Max(1L, watch.ElapsedMilliseconds);
+    }
+
+    /// <summary>
+    /// #5449: Off mode renders plans in the plan phase and has no reuse pass, so the run stamps what the phase rendered
+    /// (the rows that carry a plan or a size) and how long it took. A phase that failed leaves no row with a plan, so the
+    /// stamp reads zero rendered rows and still records the phase's milliseconds.
+    /// </summary>
+    internal static void StampProcedureStatsOffPlanPhase(
+        CollectorContext context, List<ProcedureStatsCollector.Row> rows, long planPhaseMs)
+    {
+        var renderedRows = 0;
+        long renderedBytes = 0;
+        foreach (var row in rows)
+        {
+            if (row.QueryPlanXml is not null || row.QueryPlanXmlBytes is not null)
+            {
+                renderedRows++;
+                renderedBytes += row.QueryPlanXmlBytes ?? 0;
+            }
+        }
+
+        StampPlanFetch(context, renderedRows, renderedBytes, planPhaseMs);
     }
 
     /// <summary>The cache a server's procedure_stats runs have filled so far, for a test to confirm and inspect.</summary>

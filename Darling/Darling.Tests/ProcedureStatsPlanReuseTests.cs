@@ -1201,6 +1201,100 @@ public sealed class ProcedureStatsPlanReuseTests
         Assert.Equal(capture ? "<plan/>" : null, result.PlanXml);
     }
 
+    // ---- the runner's plan phase (#5449) -------------------------------------------------------
+
+    /// <summary>A target whose plan-phase query throws what <paramref name="fail"/> returns, so the runner's catch is what a test sees.</summary>
+    private sealed class FailingPlanQueryProvider(Func<CancellationToken, Exception> fail) : ITargetProvider
+    {
+        public CollectorTargetEngine Engine => CollectorTargetEngine.SqlServer;
+
+        public System.Data.Common.DbConnection CreateConnection(string connectionString) => throw new NotSupportedException();
+
+        public System.Data.Common.DbCommand CreateCommand(CollectorQuery query, System.Data.Common.DbConnection connection, int commandTimeoutSeconds) =>
+            new FailingCommand(fail);
+
+        public CollectorTargetFault Classify(Exception exception, bool yieldsOnLockTimeout) => CollectorTargetFault.Unclassified;
+
+        public string WithDatabase(string connectionString, string databaseName) => databaseName;
+
+        public (string ConnectionString, CollectorQuery Query) BuildDatabaseListPlan(
+            string connectionString, IReadOnlyList<string>? excludedDatabases, IReadOnlyList<string>? databaseScope) =>
+            throw new NotSupportedException();
+    }
+
+    private sealed class FailingCommand(Func<CancellationToken, Exception> fail) : System.Data.Common.DbCommand
+    {
+        [System.Diagnostics.CodeAnalysis.AllowNull]
+        public override string CommandText { get; set; } = string.Empty;
+        public override int CommandTimeout { get; set; }
+        public override CommandType CommandType { get; set; }
+        public override bool DesignTimeVisible { get; set; }
+        public override UpdateRowSource UpdatedRowSource { get; set; }
+        protected override System.Data.Common.DbConnection? DbConnection { get; set; }
+        protected override System.Data.Common.DbParameterCollection DbParameterCollection => throw new NotSupportedException();
+        protected override System.Data.Common.DbTransaction? DbTransaction { get; set; }
+        public override void Cancel() { }
+        public override int ExecuteNonQuery() => throw new NotSupportedException();
+        public override object? ExecuteScalar() => throw new NotSupportedException();
+        public override void Prepare() { }
+        protected override System.Data.Common.DbParameter CreateDbParameter() => throw new NotSupportedException();
+        protected override System.Data.Common.DbDataReader ExecuteDbDataReader(CommandBehavior behavior) => throw fail(CancellationToken.None);
+        protected override Task<System.Data.Common.DbDataReader> ExecuteDbDataReaderAsync(CommandBehavior behavior, CancellationToken cancellationToken) =>
+            throw fail(cancellationToken);
+    }
+
+    private static (List<ProcedureStatsCollector.Row> Rows, System.Data.Common.DbDataReader MainReader) PlanPhaseInputs()
+    {
+        var table = new DataTable();
+        table.Columns.Add("x", typeof(int));
+        return (new List<ProcedureStatsCollector.Row> { RowFor(1), RowFor(2) }, table.CreateDataReader());
+    }
+
+    [Fact]
+    public async Task APlanQueryThatFails_ShipsTheRowsWithoutPlans_LogsOneWarning_AndStampsTheCounters()
+    {
+        var flipper = new FlippableRunner("off");
+        var context = StampedContext(flipper.Runner, capture: true);
+        var (rows, reader) = PlanPhaseInputs();
+        await using var _ = reader;
+
+        var ms = await flipper.Runner.RunProcedureStatsPlanPhaseAsync(
+            new FailingPlanQueryProvider(_ => new InvalidOperationException("the plan query failed")),
+            reader, null!, ServerFor(), context, rows, CancellationToken.None);
+
+        Assert.True(ms >= 1, "a failed phase still reports its time, so the run stamps it");
+        Assert.All(rows, row =>
+        {
+            Assert.Null(row.QueryPlanXml);
+            Assert.Null(row.QueryPlanXmlBytes);
+            Assert.True(row.PlanPhaseSkipped, "every row is marked skipped so the reuse pass counts no miss");
+        });
+        Assert.Equal(1, flipper.Log.CountAtLevel(LogLevel.Warning));
+
+        DarlingCollectorRunner.StampProcedureStatsOffPlanPhase(context, rows, ms);
+        Assert.Equal(0, context.Measurements.First(m => m.Label == "plans_rendered").Value);
+        Assert.Equal(0, context.Measurements.First(m => m.Label == "plans_rendered_bytes").Value);
+        Assert.Equal(ms, context.Measurements.First(m => m.Label == "plan_fetch_ms").Value);
+    }
+
+    [Fact]
+    public async Task AStopDuringThePlanQuery_EscapesRatherThanBecomingAWarning()
+    {
+        var flipper = new FlippableRunner("off");
+        var context = StampedContext(flipper.Runner, capture: true);
+        var (rows, reader) = PlanPhaseInputs();
+        await using var _ = reader;
+        using var cts = new CancellationTokenSource();
+        await cts.CancelAsync();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => flipper.Runner.RunProcedureStatsPlanPhaseAsync(
+            new FailingPlanQueryProvider(token => new OperationCanceledException(token)),
+            reader, null!, ServerFor(), context, rows, cts.Token));
+
+        Assert.Equal(0, flipper.Log.CountAtLevel(LogLevel.Warning));
+        Assert.All(rows, row => Assert.False(row.PlanPhaseSkipped));
+    }
+
     private sealed class NoDeltas : ICollectorDeltaCalculator
     {
         public long CalculateDelta(int serverId, string collectorName, string key, long currentValue,
