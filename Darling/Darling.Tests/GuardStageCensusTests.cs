@@ -248,6 +248,35 @@ public sealed class GuardStageCensusTests
     {
     }
 
+    /* xunit v3 runs static and non-public test methods and static classes (L1 of #5471's second review), so the
+       reflection has to see a trait on each of them as well. */
+    private sealed class ProbeStaticMethodTagged
+    {
+        [ProbeTest, Trait(ProbeStage, ProbeGuard)]
+        public static void Probe()
+        {
+        }
+    }
+
+    private sealed class ProbePrivateMethodTagged
+    {
+        [ProbeTest, Trait(ProbeStage, ProbeGuard)]
+#pragma warning disable IDE0051, CA1822
+        private void Probe()
+#pragma warning restore IDE0051, CA1822
+        {
+        }
+    }
+
+    [Trait(ProbeStage, ProbeGuard)]
+    private static class ProbeStaticClassTagged
+    {
+        [ProbeTest]
+        public static void Probe()
+        {
+        }
+    }
+
     private static bool IsProbeTest(System.Reflection.MethodInfo m) => m.IsDefined(typeof(ProbeTestAttribute), inherit: true);
 
     [Fact]
@@ -262,6 +291,9 @@ public sealed class GuardStageCensusTests
         Assert.True(reflected.ContainsKey(nameof(ProbeMethodTagged)), "a method-level trait is not seen");
         Assert.True(reflected.ContainsKey(nameof(ProbeInheritsTag)), "a trait inherited from a base class is not seen");
         Assert.True(reflected.ContainsKey(nameof(ProbeLiveTagged)) && reflected[nameof(ProbeLiveTagged)].LiveCollection, "a live-postgres collection is not seen");
+        Assert.True(reflected.ContainsKey(nameof(ProbeStaticMethodTagged)), "a static test method with a method-level trait is not seen");
+        Assert.True(reflected.ContainsKey(nameof(ProbePrivateMethodTagged)), "a non-public test method with a method-level trait is not seen");
+        Assert.True(reflected.ContainsKey(nameof(ProbeStaticClassTagged)), "a static class is not seen");
         Assert.False(reflected.ContainsKey(nameof(ProbeUntagged)), "an untagged class was selected");
         Assert.False(reflected.ContainsKey(nameof(ProbeTaggedBase)), "an abstract class was selected");
         Assert.False(reflected[nameof(ProbeClassTagged)].LiveCollection);

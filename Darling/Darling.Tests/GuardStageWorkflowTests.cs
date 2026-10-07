@@ -94,10 +94,13 @@ public sealed class GuardStageWorkflowTests
         /* The one dotnet run of the tests (the class listing is a different command) carries the switch, once, in the loop. */
         var runs = Regex.Matches(run, @"^\s*dotnet run --project \$suite\.Project -c Release --no-build -- -trait Stage=Guard.*$", RegexOptions.Multiline);
         Assert.Single(runs);
-        Assert.Contains(" -failSkips", runs[0].Value, StringComparison.Ordinal);
+        /* A whole switch, not a prefix: -failSkips- is the spelling that turns failing skips back off (L2 of the second review). */
+        Assert.Matches(@"\s-failSkips(?:\s|$)", runs[0].Value);
 
-        var preference = run.IndexOf("$PSNativeCommandUseErrorActionPreference = $false", StringComparison.Ordinal);
-        Assert.True(preference >= 0, "the guard loop does not set $PSNativeCommandUseErrorActionPreference explicitly");
+        /* An uncommented statement of its own: a commented-out line must not satisfy the pin (L2 of the second review). */
+        var preferenceLine = Regex.Match(run, @"^[ \t]*\$PSNativeCommandUseErrorActionPreference = \$false[ \t]*\r?$", RegexOptions.Multiline);
+        Assert.True(preferenceLine.Success, "the guard loop does not set $PSNativeCommandUseErrorActionPreference explicitly, on a line of its own that is not a comment");
+        var preference = preferenceLine.Index;
         Assert.True(
             preference > run.IndexOf("$ErrorActionPreference = 'Stop'", StringComparison.Ordinal)
               && preference < run.IndexOf("foreach ($suite in $suites)", StringComparison.Ordinal),

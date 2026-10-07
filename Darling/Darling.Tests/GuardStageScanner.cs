@@ -394,14 +394,16 @@ internal static class GuardStageScanner
 
     /// <summary>
     /// The classes xunit selects for <c>-trait Stage=Guard</c>, read off the test assembly itself (M1 of #5471's
-    /// review): a public, concrete class with at least one test method, where the trait sits on the assembly, the
-    /// class (or a base class, which xunit inherits) or any of its test methods. This is xunit's own idea of
-    /// "tagged": it sees a method-level trait, a combined attribute list, a trait spelled with constants and a
+    /// review): an exported, concrete (or static) class with at least one test method, static or instance, public or
+    /// not, where the trait sits on the assembly, the class (or a base class, which xunit inherits) or any of its test
+    /// methods. That is xunit v3's own discovery (L1 of the second review): <c>GetExportedTypes</c>, a class that is
+    /// not abstract or is sealed (a static class is both), and methods bound as Instance, Static, Public, NonPublic.
+    /// This is xunit's own idea of "tagged": it sees a method-level trait, a combined attribute list, a trait spelled with constants and a
     /// linked file, which a source scan can miss, so a store-needing class cannot reach the guard job unseen.
     /// </summary>
     internal static IReadOnlyList<ReflectedClass> ReflectGuardClasses(Assembly assembly) =>
         ReflectGuardClasses(
-            assembly.GetTypes().Where(t => t.IsPublic || t.IsNestedPublic),
+            assembly.GetExportedTypes(),
             HasGuardTrait(assembly.GetCustomAttributes()));
 
     /// <summary>The same read over the given types, so a test can point it at probe classes xunit does not run.</summary>
@@ -411,9 +413,10 @@ internal static class GuardStageScanner
         isTest ??= m => m.GetCustomAttributes(inherit: true).OfType<IFactAttribute>().Any();
         var result = new List<ReflectedClass>();
 
-        foreach (var type in types.Where(t => t.IsClass && !t.IsAbstract))
+        foreach (var type in types.Where(t => t.IsClass && (!t.IsAbstract || t.IsSealed)))
         {
-            var tests = type.GetMethods(BindingFlags.Public | BindingFlags.Instance)
+            var tests = type.GetMethods(
+                    BindingFlags.Instance | BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.FlattenHierarchy)
                 .Where(isTest)
                 .ToList();
             if (tests.Count == 0)
