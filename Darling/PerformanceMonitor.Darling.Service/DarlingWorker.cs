@@ -646,15 +646,23 @@ public sealed class DarlingWorker : BackgroundService
     internal const double MemoryGuardFraction = 0.80;
 
     /// <summary>
-    /// The working-set launch guard (#1556): whether the fleet sweep may launch NEW collection bodies this
-    /// tick. Once the process working set crosses <see cref="MemoryGuardFraction"/> of available memory this
-    /// returns false, so the launch loop stops STARTING new bodies and lets the in-flight ones drain — the
-    /// process backs away from the 0→13GB commit-limit blowout instead of piling on more concurrent
+    /// The memory launch guard's threshold rule (#1556): whether the fleet sweep may launch NEW collection bodies
+    /// this pass. Once the process's memory figure crosses <see cref="MemoryGuardFraction"/> of the limit it is
+    /// measured against this returns false, so the launch loop stops STARTING new bodies and lets the in-flight
+    /// ones drain, and the process backs away from memory exhaustion instead of piling on more concurrent
     /// collectors. Purge/disk/analysis/delay keep running (the guard only gates NEW launches). Pure so a unit
-    /// test pins the bands and the constant; the caller passes <c>Process.PrivateMemorySize64</c> (the metric
-    /// that matched the incident — committed private bytes, not the GC heap) and
-    /// <c>GC.GetGCMemoryInfo().TotalAvailableMemoryBytes</c>. A non-positive available figure (an unknown
-    /// budget) never blocks collection.
+    /// test pins the bands and the constant. The caller is <see cref="LaunchMemoryGuard"/>, which chooses the figure
+    /// and the limit per platform, because what each platform kills on differs:
+    /// <list type="bullet">
+    /// <item>Windows: <c>Process.PrivateMemorySize64</c> (committed private bytes, not the GC heap; the metric that
+    /// matched the 13GB commit-limit incident, and the commit charge is what the commit limit kills on) against
+    /// <c>GC.GetGCMemoryInfo().TotalAvailableMemoryBytes</c>.</item>
+    /// <item>Linux: the process's resident memory (<c>VmRSS</c>), not <c>PrivateMemorySize64</c>, which the runtime
+    /// reads as <c>VmData</c> (every private writable mapping, resident or not; #5479 measured 1426MB against 810MB
+    /// resident). The limit is the cgroup memory limit when one is set, else total RAM: the figure the kernel's
+    /// out-of-memory kill compares, not the GC's 75% budget of it.</item>
+    /// </list>
+    /// A non-positive limit (an unknown budget) never blocks collection.
     /// </summary>
     internal static bool ShouldLaunchSweeps(long workingSetBytes, long availableBytes)
     {
@@ -1022,11 +1030,20 @@ public sealed class DarlingWorker : BackgroundService
     /* #4004 review, round 3: "the log-hash key was replaced at start", held for the first pg_log_events run. */
     private readonly LogHashKeyRotationNote _logHashKeyRotation = new();
 
-    /* Fleet-level working-set launch-guard latch (#1556): true once ShouldLaunchSweeps has tripped this
-       episode, so its CRITICAL log is emitted ONCE rather than every sweep (the WarnedThisEpisode idiom —
-       but fleet-wide: the guard is about the whole process's working set, so it is a single worker field,
-       NOT a per-ServerLoopState flag). Cleared when the working set recovers below the threshold. */
-    private bool _memoryGuardTrippedThisEpisode;
+    /* The fleet-level memory launch guard (#1556, #5479): one per process, the whole process's memory rather than
+       a per-server state, so it is a single worker field and not a ServerLoopState flag. It owns the trip, the
+       garbage collection that releases it, the hold warnings and the release (see LaunchMemoryGuard). The setter
+       is the seam a test uses to make the guard hold: hand it a guard whose sampler reads over the line. */
+    private LaunchMemoryGuard _launchMemoryGuard;
+
+    /// <summary>The memory launch guard the collection loop asks once per pass. A test replaces it, before the loop
+    /// starts, with a guard built over a sampler that reads over the line, to make the guard hold with no real
+    /// memory pressure.</summary>
+    internal LaunchMemoryGuard LaunchGuard
+    {
+        get => _launchMemoryGuard;
+        set => _launchMemoryGuard = value ?? throw new ArgumentNullException(nameof(value));
+    }
 
     /* The store's TimescaleDB availability: seeded by the start-path detection and RE-PROBED on the hourly
        store-maintenance tick for as long as it reads false (#3815). What it records is whether a detection
@@ -1348,6 +1365,7 @@ LIMIT 1";
         _webTlsCertState = webTlsCertState;
         _baselineCache = baselineCache;
         _readLatency = readLatency;
+        _launchMemoryGuard = LaunchMemoryGuard.CreateDefault(logger);
     }
 
     /// <summary>
@@ -3437,32 +3455,22 @@ LIMIT 1";
                (InFlightSweep, SweepStartedUtc, WarnedThisEpisode) is written ONLY here on the outer sweep thread
                — the body never touches it, so there is no cross-thread tear on these fields. */
 
-            /* Working-set launch guard (#1556): before launching ANY new bodies this tick, check the process
-               working set against the guard threshold. Over the line, launch NOTHING this sweep so the in-flight
-               bodies drain and the process backs away from the commit-limit exhaustion the field incident hit —
-               but the purge / disk-pressure / delay steps below keep running. ONE CRITICAL per episode; a
-               recovery re-arms and logs at Information. */
-            long workingSetBytes;
-            using (var currentProcess = System.Diagnostics.Process.GetCurrentProcess())
+            /* Memory launch guard (#1556, #5479): before launching ANY new bodies this pass, ask the guard. Over the
+               line it launches NOTHING this pass so the in-flight bodies drain, and it runs a decommitting full
+               garbage collection itself (a drained process allocates nothing, so none would run otherwise), then
+               measures again in the same pass and releases when the figure is back under the line. The purge /
+               disk-pressure / delay steps below keep running. The guard logs the trip, each collection, the hold
+               and the release. */
+            var inFlightBodies = 0;
+            foreach (var target in sweepTargets)
             {
-                workingSetBytes = currentProcess.PrivateMemorySize64;
+                if (target.InFlightSweep is { IsCompleted: false })
+                {
+                    inFlightBodies++;
+                }
             }
-            var availableMemoryBytes = GC.GetGCMemoryInfo().TotalAvailableMemoryBytes;
-            var mayLaunchSweeps = ShouldLaunchSweeps(workingSetBytes, availableMemoryBytes);
-            if (!mayLaunchSweeps && !_memoryGuardTrippedThisEpisode)
-            {
-                _memoryGuardTrippedThisEpisode = true;
-                _logger.LogCritical(
-                    "Working set {WorkingSetMb}MB is over {Pct:P0} of {AvailableMb}MB available — PAUSING new collection-body launches this tick so in-flight bodies drain (the #1556 commit-limit backstop). Purge/disk/analysis continue.",
-                    workingSetBytes / (1024 * 1024), MemoryGuardFraction, availableMemoryBytes / (1024 * 1024));
-            }
-            else if (mayLaunchSweeps && _memoryGuardTrippedThisEpisode)
-            {
-                _memoryGuardTrippedThisEpisode = false;
-                _logger.LogInformation(
-                    "Working set recovered to {WorkingSetMb}MB of {AvailableMb}MB — resuming collection-body launches.",
-                    workingSetBytes / (1024 * 1024), availableMemoryBytes / (1024 * 1024));
-            }
+
+            var mayLaunchSweeps = _launchMemoryGuard.MayLaunch(inFlightBodies);
 
             foreach (var server in sweepTargets)
             {
