@@ -243,6 +243,31 @@ public sealed class WebDatabaseFilterReadsTests
     }
 
     /// <summary>
+    /// #5244 PR6 (W6): the six configuration and event reads are FILTERED, and the final roster holds: what stays UNFILTERED is the three
+    /// deadlock reads (which stay unfiltered on purpose, a deadlock spans several databases) and, until the storage and I/O part (PR5) is
+    /// built, its five reads. When PR5 lands, <c>PendingStorageAndIo</c> empties and UNFILTERED is exactly the three deadlock reads.
+    /// </summary>
+    [Fact]
+    public void ThePr6Reads_AreFiltered_AndTheFinalRosterOfUnfilteredReadsIsTheDeadlockThree_PlusPr5sPendingFive()
+    {
+        var classes = Classes();
+        var pr6 = new[]
+        {
+            "get_database_config", "get_database_scoped_config", "get_query_store_health", "get_database_config_changes",
+            "get_health_parser_severe_errors", "get_default_trace_events",
+        };
+        foreach (var read in pr6)
+        {
+            Assert.Contains(read, classes["FILTERED"]);
+            Assert.DoesNotContain(read, classes["UNFILTERED"]);
+        }
+
+        var deadlocks = new[] { "get_deadlock_trend", "get_deadlocks", "get_deadlock_detail" };
+        var pendingStorageAndIo = new[] { "get_file_io_trend", "get_file_io_stats", "get_database_sizes", "get_table_index_sizes", "get_pvs_stats" };
+        Assert.Equal(Sorted(deadlocks.Concat(pendingStorageAndIo)), Sorted(classes["UNFILTERED"]));
+    }
+
+    /// <summary>
     /// Pin 1: the reads in FILTERED are exactly the catalog rows that carry <c>PDatabases(</c>, the parameter a route that takes the
     /// list declares. A read cannot be listed in JS without its route taking the list, nor take it without being listed.
     /// </summary>

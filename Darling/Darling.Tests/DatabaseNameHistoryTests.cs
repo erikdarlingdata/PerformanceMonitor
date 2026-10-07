@@ -269,6 +269,24 @@ VALUES ($1,$2,$3,$4,$5,$6,$7)",
             Assert.Equal(new[] { 50001, 50002 }, onlyA.Select(r => r.ErrorNumber ?? 0).OrderBy(n => n).ToArray());
             var onlyB = await viewer.GetSevereErrorsAsync(ServerId, now.AddHours(-48), now, new[] { "B" }, ct);
             Assert.Equal(new[] { 50003, 50004 }, onlyB.Select(r => r.ErrorNumber ?? 0).OrderBy(n => n).ToArray());
+            Assert.Empty(await viewer.GetSevereErrorsAsync(ServerId, now.AddHours(-48), now, new[] { "database_id 99" }, ct));
+            Assert.Empty(await viewer.GetSevereErrorsAsync(ServerId, now.AddHours(-48), now, new[] { "a" }, ct));
+
+            /* #5244: the Darling MCP tool's database filter matches on the same per-error name, not the id's latest name (B). Filtering by
+               the OLD name A returns the old errors and not the new ones, B the reverse; an id the history never saw is in no chosen database. */
+            async Task<int[]> McpNumbers(params string[] chosen)
+            {
+                var doc = JsonDocument.Parse(await DarlingMcpHealthParserTools.GetSevereErrors(
+                    postgres, ServerName, 48, 50, DatabaseFilter.Of(chosen), null, null, ct)).RootElement;
+                return doc.TryGetProperty("errors", out var errors)
+                    ? errors.EnumerateArray().Select(e => e.GetProperty("error_number").GetInt32()).OrderBy(n => n).ToArray()
+                    : [];
+            }
+            Assert.Equal(new[] { 50001, 50002 }, await McpNumbers("A"));
+            Assert.Equal(new[] { 50003, 50004 }, await McpNumbers("B"));
+            Assert.Equal(new[] { 50001, 50002, 50003, 50004 }, await McpNumbers("A", "B"));
+            Assert.Equal(new[] { 50005 }, await McpNumbers("C"));
+            Assert.Empty(await McpNumbers("database_id 99"));
 
             bodySucceeded = true;
         }

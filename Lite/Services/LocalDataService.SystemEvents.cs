@@ -389,14 +389,16 @@ ORDER BY event_time DESC";
         var names = await GetDatabaseNameHistoryAsync(
             serverId, records.Select(r => (r.DatabaseId, r.EventTime)));
 
-        var filter = databaseNames is { Count: > 0 } ? new HashSet<string>(databaseNames, StringComparer.OrdinalIgnoreCase) : null;
+        /* #5244: the filter matches on that same per-error name, ordinal, and an id the history never saw (its "database_id N"
+           label is not a name) or an error with no database context is in no chosen database, the reading Darling's severe-errors
+           reader takes, so the same filter returns the same rows on both products. */
+        var filter = databaseNames is { Count: > 0 } ? databaseNames : null;
 
         var rows = new List<SevereErrorRow>();
         foreach (var record in records)
         {
-            var databaseName = names.Resolve(record.DatabaseId, record.EventTime);
-            if (filter == null || filter.Contains(databaseName))
-                rows.Add(new SevereErrorRow(record, databaseName));
+            if (filter == null || names.IsIn(record.DatabaseId, record.EventTime, filter))
+                rows.Add(new SevereErrorRow(record, names.Resolve(record.DatabaseId, record.EventTime)));
         }
         return rows;
     }
