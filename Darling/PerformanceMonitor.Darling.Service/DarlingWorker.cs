@@ -3262,6 +3262,11 @@ LIMIT 1";
             () => _timescaleAvailable);
         var backfillLoop = RunQueryStoreBackfillLoopAsync(queryStoreBackfill, servers, () => config.QueryStoreBackfillEnabled, stoppingToken);
 
+        /* #5450 proposal 2: the outbound heartbeat, on its own task and connection so a slow or dead URL never touches
+           collection. Returns at once when heartbeat.url is not set (the default). The URL is a secret: see
+           DarlingHeartbeat for what may reach the log. */
+        var heartbeatLoop = new DarlingHeartbeat(_logger).RunAsync(config.Heartbeat, postgres, stoppingToken);
+
         /* The fleet concurrency gate (#1553 D2): at most N=4 per-server collection bodies open a SQL connection
            at once, so one slow or hung server cannot head-of-line-block the fleet the way the old strictly
            sequential foreach did. Deliberately NOT disposed (CA2000 suppressed, not "fixed" back by an analyzer
@@ -3943,6 +3948,16 @@ LIMIT 1";
         try
         {
             await backfillLoop;
+        }
+        catch (OperationCanceledException)
+        {
+            /* Expected on shutdown. */
+        }
+
+        /* The heartbeat observes the same token and swallows everything but cancellation (#5450). */
+        try
+        {
+            await heartbeatLoop;
         }
         catch (OperationCanceledException)
         {
