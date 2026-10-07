@@ -102,7 +102,7 @@ public sealed class ScratchPostgresQuiesceLiveTests
 /// <summary>
 /// PR #5480: every <c>DROP DATABASE ... WITH (FORCE)</c> statement in Darling.Tests is preceded, in the same method, by
 /// <c>QuiesceTimescaleJobsAsync</c>, so a new drop site cannot reintroduce the kill of a running TimescaleDB job worker.
-/// A statement is a string literal holding both <c>DROP DATABASE</c> and <c>WITH (FORCE)</c>; comment lines are skipped.
+/// A statement is a string literal holding both <c>DROP DATABASE</c> and <c>WITH (FORCE)</c>; comments are blanked first by <see cref="CSharpSourceWalker"/>.
 /// </summary>
 public sealed class ScratchPostgresQuiesceCensusTests
 {
@@ -113,18 +113,51 @@ public sealed class ScratchPostgresQuiesceCensusTests
 
     private static readonly Regex DropStatement = new("\".*DROP DATABASE.*WITH \\(FORCE\\)", RegexOptions.Compiled);
 
+    /// <summary>
+    /// Blanks comments (to spaces, keeping every newline so line numbers hold) and keeps string literals, quotes
+    /// included, because the drop statement is itself a literal. Built on <see cref="CSharpSourceWalker"/>, so a
+    /// line that merely starts with <c>*</c> inside a literal is still seen, and a comment is never.
+    /// </summary>
+    private static string BlankComments(string text)
+    {
+        var keep = CSharpSourceWalker.CodeMask(text);
+        foreach (var (start, body) in CSharpSourceWalker.StringLiteralBodies(text))
+        {
+            for (var i = start; i < start + body.Length; i++)
+            {
+                keep[i] = true;
+            }
+
+            if (start > 0 && text[start - 1] == '"')
+            {
+                keep[start - 1] = true;
+            }
+
+            if (start + body.Length < text.Length && text[start + body.Length] == '"')
+            {
+                keep[start + body.Length] = true;
+            }
+        }
+
+        var sb = new System.Text.StringBuilder(text.Length);
+        for (var i = 0; i < text.Length; i++)
+        {
+            sb.Append(keep[i] ? text[i] : text[i] == '\n' ? '\n' : ' ');
+        }
+
+        return sb.ToString();
+    }
+
     private static (int Sites, List<string> Unguarded) Scan(IEnumerable<(string Name, string Source)> files)
     {
         var sites = 0;
         var unguarded = new List<string>();
         foreach (var (name, source) in files)
         {
-            var lines = source.Split('\n');
+            var lines = BlankComments(source).Split('\n');
             for (var i = 0; i < lines.Length; i++)
             {
-                var trimmed = lines[i].TrimStart();
-                if (trimmed.StartsWith("//", StringComparison.Ordinal) || trimmed.StartsWith("/*", StringComparison.Ordinal)
-                    || trimmed.StartsWith("*", StringComparison.Ordinal) || !DropStatement.IsMatch(lines[i]))
+                if (!DropStatement.IsMatch(lines[i]))
                 {
                     continue;
                 }
