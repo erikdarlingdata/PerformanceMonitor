@@ -86,10 +86,23 @@ public static class ParquetCompaction
 
        It is now merged into YYYYMMDD_query_snapshots.parquet (and _ptNNN parts), one day per group, with its own
        much smaller per-batch input budget (DailyBatchInputBytes) on one thread. Only the day shapes are merged:
-       a monthly, legacy or imported_ file of this table is still left alone, as before. */
+       a monthly, legacy or imported_ file of this table is still left alone, as before.
+
+       query_stats and query_store_stats join it (#5410), for a different reason: their rows are small, but a
+       month file holds every hourly merge's rows in time order across about 150 row groups, so a one-hour read
+       (the Queries tab's default window) touched 15-20% of a month's row groups (median; 27 rows decoded per row
+       wanted) and a day file touches about 4% (1.05 rows decoded per row wanted). Measured with
+       tools/CompactionRepro on a copy of one laptop's hourly files, repeated for size (directional: one laptop,
+       DuckDB 1.5.5): the day merge with no sort peaked at 1.16 GB at most and used no temp space; ORDER BY
+       collection_time added nothing to the pruning and peaked at 4.2 GB, so the day merge has no sort.
+       A month file written before the switch, and an imported_ file, stay as they are: the per-cycle files that
+       are waiting at the switch were never merged into the month file, so a day file and a month file never
+       hold the same row (neither archive view dedups). */
     private static readonly HashSet<string> DailyCompactionTables = new(StringComparer.OrdinalIgnoreCase)
     {
-        "query_snapshots"
+        "query_snapshots",
+        "query_stats",
+        "query_store_stats"
     };
 
     /* Whether compaction merges <paramref name="table"/> one day per group rather than one month per group. */
@@ -181,8 +194,9 @@ public static class ParquetCompaction
        accumulator file every step) and OOM-prone. A single COPY at the default
        row-group size is both faster and stays within the memory cap for the
        numeric tables this runs on. (query_snapshots, with its query-plan XML,
-       is merged one day at a time on a much smaller batch budget — see
-       DailyCompactionTables.)
+       is merged one day at a time on a much smaller batch budget, and
+       query_stats and query_store_stats are merged one day at a time so a
+       one-hour read prunes — see DailyCompactionTables.)
 
        Pragma tuning:
          - memory_limit = 4GB: parquet COPY makes allocations that bypass the

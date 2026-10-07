@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Data.Common;
 using System.Globalization;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -23,6 +24,26 @@ namespace PerformanceMonitor.Collectors;
 /// a quoted string); Azure SQL DB skips plan_attributes (it reports dbid=1 for all plans) and has
 /// no trigger/function branches. Seven delta groups keyed on plan_handle (falling back to
 /// db.schema.object) to prevent cross-plan contamination.
+///
+/// <para><b>#5449: every candidate with work, plans for at most <see cref="MaxPlansPerRun"/>.</b> The main query
+/// returns numbers only (ordinals 0-26) for every module that ran in the last ten minutes, up to
+/// <see cref="MaxCandidateRows"/>. It used to take the top 150 by lifetime elapsed time, which stored about one
+/// candidate in four or five and let the rest vanish from the totals. A module's plan and identity are no longer
+/// part of that query: <see cref="BuildPlanPhaseQuery"/> renders them in a second query over the first
+/// <see cref="MaxPlansPerRun"/> kept rows, by the rank <see cref="ReadAsync"/> returns them in.</para>
+///
+/// <para><b>The idle skip, and why it runs in <see cref="ReadAsync"/>.</b> A row whose seven counters all equal their
+/// cached baselines did no work since the last run, and storing it adds a row and no CPU, reads or duration. A
+/// row like that is dropped here, in one step: the calculator is called for it, which advances the baseline's
+/// timestamp (the value is unchanged) and reports (0, interval). That is lossless: nothing moved, so no slice of work
+/// is hidden. Every other row (a counter moved, or no baseline yet) is left for <see cref="WritePayload"/>, exactly as
+/// before. Computing every row's delta at read time instead, as <c>PgStatementStatsCollector</c> does, would move the
+/// baseline of a row that is then never stored: the host abandons a cycle that blows its wall-clock budget (#2673)
+/// after the read and ships nothing, and it relies on the NEXT cycle to cover that slice, so a baseline moved at read
+/// time would lose it. An unchanged counter loses nothing when it advances; a moved one is advanced only by the
+/// write. A gap past the delta policy returns (0, 0) for an unchanged row: that row is kept (the (0, 0) pair is
+/// information, not idleness) and carries its computed deltas so the write does not call the calculator a second time.
+/// Every fetched row still calls the calculator exactly once per run.</para>
 /// </summary>
 public sealed class ProcedureStatsCollector : CollectorDefinitionBase<ProcedureStatsCollector.Row>
 {
@@ -91,9 +112,59 @@ public sealed class ProcedureStatsCollector : CollectorDefinitionBase<ProcedureS
 
         /// <summary>#5158 identity fingerprint: the sum of <c>plan_generation_num</c> over the plan handle's statements.</summary>
         public long? PlanGenerationSum { get; init; }
+
+        /// <summary>
+        /// #5449: the seven deltas and the interval <see cref="ReadAsync"/> already computed for this row, set only
+        /// for a row it kept because its counters were unchanged but no interval was knowable (a gap past the delta
+        /// policy). <see cref="WritePayload"/> writes them instead of calling the calculator a second time. Null for
+        /// every other row, which takes the write's own delta path.
+        /// </summary>
+        public ReadTimeDeltas? Precomputed { get; init; }
+
+        /// <summary>
+        /// #5449: true for a row the plan phase did not cover (it fell outside the first
+        /// <see cref="MaxPlansPerRun"/> kept rows, or the phase failed). Such a row has no plan and no identity, and
+        /// the plan reuse pass must skip it rather than count it as a miss.
+        /// </summary>
+        public bool PlanPhaseSkipped { get; init; }
     }
 
-    private const string StandardQueryText = @"
+    /// <summary>The seven per-group deltas and the minimum interval of one row (see <see cref="Row.Precomputed"/>).</summary>
+    public readonly record struct ReadTimeDeltas(
+        long Exec, long Worker, long Elapsed, long Reads, long Writes, long PhysReads, long Spills, int IntervalSeconds);
+
+    /// <summary>One plan phase result row (see <see cref="ReadPlanPhaseAsync"/>), keyed by the handle's position in the query.</summary>
+    public readonly record struct PlanPhaseResult(
+        string? PlanXml, long? PlanBytes, long? StatementCount, DateTime? LastStatementCompile, long? GenerationSum);
+
+    /* The seven delta group names. ComputeDeltas spells each as a literal at its call site, because the
+       DeltaFamilySeedingCensusTests census reads the groups a collector passes from its source text; these constants
+       are what the idle skip PEEKS, and ProcedureStatsIdleSkipTests fails if a name here drifts from a call site. */
+    private const string ExecGroup = "proc_stats_exec";
+    private const string WorkerGroup = "proc_stats_worker";
+    private const string ElapsedGroup = "proc_stats_elapsed";
+    private const string ReadsGroup = "proc_stats_reads";
+    private const string WritesGroup = "proc_stats_writes";
+    private const string PhysReadsGroup = "proc_stats_phys_reads";
+    private const string SpillsGroup = "proc_stats_spills";
+
+    /// <summary>
+    /// #5449: the safety cap on the main query's candidate rows. The query keeps EVERY module that ran in the last
+    /// ten minutes, newest first by <c>last_execution_time</c>, so a cap that bites drops the stalest rows (the least
+    /// likely to have moved) and not the busiest. Measured on four busy primaries, a ten-minute window holds about
+    /// 700 to 800 rows; this is several times that and exists only to bound a pathological cache. It was 150, which
+    /// kept one candidate row in four or five and dropped the rest by lifetime elapsed time.
+    /// </summary>
+    public const int MaxCandidateRows = 5000;
+
+    /// <summary>
+    /// #5449: the most modules one run renders a plan (and an identity) for, the first this many of the kept rows in
+    /// <see cref="ReadAsync"/>'s rank order. It sits beside <see cref="MaxCandidateRows"/> because the two used to be
+    /// the same number (150) and are now independent: the main query is no longer what bounds the plan work.
+    /// </summary>
+    public const int MaxPlansPerRun = 150;
+
+    private static readonly string StandardQueryText = @"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
 DECLARE
@@ -102,11 +173,7 @@ DECLARE
     @sql nvarchar(max);
 
 SET @sql = CAST(N'
-SELECT /* PerformanceMonitorLite */ TOP (150)
-    ranked.*/*PLAN_SELECT*/
-FROM
-(
-SELECT TOP (150) * FROM (
+SELECT /* PerformanceMonitorLite */ TOP (" + MaxCandidateRows + @") * FROM (
 SELECT
     database_name = d.name,
     schema_name = OBJECT_SCHEMA_NAME(s.object_id, s.database_id),
@@ -247,21 +314,15 @@ AND   pa.dbid NOT IN (1, 3, 4, 32761, 32767, ISNULL(DB_ID(N''PerformanceMonitor'
 AND   s.last_execution_time >= DATEADD(MINUTE, -10, GETDATE())
 /*EXCLUSION_FILTER*/
 ) AS combined
-ORDER BY total_elapsed_time DESC
-) AS ranked/*PLAN_APPLY*/
-ORDER BY ranked.total_elapsed_time DESC
+ORDER BY last_execution_time DESC
 OPTION(RECOMPILE);' AS nvarchar(max));
 
 EXECUTE sys.sp_executesql @sql;";
 
-    private const string AzureSqlDbQueryText = @"
+    private static readonly string AzureSqlDbQueryText = @"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
-SELECT /* PerformanceMonitorLite */ TOP (150)
-    ranked.*/*PLAN_SELECT*/
-FROM
-(
-SELECT TOP (150)
+SELECT /* PerformanceMonitorLite */ TOP (" + MaxCandidateRows + @")
     database_name = DB_NAME(),
     schema_name = OBJECT_SCHEMA_NAME(s.object_id, s.database_id),
     object_name = OBJECT_NAME(s.object_id, s.database_id),
@@ -293,9 +354,7 @@ FROM sys.dm_exec_procedure_stats AS s
 WHERE s.database_id = DB_ID()
 AND   s.last_execution_time >= DATEADD(MINUTE, -10, GETDATE())
 /*EXCLUSION_FILTER*/
-ORDER BY s.total_elapsed_time DESC
-) AS ranked/*PLAN_APPLY*/
-ORDER BY ranked.total_elapsed_time DESC
+ORDER BY s.last_execution_time DESC
 OPTION(RECOMPILE);";
 
     /* Execution-plan capture — spliced into every branch (procedure/trigger/function) and the Azure
@@ -310,13 +369,11 @@ OPTION(RECOMPILE);";
        the OUTER APPLY never multiplies rows and never drops one (NULL plan for an aged-out handle). */
     /* #1959: the apply used to sit INSIDE each branch, below the TOP - so a burst window rendered a
        module-grain plan (the big ones) for every candidate the TOP then discarded, which is the same
-       defect the field investigation measured at 81% of query_stats' runtime. The render now happens
-       ONCE, outside the ranked derived table, against at most 150 survivors: free when candidates fit
-       under the TOP (the daytime case the field measured as noise) and bounded when they do not (the
-       25-second overnight tails). The handle round-trips through CONVERT(varbinary(64), ..., 1) from
-       the varchar(130) the payload already carries, so no extra column threads through the branches
-       and the stored shape is untouched. Placement inside the shell keeps the fragment identical for
-       the standard (dynamic SQL) and Azure variants. */
+       defect the field investigation measured at 81% of query_stats' runtime. #5449 moves the apply out of the
+       main query altogether: the main query is numbers only for every candidate, and the apply runs ONCE
+       in BuildPlanPhaseQuery, over a VALUES list aliased `ranked` holding at most MaxPlansPerRun handles. The
+       handle round-trips through CONVERT(varbinary(64), ..., 1) from the varchar(130) the payload carries, which is
+       why that list's plan_handle column is varchar and the fragments splice unchanged. */
     /* The DATALENGTH guard bounds the SIZE of one module-grain plan, on top of #1959's bound on how
        MANY rows render one — see QueryPlanXmlCaptureLimits. A whole-procedure plan is exactly the
        shape most likely to cross it: this DMV aggregates at the module grain, so one heavy stored
@@ -351,8 +408,8 @@ OUTER APPLY sys.dm_exec_text_query_plan(CONVERT(varbinary(64), ranked.plan_handl
         + ModuleStatementStartOffset + ", " + ModuleStatementEndOffset + @") AS tqp";
 
     /// <summary>
-    /// #5158: the identity columns a deferred-fetch host reads INSTEAD of the plan columns, at ordinals 27-29
-    /// (not payload columns). A module's plan XML changes in place when one statement recompiles, while
+    /// #5158: the identity columns the plan phase reads (#5449) for a host that defers the plan fetch (INSTEAD of the
+    /// plan columns) or asks for them with <see cref="CollectorContext.PlanIdentityColumns"/>. A module's plan XML changes in place when one statement recompiles, while
     /// <c>plan_handle</c> and <c>cached_time</c> stay put (measured: adding cached_time to the key changed the
     /// distinct count by zero), so the handle alone cannot say whether a cached digest is still current.
     /// These three aggregates over the module's statements move when any statement recompiles or first compiles.
@@ -362,11 +419,11 @@ OUTER APPLY sys.dm_exec_text_query_plan(CONVERT(varbinary(64), ranked.plan_handl
     plan_last_statement_compile = pfp.plan_last_statement_compile,
     plan_generation_sum = pfp.plan_generation_sum";
 
-    /* PROVISIONAL (#5158): a correlated OUTER APPLY over sys.dm_exec_query_stats, one per surviving row, outside
-       the ranked derived table like the plan apply (at most 150). dm_exec_query_stats cannot seek on
+    /* PROVISIONAL (#5158): a correlated OUTER APPLY over sys.dm_exec_query_stats, one per handle in the plan phase's
+       `ranked` list (at most MaxPlansPerRun), like the plan apply. dm_exec_query_stats cannot seek on
        plan_handle, so what this costs on a large cache is UNMEASURED; a grouped single walk or
        dm_exec_cached_plans.size_in_bytes are the alternatives if it proves too slow. No single quotes, because
-       the standard query nests this text inside dynamic SQL. */
+       the fragment text is shared with the plan-phase VALUES query's literal handling. */
     private const string PlanIdentityApplyFragment = @"
 OUTER APPLY
 (
@@ -379,22 +436,29 @@ OUTER APPLY
 ) AS pfp";
 
     /// <summary>
-    /// True when the main query carries the plan columns itself: the host captures plans and has not deferred
+    /// True when the plan phase renders the plan columns itself: the host captures plans and has not deferred
     /// the fetch to <see cref="BuildPlanFetchQuery"/> (#5158). One definition for the query text and the read.
     /// </summary>
     private static bool InlinePlanCapture(CollectorContext context) =>
         context.CapturePlanXml && !context.DeferPlanXmlFetch;
 
     /// <summary>
-    /// True when the main query carries the identity columns: the host defers the fetch
-    /// (they stand in for the plan columns, at ordinals 27-29) or the host asks for them with
-    /// <see cref="CollectorContext.PlanIdentityColumns"/> (at 27-29 with no plan columns, or 29-31 after the inline ones).
+    /// True when the plan phase carries the identity columns: the host defers the fetch
+    /// (they stand in for the plan columns) or the host asks for them with
+    /// <see cref="CollectorContext.PlanIdentityColumns"/> (alone, or after the plan columns).
     /// </summary>
     private static bool DeferredPlanIdentity(CollectorContext context) =>
         context.PlanIdentityColumns || (context.CapturePlanXml && context.DeferPlanXmlFetch);
 
-    /// <summary>The ordinal of the first identity column: right after the inline plan columns when they are present.</summary>
-    private static int IdentityOrdinal(CollectorContext context) => InlinePlanCapture(context) ? 29 : 27;
+    /// <summary>
+    /// #5449: true when this run asks the target for a module's plan or identity at all, so a second query runs. False
+    /// on a host that captures no plans (Lite) and on a gated cycle of a host that does not defer the fetch.
+    /// </summary>
+    public static bool PlanPhaseApplies(CollectorContext context) =>
+        InlinePlanCapture(context) || DeferredPlanIdentity(context);
+
+    /// <summary>The ordinal of the first identity column in the plan phase result: after <c>ord</c>, and after the plan columns when present.</summary>
+    private static int IdentityOrdinal(CollectorContext context) => InlinePlanCapture(context) ? 3 : 1;
 
     /// <summary>
     /// #5158: the second target query for a host that defers the plan fetch. Takes plan handles, not
@@ -441,6 +505,176 @@ OUTER APPLY
         }
     }
 
+    /// <summary>
+    /// #5449: the rows the plan phase covers, as indexes into <paramref name="rows"/>: the first
+    /// <see cref="MaxPlansPerRun"/> rows (in the order <see cref="ReadAsync"/> returned them, which is rank order)
+    /// whose handle parses. <paramref name="handles"/> receives each one's bytes, in the same order.
+    /// </summary>
+    public static List<int> SelectPlanPhaseRows(IReadOnlyList<Row> rows, out List<byte[]> handles)
+    {
+        ArgumentNullException.ThrowIfNull(rows);
+
+        var indexes = new List<int>(Math.Min(rows.Count, MaxPlansPerRun));
+        handles = new List<byte[]>(indexes.Capacity);
+        for (var i = 0; i < rows.Count && indexes.Count < MaxPlansPerRun; i++)
+        {
+            if (TryParsePlanHandle(rows[i].PlanHandle, out var handle))
+            {
+                indexes.Add(i);
+                handles.Add(handle);
+            }
+        }
+
+        return indexes;
+    }
+
+    /// <summary>
+    /// #5449: the plan phase, the second target query: renders the plan and/or the identity for at most
+    /// <see cref="MaxPlansPerRun"/> handles, on the same connection as the main read and inside the same budget. It
+    /// applies the EXISTING <see cref="PlanApplyFragment"/> (the host captures plans and has not deferred them: Off and
+    /// Shadow) and <see cref="PlanIdentityApplyFragment"/> (Shadow and On) unchanged, over a <c>VALUES</c> list aliased
+    /// <c>ranked</c> whose <c>plan_handle</c> is the same varchar hex the main query used to ship, so the fragments'
+    /// <c>CONVERT(varbinary(64), ranked.plan_handle, 1)</c> reads it as before. Row <c>ord</c> is the handle's position
+    /// in <paramref name="handles"/>. The handles are rendered host-side from bytes (hex only), never from operator input.
+    /// Read the result with <see cref="ReadPlanPhaseAsync"/>.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">The run asks for neither plans nor identity, or the handle list is
+    /// empty, longer than <see cref="MaxPlansPerRun"/>, or holds one that is not 1 to 64 bytes.</exception>
+    public static CollectorQuery BuildPlanPhaseQuery(CollectorContext context, IReadOnlyList<byte[]> handles)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+
+        if (!PlanPhaseApplies(context))
+        {
+            throw new InvalidOperationException("The plan phase needs a run that captures plans or reads identities.");
+        }
+
+        if (handles is null || handles.Count == 0)
+        {
+            throw new InvalidOperationException(
+                "The plan phase handle list must be non-empty; an empty list means no second query should be issued at all.");
+        }
+
+        if (handles.Count > MaxPlansPerRun)
+        {
+            throw new InvalidOperationException(
+                "The plan phase handle list holds " + handles.Count.ToString(CultureInfo.InvariantCulture)
+                + " handles; one run takes at most " + MaxPlansPerRun.ToString(CultureInfo.InvariantCulture) + ".");
+        }
+
+        var values = new System.Text.StringBuilder();
+        for (var ord = 0; ord < handles.Count; ord++)
+        {
+            var handle = handles[ord];
+            if (handle is null || handle.Length == 0 || handle.Length > 64)
+            {
+                throw new InvalidOperationException(
+                    "Plan phase handle " + ord.ToString(CultureInfo.InvariantCulture) + " must be 1 to 64 bytes.");
+            }
+
+            if (ord > 0)
+            {
+                values.Append(",\n        ");
+            }
+
+            values
+                .Append('(')
+                .Append(ord.ToString(CultureInfo.InvariantCulture))
+                .Append(", '0x").Append(Convert.ToHexString(handle)).Append("')");
+        }
+
+        var planSelect = (InlinePlanCapture(context) ? PlanSelectFragment : "")
+            + (DeferredPlanIdentity(context) ? PlanIdentitySelectFragment : "");
+        var planApply = (InlinePlanCapture(context) ? PlanApplyFragment : "")
+            + (DeferredPlanIdentity(context) ? PlanIdentityApplyFragment : "");
+
+        return new CollectorQuery(
+            "SELECT /* PerformanceMonitorLite */\n    ranked.ord" + planSelect + @"
+FROM
+(
+    VALUES
+        " + values + @"
+) AS ranked (ord, plan_handle)" + planApply + @"
+OPTION(RECOMPILE);");
+    }
+
+    /// <summary>
+    /// #5449: reads <see cref="BuildPlanPhaseQuery"/>'s result into <c>ord</c> -> <see cref="PlanPhaseResult"/>. An inline
+    /// plan passes through the host's statement filter session here, where it first enters a row (#4348). The
+    /// columns follow the run's mode: <c>ord</c>, then the plan and its size when the phase renders plans, then the
+    /// three identity aggregates when it reads identities.
+    /// </summary>
+    public static async ValueTask<Dictionary<int, PlanPhaseResult>> ReadPlanPhaseAsync(
+        DbDataReader reader, CollectorContext context, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(reader);
+        ArgumentNullException.ThrowIfNull(context);
+
+        var inlinePlan = InlinePlanCapture(context);
+        var identity = DeferredPlanIdentity(context);
+        var identityOrdinal = IdentityOrdinal(context);
+        var scrub = context.BeginStatementScrub();
+        var results = new Dictionary<int, PlanPhaseResult>();
+
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            var ord = Convert.ToInt32(reader.GetValue(0), CultureInfo.InvariantCulture);
+            results[ord] = new PlanPhaseResult(
+                inlinePlan && !reader.IsDBNull(1) ? scrub.Xml(reader.GetString(1)) : null,
+                /* Convert rather than GetInt64: DATALENGTH's return type widens to bigint only for the max types (#3392). */
+                inlinePlan && !reader.IsDBNull(2) ? Convert.ToInt64(reader.GetValue(2), CultureInfo.InvariantCulture) : null,
+                identity && !reader.IsDBNull(identityOrdinal)
+                    ? Convert.ToInt64(reader.GetValue(identityOrdinal), CultureInfo.InvariantCulture) : null,
+                identity && !reader.IsDBNull(identityOrdinal + 1) ? reader.GetDateTime(identityOrdinal + 1) : null,
+                identity && !reader.IsDBNull(identityOrdinal + 2)
+                    ? Convert.ToInt64(reader.GetValue(identityOrdinal + 2), CultureInfo.InvariantCulture) : null);
+        }
+
+        return results;
+    }
+
+    /// <summary>
+    /// #5449: puts the plan phase's results onto <paramref name="rows"/>. A row at <paramref name="indexes"/>[ord] takes
+    /// result <c>ord</c> (its plan, its size and its identity, as the run's mode carries them); every other row is
+    /// marked <see cref="Row.PlanPhaseSkipped"/>, so the plan reuse pass skips it. Pass a null
+    /// <paramref name="results"/> when the phase failed: no row gets a plan and all are marked skipped.
+    /// </summary>
+    public static void ApplyPlanPhase(
+        List<Row> rows, IReadOnlyList<int> indexes, IReadOnlyDictionary<int, PlanPhaseResult>? results)
+    {
+        ArgumentNullException.ThrowIfNull(rows);
+        ArgumentNullException.ThrowIfNull(indexes);
+
+        var covered = new HashSet<int>();
+        if (results is not null)
+        {
+            for (var ord = 0; ord < indexes.Count; ord++)
+            {
+                if (results.TryGetValue(ord, out var result))
+                {
+                    var i = indexes[ord];
+                    covered.Add(i);
+                    rows[i] = rows[i] with
+                    {
+                        QueryPlanXml = result.PlanXml,
+                        QueryPlanXmlBytes = result.PlanBytes,
+                        PlanStatementCount = result.StatementCount,
+                        PlanLastStatementCompile = result.LastStatementCompile,
+                        PlanGenerationSum = result.GenerationSum,
+                    };
+                }
+            }
+        }
+
+        for (var i = 0; i < rows.Count; i++)
+        {
+            if (!covered.Contains(i))
+            {
+                rows[i] = rows[i] with { PlanPhaseSkipped = true };
+            }
+        }
+    }
+
     public override string Name => "procedure_stats";
 
     public override string TargetTable => "procedure_stats";
@@ -468,34 +702,25 @@ OUTER APPLY
 
     public override CollectorQuery BuildQuery(CollectorContext context)
     {
-        var planSelect = (InlinePlanCapture(context) ? PlanSelectFragment : "")
-            + (DeferredPlanIdentity(context) ? PlanIdentitySelectFragment : "");
-        var planApply = (InlinePlanCapture(context) ? PlanApplyFragment : "")
-            + (DeferredPlanIdentity(context) ? PlanIdentityApplyFragment : "");
-
+        /* #5449: the main query is numbers only on every host in every plan mode: no plan columns, no identity
+           columns, no apply. A module's plan and identity come from BuildPlanPhaseQuery, for at most
+           MaxPlansPerRun of the rows this read keeps. */
         if (context.Target.IsAzureSqlDb)
         {
             /* Azure: single-database scope; the exclusion token is left in place unreplaced in the
-               original (no clause is spliced on Azure) — reproduce exactly. Plan placeholders still
-               erase (flag off) or splice (Darling) here just like the standard variant. */
-            return new CollectorQuery(
-                AzureSqlDbQueryText
-                    .Replace("/*PLAN_SELECT*/", planSelect, StringComparison.Ordinal)
-                    .Replace("/*PLAN_APPLY*/", planApply, StringComparison.Ordinal));
+               original (no clause is spliced on Azure) - reproduce exactly. */
+            return new CollectorQuery(AzureSqlDbQueryText);
         }
 
         /* Standard query is dynamic SQL (built into @sql then passed to sp_executesql), so the
-           exclusion filter is interpolated as literal N'...' values rather than parameter bindings —
-           doubled escaping because @sql is itself a single-quoted T-SQL string. The plan fragments
-           carry no single quotes, so they splice straight into the nested dynamic SQL body. */
+           exclusion filter is interpolated as literal N'...' values rather than parameter bindings -
+           doubled escaping because @sql is itself a single-quoted T-SQL string. */
         var exclusionClause = DatabaseExclusionFilter.BuildLiteralClause(
             context.ExcludedDatabases, "d.name", forNestedDynamicSql: true);
 
         return new CollectorQuery(
             StandardQueryText
-                .Replace("/*EXCLUSION_FILTER*/", exclusionClause, StringComparison.Ordinal)
-                .Replace("/*PLAN_SELECT*/", planSelect, StringComparison.Ordinal)
-                .Replace("/*PLAN_APPLY*/", planApply, StringComparison.Ordinal));
+                .Replace("/*EXCLUSION_FILTER*/", exclusionClause, StringComparison.Ordinal));
     }
 
     public override IReadOnlyList<CollectorColumn> PayloadColumns { get; } = new[]
@@ -552,17 +777,11 @@ OUTER APPLY
 
     public override async ValueTask<List<Row>> ReadAsync(DbDataReader reader, CollectorContext context, CancellationToken cancellationToken)
     {
-        var rows = new List<Row>();
-        var inlinePlan = InlinePlanCapture(context);
-        var deferredIdentity = DeferredPlanIdentity(context);
-        var identityOrdinal = IdentityOrdinal(context);
-        /* #4348: the inline plan is filtered where it first enters a row (the deferred fetch's plans are filtered in
-           QueryStatsCollector.ReadPlanFetchAsync). */
-        var scrub = context.BeginStatementScrub();
+        var fetched = new List<Row>();
 
         while (await reader.ReadAsync(cancellationToken))
         {
-            rows.Add(new Row(
+            fetched.Add(new Row(
                 reader.IsDBNull(0) ? "" : reader.GetString(0),
                 reader.IsDBNull(1) ? "" : reader.GetString(1),
                 reader.IsDBNull(2) ? "" : reader.GetString(2),
@@ -590,28 +809,89 @@ OUTER APPLY
                 reader.GetInt64(24),
                 reader.IsDBNull(25) ? null : reader.GetString(25),
                 reader.IsDBNull(26) ? null : reader.GetString(26),
-                /* query_plan_xml is the trailing column present only when CapturePlanXml spliced it
-                   into every branch's SELECT (ordinal 27); the short-circuit skips it entirely when off. */
-                inlinePlan && !reader.IsDBNull(27) ? scrub.Xml(reader.GetString(27)) : null,
-                /* #3392: the plan's measured size rides the same splice at ordinal 28, so the same
-                   short-circuit covers it. Convert rather than GetInt64: DATALENGTH's return type widens to
-                   bigint only for the max types, and a provider that hands back an Int32 here would throw on
-                   a strict accessor. */
-                inlinePlan && !reader.IsDBNull(28)
-                    ? Convert.ToInt64(reader.GetValue(28), CultureInfo.InvariantCulture)
-                    : null)
-            {
-                /* #5158: the identity fingerprint is 27-29 in place of the plan (deferred fetch), or 29-31 after the inline plan (shadow). */
-                PlanStatementCount = deferredIdentity && !reader.IsDBNull(identityOrdinal)
-                    ? Convert.ToInt64(reader.GetValue(identityOrdinal), CultureInfo.InvariantCulture) : null,
-                PlanLastStatementCompile = deferredIdentity && !reader.IsDBNull(identityOrdinal + 1)
-                    ? reader.GetDateTime(identityOrdinal + 1) : null,
-                PlanGenerationSum = deferredIdentity && !reader.IsDBNull(identityOrdinal + 2)
-                    ? Convert.ToInt64(reader.GetValue(identityOrdinal + 2), CultureInfo.InvariantCulture) : null,
-            });
+                /* #5449: no plan and no identity here; BuildPlanPhaseQuery fills them for the first MaxPlansPerRun rows. */
+                null,
+                null));
         }
 
-        return rows;
+        return SkipIdleAndRank(fetched, context);
+    }
+
+    /// <summary>
+    /// #5449: the idle skip and the rank (see the class remarks). Drops a row whose seven counters all equal their cached
+    /// baselines when the calculator then reports seven zero deltas over a measured interval; keeps every other row;
+    /// returns the kept rows by in-interval elapsed time (descending), ties by plan_handle. A calculator that peeks no
+    /// baselines (a test double, a first run) drops nothing and ranks by lifetime elapsed time.
+    /// </summary>
+    internal static List<Row> SkipIdleAndRank(List<Row> fetched, CollectorContext context)
+    {
+        var deltas = context.Deltas;
+        var serverId = context.ServerId;
+        var exec = deltas.PeekBaselines(serverId, ExecGroup);
+        var worker = deltas.PeekBaselines(serverId, WorkerGroup);
+        var elapsed = deltas.PeekBaselines(serverId, ElapsedGroup);
+        var reads = deltas.PeekBaselines(serverId, ReadsGroup);
+        var writes = deltas.PeekBaselines(serverId, WritesGroup);
+        var physReads = deltas.PeekBaselines(serverId, PhysReadsGroup);
+        var spills = deltas.PeekBaselines(serverId, SpillsGroup);
+
+        var kept = new List<(Row Row, long Rank)>(fetched.Count);
+        foreach (var row in fetched)
+        {
+            var key = DeltaKey(row);
+            var rank = row.TotalElapsedTime;
+            if (elapsed.TryGetValue(key, out var elapsedBase) && row.TotalElapsedTime >= elapsedBase)
+            {
+                rank = row.TotalElapsedTime - elapsedBase;
+            }
+
+            if (exec.TryGetValue(key, out var b1) && b1 == row.ExecutionCount
+                && worker.TryGetValue(key, out var b2) && b2 == row.TotalWorkerTime
+                && elapsed.TryGetValue(key, out var b3) && b3 == row.TotalElapsedTime
+                && reads.TryGetValue(key, out var b4) && b4 == row.TotalLogicalReads
+                && writes.TryGetValue(key, out var b5) && b5 == row.TotalLogicalWrites
+                && physReads.TryGetValue(key, out var b6) && b6 == row.TotalPhysicalReads
+                && spills.TryGetValue(key, out var b7) && b7 == row.TotalSpills)
+            {
+                var computed = ComputeDeltas(row, key, context);
+                if (computed.Exec == 0 && computed.Worker == 0 && computed.Elapsed == 0 && computed.Reads == 0
+                    && computed.Writes == 0 && computed.PhysReads == 0 && computed.Spills == 0
+                    && computed.IntervalSeconds > 0)
+                {
+                    continue; /* idle over a measured interval: nothing moved, nothing to store */
+                }
+
+                kept.Add((row with { Precomputed = computed }, rank));
+                continue;
+            }
+
+            kept.Add((row, rank));
+        }
+
+        /* OrderBy is stable, so a full tie (same rank, same handle) keeps the DMV's order. */
+        return kept
+            .OrderByDescending(k => k.Rank)
+            .ThenBy(k => k.Row.PlanHandle, StringComparer.Ordinal)
+            .Select(k => k.Row)
+            .ToList();
+    }
+
+    /// <summary>The delta key: plan_handle to prevent cross-contamination when multiple plans exist for the
+    /// same object; the db.schema.object fallback and the seven group names are the parity contract.</summary>
+    private static string DeltaKey(Row row) => row.PlanHandle ?? $"{row.DatabaseName}.{row.SchemaName}.{row.ObjectName}";
+
+    private static ReadTimeDeltas ComputeDeltas(Row row, string deltaKey, CollectorContext context)
+    {
+        var deltaExec = context.Deltas.CalculateDeltaWithInterval(context.ServerId, "proc_stats_exec", deltaKey, row.ExecutionCount, out var execInterval, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
+        var deltaWorker = context.Deltas.CalculateDeltaWithInterval(context.ServerId, "proc_stats_worker", deltaKey, row.TotalWorkerTime, out var workerInterval, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
+        var deltaElapsed = context.Deltas.CalculateDeltaWithInterval(context.ServerId, "proc_stats_elapsed", deltaKey, row.TotalElapsedTime, out var elapsedInterval, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
+        var deltaReads = context.Deltas.CalculateDeltaWithInterval(context.ServerId, "proc_stats_reads", deltaKey, row.TotalLogicalReads, out var readsInterval, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
+        var deltaWrites = context.Deltas.CalculateDeltaWithInterval(context.ServerId, "proc_stats_writes", deltaKey, row.TotalLogicalWrites, out var writesInterval, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
+        var deltaPhysReads = context.Deltas.CalculateDeltaWithInterval(context.ServerId, "proc_stats_phys_reads", deltaKey, row.TotalPhysicalReads, out var physReadsInterval, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
+        var deltaSpills = context.Deltas.CalculateDeltaWithInterval(context.ServerId, "proc_stats_spills", deltaKey, row.TotalSpills, out var spillsInterval, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
+        var interval = Math.Min(execInterval, Math.Min(workerInterval, Math.Min(elapsedInterval, Math.Min(readsInterval, Math.Min(writesInterval, Math.Min(physReadsInterval, spillsInterval))))));
+
+        return new ReadTimeDeltas(deltaExec, deltaWorker, deltaElapsed, deltaReads, deltaWrites, deltaPhysReads, deltaSpills, interval);
     }
 
     public override void WritePayload(Row row, ICollectorRowWriter writer, CollectorContext context)
@@ -635,15 +915,18 @@ OUTER APPLY
            resets all seven together). Taking the minimum makes the stored pair mean "every delta in this
            row is knowable", so a reader never divides a reset counter's 0 by a sibling's real interval
            and reads it as idle. */
-        var deltaKey = row.PlanHandle ?? $"{row.DatabaseName}.{row.SchemaName}.{row.ObjectName}";
-        var deltaExec = context.Deltas.CalculateDeltaWithInterval(context.ServerId, "proc_stats_exec", deltaKey, row.ExecutionCount, out var execInterval, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
-        var deltaWorker = context.Deltas.CalculateDeltaWithInterval(context.ServerId, "proc_stats_worker", deltaKey, row.TotalWorkerTime, out var workerInterval, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
-        var deltaElapsed = context.Deltas.CalculateDeltaWithInterval(context.ServerId, "proc_stats_elapsed", deltaKey, row.TotalElapsedTime, out var elapsedInterval, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
-        var deltaReads = context.Deltas.CalculateDeltaWithInterval(context.ServerId, "proc_stats_reads", deltaKey, row.TotalLogicalReads, out var readsInterval, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
-        var deltaWrites = context.Deltas.CalculateDeltaWithInterval(context.ServerId, "proc_stats_writes", deltaKey, row.TotalLogicalWrites, out var writesInterval, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
-        var deltaPhysReads = context.Deltas.CalculateDeltaWithInterval(context.ServerId, "proc_stats_phys_reads", deltaKey, row.TotalPhysicalReads, out var physReadsInterval, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
-        var deltaSpills = context.Deltas.CalculateDeltaWithInterval(context.ServerId, "proc_stats_spills", deltaKey, row.TotalSpills, out var spillsInterval, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
-        var sampleIntervalSeconds = Math.Min(execInterval, Math.Min(workerInterval, Math.Min(elapsedInterval, Math.Min(readsInterval, Math.Min(writesInterval, Math.Min(physReadsInterval, spillsInterval))))));
+        /* #5449: a row the read kept with deltas already computed (unchanged counters, no interval knowable) writes
+           them; calling the calculator again would compute a zero over a fresh one-interval baseline and replace the
+           (0, 0) pair this row has to carry. Every other row takes its delta path here, unchanged. */
+        var d = row.Precomputed ?? ComputeDeltas(row, DeltaKey(row), context);
+        var deltaExec = d.Exec;
+        var deltaWorker = d.Worker;
+        var deltaElapsed = d.Elapsed;
+        var deltaReads = d.Reads;
+        var deltaWrites = d.Writes;
+        var deltaPhysReads = d.PhysReads;
+        var deltaSpills = d.Spills;
+        var sampleIntervalSeconds = d.IntervalSeconds;
 
         writer
             .Value(row.DatabaseName)

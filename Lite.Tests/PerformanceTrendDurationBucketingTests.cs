@@ -158,11 +158,13 @@ public sealed class PerformanceTrendDurationBucketingTests : IClassFixture<Share
     {
         var minuteFloor = MinuteFloor(DateTime.UtcNow.AddMinutes(-50));
         var t1 = minuteFloor.AddSeconds(37);
-        var t2 = t1.AddMinutes(12);
         var excluded = t1.AddMinutes(5);
+        var t2 = excluded.AddSeconds(100);
 
-        await SeedProcedureAsync(t1, "usp_A", "AppDb", deltaExecutions: 12, deltaElapsedUs: 360_000, interval: 30);
-        await SeedProcedureAsync(t2, "usp_B", "AppDb", deltaExecutions: 100, deltaElapsedUs: 250_000, interval: 25);
+        /* #5449: a procedure point's seconds are its gap to the previous point (the first point keeps its own stored interval),
+           so t2 sits 100 s after the point before it, the interval it stored. */
+        await SeedProcedureAsync(t1, "usp_A", "AppDb", deltaExecutions: 12, deltaElapsedUs: 360_000, interval: 60);
+        await SeedProcedureAsync(t2, "usp_B", "AppDb", deltaExecutions: 100, deltaElapsedUs: 250_000, interval: 100);
         await SeedProcedureAsync(excluded, "usp_C", "OtherDb", deltaExecutions: 999_999, deltaElapsedUs: 999_999_000, interval: 1);
 
         var points = await _dataService.GetProcedureDurationTrendAsync(ServerId, hoursBack: 1, databaseNames: new[] { "AppDb" });
@@ -173,11 +175,11 @@ public sealed class PerformanceTrendDurationBucketingTests : IClassFixture<Share
         Assert.Equal(new[] { t1, excluded, t2 }, points.Select(p => p.CollectionTime).ToArray());
         Assert.Equal(0.0, points[1].Value!.Value);
 
-        Assert.Equal(12.0, points[0].Value!.Value, precision: 6);
-        Assert.Equal(0.4, points[0].ExecutionsPerSecond!.Value, precision: 6);
+        Assert.Equal(6.0, points[0].Value!.Value, precision: 6);
+        Assert.Equal(0.2, points[0].ExecutionsPerSecond!.Value, precision: 6);
 
-        Assert.Equal(10.0, points[2].Value!.Value, precision: 6);
-        Assert.Equal(4.0, points[2].ExecutionsPerSecond!.Value, precision: 6);
+        Assert.Equal(2.5, points[2].Value!.Value, precision: 6);
+        Assert.Equal(1.0, points[2].ExecutionsPerSecond!.Value, precision: 6);
     }
 
     [Fact]
@@ -254,25 +256,29 @@ public sealed class PerformanceTrendDurationBucketingTests : IClassFixture<Share
         var m2 = m1.AddMinutes(3);
         var m3 = m1.AddMinutes(6);
 
-        await SeedProcedureAsync(m1.AddSeconds(5), "usp_M1a", "AppDb", deltaExecutions: 5, deltaElapsedUs: 100_000, interval: 10);
-        await SeedProcedureAsync(m1.AddSeconds(45), "usp_M1b", "AppDb", deltaExecutions: 40, deltaElapsedUs: 600_000, interval: 20);
+        /* #5449: a procedure point's seconds are its gap to the previous point, the first point keeps its stored interval (20), the
+           second sits 40 s after it (40), a restart point (interval 0) is unrated whatever the gap. */
+        await SeedProcedureAsync(m1.AddSeconds(5), "usp_M1a", "AppDb", deltaExecutions: 5, deltaElapsedUs: 100_000, interval: 20);
+        await SeedProcedureAsync(m1.AddSeconds(45), "usp_M1b", "AppDb", deltaExecutions: 40, deltaElapsedUs: 600_000, interval: 40);
         await SeedProcedureAsync(m2.AddSeconds(10), "usp_M2", "AppDb", deltaExecutions: 777, deltaElapsedUs: 777_000, interval: 0);
         await SeedProcedureAsync(m3.AddSeconds(5), "usp_M3unrated", "AppDb", deltaExecutions: 999, deltaElapsedUs: 999_000, interval: 0);
-        await SeedProcedureAsync(m3.AddSeconds(45), "usp_M3rated", "AppDb", deltaExecutions: 30, deltaElapsedUs: 150_000, interval: 15);
+        await SeedProcedureAsync(m3.AddSeconds(45), "usp_M3rated", "AppDb", deltaExecutions: 30, deltaElapsedUs: 150_000, interval: 60);
 
         var points = await _dataService.GetProcedureDurationTrendAsync(ServerId, hoursBack: 1);
 
         Assert.Equal(3, points.Count);
         Assert.Equal(new[] { m1, m2, m3 }, points.Select(p => p.CollectionTime).ToArray());
 
-        Assert.Equal(700.0 / 30.0, points[0].Value!.Value, precision: 6);
-        Assert.Equal(45.0 / 30.0, points[0].ExecutionsPerSecond!.Value, precision: 6);
+        Assert.Equal(700.0 / 60.0, points[0].Value!.Value, precision: 6);
+        Assert.Equal(45.0 / 60.0, points[0].ExecutionsPerSecond!.Value, precision: 6);
 
         Assert.False(points[1].HasRate);
         Assert.Null(points[1].Value);
 
-        Assert.Equal(10.0, points[2].Value!.Value, precision: 6);
-        Assert.Equal(2.0, points[2].ExecutionsPerSecond!.Value, precision: 6);
+        /* The rated point of the third minute sits 40 s after its unrated neighbour: 150 ms and 30 executions over 40 s (the
+           stored interval, 60, is not what a procedure point is rated over). */
+        Assert.Equal(150.0 / 40.0, points[2].Value!.Value, precision: 6);
+        Assert.Equal(30.0 / 40.0, points[2].ExecutionsPerSecond!.Value, precision: 6);
     }
 
     [Fact]
@@ -296,6 +302,119 @@ public sealed class PerformanceTrendDurationBucketingTests : IClassFixture<Share
         Assert.Equal(45.0 / 30.0, points[0].Value!.Value, precision: 6);
         Assert.Null(points[1].Value);
         Assert.Equal(2.0, points[2].Value!.Value, precision: 6);
+    }
+
+    /* ---- #5449 procedure points on the run-based axis: the edge cases ------------------------------------------
+       A procedure point's seconds are its gap to the previous point (idle runs are points too), unrated past the collector's
+       3,600 s limit; the first point of a store keeps its own stored interval. The log stamps a run at t, its rows land
+       200 ms later. Every bucket here is one whole bucket of an aligned window, so a bucket's rate is its total over its seconds. */
+
+    private static DateTime BucketFloor(int minutes, DateTime from) =>
+        DateTime.SpecifyKind(new DateTime(from.Ticks - (from.Ticks % TimeSpan.FromMinutes(minutes).Ticks)), DateTimeKind.Unspecified);
+
+    private async Task<List<QueryTrendPoint>> BucketedProcedureAsync(DateTime bucketStart, int minutes) =>
+        await _dataService.GetBucketedProcedureDurationTrendAsync(ServerId, minutes / 60, bucketStart.AddMinutes(minutes), minutes);
+
+    private async Task SeedRunsAsync(params DateTime[] times)
+    {
+        using var readLock = _duckDb.AcquireReadLock();
+        var conn = await SeedConnectionAsync();
+        foreach (var at in times)
+        {
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = @"INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, rows_collected)
+                VALUES ($1, $2, $3, 'procedure_stats', $4, 12, 'SUCCESS', 0)";
+            foreach (var v in new object[] { _nextId--, ServerId, ServerName, at })
+            {
+                cmd.Parameters.Add(new DuckDBParameter { Value = v });
+            }
+
+            await cmd.ExecuteNonQueryAsync();
+        }
+    }
+
+    [Fact]
+    public async Task ProcedureBucket_OneBusyRunThenTwoIdleRuns_IsOneHundredEightySeconds()
+    {
+        var h = BucketFloor(60, DateTime.UtcNow.AddHours(-3));
+        var run = h.AddMinutes(10);
+        await SeedRunsAsync(run, run.AddMinutes(1), run.AddMinutes(2));
+        await SeedProcedureAsync(run.AddMilliseconds(200), "usp_A", "AppDb", deltaExecutions: 9, deltaElapsedUs: 540_000, interval: 60);
+
+        var point = Assert.Single(await BucketedProcedureAsync(h, 60));
+
+        /* 540 ms over the busy minute and the two quiet ones (the stored-interval sum alone read 60 s and 9). */
+        Assert.Equal(540.0 / 180.0, point.Value!.Value, precision: 6);
+        Assert.Equal(9.0 / 180.0, point.ExecutionsPerSecond!.Value, precision: 6);
+        Assert.Equal(0, point.UnratedInBucket);
+    }
+
+    [Fact]
+    public async Task ProcedureBucket_TwoIdleRunsThenABusyRun_RatesOnlyTheGapsItCanMeasure()
+    {
+        var h = BucketFloor(60, DateTime.UtcNow.AddHours(-3));
+        var run = h.AddMinutes(10);
+        await SeedRunsAsync(run, run.AddMinutes(1), run.AddMinutes(2));
+        await SeedProcedureAsync(run.AddMinutes(2).AddMilliseconds(200), "usp_A", "AppDb", deltaExecutions: 9, deltaElapsedUs: 540_000, interval: 60);
+
+        var point = Assert.Single(await BucketedProcedureAsync(h, 60));
+
+        /* The first run of the store has no previous point, so its minute is unrated; the other two are 60 s each. */
+        Assert.Equal(540.0 / 120.0, point.Value!.Value, precision: 6);
+        Assert.Equal(1, point.UnratedInBucket);
+    }
+
+    [Fact]
+    public async Task ProcedureBucket_TheFirstGapReachesBeforeTheWindowStart()
+    {
+        var h = BucketFloor(60, DateTime.UtcNow.AddHours(-3));
+        await SeedProcedureAsync(h.AddSeconds(-30), "usp_A", "AppDb", deltaExecutions: 0, deltaElapsedUs: 0, interval: 20);
+        await SeedProcedureAsync(h.AddSeconds(30), "usp_A", "AppDb", deltaExecutions: 6, deltaElapsedUs: 600_000, interval: 20);
+
+        var point = Assert.Single(await BucketedProcedureAsync(h, 60));
+
+        /* The point before the window still gives the first in-window point its gap (60 s), not its stored 20 s. */
+        Assert.Equal(600.0 / 60.0, point.Value!.Value, precision: 6);
+        Assert.Equal(6.0 / 60.0, point.ExecutionsPerSecond!.Value, precision: 6);
+    }
+
+    [Fact]
+    public async Task ProcedureBucket_AGapPastTheCollectorsLimitIsUnrated_AndCounted()
+    {
+        var b = BucketFloor(180, DateTime.UtcNow.AddHours(-7));
+        await SeedProcedureAsync(b.AddMinutes(5), "usp_A", "AppDb", deltaExecutions: 6, deltaElapsedUs: 600_000, interval: 60);
+        await SeedProcedureAsync(b.AddMinutes(95), "usp_A", "AppDb", deltaExecutions: 600, deltaElapsedUs: 60_000_000, interval: 60);
+
+        var point = Assert.Single(await BucketedProcedureAsync(b, 180));
+
+        /* 5,400 s after the point before it, the second collection is past the limit: out of the work and the seconds, in the count. */
+        Assert.Equal(600.0 / 60.0, point.Value!.Value, precision: 6);
+        Assert.Equal(1, point.UnratedInBucket);
+    }
+
+    [Fact]
+    public async Task ProcedureBucket_ARestartCollectionStaysUnratedAtASixtySecondGap()
+    {
+        var h = BucketFloor(60, DateTime.UtcNow.AddHours(-3));
+        await SeedProcedureAsync(h.AddMinutes(10), "usp_A", "AppDb", deltaExecutions: 6, deltaElapsedUs: 600_000, interval: 60);
+        await SeedProcedureAsync(h.AddMinutes(11), "usp_A", "AppDb", deltaExecutions: 999, deltaElapsedUs: 99_000_000, interval: 0);
+
+        var point = Assert.Single(await BucketedProcedureAsync(h, 60));
+
+        Assert.Equal(600.0 / 60.0, point.Value!.Value, precision: 6);
+        Assert.Equal(1, point.UnratedInBucket);
+    }
+
+    [Fact]
+    public async Task ProcedureBucket_TheStoresFirstCollectionUsesItsOwnInterval()
+    {
+        var h = BucketFloor(60, DateTime.UtcNow.AddHours(-3));
+        await SeedProcedureAsync(h.AddMinutes(10), "usp_A", "AppDb", deltaExecutions: 9, deltaElapsedUs: 540_000, interval: 45);
+
+        var point = Assert.Single(await BucketedProcedureAsync(h, 60));
+
+        Assert.Equal(540.0 / 45.0, point.Value!.Value, precision: 6);
+        Assert.Equal(0, point.UnratedInBucket);
     }
 
     /* ---- seeding ---------------------------------------------------------------------------------------- */

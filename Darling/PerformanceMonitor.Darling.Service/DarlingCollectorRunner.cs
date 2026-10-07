@@ -3662,6 +3662,18 @@ public sealed class DarlingCollectorRunner
                        idempotent for exactly this pairing. */
                     stallProbeArm.Dispose();
 
+                    /* #5449: procedure_stats' plan phase. The main query is numbers only, so a host that captures plans or
+                       reads identities asks the target for them in a second query over the first MaxPlansPerRun kept rows,
+                       here: on this same target connection and inside the same wall-clock budget (itemToken), before the
+                       #5158 reuse pass below reads the identities it fills. Lite never reaches this: it captures no plans. */
+                    var procedureStatsPlanPhaseMs = 0L;
+                    if ((object)rows is List<ProcedureStatsCollector.Row> phaseRows
+                        && ProcedureStatsCollector.PlanPhaseApplies(context))
+                    {
+                        procedureStatsPlanPhaseMs = await RunProcedureStatsPlanPhaseAsync(
+                            targetProvider, reader, targetConnection, server, context, phaseRows, itemToken);
+                    }
+
                     /* #5158: the deferred plan fetch. After the main read is over and on this same target connection,
                        inside the same wall-clock budget (itemToken), so a slow fetch is cut by the budget like the read. */
                     if (context.DeferPlanXmlFetch && (object)rows is List<QueryStatsCollector.Row> deferredRows)
@@ -3680,7 +3692,13 @@ public sealed class DarlingCollectorRunner
                         }
 
                         pendingProcedureKeys = await ApplyProcedureStatsPlanReuseAsync(
-                            targetProvider, targetConnection, server, context, identityRows, procedureStatsMode, itemToken);
+                            targetProvider, targetConnection, server, context, identityRows, procedureStatsMode, itemToken,
+                            procedureStatsPlanPhaseMs);
+                    }
+                    else if (procedureStatsPlanPhaseMs > 0 && (object)rows is List<ProcedureStatsCollector.Row> offRows)
+                    {
+                        /* Off mode renders the plans in the plan phase and has no reuse pass: stamp what it rendered. */
+                        StampProcedureStatsOffPlanPhase(context, offRows, procedureStatsPlanPhaseMs);
                     }
                 }
                 catch (Exception ex) when (EnumeratedCollectorDriver.ItemBudgetExpired(itemBudget, cancellationToken))
@@ -3979,7 +3997,8 @@ public sealed class DarlingCollectorRunner
         /* #3099: ONE re-attempt, gated on the COPY's START phase, and lossless because `rows` is still
            the parameter this method was handed. The gate is what makes it lossless rather than merely
            cheap: a start-phase fault sent no row, so a COPY ... FROM STDIN cannot have committed and the
-           store is byte-identical, and it ran no WritePayload, so no delta baseline moved. Both are
+           store is byte-identical, and it ran no WritePayload, so no counter-moved row's delta baseline moved (procedure_stats'
+           idle skip advances only UNCHANGED counters at read time, #5449, which is lossless). Both are
            forfeit past that point — see CopyBatchOnceAsync, which stamps the phase and carries the
            argument. StoreWriteReattempt.IsSafeToReattempt requires Start positively, so an unstamped
            fault and a data-phase fault both decline and cost a sample rather than authorising a duplicate
@@ -4338,7 +4357,9 @@ public sealed class DarlingCollectorRunner
     /// is.</b> #3095's <c>StoreCopyPhase</c> transition sits inside the COPY block below, so
     /// <c>Start</c> means strictly "the importer never came back": no row started, so a
     /// <c>COPY ... FROM STDIN</c> cannot have committed, and <c>WritePayload</c> never ran, so no
-    /// <c>CollectorDeltaCalculator</c> baseline moved. <see cref="StoreWriteReattempt.IsSafeToReattempt"/>
+    /// <c>CollectorDeltaCalculator</c> baseline moved for a row whose counters moved (procedure_stats advances an
+    /// UNCHANGED row's baseline at read time to drop it as idle, and a row kept with its deltas computed carries them;
+    /// neither can be re-derived wrongly, #5449). <see cref="StoreWriteReattempt.IsSafeToReattempt"/>
     /// requires that value positively.</para>
     ///
     /// <para><b>Both properties are why the row loop below must never be re-run.</b> Past the transition a
@@ -4444,7 +4465,8 @@ public sealed class DarlingCollectorRunner
                Start until Begin returns, and the transition sits INSIDE the block for that reason: Start has to
                mean strictly "the importer never came back", because that is the state whose two properties a
                consumer relies on — no row started, so a COPY ... FROM STDIN cannot have committed, and no
-               delta baseline moved, since CollectorDeltaCalculator advances inside WritePayload below. A
+               delta baseline moved for a row whose counters moved, since CollectorDeltaCalculator advances inside
+               WritePayload below (procedure_stats' idle skip advances unchanged counters at read time: lossless, #5449). A
                fault anywhere past this line forfeits both, so it must read as Data even where it happens to
                have sent nothing. The unsafe mislabel is the one that would report Start for a fault that had
                already sent rows; this ordering makes that unreachable rather than unlikely.
@@ -7308,12 +7330,82 @@ RETURNING s.state_key";
         context.Measure("plan_fetch_ms", context.PerItemPlanFetchMs);
     }
 
+    /// <summary>
+    /// #5449: procedure_stats' plan phase. Runs one second target query for the first
+    /// <see cref="ProcedureStatsCollector.MaxPlansPerRun"/> kept rows with a parsable plan handle, on the main read's
+    /// connection and inside its budget, and merges each row's plan and identity onto it. Closes the main reader first (one
+    /// command at a time on the connection), as the deferred fetch does. A failed query ships every row without plans and
+    /// marks them all skipped, so the reuse pass counts no miss and caches nothing; the plans are fetched again next
+    /// cycle. A stop or the item budget expiring is not a phase failure and propagates. Returns the phase's milliseconds,
+    /// 0 when no query ran.
+    /// </summary>
+    internal async Task<long> RunProcedureStatsPlanPhaseAsync(
+        ITargetProvider provider,
+        DbDataReader mainReader,
+        DbConnection targetConnection,
+        ServerRuntime server,
+        CollectorContext context,
+        List<ProcedureStatsCollector.Row> rows,
+        CancellationToken cancellationToken)
+    {
+        var indexes = ProcedureStatsCollector.SelectPlanPhaseRows(rows, out var handles);
+        if (indexes.Count == 0)
+        {
+            ProcedureStatsCollector.ApplyPlanPhase(rows, indexes, new Dictionary<int, ProcedureStatsCollector.PlanPhaseResult>());
+            return 0;
+        }
+
+        await mainReader.CloseAsync();
+        var watch = Stopwatch.StartNew();
+        Dictionary<int, ProcedureStatsCollector.PlanPhaseResult>? results = null;
+        try
+        {
+            var query = ProcedureStatsCollector.BuildPlanPhaseQuery(context, handles);
+            using var command = CreateCollectorCommand(provider, query, targetConnection, CommandTimeoutSeconds);
+            using var phaseReader = await command.ExecuteReaderAsync(cancellationToken);
+            results = await ProcedureStatsCollector.ReadPlanPhaseAsync(phaseReader, context, cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException and not OutOfMemoryException
+                                   && !cancellationToken.IsCancellationRequested)
+        {
+            _logger?.LogWarning(
+                ex,
+                "{Collector} on '{Server}': the plan query failed, so this run's rows ship without plans; they are fetched again next cycle (#5449).",
+                ProcedureStatsCollector.Instance.Name, server.Config.DisplayName);
+        }
+
+        ProcedureStatsCollector.ApplyPlanPhase(rows, indexes, results);
+        return Math.Max(1L, watch.ElapsedMilliseconds);
+    }
+
+    /// <summary>
+    /// #5449: Off mode renders plans in the plan phase and has no reuse pass, so the run stamps what the phase rendered
+    /// (the rows that carry a plan or a size) and how long it took. A phase that failed leaves no row with a plan, so the
+    /// stamp reads zero rendered rows and still records the phase's milliseconds.
+    /// </summary>
+    internal static void StampProcedureStatsOffPlanPhase(
+        CollectorContext context, List<ProcedureStatsCollector.Row> rows, long planPhaseMs)
+    {
+        var renderedRows = 0;
+        long renderedBytes = 0;
+        foreach (var row in rows)
+        {
+            if (row.QueryPlanXml is not null || row.QueryPlanXmlBytes is not null)
+            {
+                renderedRows++;
+                renderedBytes += row.QueryPlanXmlBytes ?? 0;
+            }
+        }
+
+        StampPlanFetch(context, renderedRows, renderedBytes, planPhaseMs);
+    }
+
     /// <summary>The cache a server's procedure_stats runs have filled so far, for a test to confirm and inspect.</summary>
     internal PlanDigestCache<ProcedureStatsPlanKey>? ProcedureStatsPlanCacheForTests(int serverId) =>
         _procedureStatsPlanCaches.TryGetValue(serverId, out var cache) ? cache : null;
 
     /// <summary>
-    /// #5158: procedure_stats' plan reuse, after the main read. In shadow the rows already carry their inline plans, and
+    /// #5158: procedure_stats' plan reuse, after the main read. In shadow the rows already carry their inline plans (from the #5449 plan phase), and
     /// this only measures whether each module plan's identity (<see cref="ProcedureStatsPlanKey"/>) would have been
     /// recognized and right; nothing written changes. In on the rows carry no plan: recognized identities get their stored
     /// digest, and on a cycle the cadence gate lets render, the others are rendered in one second query on this same
@@ -7333,7 +7425,8 @@ RETURNING s.state_key";
         CollectorContext context,
         List<ProcedureStatsCollector.Row> rows,
         ProcedureStatsPlanFetchMode mode,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        long planPhaseMs = 0)
     {
         var cache = _procedureStatsPlanCaches.GetOrAdd(server.ServerId, static _ => new PlanDigestCache<ProcedureStatsPlanKey>());
         if (_procedureStatsPlanCacheModes.TryGetValue(server.ServerId, out var cachedUnderMode) && cachedUnderMode != mode)
@@ -7353,7 +7446,8 @@ RETURNING s.state_key";
             : _procedureStatsCaptureOrdinals.GetOrAdd(server.ServerId, 0L);
 
         ProcedureStatsPlanReuse.Outcome outcome;
-        long fetchMs = 0;
+        /* #5449: the plan phase's own time is part of the run's plan time, in every mode. */
+        long fetchMs = planPhaseMs;
         if (shadow)
         {
             outcome = ProcedureStatsPlanReuse.ApplyShadow(
@@ -7383,7 +7477,7 @@ RETURNING s.state_key";
                 cancellationToken,
                 unjudgedOrdinals);
             fetchWatch.Stop();
-            fetchMs = fetchWatch.ElapsedMilliseconds;
+            fetchMs += fetchWatch.ElapsedMilliseconds;
 
             if (outcome.FetchFailure is { } failure)
             {
@@ -7395,7 +7489,7 @@ RETURNING s.state_key";
         }
 
         /* The same seam query_stats uses, so plans_rendered, plans_rendered_bytes and plan_fetch_ms come from one stamp.
-           Shadow renders inline and issues no second query, so its fetch time is 0. */
+           Shadow issues no further query after the plan phase, so its fetch time is the plan phase's. */
         StampPlanFetch(context, outcome.Rendered, outcome.RenderedBytes, fetchMs);
         if (shadow)
         {

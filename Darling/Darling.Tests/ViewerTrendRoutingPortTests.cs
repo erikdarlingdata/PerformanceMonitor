@@ -55,9 +55,37 @@ public sealed class ViewerTrendRoutingPortTests
     public void McpHourlySql_IsTheStorageBuilder_WithoutTheDatabaseFilter()
     {
         Assert.Equal(Lf(DurationTrendRouting.BuildBucketedHourlyTrendSql(TimescaleSupport.QueryStatsHourlyView)), Lf(DarlingTrendReader.QueryDurationTrendHourlySql));
-        Assert.Equal(Lf(DurationTrendRouting.BuildBucketedHourlyTrendSql(TimescaleSupport.ProcedureStatsHourlyView)), Lf(DarlingTrendReader.ProcedureDurationTrendHourlySql));
+        /* #5449: the procedure rollup's read also counts the quiet hours (coverIdleHours). */
+        Assert.Equal(Lf(DurationTrendRouting.BuildBucketedHourlyTrendSql(TimescaleSupport.ProcedureStatsHourlyView, coverIdleHours: true)), Lf(DarlingTrendReader.ProcedureDurationTrendHourlySql));
         Assert.DoesNotContain("$4::text[]", DarlingTrendReader.QueryDurationTrendHourlySql, StringComparison.Ordinal);
         Assert.DoesNotContain("$4::text[]", DarlingTrendReader.ProcedureDurationTrendHourlySql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #5449: the idle hours (<c>run_hours</c> and <c>idle_hours</c>: a SUCCESS collector run falls in the hour and the raw table
+    /// holds no row in it) are on both procedure hourly statements, the viewer's and the tool's, as the same text, and on no
+    /// query-view statement. The fill reads the collector's log, so it is bounded by the window like the rollup read.
+    /// </summary>
+    [Fact]
+    public void ProcedureHourlySql_CarriesTheSameIdleHoursFragment_AndTheQueryViewsCarryNone()
+    {
+        static string Fragment(string sql)
+        {
+            var text = Lf(sql);
+            var start = text.IndexOf("run_hours AS", StringComparison.Ordinal);
+            var end = text.IndexOf("filled AS", StringComparison.Ordinal);
+            Assert.True(start > 0 && end > start, "no idle-hours fragment");
+            return string.Join('\n', text[start..end].Split('\n').Select(l => l.Trim()));
+        }
+
+        var mcp = Fragment(DarlingTrendReader.ProcedureDurationTrendHourlySql);
+        Assert.Equal(mcp, Fragment(ViewerDataService.ProcedureDurationTrendHourlySql));
+        Assert.Equal(mcp, Fragment(DurationTrendRouting.BuildHourlyTrendSql(TimescaleSupport.ProcedureStatsHourlyView, withDatabaseFilter: false, coverIdleHours: true)));
+        Assert.Contains("collection_time < $3 + INTERVAL '1 hour'", mcp, StringComparison.Ordinal);
+        Assert.Contains("run_hours.bucket < $3", mcp, StringComparison.Ordinal);
+        Assert.Contains("NOT EXISTS", mcp, StringComparison.Ordinal);
+        Assert.DoesNotContain("run_hours", DarlingTrendReader.QueryDurationTrendHourlySql, StringComparison.Ordinal);
+        Assert.DoesNotContain("run_hours", ViewerDataService.QueryDurationTrendHourlySql, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -155,7 +183,7 @@ public sealed class ViewerTrendRoutingPortTests
 
         Assert.Contains("public const string HourlyBucketSecondsSql = DurationTrendRouting.HourlyBucketSecondsSql;", source, StringComparison.Ordinal);
         Assert.Contains("public static readonly string QueryDurationTrendHourlySql =\n        DurationTrendRouting.BuildBucketedHourlyTrendSql(TimescaleSupport.QueryStatsHourlyView);", Lf(source), StringComparison.Ordinal);
-        Assert.Contains("public static readonly string ProcedureDurationTrendHourlySql =\n        DurationTrendRouting.BuildBucketedHourlyTrendSql(TimescaleSupport.ProcedureStatsHourlyView);", Lf(source), StringComparison.Ordinal);
+        Assert.Contains("public static readonly string ProcedureDurationTrendHourlySql =\n        DurationTrendRouting.BuildBucketedHourlyTrendSql(TimescaleSupport.ProcedureStatsHourlyView, coverIdleHours: true);", Lf(source), StringComparison.Ordinal);
         Assert.Contains("public static readonly TimeSpan RawTierMargin = DurationTrendRouting.RawTierMargin;", source, StringComparison.Ordinal);
         Assert.Contains("public static readonly TimeSpan TruncationSlack = DurationTrendRouting.TruncationSlack;", source, StringComparison.Ordinal);
         Assert.Contains("public static bool ShouldUseRawTier(DateTime startUtc, DateTime nowUtc) =>\n        DurationTrendRouting.ShouldUseRawTier(startUtc, nowUtc);", Lf(source), StringComparison.Ordinal);
