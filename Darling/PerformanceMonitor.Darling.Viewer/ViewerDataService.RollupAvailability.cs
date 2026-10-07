@@ -74,6 +74,19 @@ public sealed partial class ViewerDataService
     }
 
     /// <summary>
+    /// #5329: whether the hourly route for a window starting at <paramref name="startUtc"/> can read the io hourly
+    /// rollup <paramref name="ioView"/> (<c>query_stats_io_hourly</c> / <c>procedure_stats_io_hourly</c>), the
+    /// siblings that also keep logical reads, physical reads and logical writes. True only when the store HAS the
+    /// view and its first materialized bucket is at or before the window's start: a view that starts later (a
+    /// store whose ensure sweep built it recently and has not been backfilled) would leave the early part of the
+    /// window out and show a reads total that is too small, so then the route stays on the interval rollup and
+    /// its blank reads columns. An absent or empty view is the same answer, with no error.
+    /// </summary>
+    internal static bool IoHourlyCoversWindow(
+        RollupAvailability rollups, RollupCoverage coverage, string ioView, DateTime startUtc)
+        => rollups.Has(ioView) && coverage.FloorOf(ioView) is { } floor && floor <= startUtc;
+
+    /// <summary>
     /// #4957: measures each rollup's coverage floor in the background shortly after the Viewer opens its store, so
     /// the first routed read (Overview, Queries, FinOps and the rest all go through
     /// <see cref="GetRollupAvailabilityAsync"/>) does not wait on the cold <c>min(bucket)</c> sort of each rollup's
