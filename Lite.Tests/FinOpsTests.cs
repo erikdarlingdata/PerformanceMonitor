@@ -623,7 +623,6 @@ public class FinOpsTests : IClassFixture<SharedDuckDbFixture>
             output.WriteLine($"Category: {r.Category}  Severity: {r.Severity}  Confidence: {r.Confidence}");
             output.WriteLine($"Finding: {r.Finding}");
             output.WriteLine($"Detail: {r.Detail}");
-            output.WriteLine($"Est Savings: {r.EstMonthlySavingsDisplay}");
             output.WriteLine("");
         }
     }

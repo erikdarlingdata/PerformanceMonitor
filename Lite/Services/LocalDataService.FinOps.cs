@@ -411,8 +411,13 @@ public class ServerPropertyRow
     }
 
     // Health score (Increment 6)
-    public int HealthScore { get; set; }
-    public string HealthScoreColor => FinOpsHealthCalculator.ScoreColor(HealthScore);
+    /// <summary>The Server Inventory health score, or null when the last 24 hours hold no CPU sample for the server: the grid shows a dash,
+    /// not a score built from the memory and storage defaults (<see cref="FinOpsHealthCalculator.InventoryScore"/>).</summary>
+    public int? HealthScore { get; set; }
+    public string HealthScoreColor => HealthScore is int score ? FinOpsHealthCalculator.ScoreColor(score) : FinOpsHealthCalculator.NoScoreColor;
+
+    /// <summary>The tooltip on the dash shown in place of a score; null when there is a score.</summary>
+    public string? HealthScoreNote => HealthScore.HasValue ? null : FinOpsHealthCalculator.NoScoreNote;
 }
 
 public class StorageGrowthRow
@@ -533,6 +538,17 @@ public static class FinOpsHealthCalculator
         return (memory * 30 + storage * 30) / 60;
     }
 
+    /// <summary>
+    /// The Server Inventory grid's score from the server's 24-hour average CPU: CPU, a default memory term of 80 (the inventory has no
+    /// buffer pool ratio) and a default storage term (no file-level free space). Null when there is no CPU sample (<paramref name="avgCpuPct"/>
+    /// null), the same rule as the drill-down badge: the defaults alone must not read as a score for a server nothing was measured on.
+    /// </summary>
+    public static int? InventoryScore(decimal? avgCpuPct)
+    {
+        if (avgCpuPct is not decimal avgCpu) return null;
+        return Overall(CpuScore(avgCpu), 80, StorageScore(50));
+    }
+
     public static string ScoreColor(int score) => score switch
     {
         >= 80 => "#27AE60",
@@ -625,7 +641,6 @@ public class RecommendationRow
     public string Finding { get; set; } = "";
     public string Detail { get; set; } = "";
     public decimal? EstMonthlySavings { get; set; }
-    public string EstMonthlySavingsDisplay => EstMonthlySavings.HasValue ? $"${EstMonthlySavings.Value:N0}" : "";
     public int SeveritySort => Severity switch
     {
         "High" => 1,

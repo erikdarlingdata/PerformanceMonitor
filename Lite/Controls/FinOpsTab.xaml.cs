@@ -816,12 +816,9 @@ public partial class FinOpsTab : UserControl
             // Compute health scores for each server
             foreach (var item in data)
             {
-                /* A server with no CPU sample in the window has a null average: its CPU term is left out, because scoring it
-                   as 0% CPU would hand it a full 100 made from nothing. */
-                int? cpuScore = item.AvgCpuPct is decimal avgCpu ? FinOpsHealthCalculator.CpuScore(avgCpu) : null;
-                var memScore = 80; // Default — we don't have buffer pool ratio in inventory
-                var storScore = FinOpsHealthCalculator.StorageScore(50); // Default — no file-level free space in inventory
-                item.HealthScore = FinOpsHealthCalculator.Overall(cpuScore, memScore, storScore);
+                /* A server with no CPU sample in the window has a null average and so no score (a dash): memory and storage here are
+                   defaults, and a score made only of defaults says nothing about the server. */
+                item.HealthScore = FinOpsHealthCalculator.InventoryScore(item.AvgCpuPct);
             }
 
             _serverInventoryCache = data;
@@ -885,9 +882,16 @@ public partial class FinOpsTab : UserControl
 
         try
         {
-            var data = await Task.Run(() => _dataService.GetIdleDatabasesAsync(serverId));
+            // The same 7-day coverage rule the recommendation row uses: a database is idle only when each of the last 7 UTC days was
+            // watched, else the grid says why it is empty instead of "No idle databases detected".
+            var (covered, data) = await Task.Run(async () =>
+            {
+                var hasCoverage = await _dataService.HasQueryStatsCoverageAsync(serverId);
+                return (hasCoverage, hasCoverage ? await _dataService.GetIdleDatabasesAsync(serverId) : new List<IdleDatabaseRow>());
+            });
             if (_loads.Superseded(nameof(LoadIdleDatabasesAsync), gen)) return;
             _idleDbsFilterMgr!.UpdateData(data);
+            IdleDatabasesNoDataMessage.Text = LocalDataService.IdleDatabasesEmptyText(covered);
             IdleDatabasesNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
             IdleDatabasesCountIndicator.Text = data.Count > 0 ? $"{data.Count} idle database(s)" : "";
         }
