@@ -30,9 +30,9 @@ namespace Darling.Tests;
 /// query-stats hour ledger): the ladder is applied and stamped in version order, so the only wrong number
 /// is a COLLISION with one already in the ladder.</para>
 ///
-/// <para>This file carries the "I am the top rung" claims that moved off
-/// <see cref="QueryStatsHourLedgerTests"/> (V164) when this rung landed — a fully-migrated store must map to
-/// EXACTLY this version, or the viewer's connect-time gate refuses a store that is actually current.</para>
+/// <para>This file carried the "I am the top rung" claims that moved off
+/// <see cref="QueryStatsHourLedgerTests"/> (V164) when this rung landed; they moved on to
+/// <see cref="PlanRegressionDailyRungTests"/> (V168) when that rung landed above it.</para>
 /// </summary>
 public sealed class PagerDutyAutoResolveRungTests
 {
@@ -47,7 +47,7 @@ public sealed class PagerDutyAutoResolveRungTests
     /* ---- the rung ------------------------------------------------------------------------------------ */
 
     [Fact]
-    public void TheRungIsRegisteredAtTheTopOfADenseLadder()
+    public void TheRungIsRegisteredInADenseLadder_BelowTheCurrentTop()
     {
         var versions = PgMigrations.Scripts.Select(s => s.Version).ToList();
 
@@ -107,7 +107,7 @@ public sealed class PagerDutyAutoResolveRungTests
     /// store that is in fact current — permanently, because no later upgrade changes the answer.</para>
     /// </summary>
     [Fact]
-    public void TheProbeMapsAFullyMigratedStoreToThisTopRung()
+    public void TheProbeMapsAStoreThatStoppedHereToThisRung()
     {
         Assert.Contains($"column_name = '{ResolveColumn}'", ViewerDataService.StoreSchemaProbeSql, StringComparison.Ordinal);
 
@@ -141,7 +141,7 @@ public sealed class PagerDutyAutoResolveRungTests
         var v165 = viewer.IndexOf("if (hasPasswordKey)", StringComparison.Ordinal);
         Assert.True(v166 >= 0, "the viewer has no V166 sentinel arm — a fully-migrated store would map to 165");
         Assert.True(v165 >= 0, "the V165 arm is gone, so this pin is comparing against nothing");
-        Assert.True(v166 < v165, "the V166 arm sits below V165's, so a current store maps one rung low");
+        Assert.True(v166 < v165, "the V166 arm sits below V165's, so a store that stopped at V166 maps one rung low");
         Assert.Contains(
             "return " + RungVersion.ToString(CultureInfo.InvariantCulture) + ";",
             viewer[v166..v165], StringComparison.Ordinal);

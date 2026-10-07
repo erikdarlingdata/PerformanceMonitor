@@ -22,7 +22,7 @@ namespace Darling.Tests;
 
 /// <summary>
 /// Pins the rung that records which old-format saved passwords were in the store at the upgrade (V167, #5456): its place
-/// at the top of a dense ladder, its owner-only table, the gate on its capture statement, and the schema-version probe's
+/// in a dense ladder (V168's rung sits above it), its owner-only table, the gate on its capture statement, and the schema-version probe's
 /// newest sentinel. The live fact mints its own scratch store.
 /// </summary>
 [Collection("live-postgres")]
@@ -35,13 +35,15 @@ public sealed class LegacyPinCandidateRungTests
     private static PgMigrations.Migration Rung => PgMigrations.Scripts.Single(m => m.Name == "legacy-pin-candidates");
 
     [Fact]
-    public void TheRungIsTheTopOfADenseLadder()
+    public void TheRungIsInADenseLadder_BelowTheCurrentTop()
     {
         var versions = PgMigrations.Scripts.Select(s => s.Version).ToList();
 
         Assert.Equal(LegacyPinCandidateTables.RungVersion, Rung.Version);
-        Assert.Equal(StorageVersion.SchemaVersion, Rung.Version);
-        Assert.Equal(Rung.Version, PgMigrations.Scripts[^1].Version);
+        /* No longer the top rung: V168 (the PLAN_REGRESSION per-day totals) landed above it. */
+        Assert.True(Rung.Version < StorageVersion.SchemaVersion);
+        Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
+        Assert.Contains(Rung.Version + 1, versions);
         Assert.Equal(versions.Distinct().OrderBy(v => v), versions);
         Assert.Contains(Rung.Version - 1, versions);
         Assert.Equal(LegacyPinCandidateTables.CreateSql + "\n\n" + LegacyPinCandidateTables.CaptureSql, Rung.Sql);
@@ -123,16 +125,17 @@ public sealed class LegacyPinCandidateRungTests
         var probe = ViewerDataService.StoreSchemaProbeSql.Replace("\r\n", "\n", StringComparison.Ordinal);
         var arm = "to_regclass('config.legacy_secret_pin_candidate') IS NOT NULL";
         Assert.Contains(arm, probe, StringComparison.Ordinal);
-        Assert.True(probe.LastIndexOf("EXISTS", StringComparison.Ordinal) < probe.IndexOf(arm, StringComparison.Ordinal),
-            "the new arm is the probe's last EXISTS, so it reads at the next ordinal");
+        Assert.True(probe.IndexOf("to_regclass('collect.plan_regression_daily_built')", StringComparison.Ordinal) > probe.IndexOf(arm, StringComparison.Ordinal),
+            "a newer rung's arm follows this one in the probe, so this one reads at the ordinal before it");
 
         var viewer = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.cs");
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal})", viewer, StringComparison.Ordinal);
-        Assert.DoesNotContain($"reader.GetBoolean({ProbeOrdinal + 1})", viewer, StringComparison.Ordinal);
+        Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 1})", viewer, StringComparison.Ordinal);
+        Assert.DoesNotContain($"reader.GetBoolean({ProbeOrdinal + 2})", viewer, StringComparison.Ordinal);
 
         var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
         var parameters = method.GetParameters();
-        Assert.Equal(ProbeOrdinal, parameters.Length - 1);
+        Assert.Equal(ProbeOrdinal + 1, parameters.Length - 1);
         Assert.Equal("hasLegacyPinCandidates", parameters[ProbeOrdinal].Name);
         Assert.Equal("hasPagerDutyAutoResolve", parameters[ProbeOrdinal - 1].Name);
 
@@ -141,8 +144,8 @@ public sealed class LegacyPinCandidateRungTests
         Assert.Equal(StorageVersion.SchemaVersion, ViewerDataService.RequiredStoreSchemaVersion);
 
         var behind = (object[])all.Clone();
-        behind[ProbeOrdinal] = false;
-        Assert.Equal(PgMigrations.Scripts[^1].Version - 1, (int)method.Invoke(null, behind)!);
+        behind[ProbeOrdinal + 1] = false;
+        Assert.Equal(Rung.Version, (int)method.Invoke(null, behind)!);
 
         var thisArm = viewer.IndexOf("if (hasLegacyPinCandidates)", StringComparison.Ordinal);
         var previousArm = viewer.IndexOf("if (hasPagerDutyAutoResolve)", StringComparison.Ordinal);

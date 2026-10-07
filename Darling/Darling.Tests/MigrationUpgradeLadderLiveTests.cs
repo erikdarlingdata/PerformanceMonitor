@@ -138,6 +138,8 @@ public sealed class MigrationUpgradeLadderLiveTests
             var scratchForPool = new NpgsqlConnectionStringBuilder(baseConnectionString) { Database = scratchDatabase };
             NpgsqlConnection.ClearPool(new NpgsqlConnection(scratchForPool.ConnectionString));
 
+            /* No TimescaleDB job worker is left in the database the FORCE drop below kills (#5480). */
+            await ScratchPostgres.QuiesceTimescaleJobsAsync(baseConnectionString, scratchDatabase);
             await using (var drop = new NpgsqlCommand(
                 $"DROP DATABASE IF EXISTS {scratchDatabase} WITH (FORCE)", admin))
             {

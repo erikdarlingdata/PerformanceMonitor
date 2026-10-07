@@ -8,7 +8,9 @@
 
 using System;
 using System.Collections.Generic;
+using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using Npgsql;
 using PerformanceMonitor.Analysis;
 using PerformanceMonitor.Analysis.Baselines;
@@ -283,16 +285,18 @@ ORDER BY worker_ratio DESC";
     }
 
     /// <summary>The PLAN_REGRESSION comparison window, in days — how far back a query's "best known" plan
-    /// may have been observed.</summary>
-    internal const int PlanRegressionWindowDays = 14;
+    /// may have been observed. One definition with the builder's (<see cref="PlanRegressionDaily.WindowDays"/>): a window
+    /// that outgrew the days the builder fills would leave every read short of built days and on the full scan.</summary>
+    internal const int PlanRegressionWindowDays = PlanRegressionDaily.WindowDays;
 
     /// <summary>
     /// How far BELOW the comparison window the chunk-exclusion bound sits (#2387). `last_execution_time`
     /// is the monitored server's clock and `collection_time` is the store's; a monitored server running
     /// ahead can report an execution time later than the collection that carried it. A day absorbs any
-    /// plausible drift while still excluding all but ~15 days of a store that may hold months.
+    /// plausible drift while still excluding all but ~15 days of a store that may hold months. One definition with the
+    /// builder's (<see cref="PlanRegressionDaily.PlanRegressionSkewMarginDays"/>), which closes a day by the same margin.
     /// </summary>
-    internal const int PlanRegressionSkewMarginDays = 1;
+    internal const int PlanRegressionSkewMarginDays = PlanRegressionDaily.PlanRegressionSkewMarginDays;
 
     /* PG port: any_value() below is standard SQL:2023, in Postgres since 16 — the product's
        minimum supported PG is 16, so it stays verbatim (DuckDB and PG agree on its semantics:
@@ -442,6 +446,108 @@ WITH plan_agg AS
 ),
 ";
 
+    /// <summary>
+    /// PLAN_REGRESSION over per-day totals for the closed days and the interval table for the rest (#5448):
+    /// <see cref="PlanRegressionTableSql"/> with its <c>plan_agg</c> replaced by the sum of two reads, so everything from
+    /// <c>plan_dedup</c> down is the shared <see cref="PlanRegressionSuffix"/> and cannot drift. $1 server_id, $2 M, $3 the
+    /// built days (<see cref="PlanRegressionDaily.BuiltDaysSql"/>, date[]), $4 the live floor and $5 M - 1 day, both
+    /// timestamps (see <see cref="PlanRegressionLiveFloor"/>).
+    ///
+    /// <para><b>The window edge moves in whole days.</b> This read's edge is M, the start of the day the exact edge falls
+    /// in, for both halves; the exact-bound read it replaces cut mid-day. It is the same function of the same snapshots
+    /// whenever the edge is day-aligned (the parity tests pin that), and differs by less than a day otherwise, which is
+    /// why the drill-down reads the same M (<c>AnalysisContext.PlanRegressionWindowStart</c>). A built day was built from
+    /// <c>last_execution_time</c> in the day, <c>first_execution_time</c> and <c>collection_time</c> a day below it, so the
+    /// two routes differ only for a snapshot collected more than a day before its interval's last execution.</para>
+    ///
+    /// <para><b>One snapshot for both.</b> The built days and this read are two statements, and the trigger can mark a
+    /// day late, and the builder can rebuild one, between them. The fact therefore runs both in one REPEATABLE READ READ
+    /// ONLY transaction: they see the same built set and the same totals, so a day is read from the totals only if the
+    /// totals the read sees are the ones that made it valid. The live floor stays a bound parameter ($4, worked out from
+    /// the built days the first statement returned), so the planner knows it and a hypertable drops the old chunks while
+    /// it plans, as the numbers in #5448 were measured. A late row that lands after the snapshot is not in it, and the
+    /// next builder pass rebuilds the day.</para>
+    /// </summary>
+    internal const string PlanRegressionDailySql = PlanRegressionDailyPrefix + PlanRegressionSuffix;
+
+    private const string PlanRegressionDailyPrefix = @"
+WITH plan_agg AS
+(
+    -- #5448: closed days from collect.plan_regression_daily (summed totals, so days recombine exactly), every other day
+    -- from the interval table with the daily builder's own aggregate. A row is in exactly one half: its day
+    -- (last_execution_time::date) is in the built set or it is not.
+    SELECT
+        database_name,
+        query_id,
+        plan_id,
+        replica_role,
+        any_value(query_plan_hash) AS query_plan_hash,
+        SUM(execs) AS execs,
+        SUM(cpu_us_sum)::DOUBLE PRECISION / NULLIF(SUM(execs), 0) AS cpu_per_exec,
+        SUM(dur_us_sum)::DOUBLE PRECISION / NULLIF(SUM(execs), 0) AS dur_per_exec,
+        MAX(last_exec) AS last_exec,
+        bool_or(is_forced_plan) AS is_forced_plan,
+        MAX(force_failure_count) AS force_failure_count
+    FROM
+    (
+        SELECT
+            d.database_name, d.query_id, d.plan_id, d.replica_role, d.query_plan_hash,
+            d.execs, d.cpu_us_sum, d.dur_us_sum, d.last_exec, d.is_forced_plan, d.force_failure_count
+        FROM plan_regression_daily AS d
+        WHERE d.server_id = $1::integer
+        AND   d.day = ANY($3::date[])
+
+        UNION ALL
+
+        SELECT
+            l.database_name, l.query_id, l.plan_id, l.replica_role, l.query_plan_hash,
+            SUM(l.execution_count),
+            SUM(l.avg_cpu_time_us::numeric * l.execution_count),
+            SUM(l.avg_duration_us::numeric * l.execution_count),
+            MAX(l.last_execution_time),
+            bool_or(l.is_forced_plan),
+            MAX(l.force_failure_count)
+        FROM query_store_interval_latest AS l
+        WHERE l.server_id = $1::integer
+        AND   l.last_execution_time >= $2::timestamp
+        AND   l.collection_time >= $5::timestamp
+        AND   l.first_execution_time >= $4::timestamp
+        AND   l.last_execution_time::date <> ALL($3::date[])
+        GROUP BY l.database_name, l.query_id, l.plan_id, l.replica_role, l.query_plan_hash
+    ) AS u
+    GROUP BY database_name, query_id, plan_id, replica_role
+),
+";
+
+    /// <summary>
+    /// M: the start of the day the comparison window's exact edge (<paramref name="rawWindowStart"/>) falls in (#5448).
+    /// </summary>
+    internal static DateTime PlanRegressionWindowFloor(DateTime rawWindowStart) =>
+        DateTime.SpecifyKind(rawWindowStart.Date, DateTimeKind.Unspecified);
+
+    /// <summary>
+    /// The live read's <c>first_execution_time</c> floor (#5448): one day below the first day, from
+    /// <paramref name="windowFloor"/> on, that is NOT built. A live row's day is that day or later, and one Query Store
+    /// interval spans at most a day, so its first execution is at or above the floor. With every day from the window's
+    /// start built up to some last one, the floor sits one day below the day after it, so a read still sees whatever
+    /// comes after the built days (a skewed server's future-dated rows).
+    /// </summary>
+    internal static DateTime PlanRegressionLiveFloor(DateTime windowFloor, IReadOnlyCollection<DateOnly> builtDays)
+    {
+        var built = new HashSet<DateOnly>(builtDays);
+        var day = DateOnly.FromDateTime(windowFloor);
+        while (built.Contains(day))
+        {
+            day = day.AddDays(1);
+        }
+
+        return DateTime.SpecifyKind(day.ToDateTime(TimeOnly.MinValue).AddDays(-1), DateTimeKind.Unspecified);
+    }
+
+    /// <summary>Test seam (#5448): runs between the PLAN_REGRESSION built-days read and the daily read, so a test can change the
+    /// store from another connection at exactly the point a snapshot has to hold. Null in production.</summary>
+    internal static readonly System.Threading.AsyncLocal<Func<System.Threading.CancellationToken, System.Threading.Tasks.Task>?> TestOnlyAfterBuiltDaysRead = new();
+
     /// <summary>Everything from <c>plan_dedup</c> down, shared by both PLAN_REGRESSION reads.</summary>
     private const string PlanRegressionSuffix = @"plan_dedup AS
 (
@@ -554,7 +660,10 @@ LIMIT 20";
            than a list some earlier pass stamped on a reused context. */
         context.PlanRegressionOffenders = null;
         context.PlanRegressionReadsIntervalTable = null;
+        context.PlanRegressionWindowStart = null;
 
+        /* #5448: the built-days read and the daily read share this transaction (see PlanRegressionDailySql). */
+        NpgsqlTransaction? snapshot = null;
         try
         {
             await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
@@ -571,14 +680,67 @@ LIMIT 20";
                 connection, context.ServerId, collectionBound, FactCommandTimeoutSeconds, _logger, context.CancellationToken);
             context.PlanRegressionReadsIntervalTable = readsTable;
 
-            using var cmd = new NpgsqlCommand(readsTable ? PlanRegressionTableSql : PlanRegressionSql, connection) { CommandTimeout = FactCommandTimeoutSeconds };
-            cmd.Parameters.AddWithValue(context.ServerId);
-            cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart.AddDays(-PlanRegressionWindowDays)));
-            cmd.Parameters.AddWithValue(collectionBound);
+            /* #5448: the closed days that are fully built, only when the table is the source. Any failure is an empty
+               set: the read below then runs PlanRegressionTableSql on its exact bounds, as it did before the daily
+               totals existed. That failure is logged in the helper and is NOT a collection caveat: the exact read is
+               whole, so nothing is missing, and if it fails too its own catch records it, once. A cancelled pass is
+               not swallowed. */
+            var rawWindowStart = AsNaive(context.TimeRangeStart.AddDays(-PlanRegressionWindowDays));
+            var windowFloor = PlanRegressionWindowFloor(rawWindowStart);
+            var builtDays = new List<DateOnly>();
             if (readsTable)
             {
-                /* $4, the table's partitioning column: the same value, bare, for the same reason. */
+                /* One REPEATABLE READ READ ONLY transaction for the built-days read and the daily read: both see the same
+                   built set and the same totals, and the live floor below stays a bound parameter. */
+                snapshot = await connection.BeginTransactionAsync(System.Data.IsolationLevel.RepeatableRead, context.CancellationToken);
+                await using (var readOnly = new NpgsqlCommand("SET TRANSACTION READ ONLY", connection, snapshot) { CommandTimeout = FactCommandTimeoutSeconds })
+                {
+                    await readOnly.ExecuteNonQueryAsync(context.CancellationToken);
+                }
+
+                builtDays = await QueryStoreIntervalLatest.ReadBuiltDaysAsync(
+                    connection, snapshot, context.ServerId, windowFloor, FactCommandTimeoutSeconds, _logger,
+                    ex => AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken), context.CancellationToken);
+                if (builtDays.Count == 0)
+                {
+                    /* No built day, or the read failed (which leaves this transaction aborted): the exact-bound read runs
+                       outside it, on an ordinary statement. */
+                    await snapshot.DisposeAsync();
+                    snapshot = null;
+                }
+                else if (TestOnlyAfterBuiltDaysRead.Value is { } afterBuiltDays)
+                {
+                    await afterBuiltDays(context.CancellationToken);
+                }
+            }
+
+            var readsDays = builtDays.Count > 0;
+
+            using var cmd = new NpgsqlCommand(
+                readsDays ? PlanRegressionDailySql : readsTable ? PlanRegressionTableSql : PlanRegressionSql, connection, snapshot)
+            { CommandTimeout = FactCommandTimeoutSeconds };
+            cmd.Parameters.AddWithValue(context.ServerId);
+            if (readsDays)
+            {
+                /* $2 M, $3 the built days, $4 the live floor, $5 M - 1 day (the collection bound, bare for #2387). */
+                cmd.Parameters.AddWithValue(NpgsqlTypes.NpgsqlDbType.Timestamp, windowFloor);
+                cmd.Parameters.Add(new NpgsqlParameter
+                {
+                    NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Array | NpgsqlTypes.NpgsqlDbType.Date,
+                    Value = builtDays.ToArray()
+                });
+                cmd.Parameters.AddWithValue(NpgsqlTypes.NpgsqlDbType.Timestamp, PlanRegressionLiveFloor(windowFloor, builtDays));
+                cmd.Parameters.AddWithValue(NpgsqlTypes.NpgsqlDbType.Timestamp, windowFloor.AddDays(-1));
+            }
+            else
+            {
+                cmd.Parameters.AddWithValue(rawWindowStart);
                 cmd.Parameters.AddWithValue(collectionBound);
+                if (readsTable)
+                {
+                    /* $4, the table's partitioning column: the same value, bare, for the same reason. */
+                    cmd.Parameters.AddWithValue(collectionBound);
+                }
             }
 
             var offenderCount = 0;
@@ -625,6 +787,10 @@ LIMIT 20";
 
             context.PlanRegressionOffenders = offenders;
 
+            /* #5448: M is recorded only now, after the read has succeeded. A read that threw leaves "not known" (null), as the
+               AnalysisContext doc says, so the drill-down does not start at an edge no fact read from. */
+            context.PlanRegressionWindowStart = readsDays ? windowFloor : null;
+
             if (offenderCount == 0) return;
 
             var fact = new Fact
@@ -663,6 +829,14 @@ LIMIT 20";
                facts — but WHY it degraded is reported, not assumed (#2826): a cancelled query is
                not "no data". An abandonment is NOT swallowed here (#2443). */
             ReportCollectionFailure(ex, context);
+        }
+        finally
+        {
+            /* After the reader and the connection's other locals are gone; a rollback, nothing here wrote. */
+            if (snapshot is not null)
+            {
+                await snapshot.DisposeAsync();
+            }
         }
     }
 
