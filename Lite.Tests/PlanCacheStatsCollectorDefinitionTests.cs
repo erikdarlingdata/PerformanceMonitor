@@ -27,7 +27,7 @@ public sealed class PlanCacheStatsCollectorDefinitionTests
     private const string ExpectedQuery = @"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
-SELECT
+SELECT /* PerformanceMonitorLite */
     cacheobjtype = cp.cacheobjtype,
     objtype = cp.objtype,
     total_plans = CONVERT(integer, COUNT_BIG(*)),

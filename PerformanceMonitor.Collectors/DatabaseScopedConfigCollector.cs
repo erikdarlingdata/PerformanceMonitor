@@ -68,7 +68,7 @@ public sealed class DatabaseScopedConfigCollector : CollectorDefinitionBase<Data
     private const string OnPremDatabaseListQueryText = @"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
-SELECT
+SELECT /* PerformanceMonitorLite */
     d.name
 FROM sys.databases AS d
 LEFT JOIN sys.dm_hadr_database_replica_states AS drs
@@ -101,7 +101,7 @@ OPTION(RECOMPILE);";
     /// master and this is what keeps master out of the payload.</para>
     /// </summary>
     private const string PayloadBodyText = @"
-SELECT
+SELECT /* PerformanceMonitorLite */
     configuration_name = dsc.name,
     value = CONVERT(nvarchar(256), dsc.value),
     value_for_secondary = CONVERT(nvarchar(256), dsc.value_for_secondary)

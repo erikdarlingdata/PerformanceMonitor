@@ -76,7 +76,7 @@ public sealed class FileIoStatsCollector : CollectorDefinitionBase<FileIoStatsCo
     private const string AzureSqlDbQueryText = @"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
-SELECT
+SELECT /* PerformanceMonitorLite */
     database_name = DB_NAME(),
     file_name = df.name,
     file_type = df.type_desc,
@@ -106,7 +106,7 @@ OPTION(RECOMPILE);";
     private const string OnPremQueryText = @"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
-SELECT
+SELECT /* PerformanceMonitorLite */
     database_name = ISNULL(d.name, DB_NAME(vfs.database_id)),
     file_name = ISNULL(mf.name, N'File_' + CONVERT(nvarchar(10), vfs.file_id)),
     file_type = ISNULL(mf.type_desc, N'UNKNOWN'),

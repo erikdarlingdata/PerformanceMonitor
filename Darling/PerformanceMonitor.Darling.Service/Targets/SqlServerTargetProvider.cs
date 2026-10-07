@@ -145,7 +145,7 @@ public sealed class SqlServerTargetProvider : ITargetProvider
         return (
             WithDatabase(connectionString, "master"),
             new CollectorQuery(
-                $"SELECT name FROM sys.databases WHERE state_desc = N'ONLINE' AND database_id > 0 {scopeClause} {exclusionClause} ORDER BY name;",
+                $"SELECT /* PerformanceMonitorLite */ name FROM sys.databases WHERE state_desc = N'ONLINE' AND database_id > 0 {scopeClause} {exclusionClause} ORDER BY name;",
                 parameters));
     }
 }

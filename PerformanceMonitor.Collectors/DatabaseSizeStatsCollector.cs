@@ -123,7 +123,7 @@ BEGIN
     BEGIN TRY
         SET @sql = N'EXECUTE ' + QUOTENAME(@db_name) + N'.sys.sp_executesql N''
 INSERT #file_space (database_id, file_id, used_size_mb, current_size_mb)
-SELECT
+SELECT /* PerformanceMonitorLite */
     DB_ID(),
     df.file_id,
     CONVERT(decimal(19,2), FILEPROPERTY(df.name, N''''SpaceUsed'''') * 8.0 / 1024.0),
@@ -147,7 +147,7 @@ END;
 CLOSE db_cursor;
 DEALLOCATE db_cursor;
 
-SELECT
+SELECT /* PerformanceMonitorLite */
     database_name = d.name,
     database_id = d.database_id,
     file_id = mf.file_id,
@@ -211,7 +211,7 @@ OPTION(RECOMPILE);
 /* Trailing result set = the payload path's probe-failure contract (#1851,
    EnumeratedCollectorDriver.ReadPayloadProbeFailuresAsync). Always returned, normally empty; the host
    reads zero rows and attaches no note. */
-SELECT
+SELECT /* PerformanceMonitorLite */
     name,
     error_text
 FROM @probe_failures
@@ -285,7 +285,7 @@ DECLARE
 
 INSERT
     @database_sizes
-SELECT
+SELECT /* PerformanceMonitorLite */
     database_name = DB_NAME(),
     database_id = DB_ID(),
     file_id = df.file_id,
@@ -389,7 +389,7 @@ BEGIN
         database_name, file_type_desc, file_name, total_size_mb, used_size_mb, state_desc
     )
     EXEC sys.sp_executesql N'
-SELECT
+SELECT /* PerformanceMonitorLite */
     rs.database_name,
     file_type_desc = N''ROWS'',
     file_name = N''" + AzureSiblingDatabaseSize.FileName + @"'',
@@ -411,7 +411,7 @@ FROM
 WHERE rs.rn = 1;';
 END;
 
-SELECT
+SELECT /* PerformanceMonitorLite */
     ds.database_name,
     ds.database_id,
     ds.file_id,

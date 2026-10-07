@@ -168,7 +168,7 @@ BEGIN
     END CATCH;
 END;
 
-SELECT
+SELECT /* PerformanceMonitorLite */
     server_name =
         CONVERT(nvarchar(128), SERVERPROPERTY(N'ServerName')),
     edition =
@@ -302,7 +302,7 @@ BEGIN
     END CATCH;
 END;
 
-SELECT
+SELECT /* PerformanceMonitorLite */
     lock_pages_in_memory = @lpim,
     instant_file_initialization_enabled = @ifi,
     memory_dump_count = @dumps;";
