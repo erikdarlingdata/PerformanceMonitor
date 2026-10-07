@@ -467,7 +467,8 @@ VALUES ($1, $2, $3, 'HsSrv', $4, 7, $5, $6, $7, $8, $9, $10, $11, $12)";
         var root = doc.RootElement;
 
         Assert.False(root.TryGetProperty("note", out _));
-        Assert.Equal(new[] { "server", "captured_at", "file_count", "databases" }, root.EnumerateObject().Select(p => p.Name).ToArray());
+        /* #5244: database_name (null for every database) is always written, right after server, in both apps. */
+        Assert.Equal(new[] { "server", "database_name", "captured_at", "file_count", "databases" }, root.EnumerateObject().Select(p => p.Name).ToArray());
         Assert.Equal(150d, root.GetProperty("databases")[0].GetProperty("total_size_mb").GetDouble());
     }
 

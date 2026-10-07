@@ -32,6 +32,7 @@ param get_current_waits_trend.hours_back 190
 param get_current_waits_trend.server_name 28
 
 tool get_file_io_stats 437
+param get_file_io_stats.database_name 46
 param get_file_io_stats.server_name 28
 
 tool get_memory_clerks 232

@@ -253,7 +253,7 @@ public sealed class DarlingMcpTrendToolsSurfaceAndSqlTests
         Assert.Contains("(delta_reads > 0 OR delta_writes > 0) AS active", trend, StringComparison.Ordinal);
         Assert.Contains("PARTITION BY database_name, file_type, file_name", trend, StringComparison.Ordinal);
         Assert.Contains("WHERE active_rows > 0", trendRanked, StringComparison.Ordinal);
-        Assert.Contains("CASE WHEN $4::text IS NULL THEN NULL ELSE file_name END AS file_name", trend, StringComparison.Ordinal);
+        Assert.Contains("CASE WHEN cardinality($4::text[]) = 1 THEN file_name END AS file_name", trend, StringComparison.Ordinal);
         Assert.Contains("FROM v_file_io_stats", ranked, StringComparison.Ordinal);
         Assert.Contains("ORDER BY SUM(delta_stall_read_ms + delta_stall_write_ms) DESC,", ranked, StringComparison.Ordinal);
         Assert.Contains("SUM(delta_reads + delta_writes) DESC,", ranked, StringComparison.Ordinal);
@@ -261,11 +261,11 @@ public sealed class DarlingMcpTrendToolsSurfaceAndSqlTests
         /* A restart row ranks nothing: the trend drops it (#3540), so it must not chart a series ahead of the
            ones whose deltas were knowable. */
         Assert.Contains("AND   sample_interval_seconds IS DISTINCT FROM 0", ranked, StringComparison.Ordinal);
-        Assert.Contains("AND   ($4::text IS NULL OR database_name = $4)", ranked, StringComparison.Ordinal);
+        Assert.Contains("AND   ($4::text[] IS NULL OR database_name = ANY($4))", ranked, StringComparison.Ordinal);
         Assert.Contains("collection_time >= $2", ranked, StringComparison.Ordinal);
         Assert.Contains("collection_time <= $3", ranked, StringComparison.Ordinal);
         /* The grain: (database, file type) unless a database is named, then its files. */
-        Assert.Contains("CASE WHEN $4::text IS NULL THEN NULL ELSE file_name END AS file_name", ranked, StringComparison.Ordinal);
+        Assert.Contains("CASE WHEN cardinality($4::text[]) = 1 THEN file_name END AS file_name", ranked, StringComparison.Ordinal);
         Assert.DoesNotContain("LIMIT", ranked, StringComparison.Ordinal);
 
         /* The fold: past $5 every ranked series takes the composer's residual label, pooled per collection. */
@@ -284,7 +284,7 @@ public sealed class DarlingMcpTrendToolsSurfaceAndSqlTests
         /* The restart rule survives (#3540), and the bucket is the shared width on the shared origin, the first
            point clamped to the window's start. */
         Assert.Contains("AND   sample_interval_seconds IS DISTINCT FROM 0", trend, StringComparison.Ordinal);
-        Assert.Contains("AND   ($4::text IS NULL OR database_name = $4)", trend, StringComparison.Ordinal);
+        Assert.Contains("AND   ($4::text[] IS NULL OR database_name = ANY($4))", trend, StringComparison.Ordinal);
         Assert.Contains("collection_time >= $2", trend, StringComparison.Ordinal);
         Assert.Contains("collection_time <= $3", trend, StringComparison.Ordinal);
         Assert.Contains("GREATEST(date_bin(CAST($6 AS integer) * INTERVAL '1 minute', collection_time, " + TrendBucketSql.OriginSql + "), $2) AS bucket_start", trend, StringComparison.Ordinal);

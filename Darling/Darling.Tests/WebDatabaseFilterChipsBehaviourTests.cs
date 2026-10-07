@@ -114,7 +114,7 @@ public sealed class WebDatabaseFilterChipsBehaviourTests
 
         /* A composite built by panelShell passes its main read. */
         AssertChip(Heading(r, "waits", "Wait Stats"), "server", "Server-wide");
-        AssertChip(Heading(r, "io", "File I/O Latency"), "unfiltered", "All databases");
+        AssertChip(Heading(r, "io", "File I/O Latency"), "filtered", "2 databases", "SalesDb\nOrders");
         AssertChip(Heading(r, "memory", "Memory Pressure Events"), "server", "Server-wide");
         AssertChip(Heading(r, "overview", "Daily Summary"), "server", "Server-wide");
         AssertChip(Heading(r, "config", "Database Scoped Configuration"), "filtered", "2 databases", "SalesDb\nOrders");
@@ -124,6 +124,21 @@ public sealed class WebDatabaseFilterChipsBehaviourTests
         var headings = r.GetProperty("tabs").EnumerateObject().SelectMany(t => t.Value.EnumerateArray()).ToArray();
         Assert.True(headings.Length > 90, "the tabs drew only " + headings.Length + " panels");
         Assert.Empty(headings.Where(h => h.GetProperty("chips").GetInt32() != 1).Select(h => h.GetProperty("title").GetString()));
+    }
+
+    /// <summary>#5244 PR5: the File I/O Latency subtitle says what a line is. Exactly one chosen database draws one line per file
+    /// ("per file"); every database, an emptied filter, two or more databases, or a filter that belongs to another server draw one
+    /// line per database and file type.</summary>
+    [Fact]
+    public void TheFileIoSubtitle_SaysPerFileForExactlyOneChosenDatabase()
+    {
+        var r = Run("fileio");
+        Assert.Contains("per file,", r.GetProperty("one").GetString());
+        Assert.DoesNotContain("per database and file type", r.GetProperty("one").GetString());
+        foreach (var key in new[] { "two", "none", "emptied", "otherServer" })
+        {
+            Assert.Contains("per database and file type,", r.GetProperty(key).GetString());
+        }
     }
 
     /// <summary>With no filter, an emptied one, or off the server page, no panel draws a chip. A read that names a database as the
@@ -140,7 +155,7 @@ public sealed class WebDatabaseFilterChipsBehaviourTests
 
         var r = Run("renderPanel");
         AssertChip(r.GetProperty("filtered"), "filtered", "SalesDb", "SalesDb");
-        AssertChip(r.GetProperty("unfiltered"), "unfiltered", "All databases", UnfilteredTitle);
+        AssertChip(r.GetProperty("unfiltered"), "unfiltered", "All databases", UnfilteredTitle + " The databases are inside each deadlock graph.");
         AssertChip(r.GetProperty("server"), "server", "Server-wide", ServerTitle);
         Assert.Equal(0, r.GetProperty("identity").GetProperty("chips").GetInt32());
         Assert.Equal(0, r.GetProperty("plan").GetProperty("chips").GetInt32());

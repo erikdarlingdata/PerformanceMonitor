@@ -243,28 +243,28 @@ public sealed class WebDatabaseFilterReadsTests
     }
 
     /// <summary>
-    /// #5244 PR6 (W6): the six configuration and event reads are FILTERED, and the final roster holds: what stays UNFILTERED is the three
-    /// deadlock reads (which stay unfiltered on purpose, a deadlock spans several databases) and, until the storage and I/O part (PR5) is
-    /// built, its five reads. When PR5 lands, <c>PendingStorageAndIo</c> empties and UNFILTERED is exactly the three deadlock reads.
+    /// #5244 PR5 and PR6 (W5, W6): the six configuration and event reads and the five storage and file I/O reads are FILTERED, and the
+    /// final roster holds: what stays UNFILTERED is exactly the three deadlock reads, which stay unfiltered on purpose (a deadlock spans
+    /// several databases).
     /// </summary>
     [Fact]
-    public void ThePr6Reads_AreFiltered_AndTheFinalRosterOfUnfilteredReadsIsTheDeadlockThree_PlusPr5sPendingFive()
+    public void ThePr5AndPr6Reads_AreFiltered_AndTheFinalRosterOfUnfilteredReadsIsTheDeadlockThree()
     {
         var classes = Classes();
-        var pr6 = new[]
+        var filtered = new[]
         {
             "get_database_config", "get_database_scoped_config", "get_query_store_health", "get_database_config_changes",
             "get_health_parser_severe_errors", "get_default_trace_events",
+            "get_file_io_trend", "get_file_io_stats", "get_database_sizes", "get_table_index_sizes", "get_pvs_stats",
         };
-        foreach (var read in pr6)
+        foreach (var read in filtered)
         {
             Assert.Contains(read, classes["FILTERED"]);
             Assert.DoesNotContain(read, classes["UNFILTERED"]);
         }
 
         var deadlocks = new[] { "get_deadlock_trend", "get_deadlocks", "get_deadlock_detail" };
-        var pendingStorageAndIo = new[] { "get_file_io_trend", "get_file_io_stats", "get_database_sizes", "get_table_index_sizes", "get_pvs_stats" };
-        Assert.Equal(Sorted(deadlocks.Concat(pendingStorageAndIo)), Sorted(classes["UNFILTERED"]));
+        Assert.Equal(Sorted(deadlocks), Sorted(classes["UNFILTERED"]));
     }
 
     /// <summary>
