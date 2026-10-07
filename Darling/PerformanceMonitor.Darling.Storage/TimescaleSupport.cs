@@ -1357,8 +1357,17 @@ $do$";
     /// data-source connection supports (the worker's #3971 capture reopens the same way). A connection that is
     /// still Open (a deadlock victim, a plain timeout) is left alone. Returns false when the reopen itself
     /// failed, which ends the sweep: every later relation would only repeat the failure.
+    ///
+    /// <para>#5444: shared, so the convergence-step runner (<c>DarlingWorker.RunStoreObjectConvergenceStepAsync</c>)
+    /// reopens the pass's one connection the same way after ANY step breaks it, not only the sweep. The reopen-failed
+    /// warning is the caller's to word (<paramref name="reopenFailedTemplate"/>, one <c>{Message}</c> placeholder);
+    /// the default is the sweep's.</para>
     /// </summary>
-    private static async Task<bool> ReopenBrokenConnectionAsync(NpgsqlConnection connection, ILogger? logger, CancellationToken cancellationToken)
+    public static async Task<bool> ReopenBrokenConnectionAsync(
+        NpgsqlConnection connection,
+        ILogger? logger,
+        CancellationToken cancellationToken,
+        string reopenFailedTemplate = "The retired-baseline sweep's connection broke and could not be reopened, so the rest of the sweep is skipped until the next pass retries it: {Message}")
     {
         if (connection.State == System.Data.ConnectionState.Open)
         {
@@ -1374,9 +1383,7 @@ $do$";
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            logger?.LogWarning(
-                "The retired-baseline sweep's connection broke and could not be reopened, so the rest of the sweep is skipped until the next pass retries it: {Message}",
-                ex.Message);
+            logger?.LogWarning(reopenFailedTemplate, ex.Message);
             return false;
         }
     }
