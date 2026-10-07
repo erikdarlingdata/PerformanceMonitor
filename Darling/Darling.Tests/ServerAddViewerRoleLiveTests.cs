@@ -128,7 +128,9 @@ public sealed class ServerAddViewerRoleLiveTests : IDisposable
         if (!string.Equals(skip, MissingEditFunction, StringComparison.Ordinal))
         {
             await ExecAsync(owner, DarlingManagedRoles.BuildEditMonitoredServerFunctionSql("config"), ct);
+            await ExecAsync(owner, DarlingManagedRoles.BuildEditMonitoredServerLegacyWrapperSql("config"), ct);
             await ExecAsync(owner, $"GRANT EXECUTE ON FUNCTION config.edit_monitored_server({DarlingManagedRoles.EditMonitoredServerSignature}) TO {roleName}", ct);
+            await ExecAsync(owner, $"GRANT EXECUTE ON FUNCTION config.edit_monitored_server({DarlingManagedRoles.EditMonitoredServerLegacySignature}) TO {roleName}", ct);
         }
 
         return NpgsqlDataSource.Create(new NpgsqlConnectionStringBuilder(ownerString) { Username = roleName, Password = RolePassword }.ConnectionString);
@@ -230,6 +232,8 @@ public sealed class ServerAddViewerRoleLiveTests : IDisposable
                 insert.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Timestamp, Value = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified) });
                 insert.Parameters.Add(new NpgsqlParameter<string> { TypedValue = "sqlserver" });
                 insert.Parameters.Add(new NpgsqlParameter<int> { TypedValue = 0 });
+                insert.Parameters.Add(new NpgsqlParameter { Value = DBNull.Value, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Text });
+                insert.Parameters.Add(new NpgsqlParameter { Value = DBNull.Value, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Text });
                 await insert.ExecuteNonQueryAsync(ct);
             });
             Assert.Equal("42501", denied.SqlState);

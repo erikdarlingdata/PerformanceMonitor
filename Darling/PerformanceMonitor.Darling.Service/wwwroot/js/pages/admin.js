@@ -216,7 +216,37 @@ export const EDIT_FIELDS = [
   { key: "read_only_intent", label: "Read-only intent" },
   { key: "multi_subnet_failover", label: "Multi-subnet failover" },
   { key: "monthly_cost_usd", label: "Monthly Cost ($)" },
+  /* #5452: PostgreSQL only, like port. A blank box keeps the stored role; "Remove AWS role" sends null. The external ID is
+     not here: it is write-only, read from its own box at Save, never held in the form's values. */
+  { key: "aws_role_arn", label: "AWS role ARN" },
 ];
+
+/* The service's own sentences for the AWS role (AwsRoleSettings in the Storage project), so the form refuses what the
+   service would refuse, in the same words. A test pins that these match the C# constants. */
+export const AWS_INVALID_ROLE = "The AWS role must be an IAM role ARN, such as arn:aws:iam::123456789012:role/darling-monitor.";
+export const AWS_INVALID_EXTERNAL_ID = "The external ID must be 2 to 1224 characters: letters, digits and _ + = , . @ : / - with no spaces.";
+export const AWS_EXTERNAL_ID_NEEDS_ROLE = "An external ID needs an AWS role ARN. Set the role, or clear the external ID.";
+export const AWS_ROLE_CHANGE_NEEDS_EXTERNAL_ID = "Changing the AWS role needs the external ID with it: send the external ID again, or clear it.";
+
+const AWS_ROLE_PATTERN = /^arn:aws(?:-[a-z]+)*:iam::[0-9]{12}:role\/(.+)$/;
+const AWS_ROLE_NAME_PATTERN = /^[A-Za-z0-9_+=,.@-]{1,64}$/;
+const AWS_ROLE_PATH_SEGMENT_PATTERN = /^[A-Za-z0-9_+=,.@-]+$/;
+const AWS_EXTERNAL_ID_PATTERN = /^[A-Za-z0-9_+=,.@:/-]{2,1224}$/;
+
+/* True when `role` (trimmed, not blank) is an IAM role ARN the service accepts. */
+function validAwsRole(role) {
+  if (role.length < 20 || role.length > 2048) return false;
+  const m = AWS_ROLE_PATTERN.exec(role);
+  if (!m) return false;
+  const parts = m[1].split("/");
+  if (!AWS_ROLE_NAME_PATTERN.test(parts[parts.length - 1])) return false;
+  let pathLength = 0;
+  for (let i = 0; i < parts.length - 1; i++) {
+    if (!AWS_ROLE_PATH_SEGMENT_PATTERN.test(parts[i])) return false;
+    pathLength += parts[i].length + 1;
+  }
+  return !(pathLength > 0 && pathLength + 1 > 512);
+}
 export const EDIT_AUTHS = ["Windows", "SQL", "ServicePrincipal", "ManagedIdentity"];
 export const EDIT_ENCRYPT_MODES = ["Optional", "Mandatory", "Strict"];
 
@@ -252,6 +282,10 @@ export function editFormValues(row) {
     read_only_intent: r.read_only_intent === true,
     multi_subnet_failover: r.multi_subnet_failover === true,
     monthly_cost_usd: Number.isFinite(cost) ? String(cost) : "0",
+    aws_role_arn: asText(r.aws_role_arn),
+    aws_external_id_set: r.aws_external_id_set === true,
+    aws_remove_role: false,
+    aws_clear_external_id: false,
   };
 }
 
@@ -280,6 +314,8 @@ export function normalizeEdit(values, engine) {
     read_only_intent: v.read_only_intent === true,
     multi_subnet_failover: v.multi_subnet_failover === true,
     monthly_cost_usd: cost === "" ? 0 : /^(\d+\.?\d*|\.\d+)$/.test(cost) ? Number(cost) : NaN,
+    /* A blank box is "no role typed" (null): it keeps the stored role, it never removes it. */
+    aws_role_arn: postgres ? trim(v.aws_role_arn) || null : null,
   };
 }
 
@@ -314,12 +350,26 @@ export function probeExpected(original, values, passwordSent) {
 
 /** The first sentence that stops a save before any request, or null. Each is the desktop's or the service's own
     sentence, in the order the form's fields run. `password` is what was typed (empty when nothing was). */
-export function validateEdit(original, values, password) {
+export function validateEdit(original, values, password, externalId) {
   const engine = original && original.engine;
   const was = normalizeEdit(original, engine);
   const next = normalizeEdit(values, engine);
   if (!next.host) return "Server name is required.";
   if (isPostgres(engine) && Number.isNaN(next.port)) return "Port must be between 1 and 65535, or blank for the default (5432).";
+  if (isPostgres(engine)) {
+    /* #5452: the AWS role checks, in the service's order: each format, an ID with no role, a role change that would keep the
+       stored ID unseen. Whether the role is on darling.json's list is the service's to say. */
+    const idTyped = asText(externalId).trim();
+    const removeRole = !!values && values.aws_remove_role === true;
+    if (!removeRole && next.aws_role_arn !== null && !validAwsRole(next.aws_role_arn)) return AWS_INVALID_ROLE;
+    if (idTyped !== "" && !AWS_EXTERNAL_ID_PATTERN.test(idTyped)) return AWS_INVALID_EXTERNAL_ID;
+    const effectiveRole = removeRole ? null : next.aws_role_arn !== null ? next.aws_role_arn : was.aws_role_arn;
+    if (idTyped !== "" && effectiveRole === null) return AWS_EXTERNAL_ID_NEEDS_ROLE;
+    const clearingId = !!values && values.aws_clear_external_id === true;
+    if (effectiveRole !== null && effectiveRole !== was.aws_role_arn && !!original && original.aws_external_id_set === true && idTyped === "" && !clearingId) {
+      return AWS_ROLE_CHANGE_NEEDS_EXTERNAL_ID;
+    }
+  }
   if (next.auth === "SQL" && !next.username) return "Username is required for SQL Server authentication.";
   if (next.auth === "ServicePrincipal" && !next.username) return "The Application (client) ID is required for service-principal authentication.";
   if (!password && passwordRequired(original, values)) {
@@ -340,7 +390,7 @@ export function validateEdit(original, values, password) {
     ServicePrincipal and managed identity (the service drops the old one on a switch) and Windows never carries one;
     password only when typed AND the effective auth stores a secret; `expected_modified_at` is `token` exactly as the
     read gave it, always last. */
-export function buildEditBody(original, values, token, password) {
+export function buildEditBody(original, values, token, password, externalId) {
   const engine = original && original.engine;
   const postgres = isPostgres(engine);
   const was = normalizeEdit(original, engine);
@@ -349,12 +399,26 @@ export function buildEditBody(original, values, token, password) {
   const body = {};
   for (const { key } of EDIT_FIELDS) {
     if (key === (postgres ? "auth" : "port")) continue;
+    if (key === "aws_role_arn") continue;
     const value = next[key];
     if (typeof value === "number" && !Number.isFinite(value)) continue;
     if (key === "username" && next.auth === "Windows") continue;
     if ((key === "username" && switched) || !sameValue(key, was[key], value)) body[key] = value;
   }
   if (typeof password === "string" && password !== "" && storesSecret(next.auth)) body.password = password;
+  if (postgres) {
+    /* #5452: a typed role that differs is sent; a blank box keeps the stored one; "Remove AWS role" sends null, which takes
+       the external ID with it. The external ID: typed text replaces, "Clear external ID" sends null, otherwise it is left out. */
+    const removeRole = !!values && values.aws_remove_role === true;
+    const idTyped = asText(externalId).trim();
+    if (removeRole) {
+      if (was.aws_role_arn !== null) body.aws_role_arn = null;
+    } else {
+      if (next.aws_role_arn !== null && next.aws_role_arn !== was.aws_role_arn) body.aws_role_arn = next.aws_role_arn;
+      if (idTyped !== "") body.aws_external_id = idTyped;
+      else if (!!values && values.aws_clear_external_id === true && !!original && original.aws_external_id_set === true) body.aws_external_id = null;
+    }
+  }
   if (!Object.keys(body).length) return null;
   /* A missing token is sent as null, which the service refuses by name, rather than dropped, which would save with no
      stale-edit check at all. */
@@ -422,6 +486,13 @@ export function conflictChanges(original, current, values) {
     const yours = sameValue(key, was[key], mine[key]) ? null : shownEdit(key, mine[key], typed[key]);
     changes.push({ key, label, was: shownWas, now: shownNow, yours, text: label + ": was " + shownWas + ", now " + shownNow + (yours === null ? "" : " (you entered " + yours + ")") });
   }
+  /* #5452: the external ID is never read back; a conflict shows only whether one is stored. */
+  if (postgres && !!original && !!current && (original.aws_external_id_set === true) !== (editFormValues(current).aws_external_id_set === true)) {
+    const idState = (set) => (set ? "set" : "not set");
+    const shownWas = idState(original.aws_external_id_set === true);
+    const shownNow = idState(editFormValues(current).aws_external_id_set === true);
+    changes.push({ key: "aws_external_id_set", label: "AWS external ID", was: shownWas, now: shownNow, yours: null, text: "AWS external ID: was " + shownWas + ", now " + shownNow });
+  }
   return changes;
 }
 
@@ -442,14 +513,23 @@ export function reapplyValues(original, values, current) {
     if (!sameValue(key, was[key], mine[key])) merged[key] = typed[key];
   }
   if (!sameValue("auth", was.auth, mine.auth)) merged.username = typed.username;
+  /* #5452: the two AWS boxes are the user's own intent, kept over whatever the other edit left. */
+  merged.aws_remove_role = typed.aws_remove_role === true;
+  merged.aws_clear_external_id = typed.aws_clear_external_id === true;
   return merged;
 }
 
 /** `text` with every copy of the typed password replaced by "[redacted]" (plain split and join, no pattern); with no
     password the text is returned as it is. Applied to any service sentence before it is shown. */
-export function redactPassword(text, password) {
-  if (typeof password !== "string" || password === "") return text;
-  return asText(text).split(password).join("[redacted]");
+export function redactPassword(text, ...secrets) {
+  let out = text;
+  for (const secret of secrets) {
+    if (typeof secret !== "string" || secret === "") continue;
+    out = asText(out).split(secret).join("[redacted]");
+    const trimmed = secret.trim();
+    if (trimmed !== "" && trimmed !== secret) out = asText(out).split(trimmed).join("[redacted]");
+  }
+  return out;
 }
 
 const TABS = [
@@ -702,8 +782,13 @@ function formNode(f) {
   const secret = el("input", { type: "password", class: "tag-input", "data-field": "password", autocomplete: "new-password", ...KEEP_FROM_PASSWORD_MANAGERS });
   const secretCaption = el("span", { class: "mute-label", text: PASSWORD_LABELS.SQL });
   const secretRow = el("label", { class: "tag-field", "data-row": "password" }, [secretCaption, secret]);
+  /* #5452: the AWS external ID box, write-only like the password: read once when Save is pressed, never copied into f.values. */
+  const externalIdInput = el("input", { type: "password", class: "tag-input", "data-field": "aws_external_id", autocomplete: "new-password", ...KEEP_FROM_PASSWORD_MANAGERS });
+  const externalIdCaption = el("span", { class: "mute-label", text: "AWS external ID (write-only):" });
+  const externalIdRow = el("label", { class: "tag-field", "data-row": "aws_external_id" }, [externalIdCaption, externalIdInput]);
   f.heading = heading;
   f.passwordInput = secret;
+  f.externalIdInput = externalIdInput;
   f.bannerBox = el("div", { "data-box": "banner" });
   f.conflictBox = el("div", { "data-box": "conflict" });
   f.statusBox = el("div", { "data-box": "status", role: "status" });
@@ -722,6 +807,7 @@ function formNode(f) {
     setShown(username.row, auth !== "Windows");
     setShown(managedNote, auth === "ManagedIdentity");
     setShown(secretRow, auth === "SQL" || auth === "ServicePrincipal");
+    externalIdCaption.textContent = "AWS external ID (write-only): " + (f.original.aws_external_id_set ? "one is stored; leave blank to keep it." : "none is stored.");
     secretCaption.textContent = (PASSWORD_LABELS[auth] || PASSWORD_LABELS.SQL) + " " + (passwordRequired(f.original, f.values) ? PASSWORD_REQUIRED : PASSWORD_KEPT);
   };
   const rows = [
@@ -752,6 +838,17 @@ function formNode(f) {
   }
   rows.push(
     textRow(f, "monthly_cost_usd", "Monthly Cost ($):", { inputmode: "decimal" }).row,
+  );
+  if (postgres) {
+    rows.push(
+      el("h4", { class: "section-title", text: "Amazon RDS or Aurora (optional)" }),
+      textRow(f, "aws_role_arn", "AWS role ARN: blank keeps the stored role", { autocomplete: "off", ...KEEP_FROM_PASSWORD_MANAGERS }).row,
+      checkRow(f, "aws_remove_role", "Remove AWS role"),
+      externalIdRow,
+      checkRow(f, "aws_clear_external_id", "Clear external ID"),
+    );
+  }
+  rows.push(
     f.statusBox,
     f.bannerBox,
     f.conflictBox,
@@ -813,6 +910,7 @@ function showForm(f) {
 function closeEdit() {
   opening++;
   if (editForm && editForm.passwordInput) editForm.passwordInput.value = "";
+  if (editForm && editForm.externalIdInput) editForm.externalIdInput.value = "";
   editForm = null;
   if (layout) mount(layout.formBox, []);
 }
@@ -878,6 +976,7 @@ function refillEdit(f, current, keepMine) {
   f.shownAuth = undefined;
   /* The redraw detaches the old password box; whatever was typed into it since the 409 goes first (#5356), as closeEdit does. */
   if (f.passwordInput) f.passwordInput.value = "";
+  if (f.externalIdInput) f.externalIdInput.value = "";
   showForm(f);
 }
 
@@ -890,9 +989,9 @@ function refillEdit(f, current, keepMine) {
    - A late answer (the form was discarded while the save ran: a tab switch, another page, the hash leaving the tab) touches
      no form. Its page sentence still shows, and a sentence that had only a banner shows as an error notice, so the user
      learns what the save did. */
-function landEdit(f, out, password) {
+function landEdit(f, out, password, externalId) {
   const here = editForm === f;
-  const say = (sentence) => redactPassword(sentence, password);
+  const say = (sentence) => redactPassword(sentence, password, externalId);
   if (out.close) {
     if (here) closeEdit();
     if (out.notice) showOutcome(say(out.notice), out.kind === "readonly");
@@ -903,6 +1002,7 @@ function landEdit(f, out, password) {
     return;
   }
   f.passwordInput.value = "";
+  f.externalIdInput.value = "";
   if (out.kind === "conflict") showConflict(f, out, say);
   else showBanner(f, say(out.banner));
 }
@@ -919,15 +1019,17 @@ async function submitEdit() {
   const f = editForm;
   if (busy || !f) return;
   const password = f.passwordInput.value;
+  const externalId = f.externalIdInput.value;
   mount(f.bannerBox, []);
   mount(f.conflictBox, []);
-  const problem = validateEdit(f.original, f.values, password);
+  const problem = validateEdit(f.original, f.values, password, externalId);
   if (problem) {
     f.passwordInput.value = "";
-    showBanner(f, redactPassword(problem, password));
+    f.externalIdInput.value = "";
+    showBanner(f, redactPassword(problem, password, externalId));
     return;
   }
-  const body = buildEditBody(f.original, f.values, f.token, password);
+  const body = buildEditBody(f.original, f.values, f.token, password, externalId);
   if (!body) {
     closeEdit();
     setNotice("No change.", false);
@@ -941,7 +1043,7 @@ async function submitEdit() {
     const res = await apiWrite("PATCH", "/api/servers/" + f.id, body);
     out = interpretEdit(res.status, res.body, res.message, res.expired === true);
     late = editForm !== f;
-    landEdit(f, out, password);
+    landEdit(f, out, password, externalId);
   } finally {
     if (editForm === f) showStatus(f, "");
     setBusy(false);

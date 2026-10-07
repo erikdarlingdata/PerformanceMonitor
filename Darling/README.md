@@ -521,12 +521,20 @@ Two mutually exclusive modes — setting `managed: true` together with `connecti
 | `encryptMode` | `"Mandatory"` | `Mandatory` / `Strict` / `Optional`; unknown values fail closed to `Mandatory` |
 | `multiSubnetFailover` | `false` | |
 | `excludedDatabases` | `[]` | Databases excluded from collection |
+| `awsRoleArn` | *(none)* | PostgreSQL targets on Amazon RDS or Aurora only: the IAM role ARN (such as `arn:aws:iam::123456789012:role/darling-monitor`) Darling assumes for this server's AWS calls (the host check, CPU and host memory from Performance Insights, and the log reads behind plan capture, deadlocks and log events). With none, the process's own AWS credentials are used. The role must be allowed: a role named in `servers[]` is allowed by being here, and the web, MCP, desktop viewer and `--add-server` can set only roles listed in [`allowedAwsRoles`](#allowedawsroles-array-optional). See the [runbook](../docs/postgres-first-target-runbook.md) for the trust policy |
+| `awsExternalId` | *(none)* | Optional, needs `awsRoleArn`: the external ID sent when the role is assumed, to match the trust policy's `sts:ExternalId` condition. 2 to 1224 characters. Never returned by the web or MCP and never written to a log |
 | `remediationUsername` | *(none)* | **Optional second credential, for operator-initiated remediation only (#2138).** The credential above stays read-only forever and is never used for a write. Omit both remediation keys — the default — and this server has no remediation surface at all: there is nothing to enable and nothing to disable. Both halves are required; one alone counts as unarmed and the service says so at connect. Always SQL auth when set, so there is no `remediationAuth` key: an integrated remediation identity would be the service account, which is the monitoring identity |
 | `remediationEncryptedPassword` | *(none)* | The remediation credential's secret: same DPAPI blob from `--encrypt-password`, or an `env:NAME` / `file:/path` reference. There is deliberately **no plaintext variant** of this one — a wrong monitoring password fails a read, a wrong remediation password fails a write against a production server |
 
 **Least privilege for the remediation credential.** Grant `ALTER` on each database you intend to force a plan in — that is what `sp_query_store_force_plan` / `sp_query_store_unforce_plan` need. `ALTER SERVER STATE` is needed *only* for the evict-first lever, because that is what a targeted `DBCC FREEPROCCACHE(plan_handle)` requires, and it is the expensive grant. It is genuinely optional: without it the flow degrades to force-only **with a named reason**, never silently. The service does not guess per platform — it asks the server with a read-only `has_perms_by_name` check, which answers for the credential's effective permissions however the grant arrived. Azure SQL Database has no `DBCC FREEPROCCACHE` at all, which no grant changes, and that is reported as its own reason rather than as a permission problem.
 
 > Phase 1 ships **no consumer of this credential**. It is accepted, stored and resolvable so the arming model can be reviewed and provisioned ahead of the write path; the service logs at connect that an armed server is inert in this build. Nothing in this release can write to a monitored server.
+
+### allowedAwsRoles (array, optional)
+
+| Key | Default | Notes |
+|---|---|---|
+| `allowedAwsRoles` | `[]` | The AWS roles the web, MCP, desktop viewer and `--add-server` may set on a server. Each entry is an IAM role ARN (matched exactly) or a 12-digit AWS account id (every role in that account in the `aws` partition; write `aws-cn:123456789012` or `aws-us-gov:123456789012` for an account in the China or GovCloud partition). The service runs a role only if it is listed here or a `servers[]` entry in this file names it in `awsRoleArn`. With no list, the web and MCP cannot set a role. Read at start: restart the service after you change it. Example: `[ "arn:aws:iam::123456789012:role/darling-monitor", "123456789012" ]` |
 
 ### capturePlans (boolean, optional)
 

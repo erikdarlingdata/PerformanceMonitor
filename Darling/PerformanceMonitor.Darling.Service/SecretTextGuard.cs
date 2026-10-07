@@ -27,6 +27,8 @@ internal static class SecretTextGuard
     {
         "password", "passwd", "pwd", "secret", "token", "apikey", "api_key", "key", "credential", "webhook",
         "connectionstring", "connection_string", "auth",
+        /* #5452: the external ID of a server's AWS role (aws_external_id, awsExternalId). */
+        "external_id", "externalid",
     };
 
     /* Fragments that mark a VALUE as a secret. Narrower than the key list: a bare "key" or "auth" would drop ordinary text. */

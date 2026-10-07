@@ -119,7 +119,7 @@ public partial class RdsEndpointVerifierTests
         Assert.True(Regex.IsMatch(planted, TargetTypedConstruction) || Regex.IsMatch(planted, TestFactoryCall));
     }
 
-    /// <summary>The runner builds one verifier, hands it to the four RDS readers, and gives each the target's connection string.</summary>
+    /// <summary>The runner builds one verifier, hands it to the four RDS readers, and gives each the target's connection string and role (#5452).</summary>
     [Fact]
     public void TheRunner_SharesOneVerifierWithTheFourRdsReaders()
     {
@@ -127,7 +127,7 @@ public partial class RdsEndpointVerifierTests
 
         Assert.Single(Regex.Matches(runner, @"RdsEndpointVerifier _rdsVerifier = new\(\);"));
         Assert.Equal(4, Regex.Matches(runner, @"verifier: _rdsVerifier").Count);
-        Assert.Equal(4, Regex.Matches(runner, @"server\.ConnectionString, cancellationToken\);").Count);
+        Assert.Equal(4, Regex.Matches(runner, @"server\.ConnectionString, server\.Config\.AwsRoleKey, cancellationToken\);").Count);
     }
 
     /// <summary>The reload clears a server's verdicts when its definition changed, and the dispatch arm for the refusal records PERMISSIONS.</summary>

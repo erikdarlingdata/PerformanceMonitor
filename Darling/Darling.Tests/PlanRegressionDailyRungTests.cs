@@ -97,15 +97,17 @@ public sealed class PlanRegressionDailyRungTests
     }
 
     [Fact]
-    public void TheRungIsRegisteredAtTheTopOfADenseLadder()
+    public void TheRungIsRegisteredInADenseLadder_BelowTheCurrentTop()
     {
         var versions = PgMigrations.Scripts.Select(s => s.Version).ToList();
 
         Assert.Equal(RungName, Rung.Name);
         Assert.Equal(RungVersion, Rung.Version);
+        /* No longer the top rung: the per-server AWS role rung (V169) landed above it. */
+        Assert.True(RungVersion < StorageVersion.SchemaVersion);
         Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
         Assert.Equal(StorageVersion.SchemaVersion, versions.Max());
-        Assert.Equal(RungVersion, StorageVersion.SchemaVersion);
+        Assert.Contains(RungVersion + 1, versions);
         Assert.Equal(versions.Distinct().OrderBy(v => v), versions);
         Assert.Contains(PreviousVersion, versions);
     }
@@ -313,7 +315,7 @@ public sealed class PlanRegressionDailyRungTests
     }
 
     [Fact]
-    public void TheProbeCarriesTheBuiltTableAsTheLastArm_AndMapsTheTopRungOnce()
+    public void TheProbeCarriesTheBuiltTableAtItsOwnOrdinal_AndMapsItsRung()
     {
         var probe = ViewerDataService.StoreSchemaProbeSql.Replace("\r\n", "\n", StringComparison.Ordinal);
         var arm = $"to_regclass('collect.{Built}') IS NOT NULL";
@@ -323,23 +325,26 @@ public sealed class PlanRegressionDailyRungTests
 
         var viewer = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.cs");
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal})", viewer, StringComparison.Ordinal);
-        Assert.DoesNotContain($"reader.GetBoolean({ProbeOrdinal + 1})", viewer, StringComparison.Ordinal);
+        Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 1})", viewer, StringComparison.Ordinal);
+        Assert.DoesNotContain($"reader.GetBoolean({ProbeOrdinal + 2})", viewer, StringComparison.Ordinal);
 
         Assert.Equal(StorageVersion.SchemaVersion, ViewerDataService.RequiredStoreSchemaVersion);
 
         var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
         var parameters = method.GetParameters();
 
-        /* The top rung's sentinel IS the last argument. */
-        Assert.Equal(ProbeOrdinal, parameters.Length - 1);
+        /* A newer rung's sentinel (V169's) is the last argument. */
+        Assert.Equal(ProbeOrdinal + 1, parameters.Length - 1);
         Assert.Equal("hasPlanRegressionDaily", parameters[ProbeOrdinal].Name);
 
         /* Every sentinel true is a fully-migrated store, which maps to exactly this build's version. */
         var all = Enumerable.Repeat((object)true, parameters.Length).ToArray();
         Assert.Equal(StorageVersion.SchemaVersion, (int)method.Invoke(null, all)!);
 
-        /* One rung behind: the same store WITHOUT this rung's sentinel reports the previous rung. */
-        var behind = (object[])all.Clone();
+        /* A store that stopped at this rung answers this rung; the same store without its sentinel answers the one before. */
+        var atThisRung = Enumerable.Range(0, parameters.Length).Select(i => (object)(i <= ProbeOrdinal)).ToArray();
+        Assert.Equal(RungVersion, (int)method.Invoke(null, atThisRung)!);
+        var behind = (object[])atThisRung.Clone();
         behind[ProbeOrdinal] = false;
         Assert.Equal(PreviousVersion, (int)method.Invoke(null, behind)!);
 

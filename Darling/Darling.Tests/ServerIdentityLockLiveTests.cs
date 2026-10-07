@@ -103,6 +103,7 @@ public sealed class ServerIdentityLockLiveTests
 
         /* The edit write is a function (#5240) the provisioning batch creates, not a migration: this rig creates the real one. */
         await ExecAsync(owner, DarlingManagedRoles.BuildEditMonitoredServerFunctionSql("config"), ct);
+        await ExecAsync(owner, DarlingManagedRoles.BuildEditMonitoredServerLegacyWrapperSql("config"), ct);
         await ExecAsync(owner, "INSERT INTO config_service (id) VALUES (1) ON CONFLICT DO NOTHING", ct);
         return new Rig(scratch, owner, ownerString);
     }

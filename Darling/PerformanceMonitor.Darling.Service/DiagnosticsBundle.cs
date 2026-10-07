@@ -126,6 +126,11 @@ internal static class DiagnosticsBundle
         "MonitoredServer.PlanForceBotEnabled",
         "MonitoredServer.RemediationUsername",
         "MonitoredServer.RemediationEncryptedPassword",
+        /* #5452: the AWS roles a deployment may use, the role a server assumes and its external ID are an account's
+           identifiers and a secret. The bundle seeds all three into the name set instead of projecting them. */
+        "DarlingConfig.AllowedAwsRoles",
+        "MonitoredServer.AwsRoleArn",
+        "MonitoredServer.AwsExternalId",
     };
 
     internal static JsonObject BuildConfigShape(DarlingConfig config)
@@ -418,6 +423,13 @@ internal static class DiagnosticsBundle
             {
                 aliaser.AddName(AliasKind.Database, excluded);
             }
+
+            SeedAwsRole(aliaser, server.AwsRoleArn, server.AwsExternalId);
+        }
+
+        foreach (var allowed in config.AllowedAwsRoles ?? new List<string>())
+        {
+            SeedAwsRole(aliaser, allowed, externalId: null);
         }
 
         try
@@ -663,6 +675,47 @@ internal static class DiagnosticsBundle
         {
             /* An unparseable string adds nothing; the text guard still redacts its password shape wherever it appears. */
         }
+    }
+
+    private static readonly System.Text.RegularExpressions.Regex s_awsRoleAccount = new(
+        @"^arn:aws(?:-[a-z]+)*:iam::(?<account>[0-9]{12}):",
+        System.Text.RegularExpressions.RegexOptions.CultureInvariant | System.Text.RegularExpressions.RegexOptions.ExplicitCapture,
+        TimeSpan.FromSeconds(1));
+
+    /// <summary>
+    /// Registers an AWS role for the name set (#5452): the role ARN and the 12-digit account id in it, or the account id
+    /// alone (an <c>allowedAwsRoles</c> entry may be either), and the external ID as a secret. The ID is never printed;
+    /// it only has to be found and removed wherever it turns up.
+    /// </summary>
+    internal static void SeedAwsRole(BundleAliaser aliaser, string? roleOrAccount, string? externalId)
+    {
+        var role = roleOrAccount?.Trim();
+        if (!string.IsNullOrEmpty(role))
+        {
+            aliaser.AddName(AliasKind.Role, role);
+            /* A partition-qualified account entry (aws-cn:123456789012): the account id alone is named too. */
+            var colon = role.LastIndexOf(':');
+            if (colon > 0 && role.Length - colon - 1 == 12 && role.AsSpan(colon + 1).IndexOfAnyExceptInRange('0', '9') < 0
+                && role.StartsWith("aws", StringComparison.Ordinal) && role.IndexOf(':') == colon)
+            {
+                aliaser.AddName(AliasKind.Role, role.Substring(colon + 1));
+            }
+
+            try
+            {
+                var match = s_awsRoleAccount.Match(role);
+                if (match.Success)
+                {
+                    aliaser.AddName(AliasKind.Role, match.Groups["account"].Value);
+                }
+            }
+            catch (System.Text.RegularExpressions.RegexMatchTimeoutException)
+            {
+                /* The ARN itself is already registered; an account id that could not be read adds nothing more. */
+            }
+        }
+
+        aliaser.AddSecret(externalId?.Trim());
     }
 
     private static void AddSecretsFrom(BundleAliaser aliaser, JsonNode? node, bool secretKey)

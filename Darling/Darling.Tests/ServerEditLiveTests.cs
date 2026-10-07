@@ -114,7 +114,9 @@ public sealed class ServerEditLiveTests : IDisposable
 
         /* The edit write is a function (#5240) the provisioning batch creates and grants: the real one, EXECUTE for this role. */
         await ExecAsync(owner, DarlingManagedRoles.BuildEditMonitoredServerFunctionSql("config"), ct);
+        await ExecAsync(owner, DarlingManagedRoles.BuildEditMonitoredServerLegacyWrapperSql("config"), ct);
         await ExecAsync(owner, $"GRANT EXECUTE ON FUNCTION config.edit_monitored_server({DarlingManagedRoles.EditMonitoredServerSignature}) TO {role}", ct);
+        await ExecAsync(owner, $"GRANT EXECUTE ON FUNCTION config.edit_monitored_server({DarlingManagedRoles.EditMonitoredServerLegacySignature}) TO {role}", ct);
         await ExecAsync(owner, "INSERT INTO config_service (id) VALUES (1) ON CONFLICT DO NOTHING", ct);
         var mcp = NpgsqlDataSource.Create(new NpgsqlConnectionStringBuilder(ownerString) { Username = role, Password = RolePassword }.ConnectionString);
         return new Rig(scratch, owner, mcp, role);
@@ -241,6 +243,99 @@ public sealed class ServerEditLiveTests : IDisposable
             var renamed = Parse(await Edit.EditServerByNameAsync(rig.Mcp, "alpha-91.example.test", "{\"display_name\":\"Renamed\"}", Reachable, TestKeyRings.Healthy, null, ct));
             Assert.Equal("updated", renamed["status"]!.GetValue<string>());
             Assert.Equal(before, await RowSignatureAsync(rig.Owner, 5191, ct));
+            ok = true;
+        }
+        finally
+        {
+            await DropRoleAsync(rig, ok);
+        }
+    }
+
+    [Fact]
+    public async Task AsTheMcpRole_RoleAndExternalIdEditsGoThroughTheEditFunction_AndEveryOtherColumnStaysUpdatable()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var rig = await OpenAsync(ct);
+        var ok = false;
+        try
+        {
+            await SeedServerAsync(rig.Owner, 5192, "alpha-92", "alpha-92.example.test", "integrated", null, null, ct);
+            await ExecAsync(rig.Owner,
+                "UPDATE config_monitored_servers SET engine = 'postgres', port = 5432, aws_role_arn = 'arn:aws:iam::123456789012:role/a', aws_external_id = 'tenant-1234' WHERE server_id = 5192", ct);
+
+            /* A direct UPDATE of the role or the external ID is not allowed for this login; the edit function is the way. */
+            var roleUpdate = await Assert.ThrowsAsync<PostgresException>(() =>
+                ExecAsync(rig.Mcp, "UPDATE config_monitored_servers SET aws_role_arn = 'arn:aws:iam::123456789012:role/b' WHERE server_id = 5192", ct));
+            Assert.Equal("42501", roleUpdate.SqlState);
+            var externalUpdate = await Assert.ThrowsAsync<PostgresException>(() =>
+                ExecAsync(rig.Mcp, "UPDATE config_monitored_servers SET aws_external_id = 'tenant-5678' WHERE server_id = 5192", ct));
+            Assert.Equal("42501", externalUpdate.SqlState);
+            Assert.Equal("arn:aws:iam::123456789012:role/a|tenant-1234",
+                await ScalarAsync<string>(rig.Owner, "SELECT concat_ws('|', aws_role_arn, aws_external_id) FROM config_monitored_servers WHERE server_id = 5192", ct));
+
+            /* Every other column is still updatable: the grant names each column of the table but the three AWS ones. */
+            await ExecAsync(rig.Mcp, "UPDATE config_monitored_servers SET name = 'alpha-92b', is_enabled = TRUE, excluded_databases = ARRAY['model'] WHERE server_id = 5192", ct);
+            var columns = await ScalarAsync<string>(rig.Owner,
+                "SELECT string_agg(attname, ',' ORDER BY attname) FROM pg_attribute WHERE attrelid = 'config.config_monitored_servers'::regclass "
+                + "AND attnum > 0 AND NOT attisdropped AND attname NOT IN ('aws_role_arn', 'aws_external_id', 'aws_external_id_set')", ct);
+            Assert.Equal(
+                string.Join(',', DarlingManagedRoles.McpMonitoredServerUpdateColumns.Split(',', StringSplitOptions.TrimEntries).Order(StringComparer.Ordinal)),
+                columns);
+
+            /* An add still names the role, and the edit function still changes it, with the external ID sent or cleared. */
+            await ExecAsync(rig.Mcp,
+                "INSERT INTO config_monitored_servers (server_id, name, host, auth, engine, port, aws_role_arn, aws_external_id) "
+                + "VALUES (5193, 'alpha-93', 'alpha-93.example.test', 'sql', 'postgres', 5432, 'arn:aws:iam::123456789012:role/a', 'tenant-1234')", ct);
+            var token = await ScalarAsync<string>(rig.Owner, "SELECT to_char(modified_at, 'YYYY-MM-DD HH24:MI:SS.US') FROM config_monitored_servers WHERE server_id = 5192", ct);
+            var outcome = await ScalarAsync<string>(rig.Mcp,
+                $"SELECT outcome FROM config.edit_monitored_server(5192, '{token}'::timestamp, ARRAY['aws_role_arn','aws_external_id']::text[], "
+                + "NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 'arn:aws:iam::123456789012:role/b', NULL)", ct);
+            Assert.Equal("saved", outcome);
+            Assert.Equal("arn:aws:iam::123456789012:role/b|",
+                await ScalarAsync<string>(rig.Owner, "SELECT concat_ws('|', aws_role_arn, aws_external_id, '') FROM config_monitored_servers WHERE server_id = 5192", ct));
+            ok = true;
+        }
+        finally
+        {
+            await DropRoleAsync(rig, ok);
+        }
+    }
+
+    [Fact]
+    public async Task AsTheMcpRole_EmptyRequiredFields_AnswerInvalidValue_OnBothSignatures_AndWriteNothing()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var rig = await OpenAsync(ct);
+        var ok = false;
+        try
+        {
+            await SeedServerAsync(rig.Owner, 5194, "alpha-94", "alpha-94.example.test", "sql", "monitor", "blob-94", ct);
+            await ExecAsync(rig.Owner,
+                "UPDATE config_monitored_servers SET engine = 'postgres', port = 5432, aws_role_arn = 'arn:aws:iam::123456789012:role/a', aws_external_id = 'tenant-1234' WHERE server_id = 5194", ct);
+            var before = await ScalarAsync<string>(rig.Owner,
+                "SELECT concat_ws('|', name, host, port, auth, encrypted_password, aws_role_arn, aws_external_id, modified_at) FROM config_monitored_servers WHERE server_id = 5194", ct);
+
+            foreach (var columns in new[] { "'name'", "'host','encrypted_password'", "'port'", "'auth'", "'encrypt_mode'", "'read_only_intent'", "'monthly_cost_usd'" })
+            {
+                var token = await ScalarAsync<string>(rig.Owner, "SELECT to_char(modified_at, 'YYYY-MM-DD HH24:MI:SS.US') FROM config_monitored_servers WHERE server_id = 5194", ct);
+                var seventeen = await ScalarAsync<string>(rig.Mcp,
+                    $"SELECT outcome FROM config.edit_monitored_server(5194, '{token}'::timestamp, ARRAY[{columns}]::text[], "
+                    + "NULL, NULL, NULL, NULL, NULL, NULL, NULL, 'typed-secret', NULL, NULL, NULL, NULL, NULL, NULL)", ct);
+                Assert.Equal("invalid_value", seventeen);
+                var fifteen = await ScalarAsync<string>(rig.Mcp,
+                    $"SELECT outcome FROM config.edit_monitored_server(5194, '{token}'::timestamp, ARRAY[{columns}]::text[], "
+                    + "NULL, NULL, NULL, NULL, NULL, NULL, NULL, 'typed-secret', NULL, NULL, NULL, NULL)", ct);
+                Assert.Equal("invalid_value", fifteen);
+            }
+
+            /* A role the table's format check does not accept is the same outcome, and nothing changed. */
+            var roleToken = await ScalarAsync<string>(rig.Owner, "SELECT to_char(modified_at, 'YYYY-MM-DD HH24:MI:SS.US') FROM config_monitored_servers WHERE server_id = 5194", ct);
+            Assert.Equal("invalid_value", await ScalarAsync<string>(rig.Mcp,
+                $"SELECT outcome FROM config.edit_monitored_server(5194, '{roleToken}'::timestamp, ARRAY['aws_role_arn','aws_external_id']::text[], "
+                + "NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 'not-an-arn', 'tenant-1234')", ct));
+
+            Assert.Equal(before, await ScalarAsync<string>(rig.Owner,
+                "SELECT concat_ws('|', name, host, port, auth, encrypted_password, aws_role_arn, aws_external_id, modified_at) FROM config_monitored_servers WHERE server_id = 5194", ct));
             ok = true;
         }
         finally

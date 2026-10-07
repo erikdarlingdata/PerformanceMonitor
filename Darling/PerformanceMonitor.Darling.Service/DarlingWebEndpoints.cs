@@ -1161,6 +1161,16 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 secrets.Add(secret);
             }
 
+            /* #5452: the typed AWS external ID is redacted wherever a password is. */
+            if (TryGetString(changes, "aws_external_id") is { Length: > 0 } externalId)
+            {
+                secrets.Add(externalId);
+                if (externalId.Trim() is { Length: > 0 } trimmedExternalId && trimmedExternalId != externalId)
+                {
+                    secrets.Add(trimmedExternalId);
+                }
+            }
+
             var ran = await RunInServerWriteSlotAsync(
                 serverWriteInFlight, () => editServer(id, body), editSlotTimeout, EditSlotLabels, logger,
                 auditLateAnswer: late => LogServerEdit(logger, principal, id, RedactEditAnswer(late, secrets)));
@@ -1341,6 +1351,15 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                     logger.LogInformation(
                         "Server edited by {Principal}: id {ServerId}, fields {Fields}",
                         DarlingHttpRefusalLog.Sanitize(principal, 256), id, DarlingHttpRefusalLog.Sanitize(fields, 256));
+                    if (fields.Split(',').Contains("aws_role_arn", StringComparer.Ordinal))
+                    {
+                        /* #5452: old and new role ARN with the principal. The external ID is never in this line. */
+                        logger.LogInformation(
+                            "AWS role changed by {Principal}: id {ServerId}, from {OldRole} to {NewRole}",
+                            DarlingHttpRefusalLog.Sanitize(principal, 256), id,
+                            DarlingHttpRefusalLog.Sanitize(TryGetString(envelope, "old_aws_role_arn") ?? "(none)", 2200),
+                            DarlingHttpRefusalLog.Sanitize(TryGetString(envelope, "new_aws_role_arn") ?? "(none)", 2200));
+                    }
                     break;
                 case "connection_failed":
                     logger.LogInformation(
@@ -1545,7 +1564,8 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         return true;
     }
 
-    /// <summary>The non-empty <c>password</c> values the request carried (a SQL password or a service-principal client secret).</summary>
+    /// <summary>The non-empty <c>password</c> values the request carried (a SQL password or a service-principal client secret),
+    /// and the typed <c>aws_external_id</c> (#5452), redacted the same way.</summary>
     private static List<string> SubmittedSecrets(List<JsonObject> entries)
     {
         var secrets = new List<string>();
@@ -1554,6 +1574,15 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             if (TryGetString(entry, "password") is { Length: > 0 } secret)
             {
                 secrets.Add(secret);
+            }
+
+            if (TryGetString(entry, "aws_external_id") is { Length: > 0 } externalId)
+            {
+                secrets.Add(externalId);
+                if (externalId.Trim() is { Length: > 0 } trimmedExternalId && trimmedExternalId != externalId)
+                {
+                    secrets.Add(trimmedExternalId);
+                }
             }
         }
 
@@ -1660,6 +1689,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     private static void LogServerAdds(ILogger logger, string principal, List<JsonObject> entries, string answer)
     {
         var authByName = new Dictionary<string, string>(StringComparer.Ordinal);
+        var roleByName = new Dictionary<string, string>(StringComparer.Ordinal);
         foreach (var entry in entries)
         {
             var host = TryGetString(entry, "host")?.Trim();
@@ -1667,6 +1697,10 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             if (!string.IsNullOrEmpty(name))
             {
                 authByName.TryAdd(name, AuthModeOf(entry));
+                if (TryGetString(entry, "aws_role_arn")?.Trim() is { Length: > 0 } awsRole)
+                {
+                    roleByName.TryAdd(name, awsRole);
+                }
             }
         }
 
@@ -1685,6 +1719,13 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                     logger.LogInformation(
                         "Server added by {Principal}: {Server}, auth {AuthMode}",
                         DarlingHttpRefusalLog.Sanitize(principal, 256), DarlingHttpRefusalLog.Sanitize(server, 256), authByName.GetValueOrDefault(server, "other"));
+                    if (roleByName.TryGetValue(server, out var addedRole))
+                    {
+                        /* #5452: the role an add set, with the principal. The external ID is never logged. */
+                        logger.LogInformation(
+                            "AWS role set by {Principal} on add: {Server}, role {NewRole}",
+                            DarlingHttpRefusalLog.Sanitize(principal, 256), DarlingHttpRefusalLog.Sanitize(server, 256), DarlingHttpRefusalLog.Sanitize(addedRole, 2200));
+                    }
                 }
             }
         }
