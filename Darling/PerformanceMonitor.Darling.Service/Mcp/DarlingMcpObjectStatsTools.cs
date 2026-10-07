@@ -57,10 +57,24 @@ public sealed class DarlingMcpObjectStatsTools
     private const int ObjectLockingTop = 75;
 
     [McpServerTool(Name = "get_table_index_sizes"), Description("Gets the 100 largest tables with per-table size, growth (7d/30d/daily rate), and row counts from the latest daily snapshot. Indexes are rolled up per table. Use to find storage hot-spots and fast-growing tables for capacity planning. Growth is measured only over history the store actually holds: the history block says how many days of snapshots exist and whether the 7-day and 30-day baselines are reachable; growth_7d_mb / growth_30d_mb / growth_pct_30d are null (with the reason in growth_note) when their baseline does not exist, never re-labelled from a nearer one, and growth_over_available_history_* always spans exactly growth_window_days. A table absent from a baseline snapshot (created since) reports null growth for that window, not 0. tables_returned and truncated bound the page.")]
-    public static async Task<string> GetTableIndexSizes(
+    public static Task<string> GetTableIndexSizes(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) =>
+        GetTableIndexSizes(postgres, server_name, DatabaseFilter.All, cancellationToken);
+
+    /// <summary>
+    /// #5244: get_table_index_sizes over a SET of databases (<see cref="DatabaseFilter.All"/> = every database). The page is
+    /// the largest <see cref="TableSizesTop"/> tables of the CHOSEN databases (the cap, and the over-fetch row that observes
+    /// truncation, apply after the filter), and the <c>history</c> block stays the store's own span for the server, so a
+    /// filtered and an unfiltered call describe the same snapshots.
+    /// <para>One-name consumers made list-aware (#5244 M4), on the empty path: a filter that matches no table is
+    /// <c>empty</c> ("for the database 'X'" or "for the chosen databases", with the server's other rows counted) and never
+    /// <c>unavailable</c>, which stays "this server has no index stats at all". The read has no truncation sentence and no
+    /// echoed name, so neither needs a database form.</para>
+    /// </summary>
+    internal static async Task<string> GetTableIndexSizes(
+        NpgsqlDataSource postgres, string? server_name, DatabaseFilter databases, CancellationToken cancellationToken = default)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
@@ -70,10 +84,29 @@ public sealed class DarlingMcpObjectStatsTools
             var now = DateTime.UtcNow;
             /* Over-fetch by one so truncation is observed, not inferred from a full page (#3541 A3's rule). */
             var rows = await DarlingObjectStatsReader.GetObjectSizeGrowthAsync(
-                postgres, resolved.ServerId, now.AddDays(-7), now.AddDays(-30), TableSizesTop + 1, cancellationToken);
+                postgres, resolved.ServerId, now.AddDays(-7), now.AddDays(-30), TableSizesTop + 1, databases, cancellationToken);
             if (rows.Count == 0)
+            {
+                /* #5244: a filter that matches no table is a different answer from a server that collects no index stats.
+                   The count reads the same relation and the same newest snapshot, unfiltered, so "there is data, just not
+                   for these databases" is observed. The capability check still runs first for a server with none. */
+                if (!databases.IsAll)
+                {
+                    var anyOnServer = await DarlingObjectStatsReader.GetIndexUsageMatchCountAsync(postgres, resolved.ServerId, DatabaseFilter.All, cancellationToken);
+                    if (anyOnServer > 0)
+                    {
+                        return McpHelpers.Status(
+                            "empty",
+                            $"No table size rows for {DescribeScope(databases)} on {resolved.ServerName} at the latest snapshot, "
+                            + $"though the server has {anyOnServer:N0} index rows across its other databases. Check the database "
+                            + $"{(databases.Names.Count == 1 ? "name" : "names")} against get_database_sizes: the filter matches exactly, "
+                            + "and an excluded or renamed database looks identical to one with no tables.");
+                    }
+                }
+
                 return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "index_object_stats", cancellationToken)
                     ?? McpHelpers.Status("unavailable", "No object size data available. Index/object stats are collected daily.");
+            }
 
             var truncated = rows.Count > TableSizesTop;
             var page = rows.Take(TableSizesTop).ToList();
@@ -543,20 +576,47 @@ public sealed class DarlingMcpObjectStatsTools
     }
 
     [McpServerTool(Name = "get_database_sizes"), Description("Gets database file sizes, space usage, and volume free space. Shows each database file with total size, used space, auto-growth settings, and the underlying volume's capacity. Use for capacity planning and identifying space pressure. LATEST IS A TIME: this reads the newest size snapshot, not a window, and captured_at is the instant it was collected - a volume's free space here is what it was AT that stamp, and a file that grew since is not reflected until the next collection.")]
-    public static async Task<string> GetDatabaseSizes(
+    public static Task<string> GetDatabaseSizes(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) =>
+        GetDatabaseSizes(postgres, server_name, DatabaseFilter.All, cancellationToken);
+
+    /// <summary>
+    /// #5244: get_database_sizes over a SET of databases (<see cref="DatabaseFilter.All"/> = every database): the files of the
+    /// chosen databases at the server's newest snapshot (the snapshot never moves with the filter, so <c>captured_at</c> is the
+    /// same for a filtered and an unfiltered call).
+    /// <para>One-name consumers made list-aware (#5244 M4), on the empty path: a filter that matches no database is <c>empty</c>
+    /// ("for the database 'X'" or "for the chosen databases", with the snapshot's time), never <c>unavailable</c>, which stays
+    /// "no size snapshot at all". The read has no truncation sentence and no echoed name.</para>
+    /// </summary>
+    internal static async Task<string> GetDatabaseSizes(
+        NpgsqlDataSource postgres, string? server_name, DatabaseFilter databases, CancellationToken cancellationToken = default)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         try
         {
-            var rows = await DarlingObjectStatsReader.GetLatestDatabaseSizesAsync(postgres, resolved.ServerId, cancellationToken);
+            var rows = await DarlingObjectStatsReader.GetLatestDatabaseSizesAsync(postgres, resolved.ServerId, databases, cancellationToken);
             if (rows.Count == 0)
+            {
+                /* #5244: when the server HAS a size snapshot and the chosen databases are not in it, the answer is about the
+                   chosen databases, not about collection. The probe is the same newest-snapshot resolver the read used. */
+                if (!databases.IsAll
+                    && await DarlingObjectStatsReader.GetLatestSnapshotTimeAsync(postgres, resolved.ServerId, cancellationToken) is { } snapshot)
+                {
+                    return McpHelpers.Status(
+                        "empty",
+                        $"No database size rows for {DescribeScope(databases)} on {resolved.ServerName} in the snapshot captured at "
+                        + $"{snapshot:o}. Check the database {(databases.Names.Count == 1 ? "name" : "names")} against the server's "
+                        + "unfiltered get_database_sizes: the filter matches exactly, and an excluded or renamed database looks identical "
+                        + "to one with no files.");
+                }
+
                 return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "database_size_stats", cancellationToken)
                     ?? McpHelpers.Status("unavailable", "No database size data available. The size collector may not have run yet.");
+            }
 
             return DatabaseSizesPayload(resolved.ServerName, rows);
         }

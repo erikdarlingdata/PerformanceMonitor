@@ -128,7 +128,8 @@ public sealed class DarlingMcpPvsToolsTests
         Assert.DoesNotContain("@", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("N'", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("getdate", sql.ToLowerInvariant());
-        Assert.DoesNotContain("[", sql, StringComparison.Ordinal);
+        /* #5244: the database filter binds a text[] ("::text[]"), the one Postgres use of a bracket; T-SQL [identifiers] stay banned. */
+        Assert.DoesNotContain("[", sql.Replace("::text[]", "", StringComparison.Ordinal), StringComparison.Ordinal);
     }
 
     [Fact]
