@@ -26,7 +26,8 @@ namespace PerformanceMonitor.Common;
 /// a re-encoder would turn a line feed between two tokens into two characters and the judge would no longer see
 /// the statement.</para>
 ///
-/// <para><b>Budget.</b> One 1.5 s budget covers every block of one result. Past it, every later value comes back as
+/// <para><b>Budget.</b> One budget covers every block of one result: 1.5 s, plus 0.5 s per 1,048,576 characters of each
+/// distinct block, up to 10 s (#5477). Past it, every later value comes back as
 /// the marker. A result the sweep cannot read is replaced by <see cref="SensitiveStatements.JsonRefusal"/> as an
 /// error result, never passed through.</para>
 /// </summary>

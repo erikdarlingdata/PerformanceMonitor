@@ -1719,6 +1719,9 @@ LIMIT 1";
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         _executeStartedUtc = DateTime.UtcNow;
+        /* #5477: build the statement filter's first-call costs off the startup path, so the first alert with a
+           large report does not pay them. Never throws, logs nothing. */
+        _ = PerformanceMonitor.Alerting.AlertStatementFilter.WarmUpAsync();
         /* #2185: an install directory the service account cannot read is diagnosed HERE — first, ahead of
            reading darling.json, and a long way ahead of the managed-Postgres bootstrap. Order is the whole
            point. Every message the reporter saw was downstream of this one: an unreadable tree takes out

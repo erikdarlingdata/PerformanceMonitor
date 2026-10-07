@@ -41,11 +41,22 @@ public static partial class SensitiveStatements
     private static readonly Lazy<Func<string, Verdict>> s_judge =
         new(() => CreateProductionJudge());
 
+    /// <summary>The linear-time pre-check of <see cref="Pattern"/> (see <see cref="CreatePrefilter"/>), built once
+    /// and shared (#5477): it is the first test the production judge makes on every value, and the whole-document
+    /// check in <see cref="RawTextHoldsNothingNamed"/> reads the SAME instance, so a document is cleared by exactly the
+    /// pre-check that would have cleared each of its values, and its lazily built states are built once. Null when
+    /// the build fails; every caller then runs the full judge.</summary>
+    private static readonly Lazy<Regex?> s_prefilter = new(() => CreatePrefilter(Pattern, MatchTimeout));
+
+    /// <summary>Whether the shared judge is a working judge (#5477): a judge whose build failed names every value, and a
+    /// pre-check that cleared a document must never stand in for it. Probed once, on a value no pattern names.</summary>
+    private static readonly Lazy<bool> s_judgeIsLive = new(() => JudgeShared(s_judge, "select 1") == Verdict.Clean);
+
     /// <summary>The judge every production caller shares (#5320 N2), with its pattern, timeout and split. Internal
     /// so a test can build it with a fake <paramref name="clock"/> and pin that it really is the split judge: a
     /// one-regex judge answers differently once the clock says the first part used most of the budget.</summary>
     internal static Func<string, Verdict> CreateProductionJudge(Func<TimeSpan>? clock = null) =>
-        CreateJudge(Pattern, MatchTimeout, headAlternatives: JudgeHeadAlternatives, clock: clock);
+        CreateJudge(Pattern, MatchTimeout, headAlternatives: JudgeHeadAlternatives, clock: clock, sharedPrefilter: s_prefilter);
 
     /// <summary>True once the shared judge is built. Exposed so a test can pin <see cref="WarmUp"/>.</summary>
     internal static bool JudgeIsBuilt => s_judge.IsValueCreated;
@@ -425,7 +436,8 @@ public static partial class SensitiveStatements
         bool factor = true,
         bool prefilter = true,
         int headAlternatives = 0,
-        Func<TimeSpan>? clock = null)
+        Func<TimeSpan>? clock = null,
+        Lazy<Regex?>? sharedPrefilter = null)
     {
         var now = clock ?? (static () => Stopwatch.GetElapsedTime(0));
         var headSource = source;
@@ -460,7 +472,7 @@ public static partial class SensitiveStatements
 
         // The pre-check is always built from the whole source: one linear-time pass over the superset, however
         // many regexes follow it.
-        var precheck = prefilter ? CreatePrefilter(source, timeout) : null;
+        var precheck = prefilter ? (sharedPrefilter is not null ? sharedPrefilter.Value : CreatePrefilter(source, timeout)) : null;
 
         // #5320 L3: the build stays outside any budget. The regexes are compiled above, and the first match still
         // pays the one-time JIT of the compiled code (inside the match timeout and the caller's clock), so run
@@ -576,6 +588,17 @@ public static partial class SensitiveStatements
     /// Runs a judge under an elapsed-time budget. Once <see cref="Elapsed"/> reaches the limit
     /// (<see cref="Spent"/>), every later value is returned as named without running the judge and is counted
     /// unjudged.
+    /// <para><b>Growth (#5477).</b> The limit the constructor takes is the floor. Each distinct document that
+    /// enters the budget through <c>SensitiveStatements.Xml</c>, <c>Json</c> or <c>TextUnder</c> (<see cref="Earn"/>)
+    /// adds <see cref="EarnPerMegabyte"/> per 1,048,576 characters of its length, proportionally, up to
+    /// <see cref="MaxLimit"/> in all (a floor above the cap stays as it is). Values nested inside a document add
+    /// nothing, and neither does a document the budget has already judged. So a blocking alert whose incidents each
+    /// carry a large report is not starved by the first, and one alert or one web or MCP read still stalls for at
+    /// most the cap plus one value's match timeout.</para>
+    /// <para><b>Memo (#5477).</b> The same entry points judge a distinct document once per budget: a repeat of
+    /// the same text (the alert's attachment and its incident's are one string) returns exactly what the first
+    /// call returned, a withheld marker included, and charges nothing. The memo lives on the budget and dies with
+    /// it; nothing is cached across budgets.</para>
     /// </summary>
     internal sealed class JudgeBudget(
         TimeSpan limit,
@@ -587,8 +610,71 @@ public static partial class SensitiveStatements
         private readonly Lazy<Func<string, Verdict>> _shared = shared ?? s_judge;
         private readonly Func<TimeSpan> _now = clock ?? (static () => Stopwatch.GetElapsedTime(0));
         private TimeSpan _elapsed;
+        private TimeSpan _earned;
+        private Dictionary<(int Kind, string Text, int Cap), (string? Result, bool Unchanged)>? _memo;
 
-        public TimeSpan Limit { get; } = limit;
+        /// <summary>Added to the limit per 1,048,576 characters of each distinct document (#5477).</summary>
+        internal static readonly TimeSpan EarnPerMegabyte = TimeSpan.FromMilliseconds(500);
+
+        /// <summary>The most a budget can grow to (#5477). A floor above it stays as it is.</summary>
+        internal static readonly TimeSpan MaxLimit = TimeSpan.FromSeconds(10);
+
+        private readonly TimeSpan _floor = limit;
+
+        /// <summary>The floor plus what the documents earned, never above <see cref="MaxLimit"/>.</summary>
+        public TimeSpan Limit
+        {
+            get
+            {
+                var grown = _floor + _earned;
+                var cap = _floor > MaxLimit ? _floor : MaxLimit;
+                return grown > cap ? cap : grown;
+            }
+        }
+
+        /// <summary>XML and JSON documents the entry points judged, memo hits and plain text values not counted (#5477).</summary>
+        public int DocumentPasses { get; private set; }
+
+        /// <summary>Grows the limit for one distinct document of <paramref name="characters"/> characters
+        /// (#5477): 0.5 s per 1,048,576, proportional.</summary>
+        public void Earn(int characters)
+        {
+            if (characters > 0)
+            {
+                _earned += TimeSpan.FromTicks((long)(EarnPerMegabyte.Ticks * (characters / 1048576.0)));
+            }
+        }
+
+        /// <summary>The result an entry point returned for this text before, if any (#5477). The text is found by ordinal
+        /// equality, and when the first call returned its input as it was, the caller gets its OWN instance back, so the
+        /// "same instance when nothing is named" contract holds for an equal copy too.</summary>
+        internal bool TryRecall(int kind, string text, int cap, out string? result)
+        {
+            result = null;
+            if (_memo is null || !_memo.TryGetValue((kind, text, cap), out var hit))
+            {
+                return false;
+            }
+
+            result = hit.Unchanged ? text : hit.Result;
+            return true;
+        }
+
+        /// <summary>Remembers what an entry point returned for this text and counts the pass (#5477). The text kind is a
+        /// plain text value, which is not counted as a document.</summary>
+        internal void Remember(int kind, string text, int cap, string? result)
+        {
+            if (kind != MemoText)
+            {
+                DocumentPasses++;
+            }
+
+            (_memo ??= new())[(kind, text, cap)] = (result, ReferenceEquals(result, text));
+        }
+
+        /// <summary>True when this budget runs the production judge, not a fake one a test handed it (#5477): only then may a
+        /// whole-document pre-check stand in for judging every value.</summary>
+        internal bool UsesSharedJudge => _judge is null && ReferenceEquals(_shared, s_judge);
 
         public TimeSpan Elapsed => _elapsed;
 

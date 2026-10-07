@@ -250,6 +250,10 @@ public partial class MainWindow : Window
             _backgroundCts = new CancellationTokenSource();
             _ = Task.Run(() => sliceRepair.RepairOnStartupAsync(_backgroundCts.Token));
 
+            /* #5477: build the statement filter's first-call costs off the startup path, so the first alert with a
+               large report does not pay them. Never throws, logs nothing. */
+            _ = PerformanceMonitor.Alerting.AlertStatementFilter.WarmUpAsync();
+
             // Routes high-severity analysis findings to email/Slack/Teams; the background
             // service runs scheduled analysis and hands findings to it.
             /* serverId resolver: Lite uses the finding's stable int id as a string (Plan E E3c). */
