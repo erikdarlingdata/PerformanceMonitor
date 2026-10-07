@@ -450,7 +450,7 @@ WITH plan_agg AS
     /// tables yet, a lock or a timeout costs the speedup, never the finding. A cancelled pass is not swallowed.
     /// </summary>
     private async Task<List<DateOnly>> ReadPlanRegressionBuiltDaysAsync(
-        NpgsqlConnection connection, int serverId, DateTime windowFloor, CancellationToken cancellationToken)
+        NpgsqlConnection connection, AnalysisContext context, int serverId, DateTime windowFloor, CancellationToken cancellationToken)
     {
         var days = new List<DateOnly>();
         try
@@ -469,6 +469,11 @@ WITH plan_agg AS
         catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, cancellationToken))
         {
             _logger?.LogWarning(ex, "PLAN_REGRESSION built-days read failed for server {ServerId}; reading the interval table directly", serverId);
+
+            /* Recorded under the fact's own method name, like every swallowing catch here (#2826): a timeout in this read
+               means the store is struggling, and the exact-bound read that follows is the slower one. If that read
+               succeeds the fact is whole and the caveat over-states what is missing; if it fails it records its own. */
+            ReportCollectionFailure(ex, context, nameof(CollectPlanRegressionFactsAsync));
             return new List<DateOnly>();
         }
     }
@@ -722,7 +727,7 @@ LIMIT 20";
             var rawWindowStart = AsNaive(context.TimeRangeStart.AddDays(-PlanRegressionWindowDays));
             var windowFloor = PlanRegressionWindowFloor(rawWindowStart);
             var builtDays = readsTable
-                ? await ReadPlanRegressionBuiltDaysAsync(connection, context.ServerId, windowFloor, context.CancellationToken)
+                ? await ReadPlanRegressionBuiltDaysAsync(connection, context, context.ServerId, windowFloor, context.CancellationToken)
                 : new List<DateOnly>();
             var readsDays = builtDays.Count > 0;
             context.PlanRegressionWindowStart = readsDays ? windowFloor : null;
