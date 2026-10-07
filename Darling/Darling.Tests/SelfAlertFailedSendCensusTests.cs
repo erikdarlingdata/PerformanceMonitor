@@ -76,6 +76,7 @@ public sealed class SelfAlertFailedSendCensusTests
         "ApplyCollectorCostDigestAsync",
         "ApplyFleetSweepRollupAsync",
         "ApplyAnalysisSinglesDigestAsync",
+        "ApplyCollectionHistoryAuditAsync",
     };
 
     /// <summary>The evaluator's source with comments and literal text blanked (offsets and newlines kept), read

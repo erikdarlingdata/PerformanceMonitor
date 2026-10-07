@@ -293,6 +293,8 @@ internal static class DarlingTriageEndpoint
             [DarlingSelfAlertEvaluator.StoreUpgradeMetric] = StoreSections(),
             /* #5450: a fleet-level event about the whole store's collection, so the same fleet-level sections. */
             [DarlingSelfAlertEvaluator.CollectionGapAtStartMetric] = StoreSections(),
+            /* #5450: about the whole store's retained history, so the same fleet-level sections. */
+            [DarlingSelfAlertEvaluator.CollectionGapsInHistoryMetric] = StoreSections(),
             [DarlingSelfAlertEvaluator.JobCadenceMetric] = StoreSections(),
             [DarlingSelfAlertEvaluator.CompressionJobMetric] = StoreSections(),
             /* #3816: the same shape for the two families the self-heal now covers and for the failure arm —

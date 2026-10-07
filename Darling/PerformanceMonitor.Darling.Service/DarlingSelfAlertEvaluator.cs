@@ -2735,6 +2735,157 @@ internal sealed class DarlingSelfAlertEvaluator
             delivery, FleetSweepRollupInterval, now, "fleet-sweep rollup", cancellationToken);
     }
 
+    /* ------------------------- #5450: the daily retained-history audit ------------------------- */
+
+    /// <summary>
+    /// The alert metric name for the daily retained-history audit (#5450, proposal 3). A WEBHOOK AUTOMATION KEY
+    /// like its siblings, so it is a const and must stay stable across releases.
+    /// </summary>
+    internal const string CollectionGapsInHistoryMetric = "Collection Gaps In History";
+
+    /// <summary>Fleet-level key, non-numeric so it never collides with a real server_id (the DiskKey shape).</summary>
+    private const string CollectionHistoryAuditKey = "collectionhistoryaudit";
+
+    /// <summary>The audit's day grid: one slot a day, at <see cref="CollectionHistoryAudit.DueTimeOfDay"/>.</summary>
+    internal static readonly TimeSpan HistoryAuditInterval = TimeSpan.FromDays(1);
+
+    /// <summary>The slot of the latest audit pass, the <see cref="_lastSweepRollup"/> idiom: a cache of the stamp.</summary>
+    private readonly ConcurrentDictionary<string, DateTime> _lastHistoryAudit = new();
+
+    /// <summary>Reads one rollup's hour buckets between the bounds; null when the relation does not exist.</summary>
+    internal delegate Task<IReadOnlyList<CollectionHistoryAudit.HourBucket>?> HistoryRollupReader(
+        CollectionHistoryAudit.Rollup rollup, DateTime fromUtc, DateTime toUtc, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// FLEET-level (#5450): the DAILY RETAINED-HISTORY AUDIT. Once per UTC day, on the first pass at or after 01:00Z,
+    /// reads each hourly rollup's per-hour server count and sample total for the previous UTC day and the seven days
+    /// before it, and raises at most ONE "Collection Gaps In History" Warning naming the flagged hour ranges. The
+    /// self-monitor alerts run inside the service, so an outage the service was not alive for, and a degraded
+    /// collection whose rows still arrive every hour, are only visible afterwards, in what the store retained.
+    /// Quiet when nothing is flagged. The rules, and why they are these, are on <see cref="CollectionHistoryAudit"/>.
+    ///
+    /// <para><b>Once a day, across restarts.</b> The <see cref="DocumentDeliveredInsideIntervalAsync"/> gate over the
+    /// delivery stamp store, as the daily documents use, with the slot pinned to 01:00Z of the day: a restart later
+    /// that day reads the stamp and does nothing. A quiet day and a delivered one both stamp; only a delivery the
+    /// deliverer reported failed does not, so the next tick retries. A pass whose every read failed does not stamp
+    /// either, so a store that was down at 01:00Z is asked again on the next tick.</para>
+    ///
+    /// <para><b>Cost.</b> One aggregate per rollup, with a range predicate on <c>bucket</c> and a 60 s deadline. A read
+    /// that times out or fails logs one warning, is counted in the alert-read-failure census, and skips THAT rollup;
+    /// the audit goes on with the others.</para>
+    /// </summary>
+    public Task EvaluateCollectionHistoryAuditAsync(NpgsqlDataSource postgres, CancellationToken cancellationToken)
+        => ApplyCollectionHistoryAuditAsync(
+            (rollup, from, to, token) => CollectionHistoryAudit.ReadAsync(postgres, rollup, from, to, token),
+            CollectionHistoryAudit.Rollups, cancellationToken);
+
+    /// <summary>
+    /// The audit with its reads handed in, so the gate, the one-alert rule and the failure isolation are
+    /// unit-testable with a controllable clock and fixture buckets.
+    /// </summary>
+    internal async Task ApplyCollectionHistoryAuditAsync(
+        HistoryRollupReader read, IReadOnlyList<CollectionHistoryAudit.Rollup> rollups, CancellationToken cancellationToken)
+    {
+        if (!_settings.AlertsEnabled)
+        {
+            return;
+        }
+
+        var now = _utcNow();
+        if (now.TimeOfDay < CollectionHistoryAudit.DueTimeOfDay)
+        {
+            return;
+        }
+
+        var dueSlot = now.Date + CollectionHistoryAudit.DueTimeOfDay;
+        if (await DocumentDeliveredInsideIntervalAsync(
+                _lastHistoryAudit, CollectionHistoryAuditKey, PgSelfAlertDeliveryStampStore.HistoryAuditStateKey,
+                HistoryAuditInterval, now, "collection-history audit", cancellationToken))
+        {
+            return;
+        }
+
+        /* Nothing known (no stamp, or none readable) anchors the slot grid on 01:00Z of today instead of on this
+           instant, so the next day's audit is due at 01:00Z and not a day after whenever this one happened to run. */
+        if (!_lastHistoryAudit.TryGetValue(CollectionHistoryAuditKey, out var known) || known == NoDeliveryKnown)
+        {
+            _lastHistoryAudit[CollectionHistoryAuditKey] = dueSlot - HistoryAuditInterval;
+        }
+
+        var auditDay = now.Date.AddDays(-1);
+        var from = CollectionHistoryAudit.ReadFrom(auditDay);
+        var to = CollectionHistoryAudit.ReadTo(auditDay);
+        var judgeLastHour = now.TimeOfDay >= CollectionHistoryAudit.LastHourSettledTimeOfDay;
+
+        var findings = new List<(CollectionHistoryAudit.Rollup Rollup, IReadOnlyList<CollectionHistoryAudit.FlaggedRange> Ranges)>();
+        var audited = 0;
+        var failed = 0;
+        foreach (var rollup in rollups)
+        {
+            IReadOnlyList<CollectionHistoryAudit.HourBucket>? buckets;
+            var readClock = Stopwatch.StartNew();
+            try
+            {
+                buckets = await read(rollup, from, to, cancellationToken);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                /* One warning, one count, and on to the next rollup. */
+                failed++;
+                _logger?.LogWarning(ex,
+                    "Collection-history audit could not read {Rollup} after {ElapsedMs} ms; that rollup is skipped",
+                    rollup.Relation, readClock.ElapsedMilliseconds);
+                _readFailures?.RecordReadFailure(null, "collection-history audit read", readClock.ElapsedMilliseconds);
+                continue;
+            }
+
+            if (buckets is null)
+            {
+                continue;
+            }
+
+            var ranges = CollectionHistoryAudit.Analyze(auditDay, buckets, judgeLastHour);
+            if (ranges is null)
+            {
+                continue;
+            }
+
+            audited++;
+            if (ranges.Count > 0)
+            {
+                findings.Add((rollup, ranges));
+            }
+        }
+
+        if (audited == 0 && failed > 0)
+        {
+            return;
+        }
+
+        AlertDelivery? delivery = null;
+        if (findings.Count > 0)
+        {
+            var hours = CollectionHistoryAudit.FlaggedHours(findings);
+            delivery = await FireAsync(
+                StoreKey(CollectionHistoryAuditKey), _storeLabel, CollectionGapsInHistoryMetric,
+                string.Create(CultureInfo.InvariantCulture, $"{hours} hours"), "half of usual",
+                detail: CollectionHistoryAudit.Render(auditDay, findings),
+                severity: AlertSeverityLevel.Warning,
+                shortMessage: string.Create(CultureInfo.InvariantCulture,
+                    $"{hours} thin hour(s) in retained history on {auditDay:yyyy-MM-dd}"),
+                numericCurrentValue: hours, numericThresholdValue: 0,
+                cancellationToken);
+        }
+
+        await RecordDocumentDeliveredAsync(
+            _lastHistoryAudit, CollectionHistoryAuditKey, PgSelfAlertDeliveryStampStore.HistoryAuditStateKey,
+            delivery, HistoryAuditInterval, now, "collection-history audit", cancellationToken);
+    }
+
     /* ------------------------- #3712: the analysis singles digest ------------------------- */
 
     /// <summary>
