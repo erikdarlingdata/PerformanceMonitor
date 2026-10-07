@@ -946,9 +946,12 @@ public sealed class SensitiveStatementsTests
         Assert.Equal(TimeSpan.FromSeconds(2), budget.Limit);
         Assert.Equal(1, budget.DocumentPasses);
 
-        // The same instance, then an equal copy: both are hits that run no judge and earn nothing.
+        // The same instance, then an equal copy: both are hits that run no judge and earn nothing, and the copy
+        // comes back as the caller's own instance, not the first one.
         Assert.Same(doc, SensitiveStatements.Xml(doc, budget));
-        Assert.Same(doc, SensitiveStatements.Xml(PaddedXml(Megabyte), budget));
+        var copy = PaddedXml(Megabyte);
+        Assert.NotSame(doc, copy);
+        Assert.Same(copy, SensitiveStatements.Xml(copy, budget));
         Assert.Equal(callsAfterFirst, calls);
         Assert.Equal(TimeSpan.FromSeconds(2), budget.Limit);
         Assert.Equal(1, budget.DocumentPasses);
@@ -957,6 +960,31 @@ public sealed class SensitiveStatementsTests
         SensitiveStatements.Xml(PaddedXml(Megabyte, 'y'), budget);
         Assert.Equal(TimeSpan.FromSeconds(2.5), budget.Limit);
         Assert.Equal(2, budget.DocumentPasses);
+    }
+
+    [Fact]
+    public void TwoEqualStringsUnderOneBudget_EachComesBackAsItsOwnInstance_WhenNothingIsNamed()
+    {
+        var budget = new SensitiveStatements.JudgeBudget(TimeSpan.FromSeconds(1.5), _ => SensitiveStatements.Verdict.Clean);
+        var first = "{\"k\":\"v\"}";
+        var second = new string(first.AsSpan());
+        Assert.NotSame(first, second);
+
+        Assert.Same(first, SensitiveStatements.Json(first, budget));
+        Assert.Same(second, SensitiveStatements.Json(second, budget));
+        Assert.Equal(1, budget.DocumentPasses);
+    }
+
+    [Fact]
+    public void ACappedXmlCall_EarnsOnlyForTheTextItCanJudge()
+    {
+        var floor = TimeSpan.FromSeconds(1.5);
+        var budget = new SensitiveStatements.JudgeBudget(floor, _ => SensitiveStatements.Verdict.Clean);
+
+        SensitiveStatements.Xml(PaddedXml(4 * Megabyte), budget, 1000);
+
+        // Well under a millisecond for about a thousand characters, not the two seconds a 4 MB document earns in full.
+        Assert.InRange(budget.Limit, floor, floor + TimeSpan.FromMilliseconds(5));
     }
 
     [Fact]

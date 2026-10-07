@@ -145,7 +145,8 @@ public static partial class SensitiveStatements
     {
         if (string.IsNullOrEmpty(xml)) return xml;
         if (budget.TryRecall(MemoXml, xml, maxOutputChars, out var recalled)) return recalled;
-        budget.Earn(xml.Length);
+        // A capped call judges only up to the cut (and its slack), so only that much earns time (#5477).
+        budget.Earn(maxOutputChars == int.MaxValue ? xml.Length : (int)Math.Min(xml.Length, (long)maxOutputChars + XmlCutSlack));
         var result = XmlWalk(xml, budget, maxOutputChars);
         budget.Remember(MemoXml, xml, maxOutputChars, result);
         return result;

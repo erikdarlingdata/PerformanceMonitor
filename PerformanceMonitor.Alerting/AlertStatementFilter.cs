@@ -8,6 +8,10 @@
 
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
+using System.Globalization;
+using System.Text;
+using System.Text.Json;
 using System.Runtime.CompilerServices;
 using System.Threading.Tasks;
 using PerformanceMonitor.Common;
@@ -227,18 +231,26 @@ public static class AlertStatementFilter
     }
 
     /// <summary>
-    /// Runs one small document (an XML report with one plain statement) through the alert path, and one small JSON
-    /// result through the MCP and web sweep path, on a background
-    /// thread, so the first real alert does not pay for the first call: the XML reader, the lazily built statement
-    /// patterns and the filter's own code are all built here, off the startup path (#5477). Never throws and logs
-    /// nothing; the task it returns always completes normally.
+    /// Runs a blocked-process report and a deadlock graph of about 64 KB each, built here from made-up names, through the
+    /// alert path (and through the MCP and web sweep path) on a background thread, so the first real alert does not
+    /// pay for the first calls: the XML reader, the lazily built statement patterns and the filter's own code are built
+    /// here, and the hot methods are called enough times, with pauses between the rounds so the runtime's background
+    /// compiler gets to replace their first, unoptimized code (#5477). At least 40 judged documents, but never more than
+    /// about 2 seconds, off the startup path. Never throws and logs nothing; the task it returns always completes normally.
     /// </summary>
-    /// <param name="probe">What to run; the default judges the sample. A test passes one that throws.</param>
-    public static Task WarmUpAsync(Action? probe = null) => Task.Run(() =>
+    /// <param name="probe">What to run in place of the default; a test passes one that throws.</param>
+    public static Task WarmUpAsync(Action? probe = null) => Task.Run(async () =>
     {
         try
         {
-            (probe ?? WarmUpProbe)();
+            if (probe is not null)
+            {
+                probe();
+            }
+            else
+            {
+                await WarmUpDocumentsAsync().ConfigureAwait(false);
+            }
         }
 #pragma warning disable CA1031 // a warm-up that fails changes nothing: the first real call does the same work
         catch (Exception)
@@ -247,15 +259,76 @@ public static class AlertStatementFilter
         }
     });
 
-    private static void WarmUpProbe()
-    {
-        _ = Apply(new AlertContext
-        {
-            AttachmentXml = "<blocked-process-report><blocked-process><process id=\"p1\"><inputbuf>SELECT 1;</inputbuf></process></blocked-process></blocked-process-report>",
-        });
+    private const int WarmUpRounds = 4;
+    private const int WarmUpCallsPerRound = 12;
+    private const int WarmUpDocumentChars = 64 * 1024;
+    private static readonly TimeSpan s_warmUpPause = TimeSpan.FromMilliseconds(150);
+    private static readonly TimeSpan s_warmUpLimit = TimeSpan.FromSeconds(2);
 
-        // The MCP and web sweeps read through Json, which builds its own walkers.
-        _ = SensitiveStatements.Json("{\"statement\":\"SELECT 1;\"}");
+    private static async Task WarmUpDocumentsAsync()
+    {
+        var started = Stopwatch.GetTimestamp();
+        var documents = new[]
+        {
+            WarmUpDocument(blocked: true, comment: false),
+            WarmUpDocument(blocked: true, comment: true),
+            WarmUpDocument(blocked: false, comment: false),
+            WarmUpDocument(blocked: false, comment: true),
+        };
+        var plan = JsonSerializer.Serialize(new { plan = documents[1] });
+
+        for (var round = 0; round < WarmUpRounds; round++)
+        {
+            for (var call = 0; call < WarmUpCallsPerRound; call++)
+            {
+                if (Stopwatch.GetElapsedTime(started) > s_warmUpLimit)
+                {
+                    return;
+                }
+
+                _ = Apply(new AlertContext { AttachmentXml = documents[call % documents.Length] });
+                if (call % 4 == 3)
+                {
+                    // The MCP and web sweeps read through Json, which builds its own walkers.
+                    _ = SensitiveStatements.Json(plan);
+                }
+            }
+
+            await Task.Delay(s_warmUpPause).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>A report of about <see cref="WarmUpDocumentChars"/> characters with plain statements; with
+    /// <paramref name="comment"/> the statements hold a line comment, which is the shape the full walk (not the
+    /// raw-text shortcut) handles.</summary>
+    private static string WarmUpDocument(bool blocked, bool comment)
+    {
+        var text = new StringBuilder(WarmUpDocumentChars + 512);
+        text.Append(blocked
+            ? "<blocked-process-report monitorLoop=\"1\"><blocked-process>"
+            : "<deadlock><victim-list><victimProcess id=\"process1\"/></victim-list><process-list>");
+        for (var i = 0; text.Length < WarmUpDocumentChars; i++)
+        {
+            var statement = "SELECT warm_a, warm_b FROM dbo.warm_table_" + i.ToString(CultureInfo.InvariantCulture)
+                + (comment ? " -- warm-up note" : string.Empty) + " WHERE warm_id = 7;";
+            if (blocked)
+            {
+                text.Append("<process id=\"process").Append(i.ToString(CultureInfo.InvariantCulture))
+                    .Append("\" status=\"suspended\" waitresource=\"KEY: 5:1\"><executionStack><frame line=\"1\">")
+                    .Append(statement).Append("</frame></executionStack><inputbuf>").Append(statement)
+                    .Append("</inputbuf></process>");
+            }
+            else
+            {
+                text.Append("<process id=\"process").Append(i.ToString(CultureInfo.InvariantCulture))
+                    .Append("\" status=\"suspended\" isolationlevel=\"read committed\"><executionStack><frame line=\"1\">")
+                    .Append(statement).Append("</frame></executionStack><inputbuf>").Append(statement)
+                    .Append("</inputbuf></process>");
+            }
+        }
+
+        text.Append(blocked ? "</blocked-process></blocked-process-report>" : "</process-list></deadlock>");
+        return text.ToString();
     }
 
     internal static AlertContext? ApplyCore(AlertContext? context, SensitiveStatements.JudgeBudget budget)

@@ -132,14 +132,16 @@ public static partial class SensitiveStatements
     /// <para><b>Why a clear is exact.</b> The production judge starts every value with that same pre-check, a superset
     /// of the pattern with no context-dependent part, and a value the pre-check misses is clean. A match inside a
     /// value is therefore a match inside the raw text, provided the value is a contiguous piece of the raw text, or
-    /// differs from it only in characters the pattern cannot tell apart. Four conditions make that so, and each
+    /// differs from it only in characters the pattern cannot tell apart. Five conditions make that so, and each
     /// one that fails sends the document to the walk, as before: no <c>&amp;</c> (a value is its raw text, nothing is
-    /// decoded, and no nested plan is held in an attribute); no <c>--</c> (the line-comment part of the pattern reads up to a
+    /// decoded, and no nested plan is held in an attribute); no carriage return (the reader turns CR LF into one
+    /// character and the pattern counts characters, so a counted part such as the type length could read a
+    /// different run in the value than in the text); no <c>--</c> (the line-comment part of the pattern reads up to a
     /// control character, and the reader turns a tab or a line break inside an attribute into a space, so a
     /// comment could run further in the value than in the text); no auto-parameter token and no <c>ParameterizedText</c>
     /// element (the walk judges statements it assembles from the plan's parameter values, which no raw text
     /// holds); and a judge that works (<see cref="s_judgeIsLive"/>) behind a budget that runs it. What is left of the
-    /// pattern sees a tab, a carriage return and a line break as the same space. A text that is not well formed,
+    /// pattern sees a tab and a line break as the same space, one character for one. A text that is not well formed,
     /// and a match that times out, are not cleared here: the first reaches the walk's own whole-text rule, and the
     /// second the walk.</para>
     /// </summary>
@@ -149,7 +151,7 @@ public static partial class SensitiveStatements
         {
             if (!budget.UsesSharedJudge || budget.Spent)
                 return false;
-            if (xml.Contains('&') || xml.Contains("--", StringComparison.Ordinal) || XmlRun.MayNeedProbe(xml))
+            if (xml.Contains('&') || xml.Contains('\r') || xml.Contains("--", StringComparison.Ordinal) || XmlRun.MayNeedProbe(xml))
                 return false;
             // Built here, before the clock starts, as the judge's own first value would build it.
             if (!s_judgeIsLive.Value)

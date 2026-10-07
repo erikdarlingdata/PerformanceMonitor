@@ -611,7 +611,7 @@ public static partial class SensitiveStatements
         private readonly Func<TimeSpan> _now = clock ?? (static () => Stopwatch.GetElapsedTime(0));
         private TimeSpan _elapsed;
         private TimeSpan _earned;
-        private Dictionary<(int Kind, string Text, int Cap), string?>? _memo;
+        private Dictionary<(int Kind, string Text, int Cap), (string? Result, bool Unchanged)>? _memo;
 
         /// <summary>Added to the limit per 1,048,576 characters of each distinct document (#5477).</summary>
         internal static readonly TimeSpan EarnPerMegabyte = TimeSpan.FromMilliseconds(500);
@@ -645,12 +645,19 @@ public static partial class SensitiveStatements
             }
         }
 
-        /// <summary>The result an entry point returned for this exact text before, if any (#5477). A string is found
-        /// by reference first, then by ordinal equality.</summary>
+        /// <summary>The result an entry point returned for this text before, if any (#5477). The text is found by ordinal
+        /// equality, and when the first call returned its input as it was, the caller gets its OWN instance back, so the
+        /// "same instance when nothing is named" contract holds for an equal copy too.</summary>
         internal bool TryRecall(int kind, string text, int cap, out string? result)
         {
             result = null;
-            return _memo is not null && _memo.TryGetValue((kind, text, cap), out result);
+            if (_memo is null || !_memo.TryGetValue((kind, text, cap), out var hit))
+            {
+                return false;
+            }
+
+            result = hit.Unchanged ? text : hit.Result;
+            return true;
         }
 
         /// <summary>Remembers what an entry point returned for this text and counts the pass (#5477). The text kind is a
@@ -662,7 +669,7 @@ public static partial class SensitiveStatements
                 DocumentPasses++;
             }
 
-            (_memo ??= new())[(kind, text, cap)] = result;
+            (_memo ??= new())[(kind, text, cap)] = (result, ReferenceEquals(result, text));
         }
 
         /// <summary>True when this budget runs the production judge, not a fake one a test handed it (#5477): only then may a
