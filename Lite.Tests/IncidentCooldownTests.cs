@@ -182,6 +182,35 @@ public class IncidentCooldownTests
     }
 
     /// <summary>
+    /// #5469 part 2: a scope folds into the metric-level key, so two scopes of one metric on one server hold
+    /// separate windows, a scoped clear forgets only its own, and a null scope is the unscoped key. A scoped
+    /// key is not seeded from the history (it carries no scope), so a sibling's history row never throttles it.
+    /// </summary>
+    [Fact]
+    public async Task Scope_SplitsTheMetricLevelKey_ClearsAndSeedsPerScope()
+    {
+        var seedCalls = 0;
+        var cd = new IncidentCooldown("", (_, _, _) => { seedCalls++; return Task.FromResult<DateTime?>(DateTime.UtcNow); });
+
+        // The unscoped key seeds from history (a row in the window), the scoped keys do not.
+        Assert.False((await cd.EvaluateAsync("1", "AG Replica Disconnected", null, Window)).ShouldSend);
+        Assert.Equal(1, seedCalls);
+        var a = await cd.EvaluateAsync("1", "AG Replica Disconnected", null, Window, "AG:A");
+        Assert.True(a.ShouldSend);
+        Assert.Equal(1, seedCalls);
+        cd.Stamp(a);
+
+        Assert.False((await cd.EvaluateAsync("1", "AG Replica Disconnected", null, Window, "AG:A")).ShouldSend);
+        var b = await cd.EvaluateAsync("1", "AG Replica Disconnected", null, Window, "AG:B");
+        Assert.True(b.ShouldSend);
+        cd.Stamp(b);
+
+        cd.ClearMetric("1", "AG Replica Disconnected", "AG:A");
+        Assert.True((await cd.EvaluateAsync("1", "AG Replica Disconnected", null, Window, "AG:A")).ShouldSend);
+        Assert.False((await cd.EvaluateAsync("1", "AG Replica Disconnected", null, Window, "AG:B")).ShouldSend);
+    }
+
+    /// <summary>
     /// The clear must survive the history seed (the review's point 2): both production paths construct the
     /// cooldown with a history store, so the entry <see cref="ClearMetric"/> removed gets RE-SEEDED from the
     /// alert history on the next evaluation — and the next "Server Unreachable" was throttled against the
@@ -391,5 +420,65 @@ public class IncidentCooldownTests
         Assert.Equal(1, cd.TrackedKeyCount);
         // And the clear record was pruned by the same sweep (a clear's instant is two windows old here).
         Assert.Equal(0, cd.TrackedClearCount);
+    }
+
+    /// <summary>
+    /// #5469: the history seed is pair-aware across a restart. A pair edge's stored send is skipped when the
+    /// pair's OTHER edge sent more recently (that edge opened or closed a newer incident), and applied when it
+    /// is the newest. Models "down, up, down, restart, up" (the recovery must be a first notice) and "down,
+    /// up, restart, down" (the firing must be one), each on a FRESH cooldown over the same history.
+    /// </summary>
+    [Fact]
+    public async Task PairedEdge_Seed_SkipsAnEdgeTheOtherEdgeHasSupersededAcrossARestart()
+    {
+        var now = DateTime.UtcNow;
+        var history = new Dictionary<string, DateTime>
+        {
+            ["Server Unreachable"] = now.AddMinutes(-3),
+            ["Server Restored"] = now.AddMinutes(-2),
+        };
+        Task<DateTime?> Seed(string server, string metric, string? dedup) =>
+            Task.FromResult<DateTime?>(history.TryGetValue(metric, out var at) ? at : null);
+
+        // down, up, then a restart, then down: the recovery (t-2) is newer than the firing (t-3), so the
+        // firing's stored send describes a closed incident and the new outage announces.
+        var afterUp = new IncidentCooldown("webhook:", Seed);
+        Assert.True((await afterUp.EvaluateAsync(
+            "1", "Server Unreachable", null, Window, null, "Server Restored")).ShouldSend);
+
+        // down, up, down, then a restart, then up: the second firing (t-1) is newer than the recovery (t-2).
+        history["Server Unreachable"] = now.AddMinutes(-1);
+        var afterDown = new IncidentCooldown("webhook:", Seed);
+        Assert.True((await afterDown.EvaluateAsync(
+            "1", "Server Restored", null, Window, null, "Server Unreachable")).ShouldSend);
+
+        // The newest edge still seeds: the firing (t-1) itself is inside its window after a restart.
+        var firingAgain = new IncidentCooldown("webhook:", Seed);
+        Assert.False((await firingAgain.EvaluateAsync(
+            "1", "Server Unreachable", null, Window, null, "Server Restored")).ShouldSend);
+
+        // Without the pair (every caller but auto-resolve) the seed is today's: the older row still seeds.
+        history["Server Unreachable"] = now.AddMinutes(-3);
+        var unpaired = new IncidentCooldown("webhook:", Seed);
+        Assert.False((await unpaired.EvaluateAsync("1", "Server Unreachable", null, Window)).ShouldSend);
+    }
+
+    /// <summary>
+    /// #5469 tie rule: only a STRICTLY newer send on the other edge supersedes this edge's row. Both edges
+    /// stored at the same instant (a same-tick pair) seed as on dev, so each edge stays throttled.
+    /// </summary>
+    [Fact]
+    public async Task PairedEdge_Seed_TreatsEqualTimesAsNotSuperseded()
+    {
+        var at = DateTime.UtcNow.AddMinutes(-2);
+        Task<DateTime?> Seed(string server, string metric, string? dedup) => Task.FromResult<DateTime?>(at);
+
+        var firing = new IncidentCooldown("webhook:", Seed);
+        Assert.False((await firing.EvaluateAsync(
+            "1", "Server Unreachable", null, Window, null, "Server Restored")).ShouldSend);
+
+        var recovery = new IncidentCooldown("webhook:", Seed);
+        Assert.False((await recovery.EvaluateAsync(
+            "1", "Server Restored", null, Window, null, "Server Unreachable")).ShouldSend);
     }
 }
