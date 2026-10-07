@@ -314,7 +314,7 @@ public sealed class SelfAlertFleetPassTests
         Assert.True(worker.TryStartSelfAlertPass(servers, TestContext.Current.CancellationToken, sweepWidth: 16));
         Assert.True(await BecomesTrueAsync(() => Volatile.Read(ref finished) == 20));
 
-        Assert.InRange(Volatile.Read(ref maxConcurrent), 3, DarlingWorker.SelfAlertPassWidthFor(16));
+        Assert.InRange(Volatile.Read(ref maxConcurrent), 3, DarlingWorker.DailyRunPoolReserve / 2);
     }
 
     /// <summary>
