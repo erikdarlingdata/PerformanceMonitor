@@ -282,7 +282,7 @@ VALUES ($1,$2,1,$3,'TestDb','dbo',$4,$5)", c);
     }
 
     [Fact]
-    public void TheTenant_IsTheLastAwaitInTheStoreMaintenanceTick_WithItsOwnCatchAll()
+    public void TheTenant_IsAwaitedRightBeforeThePlanRegressionBuilder_WithItsOwnCatchAll()
     {
         var worker = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs");
         var code = CSharpSourceWalker.StripCommentsAndStrings(worker);
@@ -294,7 +294,13 @@ VALUES ($1,$2,1,$3,'TestDb','dbo',$4,$5)", c);
         Assert.True(refreshAt > tick.IndexOf("await BuildQueryStoreTopDailyAsync(stoppingToken);", StringComparison.Ordinal), "the refresh is awaited after the summary builder");
         Assert.Equal(1, tick.Split(Refresh).Length - 1);
         Assert.Equal(1, code.Split(Refresh).Length - 1);
-        Assert.True(string.IsNullOrWhiteSpace(tick[(refreshAt + Refresh.Length)..]), "nothing follows the refresh in the tick");
+        /* #5448: the PLAN_REGRESSION day-totals builder is the seventh tenant and follows the refresh directly; the refresh is
+           no longer last, but nothing may sit between the two awaits, and the builder is the last await in the tick. */
+        const string PlanRegression = "await BuildPlanRegressionDailyAsync(stoppingToken);";
+        var planRegressionAt = tick.IndexOf(PlanRegression, StringComparison.Ordinal);
+        Assert.True(planRegressionAt >= 0, "the PLAN_REGRESSION builder is awaited in the tick");
+        Assert.True(string.IsNullOrWhiteSpace(tick[(refreshAt + Refresh.Length)..planRegressionAt]), "nothing sits between the refresh and the PLAN_REGRESSION builder");
+        Assert.True(string.IsNullOrWhiteSpace(tick[(planRegressionAt + PlanRegression.Length)..]), "nothing follows the PLAN_REGRESSION builder in the tick");
 
         var tenant = Body(code, "private async Task RefreshModuleMapRecentAsync(CancellationToken stoppingToken)");
         Assert.False(string.IsNullOrEmpty(tenant), "could not locate RefreshModuleMapRecentAsync");

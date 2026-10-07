@@ -11311,6 +11311,12 @@ AND   j.hypertable_name = '{relation}'", connection))
            It comes last so a store still being converged, or a summary builder that ran out its budget, is
            never made to wait behind it, and a fault here skips nothing above. */
         await RefreshModuleMapRecentAsync(stoppingToken);
+
+        /* #5448: the seventh tenant, same contract — its own method, its own catch-all, one awaited statement, LAST.
+           The PLAN_REGRESSION per-day totals builder needs no TimescaleDB either (collect.plan_regression_daily and
+           its built table are plain tables), so it sits outside the gate, after the module-map refresh: a builder
+           that runs out its budget never makes the cheaper tenants above it wait, and a fault here skips nothing. */
+        await BuildPlanRegressionDailyAsync(stoppingToken);
     }
 
     /// <summary>
@@ -11329,6 +11335,23 @@ AND   j.hypertable_name = '{relation}'", connection))
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             _logger.LogWarning("module_map hourly refresh could not run; the next hourly tick retries: {Message}", ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// The hourly store-maintenance tick's seventh tenant (#5448): builds the per-day per-plan totals PLAN_REGRESSION reads
+    /// for closed days, one failure-isolated pass (see <see cref="PlanRegressionDaily.RunTickAsync(NpgsqlDataSource, DateTime, ILogger, CancellationToken)"/>).
+    /// Its own catch-all: nothing here can fail the tick.
+    /// </summary>
+    private async Task BuildPlanRegressionDailyAsync(CancellationToken stoppingToken)
+    {
+        try
+        {
+            await PlanRegressionDaily.RunTickAsync(_postgres!, DateTime.UtcNow, _logger, stoppingToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning("PLAN_REGRESSION daily totals could not run; the next hourly tick retries: {Message}", ex.Message);
         }
     }
 
