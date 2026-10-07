@@ -581,7 +581,9 @@ public sealed class DurationTrendDatabaseFilterHourlyLiveTests
                     return Series(json)[WindowStart];
                 }
 
-                const double twoHours = perSecond / 2;
+                /* #5449: the procedure rollup also counts an hour in which no procedure worked, as zero work, between its first and
+                   last hour (hour 3 here), so its bucket holds three hours; the query rollup keeps its two. */
+                var twoHours = perSecond / (procedures ? 3 : 2);
                 var wideA = await Wide(DatabaseFilter.One(A));
                 var wideB = await Wide(DatabaseFilter.One(B));
                 Assert.Equal(3_000 * twoHours, wideA, 9);

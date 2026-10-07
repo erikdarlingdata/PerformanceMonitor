@@ -618,7 +618,9 @@ public sealed class DarlingMcpTrendToolsSurfaceAndSqlTests
         Assert.Contains("public static readonly string ProcedureDurationTrendFilteredSql =\n        DurationTrendRouting.BuildBucketedRawTrendSql(\"procedure_stats\", withDatabaseFilter: true);", reader, StringComparison.Ordinal);
         // LA-4a routed the builder call off the stitched from-clause instead of the bare view name, so the pin
         // follows the builder call site, not the old constant. #5244 adds the filter to that call.
-        Assert.Contains("DurationTrendRouting.BuildBucketedHourlyTrendSql(route.HourlyFromClauseOrDefault, withDatabaseFilter: true)", reader, StringComparison.Ordinal);
+        /* #5449: the procedure rollups hold no row for an hour in which no procedure worked, so that grain's call also fills the quiet hours in. */
+        Assert.Contains("DurationTrendRouting.BuildBucketedHourlyTrendSql(\n                    route.HourlyFromClauseOrDefault, withDatabaseFilter: true,", Lf(reader), StringComparison.Ordinal);
+        Assert.Contains("coverIdleHours: route.RawTable == \"procedure_stats\"", reader, StringComparison.Ordinal);
     }
 
     private static string Lf(string s) => s.Replace("\r\n", "\n", StringComparison.Ordinal);

@@ -161,9 +161,14 @@ public static class DurationTrendRouting
     /// $1 server_id, $2/$3 window (naive UTC; $3 is EXCLUSIVE — a bucket is stamped at its START, so the hour
     /// that begins at $3 lies after the window and is not read).</para>
     /// </summary>
-    public static string BuildHourlyTrendSql(string hourlyView, bool withDatabaseFilter)
+    public static string BuildHourlyTrendSql(string hourlyView, bool withDatabaseFilter, bool coverIdleHours = false)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(hourlyView);
+
+        if (coverIdleHours)
+        {
+            return BuildFilledHourlyTrendSql(hourlyView, withDatabaseFilter);
+        }
 
         if (withDatabaseFilter)
         {
@@ -207,6 +212,49 @@ public static class DurationTrendRouting
             AND   bucket < $3
             GROUP BY bucket
             ORDER BY bucket
+            """;
+    }
+
+    /// <summary>
+    /// #5449: the procedure rollups hold no row for an hour in which no procedure did work (the collector stores no row for a
+    /// procedure that did none, where an older store kept zero rows), so a fully idle hour is a gap here where an older store
+    /// has a measured 0. <see cref="BuildHourlyTrendSql"/>'s read with the hours between the series' first and last rollup hour
+    /// filled in as zero work over the same <see cref="HourlyBucketSecondsSql"/>. Only between the first and last hour in the
+    /// window: the rollup cannot say whether the collector was running before the first work or after the last, and a 0 there
+    /// would be invented. Read time only, no change to the rollup. $1..$4 as <see cref="BuildHourlyTrendSql"/>.
+    /// </summary>
+    private static string BuildFilledHourlyTrendSql(string hourlyView, bool withDatabaseFilter)
+    {
+        const string match = "$4::text[] IS NULL OR database_name = ANY($4)";
+        var sums = withDatabaseFilter
+            ? $"COALESCE(SUM(elapsed_time_sum) FILTER (WHERE {match}), 0) AS elapsed_time_sum,\n"
+              + $"                COALESCE(SUM(execution_count_sum) FILTER (WHERE {match}), 0) AS execution_count_sum,\n"
+              + $"                COUNT(*) FILTER (WHERE {match}) AS matched_rows"
+            : "SUM(elapsed_time_sum) AS elapsed_time_sum,\n"
+              + "                SUM(execution_count_sum) AS execution_count_sum";
+        var windowHasRows = withDatabaseFilter
+            ? "\n            WHERE EXISTS (SELECT 1 FROM hourly WHERE matched_rows > 0)"
+            : "";
+
+        return $"""
+            WITH hourly AS
+            (
+                SELECT
+                    bucket,
+                    {sums}
+                FROM {hourlyView}
+                WHERE server_id = $1
+                AND   bucket >= $2
+                AND   bucket < $3
+                GROUP BY bucket
+            )
+            SELECT
+                hours.bucket AS collection_time,
+                COALESCE(hourly.elapsed_time_sum, 0) / 1000.0 / {HourlyBucketSecondsSql} AS elapsed_ms_per_second,
+                CAST(COALESCE(hourly.execution_count_sum, 0) AS DOUBLE PRECISION) / {HourlyBucketSecondsSql} AS executions_per_second
+            FROM (SELECT generate_series(MIN(bucket), MAX(bucket), INTERVAL '1 hour') AS bucket FROM hourly) AS hours
+            LEFT JOIN hourly ON hourly.bucket = hours.bucket{windowHasRows}
+            ORDER BY hours.bucket
             """;
     }
 
@@ -441,8 +489,11 @@ public static class DurationTrendRouting
     /// every hourly rollup and the interval successors group by <c>database_name</c>), $4 is the guarded
     /// <c>text[]</c> database filter (<see cref="DatabaseFilter.Clause"/>'s shape) and the width moves to $5, as
     /// <see cref="BuildBucketedRawTrendSql"/> does; off, the text is the one the MCP reader's constants pin.
+    /// With <paramref name="coverIdleHours"/> (#5449, the procedure rollups only) every hour between the window's first and last
+    /// rollup hour counts, an hour with no rollup row as zero work, so a quiet hour is in the bucket's seconds as it is on a store
+    /// that kept the idle rows; off, the text is unchanged.
     /// </summary>
-    public static string BuildBucketedHourlyTrendSql(string hourlyView, bool withDatabaseFilter = false)
+    public static string BuildBucketedHourlyTrendSql(string hourlyView, bool withDatabaseFilter = false, bool coverIdleHours = false)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(hourlyView);
 
@@ -461,6 +512,26 @@ public static class DurationTrendRouting
             : "";
         var widthParam = withDatabaseFilter ? "$5" : "$4";
 
+        /* #5449: procedure rollups hold no row for an hour in which no procedure worked, so the hours the bucket divides by (COUNT(*)
+           of the rollup's hours in it) leave out the idle ones and a wider bucket reads high where an older store, which kept the
+           idle rows, reads lower. The seconds are then the larger of the hours the rollup holds and the bucket's own span, clipped
+           to the first and last rollup hour in the window: every hour between them is a bucket hour, a quiet one with 0 work. */
+        var filled = coverIdleHours
+            ? """
+            ,
+            filled AS
+            (
+                SELECT
+                    hours.bucket,
+                    COALESCE(hourly.elapsed_ms, 0) AS elapsed_ms,
+                    COALESCE(hourly.executions, 0) AS executions
+                FROM (SELECT generate_series(MIN(bucket), MAX(bucket), INTERVAL '1 hour') AS bucket FROM hourly) AS hours
+                LEFT JOIN hourly ON hourly.bucket = hours.bucket
+            )
+            """
+            : "";
+        var source = coverIdleHours ? "filled" : "hourly";
+
         return $"""
             WITH hourly AS
             (
@@ -472,7 +543,7 @@ public static class DurationTrendRouting
                 AND   bucket >= $2
                 AND   bucket < $3
                 GROUP BY bucket
-            )
+            ){filled}
             SELECT
                 GREATEST(date_bin(CAST({widthParam} AS integer) * INTERVAL '1 minute', bucket, {TrendBucketSql.OriginSql}), $2) AS bucket_start,
                 SUM(elapsed_ms) / (COUNT(*) * {HourlyBucketSecondsSql}) AS elapsed_ms_per_second,
@@ -480,7 +551,7 @@ public static class DurationTrendRouting
                 MAX(elapsed_ms / {HourlyBucketSecondsSql}) AS peak_elapsed_ms_per_second,
                 MIN(bucket) AS first_collection_time,
                 0 AS unrated_collections
-            FROM hourly{windowHasRows}
+            FROM {source}{windowHasRows}
             GROUP BY 1
             ORDER BY 1
             """;
@@ -489,5 +560,5 @@ public static class DurationTrendRouting
     /// <summary>The procedure-stats hourly trend — <see cref="BuildHourlyTrendSql"/> over
     /// <see cref="TimescaleSupport.ProcedureStatsHourlyView"/>.</summary>
     public static string ProcedureDurationTrendHourlySql(bool withDatabaseFilter)
-        => BuildHourlyTrendSql(TimescaleSupport.ProcedureStatsHourlyView, withDatabaseFilter);
+        => BuildHourlyTrendSql(TimescaleSupport.ProcedureStatsHourlyView, withDatabaseFilter, coverIdleHours: true);
 }
