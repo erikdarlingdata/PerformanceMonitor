@@ -14,11 +14,13 @@ using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
+using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Analysis;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
+using PerformanceMonitor.Notifications;
 using Xunit;
 
 namespace Darling.Tests;
@@ -268,6 +270,120 @@ public sealed class SelfAlertFleetPassTests
         Assert.All(perServer.Values, n => Assert.Equal(1, n));
         Assert.InRange(Volatile.Read(ref maxConcurrent), 3, 4);
         Assert.True(clock.ElapsedMilliseconds < 1300, $"20 servers at 100 ms and width 4 took {clock.ElapsedMilliseconds} ms; serial is 2000 ms");
+    }
+
+    /// <summary>
+    /// M1 (#5481 round 2): the pass's width comes from <see cref="DarlingWorker.SelfAlertPassWidthFor"/>, the smaller of
+    /// the sweep width and half of <see cref="DarlingWorker.DailyRunPoolReserve"/>, so its store reads spend at most half
+    /// of the reserve the web viewer's and the MCP tools' reads share.
+    /// </summary>
+    [Theory]
+    [InlineData(1, 1)]
+    [InlineData(2, 2)]
+    [InlineData(4, 4)]
+    [InlineData(9, 4)]
+    [InlineData(16, 4)]
+    [InlineData(0, 1)]
+    [InlineData(int.MaxValue, 4)]
+    public void TheSelfAlertPassWidth_IsTheSweepWidthCappedAtHalfTheReserve(int sweepWidth, int expected)
+    {
+        Assert.Equal(expected, DarlingWorker.SelfAlertPassWidthFor(sweepWidth));
+        Assert.True(DarlingWorker.SelfAlertPassWidthFor(sweepWidth) <= DarlingWorker.DailyRunPoolReserve / 2);
+    }
+
+    /// <summary>
+    /// M1: a fleet at <c>max_concurrent_sweeps = 16</c> evaluates at most 4 servers at once. RED on the round-1 shape,
+    /// where the pass took the full sweep width and ran 16 store reads beside 16 sweep bodies on a pool of 24.
+    /// </summary>
+    [Fact]
+    public async Task TheFleetPass_AtSweepWidthSixteen_NeverEvaluatesMoreThanTheCappedWidthAtOnce()
+    {
+        var worker = MakeWorker();
+        var concurrent = 0;
+        var maxConcurrent = 0;
+        var finished = 0;
+        worker.SelfAlertServerOverride = async (_, ct) =>
+        {
+            InterlockedMax(ref maxConcurrent, Interlocked.Increment(ref concurrent));
+            await Task.Delay(100, ct);
+            Interlocked.Decrement(ref concurrent);
+            Interlocked.Increment(ref finished);
+        };
+        var servers = Enumerable.Range(1, 20).Select(i => MakeServer($"example-sql-{i:00}")).ToArray();
+
+        Assert.True(worker.TryStartSelfAlertPass(servers, TestContext.Current.CancellationToken, sweepWidth: 16));
+        Assert.True(await BecomesTrueAsync(() => Volatile.Read(ref finished) == 20));
+
+        Assert.InRange(Volatile.Read(ref maxConcurrent), 3, DarlingWorker.SelfAlertPassWidthFor(16));
+    }
+
+    /// <summary>
+    /// L1 (#5481 round 2): a pass that has run 20 seconds is past one 15-second tick but inside the 30-second server
+    /// cadence, so the tick that skips logs nothing. RED on round 1, which warned on every skip.
+    /// </summary>
+    [Fact]
+    public async Task APassPastOneTickButInsideTheCadence_LogsNoWarning()
+    {
+        var logger = new CapturingTestLogger();
+        var worker = MakeWorker(logger);
+        var now = new DateTime(2026, 1, 1, 12, 0, 0, DateTimeKind.Utc);
+        worker.SelfAlertPassClock = () => now;
+        var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        worker.SelfAlertServerOverride = async (_, _) =>
+        {
+            started.TrySetResult();
+            await release.Task;
+        };
+        var server = MakeServer("example-sql-01");
+
+        Assert.True(worker.TryStartSelfAlertPass([server], TestContext.Current.CancellationToken));
+        await started.Task.WaitAsync(Patience, TestContext.Current.CancellationToken);
+
+        now += TimeSpan.FromSeconds(15);
+        Assert.False(worker.TryStartSelfAlertPass([server], TestContext.Current.CancellationToken));
+        now += TimeSpan.FromSeconds(5);
+        Assert.False(worker.TryStartSelfAlertPass([server], TestContext.Current.CancellationToken));
+
+        Assert.Equal(0, logger.CountAtLevel(LogLevel.Warning));
+        release.SetResult();
+        Assert.True(await BecomesTrueAsync(() => worker.TryStartSelfAlertPass([server], TestContext.Current.CancellationToken)));
+    }
+
+    /// <summary>
+    /// L1: a pass that has run 70 seconds has outrun the 30-second cadence, so exactly one Warning is logged for it,
+    /// with how long it has run, however many ticks skip. A pass after it that also overruns warns once again.
+    /// </summary>
+    [Fact]
+    public async Task APassThatOutrunsTheCadence_LogsExactlyOneWarning_WithHowLongItHasRun()
+    {
+        var logger = new CapturingTestLogger();
+        var worker = MakeWorker(logger);
+        var now = new DateTime(2026, 1, 1, 12, 0, 0, DateTimeKind.Utc);
+        worker.SelfAlertPassClock = () => now;
+        var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        worker.SelfAlertServerOverride = async (_, _) =>
+        {
+            started.TrySetResult();
+            await release.Task;
+        };
+        var server = MakeServer("example-sql-01");
+
+        Assert.True(worker.TryStartSelfAlertPass([server], TestContext.Current.CancellationToken));
+        await started.Task.WaitAsync(Patience, TestContext.Current.CancellationToken);
+
+        now += TimeSpan.FromSeconds(20);
+        Assert.False(worker.TryStartSelfAlertPass([server], TestContext.Current.CancellationToken));
+        now += TimeSpan.FromSeconds(50);
+        Assert.False(worker.TryStartSelfAlertPass([server], TestContext.Current.CancellationToken));
+        now += TimeSpan.FromSeconds(15);
+        Assert.False(worker.TryStartSelfAlertPass([server], TestContext.Current.CancellationToken));
+
+        Assert.Equal(1, logger.CountAtLevel(LogLevel.Warning));
+        Assert.Contains("running for 70s", logger.Joined);
+        release.SetResult();
+        Assert.True(await BecomesTrueAsync(() => worker.TryStartSelfAlertPass([server], TestContext.Current.CancellationToken)));
     }
 
     /// <summary>
@@ -530,6 +646,16 @@ VALUES ($1, $2, 'example-sql-live', 'wait_stats', $3, 0, 'SUCCESS', NULL, 0, 0, 
             }
 
             var harness = new DarlingSelfAlertTests.Harness { Now = DateTime.UtcNow };
+
+            /* The alert reaches the store through the production deliverer and history writer, so the test can read it
+               back from the alert history as well as from what the recording deliverer received (#5481 round 2). */
+            var alertSettings = new DarlingAlertSettings(new DarlingConfig());
+            var historyWriter = new PgAlertHistoryStore(postgres);
+            harness.Deliverer.Inner = new DarlingAlertDeliverer(
+                alertSettings,
+                historyWriter,
+                new WebhookAlertService(alertSettings, DarlingAlertDeliverer.Branding, NullLogger<WebhookAlertService>.Instance, historyWriter),
+                NullLogger.Instance);
             var worker = SelfAlertFleetPassTests.MakeWorker();
             worker.StoreForTests = postgres;
             worker.SelfAlertsForTests = harness.Build();
@@ -557,6 +683,11 @@ VALUES ($1, $2, 'example-sql-live', 'wait_stats', $3, 0, 'SUCCESS', NULL, 0, 0, 
 
             Assert.True(await SelfAlertFleetPassTests.BecomesTrueAsync(() => harness.Deliverer.Outcomes.Any(o => o.MetricName == "Collection Stopped")));
             Assert.Single(harness.Deliverer.Outcomes, o => o.MetricName == "Collection Stopped");
+
+            /* And the history: the production writer put exactly one Collection Stopped row in config_alert_log. The first
+               pass's silence is asserted above through the deliverer. */
+            Assert.True(await SelfAlertFleetPassTests.BecomesTrueAsync(() => CountHistoryRowsAsync(connection, ct).GetAwaiter().GetResult() >= 1));
+            Assert.Equal(1, await CountHistoryRowsAsync(connection, ct));
             Assert.True(worker.LaunchGuard.IsHolding, "the guard must still be holding when the alert fires");
             Assert.Null(server.InFlightSweep);
             bodySucceeded = true;
@@ -570,10 +701,18 @@ VALUES ($1, $2, 'example-sql-live', 'wait_stats', $3, 0, 'SUCCESS', NULL, 0, 0, 
         }
     }
 
+    private static async Task<long> CountHistoryRowsAsync(NpgsqlConnection connection, CancellationToken ct)
+    {
+        using var read = new NpgsqlCommand(
+            "SELECT count(*) FROM config_alert_log WHERE server_name = 'example-sql-live' AND metric_name = 'Collection Stopped';", connection);
+        return (long)(await read.ExecuteScalarAsync(ct))!;
+    }
+
     private static async Task DeleteLivePassRowsAsync(NpgsqlConnection connection, CancellationToken ct)
     {
         using var cleanup = new NpgsqlCommand(
-            $"DELETE FROM collection_log WHERE server_id = {LivePassServerId};", connection);
+            $"DELETE FROM collection_log WHERE server_id = {LivePassServerId}; "
+            + "DELETE FROM config_alert_log WHERE server_name = 'example-sql-live' AND metric_name = 'Collection Stopped';", connection);
         await cleanup.ExecuteNonQueryAsync(ct);
     }
 }

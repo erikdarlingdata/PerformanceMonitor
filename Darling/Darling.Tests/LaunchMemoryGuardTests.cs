@@ -25,6 +25,11 @@ namespace Darling.Tests;
 public sealed class LaunchMemoryGuardTests
 {
     private const long Mb = 1024L * 1024;
+
+    /* The root-cgroup limit files, built from the production mount constants (the production code builds the same paths
+       from them; only these tests name the whole path). */
+    private const string CgroupV2MemoryMaxPath = DarlingStoreHostProfile.CgroupV2MountPath + "/memory.max";
+    private const string CgroupV1MemoryLimitPath = DarlingStoreHostProfile.CgroupV1MemoryMountPath + "/memory.limit_in_bytes";
     private const long Limit = 1536 * Mb;
 
     /* The line is 0.80 of the limit: 1228.8MB. */
@@ -356,6 +361,36 @@ public sealed class LaunchMemoryGuardTests
         Assert.Equal(1, rig.Count(LogLevel.Warning, "collection refused"));
     }
 
+    /// <summary>L2 (#5479): a collection that threw is not "a full garbage collection" the figure survived. The Critical
+    /// says the collection failed and still gives the figure; the "ran a full garbage collection" line is not logged.
+    /// RED before: the Critical read "even after a full garbage collection" whatever happened to the collection.</summary>
+    [Fact]
+    public void ACollectionThatFails_IsNotReportedAsAFullCollectionTheFigureSurvived()
+    {
+        var rig = new Rig();
+        rig.OnCollect = () => throw new InvalidOperationException("collection refused");
+
+        Assert.False(rig.Pass());
+
+        var critical = Assert.Single(rig.Logger.Lines, l => l.StartsWith("Critical:", StringComparison.Ordinal));
+        Assert.DoesNotContain("even after a full garbage collection", critical, StringComparison.Ordinal);
+        Assert.Contains("failed", critical, StringComparison.Ordinal);
+        Assert.Contains("1426MB", critical, StringComparison.Ordinal);
+        Assert.Equal(0, rig.Count(LogLevel.Information, "ran a full garbage collection"));
+    }
+
+    /// <summary>The wording still claims a collection when one completed and the figure stayed over.</summary>
+    [Fact]
+    public void ACollectionThatCompletes_StillSaysTheFigureSurvivedIt()
+    {
+        var rig = new Rig();
+
+        Assert.False(rig.Pass());
+
+        var critical = Assert.Single(rig.Logger.Lines, l => l.StartsWith("Critical:", StringComparison.Ordinal));
+        Assert.Contains("even after a full garbage collection", critical, StringComparison.Ordinal);
+    }
+
     [Theory]
     [InlineData(0, "0s")]
     [InlineData(42, "42s")]
@@ -436,8 +471,8 @@ public sealed class LaunchMemoryGuardTests
         var files = new FakeFiles();
         files.Files[LinuxLaunchMemorySampler.ProcStatusPath] = status;
         files.Files[DarlingStoreHostProfile.ProcMeminfoPath] = meminfo;
-        files.Files[DarlingStoreHostProfile.CgroupV2MemoryMaxPath] = v2;
-        files.Files[DarlingStoreHostProfile.CgroupV1MemoryLimitPath] = v1;
+        files.Files[CgroupV2MemoryMaxPath] = v2;
+        files.Files[CgroupV1MemoryLimitPath] = v1;
         var logger = new CapturingTestLogger();
         return (new LinuxLaunchMemorySampler(files.Read, () => workingSet, () => gcBudget, logger), files, logger);
     }
@@ -583,8 +618,8 @@ public sealed class LaunchMemoryGuardTests
         }
 
         Assert.Equal(1, files.Reads[DarlingStoreHostProfile.ProcMeminfoPath]);
-        Assert.Equal(1, files.Reads[DarlingStoreHostProfile.CgroupV2MemoryMaxPath]);
-        Assert.Equal(1, files.Reads[DarlingStoreHostProfile.CgroupV1MemoryLimitPath]);
+        Assert.Equal(1, files.Reads[CgroupV2MemoryMaxPath]);
+        Assert.Equal(1, files.Reads[CgroupV1MemoryLimitPath]);
         Assert.Equal(5, files.Reads[LinuxLaunchMemorySampler.ProcStatusPath]);
     }
 
@@ -713,7 +748,7 @@ public sealed class LaunchMemoryGuardTests
         files.Files[LinuxLaunchMemorySampler.ProcStatusPath] = "VmRSS:\t 1843200 kB\n";
         files.Files[DarlingStoreHostProfile.ProcMeminfoPath] = MeminfoSixtyFourGb;
         files.Files[DarlingStoreHostProfile.ProcSelfCgroupPath] = "0::/system.slice/darling.service\n";
-        files.Files[DarlingStoreHostProfile.CgroupV2MemoryMaxPath] = "max\n";
+        files.Files[CgroupV2MemoryMaxPath] = "max\n";
         files.Files["/sys/fs/cgroup/system.slice/darling.service/memory.max"] = TwoGi + "\n";
         var sampler = new LinuxLaunchMemorySampler(files.Read, () => 700 * Mb, () => Limit, new CapturingTestLogger());
 

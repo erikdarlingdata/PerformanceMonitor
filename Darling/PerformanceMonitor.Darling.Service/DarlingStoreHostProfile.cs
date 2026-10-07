@@ -197,8 +197,6 @@ internal static class DarlingStoreHostProfile
     /// <summary>Where the Linux paths below read total RAM and the cgroup memory limit. Shared with the memory
     /// launch guard (#5479), so the guard and <c>--check-settings</c> read the same files.</summary>
     internal const string ProcMeminfoPath = "/proc/meminfo";
-    internal const string CgroupV2MemoryMaxPath = "/sys/fs/cgroup/memory.max";
-    internal const string CgroupV1MemoryLimitPath = "/sys/fs/cgroup/memory/memory.limit_in_bytes";
 
     /// <summary>This process's own cgroup membership, and the two mount points the limit files live under (#5479).</summary>
     internal const string ProcSelfCgroupPath = "/proc/self/cgroup";

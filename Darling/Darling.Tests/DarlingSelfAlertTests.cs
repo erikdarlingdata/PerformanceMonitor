@@ -105,10 +105,17 @@ public sealed class DarlingSelfAlertTests
     {
         public List<AlertOutcome> Outcomes { get; } = new();
 
-        public Task DeliverAsync(AlertOutcome outcome, CancellationToken cancellationToken = default)
+        /// <summary>#5481 round 2: when set, every outcome is also handed to this deliverer (a live test gives it the
+        /// production <c>DarlingAlertDeliverer</c> over the real history writer), and its report is returned.</summary>
+        public IAlertDeliverer? Inner { get; set; }
+
+        public async Task DeliverAsync(AlertOutcome outcome, CancellationToken cancellationToken = default)
         {
             Outcomes.Add(outcome);
-            return Task.CompletedTask;
+            if (Inner is not null)
+            {
+                await Inner.DeliverAsync(outcome, cancellationToken);
+            }
         }
 
         /* #3580: DeliverAndReportAsync is REQUIRED on the seam rather than defaulted (CONTRIBUTING, Two-Store
@@ -116,6 +123,12 @@ public sealed class DarlingSelfAlertTests
            two daily documents treat as delivered, exactly as every fire before #3580 was. */
         public async Task<AlertDelivery?> DeliverAndReportAsync(AlertOutcome outcome, CancellationToken cancellationToken = default)
         {
+            if (Inner is not null)
+            {
+                Outcomes.Add(outcome);
+                return await Inner.DeliverAndReportAsync(outcome, cancellationToken);
+            }
+
             await DeliverAsync(outcome, cancellationToken);
             return null;
         }

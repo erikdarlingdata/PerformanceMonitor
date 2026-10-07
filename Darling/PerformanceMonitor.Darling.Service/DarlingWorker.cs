@@ -784,6 +784,9 @@ public sealed class DarlingWorker : BackgroundService
     /* #5366: the service's password key at run time, set once at start; null before it. */
     private DarlingPasswordKeyRuntime? _passwordKeyRuntime;
 
+    /// <summary>#5479: the clock the fleet pass's overrun check reads; a test sets it to age a running pass without waiting.</summary>
+    internal Func<DateTime> SelfAlertPassClock { get; set; } = static () => DateTime.UtcNow;
+
     /// <summary>#5479: lets a live test give the fleet pass the production self-alert evaluator that ExecuteAsync builds.</summary>
     internal DarlingSelfAlertEvaluator? SelfAlertsForTests
     {
@@ -974,9 +977,13 @@ public sealed class DarlingWorker : BackgroundService
        time: a pass still running at the next tick makes that tick skip, so a server is never evaluated by two threads. */
     private Task? _selfAlertPass;
 
-    /* Set when a tick skipped because the previous pass was still running, cleared by the pass's end: one Warning per
-       overrun, not one per 15-second tick. */
+    /* Set when the running pass has outrun the 30 s server cadence and a tick has said so, cleared when the next pass
+       starts: one Warning per pass, not one per 15-second tick. */
     private bool _selfAlertPassOverranWarned;
+
+    /* When the in-flight pass started, read by the skipping tick to tell a pass that is merely past one tick from one
+       that has outrun the cadence. Written and read on the sweep loop's thread only. */
+    private DateTime _selfAlertPassStartedUtc;
 
     /* #4130: the in-flight daily retention purge, fire-and-tracked like the per-server sweeps and the
        oversized-plan backlog above rather than awaited inline. Measured at 346-400s deleting ~839k rows;
@@ -5415,6 +5422,17 @@ LIMIT 1";
 
         return (int)Math.Clamp((long)poolMax - sweepWidth - DailyRunPoolReserve, 1, MaxConcurrentDailyRuns);
     }
+
+    /// <summary>
+    /// #5479: how many servers the fleet self-alert pass evaluates at once, given the sweep width: the smaller of the
+    /// width and half of <see cref="DailyRunPoolReserve"/> (so at most 4). The pass is nothing but store reads, and they
+    /// run beside the sweep bodies and the daily runs, which <see cref="DailyRunCapFor"/> already counts. Those reads are
+    /// the alert reads the reserve is documented to cover, so the pass spends at most half of it and the web viewer's and
+    /// the MCP tools' reads always keep the other half. A pool of 24 with a sweep width of 16 runs 16 bodies, the pass at
+    /// 4, and a daily-run cap of 1: 21 of 24, with 3 left. The same pass at the full width of 16 would need 33.
+    /// </summary>
+    internal static int SelfAlertPassWidthFor(int sweepWidth) =>
+        Math.Max(1, Math.Min(StoreConfigProvider.ClampConcurrentSweeps(sweepWidth), DailyRunPoolReserve / 2));
 
     /// <summary>
     /// #4999: the largest number of connections the store's data source will hold open, read from the connection
@@ -11259,26 +11277,32 @@ AND   j.hypertable_name = '{relation}'", connection))
     /// body, so a body the memory launch guard held off, or one that never finished, silenced them; a fleet that had
     /// stopped collecting paged nobody for 25 hours. Called by the sweep loop every tick whether or not any body
     /// launches, fire-and-tracked like the per-server bodies and the hourly ticks, never awaited. One pass at a time: a
-    /// pass still running at the next tick makes that tick skip (one Warning per overrun), so no server is ever
+    /// pass still running at the next tick makes that tick skip (one Warning per pass, once it has outrun the 30 s cadence), so no server is ever
     /// evaluated by two threads at once, and the stamps in <see cref="ServerLoopState"/> are written by this pass only.
     /// </summary>
-    /// <param name="sweepWidth">How many servers the pass evaluates at once: the fleet gate's width
-    /// (<c>max_concurrent_sweeps</c>), because the same store reads used to run inside the bodies under that gate.</param>
+    /// <param name="sweepWidth">The fleet gate's width (<c>max_concurrent_sweeps</c>). The pass evaluates that many servers at
+    /// once, capped by <see cref="SelfAlertPassWidthFor"/> so its reads stay inside the store pool's reserve.</param>
     internal bool TryStartSelfAlertPass(ServerLoopState[] targets, CancellationToken stoppingToken, int sweepWidth = MaxConcurrentServerSweeps)
     {
         if (_selfAlertPass is { IsCompleted: false })
         {
-            if (!_selfAlertPassOverranWarned)
+            /* A server's cadence is 30 s (s_alertSweepInterval) and the sweep tick is 15 s, so a pass that runs past
+               one tick but ends inside the cadence is on time and logs nothing here. Only a pass that has outrun the
+               cadence warns, once per pass, with how long it has run. */
+            var runningFor = SelfAlertPassClock() - _selfAlertPassStartedUtc;
+            if (!_selfAlertPassOverranWarned && runningFor > s_alertSweepInterval)
             {
                 _selfAlertPassOverranWarned = true;
                 _logger.LogWarning(
-                    "the previous per-server self-alert pass is still running at this tick, so this tick starts no second one; the running pass is still judging the servers, and the next tick after it ends starts a new pass");
+                    "the previous per-server self-alert pass has been running for {RunningFor:F0}s, longer than its {Cadence:F0}s cadence, so this tick starts no second one; the running pass is still judging the servers, and the next tick after it ends starts a new pass",
+                    runningFor.TotalSeconds, s_alertSweepInterval.TotalSeconds);
             }
 
             return false;
         }
 
         _selfAlertPassOverranWarned = false;
+        _selfAlertPassStartedUtc = SelfAlertPassClock();
         _selfAlertPass = RunTrackedTickAsync("per-server self-alert pass", token => RunSelfAlertPassAsync(targets, sweepWidth, token), stoppingToken);
         return true;
     }
@@ -11287,7 +11311,7 @@ AND   j.hypertable_name = '{relation}'", connection))
     /// The pass itself (#5479): each non-retired server, up to <c>sweepWidth</c> at a time, on its own cadence stamps. A
     /// fleet pass that walked the servers one at a time took 3 or more sequential store reads per server (50 to 100 s at
     /// 500 servers), so every tick overran and Collection Stopped lagged the cadence several times over; the same calls
-    /// ran inside the bodies under the fleet gate before, and the pass is held to the same width. Each server is still
+    /// ran inside the bodies under the fleet gate before. The pass runs at <see cref="SelfAlertPassWidthFor"/> of the sweep width, which keeps its reads inside the store pool's reserve. Each server is still
     /// visited once per pass by one thread, so its stamps stay single-writer, and only one pass runs at a time.
     /// Collection-stopped is evaluated for EVERY server, connected or not and whether or not it has been seen online
     /// since this service started (#4757), because an unreachable server has stopped collecting, which is exactly the
@@ -11302,7 +11326,7 @@ AND   j.hypertable_name = '{relation}'", connection))
         var started = Stopwatch.StartNew();
         var options = new ParallelOptions
         {
-            MaxDegreeOfParallelism = StoreConfigProvider.ClampConcurrentSweeps(sweepWidth),
+            MaxDegreeOfParallelism = SelfAlertPassWidthFor(sweepWidth),
             CancellationToken = stoppingToken,
         };
 

@@ -185,9 +185,10 @@ internal sealed class LaunchMemoryGuard
         /* Over the line: collect first (the first collection after start is never rate-limited), then judge the
          * figure the collection left. */
         var collected = false;
+        var collectionCompleted = false;
         if (_lastCollection is not { } last || now - last >= CollectionInterval)
         {
-            reading = CollectAndMeasure(reading, now);
+            (reading, collectionCompleted) = CollectAndMeasure(reading, now);
             collected = true;
         }
 
@@ -212,9 +213,20 @@ internal sealed class LaunchMemoryGuard
         if (collected && !_criticalLogged)
         {
             _criticalLogged = true;
-            _logger.LogCritical(
-                "Memory over the line even after a full garbage collection: {Metric} {FigureMb}MB is over {Pct:P0} of the {LimitMb}MB limit ({LimitSource}) — PAUSING new collection-body launches so in-flight bodies drain (the #1556 commit-limit backstop). Purge/disk/analysis continue. A full garbage collection runs about once a minute while the pause holds, and the pause ends when the figure is back under the line.",
-                reading.Metric, Mb(reading.Bytes), DarlingWorker.MemoryGuardFraction, Mb(reading.LimitBytes), reading.LimitSource);
+            if (collectionCompleted)
+            {
+                _logger.LogCritical(
+                    "Memory over the line even after a full garbage collection: {Metric} {FigureMb}MB is over {Pct:P0} of the {LimitMb}MB limit ({LimitSource}) — PAUSING new collection-body launches so in-flight bodies drain (the #1556 commit-limit backstop). Purge/disk/analysis continue. A full garbage collection runs about once a minute while the pause holds, and the pause ends when the figure is back under the line.",
+                    reading.Metric, Mb(reading.Bytes), DarlingWorker.MemoryGuardFraction, Mb(reading.LimitBytes), reading.LimitSource);
+            }
+            else
+            {
+                /* The collection or the reading after it threw (#5479): the figure is the one from before, so the line
+                   must not claim a collection that did not finish. The next attempt is a minute away. */
+                _logger.LogCritical(
+                    "Memory over the line and the full garbage collection (or the reading after it) failed, so the figure was not re-checked: {Metric} {FigureMb}MB is over {Pct:P0} of the {LimitMb}MB limit ({LimitSource}) — PAUSING new collection-body launches so in-flight bodies drain (the #1556 commit-limit backstop). Purge/disk/analysis continue. The guard tries the garbage collection again about once a minute while the pause holds, and the pause ends when the figure is back under the line.",
+                    reading.Metric, Mb(reading.Bytes), DarlingWorker.MemoryGuardFraction, Mb(reading.LimitBytes), reading.LimitSource);
+            }
         }
 
         if (now - _lastWarning >= HoldWarningInterval)
@@ -229,26 +241,33 @@ internal sealed class LaunchMemoryGuard
         return false;
     }
 
-    /// <summary>Runs the collection, logs the figure before and after, and returns the fresh reading. A failed
-    /// collection or a failed second reading leaves the old reading, so the hold simply continues.</summary>
-    private LaunchMemoryReading CollectAndMeasure(LaunchMemoryReading before, TimeSpan now)
+    /// <summary>Runs the collection, logs the figure before and after, and returns the fresh reading plus whether the
+    /// collection and the reading after it both completed. A failed collection or a failed second reading leaves the
+    /// old reading and reports <c>false</c>, so the hold simply continues and the Critical does not claim a collection.</summary>
+    private (LaunchMemoryReading Reading, bool Completed) CollectAndMeasure(LaunchMemoryReading before, TimeSpan now)
     {
         _lastCollection = now;
         var after = before;
+        var completed = false;
         try
         {
             _collectGarbage();
             after = _sample();
+            completed = true;
         }
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "The memory launch guard's garbage collection or the measurement after it failed ({Reason}); the hold continues.", ex.Message);
         }
 
-        _logger.LogInformation(
-            "The memory launch guard ran a full garbage collection: {Metric} {BeforeMb}MB before, {AfterMb}MB after ({LimitMb}MB limit, {LimitSource}).",
-            before.Metric, Mb(before.Bytes), Mb(after.Bytes), Mb(after.LimitBytes), after.LimitSource);
-        return after;
+        if (completed)
+        {
+            _logger.LogInformation(
+                "The memory launch guard ran a full garbage collection: {Metric} {BeforeMb}MB before, {AfterMb}MB after ({LimitMb}MB limit, {LimitSource}).",
+                before.Metric, Mb(before.Bytes), Mb(after.Bytes), Mb(after.LimitBytes), after.LimitSource);
+        }
+
+        return (after, completed);
     }
 
     private void Release(TimeSpan now, LaunchMemoryReading reading)
