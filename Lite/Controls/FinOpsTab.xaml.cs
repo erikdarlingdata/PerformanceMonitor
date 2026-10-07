@@ -44,6 +44,10 @@ public partial class FinOpsTab : UserControl
        for a server switch that never happened. Darling's FinOps tab carries the same flag. */
     private bool _populatingServers;
 
+    /* When the last whole per-server load began (UTC). The tab loads once at start-up, before the first collection has run; showing it
+       later re-runs that load, the same one a server reselect runs, unless this is recent (FinOpsShowReloadPolicy). */
+    private DateTime? _lastPerServerLoadUtc;
+
     private DataGridFilterManager<DatabaseResourceUsageRow>? _dbResourcesFilterMgr;
     private DataGridFilterManager<StorageGrowthRow>? _storageGrowthFilterMgr;
     private DataGridFilterManager<DatabaseSizeRow>? _dbSizesFilterMgr;
@@ -257,6 +261,7 @@ public partial class FinOpsTab : UserControl
         using var _profiler = Helpers.MethodProfiler.StartTiming("FinOps-PerServerData");
         var serverId = GetSelectedServerId();
         if (serverId == 0 || _dataService == null) return;
+        _lastPerServerLoadUtc = DateTime.UtcNow;
 
         // Re-read monthly cost from server manager in case user edited the server config
         if (ServerSelector.SelectedItem is Models.ServerConnection selectedServer && _serverManager != null)
@@ -502,9 +507,10 @@ public partial class FinOpsTab : UserControl
         /* Health score: CPU, memory and storage on every edition. The memory term reads memory_stats, which on an Azure SQL
            Database is the database's own. */
         data.HealthScore = data.ComputeHealthScore();
-        /* A window with no CPU sample has no CPU term (ComputeHealthScore leaves it out), and the tooltip says so. */
-        HealthScoreBorder.ToolTip = data.HasCpuSample ? null : ServerHardwareScope.HealthScoreWithoutCpuNote;
-        HealthScoreText.Text = $"Health: {data.HealthScore}";
+        /* A window with no CPU sample has no score: the memory and storage terms alone would read a full 100 next to "No Data".
+           It shows a dash on a gray badge, and the tooltip says why. */
+        HealthScoreBorder.ToolTip = data.HasCpuSample ? null : FinOpsHealthCalculator.NoScoreNote;
+        HealthScoreText.Text = data.HealthScoreText;
         HealthScoreBorder.Background = new SolidColorBrush((Color)ColorConverter.ConvertFromString(data.HealthScoreColor));
         HealthScoreBorder.Visibility = Visibility.Visible;
     }
@@ -596,10 +602,21 @@ public partial class FinOpsTab : UserControl
     private void ReloadUnfinishedSizeGridsOnShow()
     {
         if (!IsVisible || _dataService == null) return;
-        /* A show while a flagged load is still in flight starts a second load that supersedes the first: one
-           extra local read, and the generation check keeps only the newest paint. */
         var serverId = GetSelectedServerId();
         if (serverId == 0) return;
+
+        /* The first show: the start-up load ran before any collection, against a store that may be days old, so every grid on this
+           tab (and the recommendations built from them) can still be that empty window. Re-run the same whole load a server
+           reselect runs, for the server already selected; the per-grid generations drop any paint it supersedes. Filters stay: no
+           server switch happened. It covers both size grids, so the flagged reloads below are for a recent load. */
+        if (FinOpsShowReloadPolicy.ShouldReloadOnShow(_lastPerServerLoadUtc, DateTime.UtcNow))
+        {
+            _ = LoadPerServerDataAsync();
+            return;
+        }
+
+        /* A show while a flagged load is still in flight starts a second load that supersedes the first: one
+           extra local read, and the generation check keeps only the newest paint. */
         if (_dbSizesNeedReload) _ = LoadDatabaseSizesAsync(serverId);
         if (_storageGrowthNeedReload) _ = LoadStorageGrowthAsync(serverId);
     }

@@ -471,8 +471,9 @@ public sealed class AzureSqlDatabaseOwnFiguresTests
             tab, StringComparison.Ordinal);
         Assert.DoesNotContain("$\"{data.CurrentWorkersCount:N0} / {data.MaxWorkersCount:N0}\"", tab, StringComparison.Ordinal);
 
+        /* The badge with no CPU sample is a dash with its own tooltip, not a partial score (FinOpsHealthBadgeNoCpuTests). */
         Assert.Contains(
-            "HealthScoreBorder.ToolTip = data.HasCpuSample ? null : ServerHardwareScope.HealthScoreWithoutCpuNote;",
+            "HealthScoreBorder.ToolTip = data.HasCpuSample ? null : FinOpsHealthCalculator.NoScoreNote;",
             tab, StringComparison.Ordinal);
 
         Assert.Contains(

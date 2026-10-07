@@ -103,6 +103,19 @@ SELECT @count;";
     }
 
     /// <summary>
+    /// True for an edition that is paid for as Enterprise, the only editions the licensing advice ("Enterprise may not be
+    /// required", the downgrade savings) can apply to. A Developer or Evaluation edition (including "Enterprise Developer Edition"
+    /// and "Enterprise Evaluation Edition") has no license fee to save, and Express is never Enterprise, so none of the three gets
+    /// licensing advice.
+    /// </summary>
+    internal static bool EditionNeedsLicensingAdvice(string? edition) =>
+        !string.IsNullOrEmpty(edition)
+        && edition.Contains("Enterprise", StringComparison.OrdinalIgnoreCase)
+        && !edition.Contains("Developer", StringComparison.OrdinalIgnoreCase)
+        && !edition.Contains("Evaluation", StringComparison.OrdinalIgnoreCase)
+        && !edition.Contains("Express", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
     /// Runs all Phase 1 recommendation checks and returns a consolidated list.
     /// Uses DuckDB for collected data and live SQL queries for server-specific checks.
     /// </summary>
@@ -129,7 +142,7 @@ SELECT @count;";
                 majorVersion = editionReader.IsDBNull(1) ? 0 : editionReader.GetInt32(1);
             }
 
-            if (edition.Contains("Enterprise", StringComparison.OrdinalIgnoreCase))
+            if (EditionNeedsLicensingAdvice(edition))
             {
                 var agRole = await GetAgReplicaRoleAsync(sqlConn);
 
@@ -286,13 +299,20 @@ END;", sqlConn);
             AppLogger.Error("FinOps", $"Recommendation check failed (Enterprise features): {ex.Message}");
         }
 
+        /* Both CPU right-sizing rules (2 and 12) read the same samples. A server enrolled minutes ago holds only the ring-buffer
+           backfill of its first collect ("68 samples over 4 minutes"), which is not a week of load, so neither rule speaks until the
+           samples span a full day, and the two never both land in the list: the one that keeps more cores wins. */
+        var cpuSpanEnough = CpuSamplesSpanEnough(await GetCpuSampleSpanAsync(serverId));
+        RecommendationRow? computeCpuRow = null;
+        var computeCpuTarget = 0;
+
         // 2. CPU right-sizing score (from DuckDB)
         try
         {
             var util = await GetUtilizationEfficiencyAsync(serverId);
             /* A window with no CPU sample reads a P95 of 0, which is "idle" only because nothing was measured.
                The utilization row gives that window no verdict (HasCpuSample is false); the advice follows it. */
-            if (util != null && util.HasCpuSample && util.P95CpuPct < 30 && util.CpuCount > 4
+            if (cpuSpanEnough && util != null && util.HasCpuSample && util.P95CpuPct < 30 && util.CpuCount > 4
                 && util.ProvisioningStatus != ProvisioningVerdict.NotApplicable)
             {
                 var targetCores = Math.Max(4, (int)(util.CpuCount * (util.P95CpuPct / 70m)));
@@ -300,7 +320,8 @@ END;", sqlConn);
                 /* The count is the vCores the service objective gives an Azure SQL Database, so it is named as the utilization card
                    names it; everywhere else it is the CPU count, and the word stays "cores". */
                 var cpuNoun = ServerHardwareScope.CpuCoreNoun(util.EngineEdition);
-                recommendations.Add(new RecommendationRow
+                computeCpuTarget = targetCores;
+                recommendations.Add(computeCpuRow = new RecommendationRow
                 {
                     Category = "Compute",
                     Severity = util.P95CpuPct < 15 ? "High" : "Medium",
@@ -693,8 +714,13 @@ AND   collection_time >= $2";
                     else if (p95Cpu7d < 30)
                         targetCores = Math.Max(2, cpuCount / 2);
 
-                    if (targetCores > 0 && targetCores < cpuCount)
+                    /* One CPU right-sizing row per server: rule 2 may already have added its row, and this one then takes its
+                       place only when it keeps more cores. */
+                    if (cpuSpanEnough && targetCores > 0 && targetCores < cpuCount
+                        && PrescriptiveCpuRowWins(computeCpuRow == null ? null : computeCpuTarget, targetCores))
                     {
+                        if (computeCpuRow != null)
+                            recommendations.Remove(computeCpuRow);
                         recommendations.Add(new RecommendationRow
                         {
                             Category = "Hardware",
@@ -879,18 +905,69 @@ HAVING COUNT(*) >= 24";
         return RightSizingWindow.Describe(count, Convert.ToDateTime(reader.GetValue(firstOrdinal + 1)) - Convert.ToDateTime(reader.GetValue(firstOrdinal)));
     }
 
-    /// <summary>True once the server's query stats reach back to the start of the 7-day window. The advice text claims 7 days, so the data must cover all 7: the first sample has to be at or before the cutoff, with no slack.</summary>
+    /// <summary>How long the server's CPU samples must span before either CPU right-sizing rule may speak.</summary>
+    internal static readonly TimeSpan CpuRightSizingMinSpan = TimeSpan.FromHours(24);
+
+    /// <summary>True when CPU samples spanning <paramref name="span"/> are enough for CPU right-sizing advice: a full day, so the advice is not read off the minutes a first collect backfills.</summary>
+    internal static bool CpuSamplesSpanEnough(TimeSpan span) => span >= CpuRightSizingMinSpan;
+
+    /// <summary>
+    /// True when the prescriptive CPU row (rule 12) replaces the compute row (rule 2) or stands alone: it does when no compute row
+    /// exists (<paramref name="computeTargetCores"/> null) or when it keeps MORE cores than that row. At a tie the compute row stays.
+    /// </summary>
+    internal static bool PrescriptiveCpuRowWins(int? computeTargetCores, int prescriptiveTargetCores) =>
+        computeTargetCores is not int compute || prescriptiveTargetCores > compute;
+
+    /// <summary>The span from the oldest to the newest CPU sample in the last 7 days (the window rule 12 reads): zero when there is none or the read fails.</summary>
+    private async Task<TimeSpan> GetCpuSampleSpanAsync(int serverId)
+    {
+        try
+        {
+            using var connection = await OpenConnectionAsync();
+            using var command = connection.CreateCommand();
+            command.CommandText = @"
+SELECT MIN(collection_time), MAX(collection_time)
+FROM v_cpu_utilization_stats
+WHERE server_id = $1
+AND   collection_time >= $2
+AND   sqlserver_cpu_utilization IS NOT NULL";
+            command.Parameters.Add(new DuckDBParameter { Value = serverId });
+            command.Parameters.Add(new DuckDBParameter { Value = DateTime.UtcNow.AddDays(-7) });
+            using var reader = await command.ExecuteReaderAsync();
+            if (await reader.ReadAsync() && !reader.IsDBNull(0) && !reader.IsDBNull(1))
+                return Convert.ToDateTime(reader.GetValue(1)) - Convert.ToDateTime(reader.GetValue(0));
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Error("FinOps", $"Recommendation check failed (CPU sample span): {ex.Message}");
+        }
+
+        return TimeSpan.Zero;
+    }
+
+    /// <summary>The number of UTC days, counting today, that must each hold a query-stats sample before a database is called idle for 7 days.</summary>
+    internal const int IdleCoverageDays = 7;
+
+    /// <summary>
+    /// True once the server's query stats hold a sample on each of the last 7 UTC days (today and the six before it). The advice
+    /// text claims "no query activity in 7 days", so all 7 days must have been watched. The oldest sample being 7 days old is not
+    /// enough: after a collection gap (the app was closed for nine days) the oldest sample is old, yet the days since hold no
+    /// sample, and every database reads as idle because nothing was watching, not because nothing ran. Without the coverage there is
+    /// no idle row at all.
+    /// </summary>
     private async Task<bool> HasQueryStatsCoverageAsync(int serverId)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
         command.CommandText = @"
-SELECT MIN(collection_time)
+SELECT COUNT(DISTINCT CAST(collection_time AS DATE))
 FROM v_query_stats
-WHERE server_id = $1";
+WHERE server_id = $1
+AND   collection_time >= $2";
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
-        var first = await command.ExecuteScalarAsync();
-        return first is DateTime firstSample && firstSample <= DateTime.UtcNow.AddDays(-7);
+        command.Parameters.Add(new DuckDBParameter { Value = DateTime.UtcNow.Date.AddDays(-(IdleCoverageDays - 1)) });
+        var days = await command.ExecuteScalarAsync();
+        return days != null && days != DBNull.Value && Convert.ToInt64(days) >= IdleCoverageDays;
     }
 
     private static string FormatDuration(long seconds)
