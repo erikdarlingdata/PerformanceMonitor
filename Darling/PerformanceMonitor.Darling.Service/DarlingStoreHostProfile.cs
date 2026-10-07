@@ -194,6 +194,12 @@ internal static class DarlingStoreHostProfile
     /// alongside a finite cgroup memory limit (#4214's ruling 2).</summary>
     public const string DotnetRunningInContainerEnvVar = "DOTNET_RUNNING_IN_CONTAINER";
 
+    /// <summary>Where the Linux paths below read total RAM and the cgroup memory limit. Shared with the memory
+    /// launch guard (#5479), so the guard and <c>--check-settings</c> read the same files.</summary>
+    internal const string ProcMeminfoPath = "/proc/meminfo";
+    internal const string CgroupV2MemoryMaxPath = "/sys/fs/cgroup/memory.max";
+    internal const string CgroupV1MemoryLimitPath = "/sys/fs/cgroup/memory/memory.limit_in_bytes";
+
     /* ============================= Linux RAM / cgroup: pure parse functions ============================= *
      * Pure over already-read file TEXT (not a path), so every branch — meminfo present/absent/unparseable,
      * cgroup v2 "max", v2 a real number, v1's near-long.MaxValue "no limit" sentinel, v1 a real number — has
@@ -289,7 +295,7 @@ internal static class DarlingStoreHostProfile
     /// <summary>Reads the whole file if present, or null on any I/O failure — the one shared "best effort
     /// file read" every Linux path below uses, so a missing/unreadable cgroup file degrades the same way a
     /// missing meminfo line does: fall back, never throw.</summary>
-    private static string? TryReadFile(string path)
+    internal static string? TryReadFile(string path)
     {
         try
         {
@@ -323,9 +329,9 @@ internal static class DarlingStoreHostProfile
 
         if (OperatingSystem.IsLinux())
         {
-            var memTotal = ParseProcMeminfoTotalBytes(TryReadFile("/proc/meminfo"));
-            var cgroupLimit = ParseCgroupV2MemoryMaxBytes(TryReadFile("/sys/fs/cgroup/memory.max"))
-                ?? ParseCgroupV1MemoryLimitBytes(TryReadFile("/sys/fs/cgroup/memory/memory.limit_in_bytes"));
+            var memTotal = ParseProcMeminfoTotalBytes(TryReadFile(ProcMeminfoPath));
+            var cgroupLimit = ParseCgroupV2MemoryMaxBytes(TryReadFile(CgroupV2MemoryMaxPath))
+                ?? ParseCgroupV1MemoryLimitBytes(TryReadFile(CgroupV1MemoryLimitPath));
             var authoritative = memTotal.HasValue;
             var total = memTotal ?? GC.GetGCMemoryInfo().TotalAvailableMemoryBytes;
             var effective = ComputeEffectiveMemoryLimitBytes(total, cgroupLimit);
