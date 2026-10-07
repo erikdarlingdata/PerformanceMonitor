@@ -311,13 +311,16 @@ public sealed class DarlingPasswordKeyStoreLiveTests
         var bodySucceeded = false;
         try
         {
-            await store.SeedServersAsync();
-            string? Open(string stored) => stored.StartsWith("legacy-", StringComparison.Ordinal) ? "p@ss-not-real" : throw new CryptographicException("not a blob");
+            await store.SeedServersAtUpgradeAsync();
+            bool Open(string stored) => stored.StartsWith("legacy-", StringComparison.Ordinal) ? true : throw new CryptographicException("not a blob");
 
             var logger = new ListLogger();
-            await store.StartAsync(isWindows: true, unprotect: Open, logger: logger);
+            var versionBefore = await store.ConfigVersionAsync();
+            await store.StartAsync(isWindows: true, canOpen: Open, logger: logger);
 
             Assert.Equal("done", await store.MarkerAsync());
+            Assert.Equal(0L, await store.CandidatesAsync());
+            Assert.Equal(versionBefore + 1, await store.ConfigVersionAsync());
             var pins = await store.ReadPinsAsync();
             Assert.Equal(["0/smtp", "1/remediation", "1/server"], pins.Keys.Order(StringComparer.Ordinal).ToArray());
 
@@ -333,7 +336,7 @@ public sealed class DarlingPasswordKeyStoreLiveTests
             Assert.Equal(PasswordBinding.ForSmtp("smtp.example.com", 587, true, "mail_login").LegacyPinHash(), pins["0/smtp"].Binding);
 
             // The sealed, reference and empty values were not pinned (server 2, 3 and 4 hold them), and a second start adds nothing.
-            await store.StartAsync(isWindows: true, unprotect: Open);
+            await store.StartAsync(isWindows: true, canOpen: Open);
             Assert.Equal(3, (await store.ReadPinsAsync()).Count);
             bodySucceeded = true;
         }
@@ -346,7 +349,7 @@ public sealed class DarlingPasswordKeyStoreLiveTests
     [Fact]
     public async Task TheFirstConfigView_CarriesThePins_OnlyWhenThePinSnapshotRanBeforeIt()
     {
-        string? Open(string stored) => stored.StartsWith("legacy-", StringComparison.Ordinal) ? "p@ss-not-real" : throw new CryptographicException("not a blob");
+        bool Open(string stored) => stored.StartsWith("legacy-", StringComparison.Ordinal) ? true : throw new CryptographicException("not a blob");
         var windows = new LegacyDpapi(true, _ => "p@ss-not-real");
         var ct = TestContext.Current.CancellationToken;
 
@@ -355,8 +358,8 @@ public sealed class DarlingPasswordKeyStoreLiveTests
         var firstSucceeded = false;
         try
         {
-            await pinnedFirst.SeedServersAsync();
-            await pinnedFirst.StartAsync(isWindows: true, unprotect: Open);
+            await pinnedFirst.SeedServersAtUpgradeAsync();
+            await pinnedFirst.StartAsync(isWindows: true, canOpen: Open);
             var view = await new StoreConfigProvider(pinnedFirst.Source).LoadViewAsync(new DarlingConfig(), ct);
             Assert.NotNull(view);
             var server = Assert.Single(view.EnabledServers, s => s.Name == "alpha-example");
@@ -376,10 +379,10 @@ public sealed class DarlingPasswordKeyStoreLiveTests
         var secondSucceeded = false;
         try
         {
-            await viewFirst.SeedServersAsync();
+            await viewFirst.SeedServersAtUpgradeAsync();
             var view = await new StoreConfigProvider(viewFirst.Source).LoadViewAsync(new DarlingConfig(), ct);
             Assert.NotNull(view);
-            await viewFirst.StartAsync(isWindows: true, unprotect: Open);
+            await viewFirst.StartAsync(isWindows: true, canOpen: Open);
             var server = Assert.Single(view.EnabledServers, s => s.Name == "alpha-example");
             Assert.Null(server.SecretPin);
             Assert.Equal(3, StoreConfigProvider.CountPasswordsToEnterAgain(view.EnabledServers, view.Smtp, windows));
@@ -398,8 +401,8 @@ public sealed class DarlingPasswordKeyStoreLiveTests
         var bodySucceeded = false;
         try
         {
-            await store.SeedServersAsync();
-            await store.StartAsync(isWindows: false, unprotect: static _ => throw new InvalidOperationException("must not be called"));
+            await store.SeedServersAtUpgradeAsync();
+            await store.StartAsync(isWindows: false, canOpen: static _ => throw new InvalidOperationException("must not be called"));
 
             Assert.Equal("skipped", await store.MarkerAsync());
             Assert.Empty(await store.ReadPinsAsync());
@@ -418,10 +421,10 @@ public sealed class DarlingPasswordKeyStoreLiveTests
         var bodySucceeded = false;
         try
         {
-            await store.SeedServersAsync();
+            await store.SeedServersAtUpgradeAsync();
             await store.ExecAsync("DELETE FROM config.legacy_secret_pin_marker;");
 
-            var runtime = await store.StartAsync(isWindows: true, unprotect: static _ => "p@ss-not-real");
+            var runtime = await store.StartAsync(isWindows: true, canOpen: static _ => true);
 
             Assert.Equal("ok", runtime.State);
             Assert.Null(await store.MarkerAsync());
@@ -473,14 +476,13 @@ public sealed class DarlingPasswordKeyStoreLiveTests
         var bodySucceeded = false;
         try
         {
-            await store.SeedServersAsync();
-            // Server 5 holds a value the unprotect step cannot open; it is not pinned at the snapshot.
-            await store.ExecAsync(@"
+            // Server 5 holds a value this machine cannot open; it was there at the upgrade, so it is recorded, but it is not pinned.
+            await store.SeedServersAtUpgradeAsync(@"
 INSERT INTO config.config_monitored_servers (server_id, name, host, database, auth, username, encrypted_password, port)
 VALUES (5, 'epsilon-example', 'epsilon-example', NULL, 'sql', 'monitor_login', 'unreadable-blob', 1433);");
-            string? Open(string stored) => stored.StartsWith("legacy-", StringComparison.Ordinal) ? "p@ss-not-real" : throw new CryptographicException("not a blob");
+            bool Open(string stored) => stored.StartsWith("legacy-", StringComparison.Ordinal) ? true : throw new CryptographicException("not a blob");
 
-            await store.StartAsync(isWindows: true, unprotect: Open);
+            await store.StartAsync(isWindows: true, canOpen: Open);
             Assert.Equal("done", await store.MarkerAsync());
             Assert.Equal(["0/smtp", "1/remediation", "1/server"], (await store.ReadPinsAsync()).Keys.Order(StringComparer.Ordinal).ToArray());
 
@@ -488,8 +490,8 @@ VALUES (5, 'epsilon-example', 'epsilon-example', NULL, 'sql', 'monitor_login', '
             await store.ExecAsync(@"
 INSERT INTO config.config_monitored_servers (server_id, name, host, database, auth, username, encrypted_password, port)
 VALUES (6, 'zeta-example', 'zeta-example', NULL, 'sql', 'monitor_login', 'legacy-new-blob', 1433);");
-            await store.StartAsync(isWindows: true, unprotect: Open);
-            await store.StartAsync(isWindows: true, unprotect: Open);
+            await store.StartAsync(isWindows: true, canOpen: Open);
+            await store.StartAsync(isWindows: true, canOpen: Open);
 
             var pins = await store.ReadPinsAsync();
             Assert.Equal(3, pins.Count);
@@ -510,23 +512,23 @@ VALUES (6, 'zeta-example', 'zeta-example', NULL, 'sql', 'monitor_login', 'legacy
         var bodySucceeded = false;
         try
         {
-            await store.SeedServersAsync();
+            await store.SeedServersAtUpgradeAsync();
             var ct = TestContext.Current.CancellationToken;
             var firstOpening = new ManualResetEventSlim(false);
-            string? SlowOpen(string stored)
+            bool SlowOpen(string stored)
             {
                 // Holds the first snapshot's transaction open until the second one is waiting on the marker.
                 firstOpening.Set();
                 Thread.Sleep(1500);
-                return stored.StartsWith("legacy-", StringComparison.Ordinal) ? "p@ss-not-real" : throw new CryptographicException("not a blob");
+                return stored.StartsWith("legacy-", StringComparison.Ordinal) ? true : throw new CryptographicException("not a blob");
             }
 
             var first = Task.Run(
-                () => DarlingPasswordKeyStore.SnapshotLegacyPinsAsync(store.Source, true, SlowOpen, new ListLogger(), ct), ct);
+                () => DarlingPasswordKeyStore.SnapshotLegacyPinsAsync(store.Source, true, SlowOpen, 30, new ListLogger(), ct), ct);
             Assert.True(firstOpening.Wait(TimeSpan.FromSeconds(30), ct));
             var second = Task.Run(
                 () => DarlingPasswordKeyStore.SnapshotLegacyPinsAsync(
-                    store.Source, true, static _ => throw new InvalidOperationException("must not be called"), new ListLogger(), ct), ct);
+                    store.Source, true, static _ => throw new InvalidOperationException("must not be called"), 30, new ListLogger(), ct), ct);
 
             var results = await Task.WhenAll(first, second);
 
@@ -535,6 +537,317 @@ VALUES (6, 'zeta-example', 'zeta-example', NULL, 'sql', 'monitor_login', 'legacy
             Assert.Equal(0, results[1].Pinned);
             Assert.Equal("done", results[1].MarkerState);
             Assert.Equal(3, (await store.ReadPinsAsync()).Count);
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await store.CleanupAsync(bodySucceeded);
+        }
+    }
+
+    private static bool OpensLegacy(string stored) =>
+        stored.StartsWith("legacy-", StringComparison.Ordinal) ? true : throw new CryptographicException("not a blob");
+
+    [Fact]
+    public async Task ARowWrittenAfterTheUpgrade_IsNeverPinned_AndIsRefused()
+    {
+        await using var store = await StoreFixture.CreateAsync();
+        var bodySucceeded = false;
+        try
+        {
+            // Server 6 is there at the upgrade, with its own old-format value.
+            await store.SeedServersAtUpgradeAsync(@"
+INSERT INTO config.config_monitored_servers (server_id, name, host, database, auth, username, encrypted_password, port)
+VALUES (6, 'zeta-example', 'zeta-example', NULL, 'sql', 'monitor_login', 'legacy-other-blob', 1433);");
+
+            // After the upgrade: a new row holding a copy of server 1's value, and server 6 changed to hold that value for another host.
+            await store.ExecAsync(@"
+INSERT INTO config.config_monitored_servers (server_id, name, host, database, auth, username, encrypted_password, port)
+VALUES (5, 'evil-example', 'evil-example', NULL, 'sql', 'monitor_login', 'legacy-server-blob', 1433);
+UPDATE config.config_monitored_servers SET host = 'evil-example', encrypted_password = 'legacy-server-blob' WHERE server_id = 6;");
+
+            var calls = 0;
+            bool Open(string stored)
+            {
+                calls++;
+                return OpensLegacy(stored);
+            }
+
+            await store.StartAsync(isWindows: true, canOpen: Open);
+
+            Assert.Equal("done", await store.MarkerAsync());
+            Assert.Equal(["0/smtp", "1/remediation", "1/server"], (await store.ReadPinsAsync()).Keys.Order(StringComparer.Ordinal).ToArray());
+            Assert.Equal(3, calls);
+
+            var ct = TestContext.Current.CancellationToken;
+            var view = await new StoreConfigProvider(store.Source).LoadViewAsync(new DarlingConfig(), ct);
+            Assert.NotNull(view);
+            var dpapi = new LegacyDpapi(true, static _ => throw new InvalidOperationException("must not be opened"));
+            foreach (var name in new[] { "evil-example", "zeta-example" })
+            {
+                var server = Assert.Single(view.EnabledServers, s => s.Name == name);
+                Assert.Null(server.SecretPin);
+                Assert.Throws<InvalidOperationException>(() => DarlingSecrets.ResolvePassword(server, out _, store.LastRing!, dpapi));
+            }
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await store.CleanupAsync(bodySucceeded);
+        }
+    }
+
+    [Fact]
+    public async Task ARowMovedToAnotherHost_IsNotPinned()
+    {
+        await using var store = await StoreFixture.CreateAsync();
+        var bodySucceeded = false;
+        try
+        {
+            await store.SeedServersAtUpgradeAsync();
+            await store.ExecAsync(@"
+DELETE FROM config.config_monitored_servers WHERE server_id = 1;
+INSERT INTO config.config_monitored_servers (server_id, name, host, database, auth, username, encrypted_password, remediation_username, remediation_encrypted_password, port)
+VALUES (1, 'alpha-example', 'evil-example', '', 'sql', 'monitor_login', 'legacy-server-blob', 'fix_login', 'legacy-remediation-blob', 1433);");
+
+            await store.StartAsync(isWindows: true, canOpen: OpensLegacy);
+
+            Assert.Equal("done", await store.MarkerAsync());
+            Assert.Equal(["0/smtp"], (await store.ReadPinsAsync()).Keys.ToArray());
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await store.CleanupAsync(bodySucceeded);
+        }
+    }
+
+    [Fact]
+    public async Task ALinuxHostLeavesTheStepToWindows()
+    {
+        await using var store = await StoreFixture.CreateAsync();
+        var bodySucceeded = false;
+        try
+        {
+            await store.SeedServersAtUpgradeAsync();
+            await store.StartAsync(isWindows: false, canOpen: static _ => throw new InvalidOperationException("must not be called"));
+            Assert.Equal("skipped", await store.MarkerAsync());
+            Assert.Empty(await store.ReadPinsAsync());
+            Assert.Equal(3L, await store.CandidatesAsync());
+
+            // A Windows host that starts later takes the step over from the skipped marker.
+            var before = await store.ConfigVersionAsync();
+            await store.StartAsync(isWindows: true, canOpen: OpensLegacy);
+            Assert.Equal("done", await store.MarkerAsync());
+            Assert.Equal(3, (await store.ReadPinsAsync()).Count);
+            Assert.Equal(0L, await store.CandidatesAsync());
+            Assert.Equal(before + 1, await store.ConfigVersionAsync());
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await store.CleanupAsync(bodySucceeded);
+        }
+    }
+
+    [Fact]
+    public async Task AStoreWhoseStepWasSkippedBeforeTheRecord_RecordsNothing_AndAWindowsHostSetsItDone()
+    {
+        await using var store = await StoreFixture.CreateAsync();
+        var bodySucceeded = false;
+        try
+        {
+            await store.ExecAsync("UPDATE config.legacy_secret_pin_marker SET state = 'skipped' WHERE id = 1;");
+            await store.SeedServersAtUpgradeAsync();
+            Assert.Equal(0L, await store.CandidatesAsync());
+
+            await store.StartAsync(isWindows: true, canOpen: static _ => throw new InvalidOperationException("must not be called"));
+            Assert.Equal("done", await store.MarkerAsync());
+            Assert.Empty(await store.ReadPinsAsync());
+            Assert.Equal(0L, await store.CandidatesAsync());
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await store.CleanupAsync(bodySucceeded);
+        }
+    }
+
+    [Fact]
+    public async Task AHostThatOpensNone_LeavesTheStepOpen()
+    {
+        await using var store = await StoreFixture.CreateAsync();
+        var bodySucceeded = false;
+        try
+        {
+            await store.SeedServersAtUpgradeAsync();
+            var before = await store.ConfigVersionAsync();
+
+            var opens = 0;
+            var runtime = await store.StartAsync(isWindows: true, canOpen: _ => { opens++; return false; });
+            Assert.Equal("pending", await store.MarkerAsync());
+            Assert.Empty(await store.ReadPinsAsync());
+            Assert.Equal(3L, await store.CandidatesAsync());
+            Assert.Equal(before, await store.ConfigVersionAsync());
+
+            // Nothing failed: a host that opens none leaves the step for another machine, and its sweep does not retry.
+            Assert.False(runtime.PinsWaiting);
+            var opensAtStart = opens;
+            await runtime.SweepCheckAsync(TestContext.Current.CancellationToken);
+            Assert.Equal(opensAtStart, opens);
+
+            await store.StartAsync(isWindows: true, canOpen: OpensLegacy);
+            Assert.Equal("done", await store.MarkerAsync());
+            Assert.Equal(3, (await store.ReadPinsAsync()).Count);
+            Assert.Equal(0L, await store.CandidatesAsync());
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await store.CleanupAsync(bodySucceeded);
+        }
+    }
+
+    [Fact]
+    public async Task WhenNothingStillMatches_TheStepIsDone()
+    {
+        await using var store = await StoreFixture.CreateAsync();
+        var bodySucceeded = false;
+        try
+        {
+            await store.SeedServersAtUpgradeAsync();
+            await store.ExecAsync(@"
+UPDATE config.config_monitored_servers SET encrypted_password = 'sealed:v1:0123456789abcdef:AAAA',
+    remediation_encrypted_password = 'sealed:v1:0123456789abcdef:AAAA' WHERE server_id = 1;
+UPDATE config.config_notification SET smtp_encrypted_password = 'sealed:v1:0123456789abcdef:AAAA' WHERE id = 1;");
+            var before = await store.ConfigVersionAsync();
+
+            await store.StartAsync(isWindows: true, canOpen: static _ => throw new InvalidOperationException("must not be called"));
+
+            Assert.Equal("done", await store.MarkerAsync());
+            Assert.Empty(await store.ReadPinsAsync());
+            Assert.Equal(0L, await store.CandidatesAsync());
+            Assert.Equal(before, await store.ConfigVersionAsync());
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await store.CleanupAsync(bodySucceeded);
+        }
+    }
+
+    [Fact]
+    public async Task WhenTheKeyStepThrows_ThePinsAreStillTaken()
+    {
+        await using var store = await StoreFixture.CreateAsync();
+        var bodySucceeded = false;
+        try
+        {
+            await store.SeedServersAtUpgradeAsync();
+            var before = await store.ConfigVersionAsync();
+
+            // A NUL character is refused by the store when the host's state row is written, so the key step throws.
+            var runtime = await store.StartAsync(isWindows: true, canOpen: OpensLegacy, serviceHost: "example\0host");
+
+            Assert.Equal("refused", runtime.State);
+            Assert.False(runtime.Ring.Status.CanSeal);
+            Assert.Equal("done", await store.MarkerAsync());
+            Assert.Equal(3, (await store.ReadPinsAsync()).Count);
+            Assert.Equal(0L, await store.CandidatesAsync());
+            Assert.Equal(before + 1, await store.ConfigVersionAsync());
+            Assert.False(runtime.PinsWaiting);
+
+            var view = await new StoreConfigProvider(store.Source).LoadViewAsync(new DarlingConfig(), TestContext.Current.CancellationToken);
+            Assert.NotNull(view);
+            Assert.NotNull(Assert.Single(view.EnabledServers, s => s.Name == "alpha-example").SecretPin);
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await store.CleanupAsync(bodySucceeded);
+        }
+    }
+
+    [Fact]
+    public async Task AFailedFirstPinStep_IsRetriedOnTheSweep()
+    {
+        await using var store = await StoreFixture.CreateAsync();
+        var bodySucceeded = false;
+        try
+        {
+            await store.SeedServersAtUpgradeAsync();
+            var ct = TestContext.Current.CancellationToken;
+            var before = await store.ConfigVersionAsync();
+            var failed = false;
+            var opens = 0;
+            bool FailsOnce(string stored)
+            {
+                if (!failed)
+                {
+                    failed = true;
+                    throw new InvalidOperationException("the machine's store could not be read");
+                }
+
+                opens++;
+                return OpensLegacy(stored);
+            }
+
+            var runtime = await store.StartAsync(isWindows: true, canOpen: FailsOnce);
+
+            // The first try failed: the step is open, nothing is pinned, and the runtime says it is waiting.
+            Assert.Equal("pending", await store.MarkerAsync());
+            Assert.Empty(await store.ReadPinsAsync());
+            Assert.Equal(3L, await store.CandidatesAsync());
+            Assert.Equal(before, await store.ConfigVersionAsync());
+            Assert.True(runtime.PinsWaiting);
+
+            await runtime.SweepCheckAsync(ct);
+
+            Assert.False(runtime.PinsWaiting);
+            Assert.Equal("done", await store.MarkerAsync());
+            Assert.Equal(3, (await store.ReadPinsAsync()).Count);
+            Assert.Equal(0L, await store.CandidatesAsync());
+            Assert.Equal(before + 1, await store.ConfigVersionAsync());
+            var view = await new StoreConfigProvider(store.Source).LoadViewAsync(new DarlingConfig(), ct);
+            Assert.NotNull(view);
+            Assert.NotNull(Assert.Single(view.EnabledServers, s => s.Name == "alpha-example").SecretPin);
+
+            // The next sweep opens nothing and changes nothing.
+            var opensAfterRetry = opens;
+            await runtime.SweepCheckAsync(ct);
+            Assert.Equal(opensAfterRetry, opens);
+            Assert.Equal(before + 1, await store.ConfigVersionAsync());
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await store.CleanupAsync(bodySucceeded);
+        }
+    }
+
+    [Fact]
+    public async Task ADroppedCandidateTrigger_RefusesAndPinsNothing()
+    {
+        await using var store = await StoreFixture.CreateAsync();
+        var bodySucceeded = false;
+        try
+        {
+            await store.SeedServersAtUpgradeAsync();
+            await store.ExecAsync("DROP TRIGGER trg_legacy_secret_pin_candidate_owner_only_truncate ON config.legacy_secret_pin_candidate;");
+
+            var runtime = await store.StartAsync(isWindows: true, canOpen: OpensLegacy);
+            Assert.Equal("refused", runtime.State);
+            Assert.Contains("trg_legacy_secret_pin_candidate_owner_only_truncate", runtime.Ring.Status.Reason, StringComparison.Ordinal);
+
+            var snapshot = await DarlingPasswordKeyStore.SnapshotLegacyPinsAsync(
+                store.Source, true, static _ => throw new InvalidOperationException("must not be called"), 30, new ListLogger(), TestContext.Current.CancellationToken);
+            Assert.Equal("unprotected", snapshot.MarkerState);
+            Assert.Equal(0, snapshot.Pinned);
+
+            Assert.Equal("pending", await store.MarkerAsync());
+            Assert.Empty(await store.ReadPinsAsync());
+            Assert.Equal(3L, await store.CandidatesAsync());
             bodySucceeded = true;
         }
         finally
@@ -616,17 +929,17 @@ VALUES (6, 'zeta-example', 'zeta-example', NULL, 'sql', 'monitor_login', 'legacy
         }
 
         public Task<DarlingPasswordKeyRuntime> StartAsync(
-            bool isWindows = false, Func<string, string?>? unprotect = null, Func<PasswordPrivateKey, PublishedKey, bool>? selfTest = null,
-            ILogger? logger = null) =>
+            bool isWindows = false, Func<string, bool>? canOpen = null, Func<PasswordPrivateKey, PublishedKey, bool>? selfTest = null,
+            ILogger? logger = null, string serviceHost = "example-host") =>
             DarlingPasswordKeyRuntime.StartAsync(
                 Directory, Source, logger ?? new ListLogger(), TestContext.Current.CancellationToken,
                 new PasswordKeyStartOptions
                 {
                     IsWindows = isWindows,
-                    Unprotect = unprotect ?? (static _ => null),
+                    CanOpen = canOpen ?? (static _ => false),
                     SelfTest = selfTest,
                     SetRing = ring => LastRing = ring,
-                    ServiceHost = "example-host",
+                    ServiceHost = serviceHost,
                 });
 
         public async Task ExecAsync(string sql, params (string Name, object Value)[] parameters)
@@ -711,6 +1024,7 @@ VALUES (6, 'zeta-example', 'zeta-example', NULL, 'sql', 'monitor_login', 'legacy
         public async Task SeedServersAsync()
         {
             await ExecAsync(@"
+INSERT INTO config.config_service (id) VALUES (1) ON CONFLICT (id) DO NOTHING;
 INSERT INTO config.config_monitored_servers (server_id, name, host, database, auth, username, encrypted_password, remediation_username, remediation_encrypted_password, port)
 VALUES (1, 'alpha-example', 'alpha-example', '', 'sql', 'monitor_login', 'legacy-server-blob', 'fix_login', 'legacy-remediation-blob', 1433),
        (2, 'beta-example', 'beta-example', NULL, 'sql', 'monitor_login', 'sealed:v1:0123456789abcdef:AAAA', NULL, NULL, 1433),
@@ -721,6 +1035,33 @@ VALUES (1, 'smtp.example.com', 587, TRUE, 'mail_login', 'legacy-smtp-blob')
 ON CONFLICT (id) DO UPDATE SET smtp_host = EXCLUDED.smtp_host, smtp_port = EXCLUDED.smtp_port, smtp_use_ssl = EXCLUDED.smtp_use_ssl,
     smtp_username = EXCLUDED.smtp_username, smtp_encrypted_password = EXCLUDED.smtp_encrypted_password;");
         }
+
+        /// <summary>Records the old-format values now in the store, as the V167 rung does at the upgrade.</summary>
+        public Task CaptureCandidatesAsync() => ExecAsync(LegacyPinCandidateTables.CaptureSql);
+
+        /// <summary>The store as an upgrade finds it: <see cref="SeedServersAsync"/>, then <paramref name="rowsBeforeTheUpgrade"/>
+        /// (more SQL for rows that were already there), then the record the rung takes. Rows written after this call are not in it.</summary>
+        public async Task SeedServersAtUpgradeAsync(string? rowsBeforeTheUpgrade = null)
+        {
+            await SeedServersAsync();
+            if (rowsBeforeTheUpgrade is not null)
+            {
+                await ExecAsync(rowsBeforeTheUpgrade);
+            }
+
+            await CaptureCandidatesAsync();
+        }
+
+        public async Task<long> CountAsync(string sql)
+        {
+            await using var c = await Source.OpenConnectionAsync(TestContext.Current.CancellationToken);
+            await using var command = new NpgsqlCommand(sql, c);
+            return Convert.ToInt64(await command.ExecuteScalarAsync(TestContext.Current.CancellationToken), System.Globalization.CultureInfo.InvariantCulture);
+        }
+
+        public Task<long> CandidatesAsync() => CountAsync("SELECT count(*) FROM config.legacy_secret_pin_candidate;");
+
+        public Task<long> ConfigVersionAsync() => CountAsync("SELECT config_version FROM config.config_service WHERE id = 1;");
 
         public async Task CleanupAsync(bool bodySucceeded, string? extraSql = null)
         {

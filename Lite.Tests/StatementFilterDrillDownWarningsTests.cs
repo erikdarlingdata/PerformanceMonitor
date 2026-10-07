@@ -40,7 +40,7 @@ public sealed class StatementFilterDrillDownWarningsTests : IClassFixture<Shared
     private const string PlanHandle = "0x05SSF0LITEHANDLE";
 
     private static readonly DateTime WindowEnd = DateTime.SpecifyKind(
-        new DateTime(DateTime.UtcNow.Ticks - (DateTime.UtcNow.Ticks % TimeSpan.TicksPerSecond)), DateTimeKind.Unspecified);
+        new DateTime(DateTime.UtcNow.Ticks / TimeSpan.TicksPerSecond * TimeSpan.TicksPerSecond), DateTimeKind.Unspecified);
 
     private readonly DuckDbInitializer _duckDb;
     private DuckDBConnection? _seedConn;

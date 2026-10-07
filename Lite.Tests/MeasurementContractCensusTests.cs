@@ -549,13 +549,17 @@ public sealed class MeasurementContractCensusTests
     /// (one per observation — the instance observation's single <c>ClearServer</c> serves both SQL Server
     /// carriers; the statements and postmaster observations each <c>ClearGroups</c> their own family), Lite's
     /// two remove paths (a closed tab, a removed server) and Darling's two (reconcile-remove, and the same-id
-    /// reconnect #3653 A5 added). Stated as an exact set so a forget that appears anywhere else — or one of
+    /// reconnect #3653 A5 added), plus the Darling runner's one forget of a server's RDS endpoint verdicts, which both
+    /// of those host-loop branches call. Stated as an exact set so a forget that appears anywhere else — or one of
     /// these that disappears — is a diff to this list.
     /// </summary>
     private static readonly (string File, string Method, int Count)[] ForgetSites =
     {
         (ComparatorFile, "ClearGroups", 2),
         (ComparatorFile, "ClearServer", 1),
+        /* The runner's one RDS verdict forget, reached from both of the host loop's server-removal and changed-definition
+           branches; it clears that server's RDS endpoint verdicts and fresh login, not a delta baseline. */
+        (DarlingRunner, "ClearServer", 1),
         (DarlingHostLoop, "ClearServer", 2),
         (LiteRemovePaths, "ClearServer", 2),
     };

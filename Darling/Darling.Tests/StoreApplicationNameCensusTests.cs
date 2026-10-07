@@ -64,6 +64,9 @@ public sealed class StoreApplicationNameCensusTests
         "DarlingWorker.cs:ReadPgStatementTextAsync",
         "DarlingWorker.cs:RunTestHypotheticalIndexAsync",
 
+        /* The RDS endpoint check's fresh unpooled login to the MONITORED target (runtime.ConnectionString), never the store. */
+        "RdsEndpointVerifier.cs:ProbeLoginAsync",
+
         /* DarlingWorker's custom-alert viewer source (#4479): its connection string comes from either
            DarlingManagedPostgres.TryBuildViewerConnectionStringFromStoredCredential (BuildRoleConnectionString,
            WebApplicationName) or DarlingStoreLogins.ResolveComposeCustomAlertViewerAsync (which returns

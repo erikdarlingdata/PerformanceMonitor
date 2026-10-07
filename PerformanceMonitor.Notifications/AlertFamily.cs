@@ -118,6 +118,8 @@ public static class AlertFamily
         ["Store Runtime Upgrade"] = SelfMonitor,
         /* #5450: raised once per service start when the store shows the service was not collecting. */
         ["Collection Gap At Start"] = SelfMonitor,
+        /* #5450: the daily retained-history audit: hours of a past day the store's rollups hold under half of usual. */
+        ["Collection Gaps In History"] = SelfMonitor,
         ["Store Job Over Cadence"] = SelfMonitor,
         ["Retention Held"] = SelfMonitor,
         ["Custom Alert Rules Unhealthy"] = SelfMonitor,
@@ -168,6 +170,40 @@ public static class AlertFamily
         ["Server Restored"] = "Server Unreachable",
         ["AG Replica Reconnected"] = "AG Replica Disconnected",
     };
+
+    /// <summary>
+    /// The closing edge of a FIRING metric of a pair (<see cref="RecoveryPairs"/> read from its value side):
+    /// "Server Unreachable" gives "Server Restored". False for a closing edge or any metric outside the pairs.
+    /// </summary>
+    public static bool TryGetRecoveryOf(string metricName, out string recovery)
+    {
+        foreach (var pair in RecoveryPairs)
+        {
+            if (string.Equals(pair.Value, metricName, StringComparison.Ordinal))
+            {
+                recovery = pair.Key;
+                return true;
+            }
+        }
+
+        recovery = "";
+        return false;
+    }
+
+    /// <summary>
+    /// The OTHER edge of the pair <paramref name="metricName"/> belongs to (#5469): the closing edge for a
+    /// firing metric, the firing metric for a closing edge. False for a metric outside the pairs.
+    /// </summary>
+    public static bool TryGetPairedEdge(string metricName, out string other)
+    {
+        if (RecoveryPairs.TryGetValue(metricName, out var firing))
+        {
+            other = firing;
+            return true;
+        }
+
+        return TryGetRecoveryOf(metricName, out other);
+    }
 
     /// <summary>
     /// Whether <paramref name="metricName"/> belongs to the paired lifecycle on EITHER side: a closing edge

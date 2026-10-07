@@ -68,11 +68,14 @@ public sealed class BlockingDatabaseFilterToolTests : IClassFixture<SharedDuckDb
         try { Directory.Delete(_configDir, recursive: true); } catch (IOException) { /* temp dir */ }
     }
 
-    private static DateTime Minute(int minutesAgo)
-    {
-        var now = DateTime.UtcNow;
-        return new DateTime(now.Year, now.Month, now.Day, now.Hour, now.Minute, 0, DateTimeKind.Utc).AddMinutes(-minutesAgo);
-    }
+    // One clock read per test instance (cut to the minute). Reading the clock on every call split rows
+    // seeded together across two minutes whenever a minute boundary passed mid-seed.
+    private readonly DateTime _minuteAnchor = MinuteOf(DateTime.UtcNow);
+
+    private static DateTime MinuteOf(DateTime now) =>
+        new(now.Year, now.Month, now.Day, now.Hour, now.Minute, 0, DateTimeKind.Utc);
+
+    private DateTime Minute(int minutesAgo) => _minuteAnchor.AddMinutes(-minutesAgo);
 
     private static JsonElement Parse(string json) => JsonDocument.Parse(json).RootElement;
 

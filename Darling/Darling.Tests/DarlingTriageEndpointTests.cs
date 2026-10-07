@@ -348,6 +348,7 @@ public sealed class DarlingTriageEndpointTests
     [InlineData("Store Disk Pressure")]
     [InlineData("Store Runtime Upgrade")]
     [InlineData("Collection Gap At Start")]
+    [InlineData("Collection Gaps In History")]
     [InlineData("Compression Job Stuck")]
     [InlineData("Store Disk Pressure Resolved")]
     [InlineData("Store Job Cadence Recovered")]
@@ -370,6 +371,7 @@ public sealed class DarlingTriageEndpointTests
                      DarlingSelfAlertEvaluator.DiskPressureResolvedMetric,
                      DarlingSelfAlertEvaluator.StoreUpgradeMetric,
                      DarlingSelfAlertEvaluator.CollectionGapAtStartMetric,
+                     DarlingSelfAlertEvaluator.CollectionGapsInHistoryMetric,
                      DarlingSelfAlertEvaluator.CompressionJobMetric,
                      DarlingSelfAlertEvaluator.JobCadenceMetric,
                  })

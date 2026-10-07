@@ -122,7 +122,7 @@ public sealed class TuningReaderBudgetLiveTests
                     $"{indexName} should be gone after PgTableTuning.ApplyAsync — #4247 dropped it.");
             }
 
-            var end = new DateTime(DateTime.UtcNow.Ticks - (DateTime.UtcNow.Ticks % TimeSpan.TicksPerSecond), DateTimeKind.Utc);
+            var end = new DateTime(DateTime.UtcNow.Ticks / TimeSpan.TicksPerSecond * TimeSpan.TicksPerSecond, DateTimeKind.Utc);
             var currentStart = end.AddHours(-1);
             var baselineStart = currentStart.AddHours(-1);
             var collectionTime = currentStart.AddMinutes(10);
