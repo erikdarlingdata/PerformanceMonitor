@@ -44,7 +44,7 @@ public sealed class AzureSiblingSizePayloadTests : IClassFixture<SharedDuckDbFix
     public void Dispose() => _seedConn?.Dispose();
 
     private static readonly DateTime Collected = DateTime.SpecifyKind(
-        new DateTime(DateTime.UtcNow.Ticks - (DateTime.UtcNow.Ticks % TimeSpan.TicksPerMinute)), DateTimeKind.Unspecified);
+        new DateTime(DateTime.UtcNow.Ticks / TimeSpan.TicksPerMinute * TimeSpan.TicksPerMinute), DateTimeKind.Unspecified);
 
     private static DatabaseSizeStatsRow Row(string database, int? fileId, string name, string type, double? total, double? used) => new()
     {
