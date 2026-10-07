@@ -117,7 +117,7 @@ public sealed class WebDatabaseFilterChipsBehaviourTests
         AssertChip(Heading(r, "io", "File I/O Latency"), "unfiltered", "All databases");
         AssertChip(Heading(r, "memory", "Memory Pressure Events"), "server", "Server-wide");
         AssertChip(Heading(r, "overview", "Daily Summary"), "server", "Server-wide");
-        AssertChip(Heading(r, "config", "Database Scoped Configuration"), "unfiltered", "All databases");
+        AssertChip(Heading(r, "config", "Database Scoped Configuration"), "filtered", "2 databases", "SalesDb\nOrders");
         AssertChip(Heading(r, "recommendations", "Recommendations"), "server", "Server-wide");
 
         /* No panel on any SQL Server tab is left without a chip, and none draws two. */

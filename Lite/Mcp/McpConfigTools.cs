@@ -70,7 +70,7 @@ public sealed class McpConfigTools
                         "No database configuration data available. The config collector may not have run yet.");
 
             IEnumerable<DatabaseConfigRow> filtered = rows;
-            if (!string.IsNullOrEmpty(database_name))
+            if (!string.IsNullOrWhiteSpace(database_name))
                 filtered = filtered.Where(r => r.DatabaseName.Equals(database_name, StringComparison.OrdinalIgnoreCase));
 
             /* Taken from the unfiltered snapshot, so a database_name that matches nothing still says when. */
@@ -134,7 +134,7 @@ public sealed class McpConfigTools
                         "No database-scoped configuration data available. The config collector may not have run yet.");
 
             IEnumerable<DatabaseScopedConfigRow> filtered = rows;
-            if (!string.IsNullOrEmpty(database_name))
+            if (!string.IsNullOrWhiteSpace(database_name))
                 filtered = filtered.Where(r => r.DatabaseName.Equals(database_name, StringComparison.OrdinalIgnoreCase));
 
             var capturedAt = rows[0].CaptureTime;
@@ -186,7 +186,7 @@ public sealed class McpConfigTools
                         "No Query Store health data available. The query_store_health collector runs hourly (SQL Server 2016+); a server with no rows either predates Query Store or has not completed a cycle yet.");
 
             IEnumerable<QueryStoreHealthRow> filtered = rows;
-            if (!string.IsNullOrEmpty(database_name))
+            if (!string.IsNullOrWhiteSpace(database_name))
                 filtered = filtered.Where(r => r.DatabaseName.Equals(database_name, StringComparison.OrdinalIgnoreCase));
 
             var capturedAt = rows[0].CaptureTime;
