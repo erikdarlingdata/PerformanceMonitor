@@ -2015,6 +2015,35 @@ $do$";
         return FrozenRollupAggregates.Any(a => string.Equals(a.View, bare, StringComparison.Ordinal));
     }
 
+    /// <summary>
+    /// The rollups that read a raw table directly and must NOT hold its purge (#5329, the #1661 rule: a fresh
+    /// rollup must not hold the raw purge): the two io hourlies. Both raw-purge gates honor it: the coverage
+    /// verdict leaves them out of <see cref="RawTierCoverage"/>, and the service-triggered purge's hole gate
+    /// (<c>DarlingWorker.TriggerRawPurgeCoreAsync</c>) skips them through <see cref="HoldsRawPurge"/>.
+    ///
+    /// <para><b>Why the hole gate needs its own exemption.</b> The hole gate walks
+    /// <see cref="MaterializationHoleTargets"/>, which derives from every registered rollup, so registering an
+    /// io view put it under the gate without anyone naming it. An io view is created WITH NO DATA and its
+    /// refresh policy reaches back only <see cref="HourlyRefreshStartSpan"/> (a day), so a store that took this
+    /// build holds up to <see cref="RawRetentionSpan"/> of raw hours the io view never saw. The purge range
+    /// starts at the oldest raw chunk, so those hours sit in it until the chunk drops, and the repair walk
+    /// closes at most <see cref="MaterializationHoleRepairCapBuckets"/> (24) buckets per start. A purge gated on
+    /// them would hold query_stats and procedure_stats (the largest tables) for as many restarts as it takes,
+    /// which is the unbounded raw growth the #1661 rule exists to prevent. What the exemption costs is the
+    /// documented one: the io view is partial for that window (<c>--backfill-rollups</c> fills it), and every
+    /// reader already falls back to raw below the io floor.</para>
+    /// </summary>
+    public static readonly IReadOnlyList<string> RawPurgeUngatedRollups = new[]
+    {
+        QueryStatsIoHourlyView,
+        ProcedureStatsIoHourlyView,
+    };
+
+    /// <summary>Does <paramref name="view"/> hold the raw purge when it has a hole? False for
+    /// <see cref="RawPurgeUngatedRollups"/>; true for every other rollup that reads a raw table.</summary>
+    public static bool HoldsRawPurge(string view)
+        => !RawPurgeUngatedRollups.Contains(view, StringComparer.Ordinal);
+
     /// <summary>Detaches an EXISTING refresh policy from a frozen legacy rollup, if the store still carries one
     /// from before #3653's LC — <c>if_exists</c>, so a store that has never had one, or has already lost it,
     /// changes nothing. Issued once per <see cref="FrozenRollupAggregates"/> member, every start, by

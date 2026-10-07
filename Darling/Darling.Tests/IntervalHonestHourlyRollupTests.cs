@@ -192,14 +192,37 @@ public sealed class IntervalHonestHourlyRollupTests
                 .Where(r => !TimescaleSupport.IsFrozenRollupAggregate(r.View))
                 /* #5329: the two io hourlies read raw directly and are deliberately NOT named in a raw purge
                    gate (the #1661 rule: a fresh rollup must not hold the raw purge; the hole below an io
-                   floor is --backfill-rollups' job, and the repair walk fixes holes inside its span). The
-                   exemption is by name so a THIRD raw-direct consumer still has to be named or exempted. */
-                .Where(r => r.View != TimescaleSupport.QueryStatsIoHourlyView && r.View != TimescaleSupport.ProcedureStatsIoHourlyView)
+                   floor is --backfill-rollups' job). The exemption is the product's own list
+                   (RawPurgeUngatedRollups, which the hole gate honors too) so a THIRD raw-direct consumer
+                   still has to be named or exempted. */
+                .Where(r => TimescaleSupport.HoldsRawPurge(r.View))
                 .Select(r => r.View)
                 .OrderBy(v => v, StringComparer.Ordinal)
                 .ToArray();
 
             Assert.Equal(expectedConsumers, row.Coverage.OrderBy(v => v, StringComparer.Ordinal).ToArray());
+        }
+    }
+
+    /// <summary>
+    /// #5329: the raw purge's hole gate skips exactly the two io hourlies (the #1661 rule), every other rollup
+    /// still holds the purge, and every exempt view is a registered rollup (so a rename cannot leave a stale name
+    /// that exempts nothing).
+    /// </summary>
+    [Fact]
+    public void TheHoleGateExemption_IsExactlyTheTwoIoHourlies()
+    {
+        Assert.Equal(
+            new[] { TimescaleSupport.ProcedureStatsIoHourlyView, TimescaleSupport.QueryStatsIoHourlyView },
+            TimescaleSupport.RawPurgeUngatedRollups.OrderBy(v => v, StringComparer.Ordinal).ToArray());
+        foreach (var view in TimescaleSupport.RawPurgeUngatedRollups)
+        {
+            Assert.Contains(TimescaleSupport.MaterializationHoleTargets, t => t.View == view);
+        }
+
+        foreach (var target in TimescaleSupport.MaterializationHoleTargets)
+        {
+            Assert.Equal(!TimescaleSupport.RawPurgeUngatedRollups.Contains(target.View), TimescaleSupport.HoldsRawPurge(target.View));
         }
     }
 
