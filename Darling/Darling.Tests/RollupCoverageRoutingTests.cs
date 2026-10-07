@@ -12,6 +12,7 @@ using System.IO;
 using System.Linq;
 using System.Text.RegularExpressions;
 using PerformanceMonitor.Darling.Storage;
+using PerformanceMonitor.Darling.Service.Mcp;
 using Xunit;
 
 namespace Darling.Tests;
@@ -746,5 +747,49 @@ public sealed class RollupCoverageRoutingTests
         }
 
         return null;
+    }
+
+    /// <summary>
+    /// #5329: the routing the Top Queries reader derives from what the store measured, with the io rollup ABSENT (not on
+    /// the store, even with a stale floor cached for its name), EMPTY (present, no floor), PARTIAL (a floor after the
+    /// window's start) and COVERING (a floor at or before it). The window starts ten days back and raw keeps four.
+    /// </summary>
+    [Theory]
+    [InlineData("absent", TopRanking.Reads, HourlyRoute.Raw)]
+    [InlineData("absent", TopRanking.Cpu, HourlyRoute.Stitched)]
+    [InlineData("empty", TopRanking.Reads, HourlyRoute.Raw)]
+    [InlineData("empty", TopRanking.Duration, HourlyRoute.Stitched)]
+    [InlineData("partial", TopRanking.Reads, HourlyRoute.Io)]      // io (6 days) reaches further back than raw (4 days)
+    [InlineData("partial", TopRanking.Executions, HourlyRoute.Stitched)]
+    [InlineData("covering", TopRanking.Reads, HourlyRoute.Io)]
+    [InlineData("covering", TopRanking.Cpu, HourlyRoute.Io)]
+    [InlineData("covering", TopRanking.Duration, HourlyRoute.Io)]
+    [InlineData("covering", TopRanking.Executions, HourlyRoute.Io)]
+    public void TheQueriesReader_RoutesOnTheIoRollupsAvailabilityAndFloor(string io, TopRanking ranking, HourlyRoute expected)
+    {
+        var floors = new Dictionary<string, DateTime>(StringComparer.Ordinal)
+        {
+            [TimescaleSupport.QueryStatsHourlyView] = DaysAgo(30),
+        };
+        switch (io)
+        {
+            case "absent":
+                floors[TimescaleSupport.QueryStatsIoHourlyView] = DaysAgo(30);   /* a stale floor under a name the store does not have */
+                break;
+            case "partial":
+                floors[TimescaleSupport.QueryStatsIoHourlyView] = DaysAgo(6);
+                break;
+            case "covering":
+                floors[TimescaleSupport.QueryStatsIoHourlyView] = DaysAgo(30);
+                break;
+        }
+
+        var availability = io == "absent" ? RollupAvailability.WithoutIoHourlies : RollupAvailability.All;
+        var coverage = new RollupCoverage(
+            floors,
+            new Dictionary<string, DateTime>(StringComparer.Ordinal) { ["query_stats"] = DaysAgo(4) },
+            availability);
+
+        Assert.Equal(expected, DarlingDataReader.ChooseQueriesHourlyRoute(availability, coverage, ranking, DaysAgo(10)));
     }
 }

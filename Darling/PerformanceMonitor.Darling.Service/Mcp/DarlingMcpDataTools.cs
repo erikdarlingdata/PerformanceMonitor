@@ -685,9 +685,12 @@ public sealed class DarlingMcpDataTools
                     forcedBy.Add("parallel_only / min_dop / group_by=host_object need per-row DOP and host_object, which only raw query_stats carries; this read stayed on raw, which reaches back to effective_start (window_truncated says whether that cut the window).");
                 }
 
-                if (!TopRankings.HourlyCarries(ranking))
+                if (ranking == TopRanking.Reads)
                 {
-                    forcedBy.Add("order_by=reads needs per-query logical reads, which only raw query_stats carries (the hourly rollup keeps CPU, elapsed time and execution counts); this read stayed on raw, which reaches back to effective_start (window_truncated says whether that cut the window). Rank by cpu, duration or executions to read the rollup.");
+                    /* #5329: reads is answered from collect.query_stats_io_hourly when it reaches the window's start, and
+                       from raw otherwise: this read is the raw one, so the io rollup was absent, empty or reached no
+                       further back than raw does. The stitched rollups keep no logical reads. */
+                    forcedBy.Add("order_by=reads needs per-query logical reads. Only raw query_stats and the io hourly rollup (query_stats_io_hourly) carry them, and that rollup was absent, empty or did not reach back further than raw on this store, so this read came from raw query_stats, which reaches back to effective_start (window_truncated says whether that cut the window). Rank by cpu, duration or executions to read the other hourly rollups.");
                 }
 
                 precisionNote = string.Join(" ", forcedBy);
@@ -708,8 +711,13 @@ public sealed class DarlingMcpDataTools
             var windowTruncated = RawWindowFloor.IsTruncated(floor, requestedStart);
             if (hourly)
             {
-                precisionNote = "hourly-rollup rows: no host-object split (proc-hosted callers sharing a query_hash are combined); query_plan_hash, plan_handle, DOP, reads/writes/physical reads/rows/spills, distinct_texts and min/max cpu/elapsed are null — "
-                    + "the rollup does not carry them, and its min/max are per-collection sums, not per-execution extremes."
+                /* #5329: on the io route (query_stats_io_hourly) the rows carry logical reads, physical reads and logical
+                   writes, so they are not in the null list; every other hourly read still has none of them. */
+                precisionNote = routed.IoRoute
+                    ? "hourly-rollup rows from query_stats_io_hourly, the rollup that keeps logical reads: total_logical_reads, total_physical_reads and total_logical_writes are the rollup's sums. There is no host-object split (proc-hosted callers sharing a query_hash are combined); query_plan_hash, plan_handle, DOP, rows/spills, distinct_texts and min/max cpu/elapsed are null — "
+                        + "the rollup does not carry them, and its min/max are per-collection sums, not per-execution extremes."
+                    : "hourly-rollup rows: no host-object split (proc-hosted callers sharing a query_hash are combined); query_plan_hash, plan_handle, DOP, reads/writes/physical reads/rows/spills, distinct_texts and min/max cpu/elapsed are null — "
+                        + "the rollup does not carry them, and its min/max are per-collection sums, not per-execution extremes."
                     + " sql_handle is the rollup's MAX(sql_handle), which can name a handle seen only on a zero-interval collection that raw excludes; totals are unaffected."
                     + " " + HourlyWindowEdges.Note(requestedStart, floor, now, routed.HourlyCeiling);
             }
@@ -735,9 +743,9 @@ public sealed class DarlingMcpDataTools
                     cannot.Add("apply parallel_only/min_dop/group_by=host_object");
                 }
 
-                if (!TopRankings.HourlyCarries(ranking))
+                if (ranking == TopRanking.Reads)
                 {
-                    cannot.Add("rank by reads (it carries no per-query logical reads)");
+                    cannot.Add("rank by reads (the stitched rollups carry no per-query logical reads, and the io hourly rollup, query_stats_io_hourly, does not reach this window's start on this store)");
                 }
 
                 return McpHelpers.Status(
@@ -819,12 +827,12 @@ public sealed class DarlingMcpDataTools
                 min_dop = hourly ? (int?)null : r.MinDop,
                 max_dop = hourly ? (int?)null : r.MaxDop,
                 is_parallel = hourly ? (bool?)null : r.MaxDop > 1,
-                total_logical_reads = hourly ? (long?)null : r.TotalLogicalReads,
-                total_logical_writes = hourly ? (long?)null : r.TotalLogicalWrites,
-                total_physical_reads = hourly ? (long?)null : r.TotalPhysicalReads,
+                total_logical_reads = hourly && !routed.IoRoute ? (long?)null : r.TotalLogicalReads,
+                total_logical_writes = hourly && !routed.IoRoute ? (long?)null : r.TotalLogicalWrites,
+                total_physical_reads = hourly && !routed.IoRoute ? (long?)null : r.TotalPhysicalReads,
                 total_rows = hourly ? (long?)null : r.TotalRows,
                 total_spills = hourly ? (long?)null : r.TotalSpills,
-                avg_reads = hourly ? (double?)null : r.TotalExecutions > 0 ? (double)r.TotalLogicalReads / r.TotalExecutions : 0,
+                avg_reads = hourly && !routed.IoRoute ? (double?)null : r.TotalExecutions > 0 ? (double)r.TotalLogicalReads / r.TotalExecutions : 0,
                 // #2012 stage 2: the statement's host object joins the GROUPING key, so proc-hosted
                 // INSERT...EXEC callers sharing a hash now land in separate, correctly-labeled rows;
                 // null = ad-hoc/prepared text (literal-collapse behavior unchanged). History rows

@@ -150,4 +150,30 @@ public sealed class TopQueriesHourlyRoutingTests
 
     private static string RepoRoot([CallerFilePath] string thisFile = "")
         => Path.GetFullPath(Path.Combine(Path.GetDirectoryName(thisFile)!, "..", ".."));
+
+    /// <summary>
+    /// #5329 source pin: the routed read takes the io route through <c>ChooseQueriesHourlyRoute</c>, the hourly arm names
+    /// <c>query_stats_io_hourly</c> (and projects its three sums) only on that route, a reads ranking carries the raw
+    /// retention notice only when it does not read io, and the queries tool no longer says only raw carries reads.
+    /// </summary>
+    [Fact]
+    public void TheIoRoute_IsChosenInTheRoutedRead_NamedInTheHourlyArm_AndDisclosedByTheTool()
+    {
+        var source = File.ReadAllText(FindReaderSourcePath());
+        var routed = source.Substring(source.IndexOf("public static async Task<TopQueriesReadResult> GetTopQueriesByCpuRoutedAsync", StringComparison.Ordinal));
+        routed = routed[..routed.IndexOf("GetTopQueriesByCpuHourlyAsync(postgres, coverage", StringComparison.Ordinal)];
+        Assert.Contains("ChooseQueriesHourlyRoute(rollups, coverage, ranking, startUtc)", routed, StringComparison.Ordinal);
+        Assert.Contains("ranking != TopRanking.Reads || ioRoute", routed, StringComparison.Ordinal);
+        Assert.DoesNotContain("!TopRankings.HourlyCarries(ranking)", routed, StringComparison.Ordinal);
+
+        var arm = source.Substring(source.IndexOf("private static async Task<(List<TopQueryRow> Rows, DateTime? FirstBucket)> GetTopQueriesByCpuHourlyAsync", StringComparison.Ordinal));
+        arm = arm[..arm.IndexOf("/* ─────────────────────────── top procedures", StringComparison.Ordinal)];
+        Assert.Contains("collect.{TimescaleSupport.QueryStatsIoHourlyView} AS f", arm, StringComparison.Ordinal);
+        Assert.Contains("GetHourlyFirstBucketAsync(postgres, coverage, TimescaleSupport.QueryStatsIoHourlyView,", arm, StringComparison.Ordinal);
+        Assert.Contains("TopRankings.HourlyIoSums", arm, StringComparison.Ordinal);
+
+        var tool = File.ReadAllText(Path.Combine(RepoRoot(), "Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpDataTools.cs"));
+        Assert.DoesNotContain("which only raw query_stats carries (the hourly rollup keeps CPU", tool, StringComparison.Ordinal);
+        Assert.Contains("query_stats_io_hourly", tool, StringComparison.Ordinal);
+    }
 }
