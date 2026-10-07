@@ -21,6 +21,7 @@ namespace Darling.Tests;
 /// <c>App.OnUnobservedTaskException</c> and is logged as an Error. <c>AwaitReadWatchingProbeAsync</c> prevents that, so every such
 /// read must be awaited through it. A new probe site that awaits its read bare fails here, naming the file and method.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class ViewerProbeWatchCensusTests
 {
     /// <summary>Methods that start a probe and await a read bare on purpose, as "file::method" with the reason.</summary>

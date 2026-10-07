@@ -154,6 +154,7 @@ public sealed class TopTextTieBreakLiveTests
                 now.AddDays(-2).ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture) + "') AS f";
             var sql = TopRankings.Apply(DarlingDataReader.TopQueriesHourlySql, TopRanking.Cpu, hourly: true)
                 .Replace("$FROM$", standIn, StringComparison.Ordinal)
+                .Replace("$IOSUMS$", TopRankings.HourlyNoIoSums, StringComparison.Ordinal)
                 .Replace("$CEIL$", "", StringComparison.Ordinal);
             for (var run = 0; run < 3; run++)
             {

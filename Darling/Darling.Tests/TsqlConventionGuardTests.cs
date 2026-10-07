@@ -94,6 +94,7 @@ namespace Darling.Tests;
 /// which is how the gap was found rather than assumed. The injected path has to EXIST — that guard drops
 /// references which do not resolve on disk, so a made-up filename is a red-proof that proves nothing.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class TsqlConventionGuardTests
 {
     /* Rule identifiers. Covered ones are what Findings can emit; uncovered ones exist so the disposition map
@@ -1473,6 +1474,12 @@ public sealed class TsqlConventionGuardTests
         /* #4214: an expression-bodied one-liner, same shape as the pairs elsewhere in this list — it strands
            only its own ternary, not T-SQL or a tempdb label, so no census reads a site of that kind here. */
         "Darling/PerformanceMonitor.Darling.Service/DarlingStoreHostProfile.cs ComputeEffectiveMemoryLimitBytes",
+        /* #5329: ARRIVED, the walk now stops short here. IoHourlyCoversWindow is an expression-bodied member
+           whose body opens with a property pattern (`coverage.FloorOf(ioView) is { } floor && floor <= startUtc`),
+           the same shape as the property-pattern members above. The brace match closes the range at the
+           pattern's own `{ }`, stranding `floor <= startUtc`. That is a comparison of two locals: no string
+           literal, no T-SQL and no tempdb label, so no census reads a site of that kind there. */
+        "Darling/PerformanceMonitor.Darling.Viewer/ViewerDataService.RollupAvailability.cs IoHourlyCoversWindow",
         "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingDataReader.cs OutputFinding",
         "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingStallProbeReader.cs TriggerMbPerSecond",
         "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingStallProbeReader.cs TerminalSilenceMs",

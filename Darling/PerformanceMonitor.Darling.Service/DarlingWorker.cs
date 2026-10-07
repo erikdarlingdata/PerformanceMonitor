@@ -9828,6 +9828,13 @@ AND   j.hypertable_name = '{relation}'", connection))
                         continue;
                     }
 
+                    /* #5329: the io hourlies never hold the raw purge (the #1661 rule), the same as the coverage
+                       verdict above, which leaves them out of RawTierCoverage. See RawPurgeUngatedRollups. */
+                    if (!TimescaleSupport.HoldsRawPurge(target.View))
+                    {
+                        continue;
+                    }
+
                     var materialization = await TimescaleSupport.ResolveMaterializationAsync(connection, target.View, cancellationToken);
                     if (materialization is null)
                     {

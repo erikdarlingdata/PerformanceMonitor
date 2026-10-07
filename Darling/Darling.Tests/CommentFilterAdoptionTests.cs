@@ -67,6 +67,7 @@ namespace Darling.Tests;
 /// (#4966), is named in the <c>darling</c> filter instead, as the single file it is: that costs a Darling build only
 /// when that one file changes, so it has no exemption.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class CommentFilterAdoptionTests
 {
     /// <summary>

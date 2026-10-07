@@ -42,7 +42,8 @@ public sealed class MaterializationHoleRepairTests
         Assert.Equal(registered.Length, targets.Count);
         // #3653 LC: 26 (A6 lane LB's count) minus the six the freeze took out of HourlyAggregates/DailyAggregates
         // (they stay in TimescaleSupport.RollupViews and FrozenRollupAggregates, but nothing repairs them now).
-        Assert.Equal(20, targets.Count);
+        /* 20 + the two io hourlies (#5329). */
+        Assert.Equal(22, targets.Count);
         Assert.Equal(registered.Select(a => a.View).OrderBy(v => v, StringComparer.Ordinal), targets.Select(t => t.View).OrderBy(v => v, StringComparer.Ordinal));
 
         /* The rollups come first in the backfill's dependency order — every raw-sourced rollup before the

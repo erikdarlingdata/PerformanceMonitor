@@ -749,14 +749,14 @@ const TOP_RANKINGS = [
    same lists, so a pick on one tab is the pick on the other. */
 const topRankingPick = { queries: "cpu", procedures: "cpu" };
 
-/* A reads ranking can only read raw (the hourly rollups keep no logical reads), so over a window past what raw keeps the read says so in
-   `retention_notice`, the retention notice the composed panels carry. It is drawn above the grid as text, once: readTool puts it in the
-   window note's place (util.js localizeWindowNote, #5299), so the cards below name `truncation_note` as their one note and need no key of
-   their own for it, and a ranking is never silently partial. */
-
-/* #5329: why a Reads ranking reads the raw collections. The per-query and per-procedure hourly rollups keep CPU, duration and execution
-   counts but no reads, so the ranking cannot come from them; rankedCard shows this sentence beside the picker when Reads is picked. */
-const READS_RAW_SENTENCE = "Reads are ranked from the raw collections because the per-query hourly rollups keep no reads.";
+/* A reads ranking reads raw, or (#5329) the io hourly rollup (query_stats_io_hourly, procedure_stats_io_hourly) once that reaches the window's
+   start or reaches further back than raw, and which of them answered is the tool's business, not the page's: the stitched hourly rollups keep no logical reads, but the io
+   ones do. So the card holds no sentence of its own about the source (the one it had named raw as the only source, which is
+   false on the io route). What a reader needs from the answer is whether it covers the window, and that rides on the window note: over a
+   window past what raw keeps, a raw-routed read says so in `retention_notice`, the retention notice the composed panels carry, and a
+   partial io rollup says so in `truncation_note`. The notice is drawn above the grid as text, once: readTool puts it in the window note's
+   place (util.js localizeWindowNote, #5299), so the cards below name `truncation_note` as their one note and need no key of their own for
+   it, and a ranking is never silently partial. The tool's `precision_note` names the relation that answered for a caller of the tool. */
 
 function topRankingLabel(ranking) {
   return (TOP_RANKINGS.find((r) => r.value === ranking) || TOP_RANKINGS[0]).label;
@@ -793,8 +793,6 @@ function rankedCard(kind, build) {
         },
         ranking
       ),
-      /* #5329: a reads ranking reads the raw collections, and the card says why in one plain sentence. */
-      ...(ranking === "reads" ? [el("span", { class: "muted" }, [READS_RAW_SENTENCE])] : []),
     ]);
     setPanelSignal(mine.signal);
     const card = build(ranking, picker);

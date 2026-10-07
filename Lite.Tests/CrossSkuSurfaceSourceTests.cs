@@ -46,6 +46,7 @@ namespace Lite.Tests;
 /// way the walker keeps <c>Darling.Tests</c> when Lite compiles it.</para>
 /// </summary>
 [Trait("Reads", "Darling")]
+[Trait("Stage", "Guard")]
 public sealed class CrossSkuSurfaceSourceTests
 {
     /// <summary>

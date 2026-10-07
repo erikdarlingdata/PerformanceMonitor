@@ -32,6 +32,7 @@ namespace Darling.Tests;
 /// <para>The scan reads code only: <see cref="CSharpSourceWalker.StripCommentsAndStrings"/> blanks comments and
 /// literals first, so a call named in a comment or a string counts for nothing.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class WebRouteStatementCensusTests
 {
     /// <summary>The service files that map a route, relative to the service project. A new mapper file is a

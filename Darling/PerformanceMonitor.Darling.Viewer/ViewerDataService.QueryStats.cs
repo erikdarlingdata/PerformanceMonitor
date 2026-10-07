@@ -372,7 +372,7 @@ public sealed partial class ViewerDataService
     /// An hourly-routed page carries only what the rollup has: <c>host_object_name</c>/
     /// <c>module_*</c> are empty, and the reads/writes/physical-reads/rows/spill/DOP/grant/thread/CLR columns the rollup
     /// keeps no copy of are NULL on the row (#5329), so the grid shows them blank instead of a false 0 — the same
-    /// disclosure the MCP payload's <c>tier_used</c>/<c>precision_note</c> make (null, never 0). An hourly-routed page
+    /// disclosure the MCP payload's <c>tier_used</c>/<c>precision_note</c> make (null, never 0). When the io hourly rollup (<see cref="IoHourlyCoversWindow"/>) reaches the window's start, the page reads it instead and fills logical reads, physical reads and logical writes from its sums (#5329). An hourly-routed page
     /// also stops BEFORE <paramref name="endUtc"/> (a bucket is stamped at its start, so an end on the hour
     /// does not add the hour that begins there). Use
     /// <see cref="GetTopQueriesByCpuTierAsync"/> to also learn which tier answered.</para>
@@ -389,6 +389,16 @@ public sealed partial class ViewerDataService
     public async Task<(List<ViewerQueryStatsRow> Rows, string Tier)> GetTopQueriesByCpuTierAsync(
         int serverId, DateTime startUtc, DateTime endUtc, int top = TopQueriesPageSize, IReadOnlyList<string>? databaseNames = null, CancellationToken cancellationToken = default)
     {
+        var read = await GetTopQueriesByCpuRoutedAsync(serverId, startUtc, endUtc, top, databaseNames, cancellationToken);
+        return (read.Rows, read.Tier);
+    }
+
+    /// <summary>#5329: <see cref="GetTopQueriesByCpuTierAsync"/> with the window's real edges: an hourly-routed read also
+    /// answers <see cref="ViewerRoutedRead{TRow}.HourlyEdgesNote"/> (<see cref="HourlyEdgesNote"/>), the text the MCP tool
+    /// puts in its precision note; a raw read answers none.</summary>
+    public async Task<ViewerRoutedRead<ViewerQueryStatsRow>> GetTopQueriesByCpuRoutedAsync(
+        int serverId, DateTime startUtc, DateTime endUtc, int top = TopQueriesPageSize, IReadOnlyList<string>? databaseNames = null, CancellationToken cancellationToken = default)
+    {
         var (rollups, coverage) = await GetRollupAvailabilityAsync(cancellationToken);
         var routedTier = RetentionTierRouter.Resolve(
             DateTime.UtcNow, startUtc, rollups.QueryGrainHourly, dailyAvailable: false,
@@ -400,95 +410,136 @@ public sealed partial class ViewerDataService
 
         if (routedTier == RetentionTier.Hourly)
         {
-            var hourlyRows = await GetTopQueriesByCpuHourlyAsync(coverage, serverId, startUtc, endUtc, top, databaseNames, cancellationToken);
-            return (hourlyRows, "hourly");
+            return await GetTopQueriesByCpuHourlyAsync(rollups, coverage, serverId, startUtc, endUtc, top, databaseNames, cancellationToken);
         }
 
-        return (await GetTopQueriesByCpuRawAsync(serverId, startUtc, endUtc, top, databaseNames, cancellationToken), "raw");
+        return new ViewerRoutedRead<ViewerQueryStatsRow>(await GetTopQueriesByCpuRawAsync(serverId, startUtc, endUtc, top, databaseNames, cancellationToken), "raw", null);
     }
 
     /// <summary>#4231 stage 3: the hourly-rollup arm — builds its FROM clause ONLY through
     /// <see cref="RollupCoverage.StitchedRelationSql"/> (never a literal rollup name), groups by
     /// <c>(database_name, query_hash)</c> (the rollup has no host_object_name), and resolves each row's
     /// <c>query_text</c> with a follow-up lookup mirroring <see cref="DarlingDataReader"/>'s MCP twin.</summary>
-    private async Task<List<ViewerQueryStatsRow>> GetTopQueriesByCpuHourlyAsync(
-        RollupCoverage coverage, int serverId, DateTime startUtc, DateTime endUtc, int top,
+    private async Task<ViewerRoutedRead<ViewerQueryStatsRow>> GetTopQueriesByCpuHourlyAsync(
+        RollupAvailability rollups, RollupCoverage coverage, int serverId, DateTime startUtc, DateTime endUtc, int top,
         IReadOnlyList<string>? databaseNames, CancellationToken cancellationToken)
     {
-        var fromClause = coverage.StitchedRelationSql(
-            TimescaleSupport.QueryStatsHourlyView, "f", startUtc, RollupCoverage.StitchTier.Hourly);
-        var sql = BuildTopQueriesHourlySql(fromClause);
+        /* #5329: when the io hourly rollup reaches the window's start, read it instead of the interval rollup (it
+           carries every column the interval one does) and fill reads, physical reads and writes from its three sums.
+           Otherwise today's route and today's blank columns. The io view is named only through StitchedRelationSql
+           (it has no successor, so that answers just its own relation). */
+        var useIo = IoHourlyCoversWindow(rollups, coverage, TimescaleSupport.QueryStatsIoHourlyView, startUtc);
+        var answeringView = useIo ? TimescaleSupport.QueryStatsIoHourlyView : TimescaleSupport.QueryStatsHourlyView;
+        var fromClause = coverage.StitchedRelationSql(answeringView, "f", startUtc, RollupCoverage.StitchTier.Hourly);
+        /* #5329: bound the read at the materialization ceiling of the relation that answers the window's END, as the
+           service's twin does (RollupCoverage.HourlyEndCeiling); null = no bound. */
+        var ceiling = coverage.HourlyEndCeiling(answeringView, startUtc);
+        var sql = BuildTopQueriesHourlySql(fromClause, withIo: useIo, ceiling: ceiling);
+        /* #5329: the first bucket THIS server holds in the window, from the same per-server probe the service's tools run
+           (RollupCoverage.GetHourlyFirstBucketAsync), beside the grid read. The store-wide floor belongs to the oldest
+           server, so a server added later would otherwise get no start edge. */
+        var firstBucketTask = coverage.GetHourlyFirstBucketAsync(
+            _dataSource, answeringView, serverId, startUtc, endUtc, ceiling, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
 
-        var ranked = new List<(string Database, string QueryHash, long TotalExecutions, long TotalCpuUs, long TotalElapsedUs)>();
-        await using (var command = _dataSource.CreateCommand(sql))
+        var ranked = new List<(string Database, string QueryHash, long TotalExecutions, long TotalCpuUs, long TotalElapsedUs, long? Reads, long? PhysicalReads, long? Writes)>();
+        List<ViewerQueryStatsRow> rows;
+        try
         {
-            command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
-            AddServerWindowParameters(command, serverId, startUtc, endUtc);
-            command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = top });
-            command.Parameters.Add(DatabaseFilterParameter(databaseNames));
-            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-            while (await reader.ReadAsync(cancellationToken))
+            await using (var command = _dataSource.CreateCommand(sql))
             {
-                ranked.Add((
-                    reader.IsDBNull(0) ? "" : reader.GetString(0),
-                    reader.IsDBNull(1) ? "" : reader.GetString(1),
-                    reader.IsDBNull(2) ? 0 : reader.GetInt64(2),
-                    reader.IsDBNull(3) ? 0 : reader.GetInt64(3),
-                    reader.IsDBNull(4) ? 0 : reader.GetInt64(4)));
-            }
-        }
-
-        var rows = new List<ViewerQueryStatsRow>(ranked.Count);
-        foreach (var r in ranked)
-        {
-            var queryText = "";
-            await using (var textCommand = _dataSource.CreateCommand(
-                "SELECT query_text FROM v_query_stats WHERE server_id = $1 AND database_name = $2 AND query_hash = $3 AND query_text IS NOT NULL ORDER BY collection_time DESC LIMIT 1"))
-            {
-                textCommand.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
-                textCommand.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
-                textCommand.Parameters.Add(new NpgsqlParameter<string> { TypedValue = r.Database });
-                textCommand.Parameters.Add(new NpgsqlParameter<string> { TypedValue = r.QueryHash });
-                var textResult = await textCommand.ExecuteScalarAsync(cancellationToken);
-                if (textResult is string text)
+                command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
+                AddServerWindowParameters(command, serverId, startUtc, endUtc);
+                command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = top });
+                command.Parameters.Add(DatabaseFilterParameter(databaseNames));
+                AddHourlyCeilingParameter(command, ceiling);
+                await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+                while (await reader.ReadAsync(cancellationToken))
                 {
-                    queryText = text;
+                    ranked.Add((
+                        reader.IsDBNull(0) ? "" : reader.GetString(0),
+                        reader.IsDBNull(1) ? "" : reader.GetString(1),
+                        reader.IsDBNull(2) ? 0 : reader.GetInt64(2),
+                        reader.IsDBNull(3) ? 0 : reader.GetInt64(3),
+                        reader.IsDBNull(4) ? 0 : reader.GetInt64(4),
+                        useIo && !reader.IsDBNull(5) ? reader.GetInt64(5) : null,
+                        useIo && !reader.IsDBNull(6) ? reader.GetInt64(6) : null,
+                        useIo && !reader.IsDBNull(7) ? reader.GetInt64(7) : null));
                 }
             }
 
-            rows.Add(new ViewerQueryStatsRow
+            rows = new List<ViewerQueryStatsRow>(ranked.Count);
+            foreach (var r in ranked)
             {
-                DatabaseName = r.Database,
-                QueryHash = r.QueryHash,
-                TotalExecutions = r.TotalExecutions,
-                TotalCpuUs = r.TotalCpuUs,
-                TotalElapsedUs = r.TotalElapsedUs,
-                /* #5329: MinCpuUs, MaxCpuUs, MinElapsedUs and MaxElapsedUs stay null here. */
-                QueryText = queryText,
-                /* #4231 stage 3: the rollup has no host_object_name column. */
-                HostObjectName = null,
-            });
+                var queryText = "";
+                await using (var textCommand = _dataSource.CreateCommand(
+                    "SELECT query_text FROM v_query_stats WHERE server_id = $1 AND database_name = $2 AND query_hash = $3 AND query_text IS NOT NULL ORDER BY collection_time DESC LIMIT 1"))
+                {
+                    textCommand.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
+                    textCommand.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
+                    textCommand.Parameters.Add(new NpgsqlParameter<string> { TypedValue = r.Database });
+                    textCommand.Parameters.Add(new NpgsqlParameter<string> { TypedValue = r.QueryHash });
+                    var textResult = await textCommand.ExecuteScalarAsync(cancellationToken);
+                    if (textResult is string text)
+                    {
+                        queryText = text;
+                    }
+                }
+
+                rows.Add(new ViewerQueryStatsRow
+                {
+                    DatabaseName = r.Database,
+                    QueryHash = r.QueryHash,
+                    TotalExecutions = r.TotalExecutions,
+                    TotalCpuUs = r.TotalCpuUs,
+                    TotalElapsedUs = r.TotalElapsedUs,
+                    /* #5329: from the io rollup's sums when it covers the window, else null (blank, never 0). */
+                    TotalLogicalReads = r.Reads,
+                    TotalPhysicalReads = r.PhysicalReads,
+                    TotalLogicalWrites = r.Writes,
+                    /* #5329: MinCpuUs, MaxCpuUs, MinElapsedUs and MaxElapsedUs stay null here. */
+                    QueryText = queryText,
+                    /* #4231 stage 3: the rollup has no host_object_name column. */
+                    HostObjectName = null,
+                });
+            }
+        }
+        catch
+        {
+            /* #5329: the probe is no longer wanted, so observe its fault (never throw it over this one): otherwise one failure logs twice. */
+            await ObserveAsync(firstBucketTask);
+            throw;
         }
 
-        return rows;
+        var firstBucket = await firstBucketTask;
+        return new ViewerRoutedRead<ViewerQueryStatsRow>(rows, "hourly", HourlyEdgesNote(startUtc, endUtc, firstBucket, ceiling), useIo, firstBucket);
     }
 
+    /// <summary>#5329: the three columns the io hourly rollups add, appended to the hourly arm's select list
+    /// (positions 5, 6 and 7) when the io view is the relation: logical reads, physical reads and logical writes.</summary>
+    internal const string IoSumsSelectSql = """
+        ,
+            CAST(SUM(logical_reads_sum) AS bigint) AS total_logical_reads,
+            CAST(SUM(physical_reads_sum) AS bigint) AS total_physical_reads,
+            CAST(SUM(logical_writes_sum) AS bigint) AS total_logical_writes
+        """;
+
     /// <summary>The hourly-rollup arm's SQL over <paramref name="fromClause"/>. A rollup bucket is stamped at
-    /// its START, so the window end is EXCLUSIVE (<c>bucket &lt; $3</c>): a range whose To is 14:00 sums the
+    /// its START, so the window end is EXCLUSIVE (<c>bucket &lt; $3</c>), and (#5329) a known materialization
+    /// <paramref name="ceiling"/> adds <c>bucket &lt; $6</c> (see <see cref="HourlyCeilingSql"/>): a range whose To is 14:00 sums the
     /// hours up to 13:00-14:00 and does not add the 14:00-15:00 hour that only begins at the end. (The raw arm
     /// stamps a sample when it was taken, so it keeps <c>&lt;=</c> on <c>collection_time</c>.) Split out so a
     /// test can read the text.</summary>
-    internal static string BuildTopQueriesHourlySql(string fromClause) => $"""
+    internal static string BuildTopQueriesHourlySql(string fromClause, bool withIo = false, DateTime? ceiling = null) => $"""
         SELECT
             database_name,
             query_hash,
             CAST(SUM(execution_count_sum) AS bigint) AS total_executions,
             CAST(SUM(worker_time_sum) AS bigint) AS total_cpu_us,
-            CAST(SUM(elapsed_time_sum) AS bigint) AS total_elapsed_us
+            CAST(SUM(elapsed_time_sum) AS bigint) AS total_elapsed_us{(withIo ? IoSumsSelectSql : "")}
         FROM {fromClause}
         WHERE server_id = $1
         AND   bucket >= $2
-        AND   bucket < $3
+        AND   bucket < $3{HourlyCeilingSql(ceiling)}
         AND   ($5::text[] IS NULL OR database_name = ANY($5))
         GROUP BY database_name, query_hash
         HAVING (SUM(execution_count_sum) > 0 OR SUM(elapsed_time_sum) > 0)

@@ -13,6 +13,7 @@ namespace Darling.Tests;
 /// names their reads return: a column key the read does not emit renders an empty column, so each key is
 /// checked against the tool source.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class ServerTabGridColumnPinTests
 {
     private static string ServerTabsJs => ReadRepoFile(Path.Combine(

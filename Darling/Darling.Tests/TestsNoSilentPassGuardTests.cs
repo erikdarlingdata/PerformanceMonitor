@@ -29,6 +29,7 @@ namespace Darling.Tests;
 /// literals cannot match. A <c>return;</c> in a catch of a helper that is not itself a test (a listener
 /// shutdown loop, say) is not flagged. There is no exemption list: none was needed.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class TestsNoSilentPassGuardTests
 {
     private static readonly Regex TestAttribute = new(@"\[\s*(?:Fact|Theory)\b", RegexOptions.Compiled);

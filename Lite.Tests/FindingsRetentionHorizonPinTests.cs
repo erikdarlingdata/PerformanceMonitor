@@ -37,6 +37,7 @@ namespace Lite.Tests;
 /// which is the right shape for a purge test. What was missing was a guard on the NUMBER and where it
 /// comes from, so that is all this adds.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class FindingsRetentionHorizonPinTests
 {
     /// <summary>

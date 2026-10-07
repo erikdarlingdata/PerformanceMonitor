@@ -18,6 +18,7 @@ namespace Darling.Tests;
 /// the begin precedes the transaction's open, and the end sits in a <c>finally</c> that follows the commit, so a
 /// throw or a cancel after the rows committed (or a rollback) still ends the write.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class QueryStoreWriteFencePinTests
 {
     private static string Here([CallerFilePath] string thisFile = "") => thisFile;

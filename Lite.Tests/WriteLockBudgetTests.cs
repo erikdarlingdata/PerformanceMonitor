@@ -31,6 +31,7 @@ namespace Lite.Tests;
 /// than falling back to the default while looking configured.</para>
 /// </summary>
 [Trait("Reads", "Darling")]
+[Trait("Stage", "Guard")]
 public sealed class WriteLockBudgetTests
 {
     /// <summary>

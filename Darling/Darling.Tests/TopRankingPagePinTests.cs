@@ -19,6 +19,7 @@ namespace Darling.Tests;
 /// Procedures cards, where its choice lives, what it sends, and that the card draws the reads ranking's retention
 /// notice. The server half is pinned by <c>TopRankingTests</c> and the live classes.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class TopRankingPagePinTests
 {
     private static string Tab() =>
@@ -87,16 +88,17 @@ public sealed class TopRankingPagePinTests
         Assert.Contains("control,\n    body,", Tab(), StringComparison.Ordinal);
     }
 
-    /// <summary>#5329: a Reads ranking says, in one plain sentence beside the selector, why it reads the raw collections (the hourly
-    /// rollups keep no reads), and only on that pick.</summary>
+    /// <summary>#5329: a Reads ranking reads raw OR the io hourly rollup, so the card holds no fixed sentence about the source: the one it
+    /// had ("ranked from the raw collections because the per-query hourly rollups keep no reads") is false on the io route. The window note
+    /// (<c>truncation_note</c>, with <c>retention_notice</c> riding in its place) is what tells a reader the answer is partial.</summary>
     [Fact]
-    public void AReadsRanking_SaysInOnePlainSentenceWhyItReadsRaw()
+    public void AReadsRanking_CarriesNoFixedSentenceAboutItsSource_SoItCannotBeFalseOnTheIoRoute()
     {
         var js = Tab();
-        Assert.Contains(
-            "const READS_RAW_SENTENCE = \"Reads are ranked from the raw collections because the per-query hourly rollups keep no reads.\";",
-            js, StringComparison.Ordinal);
-        Assert.Contains("...(ranking === \"reads\" ? [el(\"span\", { class: \"muted\" }, [READS_RAW_SENTENCE])] : [])", js, StringComparison.Ordinal);
-        Assert.Equal(1, js.Split("[READS_RAW_SENTENCE]").Length - 1);
+        Assert.DoesNotContain("READS_RAW_SENTENCE", js, StringComparison.Ordinal);
+        Assert.DoesNotContain("ranked from the raw collections", js, StringComparison.Ordinal);
+        Assert.DoesNotContain("keep no reads", js, StringComparison.Ordinal);
+        /* The picker row holds the selector alone, whatever is picked. */
+        Assert.DoesNotContain("ranking === \"reads\"", js, StringComparison.Ordinal);
     }
 }

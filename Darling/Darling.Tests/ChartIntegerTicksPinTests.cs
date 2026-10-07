@@ -34,6 +34,7 @@ namespace Darling.Tests;
 /// a 0-1 axis gives ticks 0 and 1, 0-2 gives 0, 1, 2, and for every maximum from 1 to 5000 the ticks are whole,
 /// distinct and cover the maximum.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class ChartIntegerTicksPinTests
 {
     private static string Js(params string[] path) => ReadRepoFileLf(Path.Combine(

@@ -78,6 +78,7 @@ namespace Darling.Tests;
 /// (<c>HostHeaderGuardTests</c>, <c>DarlingStoreUpgradeTests</c>), which is where someone looks for this
 /// kind of guard.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class DocCommentHygieneTests
 {
     /// <summary>

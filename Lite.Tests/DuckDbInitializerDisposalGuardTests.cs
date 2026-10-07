@@ -30,6 +30,7 @@ namespace PerformanceMonitorLite.Tests;
 /// <para>Literal- and comment-aware through <see cref="CSharpSourceWalker"/>, so this text naming the type is not
 /// a construction.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class DuckDbInitializerDisposalGuardTests
 {
     /// <summary>A construction, plain or namespace-qualified.</summary>

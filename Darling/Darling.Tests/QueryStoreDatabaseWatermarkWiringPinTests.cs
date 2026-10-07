@@ -19,6 +19,7 @@ namespace Darling.Tests;
 /// while it advances strictly AFTER the item's COPY transaction commits,.
 /// The writer set is pinned in <see cref="QueryStoreWriterSetPinTests"/>.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class QueryStoreDatabaseWatermarkWiringPinTests
 {
     private static string RunnerSource() =>

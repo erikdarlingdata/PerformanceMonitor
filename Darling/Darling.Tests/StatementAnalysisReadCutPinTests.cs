@@ -21,6 +21,7 @@ namespace Darling.Tests;
 /// judges it, and <see cref="AnalysisStatementText"/> cuts it after. Plans are PR C's and relation names are not
 /// statement text, so neither is scanned for.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class StatementAnalysisReadCutPinTests
 {
     [Fact]

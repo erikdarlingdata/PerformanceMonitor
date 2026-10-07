@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Copyright (c) 2026 Erik Darling, Darling Data LLC
  *
  * This file is part of the SQL Server Performance Monitor.
@@ -2186,6 +2186,8 @@ AND   j.hypertable_name = '" + relation + "'", connection) { CommandTimeout = Po
        legacies they supersede, and are DERIVED from the supersession registry so a fourth pair cannot leave an
        armed policy behind on the shared fixture. 20 relations since Q12 (17 before). */
     .Concat(TimescaleSupport.SupersededHourlyRollups.Select(s => s.Successor))
+    /* #5329: the two io hourlies carry the leaf rule's 90-day policy too (Coverage = themselves): 23 relations. */
+    .Concat(new[] { TimescaleSupport.QueryStatsIoHourlyView, TimescaleSupport.ProcedureStatsIoHourlyView })
     .Concat(TimescaleSupport.BaselineAggregates.Select(a => a.View))
     /* #3893: the off-grid fleet collection-health rollup carries its own 8-day leaf policy. 21 relations. */
     .Concat(TimescaleSupport.OffGridAggregates.Select(a => a.View))
@@ -2570,13 +2572,17 @@ LIMIT 1", connection))
            14 at Q12, 11 before it), the heaviest refresh starts at 11 + the 4-minute guard = :15 (was :18, :15
            before Q12), and its window is the remainder 60 - 15 - 24 = 21 minutes (was 18, 21 before Q12). The
            literals move WITH the identities beside them; nothing here was renumbered by hand. */
-        Assert.Equal(12, TimescaleSupport.LightHourlyRefreshCount);
-        Assert.Equal(11, TimescaleSupport.LightBandSpanMinutes);
-        Assert.Equal(15, TimescaleSupport.HeaviestRefreshStartMinute);
+        /* RE-DERIVED AGAIN at #5329 by appending the two io hourlies (query_stats_io_hourly and
+           procedure_stats_io_hourly): fifteen hourly policies, fourteen of them light, so the light band spans
+           (14 - 1) * 1 = 13 minutes (was 11), the heaviest refresh starts at 13 + the 4-minute guard = :17 (was
+           :15), and its window is 60 - 17 - 24 = 19 minutes (was 21). */
+        Assert.Equal(14, TimescaleSupport.LightHourlyRefreshCount);
+        Assert.Equal(13, TimescaleSupport.LightBandSpanMinutes);
+        Assert.Equal(17, TimescaleSupport.HeaviestRefreshStartMinute);
         Assert.Equal(
             TimescaleSupport.LightBandSpanMinutes + TimescaleSupport.CompressionPhaseGuardMinutes,
             TimescaleSupport.HeaviestRefreshStartMinute);
-        Assert.Equal(21, TimescaleSupport.HeaviestRefreshWindowMinutes);
+        Assert.Equal(19, TimescaleSupport.HeaviestRefreshWindowMinutes);
         Assert.Equal(
             TimescaleSupport.MinutesInHourlyCadence
             - TimescaleSupport.HeaviestRefreshStartMinute
@@ -2622,7 +2628,9 @@ LIMIT 1", connection))
            #3653's Q12, before the freeze moved the legacy trio off this grid). The compression band does NOT
            move: it is the hour's remainder after the heaviest window, and the window grew back by exactly
            what the light band shrank, so :36-:59 stays where #3174 left it. */
-        Assert.Equal(new[] { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 15 }, refreshMinutes);
+        /* #5329: fourteen light minutes :00-:13 and the heaviest at :17 (the two io hourlies); the compression
+           band still does NOT move, :36-:59, because the window is the hour's remainder (17 + 19 = :36). */
+        Assert.Equal(new[] { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 17 }, refreshMinutes);
         Assert.Equal(TimescaleSupport.HourlyRefreshPhaseOrder.Count, refreshMinutes.Length);
 
         var heaviestMinute = TimescaleSupport.RefreshPhaseMinutesFor(TimescaleSupport.HeaviestHourlyRefreshView);
@@ -2674,8 +2682,10 @@ LIMIT 1", connection))
         /* Twelve light starts at :00-:11, each excluding its own minute and the three after it: :00-:14, fifteen
            minutes (was :00-:17, eighteen, during Q12). The heaviest window is the 21 minutes :15-:35 (was 18,
            :18-:35, during Q12). */
-        Assert.Equal(15, excludedByGuard.Length);
-        Assert.Equal(21, excludedByHeaviestWindow.Length);
+        /* #5329: fourteen light starts at :00-:13 exclude :00-:16, seventeen minutes, and the heaviest window is
+           the 19 minutes :17-:35. */
+        Assert.Equal(17, excludedByGuard.Length);
+        Assert.Equal(19, excludedByHeaviestWindow.Length);
         Assert.Contains(heaviestMinute + 1, excludedByHeaviestWindow);
         Assert.Empty(excludedByGuard.Intersect(TimescaleSupport.CompressionPhaseMinutes));
         Assert.Empty(excludedByHeaviestWindow.Intersect(TimescaleSupport.CompressionPhaseMinutes));
@@ -2752,8 +2762,12 @@ LIMIT 1", connection))
            GAP is stated in seconds beside the percentage because a percentage that truncates to 0 can read as
            "none" when it is not. A fourth light member, or a ceiling re-derived one run higher, turns this
            red — which is the ruling the grid asks for at that point rather than a hand-tuned band. */
-        Assert.Equal(17, (TimescaleSupport.RefreshSlotWarningSeconds - ceiling) * 100 / ceiling);
-        Assert.Equal(154, TimescaleSupport.RefreshSlotWarningSeconds - ceiling);
+        /* RE-DERIVED at #5329 (the two io hourlies, window 21 -> 19 minutes): the line is 1,140 * 5 / 6 =
+           950 s, and the ceiling sits 54 s under it, 6% of itself (was 154 s, 17%). Still ordered, so the
+           pin holds; the headroom is what the io views spent. The next light member turns the ordering
+           red at the same ceiling, which is the ruling the grid asks for then. */
+        Assert.Equal(6, (TimescaleSupport.RefreshSlotWarningSeconds - ceiling) * 100 / ceiling);
+        Assert.Equal(54, TimescaleSupport.RefreshSlotWarningSeconds - ceiling);
     }
 
     /* ─────────────────── #3044: the watch on the LIVE figure, not the constant ─────────────────── */
@@ -2779,10 +2793,12 @@ LIMIT 1", connection))
            for the derivation) — the slot is 21 * 60 = 1,260 s (was 18 * 60 = 1,080 during Q12, when the
            successors were briefly appended behind the legacy trio instead) and the five-sixths line is
            1,260 * 5 / 6 = 1,050 s (was 900). The identities beside the literals are what moved them. */
-        Assert.Equal(1260, TimescaleSupport.RefreshPhaseSlotSeconds);
+        /* #5329: the two io hourlies take the window to 19 minutes, so the slot is 19 * 60 = 1,140 s and the
+           five-sixths line 1,140 * 5 / 6 = 950 s (was 1,260 and 1,050). */
+        Assert.Equal(1140, TimescaleSupport.RefreshPhaseSlotSeconds);
         Assert.Equal(TimescaleSupport.HeaviestRefreshWindowMinutes * 60, TimescaleSupport.RefreshPhaseSlotSeconds);
 
-        Assert.Equal(1050, TimescaleSupport.RefreshSlotWarningSeconds);
+        Assert.Equal(950, TimescaleSupport.RefreshSlotWarningSeconds);
         Assert.Equal(
             TimescaleSupport.RefreshPhaseSlotSeconds * 5 / 6,
             TimescaleSupport.RefreshSlotWarningSeconds);
@@ -2801,8 +2817,8 @@ LIMIT 1", connection))
         Assert.True(
             TimescaleSupport.RefreshSlotWarningSeconds < TimescaleSupport.RefreshPhaseSlotSeconds,
             "the watch line is at or past the slot it is meant to give warning of");
-        /* The remaining sixth: 1,260 / 6 = 210 s of lead (was 1,080 / 6 = 180 during Q12). */
-        Assert.Equal(210, TimescaleSupport.RefreshPhaseSlotSeconds - TimescaleSupport.RefreshSlotWarningSeconds);
+        /* The remaining sixth: 1,140 / 6 = 190 s of lead (was 1,260 / 6 = 210 before #5329). */
+        Assert.Equal(190, TimescaleSupport.RefreshPhaseSlotSeconds - TimescaleSupport.RefreshSlotWarningSeconds);
     }
 
     /// <summary>
@@ -2925,7 +2941,7 @@ LIMIT 1", connection))
            agrees with any derivation, including one frozen at 480 or at Q12's 840. */
         var alternative =
             TimescaleSupport.RefreshPhaseSlotSeconds - (TimescaleSupport.CompressionPhaseGuardMinutes * 60);
-        Assert.Equal(1020, alternative);
+        Assert.Equal(900, alternative);
         Assert.True(
             alternative < TimescaleSupport.RefreshSlotWarningSeconds,
             "the alternative is no longer the LOWER of the two lines, so the paragraph rejecting it as the "
@@ -2942,7 +2958,10 @@ LIMIT 1", connection))
             $"the {alternative} s alternative sits at or below the {ceiling} s recorded ceiling again, so the "
             + "ordering no longer discriminates and the coupling argument is the load-bearing one alone — "
             + "re-read #3107 and #3174 rather than editing this assertion");
-        Assert.Equal(124, alternative - ceiling);
+        /* #5329: 900 - 896 = 4 s (was 124 s at the 1,260 s window): the alternative is still the higher of the
+           two numbers, by almost nothing, so the ordering argument is nearly gone and the coupling is the
+           load-bearing one. The next light member would reverse it, and this assertion is where that shows. */
+        Assert.Equal(4, alternative - ceiling);
 
         /* The chosen line still clears the ceiling; the alternative would too. Stated as the verdicts the
            classifier produces where it can be (the ceiling against the shipped line) and as the inequality
@@ -2956,7 +2975,7 @@ LIMIT 1", connection))
             ceiling < TimescaleSupport.RefreshSlotWarningSeconds,
             $"the chosen {TimescaleSupport.RefreshSlotWarningSeconds} s line no longer sits above the "
             + $"{ceiling} s recorded ceiling");
-        Assert.Equal(30, TimescaleSupport.RefreshSlotWarningSeconds - alternative);
+        Assert.Equal(50, TimescaleSupport.RefreshSlotWarningSeconds - alternative);
 
         /* THE COUPLING, as the derivations rather than as prose. The alternative is the slot less one guard
            band, so it moves with the light class's declared width; the chosen line tracks only the window.
@@ -2989,7 +3008,7 @@ LIMIT 1", connection))
            leaves the larger margin, so lead time argues FOR it and cannot be part of its rejection; at LC's
            restored window the guard band (240 s) is unchanged and the sixth is 210 s (was 180 during Q12). */
         Assert.Equal(240, TimescaleSupport.RefreshPhaseSlotSeconds - alternative);
-        Assert.Equal(210, TimescaleSupport.RefreshPhaseSlotSeconds - TimescaleSupport.RefreshSlotWarningSeconds);
+        Assert.Equal(190, TimescaleSupport.RefreshPhaseSlotSeconds - TimescaleSupport.RefreshSlotWarningSeconds);
     }
 
     /// <summary>
@@ -3019,8 +3038,9 @@ LIMIT 1", connection))
            it with geometry rather than with a renumbered band — see the classifier test for the ordering it
            restored; the freeze re-derived the geometry back to that same shape, and the band held. */
         Assert.Equal(TimescaleSupport.RefreshSlotHeadroom.InsideSlot, atTheCeiling.Headroom);
-        Assert.Equal(364, atTheCeiling.ClearOfSlotSeconds);
-        Assert.Equal(71.1, atTheCeiling.PercentOfSlot, 1);
+        /* #5329: the 1,140 s window leaves 1,140 - 896 = 244 s clear, 78.6% of the window. */
+        Assert.Equal(244, atTheCeiling.ClearOfSlotSeconds);
+        Assert.Equal(78.6, atTheCeiling.PercentOfSlot, 1);
 
         /* The watch line, which is where APPROACHING starts: 83.3% of the window, 1,260 / 6 = 210 s clear
            (was 180 s of Q12's 1,080 s window; the percentage is the same five-sixths fraction at any window
@@ -3028,7 +3048,8 @@ LIMIT 1", connection))
         var atTheWatchLine = new HeaviestRefreshSlotReading(
             TimescaleSupport.HeaviestHourlyRefreshView, TimescaleSupport.RefreshSlotWarningSeconds);
         Assert.Equal(TimescaleSupport.RefreshSlotHeadroom.ApproachingSlot, atTheWatchLine.Headroom);
-        Assert.Equal(210, atTheWatchLine.ClearOfSlotSeconds);
+        /* #5329: the window is 1,140 s, so the sixth is 190 s clear. */
+        Assert.Equal(190, atTheWatchLine.ClearOfSlotSeconds);
         Assert.Equal(83.3, atTheWatchLine.PercentOfSlot, 1);
 
         /* OVERRUN, derived: a run one sixth of the window past the wall. The sixth is the same fraction the
@@ -3218,7 +3239,8 @@ LIMIT 1", connection))
             + "(V57), so the repair is the grid");
         /* #3653's LC freeze restores the 1,260 s window, leaving the knob 360 s inside the wall (was 180
            inside Q12's 1,080 s window, before the freeze moved the legacy trio off this grid). */
-        Assert.Equal(360, TimescaleSupport.RefreshPhaseSlotSeconds - (hourlyCadenceSeconds * ShippedWarnPercent / 100));
+        /* #5329: the two io hourlies take the window to 1,140 s, so the knob sits 240 s inside the wall. */
+        Assert.Equal(240, TimescaleSupport.RefreshPhaseSlotSeconds - (hourlyCadenceSeconds * ShippedWarnPercent / 100));
 
         /* And where the knob's own clamp lets an operator move it to — well past the wall, with the
            grid's precondition broken and nothing said. */
@@ -3244,7 +3266,8 @@ LIMIT 1", connection))
             $"the knob's {hourlyCadenceSeconds * ShippedWarnPercent / 100} s line no longer fires strictly "
             + $"before the {TimescaleSupport.RefreshSlotWarningSeconds} s watch line, so the two signals have "
             + "collapsed to a coincidence again — re-read #3174 and Q12 rather than editing this assertion");
-        Assert.Equal(150, TimescaleSupport.RefreshSlotWarningSeconds - (hourlyCadenceSeconds * ShippedWarnPercent / 100));
+        /* #5329: 950 - 900 = 50 s (was 150 s at the 1,260 s window). */
+        Assert.Equal(50, TimescaleSupport.RefreshSlotWarningSeconds - (hourlyCadenceSeconds * ShippedWarnPercent / 100));
         Assert.True(
             hourlyCadenceSeconds * ShippedWarnPercent / 100 <= TimescaleSupport.RefreshSlotWarningSeconds
             && TimescaleSupport.RefreshSlotWarningSeconds < TimescaleSupport.RefreshPhaseSlotSeconds,
@@ -3661,18 +3684,23 @@ LIMIT 1", connection))
                successors in the three positions their legacies held — not appended behind the family, which
                is what keeps the grid at thirteen policies instead of sixteen. */
             (TimescaleSupport.QueryStoreStatsHourlyView, 0),
-            (TimescaleSupport.QueryStoreStatsIntervalHourlyView, 15),
+            (TimescaleSupport.QueryStoreStatsIntervalHourlyView, 17),
             (TimescaleSupport.QueryStoreStatsCorrectedHourlyView, 4),
             (TimescaleSupport.QueryStatsIntervalHourlyView, 8),
             (TimescaleSupport.ProcedureStatsIntervalHourlyView, 1),
             (TimescaleSupport.QueryStatsDbIntervalHourlyView, 2),
-            (TimescaleSupport.PerfmonIntervalBaselineView, 3),
-            (TimescaleSupport.WaitStatsIntervalBaselineView, 5),
-            (TimescaleSupport.SessionStatsBaselineView, 6),
-            (TimescaleSupport.QueryStatsBaselineView, 7),
-            (TimescaleSupport.BlockedProcessBaselineView, 9),
-            (TimescaleSupport.DeadlockBaselineView, 10),
-            (TimescaleSupport.MemoryBaselineView, 11),
+            /* #5329: the two io hourlies, appended. The query one groups by statement, so it is the FOURTH
+               unbounded member and takes position 3 * 4 = 12; the procedure one is deployment-bounded and
+               takes the next free position, 3. The baseline members shift up past it. */
+            (TimescaleSupport.QueryStatsIoHourlyView, 12),
+            (TimescaleSupport.ProcedureStatsIoHourlyView, 3),
+            (TimescaleSupport.PerfmonIntervalBaselineView, 5),
+            (TimescaleSupport.WaitStatsIntervalBaselineView, 6),
+            (TimescaleSupport.SessionStatsBaselineView, 7),
+            (TimescaleSupport.QueryStatsBaselineView, 9),
+            (TimescaleSupport.BlockedProcessBaselineView, 10),
+            (TimescaleSupport.DeadlockBaselineView, 11),
+            (TimescaleSupport.MemoryBaselineView, 13),
         };
 
         Assert.Equal(expected.Length, TimescaleSupport.HourlyRefreshPhaseOrder.Count);

@@ -43,6 +43,7 @@ namespace Darling.Tests;
 /// quoted literal keeps those out, and keeps out prose mentions in doc comments (which write the name bare) so a
 /// class that only DESCRIBES the variable is not dragged in.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class LivePostgresCollectionHygieneTests
 {
     /// <summary>The env-var read as it appears in code — quoted, so <c>DARLING_TEST_PGRUNTIME</c> cannot match.</summary>

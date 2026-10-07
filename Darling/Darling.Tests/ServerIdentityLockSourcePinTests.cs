@@ -26,6 +26,7 @@ namespace Darling.Tests;
 /// key and serialise with nothing, and every write in the viewer would look locked while racing the web and MCP
 /// writers freely.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class ServerIdentityLockSourcePinTests
 {
     private static readonly Regex LockLiteral = new(
