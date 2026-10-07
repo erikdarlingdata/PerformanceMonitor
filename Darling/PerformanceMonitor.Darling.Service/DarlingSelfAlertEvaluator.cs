@@ -2757,27 +2757,53 @@ internal sealed class DarlingSelfAlertEvaluator
         CollectionHistoryAudit.Rollup rollup, DateTime fromUtc, DateTime toUtc, CancellationToken cancellationToken);
 
     /// <summary>
-    /// FLEET-level (#5450): the DAILY RETAINED-HISTORY AUDIT. Once per UTC day, on the first pass at or after 01:00Z,
-    /// reads each hourly rollup's per-hour server count and sample total for the previous UTC day and the seven days
-    /// before it, and raises at most ONE "Collection Gaps In History" Warning naming the flagged hour ranges. The
-    /// self-monitor alerts run inside the service, so an outage the service was not alive for, and a degraded
-    /// collection whose rows still arrive every hour, are only visible afterwards, in what the store retained.
-    /// Quiet when nothing is flagged. The rules, and why they are these, are on <see cref="CollectionHistoryAudit"/>.
+    /// FLEET-level (#5450): the DAILY RETAINED-HISTORY AUDIT. Once per UTC day, on the first pass at or after 03:00Z,
+    /// reads each source's per-hour counts for the previous UTC day and the seven days before it, and raises at most
+    /// ONE "Collection Gaps In History" Warning naming the flagged hour ranges. The self-monitor alerts run inside
+    /// the service, so an outage the service was not alive for, and a degraded collection whose rows still arrive
+    /// every hour, are only visible afterwards, in what the store retained. Quiet when nothing is flagged. The
+    /// sources, the tests and why they are these are on <see cref="CollectionHistoryAudit"/>.
     ///
     /// <para><b>Once a day, across restarts.</b> The <see cref="DocumentDeliveredInsideIntervalAsync"/> gate over the
-    /// delivery stamp store, as the daily documents use, with the slot pinned to 01:00Z of the day: a restart later
+    /// delivery stamp store, as the daily documents use, with the slot pinned to 03:00Z of the day: a restart later
     /// that day reads the stamp and does nothing. A quiet day and a delivered one both stamp; only a delivery the
-    /// deliverer reported failed does not, so the next tick retries. A pass whose every read failed does not stamp
-    /// either, so a store that was down at 01:00Z is asked again on the next tick.</para>
+    /// deliverer reported failed does not, so the next tick retries.</para>
     ///
-    /// <para><b>Cost.</b> One aggregate per rollup, with a range predicate on <c>bucket</c> and a 60 s deadline. A read
-    /// that times out or fails logs one warning, is counted in the alert-read-failure census, and skips THAT rollup;
-    /// the audit goes on with the others.</para>
+    /// <para><b>Every source read, or absent, before the day is done (M2 of the #5461 review).</b> A source whose read
+    /// failed, or whose newest bucket is earlier than the audited day's 23:00 bucket (not ready), is retried on the
+    /// later ticks, and only those sources are re-read; the findings so far are held in memory and nothing is raised
+    /// or stamped until every source has been read or is absent. The audit gives up on a source at the next day's
+    /// 03:00Z slot, with one warning naming it, and raises what it has, the alert text naming each source not read.
+    /// The held state is process memory: a restart starts the day over, and a day whose retries a restart ended is
+    /// not audited again.</para>
+    ///
+    /// <para><b>Days missed while the service was down are not audited (L4).</b> Only the previous UTC day is. Down
+    /// from late evening to the next morning leaves the earlier day unaudited, which is accepted: Collection Gap At
+    /// Start reports that down window itself on the restart.</para>
+    ///
+    /// <para><b>Cost.</b> One aggregate per source, with a range predicate on <c>bucket</c> and a 60 s deadline. A read
+    /// that times out or fails logs one warning, is counted in the alert-read-failure census, and leaves THAT source
+    /// unread; the audit goes on with the others.</para>
     /// </summary>
     public Task EvaluateCollectionHistoryAuditAsync(NpgsqlDataSource postgres, CancellationToken cancellationToken)
         => ApplyCollectionHistoryAuditAsync(
             (rollup, from, to, token) => CollectionHistoryAudit.ReadAsync(postgres, rollup, from, to, token),
             CollectionHistoryAudit.Rollups, cancellationToken);
+
+    /// <summary>One audit day's held state: the sources read so far and the findings of the ones that flagged.</summary>
+    private sealed class HistoryAuditDay
+    {
+        public HistoryAuditDay(DateTime day) => Day = day;
+
+        public DateTime Day { get; }
+
+        public HashSet<string> Done { get; } = new(StringComparer.Ordinal);
+
+        public Dictionary<string, IReadOnlyList<CollectionHistoryAudit.FlaggedRange>> Findings { get; } = new(StringComparer.Ordinal);
+    }
+
+    /// <summary>The day being retried: set while a source of the audited day is unread, null otherwise.</summary>
+    private HistoryAuditDay? _historyAuditDay;
 
     /// <summary>
     /// The audit with its reads handed in, so the gate, the one-alert rule and the failure isolation are
@@ -2792,36 +2818,53 @@ internal sealed class DarlingSelfAlertEvaluator
         }
 
         var now = _utcNow();
-        if (now.TimeOfDay < CollectionHistoryAudit.DueTimeOfDay)
+
+        /* A day with unread sources is retried until the next day's slot, then given up on. */
+        var held = _historyAuditDay;
+        if (held is not null && now >= held.Day.AddDays(2) + CollectionHistoryAudit.DueTimeOfDay)
         {
-            return;
+            await GiveUpOnHistoryAuditDayAsync(held, rollups, cancellationToken);
+            held = null;
+            _historyAuditDay = null;
         }
 
-        var dueSlot = now.Date + CollectionHistoryAudit.DueTimeOfDay;
-        if (await DocumentDeliveredInsideIntervalAsync(
-                _lastHistoryAudit, CollectionHistoryAuditKey, PgSelfAlertDeliveryStampStore.HistoryAuditStateKey,
-                HistoryAuditInterval, now, "collection-history audit", cancellationToken))
+        if (held is null)
         {
-            return;
+            if (now.TimeOfDay < CollectionHistoryAudit.DueTimeOfDay)
+            {
+                return;
+            }
+
+            if (await DocumentDeliveredInsideIntervalAsync(
+                    _lastHistoryAudit, CollectionHistoryAuditKey, PgSelfAlertDeliveryStampStore.HistoryAuditStateKey,
+                    HistoryAuditInterval, now, "collection-history audit", cancellationToken))
+            {
+                return;
+            }
+
+            /* Nothing known (no stamp, or none readable) anchors the slot grid on 03:00Z of today instead of on this
+               instant, so the next day's audit is due at 03:00Z and not a day after whenever this one happened to run. */
+            if (!_lastHistoryAudit.TryGetValue(CollectionHistoryAuditKey, out var known) || known == NoDeliveryKnown)
+            {
+                _lastHistoryAudit[CollectionHistoryAuditKey] =
+                    now.Date + CollectionHistoryAudit.DueTimeOfDay - HistoryAuditInterval;
+            }
+
+            held = new HistoryAuditDay(now.Date.AddDays(-1));
+            _historyAuditDay = held;
         }
 
-        /* Nothing known (no stamp, or none readable) anchors the slot grid on 01:00Z of today instead of on this
-           instant, so the next day's audit is due at 01:00Z and not a day after whenever this one happened to run. */
-        if (!_lastHistoryAudit.TryGetValue(CollectionHistoryAuditKey, out var known) || known == NoDeliveryKnown)
-        {
-            _lastHistoryAudit[CollectionHistoryAuditKey] = dueSlot - HistoryAuditInterval;
-        }
-
-        var auditDay = now.Date.AddDays(-1);
+        var auditDay = held.Day;
         var from = CollectionHistoryAudit.ReadFrom(auditDay);
         var to = CollectionHistoryAudit.ReadTo(auditDay);
-        var judgeLastHour = now.TimeOfDay >= CollectionHistoryAudit.LastHourSettledTimeOfDay;
 
-        var findings = new List<(CollectionHistoryAudit.Rollup Rollup, IReadOnlyList<CollectionHistoryAudit.FlaggedRange> Ranges)>();
-        var audited = 0;
-        var failed = 0;
         foreach (var rollup in rollups)
         {
+            if (held.Done.Contains(rollup.Relation))
+            {
+                continue;
+            }
+
             IReadOnlyList<CollectionHistoryAudit.HourBucket>? buckets;
             var readClock = Stopwatch.StartNew();
             try
@@ -2834,10 +2877,9 @@ internal sealed class DarlingSelfAlertEvaluator
             }
             catch (Exception ex)
             {
-                /* One warning, one count, and on to the next rollup. */
-                failed++;
+                /* One warning, one count, and on to the next source; this one is retried on a later tick. */
                 _logger?.LogWarning(ex,
-                    "Collection-history audit could not read {Rollup} after {ElapsedMs} ms; that rollup is skipped",
+                    "Collection-history audit could not read {Rollup} after {ElapsedMs} ms; it is retried on a later tick",
                     rollup.Relation, readClock.ElapsedMilliseconds);
                 _readFailures?.RecordReadFailure(null, "collection-history audit read", readClock.ElapsedMilliseconds);
                 continue;
@@ -2845,45 +2887,111 @@ internal sealed class DarlingSelfAlertEvaluator
 
             if (buckets is null)
             {
+                held.Done.Add(rollup.Relation);
                 continue;
             }
 
-            var ranges = CollectionHistoryAudit.Analyze(auditDay, buckets, judgeLastHour);
+            var ranges = CollectionHistoryAudit.Analyze(auditDay, buckets);
             if (ranges is null)
             {
+                held.Done.Add(rollup.Relation);
                 continue;
             }
 
-            audited++;
+            if (!CollectionHistoryAudit.IsSettled(auditDay, buckets))
+            {
+                /* Not ready: the newest bucket is earlier than the day's 23:00 bucket. Like a failed read. */
+                _logger?.LogInformation(
+                    "Collection-history audit: {Rollup} has no bucket at or after {Hour:u} yet; it is retried on a later tick",
+                    rollup.Relation, auditDay.AddHours(23));
+                continue;
+            }
+
+            held.Done.Add(rollup.Relation);
             if (ranges.Count > 0)
             {
-                findings.Add((rollup, ranges));
+                held.Findings[rollup.Relation] = ranges;
             }
         }
 
-        if (audited == 0 && failed > 0)
+        if (rollups.Any(r => !held.Done.Contains(r.Relation)))
         {
             return;
         }
 
         AlertDelivery? delivery = null;
-        if (findings.Count > 0)
+        var alert = HistoryAuditAlert(held, rollups, Array.Empty<CollectionHistoryAudit.Rollup>());
+        if (alert is not null)
         {
-            var hours = CollectionHistoryAudit.FlaggedHours(findings);
             delivery = await FireAsync(
                 StoreKey(CollectionHistoryAuditKey), _storeLabel, CollectionGapsInHistoryMetric,
-                string.Create(CultureInfo.InvariantCulture, $"{hours} hours"), "half of usual",
-                detail: CollectionHistoryAudit.Render(auditDay, findings),
+                alert.ValueText, "half of usual",
+                detail: alert.Detail,
                 severity: AlertSeverityLevel.Warning,
-                shortMessage: string.Create(CultureInfo.InvariantCulture,
-                    $"{hours} thin hour(s) in retained history on {auditDay:yyyy-MM-dd}"),
-                numericCurrentValue: hours, numericThresholdValue: 0,
+                shortMessage: alert.ShortMessage,
+                numericCurrentValue: alert.Hours, numericThresholdValue: 0,
                 cancellationToken);
         }
 
+        _historyAuditDay = null;
         await RecordDocumentDeliveredAsync(
             _lastHistoryAudit, CollectionHistoryAuditKey, PgSelfAlertDeliveryStampStore.HistoryAuditStateKey,
             delivery, HistoryAuditInterval, now, "collection-history audit", cancellationToken);
+    }
+
+    /// <summary>
+    /// The retries ran out at the next day's slot: one warning naming each source never read, and the one alert for
+    /// whatever was read, with the unread sources named in its text. The send keeps no answer and is not retried: the
+    /// day is given up on, and the stamp that matters is the new slot's own.
+    /// </summary>
+    private async Task GiveUpOnHistoryAuditDayAsync(
+        HistoryAuditDay held, IReadOnlyList<CollectionHistoryAudit.Rollup> rollups, CancellationToken cancellationToken)
+    {
+        var unread = rollups.Where(r => !held.Done.Contains(r.Relation)).ToArray();
+        _logger?.LogWarning(
+            "Collection-history audit gave up on {Rollups} for {Day:yyyy-MM-dd}: they could not be read, or had not caught up, by the next day's slot",
+            string.Join(", ", unread.Select(r => r.Relation)), held.Day);
+
+        var alert = HistoryAuditAlert(held, rollups, unread);
+        if (alert is null)
+        {
+            return;
+        }
+
+        await FireAsync(
+            StoreKey(CollectionHistoryAuditKey), _storeLabel, CollectionGapsInHistoryMetric,
+            alert.ValueText, "half of usual",
+            detail: alert.Detail,
+            severity: AlertSeverityLevel.Warning,
+            shortMessage: alert.ShortMessage,
+            numericCurrentValue: alert.Hours, numericThresholdValue: 0,
+            cancellationToken);
+    }
+
+    /// <summary>The audit alert's pieces, shared by the day's one alert and the give-up alert.</summary>
+    private sealed record HistoryAuditAlertText(int Hours, string ValueText, string Detail, string ShortMessage);
+
+    /// <summary>Null when no source flagged an hour: nothing to raise.</summary>
+    private static HistoryAuditAlertText? HistoryAuditAlert(
+        HistoryAuditDay held, IReadOnlyList<CollectionHistoryAudit.Rollup> rollups,
+        IReadOnlyList<CollectionHistoryAudit.Rollup> unread)
+    {
+        var findings = rollups
+            .Where(r => held.Findings.ContainsKey(r.Relation))
+            .Select(r => (Rollup: r, Ranges: held.Findings[r.Relation]))
+            .ToList();
+        if (findings.Count == 0)
+        {
+            return null;
+        }
+
+        var hours = CollectionHistoryAudit.FlaggedHours(findings);
+        return new HistoryAuditAlertText(
+            hours,
+            string.Create(CultureInfo.InvariantCulture, $"{hours} hours"),
+            CollectionHistoryAudit.Render(held.Day, findings, unread),
+            string.Create(CultureInfo.InvariantCulture,
+                $"{hours} thin hour(s) in retained history on {held.Day:yyyy-MM-dd}"));
     }
 
     /* ------------------------- #3712: the analysis singles digest ------------------------- */

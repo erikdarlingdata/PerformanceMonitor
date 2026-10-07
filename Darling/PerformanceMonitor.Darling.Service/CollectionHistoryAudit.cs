@@ -21,77 +21,88 @@ using PerformanceMonitor.Darling.Storage;
 namespace PerformanceMonitor.Darling.Service;
 
 /// <summary>
-/// The daily retained-history audit (#5450, proposal 3): the pure half. For each hourly rollup the store builds,
-/// the audited UTC day's per-hour server count and sample total are compared with the median of the seven days
-/// before it, for the same hour of day, so the daily load curve is the yardstick. An hour is flagged when its
-/// server count OR its sample total is under half of usual. The samples test is required: on a store that
-/// collected badly for ten days, rollup rows still arrived every hour from 42-52 servers while samples per day
-/// fell 75-85%, so a presence-only check would have passed every one of those days.
+/// The daily retained-history audit (#5450, proposal 3): the pure half. For each source the store keeps, the
+/// audited UTC day's per-hour counts are compared with the median of the seven days before it, for the same hour
+/// of day, so the daily load curve is the yardstick. An hour is flagged when a count is under half of usual.
 ///
-/// <para><b>Which rollups.</b> The live hourly aggregates (<see cref="TimescaleSupport.HourlyAggregates"/>), so a new
-/// hourly rollup is audited without touching this file. The three frozen legacy hourlies are not on that list:
-/// they stopped advancing at #3653 (LC), so auditing them would flag every day. A plain-PostgreSQL store builds no
-/// continuous aggregates, so every relation is absent there and the audit quietly does nothing.</para>
+/// <para><b>Two kinds of source, two tests.</b> The six live hourly aggregates
+/// (<see cref="TimescaleSupport.HourlyAggregates"/>) are QUERY-WORKLOAD rollups: a row exists only for a query or
+/// plan that ran, and their <c>sample_count</c> moves with the workload, so a quiet weekend would read as a
+/// failure. They get the SERVER-COUNT half test only: presence, which catches a hole (a stopped collector, a
+/// rollup whose refresh stopped). The perfmon baseline
+/// (<see cref="TimescaleSupport.PerfmonIntervalBaselineView"/>) has one row per server per perfmon collection pass,
+/// whatever the workload, so it also gets the COLLECTION-PASS half test: per hour, <c>COUNT(*)</c> is the
+/// collection passes and <c>COUNT(DISTINCT server_id)</c> the servers. That is the detector for case 2 of the
+/// issue, where rows arrived every hour and only the volume fell (collection passes at 20% of usual).</para>
 ///
-/// <para><b>Samples.</b> Every live rollup carries <c>sample_count</c>. One that does not (decided from its CREATE
-/// text, so a future one cannot be forgotten) is counted with <c>COUNT(*)</c> instead: rows per hour, a weaker
-/// signal that still catches a hole.</para>
+/// <para><b>Only servers enabled now.</b> Every count, on the audited day and the seven before it, counts only
+/// servers that are enabled now (<c>config.config_monitored_servers.is_enabled</c>). A server removed or disabled
+/// on purpose then leaves "usual" and "actual" alike, instead of flagging for the four days it takes the median
+/// to catch up.</para>
 ///
-/// <para><b>Usual.</b> The median over the prior days that have ANY rows in this rollup. A day with no rows at all
-/// is a store that was not building the rollup yet (or an earlier outage), not a day of usual, and counting it as
+/// <para><b>Usual.</b> The median over the prior days that have ANY rows in this source. A day with no rows at all
+/// is a store that was not building the source yet (or an earlier outage), not a day of usual, and counting it as
 /// zero would drag the median down and hide the next hole. An hour missing inside a day that has rows counts as
-/// zero, which is the hole the audit exists to find. A rollup with fewer than <see cref="MinimumPriorDays"/> such
-/// days has no usual yet and is skipped.</para>
+/// zero, which is the hole the audit exists to find. A source with fewer than <see cref="MinimumPriorDays"/> such
+/// days has no usual yet and is skipped. An hour flags only when its usual is at least 1: with an even number of
+/// prior days a median of 0.5 would otherwise let one quiet hour flag on a small fleet.</para>
+///
+/// <para><b>Ready.</b> The audit runs at 03:00Z or later and always judges hour 23. A source is ready when its
+/// newest bucket is at or after the audited day's 23:00 bucket (<see cref="IsSettled"/>); the read runs one hour
+/// into the next day so a genuine hole at 23:00 (a bucket after it exists) is told apart from a bucket that was
+/// not materialized yet. A source that is not ready is treated like a failed read.</para>
+///
+/// <para><b>Plain PostgreSQL.</b> A plain-PostgreSQL store builds no continuous aggregates, so every relation is
+/// absent there and the audit quietly does nothing. The three frozen legacy hourlies are not audited: they stopped
+/// advancing at #3653 (LC), so auditing them would flag every day.</para>
 /// </summary>
 internal static class CollectionHistoryAudit
 {
     /// <summary>The days before the audited day that make up "usual".</summary>
     internal const int PriorDays = 7;
 
-    /// <summary>The fewest prior days with data a rollup needs before it is audited.</summary>
+    /// <summary>The fewest prior days with data a source needs before it is audited.</summary>
     internal const int MinimumPriorDays = 3;
 
     /// <summary>An hour is flagged when a count is under this fraction of its usual.</summary>
     internal const double ShortfallFraction = 0.5;
 
-    /// <summary>The audit runs on the first pass at or after this time of day (UTC), for the previous UTC day.</summary>
-    internal static readonly TimeSpan DueTimeOfDay = TimeSpan.FromHours(1);
-
-    /// <summary>
-    /// A pass before this time of day does not judge the audited day's last hour. An hourly aggregate's end_offset
-    /// is one hour, so the 23:00 bucket is materialized by the refresh that runs after 01:00Z, and the refresh
-    /// phase grid places every hourly refresh inside the first half hour. Judging the bucket earlier would call
-    /// a refresh that had not run yet a hole.
-    /// </summary>
-    internal static readonly TimeSpan LastHourSettledTimeOfDay = TimeSpan.FromMinutes(90);
+    /// <summary>The audit runs on the first pass at or after this time of day (UTC), for the previous UTC day.
+    /// By 03:00Z the heaviest rollup (refreshed at :15 past 01:00Z) and the hierarchical corrected rollup (refreshed
+    /// at 02:0X) have both materialized the audited day's last hour.</summary>
+    internal static readonly TimeSpan DueTimeOfDay = TimeSpan.FromHours(3);
 
     /// <summary>The audit read's own deadline, longer than the 10 s alert-pass reads because it aggregates eight days.</summary>
     internal const int CommandTimeoutSeconds = 60;
 
-    /// <summary>One hourly rollup to audit: its relation, and whether it has a <c>sample_count</c> column.</summary>
-    internal sealed record Rollup(string Relation, bool HasSampleCount);
+    /// <summary>One source to audit: its relation, and whether it is judged on collection passes (a row per
+    /// server per pass) as well as on servers.</summary>
+    internal sealed record Rollup(string Relation, bool JudgesPasses);
 
-    /// <summary>One hour bucket read from a rollup: distinct servers and the sample total in it.</summary>
-    internal readonly record struct HourBucket(DateTime HourUtc, int Servers, long Samples);
+    /// <summary>One hour bucket read from a source: distinct servers, and rows (collection passes) in it. Passes
+    /// is 0 for a source that does not judge them.</summary>
+    internal readonly record struct HourBucket(DateTime HourUtc, int Servers, long Passes);
 
     /// <summary>
     /// Consecutive flagged hours. <see cref="EndHour"/> is exclusive, so hours 18, 19 and 20 are 18:00-21:00Z.
     /// The counts are the lowest the range's hours reached for each test, each with the usual for that same hour.
     /// </summary>
     internal sealed record FlaggedRange(
-        int StartHour, int EndHour, int LowestServers, double UsualServers, long LowestSamples, double UsualSamples);
+        int StartHour, int EndHour, int LowestServers, double UsualServers, long LowestPasses, double UsualPasses);
 
-    /// <summary>The live hourly rollups, derived from the store's own list.</summary>
+    /// <summary>The audited sources: the live hourly aggregates (servers only), then the perfmon baseline (servers
+    /// and collection passes). Derived from the store's own lists.</summary>
     internal static IReadOnlyList<Rollup> Rollups { get; } = TimescaleSupport.HourlyAggregates
-        .Select(a => new Rollup("collect." + a.View, a.CreateSql.Contains("AS sample_count", StringComparison.Ordinal)))
+        .Select(a => new Rollup("collect." + a.View, false))
+        .Append(new Rollup("collect." + TimescaleSupport.PerfmonIntervalBaselineView, true))
         .ToArray();
 
     private static readonly Regex s_relation = new(
         "^[a-z_][a-z0-9_]*(\\.[a-z_][a-z0-9_]*)?$", RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
     /// <summary>
-    /// The one heavy statement per rollup, with a time-range predicate on <c>bucket</c> so chunk exclusion applies.
-    /// $1 is the first bucket read and $2 the end, exclusive.
+    /// The one heavy statement per source, with a time-range predicate on <c>bucket</c> so chunk exclusion applies,
+    /// over servers enabled now only. $1 is the first bucket read and $2 the end, exclusive.
     /// </summary>
     internal static string BuildSql(Rollup rollup)
     {
@@ -100,23 +111,40 @@ internal static class CollectionHistoryAudit
             throw new ArgumentException("Not a plain relation name: " + rollup.Relation, nameof(rollup));
         }
 
-        var samples = rollup.HasSampleCount ? "COALESCE(SUM(sample_count), 0)::bigint" : "COUNT(*)::bigint";
+        var passes = rollup.JudgesPasses ? "COUNT(*)::bigint" : "0::bigint";
         return $@"
-SELECT bucket, COUNT(DISTINCT server_id)::int, {samples}
-FROM {rollup.Relation}
-WHERE bucket >= $1
-AND   bucket <  $2
-GROUP BY bucket";
+SELECT r.bucket, COUNT(DISTINCT r.server_id)::int, {passes}
+FROM {rollup.Relation} AS r
+JOIN config.config_monitored_servers AS c
+  ON c.server_id = r.server_id
+ AND c.is_enabled
+WHERE r.bucket >= $1
+AND   r.bucket <  $2
+GROUP BY r.bucket";
     }
 
     /// <summary>The first bucket the audit reads for <paramref name="auditDayUtc"/>: seven days before it.</summary>
     internal static DateTime ReadFrom(DateTime auditDayUtc) => auditDayUtc.Date.AddDays(-PriorDays);
 
-    /// <summary>The end (exclusive) of what the audit reads: the end of the audited day.</summary>
-    internal static DateTime ReadTo(DateTime auditDayUtc) => auditDayUtc.Date.AddDays(1);
+    /// <summary>
+    /// The end (exclusive) of what the audit reads: one hour past the audited day, so the next day's 00:00 bucket
+    /// is in the read. It is what tells a genuine hole at 23:00 (a later bucket exists) from a 23:00 bucket that
+    /// was not materialized yet (<see cref="IsSettled"/>).
+    /// </summary>
+    internal static DateTime ReadTo(DateTime auditDayUtc) => auditDayUtc.Date.AddDays(1).AddHours(1);
 
     /// <summary>
-    /// Reads one rollup's hour buckets, or null when the relation does not exist (a plain-PostgreSQL store, or an
+    /// True when the source's newest bucket is at or after the audited day's 23:00 bucket: the day's last hour
+    /// had its chance to materialize. A source that is not settled is "not ready" and is handled like a failed read.
+    /// </summary>
+    internal static bool IsSettled(DateTime auditDayUtc, IReadOnlyList<HourBucket> buckets)
+    {
+        var lastHour = auditDayUtc.Date.AddHours(23);
+        return buckets.Any(b => b.HourUtc >= lastHour);
+    }
+
+    /// <summary>
+    /// Reads one source's hour buckets, or null when the relation does not exist (a plain-PostgreSQL store, or an
     /// aggregate not built yet). The existence check is a catalog lookup; the aggregate is the one heavy read.
     /// </summary>
     internal static async Task<IReadOnlyList<HourBucket>?> ReadAsync(
@@ -171,11 +199,10 @@ GROUP BY bucket";
     /// <summary>
     /// The flagged ranges for the audited day, or null when the rollup has fewer than
     /// <see cref="MinimumPriorDays"/> prior days with rows (no usual yet). Empty means audited and clean.
-    /// <paramref name="judgeLastHour"/> is false when a pass is too early to trust the day's last bucket
-    /// (<see cref="LastHourSettledTimeOfDay"/>).
+    /// All 24 hours are judged, hour 23 included; whether the source had its chance to materialize hour 23 is
+    /// <see cref="IsSettled"/>, which the caller checks.
     /// </summary>
-    internal static IReadOnlyList<FlaggedRange>? Analyze(
-        DateTime auditDayUtc, IReadOnlyList<HourBucket> buckets, bool judgeLastHour)
+    internal static IReadOnlyList<FlaggedRange>? Analyze(DateTime auditDayUtc, IReadOnlyList<HourBucket> buckets)
     {
         var auditDay = auditDayUtc.Date;
         var byHour = new Dictionary<DateTime, HourBucket>();
@@ -188,7 +215,7 @@ GROUP BY bucket";
         for (var d = 1; d <= PriorDays; d++)
         {
             var day = auditDay.AddDays(-d);
-            var hasRows = buckets.Any(b => b.HourUtc.Date == day && (b.Servers > 0 || b.Samples > 0));
+            var hasRows = buckets.Any(b => b.HourUtc.Date == day && (b.Servers > 0 || b.Passes > 0));
             if (hasRows)
             {
                 priorDaysWithData.Add(day);
@@ -200,35 +227,35 @@ GROUP BY bucket";
             return null;
         }
 
-        var lastHourToJudge = judgeLastHour ? 23 : 22;
-        var flagged = new List<(int Hour, int Servers, double UsualServers, long Samples, double UsualSamples)>();
-        for (var hour = 0; hour <= lastHourToJudge; hour++)
+        var flagged = new List<(int Hour, int Servers, double UsualServers, long Passes, double UsualPasses)>();
+        for (var hour = 0; hour <= 23; hour++)
         {
             var servers = new List<long>();
-            var samples = new List<long>();
+            var passes = new List<long>();
             foreach (var day in priorDaysWithData)
             {
                 if (byHour.TryGetValue(day.AddHours(hour), out var prior))
                 {
                     servers.Add(prior.Servers);
-                    samples.Add(prior.Samples);
+                    passes.Add(prior.Passes);
                 }
                 else
                 {
                     servers.Add(0);
-                    samples.Add(0);
+                    passes.Add(0);
                 }
             }
 
             var usualServers = Median(servers);
-            var usualSamples = Median(samples);
+            var usualPasses = Median(passes);
             byHour.TryGetValue(auditDay.AddHours(hour), out var actual);
 
-            var serversLow = usualServers > 0 && actual.Servers < ShortfallFraction * usualServers;
-            var samplesLow = usualSamples > 0 && actual.Samples < ShortfallFraction * usualSamples;
-            if (serversLow || samplesLow)
+            /* L3 (review of #5461): usual must be at least 1, so an even-count median of 0.5 cannot flag a quiet hour. */
+            var serversLow = usualServers >= 1 && actual.Servers < ShortfallFraction * usualServers;
+            var passesLow = usualPasses >= 1 && actual.Passes < ShortfallFraction * usualPasses;
+            if (serversLow || passesLow)
             {
-                flagged.Add((hour, actual.Servers, usualServers, actual.Samples, usualSamples));
+                flagged.Add((hour, actual.Servers, usualServers, actual.Passes, usualPasses));
             }
         }
 
@@ -236,7 +263,7 @@ GROUP BY bucket";
     }
 
     private static List<FlaggedRange> MergeRanges(
-        List<(int Hour, int Servers, double UsualServers, long Samples, double UsualSamples)> flagged)
+        List<(int Hour, int Servers, double UsualServers, long Passes, double UsualPasses)> flagged)
     {
         var ranges = new List<FlaggedRange>();
         var i = 0;
@@ -250,10 +277,10 @@ GROUP BY bucket";
 
             var group = flagged.GetRange(i, j - i + 1);
             var lowServers = group.OrderBy(h => h.Servers).First();
-            var lowSamples = group.OrderBy(h => h.Samples).First();
+            var lowPasses = group.OrderBy(h => h.Passes).First();
             ranges.Add(new FlaggedRange(
                 group[0].Hour, group[^1].Hour + 1,
-                lowServers.Servers, lowServers.UsualServers, lowSamples.Samples, lowSamples.UsualSamples));
+                lowServers.Servers, lowServers.UsualServers, lowPasses.Passes, lowPasses.UsualPasses));
             i = j + 1;
         }
 
@@ -276,21 +303,48 @@ GROUP BY bucket";
         findings.Sum(f => f.Ranges.Sum(r => r.EndHour - r.StartHour));
 
     /// <summary>
-    /// The alert's text: the day, then for each flagged rollup its flagged ranges with the counts against usual.
+    /// The alert's text: the day, then the flagged ranges with the counts against usual, one line for all the
+    /// sources whose flagged ranges are identical (the three Query Store rollups share one signal), then any
+    /// source that could not be read for this day.
     /// </summary>
     internal static string Render(
-        DateTime auditDayUtc, IReadOnlyList<(Rollup Rollup, IReadOnlyList<FlaggedRange> Ranges)> findings)
+        DateTime auditDayUtc, IReadOnlyList<(Rollup Rollup, IReadOnlyList<FlaggedRange> Ranges)> findings,
+        IReadOnlyList<Rollup>? unread = null)
     {
         var text = new StringBuilder();
         text.Append(CultureInfo.InvariantCulture,
-            $"Retained hourly history for {auditDayUtc:yyyy-MM-dd} (UTC) fell below half of the usual pace for that hour in {findings.Count} rollup(s), ")
-            .Append("where usual is the median of the 7 days before. ");
+            $"Retained history for {auditDayUtc:yyyy-MM-dd} (UTC) fell below half of the usual pace for that hour in {findings.Count} source(s), ")
+            .Append("where usual is the median of the 7 days before and only servers enabled now are counted. ");
+
+        var groups = new List<(bool JudgesPasses, List<Rollup> Sources, IReadOnlyList<FlaggedRange> Ranges)>();
         foreach (var (rollup, ranges) in findings)
         {
-            text.Append(DisplayName(rollup)).Append(": ");
-            text.Append(string.Join("; ", ranges.Select(r => string.Create(CultureInfo.InvariantCulture,
-                $"{RangeLabel(r)} (servers as low as {r.LowestServers:N0} vs usual {Math.Round(r.UsualServers):N0}, samples as low as {r.LowestSamples:N0} vs usual {Math.Round(r.UsualSamples):N0})"))));
+            var at = groups.FindIndex(g => g.JudgesPasses == rollup.JudgesPasses && g.Ranges.SequenceEqual(ranges));
+            if (at >= 0)
+            {
+                groups[at].Sources.Add(rollup);
+            }
+            else
+            {
+                groups.Add((rollup.JudgesPasses, new List<Rollup> { rollup }, ranges));
+            }
+        }
+
+        foreach (var (judgesPasses, sources, ranges) in groups)
+        {
+            text.Append(string.Join(", ", sources.Select(DisplayName))).Append(": ");
+            text.Append(string.Join("; ", ranges.Select(r => judgesPasses
+                ? string.Create(CultureInfo.InvariantCulture,
+                    $"{RangeLabel(r)} (servers as low as {r.LowestServers:N0} vs usual {Math.Round(r.UsualServers):N0}, collection passes as low as {r.LowestPasses:N0} vs usual {Math.Round(r.UsualPasses):N0})")
+                : string.Create(CultureInfo.InvariantCulture,
+                    $"{RangeLabel(r)} (servers as low as {r.LowestServers:N0} vs usual {Math.Round(r.UsualServers):N0})"))));
             text.Append(". ");
+        }
+
+        if (unread is { Count: > 0 })
+        {
+            text.Append("Not read for this day: ").Append(string.Join(", ", unread.Select(DisplayName)))
+                .Append(" (a read failed, or the source had not caught up to the end of the day). ");
         }
 
         text.Append("A service outage, a restart, or collection that fell behind leaves this shape; compare with the Collection Stopped and Collection Gap At Start alerts for the same day.");

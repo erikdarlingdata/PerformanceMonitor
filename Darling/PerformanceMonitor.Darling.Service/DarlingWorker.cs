@@ -11171,7 +11171,7 @@ AND   j.hypertable_name = '{relation}'", connection))
                     _logger.LogDebug(ex, "analysis singles digest evaluation failed");
                 }
 
-                /* #5450: the daily retained-history audit. Same hourly tick; the once-a-day gate (01:00Z, the previous
+                /* #5450: the daily retained-history audit. Same hourly tick; the once-a-day gate (03:00Z, the previous
                    UTC day, a stamp that survives a restart) is enforced inside, so 23 of every 24 ticks cost a
                    clock check and a dictionary lookup. Master-gated inside, failure-isolated inside; the outer catch
                    is the belt. */
