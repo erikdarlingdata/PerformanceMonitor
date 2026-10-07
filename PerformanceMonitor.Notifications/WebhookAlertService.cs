@@ -382,6 +382,21 @@ public class WebhookAlertService
                        worst case is a re-post inside that sibling's window, not a lost resolve. */
                     _cooldown.ClearMetric(serverId, clearedFiring);
                 }
+
+                /* #5469: the other half of the same re-arm. The recovery stamps ITS OWN key on its first send,
+                   and the clear above names only the firing's key, so a second outage that recovers inside
+                   the window met the first recovery's stamp: its resolve was throttled and PagerDuty's
+                   second incident stayed open. A DELIVERED firing of the pair, under the same condition as
+                   the clear above, therefore forgets its closing edge's entry — the new incident has not
+                   been closed yet, so the next recovery is a first notice again. Like the clear above it is
+                   per server + pair, not per replica: a sibling replica's pending recovery is re-armed too,
+                   which only ever lets a resolve through that the stamp would have throttled. */
+                if (pagerDutyError is null
+                    && delivery.PagerDutyAutoResolve
+                    && AlertFamily.TryGetRecoveryOf(metricName, out var recoveryOfFiring))
+                {
+                    _cooldown.ClearMetric(serverId, recoveryOfFiring);
+                }
             }
 
             if (sent)
@@ -2098,7 +2113,9 @@ public class WebhookAlertService
             : RenderContextForTemplate(context, branding, prose);
 
         /* Keyed on the numeric serverId the fan-out passes — the same identity the LIVE PagerDuty path
-           feeds DerivePagerDutyDedupKey — so the two channels' keys are equal for the same alert. The
+           feeds DerivePagerDutyDedupKey — so the two channels' keys are equal for the same alert, except
+           an edge pair with PagerDuty auto-resolve on: this call keeps the default autoResolve = false on
+           purpose (#5469), so the token stays on per-state keys while PagerDuty's follows the flag. The
            serverName arm is THIS channel's own fallback for callers with no id (the settings-window test
            send); it is not a guarantee PagerDuty's path shares, so a caller wanting cross-channel
            correlation must pass the id. */
@@ -2751,9 +2768,10 @@ public class WebhookAlertService
     /// current STATE, so using it minted a distinct dedup_key per edge and PagerDuty showed two incidents for
     /// one outage (and a closing edge could never resolve the open one — its key named a different
     /// incident). Every future pair added to that census joins this by construction. With the default off,
-    /// each edge keeps its own state-named key, so the generic <c>{{dedup_key}}</c> token and the triage link
-    /// read exactly as they did before this rung: correlation is an opt-in behaviour change, scoped entirely
-    /// to the operator who switched it on.</para>
+    /// each edge keeps its own state-named key, so the triage link reads exactly as it did before this rung:
+    /// correlation is an opt-in behaviour change, scoped entirely to the operator who switched it on. The
+    /// generic webhook's <c>{{dedup_key}}</c> token is NOT part of the opt-in (#5469): its send derives the key
+    /// with the default <c>autoResolve = false</c>, so it stays on per-state keys with the flag on or off.</para>
     ///
     /// <para>The AG pair's key is also scoped per replica: "{serverId}:AG Replica Disconnected:{ag}:{replica}"
     /// from <see cref="AlertContext.AgReplicaIdentity"/>. Without that there is still one key per SERVER for
@@ -2767,9 +2785,9 @@ public class WebhookAlertService
     /// <para>The rename runs before the incident-fingerprint path on purpose: a closing edge that ever
     /// carried incident fingerprints would hash them under its own state name and split the pair again, and
     /// the deliverable recovery set is pinned to stateless notices — the incident identity IS the firing's
-    /// canonical name. All three consumers of this helper (PagerDuty, the generic <c>{{dedup_key}}</c>
-    /// token, and the triage link) share the normalized key, which is the cross-channel correlation those
-    /// call sites document.</para>
+    /// canonical name. The consumers that follow the flag (PagerDuty and the triage link) share the
+    /// normalized key, which is the cross-channel correlation those call sites document. The generic
+    /// <c>{{dedup_key}}</c> token does not follow it (#5469).</para>
     ///
     /// <para>Internal (#4220), not private: <see cref="EmailSendCore"/> reads it too, so the triage link's
     /// dedup key agrees with PagerDuty's for the same firing across every channel, email included.</para>

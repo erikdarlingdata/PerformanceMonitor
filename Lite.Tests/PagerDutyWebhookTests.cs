@@ -419,6 +419,80 @@ public class PagerDutyWebhookTests
     }
 
     /// <summary>
+    /// The flap: down, up, down, up, all inside <c>EmailCooldownMinutes</c>, with auto-resolve on. The first
+    /// recovery stamps its OWN key on its first send, and the delivered close clears only the FIRING key, so
+    /// the second recovery used to meet its own cooldown and never resolve the second incident. All four
+    /// posts must reach PagerDuty, the last a resolve on the second incident's key. Run both store-less and
+    /// with a history store that records each delivered send the way the production deliverers do.
+    /// </summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task SendPath_AutoResolveOn_DownUpDownUpInsideTheCooldown_ResolvesTheSecondIncident(bool withHistory)
+    {
+        var endpoint = new CapturingPagerDuty();
+        var history = withHistory ? new FakeHistoryStore() : null;
+        var settings = new WebhookSettings { PagerDutyRoutingKey = "rk-test", PagerDutyAutoResolve = true, Capture = endpoint };
+        var service = ServiceFor(settings, endpoint, history);
+
+        foreach (var metric in new[] { "Server Unreachable", "Server Restored", "Server Unreachable", "Server Restored" })
+        {
+            Assert.Equal(AlertChannelOutcome.Delivered, await SendSingleAlertAsync(service, metric));
+            history?.SentRow(metric, "261742202", DateTime.UtcNow);
+        }
+
+        Assert.Equal(4, endpoint.Bodies.Count);
+        Assert.Equal(new[] { "trigger", "resolve", "trigger", "resolve" }, endpoint.Bodies.Select(WireAction).ToArray());
+        Assert.Equal(WireDedupKey(endpoint.Bodies[2]), WireDedupKey(endpoint.Bodies[3]));
+    }
+
+    /// <summary>The AG Replica pair, the same flap for ONE replica.</summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task SendPath_AutoResolveOn_ReplicaDisconnectReconnectTwiceInsideTheCooldown_ResolvesTheSecondIncident(bool withHistory)
+    {
+        var endpoint = new CapturingPagerDuty();
+        var history = withHistory ? new FakeHistoryStore() : null;
+        var settings = new WebhookSettings { PagerDutyRoutingKey = "rk-test", PagerDutyAutoResolve = true, Capture = endpoint };
+        var service = ServiceFor(settings, endpoint, history);
+
+        foreach (var metric in new[] { "AG Replica Disconnected", "AG Replica Reconnected", "AG Replica Disconnected", "AG Replica Reconnected" })
+        {
+            Assert.Equal(
+                AlertChannelOutcome.Delivered,
+                await SendSingleAlertAsync(service, metric, "261742202", AgAlertContexts.ForReplica("OrdersAG", "REPLICA-A")));
+            history?.SentRow(metric, "261742202", DateTime.UtcNow);
+        }
+
+        Assert.Equal(4, endpoint.Bodies.Count);
+        Assert.Equal(new[] { "trigger", "resolve", "trigger", "resolve" }, endpoint.Bodies.Select(WireAction).ToArray());
+        Assert.Equal("261742202:AG Replica Disconnected:OrdersAG:REPLICA-A", WireDedupKey(endpoint.Bodies[3]));
+    }
+
+    /// <summary>
+    /// The control: auto-resolve OFF keeps what shipped. The second outage and the second recovery both meet
+    /// their own cooldown entries (nothing is cleared with the flag off), so only the first down and the first
+    /// up post, the up as an info-level trigger on its own key. The re-arm is gated on the flag, so this
+    /// must not move.
+    /// </summary>
+    [Fact]
+    public async Task SendPath_AutoResolveOff_DownUpDownUpInsideTheCooldown_KeepsTheShippedThrottling()
+    {
+        var endpoint = new CapturingPagerDuty();
+        var settings = new WebhookSettings { PagerDutyRoutingKey = "rk-test", PagerDutyAutoResolve = false, Capture = endpoint };
+        var service = ServiceFor(settings, endpoint);
+
+        Assert.Equal(AlertChannelOutcome.Delivered, await SendSingleAlertAsync(service, "Server Unreachable"));
+        Assert.Equal(AlertChannelOutcome.Delivered, await SendSingleAlertAsync(service, "Server Restored"));
+        Assert.NotEqual(AlertChannelOutcome.Delivered, await SendSingleAlertAsync(service, "Server Unreachable"));
+        Assert.NotEqual(AlertChannelOutcome.Delivered, await SendSingleAlertAsync(service, "Server Restored"));
+
+        Assert.Equal(2, endpoint.Bodies.Count);
+        Assert.All(endpoint.Bodies, body => Assert.Equal("trigger", WireAction(body)));
+    }
+
+    /// <summary>
     /// One alert through the real <see cref="WebhookAlertService"/> fan-out with the PagerDuty post
     /// captured. Each <see cref="WebhookAlertService"/> is constructed per send (no shared state leaks
     /// between the sends an A/B case sequences); the shared per-test cooldown is the POINT of the

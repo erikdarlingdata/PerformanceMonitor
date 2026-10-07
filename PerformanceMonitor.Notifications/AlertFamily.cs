@@ -170,6 +170,25 @@ public static class AlertFamily
     };
 
     /// <summary>
+    /// The closing edge of a FIRING metric of a pair (<see cref="RecoveryPairs"/> read from its value side):
+    /// "Server Unreachable" gives "Server Restored". False for a closing edge or any metric outside the pairs.
+    /// </summary>
+    public static bool TryGetRecoveryOf(string metricName, out string recovery)
+    {
+        foreach (var pair in RecoveryPairs)
+        {
+            if (string.Equals(pair.Value, metricName, StringComparison.Ordinal))
+            {
+                recovery = pair.Key;
+                return true;
+            }
+        }
+
+        recovery = "";
+        return false;
+    }
+
+    /// <summary>
     /// Whether <paramref name="metricName"/> belongs to the paired lifecycle on EITHER side: a closing edge
     /// (<see cref="RecoveryPairs"/> key) or a firing whose close re-keys onto it (a value). A future pair
     /// joins the checks that read this by naming its value — no second census, so the two directions of
