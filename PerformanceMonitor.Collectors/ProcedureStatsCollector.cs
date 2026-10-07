@@ -137,6 +137,9 @@ public sealed class ProcedureStatsCollector : CollectorDefinitionBase<ProcedureS
     public readonly record struct PlanPhaseResult(
         string? PlanXml, long? PlanBytes, long? StatementCount, DateTime? LastStatementCompile, long? GenerationSum);
 
+    /* The seven delta group names. ComputeDeltas spells each as a literal at its call site, because the
+       DeltaFamilySeedingCensusTests census reads the groups a collector passes from its source text; these constants
+       are what the idle skip PEEKS, and ProcedureStatsIdleSkipTests fails if a name here drifts from a call site. */
     private const string ExecGroup = "proc_stats_exec";
     private const string WorkerGroup = "proc_stats_worker";
     private const string ElapsedGroup = "proc_stats_elapsed";
@@ -879,13 +882,13 @@ OPTION(RECOMPILE);");
 
     private static ReadTimeDeltas ComputeDeltas(Row row, string deltaKey, CollectorContext context)
     {
-        var deltaExec = context.Deltas.CalculateDeltaWithInterval(context.ServerId, ExecGroup, deltaKey, row.ExecutionCount, out var execInterval, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
-        var deltaWorker = context.Deltas.CalculateDeltaWithInterval(context.ServerId, WorkerGroup, deltaKey, row.TotalWorkerTime, out var workerInterval, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
-        var deltaElapsed = context.Deltas.CalculateDeltaWithInterval(context.ServerId, ElapsedGroup, deltaKey, row.TotalElapsedTime, out var elapsedInterval, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
-        var deltaReads = context.Deltas.CalculateDeltaWithInterval(context.ServerId, ReadsGroup, deltaKey, row.TotalLogicalReads, out var readsInterval, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
-        var deltaWrites = context.Deltas.CalculateDeltaWithInterval(context.ServerId, WritesGroup, deltaKey, row.TotalLogicalWrites, out var writesInterval, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
-        var deltaPhysReads = context.Deltas.CalculateDeltaWithInterval(context.ServerId, PhysReadsGroup, deltaKey, row.TotalPhysicalReads, out var physReadsInterval, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
-        var deltaSpills = context.Deltas.CalculateDeltaWithInterval(context.ServerId, SpillsGroup, deltaKey, row.TotalSpills, out var spillsInterval, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
+        var deltaExec = context.Deltas.CalculateDeltaWithInterval(context.ServerId, "proc_stats_exec", deltaKey, row.ExecutionCount, out var execInterval, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
+        var deltaWorker = context.Deltas.CalculateDeltaWithInterval(context.ServerId, "proc_stats_worker", deltaKey, row.TotalWorkerTime, out var workerInterval, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
+        var deltaElapsed = context.Deltas.CalculateDeltaWithInterval(context.ServerId, "proc_stats_elapsed", deltaKey, row.TotalElapsedTime, out var elapsedInterval, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
+        var deltaReads = context.Deltas.CalculateDeltaWithInterval(context.ServerId, "proc_stats_reads", deltaKey, row.TotalLogicalReads, out var readsInterval, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
+        var deltaWrites = context.Deltas.CalculateDeltaWithInterval(context.ServerId, "proc_stats_writes", deltaKey, row.TotalLogicalWrites, out var writesInterval, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
+        var deltaPhysReads = context.Deltas.CalculateDeltaWithInterval(context.ServerId, "proc_stats_phys_reads", deltaKey, row.TotalPhysicalReads, out var physReadsInterval, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
+        var deltaSpills = context.Deltas.CalculateDeltaWithInterval(context.ServerId, "proc_stats_spills", deltaKey, row.TotalSpills, out var spillsInterval, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
         var interval = Math.Min(execInterval, Math.Min(workerInterval, Math.Min(elapsedInterval, Math.Min(readsInterval, Math.Min(writesInterval, Math.Min(physReadsInterval, spillsInterval))))));
 
         return new ReadTimeDeltas(deltaExec, deltaWorker, deltaElapsed, deltaReads, deltaWrites, deltaPhysReads, deltaSpills, interval);

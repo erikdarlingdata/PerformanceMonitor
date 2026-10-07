@@ -257,20 +257,26 @@ public sealed partial class StatementCollectionCensusTests
             });
         }
 
-        table.Columns.Add("query_plan_xml", typeof(string));
-        table.Columns.Add("query_plan_xml_bytes", typeof(long));
         var values = new object[table.Columns.Count];
         for (var i = 0; i < 27; i++)
         {
             values[i] = table.Columns[i].DataType == typeof(long) && i is 6 or 7 or 8 or 9 or 10 or 11 or 22 or 23 or 24 ? 1L : DBNull.Value;
         }
 
-        values[27] = StatementScrubCanary.CanaryPlan();
-        values[28] = 7L;
         table.Rows.Add(values);
 
         await using var reader = table.CreateDataReader();
         var rows = await ProcedureStatsCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
+
+        /* #5449: the plan enters the row in the plan phase, which is where the filter now runs. */
+        using var planTable = new DataTable();
+        planTable.Columns.Add("ord", typeof(int));
+        planTable.Columns.Add("query_plan_xml", typeof(string));
+        planTable.Columns.Add("query_plan_xml_bytes", typeof(long));
+        planTable.Rows.Add(0, StatementScrubCanary.CanaryPlan(), 7L);
+        await using var planReader = planTable.CreateDataReader();
+        var phase = await ProcedureStatsCollector.ReadPlanPhaseAsync(planReader, context, CancellationToken.None);
+        ProcedureStatsCollector.ApplyPlanPhase(rows, new[] { 0 }, phase);
 
         var writer = new StatementScrubRecordingWriter();
         ProcedureStatsCollector.Instance.WritePayload(Assert.Single(rows), writer, context);
