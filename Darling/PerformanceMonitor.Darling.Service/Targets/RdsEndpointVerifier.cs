@@ -50,7 +50,7 @@ public sealed class RdsTargetLoginException : RdsEndpointMismatchException
 ///
 /// <para>An instance is checked against <c>DescribeDBInstances</c> <c>Endpoint.Address</c>; a cluster, reader or custom
 /// endpoint against <c>DescribeDBClusters</c> <c>Endpoint</c>, <c>ReaderEndpoint</c> and <c>CustomEndpoints</c>. An id AWS
-/// does not know reads as a mismatch, with the same text as any other mismatch.</para>
+/// does not know reads as a mismatch.</para>
 ///
 /// <para>The verdict is cached per (server id, host, id, credential scope), so an edit of the host asks again. A match is
 /// kept for an hour and a mismatch for five minutes, so a fixed AWS side heals within one cycle of the shorter window
@@ -58,6 +58,9 @@ public sealed class RdsTargetLoginException : RdsEndpointMismatchException
 /// denied <c>rds:DescribeDBInstances</c>, a throttle) is not cached: it propagates, and the runner reads it exactly as it
 /// reads a denied log call. Each cache holds at most <see cref="MaxEntries"/> entries and drops an expired entry when it
 /// is read.</para>
+///
+/// <para>A login the target refuses is remembered for the same five minutes and the read still ends, so the target sees
+/// at most one fresh login in that window for each server; a changed definition forgets it.</para>
 ///
 /// <para>A match is honoured only while the target has accepted an unpooled login within the match lifetime: a login the
 /// target refuses (a revoked role, a changed password) ends the reads even when a pooled session is still open. With no
@@ -87,18 +90,22 @@ public sealed class RdsEndpointVerifier
     private readonly Func<string?, CancellationToken, Task<string?>> _loginProbe;
     private readonly ConcurrentDictionary<(int ServerId, string Host, string Id, string Scope), (bool Matches, DateTime AtUtc)> _verdicts = new();
     private readonly ConcurrentDictionary<(int ServerId, string Host), DateTime> _logins = new();
+    private readonly ConcurrentDictionary<(int ServerId, string Host), (string Failure, DateTime AtUtc)> _loginRefusals = new();
 
     /// <summary>The verifier every product caller uses: it enforces, with the real login probe.</summary>
-    public RdsEndpointVerifier() : this(null, null)
+    public RdsEndpointVerifier() : this(null, null, null)
     {
     }
 
-    /// <summary>
-    /// Internal so no product caller can switch the check off: <paramref name="enforce"/> is for the tests.
-    /// <paramref name="loginProbe"/> answers null when the target accepted a fresh login, otherwise what failed.
-    /// </summary>
-    internal RdsEndpointVerifier(
-        Func<DateTime>? clock, bool? enforce, Func<string?, CancellationToken, Task<string?>>? loginProbe = null)
+    /// <summary>The log source's form: a clock for its own windows, and the same checks as the parameterless one.</summary>
+    internal RdsEndpointVerifier(Func<DateTime>? clock) : this(clock, null, null)
+    {
+    }
+
+    /* Private so no product caller can switch the check off or swap the login probe: the tests reach it through
+       ForTests, and a pin test keeps that name out of every other file in the service. */
+    private RdsEndpointVerifier(
+        Func<DateTime>? clock, bool? enforce, Func<string?, CancellationToken, Task<string?>>? loginProbe)
     {
         _clock = clock ?? (() => DateTime.UtcNow);
         _enforce = enforce ?? !TestOnlySkipCheck;
@@ -106,14 +113,28 @@ public sealed class RdsEndpointVerifier
     }
 
     /// <summary>
+    /// The tests' way in. <paramref name="loginProbe"/> answers null when the target accepted a fresh login, otherwise
+    /// what failed.
+    /// </summary>
+    internal static RdsEndpointVerifier ForTests(
+        Func<DateTime>? clock = null, bool enforce = true, Func<string?, CancellationToken, Task<string?>>? loginProbe = null)
+        => new(clock, enforce, loginProbe);
+
+    /// <summary>
     /// Host names compare equal ignoring case and any trailing dots (the absolute form of a DNS name). A host with a
-    /// non-ASCII character normalizes to the empty string, which matches nothing.
+    /// non-ASCII or control character normalizes to the empty string, which matches nothing. The check runs on the string
+    /// as given, so only ordinary spaces at either end are trimmed.
     /// </summary>
     public static string Normalize(string? host)
     {
-        var trimmed = (host ?? string.Empty).Trim().TrimEnd('.');
+        var raw = host ?? string.Empty;
 
-        return trimmed.Any(character => character > 0x7F) ? string.Empty : trimmed.ToLowerInvariant();
+        if (raw.Any(character => character > 0x7F || char.IsControl(character)))
+        {
+            return string.Empty;
+        }
+
+        return raw.Trim(' ').TrimEnd('.').ToLowerInvariant();
     }
 
     /// <summary>Whether <paramref name="host"/> is one of the addresses AWS reported.</summary>
@@ -139,6 +160,8 @@ public sealed class RdsEndpointVerifier
 
     internal int CachedLoginCount => _logins.Count;
 
+    internal int CachedLoginRefusalCount => _loginRefusals.Count;
+
     /// <summary>Forgets every verdict and login held for <paramref name="serverId"/> (its definition changed).</summary>
     public void ClearServer(int serverId)
     {
@@ -150,6 +173,11 @@ public sealed class RdsEndpointVerifier
         foreach (var key in _logins.Keys.Where(key => key.ServerId == serverId).ToList())
         {
             _logins.TryRemove(key, out _);
+        }
+
+        foreach (var key in _loginRefusals.Keys.Where(key => key.ServerId == serverId).ToList())
+        {
+            _loginRefusals.TryRemove(key, out _);
         }
     }
 
@@ -215,10 +243,22 @@ public sealed class RdsEndpointVerifier
             _logins.TryRemove(key, out _);
         }
 
+        if (_loginRefusals.TryGetValue(key, out var refused))
+        {
+            if (now - refused.AtUtc < MismatchLifetime)
+            {
+                throw new RdsTargetLoginException(LoginMessage(host, refused.Failure));
+            }
+
+            _loginRefusals.TryRemove(key, out _);
+        }
+
         var failure = await _loginProbe(connectionString, cancellationToken);
 
         if (failure is not null)
         {
+            Store(_loginRefusals, key, (failure, now), entry => entry.Item2);
+
             throw new RdsTargetLoginException(LoginMessage(host, failure));
         }
 
@@ -232,8 +272,13 @@ public sealed class RdsEndpointVerifier
     {
         if (cache.Count >= MaxEntries && !cache.ContainsKey(key))
         {
-            var oldest = cache.OrderBy(pair => atUtc(pair.Value)).First().Key;
-            cache.TryRemove(oldest, out _);
+            /* A concurrent clear can empty the cache between the count and the enumeration: nothing to remove then. */
+            var oldest = cache.OrderBy(pair => atUtc(pair.Value)).Select(pair => (KeyValuePair<TKey, TValue>?)pair).FirstOrDefault();
+
+            if (oldest is { } entry)
+            {
+                cache.TryRemove(entry.Key, out _);
+            }
         }
 
         cache[key] = value;
@@ -283,8 +328,7 @@ public sealed class RdsEndpointVerifier
     private static async Task<List<string?>> ReportedAddressesAsync(
         IAmazonRDS client, RdsEndpoint.Parsed parsed, CancellationToken cancellationToken)
     {
-        /* An id AWS does not know reports no address, so it reads as the same mismatch (and the same text) as an id
-           that exists with another endpoint. */
+        /* An id AWS does not know reports no address, so it reads as a mismatch. */
         if (parsed.Kind == RdsEndpointKind.Instance)
         {
             DescribeDBInstancesResponse instances;

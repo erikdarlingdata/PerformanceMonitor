@@ -6243,6 +6243,8 @@ LIMIT 1";
                    calls after this and re-populate the server's cache for one pass; that is the same window the
                    Forget above tolerates, and a re-add inside it is the A5 epoch question, not this one. */
                 _deltas?.ClearServer(id);
+                /* The RDS endpoint verdict and fresh login held for this id go with the server: a re-add checks again. */
+                _runner?.ForgetRdsVerdicts(id);
                 /* #4999: and its single-flight slots. The id is the registration's, so a re-add carries the same one, and a
                    run of this removed state that is still going, or still queued for a permit (hours, behind other daily
                    runs), would hold the slot the re-added server's first daily run needs. That run would skip, and a

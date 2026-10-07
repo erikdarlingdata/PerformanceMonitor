@@ -195,7 +195,7 @@ public sealed class RdsLogSource
         ILogger? logger = null,
         RdsEndpointVerifier? verifier = null)
     {
-        _verifier = verifier ?? new RdsEndpointVerifier(clock, null);
+        _verifier = verifier ?? new RdsEndpointVerifier(clock);
         _clientFactory = clientFactory
             ?? (region => new AmazonRDSClient(RegionEndpoint.GetBySystemName(region)));
         _clock = clock ?? (() => DateTime.UtcNow);

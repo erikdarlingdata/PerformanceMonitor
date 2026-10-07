@@ -51,10 +51,16 @@ public partial class RdsEndpointVerifierTests
         Assert.Empty(offenders);
     }
 
+    private const string TargetTypedConstruction =
+        @"(?:RdsEndpointVerifier\??\s+\w+\s*=|[Vv]erifier\w*\s*(?:\?\?=?|=))\s*new\s*\(\s*[^)\s]";
+
+    private const string TestFactoryCall = @"RdsEndpointVerifier\s*\.\s*ForTests\b";
+
     /// <summary>
     /// No service file builds a verifier that skips the check: outside the verifier's file the only construction forms are
-    /// the parameterless one (the runner's shared verifier) and the log source's clock-only one, and none names
-    /// <c>enforce</c>. The constructor that takes it is internal.
+    /// the parameterless one (the runner's shared verifier) and the log source's clock-only one. None names
+    /// <c>enforce</c> or the test factory, and none passes arguments through a target-typed <c>new(</c>. The constructor
+    /// that takes <c>enforce</c> and the login probe is private.
     /// </summary>
     [Fact]
     public void NoServiceFile_BuildsAVerifierThatSkipsTheCheck()
@@ -71,23 +77,46 @@ public partial class RdsEndpointVerifierTests
                 offenders.Add(path + " names enforce");
             }
 
+            if (Regex.IsMatch(code, TestFactoryCall))
+            {
+                offenders.Add(path + " calls the test factory");
+            }
+
             foreach (Match match in construction.Matches(code))
             {
                 var arguments = match.Groups[1].Value.Trim();
 
-                if (arguments.Length > 0 && arguments != "clock, null")
+                if (arguments.Length > 0 && arguments != "clock")
                 {
                     offenders.Add(path + ": " + match.Value);
                 }
+            }
+
+            foreach (Match match in Regex.Matches(code, TargetTypedConstruction))
+            {
+                offenders.Add(path + ": " + match.Value);
             }
         }
 
         Assert.Empty(offenders);
 
-        var publicConstructors = typeof(RdsEndpointVerifier).GetConstructors(
-            System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
+        var constructors = typeof(RdsEndpointVerifier).GetConstructors(
+            System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
 
-        Assert.All(publicConstructors, c => Assert.DoesNotContain(c.GetParameters(), p => p.Name == "enforce"));
+        Assert.All(
+            constructors.Where(c => c.GetParameters().Any(p => p.Name == "enforce" || p.Name == "loginProbe")),
+            c => Assert.True(c.IsPrivate, "the constructor that takes enforce or the login probe is private"));
+    }
+
+    /// <summary>The pin's patterns see the forms a planted construction would take.</summary>
+    [Theory]
+    [InlineData("RdsEndpointVerifier v = new(null, false);")]
+    [InlineData("RdsEndpointVerifier? v = new(null, null, (_, _) => Task.FromResult<string?>(null));")]
+    [InlineData("_verifier = verifier ?? new(clock, false);")]
+    [InlineData("var x = RdsEndpointVerifier.ForTests(enforce: false);")]
+    public void ThePin_SeesAPlantedConstruction(string planted)
+    {
+        Assert.True(Regex.IsMatch(planted, TargetTypedConstruction) || Regex.IsMatch(planted, TestFactoryCall));
     }
 
     /// <summary>The runner builds one verifier, hands it to the four RDS readers, and gives each the target's connection string.</summary>
@@ -119,6 +148,13 @@ public partial class RdsEndpointVerifierTests
         Assert.True(arm > 0 && general > arm);
         Assert.Contains("\"PERMISSIONS\"", worker[arm..general], StringComparison.Ordinal);
         Assert.Contains("ex.Message", worker[arm..general], StringComparison.Ordinal);
+
+        /* The removal branch forgets the same state, so a re-added server is checked afresh. */
+        var removed = worker.IndexOf("Removed from the monitored set (disabled/deleted)", StringComparison.Ordinal);
+        var removedForget = worker.IndexOf("_runner?.ForgetRdsVerdicts(id);", removed, StringComparison.Ordinal);
+        var removedEnd = worker.IndexOf("servers.RemoveAt(i);", removed, StringComparison.Ordinal);
+
+        Assert.True(removed > 0 && removedForget > removed && removedForget < removedEnd, "the removal branch clears the verdicts");
 
         /* The denied-Describe text on the log route names both Describe actions, as the AWS refusal does. */
         Assert.Contains("the role needs rds:DescribeDBInstances, rds:DescribeDBClusters, \"", worker, StringComparison.Ordinal);
@@ -175,17 +211,67 @@ public partial class RdsEndpointVerifierTests
         Assert.Contains("SQLSTATE 28P01", ex.Message, StringComparison.Ordinal);
         Assert.IsAssignableFrom<RdsEndpointMismatchException>(ex);
 
-        /* A refusal is not cached: the next read tries the login again, and goes on when it is accepted. */
+        /* The refusal is kept for the mismatch lifetime and the read still ends, with no new login in that window. */
         answer = null;
+        now = now.AddMinutes(4);
+
+        var again = await Assert.ThrowsAsync<RdsTargetLoginException>(
+            () => verifier.EnsureAsync(rds, Parse(InstanceHost), InstanceHost, 1, CancellationToken.None, ConnectionString));
+
+        Assert.Equal(2, probes);
+        Assert.Contains("SQLSTATE 28P01", again.Message, StringComparison.Ordinal);
+
+        /* After it the next read logs in again, and goes on when the login is accepted. */
+        now = now.AddMinutes(2);
         await verifier.EnsureAsync(rds, Parse(InstanceHost), InstanceHost, 1, CancellationToken.None, ConnectionString);
         Assert.Equal(3, probes);
+        Assert.Equal(0, verifier.CachedLoginRefusalCount);
+    }
+
+    [Fact]
+    public async Task ARefusedLogin_IsKeptPerServer_AndAClearedServerLogsInAgain()
+    {
+        var now = new DateTime(2026, 10, 7, 12, 0, 0, DateTimeKind.Utc);
+        var probes = 0;
+        var verifier = Enforcing(() => now, (_, _) => { probes++; return Task.FromResult<string?>("SQLSTATE 28P01"); });
+        var rds = new FakeRds();
+
+        for (var read = 0; read < 3; read++)
+        {
+            await Assert.ThrowsAsync<RdsTargetLoginException>(
+                () => verifier.EnsureAsync(rds, Parse(InstanceHost), InstanceHost, 1, CancellationToken.None, ConnectionString));
+        }
+
+        Assert.Equal(1, probes);
+        Assert.Equal(1, rds.InstanceDescribes);
+
+        await Assert.ThrowsAsync<RdsTargetLoginException>(
+            () => verifier.EnsureAsync(rds, Parse(InstanceHost), InstanceHost, 2, CancellationToken.None, ConnectionString));
+        Assert.Equal(2, probes);
+
+        verifier.ClearServer(1);
+        Assert.Equal(1, verifier.CachedLoginRefusalCount);
+
+        await Assert.ThrowsAsync<RdsTargetLoginException>(
+            () => verifier.EnsureAsync(rds, Parse(InstanceHost), InstanceHost, 1, CancellationToken.None, ConnectionString));
+        Assert.Equal(3, probes);
+    }
+
+    [Fact]
+    public async Task TheRealLoginProbe_NamesNoAddress()
+    {
+        var result = await RdsEndpointVerifier.ProbeLoginAsync("Host=127.0.0.1;Port=1;Timeout=1", CancellationToken.None);
+
+        Assert.NotNull(result);
+        Assert.DoesNotContain("127.0.0.1", result, StringComparison.Ordinal);
+        Assert.Matches(@"^(SQLSTATE [0-9A-Z]{5}|[A-Za-z][A-Za-z0-9]*)$", result);
     }
 
     [Fact]
     public async Task NoConnectionString_IsNoFreshLogin_AndNothingIsRead()
     {
         var rds = new FakeRds();
-        var verifier = new RdsEndpointVerifier(null, enforce: true);
+        var verifier = RdsEndpointVerifier.ForTests(enforce: true);
 
         var ex = await Assert.ThrowsAsync<RdsTargetLoginException>(
             () => verifier.EnsureAsync(rds, Parse(InstanceHost), InstanceHost, 1, CancellationToken.None));
@@ -244,7 +330,7 @@ public partial class RdsEndpointVerifierTests
     }
 
     [Fact]
-    public async Task MissingId_ReadsAsMismatch_WithTheSameTextAsAMismatchedId()
+    public async Task MissingId_ReadsAsMismatch()
     {
         var mismatched = await MismatchTextAsync(new FakeRds { InstanceAddress = ReportedElsewhere }, InstanceHost);
 
@@ -281,6 +367,29 @@ public partial class RdsEndpointVerifierTests
         Assert.False(RdsEndpointVerifier.Matches(host, [reported]));
         Assert.False(RdsEndpointVerifier.Matches(reported, [host]));
         Assert.Equal(string.Empty, RdsEndpointVerifier.Normalize(host));
+    }
+
+    [Theory]
+    [InlineData("solo.abc123.us-east-1.rds.amazonaws.com\u00A0")]
+    [InlineData("solo.abc123.us-east-1.rds.amazonaws.com\u3000")]
+    [InlineData("\u00A0solo.abc123.us-east-1.rds.amazonaws.com")]
+    [InlineData("solo.abc123.us-east-1.rds.amazonaws.com\t")]
+    [InlineData("solo.abc123.us-east-1.rds.amazonaws.com\n")]
+    public async Task AHostWithAUnicodeSpaceOrControlCharacter_ReadsAsAMismatch(string host)
+    {
+        Assert.False(RdsEndpointVerifier.Matches(host, [InstanceHost]));
+        Assert.Equal(string.Empty, RdsEndpointVerifier.Normalize(host));
+
+        var rds = new FakeRds();
+
+        await Assert.ThrowsAsync<RdsEndpointMismatchException>(
+            () => Enforcing().EnsureAsync(rds, Parse(InstanceHost), host, 1, CancellationToken.None, ConnectionString));
+    }
+
+    [Fact]
+    public void OrdinarySpacesAtTheEnds_AreStillTrimmed()
+    {
+        Assert.True(RdsEndpointVerifier.Matches("  " + InstanceHost + " ", [InstanceHost]));
     }
 
     [Fact]

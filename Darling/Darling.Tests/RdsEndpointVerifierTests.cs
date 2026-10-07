@@ -39,7 +39,7 @@ public partial class RdsEndpointVerifierTests
 
     private static RdsEndpointVerifier Enforcing(
         Func<DateTime>? clock = null, Func<string?, CancellationToken, Task<string?>>? loginProbe = null)
-        => new(clock, enforce: true, loginProbe ?? ((_, _) => Task.FromResult<string?>(null)));
+        => RdsEndpointVerifier.ForTests(clock, enforce: true, loginProbe ?? ((_, _) => Task.FromResult<string?>(null)));
 
     private static RdsEndpoint.Parsed Parse(string host) => RdsEndpoint.TryParse(host)!.Value;
 
