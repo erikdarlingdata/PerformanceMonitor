@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Runtime.CompilerServices;
+using System.Threading.Tasks;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Notifications;
 
@@ -44,9 +45,13 @@ namespace PerformanceMonitor.Alerting;
 /// rows go out to the history store. The server name and the metric name are routing and pairing keys and stay as
 /// typed, and local log lines (which never leave the machine) are not filtered.</para>
 ///
-/// <para><b>Budget.</b> One 1.5 s <c>JudgeBudget</c> per <see cref="Apply(AlertOutcome)"/> call, shared by every value
-/// it judges. Past it a value is withheld unjudged (the marker), never passed. A list of finding alerts shares one
-/// budget across the list.</para>
+/// <para><b>Budget.</b> One <c>JudgeBudget</c> per <see cref="Apply(AlertOutcome)"/> call, shared by every value
+/// it judges. It starts at 1.5 s and earns 0.5 s per 1,048,576 characters of each distinct document it judges (the
+/// alert's attachment, each incident's attachment, a long detail value), up to 10 s, so several incidents with large
+/// reports do not starve each other and one alert still stalls for a bounded time. A document that appears twice
+/// (the alert's attachment is also its first incident's) is judged once per budget and the repeat reuses the first
+/// result (#5477). Past the limit a value is withheld unjudged (the marker), never passed. A list of finding alerts
+/// shares one budget across the list.</para>
 ///
 /// <para><b>Failure.</b> Never throws and never lets the input through after a failure: the alert is delivered
 /// with its detail items cleared, its attachments dropped, each incident's objects, forensic fields and attachment
@@ -221,7 +226,39 @@ public static class AlertStatementFilter
         }
     }
 
-    private static AlertContext? ApplyCore(AlertContext? context, SensitiveStatements.JudgeBudget budget)
+    /// <summary>
+    /// Runs one small document (an XML report with one plain statement) through the alert path, and one small JSON
+    /// result through the MCP and web sweep path, on a background
+    /// thread, so the first real alert does not pay for the first call: the XML reader, the lazily built statement
+    /// patterns and the filter's own code are all built here, off the startup path (#5477). Never throws and logs
+    /// nothing; the task it returns always completes normally.
+    /// </summary>
+    /// <param name="probe">What to run; the default judges the sample. A test passes one that throws.</param>
+    public static Task WarmUpAsync(Action? probe = null) => Task.Run(() =>
+    {
+        try
+        {
+            (probe ?? WarmUpProbe)();
+        }
+#pragma warning disable CA1031 // a warm-up that fails changes nothing: the first real call does the same work
+        catch (Exception)
+#pragma warning restore CA1031
+        {
+        }
+    });
+
+    private static void WarmUpProbe()
+    {
+        _ = Apply(new AlertContext
+        {
+            AttachmentXml = "<blocked-process-report><blocked-process><process id=\"p1\"><inputbuf>SELECT 1;</inputbuf></process></blocked-process></blocked-process-report>",
+        });
+
+        // The MCP and web sweeps read through Json, which builds its own walkers.
+        _ = SensitiveStatements.Json("{\"statement\":\"SELECT 1;\"}");
+    }
+
+    internal static AlertContext? ApplyCore(AlertContext? context, SensitiveStatements.JudgeBudget budget)
     {
         if (context is null)
         {

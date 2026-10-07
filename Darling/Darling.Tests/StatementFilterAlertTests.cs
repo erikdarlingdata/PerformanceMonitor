@@ -409,4 +409,77 @@ public sealed class StatementFilterAlertTests
         Assert.Contains(StatementScrubCanary.PlainStatement, filtered.AttachmentXml!, StringComparison.Ordinal);
         AssertNoSecret(filtered.AttachmentXml!);
     }
+
+    /// <summary>A report with a 4 MB tail of harmless elements, made different per <paramref name="distinct"/>
+    /// so no two share a string (#5477).</summary>
+    private static string BigReport(int distinct) =>
+        ReportXml().Replace(
+            "</blocked-process-report>",
+            string.Concat(Enumerable.Repeat("<note>" + distinct.ToString(System.Globalization.CultureInfo.InvariantCulture) + new string('x', 399) + "</note>", 10_000))
+                + "</blocked-process-report>",
+            StringComparison.Ordinal);
+
+    private static AlertEngineTests.Harness ThreeIncidentHarness()
+    {
+        var h = new AlertEngineTests.Harness();
+        h.Settings.BlockingEnabled = true;
+        for (var i = 0; i < 3; i++)
+        {
+            var row = AlertEngineTests.BlockingRow(55 + i);
+            row.ContentiousObject = "StackOverflow.dbo.Table" + i.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            row.BlockedSqlText = StatementScrubCanary.CanaryStatement;
+            row.BlockingSqlText = StatementScrubCanary.PlainStatement;
+            row.BlockedProcessReportXml = BigReport(i);
+            h.Adapter.Blocking.Add(row);
+        }
+
+        return h;
+    }
+
+    [Fact]
+    public async Task Engine_ThreeIncidentsWithDifferentFourMegabyteReports_EachReachesTheDelivererFilteredNotWithheldWhole()
+    {
+        // #5477: the budget grows with the distinct documents it judges, so the third report is not starved by the first two.
+        var h = ThreeIncidentHarness();
+
+        await h.Build().EvaluateServerAsync(AlertEngineTests.Harness.Snapshot());
+
+        var outcome = Assert.Single(h.Deliverer.Outcomes);
+        AssertNoSecret(Everything(outcome));
+        var incidents = outcome.Context!.Incidents!;
+        Assert.Equal(3, incidents.Count);
+        foreach (var incident in incidents)
+        {
+            var xml = incident.Attachment!.Xml;
+            Assert.True(xml.Length > 4_000_000, "a report was withheld whole: " + xml.Length);
+            Assert.Contains(StatementScrubCanary.PlainStatement, xml, StringComparison.Ordinal);
+            Assert.Contains(Marker, xml, StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
+    public void ApplyCore_ThreeIncidentsWithOneBlockingAlertContext_JudgesEachDistinctReportOnce()
+    {
+        // The engine's own context: the alert's attachment is the first incident's report (the same string).
+        var h = ThreeIncidentHarness();
+        var context = AlertContextBuilders.BuildBlockingContext("SRV", h.Adapter.Blocking, Array.Empty<string>())!;
+        Assert.Equal(3, context.Incidents!.Count);
+        Assert.Same(context.AttachmentXml, context.Incidents[0].Attachment!.Xml);
+
+        var budget = new SensitiveStatements.JudgeBudget(SensitiveStatements.ReadBudget);
+        var filtered = AlertStatementFilter.ApplyCore(context, budget)!;
+
+        Assert.Equal(3, filtered.Incidents!.Count(i => i.Attachment!.Xml.Length > 4_000_000));
+        // Three distinct reports: the alert-level copy of the first one was a memo hit, not a second walk.
+        Assert.Equal(3, budget.DocumentPasses);
+        // And the budget earned 0.5 s per MB of each of them (about 2.0 s each, so 1.5 + 3 x 2.0 and a little over), not 1.5 s in all.
+        Assert.InRange(budget.Limit, TimeSpan.FromSeconds(7.5), TimeSpan.FromSeconds(8.5));
+    }
+
+    [Fact]
+    public async Task TheAlertWarmUpSwallowsAThrownException_AndRunsTheDefaultProbe()
+    {
+        await AlertStatementFilter.WarmUpAsync(() => throw new InvalidOperationException("boom"));
+        await AlertStatementFilter.WarmUpAsync();
+    }
 }
