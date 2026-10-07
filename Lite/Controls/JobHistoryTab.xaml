@@ -167,7 +167,7 @@
                             </StackPanel>
                         </DataGridTextColumn.Header>
                     </DataGridTextColumn>
-                    <DataGridTextColumn Binding="{Binding RunStatusDesc}" Width="90">
+                    <DataGridTextColumn Binding="{Binding RunStatusDesc}" Width="95">
                         <DataGridTextColumn.Header>
                             <StackPanel Orientation="Horizontal">
                                 <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="RunStatusDesc" Click="FilterButton_Click" Margin="0,0,4,0"/>
@@ -175,7 +175,7 @@
                             </StackPanel>
                         </DataGridTextColumn.Header>
                     </DataGridTextColumn>
-                    <DataGridTextColumn Binding="{Binding DurationFormatted}" Width="90">
+                    <DataGridTextColumn Binding="{Binding DurationFormatted}" Width="105">
                         <DataGridTextColumn.Header>
                             <StackPanel Orientation="Horizontal">
                                 <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="DurationFormatted" Click="FilterButton_Click" Margin="0,0,4,0"/>
@@ -183,7 +183,7 @@
                             </StackPanel>
                         </DataGridTextColumn.Header>
                     </DataGridTextColumn>
-                    <DataGridTextColumn Binding="{Binding RetriesDisplay}" Width="65">
+                    <DataGridTextColumn Binding="{Binding RetriesDisplay}" Width="100">
                         <DataGridTextColumn.Header>
                             <StackPanel Orientation="Horizontal">
                                 <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="RetriesDisplay" Click="FilterButton_Click" Margin="0,0,4,0"/>

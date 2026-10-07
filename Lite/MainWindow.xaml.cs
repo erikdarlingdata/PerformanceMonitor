@@ -884,6 +884,7 @@ public partial class MainWindow : Window
                     if (summary != null)
                     {
                         summary.ServerName = server.ServerName;
+                        summary.Clock = await ReadOverviewClockAsync(serverId);
                         summary.IsSilenced = _alertStateService.IsServerSilenced(server.Id);
                         var connStatus = _serverManager.GetConnectionStatus(server.Id);
                         summary.IsOnline = connStatus.IsOnline;
@@ -913,6 +914,28 @@ public partial class MainWindow : Window
         {
             AppLogger.Info("Overview", $"RefreshOverviewAsync failed: {ex.Message}");
         }
+    }
+
+    /// <summary>
+    /// The clock one Overview card converts its Last Collect time on, so the card follows "Show timestamps in" like the
+    /// Alert History and Job History rows do: the server's own collected clock, else its open tab's, else the machine's
+    /// (<see cref="ServerTimeHelper.ClockForServer(ServerClock?, ServerClock?)"/>). A failed clock read leaves the card on
+    /// the next clock in the chain rather than dropping the card.
+    /// </summary>
+    private async Task<ServerClock> ReadOverviewClockAsync(int serverId)
+    {
+        ServerClock? collected = null;
+        try
+        {
+            var dataService = _dataService;
+            collected = dataService == null ? null : await Task.Run(() => dataService.GetServerClockAsync(serverId));
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Debug("Overview", $"Server clock read failed for server {serverId}, its card takes its open tab's or the machine's clock: {ex.Message}");
+        }
+
+        return ServerTimeHelper.ClockForServer(collected, OpenTabClockFor(serverId));
     }
 
     private void ServerListView_MouseDoubleClick(object sender, MouseButtonEventArgs e)

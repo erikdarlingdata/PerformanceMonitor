@@ -234,7 +234,7 @@
                                Foreground="{DynamicResource ForegroundBrush}"/>
                     <TextBlock Text="measured as" VerticalAlignment="Center" Margin="8,0,4,0"
                                Foreground="{DynamicResource ForegroundBrush}"/>
-                    <ComboBox x:Name="AlertCpuModeBox" Width="220" VerticalAlignment="Center">
+                    <ComboBox x:Name="AlertCpuModeBox" MinWidth="220" VerticalAlignment="Center">
                         <ComboBoxItem Content="Total non-idle CPU (SQL + other processes)" Tag="Total"/>
                         <ComboBoxItem Content="SQL Server only (scheduler %)" Tag="SqlOnly"/>
                     </ComboBox>
@@ -259,14 +259,11 @@
                 <StackPanel Orientation="Horizontal" Margin="20,6,0,0">
                     <!-- #3539 A4: the alert grades wait ACCUMULATED over a rolling ten-minute window against fixed,
                          fleet-calibrated bars shared with the PostgreSQL edition (PoisonWaitEvaluator). The ms box was the
-                         retired per-wait-average bar; it stays so saved settings round-trip, disabled and labelled so nobody
-                         tunes a number nothing reads. The preview line below the section states the live bars. -->
-                    <CheckBox x:Name="AlertPoisonWaitCheckBox" Content="Poison waits (THREADPOOL, etc.) — accumulated wait over a 10-minute window; legacy avg-ms bar (no longer used):" VerticalAlignment="Center"
-                              Foreground="{DynamicResource ForegroundBrush}"/>
-                    <TextBox x:Name="AlertPoisonWaitThresholdBox" Width="45" Text="500" Margin="6,0,0,0" VerticalAlignment="Center" IsEnabled="False"
-                             ToolTip="Retired. The Poison Wait alert no longer judges an average ms per wait; it fires when a poison wait type accumulates 600 s of wait inside 10 minutes (WARNING) or 6,000 s (CRITICAL). Kept so existing settings round-trip."/>
-                    <TextBlock Text="ms" VerticalAlignment="Center" Margin="2,0,0,0"
-                               Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                         retired per-wait-average bar; its box is gone from the window (nothing reads it), and the saved
+                         value is left as it is on save. The preview line below the section states the live bars. -->
+                    <CheckBox x:Name="AlertPoisonWaitCheckBox" Content="Poison waits (THREADPOOL, etc.) — accumulated wait over a 10-minute window" VerticalAlignment="Center"
+                              Foreground="{DynamicResource ForegroundBrush}"
+                              ToolTip="The Poison Wait alert fires when a poison wait type accumulates 600 s of wait inside 10 minutes (WARNING) or 6,000 s (CRITICAL)."/>
                 </StackPanel>
                 <StackPanel Orientation="Horizontal" Margin="20,6,0,0">
                     <CheckBox x:Name="AlertLongRunningQueryCheckBox" Content="Long-running queries over" VerticalAlignment="Center"
@@ -341,7 +338,8 @@
                     <TextBlock Text="GB (ADR databases only)" VerticalAlignment="Center" Margin="2,0,0,0"
                                Foreground="{DynamicResource ForegroundBrush}"/>
                 </StackPanel>
-                <StackPanel Orientation="Horizontal" Margin="20,6,0,0">
+                <!-- A WrapPanel, not a StackPanel: this row is wider than the window, so its tail wrapped off the right edge. -->
+                <WrapPanel Orientation="Horizontal" Margin="20,6,0,0">
                     <CheckBox x:Name="AlertFileGrowthCheckBox" Content="Database file growing over" VerticalAlignment="Center"
                               Foreground="{DynamicResource ForegroundBrush}"/>
                     <TextBox x:Name="AlertFileGrowthRiseMbBox" Width="60" Text="10240" Margin="6,0,0,0" VerticalAlignment="Center"/>
@@ -353,7 +351,7 @@
                     <TextBox x:Name="AlertFileGrowthVolumePercentBox" Width="45" Text="60" Margin="6,0,0,0" VerticalAlignment="Center"/>
                     <TextBlock Text="% of its volume (0 disables either gate)" VerticalAlignment="Center" Margin="2,0,0,0"
                                Foreground="{DynamicResource ForegroundBrush}"/>
-                </StackPanel>
+                </WrapPanel>
                 <StackPanel Orientation="Horizontal" Margin="20,6,0,0">
                     <CheckBox x:Name="AlertLongRunningJobCheckBox" Content="Agent jobs running over" VerticalAlignment="Center"
                               Foreground="{DynamicResource ForegroundBrush}"/>

@@ -278,6 +278,7 @@
                         <Style TargetType="ListBoxItem">
                             <Setter Property="Padding" Value="0"/>
                             <Setter Property="Margin" Value="0,1"/>
+                            <Setter Property="AutomationProperties.Name" Value="{Binding AutomationName, Mode=OneTime}"/>
                             <Setter Property="Background" Value="Transparent"/>
                             <Setter Property="BorderThickness" Value="0"/>
                             <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
@@ -422,6 +423,7 @@
                                                 Margin="6"
                                                 Width="260" MinHeight="160"
                                                 Cursor="Hand"
+                                                AutomationProperties.Name="{Binding DisplayName}"
                                                 MouseLeftButtonDown="OverviewCard_MouseLeftButtonDown">
                                             <Grid>
                                                 <StackPanel Margin="16">
