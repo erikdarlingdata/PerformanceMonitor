@@ -2967,6 +2967,14 @@ internal sealed class DarlingSelfAlertEvaluator
             "Collection-history audit gave up on {Rollups} for {Day:yyyy-MM-dd}: they could not be read, or had not caught up, by the next day's slot",
             string.Join(", ", unread.Select(r => r.Relation)), held.Day);
 
+        /* The master switch, consulted here as the sibling applies do (#3464): the caller gated at its top, but this
+           member fires on its own and the switch can go off between that check and here. Off: the warning above is
+           logged, nothing is raised, and the caller still clears the held day so it is not given up on again. */
+        if (!_settings.AlertsEnabled)
+        {
+            return;
+        }
+
         var alert = HistoryAuditAlert(held, rollups, unread);
         if (alert is null)
         {

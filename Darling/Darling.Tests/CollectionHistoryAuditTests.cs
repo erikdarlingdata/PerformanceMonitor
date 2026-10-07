@@ -677,6 +677,71 @@ public sealed class CollectionHistoryAuditTests
         Assert.Single(p.Log.Entries, e => e.Message.Contains("gave up on collect.query_stats_interval_hourly", StringComparison.Ordinal));
     }
 
+    /// <summary>A logger that switches the master switch off when the give-up warning is written: the switch going off
+    /// between the apply's top check and the give-up's own send.</summary>
+    private sealed class SwitchOffOnGiveUpLogger : Microsoft.Extensions.Logging.ILogger
+    {
+        private readonly DarlingSelfAlertTests.FakeSettings _settings;
+        public List<string> Messages { get; } = new();
+
+        public SwitchOffOnGiveUpLogger(DarlingSelfAlertTests.FakeSettings settings) => _settings = settings;
+
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+
+        public bool IsEnabled(Microsoft.Extensions.Logging.LogLevel logLevel) => true;
+
+        public void Log<TState>(
+            Microsoft.Extensions.Logging.LogLevel logLevel, Microsoft.Extensions.Logging.EventId eventId,
+            TState state, Exception? exception, Func<TState, Exception?, string> formatter)
+        {
+            var message = formatter(state, exception);
+            Messages.Add(message);
+            if (message.Contains("gave up on", StringComparison.Ordinal))
+            {
+                _settings.AlertsEnabled = false;
+            }
+        }
+    }
+
+    [Fact]
+    public async Task AGiveUpWithAlertsOff_LogsTheWarning_RaisesNothing_AndStillClearsTheHeldDay()
+    {
+        /* #3464 master-switch gate on the give-up's own send. The same never-ready source as above, so the give-up has
+           flagged hours to raise; the switch goes off as the give-up logs its warning. */
+        var settings = new DarlingSelfAlertTests.FakeSettings();
+        var deliverer = new DarlingSelfAlertTests.RecordingDeliverer();
+        var log = new SwitchOffOnGiveUpLogger(settings);
+        var now = FirstPass;
+        var evaluator = new DarlingSelfAlertEvaluator(
+            settings, deliverer, new NoHistoryStore(), _ => false,
+            logger: log, utcNow: () => now, readFailures: new AlertReadFailureCounter(), deliveryStamps: new MemoryStampStore());
+        var stopped = WithAuditDay(Week(), h => h <= 9 ? Usual(h) : null);
+        var clean = WithAuditDay(Week(), h => Usual(h));
+
+        Task Run() => evaluator.ApplyCollectionHistoryAuditAsync(
+            (rollup, from, to, token) =>
+            {
+                var all = rollup.Relation == QueryStats.Relation ? stopped : clean;
+                return Task.FromResult<IReadOnlyList<HourBucket>?>(all.Where(b => b.HourUtc >= from && b.HourUtc < to).ToList());
+            },
+            new[] { QueryStats, Perfmon }, Ct);
+
+        await Run();
+        now = new DateTime(2026, 10, 12, 3, 0, 0, DateTimeKind.Utc);
+        await Run();
+
+        Assert.Empty(deliverer.Outcomes);
+        Assert.Single(log.Messages, m => m.Contains("gave up on collect.query_stats_interval_hourly", StringComparison.Ordinal));
+
+        /* Switched back on, the day is not given up on a second time: the held state was cleared. */
+        settings.AlertsEnabled = true;
+        now = new DateTime(2026, 10, 12, 3, 30, 0, DateTimeKind.Utc);
+        await Run();
+
+        Assert.Single(log.Messages, m => m.Contains("gave up on", StringComparison.Ordinal));
+        Assert.DoesNotContain(deliverer.Outcomes, o => o.DetailText?.Contains("2026-10-10", StringComparison.Ordinal) == true);
+    }
+
     /// <summary>A deliverer that applies the cooldown the way the real one does for a self-alert (no incidents): one
     /// send per (server key, metric) pair, the repeat throttled. Throttled counts as delivered upstream, so a
     /// throttled alert simply never reaches a channel.</summary>
