@@ -432,26 +432,56 @@ public sealed class DarlingMcpDataTools
     }
 
     [McpServerTool(Name = "get_file_io_stats"), Description("Gets the latest per-database-file I/O stats: read/write counts, bytes, stall times, calculated latency. LATEST IS A TIME: the newest snapshot, not a window; captured_at is when it was collected, and the deltas cover the sample_interval_seconds ending there. sample_interval_seconds 0 means no delta was knowable for that file (first sighting, counter reset, a gap) and that row's latencies are null, not 0. <<GUIDE>> Gets the latest file I/O statistics per database file: read/write counts, bytes, stall times, and calculated latency. High read latency (>20ms) or write latency (>10ms for data, >2ms for log) often indicates storage bottlenecks. Each row carries sample_interval_seconds, the measured seconds its deltas accrued over; a 0 means no delta was knowable for that file at this collection (first sighting, counter reset, or a gap past the delta policy — typically a restart) and its latencies are null rather than 0. LATEST IS A TIME: this reads the newest file-I/O snapshot, not a window, and captured_at is the instant it was collected; the deltas cover the sample_interval_seconds ending there.")]
-    public static async Task<string> GetFileIoStats(
+    public static Task<string> GetFileIoStats(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) =>
+        GetFileIoStats(postgres, server_name, DatabaseFilter.All, cancellationToken);
+
+    /// <summary>
+    /// get_file_io_stats limited to <paramref name="databases"/> (#5244; <see cref="DatabaseFilter.All"/> is every database).
+    /// The filter is on the snapshot's ROWS: the capture is the server's newest whatever the filter, so a filtered and an
+    /// unfiltered call show the same <c>captured_at</c>. Three one-name consumers of the unfiltered read are list-aware here:
+    /// a filtered read that finds no row is <c>empty</c> (the newest capture exists and holds none of the chosen databases)
+    /// rather than <c>unavailable</c> (nothing was ever collected, the answer the unfiltered read gives), the
+    /// not-collected envelopes carry the echo, and every answer says which databases it was limited to.
+    /// </summary>
+    internal static async Task<string> GetFileIoStats(
+        NpgsqlDataSource postgres, string? server_name, DatabaseFilter databases, CancellationToken cancellationToken = default)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         try
         {
-            var snapshot = await DarlingDataReader.GetLatestFileIoStatsAsync(postgres, resolved.ServerId, cancellationToken);
+            var snapshot = await DarlingDataReader.GetLatestFileIoStatsAsync(postgres, resolved.ServerId, databases, cancellationToken);
             if (snapshot.IsEmpty)
-                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "file_io_stats", cancellationToken)
-                    ?? McpHelpers.Status("unavailable", "No file I/O stats available.");
+            {
+                if (!databases.IsAll)
+                {
+                    var capturedAt = await DarlingDataReader.GetLatestFileIoCaptureAsync(postgres, resolved.ServerId, cancellationToken);
+                    if (capturedAt is not null)
+                    {
+                        return McpHelpers.StatusForDatabase(
+                            "empty",
+                            $"The newest file I/O snapshot for {resolved.ServerName} (captured_at {capturedAt.Value.ToString("o")}) holds no files{DarlingMcpBlockingTools.ForChosenDatabases(databases)}. "
+                            + "The name must match a collected database exactly; omit database_name for every database.",
+                            databases.Describe());
+                    }
+                }
+
+                return McpHelpers.WithDatabase(
+                           await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "file_io_stats", cancellationToken),
+                           databases.Describe())
+                    ?? McpHelpers.StatusForDatabase("unavailable", "No file I/O stats available.", databases.Describe());
+            }
 
             var result = snapshot.Rows.Select(FileIoRowPayload);
 
             return JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
+                database_name = databases.Describe(),
                 captured_at = snapshot.CapturedAt!.Value.ToString("o"),
                 files = result
             }, McpHelpers.JsonOptions);
