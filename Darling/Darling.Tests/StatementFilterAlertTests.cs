@@ -312,8 +312,10 @@ public sealed class StatementFilterAlertTests
     [Fact]
     public void Apply_AQuerySetThatSlowsTheJudge_FinishesInsideTheBudget()
     {
-        /* Many long values built to make the judge work: nested gaps and unterminated comments. Past the 1.5 s
-           budget a value is withheld unjudged, so the call is bounded however many arrive. */
+        /* Many long values built to make the judge work: nested gaps and unterminated comments. Past the budget a
+           value is withheld unjudged, so the call is bounded however many arrive. A tiny injected budget (#5474)
+           makes it run out on any runner; the 1950 ms ceiling is then far above 200 ms plus one value's timeout. */
+        using var budget = SensitiveStatements.OverrideReadBudget(TimeSpan.FromMilliseconds(200));
         var context = new AlertContext();
         for (var i = 0; i < 400; i++)
         {
@@ -373,6 +375,9 @@ public sealed class StatementFilterAlertTests
     [Fact]
     public async Task Engine_AFourMegabyteReport_ReachesTheDelivererFilteredNotWithheldWhole()
     {
+        /* #5474: the walk must not depend on the runner's speed, so the read budget is far larger than the
+           production 1.5 s. A walk that still came back withheld whole would mean a real defect. */
+        using var budget = SensitiveStatements.OverrideReadBudget(TimeSpan.FromMinutes(5));
         var h = BlockingHarness(out _);
         /* One report with a 4 MB tail of harmless elements: the walk reads all of it, withholds only the
            canary statement, and does not run out of budget. */
@@ -391,22 +396,34 @@ public sealed class StatementFilterAlertTests
     }
 
     [Fact]
-    public void Apply_AFourMegabyteReport_FinishesInsideTheBudget()
+    public void Apply_AFourMegabyteReport_IsWalkedWholeAndOnlyTheCanaryIsWithheld()
     {
+        /* #5474: a budget no runner can exhaust, so the result does not depend on speed. A document that
+           crosses the real 1.5 s is withheld whole (fail closed), which the tiny-budget test below covers. */
+        using var budget = SensitiveStatements.OverrideReadBudget(TimeSpan.FromMinutes(5));
         var report = ReportXml().Replace(
             "</blocked-process-report>",
             string.Concat(Enumerable.Repeat("<note>" + new string('x', 400) + "</note>", 10_000)) + "</blocked-process-report>",
             StringComparison.Ordinal);
         var context = new AlertContext { AttachmentXml = report };
 
-        var stopwatch = Stopwatch.StartNew();
         var filtered = AlertStatementFilter.Apply(context)!;
-        stopwatch.Stop();
 
-        /* The budget is 1.5 s, and a document that crosses it is withheld whole, so a result that still holds
-           the plain statement proves the walk finished inside it. */
-        Assert.True(stopwatch.ElapsedMilliseconds < 1950, "took " + stopwatch.ElapsedMilliseconds + " ms");
-        Assert.Contains(StatementScrubCanary.PlainStatement, filtered.AttachmentXml!, StringComparison.Ordinal);
-        AssertNoSecret(filtered.AttachmentXml!);
+        Assert.True(filtered.AttachmentXml!.Length > 4_000_000, "the report was withheld whole: " + filtered.AttachmentXml.Length);
+        Assert.Contains(StatementScrubCanary.PlainStatement, filtered.AttachmentXml, StringComparison.Ordinal);
+        AssertNoSecret(filtered.AttachmentXml);
+    }
+
+    [Fact]
+    public void Apply_AReportThatOutrunsATinyBudget_IsWithheldWhole()
+    {
+        /* The fail-closed side of the 4 MB tests, with a budget spent at once rather than a huge input. */
+        using var budget = SensitiveStatements.OverrideReadBudget(TimeSpan.Zero);
+        var context = new AlertContext { AttachmentXml = ReportXml() };
+
+        var filtered = AlertStatementFilter.Apply(context)!;
+
+        AssertNoSecret(filtered.AttachmentXml ?? string.Empty);
+        Assert.DoesNotContain(StatementScrubCanary.PlainStatement, filtered.AttachmentXml ?? string.Empty, StringComparison.Ordinal);
     }
 }

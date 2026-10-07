@@ -8,6 +8,7 @@
 
 using System;
 using System.Net;
+using System.Threading;
 
 namespace PerformanceMonitor.Common;
 
@@ -113,7 +114,28 @@ public static partial class SensitiveStatements
     /// <summary>One read-time call may spend this long judging and parsing (the outermost <see cref="Xml"/> or
     /// <see cref="Json"/> call; every nested value shares it). One value may still overrun by its own match
     /// timeout, so a call is bounded by about 1.75 s.</summary>
-    internal static readonly TimeSpan ReadBudget = TimeSpan.FromMilliseconds(1500);
+    internal static TimeSpan ReadBudget => s_readBudgetOverride.Value ?? DefaultReadBudget;
+
+    private static readonly TimeSpan DefaultReadBudget = TimeSpan.FromMilliseconds(1500);
+
+    private static readonly AsyncLocal<TimeSpan?> s_readBudgetOverride = new();
+
+    /// <summary>
+    /// Test seam (#5474): replaces <see cref="ReadBudget"/> for the calling async flow until the returned scope is
+    /// disposed. A test that needs the walk to finish however slow the runner is passes a large budget; a test
+    /// that needs the budget to run out passes a tiny one. Production never calls it and keeps 1.5 s.
+    /// </summary>
+    internal static IDisposable OverrideReadBudget(TimeSpan budget)
+    {
+        var previous = s_readBudgetOverride.Value;
+        s_readBudgetOverride.Value = budget;
+        return new ReadBudgetScope(previous);
+    }
+
+    private sealed class ReadBudgetScope(TimeSpan? previous) : IDisposable
+    {
+        public void Dispose() => s_readBudgetOverride.Value = previous;
+    }
 
     /// <summary>
     /// Judges every value of a plan, report or event XML document (see <see cref="XmlCore"/>) and returns the SAME
