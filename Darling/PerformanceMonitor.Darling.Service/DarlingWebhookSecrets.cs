@@ -67,6 +67,7 @@ internal static class DarlingWebhookSecrets
             GenericProxy = stored.GenericProxy,
             PagerDutyRoutingKey = OpenValue(stored.PagerDutyRoutingKey, "pagerduty", row, stored.PagerDutyProxy, null, NotificationRouter.PagerDutyChannel, "PagerDuty routing key", ring, failures),
             PagerDutyUseEuRegion = stored.PagerDutyUseEuRegion,
+            PagerDutyAutoResolve = stored.PagerDutyAutoResolve,
             PagerDutyProxy = stored.PagerDutyProxy,
         };
 
@@ -191,6 +192,7 @@ internal static class DarlingWebhookSecrets
         Add(w.GenericProxy);
         Add(w.PagerDutyRoutingKey);
         Add(w.PagerDutyUseEuRegion ? "1" : "0");
+        Add(w.PagerDutyAutoResolve ? "1" : "0");
         Add(w.PagerDutyProxy);
         foreach (var r in routes ?? Array.Empty<NotificationRoute>())
         {

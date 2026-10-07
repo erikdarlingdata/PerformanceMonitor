@@ -156,30 +156,32 @@ public sealed class PasswordKeyRungTests
     }
 
     [Fact]
-    public void TheProbeCarriesTheKeyTable_AsTheNewestArm_AndMapsFullyMigratedToTheNewestRung()
+    public void TheProbeCarriesTheKeyTable_AndAStoreThatStoppedHereMapsToThisRung()
     {
         var probe = ViewerDataService.StoreSchemaProbeSql.Replace("\r\n", "\n", StringComparison.Ordinal);
         var arm = "to_regclass('config.password_key') IS NOT NULL";
         Assert.Contains(arm, probe, StringComparison.Ordinal);
-        Assert.True(probe.LastIndexOf("EXISTS", StringComparison.Ordinal) < probe.IndexOf(arm, StringComparison.Ordinal),
-            "the new arm is the probe's last EXISTS, so it reads at the next ordinal");
 
+        /* No longer the probe's last EXISTS: V166 (the PagerDuty auto-resolve column) landed above it. */
         var viewer = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.cs");
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal})", viewer, StringComparison.Ordinal);
-        Assert.DoesNotContain($"reader.GetBoolean({ProbeOrdinal + 1})", viewer, StringComparison.Ordinal);
+        Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 1})", viewer, StringComparison.Ordinal);
 
         var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
         var parameters = method.GetParameters();
-        Assert.Equal(ProbeOrdinal, parameters.Length - 1);
+        Assert.True(ProbeOrdinal < parameters.Length - 1, "a newer rung's sentinel follows this one");
         Assert.Equal("hasPasswordKey", parameters[ProbeOrdinal].Name);
 
         var all = Enumerable.Repeat((object)true, parameters.Length).ToArray();
         Assert.Equal(PgMigrations.Scripts[^1].Version, (int)method.Invoke(null, all)!);
         Assert.Equal(StorageVersion.SchemaVersion, ViewerDataService.RequiredStoreSchemaVersion);
 
-        var behind = (object[])all.Clone();
+        var atThisRung = Enumerable.Range(0, parameters.Length).Select(i => (object)(i <= ProbeOrdinal)).ToArray();
+        Assert.Equal(Rung.Version, (int)method.Invoke(null, atThisRung)!);
+
+        var behind = (object[])atThisRung.Clone();
         behind[ProbeOrdinal] = false;
-        Assert.Equal(PgMigrations.Scripts[^1].Version - 1, (int)method.Invoke(null, behind)!);
+        Assert.Equal(Rung.Version - 1, (int)method.Invoke(null, behind)!);
 
         var thisArm = viewer.IndexOf("if (hasPasswordKey)", StringComparison.Ordinal);
         var previousArm = viewer.IndexOf("if (hasQueryStatsHourLedger)", StringComparison.Ordinal);
