@@ -144,7 +144,8 @@ public sealed class AwsRoleAssumeException : Exception
     internal static AwsRoleAssumeException ForPartitionMismatch(AwsRoleKey key, string region, string rolePartition, string regionPartition) =>
         new(AwsRoleAssumeKind.PartitionMismatch, key.RoleArn, region, key.HasExternalId,
             $"Role {key.RoleArn} is in AWS partition {rolePartition}, but this target's region {region} is in partition {regionPartition}. "
-            + "A role can be assumed only inside its own partition. Nothing was read this cycle.",
+            + "A role can be assumed only inside its own partition. Nothing was read this cycle. "
+            + "Set a role from the target's partition on this server, or clear the role, or correct the server's host name if it names the wrong region.",
             null, null);
 
     /// <summary>The host has no AWS credentials to assume the role with.</summary>
@@ -169,7 +170,8 @@ public sealed class AwsRoleAssumeException : Exception
         {
             AwsRoleAssumeKind.RegionDisabled =>
                 $"AWS STS is not active in region {region} for the monitoring host's AWS account, so role {key.RoleArn} could not be assumed. "
-                + "Activate STS for that region in the host account's IAM settings. Nothing was read this cycle.",
+                + "Nothing was read this cycle. Enable that region for the AWS account that owns the role and for the monitoring host's account "
+                + "(AWS account settings, Regions), or set a role in a region that is enabled, or correct the server's host name if it names the wrong region.",
             AwsRoleAssumeKind.Denied =>
                 $"AWS refused to let the monitoring host assume role {key.RoleArn} "
                 + (key.HasExternalId ? "(with the external ID set on this server)" : "(without an external ID)")

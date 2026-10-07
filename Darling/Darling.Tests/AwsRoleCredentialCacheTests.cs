@@ -113,7 +113,8 @@ public sealed class AwsRoleCredentialCacheTests
         Assert.True(china.IsConfiguration);
         Assert.Equal(
             "Role arn:aws:iam::123456789012:role/darling-monitor is in AWS partition aws, but this target's region cn-north-1 is in partition aws-cn. "
-            + "A role can be assumed only inside its own partition. Nothing was read this cycle.",
+            + "A role can be assumed only inside its own partition. Nothing was read this cycle. "
+            + "Set a role from the target's partition on this server, or clear the role, or correct the server's host name if it names the wrong region.",
             china.Message);
 
         /* The entry exists and was used from us-east-1, and the mismatch is still refused: the check is per call. */

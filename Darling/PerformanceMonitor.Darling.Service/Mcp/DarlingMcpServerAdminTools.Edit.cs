@@ -1012,6 +1012,7 @@ public sealed partial class DarlingMcpServerAdminTools
             Username = row.Username, EncryptedPassword = IsSecretAuth(row.Auth) ? "stored" : null, EncryptMode = row.EncryptMode,
             TrustServerCertificate = row.TrustServerCertificate, ReadOnlyIntent = row.ReadOnlyIntent,
             MultiSubnetFailover = row.MultiSubnetFailover, Engine = row.Engine, Port = row.Port,
+            AwsRoleArn = row.AwsRoleArn, AwsExternalId = row.AwsExternalIdSet ? "stored" : null,
         };
         var after = new MonitoredServer
         {
@@ -1020,6 +1021,11 @@ public sealed partial class DarlingMcpServerAdminTools
             EncryptedPassword = !secretMode ? null : (c.Password is not null ? "changed" : "stored"),
             EncryptMode = encryptMode, TrustServerCertificate = trust, ReadOnlyIntent = readOnly,
             MultiSubnetFailover = multi, Engine = row.Engine, Port = port,
+            /* #5452: the role and the external ID are part of the definition the worker compares, so a role-only edit
+               reconnects under the new role. The stored ID cannot be read, so it differs by a marker: a typed one
+               is "changed", a cleared one (or a cleared role) is none, and an untouched one stays "stored". */
+            AwsRoleArn = newRole,
+            AwsExternalId = newRole is null ? null : c.HasAwsExternalId ? (c.AwsExternalId is null ? null : "changed") : (row.AwsExternalIdSet ? "stored" : null),
         };
         plan.Reconnects = plan.Sets.Count > 0 && !DarlingWorker.ServerDefinitionEquals(before, after);
         return (plan, null);

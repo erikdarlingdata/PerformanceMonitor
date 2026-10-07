@@ -239,6 +239,104 @@ public sealed class AwsRoleEditTests
         Assert.All(logger.Lines, l => Assert.DoesNotContain(TypedId, l, StringComparison.Ordinal));
     }
 
+    /* ---------------- the save path of a role-only edit ---------------- */
+
+    [Fact]
+    public void ARoleOnlyEdit_ReconnectsUnderTheNewRole_AndNeedsNoProbe()
+    {
+        /* The probe opens a PostgreSQL connection and makes no AWS call (DarlingServerConnector.ProbeAsync), so an edit
+           that moves nothing the connection uses has nothing to probe, the same as a display-name-only edit. What the
+           role changes is the service's connection: the answer says it reconnects. */
+        var list = AwsRoleAllowlist.From([RoleA, RoleB]);
+        foreach (var (row, body) in new[]
+        {
+            (PgRow(), $"{{\"aws_role_arn\":\"{RoleA}\"}}"),
+            (PgRow(RoleA), $"{{\"aws_role_arn\":\"{RoleB}\"}}"),
+            (PgRow(RoleA), "{\"aws_role_arn\":null}"),
+            (PgRow(RoleA, idSet: true), "{\"aws_role_arn\":null}"),
+            (PgRow(RoleA, idSet: true), $"{{\"aws_role_arn\":\"{RoleB}\",\"aws_external_id\":\"{TypedId}\"}}"),
+            (PgRow(RoleA, idSet: true), $"{{\"aws_external_id\":\"{TypedId}\"}}"),
+            (PgRow(RoleA, idSet: true), "{\"aws_external_id\":null}"),
+        })
+        {
+            var (plan, error) = Plan(row, body, list);
+            Assert.Null(error);
+            Assert.True(plan!.Reconnects, body);
+            Assert.False(plan.NeedsProbe, body);
+        }
+
+        var (cost, _) = Plan(PgRow(RoleA, idSet: true), "{\"monthly_cost_usd\":11}", list);
+        Assert.False(cost!.Reconnects);
+
+        var (same, _) = Plan(PgRow(RoleA, idSet: true), $"{{\"aws_role_arn\":\"{RoleA}\",\"monthly_cost_usd\":11}}", list);
+        Assert.False(same!.Reconnects);
+    }
+
+    [Fact]
+    public async Task ARoleRemoval_WritesAndAnswersReconnectsTrue_WithNoProbe()
+    {
+        var store = new Store(PgRow(RoleA, idSet: true));
+        var probed = 0;
+        var counting = (Edit.ServerProbe)((_, _) => { probed++; return Task.FromResult(new ConnectionProbeResult(true, 15, 3, "Enterprise", false, false, false, true, null)); });
+        var answer = await Edit.EditServerCoreAsync(store, 41, "{\"aws_role_arn\":null}", counting, TestKeyRings.Healthy, null, CancellationToken.None);
+        using var doc = JsonDocument.Parse(answer);
+        Assert.Equal("updated", doc.RootElement.GetProperty("status").GetString());
+        Assert.True(doc.RootElement.GetProperty("reconnects").GetBoolean());
+        Assert.Equal(0, probed);
+        Assert.Equal(1, store.Writes);
+    }
+
+    [Fact]
+    public async Task AConnectionEdit_ThatKeepsTheRole_ProbesWithTheRole_AndAnswersReconnects()
+    {
+        MonitoredServer? probedConfig = null;
+        var recording = (Edit.ServerProbe)((config, _) =>
+        {
+            probedConfig = config;
+            return Task.FromResult(new ConnectionProbeResult(true, 15, 3, "Enterprise", false, false, false, true, null));
+        });
+        var store = new Store(PgRow(RoleA, idSet: true));
+        var body = "{\"host\":\"pg-02.example.test\",\"password\":\"pw-secret-1\"}";
+        var answer = await Edit.EditServerCoreAsync(store, 41, body, recording, TestKeyRings.Healthy, null, CancellationToken.None);
+        using var doc = JsonDocument.Parse(answer);
+        Assert.Equal("updated", doc.RootElement.GetProperty("status").GetString());
+        Assert.True(doc.RootElement.GetProperty("reconnects").GetBoolean());
+        Assert.True(doc.RootElement.GetProperty("tested").GetBoolean());
+        Assert.NotNull(probedConfig);
+        Assert.Equal(RoleA, probedConfig!.AwsRoleArn);
+    }
+
+    [Fact]
+    public async Task ARoleTheListRefuses_StopsTheEdit_BeforeAnyProbeOrWrite()
+    {
+        /* Current is Empty in these tests: a role set along with a host move is refused by the list first, so the probe
+           (which would connect to the new host) never runs and nothing is written. */
+        var store = new Store(PgRow());
+        var probed = 0;
+        var counting = (Edit.ServerProbe)((_, _) => { probed++; return Task.FromResult(new ConnectionProbeResult(true, 15, 3, "Enterprise", false, false, false, true, null)); });
+        var body = $"{{\"host\":\"pg-02.example.test\",\"password\":\"pw-secret-1\",\"aws_role_arn\":\"{RoleA}\"}}";
+        var answer = await Edit.EditServerCoreAsync(store, 41, body, counting, TestKeyRings.Healthy, null, CancellationToken.None);
+        using var doc = JsonDocument.Parse(answer);
+        Assert.Equal("invalid", doc.RootElement.GetProperty("status").GetString());
+        Assert.Equal(0, probed);
+        Assert.Equal(0, store.Writes);
+    }
+
+    [Fact]
+    public void TheWebAndMcpEdits_ShareOneCore_AndTheSameDefaultProbe()
+    {
+        var text = File.ReadAllText(Path.Combine(FindRepoRoot(), "Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpServerAdminTools.Edit.cs"));
+        var tool = text.IndexOf("public static Task<string> EditServer(", StringComparison.Ordinal);
+        var byName = text.IndexOf("internal static async Task<string> EditServerByNameAsync", StringComparison.Ordinal);
+        var byId = text.IndexOf("internal static async Task<string> EditServerByIdAsync", StringComparison.Ordinal);
+        Assert.True(tool > 0 && byName > tool && byId > byName, "the tool, the by-name body and the web entry exist in order");
+        Assert.Contains("DefaultProbeAsync", text[tool..byName], StringComparison.Ordinal);
+        Assert.Contains("EditServerCoreAsync(", text[byName..byId], StringComparison.Ordinal);
+        var webBody = text[byId..(byId + 1500)];
+        Assert.Contains("EditServerCoreAsync(", webBody, StringComparison.Ordinal);
+        Assert.Contains("DefaultProbeAsync", webBody, StringComparison.Ordinal);
+    }
+
     /* ---------------- add ---------------- */
 
     private static string AddJson(string extra) =>
@@ -335,6 +433,8 @@ public sealed class AwsRoleEditTests
     {
         public Edit.ServerEditWriteKind WriteResult { get; set; } = Edit.ServerEditWriteKind.Written;
 
+        public int Writes { get; private set; }
+
         public Task<Edit.ServerEditRow?> ReadRowAsync(int serverId, CancellationToken cancellationToken) =>
             Task.FromResult<Edit.ServerEditRow?>(row);
 
@@ -343,7 +443,13 @@ public sealed class AwsRoleEditTests
 
         public Task<Edit.ServerEditWrite> WriteAsync(
             int serverId, DateTime expectedModifiedAt, IReadOnlyList<Edit.EditColumnValue> sets, string? newStorageKey, string? actualStorageKey, CancellationToken cancellationToken) =>
-            Task.FromResult(new Edit.ServerEditWrite(WriteResult, Stamp.AddSeconds(1)));
+            Task.FromResult(CountedWrite());
+
+        private Edit.ServerEditWrite CountedWrite()
+        {
+            Writes++;
+            return new Edit.ServerEditWrite(WriteResult, Stamp.AddSeconds(1));
+        }
     }
 
     private sealed class CapturingLogger : ILogger
