@@ -435,8 +435,9 @@ public sealed class DarlingMcpDataTools
     public static Task<string> GetFileIoStats(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
+        [Description("Limit to one database. Omit for all databases.")] string? database_name = null,
         CancellationToken cancellationToken = default) =>
-        GetFileIoStats(postgres, server_name, DatabaseFilter.All, cancellationToken);
+        GetFileIoStats(postgres, server_name, DatabaseFilter.One(database_name), cancellationToken);
 
     /// <summary>
     /// get_file_io_stats limited to <paramref name="databases"/> (#5244; <see cref="DatabaseFilter.All"/> is every database).

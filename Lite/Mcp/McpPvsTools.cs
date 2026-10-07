@@ -62,16 +62,21 @@ public sealed class McpPvsTools
                    server's PVS collection: the probe is the same newest-snapshot read, unfiltered. */
                 if (names != null && await dataService.GetPvsStatsLatestAsync(resolved.ServerId) is { Count: > 0 } serverRows)
                 {
-                    return McpHelpers.Status("empty",
+                    return McpHelpers.StatusForDatabase("empty",
                         $"No PVS rows for {McpDatabaseSelection.Scope(names)} on {resolved.ServerName} in the snapshot taken at "
                         + $"{serverRows[0].CollectionTime:o}, though it holds {serverRows.Count:N0} other database(s). Check the database "
-                        + "name: the filter matches exactly, and a database with no row at that snapshot looks identical to one that does not exist.");
+                        + "name: the filter matches exactly, and a database with no row at that snapshot looks identical to one that does not exist.",
+                        McpDatabaseSelection.Describe(names));
                 }
 
-                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "pvs_stats")
-                    ?? McpHelpers.Status("empty",
+                /* #5244: every answer shape says which database it was limited to (null for every database). */
+                return McpHelpers.WithDatabase(
+                           await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "pvs_stats"),
+                           McpDatabaseSelection.Describe(names))
+                    ?? McpHelpers.StatusForDatabase("empty",
                         "No PVS data collected for this server. The collector reads sys.dm_tran_persistent_version_store_stats " +
-                        "(SQL Server 2019+); a server with no rows either predates ADR or has not completed a pvs_stats cycle yet.");
+                        "(SQL Server 2019+); a server with no rows either predates ADR or has not completed a pvs_stats cycle yet.",
+                        McpDatabaseSelection.Describe(names));
             }
 
             var databases = rows.Select(r => new
@@ -130,6 +135,7 @@ public sealed class McpPvsTools
             return JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
+                database_name = McpDatabaseSelection.Describe(names),
                 as_of = rows[0].CollectionTime.ToString("o"),
                 databases,
                 trend_hours_back = trend_hours_back > 0 ? trend_hours_back : (int?)null,

@@ -60,8 +60,9 @@ public sealed class DarlingMcpObjectStatsTools
     public static Task<string> GetTableIndexSizes(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
+        [Description("Limit to one database. Omit for all databases.")] string? database_name = null,
         CancellationToken cancellationToken = default) =>
-        GetTableIndexSizes(postgres, server_name, DatabaseFilter.All, cancellationToken);
+        GetTableIndexSizes(postgres, server_name, DatabaseFilter.One(database_name), cancellationToken);
 
     /// <summary>
     /// #5244: get_table_index_sizes over a SET of databases (<see cref="DatabaseFilter.All"/> = every database). The page is
@@ -70,8 +71,8 @@ public sealed class DarlingMcpObjectStatsTools
     /// filtered and an unfiltered call describe the same snapshots.
     /// <para>One-name consumers made list-aware (#5244 M4), on the empty path: a filter that matches no table is
     /// <c>empty</c> ("for the database 'X'" or "for the chosen databases", with the server's other rows counted) and never
-    /// <c>unavailable</c>, which stays "this server has no index stats at all". The read has no truncation sentence and no
-    /// echoed name, so neither needs a database form.</para>
+    /// <c>unavailable</c>, which stays "this server has no index stats at all". The read has no truncation sentence. Every answer
+    /// shape carries the <c>database_name</c> echo (the name, "the chosen databases", or null for every database).</para>
     /// </summary>
     internal static async Task<string> GetTableIndexSizes(
         NpgsqlDataSource postgres, string? server_name, DatabaseFilter databases, CancellationToken cancellationToken = default)
@@ -95,17 +96,20 @@ public sealed class DarlingMcpObjectStatsTools
                     var anyOnServer = await DarlingObjectStatsReader.GetIndexUsageMatchCountAsync(postgres, resolved.ServerId, DatabaseFilter.All, cancellationToken);
                     if (anyOnServer > 0)
                     {
-                        return McpHelpers.Status(
+                        return McpHelpers.StatusForDatabase(
                             "empty",
                             $"No table size rows for {DescribeScope(databases)} on {resolved.ServerName} at the latest snapshot, "
                             + $"though the server has {anyOnServer:N0} index rows across its other databases. Check the database "
                             + $"{(databases.Names.Count == 1 ? "name" : "names")} against get_database_sizes: the filter matches exactly, "
-                            + "and an excluded or renamed database looks identical to one with no tables.");
+                            + "and an excluded or renamed database looks identical to one with no tables.",
+                            databases.Describe());
                     }
                 }
 
-                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "index_object_stats", cancellationToken)
-                    ?? McpHelpers.Status("unavailable", "No object size data available. Index/object stats are collected daily.");
+                return McpHelpers.WithDatabase(
+                           await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "index_object_stats", cancellationToken),
+                           databases.Describe())
+                    ?? McpHelpers.StatusForDatabase("unavailable", "No object size data available. Index/object stats are collected daily.", databases.Describe());
             }
 
             var truncated = rows.Count > TableSizesTop;
@@ -143,6 +147,7 @@ public sealed class DarlingMcpObjectStatsTools
             return JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
+                database_name = databases.Describe(),
                 history = new
                 {
                     earliest_snapshot = span.EarliestSnapshotTime.ToString("o"),
@@ -579,8 +584,9 @@ public sealed class DarlingMcpObjectStatsTools
     public static Task<string> GetDatabaseSizes(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
+        [Description("Limit to one database. Omit for all databases.")] string? database_name = null,
         CancellationToken cancellationToken = default) =>
-        GetDatabaseSizes(postgres, server_name, DatabaseFilter.All, cancellationToken);
+        GetDatabaseSizes(postgres, server_name, DatabaseFilter.One(database_name), cancellationToken);
 
     /// <summary>
     /// #5244: get_database_sizes over a SET of databases (<see cref="DatabaseFilter.All"/> = every database): the files of the
@@ -588,7 +594,8 @@ public sealed class DarlingMcpObjectStatsTools
     /// same for a filtered and an unfiltered call).
     /// <para>One-name consumers made list-aware (#5244 M4), on the empty path: a filter that matches no database is <c>empty</c>
     /// ("for the database 'X'" or "for the chosen databases", with the snapshot's time), never <c>unavailable</c>, which stays
-    /// "no size snapshot at all". The read has no truncation sentence and no echoed name.</para>
+    /// "no size snapshot at all". The read has no truncation sentence. Every answer shape carries the <c>database_name</c> echo
+    /// (the name, "the chosen databases", or null for every database).</para>
     /// </summary>
     internal static async Task<string> GetDatabaseSizes(
         NpgsqlDataSource postgres, string? server_name, DatabaseFilter databases, CancellationToken cancellationToken = default)
@@ -606,19 +613,22 @@ public sealed class DarlingMcpObjectStatsTools
                 if (!databases.IsAll
                     && await DarlingObjectStatsReader.GetLatestSnapshotTimeAsync(postgres, resolved.ServerId, cancellationToken) is { } snapshot)
                 {
-                    return McpHelpers.Status(
+                    return McpHelpers.StatusForDatabase(
                         "empty",
                         $"No database size rows for {DescribeScope(databases)} on {resolved.ServerName} in the snapshot captured at "
                         + $"{snapshot:o}. Check the database {(databases.Names.Count == 1 ? "name" : "names")} against the server's "
                         + "unfiltered get_database_sizes: the filter matches exactly, and an excluded or renamed database looks identical "
-                        + "to one with no files.");
+                        + "to one with no files.",
+                        databases.Describe());
                 }
 
-                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "database_size_stats", cancellationToken)
-                    ?? McpHelpers.Status("unavailable", "No database size data available. The size collector may not have run yet.");
+                return McpHelpers.WithDatabase(
+                           await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "database_size_stats", cancellationToken),
+                           databases.Describe())
+                    ?? McpHelpers.StatusForDatabase("unavailable", "No database size data available. The size collector may not have run yet.", databases.Describe());
             }
 
-            return DatabaseSizesPayload(resolved.ServerName, rows);
+            return DatabaseSizesPayload(resolved.ServerName, rows, databases.Describe());
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -634,8 +644,10 @@ public sealed class DarlingMcpObjectStatsTools
     /// gets holds its data size only, and the server reports no log size for it: that row, and its database's
     /// entry, carry <see cref="AzureSiblingDatabaseSize.LogNote"/> under <see cref="AzureSiblingDatabaseSize.RowNoteKey"/>,
     /// and the top-level note says it too. No other row has the key. Lite's twin gives the same words and shape.
+    /// <paramref name="databaseEcho"/> (#5244) is the <c>database_name</c> echo: the name, "the chosen databases", or null for
+    /// every database; the key is always written.
     /// </summary>
-    internal static string DatabaseSizesPayload(string serverName, IReadOnlyList<DarlingObjectStatsReader.DatabaseSizeRow> rows)
+    internal static string DatabaseSizesPayload(string serverName, IReadOnlyList<DarlingObjectStatsReader.DatabaseSizeRow> rows, string? databaseEcho = null)
     {
         var databases = rows
             .GroupBy(r => r.DatabaseName)
@@ -669,6 +681,7 @@ public sealed class DarlingMcpObjectStatsTools
             return JsonSerializer.Serialize(new
             {
                 server = serverName,
+                database_name = databaseEcho,
                 /* #3653: captured_at, the #3637 census's one spelling for a latest read's stamp - see
                    DarlingMcpDataTools.GetServerProperties for why it is a cut-over and not an alias. */
                 captured_at = rows[0].CollectionTime.ToString("o"),
@@ -681,6 +694,7 @@ public sealed class DarlingMcpObjectStatsTools
         return JsonSerializer.Serialize(new
         {
             server = serverName,
+            database_name = databaseEcho,
             /* #3653: captured_at, the #3637 census's one spelling for a latest read's stamp - see
                DarlingMcpDataTools.GetServerProperties for why it is a cut-over and not an alias. */
             captured_at = rows[0].CollectionTime.ToString("o"),

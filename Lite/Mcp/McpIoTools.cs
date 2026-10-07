@@ -126,7 +126,9 @@ public sealed class McpIoTools
                    The quiet-window sentence carries one extra clause the others do not need: the ranking
                    counts only series that read or wrote, so a genuinely idle file set is empty here even on a
                    server whose file_io_stats collector ran every cycle. */
-                var gated = await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "file_io_stats");
+                /* #5244: every answer shape says which database it was limited to (null for every database), as Darling's twin does. */
+                var gated = McpHelpers.WithDatabase(
+                    await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "file_io_stats"), scope);
                 if (gated != null)
                 {
                     return gated;
@@ -137,16 +139,16 @@ public sealed class McpIoTools
                 /* A scoped read that found nothing is first a question about the NAME — Darling's twin's rule. */
                 if (scope is not null && everCollected)
                 {
-                    return McpHelpers.Status("empty", TrendPayloads.FileIoScopeEmptyMessage(resolved.ServerName, scope, hours_back));
+                    return McpHelpers.StatusForDatabase("empty", TrendPayloads.FileIoScopeEmptyMessage(resolved.ServerName, scope, hours_back), scope);
                 }
 
                 return everCollected
-                    ? McpHelpers.Status(
+                    ? McpHelpers.StatusForDatabase(
                         "empty",
-                        $"No file I/O samples recorded for {resolved.ServerName} in the last {hours_back} hour(s). This server HAS collected file I/O stats before, so this window is genuinely quiet rather than broken — widen hours_back, or read it as no measurable read or write activity on any file in this window.")
-                    : McpHelpers.Status(
+                        $"No file I/O samples recorded for {resolved.ServerName} in the last {hours_back} hour(s). This server HAS collected file I/O stats before, so this window is genuinely quiet rather than broken — widen hours_back, or read it as no measurable read or write activity on any file in this window.", scope)
+                    : McpHelpers.StatusForDatabase(
                         "unavailable",
-                        $"No file I/O stats have EVER been recorded for {resolved.ServerName}. This is not an empty window — the file_io_stats collector has stored nothing at all for this server. Check that collection is running and that the server is enabled; get_file_io_stats will be equally empty until it does.");
+                        $"No file I/O stats have EVER been recorded for {resolved.ServerName}. This is not an empty window — the file_io_stats collector has stored nothing at all for this server. Check that collection is running and that the server is enabled; get_file_io_stats will be equally empty until it does.", scope);
             }
 
             var budget = TrendBudget.Mcp(TrendBuckets.FileIoMaxPoints);

@@ -53,14 +53,18 @@ public sealed class McpObjectStatsTools
                    words it the same, minus the count of the server's other rows, which Lite has no read for). */
                 if (names != null && (await dataService.GetObjectSizeGrowthAsync(resolved.ServerId, 1)).Count > 0)
                 {
-                    return McpHelpers.Status("empty",
+                    return McpHelpers.StatusForDatabase("empty",
                         $"No table size rows for {McpDatabaseSelection.Scope(names)} on {resolved.ServerName} at the latest snapshot, "
                         + "though the server has index rows in its other databases. Check the database name against get_database_sizes: "
-                        + "the filter matches exactly, and an excluded or renamed database looks identical to one with no tables.");
+                        + "the filter matches exactly, and an excluded or renamed database looks identical to one with no tables.",
+                        McpDatabaseSelection.Describe(names));
                 }
 
-                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "index_object_stats")
-                    ?? McpHelpers.Status("unavailable", "No object size data available. Index/object stats are collected daily.");
+                /* #5244: every answer shape says which database it was limited to (null for every database). */
+                return McpHelpers.WithDatabase(
+                           await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "index_object_stats"),
+                           McpDatabaseSelection.Describe(names))
+                    ?? McpHelpers.StatusForDatabase("unavailable", "No object size data available. Index/object stats are collected daily.", McpDatabaseSelection.Describe(names));
             }
 
             var truncated = rows.Count > TableSizesTop;
@@ -98,6 +102,7 @@ public sealed class McpObjectStatsTools
             return JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
+                database_name = McpDatabaseSelection.Describe(names),
                 history = new
                 {
                     earliest_snapshot = span.EarliestSnapshotTime.ToString("o"),

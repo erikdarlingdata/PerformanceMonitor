@@ -30,13 +30,13 @@ namespace PerformanceMonitor.Darling.Tests;
 [Collection("live-postgres")]
 public sealed class StorageDatabaseFilterLiveTests
 {
-    private const string Cleanup =
+    internal const string Cleanup =
         "DELETE FROM index_object_stats WHERE server_id = {0}; DELETE FROM database_size_stats WHERE server_id = {0}; " +
         "DELETE FROM pvs_stats WHERE server_id = {0}";
 
-    private const string A = "StorageFilterA";
-    private const string B = "StorageFilterB";
-    private const string C = "StorageFilterC";
+    internal const string A = "StorageFilterA";
+    internal const string B = "StorageFilterB";
+    internal const string C = "StorageFilterC";
 
     private static DatabaseFilter Of(params string[] names) => DatabaseFilter.Of(names);
 
@@ -49,7 +49,7 @@ public sealed class StorageDatabaseFilterLiveTests
 
     /* ───────────────────────────── seeding ───────────────────────────── */
 
-    private static Task InsertTableAsync(Npgsql.NpgsqlConnection connection, System.Threading.CancellationToken ct,
+    internal static Task InsertTableAsync(Npgsql.NpgsqlConnection connection, System.Threading.CancellationToken ct,
         int serverId, string serverName, DateTime t, string db, string table, decimal reservedMb) =>
         DarlingMcpTestData.ExecAsync(connection, ct,
             @"INSERT INTO index_object_stats (collection_id, collection_time, server_id, server_name, database_name, schema_name, object_id, table_name, index_id, index_name, index_type_desc, reserved_mb, used_mb, total_rows)
@@ -57,7 +57,7 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)",
             CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(t), serverId, serverName, db, "dbo", 100, table, 1,
             "PK_" + table, "CLUSTERED", reservedMb, reservedMb / 2, 1_000L);
 
-    private static Task InsertFileAsync(Npgsql.NpgsqlConnection connection, System.Threading.CancellationToken ct,
+    internal static Task InsertFileAsync(Npgsql.NpgsqlConnection connection, System.Threading.CancellationToken ct,
         int serverId, string serverName, DateTime t, string db, decimal sizeMb) =>
         DarlingMcpTestData.ExecAsync(connection, ct,
             @"INSERT INTO database_size_stats (collection_id, collection_time, server_id, server_name, database_name, database_id, file_id, file_type_desc, file_name, physical_name, total_size_mb, used_size_mb)
@@ -65,7 +65,7 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)",
             CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(t), serverId, serverName, db, 5, 1, "ROWS", db + "_data",
             "C:\\data\\" + db + ".mdf", sizeMb, sizeMb / 2);
 
-    private static Task InsertPvsAsync(Npgsql.NpgsqlConnection connection, System.Threading.CancellationToken ct,
+    internal static Task InsertPvsAsync(Npgsql.NpgsqlConnection connection, System.Threading.CancellationToken ct,
         int serverId, string serverName, DateTime t, string db, decimal pvsMb) =>
         DarlingMcpTestData.ExecAsync(connection, ct,
             @"INSERT INTO pvs_stats (collection_id, collection_time, server_id, server_name, database_name, database_id, is_accelerated_database_recovery_on, persistent_version_store_size_mb, database_data_size_mb)
@@ -101,7 +101,7 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)",
             Assert.Equal(new[] { B }, Names(one, "tables"));
 
             /* The public MCP method passes every database, and a whitespace-only name is every database too (M3). */
-            Assert.Equal(all.GetRawText(), Parse(await DarlingMcpObjectStatsTools.GetTableIndexSizes(postgres, serverName, ct)).GetRawText());
+            Assert.Equal(all.GetRawText(), Parse(await DarlingMcpObjectStatsTools.GetTableIndexSizes(postgres, serverName, cancellationToken: ct)).GetRawText());
             Assert.Equal(all.GetRawText(), Parse(await DarlingMcpObjectStatsTools.GetTableIndexSizes(postgres, serverName, DatabaseFilter.One("   "), ct)).GetRawText());
         }, Cleanup);
 
@@ -192,7 +192,7 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)",
             Assert.Equal("empty", DarlingMcpTestData.StatusOf(
                 await DarlingMcpObjectStatsTools.GetDatabaseSizes(postgres, serverName, DatabaseFilter.One(A.ToUpperInvariant()), ct)));
 
-            Assert.Equal(all.GetRawText(), Parse(await DarlingMcpObjectStatsTools.GetDatabaseSizes(postgres, serverName, ct)).GetRawText());
+            Assert.Equal(all.GetRawText(), Parse(await DarlingMcpObjectStatsTools.GetDatabaseSizes(postgres, serverName, cancellationToken: ct)).GetRawText());
             Assert.Equal(all.GetRawText(), Parse(await DarlingMcpObjectStatsTools.GetDatabaseSizes(postgres, serverName, DatabaseFilter.One(""), ct)).GetRawText());
 
             var older = await DarlingMcpObjectStatsTools.GetDatabaseSizes(postgres, serverName, DatabaseFilter.One("OnlyOlder"), ct);
@@ -249,7 +249,7 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)",
             var one = Parse(await DarlingMcpPvsTools.GetPvsStats(postgres, serverName, 0, DatabaseFilter.One(B), ct));
             Assert.Equal(new[] { B }, Names(one, "databases"));
 
-            Assert.Equal(all.GetRawText(), Parse(await DarlingMcpPvsTools.GetPvsStats(postgres, serverName, 24, ct)).GetRawText());
+            Assert.Equal(all.GetRawText(), Parse(await DarlingMcpPvsTools.GetPvsStats(postgres, serverName, 24, cancellationToken: ct)).GetRawText());
             Assert.Equal(all.GetRawText(), Parse(await DarlingMcpPvsTools.GetPvsStats(postgres, serverName, 24, DatabaseFilter.One(" "), ct)).GetRawText());
         }, Cleanup);
 

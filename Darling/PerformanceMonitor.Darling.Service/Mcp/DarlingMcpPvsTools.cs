@@ -38,8 +38,9 @@ public sealed class DarlingMcpPvsTools
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of size-trend history for the top-5 databases; 0 (default) returns the latest snapshot only.")] int trend_hours_back = 0,
+        [Description("Limit to one database. Omit for all databases.")] string? database_name = null,
         CancellationToken cancellationToken = default) =>
-        GetPvsStats(postgres, server_name, trend_hours_back, DatabaseFilter.All, cancellationToken);
+        GetPvsStats(postgres, server_name, trend_hours_back, DatabaseFilter.One(database_name), cancellationToken);
 
     /// <summary>
     /// #5244: get_pvs_stats over a SET of databases (<see cref="DatabaseFilter.All"/> = every database): the chosen databases'
@@ -48,8 +49,9 @@ public sealed class DarlingMcpPvsTools
     /// <para>One-name consumers made list-aware (#5244 M4), on the empty path: when the server has a PVS snapshot and the chosen
     /// databases are not in it, the answer is <c>empty</c> for the chosen databases, with how many databases the snapshot does
     /// hold. It never says "no PVS data collected for this server", which would be a verdict about the server. The
-    /// <c>not_collected</c> and unfiltered <c>empty</c> envelopes are unchanged. The read has no truncation sentence and no
-    /// echoed name.</para>
+    /// <c>not_collected</c> and unfiltered <c>empty</c> envelopes keep their words. Every answer shape carries the
+    /// <c>database_name</c> echo (the name, "the chosen databases", or null for every database), including those two.
+    /// The read has no truncation sentence.</para>
     /// </summary>
     internal static async Task<string> GetPvsStats(
         NpgsqlDataSource postgres, string? server_name, int trend_hours_back, DatabaseFilter databaseFilter, CancellationToken cancellationToken = default)
@@ -75,18 +77,22 @@ public sealed class DarlingMcpPvsTools
                     var serverRows = await DarlingPvsReader.GetPvsStatsLatestAsync(postgres, resolved.ServerId, DatabaseFilter.All, cancellationToken);
                     if (serverRows.Count > 0)
                     {
-                        return McpHelpers.Status("empty",
+                        return McpHelpers.StatusForDatabase("empty",
                             $"No PVS rows for {DarlingMcpObjectStatsTools.DescribeScope(databaseFilter)} on {resolved.ServerName} in the snapshot taken at "
                             + $"{serverRows[0].CollectionTime:o}, though it holds {serverRows.Count:N0} other database(s). Check the database "
                             + $"{(databaseFilter.Names.Count == 1 ? "name" : "names")}: the filter matches exactly, and a database with no row at that "
-                            + "snapshot looks identical to one that does not exist.");
+                            + "snapshot looks identical to one that does not exist.",
+                            databaseFilter.Describe());
                     }
                 }
 
-                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "pvs_stats", cancellationToken)
-                    ?? McpHelpers.Status("empty",
+                return McpHelpers.WithDatabase(
+                           await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "pvs_stats", cancellationToken),
+                           databaseFilter.Describe())
+                    ?? McpHelpers.StatusForDatabase("empty",
                         "No PVS data collected for this server. The collector reads sys.dm_tran_persistent_version_store_stats " +
-                        "(SQL Server 2019+); a server with no rows either predates ADR or has not completed a pvs_stats cycle yet.");
+                        "(SQL Server 2019+); a server with no rows either predates ADR or has not completed a pvs_stats cycle yet.",
+                        databaseFilter.Describe());
             }
 
             var databases = rows.Select(r => new
@@ -162,6 +168,7 @@ public sealed class DarlingMcpPvsTools
             return JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
+                database_name = databaseFilter.Describe(),
                 as_of = rows[0].CollectionTime.ToString("o"),
                 databases,
                 trend_hours_back = trend_hours_back > 0 ? trend_hours_back : (int?)null,

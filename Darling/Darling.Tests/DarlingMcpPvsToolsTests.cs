@@ -56,7 +56,9 @@ public sealed class DarlingMcpPvsToolsTests
             .Select(p => (p.Name, p.HasDefaultValue, p.DefaultValue))
             .ToArray();
 
-        Assert.Equal(new[] { "server_name", "trend_hours_back" }, mcpParams.Select(p => p.Name).ToArray());
+        /* #5244 PR5: database_name is appended LAST (the Lite twin's order), and optional. */
+        Assert.Equal(new[] { "server_name", "trend_hours_back", "database_name" }, mcpParams.Select(p => p.Name).ToArray());
+        Assert.True(mcpParams.Single(p => p.Name == "database_name").HasDefaultValue, "database_name must be optional");
         Assert.True(mcpParams.Single(p => p.Name == "server_name").HasDefaultValue, "server_name must be optional");
 
         /* The trend is an OPT-IN: 0 means snapshot-only, so a default call stays one cheap read. */
