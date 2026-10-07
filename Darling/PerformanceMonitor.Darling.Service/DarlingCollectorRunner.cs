@@ -853,6 +853,7 @@ public sealed class DarlingCollectorRunner
         /* #4961: null provider = no install id, so no long-query session can be named (what a test that builds a runner
            without one gets). The worker passes the id it made at start. */
         _installId = installId ?? (() => null);
+        _awsRoles = new Targets.AwsRoleCredentialCache(installId: () => _installId(), logger: logger);
         /* #4004: the store's log-hash key, loaded once by the worker at start and shared by every run that hashes log
            text (pg_log_events on both transports). Null = none could be used: those runs refuse, with the reason. */
         _logHashKey = logHashKey;
@@ -903,6 +904,17 @@ public sealed class DarlingCollectorRunner
        not once per collector, and ForgetRdsVerdicts clears both when the server's definition changes. */
     private readonly RdsEndpointVerifier _rdsVerifier = new();
 
+    /* #5452: the assumed-role credentials of every server that names its own AWS role, one session per (role, external ID)
+       however many servers share it. Built beside the verifier and handed to the four RDS readers; the allow list it checks
+       is AwsRoleAllowlist.Current, which the worker sets at start. A server with no role never touches it. */
+    private readonly Targets.AwsRoleCredentialCache _awsRoles;
+
+    /// <summary>Drops the assumed-role sessions that no enabled server names any more (#5452). Called after each reload of the server list.</summary>
+    internal void RetainAwsRoles(IEnumerable<Targets.AwsRoleKey> liveKeys) => _awsRoles.Retain(liveKeys);
+
+    /// <summary>The role-credential cache the RDS readers use, for the tests (#5452).</summary>
+    internal Targets.AwsRoleCredentialCache AwsRoles => _awsRoles;
+
     /// <summary>Forgets the endpoint verdicts and the fresh login held for <paramref name="serverId"/>: its definition changed.</summary>
     internal void ForgetRdsVerdicts(int serverId) => _rdsVerifier.ClearServer(serverId);
 
@@ -923,24 +935,24 @@ public sealed class DarlingCollectorRunner
     internal RdsPlanIngestor PublishedRdsPlanIngestor()
         => LazyInitializer.EnsureInitialized(
             ref _rdsPlans,
-            () => new RdsPlanIngestor(_postgres, logger: _logger, resume: RdsResumeStoreFor(PgPlanCaptureCollector.Instance.Name), verifier: _rdsVerifier));
+            () => new RdsPlanIngestor(_postgres, logger: _logger, resume: RdsResumeStoreFor(PgPlanCaptureCollector.Instance.Name), verifier: _rdsVerifier, roles: _awsRoles));
 
     /// <summary>The one deadlock ingestor of this runner, built the first time a target needs it.</summary>
     internal RdsDeadlockIngestor PublishedRdsDeadlockIngestor()
         => LazyInitializer.EnsureInitialized(
             ref _rdsDeadlocks,
-            () => new RdsDeadlockIngestor(_postgres, logger: _logger, resume: RdsResumeStoreFor(PgDeadlocksCollector.Instance.Name), verifier: _rdsVerifier));
+            () => new RdsDeadlockIngestor(_postgres, logger: _logger, resume: RdsResumeStoreFor(PgDeadlocksCollector.Instance.Name), verifier: _rdsVerifier, roles: _awsRoles));
 
     /// <summary>The one log-event ingestor of this runner, built the first time a target needs it with the store's
     /// log-hash key <paramref name="logHashKey"/>.</summary>
     internal RdsLogEventIngestor PublishedRdsLogEventIngestor(PgLogHashKey logHashKey)
         => LazyInitializer.EnsureInitialized(
             ref _rdsLogEvents,
-            () => new RdsLogEventIngestor(_postgres, logHashKey, logger: _logger, resume: RdsResumeStoreFor(PgLogEventsCollector.Instance.Name), verifier: _rdsVerifier));
+            () => new RdsLogEventIngestor(_postgres, logHashKey, logger: _logger, resume: RdsResumeStoreFor(PgLogEventsCollector.Instance.Name), verifier: _rdsVerifier, roles: _awsRoles));
 
     /// <summary>The one CPU ingestor of this runner, built the first time a target needs it.</summary>
     internal RdsCpuIngestor PublishedRdsCpuIngestor()
-        => LazyInitializer.EnsureInitialized(ref _rdsCpu, () => new RdsCpuIngestor(_postgres, logger: _logger, verifier: _rdsVerifier));
+        => LazyInitializer.EnsureInitialized(ref _rdsCpu, () => new RdsCpuIngestor(_postgres, logger: _logger, verifier: _rdsVerifier, roles: _awsRoles));
 
     /// <summary>
     /// <paramref name="result"/> with <see cref="PgServerLogTail.ForeignZoneLinesNote"/> merged into its host note
@@ -1084,7 +1096,7 @@ public sealed class DarlingCollectorRunner
         var started = Stopwatch.GetTimestamp();
 
         var outcome = await rdsPlans.IngestAsync(
-            server.ServerId, server.StorageName, host, pgLogUsesCsvlog, server.ConnectionString, cancellationToken);
+            server.ServerId, server.StorageName, host, pgLogUsesCsvlog, server.ConnectionString, server.Config.AwsRoleKey, cancellationToken);
 
         var elapsedMs = (long)Stopwatch.GetElapsedTime(started).TotalMilliseconds;
 
@@ -1124,7 +1136,7 @@ public sealed class DarlingCollectorRunner
         var started = Stopwatch.GetTimestamp();
 
         var outcome = await rdsDeadlocks.IngestAsync(
-            server.ServerId, server.StorageName, host, logTimezoneIsUtc, pgLogUsesCsvlog, server.ConnectionString, cancellationToken);
+            server.ServerId, server.StorageName, host, logTimezoneIsUtc, pgLogUsesCsvlog, server.ConnectionString, server.Config.AwsRoleKey, cancellationToken);
 
         var elapsedMs = (long)Stopwatch.GetElapsedTime(started).TotalMilliseconds;
 
@@ -1318,7 +1330,7 @@ public sealed class DarlingCollectorRunner
         var started = Stopwatch.GetTimestamp();
 
         var outcome = await rdsLogEvents.IngestAsync(
-            server.ServerId, server.StorageName, host, logTimezoneIsUtc, pgLogUsesCsvlog, server.ConnectionString, cancellationToken);
+            server.ServerId, server.StorageName, host, logTimezoneIsUtc, pgLogUsesCsvlog, server.ConnectionString, server.Config.AwsRoleKey, cancellationToken);
 
         var elapsedMs = (long)Stopwatch.GetElapsedTime(started).TotalMilliseconds;
 
@@ -1403,7 +1415,7 @@ public sealed class DarlingCollectorRunner
         var started = Stopwatch.GetTimestamp();
 
         var outcome = await rdsCpu.IngestAsync(
-            server.ServerId, server.StorageName, host, server.ConnectionString, cancellationToken);
+            server.ServerId, server.StorageName, host, server.ConnectionString, server.Config.AwsRoleKey, cancellationToken);
 
         var elapsedMs = (long)Stopwatch.GetElapsedTime(started).TotalMilliseconds;
 

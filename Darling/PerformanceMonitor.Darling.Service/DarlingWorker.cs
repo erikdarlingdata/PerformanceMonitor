@@ -6110,6 +6110,9 @@ LIMIT 1";
                drop below needs (the definition, the runtime, the long-query latch) is taken first. */
             removedServers = DarlingRemovedServerSessions.Capture(servers, view.EnabledServers, runner);
             ReconcileServers(servers, view.EnabledServers);
+
+            /* #5452: an assumed-role session is kept only while an enabled server names its role and external ID. */
+            runner.RetainAwsRoles(servers.Select(state => state.Config.AwsRoleKey).OfType<Targets.AwsRoleKey>());
         }
 
         /* #4961: a removed server's sessions of this install's go with it, awaited here, after the lock is released: the
@@ -6482,7 +6485,8 @@ LIMIT 1";
 
     /// <summary>
     /// Whether two server definitions are identical for the collection loop — the connection-relevant fields
-    /// (host, port, engine, database, auth, credentials, intent) plus the collection-affecting excluded databases. A difference triggers a reconnect on reconcile so the
+    /// (host, port, engine, database, auth, credentials, intent), the server's own AWS role and external ID (#5452: a role-only edit
+    /// reconnects, so the runtime reads under the new role and the host check starts over), plus the collection-affecting excluded databases. A difference triggers a reconnect on reconcile so the
     /// new definition takes effect. <c>MonthlyCostUsd</c> is deliberately NOT compared: it does not affect
     /// collection at all, and the reload's <see cref="DarlingObservability.SyncServerEnabledStatesAsync"/>
     /// mirrors a cost change straight onto <c>collect.servers</c> (which the FinOps display reads) with no
@@ -6503,6 +6507,7 @@ LIMIT 1";
         && a.MultiSubnetFailover == b.MultiSubnetFailover
         && a.Port == b.Port
         && a.TargetEngine == b.TargetEngine
+        && a.AwsRoleKey == b.AwsRoleKey
         && a.ExcludedDatabases.SequenceEqual(b.ExcludedDatabases, StringComparer.OrdinalIgnoreCase);
 
     /// <summary>
@@ -14462,6 +14467,24 @@ LIMIT 1";
 
             await DarlingObservability.LogCollectionAsync(
                 _postgres!, runtime, collectorName, "SESSION_MISSING", 0, runClock.ElapsedMilliseconds, 0, ex.Message, fanout: null, phases: null, drain: null, fetchPhases: null, sweepPeerMaxMs: peerMaxAtDispatchMs, _logger, cancellationToken);
+            return 0;
+        }
+        catch (Exception ex) when (AwsRoleAssumeException.Find(ex) is { IsConfiguration: true } assume)
+        {
+            /* #5452: the AWS role on this server cannot be used: the allow list does not list it, its partition is not the
+               target's, or STS refused to hand it out. FIRST of the RDS arms, and ahead of every arm that reads the text of an
+               AWS failure: an STS denial says "is not authorized to perform", which the log and Performance Insights arms
+               below would read as the monitoring host's own IAM role missing a grant, and tell an operator to fix the wrong
+               role. PERMISSIONS, like the other refused-source outcomes, with the exception's own message, which names the role
+               ARN and whether an external ID is set and never the ID. Nothing was read this cycle. Written on every sweep so
+               collection health keeps reading it. The other kinds (the host's credentials, no source identity, a transient
+               STS failure) carry no operator-fixable setting and fall through to the general ERROR arm with the same message. */
+            _logger.LogWarning("  [{Server}] {Collector} => PERMISSIONS: {Message}",
+                server.Config.DisplayName, collectorName, assume.Message);
+
+            await DarlingObservability.LogCollectionAsync(
+                _postgres!, runtime, collectorName, "PERMISSIONS", 0, 0, runClock.ElapsedMilliseconds, assume.Message,
+                fanout: null, phases: null, drain: null, fetchPhases: null, sweepPeerMaxMs: peerMaxAtDispatchMs, _logger, cancellationToken);
             return 0;
         }
         catch (RdsEndpointMismatchException ex)

@@ -25,6 +25,16 @@ public readonly record struct AwsRoleKey(string RoleArn, string? ExternalId)
     /// <summary>True when an external ID is set. A null or empty one means none, and none is sent with the request.</summary>
     public bool HasExternalId => !string.IsNullOrEmpty(ExternalId);
 
+    /// <summary>
+    /// The host check's credential scope for a server that reads under this role: the role ARN and whether an external ID
+    /// is set, never the ID itself (#5452). A different role, or an ID added or removed, is a different scope, so a verdict
+    /// made under one role is never reused under another.
+    /// </summary>
+    public string CredentialScope => $"{RoleArn}|ext={(HasExternalId ? "set" : "none")}";
+
+    /// <summary>The credential scope of a server with this role, or "" (the process credentials) when it has none.</summary>
+    public static string ScopeOf(AwsRoleKey? role) => role is { } key ? key.CredentialScope : string.Empty;
+
     private bool PrintMembers(StringBuilder builder)
     {
         builder.Append("RoleArn = ").Append(RoleArn).Append(", ExternalId = ").Append(HasExternalId ? "set" : "none");

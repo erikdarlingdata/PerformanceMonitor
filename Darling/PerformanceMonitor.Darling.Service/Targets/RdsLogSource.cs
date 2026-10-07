@@ -159,7 +159,7 @@ public sealed class RdsLogSource
         }
     }
 
-    private readonly Func<string, IAmazonRDS> _clientFactory;
+    private readonly Func<string, AwsRoleKey?, IAmazonRDS> _clientFactory;
 
     private readonly Func<DateTime> _clock;
 
@@ -193,11 +193,12 @@ public sealed class RdsLogSource
         Func<string, IAmazonRDS>? clientFactory = null,
         Func<DateTime>? clock = null,
         ILogger? logger = null,
-        RdsEndpointVerifier? verifier = null)
+        RdsEndpointVerifier? verifier = null,
+        AwsRoleCredentialCache? roles = null,
+        Func<string, AwsRoleKey?, IAmazonRDS>? roleClientFactory = null)
     {
         _verifier = verifier ?? new RdsEndpointVerifier(clock);
-        _clientFactory = clientFactory
-            ?? (region => new AmazonRDSClient(RegionEndpoint.GetBySystemName(region)));
+        _clientFactory = roleClientFactory ?? AwsRoleClients.Rds(clientFactory, roles);
         _clock = clock ?? (() => DateTime.UtcNow);
         _logger = logger;
     }
@@ -437,10 +438,12 @@ public sealed class RdsLogSource
     /// The same read for the server <paramref name="serverId"/>, which keys the cached endpoint check
     /// (<see cref="RdsEndpointVerifier"/>) together with the host and the parsed id.
     /// <paramref name="loginConnectionString"/> is the target's connection string, for the fresh login the check needs.
+    /// <paramref name="role"/> is the server's own AWS role (#5452), null for the process credentials: the log calls AND the
+    /// endpoint check's Describe calls both use the one client built for it.
     /// </summary>
     public async Task<LogChunk?> ReadNewestAsync(
         string host, LogFileKind kind, int serverId, CancellationToken cancellationToken,
-        string? loginConnectionString = null)
+        string? loginConnectionString = null, AwsRoleKey? role = null)
     {
         var endpoint = RdsEndpoint.TryParse(host);
 
@@ -460,10 +463,12 @@ public sealed class RdsLogSource
                 + "so captured plans belong to a server that can be named.");
         }
 
-        using var client = _clientFactory(parsed.Region);
+        using var client = _clientFactory(parsed.Region, role);
 
-        /* The host must be the endpoint AWS reports for the id parsed from it before any log call is made. */
-        await _verifier.EnsureAsync(client, parsed, host, serverId, cancellationToken, loginConnectionString);
+        /* The host must be the endpoint AWS reports for the id parsed from it before any log call is made. Under a role
+           the check's Describe calls use this same role-bound client, and the verdict is kept per role (#5452). */
+        await _verifier.EnsureAsync(
+            client, parsed, host, serverId, cancellationToken, loginConnectionString, AwsRoleKey.ScopeOf(role));
 
         var instanceId = parsed.Kind == RdsEndpointKind.ClusterWriter
             ? await ResolveWriterAsync(client, parsed.Identifier, cancellationToken)
