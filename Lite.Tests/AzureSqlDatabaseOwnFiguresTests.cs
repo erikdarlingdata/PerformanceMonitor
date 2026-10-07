@@ -476,9 +476,8 @@ public sealed class AzureSqlDatabaseOwnFiguresTests
             "HealthScoreBorder.ToolTip = data.HasCpuSample ? null : FinOpsHealthCalculator.NoScoreNote;",
             tab, StringComparison.Ordinal);
 
-        Assert.Contains(
-            "int? cpuScore = item.AvgCpuPct is decimal avgCpu ? FinOpsHealthCalculator.CpuScore(avgCpu) : null;",
-            tab, StringComparison.Ordinal);
+        /* The inventory grid's score is the shared rule: a server with no CPU sample has no score (a dash), not defaults alone. */
+        Assert.Contains("item.HealthScore = FinOpsHealthCalculator.InventoryScore(item.AvgCpuPct);", tab, StringComparison.Ordinal);
         Assert.DoesNotContain("item.AvgCpuPct ?? 0m", tab, StringComparison.Ordinal);
     }
 
