@@ -41,11 +41,22 @@ public static partial class SensitiveStatements
     private static readonly Lazy<Func<string, Verdict>> s_judge =
         new(() => CreateProductionJudge());
 
+    /// <summary>The linear-time pre-check of <see cref="Pattern"/> (see <see cref="CreatePrefilter"/>), built once
+    /// and shared (#5477): it is the first test the production judge makes on every value, and the whole-document
+    /// check in <see cref="RawTextHoldsNothingNamed"/> reads the SAME instance, so a document is cleared by exactly the
+    /// pre-check that would have cleared each of its values, and its lazily built states are built once. Null when
+    /// the build fails; every caller then runs the full judge.</summary>
+    private static readonly Lazy<Regex?> s_prefilter = new(() => CreatePrefilter(Pattern, MatchTimeout));
+
+    /// <summary>Whether the shared judge is a working judge (#5477): a judge whose build failed names every value, and a
+    /// pre-check that cleared a document must never stand in for it. Probed once, on a value no pattern names.</summary>
+    private static readonly Lazy<bool> s_judgeIsLive = new(() => JudgeShared(s_judge, "select 1") == Verdict.Clean);
+
     /// <summary>The judge every production caller shares (#5320 N2), with its pattern, timeout and split. Internal
     /// so a test can build it with a fake <paramref name="clock"/> and pin that it really is the split judge: a
     /// one-regex judge answers differently once the clock says the first part used most of the budget.</summary>
     internal static Func<string, Verdict> CreateProductionJudge(Func<TimeSpan>? clock = null) =>
-        CreateJudge(Pattern, MatchTimeout, headAlternatives: JudgeHeadAlternatives, clock: clock);
+        CreateJudge(Pattern, MatchTimeout, headAlternatives: JudgeHeadAlternatives, clock: clock, sharedPrefilter: s_prefilter);
 
     /// <summary>True once the shared judge is built. Exposed so a test can pin <see cref="WarmUp"/>.</summary>
     internal static bool JudgeIsBuilt => s_judge.IsValueCreated;
@@ -425,7 +436,8 @@ public static partial class SensitiveStatements
         bool factor = true,
         bool prefilter = true,
         int headAlternatives = 0,
-        Func<TimeSpan>? clock = null)
+        Func<TimeSpan>? clock = null,
+        Lazy<Regex?>? sharedPrefilter = null)
     {
         var now = clock ?? (static () => Stopwatch.GetElapsedTime(0));
         var headSource = source;
@@ -460,7 +472,7 @@ public static partial class SensitiveStatements
 
         // The pre-check is always built from the whole source: one linear-time pass over the superset, however
         // many regexes follow it.
-        var precheck = prefilter ? CreatePrefilter(source, timeout) : null;
+        var precheck = prefilter ? (sharedPrefilter is not null ? sharedPrefilter.Value : CreatePrefilter(source, timeout)) : null;
 
         // #5320 L3: the build stays outside any budget. The regexes are compiled above, and the first match still
         // pays the one-time JIT of the compiled code (inside the match timeout and the caller's clock), so run
@@ -589,6 +601,10 @@ public static partial class SensitiveStatements
         private TimeSpan _elapsed;
 
         public TimeSpan Limit { get; } = limit;
+
+        /// <summary>True when this budget runs the production judge, not a fake one a test handed it (#5477): only then may a
+        /// whole-document pre-check stand in for judging every value.</summary>
+        internal bool UsesSharedJudge => _judge is null && ReferenceEquals(_shared, s_judge);
 
         public TimeSpan Elapsed => _elapsed;
 

@@ -138,6 +138,7 @@ public static partial class SensitiveStatements
     internal static string? Xml(string? xml, JudgeBudget budget, int maxOutputChars = int.MaxValue)
     {
         if (string.IsNullOrEmpty(xml)) return xml;
+        if (RawTextHoldsNothingNamed(budget, xml)) return xml;
         try
         {
             return XmlCore(
