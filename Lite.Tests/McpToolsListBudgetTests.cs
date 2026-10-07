@@ -154,7 +154,10 @@ public sealed class McpToolsListBudgetTests
     // #5244 PR4 lane L1: get_query_duration_trend, get_procedure_duration_trend and get_query_store_duration_trend gain database_name
     // (46 characters each, the shared sentence); no served head changes. The ceiling is the measured total: 93,750 = dev 93,265 + 485 (lane L1 291, the three
     // parameters with their JSON framing, + lane L2 194).
-    private const int TotalCeilingBytes = 93_750;
+    // #5244 PR6: get_database_config_changes, get_default_trace_events and get_health_parser_severe_errors gain database_name (appended last, the
+    // 46-character sentence the other Lite database_name parameters use; the served heads are unchanged), +97 bytes each (+291). The ceiling is the
+    // measured total on this tree, not a hand sum.
+    private const int TotalCeilingBytes = 94_041;
 
     private const int ConvertedHeadCap = 1_000;
     private const int ConvertedParameterCap = 200;

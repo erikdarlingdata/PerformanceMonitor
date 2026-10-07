@@ -42,6 +42,7 @@ import {
   sevClass,
   windowFromHours,
   dbScopeChip,
+  dbFilteredEmptyText,
   sourceStrip,
 } from "./util.js";
 import { zoomableLineChart, chartZoomScope, SERIES_COLORS } from "./charts.js";
@@ -208,7 +209,8 @@ function vizTable(data, desc) {
   if (!(Array.isArray(desc.columns) && desc.columns.length)) return emptyStrip(NO_FIELDS_MSG);
   /* rowsKey "." is a read whose payload is one object, drawn as one row. */
   const rows = desc.rowsKey === "." ? (data ? [data] : []) : getPath(data, desc.rowsKey) || [];
-  return gridTable(rows, desc);
+  /* #5244: a filtered read that has a snapshot but no row for the chosen databases must not say there is no snapshot. */
+  return gridTable(rows, rows.length ? desc : { ...desc, emptyText: dbFilteredEmptyText(desc.read, desc.emptyText, desc.dbScope) });
 }
 
 /** The grid every table on the web draws through (#4843): sort, column groups, per-column filters, Copy cell / row /

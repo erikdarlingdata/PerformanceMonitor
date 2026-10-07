@@ -89,6 +89,19 @@ public sealed class DatabaseNameHistory
         return changes[found].DatabaseName;
     }
 
+    /// <summary>True when the name <paramref name="databaseId"/> carried at <paramref name="eventTime"/> (the same
+    /// <see cref="Resolve"/> rule the rows show) is one of <paramref name="chosen"/>, compared ordinally (#5244). An id
+    /// with no database context (null or 0) or one this history never saw resolves to no name, so it is in no chosen
+    /// database. A database that was dropped and whose id a second database reused matches by the name each error
+    /// carried, not by the id's latest name.</summary>
+    public bool IsIn(int? databaseId, DateTime? eventTime, IEnumerable<string> chosen)
+    {
+        if (databaseId is not { } id || id == 0 || !_byId.TryGetValue(id, out var changes) || changes.Length == 0)
+            return false;
+        var name = Resolve(id, eventTime);
+        return chosen.Contains(name, StringComparer.Ordinal);
+    }
+
     /// <summary>What a history read has to cover for a set of errors (#5373): the real database ids, the range of the
     /// times of the errors that carry one, and whether any of those errors has no time (it resolves to its id's
     /// newest name, so the newest row per id is read too).</summary>
