@@ -143,6 +143,10 @@ internal static class DarlingObjectStatsReader
     /// Postgres: roll indexes up per (database, schema, table) at the latest snapshot, and read the same
     /// table's reserved size at the newest snapshot at/older-than the 7-day ($2) and 30-day ($3) cutoffs and
     /// at the store's earliest snapshot. Ranks by current reserved size descending, cap $4. $1 server_id.
+    /// <para>#5244: $5 is the database filter (a text[], NULL = every database; the shape of <see cref="DatabaseFilter.Clause"/>).
+    /// It sits on the four snapshot CTEs and NOT on <c>boundaries</c>, so the snapshot anchors, the store's span and
+    /// the 7-day and 30-day baselines stay the server's: a filtered and an unfiltered call read the same captures,
+    /// and the cap $4 applies after the filter, so the page is the largest N tables of the chosen databases.</para>
     /// <para><b>Baselines are projected RAW, not folded (#3541 A12).</b> The previous shape derived the growth
     /// columns in SQL through <c>COALESCE(p30, p7, oldest, current)</c>, so a baseline the store did not hold
     /// was silently replaced by a nearer one and labelled with the farther window's name — and a table in no
@@ -171,24 +175,28 @@ internal static class DarlingObjectStatsReader
                 COUNT(*) AS index_count
             FROM v_index_object_stats
             WHERE server_id = $1 AND collection_time = (SELECT latest_time FROM boundaries)
+            AND ($5::text[] IS NULL OR database_name = ANY($5))
             GROUP BY database_name, schema_name, table_name
         ),
         past_7d AS (
             SELECT database_name, schema_name, table_name, SUM(reserved_mb) AS reserved_mb
             FROM v_index_object_stats
             WHERE server_id = $1 AND collection_time = (SELECT snapshot_7d_time FROM boundaries)
+            AND ($5::text[] IS NULL OR database_name = ANY($5))
             GROUP BY database_name, schema_name, table_name
         ),
         past_30d AS (
             SELECT database_name, schema_name, table_name, SUM(reserved_mb) AS reserved_mb
             FROM v_index_object_stats
             WHERE server_id = $1 AND collection_time = (SELECT snapshot_30d_time FROM boundaries)
+            AND ($5::text[] IS NULL OR database_name = ANY($5))
             GROUP BY database_name, schema_name, table_name
         ),
         oldest AS (
             SELECT database_name, schema_name, table_name, SUM(reserved_mb) AS reserved_mb
             FROM v_index_object_stats
             WHERE server_id = $1 AND collection_time = (SELECT earliest_time FROM boundaries)
+            AND ($5::text[] IS NULL OR database_name = ANY($5))
             GROUP BY database_name, schema_name, table_name
         )
         SELECT
@@ -216,8 +224,16 @@ internal static class DarlingObjectStatsReader
         LIMIT $4
         """;
 
+    public static Task<List<ObjectSizeGrowthRow>> GetObjectSizeGrowthAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime cutoff7dUtc, DateTime cutoff30dUtc, int top, CancellationToken cancellationToken = default) =>
+        GetObjectSizeGrowthAsync(postgres, serverId, cutoff7dUtc, cutoff30dUtc, top, DatabaseFilter.All, cancellationToken);
+
+    /// <summary>#5244: <see cref="GetObjectSizeGrowthAsync(NpgsqlDataSource,int,DateTime,DateTime,int,CancellationToken)"/> over
+    /// a SET of databases (<see cref="DatabaseFilter.All"/> = every database). Rows of the chosen databases only, capped after
+    /// the filter; the snapshot anchors stay the server's.</summary>
     public static async Task<List<ObjectSizeGrowthRow>> GetObjectSizeGrowthAsync(
-        NpgsqlDataSource postgres, int serverId, DateTime cutoff7dUtc, DateTime cutoff30dUtc, int top, CancellationToken cancellationToken = default)
+        NpgsqlDataSource postgres, int serverId, DateTime cutoff7dUtc, DateTime cutoff30dUtc, int top, DatabaseFilter databases,
+        CancellationToken cancellationToken = default)
     {
         var rows = new List<ObjectSizeGrowthRow>();
         await using var command = postgres.CreateCommand(ObjectSizeGrowthSql);
@@ -226,6 +242,7 @@ internal static class DarlingObjectStatsReader
         DarlingMcpReadParameters.AddTimestamp(command, cutoff7dUtc);
         DarlingMcpReadParameters.AddTimestamp(command, cutoff30dUtc);
         DarlingMcpReadParameters.AddInt(command, top);
+        command.Parameters.Add(databases.Parameter());
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -660,6 +677,8 @@ internal static class DarlingObjectStatsReader
     /// of planning against 2.6 ms of execution in the field, over 71 chunks. <see cref="GetLatestSnapshotTimeAsync"/>
     /// resolves the snapshot as its own round trip first, so this statement only ever binds a literal
     /// <c>collection_time</c> the planner can exclude every other chunk against at plan time.</para>
+    /// <para>#5244: $3 is the database filter (a text[], NULL = every database; the shape of <see cref="DatabaseFilter.Clause"/>).
+    /// The snapshot $2 stays the server's newest, so a filtered and an unfiltered call read the same capture.</para>
     /// </summary>
     public const string DatabaseSizeLatestSql = """
         SELECT
@@ -678,6 +697,7 @@ internal static class DarlingObjectStatsReader
         FROM v_database_size_stats
         WHERE server_id = $1
         AND   collection_time = $2
+        AND   ($3::text[] IS NULL OR database_name = ANY($3))
         ORDER BY database_name, file_type_desc, file_name
         """;
 
@@ -701,8 +721,14 @@ internal static class DarlingObjectStatsReader
         WHERE server_id = $1
         """;
 
+    public static Task<List<DatabaseSizeRow>> GetLatestDatabaseSizesAsync(
+        NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken = default) =>
+        GetLatestDatabaseSizesAsync(postgres, serverId, DatabaseFilter.All, cancellationToken);
+
+    /// <summary>#5244: <see cref="GetLatestDatabaseSizesAsync(NpgsqlDataSource,int,CancellationToken)"/> over a SET of databases
+    /// (<see cref="DatabaseFilter.All"/> = every database): the files of the chosen databases at the server's newest snapshot.</summary>
     public static async Task<List<DatabaseSizeRow>> GetLatestDatabaseSizesAsync(
-        NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken = default)
+        NpgsqlDataSource postgres, int serverId, DatabaseFilter databases, CancellationToken cancellationToken = default)
     {
         var rows = new List<DatabaseSizeRow>();
         var snapshotTime = await GetLatestSnapshotTimeAsync(postgres, serverId, cancellationToken);
@@ -715,6 +741,7 @@ internal static class DarlingObjectStatsReader
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddInt(command, serverId);
         DarlingMcpReadParameters.AddTimestamp(command, snapshotTime.Value);
+        command.Parameters.Add(databases.Parameter());
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -750,7 +777,7 @@ internal static class DarlingObjectStatsReader
     /// database-size history at all. <b>Neither probe bounds above by "now"</b> — this is a latest read, and
     /// the collector host's clock is not this reader's clock; a snapshot stamped a few minutes into this
     /// reader's future is still the latest snapshot that exists (#4245 follow-up).</summary>
-    private static async Task<DateTime?> GetLatestSnapshotTimeAsync(NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken)
+    internal static async Task<DateTime?> GetLatestSnapshotTimeAsync(NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken)
     {
         var windowStart = DateTime.SpecifyKind(DateTime.UtcNow.AddDays(-2), DateTimeKind.Unspecified);
 
