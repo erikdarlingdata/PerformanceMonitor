@@ -85,6 +85,20 @@
             </StackPanel>
             <TextBlock TextWrapping="Wrap" Foreground="{DynamicResource ForegroundMutedBrush}" FontSize="11"
                        Text="PostgreSQL targets connect with username/password authentication. The Database box below is optional — blank connects to the maintenance database ('postgres'), which the cluster-wide collectors read from. Encryption maps to sslmode: Optional → prefer; Mandatory/Strict → verify-full, or require when 'Trust server certificate' is checked (typically needed for Aurora)."/>
+
+            <!-- #5452: the per-server AWS role, for an Amazon RDS or Aurora target the service reaches by assuming a
+                 role. Blank = the service's own credentials. Clearing the box on an edit clears the stored role. -->
+            <StackPanel Orientation="Horizontal" Margin="0,8,0,4">
+                <TextBlock Text="AWS role ARN:" Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center" Width="110"/>
+                <TextBox x:Name="AwsRoleBox" Width="360"
+                         ToolTip="Optional. The IAM role the service assumes to reach this target, such as arn:aws:iam::123456789012:role/darling-monitor. Blank uses the service's own AWS credentials."/>
+            </StackPanel>
+            <StackPanel Orientation="Horizontal" Margin="0,0,0,4">
+                <TextBlock Text="External ID:" Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center" Width="110"/>
+                <PasswordBox x:Name="AwsExternalIdBox" Width="360"
+                             ToolTip="Optional. The external ID the role's trust policy asks for. Needs a role ARN. Clear it to remove it."/>
+            </StackPanel>
+            <TextBlock x:Name="AwsRoleNote" TextWrapping="Wrap" Foreground="{DynamicResource ForegroundMutedBrush}" FontSize="11"/>
         </StackPanel>
 
         <!-- Authentication. The credential source is either inline per-server auth or a shared credential
