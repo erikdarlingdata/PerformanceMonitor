@@ -899,6 +899,13 @@ public sealed class DarlingCollectorRunner
        _rdsPlans/_rdsDeadlocks get: its resume watermark lives in the store, not in this field. */
     private RdsCpuIngestor? _rdsCpu;
 
+    /* One verifier for the four RDS readers: a server's endpoint verdict and its fresh login are made once per lifetime,
+       not once per collector, and ForgetRdsVerdicts clears both when the server's definition changes. */
+    private readonly RdsEndpointVerifier _rdsVerifier = new();
+
+    /// <summary>Forgets the endpoint verdicts and the fresh login held for <paramref name="serverId"/>: its definition changed.</summary>
+    internal void ForgetRdsVerdicts(int serverId) => _rdsVerifier.ClearServer(serverId);
+
     /// <summary>
     /// #4708: where an RDS log ingestor keeps its positions across a restart - <c>collect.collector_state</c>, under
     /// the collector <paramref name="collectorName"/> and the keys the self-hosted tail already declares
@@ -916,24 +923,24 @@ public sealed class DarlingCollectorRunner
     internal RdsPlanIngestor PublishedRdsPlanIngestor()
         => LazyInitializer.EnsureInitialized(
             ref _rdsPlans,
-            () => new RdsPlanIngestor(_postgres, logger: _logger, resume: RdsResumeStoreFor(PgPlanCaptureCollector.Instance.Name)));
+            () => new RdsPlanIngestor(_postgres, logger: _logger, resume: RdsResumeStoreFor(PgPlanCaptureCollector.Instance.Name), verifier: _rdsVerifier));
 
     /// <summary>The one deadlock ingestor of this runner, built the first time a target needs it.</summary>
     internal RdsDeadlockIngestor PublishedRdsDeadlockIngestor()
         => LazyInitializer.EnsureInitialized(
             ref _rdsDeadlocks,
-            () => new RdsDeadlockIngestor(_postgres, logger: _logger, resume: RdsResumeStoreFor(PgDeadlocksCollector.Instance.Name)));
+            () => new RdsDeadlockIngestor(_postgres, logger: _logger, resume: RdsResumeStoreFor(PgDeadlocksCollector.Instance.Name), verifier: _rdsVerifier));
 
     /// <summary>The one log-event ingestor of this runner, built the first time a target needs it with the store's
     /// log-hash key <paramref name="logHashKey"/>.</summary>
     internal RdsLogEventIngestor PublishedRdsLogEventIngestor(PgLogHashKey logHashKey)
         => LazyInitializer.EnsureInitialized(
             ref _rdsLogEvents,
-            () => new RdsLogEventIngestor(_postgres, logHashKey, logger: _logger, resume: RdsResumeStoreFor(PgLogEventsCollector.Instance.Name)));
+            () => new RdsLogEventIngestor(_postgres, logHashKey, logger: _logger, resume: RdsResumeStoreFor(PgLogEventsCollector.Instance.Name), verifier: _rdsVerifier));
 
     /// <summary>The one CPU ingestor of this runner, built the first time a target needs it.</summary>
     internal RdsCpuIngestor PublishedRdsCpuIngestor()
-        => LazyInitializer.EnsureInitialized(ref _rdsCpu, () => new RdsCpuIngestor(_postgres, logger: _logger));
+        => LazyInitializer.EnsureInitialized(ref _rdsCpu, () => new RdsCpuIngestor(_postgres, logger: _logger, verifier: _rdsVerifier));
 
     /// <summary>
     /// <paramref name="result"/> with <see cref="PgServerLogTail.ForeignZoneLinesNote"/> merged into its host note
@@ -1077,7 +1084,7 @@ public sealed class DarlingCollectorRunner
         var started = Stopwatch.GetTimestamp();
 
         var outcome = await rdsPlans.IngestAsync(
-            server.ServerId, server.StorageName, host, pgLogUsesCsvlog, cancellationToken);
+            server.ServerId, server.StorageName, host, pgLogUsesCsvlog, server.ConnectionString, cancellationToken);
 
         var elapsedMs = (long)Stopwatch.GetElapsedTime(started).TotalMilliseconds;
 
@@ -1117,7 +1124,7 @@ public sealed class DarlingCollectorRunner
         var started = Stopwatch.GetTimestamp();
 
         var outcome = await rdsDeadlocks.IngestAsync(
-            server.ServerId, server.StorageName, host, logTimezoneIsUtc, pgLogUsesCsvlog, cancellationToken);
+            server.ServerId, server.StorageName, host, logTimezoneIsUtc, pgLogUsesCsvlog, server.ConnectionString, cancellationToken);
 
         var elapsedMs = (long)Stopwatch.GetElapsedTime(started).TotalMilliseconds;
 
@@ -1311,7 +1318,7 @@ public sealed class DarlingCollectorRunner
         var started = Stopwatch.GetTimestamp();
 
         var outcome = await rdsLogEvents.IngestAsync(
-            server.ServerId, server.StorageName, host, logTimezoneIsUtc, pgLogUsesCsvlog, cancellationToken);
+            server.ServerId, server.StorageName, host, logTimezoneIsUtc, pgLogUsesCsvlog, server.ConnectionString, cancellationToken);
 
         var elapsedMs = (long)Stopwatch.GetElapsedTime(started).TotalMilliseconds;
 
@@ -1396,7 +1403,7 @@ public sealed class DarlingCollectorRunner
         var started = Stopwatch.GetTimestamp();
 
         var outcome = await rdsCpu.IngestAsync(
-            server.ServerId, server.StorageName, host, cancellationToken);
+            server.ServerId, server.StorageName, host, server.ConnectionString, cancellationToken);
 
         var elapsedMs = (long)Stopwatch.GetElapsedTime(started).TotalMilliseconds;
 

@@ -55,9 +55,10 @@ public sealed class PagerDutyAutoResolveRungTests
             "pagerduty-auto-resolve",
             PgMigrations.Scripts.Single(s => s.Version == RungVersion).Name);
 
+        /* V167 (the record of old-format saved passwords) landed above this rung, so it is no longer the top. */
         Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
         Assert.Equal(StorageVersion.SchemaVersion, versions.Max());
-        Assert.Equal(RungVersion, StorageVersion.SchemaVersion);
+        Assert.Contains(RungVersion, versions);
 
         Assert.Equal(versions.Distinct().OrderBy(v => v), versions);
     }
@@ -112,16 +113,14 @@ public sealed class PagerDutyAutoResolveRungTests
 
         var viewer = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.cs");
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal})", viewer, StringComparison.Ordinal);
-        Assert.DoesNotContain($"reader.GetBoolean({ProbeOrdinal + 1})", viewer, StringComparison.Ordinal);
-
         Assert.Equal(StorageVersion.SchemaVersion, ViewerDataService.RequiredStoreSchemaVersion);
 
         var method = typeof(ViewerDataService)
             .GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
         var arity = method.GetParameters().Length;
 
-        /* The top rung's sentinel IS the last argument. */
-        Assert.Equal(ProbeOrdinal, arity - 1);
+        /* A newer rung's sentinel (V167's) follows this one. */
+        Assert.True(ProbeOrdinal < arity - 1, "a newer rung's sentinel follows this one");
 
         /* Every sentinel true = a fully-migrated store, which must map to exactly this version. */
         var all = Enumerable.Repeat((object)true, arity).ToArray();
@@ -144,8 +143,8 @@ public sealed class PagerDutyAutoResolveRungTests
         Assert.True(v165 >= 0, "the V165 arm is gone, so this pin is comparing against nothing");
         Assert.True(v166 < v165, "the V166 arm sits below V165's, so a current store maps one rung low");
         Assert.Contains(
-            "return " + StorageVersion.SchemaVersion.ToString(CultureInfo.InvariantCulture) + ";",
-            viewer[v166..], StringComparison.Ordinal);
+            "return " + RungVersion.ToString(CultureInfo.InvariantCulture) + ";",
+            viewer[v166..v165], StringComparison.Ordinal);
     }
 
     /* ---- every notification-row surface names the column ---------------------------------------------- */

@@ -58,6 +58,13 @@ public sealed class PasswordKeyTablesLiveTests
             "DELETE FROM config.legacy_secret_pin_marker",
             "TRUNCATE config.legacy_secret_pin_marker",
         ],
+        ["config.legacy_secret_pin_candidate"] =
+        [
+            "INSERT INTO config.legacy_secret_pin_candidate (server_id, slot, value_sha256) VALUES (2, 'server', '\\x01'::bytea)",
+            "UPDATE config.legacy_secret_pin_candidate SET slot = 'smtp'",
+            "DELETE FROM config.legacy_secret_pin_candidate",
+            "TRUNCATE config.legacy_secret_pin_candidate",
+        ],
     };
 
     private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
@@ -104,7 +111,7 @@ public sealed class PasswordKeyTablesLiveTests
 
             /* The same for the other two roles holding every privilege. */
             await ExecAsync(owner,
-                "GRANT SELECT, INSERT, UPDATE, DELETE, TRUNCATE ON config.password_key, config.password_key_service, config.legacy_secret_pin, config.legacy_secret_pin_marker TO viewer, mcp;", ct);
+                "GRANT SELECT, INSERT, UPDATE, DELETE, TRUNCATE ON config.password_key, config.password_key_service, config.legacy_secret_pin, config.legacy_secret_pin_marker, config.legacy_secret_pin_candidate TO viewer, mcp;", ct);
             await using var viewer = await OpenAsAsync(scratch, "viewer", ProvisioningTestSecrets.ViewerPassword, ct);
             await using var mcp = await OpenAsAsync(scratch, "mcp", ProvisioningTestSecrets.McpPassword, ct);
             foreach (var statement in Writes.Values.SelectMany(v => v))
@@ -164,7 +171,7 @@ public sealed class PasswordKeyTablesLiveTests
                check left, then let it create a temporary table that is shaped like pg_class and names the viewer as the owner of
                every relation. */
             await ExecAsync(owner,
-                "GRANT SELECT, INSERT, UPDATE, DELETE, TRUNCATE ON config.password_key, config.password_key_service, config.legacy_secret_pin, config.legacy_secret_pin_marker TO viewer;", ct);
+                "GRANT SELECT, INSERT, UPDATE, DELETE, TRUNCATE ON config.password_key, config.password_key_service, config.legacy_secret_pin, config.legacy_secret_pin_marker, config.legacy_secret_pin_candidate TO viewer;", ct);
             await using var viewer = await OpenAsAsync(scratch, "viewer", ProvisioningTestSecrets.ViewerPassword, ct);
             await ExecAsync(viewer,
                 "CREATE TEMP TABLE pg_class (oid oid, relowner oid); " +
@@ -276,6 +283,7 @@ GRANT INSERT ON public.temp_name_control TO viewer;", ct);
         "config.password_key_service",
         "config.legacy_secret_pin",
         "config.legacy_secret_pin_marker",
+        "config.legacy_secret_pin_candidate",
     ];
 
     private static ProvisioningTarget TargetFor(bool managed, NpgsqlConnection owner, ScratchPostgres scratch) =>
@@ -323,6 +331,7 @@ GRANT INSERT ON public.temp_name_control TO viewer;", ct);
                 await using var connection = await OpenAsAsync(scratch, role, password, ct);
                 Assert.Equal("42501", await SqlStateOfAsync(connection, "SELECT count(*) FROM config.legacy_secret_pin", ct));
                 Assert.Equal("42501", await SqlStateOfAsync(connection, "SELECT count(*) FROM config.legacy_secret_pin_marker", ct));
+                Assert.Equal("42501", await SqlStateOfAsync(connection, "SELECT count(*) FROM config.legacy_secret_pin_candidate", ct));
 
                 /* The key and service-state tables are readable by admin only (the desktop Viewer reads them as admin). */
                 var expected = role == "admin" ? null : "42501";
@@ -331,13 +340,15 @@ GRANT INSERT ON public.temp_name_control TO viewer;", ct);
             }
 
             /* Row security with no policy: even a role handed SELECT on a pin table explicitly counts no rows. */
-            await ExecAsync(owner, "GRANT SELECT ON config.legacy_secret_pin, config.legacy_secret_pin_marker TO viewer", ct);
+            await ExecAsync(owner, "GRANT SELECT ON config.legacy_secret_pin, config.legacy_secret_pin_marker, config.legacy_secret_pin_candidate TO viewer", ct);
             Assert.True(Convert.ToInt64(await ScalarAsync(owner, "SELECT count(*) FROM config.legacy_secret_pin", ct)) > 0, "the seed put a pin row in");
             Assert.Equal(1L, await ScalarAsync(owner, "SELECT count(*) FROM config.legacy_secret_pin_marker", ct));
+            Assert.Equal(1L, await ScalarAsync(owner, "SELECT count(*) FROM config.legacy_secret_pin_candidate", ct));
             await using (var viewerConnection = await OpenAsAsync(scratch, "viewer", ProvisioningTestSecrets.ViewerPassword, ct))
             {
                 Assert.Equal(0L, await ScalarAsync(viewerConnection, "SELECT count(*) FROM config.legacy_secret_pin", ct));
                 Assert.Equal(0L, await ScalarAsync(viewerConnection, "SELECT count(*) FROM config.legacy_secret_pin_marker", ct));
+                Assert.Equal(0L, await ScalarAsync(viewerConnection, "SELECT count(*) FROM config.legacy_secret_pin_candidate", ct));
             }
 
             /* A blanket grant to the three roles, as a later grant-all would make. Control: before the batch runs again, admin can
@@ -362,8 +373,8 @@ GRANT INSERT ON public.temp_name_control TO viewer;", ct);
             Assert.Contains(notices, n => n.Contains("temp_name_control_fk", StringComparison.Ordinal));
             Assert.Equal(0L, await ScalarAsync(owner, "SELECT count(*) FROM pg_catalog.pg_trigger WHERE tgname LIKE 'temp_name_control_trg_%'", ct));
             Assert.Equal(0L, await ScalarAsync(owner, "SELECT count(*) FROM pg_catalog.pg_constraint WHERE contype = 'f' AND conrelid = 'config.temp_name_control_fk'::regclass", ct));
-            Assert.Equal(8L, await ScalarAsync(owner,
-                "SELECT count(*) FROM pg_catalog.pg_trigger WHERE NOT tgisinternal AND tgrelid = ANY (ARRAY['config.password_key','config.password_key_service','config.legacy_secret_pin','config.legacy_secret_pin_marker']::regclass[])", ct));
+            Assert.Equal(10L, await ScalarAsync(owner,
+                "SELECT count(*) FROM pg_catalog.pg_trigger WHERE NOT tgisinternal AND tgrelid = ANY (ARRAY['config.password_key','config.password_key_service','config.legacy_secret_pin','config.legacy_secret_pin_marker','config.legacy_secret_pin_candidate']::regclass[])", ct));
             await ExecAsync(owner, "DROP TABLE config.temp_name_control_fk", ct);
 
             for (var i = 0; i < KeyTables.Length; i++)
@@ -416,7 +427,7 @@ GRANT INSERT ON public.temp_name_control TO viewer;", ct);
             /* With the setting granted and every write privilege, the triggers still fire: they are enabled always. */
             await ExecAsync(owner, "GRANT SET ON PARAMETER session_replication_role TO viewer;", ct);
             await ExecAsync(owner,
-                "GRANT SELECT, INSERT, UPDATE, DELETE, TRUNCATE ON config.password_key, config.password_key_service, config.legacy_secret_pin, config.legacy_secret_pin_marker TO viewer;", ct);
+                "GRANT SELECT, INSERT, UPDATE, DELETE, TRUNCATE ON config.password_key, config.password_key_service, config.legacy_secret_pin, config.legacy_secret_pin_marker, config.legacy_secret_pin_candidate TO viewer;", ct);
             await ExecAsync(viewer, "SET session_replication_role = replica", ct);
             Assert.Equal("replica", await ScalarAsync(viewer, "SHOW session_replication_role", ct));
             foreach (var statement in Writes.Values.SelectMany(v => v))
@@ -460,6 +471,7 @@ GRANT INSERT ON public.temp_name_control TO viewer;", ct);
         await ExecAsync(owner, "INSERT INTO config.password_key (key_id, public_key, algorithm, state) VALUES ('afb6cecb558a0858', decode(repeat('01', 400), 'hex'), 'RSA3072-OAEP-SHA256/A256GCM', 'current')", ct);
         await ExecAsync(owner, "INSERT INTO config.password_key_service (service_host, key_id, state, updated_at) VALUES ('example-01', 'afb6cecb558a0858', 'ok', now() AT TIME ZONE 'UTC')", ct);
         await ExecAsync(owner, "INSERT INTO config.legacy_secret_pin (server_id, slot, value_sha256, binding_sha256) VALUES (1, 'server', '\\x01'::bytea, '\\x02'::bytea)", ct);
+        await ExecAsync(owner, "INSERT INTO config.legacy_secret_pin_candidate (server_id, slot, value_sha256) VALUES (1, 'server', '\\x01'::bytea)", ct);
     }
 
     private static async Task<NpgsqlConnection> OpenAsAsync(ScratchPostgres scratch, string role, string password, CancellationToken ct)

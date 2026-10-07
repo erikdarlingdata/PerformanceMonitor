@@ -208,9 +208,9 @@ public sealed class PasswordKeyRungTests
         try
         {
             Assert.Equal(StorageVersion.SchemaVersion, Convert.ToInt32(await ScalarAsync(connection, "SELECT MAX(version) FROM darling_schema_version", ct)));
-            Assert.Equal(4L, await ScalarAsync(connection,
-                "SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'config' AND c.relkind = 'r' AND c.relname IN ('password_key','password_key_service','legacy_secret_pin','legacy_secret_pin_marker')", ct));
-            Assert.Equal(8L, await ScalarAsync(connection,
+            Assert.Equal(5L, await ScalarAsync(connection,
+                "SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'config' AND c.relkind = 'r' AND c.relname IN ('password_key','password_key_service','legacy_secret_pin','legacy_secret_pin_marker','legacy_secret_pin_candidate')", ct));
+            Assert.Equal(10L, await ScalarAsync(connection,
                 "SELECT count(*) FROM pg_trigger t JOIN pg_proc p ON p.oid = t.tgfoid WHERE NOT t.tgisinternal AND p.proname = 'password_key_owner_only'", ct));
             Assert.Equal(1L, await ScalarAsync(connection, "SELECT count(*) FROM config.legacy_secret_pin_marker WHERE id = 1 AND state = 'pending'", ct));
             Assert.Equal(1L, await ScalarAsync(connection, "SELECT count(*) FROM config.legacy_secret_pin_marker", ct));
@@ -226,7 +226,7 @@ public sealed class PasswordKeyRungTests
             await PgMigrations.MigrateAsync(connection, ct);
             Assert.Equal(StorageVersion.SchemaVersion, Convert.ToInt32(await ScalarAsync(connection, "SELECT MAX(version) FROM darling_schema_version", ct)));
             Assert.Equal(1L, await ScalarAsync(connection, "SELECT count(*) FROM config.legacy_secret_pin_marker WHERE id = 1 AND state = 'done' AND changed_at = '2026-01-05 10:00:00'", ct));
-            Assert.Equal(8L, await ScalarAsync(connection,
+            Assert.Equal(10L, await ScalarAsync(connection,
                 "SELECT count(*) FROM pg_trigger t JOIN pg_proc p ON p.oid = t.tgfoid WHERE NOT t.tgisinternal AND p.proname = 'password_key_owner_only'", ct));
 
             bodySucceeded = true;

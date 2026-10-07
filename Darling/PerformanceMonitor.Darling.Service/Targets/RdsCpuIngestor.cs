@@ -221,13 +221,16 @@ public sealed class RdsCpuIngestor
     private readonly Func<string, IAmazonRDS> _rdsClientFactory;
     private readonly Func<string, IAmazonPI> _piClientFactory;
     private readonly ILogger? _logger;
+    private readonly RdsEndpointVerifier _verifier;
 
     public RdsCpuIngestor(
         NpgsqlDataSource postgres,
         Func<string, IAmazonRDS>? rdsClientFactory = null,
         Func<string, IAmazonPI>? piClientFactory = null,
-        ILogger? logger = null)
+        ILogger? logger = null,
+        RdsEndpointVerifier? verifier = null)
     {
+        _verifier = verifier ?? new RdsEndpointVerifier();
         _postgres = postgres ?? throw new ArgumentNullException(nameof(postgres));
         _rdsClientFactory = rdsClientFactory ?? (region => new AmazonRDSClient(RegionEndpoint.GetBySystemName(region)));
         _piClientFactory = piClientFactory ?? (region => new AmazonPIClient(RegionEndpoint.GetBySystemName(region)));
@@ -247,6 +250,7 @@ public sealed class RdsCpuIngestor
         int serverId,
         string storageName,
         string host,
+        string? loginConnectionString = null,
         CancellationToken cancellationToken = default)
     {
         var endpoint = RdsEndpoint.TryParse(host);
@@ -279,6 +283,10 @@ public sealed class RdsCpuIngestor
         try
         {
             using var rds = _rdsClientFactory(parsed.Region);
+
+            /* The host must be the endpoint AWS reports for the id parsed from it before any RDS or Performance
+               Insights read is made. */
+            await _verifier.EnsureAsync(rds, parsed, host, serverId, cancellationToken, loginConnectionString);
 
             var instanceId = parsed.Kind == RdsEndpointKind.ClusterWriter
                 ? await ResolveWriterAsync(rds, parsed.Identifier, cancellationToken)
@@ -321,6 +329,12 @@ public sealed class RdsCpuIngestor
                rather than empty when the service omits them, and LINQ over either raises
                ArgumentNullException whose whole message is "Value cannot be null. (Parameter 'source')". */
             samples = BuildSamples(response.MetricList, watermark);
+        }
+        catch (RdsEndpointMismatchException)
+        {
+            /* Propagated UNWRAPPED so DarlingWorker records the PERMISSIONS outcome with this message, not the IAM
+               text the wrapped type carries. */
+            throw;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

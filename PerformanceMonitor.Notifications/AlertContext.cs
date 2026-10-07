@@ -102,8 +102,10 @@ public class AlertContext
     /// groups). Set by both engines' AG fire sites to the replica grain the row itself is keyed on, so
     /// <see cref="WebhookAlertService.DerivePagerDutyDedupKey"/> can scope that pair's dedup key per
     /// replica instead of per server: with auto-resolve on, one replica's reconnect must close only ITS
-    /// incident, not the one a still-disconnected sibling is still holding open. Read only by that helper,
-    /// only for that pair — no renderer, budget or cooldown reads it. Null on every other alert and on any
+    /// incident, not the one a still-disconnected sibling is still holding open. Read only through
+    /// <see cref="WebhookAlertService.PairedReplicaScope"/>, only for that pair: the dedup key and the
+    /// webhook cooldown key (#5469) both take it from there, under the same auto-resolve gate. No renderer,
+    /// budget or email cooldown reads it. Null on every other alert and on any
     /// row written before this member existed. Unpersisted: like <see cref="AttachmentXml"/> this is
     /// live-render data, not row data. The pairing name is the literal "AG:replica", because that is
     /// exactly the shape consumers can reason about — see the helper for why.

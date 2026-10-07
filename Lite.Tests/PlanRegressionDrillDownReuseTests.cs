@@ -55,7 +55,7 @@ public sealed class PlanRegressionDrillDownReuseTests : IClassFixture<SharedDuck
     private const int CollectionsPerInterval = 2;
 
     private static readonly DateTime PeriodEnd =
-        DateTime.SpecifyKind(new DateTime(DateTime.UtcNow.Ticks - (DateTime.UtcNow.Ticks % TimeSpan.TicksPerSecond)), DateTimeKind.Unspecified);
+        DateTime.SpecifyKind(new DateTime(DateTime.UtcNow.Ticks / TimeSpan.TicksPerSecond * TimeSpan.TicksPerSecond), DateTimeKind.Unspecified);
     private static readonly DateTime PeriodStart = PeriodEnd.AddHours(-4);
 
     private readonly DuckDbInitializer _duckDb;
