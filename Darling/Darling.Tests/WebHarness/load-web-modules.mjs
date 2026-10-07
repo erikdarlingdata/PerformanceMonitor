@@ -63,7 +63,8 @@ for (const f of files) {
     console.error("module " + name + " failed to load: " + (e && e.stack ? e.stack.split("\n").slice(0, 3).join(" | ") : e));
     process.exit(1);
   }
-  if (name.startsWith("pages/finops/")) {
+  // database-box.js is the shared Database box the Index Analysis and Locking tabs import (#5231): a helper, not a tab.
+  if (name.startsWith("pages/finops/") && name !== "pages/finops/database-box.js") {
     if (!m.tab || typeof m.tab.build !== "function" || !m.tab.id) {
       console.error(name + " does not export tab = { id, build }");
       process.exit(1);

@@ -94,9 +94,30 @@ public sealed class AdminServersRouteTests
             || k.Contains("password", StringComparison.OrdinalIgnoreCase)
             || k.Contains("encrypted", StringComparison.OrdinalIgnoreCase)
             || k.Contains("secret", StringComparison.OrdinalIgnoreCase));
+        /* server_id is the one key that is not a grid column (#5240): the web Edit action sends it to the by-id read and the
+           edit route. It is a plain id, not a credential, and both routes check the seat before they use it. */
         Assert.Equal(
-            new[] { "added", "auth", "display_name", "engine", "freshness", "last_collected", "monthly_cost", "monthly_cost_usd", "read_only", "server_name", "status", "version" },
+            new[] { "added", "auth", "display_name", "engine", "freshness", "last_collected", "monthly_cost", "monthly_cost_usd", "read_only", "server_id", "server_name", "status", "version" },
             keys.OrderBy(k => k, StringComparer.Ordinal).ToArray());
+    }
+
+    [Fact]
+    public void EachRow_CarriesTheServerIdOfItsOwnConfigRow_NotItsPlaceInTheSort_AndItIsAWholeNumberInTheJson()
+    {
+        /* Ids 9, 3 and 5 sort by display name to Alpha (5), Bravo (9), Charlie (3), so an id taken from the sort position
+           or an index would read 0, 1, 2 here. */
+        var rows = DarlingAdminServersReader.Build(new[]
+        {
+            Config(9, "Bravo", "beta-01"),
+            Config(3, "Charlie", "gamma-01"),
+            Config(5, "Alpha", "alpha-01"),
+        }, Now);
+        Assert.Equal(new[] { 5, 9, 3 }, rows.Select(r => r.server_id).ToArray());
+
+        using var doc = JsonDocument.Parse(DarlingAdminServersReader.Render(new[] { Config(12, "Alpha", "alpha-01") }, Now));
+        var id = doc.RootElement.GetProperty("servers")[0].GetProperty("server_id");
+        Assert.Equal(JsonValueKind.Number, id.ValueKind);
+        Assert.Equal(12, id.GetInt32());
     }
 
     [Theory]

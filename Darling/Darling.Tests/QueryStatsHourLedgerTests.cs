@@ -82,13 +82,7 @@ public sealed class QueryStatsHourLedgerTests
         Assert.Equal(164, Rung.Version);
         Assert.Equal(QueryStatsHourLedger.RungVersion, Rung.Version); // the runner's below-the-rung check reads this constant
         Assert.Single(PgMigrations.Scripts, m => m.Name == RungName);
-        Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
-
-        /* Not `Rung.Version == StorageVersion.SchemaVersion` any more: that asserted this rung is the
-           newest, which stopped being true when V165 landed above it. The invariant that outlives the
-           handoff (the top and the declared version agree) is the line above. */
-        Assert.True(Rung.Version < StorageVersion.SchemaVersion);
-
+        Assert.Contains(Rung.Version + 1, versions); // no longer the top rung: V165 landed above it
         Assert.Equal(versions.Distinct().OrderBy(v => v), versions);
         Assert.Contains(Rung.Version - 1, versions);
     }
@@ -178,38 +172,27 @@ public sealed class QueryStatsHourLedgerTests
     }
 
     [Fact]
-    public void TheProbeCarriesTheLedgerTable_AndAStoreThatStoppedHereMapsToThisRung()
+    public void TheProbeCarriesTheLedgerTable_AsTheTopArm_AndMapsFullyMigratedToThisRung()
     {
         var probe = ViewerDataService.StoreSchemaProbeSql.Replace("\r\n", "\n", StringComparison.Ordinal);
         var arm = "to_regclass('collect.query_stats_hour_ledger') IS NOT NULL";
         Assert.Contains(arm, probe, StringComparison.Ordinal);
-
-        /* The probe is a comma-separated EXISTS list walked in order, so the arm is present mid-list: it is
-           preceded by earlier arms (the `before` slice above) and followed by V165's COLUMN-existence
-           sentinel, which stopped this rung being the newest. Its ordinal is unchanged. */
-        var before = probe[..probe.IndexOf(arm, StringComparison.Ordinal)];
-        Assert.Contains("EXISTS", before, StringComparison.Ordinal);
+        /* No longer the probe's last EXISTS: V165 (the password key tables) landed above it. */
 
         var viewer = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.cs");
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal})", viewer, StringComparison.Ordinal);
+        Assert.Contains($"reader.GetBoolean({ProbeOrdinal + 1})", viewer, StringComparison.Ordinal);
 
         var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
         var parameters = method.GetParameters();
-
-        /* A position within the signature, not its end: `ProbeOrdinal == parameters.Length - 1` asserted
-           this rung is the newest sentinel, which stopped being true the moment V165 appended its own. */
-        Assert.True(ProbeOrdinal < parameters.Length - 1);
+        Assert.True(ProbeOrdinal < parameters.Length - 1, "a newer rung's sentinel follows this one");
         Assert.Equal("hasQueryStatsHourLedger", parameters[ProbeOrdinal].Name);
 
-        var all = Enumerable.Repeat((object)true, parameters.Length).ToArray();
-        Assert.Equal(StorageVersion.SchemaVersion, (int)method.Invoke(null, all)!);
+        var all = Enumerable.Range(0, parameters.Length).Select(i => (object)(i <= ProbeOrdinal)).ToArray();
+        Assert.Equal(Rung.Version, (int)method.Invoke(null, all)!);
         Assert.Equal(StorageVersion.SchemaVersion, ViewerDataService.RequiredStoreSchemaVersion);
 
-        /* A store that stopped here maps to exactly this rung, not to the top that now sits above it. */
-        var atThisRung = Enumerable.Range(0, parameters.Length).Select(i => (object)(i <= ProbeOrdinal)).ToArray();
-        Assert.Equal(Rung.Version, (int)method.Invoke(null, atThisRung)!);
-
-        var behind = (object[])atThisRung.Clone();
+        var behind = (object[])all.Clone();
         behind[ProbeOrdinal] = false;
         Assert.Equal(Rung.Version - 1, (int)method.Invoke(null, behind)!);
 

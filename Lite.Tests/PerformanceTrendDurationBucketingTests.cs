@@ -132,16 +132,19 @@ public sealed class PerformanceTrendDurationBucketingTests : IClassFixture<Share
 
         var points = await _dataService.GetQueryDurationTrendAsync(ServerId, hoursBack: 1, databaseNames: new[] { "AppDb" });
 
-        Assert.Equal(2, points.Count);
-        Assert.Equal(new[] { t1, t2 }, points.Select(p => p.CollectionTime).ToArray());
+        /* #5414 round 2: the collection where only OtherDb ran is a collection the store held, so [AppDb] reads a measured 0 there
+           (it is a point of the chart, not a gap). */
+        Assert.Equal(3, points.Count);
+        Assert.Equal(new[] { t1, excluded, t2 }, points.Select(p => p.CollectionTime).ToArray());
+        Assert.Equal(0.0, points[1].Value!.Value);
 
         Assert.Equal(12.0, points[0].Value!.Value, precision: 6);
         Assert.Equal(0.4, points[0].ExecutionsPerSecond!.Value, precision: 6);
         Assert.Equal(0L, points[0].ExecutionCount);
 
-        Assert.Equal(10.0, points[1].Value!.Value, precision: 6);
-        Assert.Equal(4.0, points[1].ExecutionsPerSecond!.Value, precision: 6);
-        Assert.Equal(4L, points[1].ExecutionCount);
+        Assert.Equal(10.0, points[2].Value!.Value, precision: 6);
+        Assert.Equal(4.0, points[2].ExecutionsPerSecond!.Value, precision: 6);
+        Assert.Equal(4L, points[2].ExecutionCount);
 
         /* #4234: only Value/ExecutionCount/ExecutionsPerSecond are filled for a chart point — the MCP-only
            bucket fields stay null, as they always have for these three reads. */
@@ -164,14 +167,17 @@ public sealed class PerformanceTrendDurationBucketingTests : IClassFixture<Share
 
         var points = await _dataService.GetProcedureDurationTrendAsync(ServerId, hoursBack: 1, databaseNames: new[] { "AppDb" });
 
-        Assert.Equal(2, points.Count);
-        Assert.Equal(new[] { t1, t2 }, points.Select(p => p.CollectionTime).ToArray());
+        /* #5414 round 2: the collection where only OtherDb ran is a collection the store held, so [AppDb] reads a measured 0 there
+           (it is a point of the chart, not a gap). */
+        Assert.Equal(3, points.Count);
+        Assert.Equal(new[] { t1, excluded, t2 }, points.Select(p => p.CollectionTime).ToArray());
+        Assert.Equal(0.0, points[1].Value!.Value);
 
         Assert.Equal(12.0, points[0].Value!.Value, precision: 6);
         Assert.Equal(0.4, points[0].ExecutionsPerSecond!.Value, precision: 6);
 
-        Assert.Equal(10.0, points[1].Value!.Value, precision: 6);
-        Assert.Equal(4.0, points[1].ExecutionsPerSecond!.Value, precision: 6);
+        Assert.Equal(10.0, points[2].Value!.Value, precision: 6);
+        Assert.Equal(4.0, points[2].ExecutionsPerSecond!.Value, precision: 6);
     }
 
     [Fact]
@@ -188,10 +194,13 @@ public sealed class PerformanceTrendDurationBucketingTests : IClassFixture<Share
 
         var points = await _dataService.GetExecutionCountTrendAsync(ServerId, hoursBack: 1, databaseNames: new[] { "AppDb" });
 
-        Assert.Equal(2, points.Count);
-        Assert.Equal(new[] { t1, t2 }, points.Select(p => p.CollectionTime).ToArray());
+        /* #5414 round 2: the collection where only OtherDb ran is a collection the store held, so [AppDb] reads a measured 0 there
+           (it is a point of the chart, not a gap). */
+        Assert.Equal(3, points.Count);
+        Assert.Equal(new[] { t1, excluded, t2 }, points.Select(p => p.CollectionTime).ToArray());
+        Assert.Equal(0.0, points[1].Value!.Value);
         Assert.Equal(0.4, points[0].Value!.Value, precision: 6);
-        Assert.Equal(4.0, points[1].Value!.Value, precision: 6);
+        Assert.Equal(4.0, points[2].Value!.Value, precision: 6);
     }
 
     /* ---- a merged bucket sums work over seconds (never averages the rates), and an unrated collection

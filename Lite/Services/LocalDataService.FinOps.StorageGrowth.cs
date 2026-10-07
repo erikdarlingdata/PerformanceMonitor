@@ -165,8 +165,12 @@ ORDER BY growth_30d_mb DESC NULLS LAST, growth_7d_mb DESC NULLS LAST, l.database
 
     /// <summary>
     /// Gets per-database storage growth trends comparing current size to 7d and 30d ago.
+    /// #5312: <paramref name="databaseNames"/> is the saved database filter (the Storage Growth grid also lists the databases the
+    /// table and index drill starts from); null or empty is every database. The rows are narrowed after the read, by exact
+    /// (ordinal) name, the same rule as the viewer's twin. The statement has no row cap, so the narrowing cannot lose a chosen
+    /// database. A row whose name was NULL reads as "" and never matches a chosen name.
     /// </summary>
-    public async Task<List<StorageGrowthRow>> GetStorageGrowthAsync(int serverId)
+    public async Task<List<StorageGrowthRow>> GetStorageGrowthAsync(int serverId, IReadOnlyList<string>? databaseNames = null)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
@@ -198,6 +202,12 @@ ORDER BY growth_30d_mb DESC NULLS LAST, growth_7d_mb DESC NULLS LAST, l.database
                 HasLogServiceFile = !reader.IsDBNull(9) && reader.GetBoolean(9)
             });
         }
+        if (databaseNames is { Count: > 0 })
+        {
+            var chosen = new HashSet<string>(databaseNames, StringComparer.Ordinal);
+            items = items.Where(r => chosen.Contains(r.DatabaseName)).ToList();
+        }
+
         return items;
     }
 }

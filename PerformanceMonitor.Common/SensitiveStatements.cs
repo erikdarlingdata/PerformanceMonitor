@@ -6,6 +6,9 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+using System;
+using System.Net;
+
 namespace PerformanceMonitor.Common;
 
 /// <summary>
@@ -19,7 +22,7 @@ namespace PerformanceMonitor.Common;
 /// evaluation, XML and JSON handling) live in their own files and declare only their own members.</para>
 ///
 /// <para><b>Append-only.</b> The four first alternatives (A1-A4, the PostgreSQL forms) are byte-identical to
-/// the pattern before the T-SQL forms were added, and the T-SQL alternatives (T1-T9) follow them. Every
+/// the pattern before the T-SQL forms were added, and the T-SQL alternatives (T1-T10) follow them. Every
 /// statement the earlier pattern named is therefore still named.</para>
 /// </summary>
 public static partial class SensitiveStatements
@@ -42,7 +45,10 @@ public static partial class SensitiveStatements
     /// parameter. T5: system procedures that take a secret positionally. T6: built-ins that take a pass phrase
     /// or a key password. T7: <c>OPENDATASOURCE</c>. T8: <c>OPENROWSET</c>'s provider form (not
     /// <c>OPENROWSET(BULK ...)</c>). T9: a bracketed or double-quoted name ending in password, passwd, pwd or
-    /// secret assigned a literal.</para>
+    /// secret assigned a literal. T10: a typed declaration of such a name (T3's name set, <c>key_source</c>
+    /// included), so the type sits between the name and the literal (<c>DECLARE @x nvarchar(20) = N'...'</c>,
+    /// <c>x text := '...'</c>): the name, an optional <c>AS</c> or <c>CONSTANT</c>, one type name (plain, dotted
+    /// or bracketed) with an optional length of up to 20 characters in parentheses, then <c>=</c>, <c>:=</c> or <c>DEFAULT</c> and a literal.</para>
     ///
     /// <para><b>No backslash, on purpose.</b> <c>[[:&lt;:]]</c>, <c>[[:&gt;:]]</c>, <c>[[:space:]]</c>,
     /// <c>[*]</c> and <c>[$]</c> spell what a first version wrote with backslash escapes. A normalized
@@ -67,10 +73,111 @@ public static partial class SensitiveStatements
         + "|[[:<:]]opendatasource[[:>:]]"                                                                      // T7
         + "|[[:<:]]openrowset" + TokenGap + "*[(]" + TokenGap + "*n?'"                                         // T8
         + "|[[:<:]][a-z0-9_]*(password|passwd|pwd|secret)(]|\")" + TokenGap + "*=" + TokenGap
-            + "*(n?'|e'|u&'|0x)";                                                                             // T9
+            + "*(n?'|e'|u&'|0x)"                                                                              // T9
+        + "|[[:<:]]([a-z0-9_]*(password|passwd|pwd|secret)|key_source)" + TokenGap + "+((as|constant)" + TokenGap + "+)?"
+            + "[[]?[a-z_][a-z0-9_.]*]?([[:space:]]*[(][[:space:]0-9a-z,]{0,20}[)])?" + TokenGap
+            + "*(:?=|default[[:>:]])" + TokenGap + "*(n?'|e'|u&'|0x|[$][^0-9])";                              // T10
+
+    /// <summary>
+    /// How many top-level alternatives at the head of <see cref="Pattern"/> (A1-A4 and T1-T9: thirteen) the .NET
+    /// judge compiles as its first regex. The alternatives after them (T10, and anything appended later) are its
+    /// second regex, and a value is named when either matches (#5320). The split is only about speed: past a size
+    /// the runtime stops optimizing the compiled matcher, and one regex for the whole alternation ran about three
+    /// times slower on a long value than the two halves together. PostgreSQL still reads the one
+    /// <see cref="Pattern"/>. The two parts are cut from that constant when the judge is built, never copied, and
+    /// a test pins that they put back together make exactly <see cref="Pattern"/>. New alternatives are appended
+    /// after T10 (the pattern is append-only), so this number stays 13; if the second part itself grows large
+    /// enough to slow down the same way, cut it again.
+    /// </summary>
+    internal const int JudgeHeadAlternatives = 13;
 
     /// <summary>What a collector or reader stores or returns in place of a statement <see cref="Pattern"/>
     /// names. Fixed, so a reader never has to distinguish "withheld" from "not captured yet" by anything other
     /// than this literal.</summary>
     public const string PlaceholderText = "-- statement text withheld (#4348)";
+
+    /// <summary>What a plan window says, in place of a plan, for a plan the filter withheld whole (the document's own
+    /// value is <see cref="PlaceholderText"/>). The viewers show it as the empty state and refuse to save the plan with
+    /// it, so "withheld" is never read as "could not be read". One sentence, so the apps and the tests share it.</summary>
+    public const string WithheldPlanSentence = "This plan was withheld by the statement filter (#4348).";
+
+    /// <summary>Whether a plan document is the whole-plan marker (what <see cref="Xml(string?, int)"/> returns for a
+    /// plan it withholds whole) rather than a plan. A real plan is never equal to it.</summary>
+    public static bool IsWithheldPlan(string? planXml) =>
+        planXml is not null && string.Equals(planXml.Trim(), PlaceholderText, StringComparison.Ordinal);
+
+    /// <summary>What <see cref="Json"/> returns when it cannot read a result. Fixed, so a caller can tell a refusal
+    /// from withheld text, and never the input.</summary>
+    public const string JsonRefusal = "Output withheld: the sensitive-statement filter could not read this result.";
+
+    /// <summary>One read-time call may spend this long judging and parsing (the outermost <see cref="Xml"/> or
+    /// <see cref="Json"/> call; every nested value shares it). One value may still overrun by its own match
+    /// timeout, so a call is bounded by about 1.75 s.</summary>
+    internal static readonly TimeSpan ReadBudget = TimeSpan.FromMilliseconds(1500);
+
+    /// <summary>
+    /// Judges every value of a plan, report or event XML document (see <see cref="XmlCore"/>) and returns the SAME
+    /// instance when nothing is named. Never throws. A document the read cannot finish inside its budget comes back
+    /// as <see cref="PlaceholderText"/>.
+    /// </summary>
+    /// <param name="xml">The document or fragment.</param>
+    /// <param name="maxOutputChars">The caller will cut the result at this length; work stops once nothing before
+    /// the cut can change.</param>
+    public static string? Xml(string? xml, int maxOutputChars = int.MaxValue) =>
+        string.IsNullOrEmpty(xml) ? xml : Xml(xml, new JudgeBudget(ReadBudget), maxOutputChars);
+
+    /// <summary>
+    /// Judges every string (and key) of a whole tool result (see <see cref="JsonCore"/>) and returns the SAME
+    /// instance when nothing is named. Never throws: a result it cannot read comes back as
+    /// <see cref="JsonRefusal"/>, not as the input.
+    /// </summary>
+    public static string Json(string output) => Json(output, new JudgeBudget(ReadBudget));
+
+    /// <summary><see cref="Xml(string?, int)"/> under a budget the caller owns, so one outermost call can share it
+    /// across every value it judges.</summary>
+    internal static string? Xml(string? xml, JudgeBudget budget, int maxOutputChars = int.MaxValue)
+    {
+        if (string.IsNullOrEmpty(xml)) return xml;
+        try
+        {
+            return XmlCore(
+                xml,
+                value => IsNamedUnder(budget, value),
+                () => budget.Spent,
+                PlaceholderText,
+                budget.AddElapsed,
+                maxOutputChars);
+        }
+#pragma warning disable CA1031 // fail closed
+        catch (Exception)
+#pragma warning restore CA1031
+        {
+            return PlaceholderText;
+        }
+    }
+
+    /// <summary><see cref="Json(string)"/> under a budget the caller owns.</summary>
+    internal static string Json(string output, JudgeBudget budget) =>
+        JsonCore(output, value => TextUnder(budget, value), value => Xml(value, budget), JsonRefusal);
+
+    /// <summary>True when <paramref name="value"/>, or its HTML-decoded form, is named or not judged in time.</summary>
+    private static bool IsNamedUnder(JudgeBudget budget, string value) =>
+        budget.Judge(value) != Verdict.Clean
+        || (value.Contains('&', StringComparison.Ordinal) && budget.Judge(WebUtility.HtmlDecode(value)) != Verdict.Clean);
+
+    /// <summary><see cref="Text(string?)"/> under a budget: a spent budget or a failed match gives the marker.</summary>
+    internal static string? TextUnder(JudgeBudget budget, string? value)
+    {
+        if (string.IsNullOrEmpty(value)) return value;
+        try
+        {
+            return IsNamedUnder(budget, value) ? PlaceholderText : value;
+        }
+#pragma warning disable CA1031 // fail closed
+        catch (Exception)
+#pragma warning restore CA1031
+        {
+            return PlaceholderText;
+        }
+    }
 }

@@ -205,7 +205,7 @@ VALUES
         var bodySucceeded = false;
         try
         {
-            var rows = await viewer.GetPvsStatsLatestAsync(TestServerId, TestContext.Current.CancellationToken);
+            var rows = await viewer.GetPvsStatsLatestAsync(TestServerId, cancellationToken: TestContext.Current.CancellationToken);
 
             var row = Assert.Single(rows);
             Assert.Equal("PvsScratch1951", row.DatabaseName);

@@ -18,6 +18,7 @@ using Microsoft.Extensions.Logging;
 using ModelContextProtocol.Server;
 using Npgsql;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Storage;
 
 #pragma warning disable CA1707 // MCP tools use snake_case naming convention
 
@@ -143,8 +144,20 @@ public sealed class DarlingMcpSessionTools
     /// so the two surfaces differ only in preview length; null means no truncation at all, not "unbounded
     /// preview length" — the ternary below never truncates on a null budget.
     /// </summary>
-    internal static async Task<string> GetActiveQueries(
+    internal static Task<string> GetActiveQueries(
         NpgsqlDataSource postgres, string? server_name, int hours_back, string? database_name, bool blocking_only, string? waitType,
+        int limit, int? queryTextPreviewLength, string? as_of, ILogger? logger = null, CancellationToken cancellationToken = default) =>
+        GetActiveQueries(postgres, server_name, hours_back, DatabaseFilter.One(database_name), blocking_only, waitType,
+            limit, queryTextPreviewLength, as_of, logger, cancellationToken);
+
+    /// <summary>
+    /// The same read over a SET of databases (#5245). The MCP tool and the web mirror pass <see cref="DatabaseFilter.One"/> of
+    /// their one <c>database_name</c> until a later lane wires the list. <b>The name is no longer trimmed (#5245):</b> a blank
+    /// name is <see cref="DatabaseFilter.All"/>, and every other name is compared exactly as given, so ' SalesDb' no longer
+    /// finds <c>SalesDb</c>. The wait type is still trimmed (#5235).
+    /// </summary>
+    internal static async Task<string> GetActiveQueries(
+        NpgsqlDataSource postgres, string? server_name, int hours_back, DatabaseFilter databases, bool blocking_only, string? waitType,
         int limit, int? queryTextPreviewLength, string? as_of, ILogger? logger = null, CancellationToken cancellationToken = default)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
@@ -158,7 +171,9 @@ public sealed class DarlingMcpSessionTools
         try
         {
             var now = windowEnd;
-            var filter = string.IsNullOrWhiteSpace(database_name) ? null : database_name.Trim();
+            /* #5245: the databases are a SET (DatabaseFilter), and a name is compared as given; it used to be trimmed here.
+               The one-name echo and text below stay as they were, and two or more names say "the chosen databases". */
+            var filter = databases.Describe();
             /* #5235: the wait filter is trimmed the same way, so a blank is none and the echo below names the value that was applied. */
             var waitFilter = string.IsNullOrWhiteSpace(waitType) ? null : waitType.Trim();
 
@@ -167,7 +182,7 @@ public sealed class DarlingMcpSessionTools
                the page. total_snapshots is the SQL's COUNT(*) OVER () of that same population — the number
                used to be rows.Count of an unfiltered window read, a different population from the rows. */
             var page = await DarlingSessionReader.GetActiveQueriesAsync(
-                postgres, resolved.ServerId, now.AddHours(-hours_back), now, limit + 1, filter, blocking_only, waitFilter, cancellationToken);
+                postgres, resolved.ServerId, now.AddHours(-hours_back), now, limit + 1, databases, blocking_only, waitFilter, cancellationToken);
             var rows = page.Rows;
 
             /* #4966: where the store's coverage of the window starts, in the three keys every window-floor tool writes. An answer
@@ -181,12 +196,12 @@ public sealed class DarlingMcpSessionTools
             {
                 /* A filtered miss is not a collection miss: with the filters in the query, an empty page under
                    database_name, blocking_only or wait_type means the window held no snapshot matching them. */
-                if (filter != null || blocking_only || waitFilter != null)
+                if (!databases.IsAll || blocking_only || waitFilter != null)
                 {
                     return McpHelpers.Status(
                         "empty",
                         $"No active query snapshots on {resolved.ServerName} in the last {hours_back} hour(s) matched "
-                        + DescribeActiveQueryFilters(filter, blocking_only, waitFilter)
+                        + DescribeActiveQueryFilters(databases, blocking_only, waitFilter)
                         + ". The filters were applied in SQL over the whole window, so unfiltered snapshots may well exist — drop them to see what the window holds.",
                         notice.AsHints());
                 }
@@ -237,7 +252,7 @@ public sealed class DarlingMcpSessionTools
                 login_name = r.LoginName,
                 host_name = r.HostName,
                 program_name = r.ProgramName,
-                query_text = queryTextPreviewLength.HasValue ? McpHelpers.Truncate(r.QueryText, queryTextPreviewLength.Value) : r.QueryText,
+                query_text = queryTextPreviewLength.HasValue ? McpHelpers.TruncateStatement(r.QueryText, queryTextPreviewLength.Value) : r.QueryText,
                 query_text_truncated = queryTextPreviewLength.HasValue && (r.QueryText?.Length ?? 0) > queryTextPreviewLength.Value
             }).ToList();
 
@@ -318,14 +333,24 @@ public sealed class DarlingMcpSessionTools
 
     /// <summary>
     /// Names the active filters for the filtered-miss sentence, in the caller's own vocabulary, joined with " with ":
-    /// database_name, then blocking_only, then wait_type (#5235). The database_name and blocking_only wording is
+    /// database_name, then blocking_only, then wait_type (#5235). One database keeps the sentence it always had
+    /// (database_name 'X'); two or more say "the chosen databases" (#5245). The database_name and blocking_only wording is
     /// byte-identical to what it was before the wait filter existed, and Lite's twin says the same.
     /// </summary>
-    private static string DescribeActiveQueryFilters(string? databaseName, bool blockingOnly, string? waitType)
+    internal static string DescribeActiveQueryFilters(DatabaseFilter databases, bool blockingOnly, string? waitType = null)
     {
         var parts = new List<string>(3);
-        if (databaseName != null)
-            parts.Add($"database_name '{databaseName}'");
+        switch (databases.Names.Count)
+        {
+            case 0:
+                break;
+            case 1:
+                parts.Add($"database_name '{databases.Names[0]}'");
+                break;
+            default:
+                parts.Add(DatabaseFilter.ManyDatabasesDescription);
+                break;
+        }
         if (blockingOnly)
             parts.Add("blocking_only");
         if (waitType != null)
@@ -334,14 +359,28 @@ public sealed class DarlingMcpSessionTools
     }
 
     [McpServerTool(Name = "get_waiting_tasks"), Description("Gets recently captured waiting tasks — queries that were actively waiting on a resource at collection time — NEWEST CAPTURE FIRST, longest wait first within a capture. Shows session ID, wait type, duration, blocking session, and database. Complements get_wait_stats by showing individual waiting queries rather than aggregated stats. <<GUIDE>> THE PAGE IS BOUNDED BY limit, NOT BY hours_back: tasks_returned is how many rows you got, truncated says the window held more than limit, and oldest_returned_collection_time / newest_returned_collection_time bound the page — under newest-first ordering the oldest stamp IS how far back this read reached, and one busy capture can fill the whole page by itself. Raise limit or narrow hours_back when truncated is true. When the store did not cover the whole window, effective_start, window_truncated and truncation_note say where its data starts.")]
-    public static async Task<string> GetWaitingTasks(
+    public static Task<string> GetWaitingTasks(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history. Default 1.")] int hours_back = 1,
         [Description("Maximum rows to return, newest capture first. Default 30. This is what bounds the page — read truncated to know whether the window held more.")] int limit = 30,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        [Description("Limit to one database. Omit for all databases.")] string? database_name = null,
         ILogger? logger = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) =>
+        GetWaitingTasks(postgres, server_name, hours_back, limit, DatabaseFilter.One(database_name), as_of, logger, cancellationToken);
+
+    /// <summary>
+    /// #5244: <see cref="GetWaitingTasks(NpgsqlDataSource,string,int,int,string,ILogger,CancellationToken)"/> over a SET of
+    /// databases. Snapshot rows: the list limits which rows are the population and the cap applies after it, so the page is the newest
+    /// <paramref name="limit"/> of the chosen databases. Every one-name consumer on the empty path is list-aware: a filtered miss still
+    /// asks whether the collector ever ran (so "never collected" stays <c>unavailable</c>, never an <c>empty</c> about databases nobody
+    /// looked at) and otherwise says the CHOSEN databases had none, not that nothing was captured; the echoed <c>database_name</c> is the
+    /// name for one database and "the chosen databases" for two or more.
+    /// </summary>
+    internal static async Task<string> GetWaitingTasks(
+        NpgsqlDataSource postgres, string? server_name, int hours_back, int limit, DatabaseFilter databases, string? as_of,
+        ILogger? logger = null, CancellationToken cancellationToken = default)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
@@ -357,13 +396,23 @@ public sealed class DarlingMcpSessionTools
             /* #3541 A3: the caller's limit + 1 as the fetch, the extra row as the observed truncation
                signal. The reader's LIMIT 500 was invisible, and the envelope stated no bound at all. */
             var rows = await DarlingSessionReader.GetWaitingTasksAsync(
-                postgres, resolved.ServerId, now.AddHours(-hours_back), now, limit + 1, cancellationToken);
+                postgres, resolved.ServerId, now.AddHours(-hours_back), now, limit + 1, databases, cancellationToken);
 
             /* #4966: the window floor, as get_active_queries writes it (see there). */
             var windowStart = now.AddHours(-hours_back);
             var notice = await DarlingMcpWindowNotice.ReadAsync(
                 () => DarlingMcpWindowNotice.Probe(postgres, "waiting_tasks", resolved.ServerName, windowStart, now, cancellationToken),
                 windowStart, now, "waiting_tasks", emptyAnswer: rows.Count == 0, logger: logger, cancellationToken: cancellationToken);
+            /* #5244: a filtered miss is not a collection miss, but it is not a verdict on databases nobody read either: the collector
+               question is asked first (never collected stays unavailable), and only then does the answer say the CHOSEN databases had
+               none. The unfiltered sentence below is the one it always was. */
+            if (rows.Count == 0 && !databases.IsAll)
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "waiting_tasks", cancellationToken)
+                    ?? McpHelpers.Status(
+                        "empty",
+                        $"No waiting tasks captured in the specified time range{DarlingMcpBlockingTools.ForChosenDatabases(databases)}. "
+                        + "The filter was applied in SQL over the whole window, so waiting tasks of other databases may well exist; drop it to see what the window holds.",
+                        notice.AsHints());
             if (rows.Count == 0)
                 return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "waiting_tasks", cancellationToken)
                     ?? McpHelpers.Status("empty", "No waiting tasks captured in the specified time range.", notice.AsHints());
@@ -392,6 +441,9 @@ public sealed class DarlingMcpSessionTools
                 effective_start = notice.EffectiveStart,
                 window_truncated = notice.WindowTruncated,
                 truncation_note = notice.TruncationNote,
+                /* #5244: the name for one database, "the chosen databases" for two or more, null for all. After the three notice
+                   keys, which stay right behind hours_back. */
+                database_name = databases.Describe(),
                 tasks_returned = page.Count,
                 truncated,
                 /* #4966: where the page's rows stop describes the window the page covers, so it prints like

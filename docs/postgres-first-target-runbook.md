@@ -158,18 +158,20 @@ exposure is acceptable for this role. The collector reads nothing from the view 
 error text; `get_pg_server_config` and `get_pg_logging_audit` say so in the caveat they attach when the
 grants are missing on a Windows target.
 
-### IAM, for the three collectors that read the server log (plan capture, deadlocks, log events)
+### IAM, for the collectors that call AWS (server log, CPU and host memory)
 
 This is a **different axis from the grant above** — it authorizes the **monitoring host's AWS identity**,
 not the PostgreSQL login. On Aurora/RDS there is no local log directory a SQL session can read with
 `pg_read_file()`; plan capture, deadlock detection and the log-event pipeline instead pull the log tail
-through the RDS control plane. Attach this to the instance role/profile the Darling service actually runs as:
+through the RDS control plane. The CPU and host-memory collector also calls AWS, to read Performance Insights.
+Attach this to the instance role/profile the Darling service actually runs as:
 
 ```json
 {
   "Effect": "Allow",
   "Action": [
     "rds:DescribeDBClusters",
+    "rds:DescribeDBInstances",
     "rds:DescribeDBLogFiles",
     "rds:DownloadDBLogFilePortion"
   ],
@@ -180,10 +182,39 @@ through the RDS control plane. Attach this to the instance role/profile the Darl
 }
 ```
 
-`DescribeDBClusters` resolves an Aurora cluster to its current writer instance; the other two list and read
-the log file itself. Self-managed PostgreSQL doesn't need this at all — it reads `pg_read_file()` directly,
+Add a second statement for Performance Insights:
+
+```json
+{
+  "Effect": "Allow",
+  "Action": "pi:GetResourceMetrics",
+  "Resource": "arn:aws:pi:<region>:<account-id>:metrics/rds/*"
+}
+```
+
+`DescribeDBClusters` resolves an Aurora cluster to its current writer instance; the log actions list and
+read the log file itself. `DescribeDBInstances` looks up the instance's `DbiResourceId`, the identifier that
+Performance Insights uses. `pi:GetResourceMetrics` reads the CPU and host-memory series from Performance
+Insights. Self-managed PostgreSQL doesn't need this at all — it reads `pg_read_file()` directly,
 which is what the log-reader grants above are for. Skipping this on Aurora/RDS is not silent: both
 collectors log the missing action by name (see step 10).
+
+#### The cluster is in a different AWS account
+
+The service asks AWS for the cluster in the account that its credentials belong to. If the cluster is in
+another account, the host's own role cannot see it, and the calls fail with `is not authorized to perform`.
+Use a role in the cluster's account instead:
+
+1. In `<cluster-account>`, create a role that carries the policies above and trusts the host's role in
+   `<host-account>`.
+2. In `<host-account>`, allow the host's role to call `sts:AssumeRole` on the role from step 1.
+3. On the host, define an AWS profile that has `role_arn` and `credential_source = Ec2InstanceMetadata`.
+   Set `AWS_CONFIG_FILE` to the file that holds the profile, and set `AWS_PROFILE` to the profile name.
+   On Windows, set both as machine-level environment variables, because the service does not run as your user.
+4. Restart the service, so that it reads the new environment variables.
+
+`AWS_PROFILE` applies to the whole service process. Every RDS and Performance Insights call that the
+service makes then uses the role in `<cluster-account>`, including calls for targets in `<host-account>`.
 
 ## 2. Register the target
 

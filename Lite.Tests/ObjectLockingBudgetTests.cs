@@ -8,6 +8,7 @@
 
 using System;
 using System.IO;
+using System.Linq;
 using System.Text;
 using System.Text.Json;
 using System.Threading.Tasks;
@@ -108,6 +109,154 @@ public sealed class ObjectLockingBudgetTests : IClassFixture<SharedDuckDbFixture
                 "an explicit limit covering every seeded row should not come back truncated.");
             Assert.Equal(SeededRowCount, root.GetProperty("objects").GetArrayLength());
         }
+    }
+
+    /// <summary>
+    /// #5231: <c>database_name</c> (appended last) reaches the reader's one-database filter. Over the seeded 200
+    /// rows across 10 databases, one name returns exactly that database's 20 rows, omitting it or passing a blank
+    /// returns the whole server, and a name nothing was collected for gets the database named in its empty answer.
+    /// </summary>
+    [Fact]
+    public async Task DatabaseName_LimitsTheAnswerToThatDatabase()
+    {
+        await SeedAsync();
+
+        var json = await McpObjectStatsTools.GetObjectLocking(_dataService, _serverManager, ServerName,
+            limit: SeededRowCount, database_name: "TenantDb03");
+        Assert.False(McpHelpers.IsErrorEnvelope(json), $"tool returned an error: {json}");
+        using (var doc = JsonDocument.Parse(json))
+        {
+            var objects = doc.RootElement.GetProperty("objects");
+            Assert.Equal(SeededRowCount / DatabaseCount, objects.GetArrayLength());
+            foreach (var o in objects.EnumerateArray())
+                Assert.Equal("TenantDb03", o.GetProperty("database_name").GetString());
+            Assert.False(doc.RootElement.GetProperty("truncated").GetBoolean());
+        }
+
+        foreach (var unfiltered in new string?[] { null, "", "   " })
+        {
+            var all = await McpObjectStatsTools.GetObjectLocking(_dataService, _serverManager, ServerName,
+                limit: SeededRowCount, database_name: unfiltered);
+            using var allDoc = JsonDocument.Parse(all);
+            Assert.Equal(SeededRowCount, allDoc.RootElement.GetProperty("objects").GetArrayLength());
+        }
+
+        var none = await McpObjectStatsTools.GetObjectLocking(_dataService, _serverManager, ServerName,
+            database_name: "NoSuchDb");
+        Assert.False(McpHelpers.IsErrorEnvelope(none), $"tool returned an error: {none}");
+        Assert.Contains("NoSuchDb", none);
+        /* #5372 M2: the server HAS contention elsewhere, so this is `empty` (looked, found nothing in that database), not
+           `unavailable`, exactly as Darling's twin answers. */
+        using var noneDoc = JsonDocument.Parse(none);
+        Assert.Equal("empty", noneDoc.RootElement.GetProperty("status").GetString());
+    }
+
+    /// <summary>
+    /// #5372 M2: a server with no contention at all is still <c>unavailable</c> (or <c>not_collected</c>) for a filtered call,
+    /// so the status word keeps telling "nothing on this server" from "nothing in this database".
+    /// </summary>
+    [Fact]
+    public async Task DatabaseName_OnAServerWithNoContentionAtAll_IsNotEmpty()
+    {
+        var json = await McpObjectStatsTools.GetObjectLocking(_dataService, _serverManager, ServerName, database_name: "TenantDb03");
+        using var doc = JsonDocument.Parse(json);
+        Assert.NotEqual("empty", doc.RootElement.GetProperty("status").GetString());
+    }
+
+    /// <summary>
+    /// #5372 (r2 Low): a latest snapshot that holds an index with no contention anywhere is a true negative, so the word is
+    /// <c>empty</c> (the collector looked and found nothing), with or without a database chosen, in the sentence shape
+    /// Darling's twin uses. A server with no snapshot at all stays <c>unavailable</c> (the test above).
+    /// </summary>
+    [Fact]
+    public async Task ASnapshotWithNoContendedIndex_IsEmpty_NotUnavailable()
+    {
+        await SeedQuietAsync();
+
+        using var all = JsonDocument.Parse(await McpObjectStatsTools.GetObjectLocking(_dataService, _serverManager, ServerName));
+        Assert.Equal("empty", all.RootElement.GetProperty("status").GetString());
+        Assert.Equal($"No lock/latch contention on {ServerName} at the latest snapshot.", all.RootElement.GetProperty("message").GetString());
+
+        using var one = JsonDocument.Parse(await McpObjectStatsTools.GetObjectLocking(_dataService, _serverManager, ServerName, database_name: "QuietDb"));
+        Assert.Equal("empty", one.RootElement.GetProperty("status").GetString());
+        Assert.Equal($"No lock/latch contention in database 'QuietDb' or in any other database on {ServerName} at the latest snapshot.",
+            one.RootElement.GetProperty("message").GetString());
+    }
+
+    /// <summary>#5372 M2: the TRUNCATED and Complete sentences name the chosen database, as Darling's twin does.</summary>
+    [Fact]
+    public async Task DatabaseName_IsNamedInTheTruncatedAndCompleteSentences()
+    {
+        await SeedAsync();
+
+        using var capped = JsonDocument.Parse(await McpObjectStatsTools.GetObjectLocking(_dataService, _serverManager, ServerName,
+            limit: 5, database_name: "TenantDb03"));
+        Assert.True(capped.RootElement.GetProperty("truncated").GetBoolean());
+        Assert.Contains("lock/latch contention in database 'TenantDb03' at the latest", capped.RootElement.GetProperty("note").GetString());
+
+        using var whole = JsonDocument.Parse(await McpObjectStatsTools.GetObjectLocking(_dataService, _serverManager, ServerName,
+            limit: SeededRowCount, database_name: "TenantDb03"));
+        Assert.Equal("Complete: every index with lock/latch contention in database 'TenantDb03' at the latest snapshot is included.",
+            whole.RootElement.GetProperty("note").GetString());
+    }
+
+    /// <summary>
+    /// #5372 L1: rows that tie on the four summed waits (every row listed only for a lock promotion sums to 0) come back
+    /// in a fixed order, promotions first and then the four-part name, so two runs at the cap return the same rows.
+    /// Seeded in REVERSE name order so an unordered tie would hand back the wrong end.
+    /// </summary>
+    [Fact]
+    public async Task TiedRows_AtTheCap_ComeBackInAFixedOrder()
+    {
+        await SeedTiedAsync();
+
+        var first = await _dataService.GetIndexLockingAsync(_serverId, 3);
+        var second = await _dataService.GetIndexLockingAsync(_serverId, 3);
+        Assert.Equal(["Tied00", "Tied01", "Tied02"], first.Select(r => r.TableName));
+        Assert.Equal(first.Select(r => r.TableName), second.Select(r => r.TableName));
+    }
+
+    private async Task SeedQuietAsync()
+    {
+        var capture = DateTime.UtcNow;
+        var seedConn = await SeedConnectionAsync();
+        using var batch = new SeedBatch(_duckDb, seedConn);
+        using var readLock = _duckDb.AcquireReadLock();
+        using var cmd = seedConn.CreateCommand();
+        cmd.CommandText = @"INSERT INTO index_object_stats
+            (collection_id, collection_time, server_id, server_name, sqlserver_start_time, database_name, database_id,
+             schema_name, object_id, table_name, index_id, index_name, index_type_desc, reserved_mb, used_mb, total_rows,
+             row_lock_wait_count, row_lock_wait_in_ms, page_lock_wait_count, page_lock_wait_in_ms,
+             index_lock_promotion_count, page_latch_wait_in_ms, page_io_latch_wait_in_ms)
+            VALUES ($1,$2,$3,$4,$5,'QuietDb',7,'dbo',6000,'Quiet',1,'PK_Quiet','CLUSTERED',1,1,100,0,0,0,0,0,0,0)";
+        void P(object v) => cmd.Parameters.Add(new DuckDBParameter { Value = v });
+        P(_nextId--); P(capture); P(_serverId); P(ServerName); P(capture.AddDays(-10));
+        await cmd.ExecuteNonQueryAsync();
+        batch.Commit();
+    }
+
+    private async Task SeedTiedAsync()
+    {
+        var capture = DateTime.UtcNow;
+        var seedConn = await SeedConnectionAsync();
+        using var batch = new SeedBatch(_duckDb, seedConn);
+        for (var i = 9; i >= 0; i--)
+        {
+            using var readLock = _duckDb.AcquireReadLock();
+            using var cmd = seedConn.CreateCommand();
+            cmd.CommandText = @"INSERT INTO index_object_stats
+                (collection_id, collection_time, server_id, server_name, sqlserver_start_time, database_name, database_id,
+                 schema_name, object_id, table_name, index_id, index_name, index_type_desc, reserved_mb, used_mb, total_rows,
+                 row_lock_wait_count, row_lock_wait_in_ms, page_lock_wait_count, page_lock_wait_in_ms,
+                 index_lock_promotion_count, page_latch_wait_in_ms, page_io_latch_wait_in_ms)
+                VALUES ($1,$2,$3,$4,$5,'TieDb',7,'dbo',$6,$7,1,$8,'CLUSTERED',1,1,100,0,0,0,0,$9,0,0)";
+            void P(object v) => cmd.Parameters.Add(new DuckDBParameter { Value = v });
+            P(_nextId--); P(capture); P(_serverId); P(ServerName); P(capture.AddDays(-10));
+            P(5000 + i); P($"Tied{i:D2}"); P($"PK_Tied{i:D2}"); P(1L);
+            await cmd.ExecuteNonQueryAsync();
+        }
+
+        batch.Commit();
     }
 
     private async Task SeedAsync()

@@ -148,7 +148,7 @@ public sealed class QueryStatsPlanFetchTests
         table.Rows.Add(2, DBNull.Value, DBNull.Value);
 
         await using var reader = table.CreateDataReader();
-        var result = await QueryStatsCollector.ReadPlanFetchAsync(reader, CancellationToken.None);
+        var result = await QueryStatsCollector.ReadPlanFetchAsync(reader, new PerformanceMonitor.Common.SensitiveStatements.Session(), CancellationToken.None);
 
         Assert.Equal(("<ShowPlanXML/>", (long?)14), result[0]);
         Assert.Equal(((string?)null, (long?)900_000), result[1]);

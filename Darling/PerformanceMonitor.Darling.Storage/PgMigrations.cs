@@ -656,7 +656,23 @@ CREATE TABLE IF NOT EXISTS config.store_statement_baseline
     private const string V164Sql = QueryStatsHourLedger.CreateSql;
 
     /// <summary>
-    /// V165 — the PagerDuty auto-resolve opt-in. Adds <c>pagerduty_auto_resolve</c> to
+    /// V165 (#5366) — the tables for the service's published password key: <c>config.password_key</c> (the public key,
+    /// one <c>current</c> row at most), <c>config.password_key_service</c> (what each service host holds and its state),
+    /// <c>config.legacy_secret_pin</c> and the one-row <c>config.legacy_secret_pin_marker</c>, seeded <c>pending</c>. The
+    /// text and the reasoning are on <see cref="PasswordKeyTables"/>, which the rung embeds.
+    ///
+    /// <para><b>Only the store owner writes them,</b> by a trigger created here on each table (a row trigger and a
+    /// TRUNCATE trigger, both enabled always), which refuses a write from any session that is not the owner. The
+    /// provisioning scripts also revoke every privilege on the four tables from PUBLIC, admin, viewer and mcp (so none
+    /// of them can add a trigger or a foreign key) and drop any trigger or foreign key already there. The two pin
+    /// tables have row security on with no policy.</para>
+    ///
+    /// <para><b>No Lite twin.</b> Lite keeps its secrets in its own local store.</para>
+    /// </summary>
+    private const string V165Sql = PasswordKeyTables.CreateSql;
+
+    /// <summary>
+    /// V166 — the PagerDuty auto-resolve opt-in. Adds <c>pagerduty_auto_resolve</c> to
     /// <c>config.config_notification</c>: non-null with a FALSE default, so every existing row keeps the
     /// shipped behaviour of NOT auto-resolving incidents with PagerDuty (the closing edge of an edge-type
     /// pair stays an info-severity trigger; with the toggle on it becomes a <c>resolve</c> — see
@@ -665,11 +681,11 @@ CREATE TABLE IF NOT EXISTS config.store_statement_baseline
     /// unlike the routing key beside it, it stays in the read-only roles' SELECT grants —
     /// <c>DarlingManagedRoles.ViewerRestrictedConfigTables</c> and <c>Darling/tools/provision-roles.sql</c>.
     ///
-    /// <para><b>Numbered 165, the ladder's next free version</b> (the top was 164): the migration ladder is
-    /// applied and stamped in version order, so ANY free number >= 165 would apply on every store — but the
+    /// <para><b>Numbered 166, the ladder's next free version</b> (the top was 165): the migration ladder is
+    /// applied and stamped in version order, so ANY free number >= 166 would apply on every store — but the
     /// convention is dense, consecutive versions, and a gap would trip the ladder-density census.</para>
     /// </summary>
-    private const string V165Sql = @"
+    private const string V166Sql = @"
 ALTER TABLE config.config_notification
     ADD COLUMN IF NOT EXISTS pagerduty_auto_resolve boolean NOT NULL DEFAULT FALSE;";
 
@@ -875,7 +891,8 @@ ALTER TABLE config.config_notification
         new Migration(162, "slow-reads", V162Sql),
         new Migration(163, "store-statement-history", V163Sql),
         new Migration(164, "query-stats-hour-ledger", V164Sql),
-        new Migration(165, "pagerduty-auto-resolve", V165Sql),
+        new Migration(165, "password-key", V165Sql),
+        new Migration(166, "pagerduty-auto-resolve", V166Sql),
     };
 
     /// <summary>

@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
 
@@ -22,7 +23,8 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// <c>long_query_completions</c> table (a post-V14 collector has no <c>v_*</c> passthrough view). Ordered by
 /// duration DESC (NULLS LAST so attentions, whose duration is NULL, follow the ranked completions). The SQL
 /// is a public const so Darling.Tests can pin the dialect + columns without a live Postgres. $1 server_id,
-/// $2/$3 window (naive UTC), $4 row cap.
+/// $2/$3 window (naive UTC), $4 row cap, $5 the chosen databases (#5244: one text[], NULL for every
+/// database).
 /// </summary>
 internal static class DarlingLongQueryReader
 {
@@ -76,6 +78,7 @@ internal static class DarlingLongQueryReader
         WHERE server_id = $1
         AND   collection_time >= $2
         AND   collection_time <= $3
+        AND   ($5::text[] IS NULL OR database_name = ANY($5))
         ORDER BY duration_microseconds DESC NULLS LAST, event_time DESC
         LIMIT $4
         """;
@@ -90,9 +93,12 @@ internal static class DarlingLongQueryReader
     /// both SKUs now share: the population a completions tool must keep is the window's slowest, because a
     /// newest-first cap re-ranked afterwards can omit the slowest run in the window entirely, which is what
     /// Lite's twin did until this change.</para>
+    ///
+    /// <para><paramref name="databases"/> (#5244) narrows the read to the chosen databases BEFORE the cap, so the
+    /// page is the slowest N of those databases. <see cref="DatabaseFilter.All"/> (the default) is every database.</para>
     /// </summary>
     public static async Task<List<LongQueryReadRow>> GetRecentLongQueryCompletionsAsync(
-        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int cap, CancellationToken cancellationToken = default)
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int cap, DatabaseFilter databases = default, CancellationToken cancellationToken = default)
     {
         var rows = new List<LongQueryReadRow>();
 
@@ -101,6 +107,7 @@ internal static class DarlingLongQueryReader
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddWindow(command, serverId, startUtc, endUtc);
         DarlingMcpReadParameters.AddInt(command, cap);
+        command.Parameters.Add(databases.Parameter());
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {

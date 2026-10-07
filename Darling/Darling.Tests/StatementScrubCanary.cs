@@ -38,6 +38,23 @@ internal static class StatementScrubCanary
         "autoparam-secret-ssf",
     };
 
+    /// <summary>The credential in <see cref="UriStatement"/>.</summary>
+    public const string UriSecret = "Q4rTw8Nzk";
+
+    /// <summary>The first characters of <see cref="UriSecret"/>: all a preview cut before the closing at-sign holds.</summary>
+    public const string UriSecretPartial = "Q4r";
+
+    /// <summary>
+    /// A statement that holds a URI's <c>user:secret@</c>, padded in front so a cut at <paramref name="cutLength"/>
+    /// lands after the first three characters of the secret and before the at-sign that names it (#5320). A preview
+    /// cut BEFORE the statement is judged holds <see cref="UriSecretPartial"/>; one cut after the judgement holds none.
+    /// </summary>
+    public static string UriStatement(int cutLength)
+    {
+        const string Head = "EXEC x @u = N'https://svc:";
+        return new string(' ', cutLength - 3 - Head.Length) + Head + UriSecret + "@host.example/path'";
+    }
+
     /// <summary>Text that must come through the filter unchanged.</summary>
     public static readonly string[] KeptNeedles =
     {

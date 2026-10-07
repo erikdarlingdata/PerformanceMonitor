@@ -546,8 +546,13 @@ internal static class FileIdentity
         return new FileId(info.VolumeSerialNumber, ((ulong)info.FileIndexHigh << 32) | info.FileIndexLow);
     }
 
-    /* st_dev is at offset 0 and st_ino at offset 8 in struct stat on 64-bit Linux (x86-64 and arm64) and on macOS with
-       64-bit inodes; st_dev is 8 bytes on Linux and 4 on macOS. A buffer larger than any of those structs is used. */
+    /* Linux asks statx, which has one layout on every architecture and is in every glibc from 2.28; plain stat is
+       exported only from glibc 2.33 on, so a call to it fails with a missing entry point on older systems (#5366).
+       statx follows a symbolic link, as stat does. stx_ino is 8 bytes at offset 32, and stx_dev_major and stx_dev_minor
+       are 4 bytes each at 136 and 140 (the kernel always fills the device). The device is folded into one value as
+       (major << 32) | minor: every FileId comes from this one function, so the encoding only has to be consistent.
+       macOS reads stat (stat$INODE64 on x64): st_dev is at offset 0 (4 bytes) and st_ino at offset 8 (64-bit inodes).
+       A buffer larger than either struct is used. */
     private static FileId? OfUnix(string path)
     {
         var buffer = new byte[512];
@@ -556,11 +561,15 @@ internal static class FileIdentity
             throw new PlatformNotSupportedException("The stat layout is only known for 64-bit processes.");
         }
 
+        var linux = OperatingSystem.IsLinux();
+
         /* DllNotFoundException / EntryPointNotFoundException propagate: the native call being unavailable is a failure
            to look, not absence. */
-        var result = OperatingSystem.IsMacOS() && RuntimeInformation.ProcessArchitecture == Architecture.X64
-            ? StatMacIntel(path, buffer)
-            : Stat(path, buffer);
+        var result = linux
+            ? Statx(AtFdcwd, path, 0, StatxIno, buffer)
+            : OperatingSystem.IsMacOS() && RuntimeInformation.ProcessArchitecture == Architecture.X64
+                ? StatMacIntel(path, buffer)
+                : Stat(path, buffer);
         if (result != 0)
         {
             var errno = Marshal.GetLastPInvokeError();
@@ -572,19 +581,126 @@ internal static class FileIdentity
             };
         }
 
+        if (linux)
+        {
+            if (!StatxFilledInode(buffer))
+            {
+                throw new IOException("The path could not be examined: the file system did not report a file number.");
+            }
+
+            return DecodeStatxFileId(buffer);
+        }
+
         var dev = OperatingSystem.IsMacOS() ? (ulong)BitConverter.ToUInt32(buffer, 0) : BitConverter.ToUInt64(buffer, 0);
         return new FileId(dev, BitConverter.ToUInt64(buffer, 8));
     }
 
+    private const uint StatxIno = 0x100;
+
+    /// <summary>True when a <c>statx</c> buffer's mask says the file number was filled in.</summary>
+    internal static bool StatxFilledInode(byte[] buffer) =>
+        (BitConverter.ToUInt32(buffer, 0) & StatxIno) == StatxIno;
+
+    /// <summary>The device and file number in a <c>statx</c> buffer: <c>stx_ino</c> at 32, <c>stx_dev_major</c> at 136 and
+    /// <c>stx_dev_minor</c> at 140, the device as <c>(major &lt;&lt; 32) | minor</c>.</summary>
+    internal static FileId DecodeStatxFileId(byte[] buffer) =>
+        new(((ulong)BitConverter.ToUInt32(buffer, 136) << 32) | BitConverter.ToUInt32(buffer, 140), BitConverter.ToUInt64(buffer, 32));
+
+    /// <summary>Where the owner and link count sit in the buffer each platform's call fills (#5366).</summary>
+    internal enum UnixStatLayout
+    {
+        /// <summary>Linux, every architecture: <c>struct statx</c>, where <c>stx_nlink</c> is 4 bytes at 16 and
+        /// <c>stx_uid</c> 4 bytes at 20, and <c>stx_mask</c> (4 bytes at 0) says which fields the kernel filled.</summary>
+        Statx,
+
+        /// <summary>macOS with 64-bit inodes: <c>struct stat</c>, where <c>st_nlink</c> is 2 bytes at 6 and
+        /// <c>st_uid</c> 4 bytes at 16.</summary>
+        MacOs,
+    }
+
+    private const int AtFdcwd = -100;
+    private const uint StatxNlink = 0x4;
+    private const uint StatxUid = 0x8;
+
+    /// <summary>The owner and link count in a buffer a platform call filled, read at <paramref name="layout"/>'s offsets.</summary>
+    internal static UnixFileOwner DecodeUnixOwner(byte[] buffer, UnixStatLayout layout) => layout switch
+    {
+        UnixStatLayout.Statx => new UnixFileOwner(BitConverter.ToUInt32(buffer, 20), BitConverter.ToUInt32(buffer, 16)),
+        UnixStatLayout.MacOs => new UnixFileOwner(BitConverter.ToUInt32(buffer, 16), BitConverter.ToUInt16(buffer, 6)),
+        _ => throw new ArgumentOutOfRangeException(nameof(layout)),
+    };
+
+    /// <summary>True when a <c>statx</c> buffer's mask says both the owner and the link count were filled in.</summary>
+    internal static bool StatxFilledOwnerAndLinks(byte[] buffer) =>
+        (BitConverter.ToUInt32(buffer, 0) & (StatxNlink | StatxUid)) == (StatxNlink | StatxUid);
+
+    /// <summary>
+    /// The owner and link count of the file at <paramref name="path"/> (#5366); null only when nothing is there. A link is
+    /// followed, as the file check's own read does. Linux asks <c>statx</c>, which has one layout on every architecture
+    /// and is in every glibc from 2.28 (plain <c>stat</c> is exported only from 2.33); macOS reads <c>stat</c>. Anything
+    /// else (a missing entry point, a failed call, a buffer that lacks the owner or link count, a platform this does not
+    /// know) THROWS with a sentence naming the file: the caller must never take "could not read" for "fine".
+    /// </summary>
+    internal static UnixFileOwner? UnixOwnerOf(string path)
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            return null;
+        }
+
+        var layout = OperatingSystem.IsLinux() ? UnixStatLayout.Statx
+            : OperatingSystem.IsMacOS() ? UnixStatLayout.MacOs
+            : throw new PlatformNotSupportedException($"The owner and link count of '{path}' cannot be read on this operating system.");
+        var buffer = new byte[512];
+        int result;
+        try
+        {
+            result = layout == UnixStatLayout.Statx
+                ? Statx(AtFdcwd, path, 0, StatxNlink | StatxUid, buffer)
+                : RuntimeInformation.ProcessArchitecture == Architecture.X64 ? StatMacIntel(path, buffer) : Stat(path, buffer);
+        }
+        catch (Exception ex) when (ex is DllNotFoundException or EntryPointNotFoundException)
+        {
+            throw new PlatformNotSupportedException($"The owner and link count of '{path}' cannot be read: this system does not offer the call that reports them.", ex);
+        }
+
+        if (result != 0)
+        {
+            var errno = Marshal.GetLastPInvokeError();
+            return errno switch
+            {
+                Enoent or Enotdir => null,
+                Eacces => throw new UnauthorizedAccessException($"Access to '{path}' was denied (errno 13)."),
+                _ => throw new IOException($"The owner and link count of '{path}' could not be read (errno {errno})."),
+            };
+        }
+
+        if (layout == UnixStatLayout.Statx && !StatxFilledOwnerAndLinks(buffer))
+        {
+            throw new IOException($"The owner and link count of '{path}' could not be read: the file system did not report them.");
+        }
+
+        return DecodeUnixOwner(buffer, layout);
+    }
+
+    /// <summary>The user id this process runs as. Only called on a platform that has one.</summary>
+    internal static uint EffectiveUserId() => GetEffectiveUserId();
+
+    [DllImport("libc", EntryPoint = "geteuid")]
+    private static extern uint GetEffectiveUserId();
+
     /* CA2101 wants CharSet.Unicode on a P/Invoke that takes a string, but libc's stat takes a UTF-8 path:
        CharSet.Unicode would marshal UTF-16 and the call would fail on every non-ASCII path. LPUTF8Str is the
-       correct marshaling here, so the rule is suppressed for these two declarations only. */
+       correct marshaling here, so the rule is suppressed for these three declarations only. */
 #pragma warning disable CA2101 // libc takes UTF-8; LPUTF8Str is correct and CharSet.Unicode would be wrong
     [DllImport("libc", EntryPoint = "stat", SetLastError = true)]
     private static extern int Stat([MarshalAs(UnmanagedType.LPUTF8Str)] string path, byte[] buffer);
 
     [DllImport("libc", EntryPoint = "stat$INODE64", SetLastError = true)]
     private static extern int StatMacIntel([MarshalAs(UnmanagedType.LPUTF8Str)] string path, byte[] buffer);
+
+    [DllImport("libc", EntryPoint = "statx", SetLastError = true)]
+    private static extern int Statx(int dirFd, [MarshalAs(UnmanagedType.LPUTF8Str)] string path, int flags, uint mask, byte[] buffer);
 #pragma warning restore CA2101
 
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]

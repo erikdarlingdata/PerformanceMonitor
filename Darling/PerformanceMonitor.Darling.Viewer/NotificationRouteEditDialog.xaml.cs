@@ -27,9 +27,13 @@ public partial class NotificationRouteEditDialog : Window
     /// <summary>The route as edited — the caller persists it.</summary>
     public NotificationRouteRow Route { get; private set; }
 
+    /// <summary>The route as stored, for the sealed values a blank box keeps (#5366).</summary>
+    private readonly NotificationRouteRow? _stored;
+
     public NotificationRouteEditDialog(NotificationRouteRow? existing = null)
     {
         InitializeComponent();
+        _stored = existing;
 
         foreach (var name in AlertFamily.All)
         {
@@ -60,10 +64,14 @@ public partial class NotificationRouteEditDialog : Window
             FamilyCombo.SelectedIndex = FamilyIndex(family);
         }
 
-        TeamsUrlBox.Text = Route.TeamsUrl;
-        SlackUrlBox.Text = Route.SlackUrl;
-        GenericUrlBox.Text = Route.GenericUrl;
-        PagerDutyKeyBox.Text = Route.PagerDutyRoutingKey;
+        TeamsUrlBox.Text = ViewerWebhookSealing.ShownText(Route.TeamsUrl);
+        SlackUrlBox.Text = ViewerWebhookSealing.ShownText(Route.SlackUrl);
+        GenericUrlBox.Text = ViewerWebhookSealing.ShownText(Route.GenericUrl);
+        PagerDutyKeyBox.Text = ViewerWebhookSealing.ShownText(Route.PagerDutyRoutingKey);
+        MarkSaved(TeamsUrlBox, Route.TeamsUrl);
+        MarkSaved(SlackUrlBox, Route.SlackUrl);
+        MarkSaved(GenericUrlBox, Route.GenericUrl);
+        MarkSaved(PagerDutyKeyBox, Route.PagerDutyRoutingKey);
         SmtpRecipientsBox.Text = Route.SmtpRecipients;
         EnabledCheckBox.IsChecked = Route.Enabled;
     }
@@ -100,10 +108,11 @@ public partial class NotificationRouteEditDialog : Window
     private void Save_Click(object sender, RoutedEventArgs e)
     {
         Route.MetricMatch = SelectedFamily() ?? ExactMetricBox.Text.Trim();
-        Route.TeamsUrl = TeamsUrlBox.Text.Trim();
-        Route.SlackUrl = SlackUrlBox.Text.Trim();
-        Route.GenericUrl = GenericUrlBox.Text.Trim();
-        Route.PagerDutyRoutingKey = PagerDutyKeyBox.Text.Trim();
+        /* A blank box keeps the sealed value stored for it; the data service seals anything typed (#5366). */
+        Route.TeamsUrl = ViewerWebhookSealing.CarryKept(TeamsUrlBox.Text, _stored?.TeamsUrl);
+        Route.SlackUrl = ViewerWebhookSealing.CarryKept(SlackUrlBox.Text, _stored?.SlackUrl);
+        Route.GenericUrl = ViewerWebhookSealing.CarryKept(GenericUrlBox.Text, _stored?.GenericUrl);
+        Route.PagerDutyRoutingKey = ViewerWebhookSealing.CarryKept(PagerDutyKeyBox.Text, _stored?.PagerDutyRoutingKey);
         Route.SmtpRecipients = SmtpRecipientsBox.Text.Trim();
         Route.Enabled = EnabledCheckBox.IsChecked == true;
 
@@ -122,6 +131,15 @@ public partial class NotificationRouteEditDialog : Window
         }
 
         DialogResult = true;
+    }
+
+    /// <summary>A box whose value is stored sealed shows nothing, and says so in its tooltip.</summary>
+    private static void MarkSaved(System.Windows.Controls.TextBox box, string? stored)
+    {
+        if (ViewerWebhookSealing.IsSaved(stored))
+        {
+            box.ToolTip = ViewerWebhookSealing.KeepHint;
+        }
     }
 
     private void Cancel_Click(object sender, RoutedEventArgs e) => DialogResult = false;

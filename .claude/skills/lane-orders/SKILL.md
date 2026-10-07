@@ -7,8 +7,9 @@ disable-model-invocation: false
 
 # Lane orders
 
-One lane works one issue, or a few small related ones, in its own worktree. The coordinator reviews each PR, arms
-auto-merge and splices the CHANGELOG. These orders apply alongside the user's token guardrails, which win on
+One lane works one issue, or a few small related ones, in its own worktree. An issue too big for one lane still gets
+ONE branch and ONE PR: its lanes share the issue branch (see "Worktree and branch"). The coordinator reviews each PR,
+arms auto-merge and splices the CHANGELOG. These orders apply alongside the user's token guardrails, which win on
 conflict.
 
 **The coordinator fills these per wave, in every brief:**
@@ -54,6 +55,11 @@ At dispatch:
   In wave B, every lane read an 8-10k-character PR section to see one example.
 - Label each issue the lane takes `in-progress` (`gh issue edit <n> --add-label in-progress`), so the board shows
   it as taken; remove the label when the issue closes or the work stops.
+- Before dispatching several lanes for one issue, create its issue branch
+  (`git -C <repo> push origin origin/dev:refs/heads/fix/<issue>-<slug>`) and name it in every brief, with the lane
+  that writes the PR summary and the CHANGELOG entry. Open a separate PR only for a part that must ship before the
+  rest; an issue that is really several issues is split into issues first. Reviews of an issue PR built in waves: one
+  round per wave on that wave's commits only, plus one final round on the whole PR.
 
 At each report:
 1. Stop the agent.
@@ -123,6 +129,11 @@ census, one of them introduced by that night's own wave).
 
 - `git -C <repo> fetch origin`, then `git -C <repo> worktree add -b fix/<issue>-<slug> <worktrees>/<name> origin/dev`.
   Use one branch per issue.
+- **An issue that several lanes build** shares one issue branch, `fix/<issue>-<slug>`, which the coordinator creates
+  from `origin/dev` and names in each brief. Create your worktree from `origin/<issue branch>` on a branch of your own
+  (`fix/<issue>-<slug>-<part>`). When done: `git fetch origin`, `git merge origin/<issue branch>`, rerun your targeted
+  tests, and `git push origin HEAD:<issue branch>`. If the push is rejected, fetch, merge and push again. Never
+  force-push.
 - Before the final full run, `git merge origin/dev`. Never rebase. Resolve by keeping both sides.
 
 ## PostgreSQL rig
@@ -207,10 +218,16 @@ Never edit an existing migration.
 - Open the PR against `dev` **as a draft** (`gh pr create --draft`). Title: the outcome in plain language, plus
   `(#<issue>)`. The body starts with `Closes #<issue>.`, then `## Why`, `## What changes` and `## Test plan`
   (checkboxes, measured numbers). List anything you did not run (a live test, the full suite) as an unchecked box.
-- Write the PR body in one Write, from the diff and your numbers, and publish it. Do NOT run the plain-English
-  checker and do NOT rewrite the prose, in a PR body or an issue comment (Erik, 2026-09-25). A lane writes its
-  body at its largest context, so every rewrite turn costs the whole context: one lane spent 53 minutes and
-  278k tokens there. Nobody polishes lane prose afterwards either. The body must still be true.
+- On a shared issue branch, open the PR only if `gh pr list --head <issue branch>` shows none. Otherwise add your
+  part to its body under `## <your part>`: read the body right before you edit it, and edit once. Never open a second
+  PR for one issue. The coordinator names one lane, usually the last, to write the PR's top `## Why` and
+  `## What changes` for the whole issue and its one CHANGELOG entry. Lanes that fix review findings push to the PR's
+  own branch.
+- Write the PR body in one Write, from the diff and your numbers. Run
+  `python "C:/Users/edarl/.claude/skills/plain-english/check.py" <body-file>` ONCE, fix the real hits in one pass,
+  and publish (Erik, 2026-10-06; this replaces the 2026-09-25 rule against running it). Don't re-run it to chase a
+  clean score: a lane writes its body at its largest context, and one lane spent 53 minutes and 278k tokens
+  rewriting. The body must be true.
 - **Don't mark it ready, don't merge, and don't enable auto-merge.** The coordinator does all three after
   verifying.
 - A user-visible change gets a CHANGELOG entry in `<CHANGELOG_BUFFER_DIR>/<PR>-reported.txt`, in this form:

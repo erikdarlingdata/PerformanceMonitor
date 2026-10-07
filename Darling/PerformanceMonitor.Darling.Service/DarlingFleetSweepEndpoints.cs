@@ -253,21 +253,19 @@ internal static class DarlingFleetSweepEndpoints
         return FleetSweepPresentation.BuildSweepDetailNode(run, verdicts, ledger);
     }
 
-    /// <summary>The first non-empty value for a query key, or null — the read surface's binding rule.</summary>
-    private static string? Query(HttpContext context, string key)
-    {
-        var value = context.Request.Query[key].ToString();
-        return string.IsNullOrEmpty(value) ? null : value;
-    }
+    /// <summary>The first non-empty value for a query key, or null — the read surface's binding rule, which this
+    /// calls rather than restates (#5245: a repeated key is its first value, not the values joined by a comma).</summary>
+    internal static string? Query(HttpContext context, string key) =>
+        DarlingWebEndpoints.First(context, key);
 
     /// <summary>JSON written verbatim, bypassing any serializer naming policy — the surface's rule.</summary>
     private static IResult JsonResult(JsonNode node) =>
-        Results.Text(node.ToJsonString(), "application/json");
+        DarlingWebStatementSweep.JsonText(node, "/api/sweeps", null, 0); // #4348: swept before it is written
 
     /// <summary>This surface's error body — <c>{"error": sentence}</c>, its own contract since #2506, kept
     /// rather than switched to the read surface's envelope pass-through: <paramref name="message"/> may be the
     /// <c>invalid</c> envelope the shared validators answer since #3739, so the sentence is read out of it
     /// and a web client that reads <c>.error</c> is not handed JSON inside a string.</summary>
     private static IResult SweepError(string message, int statusCode) =>
-        Results.Text(new JsonObject { ["error"] = McpHelpers.ErrorMessageOf(message) }.ToJsonString(), "application/json", statusCode: statusCode);
+        DarlingWebStatementSweep.JsonText(new JsonObject { ["error"] = McpHelpers.ErrorMessageOf(message) }, "/api/sweeps", null, 0, statusCode);
 }

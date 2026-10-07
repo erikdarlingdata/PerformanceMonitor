@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Text.RegularExpressions;
 using PerformanceMonitor.Darling.Service;
+using PerformanceMonitor.Darling.Storage;
 using Xunit;
 
 namespace Darling.Tests;
@@ -98,6 +99,74 @@ public sealed class DarlingManagedRolesTests
         Assert.DoesNotMatch(@"GRANT[^;]*\bUPDATE\b[^;]*ON config\.config_monitored_servers TO [^;]*viewer", byo);
         Assert.Single(Regex.Matches(byo, @"REVOKE UPDATE ON config\.config_monitored_servers FROM [^;]*viewer[^;]*;"));
         Assert.Contains(EditRevoke, byo, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The store's password rules (a trigger on <c>config_monitored_servers</c> and its function) are provisioning, not a
+    /// migration, so a managed store gets them from the batch on every start and a self-managed store from the script: the
+    /// same text in both, created idempotently, and nothing in the migrations that would move the schema version.
+    /// </summary>
+    [Fact]
+    public void TheByoScript_CarriesTheSamePasswordRules_AsTheManagedBatch()
+    {
+        var byo = Regex.Replace(RepoFile.ReadRepoFile("Darling", "tools", "provision-roles.sql"), @"(?m)^\s*--.*$", "");
+        var rules = DarlingManagedRoles.BuildServerPasswordRulesSql("config");
+        var batch = DarlingManagedRoles.BuildProvisioningSql(ProvisioningTestSecrets.Admin, ProvisioningTestSecrets.Viewer, ProvisioningTestSecrets.Mcp);
+
+        Assert.Contains(NormalizeSql(rules), NormalizeSql(byo), StringComparison.Ordinal);
+        Assert.Contains(rules, batch, StringComparison.Ordinal);
+        Assert.Contains("CREATE OR REPLACE FUNCTION config.monitored_server_password_rules()", rules, StringComparison.Ordinal);
+        Assert.Contains("CREATE OR REPLACE TRIGGER trg_monitored_server_password_rules", rules, StringComparison.Ordinal);
+        Assert.Contains("BEFORE INSERT OR UPDATE ON config.config_monitored_servers", rules, StringComparison.Ordinal);
+        Assert.DoesNotContain("monitored_server_password_rules", PgMigrations.Scripts.Aggregate("", (all, script) => all + script.Sql), StringComparison.Ordinal);
+
+        /* The edit function refuses a reference in the same two spellings the service reads. */
+        var function = DarlingManagedRoles.BuildEditMonitoredServerFunctionSql("config");
+        Assert.Contains("left(p_secret, 4) = 'env:' OR left(p_secret, 5) = 'file:'", function, StringComparison.Ordinal);
+        Assert.Contains("'reference_refused'", function, StringComparison.Ordinal);
+
+        /* The rules read the catalog by its schema and keep the temporary schema last; the two definer functions pin it the
+           same way. Each string is in the batch's text and, by the comparison above, in the script's. */
+        Assert.Contains("FROM pg_catalog.pg_class AS c", rules, StringComparison.Ordinal);
+        Assert.Contains("SET search_path = pg_catalog, pg_temp", rules, StringComparison.Ordinal);
+        Assert.Contains("SET search_path = pg_catalog, pg_temp", function, StringComparison.Ordinal);
+        Assert.Contains("SET search_path = pg_catalog, pg_temp", DarlingManagedRoles.BuildCustomAlertResolveFunctionSql("config"), StringComparison.Ordinal);
+        Assert.DoesNotContain("FROM pg_class", rules, StringComparison.Ordinal);
+
+        /* The edit function names its table by schema in both statements, so the pinned path needs nothing from config. */
+        Assert.Contains("FROM config.config_monitored_servers AS s", function, StringComparison.Ordinal);
+        Assert.Contains("UPDATE config.config_monitored_servers AS s", function, StringComparison.Ordinal);
+
+        /* A change to how a row is reached while it holds a remediation login has its own outcome and its own state. */
+        Assert.Contains("'remediation_kept'", function, StringComparison.Ordinal);
+        Assert.Contains("USING ERRCODE = 'PW003'", rules, StringComparison.Ordinal);
+        Assert.Contains("This server has a remediation login stored. Change how it is reached on the service host, in the configuration file or with --add-server.", rules, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The rules' three refusal sentences are literal in the managed batch and in the script, and each is the one in
+    /// <see cref="ServerConnectionRule"/> that the web, MCP and viewer answers use: every message the rules raise is one of
+    /// the three, and each of the three is raised.
+    /// </summary>
+    [Fact]
+    public void TheRulesRefusalSentences_AreTheSharedConstants_InTheManagedBatchAndTheScript()
+    {
+        var expected = new[]
+        {
+            ServerConnectionRule.PasswordNeededOnMoveText,
+            ServerConnectionRule.ReferenceRefusedText,
+            ServerConnectionRule.RemediationKeptText,
+        };
+        var byo = Regex.Replace(RepoFile.ReadRepoFile("Darling", "tools", "provision-roles.sql"), @"(?m)^\s*--.*$", "");
+        var rules = DarlingManagedRoles.BuildServerPasswordRulesSql("config");
+        var pattern = new Regex(@"RAISE EXCEPTION '%', '([^']*)'");
+
+        foreach (var text in new[] { rules, byo })
+        {
+            var raised = pattern.Matches(text).Select(match => match.Groups[1].Value).ToList();
+            Assert.All(raised, sentence => Assert.Contains(sentence, expected));
+            Assert.Equal(expected.OrderBy(s => s, StringComparer.Ordinal), raised.Distinct().OrderBy(s => s, StringComparer.Ordinal));
+        }
     }
 
     [Fact]
@@ -624,9 +693,9 @@ public sealed class DarlingManagedRolesTests
         Assert.Contains("CREATE OR REPLACE FUNCTION config.record_custom_alert_resolution(", sql, StringComparison.Ordinal);
         Assert.Contains("SECURITY DEFINER", sql, StringComparison.Ordinal);
 
-        /* The pinned search_path (config first, then pg_catalog) is what makes injection impossible — no caller
-           path can redirect the unqualified config_alert_log or now(). */
-        Assert.Contains("SET search_path = config, pg_catalog", sql, StringComparison.Ordinal);
+        /* The pinned search_path (pg_catalog, the temporary schema last) and the table named by its
+           schema keep a caller's temporary objects and search path from redirecting the config_alert_log write or now(). */
+        Assert.Contains("SET search_path = pg_catalog, pg_temp", sql, StringComparison.Ordinal);
 
         /* A fresh function is EXECUTE-able by PUBLIC by default, so the REVOKE is mandatory and must precede the
            narrow grant; EXECUTE is the ONLY privilege the least-privilege roles get. */
@@ -638,7 +707,7 @@ public sealed class DarlingManagedRolesTests
 
         /* The body writes ONE config_alert_log row, shape-LOCKED to a no-channel resolution (alert_sent false,
            notification_type 'none', zeroed values, unmuted) — so a grantee can page nothing and forge no fire. */
-        Assert.Contains("INSERT INTO config_alert_log", sql, StringComparison.Ordinal);
+        Assert.Contains("INSERT INTO config.config_alert_log", sql, StringComparison.Ordinal);
         Assert.Contains("false, 'none', NULL, false,", sql, StringComparison.Ordinal);
 
         /* NOT the rejected blanket grant: viewer/mcp never get a table-level write on the history table. The one

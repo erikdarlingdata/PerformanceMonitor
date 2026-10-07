@@ -402,6 +402,10 @@
                                     </TextBlock.Style>
                                 </TextBlock>
                             </Grid>
+                            <!-- #5352: says so when the search above matched no card, instead of leaving a blank
+                                 grid. The sentence is ServerOverviewFilter.NoMatchText, shared with the viewer. -->
+                            <TextBlock x:Name="OverviewNoMatchText" VerticalAlignment="Center" Margin="12,0,0,0"
+                                       Foreground="{DynamicResource ForegroundMutedBrush}" Visibility="Collapsed"/>
                         </StackPanel>
                         <ScrollViewer VerticalScrollBarVisibility="Auto" Margin="8">
                             <ItemsControl x:Name="OverviewItemsControl">

@@ -604,8 +604,20 @@ public sealed class DarlingMcpDataTools
     /// is cpu). An unknown value is refused, which the web answers as a 400, the way it answers a bad
     /// <c>detail</c> or <c>group_by</c>.
     /// </summary>
-    internal static async Task<string> GetTopQueriesRanked(
+    internal static Task<string> GetTopQueriesRanked(
         NpgsqlDataSource postgres, string? server_name, int hours_back, int top, string? database_name, bool parallel_only, int min_dop,
+        string group_by, string? as_of, string detail, string? order_by, CancellationToken cancellationToken) =>
+        GetTopQueriesRanked(
+            postgres, server_name, hours_back, top, DatabaseFilter.One(database_name), parallel_only, min_dop, group_by, as_of, detail, order_by, cancellationToken);
+
+    /// <summary>
+    /// #5245: <see cref="GetTopQueriesRanked(NpgsqlDataSource,string,int,int,string,bool,int,string,string,string,string,CancellationToken)"/>
+    /// over a SET of databases. The MCP tool and the web read pass <see cref="DatabaseFilter.One"/> of their one
+    /// <c>database_name</c> until the parameter becomes a list; the page is the top N of the chosen databases, on the raw
+    /// and the hourly tier alike.
+    /// </summary>
+    internal static async Task<string> GetTopQueriesRanked(
+        NpgsqlDataSource postgres, string? server_name, int hours_back, int top, DatabaseFilter databases, bool parallel_only, int min_dop,
         string group_by, string? as_of, string detail, string? order_by, CancellationToken cancellationToken)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
@@ -656,7 +668,7 @@ public sealed class DarlingMcpDataTools
             var now = windowEnd;
             var requestedStart = now.AddHours(-hours_back);
             var routed = await DarlingDataReader.GetTopQueriesByCpuRoutedAsync(
-                postgres, resolved.ServerId, requestedStart, now, top, database_name, rollUpByHostObject: rollUp, minMaxDop: minMaxDop, ranking: ranking, cancellationToken: cancellationToken);
+                postgres, resolved.ServerId, requestedStart, now, top, databases, rollUpByHostObject: rollUp, minMaxDop: minMaxDop, ranking: ranking, cancellationToken: cancellationToken);
             var rows = routed.Rows;
             var tierUsed = routed.Tier == RetentionTier.Hourly ? "hourly" : "raw";
 
@@ -818,7 +830,7 @@ public sealed class DarlingMcpDataTools
                 // null = ad-hoc/prepared text (literal-collapse behavior unchanged). History rows
                 // predating the column read as null and age out with raw retention.
                 host_object = r.HostObjectName,
-                query_text = r.QueryText is null ? null : McpHelpers.Truncate(r.QueryText, 2000),
+                query_text = r.QueryText is null ? null : McpHelpers.TruncateStatement(r.QueryText, 2000),
                 // #2012 stage 1's disclosure, now the residual: with proc-hosted callers split by
                 // host_object, distinct_texts > 1 marks ad-hoc literal blends (or pre-stage-2
                 // history where the split can't apply yet).
@@ -987,8 +999,18 @@ public sealed class DarlingMcpDataTools
     /// #5226: the body of <see cref="GetTopProceduresByCpu"/> with the ranking choice the web page offers; the MCP
     /// tool stays CPU-only and calls this with no <paramref name="order_by"/>. See <see cref="GetTopQueriesRanked"/>.
     /// </summary>
-    internal static async Task<string> GetTopProceduresRanked(
+    internal static Task<string> GetTopProceduresRanked(
         NpgsqlDataSource postgres, string? server_name, int hours_back, int top, string? database_name, string? as_of, string detail,
+        string? order_by, CancellationToken cancellationToken) =>
+        GetTopProceduresRanked(
+            postgres, server_name, hours_back, top, DatabaseFilter.One(database_name), as_of, detail, order_by, cancellationToken);
+
+    /// <summary>
+    /// #5245: <see cref="GetTopProceduresRanked(NpgsqlDataSource,string,int,int,string,string,string,string,CancellationToken)"/>
+    /// over a SET of databases, on the raw and the hourly tier alike.
+    /// </summary>
+    internal static async Task<string> GetTopProceduresRanked(
+        NpgsqlDataSource postgres, string? server_name, int hours_back, int top, DatabaseFilter databases, string? as_of, string detail,
         string? order_by, CancellationToken cancellationToken)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
@@ -1015,7 +1037,7 @@ public sealed class DarlingMcpDataTools
         {
             var now = windowEnd;
             var requestedStart = now.AddHours(-hours_back);
-            var routed = await DarlingDataReader.GetTopProceduresByCpuRoutedAsync(postgres, resolved.ServerId, requestedStart, now, top, database_name, ranking, cancellationToken);
+            var routed = await DarlingDataReader.GetTopProceduresByCpuRoutedAsync(postgres, resolved.ServerId, requestedStart, now, top, databases, ranking, cancellationToken);
             var rows = routed.Rows;
             var tierUsed = routed.Tier == RetentionTier.Hourly ? "hourly" : "raw";
 
@@ -1210,8 +1232,21 @@ public sealed class DarlingMcpDataTools
     /// query_text already had before this opt-in existed, so the viewer's page does not change. Same overload
     /// shape #3897's trend tools use <c>TrendBudget.Chart</c> for.
     /// </summary>
-    internal static async Task<string> GetQueryStoreTop(
+    internal static Task<string> GetQueryStoreTop(
         NpgsqlDataSource postgres, string? server_name, int hours_back, int top, string? database_name, string? as_of,
+        string? execution_type, string? module_name, bool full_text, int previewLength, CancellationToken cancellationToken = default) =>
+        GetQueryStoreTop(
+            postgres, server_name, hours_back, top, DatabaseFilter.One(database_name), as_of, execution_type, module_name, full_text, previewLength, cancellationToken);
+
+    /// <summary>
+    /// #5245: <see cref="GetQueryStoreTop(NpgsqlDataSource,string,int,int,string,string,string,string,bool,int,CancellationToken)"/>
+    /// over a SET of databases. Every one-name consumer on the empty path is list-aware: the unfiltered top-1 read that
+    /// tells a measured zero from missing data, the two empty-answer texts (<c>scopeText</c> says "for the chosen
+    /// databases" for two or more names and leaves the one-name text exactly as it was), and the Query Store
+    /// precondition, which stays silent while any database in scope is READ_WRITE.
+    /// </summary>
+    internal static async Task<string> GetQueryStoreTop(
+        NpgsqlDataSource postgres, string? server_name, int hours_back, int top, DatabaseFilter databases, string? as_of,
         string? execution_type, string? module_name, bool full_text, int previewLength, CancellationToken cancellationToken = default)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
@@ -1235,7 +1270,7 @@ public sealed class DarlingMcpDataTools
         {
             var now = windowEnd;
             var requestedStart = now.AddHours(-hours_back);
-            var read = await DarlingDataReader.GetQueryStoreTopWithReachAsync(postgres, resolved.ServerId, requestedStart, now, top, database_name, execution_type, module_name, cancellationToken);
+            var read = await DarlingDataReader.GetQueryStoreTopWithReachAsync(postgres, resolved.ServerId, requestedStart, now, top, databases, execution_type, module_name, cancellationToken);
             var rows = read.Rows;
             var tablePlan = read.Table;
 
@@ -1273,16 +1308,20 @@ public sealed class DarlingMcpDataTools
                    the filter has rows. One unfiltered top-1 read tells the two apart; it runs only on this path.
                    module_name (#4057) is the same case and takes the same test: a module that did not run in the
                    window is a measured zero whenever the read without the filters has rows. */
+                /* #5245: one name keeps today's "in database 'X'" text; two or more have no one name to say, so the
+                   helpers get the phrase for the whole set. */
+                var scopeName = databases.Names.Count == 1 ? databases.Names[0] : null;
+                var scopeText = databases.Names.Count > 1 ? " for " + DatabaseFilter.ManyDatabasesDescription : null;
                 if ((execution_type != null || module_name != null)
-                    && (await DarlingDataReader.GetQueryStoreTopAsync(postgres, resolved.ServerId, requestedStart, now, 1, database_name, cancellationToken)).Count > 0)
+                    && (await DarlingDataReader.GetQueryStoreTopAsync(postgres, resolved.ServerId, requestedStart, now, 1, databases, cancellationToken)).Count > 0)
                     return module_name is null
                         /* #5094: whole days from the daily summary make a zero here "close, not exact" (a late write the
                            summary missed), so the empty answer carries the same flag as a populated one. */
-                        ? McpHelpers.QueryStoreExecutionTypeEmpty(execution_type!, hours_back, database_name,
-                            read.DailyDaysUsed > 0 ? new { approximate = true, approximation_note = QueryStoreApproximationNote } : null)
+                        ? McpHelpers.QueryStoreExecutionTypeEmpty(execution_type!, hours_back, scopeName,
+                            read.DailyDaysUsed > 0 ? new { approximate = true, approximation_note = QueryStoreApproximationNote } : null, scopeText)
                         /* The module miss hands back the window it read: "did not run" is a claim about that window,
                            and the raw tier may not reach the whole of the one asked for. */
-                        : McpHelpers.QueryStoreModuleEmpty(module_name, execution_type, hours_back, database_name, truncated, read.DailyDaysUsed > 0
+                        : McpHelpers.QueryStoreModuleEmpty(module_name, execution_type, hours_back, scopeName, truncated, read.DailyDaysUsed > 0
                             ? new
                             {
                                 effective_start = McpHelpers.FormatEffectiveStart(effectiveStart),
@@ -1296,7 +1335,7 @@ public sealed class DarlingMcpDataTools
                                 effective_start = McpHelpers.FormatEffectiveStart(effectiveStart),
                                 effective_hours_back = Math.Round((now - effectiveStart).TotalHours, 1),
                                 window_truncated = truncated
-                            });
+                            }, scopeText);
 
                 return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "query_store", cancellationToken)
                     /* #2546: the sentence below GUESSES ("may not be enabled"), and it has to, because the
@@ -1304,7 +1343,7 @@ public sealed class DarlingMcpDataTools
                        records actual_state per database every hour for exactly this purpose. Asking it turns
                        a hedge into a fact plus the ALTER DATABASE that fixes it, and it answers for the
                        database this read was scoped to rather than for the server's most flattering one. */
-                    ?? await DarlingRuntimePrecondition.QueryStoreStatusAsync(postgres, resolved.ServerId, resolved.ServerName, database_name, cancellationToken)
+                    ?? await DarlingRuntimePrecondition.QueryStoreStatusAsync(postgres, resolved.ServerId, resolved.ServerName, databases, cancellationToken)
                     /* And the collector's own last run, for the case Query Store is on and the collector is
                        the thing that cannot read it. */
                     ?? await DarlingRuntimePrecondition.StatusAsync(postgres, resolved.ServerId, resolved.ServerName, "query_store", cancellationToken)
@@ -1335,7 +1374,7 @@ public sealed class DarlingMcpDataTools
                 avg_physical_reads = r.AvgPhysicalReads,
                 avg_rowcount = r.AvgRowcount,
                 last_execution_time = r.LastExecutionTime?.ToString("o"),
-                query_text = full_text ? r.QueryText : McpHelpers.Truncate(r.QueryText, previewLength),
+                query_text = full_text ? r.QueryText : McpHelpers.TruncateStatement(r.QueryText, previewLength),
                 query_text_truncated = !full_text && r.QueryText != null && r.QueryText.Length > previewLength,
                 /* Emitted because it is a grouping key: on a 2022+ AG the same query can appear once per
                    replica role, and without this the caller would see duplicate-looking rows with no way
@@ -2896,12 +2935,24 @@ public sealed class DarlingMcpDataTools
     }
 
     [McpServerTool(Name = "get_current_waits_trend"), Description("Gets the two Current Waits series over time for a server: waiting-task total wait duration per wait type per collection, and blocked-session counts per database per collection. get_waiting_tasks answers 'what is waiting right now' and can never say whether it is worse than an hour ago — this is that question. Use it to tell a server that is always mildly blocked from one that just started, and to see which database owns the blocking over the window rather than in one snapshot.")]
-    public static async Task<string> GetCurrentWaitsTrend(
+    public static Task<string> GetCurrentWaitsTrend(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history. Default 4. No upper bound (this read exists to look further back than the 168-hour reads allow); a negative or zero value is refused rather than read as its absolute value.")] int hours_back = 4,
         [Description("Limit the blocked-session series to one database. Omit for all databases.")] string? database_name = null,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        CancellationToken cancellationToken = default) =>
+        GetCurrentWaitsTrend(postgres, server_name, hours_back, DatabaseFilter.One(database_name), as_of, cancellationToken);
+
+    /// <summary>
+    /// #5244: <see cref="GetCurrentWaitsTrend(NpgsqlDataSource,string,int,string,string,CancellationToken)"/> over a SET of
+    /// databases. The list limits the BLOCKED-SESSION series only (the waiting-task series is per wait type, whole, as the tool's head
+    /// says). The echoed <c>database_name</c> is the name for one database and "the chosen databases" for two or more. The
+    /// both-series-empty answers below name no database: "nothing was waiting" is true of the whole server, because the
+    /// waiting-task series the filter never touches is empty too, so neither text is a verdict about a database the read skipped.
+    /// </summary>
+    internal static async Task<string> GetCurrentWaitsTrend(
+        NpgsqlDataSource postgres, string? server_name, int hours_back, DatabaseFilter databases, string? as_of,
         CancellationToken cancellationToken = default)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
@@ -2923,7 +2974,7 @@ public sealed class DarlingMcpDataTools
 
             var waits = await DarlingDataReader.GetWaitingTaskTrendAsync(postgres, resolved.ServerId, start, end, cancellationToken);
             var blocked = await DarlingDataReader.GetBlockedSessionTrendAsync(
-                postgres, resolved.ServerId, start, end, database_name, cancellationToken);
+                postgres, resolved.ServerId, start, end, databases, cancellationToken);
 
             if (waits.Count == 0 && blocked.Count == 0)
             {
@@ -2952,7 +3003,8 @@ public sealed class DarlingMcpDataTools
             {
                 server = resolved.ServerName,
                 hours_back = hours_back,
-                database_name,
+                /* #5244: the name for one database, "the chosen databases" for two or more, null for all. */
+                database_name = databases.Describe(),
                 /*
                     Two series in one payload because they are read together: a wait-type spike with no
                     blocked sessions is a resource wait, and the same spike WITH them is contention. Split
@@ -2978,14 +3030,29 @@ public sealed class DarlingMcpDataTools
         }
     }
 
-    [McpServerTool(Name = "get_blocking_stats"), Description("Gets blocking SEVERITY over time for a server: per-minute blocking duration (event count, total, max and average wait) and per-minute deadlock severity (victim count plus total, max and average wait across every process in the graphs). get_blocking_trend and get_deadlock_trend count incidents; this is how BAD they were. Ten one-second blocks and one ten-minute block are the same count and are not the same problem, which is the distinction this read exists to make.")]
-    public static async Task<string> GetBlockingStats(
+    [McpServerTool(Name = "get_blocking_stats"), Description("Gets blocking SEVERITY over time for a server: per-minute blocking duration (event count, total, max and average wait) and per-minute deadlock severity (victim count plus total, max and average wait across every process in the graphs). get_blocking_trend and get_deadlock_trend count incidents; this is how BAD they were. Ten one-second blocks and one ten-minute block are the same count and are not the same problem, which is the distinction this read exists to make. The source key names the collector that answered, blocked-process-report or DMV snapshot; the DMV snapshot is used only when the blocked process reports have no rows for the chosen databases, so source can differ between filters.")]
+    public static Task<string> GetBlockingStats(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history. Default 24. No upper bound (this read exists to look further back than the 168-hour reads allow); a negative or zero value is refused rather than read as its absolute value.")] int hours_back = 24,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        [Description("Limit the blocking series to one database. Omit for all databases.")] string? database_name = null,
         ILogger? logger = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) =>
+        GetBlockingStats(postgres, server_name, hours_back, DatabaseFilter.One(database_name), as_of, logger, cancellationToken);
+
+    /// <summary>
+    /// #5244: <see cref="GetBlockingStats(NpgsqlDataSource,string,int,string,ILogger,CancellationToken)"/> with the BLOCKING series
+    /// limited to a SET of databases. Deadlocks carry no database column here, so the deadlock series stays whole, and every
+    /// text that speaks of "blocking or deadlocks" says so. Every one-name consumer on the empty path is list-aware: the empty
+    /// answer reads "No blocking for {the chosen databases} and no deadlocks" rather than a verdict that the window was
+    /// genuinely clear for databases the read filtered, and the echoed <c>database_name</c> is the name for one database and
+    /// "the chosen databases" for two or more. The unavailable arm ("never run successfully") is about collection and is
+    /// unchanged: no filtered series can make a collector that never ran look quiet.
+    /// </summary>
+    internal static async Task<string> GetBlockingStats(
+        NpgsqlDataSource postgres, string? server_name, int hours_back, DatabaseFilter databases, string? as_of,
+        ILogger? logger = null, CancellationToken cancellationToken = default)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
@@ -3004,7 +3071,7 @@ public sealed class DarlingMcpDataTools
             var end = windowEnd;
             var start = end.AddHours(-hours_back);
 
-            var blocking = await DarlingDataReader.GetBlockingDurationStatsAsync(postgres, resolved.ServerId, start, end, cancellationToken);
+            var blocking = await DarlingDataReader.GetBlockingDurationStatsAsync(postgres, resolved.ServerId, start, end, databases, cancellationToken);
 
             /* Parsed and bucketed by the shared aggregator rather than re-derived here: a second copy of
                "what counts as a victim" is how two surfaces end up disagreeing about one deadlock. */
@@ -3041,7 +3108,12 @@ public sealed class DarlingMcpDataTools
                         "empty",
                         McpHelpers.QuietUnlessCut(
                             emptyNotice.WindowTruncated, emptyNotice.EffectiveStart,
-                            factual: $"No blocking or deadlocks recorded for {resolved.ServerName} in the last {hours_back} hour(s)",
+                            /* #5244: with a database filter only the blocking half was limited to it (deadlocks are not
+                               split by database here), so the sentence says exactly that instead of "no blocking". */
+                            factual: databases.IsAll
+                                ? $"No blocking or deadlocks recorded for {resolved.ServerName} in the last {hours_back} hour(s)"
+                                : $"No blocking{DarlingMcpBlockingTools.ForChosenDatabases(databases)} "
+                                  + $"(and no deadlocks, which are not limited by database) recorded for {resolved.ServerName} in the last {hours_back} hour(s)",
                             coveredClaim: ". The blocking collectors HAVE run successfully for this server, so the window is genuinely clear rather than blind."),
                         emptyNotice.AsHints())
                     : McpHelpers.Status(
@@ -3062,6 +3134,13 @@ public sealed class DarlingMcpDataTools
                 effective_start = notice.EffectiveStart,
                 window_truncated = notice.WindowTruncated,
                 truncation_note = notice.TruncationNote,
+                /* #5244: which databases the blocking series is limited to (the deadlock series never is): the name for one,
+                   "the chosen databases" for two or more, null for all. After the three notice keys, which stay right behind
+                   hours_back. */
+                database_name = databases.Describe(),
+                /* #5244: which collector the blocking series came from (null when it has no rows): the blocked-process reports, or the
+                   DMV snapshot when those have no rows for the chosen databases. One source per answer. */
+                source = blocking.Count == 0 ? null : blocking[0].Source,
                 /*
                     Severity, not counts. get_blocking_trend already answers how OFTEN; ten one-second
                     blocks and one ten-minute block share a count and are different problems.

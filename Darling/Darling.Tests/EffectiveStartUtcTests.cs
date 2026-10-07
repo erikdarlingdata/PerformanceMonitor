@@ -128,7 +128,13 @@ public sealed class EffectiveStartUtcTests
         Assert.All(writes, line => Assert.Equal("effective_start = notice.EffectiveStart,", line));
         /* Two calls per tool: the data answer's, and the empty answer's. */
         Assert.Equal(expectedTools * 2, Regex.Matches(source, @"EventWindowNoticeAsync\(\s*\(\) => dataService\.GetQueryWindowFloorAsync").Count);
-        Assert.Equal(expectedTools, Regex.Matches(source, @"emptyAnswer: true\)\)\.AsHints\(\)").Count);
+        /* The empty answer carries the notice under hints in one of two shapes: inline (`...emptyAnswer: true)).AsHints()`), or, where the
+           answer first reads the notice to decide its own wording (#5244 L3: get_long_query_completions points at the opt-in switch only
+           when the floor probe is null), built into `emptyNotice` and handed to the status as `emptyNotice.AsHints()`. The second shape
+           must still be a notice built with emptyAnswer: true, so a hand-built floor cannot pass it. */
+        var inlineHints = Regex.Matches(source, @"emptyAnswer: true\)\)\.AsHints\(\)").Count;
+        var namedHints = Regex.Matches(source, @"emptyAnswer: true\);(?:(?!EventWindowNoticeAsync)[\s\S])*?\bemptyNotice\.AsHints\(\)").Count;
+        Assert.Equal(expectedTools, inlineHints + namedHints);
     }
 
     /// <summary>

@@ -66,7 +66,7 @@ public sealed class TopTextLookupPlanLiveTests
                 var sql = TopRankings.Apply(name == "TopQueriesSql" ? DarlingDataReader.TopQueriesSql : DarlingDataReader.TopQueriesByHostObjectSql,
                     TopRanking.Cpu, hourly: false);
                 var plan = await ExplainAsync(connection, sql, ct, serverId, start, end,
-                    P(NpgsqlDbType.Integer, Top), P(NpgsqlDbType.Text, null), P(NpgsqlDbType.Integer, 0), P(NpgsqlDbType.Integer, Candidates));
+                    P(NpgsqlDbType.Integer, Top), P(NpgsqlDbType.Array | NpgsqlDbType.Text, null), P(NpgsqlDbType.Integer, 0), P(NpgsqlDbType.Integer, Candidates));
                 AssertLookupRanOnce(name, plan);
             }
 
@@ -101,7 +101,7 @@ public sealed class TopTextLookupPlanLiveTests
             .Replace("$FROM$", standIn, StringComparison.Ordinal)
             .Replace("$CEIL$", "", StringComparison.Ordinal);
         var plan = await ExplainAsync(connection, sql, ct, serverId, now.AddHours(-24), now.AddMinutes(5),
-            P(NpgsqlDbType.Integer, Top), P(NpgsqlDbType.Text, null), P(NpgsqlDbType.Integer, Candidates));
+            P(NpgsqlDbType.Integer, Top), P(NpgsqlDbType.Array | NpgsqlDbType.Text, null), P(NpgsqlDbType.Integer, Candidates));
 
         var lookup = Nodes(plan.Root, null).Where(n => n.Cte == "latest_in_window" && n.Relation == "query_stats").ToList();
         Assert.NotEmpty(lookup);
@@ -149,7 +149,7 @@ public sealed class TopTextLookupPlanLiveTests
             command.Parameters.Add(P(NpgsqlDbType.Timestamp, DateTime.SpecifyKind(now.AddHours(-24), DateTimeKind.Unspecified)));
             command.Parameters.Add(P(NpgsqlDbType.Timestamp, DateTime.SpecifyKind(now.AddMinutes(5), DateTimeKind.Unspecified)));
             command.Parameters.Add(P(NpgsqlDbType.Integer, 10));
-            command.Parameters.Add(P(NpgsqlDbType.Text, null));
+            command.Parameters.Add(P(NpgsqlDbType.Array | NpgsqlDbType.Text, null));
             command.Parameters.Add(P(NpgsqlDbType.Integer, 10));
             var texts = new Dictionary<string, string?>();
             await using (var reader = await command.ExecuteReaderAsync(ct))
@@ -214,7 +214,7 @@ public sealed class TopTextLookupPlanLiveTests
                 .Replace("$FROM$", standIn, StringComparison.Ordinal)
                 .Replace("$CEIL$", "", StringComparison.Ordinal);
             var plan = await ExplainAsync(connection, sql, ct, serverId, now.AddHours(-24), now.AddMinutes(5),
-                P(NpgsqlDbType.Integer, Top), P(NpgsqlDbType.Text, null), P(NpgsqlDbType.Integer, Candidates));
+                P(NpgsqlDbType.Integer, Top), P(NpgsqlDbType.Array | NpgsqlDbType.Text, null), P(NpgsqlDbType.Integer, Candidates));
 
             /* Every raw read that is neither the ranking nor the in-window lookup is the fallback (the old shape was inlined into the join, so no CTE name). */
             var lookup = Nodes(plan.Root, null).Where(n => n.Relation == "query_stats" && n.Cte != "ranked" && n.Cte != "latest_in_window").ToList();

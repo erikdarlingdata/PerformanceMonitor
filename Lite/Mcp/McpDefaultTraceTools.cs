@@ -93,7 +93,7 @@ public sealed class McpDefaultTraceTools
                     growth_mb = r.GrowthMb,
                     error_number = r.ErrorNumber,
                     severity = r.Severity,
-                    text_data = McpHelpers.Truncate(r.TextData, 2000)
+                    text_data = McpHelpers.TruncateStatement(r.TextData, 2000)
                 })
             }, McpHelpers.JsonOptions);
         }

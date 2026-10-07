@@ -515,7 +515,8 @@ public sealed class QueryStoreSliceRepairTests : IClassFixture<SharedDuckDbFixtu
            the UI's exclusivity for the whole of a large archive rewrite. */
         Assert.Contains("using (_duckDb.AcquireReadLock(cancellationToken))", source, StringComparison.Ordinal);
         var readLock = source.IndexOf("using (_duckDb.AcquireReadLock(cancellationToken))", StringComparison.Ordinal);
-        var copyToTemp = source.IndexOf("COMPRESSION ZSTD)\";", StringComparison.Ordinal);
+        /* The COPY is located by its shared option list (#5381), which replaced the spelled-out "COMPRESSION ZSTD)". */
+        var copyToTemp = source.IndexOf("ParquetCompaction.ArchiveCopyOptions})\";", StringComparison.Ordinal);
         Assert.True(copyToTemp > readLock, "the rewrite-to-temp belongs under the read lock, not the write lock");
     }
 

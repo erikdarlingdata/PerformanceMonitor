@@ -14,6 +14,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Xml.Linq;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Collectors;
 
@@ -512,6 +513,23 @@ OUTER APPLY
         return new CollectorQuery(text, parameters);
     }
 
+    /// <summary>The separator inside the identity text of a whole-marker graph (see <see cref="GetIdentity"/>). An
+    /// XML graph cannot hold it, so no real graph can equal a whole-marker identity.</summary>
+    public const char WholeMarkerIdentitySeparator = '\u0001';
+
+    /// <summary>
+    /// The SQL expression (PostgreSQL and DuckDB both run it) that gives a stored row the same identity text
+    /// <see cref="GetIdentity"/> gives the row it was written from: the graph itself, except that a graph equal to
+    /// the statement filter's marker becomes marker + victim process id + database name. A marker row with no victim
+    /// process id has nothing to tell it apart, so it stays the bare marker, which no row's identity ever equals
+    /// (#4348, R4b).
+    /// </summary>
+    public const string StoredGraphIdentitySql =
+        "CASE WHEN deadlock_graph_xml = '" + SensitiveStatements.PlaceholderText + "' "
+        + "AND victim_process_id IS NOT NULL AND victim_process_id <> '' "
+        + "THEN deadlock_graph_xml || chr(1) || victim_process_id || chr(1) || COALESCE(database_name, '') "
+        + "ELSE deadlock_graph_xml END";
+
     /// <inheritdoc />
     public (DateTime Time, string Graph)? GetIdentity(Row row)
     {
@@ -520,7 +538,27 @@ OUTER APPLY
             return null;
         }
 
-        return (new DateTime(time.Ticks - (time.Ticks % 10), time.Kind), row.GraphXml);
+        var graph = row.GraphXml;
+
+        /* #4348: a graph the statement filter withheld WHOLE is the marker, the same text for every such graph, so
+           the text cannot tell two deadlocks at one time apart. The identity is then built from the columns this row
+           parsed from the raw graph before judging it: the event time (above), the victim process id and the
+           database. The same deadlock re-read inside CursorReReadOverlap gets the same identity and is dropped as a
+           copy; a different deadlock at that time has another victim process. A marker row with no victim process id
+           has nothing to tell it apart, so it has no identity and is never dropped. StoredGraphIdentitySql builds
+           the same text for a stored row. */
+        if (string.Equals(graph, SensitiveStatements.PlaceholderText, StringComparison.Ordinal))
+        {
+            if (string.IsNullOrEmpty(row.VictimProcessId))
+            {
+                return null;
+            }
+
+            graph = string.Concat(graph, WholeMarkerIdentitySeparator.ToString(), row.VictimProcessId,
+                WholeMarkerIdentitySeparator.ToString(), row.DatabaseName ?? string.Empty);
+        }
+
+        return (new DateTime(time.Ticks - (time.Ticks % 10), time.Kind), graph);
     }
 
     /// <inheritdoc />
@@ -571,6 +609,10 @@ OUTER APPLY
            XElement.Parse, which is expensive and was previously misattributed as storage time. */
         var rows = new List<Row>();
         DateTime? telemetryMax = null;
+        /* #4348: one statement-filter session for this read. The RAW graph is parsed first (ExtractVictimFields);
+           each derived string is then judged where it first enters the row, so the stored identity (time and
+           graph) is computed from the filtered value. */
+        var scrub = context.BeginStatementScrub();
 
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -582,12 +624,13 @@ OUTER APPLY
             var victimProcessId = reader.IsDBNull(1) ? null : reader.GetString(1);
             var graphXml = reader.IsDBNull(2) ? null : reader.GetString(2);
             var victim = ExtractVictimFields(graphXml, victimProcessId);
+            var victimSqlText = scrub.Text(victim.SqlText);
 
             /* #3307: a victim whose statement came from a procedure invoked as an RPC carries
                "Proc [Database Id = N Object Id = M]" instead of the procedure name — SQL Server writes
                the ids because there is no batch text to write. Note the pair here, in the read, and the
                supplemental below resolves every one the cycle produced in a single lookup. */
-            ProcPlaceholder.Register(victim.SqlText, context.ProcPlaceholderIds);
+            ProcPlaceholder.Register(victimSqlText, context.ProcPlaceholderIds);
 
             var deadlockTime = reader.IsDBNull(0) ? (DateTime?)null : reader.GetDateTime(0);
 
@@ -601,11 +644,11 @@ OUTER APPLY
             {
                 DeadlockTime = deadlockTime,
                 VictimProcessId = victimProcessId,
-                VictimSqlText = victim.SqlText,
-                GraphXml = graphXml,
+                VictimSqlText = victimSqlText,
+                GraphXml = scrub.Xml(graphXml),
                 /* victim_query_plan_xml rides at ordinal 3 only when CapturePlanXml spliced it into
                    the projection; the short-circuit skips it entirely when off. */
-                VictimQueryPlanXml = context.CapturePlanXml && !reader.IsDBNull(3) ? reader.GetString(3) : null,
+                VictimQueryPlanXml = context.CapturePlanXml && !reader.IsDBNull(3) ? scrub.Xml(reader.GetString(3)) : null,
                 /* #2641: a row that KNOWS its own database wins, and only the Azure telemetry arm
                    does. That arm is read from master while CurrentDatabaseName is "master", so taking
                    the connection's database would stamp every deadlock on the server as master's —
@@ -682,9 +725,11 @@ OUTER APPLY
             return;
         }
 
+        /* #4348: the resolved name is a new string entering the row, so it goes through the filter again. */
+        var scrub = context.BeginStatementScrub();
         foreach (var row in rows)
         {
-            row.VictimSqlText = ProcPlaceholder.Resolve(row.VictimSqlText, resolved);
+            row.VictimSqlText = scrub.Text(ProcPlaceholder.Resolve(row.VictimSqlText, resolved));
         }
     }
 

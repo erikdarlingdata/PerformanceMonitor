@@ -991,6 +991,14 @@ public partial class MainWindow : Window
         OverviewItemsControl.ItemsSource = ServerOverviewSort.Order(
             filtered, App.OverviewSortMode,
             s => s.CpuPercentForAlert, s => s.DisplayName, s => s.ServerId);
+
+        /* #5352: a search that matched nothing says so (same sentence as the viewer) rather than leaving a blank grid. */
+        var noMatch = _overviewSummaries.Count > 0 && filtered.Count == 0;
+        if (OverviewNoMatchText != null)
+        {
+            OverviewNoMatchText.Text = noMatch ? ServerOverviewFilter.NoMatchText : string.Empty;
+            OverviewNoMatchText.Visibility = noMatch ? Visibility.Visible : Visibility.Collapsed;
+        }
     }
 
     /// <summary>The fields a search term matches against for a card: its display and instance names, plus each

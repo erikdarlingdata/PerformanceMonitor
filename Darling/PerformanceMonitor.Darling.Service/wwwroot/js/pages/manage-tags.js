@@ -26,7 +26,7 @@
  * a double click sends one request. All server text reaches the DOM through el()/textContent.
  */
 
-import { el, mount, apiGetFleet, loadingStrip, errorStrip, emptyStrip, reportSessionExpired } from "../util.js";
+import { el, mount, apiGetFleet, apiWrite, loadingStrip, errorStrip, emptyStrip } from "../util.js";
 import { getSession } from "../views-api.js";
 
 /** The swatches offered next to the #RRGGBB box. The server accepts any #RRGGBB; these are only shortcuts. */
@@ -126,30 +126,14 @@ export function interpretWrite(status, body) {
   return { kind: "error", message };
 }
 
+/* One write: apiWrite's transport (it tells the shell once when the session is gone), read through interpretWrite. A
+   status of 0 is a request that got no answer; `expired` is a 401 or a 2xx that is not a JSON body, never a saved change. */
 async function send(method, path, body) {
-  let resp;
-  try {
-    resp = await fetch(path, {
-      method,
-      headers: { Accept: "application/json", "Content-Type": "application/json" },
-      body: body === undefined ? undefined : JSON.stringify(body),
-    });
-  } catch (e) {
-    return { kind: "error", message: "Network error: " + (e && e.message ? e.message : String(e)) };
-  }
-  let parsed = null;
-  try {
-    parsed = JSON.parse(await resp.text());
-  } catch {
-    parsed = null;
-  }
-  let result = interpretWrite(resp.status, parsed);
-  if (result.kind === "ok" && (parsed === null || typeof parsed !== "object")) {
-    /* A 2xx that is not a JSON body is a sign-in page in front of the API, not a saved change. */
-    result = { kind: "expired", message: "Your session has expired. Sign in again." };
-  }
-  if (result.kind === "expired") reportSessionExpired(result.message, "/");
-  return result;
+  const res = await apiWrite(method, path, body);
+  if (res.status === 0) return { kind: "error", message: res.message };
+  if (res.expired) return { kind: "expired", message: "Your session has expired. Sign in again." };
+  if (res.unexpected) return { kind: "error", message: "The service gave an unexpected answer (HTTP " + res.status + "). Check the list before trying again." };
+  return interpretWrite(res.status, res.body);
 }
 
 const tagPath = (id) => "/api/server-tags/" + encodeURIComponent(id);

@@ -215,9 +215,11 @@ public partial class ServerTab : UserControl
         AutoRefreshCheckBox.IsChecked = App.AutoRefreshEnabled;
 
         _refreshTimer = new DispatcherTimer();
+        /* #5371: a tick is a poll. When a tab-switch read or an earlier refresh is still running (or waiting to
+           replay) the data is being refreshed right now, so the tick starts nothing and queues nothing. */
         _refreshTimer.Tick += async (s, e) =>
         {
-            await RefreshAllDataAsync();
+            await RefreshAllDataOnTimerAsync();
         };
         /* The interval comes off the just-restored combo through the same call a live selection change
            makes, so the constructor and AutoRefreshInterval_Changed cannot disagree about what an index
@@ -521,7 +523,10 @@ public partial class ServerTab : UserControl
     private async void MainTabControl_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
         if (!IsLoaded || _dataService == null) return;
-        if (_isRefreshing) return;
+        /* #5371: no bail on a refresh in flight any more. A switch that arrives during one is remembered (latest
+           wins) and loaded when it ends, and the timer's refresh that follows a pending switch read joins it
+           instead of starting a second read. Programmatic selection changes are still skipped below by
+           _suppressActiveQueriesAutoRefresh, the only flag that was ever meant to silence this handler. */
         if (e.Source != MainTabControl && e.Source != QueriesSubTabControl
             && e.Source != MemorySubTabControl && e.Source != BlockingSubTabControl
             && e.Source != SystemEventsSubTabControl && e.Source != ConfigChangesSubTabControl) return;
@@ -533,12 +538,11 @@ public partial class ServerTab : UserControl
         // set/cleared around the tab switch in SelectActiveQueriesForDrillDown().
         if (_suppressActiveQueriesAutoRefresh) return;
 
-        var (hoursBack, fromDate, toDate) = GetCurrentWindowUtc();
         var navContext = MainTabControl.SelectedIndex == 2
             ? $"TabNav-Queries.sub{QueriesSubTabControl.SelectedIndex}"
             : $"TabNav-tab{MainTabControl.SelectedIndex}";
         using var _navTimer = Helpers.MethodProfiler.StartTiming(navContext);
-        await RefreshVisibleTabAsync(hoursBack, fromDate, toDate, subTabOnly: true);
+        await RefreshVisibleTabOnlyAsync();
     }
 
     private async void LiveSnapshot_Click(object sender, RoutedEventArgs e)

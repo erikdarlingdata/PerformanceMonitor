@@ -199,10 +199,11 @@
   // procedure_stats plan fetching: "off" (the default), "shadow" or "on". "off" renders and ships every captured
   // module plan, as before. "shadow" does the same and also checks, run by run, whether this service's way of
   // recognizing a module plan (its handle, cached time and a fingerprint of its statements) would have recognized
-  // the plans it just rendered; the run's collection-log note reports deferred_would_hit and deferred_false_hit,
-  // and no stored row changes. "on" skips the render for a plan the service has already stored and renders at most
+  // the plans it just rendered; the run's collection-log note reports deferred_would_hit, deferred_false_hit (the plan's shape
+  // changed, or could not be compared) and deferred_same_shape (the bytes changed but the shape held, for example a
+  // memory grant adjusted in place; "on" treats that as a correct hit), and no stored row changes. "on" skips the render for a plan the service has already stored and renders at most
   // 150 others per run; procedureStatsPlanCycleInterval still decides which runs may render. Move from "shadow"
-  // to "on" only after deferred_false_hit has stayed 0. An unrecognized value means "off". A file-only knob:
+  // to "on" only after deferred_false_hit has stayed 0; deferred_same_shape does not count. An unrecognized value means "off". A file-only knob:
   // edit + restart. Only matters while capturePlans is on; Azure SQL Database keeps "off".
   "procedureStatsDeferredPlanFetch": "off",
 

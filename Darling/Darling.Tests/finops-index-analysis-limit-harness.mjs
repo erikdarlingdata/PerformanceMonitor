@@ -1,7 +1,7 @@
 /* Runs the shipped Index Analysis tab (wwwroot/js/pages/finops/index-analysis.js) against a recording fetch and a node-tree DOM,
    and prints as one line of JSON what it asked for and which notices it drew (#5238): the first read's limit, the notice for a
    list the read cut, for a cut list of one database, for a list that fits, for a list of exactly the limit that cuts nothing and for a list
-   cut one row short of whole.
+   cut one row short of whole, and the stored spelling the shared Database box sends for a typed name that differs only by case.
        node finops-index-analysis-limit-harness.mjs <path to wwwroot/js> */
 import fs from "node:fs";
 import os from "node:os";
@@ -149,6 +149,24 @@ try {
   root = tab.build("srv-d", {});
   await settle();
   out.oneOver = { reads: seen(), notices: noticeTexts(root) };
+
+  // The shared Database box sends the stored spelling (#5244 L8c): a typed "alpha" goes as the listed "Alpha"; a name no list holds goes as typed.
+  body = JSON.stringify(payload(3, 3, 500));
+  root = tab.build("srv-e", {});
+  await settle();
+  const stored = findAll(root, byTag("input")).find((n) => n.attrs.type === "text");
+  fetches.length = 0;
+  stored.value = "alpha";
+  stored.handlers.input();
+  stored.handlers.change();
+  await settle();
+  const lower = seen().map((r) => r.database_name);
+  fetches.length = 0;
+  stored.value = "Gamma";
+  stored.handlers.input();
+  stored.handlers.change();
+  await settle();
+  out.storedSpelling = { typedLower: lower, typedUnknown: seen().map((r) => r.database_name), shown: stored.value };
   console.log(JSON.stringify(out));
 } finally {
   fs.rmSync(scratch, { recursive: true, force: true });

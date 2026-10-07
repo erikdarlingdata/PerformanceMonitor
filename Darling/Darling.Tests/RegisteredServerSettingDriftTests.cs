@@ -979,4 +979,41 @@ public sealed class RegisteredServerSettingDriftTests
                 key);
         }
     }
+
+    /// <summary>
+    /// A drifted connection setting on an entry that carries a password or a reference ends the file's password being
+    /// used (the backfill needs every connection setting to agree), and the warning says so: the server is named and the
+    /// sentence is the clause. An entry with no password, or a drift that is not a connection setting, adds nothing.
+    /// </summary>
+    [Fact]
+    public void ADriftedConnectionSettingOnAnEntryWithAPassword_SaysTheFilesPasswordIsNotUsedUntilTheyAgree()
+    {
+        var withPassword = FileEntry("pgtarget", "pgtarget.example.internal");
+        withPassword.Auth = "sql";
+        withPassword.Username = "darling_monitor";
+        withPassword.EncryptedPassword = "env:PGTARGET_PASSWORD";
+        var withoutPassword = FileEntry("other", "other.example.internal");
+        var costOnly = FileEntry("costly", "costly.example.internal");
+        costOnly.Auth = "sql";
+        costOnly.Username = "darling_monitor";
+        costOnly.Password = "typed-in-the-file";
+        var stores = new[] { StoreRow(withPassword), StoreRow(withoutPassword), StoreRow(costOnly) }
+            .Select(r => Registered(r)).ToList();
+
+        withPassword.EncryptMode = "Strict";
+        withoutPassword.EncryptMode = "Strict";
+        costOnly.MonthlyCostUsd = 99m;
+
+        var drifted = StoreConfigProvider.DescribeSettingDrift(new[] { withPassword, withoutPassword, costOnly }, stores);
+        Assert.Equal(3, drifted.Count);
+
+        var note = StoreConfigProvider.DescribePasswordNotUsed(drifted, 10);
+        Assert.Contains("its password from darling.json is not used until the two agree", note, System.StringComparison.Ordinal);
+        Assert.Contains("pgtarget", note, System.StringComparison.Ordinal);
+        Assert.DoesNotContain("other", note, System.StringComparison.Ordinal);
+        Assert.DoesNotContain("costly", note, System.StringComparison.Ordinal);
+        Assert.DoesNotContain("typed-in-the-file", note, System.StringComparison.Ordinal);
+        Assert.DoesNotContain("PGTARGET_PASSWORD", note, System.StringComparison.Ordinal);
+        Assert.Equal("", StoreConfigProvider.DescribePasswordNotUsed(drifted.Where(d => d.Server != "pgtarget").ToList(), 10));
+    }
 }

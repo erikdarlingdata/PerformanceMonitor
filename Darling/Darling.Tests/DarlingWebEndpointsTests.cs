@@ -15,6 +15,7 @@ using System.Runtime.CompilerServices;
 using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.DependencyInjection;
 using ModelContextProtocol.Server;
 using PerformanceMonitor.Common;
@@ -199,10 +200,11 @@ public sealed class DarlingWebEndpointsTests
            overload with an explicit 2000, the pre-#4198 McpHelpers.Truncate budget every caller got, so the
            Active Queries tab doesn't shrink under it. A regression here (dropping the overload, or the literal
            2000) silently starves that tab's query text down to the MCP preview (400 characters). Source-text pin rather than a
-           live call: no rig in this lane. */
+           live call: no rig in this lane. #5245: the entry now binds the chosen databases (DatabaseNames(c)), so the pin
+           matches the call and not the whole entry; the 2000 is what it guards. */
         var source = RepoFile.ReadRepoFileLf("Darling", "PerformanceMonitor.Darling.Service", "DarlingWebEndpoints.cs");
         Assert.Contains(
-            "[\"get_active_queries\"] = (c, pg, an) => DarlingMcpSessionTools.GetActiveQueries(pg, Server(c), Hours(c, 1), Str(c, \"database_name\"), QueryBool(c, \"blocking_only\", false), Str(c, \"wait_type\"), Rows(c, \"limit\", 50), 2000, AsOf(c), logger, c.RequestAborted),",
+            "DarlingMcpSessionTools.GetActiveQueries(pg, Server(c), Hours(c, 1), databases, QueryBool(c, \"blocking_only\", false), Str(c, \"wait_type\"), Rows(c, \"limit\", 50), 2000, AsOf(c), logger, c.RequestAborted)",
             source, StringComparison.Ordinal);
     }
 
@@ -782,5 +784,52 @@ public sealed class DarlingWebEndpointsTests
 
         Assert.NotNull(dir);
         return dir!;
+    }
+
+    /* ---- #5245: a single-value query key sent more than once is refused, never read as the joined "a,b" ---- */
+
+    private static DefaultHttpContext Ask(string query)
+    {
+        var context = new DefaultHttpContext();
+        context.Request.QueryString = new QueryString(query);
+        return context;
+    }
+
+    [Theory]
+    [InlineData("", "", true)]
+    [InlineData("?confirm=true", "true", true)]
+    [InlineData("?confirm=", "", true)]
+    [InlineData("?confirm=true&confirm=true", "", false)]
+    [InlineData("?confirm=&confirm=true", "", false)]
+    public void TrySingleQueryValue_ReturnsTheOneValue_AndRefusesARepeatedKey(string query, string expected, bool accepted)
+    {
+        var context = Ask(query);
+
+        Assert.Equal(accepted, DarlingWebEndpoints.TrySingleQueryValue(context.Request.Query, "confirm", out var value));
+        Assert.Equal(expected, value);
+    }
+
+    [Theory]
+    [InlineData("", false)]
+    [InlineData("?confirm=true", true)]
+    public void ParseConfirm_SingleValue_BehavesAsBefore(string query, bool expectedConfirm)
+    {
+        var (confirm, refusal) = DarlingWebEndpoints.ParseConfirm(Ask(query).Request.Query);
+
+        Assert.Equal(expectedConfirm, confirm);
+        Assert.Null(refusal);
+    }
+
+    [Theory]
+    [InlineData("?confirm=1", "confirm must be true, or omitted.")]
+    [InlineData("?confirm=TRUE", "confirm must be true, or omitted.")]
+    [InlineData("?confirm=true&confirm=true", "confirm must be given once, as true, or omitted.")]
+    [InlineData("?confirm=true&confirm=1", "confirm must be given once, as true, or omitted.")]
+    public void ParseConfirm_RefusesAWrongValue_AndARepeatedKey(string query, string expectedRefusal)
+    {
+        var (confirm, refusal) = DarlingWebEndpoints.ParseConfirm(Ask(query).Request.Query);
+
+        Assert.False(confirm);
+        Assert.Equal(expectedRefusal, refusal);
     }
 }

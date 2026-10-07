@@ -69,7 +69,7 @@ public sealed class DarlingMcpPlanTools
         try
         {
             var xml = await DarlingStoredPlanReader.GetQueryStatsPlanXmlByHashAsync(
-                postgres, resolved.ServerId, query_hash, database_name, cancellationToken);
+                postgres, resolved.ServerId, query_hash, database_name, cancellationToken: cancellationToken);
             if (string.IsNullOrEmpty(xml))
                 return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "query_stats", cancellationToken)
                     ?? McpHelpers.Status(
@@ -80,7 +80,7 @@ public sealed class DarlingMcpPlanTools
             // Server Context card can see cost threshold/max memory/database. Non-fatal (null on a miss or a
             // read failure) — the analyzer then falls back to its Info branch.
             var metadata = await DarlingServerMetadataReader.ReadAsync(postgres, resolved.ServerId, database_name, cancellationToken);
-            return McpPlanAnalysisFormatter.BuildAnalysisResult(xml, resolved.ServerName, "query_stats", query_hash, analyzerConfig, metadata, cancellationToken);
+            return AnalyzeFilteredPlan(xml, resolved.ServerName, "query_stats", query_hash, analyzerConfig, metadata, cancellationToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -110,7 +110,7 @@ public sealed class DarlingMcpPlanTools
         try
         {
             var xml = await DarlingStoredPlanReader.GetProcedurePlanXmlBySqlHandleAsync(
-                postgres, resolved.ServerId, sql_handle, cancellationToken);
+                postgres, resolved.ServerId, sql_handle, cancellationToken: cancellationToken);
             if (string.IsNullOrEmpty(xml))
                 return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "procedure_stats", cancellationToken)
                     ?? McpHelpers.Status(
@@ -120,7 +120,7 @@ public sealed class DarlingMcpPlanTools
             // #4530: one store read per call so rule 38 can see the server's edition/MAXDOP. No database
             // name is available for a procedure looked up by sql_handle alone, so Database stays null (#4597).
             var metadata = await DarlingServerMetadataReader.ReadAsync(postgres, resolved.ServerId, cancellationToken: cancellationToken);
-            return McpPlanAnalysisFormatter.BuildAnalysisResult(xml, resolved.ServerName, "procedure_stats", sql_handle, analyzerConfig, metadata, cancellationToken);
+            return AnalyzeFilteredPlan(xml, resolved.ServerName, "procedure_stats", sql_handle, analyzerConfig, metadata, cancellationToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -162,7 +162,7 @@ public sealed class DarlingMcpPlanTools
             // #4530/#4597: one store read per call so rule 38 can see the server's edition/MAXDOP, and the
             // Server Context card can see cost threshold/max memory/database.
             var metadata = await DarlingServerMetadataReader.ReadAsync(postgres, resolved.ServerId, database_name, cancellationToken);
-            return McpPlanAnalysisFormatter.BuildAnalysisResult(xml, resolved.ServerName, "query_store", identifier, analyzerConfig, metadata, cancellationToken);
+            return AnalyzeFilteredPlan(xml, resolved.ServerName, "query_store", identifier, analyzerConfig, metadata, cancellationToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -191,7 +191,10 @@ public sealed class DarlingMcpPlanTools
 
         try
         {
-            return McpPlanAnalysisFormatter.BuildAnalysisResult(plan_xml, null, "xml", null, analyzerConfig, cancellationToken);
+            // #4348: the caller's XML has no stored-plan read to filter it, so AnalyzeFilteredPlan runs the statement
+            // filter before the analysis lifts parameter values and statement text out of it into fields the JSON sweep
+            // cannot pair.
+            return AnalyzeFilteredPlan(plan_xml, null, "xml", null, analyzerConfig, null, cancellationToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -216,12 +219,12 @@ public sealed class DarlingMcpPlanTools
         try
         {
             var xml = await DarlingStoredPlanReader.GetQueryStatsPlanXmlByHashAsync(
-                postgres, resolved.ServerId, query_hash, database_name, cancellationToken);
+                postgres, resolved.ServerId, query_hash, database_name, maxOutputChars: PlanXmlOutputChars, cancellationToken: cancellationToken);
             if (string.IsNullOrEmpty(xml))
                 return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "query_stats", cancellationToken)
                     ?? McpHelpers.Status("unavailable", $"No stored plan found for query_hash '{query_hash}'{DbSuffix(database_name)}.");
 
-            return McpHelpers.Truncate(xml, 512_000) ?? "No plan XML available.";
+            return McpHelpers.Truncate(xml, PlanXmlOutputChars) ?? "No plan XML available.";
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -245,14 +248,14 @@ public sealed class DarlingMcpPlanTools
         try
         {
             var xml = await DarlingStoredPlanReader.GetQueryStorePlanTextAsync(
-                postgres, resolved.ServerId, database_name, query_id, plan_id, cancellationToken: cancellationToken);
+                postgres, resolved.ServerId, database_name, query_id, plan_id, maxOutputChars: PlanXmlOutputChars, cancellationToken: cancellationToken);
             if (string.IsNullOrEmpty(xml))
                 return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "query_store", cancellationToken)
                     ?? McpHelpers.Status(
                         "unavailable",
                         $"No stored Query Store plan found for query_id {query_id} in database '{database_name}'{PlanSuffix(plan_id)}.");
 
-            return McpHelpers.Truncate(xml, 512_000) ?? "No plan XML available.";
+            return McpHelpers.Truncate(xml, PlanXmlOutputChars) ?? "No plan XML available.";
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -277,12 +280,12 @@ public sealed class DarlingMcpPlanTools
         try
         {
             var xml = await DarlingStoredPlanReader.GetProcedurePlanXmlBySqlHandleAsync(
-                postgres, resolved.ServerId, sql_handle, cancellationToken);
+                postgres, resolved.ServerId, sql_handle, maxOutputChars: PlanXmlOutputChars, cancellationToken: cancellationToken);
             if (string.IsNullOrEmpty(xml))
                 return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "procedure_stats", cancellationToken)
                     ?? McpHelpers.Status("unavailable", $"No stored plan found for sql_handle '{sql_handle}'.");
 
-            return McpHelpers.Truncate(xml, 512_000) ?? "No plan XML available.";
+            return McpHelpers.Truncate(xml, PlanXmlOutputChars) ?? "No plan XML available.";
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -331,19 +334,55 @@ public sealed class DarlingMcpPlanTools
         try
         {
             var xml = await DarlingStoredPlanReader.GetQuerySnapshotPlanXmlAsync(
-                postgres, resolved.ServerId, collectionTimeUtc, session_id, request_id, live, cancellationToken);
+                postgres, resolved.ServerId, collectionTimeUtc, session_id, request_id, live, maxOutputChars: PlanXmlOutputChars, cancellationToken: cancellationToken);
             if (string.IsNullOrEmpty(xml))
                 return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "query_snapshots", cancellationToken)
                     ?? McpHelpers.Status(
                         "unavailable",
                         $"No stored {(live ? "live " : "")}plan found for session_id {session_id} (request_id {request_id}) at collection_time '{collection_time}'.");
 
-            return McpHelpers.Truncate(xml, 512_000) ?? "No plan XML available.";
+            return McpHelpers.Truncate(xml, PlanXmlOutputChars) ?? "No plan XML available.";
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_active_query_plan_xml", ex);
         }
+    }
+
+    /// <summary>
+    /// Where the <c>get_*_plan_xml</c> tools cut a plan for transport (500 KB of characters, the "Truncated at 500KB" in their
+    /// descriptions). #4348: the same number goes to the stored-plan read, so the statement filter stops walking a very large plan
+    /// once nothing before the cut can change, and <see cref="McpHelpers.Truncate"/> then cuts the filtered plan on a text element
+    /// and appends its marker as it always has.
+    /// </summary>
+    private const int PlanXmlOutputChars = 512_000;
+
+    /// <summary>
+    /// #4348: said when the statement filter withheld a plan whole, so the analysis is skipped instead of reading the
+    /// placeholder as XML and reporting a parse error. Worded once for the four analysis tools.
+    /// </summary>
+    internal const string WithheldPlanMessage = "This plan was withheld by the statement filter (#4348), so it was not analysed.";
+
+    /// <summary>
+    /// #4348: the one way every plan-analysis tool here turns plan XML into its result. The statement filter runs on
+    /// the XML first, because the analysis lifts parameter values and statement text out of it into fields the JSON
+    /// sweep cannot pair with their statement. A plan the filter withholds whole is answered with
+    /// <see cref="WithheldPlanMessage"/>. Kept out of <c>McpPlanAnalysisFormatter.BuildAnalysisResult</c>, which the
+    /// desktop Dashboard also calls.
+    /// </summary>
+    internal static string AnalyzeFilteredPlan(
+        string xml,
+        string? serverName,
+        string source,
+        string? identifier,
+        AnalyzerConfig? analyzerConfig,
+        ServerMetadata? metadata,
+        CancellationToken cancellationToken)
+    {
+        xml = SensitiveStatements.Xml(xml) ?? SensitiveStatements.PlaceholderText;
+        if (xml == SensitiveStatements.PlaceholderText)
+            return McpHelpers.Status("unavailable", WithheldPlanMessage);
+        return McpPlanAnalysisFormatter.BuildAnalysisResult(xml, serverName, source, identifier, analyzerConfig, metadata, cancellationToken);
     }
 
     private static readonly JsonSerializerOptions ReproJson = new() { DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull };
@@ -398,7 +437,7 @@ public sealed class DarlingMcpPlanTools
                     db = database_name;
                     text = await DarlingReproScript.ReadQueryStatsTextAsync(postgres, resolved.ServerId, query_hash!, database_name, cancellationToken);
                     planXml = text == null ? null : await DarlingStoredPlanReader.GetQueryStatsPlanXmlByHashAsync(
-                        postgres, resolved.ServerId, query_hash!, database_name, cancellationToken);
+                        postgres, resolved.ServerId, query_hash!, database_name, cancellationToken: cancellationToken);
                     break;
                 case DarlingReproScript.KindQueryStore:
                     db = database_name;
@@ -410,7 +449,7 @@ public sealed class DarlingMcpPlanTools
                     (text, isolation, db) = await DarlingReproScript.ReadSnapshotTextAsync(
                         postgres, resolved.ServerId, snapshotTime, session_id!.Value, request_id, cancellationToken);
                     planXml = text == null ? null : await DarlingStoredPlanReader.GetQuerySnapshotPlanXmlAsync(
-                        postgres, resolved.ServerId, snapshotTime, session_id.Value, request_id, live: false, cancellationToken);
+                        postgres, resolved.ServerId, snapshotTime, session_id.Value, request_id, live: false, cancellationToken: cancellationToken);
                     break;
             }
 
@@ -486,7 +525,7 @@ public sealed class DarlingMcpPlanTools
         try
         {
             var xml = await DarlingStoredPlanReader.GetBlockingPlanXmlAsync(
-                postgres, resolved.ServerId, eventTimeUtc, blocked_spid, blocked_ecid, blocking_spid, blocking_ecid, blockingSide, database_name, cancellationToken);
+                postgres, resolved.ServerId, eventTimeUtc, blocked_spid, blocked_ecid, blocking_spid, blocking_ecid, blockingSide, database_name, maxOutputChars: PlanXmlOutputChars, cancellationToken: cancellationToken);
             if (string.IsNullOrEmpty(xml))
                 return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "blocked_process_report", cancellationToken)
                     ?? McpHelpers.Status(
@@ -494,7 +533,7 @@ public sealed class DarlingMcpPlanTools
                         $"No stored {(blockingSide ? BlockingSide : BlockedSide)} plan found for blocked_spid {blocked_spid} and blocking_spid {blocking_spid} at event_time '{event_time}'{DbSuffix(database_name)}. " +
                         "The collector captures these plans best-effort, only while the statement is still in the plan cache, so many reports have none.");
 
-            return McpHelpers.Truncate(xml, 512_000) ?? "No plan XML available.";
+            return McpHelpers.Truncate(xml, PlanXmlOutputChars) ?? "No plan XML available.";
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -525,7 +564,7 @@ public sealed class DarlingMcpPlanTools
         try
         {
             var read = await DarlingStoredPlanReader.GetDeadlockVictimPlanXmlAsync(
-                postgres, resolved.ServerId, collectionTimeUtc, deadlockTimeUtc, victim_process_id, database_name, cancellationToken);
+                postgres, resolved.ServerId, collectionTimeUtc, deadlockTimeUtc, victim_process_id, database_name, maxOutputChars: PlanXmlOutputChars, cancellationToken: cancellationToken);
 
             /* Deadlocks with the same stamps that name more than one victim (whether or not each captured a plan), and no victim
                named: the plan of the wrong deadlock is worse than none (as with side above), so none is returned and the caller is
@@ -542,7 +581,7 @@ public sealed class DarlingMcpPlanTools
                         $"No stored victim plan found for the deadlock at deadlock_time '{deadlock_time}' (collection_time '{collection_time}'){DbSuffix(database_name)}. " +
                         "The collector captures the victim's plan best-effort, only while the statement is still in the plan cache, so many deadlocks have none.");
 
-            return McpHelpers.Truncate(xml, 512_000) ?? "No plan XML available.";
+            return McpHelpers.Truncate(xml, PlanXmlOutputChars) ?? "No plan XML available.";
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

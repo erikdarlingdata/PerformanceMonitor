@@ -71,7 +71,7 @@ public static class DarlingDeadlockProcessRows
         Put(row, "host_name", p.HostName);
         Put(row, "client_app", p.ClientApp);
         Put(row, "status", p.Status);
-        Put(row, "sql_text", McpHelpers.Truncate(p.SqlText, statementLength));
+        Put(row, "sql_text", McpHelpers.TruncateStatement(p.SqlText, statementLength));
         return row;
     }
 

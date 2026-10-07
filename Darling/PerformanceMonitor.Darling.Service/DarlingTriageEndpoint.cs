@@ -743,7 +743,8 @@ internal static class DarlingTriageEndpoint
                 ["sections"] = sections,
             };
 
-            return Results.Text(body.ToJsonString(), "application/json");
+            /* #4348: the page's own body holds the alert row and every section's read, so it is swept whole. */
+            return DarlingWebStatementSweep.JsonText(body, "/api/triage", logger, 0);
         });
     }
 
@@ -875,9 +876,8 @@ internal static class DarlingTriageEndpoint
         ["detail_text"] = row.DetailText,
     };
 
-    private static string? Query(HttpContext context, string key)
-    {
-        var value = context.Request.Query[key].ToString();
-        return string.IsNullOrEmpty(value) ? null : value;
-    }
+    /// <summary>The first non-empty value for a query key, or null — the read surface's binding rule, which this
+    /// calls rather than restates (#5245: a repeated key is its first value, not the values joined by a comma).</summary>
+    internal static string? Query(HttpContext context, string key) =>
+        DarlingWebEndpoints.First(context, key);
 }

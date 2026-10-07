@@ -161,11 +161,14 @@ public sealed class DarlingQueryHeatmapSurfaceAndSqlTests
         Assert.Contains("FROM query_stats", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("v_query_stats", sql, StringComparison.Ordinal);
 
-        /* The preview is resolved for the rn = 1 row of each cell only, at the #4198 bound width - inline
-           text when the row predates #1767, the dimension row when it does not, truncated last. */
+        /* The text is resolved for the rn = 1 row of each cell only - inline text when the row predates #1767, the
+           dimension row when it does not - and comes back WHOLE (#5320): the statement filter judges the whole
+           text and the preview is cut after it in C#, so no SQL cut can end inside a value whose naming text lies
+           past it. */
         Assert.Contains(
-            "LEFT(COALESCE(query_text, (SELECT d.query_text FROM query_text_dim d WHERE d.digest = ranked.query_text_digest)), $7) AS top_query_text",
+            "COALESCE(query_text, (SELECT d.query_text FROM query_text_dim d WHERE d.digest = ranked.query_text_digest)) AS top_query_text",
             sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("LEFT(", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("LEFT(query_text, 120)", sql, StringComparison.Ordinal);
 
         /* DuckDB's ARG_MAX has no Postgres equivalent; the viewer's replacement is a top-1 window over the
@@ -1002,7 +1005,9 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)",
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text, Value = DBNull.Value });
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = 5 });
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = 500 });
-        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = 120 });
+        /* #5320: the reader's SQL no longer cuts the text, so it takes no preview-width parameter; the pre-#4233 copy still does. */
+        if (sql.Contains("$7", StringComparison.Ordinal))
+            command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = 120 });
 
         await using var reader = await command.ExecuteReaderAsync(ct);
         while (await reader.ReadAsync(ct))

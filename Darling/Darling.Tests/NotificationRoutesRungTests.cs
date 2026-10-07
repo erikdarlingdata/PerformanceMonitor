@@ -460,10 +460,11 @@ public sealed class NotificationRoutesLivePostgresTests
             StoreConfigProvider.ApplyToConfig(config, view);
             /* The parent channel AFTER the apply: ApplyToConfig swaps Webhooks wholesale for the store's row,
                and this rig's row is the unseeded default. The point under test is the routes list riding the
-               same swap, which the Assert.Same below holds. */
+               same swap, which the Assert.Equal below holds. */
             config.Webhooks.SlackUrl = "https://hooks.example.invalid/parent";
             var settings = new DarlingAlertSettings(config);
-            Assert.Same(view.NotificationRoutes, settings.NotificationRoutes);
+            /* The settings read the routes through the opener (#5366), which hands back its own list: the same routes, not the same instance. */
+            Assert.Equal(view.NotificationRoutes, settings.NotificationRoutes);
 
             var decision = NotificationRouter.Resolve(DarlingSelfAlertEvaluator.CompressionJobMetric, settings.NotificationRoutes, settings);
             Assert.Equal((marker, routeId, RouteSource.Family), (decision.Slack.Destination, decision.Slack.RouteId, decision.Slack.Source));

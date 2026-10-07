@@ -174,6 +174,10 @@ OPTION(RECOMPILE);";
     public override async ValueTask<List<Row>> ReadAsync(DbDataReader reader, CollectorContext context, CancellationToken cancellationToken)
     {
         var rows = new List<Row>();
+        /* #4348: the event node goes through the statement filter's XML walk where it first enters a row. A named
+           value (the sql_text action's statement, an error message that echoes one) becomes the placeholder in
+           place and the rest of the event keeps its shape, so the stage-2 parse still reads the other fields. */
+        var scrub = context.BeginStatementScrub();
 
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -181,7 +185,7 @@ OPTION(RECOMPILE);";
             {
                 EventTime = reader.IsDBNull(0) ? null : reader.GetDateTime(0),
                 EventType = reader.IsDBNull(1) ? null : reader.GetString(1),
-                EventXml = reader.IsDBNull(2) ? null : reader.GetString(2),
+                EventXml = reader.IsDBNull(2) ? null : scrub.Xml(reader.GetString(2)),
             });
         }
 

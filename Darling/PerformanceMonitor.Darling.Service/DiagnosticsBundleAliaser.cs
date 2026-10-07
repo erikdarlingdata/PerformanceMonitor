@@ -15,6 +15,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Darling.Service;
 
@@ -570,10 +571,58 @@ internal sealed class BundleAliaser
             }
 
             case JsonValue value:
-                return value.TryGetValue<string>(out var text) ? JsonValue.Create(Alias(text)) : value.DeepClone();
+                return value.TryGetValue<string>(out var text) ? JsonValue.Create(Alias(JudgeStatementText(text))) : value.DeepClone();
             default:
                 return node.DeepClone();
         }
+    }
+
+    /// <summary>
+    /// #4348: one string of a section through the statement filter, BEFORE the alias pass (the filter reads the text the
+    /// store held, not a name already replaced). A value that opens with <c>&lt;</c> is a plan or report document and
+    /// goes to <see cref="SensitiveStatements.Xml(string?, int)"/>; one that opens with <c>{</c> or <c>[</c> and parses is
+    /// a JSON document and goes to <see cref="SensitiveStatements.Json(string)"/>, which walks its strings; anything else of
+    /// five characters or more goes to <see cref="SensitiveStatements.Text"/>. A value that merely looks like JSON (a log
+    /// line that opens with a bracket) is judged as text, so it is not replaced by the refusal sentence. Each value has
+    /// its own judging budget, so a long section never runs a later value out of time.
+    /// </summary>
+    internal static string JudgeStatementText(string text)
+    {
+        if (text.Length < 5)
+        {
+            return text;
+        }
+
+        var first = text.AsSpan().TrimStart();
+        if (first.IsEmpty)
+        {
+            return text;
+        }
+
+        if (first[0] == '<')
+        {
+            return SensitiveStatements.Xml(text) ?? SensitiveStatements.PlaceholderText;
+        }
+
+        if (first[0] is '{' or '[')
+        {
+            JsonNode? parsed = null;
+            try
+            {
+                parsed = JsonNode.Parse(text);
+            }
+            catch (JsonException)
+            {
+                /* Not a document: judged below as the text it is. */
+            }
+
+            if (parsed is JsonObject or JsonArray)
+            {
+                return SensitiveStatements.Json(text);
+            }
+        }
+
+        return SensitiveStatements.Text(text) ?? SensitiveStatements.PlaceholderText;
     }
 
     /// <summary>

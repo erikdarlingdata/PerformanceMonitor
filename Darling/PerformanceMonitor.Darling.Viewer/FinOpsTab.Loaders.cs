@@ -197,6 +197,8 @@ public partial class FinOpsTab
             data.MonthlyCost = _server.MonthlyCostUsd;
 
             /* Free space % for the storage health score, from the latest database sizes. */
+            /* #5312: deliberately NOT narrowed by the saved database filter. The free-space figure is the server's volume headroom, a
+               server-level health score, not a per-database size, so it reads every database's files whatever the filter says. */
             dbSizes = await _dataService.GetDatabaseSizeLatestAsync(_server.ServerId);
             var totalStorageMb = DatabaseSizeRow.AllocatedTotalMb(dbSizes);
             var totalFreeMb = DatabaseSizeRow.FreeTotalMb(dbSizes);
@@ -213,7 +215,7 @@ public partial class FinOpsTab
             var topConsumers = await _dataService.GetTopResourceConsumersAsync(_server.ServerId);
             FinOpsTopTotalGrid.ItemsSource = topConsumers.ByTotal;
             FinOpsTopAvgGrid.ItemsSource = topConsumers.ByAvg;
-            var dbSizeSummary = await _dataService.GetDatabaseSizeSummaryAsync(_server.ServerId);
+            var dbSizeSummary = await _dataService.GetDatabaseSizeSummaryAsync(_server.ServerId, databaseNames: SelectedDatabaseFilter);
             FinOpsDbSizeChart.ItemsSource = dbSizeSummary;
             /* The caption names only the databases that have a bar, so it is built from the list the chart is painted from. */
             var chartCaption = DatabaseSizeRow.ChartCaption(dbSizes, dbSizeSummary.Select(b => b.DatabaseName));
@@ -375,7 +377,7 @@ public partial class FinOpsTab
 
     private async Task LoadFinOpsDatabaseSizesAsync()
     {
-        var data = await _dataService.GetDatabaseSizeLatestAsync(_server.ServerId);
+        var data = await _dataService.GetDatabaseSizeLatestAsync(_server.ServerId, SelectedDatabaseFilter);
 
         /* Proportional cost share by size (mirrors Lite's LoadDatabaseSizesAsync). */
         if (_server.MonthlyCostUsd > 0 && data.Count > 0)
@@ -401,7 +403,7 @@ public partial class FinOpsTab
 
     private async Task LoadFinOpsPvsStatsAsync()
     {
-        var data = await _dataService.GetPvsStatsLatestAsync(_server.ServerId);
+        var data = await _dataService.GetPvsStatsLatestAsync(_server.ServerId, SelectedDatabaseFilter);
 
         _finopsPvsStatsFilterMgr!.UpdateData(data);
         FinOpsNoPvsStatsMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
@@ -409,7 +411,7 @@ public partial class FinOpsTab
 
         /* #1984 stage 2: the trend beside the grid — "when did it start growing" on the same axis
            family as Storage Growth. Top-5 databases by current PVS size, 7 days of hourly points. */
-        var trend = await _dataService.GetPvsTrendAsync(_server.ServerId, DateTime.UtcNow.AddDays(-7));
+        var trend = await _dataService.GetPvsTrendAsync(_server.ServerId, DateTime.UtcNow.AddDays(-7), SelectedDatabaseFilter);
         RenderPvsTrendChart(trend);
     }
 

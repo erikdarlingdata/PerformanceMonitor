@@ -773,6 +773,14 @@ public sealed class DarlingWorker : BackgroundService
 
     /* Set once by ExecuteAsync before the loop starts; the observability writes need it. */
     private NpgsqlDataSource? _postgres;
+    /* #5366: the service's password key at run time, set once at start; null before it. */
+    private DarlingPasswordKeyRuntime? _passwordKeyRuntime;
+
+    /// <summary>#5378: lets a live test give a worker the store ExecuteAsync would, so a run's row can be read back.</summary>
+    internal NpgsqlDataSource? StoreForTests
+    {
+        set => _postgres = value;
+    }
 
     /// <summary>
     /// #4961: this install's id, the eight characters that tell its Extended Events sessions from another install's on
@@ -1609,7 +1617,25 @@ LIMIT 1";
 
            Both reset with the latch on every (re)connect, and both written only by the per-server body on
            the pool thread (INV-2), like the latch itself. */
-        public string? LongQueryTraceFault { get; set; }
+        public string? LongQueryTraceFault
+        {
+            get => _longQueryTraceFault;
+            set
+            {
+                _longQueryTraceFault = value;
+                if (value is null)
+                {
+                    LongQueryTraceFaultIsPermission = false;
+                }
+            }
+        }
+
+        private string? _longQueryTraceFault;
+
+        /* #5378: the kept fault above is a permission denial (the login lacks ALTER ANY EVENT SESSION, error 15247 and its
+           kin), so the run records PERMISSIONS rather than SESSION_MISSING, and the reconcile does not repeat the create DDL
+           on every sweep. Cleared with the fault. */
+        public bool LongQueryTraceFaultIsPermission { get; set; }
 
         public string? LongQueryTracePartialNote { get; set; }
 
@@ -2594,6 +2620,10 @@ LIMIT 1";
                 _logger.LogError(
                     "Least-privilege role provisioning failed — the Viewer's admin/viewer roles may be stale " +
                     "until the next successful start: {Message}", ex.Message);
+                /* Provisioning stopped before its own rules section: a store that has never had the password rules
+                   would keep none while the viewer and mcp roles keep their earlier credentials. Best effort; the
+                   call warns for itself and never throws. */
+                await DarlingManagedRoles.EnsureServerPasswordRulesAsync(postgres, _logger, stoppingToken);
             }
         }
         else if (!config.Postgres.Managed && Hosting.DarlingHostBinding.IsRunningInContainer)
@@ -2610,6 +2640,17 @@ LIMIT 1";
                 _composeStoreRolesProvisioned = true;
                 _appliedComposeStatementTimeoutSeconds = verdict.AppliedComposeStatementTimeoutSeconds;
             }
+            else
+            {
+                await DarlingManagedRoles.EnsureServerPasswordRulesAsync(postgres, _logger, stoppingToken);
+            }
+        }
+        else if (!config.Postgres.Managed)
+        {
+            /* A self-managed store gets the store's password rules from tools/provision-roles.sql; a store upgraded
+               without re-running it has none. Best-effort on every start as the role that owns the tables, the way the
+               database-default search_path is: one warning naming the script when the login may not create them. */
+            await DarlingManagedRoles.EnsureServerPasswordRulesAsync(postgres, _logger, stoppingToken);
         }
 
         /* Optional TimescaleDB adoption — runtime setup, deliberately NOT a versioned migration
@@ -2879,6 +2920,12 @@ LIMIT 1";
            users, by whichever look found it so (role provisioning above, a host, or this load), which removes the key
            there and then: null means the file could not be used, the reason is already logged, and those runs refuse
            rather than hash without it. */
+        /* #5366: the service's password key, after migrations and role provisioning and before any collection or reload
+           can need it: loaded (or made and published) here, with the legacy pin snapshot, and the ring every writer and
+           the resolver seal and open through is set. Until this returns the ring refuses with the "still loading" reason.
+           Never throws; a key that cannot be used is a refusing ring with the reason logged and recorded in the store. */
+        _passwordKeyRuntime = await DarlingPasswordKeyRuntime.StartForServiceAsync(
+            config, DarlingConfig.ResolveConfigPath(), postgres, _logger, stoppingToken);
         var logHashKeyLoad = DarlingLogHashKeyFile.LoadForService(config, DarlingConfig.ResolveConfigPath(), _logger);
         var logHashKey = logHashKeyLoad.Key;
         /* #4004 review, round 3: a key that replaced one the directory check discarded is noted on the collection-log
@@ -2942,7 +2989,7 @@ LIMIT 1";
            are hoisted here because the AN3 analysis-notification path below shares them. The mute
            service is hoisted too so a reload can re-LoadAsync() it (closes F16 — the engine holds
            its IsAlertMuted delegate, so refreshing the same instance's cache mutes the next sweep). */
-        var alertSettings = new DarlingAlertSettings(config);
+        var alertSettings = new DarlingAlertSettings(config, _logger);
         var historyStore = new PgAlertHistoryStore(postgres, _logger);
         var webhookAlertService = new WebhookAlertService(
             alertSettings, DarlingAlertDeliverer.Branding,
@@ -3213,6 +3260,14 @@ LIMIT 1";
                wall clock the collectors' due stamps are written on, so a sleep, a stall or a clock step of either sign
                since the previous pass raises the floor before this pass launches any body. */
             _skipCreditFloor.Tick(DateTime.UtcNow);
+
+            /* #5366: the password key check, once per pass: the store still publishes the key this service holds and the key
+               tables still have all their triggers. A change turns the ring to refusing until the start fixes it; the check
+               never throws and costs two small reads. */
+            if (_passwordKeyRuntime is not null)
+            {
+                await _passwordKeyRuntime.SweepCheckAsync(stoppingToken);
+            }
 
             /* Control-plane reload beacon: poll config_version at a SAFE point (top of the sweep, never
                mid-collection). On change, re-read the store and hot-swap the live config: the alert /
@@ -4486,6 +4541,10 @@ LIMIT 1";
                or the server reconnects. */
             /* #4961: a read-only database's refusal was already logged where it happened, with why and what to change. */
             var readOnlyRefusal = enabled && DarlingXeSessions.IsReadOnlyDatabaseRefusal(ex);
+            /* #5378: a login that was told no (error 15247, the other denial numbers) stays told no until it is granted
+               something, so the create is not re-run on every sweep: it backs off exactly like the read-only refusal above,
+               to the hourly create pass, and a reconnect or a change of the state key tries again at once. */
+            var permissionDenied = enabled && DarlingXeSessions.ErrorNumbersOf(ex).Any(SqlServerPermissionErrors.IsPermissionDenied);
             logger.Log(createFailureWarned || readOnlyRefusal ? LogLevel.Debug : LogLevel.Warning,
                 "[{Server}] Failed to reconcile the long-query completion XE session: {Message}",
                 server.Config.DisplayName, AlwaysOnXeSessions.DescribeFailure(ex));
@@ -4495,7 +4554,7 @@ LIMIT 1";
                refused is not tried again on every sweep. The latch counts the reconcile as applied for this state: the next
                attempt is the hourly create pass, logged at Debug, and a reconnect or a change of the state key runs the
                whole reconcile again. The fault below stays set, so every run still records it. */
-            if (readOnlyRefusal)
+            if (readOnlyRefusal || permissionDenied)
             {
                 server.LongQueryTraceApplied = enabled;
                 server.LongQueryTraceAppliedKey = stateKey;
@@ -4536,9 +4595,11 @@ LIMIT 1";
 
                 /* #4961: the sentence about Azure SQL Database's caps rides on a failed create or start there, and on nothing else. */
                 var refusal = AlwaysOnXeSessions.DescribeFailure(ex);
-                server.LongQueryTraceFault = refusedIn is null
-                    ? $"XE session {sessionLabel} could not be created, so no completions can be captured until it is: {refusal}"
-                    : $"XE session {sessionLabel} could not be created in any monitored database (first refusal in [{refusedIn}]), so no completions can be captured until it is: {refusal}";
+                var where = refusedIn is null ? string.Empty : $" in any monitored database (first refusal in [{refusedIn}])";
+                server.LongQueryTraceFault = permissionDenied
+                    ? $"XE session {sessionLabel} could not be created{where} because the monitoring login lacks the permission to create Extended Events sessions (ALTER ANY EVENT SESSION on-premises, CREATE ANY DATABASE EVENT SESSION on Azure SQL Database), so no completions can be captured until it is granted: {refusal}"
+                    : $"XE session {sessionLabel} could not be created{where}, so no completions can be captured until it is: {refusal}";
+                server.LongQueryTraceFaultIsPermission = permissionDenied;
                 server.LongQueryTracePartialNote = null;
             }
         }
@@ -7321,7 +7382,7 @@ LIMIT 1";
             return;
         }
 
-        var alertSettings = new DarlingAlertSettings(config);
+        var alertSettings = new DarlingAlertSettings(config, _logger);
 
         if (!alertSettings.CpuEnabled)
         {
@@ -7638,7 +7699,7 @@ LIMIT 1";
             return;
         }
 
-        var alertSettings = new DarlingAlertSettings(config);
+        var alertSettings = new DarlingAlertSettings(config, _logger);
 
         if (!alertSettings.DeadlockEnabled)
         {
@@ -7846,7 +7907,7 @@ LIMIT 1";
             return;
         }
 
-        var alertSettings = new DarlingAlertSettings(config);
+        var alertSettings = new DarlingAlertSettings(config, _logger);
 
         if (!alertSettings.BlockingEnabled)
         {
@@ -8073,7 +8134,7 @@ LIMIT 1";
             return;
         }
 
-        var alertSettings = new DarlingAlertSettings(config);
+        var alertSettings = new DarlingAlertSettings(config, _logger);
 
         if (!alertSettings.LongRunningQueryEnabled)
         {
@@ -8297,7 +8358,7 @@ LIMIT 1";
             return;
         }
 
-        var alertSettings = new DarlingAlertSettings(config);
+        var alertSettings = new DarlingAlertSettings(config, _logger);
         if (!alertSettings.PoisonWaitEnabled)
         {
             return;
@@ -12675,8 +12736,24 @@ AND   j.hypertable_name = '{relation}'", connection))
         }
 
         _logger.LogInformation("[{Server}] fetch_plan returned a {Length}-char plan", displayName, planXml.Length);
-        return new CommandOutcome(true, "plan fetched",
-            JsonSerializer.Serialize(new { success = true, planXml }));
+        return PlanResultOutcome("plan fetched", planXml);
+    }
+
+    /// <summary>
+    /// #5320 (the Darling twin of Lite's <c>LivePlanDisplay.Filter</c>): the one place the <c>fetch_plan</c> and
+    /// <c>execute_actual_plan</c> handlers turn a plan read live from the monitored server into the command's
+    /// <c>result_json</c>. The plan is judged whole by the statement filter BEFORE it is serialized, so the stored
+    /// result never holds the raw text (the viewer deletes the row after it reads it, but a row it never reads stays
+    /// until the terminal-command purge). The same instance comes back when nothing is named; the whole-plan
+    /// marker comes back when the plan cannot be judged, and the viewer shows that as withheld. Nothing cuts the
+    /// plan here, so there is no second judge after a cut.
+    /// </summary>
+    internal static CommandOutcome PlanResultOutcome(string resultStatus, string planXml)
+    {
+        /* A block body, not an expression body: the statement-column census reads method bodies, and it only sees a
+           block (#5367 review round 2, N1). */
+        return new(true, resultStatus,
+            JsonSerializer.Serialize(new { success = true, planXml = SensitiveStatements.Xml(planXml) }));
     }
 
     /// <summary>The SQL command timeout (seconds) for the live active-queries DMV read. A "what is running now"
@@ -13068,8 +13145,7 @@ LIMIT 1";
             }
 
             _logger.LogInformation("[{Server}] execute_actual_plan captured a {Length}-char actual plan", displayName, planXml.Length);
-            return new CommandOutcome(true, "actual plan captured",
-                JsonSerializer.Serialize(new { success = true, planXml }));
+            return PlanResultOutcome("actual plan captured", planXml);
         }
         catch (OperationCanceledException)
         {
@@ -14011,6 +14087,12 @@ LIMIT 1";
                are the ones an operator already knows from the deadlock and blocked-process collectors. */
             if (IsLongQueryCompletionsCollector(collectorName) && server.LongQueryTraceFault is { } traceFault)
             {
+                /* #5378: a denied create is a permission state, not a capture that broke: PERMISSIONS, as in Lite. */
+                if (server.LongQueryTraceFaultIsPermission)
+                {
+                    throw new DarlingXeSessionDeniedException(traceFault);
+                }
+
                 throw new DarlingXeSessionMissingException(traceFault);
             }
 
@@ -14214,6 +14296,20 @@ LIMIT 1";
         catch (OperationCanceledException)
         {
             throw;
+        }
+        catch (DarlingXeSessionDeniedException ex)
+        {
+            /* #5378: the long-query session's create was denied (the login lacks ALTER ANY EVENT SESSION). A least-privilege
+               choice an operator is entitled to make (#1823), so PERMISSIONS, the status every other denied source records,
+               and not the SESSION_MISSING of a session that broke. The row is written on every sweep, so collection health
+               keeps reading it; the line logs at Warning once and at Debug after, like the missing-session line (#4964). */
+            _logger.Log(server.XeSessionMissingWarnings.TryMarkWarned(collectorName) ? LogLevel.Warning : LogLevel.Debug,
+                "  [{Server}] {Collector} => insufficient permissions: {Message}",
+                server.Config.DisplayName, collectorName, ex.Message);
+
+            await DarlingObservability.LogCollectionAsync(
+                _postgres!, runtime, collectorName, "PERMISSIONS", 0, runClock.ElapsedMilliseconds, 0, ex.Message, fanout: null, phases: null, drain: null, fetchPhases: null, sweepPeerMaxMs: peerMaxAtDispatchMs, _logger, cancellationToken);
+            return 0;
         }
         catch (DarlingXeSessionMissingException ex)
         {
@@ -14926,6 +15022,15 @@ LIMIT 1";
         /// there is no inner exception to carry - and the arm that catches this reads the message alone.
         /// </summary>
         public DarlingXeSessionMissingException(string message) : base(message) { }
+    }
+
+    /// <summary>
+    /// #5378: the reconcile's kept failure to create the long-query session was a permission denial. Only its message
+    /// survives to the run, like <see cref="DarlingXeSessionMissingException"/>; the run records PERMISSIONS for it.
+    /// </summary>
+    private sealed class DarlingXeSessionDeniedException : Exception
+    {
+        public DarlingXeSessionDeniedException(string message) : base(message) { }
     }
 
     private static async Task<CollectorRunResult> RunXeTolerantAsync<TRow>(

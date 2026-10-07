@@ -14,6 +14,7 @@ using System.Linq;
 using System.Text;
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Darling.Service;
 
@@ -200,7 +201,10 @@ internal static class DiagnosticsBundleServiceLog
         {
             if (message is not null && time is { } t && level is "WARN" or "ERROR" or "CRIT" && t >= windowStartLocal)
             {
+                /* #5320: the whole entry is judged first, then cut, so a statement past the cut still withholds the text
+                   before it. The judge has its own time budget and fails closed to the placeholder. */
                 var m = message.ToString();
+                m = SensitiveStatements.Text(m) ?? SensitiveStatements.PlaceholderText;
                 result.Add((t, level, category, CutAtWhitespace(m, maxEntryChars)));
             }
 
@@ -230,10 +234,8 @@ internal static class DiagnosticsBundleServiceLog
             }
             else if (message is not null && line.StartsWith("    ", StringComparison.Ordinal))
             {
-                if (message.Length < maxEntryChars)
-                {
-                    message.Append('\n').Append(line, 4, line.Length - 4);
-                }
+                /* Every continuation line joins the entry (the tail read bounds the total), so the judge sees all of it. */
+                message.Append('\n').Append(line, 4, line.Length - 4);
             }
         }
 

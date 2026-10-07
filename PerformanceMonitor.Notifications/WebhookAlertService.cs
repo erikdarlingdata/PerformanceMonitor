@@ -329,18 +329,23 @@ public class WebhookAlertService
                IS the settings member the four gates above read, so the fan-out is the pre-routes one byte
                for byte. A channel that resolves to nothing is not attempted, exactly as an unconfigured one
                was not. The decision rides the result so the deliverer can record it on the history row. */
-            var route = NotificationRouter.Resolve(metricName, _settings.NotificationRoutes, _settings);
+            /* #5366: ONE snapshot of the webhook settings for this whole delivery. The routing decision above and
+               every channel's URL, headers, body template and proxy below read from it, so a saved setting that
+               changes while the posts are in flight cannot send a later channel somewhere the decision did not
+               name. With an adapter that does not override SnapshotForDelivery (Lite) it is the live settings. */
+            var delivery = _settings.SnapshotForDelivery();
+            var route = NotificationRouter.Resolve(metricName, delivery.NotificationRoutes, delivery);
 
             if (route.Teams.Destination is { } teamsUrl)
             {
                 attempted = true;
-                Record(NotificationRouter.TeamsChannel, await TrySendTeamsAlertAsync(teamsUrl, metricName, serverName, currentValue, thresholdValue, renderContext, triageUrl, prose, nowUtc, displayName, cancellationToken));
+                Record(NotificationRouter.TeamsChannel, await TrySendTeamsAlertAsync(delivery, teamsUrl, metricName, serverName, currentValue, thresholdValue, renderContext, triageUrl, prose, nowUtc, displayName, cancellationToken));
             }
 
             if (route.Slack.Destination is { } slackUrl)
             {
                 attempted = true;
-                Record(NotificationRouter.SlackChannel, await TrySendSlackAlertAsync(slackUrl, metricName, serverName, currentValue, thresholdValue, renderContext, triageUrl, prose, nowUtc, displayName, cancellationToken));
+                Record(NotificationRouter.SlackChannel, await TrySendSlackAlertAsync(delivery, slackUrl, metricName, serverName, currentValue, thresholdValue, renderContext, triageUrl, prose, nowUtc, displayName, cancellationToken));
             }
 
             if (route.Generic.Destination is { } genericUrl)
@@ -349,13 +354,13 @@ public class WebhookAlertService
                    so it stays the immutable metric name — the display name is a human-title concern only, and
                    this channel has no title. The prose detail DOES go, because it is alert content. */
                 attempted = true;
-                Record(NotificationRouter.GenericChannel, await TrySendGenericAlertAsync(genericUrl, metricName, serverName, currentValue, thresholdValue, serverId, renderContext, triageUrl, prose, nowUtc, cancellationToken));
+                Record(NotificationRouter.GenericChannel, await TrySendGenericAlertAsync(delivery, genericUrl, metricName, serverName, currentValue, thresholdValue, serverId, renderContext, triageUrl, prose, nowUtc, cancellationToken));
             }
 
             if (route.PagerDuty.Destination is { } pagerDutyKey)
             {
                 attempted = true;
-                var pagerDutyError = await TrySendPagerDutyAlertAsync(pagerDutyKey, metricName, serverName, currentValue, thresholdValue, serverId, renderContext, triageUrl, prose, nowUtc, displayName, cancellationToken);
+                var pagerDutyError = await TrySendPagerDutyAlertAsync(delivery, pagerDutyKey, metricName, serverName, currentValue, thresholdValue, serverId, renderContext, triageUrl, prose, nowUtc, displayName, cancellationToken);
                 Record(NotificationRouter.PagerDutyChannel, pagerDutyError);
 
                 /* With auto-resolve on, a DELIVERED close re-opens the lifecycle: the cooldown entry the
@@ -366,7 +371,7 @@ public class WebhookAlertService
                    and it names exactly the pair's firing metric, so a failed close never re-arms an outage
                    whose incident may still be open in PagerDuty. */
                 if (pagerDutyError is null
-                    && _settings.PagerDutyAutoResolve
+                    && delivery.PagerDutyAutoResolve
                     && AlertFamily.RecoveryPairs.TryGetValue(metricName, out var clearedFiring))
                 {
                     _cooldown.ClearMetric(serverId, clearedFiring);
@@ -570,6 +575,7 @@ public class WebhookAlertService
     /// (#3598) — the parent's URL when no route touched this firing — while the proxy stays the parent's:
     /// a route says where a family lands, not how the channel type is reached.</summary>
     private async Task<string?> TrySendTeamsAlertAsync(
+        IAlertSettings settings,
         string webhookUrl,
         string metricName,
         string serverName,
@@ -586,7 +592,7 @@ public class WebhookAlertService
         {
             var payload = BuildTeamsPayload(metricName, serverName, currentValue, thresholdValue, _branding, context: context, triageUrl: triageUrl,
                 detailText: detailText, displayName: displayName, nowUtc: nowUtc);
-            var error = await PostWebhookAsync(webhookUrl, payload, _settings.TeamsProxyAddress, cancellationToken: cancellationToken);
+            var error = await PostWebhookAsync(webhookUrl, payload, settings.TeamsProxyAddress, cancellationToken: cancellationToken);
 
             if (error != null)
             {
@@ -886,6 +892,7 @@ public class WebhookAlertService
     /// <summary>Posts to Slack. Null when the post succeeded, the error text when it did not — see
     /// <see cref="TrySendTeamsAlertAsync"/>, including for the routed <paramref name="webhookUrl"/>.</summary>
     private async Task<string?> TrySendSlackAlertAsync(
+        IAlertSettings settings,
         string webhookUrl,
         string metricName,
         string serverName,
@@ -902,7 +909,7 @@ public class WebhookAlertService
         {
             var payload = BuildSlackPayload(metricName, serverName, currentValue, thresholdValue, _branding, context: context, triageUrl: triageUrl,
                 detailText: detailText, displayName: displayName, nowUtc: nowUtc);
-            var error = await PostWebhookAsync(webhookUrl, payload, _settings.SlackProxyAddress, cancellationToken: cancellationToken);
+            var error = await PostWebhookAsync(webhookUrl, payload, settings.SlackProxyAddress, cancellationToken: cancellationToken);
 
             if (error != null)
             {
@@ -1888,6 +1895,7 @@ public class WebhookAlertService
     /// too: an operator config error still delivers nothing, and naming it is the difference between a
     /// fixable row and a bare "failed".</summary>
     private async Task<string?> TrySendGenericAlertAsync(
+        IAlertSettings settings,
         string webhookUrl,
         string metricName,
         string serverName,
@@ -1905,15 +1913,23 @@ public class WebhookAlertService
             /* A malformed headers JSON / body template is an operator config error, not a transport
                failure — but it still counts as a failure so the health surface and the log throttle
                report a channel that is delivering nothing, and it must never throw into the alert loop. */
-            if (!TryParseHeaders(_settings.GenericWebhookHeadersJson, out var headers, out var headerError))
+            if (!TryParseHeaders(settings.GenericWebhookHeadersJson, out var headers, out var headerError))
             {
                 RecordGenericFailure(headerError!);
                 return headerError;
             }
 
+            /* #5366: the configured headers go only to the generic URL itself or a path under it on the same
+               scheme, host and port. A route to any other URL gets the body but not the headers. */
+            if (headers.Count > 0 && !HeadersApplyTo(webhookUrl, settings.GenericWebhookUrl))
+            {
+                headers = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                _logger.LogInformation("Generic webhook headers were not sent: the routed endpoint is not the generic URL or a path under it");
+            }
+
             var payload = BuildGenericPayload(
                 metricName, serverName, currentValue, thresholdValue, _branding,
-                context: context, bodyTemplate: _settings.GenericWebhookBodyTemplate, serverId: serverId,
+                context: context, bodyTemplate: settings.GenericWebhookBodyTemplate, serverId: serverId,
                 triageUrl: triageUrl, detailText: detailText, nowUtc: nowUtc);
 
             if (!IsWellFormedJson(payload, out var bodyError))
@@ -1925,7 +1941,7 @@ public class WebhookAlertService
             /* #3598: the routed endpoint; headers, body template and proxy stay the parent's — a route
                redirects the POST, it does not re-author it. */
             var error = await PostWebhookAsync(
-                webhookUrl, payload, _settings.GenericWebhookProxyAddress, headers, cancellationToken);
+                webhookUrl, payload, settings.GenericWebhookProxyAddress, headers, cancellationToken);
 
             if (error != null)
             {
@@ -1953,6 +1969,47 @@ public class WebhookAlertService
             _logger.LogError($"Generic webhook error: {ex.Message}");
             return ex.Message;
         }
+    }
+
+    /// <summary>Whether the generic headers go to <paramref name="routeUrl"/> (#5366): it has the same scheme, host
+    /// and port as <paramref name="genericUrl"/>, and its path is the generic path or continues it at a "/"
+    /// boundary, so "/alerts" covers "/alerts" and "/alerts/team-a" but not "/alerts2" or "/other". Paths compare
+    /// case-sensitively after URI parsing; the query string is ignored. A generic URL whose path is "/" covers
+    /// only a route whose path is exactly "/", and a route path containing %2F or %5C (any case) matches nothing.
+    /// Text that is not an absolute URL matches nothing, not even itself.</summary>
+    internal static bool HeadersApplyTo(string? routeUrl, string? genericUrl)
+    {
+        if (!Uri.TryCreate(routeUrl?.Trim(), UriKind.Absolute, out var a) || !Uri.TryCreate(genericUrl?.Trim(), UriKind.Absolute, out var b))
+        {
+            return false;
+        }
+
+        if (!string.Equals(a.Scheme, b.Scheme, StringComparison.OrdinalIgnoreCase)
+            || !string.Equals(a.IdnHost, b.IdnHost, StringComparison.OrdinalIgnoreCase)
+            || a.Port != b.Port)
+        {
+            return false;
+        }
+
+        var genericPath = b.AbsolutePath.TrimEnd('/');
+        var routePath = a.AbsolutePath;
+
+        /* A route path with an encoded slash or backslash does not take the headers: the "/" boundary below is for
+           plain paths only. */
+        if (routePath.Contains("%2F", StringComparison.OrdinalIgnoreCase) || routePath.Contains("%5C", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        /* A generic URL at the site root has an empty path here: it covers only the root itself, not every path
+           on the host. */
+        if (genericPath.Length == 0)
+        {
+            return routePath == "/";
+        }
+
+        return routePath.Equals(genericPath, StringComparison.Ordinal)
+            || routePath.StartsWith(genericPath + "/", StringComparison.Ordinal);
     }
 
     /* The Teams/Slack log-throttle shape (loud for the first 3, then every 50th) — factored out only
@@ -2402,6 +2459,7 @@ public class WebhookAlertService
     /// <summary>Posts to PagerDuty Events v2. Null when the post succeeded, the error text when it did not
     /// — see <see cref="TrySendTeamsAlertAsync"/>.</summary>
     private async Task<string?> TrySendPagerDutyAlertAsync(
+        IAlertSettings settings,
         string routingKey,
         string metricName,
         string serverName,
@@ -2420,7 +2478,7 @@ public class WebhookAlertService
             /* Derive the dedup_key from the same fingerprint the cooldown uses, so repeated alerts for
                the same ongoing incident correlate into one PagerDuty alert. Falls back to a stable
                metric+server key when there is no incident. */
-            var dedupKey = DerivePagerDutyDedupKeyForSend(serverId, metricName, context, _settings);
+            var dedupKey = DerivePagerDutyDedupKeyForSend(serverId, metricName, context, settings);
 
             /* #3598: the routed routing key (a PagerDuty SERVICE is a destination); the EU-region flag and
                proxy stay the parent's. */
@@ -2428,7 +2486,7 @@ public class WebhookAlertService
                 metricName, serverName, currentValue, thresholdValue, _branding,
                 routingKey, context: context, dedupKey: dedupKey, triageUrl: triageUrl,
                 detailText: detailText, displayName: displayName, nowUtc: nowUtc,
-                autoResolve: _settings.PagerDutyAutoResolve);
+                autoResolve: settings.PagerDutyAutoResolve);
 
             /* #4752: test-only override for the PagerDuty send above (below). A test funneling an
                alert THROUGH the service must read the payload the wire saw — which a real post won't let
@@ -2436,10 +2494,10 @@ public class WebhookAlertService
                production endpoint (it is not routed, unlike the token channels). The override answers the
                send and captures the payload instead; it is on the instance (not static), so one test's
                capture can never leak into another's run. Production construction sites never set it. */
-            var endpoint = PagerDutyEndpoint(_settings.PagerDutyUseEuRegion);
+            var endpoint = PagerDutyEndpoint(settings.PagerDutyUseEuRegion);
             var error = PostPagerDutyAsyncOverride is not null
                 ? await PostPagerDutyAsyncOverride(endpoint, payload)
-                : await PostWebhookAsync(endpoint, payload, _settings.PagerDutyProxyAddress, cancellationToken: cancellationToken);
+                : await PostWebhookAsync(endpoint, payload, settings.PagerDutyProxyAddress, cancellationToken: cancellationToken);
 
             if (error != null)
             {
@@ -2810,6 +2868,15 @@ public class WebhookAlertService
 
     private static readonly ConcurrentDictionary<string, HttpClient> s_proxyClients = new();
 
+    /* #5366: a send that carries the generic headers does not follow redirects, so the headers go to the URL they
+       were set up for and nowhere else. These two clients serve only those sends; sends without headers keep the
+       clients above. */
+    private static readonly HttpClient s_defaultNoRedirectClient =
+        new(new SocketsHttpHandler { PooledConnectionLifetime = TimeSpan.FromMinutes(5), AllowAutoRedirect = false })
+        { Timeout = TimeSpan.FromSeconds(30) };
+
+    private static readonly ConcurrentDictionary<string, HttpClient> s_proxyNoRedirectClients = new();
+
     /* #4752: how long ONE webhook post may take, from the send to the last byte of the response. The pooled
        clients' 30-second Timeout stays as the outer bound and is not what a post normally meets. A delivery
        posts to up to four channels one after another, so an endpoint that accepts the connection and never
@@ -2818,17 +2885,18 @@ public class WebhookAlertService
        slower one is reported as failed, with the timeout as the reason, instead of being waited on. */
     internal static readonly TimeSpan WebhookPostTimeout = TimeSpan.FromSeconds(10);
 
-    private static HttpClient GetHttpClient(string? proxyAddress)
+    private static HttpClient GetHttpClient(string? proxyAddress, bool followRedirects = true)
     {
         if (string.IsNullOrWhiteSpace(proxyAddress))
-            return s_defaultClient;
+            return followRedirects ? s_defaultClient : s_defaultNoRedirectClient;
 
-        return s_proxyClients.GetOrAdd(proxyAddress, addr =>
+        return (followRedirects ? s_proxyClients : s_proxyNoRedirectClients).GetOrAdd(proxyAddress, addr =>
             new HttpClient(new SocketsHttpHandler
             {
                 Proxy = new WebProxy(addr),
                 UseProxy = true,
-                PooledConnectionLifetime = TimeSpan.FromMinutes(5)
+                PooledConnectionLifetime = TimeSpan.FromMinutes(5),
+                AllowAutoRedirect = followRedirects
             })
             { Timeout = TimeSpan.FromSeconds(30) });
     }
@@ -2865,7 +2933,8 @@ public class WebhookAlertService
         TimeSpan postTimeout,
         CancellationToken cancellationToken)
     {
-        var client = GetHttpClient(proxyAddress);
+        var sendsHeaders = headers is { Count: > 0 };
+        var client = GetHttpClient(proxyAddress, followRedirects: !sendsHeaders);
         using var content = new StringContent(jsonPayload, Encoding.UTF8, "application/json");
         using var request = new HttpRequestMessage(HttpMethod.Post, webhookUrl) { Content = content };
 
@@ -2887,6 +2956,13 @@ public class WebhookAlertService
 
             if (response.IsSuccessStatusCode)
                 return null;
+
+            /* #5366: a redirect is not followed on a send with headers. The message names no URL and no header. */
+            if (sendsHeaders && (int)response.StatusCode is >= 300 and < 400)
+            {
+                return string.Create(CultureInfo.InvariantCulture,
+                    $"HTTP {(int)response.StatusCode}: the endpoint answered with a redirect. Set the webhook URL to the final address.");
+            }
 
             /* Cap the destination's error body: it goes into the log + the health getter, and an unbounded read
                lets a hostile/misconfigured endpoint bloat both (and, if it echoes request headers, spill more of

@@ -71,6 +71,10 @@ LIMIT 1";
         // Fetch plan XML live from SQL Server
         var planXml = await _planFetcher.FetchPlanXmlAsync(context.ServerId, planHandle, context.CancellationToken);
         if (string.IsNullOrEmpty(planXml)) return;
+        // #4348: the plan is judged BEFORE it is analyzed. A warning quotes up to 300 characters of a predicate or
+        // a statement from the plan, so a statement the filter withholds must reach the analyzer already withheld,
+        // with its predicates and parameter values: each quote is then judged with its statement.
+        planXml = SensitiveStatements.Xml(planXml)!;
 
         try
         {
@@ -226,7 +230,7 @@ LIMIT 10";
                 while (await reader.ReadAsync(context.CancellationToken))
                 {
                     if (!reader.IsDBNull(0))
-                        planXmls.Add(reader.GetString(0));
+                        planXmls.Add(SensitiveStatements.Xml(reader.GetString(0))!); // #4348: judged before the analyzer quotes it
                 }
             }
 

@@ -19,14 +19,14 @@ using Xunit;
 namespace Darling.Tests;
 
 /// <summary>
-/// V165: the PagerDuty auto-resolve opt-in on <c>config.config_notification</c> — when set, the closing
+/// V166: the PagerDuty auto-resolve opt-in on <c>config.config_notification</c> — when set, the closing
 /// edge of an edge-type alert pair (<see cref="AlertFamily.RecoveryPairs"/>: a connection's "Server
 /// Restored", a replica's "AG Replica Reconnected") is sent to PagerDuty as a <c>resolve</c> on the same
 /// dedup_key its firing edge's trigger opened, closing the incident; when unset (the default) the closing
 /// edge is an info-severity trigger and the incident stays open, so the tool never auto-resolves a
 /// third-party incident unasked.
 ///
-/// <para>The rung is numbered 165, the ladder's next free version above the top it landed under (164, the
+/// <para>The rung is numbered 166, the ladder's next free version above the top it landed under (165, the
 /// query-stats hour ledger): the ladder is applied and stamped in version order, so the only wrong number
 /// is a COLLISION with one already in the ladder.</para>
 ///
@@ -36,11 +36,11 @@ namespace Darling.Tests;
 /// </summary>
 public sealed class PagerDutyAutoResolveRungTests
 {
-    private const int RungVersion = 165;
-    private const int PreviousVersion = 164;
+    private const int RungVersion = 166;
+    private const int PreviousVersion = 165;
 
     /// <summary>This rung's sentinel ordinal in the viewer probe — the newest, so the last argument.</summary>
-    private const int ProbeOrdinal = 140;
+    private const int ProbeOrdinal = 141;
 
     private const string ResolveColumn = "pagerduty_auto_resolve";
 
@@ -136,16 +136,16 @@ public sealed class PagerDutyAutoResolveRungTests
         behind[ProbeOrdinal] = false;
         Assert.Equal(PreviousVersion, (int)method.Invoke(null, behind)!);
 
-        /* And in the source, the arm sits ABOVE V164's — newest-first is the whole contract of that method —
+        /* And in the source, the arm sits ABOVE V165's — newest-first is the whole contract of that method —
            and returns this build's version rather than a literal that could drift from it. */
-        var v165 = viewer.IndexOf("if (hasPagerDutyAutoResolve)", StringComparison.Ordinal);
-        var v164 = viewer.IndexOf("if (hasQueryStatsHourLedger)", StringComparison.Ordinal);
-        Assert.True(v165 >= 0, "the viewer has no V165 sentinel arm — a fully-migrated store would map to 164");
-        Assert.True(v164 >= 0, "the V164 arm is gone, so this pin is comparing against nothing");
-        Assert.True(v165 < v164, "the V165 arm sits below V164's, so a current store maps one rung low");
+        var v166 = viewer.IndexOf("if (hasPagerDutyAutoResolve)", StringComparison.Ordinal);
+        var v165 = viewer.IndexOf("if (hasPasswordKey)", StringComparison.Ordinal);
+        Assert.True(v166 >= 0, "the viewer has no V166 sentinel arm — a fully-migrated store would map to 165");
+        Assert.True(v165 >= 0, "the V165 arm is gone, so this pin is comparing against nothing");
+        Assert.True(v166 < v165, "the V166 arm sits below V165's, so a current store maps one rung low");
         Assert.Contains(
             "return " + StorageVersion.SchemaVersion.ToString(CultureInfo.InvariantCulture) + ";",
-            viewer[v165..], StringComparison.Ordinal);
+            viewer[v166..], StringComparison.Ordinal);
     }
 
     /* ---- every notification-row surface names the column ---------------------------------------------- */

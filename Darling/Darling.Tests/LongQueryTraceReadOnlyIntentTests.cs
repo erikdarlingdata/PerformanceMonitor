@@ -432,13 +432,54 @@ public sealed class LongQueryTraceReadOnlyIntentTests : IAsyncDisposable
     public async Task Azure_ARefusalThatIsNotReadOnly_StillRetriesOnEverySweep()
     {
         var rig = BuildRig("beta", readOnlyIntent: false);
-        rig.Refusal = _ => SqlExceptionFactory.Create(262, 14, "CREATE EVENT SESSION permission denied.");
+        /* Not a permission denial: 262 is one now (#5378), and a denial backs off like a read-only refusal. */
+        rig.Refusal = _ => SqlExceptionFactory.Create(1105, 17, "Could not allocate space for the event session.");
 
         await rig.ReconcileAsync();
         await rig.ReconcileAsync();
         await rig.ReconcileAsync();
 
         Assert.Equal(3, rig.Steps.Count);
+    }
+
+    /* ── A denied create is a permission state (#5378) ── */
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task ADeniedCreate_IsAPermissionFault_BacksOffToTheHourlyPass_AndIsTriedAgainOnAReconnect(bool azureSqlDatabase)
+    {
+        var rig = BuildRig("beta", readOnlyIntent: false, azureSqlDatabase);
+        rig.Refusal = step => step is LongQueryTraceStep.Stop or LongQueryTraceStep.Drop
+            ? null
+            : SqlExceptionFactory.Create(15247, 14, "User does not have permission to perform this action.");
+
+        await rig.ReconcileAsync();
+
+        /* The run records PERMISSIONS from the kept fault, and the message says what to grant. */
+        Assert.True(rig.State.LongQueryTraceFaultIsPermission);
+        Assert.Contains("ALTER ANY EVENT SESSION", rig.State.LongQueryTraceFault, StringComparison.Ordinal);
+        Assert.Single(rig.Steps);
+        var loudAfterTheFirst = rig.Loud().Count;
+        Assert.NotEqual(0, loudAfterTheFirst);
+
+        /* Within the hour: the create is not run again, on any sweep, no line repeats, and the fault stays. */
+        rig.Clock += LongQueryTraceDatabases.RetryInterval - TimeSpan.FromMinutes(1);
+        await rig.ReconcileAsync();
+        await rig.ReconcileAsync();
+        Assert.Single(rig.Steps);
+        Assert.Equal(loudAfterTheFirst, rig.Loud().Count);
+        Assert.True(rig.State.LongQueryTraceFaultIsPermission);
+
+        /* A reconnect resets the latch, as it does for every other reconcile: the login may have been granted since. */
+        rig.State.LongQueryTraceApplied = null;
+        rig.State.LongQueryTraceAppliedKey = null;
+        rig.State.LongQueryTraceAppliedAtUtc = null;
+        rig.Refusal = _ => null;
+        await rig.ReconcileAsync();
+        Assert.Equal(2, rig.Steps.Count);
+        Assert.Null(rig.State.LongQueryTraceFault);
+        Assert.False(rig.State.LongQueryTraceFaultIsPermission);
     }
 
     /* ── A failed create or start on Azure SQL Database carries the caps sentence (#4961, plan test 27) ── */

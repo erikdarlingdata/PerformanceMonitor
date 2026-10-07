@@ -1184,19 +1184,19 @@ SELECT
            window (AWS RDS) — so a server with both sources never double-counts. */
         command.CommandText = @"
 WITH bpr AS (
-    SELECT DATE_TRUNC('minute', event_time) AS bucket, COUNT(*) AS incident_count
+    SELECT DATE_TRUNC('minute', event_time) AS bucket, COUNT(*) AS incident_count, 'blocked-process-report' AS source
     FROM " + StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time >= $2 AND event_time <= $3" + dbClause) + @" AS ev
     GROUP BY DATE_TRUNC('minute', event_time)
 ),
 dmv AS (
-    SELECT DATE_TRUNC('minute', event_time) AS bucket, COUNT(*) AS incident_count
+    SELECT DATE_TRUNC('minute', event_time) AS bucket, COUNT(*) AS incident_count, 'DMV snapshot' AS source
     FROM v_dmv_blocking_snapshots
     WHERE server_id = $1 AND event_time >= $2 AND event_time <= $3" + dbClause + @"
     GROUP BY DATE_TRUNC('minute', event_time)
 )
-SELECT bucket, incident_count FROM bpr
+SELECT bucket, incident_count, source FROM bpr
 UNION ALL
-SELECT bucket, incident_count FROM dmv WHERE NOT EXISTS (SELECT 1 FROM bpr)
+SELECT bucket, incident_count, source FROM dmv WHERE NOT EXISTS (SELECT 1 FROM bpr)
 ORDER BY bucket";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
@@ -1212,7 +1212,8 @@ ORDER BY bucket";
             items.Add(new TrendPoint
             {
                 Time = reader.GetDateTime(0),
-                Count = reader.IsDBNull(1) ? 0 : Convert.ToInt32(reader.GetValue(1))
+                Count = reader.IsDBNull(1) ? 0 : Convert.ToInt32(reader.GetValue(1)),
+                Source = reader.IsDBNull(2) ? null : reader.GetString(2)
             });
         }
         return items;
@@ -1502,6 +1503,9 @@ public class TrendPoint
 {
     public DateTime Time { get; set; }
     public int Count { get; set; }
+
+    /// <summary>#5244: which collector answered, "blocked-process-report" or "DMV snapshot", set only by the blocking trend read.</summary>
+    public string? Source { get; set; }
 }
 
 /// <summary>

@@ -24,7 +24,7 @@ function load(storage) {
   vm.runInContext(source + "\n;globalThis.api = { " +
     "KEY_FAVORITES, KEY_ACKS, KEY_SEVERITY_COLORS, KEY_SIDEBAR, isFavorite, toggleFavorite, favoritesFirst, updateAttention, attentionFor, " +
     "acknowledge, isAcknowledged, severityColor, setSeverityColor, applySeverityColors, isSidebarCollapsed, setSidebarCollapsed, " +
-    "refreshAttention, summarizeAlerts };", ctx);
+    "refreshAttention, summarizeAlerts, KEY_DB_FILTER, getDatabaseFilter, setDatabaseFilter, MAX_DB_NAMES, MAX_DB_QUERY_BYTES, databaseQueryBytes };", ctx);
   return ctx.api;
 }
 
@@ -128,6 +128,56 @@ if (scenario === "favorites") {
   out.readsAfterTtl = reads;
   await a.refreshAttention(async () => ({ kind: "error" }), 300000);
   out.countAfterFailedRead = a.attentionFor(1).count;
+} else if (scenario === "dbFilter") {
+  /* #5245: the server page's database filter, per server id, in the same storage discipline as the rest. */
+  const six = ["A,B", "x]", " SalesDb", "O'Brien", "50%+off", "<img src=x onerror=alert(1)>"];
+  const st = makeStorage();
+  const a = load(st);
+  out.none = a.getDatabaseFilter(3);
+  out.setSix = a.setDatabaseFilter(3, six);
+  a.setDatabaseFilter(4, ["Other"]);
+  out.perId = [a.getDatabaseFilter(3), a.getDatabaseFilter(4), a.getDatabaseFilter(5)];
+  const b = load(st); // reloaded
+  out.afterReload = b.getDatabaseFilter(3);
+  out.stored = JSON.parse(st.data[a.KEY_DB_FILTER]);
+  out.noCopyLeak = (() => { const got = b.getDatabaseFilter(3); got.push("zzz"); return b.getDatabaseFilter(3).length; })();
+  // Clearing: an empty set removes the entry and leaves the other server's.
+  b.setDatabaseFilter(3, []);
+  out.afterClear = [load(st).getDatabaseFilter(3), load(st).getDatabaseFilter(4)];
+  // Exactly the names given: duplicates dropped, order kept, nothing trimmed or folded.
+  b.setDatabaseFilter(6, ["b", "B", "b", " b"]);
+  out.exact = load(st).getDatabaseFilter(6);
+  // The 50 cap: 50 is kept, 51 is refused and changes nothing.
+  const names = (n) => Array.from({ length: n }, (_, i) => "db" + i);
+  out.set50 = b.setDatabaseFilter(7, names(50));
+  out.len50 = load(st).getDatabaseFilter(7).length;
+  out.set51 = b.setDatabaseFilter(7, names(51));
+  out.len51Kept = load(st).getDatabaseFilter(7).length;
+  // A stored set over either bound reads as none, never as a truncated set.
+  const raw = (servers) => makeStorage({ [a.KEY_DB_FILTER]: JSON.stringify({ v: 1, servers }) });
+  out.stored51 = load(raw({ 9: names(51) })).getDatabaseFilter(9);
+  const long = Array.from({ length: 50 }, (_, i) => String(i).padStart(2, "0") + "\u4e2d".repeat(60)); // 50 names, 9 bytes a char encoded
+  out.longBytes = a.databaseQueryBytes(long[0]);
+  out.storedOverBudget = load(raw({ 9: long })).getDatabaseFilter(9);
+  out.setOverBudget = b.setDatabaseFilter(8, long);
+  out.overBudgetKept = load(st).getDatabaseFilter(8);
+  const fit = Array.from({ length: 7 }, (_, i) => String(i).padStart(2, "0") + "\u4e2d".repeat(60));
+  out.fitsBytes = fit.reduce((s, n) => s + a.databaseQueryBytes(n), 0);
+  out.fitSet = b.setDatabaseFilter(8, fit);
+  // Version mismatch, corrupt and hand-edited values read as none and never throw.
+  out.foreignVersion = load(makeStorage({ [a.KEY_DB_FILTER]: JSON.stringify({ v: 2, servers: { 3: ["A"] } }) })).getDatabaseFilter(3);
+  out.garbage = load(makeStorage({ [a.KEY_DB_FILTER]: "{not json" })).getDatabaseFilter(3);
+  out.wrongTypes = [
+    load(raw({ 3: "A" })).getDatabaseFilter(3),
+    load(raw({ 3: [1, null, ""] })).getDatabaseFilter(3),
+    load(raw({ x: ["A"], 0: ["A"], "-1": ["A"] })).getDatabaseFilter(1),
+    load(makeStorage({ [a.KEY_DB_FILTER]: JSON.stringify({ v: 1, servers: ["A"] }) })).getDatabaseFilter(3),
+  ];
+  out.badId = [a.setDatabaseFilter(0, ["A"]), a.setDatabaseFilter("3", ["A"]), a.setDatabaseFilter(-1, ["A"])];
+  // Private mode: the choice holds for this page load only.
+  const t = load(makeStorage({}, { throwOnWrite: true }));
+  out.setNoStorage = t.setDatabaseFilter(3, ["A"]);
+  out.heldNoStorage = t.getDatabaseFilter(3);
 } else {
   throw new Error("unknown scenario " + scenario);
 }

@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
 
@@ -144,8 +145,13 @@ internal static class DarlingSessionReader
     /// The captured query snapshots over the window — the viewer's <c>LatestQuerySnapshotsSql</c> projected
     /// to the columns Lite's get_active_queries surfaces, from the base <c>query_snapshots</c> table (the
     /// viewer reads base here too). granted_query_memory_gb is <c>numeric(18,2)</c> → double precision.
-    /// $1 server_id, $2/$3 window (naive UTC), $4 row cap, $5 database filter (NULL = all), $6 blocking_only,
-    /// $7 wait_type filter (NULL = all).
+    /// $1 server_id, $2/$3 window (naive UTC), $4 row cap, $5 database filter (<c>text[]</c>, NULL = all; #5245), $6 blocking_only,
+    /// $7 wait_type filter (NULL = all; #5235).
+    ///
+    /// <para><b>The database predicate is the list form (#5245).</b> <see cref="DatabaseFilter.Clause"/> on <c>w.database_name</c>
+    /// at $5, so one name and several names are the same statement text; <see cref="DatabaseFilter.Parameter"/> binds the set.
+    /// This read has ONE tier (the base <c>query_snapshots</c> table), so the clause is in the one place the filter belongs: the
+    /// population, which also feeds <c>blocker_in_population</c>, so a head blocker outside the set stays off the page.</para>
     ///
     /// <para><b>Every filter is part of the query (#3541 A13).</b> This read used to return the whole window
     /// unfiltered and unbounded; the tool then applied <c>database_name</c> and <c>blocking_only</c> in C#,
@@ -180,7 +186,7 @@ internal static class DarlingSessionReader
     /// collector wrote, so the match takes the name with and without one. A head blocker on another
     /// wait leaves the page, and its victims say <c>blocker_not_shown = filtered</c> (the database filter's rule).</para>
     /// </summary>
-    public const string ActiveQueriesSql = """
+    public static readonly string ActiveQueriesSql = $$"""
         WITH window_rows AS (
             SELECT
                 collection_time,
@@ -237,7 +243,7 @@ internal static class DarlingSessionReader
               ON  h.collection_time = w.collection_time
               AND h.session_id = w.session_id
             WHERE (w.query_text NOT LIKE 'WAITFOR%' OR h.session_id IS NOT NULL)
-            AND   ($5::text IS NULL OR w.database_name = $5)
+            {{DatabaseFilter.All.Clause("w.database_name", 5)}}
             AND   (NOT $6::boolean OR w.blocking_session_id > 0 OR h.session_id IS NOT NULL)
             AND   ($7::text IS NULL OR upper(w.wait_type) IN (upper($7), upper($7) || ' '))
         )
@@ -292,11 +298,20 @@ internal static class DarlingSessionReader
     /// population's count (#3541 A13). Callers detecting truncation pass <c>limit + 1</c> and read the extra
     /// row as the signal. <paramref name="databaseName"/> null = every database; <paramref name="blockingOnly"/>
     /// keeps victims and the head blockers of victims in the same capture; <paramref name="waitType"/> null = every
-    /// wait (#5235), else only the rows waiting on that wait type at the capture, any case.
+    /// wait (#5235), else only the rows waiting on that wait type at the capture, any case. One database name, as <see cref="DatabaseFilter.One"/>.
     /// </summary>
-    public static async Task<ActiveQueriesPage> GetActiveQueriesAsync(
+    public static Task<ActiveQueriesPage> GetActiveQueriesAsync(
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int cap,
-        string? databaseName = null, bool blockingOnly = false, string? waitType = null, CancellationToken cancellationToken = default)
+        string? databaseName = null, bool blockingOnly = false, string? waitType = null, CancellationToken cancellationToken = default) =>
+        GetActiveQueriesAsync(postgres, serverId, startUtc, endUtc, cap, DatabaseFilter.One(databaseName), blockingOnly, waitType, cancellationToken);
+
+    /// <summary>
+    /// The same read over a SET of databases (#5245): <paramref name="databases"/> empty (<see cref="DatabaseFilter.All"/>) is
+    /// every database, otherwise only the rows of the named databases are the population.
+    /// </summary>
+    internal static async Task<ActiveQueriesPage> GetActiveQueriesAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int cap,
+        DatabaseFilter databases, bool blockingOnly = false, string? waitType = null, CancellationToken cancellationToken = default)
     {
         var rows = new List<ActiveQueryRow>();
         long populationCount = 0;
@@ -304,7 +319,7 @@ internal static class DarlingSessionReader
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddWindow(command, serverId, startUtc, endUtc);
         DarlingMcpReadParameters.AddInt(command, cap);
-        DarlingMcpReadParameters.AddNullableText(command, databaseName);
+        command.Parameters.Add(databases.Parameter());
         DarlingMcpReadParameters.AddBoolean(command, blockingOnly);
         DarlingMcpReadParameters.AddNullableText(command, waitType);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -355,13 +370,15 @@ internal static class DarlingSessionReader
     /// <summary>
     /// The recently-captured waiting tasks over the window — the base <c>waiting_tasks</c> table (there is no
     /// <c>v_waiting_tasks</c> view), newest first then longest wait. resource_description is stored but always
-    /// NULL (the collector no longer collects it). $1 server_id, $2/$3 window (naive UTC), $4 row cap.
+    /// NULL (the collector no longer collects it). $1 server_id, $2/$3 window (naive UTC), $4 row cap, $5 the databases as one
+    /// <c>text[]</c> (#5244, <see cref="DatabaseFilter.Clause"/>): SQL NULL is every database, otherwise only the named databases'
+    /// rows. The predicate sits in the WHERE, ahead of the cap, so the page is the newest N of the chosen databases.
     ///
     /// <para>The cap is a PARAMETER, not a literal (#3541 A3). It was <c>LIMIT 500</c> under a tool that
     /// advertised <c>limit</c>, applied it with <c>Take(limit)</c>, and then published a bare envelope with no
     /// window, no count and no bound — so a caller could not tell thirty tasks from thirty of five thousand.</para>
     /// </summary>
-    public const string WaitingTasksSql = """
+    public static readonly string WaitingTasksSql = $$"""
         SELECT
             collection_time,
             session_id,
@@ -375,20 +392,31 @@ internal static class DarlingSessionReader
         AND   collection_time >= $2
         AND   collection_time <= $3
         AND   wait_type IS NOT NULL
+        {{DatabaseFilter.All.Clause("database_name", 5)}}
         ORDER BY collection_time DESC, wait_duration_ms DESC
         LIMIT $4
         """;
 
     /// <summary>The newest <paramref name="cap"/> waiting tasks over the window. Callers detecting truncation
     /// pass <c>limit + 1</c> and read the extra row as the signal.</summary>
-    public static async Task<List<WaitingTaskRow>> GetWaitingTasksAsync(
-        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int cap, CancellationToken cancellationToken = default)
+    public static Task<List<WaitingTaskRow>> GetWaitingTasksAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int cap, CancellationToken cancellationToken = default) =>
+        GetWaitingTasksAsync(postgres, serverId, startUtc, endUtc, cap, DatabaseFilter.All, cancellationToken);
+
+    /// <summary>
+    /// The same read over a SET of databases (#5244): <paramref name="databases"/> empty (<see cref="DatabaseFilter.All"/>) is every
+    /// database, otherwise only the named databases' waiting tasks are the population, and the cap applies to them.
+    /// </summary>
+    internal static async Task<List<WaitingTaskRow>> GetWaitingTasksAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int cap, DatabaseFilter databases,
+        CancellationToken cancellationToken = default)
     {
         var rows = new List<WaitingTaskRow>();
         await using var command = postgres.CreateCommand(WaitingTasksSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddWindow(command, serverId, startUtc, endUtc);
         DarlingMcpReadParameters.AddInt(command, cap);
+        command.Parameters.Add(databases.Parameter());
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {

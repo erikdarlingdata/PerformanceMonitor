@@ -432,6 +432,15 @@ public partial class MainWindow : Window
             return;
         }
 
+        /* #5366: save the store's password key the first time it is seen and say so once. A read-only connection and a
+           store without a healthy key show nothing; a changed key is asked about when a password is saved. */
+        var passwordKeyNotice = await ViewerPasswordKey.CheckOnConnectAsync(_dataService);
+        if (passwordKeyNotice is not null)
+        {
+            StatusText.Text = passwordKeyNotice;
+            ViewerLogger.Info("App", passwordKeyNotice);
+        }
+
         /* #4957: measure the rollup floors in the background now that the store has answered, so the first tab that
            routes by them does not wait on the cold sort. Fire and forget: the warm never throws and changes nothing
            else when it fails. */
@@ -458,7 +467,7 @@ public partial class MainWindow : Window
         /* The FinOps tab is a self-loading cross-server aggregate control with its own server selector; give
            it the store, surface its load/refresh outcomes on the shared status bar, and route its query grids'
            "View Plan" requests into the standalone Plan Viewer surface (it has no per-server plan host). */
-        FinOpsContent.Initialize(_dataService);
+        FinOpsContent.Initialize(_dataService, _serverStore);
         FinOpsContent.StatusChanged += OnServerTabStatusChanged;
         FinOpsContent.PlanRequested += OpenStoredPlanInPlanViewer;
 
@@ -1666,19 +1675,24 @@ public partial class MainWindow : Window
     ///
     /// <para>The predicate is <see cref="FleetRollup.NeedsAttention"/>, the same banding the roll-up counted
     /// the "+N more" with, so the grid the link lands on holds exactly the servers the link was counting.</para>
+    ///
+    /// <para>#5352: the Overview search box narrows the same projection (name or tag, as in Lite), composed with
+    /// the toggle in <see cref="OverviewCardView.Project"/> so the two can never disagree about the grid.</para>
     /// </summary>
     private void ApplyOverviewCardFilter()
     {
-        var shown = _overviewAttentionOnly
-            ? FleetRollup.NeedsAttention(_overviewCards)
-            : _overviewCards;
+        var shown = OverviewCardView.Project(_overviewCards, _overviewAttentionOnly, OverviewSearchBox?.Text);
 
         OverviewItemsControl.ItemsSource = shown;
         ApplyOverviewAttentionCount(shown.Count);
     }
 
+    /// <summary>Live name/tag filter over the Overview cards (#5352). A cheap in-memory pass over the held
+    /// card set, so running it per keystroke is fine; clearing the box restores every card.</summary>
+    private void OverviewSearchBox_TextChanged(object sender, TextChangedEventArgs e) => ApplyOverviewCardFilter();
+
     /// <summary>
-    /// Shows what the filter did, beside the toggle that did it. Only rendered while the filter is on: a grid
+    /// Shows what the filter did, beside the toggle that did it. Only rendered while the filter or the search is on: a grid
     /// showing every server needs no arithmetic, and a filtered one must never be mistakable for it.
     ///
     /// <para>The colour follows the sentence. This line has two of them — a count of servers wanting attention,
@@ -1688,11 +1702,18 @@ public partial class MainWindow : Window
     /// </summary>
     private void ApplyOverviewAttentionCount(int shown)
     {
-        if (_overviewAttentionOnly)
+        var search = OverviewSearchBox?.Text;
+        var text = OverviewCardView.CountText(_overviewCards, shown, _overviewAttentionOnly, search);
+        if (text is not null)
         {
-            OverviewAttentionCountText.Text = FleetRollup.AttentionFilterCountText(shown, _overviewCards.Count);
+            OverviewAttentionCountText.Text = text;
+            /* A search's own sentence ("No server matches the search.") is neither a count of problems nor an
+               all-clear, so it is neutral; the attention sentences keep their colour-follows-the-sentence rule. */
             OverviewAttentionCountText.SetResourceReference(
-                ForegroundProperty, shown > 0 ? "WarningBrush" : "SuccessBrush");
+                ForegroundProperty,
+                OverviewCardView.IsSearchLine(shown, _overviewAttentionOnly, search, _overviewCards.Count)
+                    ? "ForegroundMutedBrush"
+                    : shown > 0 ? "WarningBrush" : "SuccessBrush");
             OverviewAttentionCountText.Visibility = Visibility.Visible;
             return;
         }

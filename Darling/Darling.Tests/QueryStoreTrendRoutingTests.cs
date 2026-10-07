@@ -268,8 +268,8 @@ public sealed class QueryStoreTrendRoutingTests
     [Fact]
     public void RawFallbackSql_KeepsItsSlab_Deliberately()
     {
-        Assert.Contains("collection_time >= $2 - interval '1 day'", DarlingTrendReader.QueryStoreDurationTrendSql, StringComparison.Ordinal);
-        Assert.Contains("collection_time <= $3 + interval '30 days'", DarlingTrendReader.QueryStoreDurationTrendSql, StringComparison.Ordinal);
+        Assert.Contains("collection_time >= $2 - interval '1 day'", DarlingTrendReader.QueryStoreDurationTrendFilteredSql, StringComparison.Ordinal);
+        Assert.Contains("collection_time <= $3 + interval '30 days'", DarlingTrendReader.QueryStoreDurationTrendFilteredSql, StringComparison.Ordinal);
         Assert.Contains("collection_time >= $2 - interval '1 day'", ViewerDataService.QueryStoreDurationTrendSql, StringComparison.Ordinal);
         Assert.Contains("collection_time <= $3 + interval '30 days'", ViewerDataService.QueryStoreDurationTrendSql, StringComparison.Ordinal);
     }
@@ -285,7 +285,7 @@ public sealed class QueryStoreTrendRoutingTests
     [Fact]
     public void BothApps_ServeTheBuilderOutput_DifferingOnlyByTheDatabaseFilter()
     {
-        Assert.Equal(QueryStoreTrendRouting.BuildRollupTrendSql(withDatabaseFilter: false), DarlingTrendReader.QueryStoreDurationTrendRollupSql);
+        Assert.Equal(QueryStoreTrendRouting.BuildRollupTrendSql(withDatabaseFilter: true), DarlingTrendReader.QueryStoreDurationTrendRollupFilteredSql);
         Assert.Equal(QueryStoreTrendRouting.BuildRollupTrendSql(withDatabaseFilter: true), ViewerDataService.QueryStoreDurationTrendRollupSql);
 
         /* Strip the filter lines from the viewer's copy and the two must be byte-identical. */
@@ -293,12 +293,13 @@ public sealed class QueryStoreTrendRoutingTests
         var stripped = viewerSql
             .Replace("\n    AND   ($5::text[] IS NULL OR database_name = ANY($5))", "", StringComparison.Ordinal)
             .Replace("\n            AND   ($5::text[] IS NULL OR database_name = ANY($5))", "", StringComparison.Ordinal);
-        Assert.Equal(DarlingTrendReader.QueryStoreDurationTrendRollupSql, stripped);
+        Assert.Equal(QueryStoreTrendRouting.BuildRollupTrendSql(withDatabaseFilter: false), stripped);
 
         /* Every arm of the viewer's copy carries the filter: the rollup scan, the identified-interval arm,
            and the legacy arm — three occurrences, or one arm silently ignores the user's selection. */
         var occurrences = viewerSql.Split("$5::text[] IS NULL").Length - 1;
         Assert.Equal(3, occurrences);
-        Assert.DoesNotContain("$5", DarlingTrendReader.QueryStoreDurationTrendRollupSql, StringComparison.Ordinal);
+        Assert.Equal(viewerSql, DarlingTrendReader.QueryStoreDurationTrendRollupFilteredSql);
+        Assert.DoesNotContain("$5", QueryStoreTrendRouting.BuildRollupTrendSql(withDatabaseFilter: false), StringComparison.Ordinal);
     }
 }

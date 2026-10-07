@@ -935,11 +935,11 @@ public sealed class ServerPageTabsTests
            read off an options object. #3278 appended `noteKey = null` - an opt-in server-supplied caveat,
            unrelated to this guard - and #4925 appended `moreNoteKeys = null` after it (further caveat fields
            rendered the same way), and #4843 appended `columnGroups = null` (the opt-in column groups of a wide grid), and #5226 appended `control = null` (a node drawn under the title:
-           the ranking selector of the Top Queries / Top Procedures cards). The literal is spelled out here rather than truncated at emptyText
+           the ranking selector of the Top Queries / Top Procedures cards), and #5245 appended `dbScope = null` (the panel's own database-scope chip, for a panel whose scope differs from its read's class; unrelated to this guard). The literal is spelled out here rather than truncated at emptyText
            because a prefix match would stop noticing a parameter inserted BEFORE it. */
         Assert.Contains(
             "function table(title, read, params, rowsKey, columns, subtitle, emptyText, span = 2, "
-            + "noteKey = null, moreNoteKeys = null, columnGroups = null, control = null)",
+            + "noteKey = null, moreNoteKeys = null, columnGroups = null, control = null, dbScope = null)",
             js,
             StringComparison.Ordinal);
         Assert.Contains(

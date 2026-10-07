@@ -254,7 +254,10 @@ public sealed class RegressedFromProductiveTests
             "MAX(CASE WHEN rows_collected > 0 THEN collection_time END) AS last_productive_time",
             sql,
             StringComparison.Ordinal);
-        Assert.Contains("MAX(CASE WHEN recency_rank = 1 THEN status END) AS current_status", sql, StringComparison.Ordinal);
+        /* #5371: the status of the newest run, read at the aggregate's newest instant (it was the rank-1 row).
+           Still not a MAX over the skip rows, which is lexicographic. */
+        Assert.Contains("newest.pick.status AS current_status", sql, StringComparison.Ordinal);
+        Assert.Contains("AND   n.collection_time = h.last_run_time", sql, StringComparison.Ordinal);
 
         /* The vocabulary reaches the STORE from the one place it is declared, so a fourth skip status
            split out later reaches this read without anybody editing SQL. */

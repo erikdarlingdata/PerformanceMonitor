@@ -100,6 +100,14 @@ public partial class ServerTab : UserControl
     private bool _renderingCustomRange;
 
     /// <summary>
+    /// True during a synchronous, programmatic write to the range controls (a display-mode switch re-rendering the pickers,
+    /// a drill setting Custom), so those writes are not read as the user choosing a range and do not start a refresh (#5371).
+    /// It used to share <c>_isRefreshing</c> with "a refresh is in flight", which made every range handler bail on an
+    /// in-flight refresh and drop the user's change; the in-flight half is now the refresh coordinator's, which remembers it.
+    /// </summary>
+    private bool _suppressRangeRefresh;
+
+    /// <summary>
     /// The zone the pickers show and are read in for <paramref name="mode"/>: UTC, this machine's zone, or the tab's OWN
     /// server clock (<paramref name="tabClock"/>, not the selected tab's, so a tab that is not the selected one keeps
     /// its own server's zone; a server with no collected clock keeps the fixed offset the connect probe read).
@@ -335,7 +343,7 @@ public partial class ServerTab : UserControl
         /* The held range is two instants (#4766), so a switch of display zone re-renders the same pair in the new
            zone and parses nothing back: a range in the repeated hour, or one the pickers cannot spell exactly,
            returns to exactly the instants it held. Suppress refreshes while updating pickers to avoid cascading queries. */
-        _isRefreshing = true;
+        _suppressRangeRefresh = true;
         try
         {
             ServerTimeHelper.CurrentDisplayMode = mode;
@@ -343,7 +351,7 @@ public partial class ServerTab : UserControl
         }
         finally
         {
-            _isRefreshing = false;
+            _suppressRangeRefresh = false;
         }
 
         // Refresh every grid so each row's time text (ServerTimeHelper.FormatServerTime / FormatServerClock) is read again in the new mode
@@ -375,7 +383,7 @@ public partial class ServerTab : UserControl
 
     private async void TimeRangeCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
-        if (!IsLoaded || _isRefreshing) return;
+        if (!IsLoaded || _suppressRangeRefresh) return;
 
         /* Show/hide custom date pickers and time ComboBoxes */
         var isCustom = TimeRangeCombo.SelectedIndex == 5;
@@ -460,7 +468,9 @@ public partial class ServerTab : UserControl
     {
         if (!IsLoaded || _renderingCustomRange) return;
         CaptureCustomRangeEdit(sender);
-        if (_isRefreshing) return;
+        /* #5371: a picker edit that lands while a refresh is in flight is kept (captured above) and refreshed when that
+           one ends; only a programmatic write is skipped. */
+        if (_suppressRangeRefresh) return;
         if (FromDatePicker?.SelectedDate != null && ToDatePicker?.SelectedDate != null)
         {
             await RefreshAllDataAsync();
@@ -471,7 +481,7 @@ public partial class ServerTab : UserControl
     {
         if (!IsLoaded || _renderingCustomRange) return;
         CaptureCustomRangeEdit(sender);
-        if (_isRefreshing) return;
+        if (_suppressRangeRefresh) return;
         /* Only refresh if we have valid dates selected */
         if (FromDatePicker?.SelectedDate != null && ToDatePicker?.SelectedDate != null)
         {

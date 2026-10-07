@@ -1065,7 +1065,8 @@ public sealed class McpPageContractTests
         }
 
         var active = DarlingSessionReader.ActiveQueriesSql;
-        Assert.Contains("($5::text IS NULL OR w.database_name = $5)", active, StringComparison.Ordinal);
+        /* #5245: the list form (one text[] at $5), the same statement for one name or several. */
+        Assert.Contains("($5::text[] IS NULL OR w.database_name = ANY($5))", active, StringComparison.Ordinal);
         Assert.Contains("(NOT $6::boolean OR w.blocking_session_id > 0 OR h.session_id IS NOT NULL)", active, StringComparison.Ordinal);
         Assert.Contains("COUNT(*) OVER () AS population_count", active, StringComparison.Ordinal);
         /* The head-blocker keep: a WAITFOR row stays when a row in the SAME capture names it. */

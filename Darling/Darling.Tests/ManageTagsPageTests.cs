@@ -40,7 +40,18 @@ public sealed class ManageTagsPageTests
         Assert.Contains("send(\"DELETE\", tagPath(id) + (confirm ? \"?confirm=true\" : \"\"))", page);
         Assert.Contains("send(\"POST\", tagPath(id) + \"/servers\", { server_ids: ids })", page);
         Assert.Contains("send(\"DELETE\", tagPath(id) + \"/servers\", { server_ids: ids })", page);
-        Assert.Contains("\"Content-Type\": \"application/json\"", page);
+        /* #5240: the write transport moved to util.js's apiWrite, so the JSON content type the server demands of every
+           mutation (a 415 otherwise) is declared there, once. The pin follows it: the page must send through apiWrite,
+           and apiWrite itself (not apiSend, which carries the same header line) must declare the header. */
+        Assert.Contains("const res = await apiWrite(method, path, body);", page);
+        // #5356: a 2xx that is JSON but not an object is an error answer here, not a saved change and not an expired session.
+        Assert.Contains("if (res.unexpected) return { kind: \"error\"", page);
+        Assert.DoesNotContain("fetch(", page);
+        var util = Wwwroot("js", "util.js");
+        var write = util.IndexOf("export async function apiWrite(method, path, body) {", System.StringComparison.Ordinal);
+        Assert.True(write >= 0, "util.js no longer exports apiWrite");
+        var writeBody = util.Substring(write, util.IndexOf("\n}\n", write, System.StringComparison.Ordinal) - write);
+        Assert.Contains("\"Content-Type\": \"application/json\"", writeBody);
     }
 
     [Fact]

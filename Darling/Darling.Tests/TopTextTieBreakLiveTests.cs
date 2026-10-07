@@ -127,7 +127,7 @@ public sealed class TopTextTieBreakLiveTests
                 foreach (var sql in new[] { DarlingDataReader.TopQueriesSql, DarlingDataReader.TopQueriesByHostObjectSql })
                 {
                     var page = await ReadPageAsync(connection, TopRankings.Apply(sql, TopRanking.Cpu, hourly: false), "query_hash", ct, serverId, start, end,
-                        P(NpgsqlDbType.Integer, 5), P(NpgsqlDbType.Text, null), P(NpgsqlDbType.Integer, 0), P(NpgsqlDbType.Integer, 10));
+                        P(NpgsqlDbType.Integer, 5), P(NpgsqlDbType.Array | NpgsqlDbType.Text, null), P(NpgsqlDbType.Integer, 0), P(NpgsqlDbType.Integer, 10));
                     Assert.Equal("tie text B (higher collection id)", Assert.Single(page).Text);
                 }
 
@@ -158,7 +158,7 @@ public sealed class TopTextTieBreakLiveTests
             for (var run = 0; run < 3; run++)
             {
                 var page = await ReadPageAsync(connection, sql, "query_hash", ct, serverId, now.AddHours(-24), now.AddMinutes(5),
-                    P(NpgsqlDbType.Integer, 5), P(NpgsqlDbType.Text, null), P(NpgsqlDbType.Integer, 10));
+                    P(NpgsqlDbType.Integer, 5), P(NpgsqlDbType.Array | NpgsqlDbType.Text, null), P(NpgsqlDbType.Integer, 10));
                 Assert.Equal(2, page.Count);
                 Assert.Equal("window text B", page.Find(r => r.Key == "0xT1").Text);
                 Assert.Equal("old text B", page.Find(r => r.Key == "0xT2").Text);
@@ -184,14 +184,14 @@ public sealed class TopTextTieBreakLiveTests
             for (var run = 0; run < 3; run++)
             {
                 var page = await ReadPageAsync(connection, DarlingDataReader.QueryStoreTopSql, "query_id", ct, serverId, start, end,
-                    P(NpgsqlDbType.Integer, 1), P(NpgsqlDbType.Text, null), P(NpgsqlDbType.Text, null), P(NpgsqlDbType.Text, null), P(NpgsqlDbType.Integer, 1));
+                    P(NpgsqlDbType.Integer, 1), P(NpgsqlDbType.Array | NpgsqlDbType.Text, null), P(NpgsqlDbType.Text, null), P(NpgsqlDbType.Text, null), P(NpgsqlDbType.Integer, 1));
                 Assert.Equal("10", Assert.Single(page).Key);
                 var viewerOne = await ReadPageAsync(connection, ViewerDataService.QueryStoreTopSql, "query_id", ct, serverId, start, end,
                     P(NpgsqlDbType.Integer, 1), P(NpgsqlDbType.Array | NpgsqlDbType.Text, null), P(NpgsqlDbType.Integer, 1));
                 Assert.Equal("10", Assert.Single(viewerOne).Key);
 
                 var all = await ReadPageAsync(connection, DarlingDataReader.QueryStoreTopSql, "query_id", ct, serverId, start, end,
-                    P(NpgsqlDbType.Integer, 3), P(NpgsqlDbType.Text, null), P(NpgsqlDbType.Text, null), P(NpgsqlDbType.Text, null), P(NpgsqlDbType.Integer, 3));
+                    P(NpgsqlDbType.Integer, 3), P(NpgsqlDbType.Array | NpgsqlDbType.Text, null), P(NpgsqlDbType.Text, null), P(NpgsqlDbType.Text, null), P(NpgsqlDbType.Integer, 3));
                 var viewerAll = await ReadPageAsync(connection, ViewerDataService.QueryStoreTopSql, "query_id", ct, serverId, start, end,
                     P(NpgsqlDbType.Integer, 3), P(NpgsqlDbType.Array | NpgsqlDbType.Text, null), P(NpgsqlDbType.Integer, 3));
                 foreach (var rows in new[] { all, viewerAll })

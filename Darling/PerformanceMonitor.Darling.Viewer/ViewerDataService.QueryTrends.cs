@@ -115,7 +115,7 @@ public sealed partial class ViewerDataService
     /// Query-stats duration trend: elapsed ms/sec + executions/sec per BUCKET —
     /// <see cref="DurationTrendRouting.BuildBucketedRawTrendSql"/> over <c>query_stats</c> with the viewer's $4
     /// database filter (#4234; #3653 A11 before it). Until #4234 this read was the per-collection builder's
-    /// output (<see cref="DurationTrendRouting.QueryDurationTrendRawSql"/>), and a 7-day chart could hold as
+    /// output (the builder's <c>QueryDurationTrendRawSql</c>, since deleted), and a 7-day chart could hold as
     /// many rows as the window had collections — the issue's measured number for the sibling wait/perfmon
     /// charts this same fix applied to. The per-collection CTE and its three-state interval (the collection's
     /// STORED <c>sample_interval_seconds</c>, MAX over its rows, 0 → NULL so a restart pass is unrated, NULL →
@@ -145,7 +145,7 @@ public sealed partial class ViewerDataService
     /// Procedure-stats duration trend: elapsed ms/sec + executions/sec per BUCKET —
     /// <see cref="DurationTrendRouting.BuildBucketedRawTrendSql"/> over <c>procedure_stats</c> with the
     /// viewer's $4 database filter (#4234). Until #4234 this read was the per-collection builder's output
-    /// (<see cref="DurationTrendRouting.ProcedureDurationTrendRawSql"/>, itself an alias since #3653); see
+    /// (the builder's <c>ProcedureDurationTrendRawSql</c>, itself an alias since #3653, since deleted); see
     /// <see cref="QueryDurationTrendSql"/> for why the read is bucketed now and what stays the same.
     ///
     /// <para>#3540 (V128): the interval is the collection's STORED one where the rows have it — <c>MAX</c>
@@ -414,13 +414,16 @@ public sealed partial class ViewerDataService
     /// <c>first_collection_time</c> and <c>collection_count</c> are stated here rather than factored out for a
     /// builder of one caller. A static readonly rather than a const: the interpolated <see cref="TrendBucketSql.OriginSql"/>
     /// reference is not a compile-time constant. $1 server_id, $2/$3 window (naive UTC), $4 database filter, $5
-    /// the bucket width in minutes.</summary>
+    /// the bucket width in minutes. The database filter sits inside the aggregates (#5414 M1), as in
+    /// <see cref="DurationTrendRouting.BuildBucketedRawTrendSql"/>: a collection the chosen database had no rows in
+    /// still counts its seconds, so the rate is the true per-second rate over the bucket.</summary>
     public static readonly string ExecutionCountTrendSql = $"""
         WITH raw AS
         (
             SELECT
                 collection_time,
-                SUM(delta_execution_count) AS total_executions,
+                COALESCE(SUM(delta_execution_count) FILTER (WHERE $4::text[] IS NULL OR database_name = ANY($4)), 0) AS total_executions,
+                COUNT(*) FILTER (WHERE $4::text[] IS NULL OR database_name = ANY($4)) AS matched_rows,
                 CASE WHEN MAX(sample_interval_seconds) IS NULL
                      THEN extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time))))
                      ELSE NULLIF(MAX(sample_interval_seconds), 0)
@@ -429,7 +432,6 @@ public sealed partial class ViewerDataService
             WHERE server_id = $1
             AND   collection_time >= $2
             AND   collection_time <= $3
-            AND   ($4::text[] IS NULL OR database_name = ANY($4))
             GROUP BY collection_time
         ),
         rated AS
@@ -438,7 +440,8 @@ public sealed partial class ViewerDataService
                 collection_time,
                 CASE WHEN interval_seconds > 0 THEN total_executions END AS rated_executions,
                 CASE WHEN interval_seconds > 0 THEN interval_seconds END AS rated_seconds,
-                CASE WHEN interval_seconds > 0 THEN CAST(total_executions AS DOUBLE PRECISION) / interval_seconds END AS executions_per_second
+                CASE WHEN interval_seconds > 0 THEN CAST(total_executions AS DOUBLE PRECISION) / interval_seconds END AS executions_per_second,
+                matched_rows
             FROM raw
         )
         SELECT
@@ -447,6 +450,7 @@ public sealed partial class ViewerDataService
             MIN(collection_time) AS first_collection_time,
             COUNT(*) AS collection_count
         FROM rated
+        WHERE EXISTS (SELECT 1 FROM rated WHERE matched_rows > 0)
         GROUP BY 1
         ORDER BY 1
         """;
