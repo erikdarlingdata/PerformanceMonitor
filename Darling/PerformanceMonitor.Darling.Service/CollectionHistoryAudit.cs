@@ -47,10 +47,11 @@ namespace PerformanceMonitor.Darling.Service;
 /// days has no usual yet and is skipped. An hour flags only when its usual is at least 1: with an even number of
 /// prior days a median of 0.5 would otherwise let one quiet hour flag on a small fleet.</para>
 ///
-/// <para><b>Ready.</b> The audit runs at 03:00Z or later and always judges hour 23. A source is ready when its
-/// newest bucket is at or after the audited day's 23:00 bucket (<see cref="IsSettled"/>); the read runs one hour
-/// into the next day so a genuine hole at 23:00 (a bucket after it exists) is told apart from a bucket that was
-/// not materialized yet. A source that is not ready is treated like a failed read.</para>
+/// <para><b>Ready.</b> The audit runs at 03:00Z or later and always judges hour 23. A source is ready when it has
+/// ANY bucket at or after the audited day's 23:00 bucket (<see cref="IsSettled"/>), read up to the current hour, so
+/// a genuine hole at 23:00, including one that runs past midnight, is told apart from a bucket not materialized yet
+/// as soon as collection resumes. A source that is not ready is retried like a failed read, and keeps what it
+/// flagged: at the give-up those hours reach the alert, marked as not complete.</para>
 ///
 /// <para><b>Plain PostgreSQL.</b> A plain-PostgreSQL store builds no continuous aggregates, so every relation is
 /// absent there and the audit quietly does nothing. The three frozen legacy hourlies are not audited: they stopped
@@ -127,15 +128,30 @@ GROUP BY r.bucket";
     internal static DateTime ReadFrom(DateTime auditDayUtc) => auditDayUtc.Date.AddDays(-PriorDays);
 
     /// <summary>
-    /// The end (exclusive) of what the audit reads: one hour past the audited day, so the next day's 00:00 bucket
-    /// is in the read. It is what tells a genuine hole at 23:00 (a later bucket exists) from a 23:00 bucket that
-    /// was not materialized yet (<see cref="IsSettled"/>).
+    /// The earliest end (exclusive) of what the audit reads: one hour past the audited day, so the next day's 00:00
+    /// bucket is in the read. The read itself ends later, at the current hour (<see cref="ReadTo(DateTime, DateTime)"/>).
     /// </summary>
     internal static DateTime ReadTo(DateTime auditDayUtc) => auditDayUtc.Date.AddDays(1).AddHours(1);
 
     /// <summary>
-    /// True when the source's newest bucket is at or after the audited day's 23:00 bucket: the day's last hour
-    /// had its chance to materialize. A source that is not settled is "not ready" and is handled like a failed read.
+    /// The end (exclusive) of what the audit reads: the current hour (<paramref name="nowUtc"/> truncated to the
+    /// hour, so only whole buckets), never earlier than <see cref="ReadTo(DateTime)"/>. Readiness
+    /// (<see cref="IsSettled"/>) looks for ANY bucket at or after the audited day's 23:00 bucket, so a hole that
+    /// runs past 01:00Z (an outage from 22:30Z to 01:30Z) is told apart from a bucket not materialized yet as soon as
+    /// collection resumes, instead of never (H1 of the #5461 round 2 review: with the read fixed at 01:00Z the
+    /// later buckets that prove the hole real were outside it, so the whole day stayed "not ready"). Analyze ignores
+    /// every bucket after the audited day, so reading further changes no count.
+    /// </summary>
+    internal static DateTime ReadTo(DateTime auditDayUtc, DateTime nowUtc)
+    {
+        var floor = ReadTo(auditDayUtc);
+        var currentHour = DateTime.SpecifyKind(nowUtc.Date.AddHours(nowUtc.Hour), DateTimeKind.Utc);
+        return currentHour > floor ? currentHour : floor;
+    }
+
+    /// <summary>
+    /// True when the source has ANY bucket at or after the audited day's 23:00 bucket (up to the current hour, see
+    /// <see cref="ReadTo(DateTime, DateTime)"/>): the day's last hour had its chance to materialize. A source that is not settled is "not ready" and is handled like a failed read.
     /// </summary>
     internal static bool IsSettled(DateTime auditDayUtc, IReadOnlyList<HourBucket> buckets)
     {
@@ -298,39 +314,46 @@ GROUP BY r.bucket";
     internal static string RangeLabel(FlaggedRange range) =>
         string.Create(CultureInfo.InvariantCulture, $"{range.StartHour:00}:00-{range.EndHour:00}:00Z");
 
-    /// <summary>Hours flagged across <paramref name="findings"/>.</summary>
+    /// <summary>The distinct hours of the day flagged by any source in <paramref name="findings"/> (L2 of the #5461
+    /// round 2 review: one outage that thins seven sources is that many hours, not seven times as many).</summary>
     internal static int FlaggedHours(IEnumerable<(Rollup Rollup, IReadOnlyList<FlaggedRange> Ranges)> findings) =>
-        findings.Sum(f => f.Ranges.Sum(r => r.EndHour - r.StartHour));
+        findings.SelectMany(f => f.Ranges)
+            .SelectMany(r => Enumerable.Range(r.StartHour, r.EndHour - r.StartHour))
+            .Distinct()
+            .Count();
 
     /// <summary>
     /// The alert's text: the day, then the flagged ranges with the counts against usual, one line for all the
     /// sources whose flagged ranges are identical (the three Query Store rollups share one signal), then any
-    /// source that could not be read for this day.
+    /// source that could not be read for this day. A source in <paramref name="incomplete"/> had not caught up to the
+    /// end of the day when the audit gave up: its ranges are judged on what it held, and are marked as not complete.
     /// </summary>
     internal static string Render(
         DateTime auditDayUtc, IReadOnlyList<(Rollup Rollup, IReadOnlyList<FlaggedRange> Ranges)> findings,
-        IReadOnlyList<Rollup>? unread = null)
+        IReadOnlyList<Rollup>? unread = null, IReadOnlySet<string>? incomplete = null)
     {
         var text = new StringBuilder();
         text.Append(CultureInfo.InvariantCulture,
             $"Retained history for {auditDayUtc:yyyy-MM-dd} (UTC) fell below half of the usual pace for that hour in {findings.Count} source(s), ")
             .Append("where usual is the median of the 7 days before and only servers enabled now are counted. ");
 
-        var groups = new List<(bool JudgesPasses, List<Rollup> Sources, IReadOnlyList<FlaggedRange> Ranges)>();
+        var groups = new List<(bool JudgesPasses, bool Incomplete, List<Rollup> Sources, IReadOnlyList<FlaggedRange> Ranges)>();
         foreach (var (rollup, ranges) in findings)
         {
-            var at = groups.FindIndex(g => g.JudgesPasses == rollup.JudgesPasses && g.Ranges.SequenceEqual(ranges));
+            var isIncomplete = incomplete is not null && incomplete.Contains(rollup.Relation);
+            var at = groups.FindIndex(g =>
+                g.JudgesPasses == rollup.JudgesPasses && g.Incomplete == isIncomplete && g.Ranges.SequenceEqual(ranges));
             if (at >= 0)
             {
                 groups[at].Sources.Add(rollup);
             }
             else
             {
-                groups.Add((rollup.JudgesPasses, new List<Rollup> { rollup }, ranges));
+                groups.Add((rollup.JudgesPasses, isIncomplete, new List<Rollup> { rollup }, ranges));
             }
         }
 
-        foreach (var (judgesPasses, sources, ranges) in groups)
+        foreach (var (judgesPasses, isIncomplete, sources, ranges) in groups)
         {
             text.Append(string.Join(", ", sources.Select(DisplayName))).Append(": ");
             text.Append(string.Join("; ", ranges.Select(r => judgesPasses
@@ -338,7 +361,7 @@ GROUP BY r.bucket";
                     $"{RangeLabel(r)} (servers as low as {r.LowestServers:N0} vs usual {Math.Round(r.UsualServers):N0}, collection passes as low as {r.LowestPasses:N0} vs usual {Math.Round(r.UsualPasses):N0})")
                 : string.Create(CultureInfo.InvariantCulture,
                     $"{RangeLabel(r)} (servers as low as {r.LowestServers:N0} vs usual {Math.Round(r.UsualServers):N0})"))));
-            text.Append(". ");
+            text.Append(isIncomplete ? " [not complete: the source had not caught up to the end of the day, judged on what it held]. " : ". ");
         }
 
         if (unread is { Count: > 0 })
@@ -347,7 +370,8 @@ GROUP BY r.bucket";
                 .Append(" (a read failed, or the source had not caught up to the end of the day). ");
         }
 
-        text.Append("A service outage, a restart, or collection that fell behind leaves this shape; compare with the Collection Stopped and Collection Gap At Start alerts for the same day.");
+        text.Append("A service outage, a restart, or collection that fell behind leaves this shape; compare with the Collection Stopped and Collection Gap At Start alerts for the same day. ")
+            .Append("A change to the perfmon collection schedule reads as fewer passes and can trigger this for a few days, until the 7-day median catches up.");
         return text.ToString();
     }
 }

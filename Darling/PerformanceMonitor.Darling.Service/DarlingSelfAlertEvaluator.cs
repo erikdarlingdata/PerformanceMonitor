@@ -2770,12 +2770,20 @@ internal sealed class DarlingSelfAlertEvaluator
     /// deliverer reported failed does not, so the next tick retries.</para>
     ///
     /// <para><b>Every source read, or absent, before the day is done (M2 of the #5461 review).</b> A source whose read
-    /// failed, or whose newest bucket is earlier than the audited day's 23:00 bucket (not ready), is retried on the
-    /// later ticks, and only those sources are re-read; the findings so far are held in memory and nothing is raised
-    /// or stamped until every source has been read or is absent. The audit gives up on a source at the next day's
-    /// 03:00Z slot, with one warning naming it, and raises what it has, the alert text naming each source not read.
-    /// The held state is process memory: a restart starts the day over, and a day whose retries a restart ended is
-    /// not audited again.</para>
+    /// failed, or that has no bucket at or after the audited day's 23:00 bucket (not ready; the read runs up to the
+    /// current hour, so a hole across midnight is judged as soon as collection resumes), is retried on the later
+    /// ticks, and only those sources are re-read; the findings so far are held in memory and nothing is raised or
+    /// stamped until every source has been read or is absent. The audit gives up on a source at the next day's 03:00Z
+    /// slot, with one warning naming it, and raises what it has, the alert text naming each source not read. A source
+    /// that was read but never became ready keeps its flagged hours (an hour with no rows counts as 0): they reach
+    /// the give-up alert, marked as not complete. A give-up with no flagged hours at all raises nothing and leaves the
+    /// warning in the log. The held state is process memory: a restart starts the day over, and a day whose retries a
+    /// restart ended is not audited again.</para>
+    ///
+    /// <para><b>One alert per audited day (M1 of the #5461 round 2 review).</b> The audit day is in the alert's
+    /// delivery key, so the give-up alert for day D and the audit of day D+1 in the same tick are two incidents: the
+    /// deliverer's cooldown falls back to the (server key, metric) pair for a self-alert, and with one key for both
+    /// days it would throttle the second.</para>
     ///
     /// <para><b>Days missed while the service was down are not audited (L4).</b> Only the previous UTC day is. Down
     /// from late evening to the next morning leaves the earlier day unaudited, which is accepted: Collection Gap At
@@ -2800,6 +2808,10 @@ internal sealed class DarlingSelfAlertEvaluator
         public HashSet<string> Done { get; } = new(StringComparer.Ordinal);
 
         public Dictionary<string, IReadOnlyList<CollectionHistoryAudit.FlaggedRange>> Findings { get; } = new(StringComparer.Ordinal);
+
+        /// <summary>The ranges of a source that was read but not ready, from its latest read: raised only if the
+        /// audit gives up on it (H1 of the #5461 round 2 review).</summary>
+        public Dictionary<string, IReadOnlyList<CollectionHistoryAudit.FlaggedRange>> Unsettled { get; } = new(StringComparer.Ordinal);
     }
 
     /// <summary>The day being retried: set while a source of the audited day is unread, null otherwise.</summary>
@@ -2856,7 +2868,7 @@ internal sealed class DarlingSelfAlertEvaluator
 
         var auditDay = held.Day;
         var from = CollectionHistoryAudit.ReadFrom(auditDay);
-        var to = CollectionHistoryAudit.ReadTo(auditDay);
+        var to = CollectionHistoryAudit.ReadTo(auditDay, now);
 
         foreach (var rollup in rollups)
         {
@@ -2900,7 +2912,9 @@ internal sealed class DarlingSelfAlertEvaluator
 
             if (!CollectionHistoryAudit.IsSettled(auditDay, buckets))
             {
-                /* Not ready: the newest bucket is earlier than the day's 23:00 bucket. Like a failed read. */
+                /* Not ready: no bucket at or after the day's 23:00 bucket yet. Like a failed read, but its ranges are
+                   kept: if the audit gives up on it they reach the alert (H1 of the #5461 round 2 review). */
+                held.Unsettled[rollup.Relation] = ranges;
                 _logger?.LogInformation(
                     "Collection-history audit: {Rollup} has no bucket at or after {Hour:u} yet; it is retried on a later tick",
                     rollup.Relation, auditDay.AddHours(23));
@@ -2908,6 +2922,7 @@ internal sealed class DarlingSelfAlertEvaluator
             }
 
             held.Done.Add(rollup.Relation);
+            held.Unsettled.Remove(rollup.Relation);
             if (ranges.Count > 0)
             {
                 held.Findings[rollup.Relation] = ranges;
@@ -2924,7 +2939,7 @@ internal sealed class DarlingSelfAlertEvaluator
         if (alert is not null)
         {
             delivery = await FireAsync(
-                StoreKey(CollectionHistoryAuditKey), _storeLabel, CollectionGapsInHistoryMetric,
+                StoreKey(HistoryAuditDayKey(held.Day)), _storeLabel, CollectionGapsInHistoryMetric,
                 alert.ValueText, "half of usual",
                 detail: alert.Detail,
                 severity: AlertSeverityLevel.Warning,
@@ -2959,7 +2974,7 @@ internal sealed class DarlingSelfAlertEvaluator
         }
 
         await FireAsync(
-            StoreKey(CollectionHistoryAuditKey), _storeLabel, CollectionGapsInHistoryMetric,
+            StoreKey(HistoryAuditDayKey(held.Day)), _storeLabel, CollectionGapsInHistoryMetric,
             alert.ValueText, "half of usual",
             detail: alert.Detail,
             severity: AlertSeverityLevel.Warning,
@@ -2967,6 +2982,14 @@ internal sealed class DarlingSelfAlertEvaluator
             numericCurrentValue: alert.Hours, numericThresholdValue: 0,
             cancellationToken);
     }
+
+    /// <summary>
+    /// The family key of one audited day's alert, qualified by <see cref="StoreKey"/> at the fire site: the audit day on the fleet key (M1 of the #5461 round 2 review).
+    /// Non-numeric like its siblings, so it never parses as a server_id; a self-alert has no incidents, so the
+    /// cooldown key is this plus the metric, and two days are two keys.
+    /// </summary>
+    private static string HistoryAuditDayKey(DateTime auditDay) =>
+        CollectionHistoryAuditKey + ":" + auditDay.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
 
     /// <summary>The audit alert's pieces, shared by the day's one alert and the give-up alert.</summary>
     private sealed record HistoryAuditAlertText(int Hours, string ValueText, string Detail, string ShortMessage);
@@ -2976,9 +2999,14 @@ internal sealed class DarlingSelfAlertEvaluator
         HistoryAuditDay held, IReadOnlyList<CollectionHistoryAudit.Rollup> rollups,
         IReadOnlyList<CollectionHistoryAudit.Rollup> unread)
     {
+        /* A source given up on that was read but never ready contributes what it flagged, marked as not complete. */
+        var incomplete = unread
+            .Where(r => held.Unsettled.TryGetValue(r.Relation, out var ranges) && ranges.Count > 0)
+            .Select(r => r.Relation)
+            .ToHashSet(StringComparer.Ordinal);
         var findings = rollups
-            .Where(r => held.Findings.ContainsKey(r.Relation))
-            .Select(r => (Rollup: r, Ranges: held.Findings[r.Relation]))
+            .Where(r => held.Findings.ContainsKey(r.Relation) || incomplete.Contains(r.Relation))
+            .Select(r => (Rollup: r, Ranges: held.Findings.TryGetValue(r.Relation, out var done) ? done : held.Unsettled[r.Relation]))
             .ToList();
         if (findings.Count == 0)
         {
@@ -2989,7 +3017,7 @@ internal sealed class DarlingSelfAlertEvaluator
         return new HistoryAuditAlertText(
             hours,
             string.Create(CultureInfo.InvariantCulture, $"{hours} hours"),
-            CollectionHistoryAudit.Render(held.Day, findings, unread),
+            CollectionHistoryAudit.Render(held.Day, findings, unread, incomplete),
             string.Create(CultureInfo.InvariantCulture,
                 $"{hours} thin hour(s) in retained history on {held.Day:yyyy-MM-dd}"));
     }

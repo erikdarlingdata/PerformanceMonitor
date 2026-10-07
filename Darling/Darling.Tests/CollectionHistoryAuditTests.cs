@@ -225,6 +225,39 @@ public sealed class CollectionHistoryAuditTests
     }
 
     [Fact]
+    public void TheReadRunsUpToTheCurrentHour_NeverEarlierThanOneHourPastTheAuditedDay()
+    {
+        /* H1 of the #5461 round 2 review: the read ends at the current hour, so a bucket after a hole that runs past
+           01:00Z is in it. A bucket at 01:00Z or 02:00Z settles a source whose 23:00 bucket is missing. */
+        var tick = new DateTime(2026, 10, 11, 3, 5, 0, DateTimeKind.Utc);
+        Assert.Equal(new DateTime(2026, 10, 11, 3, 0, 0, DateTimeKind.Utc), CollectionHistoryAudit.ReadTo(AuditDay, tick));
+        Assert.Equal(DateTimeKind.Utc, CollectionHistoryAudit.ReadTo(AuditDay, tick).Kind);
+        Assert.Equal(AuditDay.AddDays(2).AddHours(3), CollectionHistoryAudit.ReadTo(AuditDay, AuditDay.AddDays(2).AddHours(3).AddMinutes(59)));
+
+        /* Never earlier than the day's own end plus one hour, whatever the clock says. */
+        Assert.Equal(CollectionHistoryAudit.ReadTo(AuditDay), CollectionHistoryAudit.ReadTo(AuditDay, AuditDay.AddHours(5)));
+
+        var holeThroughMidnight = WithAuditDay(Week(), h => h == 23 ? null : Usual(h));
+        holeThroughMidnight.Add(new HourBucket(AuditDay.AddDays(1).AddHours(2), 40, Usual(2).Passes));
+        Assert.True(CollectionHistoryAudit.IsSettled(AuditDay, holeThroughMidnight));
+    }
+
+    [Fact]
+    public void TheFlaggedHours_AreTheDistinctHoursOfTheDay_NotHoursTimesSources()
+    {
+        /* L2 of the #5461 round 2 review: one three-hour outage that thins every source is three hours. */
+        var shared = new[] { new CollectionHistoryAudit.FlaggedRange(18, 21, 0, 40, 0, 0) };
+        var overlapping = new[] { new CollectionHistoryAudit.FlaggedRange(20, 22, 0, 40, 0, 0) };
+        var sources = Enumerable.Range(0, 7).Select(i => new Rollup("collect.s" + i, false)).ToArray();
+
+        Assert.Equal(3, CollectionHistoryAudit.FlaggedHours(sources.Select(r => (r, (IReadOnlyList<CollectionHistoryAudit.FlaggedRange>)shared))));
+        Assert.Equal(4, CollectionHistoryAudit.FlaggedHours(new (Rollup, IReadOnlyList<CollectionHistoryAudit.FlaggedRange>)[]
+        {
+            (sources[0], shared), (sources[1], overlapping),
+        }));
+    }
+
+    [Fact]
     public void TheSql_HasARangePredicateOnBucket_AndCountsOnlyServersEnabledNow()
     {
         var servers = CollectionHistoryAudit.BuildSql(QueryStats);
@@ -369,7 +402,9 @@ public sealed class CollectionHistoryAuditTests
                 {
                     Reads++;
                     Assert.Equal(AuditDay.AddDays(-7), from);
-                    Assert.Equal(AuditDay.AddDays(1).AddHours(1), to);
+                    /* The read runs up to the current hour (every tick of these tests is on the day after the audited day
+                       or later), so a bucket after a hole across midnight is in it. */
+                    Assert.Equal(Now.Date.AddHours(Now.Hour), to);
                     return Task.FromResult<IReadOnlyList<HourBucket>?>(
                         rollup.Relation == QueryStats.Relation ? queryStats : perfmon);
                 },
@@ -404,7 +439,7 @@ public sealed class CollectionHistoryAuditTests
         var fired = Assert.Single(p.Deliverer.Outcomes);
         Assert.Equal("Collection Gaps In History", fired.MetricName);
         Assert.Equal(AlertSeverityLevel.Warning, fired.Severity);
-        Assert.Equal("collectionhistoryaudit", fired.ServerKey);
+        Assert.Equal("collectionhistoryaudit:2026-10-10", fired.ServerKey);
         Assert.Contains("2026-10-10", fired.DetailText, StringComparison.Ordinal);
         Assert.Contains("query_stats_interval_hourly: 18:00-21:00Z (servers as low as 0 vs usual 40)", fired.DetailText, StringComparison.Ordinal);
         Assert.Contains("perfmon_interval_baseline: 05:00-08:00Z (servers as low as 40 vs usual 40, collection passes as low as 300 vs usual 1,500)", fired.DetailText, StringComparison.Ordinal);
@@ -486,8 +521,9 @@ public sealed class CollectionHistoryAuditTests
     [InlineData(23, 59)]
     public async Task AHoleInTheLastHour_IsJudged_AtEveryTick_OnceTheBucketAfterItExists(int hour, int minute)
     {
-        /* L1 of the #5461 review: a hole at 23:00 with a bucket after it, whenever the tick falls. The old rule skipped
-           hour 23 before 01:30Z, so a pass at 01:05Z called this day clean. */
+        /* L1 of the #5461 review: a hole at 23:00 with a bucket after it, whenever the tick falls from 03:00Z on. The
+           01:30Z rule it replaced did judge hour 23 at every one of these ticks, so this guards the 03:00Z slot and
+           the always-judged hour together, not that rule. The midnight test below is the one that was red before. */
         var p = new Process(new MemoryStampStore(), new DateTime(2026, 10, 11, hour, minute, 0, DateTimeKind.Utc));
         var holeAt23 = WithAuditDay(Week(), h => h == 23 ? null : Usual(h));
         holeAt23.Add(new HourBucket(AuditDay.AddDays(1), 40, Usual(0).Passes));
@@ -561,6 +597,168 @@ public sealed class CollectionHistoryAuditTests
         Assert.Contains("perfmon_interval_baseline: 18:00-21:00Z", fired.DetailText, StringComparison.Ordinal);
         Assert.Contains("Not read for this day: query_stats_interval_hourly", fired.DetailText, StringComparison.Ordinal);
         Assert.Single(p.Log.Entries, e => e.Message.Contains("gave up on collect.query_stats_interval_hourly", StringComparison.Ordinal));
+    }
+
+    /// <summary>A run whose reader serves each source from its own list, cut at the bounds the evaluator passes, as the
+    /// real read is: a bucket outside [from, to) is not seen.</summary>
+    private static Task RunBoundedAsync(Process p, Func<Rollup, IReadOnlyList<HourBucket>?> source, params Rollup[] rollups) =>
+        p.Evaluator.ApplyCollectionHistoryAuditAsync(
+            (rollup, from, to, token) =>
+            {
+                var all = source(rollup);
+                return Task.FromResult<IReadOnlyList<HourBucket>?>(
+                    all?.Where(b => b.HourUtc >= from && b.HourUtc < to).ToList());
+            },
+            rollups.Length == 0 ? new[] { QueryStats, Perfmon } : rollups, Ct);
+
+    [Fact]
+    public async Task AnOutageFrom2230To0130_IsRaisedOnceCollectionResumes_NotAfterTheGiveUp()
+    {
+        /* H1 of the #5461 round 2 review. No row in any source from 23:00Z to 01:00Z; rows again at 01:00Z. With the
+           read fixed at 01:00Z no bucket after the hole was in it, so every source read "not ready" forever and the
+           day, hole and any unrelated thin hour included, was never judged. */
+        var stamps = new MemoryStampStore();
+        var p = new Process(stamps, FirstPass);
+        var days = WithAuditDay(Week(), h => h == 23 ? null : Usual(h));
+        days.Add(new HourBucket(AuditDay.AddDays(1).AddHours(1), 40, Usual(1).Passes));
+        days.Add(new HourBucket(AuditDay.AddDays(1).AddHours(2), 40, Usual(2).Passes));
+
+        await RunBoundedAsync(p, _ => days);
+
+        var fired = Assert.Single(p.Deliverer.Outcomes);
+        Assert.Contains("23:00-24:00Z", fired.DetailText, StringComparison.Ordinal);
+        Assert.DoesNotContain("Not read", fired.DetailText, StringComparison.Ordinal);
+        Assert.DoesNotContain("not complete", fired.DetailText, StringComparison.Ordinal);
+        Assert.Equal(1, fired.NumericCurrentValue);
+        Assert.Equal(new DateTime(2026, 10, 11, 3, 0, 0, DateTimeKind.Utc), stamps.Stamps["history_audit_slot"]);
+    }
+
+    [Fact]
+    public async Task ASourceThatNeverBecomesReady_KeepsItsFlaggedHours_AndTheGiveUpAlertMarksThemNotComplete()
+    {
+        /* H1 of the #5461 round 2 review: a rollup whose refresh stopped at 10:00Z. Perfmon is clean. Every read finds
+           the rollup not ready; its hole (hour 10 to 24, zero servers) must reach the alert at the give-up. */
+        var stamps = new MemoryStampStore();
+        var p = new Process(stamps, FirstPass);
+        var stopped = WithAuditDay(Week(), h => h <= 9 ? Usual(h) : null);
+        var clean = WithAuditDay(Week(), h => Usual(h));
+        IReadOnlyList<HourBucket>? Source(Rollup r) => r.Relation == QueryStats.Relation ? stopped : clean;
+
+        foreach (var tick in new[] { FirstPass, FirstPass.AddHours(8), new DateTime(2026, 10, 12, 2, 59, 0, DateTimeKind.Utc) })
+        {
+            p.Now = tick;
+            await RunBoundedAsync(p, Source);
+            Assert.Empty(p.Deliverer.Outcomes);
+            Assert.Empty(stamps.Stamps);
+        }
+
+        p.Now = new DateTime(2026, 10, 12, 3, 0, 0, DateTimeKind.Utc);
+        await RunBoundedAsync(p, Source);
+
+        var fired = Assert.Single(p.Deliverer.Outcomes);
+        Assert.Contains("query_stats_interval_hourly: 10:00-24:00Z (servers as low as 0 vs usual 40) [not complete", fired.DetailText, StringComparison.Ordinal);
+        Assert.Contains("Not read for this day: query_stats_interval_hourly", fired.DetailText, StringComparison.Ordinal);
+        Assert.Equal(14, fired.NumericCurrentValue);
+        Assert.Single(p.Log.Entries, e => e.Message.Contains("gave up on collect.query_stats_interval_hourly", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task AGiveUpWithNoFlaggedHours_RaisesNothing_AndLogsTheWarning()
+    {
+        var p = new Process(new MemoryStampStore(), FirstPass);
+        var clean = WithAuditDay(Week(), h => Usual(h));
+
+        p.Now = FirstPass;
+        await p.RunWithAsync((r, from) => r.Relation == QueryStats.Relation ? throw new TimeoutException("statement timeout") : clean);
+        p.Now = new DateTime(2026, 10, 12, 3, 0, 0, DateTimeKind.Utc);
+        await p.RunWithAsync((r, from) => r.Relation == QueryStats.Relation && from == AuditDay.AddDays(-7) ? throw new TimeoutException("statement timeout") : clean);
+
+        Assert.Empty(p.Deliverer.Outcomes);
+        Assert.Single(p.Log.Entries, e => e.Message.Contains("gave up on collect.query_stats_interval_hourly", StringComparison.Ordinal));
+    }
+
+    /// <summary>A deliverer that applies the cooldown the way the real one does for a self-alert (no incidents): one
+    /// send per (server key, metric) pair, the repeat throttled. Throttled counts as delivered upstream, so a
+    /// throttled alert simply never reaches a channel.</summary>
+    private sealed class CooldownDeliverer : IAlertDeliverer
+    {
+        private readonly HashSet<string> _sent = new(StringComparer.Ordinal);
+        public List<AlertOutcome> Delivered { get; } = new();
+        public List<AlertOutcome> Throttled { get; } = new();
+
+        public Task DeliverAsync(AlertOutcome outcome, CancellationToken cancellationToken = default)
+        {
+            (_sent.Add(outcome.ServerKey + "|" + outcome.MetricName) ? Delivered : Throttled).Add(outcome);
+            return Task.CompletedTask;
+        }
+
+        public async Task<AlertDelivery?> DeliverAndReportAsync(AlertOutcome outcome, CancellationToken cancellationToken = default)
+        {
+            await DeliverAsync(outcome, cancellationToken);
+            return null;
+        }
+    }
+
+    [Fact]
+    public async Task TheGiveUpAlertForOneDay_AndTheNextDaysAudit_AreBothDelivered_InOneTick()
+    {
+        /* M1 of the #5461 round 2 review: at the first tick on or after D+2 03:00Z the give-up for D fires, then the
+           same call audits D+1. Under one delivery key the second was throttled by the cooldown and never reached a
+           channel; with the audit day in the key they are two incidents. */
+        var cooldown = new CooldownDeliverer();
+        var stamps = new MemoryStampStore();
+        var settings = new DarlingSelfAlertTests.FakeSettings();
+        var now = FirstPass;
+        var evaluator = new DarlingSelfAlertEvaluator(
+            settings, cooldown, new NoHistoryStore(), _ => false, utcNow: () => now, deliveryStamps: stamps);
+
+        var dayOne = WithAuditDay(Week(), h => h is >= 18 and <= 20 ? null : Usual(h));
+        var dayTwo = Week().Concat(Day(AuditDay, h => Usual(h))).Concat(Day(AuditDay.AddDays(1), h => h is >= 5 and <= 6 ? null : Usual(h))).ToList();
+        var firstDayFrom = AuditDay.AddDays(-7);
+
+        Task Run() => evaluator.ApplyCollectionHistoryAuditAsync(
+            (rollup, from, to, token) =>
+            {
+                if (from == firstDayFrom)
+                {
+                    /* Day D: the workload rollup keeps timing out; perfmon reads and is holey. */
+                    return rollup.Relation == QueryStats.Relation
+                        ? throw new TimeoutException("statement timeout")
+                        : Task.FromResult<IReadOnlyList<HourBucket>?>(dayOne);
+                }
+
+                return Task.FromResult<IReadOnlyList<HourBucket>?>(dayTwo);
+            },
+            new[] { QueryStats, Perfmon }, Ct);
+
+        await Run();
+        now = new DateTime(2026, 10, 12, 2, 59, 0, DateTimeKind.Utc);
+        await Run();
+        Assert.Empty(cooldown.Delivered);
+
+        now = new DateTime(2026, 10, 12, 3, 0, 0, DateTimeKind.Utc);
+        await Run();
+
+        Assert.Equal(2, cooldown.Delivered.Count);
+        Assert.Empty(cooldown.Throttled);
+        Assert.Contains("2026-10-10", cooldown.Delivered[0].DetailText, StringComparison.Ordinal);
+        Assert.Contains("Not read for this day: query_stats_interval_hourly", cooldown.Delivered[0].DetailText, StringComparison.Ordinal);
+        Assert.Contains("2026-10-11", cooldown.Delivered[1].DetailText, StringComparison.Ordinal);
+        Assert.NotEqual(cooldown.Delivered[0].ServerKey, cooldown.Delivered[1].ServerKey);
+        Assert.StartsWith("collectionhistoryaudit:2026-10-1", cooldown.Delivered[0].ServerKey, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task TheAlertText_SaysAPerfmonScheduleChangeCanTriggerItForAFewDays()
+    {
+        var p = new Process(new MemoryStampStore(), FirstPass.AddHours(1));
+        var holey = WithAuditDay(Week(), h => h is >= 18 and <= 20 ? null : Usual(h));
+        await p.RunAsync(holey, holey);
+
+        var fired = Assert.Single(p.Deliverer.Outcomes);
+        Assert.Contains("A change to the perfmon collection schedule", fired.DetailText, StringComparison.Ordinal);
+        Assert.Contains("for a few days", fired.DetailText, StringComparison.Ordinal);
+        Assert.Equal(3, fired.NumericCurrentValue);
     }
 
     [Fact]
