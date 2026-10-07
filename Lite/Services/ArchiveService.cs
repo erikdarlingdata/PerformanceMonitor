@@ -79,7 +79,7 @@ public class ArchiveService
     internal static Func<Task>? BetweenPreserveCopyAndResetForTests { get; set; }
     internal long CompactionBatchInputBytes { get; set; } = ParquetCompaction.DefaultBatchInputBytes;
 
-    /* The per-batch input budget for the tables merged one day at a time (query_snapshots, #5393). */
+    /* The per-batch input budget for the tables merged one day at a time (query_snapshots, #5393; query_stats and query_store_stats, #5410). */
     internal long DailyCompactionBatchInputBytes { get; set; } = ParquetCompaction.DailyBatchInputBytes;
 
     /// <summary>
@@ -105,7 +105,7 @@ public class ArchiveService
        rebuilt (#4720): the same moment for a replay that the seam above marks for a swap. */
     internal Action? AfterCompactionReplayForTests { get; set; }
 
-    /* How long one compaction pass keeps starting new merges of a daily table (query_snapshots, #5393). A store
+    /* How long one compaction pass keeps starting new merges of a daily table (query_snapshots, #5393; query_stats and query_store_stats, #5410). A store
        that already holds months of per-cycle files merges one day per group, slowly (the table's budget is a few
        MiB and one thread), so the first pass could hold the pass for hours; past this time it starts no further
        daily merge and the rest of the backlog goes on in the next pass. The first daily merge always starts, so a
@@ -825,7 +825,7 @@ COPY (
 
     /// <summary>
     /// Compacts all per-cycle parquet files into monthly files (YYYYMM_tablename.parquet), or, for the tables
-    /// <see cref="ParquetCompaction.IsDailyTable"/> names (query_snapshots), into daily files
+    /// <see cref="ParquetCompaction.IsDailyTable"/> names (query_snapshots, query_stats, query_store_stats), into daily files
     /// (YYYYMMDD_tablename.parquet, and _ptNNN parts past the table's smaller batch budget).
     /// This keeps the archive directory small (~75 files for 3 months of 25 tables)
     /// and dramatically improves DuckDB read_parquet glob performance.
@@ -1039,7 +1039,7 @@ COPY (
 
         foreach (var ((month, table), files) in groups)
         {
-            /* A table merged per day (query_snapshots, #5393) has no monthly merge: its monthly, legacy and
+            /* A table merged per day (query_snapshots, #5393; query_stats and query_store_stats, #5410) has no monthly merge: its monthly, legacy and
                imported_ files stay as they are and are pruned by retention. Only its day groups go on. */
             if (ParquetCompaction.ShouldSkipCompaction(table, month))
             {

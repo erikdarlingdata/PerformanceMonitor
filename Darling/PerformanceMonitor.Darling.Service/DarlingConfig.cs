@@ -206,7 +206,7 @@ public sealed class DarlingConfig
     ///
     /// <para>The cost paid is plan-data granularity: a captured plan is up to this many cycles old. 4 keeps
     /// the worst-case plan age inside the collector's own ten-minute <c>last_execution_time</c> candidate
-    /// window, so a module busy enough to reach the TOP (150) cut is still busy when its plan is next
+    /// window, so a module busy enough to be among the first MaxPlansPerRun (150) kept rows is still busy when its plan is next
     /// rendered. Runtime statistics are unaffected — they are collected at full resolution every cycle.</para>
     ///
     /// <para>A file-only knob (not seeded into the control-plane store), exactly like

@@ -318,14 +318,25 @@ public sealed class CaggGroupIndexDropLiveTests
     /// A future rung that adds a new probe sentinel must add its artifact's removal here.</summary>
     private static async Task DropArtifactsOfLaterRungsAsync(NpgsqlConnection connection, int simulatedVersion, CancellationToken ct)
     {
-        if (simulatedVersion < 168)
+        if (simulatedVersion < 169)
         {
-            /* V168 (#5452) - the per-server AWS role on config_monitored_servers; the role column is the probe's sentinel.
+            /* V169 (#5452) - the per-server AWS role on config_monitored_servers; the role column is the probe's sentinel.
                Dropping the columns drops the table's check on them too. */
             await using var dropAwsRole = new NpgsqlCommand(
                 "ALTER TABLE config.config_monitored_servers DROP COLUMN IF EXISTS aws_external_id_set, "
                 + "DROP COLUMN IF EXISTS aws_external_id, DROP COLUMN IF EXISTS aws_role_arn", connection);
             await dropAwsRole.ExecuteNonQueryAsync(ct);
+        }
+
+        if (simulatedVersion < 168)
+        {
+            /* V168 (#5448) - the PLAN_REGRESSION per-day totals; the built table is the probe's sentinel. The trigger on
+               query_store_interval_latest goes first, then the function it calls, then the two tables. */
+            await using var dropPlanRegressionDaily = new NpgsqlCommand(
+                "DROP TRIGGER IF EXISTS trg_plan_regression_daily_late ON collect.query_store_interval_latest;"
+                + " DROP FUNCTION IF EXISTS collect.plan_regression_daily_mark_late();"
+                + " DROP TABLE IF EXISTS collect.plan_regression_daily, collect.plan_regression_daily_built", connection);
+            await dropPlanRegressionDaily.ExecuteNonQueryAsync(ct);
         }
 
         if (simulatedVersion < LegacyPinCandidateTables.RungVersion)

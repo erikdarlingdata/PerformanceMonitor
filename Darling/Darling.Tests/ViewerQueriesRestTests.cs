@@ -29,14 +29,14 @@ namespace Darling.Tests;
 public sealed class ViewerQueryTrendsSqlTests
 {
     /// <summary>
-    /// The three DELTA-based trends. Query Store is deliberately not here: its x-axis stopped being
+    /// The two query-stats DELTA-based trends (the procedure trend reads its seconds from the run axis and is pinned
+    /// by <see cref="ProcedureDurationTrendSql_RatesOverTheRunAxis_AndNeverFabricatesZero"/>). Query Store is deliberately not here: its x-axis stopped being
     /// collection_time in #1841 tier 2 (see <see cref="QueryStoreDurationTrend_PlacesWorkAtTheIntervalStart_WithALegacyArm"/>),
     /// so folding it into this theory would force the shared pins to be loosened for all four and the
     /// delta trends would stop being pinned to the axis they genuinely use.
     /// </summary>
     [Theory]
     [InlineData(nameof(ViewerDataService.QueryDurationTrendSql), "query_stats")]
-    [InlineData(nameof(ViewerDataService.ProcedureDurationTrendSql), "procedure_stats")]
     [InlineData(nameof(ViewerDataService.ExecutionCountTrendSql), "query_stats")]
     public void TrendSql_ComputesPerSecondRate_OverTheStoredInterval_BaseTable(string sqlName, string table)
     {
@@ -60,23 +60,35 @@ public sealed class ViewerQueryTrendsSqlTests
     }
 
     /// <summary>
-    /// #3540 (V128): the procedure trend reads the collection's STORED interval — MAX over the collection's
-    /// rows, 0 → NULL through NULLIF so a restart's marker collection drops rather than plotting 0.00 — and
-    /// falls back to the LAG derivation only for a pre-V128 collection (NULL). No ELSE 0 anywhere in it: the
-    /// rate is NULL when the interval is unknowable or absent and the reader drops the point. Its
-    /// query-stats siblings kept the LAG-only form until #3653 A11 (the residual #3540 reported rather than
-    /// rewrote); the theory above now pins all three to this read.
+    /// #5449 (after #3540 V128): the procedure trend's seconds are the gap to the previous point on the run axis (the
+    /// stored collections and the collector's SUCCESS runs, an idle run being a 0-work point), NULL past the delta
+    /// policy's 3600 s; the STORED interval is read only for the store's first collection. Three states, none a
+    /// fabricated zero: a stored collection whose rows ALL carry interval 0 is a restart and stays unrated (NULL); a
+    /// point with a previous point rates over the gap, capped at 3600 s; the first point rates over
+    /// <c>NULLIF(MAX(sample_interval_seconds), 0)</c>. No ELSE 0 anywhere in it: the rate is NULL when the seconds are
+    /// unknowable and the reader drops the point.
     /// </summary>
     [Fact]
-    public void ProcedureDurationTrendSql_PrefersTheStoredInterval_AndNeverFabricatesZero()
+    public void ProcedureDurationTrendSql_RatesOverTheRunAxis_AndNeverFabricatesZero()
     {
         var sql = ViewerDataService.ProcedureDurationTrendSql;
-        Assert.Contains("CASE WHEN MAX(sample_interval_seconds) IS NULL", sql, StringComparison.Ordinal);
-        Assert.Contains("ELSE NULLIF(MAX(sample_interval_seconds), 0)", sql, StringComparison.Ordinal);
-        Assert.Contains("THEN extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time))))", sql, StringComparison.Ordinal);
+        Assert.Contains("FROM procedure_stats", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("v_procedure_stats", sql, StringComparison.Ordinal); /* viewer reads base tables */
+        Assert.Contains("MAX(sample_interval_seconds) AS max_interval_seconds", sql, StringComparison.Ordinal);
+        Assert.Contains("LAG(collection_time) OVER (ORDER BY collection_time)", sql, StringComparison.Ordinal);
+        Assert.Contains("extract(epoch FROM", sql, StringComparison.Ordinal);
+        Assert.Contains("date_trunc('second', collection_time)", sql, StringComparison.Ordinal);
+        /* The three states of the seconds, in order: restart (stored, MAX 0) -> NULL; a previous point -> the gap, capped
+           at the delta policy's 3600 s (past it NULL); the store's first collection -> the stored interval, 0 -> NULL. */
+        Assert.Contains("CASE WHEN is_stored AND max_interval_seconds = 0 THEN NULL", sql, StringComparison.Ordinal);
+        Assert.Contains("WHEN gap_seconds IS NOT NULL THEN CASE WHEN gap_seconds <= 3600 THEN gap_seconds END", sql, StringComparison.Ordinal);
+        Assert.Contains("WHEN is_stored THEN NULLIF(max_interval_seconds, 0)", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("ELSE 0", sql, StringComparison.Ordinal);
+        /* The rates divide only where the seconds are known: no ELSE, so NULL, not a fabricated 0. */
         Assert.Contains("CASE WHEN interval_seconds > 0 THEN total_elapsed_ms / interval_seconds END AS elapsed_ms_per_second", sql, StringComparison.Ordinal);
         Assert.Contains("CASE WHEN interval_seconds > 0 THEN CAST(total_executions AS DOUBLE PRECISION) / interval_seconds END AS executions_per_second", sql, StringComparison.Ordinal);
+        Assert.Contains("GROUP BY collection_time", sql, StringComparison.Ordinal);
+        Assert.Contains("ORDER BY 1", sql, StringComparison.Ordinal);
 
         /* And the shared reader DROPS a NULL-rate row rather than reading it as 0 — the C# half of the idiom.
            #3653: one loop (ReadTrendPointsAsync) serves every trend here, including the execution-count one

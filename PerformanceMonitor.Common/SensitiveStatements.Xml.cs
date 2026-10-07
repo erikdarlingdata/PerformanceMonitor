@@ -13,6 +13,7 @@ using System.Globalization;
 using System.IO;
 using System.Net;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Xml;
 
 namespace PerformanceMonitor.Common;
@@ -115,6 +116,73 @@ public static partial class SensitiveStatements
         catch (Exception)
         {
             return placeholder;
+        }
+    }
+
+    /// <summary>Documents the whole-document check cleared without a walk (#5477); counted on the calling thread; a test reads it to
+    /// pin which documents take that path.</summary>
+    [ThreadStatic]
+    internal static long RawCleanClears;
+
+    /// <summary>
+    /// True when <paramref name="xml"/> provably holds no value the production judge would name, so the walk (two
+    /// parses and a judge call per value) can be skipped and the document returned as it is (#5477). One pass of the
+    /// linear-time pre-check over the raw text, charged to <paramref name="budget"/>.
+    ///
+    /// <para><b>Why a clear is exact.</b> The production judge starts every value with that same pre-check, a superset
+    /// of the pattern with no context-dependent part, and a value the pre-check misses is clean. A match inside a
+    /// value is therefore a match inside the raw text, provided the value is a contiguous piece of the raw text, or
+    /// differs from it only in characters the pattern cannot tell apart. Five conditions make that so, and each
+    /// one that fails sends the document to the walk, as before: no <c>&amp;</c> (a value is its raw text, nothing is
+    /// decoded, and no nested plan is held in an attribute); no carriage return (the reader turns CR LF into one
+    /// character and the pattern counts characters, so a counted part such as the type length could read a
+    /// different run in the value than in the text); no <c>--</c> (the line-comment part of the pattern reads up to a
+    /// control character, and the reader turns a tab or a line break inside an attribute into a space, so a
+    /// comment could run further in the value than in the text); no auto-parameter token and no <c>ParameterizedText</c>
+    /// element (the walk judges statements it assembles from the plan's parameter values, which no raw text
+    /// holds); and a judge that works (<see cref="s_judgeIsLive"/>) behind a budget that runs it. What is left of the
+    /// pattern sees a tab and a line break as the same space, one character for one. A text that is not well formed,
+    /// and a match that times out, are not cleared here: the first reaches the walk's own whole-text rule, and the
+    /// second the walk.</para>
+    /// </summary>
+    internal static bool RawTextHoldsNothingNamed(JudgeBudget budget, string xml)
+    {
+        try
+        {
+            if (!budget.UsesSharedJudge || budget.Spent)
+                return false;
+            if (xml.Contains('&') || xml.Contains('\r') || xml.Contains("--", StringComparison.Ordinal) || XmlRun.MayNeedProbe(xml))
+                return false;
+            // Built here, before the clock starts, as the judge's own first value would build it.
+            if (!s_judgeIsLive.Value)
+                return false;
+            var precheck = s_prefilter.Value;
+            if (precheck is null)
+                return false;
+            var started = Stopwatch.GetTimestamp();
+            bool matched;
+            try
+            {
+                matched = precheck.IsMatch(xml);
+            }
+            catch (RegexMatchTimeoutException)
+            {
+                matched = true;
+            }
+            finally
+            {
+                budget.AddElapsed(Stopwatch.GetElapsedTime(started));
+            }
+            if (matched)
+                return false;
+            RawCleanClears++;
+            return true;
+        }
+#pragma warning disable CA1031 // fail closed: a document that cannot be pre-checked is walked
+        catch (Exception)
+#pragma warning restore CA1031
+        {
+            return false;
         }
     }
 
@@ -320,7 +388,7 @@ public static partial class SensitiveStatements
         /// <summary>Whether the raw text could hold an auto-parameter token or an element-form
         /// <c>ParameterizedText</c>: when it cannot, pass 1 returns at the first hit as it always did. Cheap and
         /// one-sided (a false yes only costs a full read), and an entity-encoded <c>@</c> counts as a yes.</summary>
-        private static bool MayNeedProbe(string xml)
+        internal static bool MayNeedProbe(string xml)
         {
             if (xml.Contains("ParameterizedText>", StringComparison.Ordinal) || HoldsAtReference(xml))
                 return true;

@@ -34,7 +34,7 @@ SELECT name, host, database, username, excluded_databases
 FROM config_monitored_servers";
 
     /// <summary>
-    /// The registry's AWS role columns (#5452, store version 168), for the name set: the role ARN, whose account id is
+    /// The registry's AWS role columns (#5452, store version 169), for the name set: the role ARN, whose account id is
     /// aliased too, and the external ID, a secret. The CLI reads with the service's own store login, which reads
     /// every column of this table (the service's config provider reads the same two). A store older than 168 has no such
     /// columns; that read adds nothing instead of refusing the bundle.

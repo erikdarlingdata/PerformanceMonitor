@@ -33,11 +33,12 @@ namespace PerformanceMonitor.Darling.Service;
 internal static class ProcedureStatsPlanReuse
 {
     /// <summary>
-    /// The most module plans one run renders in the second query, taken in row order. Today's inline capture renders at
-    /// most as many. This is a guard only: the main query is already <c>TOP (150)</c>, so at most 150 rows can miss and
-    /// <c>deferred_over_cap = 0</c> is what to expect. A zero there is not evidence that anything was tested.
+    /// The most module plans one run renders in the second query, taken in row order. This is a guard only: the plan phase
+    /// (#5449) covers at most <see cref="ProcedureStatsCollector.MaxPlansPerRun"/> rows and a row outside it is skipped, so
+    /// at most that many rows can miss and <c>deferred_over_cap = 0</c> is what to expect. A zero there is not evidence
+    /// that anything was tested.
     /// </summary>
-    internal const int MaxMissesPerRun = 150;
+    internal const int MaxMissesPerRun = ProcedureStatsCollector.MaxPlansPerRun;
 
     /// <summary>
     /// How many capture cycles an identity may go without being rendered again before a hit is refused. The
@@ -264,6 +265,11 @@ internal static class ProcedureStatsPlanReuse
         var outcome = new Outcome();
         foreach (var row in rows)
         {
+            if (row.PlanPhaseSkipped)
+            {
+                continue; /* #5449: outside the plan phase: no plan, no identity, and not a miss */
+            }
+
             var rendered = row.QueryPlanXml is not null || row.QueryPlanXmlBytes is not null;
             if (rendered)
             {
@@ -369,6 +375,11 @@ internal static class ProcedureStatsPlanReuse
         for (var i = 0; i < rows.Count; i++)
         {
             var row = rows[i];
+            if (row.PlanPhaseSkipped)
+            {
+                continue; /* #5449: outside the plan phase: no plan, no identity, and not a miss */
+            }
+
             var key = ProcedureStatsPlanKey.TryCreate(serverId, row);
             if (key is { } k && cache.TryGet(k, nowUtc, out var entry) && !IsExpired(entry, captureOrdinal))
             {

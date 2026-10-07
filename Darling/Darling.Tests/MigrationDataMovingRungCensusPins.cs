@@ -219,7 +219,7 @@ public sealed class MigrationDataMovingRungCensusPins
             + "nightly-build store already holds rows, and only for the few days since it picked up V145 - "
             + "nowhere near the horizon in practice"),
         new(
-            168,
+            169,
             SetsTheFloor: false,
             "ADD CONSTRAINT ... CHECK on config.config_monitored_servers (#5452) validates every existing row, and the "
             + "stored generated aws_external_id_set column is filled for every existing row. Both scans are over the "

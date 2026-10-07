@@ -1271,7 +1271,7 @@ ON CONFLICT (server_id) DO NOTHING", connection, transaction) { CommandTimeout =
                does not exist, deliberately. */
             AddNullableText(command, server.RemediationUsername);
             AddNullableText(command, server.RemediationEncryptedPassword);
-            /* V168 (#5452): the AWS role and its external ID, trimmed with blank as NULL. Seeded for a NEW row only,
+            /* V169 (#5452): the AWS role and its external ID, trimmed with blank as NULL. Seeded for a NEW row only,
                like every other column here (ON CONFLICT DO NOTHING). An external ID with no role would break the
                table's check, so it is dropped with the role it belonged to; Validate refuses that file earlier. */
             var seedRole = AwsRoleSettings.Normalize(server.AwsRoleArn);
@@ -1933,7 +1933,7 @@ ORDER BY name", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoo
                about; it is the shipped state, and it means this server has no phase-1 surface. */
             RemediationUsername = reader.IsDBNull(17) ? null : reader.GetString(17),
             RemediationEncryptedPassword = reader.IsDBNull(18) ? null : reader.GetString(18),
-            /* V168 (#5452): the AWS role and its external ID. Nullable with no default: NULL is every server nobody
+            /* V169 (#5452): the AWS role and its external ID. Nullable with no default: NULL is every server nobody
                has pointed at a role, and it means the process's own credentials. */
             AwsRoleArn = reader.IsDBNull(19) ? null : reader.GetString(19),
             AwsExternalId = reader.IsDBNull(20) ? null : reader.GetString(20),

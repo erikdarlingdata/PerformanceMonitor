@@ -165,7 +165,7 @@ public static class DarlingManagedRoles
                    learns a server is armed at all: the phase-1 surface exists when this is non-null, so a
                    `viewer` seat that could not read it would see no surface on an armed server. */
                 "remediation_username",
-                /* V168 (#5452): the AWS role Darling assumes for an RDS or Aurora target, and whether an external
+                /* V169 (#5452): the AWS role Darling assumes for an RDS or Aurora target, and whether an external
                    ID is stored with it. Non-secret: an account id is an identifier, not a credential, and the
                    viewer has to be able to SHOW which role a target uses. The flag lets it show that an
                    external ID is set without ever being able to read the ID. */
@@ -176,7 +176,7 @@ public static class DarlingManagedRoles
                anything in this table is secret it is. Named explicitly rather than left unclassified
                because unclassified is only invisible until someone "fixes" the failing security gate by
                adding the column to whichever list is nearer. */
-            /* aws_external_id (V168, #5452) is write-only for these roles. AWS does not treat an external ID as
+            /* aws_external_id (V169, #5452) is write-only for these roles. AWS does not treat an external ID as
                a secret, but a role that trusts a whole account plus an external ID is only as closed as that ID
                is private, so it is named here rather than left unclassified. */
             SecretColumns: new[] { "encrypted_password", "remediation_encrypted_password", "aws_external_id" }),

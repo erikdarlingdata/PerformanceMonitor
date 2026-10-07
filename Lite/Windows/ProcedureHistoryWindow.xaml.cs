@@ -40,6 +40,8 @@ public partial class ProcedureHistoryWindow : Window
     private readonly Func<ServerClock> _serverClock;
     private readonly PlanNavigationController _planActions;
     private List<ProcedureStatsHistoryRow> _historyData = new();
+    /* #5449: the rows the chart plots: _historyData plus a zero row at each collector run that stored nothing for this procedure. */
+    private List<ProcedureStatsHistoryRow> _chartData = new();
     private ChartHoverHelper? _chartHover;
     private DataGridFilterManager<ProcedureStatsHistoryRow>? _filterManager;
     private Popup? _filterPopup;
@@ -110,6 +112,9 @@ public partial class ProcedureHistoryWindow : Window
                 SummaryText.Text = "No history data found for this procedure in the selected time range.";
             }
 
+            /* #5449: the chart also plots a 0 for each collector run that stored nothing for this procedure, so a quiet
+               minute is a 0 as it is on an older store, not a gap. The grid and summary keep the stored rows. */
+            _chartData = await _dataService.GetProcedureStatsHistoryChartRowsAsync(_serverId, _historyData);
             UpdateChart();
         }
         catch (Exception ex)
@@ -120,7 +125,7 @@ public partial class ProcedureHistoryWindow : Window
 
     private void UpdateChart()
     {
-        if (_historyData == null || _historyData.Count == 0)
+        if (_chartData == null || _chartData.Count == 0)
         {
             HistoryChart.Plot.Clear();
             HistoryChart.Refresh();
@@ -133,8 +138,8 @@ public partial class ProcedureHistoryWindow : Window
         var tag = selected?.Tag?.ToString() ?? "AvgCpuMs";
         var label = selected?.Content?.ToString() ?? "Avg CPU (ms)";
 
-        var xs = _historyData.Select(r => r.CollectionTime.ToOADate()).ToArray();
-        var ys = _historyData.Select(r => GetMetricValue(r, tag)).ToArray();
+        var xs = _chartData.Select(r => r.CollectionTime.ToOADate()).ToArray();
+        var ys = _chartData.Select(r => GetMetricValue(r, tag)).ToArray();
 
         var scatter = HistoryChart.Plot.Add.TimeSeries(xs, ys);
         scatter.Color = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("MetricTrend"));

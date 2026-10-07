@@ -224,7 +224,7 @@ GRANT SELECT (server_id, name, host, database, auth, username, encrypt_mode, tru
               -- V113 (#2138 phase 1): the remediation credential's login name. Non-secret, exactly like
               -- username; remediation_encrypted_password is deliberately NOT granted.
               remediation_username,
-              -- V168 (#5452): the AWS role a target uses, and whether an external ID is stored with it.
+              -- V169 (#5452): the AWS role a target uses, and whether an external ID is stored with it.
               -- Non-secret; the external ID itself (aws_external_id) is deliberately NOT granted.
               aws_role_arn, aws_external_id_set)
     ON config.config_monitored_servers TO viewer;
