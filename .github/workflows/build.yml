@@ -229,6 +229,9 @@ jobs:
   # four Lite shards, the whole-tree guards job) download it into the same relative paths and skip their own
   # restore and build. The obj/Release intermediates and every other project's obj are not needed, and not
   # uploaded: `dotnet run --no-build` was proven locally with exactly this set and an empty NuGet package folder.
+  # Two tests read ANOTHER project's build output through the repo layout, so those are uploaded too: the Darling
+  # service's bin/Release (DarlingEncryptPasswordStreamTests starts its exe) and the Lite app's runtimeconfig
+  # (LiteRuntimePrerequisiteDocsTests reads Lite/bin/**). A first version without them failed both on the shards.
   # The workspace path is recorded because many tests find the repo root through [CallerFilePath], so a binary
   # built in one workspace path reads its source from that path; a consumer whose workspace or sha differs fails
   # loudly instead of testing the wrong tree. Only a consumer that USED the artifact leaves out Stage=Guard (this
@@ -353,6 +356,7 @@ jobs:
           path: |
             guard-build-origin.txt
             Darling/Darling.Tests/bin/Release
+            Darling/PerformanceMonitor.Darling.Service/bin/Release
             Darling/Darling.Tests/obj/project.assets.json
             Darling/Darling.Tests/obj/project.nuget.cache
             Darling/Darling.Tests/obj/*.nuget.g.props
@@ -372,6 +376,7 @@ jobs:
           path: |
             guard-build-origin.txt
             Lite.Tests/bin/Release
+            Lite/bin/**/PerformanceMonitorLite.runtimeconfig.json
             Lite.Tests/obj/project.assets.json
             Lite.Tests/obj/project.nuget.cache
             Lite.Tests/obj/*.nuget.g.props

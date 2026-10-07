@@ -321,6 +321,11 @@ public sealed class GuardStageWorkflowTests
             Assert.Contains("guard-build-origin.txt", upload, StringComparison.Ordinal);
             Assert.Contains(project + "/bin/Release", upload, StringComparison.Ordinal);
             Assert.Contains(project + "/obj/project.assets.json", upload, StringComparison.Ordinal);
+            /* Tests that read another project's build output through the repo layout (the first version failed both). */
+            Assert.Contains(
+                project == "Lite.Tests" ? "Lite/bin/**/PerformanceMonitorLite.runtimeconfig.json" : "Darling/PerformanceMonitor.Darling.Service/bin/Release",
+                upload,
+                StringComparison.Ordinal);
             Assert.Contains("retention-days: 1\n", upload, StringComparison.Ordinal);
             Assert.Contains("overwrite: true", upload, StringComparison.Ordinal);
             Assert.Contains("if-no-files-found: error", upload, StringComparison.Ordinal);
