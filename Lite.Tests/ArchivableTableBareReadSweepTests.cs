@@ -69,6 +69,11 @@ public class ArchivableTableBareReadSweepTests
         [("RemoteCollectorService.QueryStoreBackfill.cs", "query_store_stats")] = 1,
         [("RemoteCollectorService.QueryStoreBackfill.cs", "database_states")] = 3,
         [("RemoteCollectorService.cs", "collection_log")] = 1,
+
+        /* #4938: the start-up read of each daily collector's last run, so a restart does not make it due again. It
+           reads the live log within the longest daily interval plus a day: a collector whose last run is older than
+           that is due anyway, and the run it makes is then a live row. */
+        [("RemoteCollectorService.RunTime.cs", "collection_log")] = 1,
     };
 
     private static readonly List<string> Tables = ArchiveService.ArchivableTables.Select(t => t.Table)

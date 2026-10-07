@@ -17,6 +17,7 @@ using ModelContextProtocol.Server;
 using Npgsql;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
@@ -267,6 +268,61 @@ public sealed class DarlingMcpLatchSpinlockToolsLivePostgresTests
     private const string ServerName = "darling-mcp-latch-e2e";
     private static readonly int ServerId = ServerIdHelper.GetDeterministicHashCode(ServerName);
     private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+
+    /* #4966: the window-floor cases of get_latch_stats and get_spinlock_stats (WindowNoticeAggregateCases). */
+    private static readonly WindowNoticeAggregateCases s_latchWindow = new(
+        "get_latch_stats", "latch_stats",
+        (ds, name, hours, end, top) => DarlingMcpLatchSpinlockTools.GetLatchStats(ds, name, hours, top, WebDataStartNote.FormatWindowEnd(end)),
+        (c, name, at, i) => DarlingMcpTestData.ExecAsync(c, TestContext.Current.CancellationToken,
+            @"INSERT INTO latch_stats (collection_id, collection_time, server_id, server_name, latch_class, waiting_requests_count, wait_time_ms, max_wait_time_ms, delta_waiting_requests_count, delta_wait_time_ms, delta_max_wait_time_ms, sample_interval_seconds)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::integer)",
+            CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(at), ServerIdHelper.GetDeterministicHashCode(name), name, "WINDOW_LATCH_" + i, 1000L, 20000L, 50L, 100L, 4000L - i, 5L, 60),
+        null);
+
+    private static readonly WindowNoticeAggregateCases s_spinlockWindow = new(
+        "get_spinlock_stats", "spinlock_stats",
+        (ds, name, hours, end, top) => DarlingMcpLatchSpinlockTools.GetSpinlockStats(ds, name, hours, top, WebDataStartNote.FormatWindowEnd(end)),
+        (c, name, at, i) => DarlingMcpTestData.ExecAsync(c, TestContext.Current.CancellationToken,
+            @"INSERT INTO spinlock_stats (collection_id, collection_time, server_id, server_name, spinlock_name, collisions, spins, spins_per_collision, sleep_time, backoffs, delta_collisions, delta_spins, delta_sleep_time, delta_backoffs, sample_interval_seconds)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15::integer)",
+            CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(at), ServerIdHelper.GetDeterministicHashCode(name), name, "WINDOW_SPIN_" + i, 900000L, 5000000L, 5.5d, 100L, 200L, 40000L - i, 200000L, 3L, 7L, 60),
+        null);
+
+    [Fact]
+    public Task GetLatchStats_CollectionStartingInsideTheWindow_NamesWhereCoverageStarts_AndACappedPageKeepsTheTwoFlagsApart_AgainstDevPostgres() => s_latchWindow.CollectionStartingInsideTheWindow_NamesWhereCoverageStarts_AndACappedPageKeepsTheTwoFlagsApart(ConnectionString);
+
+    [Fact]
+    public Task GetLatchStats_ARankCappedPage_BesideACoveredWindow_IsNotWindowTruncated_AgainstDevPostgres() => s_latchWindow.ARankCappedPage_BesideACoveredWindow_IsNotWindowTruncated(ConnectionString);
+
+    [Fact]
+    public Task GetLatchStats_AQuietStart_IsCovered_AgainstDevPostgres() => s_latchWindow.AQuietStart_IsCovered(ConnectionString);
+
+    [Fact]
+    public Task GetLatchStats_TheNoRowsAnswer_StaysBare_AgainstDevPostgres() => s_latchWindow.TheNoRowsAnswer_StaysBare(ConnectionString);
+
+    [Fact]
+    public Task GetLatchStats_AShortWindow_WithRows_StartsNoProbe_AgainstDevPostgres() => s_latchWindow.AShortWindow_WithRows_StartsNoProbe(ConnectionString);
+
+    [Fact]
+    public Task GetLatchStats_AFailedProbe_CostsTheNotice_NeverTheRows_AgainstDevPostgres() => s_latchWindow.AFailedProbe_CostsTheNotice_NeverTheRows(ConnectionString);
+
+    [Fact]
+    public Task GetSpinlockStats_CollectionStartingInsideTheWindow_NamesWhereCoverageStarts_AndACappedPageKeepsTheTwoFlagsApart_AgainstDevPostgres() => s_spinlockWindow.CollectionStartingInsideTheWindow_NamesWhereCoverageStarts_AndACappedPageKeepsTheTwoFlagsApart(ConnectionString);
+
+    [Fact]
+    public Task GetSpinlockStats_ARankCappedPage_BesideACoveredWindow_IsNotWindowTruncated_AgainstDevPostgres() => s_spinlockWindow.ARankCappedPage_BesideACoveredWindow_IsNotWindowTruncated(ConnectionString);
+
+    [Fact]
+    public Task GetSpinlockStats_AQuietStart_IsCovered_AgainstDevPostgres() => s_spinlockWindow.AQuietStart_IsCovered(ConnectionString);
+
+    [Fact]
+    public Task GetSpinlockStats_TheNoRowsAnswer_StaysBare_AgainstDevPostgres() => s_spinlockWindow.TheNoRowsAnswer_StaysBare(ConnectionString);
+
+    [Fact]
+    public Task GetSpinlockStats_AShortWindow_WithRows_StartsNoProbe_AgainstDevPostgres() => s_spinlockWindow.AShortWindow_WithRows_StartsNoProbe(ConnectionString);
+
+    [Fact]
+    public Task GetSpinlockStats_AFailedProbe_CostsTheNotice_NeverTheRows_AgainstDevPostgres() => s_spinlockWindow.AFailedProbe_CostsTheNotice_NeverTheRows(ConnectionString);
 
     [Fact]
     public async Task LatchSpinlockTools_ReadPlantedRows_AgainstDevPostgres()

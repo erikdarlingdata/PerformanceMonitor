@@ -21,6 +21,7 @@ namespace PerformanceMonitorLite.Tests;
 /// A logical server's <c>master</c> has no service objective to resize: Server Inventory and the 7-day trend say N/A, and
 /// the constant that finds it is the collector's stored edition.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class AzureSqlDatabaseMasterPinsTests
 {
     private static IDataReader FleetRow(int engineEdition, string edition)

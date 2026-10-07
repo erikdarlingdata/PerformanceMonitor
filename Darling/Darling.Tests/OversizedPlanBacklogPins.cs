@@ -13,6 +13,7 @@ using System.Globalization;
 using System.Linq;
 using System.Reflection;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
@@ -818,6 +819,7 @@ public sealed class OversizedPlanBacklogPins
             OversizedPlanBacklog.RecordCaptureSql,
             OversizedPlanBacklog.RecordExpirySql,
             OversizedPlanBacklog.RecordAttemptSql,
+            OversizedPlanBacklog.RecordFailureSql,
         })
         {
             foreach (var column in new[]
@@ -829,11 +831,16 @@ public sealed class OversizedPlanBacklogPins
                 Assert.Contains(column, sql, StringComparison.Ordinal);
             }
 
-            /* Every attempt is counted, whatever it established — a chronically unfetchable row has to be
-               legible in the TABLE, not only in a log line nobody greps. */
-            Assert.Contains("attempt_count = attempt_count + 1", sql, StringComparison.Ordinal);
+            /* Every outcome stamps when the row was last tried, which is what puts it at the back of the claim. */
             Assert.Contains("last_attempt_at = $7", sql, StringComparison.Ordinal);
         }
+
+        /* attempt_count is the sweep's retirement limit (#5367 review, A-M1): the capture (which retires the row) and a
+           judge timeout add to it; a connect failure and an expiry do not. */
+        Assert.Contains("attempt_count = attempt_count + 1", OversizedPlanBacklog.RecordCaptureSql, StringComparison.Ordinal);
+        Assert.Contains("attempt_count = attempt_count + 1", OversizedPlanBacklog.RecordAttemptSql, StringComparison.Ordinal);
+        Assert.DoesNotContain("attempt_count", OversizedPlanBacklog.RecordExpirySql, StringComparison.Ordinal);
+        Assert.DoesNotContain("attempt_count", OversizedPlanBacklog.RecordFailureSql, StringComparison.Ordinal);
 
         /* Only the capture stores content, and only the expiry stamps an expiry. A failed fetch established
            nothing about the handle, so it must not retire the row. */
@@ -841,6 +848,8 @@ public sealed class OversizedPlanBacklogPins
         Assert.DoesNotContain("plan_xml", OversizedPlanBacklog.RecordExpirySql, StringComparison.Ordinal);
         Assert.DoesNotContain("plan_xml", OversizedPlanBacklog.RecordAttemptSql, StringComparison.Ordinal);
         Assert.DoesNotContain("expired_at", OversizedPlanBacklog.RecordAttemptSql, StringComparison.Ordinal);
+        Assert.DoesNotContain("plan_xml", OversizedPlanBacklog.RecordFailureSql, StringComparison.Ordinal);
+        Assert.DoesNotContain("expired_at", OversizedPlanBacklog.RecordFailureSql, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -851,15 +860,53 @@ public sealed class OversizedPlanBacklogPins
         Assert.Contains("captured_at IS NULL", claim, StringComparison.Ordinal);
         Assert.Contains("expired_at IS NULL", claim, StringComparison.Ordinal);
 
-        /* Oldest ATTEMPT first is what makes head-of-line starvation impossible: one plan that can never be
-           fetched cannot occupy a slot every tick forever. Largest plan first only breaks ties among rows
-           never attempted — those are the plans the cap cost the most visibility on. */
-        Assert.Contains("last_attempt_at ASC NULLS FIRST", claim, StringComparison.Ordinal);
+        /* Tried rows rank oldest ATTEMPT first, so a failing plan goes to the back of the tried rows. Largest plan
+           first ranks the rows never attempted — those are the plans the cap cost the most visibility on. */
+        Assert.Contains("last_attempt_at ASC", claim, StringComparison.Ordinal);
         Assert.Contains("observed_bytes DESC", claim, StringComparison.Ordinal);
         Assert.True(
-            claim.IndexOf("last_attempt_at ASC NULLS FIRST", StringComparison.Ordinal)
+            claim.IndexOf("last_attempt_at ASC", StringComparison.Ordinal)
                 < claim.IndexOf("observed_bytes DESC", StringComparison.Ordinal),
             "size overtook attempt age in the claim order — an unfetchable large plan would then starve the rest");
+
+        /* #5367: a row tried once is claimed ahead of the rows never tried (it used to sort behind them, so new rows
+           arriving each pass could keep it waiting without end), and is judged on a session of its own. The returned
+           order is tried first. */
+        Assert.DoesNotContain("NULLS FIRST", claim, StringComparison.Ordinal);
+        var outer = claim[(claim.LastIndexOf(") AS claimed", StringComparison.Ordinal))..];
+        Assert.True(outer.IndexOf("tried DESC", StringComparison.Ordinal) >= 0
+            && outer.IndexOf("tried DESC", StringComparison.Ordinal) < outer.IndexOf("last_attempt_at ASC", StringComparison.Ordinal),
+            "the tried-first key must lead the order the claim returns");
+
+        /* #5367 review round 2, N2: the tried rows hold at most half of a claim, because a fetch that keeps failing is
+           not counted and never retires, so ten of them used to fill every claim and no new row was ever claimed. The
+           other half goes to never-tried rows, and a side that is short leaves its slots to the other. */
+        Assert.Equal(5, OversizedPlanBacklog.TriedRowsPerClaim(OversizedPlanBacklogSweep.MaxPlansPerServerPerTick));
+        Assert.Equal(0, OversizedPlanBacklog.TriedRowsPerClaim(1));
+        Assert.Contains("PARTITION BY (last_attempt_at IS NOT NULL)", claim, StringComparison.Ordinal);
+        Assert.Contains("share_rank <= CASE WHEN tried THEN 5 ELSE 5 END", claim, StringComparison.Ordinal);
+        Assert.Contains("LIMIT 10", claim, StringComparison.Ordinal);
+        Assert.Contains("last_attempt_at IS NOT NULL AS tried", claim, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ATriedRow_IsJudgedOnASessionOfItsOwn_AndANewRowSharesTheBatchSession()
+    {
+        /* #5367: JudgeFetchedPlan retires a plan only on a whole budget, which on the shared session means first in
+           its batch. A row tried before gets a session of its own, so its place in the batch cannot starve it. */
+        var observation = new OversizedPlanObservation("0xPLAN", "0xSQL", 0, 100, "db", null, 1000);
+        var batch = new SensitiveStatements.Session();
+        var fresh = new SensitiveStatements.Session();
+
+        Assert.Same(batch, OversizedPlanBacklogSweep.SessionFor(new OversizedPlanBacklog.PendingPlan("query_stats", observation), batch, () => fresh));
+        Assert.Same(fresh, OversizedPlanBacklogSweep.SessionFor(new OversizedPlanBacklog.PendingPlan("query_stats", observation, 0, true), batch, () => fresh));
+        Assert.NotSame(batch, OversizedPlanBacklogSweep.SessionFor(new OversizedPlanBacklog.PendingPlan("query_stats", observation, 1, true), batch));
+
+        /* The sweep loop asks for it, rather than handing every plan the batch session. */
+        var map = CSharpMemberMap.Of(ReadRepoFile("Darling/PerformanceMonitor.Darling.Service/OversizedPlanBacklogSweep.cs"));
+        var at = map.Code.IndexOf("SessionFor(plan, scrub)", StringComparison.Ordinal);
+        Assert.True(at >= 0, "SweepServerAsync must choose each plan's session through SessionFor");
+        Assert.Equal("SweepServerAsync", CSharpMemberMap.EnclosingMember(map, at));
     }
 
     /* ---- the read surface --------------------------------------------------------------------------- */

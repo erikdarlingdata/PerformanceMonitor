@@ -170,14 +170,18 @@ public sealed class ViewerGridTimeTextZoneTests
     /// The readers set the UTC instant beside each converted DateTime, so a row can never show the default 0001-01-01.
     /// </summary>
     [Theory]
-    [InlineData("ViewerDataService.FinOps.Workload.cs", "FirstSeenUtc = reader.GetDateTime(18)")]
-    [InlineData("ViewerDataService.FinOps.Workload.cs", "LastSeenUtc = reader.GetDateTime(19)")]
-    [InlineData("ViewerDataService.FinOps.Inventory.cs", "InventoryAsOfUtc = reader.IsDBNull(13) ? null : reader.GetDateTime(13)")]
-    [InlineData("ViewerDataService.FinOps.Inventory.cs", "LastCollectedUtc = reader.IsDBNull(19) ? null : reader.GetDateTime(19)")]
-    [InlineData("ViewerDataService.QueryStoreClutter.cs", "OptionsCapturedUtc = c?.CapturedAt")]
-    [InlineData("ViewerDataService.QueryStoreClutter.cs", "LastObservedUtc = w.LastObserved")]
-    public void EachReader_SetsTheUtcInstant_BesideTheConvertedDateTime(string file, string assignment)
+    [InlineData("PerformanceMonitor.Darling.Storage", "FinOps/DarlingFinOpsApplicationConnectionsReader.cs", "FirstSeenUtc: reader.GetDateTime(18)")]
+    [InlineData("PerformanceMonitor.Darling.Storage", "FinOps/DarlingFinOpsApplicationConnectionsReader.cs", "LastSeenUtc: reader.GetDateTime(19)")]
+    [InlineData(ViewerFolder, "ViewerDataService.FinOps.cs", "FirstSeenUtc = d.FirstSeenUtc")]
+    [InlineData(ViewerFolder, "ViewerDataService.FinOps.cs", "LastSeenUtc = d.LastSeenUtc")]
+    [InlineData("PerformanceMonitor.Darling.Storage", "FinOps/DarlingFinOpsInventoryReader.cs", "InventoryAsOfUtc: reader.IsDBNull(13) ? null : reader.GetDateTime(13)")]
+    [InlineData("PerformanceMonitor.Darling.Storage", "FinOps/DarlingFinOpsInventoryReader.cs", "LastCollectedUtc: reader.IsDBNull(19) ? null : reader.GetDateTime(19)")]
+    [InlineData(ViewerFolder, "ViewerDataService.FinOps.cs", "InventoryAsOfUtc = dto.InventoryAsOfUtc")]
+    [InlineData(ViewerFolder, "ViewerDataService.FinOps.cs", "LastCollectedUtc = dto.LastCollectedUtc")]
+    [InlineData(ViewerFolder, "ViewerDataService.QueryStoreClutter.cs", "OptionsCapturedUtc = c?.CapturedAt")]
+    [InlineData(ViewerFolder, "ViewerDataService.QueryStoreClutter.cs", "LastObservedUtc = w.LastObserved")]
+    public void EachReader_SetsTheUtcInstant_BesideTheConvertedDateTime(string project, string file, string assignment)
     {
-        Assert.Contains(assignment, ReadRepoFile("Darling", ViewerFolder, file), StringComparison.Ordinal);
+        Assert.Contains(assignment, ReadRepoFile(["Darling", project, .. file.Split('/')]), StringComparison.Ordinal);
     }
 }

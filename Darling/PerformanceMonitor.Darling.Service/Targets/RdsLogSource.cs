@@ -137,13 +137,29 @@ public sealed class RdsLogSource
         Csv,
     }
 
+    /// <summary>
+    /// #5003: guards <see cref="_markers"/> and <see cref="_staleSinceUtc"/>. One ingestor, and so one source, serves
+    /// every RDS target of a collector, and the targets' runs overlap: two threads walking or changing these tables at
+    /// once threw "Collection was modified; enumeration operation may not execute" out of a position commit, and the
+    /// same race with no walk in it tears a table without any error. Every access takes this lock, and each sequence
+    /// that reads and then writes (find a position, then seed it; add a key, then prune the old ones) holds it across
+    /// the whole sequence. Nothing awaits, calls out or throws while it is held, so it is never held across an await.
+    /// </summary>
+    private readonly object _stateLock = new();
+
     private readonly Dictionary<string, string> _markers = new(StringComparer.Ordinal);
 
     /// <summary>Test-only visibility into which marker keys survive a commit (#4053 review round 2, item 3):
     /// whether <paramref name="key"/> (an "instance|file" pair) still holds a marker.</summary>
-    internal bool HasMarkerForKey(string key) => _markers.ContainsKey(key);
+    internal bool HasMarkerForKey(string key)
+    {
+        lock (_stateLock)
+        {
+            return _markers.ContainsKey(key);
+        }
+    }
 
-    private readonly Func<string, IAmazonRDS> _clientFactory;
+    private readonly Func<string, AwsRoleKey?, IAmazonRDS> _clientFactory;
 
     private readonly Func<DateTime> _clock;
 
@@ -171,10 +187,18 @@ public sealed class RdsLogSource
 
     private static readonly TimeSpan ListingCapWarnInterval = TimeSpan.FromHours(1);
 
-    public RdsLogSource(Func<string, IAmazonRDS>? clientFactory = null, Func<DateTime>? clock = null, ILogger? logger = null)
+    private readonly RdsEndpointVerifier _verifier;
+
+    public RdsLogSource(
+        Func<string, IAmazonRDS>? clientFactory = null,
+        Func<DateTime>? clock = null,
+        ILogger? logger = null,
+        RdsEndpointVerifier? verifier = null,
+        AwsRoleCredentialCache? roles = null,
+        Func<string, AwsRoleKey?, IAmazonRDS>? roleClientFactory = null)
     {
-        _clientFactory = clientFactory
-            ?? (region => new AmazonRDSClient(RegionEndpoint.GetBySystemName(region)));
+        _verifier = verifier ?? new RdsEndpointVerifier(clock);
+        _clientFactory = roleClientFactory ?? AwsRoleClients.Rds(clientFactory, roles);
         _clock = clock ?? (() => DateTime.UtcNow);
         _logger = logger;
     }
@@ -259,14 +283,23 @@ public sealed class RdsLogSource
     public bool RestorePosition(LogFileKind kind, string instanceId, string file, string marker)
     {
         if (string.IsNullOrEmpty(instanceId) || string.IsNullOrEmpty(file) || string.IsNullOrEmpty(marker)
-            || IsCsvFileName(file) != (kind == LogFileKind.Csv)
-            || FindHeldPosition(instanceId, kind) is not null)
+            || IsCsvFileName(file) != (kind == LogFileKind.Csv))
         {
             return false;
         }
 
-        _markers[instanceId + "|" + file] = marker;
-        return true;
+        /* #5003: finding a held position and seeding one are one step. Two restores for the same instance cannot both
+           pass the check, and a commit cannot land between the check and the write. */
+        lock (_stateLock)
+        {
+            if (FindHeldPosition(instanceId, kind) is not null)
+            {
+                return false;
+            }
+
+            _markers[instanceId + "|" + file] = marker;
+            return true;
+        }
     }
 
     /// <summary>
@@ -289,6 +322,15 @@ public sealed class RdsLogSource
     }
 
     private void CommitKey(string key, string marker)
+    {
+        /* #5003: the write, the walk that finds the instance's other files, and the removals are one step. */
+        lock (_stateLock)
+        {
+            CommitKeyLocked(key, marker);
+        }
+    }
+
+    private void CommitKeyLocked(string key, string marker)
     {
         /* Keyed by FILE as well as instance, so a log rotation starts a fresh marker instead of resuming a
            new file at an old file's offset. */
@@ -389,7 +431,19 @@ public sealed class RdsLogSource
     /// behaviour — the writer resolution, the marker discipline, the bounded first read — is unchanged; only
     /// which file name <see cref="LogFilesNewestFirstAsync"/> picks differs.
     /// </summary>
-    public async Task<LogChunk?> ReadNewestAsync(string host, LogFileKind kind, CancellationToken cancellationToken = default)
+    public Task<LogChunk?> ReadNewestAsync(string host, LogFileKind kind, CancellationToken cancellationToken = default)
+        => ReadNewestAsync(host, kind, 0, cancellationToken);
+
+    /// <summary>
+    /// The same read for the server <paramref name="serverId"/>, which keys the cached endpoint check
+    /// (<see cref="RdsEndpointVerifier"/>) together with the host and the parsed id.
+    /// <paramref name="loginConnectionString"/> is the target's connection string, for the fresh login the check needs.
+    /// <paramref name="role"/> is the server's own AWS role (#5452), null for the process credentials: the log calls AND the
+    /// endpoint check's Describe calls both use the one client built for it.
+    /// </summary>
+    public async Task<LogChunk?> ReadNewestAsync(
+        string host, LogFileKind kind, int serverId, CancellationToken cancellationToken,
+        string? loginConnectionString = null, AwsRoleKey? role = null)
     {
         var endpoint = RdsEndpoint.TryParse(host);
 
@@ -409,7 +463,12 @@ public sealed class RdsLogSource
                 + "so captured plans belong to a server that can be named.");
         }
 
-        using var client = _clientFactory(parsed.Region);
+        using var client = _clientFactory(parsed.Region, role);
+
+        /* The host must be the endpoint AWS reports for the id parsed from it before any log call is made. Under a role
+           the check's Describe calls use this same role-bound client, and the verdict is kept per role (#5452). */
+        await _verifier.EnsureAsync(
+            client, parsed, host, serverId, cancellationToken, loginConnectionString, AwsRoleKey.ScopeOf(role));
 
         var instanceId = parsed.Kind == RdsEndpointKind.ClusterWriter
             ? await ResolveWriterAsync(client, parsed.Identifier, cancellationToken)
@@ -500,18 +559,23 @@ public sealed class RdsLogSource
     {
         var prefix = instanceId + "|";
 
-        foreach (var (existingKey, marker) in _markers)
+        /* #5003: the walk holds the lock, so a commit for another instance cannot add a key under it. The tuple it
+           returns is a copy, so the caller uses it after the lock is released. */
+        lock (_stateLock)
         {
-            if (!existingKey.StartsWith(prefix, StringComparison.Ordinal))
+            foreach (var (existingKey, marker) in _markers)
             {
-                continue;
-            }
+                if (!existingKey.StartsWith(prefix, StringComparison.Ordinal))
+                {
+                    continue;
+                }
 
-            var fileName = existingKey[prefix.Length..];
+                var fileName = existingKey[prefix.Length..];
 
-            if (IsCsvFileName(fileName) == (kind == LogFileKind.Csv))
-            {
-                return (existingKey, fileName, marker);
+                if (IsCsvFileName(fileName) == (kind == LogFileKind.Csv))
+                {
+                    return (existingKey, fileName, marker);
+                }
             }
         }
 
@@ -646,20 +710,33 @@ public sealed class RdsLogSource
                close, the instance's entry is cleared and the debounce starts over from nothing. */
             var staleNow = newestStderr - newestCsv > StaleCsvThresholdMs;
 
-            if (staleNow)
+            /* #5003: the table is shared by every target's read, so the check and the write that follows it hold the
+               lock. The clock is read before it, and the throw comes after it. */
+            var seenAt = staleNow ? _clock() : default;
+            var debounceElapsed = false;
+
+            lock (_stateLock)
             {
-                if (!_staleSinceUtc.TryGetValue(instanceId, out var since))
+                if (staleNow)
                 {
-                    _staleSinceUtc[instanceId] = _clock();
+                    if (!_staleSinceUtc.TryGetValue(instanceId, out var since))
+                    {
+                        _staleSinceUtc[instanceId] = seenAt;
+                    }
+                    else if (seenAt - since >= StaleCsvDebounce)
+                    {
+                        debounceElapsed = true;
+                    }
                 }
-                else if (_clock() - since >= StaleCsvDebounce)
+                else
                 {
-                    throw new PgNoCsvlogFileException();
+                    _staleSinceUtc.Remove(instanceId);
                 }
             }
-            else
+
+            if (debounceElapsed)
             {
-                _staleSinceUtc.Remove(instanceId);
+                throw new PgNoCsvlogFileException();
             }
         }
 

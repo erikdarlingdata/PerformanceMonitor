@@ -438,6 +438,7 @@ AND   hypertable_name = 'query_store_stats';";
             ViewerDataService.AddServerWindowParameters(raw, ServerId, windowStart, windowEnd);
             raw.Parameters.Add(new NpgsqlParameter<int> { TypedValue = top });
             raw.Parameters.Add(ViewerDataService.DatabaseFilterParameter(null));
+            raw.Parameters.Add(new NpgsqlParameter<int> { TypedValue = PerformanceMonitor.Darling.Storage.TopFill.FirstCandidates(top) });  /* #5313: the round's candidate limit, bound last */
             await raw.ExecuteNonQueryAsync(ct);
         }
 
@@ -452,6 +453,7 @@ AND   hypertable_name = 'query_store_stats';";
             });
             table.Parameters.Add(new NpgsqlParameter<int> { TypedValue = top });
             table.Parameters.Add(ViewerDataService.DatabaseFilterParameter(null));
+            table.Parameters.Add(new NpgsqlParameter<int> { TypedValue = PerformanceMonitor.Darling.Storage.TopFill.FirstCandidates(top) });  /* #5313: the round's candidate limit, bound last */
             await table.ExecuteNonQueryAsync(ct);
         }
 
@@ -475,6 +477,7 @@ AND   hypertable_name = 'query_store_stats';";
         ViewerDataService.AddServerWindowParameters(command, ServerId, windowStart, windowEnd);
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = top });
         command.Parameters.Add(ViewerDataService.DatabaseFilterParameter(null));
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = PerformanceMonitor.Darling.Storage.TopFill.FirstCandidates(top) });  /* #5313: the round's candidate limit, bound last */
         await using var reader = await command.ExecuteReaderAsync(ct);
         while (await reader.ReadAsync(ct))
         {

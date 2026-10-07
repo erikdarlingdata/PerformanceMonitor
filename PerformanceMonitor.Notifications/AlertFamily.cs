@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 
 namespace PerformanceMonitor.Notifications;
 
@@ -115,11 +116,18 @@ public static class AlertFamily
         ["Compression Job Stuck"] = SelfMonitor,
         ["Store Disk Pressure"] = SelfMonitor,
         ["Store Runtime Upgrade"] = SelfMonitor,
+        /* #5450: raised once per service start when the store shows the service was not collecting. */
+        ["Collection Gap At Start"] = SelfMonitor,
+        /* #5450: the daily retained-history audit: hours of a past day the store's rollups hold under half of usual. */
+        ["Collection Gaps In History"] = SelfMonitor,
         ["Store Job Over Cadence"] = SelfMonitor,
         ["Retention Held"] = SelfMonitor,
         ["Custom Alert Rules Unhealthy"] = SelfMonitor,
         ["Stale Mute Rules"] = SelfMonitor,
         ["Web TLS Certificate Expiring"] = SelfMonitor,
+        /* #5288: the MCP endpoint's twin of the web certificate alert, its own metric so a mute or route for
+           one never covers the other. */
+        ["MCP TLS Certificate Expiring"] = SelfMonitor,
         /* #4732: collection skipped a share of the slots that came due over the last hour. */
         ["Collection Falling Behind"] = SelfMonitor,
         /* #4215: a managed store's darling-managed.conf fell back to the last-good copy, is
@@ -153,12 +161,59 @@ public static class AlertFamily
     /// The recoveries the product DELIVERS as alerts, each paired with the firing it clears. Only these two
     /// reach a channel under a name other than their firing's; every other recovery is a history row
     /// (<c>AlertResolution</c>, never routed). An exact-metric route on the firing catches the recovery.
+    /// <para>The VALUE side is the incident's name, which is also the whole grain the pair is keyed on
+    /// everywhere the lifecycle is named: the PagerDuty dedup key reads the value for the firing edge
+    /// too (the firing's own name must equal the closing edge's, or the pair is two incidents again).</para>
     /// </summary>
     public static readonly IReadOnlyDictionary<string, string> RecoveryPairs = new Dictionary<string, string>(StringComparer.Ordinal)
     {
         ["Server Restored"] = "Server Unreachable",
         ["AG Replica Reconnected"] = "AG Replica Disconnected",
     };
+
+    /// <summary>
+    /// The closing edge of a FIRING metric of a pair (<see cref="RecoveryPairs"/> read from its value side):
+    /// "Server Unreachable" gives "Server Restored". False for a closing edge or any metric outside the pairs.
+    /// </summary>
+    public static bool TryGetRecoveryOf(string metricName, out string recovery)
+    {
+        foreach (var pair in RecoveryPairs)
+        {
+            if (string.Equals(pair.Value, metricName, StringComparison.Ordinal))
+            {
+                recovery = pair.Key;
+                return true;
+            }
+        }
+
+        recovery = "";
+        return false;
+    }
+
+    /// <summary>
+    /// The OTHER edge of the pair <paramref name="metricName"/> belongs to (#5469): the closing edge for a
+    /// firing metric, the firing metric for a closing edge. False for a metric outside the pairs.
+    /// </summary>
+    public static bool TryGetPairedEdge(string metricName, out string other)
+    {
+        if (RecoveryPairs.TryGetValue(metricName, out var firing))
+        {
+            other = firing;
+            return true;
+        }
+
+        return TryGetRecoveryOf(metricName, out other);
+    }
+
+    /// <summary>
+    /// Whether <paramref name="metricName"/> belongs to the paired lifecycle on EITHER side: a closing edge
+    /// (<see cref="RecoveryPairs"/> key) or a firing whose close re-keys onto it (a value). A future pair
+    /// joins the checks that read this by naming its value — no second census, so the two directions of
+    /// one pair cannot drift apart.
+    /// </summary>
+    public static bool IsPairedEdge(string metricName) =>
+        RecoveryPairs.ContainsKey(metricName)
+        || RecoveryPairs.Values.Any(value => string.Equals(value, metricName, StringComparison.Ordinal));
 
     /// <summary>The metric-name prefixes of the two dynamic alert shapes, each with its family.</summary>
     public static readonly IReadOnlyList<(string Prefix, string Family)> PrefixFamilies = new[]

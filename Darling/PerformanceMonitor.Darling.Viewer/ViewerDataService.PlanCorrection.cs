@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Viewer;
 
@@ -91,6 +92,22 @@ public sealed partial class ViewerDataService
         AND   ($2::text[] IS NULL OR database_name = ANY($2))
         ORDER BY database_name
         """;
+
+    /// <summary>The grid's row cap: the newest 200 recommendations by collection time. <see cref="PlanCorrectionsSql"/>'s LIMIT is the same number.</summary>
+    public const int PlanCorrectionsRowCap = 200;
+
+    /// <summary>
+    /// Where this server's plan_correction coverage starts for the window (#4966), through the shared probe
+    /// (<see cref="DataWindowFloor"/>): the later of its first collection and the table's retention edge, or its first row in
+    /// the window if that is earlier. The grid windows on <c>collection_time</c> and shows it, the probe's own column, so every
+    /// row it shows was collected at or after this start. The collector re-captures every open recommendation on each cycle, so
+    /// a few recommendations fill <see cref="PlanCorrectionsRowCap"/> within hours and a wide range is answered from its newest
+    /// hours: the caller names the oldest row when the read hit that cap (<see cref="ViewerEventDataStart.ReadHitCap"/>), whatever
+    /// the store covers. Null when the window holds no row and no logged run, and when it lies wholly before the coverage.
+    /// </summary>
+    public Task<DateTime?> GetPlanCorrectionsDataStartAsync(int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default) =>
+        DataWindowFloor.GetForServerAsync(_dataSource, DataWindowFloor.Source.ForCollectorTable("plan_correction"), serverId, startUtc, endUtc,
+            ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
 
     /// <summary>Automatic plan correction recommendations over the window (Plan Corrections grid).</summary>
     public async Task<List<PlanCorrectionRow>> GetPlanCorrectionsAsync(

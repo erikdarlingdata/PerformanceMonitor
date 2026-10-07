@@ -18,6 +18,7 @@ using Microsoft.Extensions.DependencyInjection;
 using ModelContextProtocol.Server;
 using Npgsql;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
@@ -173,6 +174,17 @@ public sealed class DarlingQueryStoreRegressionsSurfaceAndSqlTests
         Assert.Equal(2, CountOf(sql, "EXISTS ("));
     }
 
+    /// <summary>
+    /// #5015: the coverage probe takes the read's database filter ($5), in both of its questions, so a filter that matched
+    /// nothing can be told from one that matched and found nothing wrong.
+    /// </summary>
+    [Fact]
+    public void CoverageSql_TakesTheReadsDatabaseFilter_InBothQuestions()
+    {
+        var sql = DarlingQueryStoreRegressionReader.RegressionCoverageSql;
+        Assert.Equal(2, CountOf(sql, "$5::text[] IS NULL OR database_name = ANY($5)"));
+    }
+
     [Theory]
     [InlineData(nameof(DarlingQueryStoreRegressionReader.QueryStoreRegressionsSql))]
     [InlineData(nameof(DarlingQueryStoreRegressionReader.RegressionCoverageSql))]
@@ -247,6 +259,7 @@ public sealed class DarlingQueryStoreRegressionsLiveTests
     private const int ServerId = -949556;
     private const string ServerName = "query-store-regressions";
     private const string Db = "AppDb";
+    private const string OtherDb = "OtherDb";
 
     private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
 
@@ -299,7 +312,8 @@ public sealed class DarlingQueryStoreRegressionsLiveTests
             var clear = Root(await DarlingMcpQueryStoreRegressionTools.GetQueryStoreRegressions(postgres, ServerName, 24));
             Assert.Equal("empty", clear.GetProperty("status").GetString());
             var clearText = clear.GetProperty("message").GetString()!;
-            Assert.Contains("all-clear", clearText, StringComparison.Ordinal);
+            /* #4966: the baseline reaches 40 hours back, past the 24-hour window's start but not seven days, so the window is cut and the all-clear gives way. */
+            AssertCutAllClear(clear, clearText);
             Assert.DoesNotContain("EVER", clearText, StringComparison.Ordinal);
             Assert.DoesNotContain("Widen", clearText, StringComparison.Ordinal);
 
@@ -380,11 +394,376 @@ public sealed class DarlingQueryStoreRegressionsLiveTests
         }
     }
 
+    /// <summary>Runs <paramref name="body"/> against a registered, empty server and removes what it seeded. The seeded
+    /// instants are offsets from the current second, never a fixed date: the data-start probe reads the clock for the
+    /// purge edge, so a fixed past anchor would fall wholly outside the store's coverage.</summary>
+    private async Task WithServerAsync(Func<NpgsqlConnection, NpgsqlDataSource, DateTime, CancellationToken, Task> body)
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live regressions test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+
+        await using var postgres = NpgsqlDataSource.Create(cs!);
+        var bodySucceeded = false;
+        try
+        {
+            await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+            await body(connection, postgres, DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow), ct);
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
+    /// <summary>The truncated-baseline sentence Lite adds to its note, which this tool copies.</summary>
+    private const string BaselineTail = "Here the window starts at baseline_start, so the baseline holds only the part from effective_start to baseline_end.";
+
+    /// <summary>
+    /// #4966: the store's first Query Store row comes 40 hours back, inside the 7-day baseline, so the baseline holds only part
+    /// of what <c>baseline_start</c> names. The answer says so: truncated, <c>effective_start</c> is that first row (exact: the
+    /// table is raw, so its coverage starts at its oldest row), the note names the table and ends with the baseline sentence.
+    /// </summary>
+    [Fact]
+    public async Task ARegression_WhoseBaselineStartsInsideTheRange_SaysWhereTheDataStarts_AgainstDevPostgres()
+    {
+        await WithServerAsync(async (connection, postgres, baseNow, ct) =>
+        {
+            await SeedAsync(connection, ct, baseNow.AddHours(-40), 90, avgDurationUs: 1000, avgCpuUs: 1000, intervalId: 3, queryId: 7);
+            await SeedAsync(connection, ct, baseNow.AddMinutes(-30), 200, avgDurationUs: 4000, avgCpuUs: 4000, intervalId: 4, queryId: 7);
+
+            var hit = Root(await DarlingMcpQueryStoreRegressionTools.GetQueryStoreRegressions(postgres, ServerName, 24));
+
+            Assert.Equal(1, hit.GetProperty("regression_count").GetInt32());
+            Assert.True(hit.GetProperty("window_truncated").GetBoolean());
+            Assert.Equal(McpHelpers.FormatEffectiveStart(baseNow.AddHours(-40)), hit.GetProperty("effective_start").GetString());
+            Assert.NotEqual(hit.GetProperty("baseline_start").GetString(), hit.GetProperty("effective_start").GetString());
+            var note = hit.GetProperty("truncation_note").GetString()!;
+            Assert.Contains("raw query_store_stats retains", note, StringComparison.Ordinal);
+            Assert.EndsWith(BaselineTail, note, StringComparison.Ordinal);
+            Assert.False(hit.TryGetProperty("effective_hours_back", out _));
+
+            var names = hit.EnumerateObject().Select(p => p.Name).ToList();
+            Assert.Equal(["effective_start", "window_truncated", "truncation_note"], names.Skip(names.IndexOf("hours_back") + 1).Take(3));
+        });
+    }
+
+    /// <summary>
+    /// #4966: a quiet start. The store holds a row from before the baseline begins (nine days back, for a baseline that
+    /// starts eight days back), so the baseline is covered whenever the rows inside it begin: false, no note, and
+    /// <c>effective_start</c> is exactly <c>baseline_start</c>.
+    /// </summary>
+    [Fact]
+    public async Task ARegression_WhoseTableReachesBeforeTheBaseline_SaysNothing_AgainstDevPostgres()
+    {
+        await WithServerAsync(async (connection, postgres, baseNow, ct) =>
+        {
+            await SeedAsync(connection, ct, baseNow.AddDays(-9), 10, avgDurationUs: 1000, avgCpuUs: 1000, intervalId: 2, queryId: 9);
+            await SeedAsync(connection, ct, baseNow.AddHours(-40), 90, avgDurationUs: 1000, avgCpuUs: 1000, intervalId: 3, queryId: 7);
+            await SeedAsync(connection, ct, baseNow.AddMinutes(-30), 200, avgDurationUs: 4000, avgCpuUs: 4000, intervalId: 4, queryId: 7);
+
+            var hit = Root(await DarlingMcpQueryStoreRegressionTools.GetQueryStoreRegressions(postgres, ServerName, 24));
+
+            Assert.Equal(1, hit.GetProperty("regression_count").GetInt32());
+            Assert.False(hit.GetProperty("window_truncated").GetBoolean());
+            Assert.Equal(JsonValueKind.Null, hit.GetProperty("truncation_note").ValueKind);
+            Assert.Equal(hit.GetProperty("baseline_start").GetString(), hit.GetProperty("effective_start").GetString());
+        });
+    }
+
+    /// <summary>
+    /// #4966: a failed data-start probe costs the notice, never the answer. The regression rows come back with the three keys
+    /// absent, and an empty answer carries no hints.
+    /// </summary>
+    [Fact]
+    public async Task AFailedProbe_CostsTheNotice_NeverTheRows_AgainstDevPostgres()
+    {
+        await WithServerAsync(async (connection, postgres, baseNow, ct) =>
+        {
+            await SeedAsync(connection, ct, baseNow.AddHours(-40), 90, avgDurationUs: 1000, avgCpuUs: 1000, intervalId: 3, queryId: 7);
+            await SeedAsync(connection, ct, baseNow.AddMinutes(-30), 200, avgDurationUs: 4000, avgCpuUs: 4000, intervalId: 4, queryId: 7);
+
+            var bodySucceeded = false;
+            DarlingMcpWindowNotice.TestOnlyProbe = () => throw new TimeoutException("the probe's deadline passed");
+            try
+            {
+                var hit = Root(await DarlingMcpQueryStoreRegressionTools.GetQueryStoreRegressions(postgres, ServerName, 24));
+
+                Assert.False(hit.TryGetProperty("status", out _));
+                Assert.False(hit.TryGetProperty("error", out _));
+                Assert.Equal(1, hit.GetProperty("regression_count").GetInt32());
+                Assert.False(hit.TryGetProperty("effective_start", out _));
+                Assert.False(hit.TryGetProperty("window_truncated", out _));
+                Assert.False(hit.TryGetProperty("truncation_note", out _));
+
+                /* Take the recent row away: the recent side is missing, so the answer is empty. */
+                await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM query_store_stats WHERE server_id = $1 AND collection_time > $2", ServerId, DarlingMcpTestData.Naive(baseNow.AddHours(-2)));
+
+                var empty = Root(await DarlingMcpQueryStoreRegressionTools.GetQueryStoreRegressions(postgres, ServerName, 2));
+                Assert.Equal("empty", empty.GetProperty("status").GetString());
+                Assert.False(empty.TryGetProperty("hints", out _));
+                bodySucceeded = true;
+            }
+            finally
+            {
+                await LiveStoreCleanup.RunOwnedAsync(bodySucceeded, () =>
+                {
+                    DarlingMcpWindowNotice.TestOnlyProbe = null;
+                    return Task.CompletedTask;
+                });
+            }
+        });
+    }
+
+    /// <summary>
+    /// #4966: every <c>empty</c> answer carries the three keys under <c>hints</c>, the all-clear included (a clean comparison
+    /// over a baseline the store only partly holds is not a true negative), and every <c>unavailable</c> answer carries none.
+    /// </summary>
+    [Fact]
+    public async Task TheEmptyAnswers_CarryTheDataStartHints_AndTheUnavailableOnesStayBare_AgainstDevPostgres()
+    {
+        await WithServerAsync(async (connection, postgres, baseNow, ct) =>
+        {
+            var never = Root(await DarlingMcpQueryStoreRegressionTools.GetQueryStoreRegressions(postgres, ServerName));
+            Assert.Equal("unavailable", never.GetProperty("status").GetString());
+            Assert.False(never.TryGetProperty("hints", out _));
+
+            await SeedAsync(connection, ct, baseNow.AddHours(-40), 100, avgDurationUs: 1000, avgCpuUs: 1000, intervalId: 2);
+
+            /* Nothing in the last two hours: the recent side is missing. The baseline still starts 40 hours back, inside it. */
+            var noRecent = Root(await DarlingMcpQueryStoreRegressionTools.GetQueryStoreRegressions(postgres, ServerName, 2));
+            Assert.Equal("empty", noRecent.GetProperty("status").GetString());
+            var noRecentHints = noRecent.GetProperty("hints");
+            Assert.True(noRecentHints.GetProperty("window_truncated").GetBoolean());
+            Assert.Equal(McpHelpers.FormatEffectiveStart(baseNow.AddHours(-40)), noRecentHints.GetProperty("effective_start").GetString());
+            Assert.EndsWith(BaselineTail, noRecentHints.GetProperty("truncation_note").GetString()!, StringComparison.Ordinal);
+
+            await SeedAsync(connection, ct, baseNow.AddMinutes(-30), 100, avgDurationUs: 1000, avgCpuUs: 1000, intervalId: 1);
+
+            var clear = Root(await DarlingMcpQueryStoreRegressionTools.GetQueryStoreRegressions(postgres, ServerName, 24));
+            Assert.Equal("empty", clear.GetProperty("status").GetString());
+            AssertCutAllClear(clear, clear.GetProperty("message").GetString()!);
+            var clearHints = clear.GetProperty("hints");
+            Assert.True(clearHints.GetProperty("window_truncated").GetBoolean());
+            Assert.Equal(McpHelpers.FormatEffectiveStart(baseNow.AddHours(-40)), clearHints.GetProperty("effective_start").GetString());
+
+            /* No baseline: the whole history sits inside the window. The unavailable answer stays bare. */
+            var noBaseline = Root(await DarlingMcpQueryStoreRegressionTools.GetQueryStoreRegressions(postgres, ServerName, 48));
+            Assert.Equal("unavailable", noBaseline.GetProperty("status").GetString());
+            Assert.False(noBaseline.TryGetProperty("hints", out _));
+        });
+    }
+
+    /// <summary>
+    /// #5015: a database_name filter that matches nothing in the baseline or the window says the filter matched nothing, not
+    /// "this IS the all-clear" (the server-wide probe saw both sides collected). A filter that matches, and finds nothing
+    /// wrong, is still the all-clear.
+    /// </summary>
+    [Fact]
+    public async Task AFilteredMiss_SaysTheFilterMatchedNothing_NotTheAllClear_AgainstDevPostgres()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live regressions test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+
+        await using var postgres = NpgsqlDataSource.Create(cs!);
+        var bodySucceeded = false;
+
+        try
+        {
+            await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+            var baseNow = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow);
+            await SeedAsync(connection, ct, baseNow.AddHours(-40), 100, avgDurationUs: 1000, avgCpuUs: 1000, intervalId: 2);
+            await SeedAsync(connection, ct, baseNow.AddMinutes(-30), 100, avgDurationUs: 1000, avgCpuUs: 1000, intervalId: 1);
+
+            var miss = Root(await DarlingMcpQueryStoreRegressionTools.GetQueryStoreRegressions(postgres, ServerName, 24, "NoSuchDb"));
+            Assert.Equal("empty", miss.GetProperty("status").GetString());
+            var missText = miss.GetProperty("message").GetString()!;
+            Assert.Contains("database_name 'NoSuchDb'", missText, StringComparison.Ordinal);
+            Assert.Contains("the filter matched nothing and this is NOT the all-clear", missText, StringComparison.Ordinal);
+            Assert.DoesNotContain("this IS the all-clear", missText, StringComparison.Ordinal);
+
+            var match = Root(await DarlingMcpQueryStoreRegressionTools.GetQueryStoreRegressions(postgres, ServerName, 24, Db));
+            /* #4966: this fixture's baseline is cut (40 hours of the seven days), so the matching filter's nothing is the cut sentence. */
+            AssertCutAllClear(match, match.GetProperty("message").GetString()!);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
+    /// <summary>
+    /// #5015: a filter whose database has captures in the baseline and none in the window is a missing recent side FOR THAT
+    /// DATABASE, not the all-clear: the server-wide probe saw both sides (another database wrote the window), and no query of
+    /// the filtered database was compared. It words the server-wide "nothing collected IN the last N hour(s)" answer,
+    /// naming the database.
+    /// </summary>
+    [Fact]
+    public async Task AFilteredDatabase_WithBaselineCapturesOnly_SaysItsWindowIsMissing_NotTheAllClear_AgainstDevPostgres()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live regressions test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+
+        await using var postgres = NpgsqlDataSource.Create(cs!);
+        var bodySucceeded = false;
+
+        try
+        {
+            await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+            var baseNow = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow);
+            await SeedAsync(connection, ct, baseNow.AddHours(-40), 100, avgDurationUs: 1000, avgCpuUs: 1000, intervalId: 2);
+            await SeedAsync(connection, ct, baseNow.AddMinutes(-30), 100, avgDurationUs: 1000, avgCpuUs: 1000, intervalId: 1, queryId: 2, database: OtherDb);
+
+            var noRecent = Root(await DarlingMcpQueryStoreRegressionTools.GetQueryStoreRegressions(postgres, ServerName, 24, Db));
+            Assert.Equal("empty", noRecent.GetProperty("status").GetString());
+            var noRecentText = noRecent.GetProperty("message").GetString()!;
+            Assert.Contains("database_name 'AppDb'", noRecentText, StringComparison.Ordinal);
+            Assert.Contains("nothing of it collected IN the last 24 hour(s)", noRecentText, StringComparison.Ordinal);
+            Assert.Contains("NOT the all-clear", noRecentText, StringComparison.Ordinal);
+            Assert.DoesNotContain("this IS the all-clear", noRecentText, StringComparison.Ordinal);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
+    /// <summary>
+    /// #5015: a filter whose database has captures in the window and none in the baseline has nothing to compare against FOR
+    /// THAT DATABASE: <c>unavailable</c>, worded like the server-wide no-baseline answer and naming the database, not the
+    /// all-clear.
+    /// </summary>
+    [Fact]
+    public async Task AFilteredDatabase_WithWindowCapturesOnly_SaysItHasNoBaseline_NotTheAllClear_AgainstDevPostgres()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live regressions test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+
+        await using var postgres = NpgsqlDataSource.Create(cs!);
+        var bodySucceeded = false;
+
+        try
+        {
+            await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+            var baseNow = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow);
+            await SeedAsync(connection, ct, baseNow.AddHours(-40), 100, avgDurationUs: 1000, avgCpuUs: 1000, intervalId: 2, queryId: 2, database: OtherDb);
+            await SeedAsync(connection, ct, baseNow.AddMinutes(-30), 100, avgDurationUs: 3000, avgCpuUs: 3000, intervalId: 1);
+
+            var noBaseline = Root(await DarlingMcpQueryStoreRegressionTools.GetQueryStoreRegressions(postgres, ServerName, 24, Db));
+            Assert.Equal("unavailable", noBaseline.GetProperty("status").GetString());
+            var noBaselineText = noBaseline.GetProperty("message").GetString()!;
+            Assert.Contains("database_name 'AppDb'", noBaselineText, StringComparison.Ordinal);
+            Assert.Contains("no baseline", noBaselineText, StringComparison.Ordinal);
+            Assert.Contains("NOT a clean bill of health", noBaselineText, StringComparison.Ordinal);
+            Assert.DoesNotContain("this IS the all-clear", noBaselineText, StringComparison.Ordinal);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
+    /// <summary>
+    /// #4966: the same all-clear over a baseline the store covers in full (a capture older than the seven-day lookback) keeps
+    /// its "this IS the all-clear" sentence, and its hints say the window is not cut.
+    /// </summary>
+    [Fact]
+    public async Task TheAllClear_OverACoveredBaseline_KeepsItsSentence_AgainstDevPostgres()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live regressions test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+
+        await using var postgres = NpgsqlDataSource.Create(cs!);
+        var bodySucceeded = false;
+
+        try
+        {
+            await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+            var baseNow = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow);
+            await SeedAsync(connection, ct, baseNow.AddDays(-9), 100, avgDurationUs: 1000, avgCpuUs: 1000, intervalId: 3);
+            await SeedAsync(connection, ct, baseNow.AddDays(-3), 100, avgDurationUs: 1000, avgCpuUs: 1000, intervalId: 2);
+            await SeedAsync(connection, ct, baseNow.AddMinutes(-30), 100, avgDurationUs: 1000, avgCpuUs: 1000, intervalId: 1);
+
+            var clear = Root(await DarlingMcpQueryStoreRegressionTools.GetQueryStoreRegressions(postgres, ServerName, 24));
+            Assert.Equal("empty", clear.GetProperty("status").GetString());
+            Assert.False(clear.GetProperty("hints").GetProperty("window_truncated").GetBoolean());
+            Assert.Contains("this IS the all-clear", clear.GetProperty("message").GetString()!, StringComparison.Ordinal);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
+    /// <summary>
+    /// #4966: the all-clear over a cut baseline keeps its factual first sentence (the 25% threshold included) and swaps only the
+    /// claim for the cut sentence its hints select: the one that points at <c>effective_start</c> when the notice names one.
+    /// </summary>
+    private static void AssertCutAllClear(JsonElement answer, string message)
+    {
+        Assert.True(answer.GetProperty("hints").GetProperty("window_truncated").GetBoolean());
+        Assert.StartsWith("No query on ", message, StringComparison.Ordinal);
+        Assert.Contains("more than 25% worse than its baseline", message, StringComparison.Ordinal);
+        /* Every fixture here has a baseline that starts 40 hours back, so the notice names a start: the CutWindowNothingMessage variant. */
+        Assert.NotEqual(System.Text.Json.JsonValueKind.Null, answer.GetProperty("hints").GetProperty("effective_start").ValueKind);
+        Assert.EndsWith(". " + McpHelpers.CutWindowNothingMessage, message, StringComparison.Ordinal);
+        Assert.DoesNotContain("this IS the all-clear", message, StringComparison.Ordinal);
+    }
+
     private static JsonElement Root(string json) => JsonDocument.Parse(json).RootElement;
 
+    /// <summary>One Query Store interval of a query in <paramref name="database"/> (<see cref="Db"/> unless a test needs a second database to filter on).</summary>
     private static async Task SeedAsync(
         NpgsqlConnection connection, CancellationToken ct, DateTime collectionTime, long executions,
-        long avgDurationUs, long avgCpuUs, long intervalId, long queryId = 1) =>
+        long avgDurationUs, long avgCpuUs, long intervalId, long queryId = 1, string database = Db) =>
         await DarlingMcpTestData.ExecAsync(connection, ct, @"
 INSERT INTO query_store_stats
     (collection_id, collection_time, server_id, server_name, database_name, query_id, plan_id,
@@ -392,7 +771,7 @@ INSERT INTO query_store_stats
      runtime_stats_interval_id, query_text, last_execution_time)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)",
             CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(collectionTime), ServerId, ServerName,
-            Db, queryId, 9L, "Regular", executions, avgDurationUs, avgCpuUs, 100L, intervalId,
+            database, queryId, 9L, "Regular", executions, avgDurationUs, avgCpuUs, 100L, intervalId,
             "SELECT * FROM dbo.Widgets", DarlingMcpTestData.Naive(collectionTime));
 
     private static async Task DeleteRowsAsync(NpgsqlConnection connection, CancellationToken ct)

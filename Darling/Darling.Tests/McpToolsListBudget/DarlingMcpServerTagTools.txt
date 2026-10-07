@@ -1,0 +1,21 @@
+# DarlingMcpServerTagTools: tools/list budget for #3898. Ceilings only go down; see McpToolsListBudgetTests. One block per tool, blank line between blocks.
+tool assign_server_tag 409
+param assign_server_tag.server_ids 68
+param assign_server_tag.tag_id 42
+
+tool create_server_tag 489
+param create_server_tag.colour 51
+param create_server_tag.name 64
+param create_server_tag.parent_id 70
+
+tool delete_server_tag 473
+param delete_server_tag.confirm 81
+param delete_server_tag.tag_id 42
+
+tool unassign_server_tag 407
+param unassign_server_tag.server_ids 68
+param unassign_server_tag.tag_id 42
+
+tool update_server_tag 473
+param update_server_tag.changes_json 154
+param update_server_tag.tag_id 42

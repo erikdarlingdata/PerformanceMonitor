@@ -95,6 +95,29 @@ public class AlertContext
     /// other alert and on any row written before this member existed.
     /// </summary>
     public string? CollectorName { get; set; }
+
+    /// <summary>
+    /// The availability group and replica this firing is ABOUT, for edge alerts that need a per-replica
+    /// incident identity (the AG disconnect/reconnect pair — one server can host many replicas of many
+    /// groups). Set by both engines' AG fire sites to the replica grain the row itself is keyed on, so
+    /// <see cref="WebhookAlertService.DerivePagerDutyDedupKey"/> can scope that pair's dedup key per
+    /// replica instead of per server: with auto-resolve on, one replica's reconnect must close only ITS
+    /// incident, not the one a still-disconnected sibling is still holding open. Read only through
+    /// <see cref="WebhookAlertService.PairedReplicaScope"/>, only for that pair: the dedup key and the
+    /// webhook cooldown key (#5469) both take it from there, under the same auto-resolve gate. No renderer,
+    /// budget or email cooldown reads it. Null on every other alert and on any
+    /// row written before this member existed. Unpersisted: like <see cref="AttachmentXml"/> this is
+    /// live-render data, not row data. The pairing name is the literal "AG:replica", because that is
+    /// exactly the shape consumers can reason about — see the helper for why.
+    /// </summary>
+    public string? AgReplicaIdentity { get; set; }
+
+    /// <summary>
+    /// A copy of this context that shares its member objects (#5320): the alert statement filter replaces the
+    /// members it rewrites and leaves the rest, so a member added to this class later is carried without the
+    /// filter being edited. A field-by-field copy would silently drop it.
+    /// </summary>
+    public AlertContext ShallowCopy() => (AlertContext)MemberwiseClone();
 }
 
 /// <summary>
@@ -285,6 +308,9 @@ public class AlertDetailItem
     /// which is the no-Apply-button case.
     /// </summary>
     public RemediationAction? Remediation { get; set; }
+
+    /// <summary>A copy that shares its member objects (#5320); see <see cref="AlertContext.ShallowCopy"/>.</summary>
+    public AlertDetailItem ShallowCopy() => (AlertDetailItem)MemberwiseClone();
 }
 
 /// <summary>

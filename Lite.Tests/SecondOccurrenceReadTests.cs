@@ -103,7 +103,7 @@ public sealed class SecondOccurrenceReadTests : IClassFixture<SharedDuckDbFixtur
     /// needs a row here.
     /// </summary>
     [Theory]
-    [InlineData("private async void OnBlockingSlicerChanged(", "GetRecentBlockedProcessReportsAsync(_serverId, 0, e.StartUtc, e.EndUtc,")]
+    [InlineData("private async void OnBlockingSlicerChanged(", "ReadRecentBlockedProcessReportsAsync(_serverId, 0, e.StartUtc, e.EndUtc,")]
     [InlineData("private async void OnDeadlockSlicerChanged(", "GetRecentDeadlocksAsync(_serverId, 0, e.StartUtc, e.EndUtc)")]
     [InlineData("private async void OnActiveQueriesSlicerChanged(", "GetLatestQuerySnapshotsAsync(_serverId, 0, e.StartUtc, e.EndUtc,")]
     [InlineData("private async void OnQueryStatsSlicerChanged(", "GetTopQueriesByCpuAsync(_serverId, 0, 50, e.StartUtc, e.EndUtc,")]

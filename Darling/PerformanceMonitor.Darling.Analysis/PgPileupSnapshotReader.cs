@@ -38,13 +38,17 @@ namespace PerformanceMonitor.Darling.Analysis;
 /// </summary>
 public sealed class PgPileupSnapshotReader
 {
+    /// <summary>The characters of a statement the detector keeps (the bound the read's <c>LEFT()</c> applied until #5320).</summary>
+    internal const int StatementTextCharacters = 1500;
+
     private readonly NpgsqlDataSource _postgres;
     private readonly ILogger? _logger;
 
     /// <summary>
     /// $1 server_id, $2 window floor (naive UTC — <c>collection_time</c> is stamped host-UTC by the
-    /// collector runner and stored naive). LEFT() bounds the text to what identity fallback and the
-    /// drill-down preview need. Bounded output: the window is
+    /// collector runner and stored naive). The text comes back WHOLE (#5320): <see cref="ReadWindowAsync"/> cuts it to
+    /// <see cref="StatementTextCharacters"/> code points, the bound identity fallback and the drill-down preview
+    /// need, and judges the whole statement with the sensitive-statement filter before the cut that is printed. Bounded output: the window is
     /// <see cref="SameStatementPileupDetector.BaselineLookbackMinutes"/> of a one-minute-cadence
     /// collector, ~50–150 rows on a busy server; the LIMIT is a tripwire against a misbehaving
     /// snapshot (a runaway session count), not a working cap.
@@ -53,7 +57,7 @@ public sealed class PgPileupSnapshotReader
 SELECT collection_time,
        session_id,
        query_hash,
-       LEFT(query_text, 1500) AS query_text,
+       query_text,
        database_name,
        status,
        wait_type,
@@ -101,11 +105,14 @@ LIMIT 5000";
             using var reader = await command.ExecuteReaderAsync(cancellationToken);
             while (await reader.ReadAsync(cancellationToken))
             {
+                var rawText = reader.IsDBNull(3) ? null : reader.GetString(3);
                 rows.Add(new SameStatementPileupDetector.SnapshotRow(
                     CollectionTime: reader.GetDateTime(0),
                     SessionId: reader.IsDBNull(1) ? 0 : Convert.ToInt32(reader.GetValue(1)),
                     QueryHash: reader.IsDBNull(2) ? null : reader.GetString(2),
-                    QueryText: reader.IsDBNull(3) ? null : reader.GetString(3),
+                    /* #5320: the raw cut feeds only the identity surrogate and the noise filter, exactly as the
+                       SQL cut did; the text the finding prints is judged whole, then cut (PreviewText). */
+                    QueryText: rawText is null ? null : AnalysisStatementText.CutCodePoints(rawText, StatementTextCharacters),
                     DatabaseName: reader.IsDBNull(4) ? null : reader.GetString(4),
                     Status: reader.IsDBNull(5) ? null : reader.GetString(5),
                     WaitType: reader.IsDBNull(6) ? null : reader.GetString(6),
@@ -113,7 +120,8 @@ LIMIT 5000";
                     ElapsedMs: reader.IsDBNull(8) ? 0L : Convert.ToInt64(reader.GetValue(8)),
                     CpuTimeMs: reader.IsDBNull(9) ? 0L : Convert.ToInt64(reader.GetValue(9)),
                     LogicalReads: reader.IsDBNull(10) ? 0L : Convert.ToInt64(reader.GetValue(10)),
-                    PhysicalReads: reader.IsDBNull(11) ? 0L : Convert.ToInt64(reader.GetValue(11))));
+                    PhysicalReads: reader.IsDBNull(11) ? 0L : Convert.ToInt64(reader.GetValue(11)),
+                    PreviewText: AnalysisStatementText.Preview(rawText, StatementTextCharacters)));
             }
         }
         catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, cancellationToken))

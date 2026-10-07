@@ -179,12 +179,19 @@ public partial class ViewerServerTab
         {
             PgCpuGrid.ItemsSource = null;
             PgCpuNote.Text = PanelNote("pg_cpu_utilization", 0, string.Empty);
+            PgCpuDataStartBanner.Visibility = Visibility.Collapsed;
             return;
         }
 
-        var rows = await _dataService.GetPgCpuUtilizationHistoryAsync(_server.ServerId, startUtc, endUtc);
+        using var readFanOut = ViewerReadFanOut.Of(2);
+        var dataStartTask = StartPgDataStartProbe("pg_cpu_utilization", startUtc, endUtc);
+        var rowsTask = _dataService.GetPgCpuUtilizationHistoryAsync(_server.ServerId, startUtc, endUtc);
+        await AwaitReadWatchingProbeAsync(rowsTask, dataStartTask, "PostgreSQL CPU");
+        var rows = rowsTask.Result;
+        readFanOut.Release();
 
         PgCpuGrid.ItemsSource = rows;
+        UpdateTruncationBanner(PgCpuDataStartBanner, await DataStartOrNullAsync(dataStartTask, "PostgreSQL CPU"), startUtc);
         PgCpuNote.Text = PanelNote("pg_cpu_utilization", rows.Count,
             "This collector samples AWS Performance Insights on a 5-minute cadence, so a server added "
             + "recently may have nothing here yet.");
@@ -210,7 +217,7 @@ public partial class ViewerServerTab
 
         var rows = await _dataService.GetPgExtensionAvailabilityAsync(_server.ServerId, startUtc, endUtc);
 
-        PgExtensionsGrid.ItemsSource = rows;
+        PgExtensionsGrid.ItemsSource = rows.Select(PgDisplay.Extension).ToList();
 
         var actionable = rows.Count(r => r.IsMonitoringRelevant && string.Equals(r.State, "available", StringComparison.Ordinal));
         var outdated = rows.Count(r => r.IsMonitoringRelevant && string.Equals(r.State, "outdated", StringComparison.Ordinal));
@@ -257,7 +264,7 @@ public partial class ViewerServerTab
         /* Non-default only in the grid: several hundred parameters sorted alphabetically is a dump, and the
            ones somebody chose are the answer. The full set stays one MCP call away for anyone who wants it. */
         var chosen = rows.Where(r => !r.IsDefault).ToList();
-        PgServerConfigGrid.ItemsSource = chosen;
+        PgServerConfigGrid.ItemsSource = chosen.Select(PgDisplay.ServerConfig).ToList();
 
         var pendingRestart = rows.Where(r => r.PendingRestart).Select(r => r.Name).ToList();
 
@@ -285,7 +292,8 @@ public partial class ViewerServerTab
     {
         var (startUtc, endUtc) = GetWindowUtc();
 
-        using var readFanOut = ViewerReadFanOut.Of(6);
+        /* Six reads, and the three data-start probes (#4966) started beside them: priced together. */
+        using var readFanOut = ViewerReadFanOut.Of(9);
 
         var countsTask = _dataService.GetPgBlockingCaptureCountsAsync(_server.ServerId, startUtc, endUtc);
         var chainsTask = _dataService.GetPgBlockingChainsAsync(_server.ServerId, startUtc, endUtc, PgGridRowLimit);
@@ -307,7 +315,20 @@ public partial class ViewerServerTab
             ? Task.FromResult(new DarlingPgStatementReader.PgEvictionInfo(false, null, null))
             : _dataService.GetPgStatementEvictionsAsync(_server.ServerId, startUtc, endUtc);
 
-        await Task.WhenAll(countsTask, chainsTask, cyclesTask, statementsTask, databasesTask, evictionsTask);
+        /* #4966: where each grid's table starts. Started beside the reads and kept OUT of the WhenAll below, so a probe
+           that throws costs only its banner. The blocking chains and cycles read one table and share one banner. */
+        var blockingStartTask = PgCollectorIsGatedOff("pg_blocking") ? Task.FromResult<DateTime?>(null) : StartPgDataStartProbe("pg_blocking", startUtc, endUtc);
+        var statementsStartTask = statementsGatedOff ? Task.FromResult<DateTime?>(null) : StartPgDataStartProbe("pg_statement_stats", startUtc, endUtc);
+        var databasesStartTask = StartPgDataStartProbe("pg_database_stats", startUtc, endUtc);
+
+        /* #5022: a join that throws skips the banner step, so each probe is watched (nested: one helper call per probe). */
+        await AwaitReadWatchingProbeAsync(
+            AwaitReadWatchingProbeAsync(
+                AwaitReadWatchingProbeAsync(
+                    Task.WhenAll(countsTask, chainsTask, cyclesTask, statementsTask, databasesTask, evictionsTask),
+                    blockingStartTask, "PostgreSQL Blocking"),
+                statementsStartTask, "PostgreSQL Top Queries"),
+            databasesStartTask, "PostgreSQL Database Stats");
 
         /* Released here rather than at the closing brace: the four sub-tab loads at the end of this method
            run after these five have finished, so they do not contend with them. */
@@ -347,6 +368,10 @@ public partial class ViewerServerTab
         PgDatabasesNote.Text = PanelNote("pg_database_stats", databasesTask.Result.Count,
             "No database counter moved in this window.");
 
+        UpdateTruncationBanner(PgBlockingDataStartBanner, await DataStartOrNullAsync(blockingStartTask, "PostgreSQL Blocking"), startUtc);
+        UpdateTruncationBanner(PgStatementsDataStartBanner, await DataStartOrNullAsync(statementsStartTask, "PostgreSQL Top Queries"), startUtc);
+        UpdateTruncationBanner(PgDatabasesDataStartBanner, await DataStartOrNullAsync(databasesStartTask, "PostgreSQL Database Stats"), startUtc);
+
         await LoadPgLockStatsAsync(startUtc, endUtc);
         await LoadPgKernelStatsAsync(startUtc, endUtc);
         await LoadPgPlanCaptureAsync(startUtc, endUtc);
@@ -366,12 +391,20 @@ public partial class ViewerServerTab
         {
             PgLogEventsGrid.ItemsSource = null;
             PgLogEventsNote.Text = PanelNote("pg_log_events", 0, string.Empty);
+            PgLogEventsDataStartBanner.Visibility = Visibility.Collapsed;
             return;
         }
 
-        var page = await _dataService.GetPgLogEventsAsync(_server.ServerId, startUtc, endUtc);
+        using var readFanOut = ViewerReadFanOut.Of(2);
+        var dataStartTask = StartPgDataStartProbe("pg_log_events", startUtc, endUtc);
+        var pageTask = _dataService.GetPgLogEventsAsync(_server.ServerId, startUtc, endUtc);
+        await AwaitReadWatchingProbeAsync(pageTask, dataStartTask, "PostgreSQL Log Events");
+        var page = pageTask.Result;
+        readFanOut.Release();
 
         PgLogEventsGrid.ItemsSource = page.Rows;
+        await ShowEventDataStartAsync(PgLogEventsDataStartBanner, dataStartTask, "PostgreSQL Log Events", startUtc,
+            page.Rows.Select(r => (DateTime?)r.OccurredAtUtc), ViewerDataService.PgLogEventsRowCap);
 
         PgLogEventsNote.Text = PanelNote("pg_log_events", page.Rows.Count,
             "No classified log event was stored in this window. That is the healthy answer for the error "
@@ -407,14 +440,21 @@ public partial class ViewerServerTab
         {
             PgLockStatsGrid.ItemsSource = null;
             PgLockStatsNote.Text = PanelNote("pg_lock_stats", 0, string.Empty);
+            PgLockStatsDataStartBanner.Visibility = Visibility.Collapsed;
             return;
         }
 
-        var rows = await _dataService.GetPgLockStatsAsync(_server.ServerId, startUtc, endUtc, PgGridRowLimit);
+        using var readFanOut = ViewerReadFanOut.Of(2);
+        var dataStartTask = StartPgDataStartProbe("pg_lock_stats", startUtc, endUtc);
+        var rowsTask = _dataService.GetPgLockStatsAsync(_server.ServerId, startUtc, endUtc, PgGridRowLimit);
+        await AwaitReadWatchingProbeAsync(rowsTask, dataStartTask, "PostgreSQL Lock Stats");
+        var rows = rowsTask.Result;
+        readFanOut.Release();
 
         /* The display row, not the reader's: its Last Seen follows the display mode and sorts by its UTC instant
            (#4766). The counts below read the reader rows, which are unchanged. */
         PgLockStatsGrid.ItemsSource = PgDisplay.LockStatRows(rows);
+        UpdateTruncationBanner(PgLockStatsDataStartBanner, await DataStartOrNullAsync(dataStartTask, "PostgreSQL Lock Stats"), startUtc);
 
         var queued = rows.Where(r => !r.Granted).ToList();
         var totalCaptures = rows.Count == 0 ? 0 : rows[0].TotalCaptures;
@@ -447,10 +487,16 @@ public partial class ViewerServerTab
         {
             PgWaitSamplingGrid.ItemsSource = null;
             PgWaitSamplingNote.Text = PanelNote("pg_wait_sampling", 0, string.Empty);
+            PgWaitSamplingDataStartBanner.Visibility = Visibility.Collapsed;
             return;
         }
 
-        var rows = await _dataService.GetPgWaitSamplingAsync(_server.ServerId, startUtc, endUtc, PgGridRowLimit);
+        using var readFanOut = ViewerReadFanOut.Of(2);
+        var dataStartTask = StartPgDataStartProbe("pg_wait_sampling", startUtc, endUtc);
+        var rowsTask = _dataService.GetPgWaitSamplingAsync(_server.ServerId, startUtc, endUtc, PgGridRowLimit);
+        await AwaitReadWatchingProbeAsync(rowsTask, dataStartTask, "PostgreSQL Wait Sampling");
+        var rows = rowsTask.Result;
+        readFanOut.Release();
         /* #3604: the arm that fed the grid, off the collector's own state — the same disclosure the MCP read
            makes, because the same table now holds two grains and the note is where this panel says which. */
         var instrument = await _dataService.GetPgWaitInstrumentAsync(_server.ServerId);
@@ -458,6 +504,7 @@ public partial class ViewerServerTab
             && string.Equals(instrument.Instrument, PgWaitInstrument.ServiceSampled, StringComparison.Ordinal);
 
         PgWaitSamplingGrid.ItemsSource = PgDisplay.WaitSamplingRows(rows);
+        UpdateTruncationBanner(PgWaitSamplingDataStartBanner, await DataStartOrNullAsync(dataStartTask, "PostgreSQL Wait Sampling"), startUtc);
 
         var attributed = rows.Count(r => r.QueryId != 0);
         var reset = rows.Any(r => r.CounterReset);
@@ -506,12 +553,19 @@ public partial class ViewerServerTab
         {
             PgKernelStatsGrid.ItemsSource = null;
             PgKernelStatsNote.Text = PanelNote("pg_kernel_stats", 0, string.Empty);
+            PgKernelStatsDataStartBanner.Visibility = Visibility.Collapsed;
             return;
         }
 
-        var rows = await _dataService.GetPgKernelStatsAsync(_server.ServerId, startUtc, endUtc, PgGridRowLimit);
+        using var readFanOut = ViewerReadFanOut.Of(2);
+        var dataStartTask = StartPgDataStartProbe("pg_kernel_stats", startUtc, endUtc);
+        var rowsTask = _dataService.GetPgKernelStatsAsync(_server.ServerId, startUtc, endUtc, PgGridRowLimit);
+        await AwaitReadWatchingProbeAsync(rowsTask, dataStartTask, "PostgreSQL Kernel Stats");
+        var rows = rowsTask.Result;
+        readFanOut.Release();
 
         PgKernelStatsGrid.ItemsSource = rows;
+        UpdateTruncationBanner(PgKernelStatsDataStartBanner, await DataStartOrNullAsync(dataStartTask, "PostgreSQL Kernel Stats"), startUtc);
 
         var reset = rows.Any(r => r.CounterReset);
 
@@ -548,7 +602,7 @@ public partial class ViewerServerTab
 
         var rows = await _dataService.GetPgPredicateStatsAsync(_server.ServerId, startUtc, endUtc, PgGridRowLimit);
 
-        PgPredicateStatsGrid.ItemsSource = rows;
+        PgPredicateStatsGrid.ItemsSource = rows.Select(PgDisplay.PredicateStat).ToList();
 
         var sampled = rows.Count == 0 ? 1.0 : rows[0].SampleRate;
         var misestimated = rows.Count(r => r.WorstEstimateErrorRatio >= 10);
@@ -580,12 +634,19 @@ public partial class ViewerServerTab
         {
             PgCapturedPlansGrid.ItemsSource = null;
             PgCapturedPlansNote.Text = PanelNote("pg_plan_capture", 0, string.Empty);
+            PgCapturedPlansDataStartBanner.Visibility = Visibility.Collapsed;
             return;
         }
 
-        var rows = await _dataService.GetPgPlanCaptureAsync(_server.ServerId, startUtc, endUtc, PgGridRowLimit);
+        using var readFanOut = ViewerReadFanOut.Of(2);
+        var dataStartTask = StartPgDataStartProbe("pg_plan_capture", startUtc, endUtc);
+        var rowsTask = _dataService.GetPgPlanCaptureAsync(_server.ServerId, startUtc, endUtc, PgGridRowLimit);
+        await AwaitReadWatchingProbeAsync(rowsTask, dataStartTask, "PostgreSQL Captured Plans");
+        var rows = rowsTask.Result;
+        readFanOut.Release();
 
         PgCapturedPlansGrid.ItemsSource = rows;
+        UpdateTruncationBanner(PgCapturedPlansDataStartBanner, await DataStartOrNullAsync(dataStartTask, "PostgreSQL Captured Plans"), startUtc);
 
         var orphans = rows.Count(r => r.QueryId == 0);
 
@@ -628,12 +689,20 @@ public partial class ViewerServerTab
         {
             PgDeadlocksGrid.ItemsSource = null;
             PgDeadlocksNote.Text = PanelNote("pg_deadlocks", 0, string.Empty);
+            PgDeadlocksDataStartBanner.Visibility = Visibility.Collapsed;
             return;
         }
 
-        var rows = await _dataService.GetPgDeadlocksAsync(_server.ServerId, startUtc, endUtc);
+        using var readFanOut = ViewerReadFanOut.Of(2);
+        var dataStartTask = StartPgDataStartProbe("pg_deadlocks", startUtc, endUtc);
+        var rowsTask = _dataService.GetPgDeadlocksAsync(_server.ServerId, startUtc, endUtc);
+        await AwaitReadWatchingProbeAsync(rowsTask, dataStartTask, "PostgreSQL Deadlocks");
+        var rows = rowsTask.Result;
+        readFanOut.Release();
 
         PgDeadlocksGrid.ItemsSource = rows;
+        await ShowEventDataStartAsync(PgDeadlocksDataStartBanner, dataStartTask, "PostgreSQL Deadlocks", startUtc,
+            rows.Select(r => (DateTime?)r.OccurredAtUtc), ViewerDataService.PgDeadlocksRowCap);
 
         PgDeadlocksNote.Text = PanelNote("pg_deadlocks", rows.Count,
             "No deadlock was reported in this window. That is the healthy answer, and it is also what an "
@@ -660,7 +729,8 @@ public partial class ViewerServerTab
     {
         var (startUtc, endUtc) = GetWindowUtc();
 
-        using var readFanOut = ViewerReadFanOut.Of(5);
+        /* Five reads, and the three data-start probes (#4966) started beside them: priced together. */
+        using var readFanOut = ViewerReadFanOut.Of(8);
 
         var sessionsTask = _dataService.GetPgSessionStatesAsync(_server.ServerId, startUtc, endUtc, PgGridRowLimit);
         var xminTask = _dataService.GetPgXminHorizonAsync(_server.ServerId, startUtc, endUtc);
@@ -668,7 +738,26 @@ public partial class ViewerServerTab
         var wraparoundTask = _dataService.GetPgWraparoundAsync(_server.ServerId, startUtc, endUtc);
         var planCaptureTask = _dataService.GetPgPlanCaptureReadinessAsync(_server.ServerId, startUtc, endUtc, PgGridRowLimit);
 
-        await Task.WhenAll(sessionsTask, xminTask, autovacuumTask, wraparoundTask, planCaptureTask);
+        /* #4966: where each grid's table starts, kept OUT of the WhenAll so a probe that throws costs only its banner. */
+        var sessionsStartTask = PgCollectorIsGatedOff("pg_session_states") ? Task.FromResult<DateTime?>(null) : StartPgDataStartProbe("pg_session_states", startUtc, endUtc);
+        var xminStartTask = StartPgDataStartProbe("pg_xmin_horizon", startUtc, endUtc);
+        var autovacuumStartTask = StartPgDataStartProbe("pg_autovacuum_stats", startUtc, endUtc);
+
+        /* #5022: a join that throws skips the banner step, so each probe is watched (nested: one helper call per probe). */
+        await AwaitReadWatchingProbeAsync(
+            AwaitReadWatchingProbeAsync(
+                AwaitReadWatchingProbeAsync(
+                    Task.WhenAll(sessionsTask, xminTask, autovacuumTask, wraparoundTask, planCaptureTask),
+                    sessionsStartTask, "PostgreSQL Session States"),
+                xminStartTask, "PostgreSQL Xmin Horizon"),
+            autovacuumStartTask, "PostgreSQL Autovacuum");
+
+        /* Released before the first banner await: the reads and probes are done or detached by here. */
+        readFanOut.Release();
+
+        UpdateTruncationBanner(PgSessionStatesDataStartBanner, await DataStartOrNullAsync(sessionsStartTask, "PostgreSQL Session States"), startUtc);
+        UpdateTruncationBanner(PgXminDataStartBanner, await DataStartOrNullAsync(xminStartTask, "PostgreSQL Xmin Horizon"), startUtc);
+        UpdateTruncationBanner(PgAutovacuumDataStartBanner, await DataStartOrNullAsync(autovacuumStartTask, "PostgreSQL Autovacuum"), startUtc);
 
         PgSessionStatesGrid.ItemsSource = sessionsTask.Result.Select(PgDisplay.SessionState).ToList();
 
@@ -708,18 +797,7 @@ public partial class ViewerServerTab
         PgWraparoundNote.Text = PanelNote("pg_wraparound_stats", wraparoundTask.Result.Count,
             "No per-database freeze headroom has been collected in this window.");
 
-        PgPlanCaptureGrid.ItemsSource = planCaptureTask.Result
-            .Select(r => new
-            {
-                r.Facet,
-                /* Rendered as words, not a checkbox or a bare bool. The reader is being told whether a
-                   PRECONDITION holds, and "False" beside a remedy sentence reads as a failure rather than as
-                   a step not yet taken. */
-                Satisfied = r.IsSatisfied ? "yes" : "no",
-                Observed = r.Observed ?? "(not reported)",
-                Detail = r.Detail ?? string.Empty,
-            })
-            .ToList();
+        PgPlanCaptureGrid.ItemsSource = planCaptureTask.Result.Select(PgDisplay.PlanCapture).ToList();
 
         /* Three states, and they are genuinely different answers. Gated off is the engine sentence. Zero
            rows means the collector has not run yet on a server that only just started collecting - NOT that
@@ -771,10 +849,17 @@ public partial class ViewerServerTab
     {
         var (startUtc, endUtc) = GetWindowUtc();
 
-        var rows = PgCollectorIsGatedOff("pg_wait_stats")
-            ? new List<DarlingPgWaitReader.PgWaitRow>()
-            : await _dataService.GetPgWaitStatsAsync(_server.ServerId, startUtc, endUtc, PgGridRowLimit);
+        var waitsGatedOff = PgCollectorIsGatedOff("pg_wait_stats");
+        using var readFanOut = ViewerReadFanOut.Of(2);
+        var dataStartTask = waitsGatedOff ? Task.FromResult<DateTime?>(null) : StartPgDataStartProbe("pg_wait_stats", startUtc, endUtc);
+        var rowsTask = waitsGatedOff
+            ? Task.FromResult(new List<DarlingPgWaitReader.PgWaitRow>())
+            : _dataService.GetPgWaitStatsAsync(_server.ServerId, startUtc, endUtc, PgGridRowLimit);
+        await AwaitReadWatchingProbeAsync(rowsTask, dataStartTask, "PostgreSQL Wait Stats");
+        var rows = rowsTask.Result;
+        readFanOut.Release();
 
+        UpdateTruncationBanner(PgWaitStatsDataStartBanner, await DataStartOrNullAsync(dataStartTask, "PostgreSQL Wait Stats"), startUtc);
         PgWaitStatsGrid.ItemsSource = rows.Select(PgDisplay.Wait).ToList();
         PgWaitsNote.Text = PanelNote("pg_wait_stats", rows.Count,
             "No wait time was recorded for this server in this window.");
@@ -787,9 +872,15 @@ public partial class ViewerServerTab
     {
         var (startUtc, endUtc) = GetWindowUtc();
 
-        var rows = await _dataService.GetPgIoAsync(_server.ServerId, startUtc, endUtc, PgGridRowLimit);
+        using var readFanOut = ViewerReadFanOut.Of(2);
+        var dataStartTask = StartPgDataStartProbe("pg_io_stats", startUtc, endUtc);
+        var rowsTask = _dataService.GetPgIoAsync(_server.ServerId, startUtc, endUtc, PgGridRowLimit);
+        await AwaitReadWatchingProbeAsync(rowsTask, dataStartTask, "PostgreSQL I/O Stats");
+        var rows = rowsTask.Result;
+        readFanOut.Release();
 
         PgIoStatsGrid.ItemsSource = PgDisplay.IoRows(rows);
+        UpdateTruncationBanner(PgIoStatsDataStartBanner, await DataStartOrNullAsync(dataStartTask, "PostgreSQL I/O Stats"), startUtc);
         PgIoNote.Text = PanelNote("pg_io_stats", rows.Count,
             "No backend / object / context combination did any I/O in this window. This view needs "
             + "PostgreSQL 16 or newer, where pg_stat_io exists; below that the collector does not run and "
@@ -818,7 +909,7 @@ public partial class ViewerServerTab
 
         var rows = await _dataService.GetPgBufferUsageAsync(_server.ServerId, startUtc, endUtc, PgGridRowLimit);
 
-        PgBufferUsageGrid.ItemsSource = rows;
+        PgBufferUsageGrid.ItemsSource = rows.Select(PgDisplay.BufferUsage).ToList();
 
         var total = rows.Count == 0 ? 0L : rows[0].PoolBuffersTotal;
         var used = rows.Count == 0 ? 0L : rows[0].PoolBuffersUsed;
@@ -852,12 +943,15 @@ public partial class ViewerServerTab
         {
             PgWriteStatsGrid.ItemsSource = null;
             PgWriteStatsNote.Text = PanelNote("pg_write_stats", 0, string.Empty);
+            PgWriteStatsDataStartBanner.Visibility = Visibility.Collapsed;
             return;
         }
 
         var row = await _dataService.GetPgWriteStatsAsync(_server.ServerId, startUtc, endUtc);
 
         PgWriteStatsGrid.ItemsSource = row is null ? null : PgDisplay.WriteStatsRows(row);
+        /* #4966: the row already holds the window's first sample (WindowStartUtc), so it is the coverage start and needs no probe. */
+        UpdateTruncationBanner(PgWriteStatsDataStartBanner, row?.WindowStartUtc, startUtc);
         PgWriteStatsNote.Text = row is null
             ? "Write-side counters need TWO collections before a change exists between them, so a server "
               + "added in the last cycle has nothing here yet. This is not the same as a quiet server, "
@@ -913,12 +1007,19 @@ public partial class ViewerServerTab
         {
             PgReplicationStatsGrid.ItemsSource = null;
             PgReplicationStatsNote.Text = PanelNote("pg_replication_stats", 0, string.Empty);
+            PgReplicationStatsDataStartBanner.Visibility = Visibility.Collapsed;
             return;
         }
 
-        var rows = await _dataService.GetPgReplicationStatsAsync(_server.ServerId, startUtc, endUtc, PgGridRowLimit);
+        using var readFanOut = ViewerReadFanOut.Of(2);
+        var dataStartTask = StartPgDataStartProbe("pg_replication_stats", startUtc, endUtc);
+        var rowsTask = _dataService.GetPgReplicationStatsAsync(_server.ServerId, startUtc, endUtc, PgGridRowLimit);
+        await AwaitReadWatchingProbeAsync(rowsTask, dataStartTask, "PostgreSQL Replication Stats");
+        var rows = rowsTask.Result;
+        readFanOut.Release();
 
         PgReplicationStatsGrid.ItemsSource = PgDisplay.ReplicationStatRows(rows);
+        UpdateTruncationBanner(PgReplicationStatsDataStartBanner, await DataStartOrNullAsync(dataStartTask, "PostgreSQL Replication Stats"), startUtc);
 
         var worst = rows.Count == 0 ? 0L : rows.Max(r => r.WorstReplayBytesBehind ?? 0L);
         var flapping = rows.Count(r => r.TotalSamples > 0 && r.Samples < r.TotalSamples);
@@ -954,15 +1055,27 @@ public partial class ViewerServerTab
     {
         var (startUtc, endUtc) = GetWindowUtc();
 
-        using var readFanOut = ViewerReadFanOut.Of(2);
+        /* Two reads, and the two data-start probes (#4966) started beside them: priced together. */
+        using var readFanOut = ViewerReadFanOut.Of(4);
 
         var bloatTask = _dataService.GetPgTableBloatAsync(_server.ServerId, startUtc, endUtc, PgGridRowLimit);
         var indexTask = _dataService.GetPgIndexUsageAsync(_server.ServerId, startUtc, endUtc, PgGridRowLimit);
 
-        await Task.WhenAll(bloatTask, indexTask);
+        var bloatStartTask = PgCollectorIsGatedOff("pg_table_bloat_stats") ? Task.FromResult<DateTime?>(null) : StartPgDataStartProbe("pg_table_bloat_stats", startUtc, endUtc);
+        var indexStartTask = PgCollectorIsGatedOff("pg_index_usage_stats") ? Task.FromResult<DateTime?>(null) : StartPgDataStartProbe("pg_index_usage_stats", startUtc, endUtc);
 
-        /* Released here — the three sub-tab loads at the end of this method do not contend with these two. */
+        /* #5022: a join that throws skips the banner step, so each probe is watched. */
+        await AwaitReadWatchingProbeAsync(
+            AwaitReadWatchingProbeAsync(
+                Task.WhenAll(bloatTask, indexTask),
+                bloatStartTask, "PostgreSQL Table Bloat"),
+            indexStartTask, "PostgreSQL Index Usage");
+
+        /* Released here, before any banner await. */
         readFanOut.Release();
+
+        UpdateTruncationBanner(PgTableBloatDataStartBanner, await DataStartOrNullAsync(bloatStartTask, "PostgreSQL Table Bloat"), startUtc);
+        UpdateTruncationBanner(PgIndexUsageDataStartBanner, await DataStartOrNullAsync(indexStartTask, "PostgreSQL Index Usage"), startUtc);
 
         var bloat = bloatTask.Result;
         var indexes = indexTask.Result;

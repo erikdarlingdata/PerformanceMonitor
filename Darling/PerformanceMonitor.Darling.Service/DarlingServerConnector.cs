@@ -168,32 +168,10 @@ SELECT
         {
             /* SQL auth (password) and service principal (client secret) both resolve their secret here from
                EncryptedPassword; managed identity and integrated resolve none. #3484. */
-            bool usedPlaintext;
-            if (OperatingSystem.IsWindows())
-            {
-                password = DarlingSecrets.ResolvePassword(config, out usedPlaintext);
-            }
-            else
-            {
-                /* Non-Windows: DPAPI (DarlingSecrets) is unavailable, so only the password slot applies —
-                   inlined here to keep the DPAPI call provably Windows-only for the platform analyzer.
-                   The slot takes the same env:/file: references as everywhere else (#1804), which is the
-                   supported non-Windows shape; a literal still works and still warns below. */
-                if (!string.IsNullOrWhiteSpace(config.EncryptedPassword))
-                {
-                    throw new PlatformNotSupportedException(
-                        "encryptedPassword requires Windows (DPAPI); use password with an env:/file: reference on other platforms.");
-                }
-
-                if (string.IsNullOrWhiteSpace(config.Password))
-                {
-                    throw new InvalidOperationException(
-                        $"Server '{config.DisplayName}' requires a secret (a SQL password or a service-principal client secret) but has neither encryptedPassword nor password.");
-                }
-
-                usedPlaintext = !DarlingSecretSource.IsReference(config.Password);
-                password = DarlingSecretSource.Resolve(config.Password, $"servers['{config.DisplayName}'].password");
-            }
+            /* #5366: one dispatch on every platform. A reference or a sealed value resolves anywhere; an old-format
+               DPAPI value opens only on Windows and says so on any other platform. The password slot takes the same
+               env:/file: references as everywhere else (#1804); a literal still works and still warns below. */
+            password = DarlingSecrets.ResolvePassword(config, out var usedPlaintext);
 
             if (usedPlaintext)
             {

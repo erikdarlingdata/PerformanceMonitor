@@ -26,14 +26,25 @@ namespace PerformanceMonitor.Darling.Service;
 public sealed class ReadLatencyRecorder
 {
     public ReadLatencyRecorder(ReadLatencyAccumulator? readLatency, ILogger? logger)
+        : this(readLatency, logger, null)
+    {
+    }
+
+    internal ReadLatencyRecorder(ReadLatencyAccumulator? readLatency, ILogger? logger, SlowReadLog? slowReads)
     {
         Accumulator = readLatency;
         Logger = logger;
+        SlowReads = slowReads;
     }
+
+    /// <summary>Where a slow or failed read is offered (#5097); null records none.</summary>
+    internal SlowReadLog? SlowReads { get; }
 
     /// <summary>Where a sample goes; null records nothing.</summary>
     internal ReadLatencyAccumulator? Accumulator { get; }
 
-    /// <summary>Where a recording failure is reported, at Debug; null reports nothing.</summary>
+    /// <summary>Where a recording failure is reported, at Debug; null reports nothing. The composed-panel runner
+    /// reports through it too, at the same level, a data-start probe it swallows (the panel is answered without
+    /// its notice).</summary>
     internal ILogger? Logger { get; }
 }

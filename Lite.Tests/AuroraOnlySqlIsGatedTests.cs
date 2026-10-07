@@ -43,6 +43,8 @@ namespace Lite.Tests;
 /// file arrive unexamined.
 /// </para>
 /// </summary>
+[Trait("Reads", "Darling")]
+[Trait("Stage", "Guard")]
 public class AuroraOnlySqlIsGatedTests
 {
     /// <summary>The Aurora-extended surfaces. Community PostgreSQL has none of them under any version.</summary>

@@ -24,8 +24,8 @@ using Xunit;
 namespace Darling.Tests;
 
 /// <summary>
-/// #4732: removing a server leaves its Extended Events sessions on it, and <c>--drop-xe-sessions</c> is the operator's
-/// explicit way to remove them. The pure halves (the grammar, the statements, the plan) pin as text; the executor runs over a
+/// #4732, #4961: removing a server drops this install's own Extended Events sessions on it, and <c>--drop-xe-sessions</c> is
+/// the operator's explicit way to drop the shared ones and what a removal could not drop. The pure halves (the grammar, the statements, the plan) pin as text; the executor runs over a
 /// fake target so the find-print-drop path needs no SQL Server.
 /// </summary>
 public sealed class DropXeSessionsVerbTests
@@ -37,6 +37,444 @@ public sealed class DropXeSessionsVerbTests
     /// <summary>The words that tell an operator the service stops capturing until it reconnects: printed only by a run that dropped
     /// a session (#4732).</summary>
     private const string CaptureStopsMarker = "stops until this service reconnects to it, so remove the server next.";
+
+    // ---- Azure SQL Database: which databases the verb searches for which session -------------------------------------------
+
+    private const string AzureHost = "dropxe.database.windows.net";
+
+    private static SqlServerXeSessionCleanupTarget AzureTarget(MonitoredServer self, params MonitoredServer[] registry) =>
+        AzureTarget(facts: null, self, registry);
+
+    private static SqlServerXeSessionCleanupTarget AzureTarget(XeCleanupStoreFacts? facts, MonitoredServer self, params MonitoredServer[] registry) =>
+        new(
+            new ServerRuntime
+            {
+                Config = self,
+                ConnectionString = $"Server=tcp:{AzureHost},1433;Initial Catalog=master;Encrypt=True",
+                Target = new CollectorTargetInfo { IsAzureSqlDb = true },
+                StorageName = AzureHost,
+                ServerId = self.ServerId,
+            },
+            sessionNames: null,
+            registry,
+            facts);
+
+    private const int SelfId = 11;
+    private const int SecondId = 12;
+    private const string StoreInstallId = "1a2b3c4d";
+    private const string OwnLongQuery = "PerformanceMonitor_Darling_1a2b3c4d_LongQueryCompletions";
+
+    /// <summary>One row of the store's collector schedules for the long-query collector: a registration's own override, or the
+    /// install's default when <paramref name="serverId"/> is null.</summary>
+    private static ScheduleOverride LongQueryRow(int? serverId, bool enabled) =>
+        new(serverId, "long_query_completions", FrequencyMinutes: null, RetentionDays: null, enabled);
+
+    private static XeCleanupStoreFacts FactsWith(IReadOnlyList<ScheduleOverride>? rows, IReadOnlyDictionary<int, string>? names = null) =>
+        new(StoreInstallId, rows, names);
+
+    /// <summary>Two registrations of one logical server: this one, which excludes gamma, and a second with read-only intent,
+    /// which excludes delta.</summary>
+    private static (MonitoredServer Self, MonitoredServer Second) TwoRegistrations() =>
+        (new MonitoredServer { Name = "dropxe", Host = AzureHost, ExcludedDatabases = ["gamma"], StoredServerId = SelfId },
+         new MonitoredServer { Name = "dropxe-ro", Host = AzureHost, ReadOnlyIntent = true, ExcludedDatabases = ["delta"], StoredServerId = SecondId });
+
+    private static SqlServerXeSessionCleanupTarget.AzureSearchPlan PlanWith(XeCleanupStoreFacts? facts)
+    {
+        var (self, second) = TwoRegistrations();
+        return AzureTarget(facts, self, self, second).PlanAzureSearch(
+            monitored: ["master", "alpha", "delta"],
+            every: ["master", "alpha", "gamma", "delta"]);
+    }
+
+    /// <summary>
+    /// The long-query session is searched in the databases the registration excludes, because a session created before the
+    /// database was excluded stays there with nothing that drops it. It is not searched in a database monitored as its own
+    /// server, which that server's registration owns, and never in master. The other sessions keep the monitored list.
+    /// </summary>
+    [Fact]
+    public void TheLongQuerySearch_VisitsAnExcludedDatabase_AndSkipsOneMonitoredAsItsOwnServer()
+    {
+        var self = new MonitoredServer { Name = "dropxe", Host = AzureHost, ExcludedDatabases = ["gamma"] };
+        var alphaOwnServer = new MonitoredServer { Name = "dropxe-alpha", Host = AzureHost, Database = "alpha" };
+        var target = AzureTarget(self, self, alphaOwnServer);
+
+        var plan = target.PlanAzureSearch(
+            monitored: ["master", "alpha", "beta"],
+            every: ["master", "alpha", "beta", "gamma"]);
+
+        Assert.Equal(new[] { "beta", "gamma" }, plan.LongQueryDatabases);
+        Assert.Equal(new[] { "alpha", "beta" }, plan.AlwaysOnDatabases);
+        Assert.True(plan.Reports("gamma", LongQuery));
+        Assert.False(plan.Reports("gamma", Deadlock));
+        Assert.False(plan.Reports("alpha", LongQuery));
+        Assert.True(plan.Reports("alpha", Blocked));
+        Assert.False(plan.Reports("master", LongQuery));
+        Assert.Equal(new[] { "alpha", "beta", "gamma" }, plan.Visited);
+    }
+
+    /// <summary>
+    /// #4961: another registration of the logical server keeps the session when its EFFECTIVE long-query setting is on, its own
+    /// override or else the install's default: the verb leaves each database that registration would create the session in.
+    /// </summary>
+    [Fact]
+    public void TheLongQuerySearch_SkipsADatabaseAnotherRegistrationOfTheServerKeeps()
+    {
+        var plan = PlanWith(FactsWith([LongQueryRow(SecondId, enabled: true)]));
+
+        Assert.Equal(new[] { "delta" }, plan.LongQueryDatabases);
+    }
+
+    /// <summary>The install's default can turn a registration's trace on: it keeps the session with no row of its own.</summary>
+    [Fact]
+    public void TheLongQuerySearch_SkipsADatabaseWhenTheInstallsDefaultTurnsTheOtherRegistrationOn()
+    {
+        var plan = PlanWith(FactsWith([LongQueryRow(serverId: null, enabled: true)]));
+
+        Assert.Equal(new[] { "delta" }, plan.LongQueryDatabases);
+    }
+
+    /// <summary>
+    /// #4961: a registration whose long-query trace is off keeps nothing, so the verb drops the session in every database it
+    /// finds it in, the ones that registration would have created it in too. Its own override beats the install's default,
+    /// and with no row at all the collector's default, which is off, applies.
+    /// </summary>
+    [Fact]
+    public void TheLongQuerySearch_DropsInADatabaseTheOtherRegistrationLeavesOff()
+    {
+        var everyDatabase = new[] { "alpha", "gamma", "delta" };
+
+        /* Its own override is off. */
+        Assert.Equal(everyDatabase, PlanWith(FactsWith([LongQueryRow(SecondId, enabled: false)])).LongQueryDatabases);
+
+        /* Its own override beats an install's default that is on. */
+        Assert.Equal(
+            everyDatabase,
+            PlanWith(FactsWith([LongQueryRow(serverId: null, enabled: true), LongQueryRow(SecondId, enabled: false)])).LongQueryDatabases);
+
+        /* No row at all: the collector's own default applies, which is off. */
+        Assert.Equal(everyDatabase, PlanWith(FactsWith([])).LongQueryDatabases);
+    }
+
+    /// <summary>A store whose schedule rows could not be read gives the verb no setting to go by, so it keeps counting every
+    /// other registration of the logical server as keeping the session, as it did before it read them.</summary>
+    [Fact]
+    public void TheLongQuerySearch_WhenTheScheduleRowsCouldNotBeRead_CountsEveryOtherRegistrationAsKeeping()
+    {
+        Assert.Equal(new[] { "delta" }, PlanWith(FactsWith(rows: null)).LongQueryDatabases);
+        Assert.Equal(new[] { "delta" }, PlanWith(facts: null).LongQueryDatabases);
+    }
+
+    [Fact]
+    public void ATargetWithItsOwnNames_SearchesNoDatabaseForTheLongQuerySession()
+    {
+        var self = new MonitoredServer { Name = "dropxe", Host = AzureHost, ExcludedDatabases = ["gamma"] };
+        var runtime = new ServerRuntime
+        {
+            Config = self,
+            ConnectionString = $"Server=tcp:{AzureHost},1433;Initial Catalog=master;Encrypt=True",
+            Target = new CollectorTargetInfo { IsAzureSqlDb = true },
+            StorageName = AzureHost,
+            ServerId = self.ServerId,
+        };
+        var target = new SqlServerXeSessionCleanupTarget(runtime, new[] { "dropxe_test_only" }, [self]);
+
+        var plan = target.PlanAzureSearch(["master", "alpha"], ["master", "alpha", "gamma"]);
+
+        Assert.Empty(plan.LongQueryDatabases);
+        Assert.Equal(new[] { "alpha" }, plan.AlwaysOnDatabases);
+    }
+
+    // ---- on-premises: this install's long-query session when another registration of this install keeps it (#4961) ---------------
+
+    private static SqlServerXeSessionCleanupTarget OnPremisesTarget(XeCleanupStoreFacts facts, MonitoredServer self, params MonitoredServer[] registry) =>
+        new(
+            new ServerRuntime
+            {
+                Config = self,
+                ConnectionString = "Server=sql01;Encrypt=True",
+                Target = new CollectorTargetInfo(),
+                StorageName = "sql01",
+                ServerId = self.ServerId,
+            },
+            sessionNames: null,
+            registry,
+            facts);
+
+    private static (MonitoredServer Self, MonitoredServer Second) TwoOnPremisesRegistrations() =>
+        (new MonitoredServer { Name = "sql01-a", Host = "sql01-a", StoredServerId = SelfId },
+         new MonitoredServer { Name = "sql01-b", Host = "sql01-b", StoredServerId = SecondId });
+
+    private static Dictionary<int, string> InstanceNames(string? own, string? second)
+    {
+        var names = new Dictionary<int, string>();
+        if (own is not null)
+        {
+            names[SelfId] = own;
+        }
+
+        if (second is not null)
+        {
+            names[SecondId] = second;
+        }
+
+        return names;
+    }
+
+    /// <summary>The server-scope search of a server that holds this install's long-query session, the old shared one and the
+    /// shared deadlock session.</summary>
+    private static Task<XeSessionSearch> OnPremisesSearchAsync(
+        IReadOnlyList<ScheduleOverride>? rows, IReadOnlyDictionary<int, string>? names, params string[] found)
+    {
+        var (self, second) = TwoOnPremisesRegistrations();
+        return OnPremisesTarget(FactsWith(rows, names), self, self, second)
+            .ServerScopeSearchAsync(found.Length == 0 ? [Deadlock, OwnLongQuery, LongQuery] : found, []);
+    }
+
+    private static readonly string[] SharedAndLegacy = [Deadlock, LongQuery];
+
+    /// <summary>
+    /// A server's session is the instance's own, so another registration of this install on the same instance, with its
+    /// long-query trace on, keeps this install's session: the verb leaves it and says why. The shared sessions and the old
+    /// shared long-query session are nobody's keeper session, so they stay in the plan.
+    /// </summary>
+    [Fact]
+    public async Task OnPremises_AKeeperOnTheSameInstance_LeavesThisInstallsLongQuerySession_AndSaysWhy()
+    {
+        var search = await OnPremisesSearchAsync([LongQueryRow(SecondId, enabled: true)], InstanceNames("SQL01", "sql01"));
+
+        Assert.Equal(SharedAndLegacy, search.Sessions.Select(session => session.Name).ToArray());
+        var note = Assert.Single(search.Notes);
+        Assert.Contains(OwnLongQuery, note, StringComparison.Ordinal);
+        Assert.Contains("Another registration of this install keeps it on the same instance", note, StringComparison.Ordinal);
+    }
+
+    /// <summary>A name that is not known cannot match: this registration's own, or the keeper's. The session is dropped.</summary>
+    [Fact]
+    public async Task OnPremises_AnUnknownInstanceName_DropsThisInstallsLongQuerySession()
+    {
+        var keeperOn = new[] { LongQueryRow(SecondId, enabled: true) };
+
+        foreach (var names in new[] { InstanceNames(null, "SQL01"), InstanceNames("SQL01", null), InstanceNames(null, null) })
+        {
+            var search = await OnPremisesSearchAsync(keeperOn, names);
+
+            Assert.Equal(new[] { Deadlock, OwnLongQuery, LongQuery }, search.Sessions.Select(session => session.Name).ToArray());
+            Assert.Empty(search.Notes);
+        }
+    }
+
+    [Fact]
+    public async Task OnPremises_AKeeperOnAnotherInstance_DropsThisInstallsLongQuerySession()
+    {
+        var search = await OnPremisesSearchAsync([LongQueryRow(SecondId, enabled: true)], InstanceNames("SQL01", "SQL02"));
+
+        Assert.Equal(new[] { Deadlock, OwnLongQuery, LongQuery }, search.Sessions.Select(session => session.Name).ToArray());
+        Assert.Empty(search.Notes);
+    }
+
+    /// <summary>A registration whose effective trace setting is off keeps nothing, however its instance name reads: its own
+    /// override, or with no row at all the collector's default, which is off.</summary>
+    [Fact]
+    public async Task OnPremises_AKeeperWithItsTraceOff_DoesNotCount()
+    {
+        var sameInstance = InstanceNames("SQL01", "SQL01");
+
+        foreach (var rows in new[] { new[] { LongQueryRow(SecondId, enabled: false) }, Array.Empty<ScheduleOverride>() })
+        {
+            var search = await OnPremisesSearchAsync(rows, sameInstance);
+
+            Assert.Equal(new[] { Deadlock, OwnLongQuery, LongQuery }, search.Sessions.Select(session => session.Name).ToArray());
+            Assert.Empty(search.Notes);
+        }
+    }
+
+    /// <summary>With the schedule rows unreadable, every other registration counts as having its trace on, as on Azure SQL
+    /// Database; the instance names still have to match.</summary>
+    [Fact]
+    public async Task OnPremises_WhenTheScheduleRowsCouldNotBeRead_AKeeperOnTheSameInstanceStillCounts()
+    {
+        var search = await OnPremisesSearchAsync(rows: null, InstanceNames("SQL01", "SQL01"));
+
+        Assert.Equal(SharedAndLegacy, search.Sessions.Select(session => session.Name).ToArray());
+        Assert.Single(search.Notes);
+    }
+
+    /// <summary>The guard is for this install's long-query session alone: with that session not on the server, nothing is left
+    /// and nothing is said.</summary>
+    [Fact]
+    public async Task OnPremises_WithNoLongQuerySessionOfThisInstallOnTheServer_SaysNothing()
+    {
+        var search = await OnPremisesSearchAsync([LongQueryRow(SecondId, enabled: true)], InstanceNames("SQL01", "SQL01"), Deadlock, LongQuery);
+
+        Assert.Equal(SharedAndLegacy, search.Sessions.Select(session => session.Name).ToArray());
+        Assert.Empty(search.Notes);
+    }
+
+    /// <summary>
+    /// Under the real executor: the session left in place is never dropped, the reason is on stderr, and it is a note, not a
+    /// failure, so the exit code stays 0 for a script that removes the server next.
+    /// </summary>
+    [Fact]
+    public async Task OnPremises_TheVerbDoesNotDropTheSessionItLeft_AndPrintsWhyOnStderr()
+    {
+        var (self, second) = TwoOnPremisesRegistrations();
+        var real = OnPremisesTarget(FactsWith([LongQueryRow(SecondId, enabled: true)], InstanceNames("SQL01", "SQL01")), self, self, second);
+        var target = new OnPremisesSearchTarget(real, [Deadlock, OwnLongQuery, LongQuery]);
+        var output = new StringWriter();
+        var error = new StringWriter();
+
+        var exit = await DarlingXeSessionCleanup.RunAsync("sql01", dryRun: false, target, output, error, CancellationToken.None, StoreInstallId);
+
+        Assert.Equal(0, exit);
+        Assert.Equal(SharedAndLegacy, target.Dropped.Select(drop => drop.Session.Name).ToArray());
+        Assert.Contains(OwnLongQuery, error.ToString(), StringComparison.Ordinal);
+        Assert.Contains("keeps it on the same instance", error.ToString(), StringComparison.Ordinal);
+        Assert.DoesNotContain(OwnLongQuery, output.ToString(), StringComparison.Ordinal);
+    }
+
+    private sealed class OnPremisesSearchTarget : IXeSessionCleanupTarget
+    {
+        private readonly SqlServerXeSessionCleanupTarget _real;
+        private readonly string[] _found;
+
+        public OnPremisesSearchTarget(SqlServerXeSessionCleanupTarget real, string[] found)
+        {
+            _real = real;
+            _found = found;
+        }
+
+        public List<XeSessionDrop> Dropped { get; } = [];
+
+        public Task<XeSessionSearch> FindSessionsAsync(CancellationToken cancellationToken) => _real.ServerScopeSearchAsync(_found, []);
+
+        public Task DropAsync(XeSessionDrop drop, CancellationToken cancellationToken)
+        {
+            Dropped.Add(drop);
+            return Task.CompletedTask;
+        }
+    }
+
+    // ---- a database the search cannot open: a problem when it is monitored, a note when the registration excludes it ----------
+
+    /// <summary>The registration excludes gamma and monitors alpha as its own server: the plan visits alpha and beta for the
+    /// always-on sessions and beta and gamma for the long-query one, so gamma is searched for that session alone.</summary>
+    private static SqlServerXeSessionCleanupTarget.AzureSearchPlan ExcludedGammaPlan()
+    {
+        var self = new MonitoredServer { Name = "dropxe", Host = AzureHost, ExcludedDatabases = ["gamma"] };
+        var alphaOwnServer = new MonitoredServer { Name = "dropxe-alpha", Host = AzureHost, Database = "alpha" };
+        return AzureTarget(self, self, alphaOwnServer).PlanAzureSearch(
+            monitored: ["master", "alpha", "beta"],
+            every: ["master", "alpha", "beta", "gamma"]);
+    }
+
+    /// <summary>The target's real Azure search loop under the real executor, with the read of one database replaced: the
+    /// <paramref name="refusing"/> database refuses the connection, alpha holds the deadlock session and beta the long-query
+    /// one.</summary>
+    private sealed class AzureSearchTarget : IXeSessionCleanupTarget
+    {
+        private readonly SqlServerXeSessionCleanupTarget.AzureSearchPlan _plan;
+        private readonly string _refusing;
+
+        public AzureSearchTarget(SqlServerXeSessionCleanupTarget.AzureSearchPlan plan, string refusing)
+        {
+            _plan = plan;
+            _refusing = refusing;
+        }
+
+        public List<XeSessionDrop> Dropped { get; } = [];
+
+        public Task<XeSessionSearch> FindSessionsAsync(CancellationToken cancellationToken) =>
+            SqlServerXeSessionCleanupTarget.SearchAzureDatabasesAsync(_plan, NamesInDatabaseAsync, cancellationToken);
+
+        public Task DropAsync(XeSessionDrop drop, CancellationToken cancellationToken)
+        {
+            Dropped.Add(drop);
+            return Task.CompletedTask;
+        }
+
+        private Task<IReadOnlyList<string>> NamesInDatabaseAsync(string database, CancellationToken cancellationToken)
+        {
+            if (string.Equals(database, _refusing, StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidOperationException("login failed");
+            }
+
+            return Task.FromResult<IReadOnlyList<string>>(database switch
+            {
+                "alpha" => new[] { Deadlock },
+                "beta" => new[] { LongQuery },
+                _ => Array.Empty<string>(),
+            });
+        }
+    }
+
+    private static async Task<(int Exit, string Error, AzureSearchTarget Target)> RunAzureSearchAsync(string refusing)
+    {
+        var target = new AzureSearchTarget(ExcludedGammaPlan(), refusing);
+        var error = new StringWriter();
+        var exit = await DarlingXeSessionCleanup.RunAsync("sql01", dryRun: false, target, new StringWriter(), error, CancellationToken.None);
+        return (exit, error.ToString(), target);
+    }
+
+    /// <summary>
+    /// The long-query search opens databases the registration excludes, which the verb never opened before it. An excluded
+    /// database the login cannot open (no user there, a paused serverless database) must not fail a verb that dropped every
+    /// session it found: a script that runs the verb and then removes the server would stop there. It is a note on stderr that
+    /// names the database, says it is excluded and says a session left there needs a manual drop.
+    /// </summary>
+    [Fact]
+    public async Task AnExcludedDatabaseTheLoginCannotOpen_IsANoteOnStderr_AndTheRunStillSucceeds()
+    {
+        var (exit, error, target) = await RunAzureSearchAsync(refusing: "gamma");
+
+        Assert.Equal(0, exit);
+        Assert.Equal(
+            [
+                ("alpha", Deadlock),
+                ("beta", LongQuery),
+            ],
+            target.Dropped.Select(drop => (drop.Session.Database!, drop.Session.Name)).ToArray());
+        Assert.Equal(
+            $"Database gamma is excluded from monitoring and could not be searched for the long-query completion session (login failed), so a {LongQuery} session left there needs a manual drop."
+                + Environment.NewLine,
+            error);
+    }
+
+    /// <summary>A database the registration monitors is searched for every session, so one the login cannot open still fails
+    /// the run with the unavailable code, as it did before the search reached excluded databases. This passes without the
+    /// exclusion rule too: it is the guard that the rule did not loosen the monitored case.</summary>
+    [Fact]
+    public async Task AMonitoredDatabaseTheLoginCannotOpen_StillFailsTheRun_WithTheUnavailableCode()
+    {
+        var (exit, error, target) = await RunAzureSearchAsync(refusing: "beta");
+
+        Assert.Equal(2, exit);
+        Assert.Equal(
+            "Could not search database beta for Extended Events sessions: login failed" + Environment.NewLine,
+            error);
+        Assert.DoesNotContain("excluded from monitoring", error, StringComparison.Ordinal);
+        Assert.Equal(new[] { ("alpha", Deadlock) }, target.Dropped.Select(drop => (drop.Session.Database!, drop.Session.Name)).ToArray());
+    }
+
+    [Fact]
+    public void ADatabaseSearchedOnlyForTheLongQuerySession_IsFiledAsANote_AndAMonitoredOneAsAProblem()
+    {
+        var plan = ExcludedGammaPlan();
+
+        var excluded = plan.Unsearched("gamma", "login failed");
+        Assert.False(excluded.IsProblem);
+        Assert.Contains("Database gamma is excluded from monitoring", excluded.Text, StringComparison.Ordinal);
+        Assert.Contains("could not be searched for the long-query completion session (login failed)", excluded.Text, StringComparison.Ordinal);
+        Assert.Contains($"{LongQuery} session left there needs a manual drop", excluded.Text, StringComparison.Ordinal);
+
+        var monitored = plan.Unsearched("beta", "login failed");
+        Assert.True(monitored.IsProblem);
+        Assert.Equal("Could not search database beta for Extended Events sessions: login failed", monitored.Text);
+
+        // Database names compare without regard to case, as the rest of the plan does.
+        Assert.True(plan.Unsearched("BETA", "login failed").IsProblem);
+        Assert.False(plan.Unsearched("GAMMA", "login failed").IsProblem);
+    }
 
     // ---- classification, help and dispatch -----------------------------------------------------------------------------
 
@@ -192,7 +630,9 @@ public sealed class DropXeSessionsVerbTests
         var script = DarlingXeSessionCleanup.GuardedDropScript();
         var code = string.Join('\n', script.Split('\n').Where(l => !l.TrimStart().StartsWith("--", StringComparison.Ordinal)));
 
-        Assert.Equal(6, Regex.Matches(code, "DROP EVENT SESSION", RegexOptions.CultureInvariant).Count);
+        /* Six guarded drops, and the two per-install queries (one for each scope) that print a DROP statement as a column for
+           the operator to run (#4961). */
+        Assert.Equal(8, Regex.Matches(code, "DROP EVENT SESSION", RegexOptions.CultureInvariant).Count);
         Assert.Equal(6, Regex.Matches(code, @"IF EXISTS", RegexOptions.CultureInvariant).Count);
         Assert.Equal(
             new[] { Blocked, Deadlock, LongQuery },
@@ -201,7 +641,7 @@ public sealed class DropXeSessionsVerbTests
             new[] { Deadlock, Blocked, LongQuery },
             DarlingXeSessionCleanup.SessionNames.ToArray());
         Assert.Equal(
-            new[] { DeadlocksCollector.XeSessionName, BlockedProcessReportCollector.XeSessionName, LongQueryCompletionsCollector.XeSessionName },
+            new[] { DeadlocksCollector.XeSessionName, BlockedProcessReportCollector.XeSessionName, LongQueryCompletionsCollector.LegacyXeSessionName },
             DarlingXeSessionCleanup.SessionNames.ToArray());
         foreach (var other in new[] { "CREATE", "ALTER", "DELETE", "TRUNCATE", "EXEC", "sp_", "DROP DATABASE", "DROP TABLE", "ON ALL SERVER" })
         {
@@ -328,19 +768,25 @@ public sealed class DropXeSessionsVerbTests
 
         public List<string> Problems { get; } = [];
 
+        public List<string> Notes { get; } = [];
+
         public Exception? SearchFails { get; set; }
 
         public HashSet<string> Refused { get; } = [];
 
         public List<XeSessionDrop> Dropped { get; } = [];
 
+        /// <summary>Runs as each drop starts, before the target answers, so a test can read what the verb had printed by then.</summary>
+        public Action? BeforeDrop { get; set; }
+
         public Task<XeSessionSearch> FindSessionsAsync(CancellationToken cancellationToken) =>
             SearchFails is null
-                ? Task.FromResult(new XeSessionSearch(Found.ToList(), Problems.ToList()))
+                ? Task.FromResult(new XeSessionSearch(Found.ToList(), Problems.ToList()) { Notes = Notes.ToList() })
                 : throw SearchFails;
 
         public Task DropAsync(XeSessionDrop drop, CancellationToken cancellationToken)
         {
+            BeforeDrop?.Invoke();
             if (Refused.Contains(drop.Statement))
             {
                 throw new InvalidOperationException("permission denied");
@@ -385,8 +831,43 @@ public sealed class DropXeSessionsVerbTests
         Assert.Single(Regex.Matches(output, "^WARNING: ", RegexOptions.Multiline));
     }
 
+    /// <summary>
+    /// The warning says other installs recreate a shared session, so it is what the operator reads before anything is
+    /// dropped: it is printed once, ahead of the first drop, and a dry run prints it ahead of the first session it lists.
+    /// </summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task TheSharedNamesWarning_IsPrintedBeforeTheFirstDrop(bool dryRun)
+    {
+        var output = new StringWriter();
+        var target = new FakeTarget();
+        target.Found.Add(new ExistingXeSession(Deadlock, XeSessionScope.Server));
+        target.Found.Add(new ExistingXeSession(Blocked, XeSessionScope.Server));
+        string? outputAtTheFirstDrop = null;
+        target.BeforeDrop = () => outputAtTheFirstDrop ??= output.ToString();
+
+        await DarlingXeSessionCleanup.RunAsync("sql01", dryRun, target, output, new StringWriter(), CancellationToken.None);
+
+        var all = output.ToString();
+        Assert.Single(Regex.Matches(all, "^WARNING: ", RegexOptions.Multiline));
+        Assert.Contains(DarlingXeSessionCleanup.SharedNamesWarning, all, StringComparison.Ordinal);
+        if (dryRun)
+        {
+            Assert.Null(outputAtTheFirstDrop);
+            Assert.True(
+                all.IndexOf("WARNING: ", StringComparison.Ordinal) < all.IndexOf("  Found ", StringComparison.Ordinal),
+                "the warning comes before the first session the dry run lists");
+        }
+        else
+        {
+            Assert.NotNull(outputAtTheFirstDrop);
+            Assert.Contains("WARNING: " + DarlingXeSessionCleanup.SharedNamesWarning, outputAtTheFirstDrop, StringComparison.Ordinal);
+        }
+    }
+
     [Fact]
-    public async Task ARealDrop_SaysWhatStopsUntilTheServiceReconnects_OnceAndBeforeTheWarning()
+    public async Task ARealDrop_SaysWhatStopsUntilTheServiceReconnects_OnceAndAfterTheWarning()
     {
         var target = new FakeTarget();
         target.Found.Add(new ExistingXeSession(Deadlock, XeSessionScope.Server));
@@ -398,8 +879,8 @@ public sealed class DropXeSessionsVerbTests
         Assert.Single(Regex.Matches(output, "^NOTE: ", RegexOptions.Multiline));
         Assert.Contains(note, output, StringComparison.Ordinal);
         Assert.True(
-            output.IndexOf(note, StringComparison.Ordinal) < output.IndexOf("WARNING: ", StringComparison.Ordinal),
-            "the note comes before the shared-names warning");
+            output.IndexOf("WARNING: ", StringComparison.Ordinal) < output.IndexOf(note, StringComparison.Ordinal),
+            "the shared-names warning comes before the note on what the drops stopped");
     }
 
     [Theory]
@@ -490,6 +971,35 @@ public sealed class DropXeSessionsVerbTests
     }
 
     [Fact]
+    public async Task ANoteFromTheSearch_IsPrintedOnStderr_AndLeavesTheExitCodeAndTheDropsAlone()
+    {
+        var target = new FakeTarget();
+        target.Found.Add(new ExistingXeSession(Deadlock, XeSessionScope.Server));
+        target.Notes.Add("Database hr is excluded from monitoring and could not be searched for the long-query completion session (login failed), so a session left there needs a manual drop.");
+
+        var (exit, output, error) = await RunAsync(target, dryRun: false);
+
+        Assert.Equal(DarlingCliCommands.DropXeSessionsExitCode.Success, exit);
+        Assert.Single(target.Dropped);
+        Assert.Contains($"[DROPPED] {Deadlock}", output, StringComparison.Ordinal);
+        Assert.Equal(target.Notes[0] + Environment.NewLine, error);
+        Assert.DoesNotContain("[FAILED]", error, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ANoteWithNothingFound_StillSaysNothingWasDroppedOnlyInThePlacesSearched()
+    {
+        var target = new FakeTarget();
+        target.Notes.Add("Database hr is excluded from monitoring and could not be searched for the long-query completion session (login failed), so a session left there needs a manual drop.");
+
+        var (exit, output, error) = await RunAsync(target, dryRun: false);
+
+        Assert.Equal(DarlingCliCommands.DropXeSessionsExitCode.Success, exit);
+        Assert.Contains("nothing to drop in the places searched", output, StringComparison.Ordinal);
+        Assert.Contains("database hr", error, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public async Task ARefusedDrop_DoesNotStopTheNext_AndExitsWithTheUnavailableCode()
     {
         var target = new FakeTarget();
@@ -548,7 +1058,7 @@ public sealed class DropXeSessionsVerbTests
 
     // ---- the whole verb through the configuration, with the connection injected ------------------------------------------
 
-    private static Task<IXeSessionCleanupTarget> ThrowingConnect(MonitoredServer server, CancellationToken cancellationToken) =>
+    private static Task<IXeSessionCleanupTarget> ThrowingConnect(MonitoredServer server, IReadOnlyList<MonitoredServer> registry, XeCleanupStoreFacts facts, CancellationToken cancellationToken) =>
         throw new InvalidOperationException("the verb connected when it should not have");
 
     private static string WriteConfig(DirectoryInfo root)
@@ -576,7 +1086,7 @@ public sealed class DropXeSessionsVerbTests
 
         var exit = await DarlingCliCommands.DropXeSessionsAsync(
             rest,
-            (server, _) =>
+            (server, _, _, _) =>
             {
                 connected.Add(server.DisplayName);
                 return connectFails is not null
@@ -729,6 +1239,11 @@ public sealed class DropXeSessionsVerbTests
         Assert.Contains("--print-sql", note, StringComparison.Ordinal);
         Assert.Contains("history are kept", note, StringComparison.Ordinal);
 
+        /* #4961: the removal drops this install's own sessions, so the note no longer says every session stays. */
+        Assert.Contains("also drops this install's own Extended Events sessions on the server", note, StringComparison.Ordinal);
+        Assert.Contains("The shared sessions (", note, StringComparison.Ordinal);
+        Assert.DoesNotContain("are not dropped and stay on the server", note, StringComparison.Ordinal);
+
         /* The server is gone by the time the answer is read, so the named form cannot find it: the first form the note points at is
            --print-sql, and the named form is mentioned only to say it had to run before the removal. */
         Assert.Equal(
@@ -754,7 +1269,7 @@ public sealed class DropXeSessionsVerbTests
         Assert.True(end > start, "the --drop-xe-sessions section no longer ends at a horizontal rule");
         var section = readme[start..end];
 
-        var bulletAt = readme.IndexOf("`remove_server` (which leaves the server's Extended Events sessions on it", StringComparison.Ordinal);
+        var bulletAt = readme.IndexOf("`remove_server` (which drops this install's own Extended Events sessions on the server", StringComparison.Ordinal);
         Assert.True(bulletAt >= 0, "the remove_server bullet no longer says what it leaves on the server (#4732)");
         var bullet = readme[bulletAt..Math.Min(readme.Length, bulletAt + 500)];
 
@@ -797,21 +1312,41 @@ public sealed class DropXeSessionsVerbTests
         Assert.DoesNotContain("monitored server: the Extended Events sessions", section, StringComparison.Ordinal);
 
         // The other places that point at the verb say the same: after the removal it is --print-sql.
-        var bulletAt = readme.IndexOf("`remove_server` (which leaves the server's Extended Events sessions on it", StringComparison.Ordinal);
+        var bulletAt = readme.IndexOf("`remove_server` (which drops this install's own Extended Events sessions on the server", StringComparison.Ordinal);
         Assert.True(bulletAt >= 0, "the remove_server bullet no longer says what it leaves on the server (#4732)");
         var bullet = readme[bulletAt..Math.Min(readme.Length, bulletAt + 1000)];
         Assert.Contains("`--drop-xe-sessions --print-sql`", bullet, StringComparison.Ordinal);
         Assert.Contains("works only before the removal", bullet, StringComparison.Ordinal);
 
-        var collectorAt = readme.IndexOf("a server removed while the collector was on keeps the session.", StringComparison.Ordinal);
-        Assert.True(collectorAt >= 0, "the long_query_completions paragraph no longer says a removed server keeps its session (#4732)");
+        /* #4961: removing the server drops this install's long-query session; the verb's script is for an attempt that failed. */
+        Assert.DoesNotContain("a server removed while the collector was on keeps the session", readme, StringComparison.Ordinal);
+        var collectorAt = readme.IndexOf("Removing the server also drops this install's session on it", StringComparison.Ordinal);
+        Assert.True(collectorAt >= 0, "the long_query_completions paragraph no longer says removing a server drops this install's session (#4961)");
         var collector = readme[collectorAt..Math.Min(readme.Length, collectorAt + 500)];
-        Assert.Contains("just before you remove the server", collector, StringComparison.Ordinal);
-        Assert.Contains("`--drop-xe-sessions --print-sql` afterwards", collector, StringComparison.Ordinal);
+        Assert.Contains("If that attempt failed or ran out of time", collector, StringComparison.Ordinal);
+        Assert.Contains("`--drop-xe-sessions --print-sql`", collector, StringComparison.Ordinal);
 
         // The list of verbs that survive an unusable store connection names this one.
         var listAt = readme.IndexOf("Every other verb that opens the store (", StringComparison.Ordinal);
         Assert.True(listAt >= 0, "the README no longer lists the verbs that open the store");
         Assert.Contains("`--drop-xe-sessions <server-name>`", readme[listAt..Math.Min(readme.Length, listAt + 400)], StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TheUsageAndTheReadme_SayAnExcludedDatabaseThatCannotBeOpenedLeavesTheExitCodeAlone_AndAMonitoredOneExitsTwo()
+    {
+        var usage = DarlingCliCommands.DropXeSessionsUsageText();
+        Assert.Contains("An excluded database that cannot be opened is reported as a note and does not change the exit code", usage, StringComparison.Ordinal);
+        Assert.Contains("a monitored database that cannot be opened exits 2", usage, StringComparison.Ordinal);
+
+        var readme = RepoFile.ReadRepoFile("Darling", "README.md").Replace("\r\n", "\n", StringComparison.Ordinal);
+        var start = readme.IndexOf("### Drop the Extended Events sessions a removed server left behind", StringComparison.Ordinal);
+        Assert.True(start >= 0, "the README no longer has the --drop-xe-sessions section (#4732)");
+        var end = readme.IndexOf("\n---", start, StringComparison.Ordinal);
+        Assert.True(end > start, "the --drop-xe-sessions section no longer ends at a horizontal rule");
+        var section = readme[start..end];
+
+        Assert.Contains("is reported in a note on stderr and does not change the exit code", section, StringComparison.Ordinal);
+        Assert.Contains("a monitored database it cannot open makes the verb exit `2`", section, StringComparison.Ordinal);
     }
 }

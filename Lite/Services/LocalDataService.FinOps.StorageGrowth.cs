@@ -17,7 +17,13 @@ namespace PerformanceMonitorLite.Services;
 public partial class LocalDataService
 {
     /// <summary>
-    /// Per-database size now, 7 days ago and 30 days ago. $1 server_id, $2 the 7-day cutoff, $3 the 30-day cutoff.
+    /// Per-database size now, 7 days ago and 30 days ago. $1 server_id, $2 the 7-day mark, $3 the 30-day mark.
+    ///
+    /// <para>Each baseline is the snapshot NEAREST its mark, and only when that snapshot is within one day of it
+    /// (86400 seconds). The older shape took the newest snapshot at or before the mark, however far
+    /// before: a store with 25 days of history then called its 25-day-old sample "30d ago" and measured Growth % and the daily
+    /// rate against it, and a store with a gap labeled whatever sample the gap left as the 7-day baseline. With no snapshot near
+    /// the mark the baseline is NULL, and the grid shows n/a with a tooltip saying no sample from that many days ago exists.</para>
     ///
     /// <para>A file whose row in the latest snapshot has no size is left out of all three sums, by one predicate
     /// (the <c>NOT EXISTS</c> against <c>log_service_files</c>) repeated in each. That file is the log of an Azure
@@ -43,7 +49,28 @@ public partial class LocalDataService
     /// the sums skip). Both come from the latest snapshot only, and the row's <c>Note</c> says which.</para>
     /// </summary>
     internal const string StorageGrowthSql = @"
-WITH log_service_files AS (
+WITH snaps AS (
+    SELECT DISTINCT collection_time AS t
+    FROM v_database_size_stats
+    WHERE server_id = $1
+),
+base_7d AS (
+    SELECT t
+    FROM snaps
+    WHERE t < (SELECT MAX(t) FROM snaps)
+    AND   abs(epoch(t) - epoch(CAST($2 AS TIMESTAMP))) <= 86400
+    ORDER BY abs(epoch(t) - epoch(CAST($2 AS TIMESTAMP))), t DESC
+    LIMIT 1
+),
+base_30d AS (
+    SELECT t
+    FROM snaps
+    WHERE t < (SELECT MAX(t) FROM snaps)
+    AND   abs(epoch(t) - epoch(CAST($3 AS TIMESTAMP))) <= 86400
+    ORDER BY abs(epoch(t) - epoch(CAST($3 AS TIMESTAMP))), t DESC
+    LIMIT 1
+),
+log_service_files AS (
     SELECT
         database_name,
         file_id
@@ -90,17 +117,7 @@ past_7d AS (
         MAX(s.collection_time) AS snap_time
     FROM v_database_size_stats AS s
     WHERE s.server_id = $1
-    AND   s.collection_time = (
-        SELECT MAX(collection_time)
-        FROM v_database_size_stats
-        WHERE server_id = $1
-        AND   collection_time <= $2
-    )
-    AND   s.collection_time < (
-        SELECT MAX(collection_time)
-        FROM v_database_size_stats
-        WHERE server_id = $1
-    )
+    AND   s.collection_time = (SELECT t FROM base_7d)
     AND   NOT EXISTS (
         SELECT 1
         FROM log_service_files AS ls
@@ -117,17 +134,7 @@ past_30d AS (
         MAX(s.collection_time) AS snap_time
     FROM v_database_size_stats AS s
     WHERE s.server_id = $1
-    AND   s.collection_time = (
-        SELECT MAX(collection_time)
-        FROM v_database_size_stats
-        WHERE server_id = $1
-        AND   collection_time <= $3
-    )
-    AND   s.collection_time < (
-        SELECT MAX(collection_time)
-        FROM v_database_size_stats
-        WHERE server_id = $1
-    )
+    AND   s.collection_time = (SELECT t FROM base_30d)
     AND   NOT EXISTS (
         SELECT 1
         FROM log_service_files AS ls
@@ -165,8 +172,12 @@ ORDER BY growth_30d_mb DESC NULLS LAST, growth_7d_mb DESC NULLS LAST, l.database
 
     /// <summary>
     /// Gets per-database storage growth trends comparing current size to 7d and 30d ago.
+    /// #5312: <paramref name="databaseNames"/> is the saved database filter (the Storage Growth grid also lists the databases the
+    /// table and index drill starts from); null or empty is every database. The rows are narrowed after the read, by exact
+    /// (ordinal) name, the same rule as the viewer's twin. The statement has no row cap, so the narrowing cannot lose a chosen
+    /// database. A row whose name was NULL reads as "" and never matches a chosen name.
     /// </summary>
-    public async Task<List<StorageGrowthRow>> GetStorageGrowthAsync(int serverId)
+    public async Task<List<StorageGrowthRow>> GetStorageGrowthAsync(int serverId, IReadOnlyList<string>? databaseNames = null)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
@@ -198,6 +209,12 @@ ORDER BY growth_30d_mb DESC NULLS LAST, growth_7d_mb DESC NULLS LAST, l.database
                 HasLogServiceFile = !reader.IsDBNull(9) && reader.GetBoolean(9)
             });
         }
+        if (databaseNames is { Count: > 0 })
+        {
+            var chosen = new HashSet<string>(databaseNames, StringComparer.Ordinal);
+            items = items.Where(r => chosen.Contains(r.DatabaseName)).ToList();
+        }
+
         return items;
     }
 }

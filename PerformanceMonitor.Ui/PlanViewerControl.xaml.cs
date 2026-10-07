@@ -14,6 +14,7 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
 using Microsoft.Win32;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.PlanAnalysis;
 
 namespace PerformanceMonitor.Ui;
@@ -30,6 +31,7 @@ public partial class PlanViewerControl : UserControl
     public AnalyzerConfig? AnalyzerConfig { get; set; }
 
     private ParsedPlan? _currentPlan;
+    private bool _planWithheld;
     private PlanStatement? _currentStatement;
     private int _allStatementsCount;
     private double _zoomLevel = 1.0;
@@ -233,6 +235,22 @@ public partial class PlanViewerControl : UserControl
         {
             QueryTextExpander.Visibility = Visibility.Collapsed;
         }
+
+        /* #5320: a plan the statement filter withheld whole is the marker, not a plan. Say so, rather than letting
+           the parser fail on it and show "The plan XML could not be read". Save refuses it with the same sentence. */
+        var withheld = WithheldPlanGuard.WithheldSentence(planXml);
+        if (withheld is not null)
+        {
+            Clear();
+            CapturedQueryText = queryText;
+            _planWithheld = true;
+            EmptyStateTitle.Text = withheld;
+            EmptyStateDetail.Visibility = Visibility.Collapsed;
+            return;
+        }
+
+        _planWithheld = false;
+
         /* Parse + analyze off the UI thread — a multi-MB showplan is two heavy passes that would
            otherwise freeze the window for seconds. Only the render below touches the UI. A refused
            or exception-terminated parse sets ParsedPlan.ParseError instead of throwing; see below. */
@@ -302,6 +320,7 @@ public partial class PlanViewerControl : UserControl
     {
         PlanCanvas.Children.Clear();
         _currentPlan = null;
+        _planWithheld = false;
         _currentStatement = null;
         _allStatementsCount = 0;
         CapturedQueryText = null;
@@ -329,6 +348,14 @@ public partial class PlanViewerControl : UserControl
 
     private void SavePlan_Click(object sender, RoutedEventArgs e)
     {
+        if (_planWithheld)
+        {
+            WithheldPlanGuard.RefuseSave(SensitiveStatements.PlaceholderText);
+            return;
+        }
+
+        if (WithheldPlanGuard.RefuseSave(_currentPlan?.RawXml)) return;
+
         if (_currentPlan == null || string.IsNullOrEmpty(_currentPlan.RawXml)) return;
 
         var dialog = new SaveFileDialog

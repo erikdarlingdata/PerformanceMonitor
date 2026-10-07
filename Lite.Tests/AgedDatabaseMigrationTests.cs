@@ -70,7 +70,7 @@ public class AgedDatabaseMigrationTests : IDisposable
             await ExecAsync(seed, "CREATE INDEX idx_server_properties_time ON server_properties(server_id, collection_time)");
         }
 
-        var initializer = new DuckDbInitializer(_dbPath);
+        using var initializer = new DuckDbInitializer(_dbPath);
         await initializer.InitializeAsync();
 
         using var verify = new DuckDBConnection($"Data Source={_dbPath}");
@@ -116,7 +116,7 @@ public class AgedDatabaseMigrationTests : IDisposable
                enough that this table had never been created — that is the entire bug. */
         }
 
-        var initializer = new DuckDbInitializer(_dbPath);
+        using var initializer = new DuckDbInitializer(_dbPath);
         await initializer.InitializeAsync();
 
         using var verify = new DuckDBConnection($"Data Source={_dbPath}");
@@ -167,7 +167,7 @@ public class AgedDatabaseMigrationTests : IDisposable
             await ExecAsync(seed, "CREATE INDEX idx_database_size_stats_time ON database_size_stats(server_id, collection_time)");
         }
 
-        var initializer = new DuckDbInitializer(_dbPath);
+        using var initializer = new DuckDbInitializer(_dbPath);
         await initializer.InitializeAsync();
 
         using var verify = new DuckDBConnection($"Data Source={_dbPath}");
@@ -213,7 +213,7 @@ public class AgedDatabaseMigrationTests : IDisposable
             await ExecAsync(seed, "CREATE INDEX idx_database_size_stats_time ON database_size_stats(server_id, collection_time)");
         }
 
-        var initializer = new DuckDbInitializer(_dbPath);
+        using var initializer = new DuckDbInitializer(_dbPath);
         await initializer.InitializeAsync();
 
         using var verify = new DuckDBConnection($"Data Source={_dbPath}");

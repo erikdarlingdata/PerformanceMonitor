@@ -909,6 +909,36 @@ public static class DarlingRetention
                 tablesFailed++;
             }
 
+            /* collect.query_stats_hour_ledger (#4605, V164): the hourly row-count ledger that the long-window count
+               guard compares with the hourly rollup, in place of counting raw. NOT in CollectorCatalog.All (the
+               collector runner's COPY transaction writes it, not a collector definition), so the loop above skips
+               it, and the raw-relation skip in that loop is for raw tables only; nothing else prunes it.
+               The horizon is the SUCCESSOR HOURLY ROLLUP's (TimescaleSupport.HourlyRetentionSpan, the same
+               constant the successor's own retention policy and the read router derive from), NOT raw's four days
+               and NOT a collector's retention: the guard compares the ledger with the rollup, which keeps ninety
+               days, so a ledger pruned at raw's horizon would be missing hours the rollup still holds and the guard
+               would fail every window past four days. A store without TimescaleDB has no rollup and no guard, and
+               the same constant just bounds the table there.
+               A plain table, so a plain DELETE: about one row per server per hour (servers x 24 x retention days),
+               and the primary key leads with bucket, so the predicate is an index range scan. One execution IS the
+               whole purge, so it dispatches single-shot, like the fleet-sweep children below.
+               Failure-isolated like every sibling: a failed statement is warned + counted, the sweep goes on. */
+            var hourLedgerDeleted = await PurgeOneAsync(
+                postgres, QueryStatsHourLedger.LedgerTable,
+                QueryStatsHourLedger.PruneSql,
+                utcNow - TimescaleSupport.HourlyRetentionSpan, logger, cancellationToken,
+                batchSize: SingleShotStatement,
+                pacer: walPacer);
+            if (hourLedgerDeleted is not null)
+            {
+                tablesPurged++;
+                totalRowsDeleted += hourLedgerDeleted.Value;
+            }
+            else
+            {
+                tablesFailed++;
+            }
+
             /* collect.oversized_plan_backlog (#3392) purges on last_seen_at at
                OversizedPlanBacklogRetentionDays. NOT in CollectorCatalog.All (it is written by the collector
                runner's post-write hook and by the backlog sweep, not by a collector definition), so the loop

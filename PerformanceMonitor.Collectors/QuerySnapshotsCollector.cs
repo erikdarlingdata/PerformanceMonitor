@@ -13,6 +13,7 @@ using System.Globalization;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Collectors;
 
@@ -490,6 +491,10 @@ DROP TABLE #req;
     {
         var rows = new List<Row>();
 
+        /* #4348: the statement text and both plans are judged where they first enter a Row, so the stored rows and
+           the live Active Queries read (which shares this ReadAsync) both carry the filtered values. */
+        var scrub = context.BeginStatementScrub();
+
         while (await reader.ReadAsync(cancellationToken))
         {
             rows.Add(new Row
@@ -497,9 +502,9 @@ DROP TABLE #req;
                 SessionId = Convert.ToInt32(reader.GetValue(0), CultureInfo.InvariantCulture),
                 DatabaseName = reader.IsDBNull(1) ? null : reader.GetString(1),
                 ElapsedTimeFormatted = reader.IsDBNull(2) ? null : reader.GetString(2),
-                QueryText = reader.IsDBNull(3) ? null : reader.GetString(3),
-                QueryPlan = reader.IsDBNull(4) ? null : reader.GetString(4),
-                LiveQueryPlan = reader.IsDBNull(5) ? null : reader.GetValue(5)?.ToString(),
+                QueryText = reader.IsDBNull(3) ? null : scrub.Text(reader.GetString(3)),
+                QueryPlan = reader.IsDBNull(4) ? null : scrub.Xml(reader.GetString(4)),
+                LiveQueryPlan = reader.IsDBNull(5) ? null : scrub.Xml(reader.GetValue(5)?.ToString()),
                 Status = reader.IsDBNull(6) ? null : reader.GetString(6),
                 BlockingSessionId = reader.IsDBNull(7) ? 0 : Convert.ToInt32(reader.GetValue(7), CultureInfo.InvariantCulture),
                 /* Trimmed at the read (see WaitTypeName): this is the live Active Queries fetch's read too. */

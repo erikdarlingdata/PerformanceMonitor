@@ -38,6 +38,7 @@ namespace Darling.Tests;
 /// only SQL Server's own findings across those same fixtures — proof that each rule's guard, not
 /// just its stamp, is wired to <see cref="AnalyzerConfig"/>.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class PlanSync4535RuleNumberCensusTests
 {
     private static string RepoRoot([CallerFilePath] string thisFile = "")

@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Copyright (c) 2026 Erik Darling, Darling Data LLC
  *
  * This file is part of the SQL Server Performance Monitor.
@@ -75,6 +75,7 @@ namespace Darling.Tests;
 /// runs this suite on a change there.</description></item>
 /// </list>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class MeasurementContractCensusTests
 {
     /// <summary>The two trees the Lite census cannot reach; everything else is swept there.</summary>
@@ -948,14 +949,17 @@ public sealed class MeasurementContractCensusTests
         var admitting = governed.Where(a => !a.CarriesIntervalPredicate && EquivalentPredicates.All(e => e.View != a.View)).Select(a => a.View).OrderBy(v => v, StringComparer.Ordinal).ToList();
 
         /* The successors carry it — the whole point of #3698 and of #3653 Q12 — and every one is REGISTERED:
-           the baseline pair in the legacy pair's positions, the hourly trio appended to HourlyAggregates. */
+           the baseline pair in the legacy pair's positions, the hourly trio appended to HourlyAggregates. The
+           two io hourlies (#5329) copy their interval siblings' WHERE and carry it too. */
         Assert.Equal(
             new[]
             {
                 TimescaleSupport.PerfmonIntervalBaselineView,
                 TimescaleSupport.ProcedureStatsIntervalHourlyView,
+                TimescaleSupport.ProcedureStatsIoHourlyView,
                 TimescaleSupport.QueryStatsDbIntervalHourlyView,
                 TimescaleSupport.QueryStatsIntervalHourlyView,
+                TimescaleSupport.QueryStatsIoHourlyView,
                 TimescaleSupport.WaitStatsIntervalBaselineView,
             }.OrderBy(v => v, StringComparer.Ordinal),
             carrying);

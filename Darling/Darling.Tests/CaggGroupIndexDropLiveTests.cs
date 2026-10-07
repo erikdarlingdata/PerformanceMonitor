@@ -318,6 +318,54 @@ public sealed class CaggGroupIndexDropLiveTests
     /// A future rung that adds a new probe sentinel must add its artifact's removal here.</summary>
     private static async Task DropArtifactsOfLaterRungsAsync(NpgsqlConnection connection, int simulatedVersion, CancellationToken ct)
     {
+        if (simulatedVersion < 169)
+        {
+            /* V169 (#5452) - the per-server AWS role on config_monitored_servers; the role column is the probe's sentinel.
+               Dropping the columns drops the table's check on them too. */
+            await using var dropAwsRole = new NpgsqlCommand(
+                "ALTER TABLE config.config_monitored_servers DROP COLUMN IF EXISTS aws_external_id_set, "
+                + "DROP COLUMN IF EXISTS aws_external_id, DROP COLUMN IF EXISTS aws_role_arn", connection);
+            await dropAwsRole.ExecuteNonQueryAsync(ct);
+        }
+
+        if (simulatedVersion < 168)
+        {
+            /* V168 (#5448) - the PLAN_REGRESSION per-day totals; the built table is the probe's sentinel. The trigger on
+               query_store_interval_latest goes first, then the function it calls, then the two tables. */
+            await using var dropPlanRegressionDaily = new NpgsqlCommand(
+                "DROP TRIGGER IF EXISTS trg_plan_regression_daily_late ON collect.query_store_interval_latest;"
+                + " DROP FUNCTION IF EXISTS collect.plan_regression_daily_mark_late();"
+                + " DROP TABLE IF EXISTS collect.plan_regression_daily, collect.plan_regression_daily_built", connection);
+            await dropPlanRegressionDaily.ExecuteNonQueryAsync(ct);
+        }
+
+        if (simulatedVersion < LegacyPinCandidateTables.RungVersion)
+        {
+            /* V167 (#5456) - the table that records the old-format values present at the upgrade;
+               config.legacy_secret_pin_candidate is the probe's sentinel. It goes before the V165 arm below, because its
+               triggers use the function that arm drops. */
+            await using var dropCandidates = new NpgsqlCommand("DROP TABLE IF EXISTS config.legacy_secret_pin_candidate", connection);
+            await dropCandidates.ExecuteNonQueryAsync(ct);
+        }
+
+        if (simulatedVersion < 166)
+        {
+            /* V166 - the PagerDuty auto-resolve column on config_notification; the column is the probe's sentinel. */
+            await using var dropAutoResolve = new NpgsqlCommand(
+                "ALTER TABLE config.config_notification DROP COLUMN IF EXISTS pagerduty_auto_resolve", connection);
+            await dropAutoResolve.ExecuteNonQueryAsync(ct);
+        }
+
+        if (simulatedVersion < PasswordKeyTables.RungVersion)
+        {
+            /* V165 (#5366) - the tables for the service's password key; config.password_key is the probe's sentinel.
+               The four tables go first, which also drops their triggers, and then the trigger function they shared. */
+            await using var dropPasswordKey = new NpgsqlCommand(
+                "DROP TABLE IF EXISTS config.password_key, config.password_key_service, config.legacy_secret_pin, config.legacy_secret_pin_marker;"
+                + " DROP FUNCTION IF EXISTS config.password_key_owner_only()", connection);
+            await dropPasswordKey.ExecuteNonQueryAsync(ct);
+        }
+
         if (simulatedVersion < 153)
         {
             /* V153 (#4608, split #4615) — the interval-tables-latest first_execution_time index. */
@@ -341,6 +389,64 @@ public sealed class CaggGroupIndexDropLiveTests
             await using var dropEnd = new NpgsqlCommand(
                 "ALTER TABLE collect.query_store_interval_wide DROP COLUMN IF EXISTS interval_end_time_utc", connection);
             await dropEnd.ExecuteNonQueryAsync(ct);
+        }
+
+        if (simulatedVersion < QueryStatsHourLedgerTests.RungVersion)
+        {
+            /* V164 (#4605) - the hourly row-count ledger; the ledger table is the probe's sentinel. */
+            await using var dropLedger = new NpgsqlCommand(
+                "DROP TABLE IF EXISTS collect.query_stats_hour_ledger_state, collect.query_stats_hour_ledger", connection);
+            await dropLedger.ExecuteNonQueryAsync(ct);
+        }
+
+        if (simulatedVersion < StoreStatementHistoryRungTests.RungVersion)
+        {
+            /* V163 (#5097) - the store's statement history; the history table is the probe's sentinel. */
+            await using var dropStatementHistory = new NpgsqlCommand(
+                "DROP TABLE IF EXISTS collect.store_statement_history, collect.store_statement_captures, config.store_statement_baseline", connection);
+            await dropStatementHistory.ExecuteNonQueryAsync(ct);
+        }
+
+        if (simulatedVersion < SlowReadsRungTests.RungVersion)
+        {
+            /* V162 (#5097) - the slow-read record; the table is the probe's sentinel. */
+            await using var dropSlowReads = new NpgsqlCommand(
+                "DROP TABLE IF EXISTS collect.slow_reads", connection);
+            await dropSlowReads.ExecuteNonQueryAsync(ct);
+        }
+
+        if (simulatedVersion < QueryStoreTopDailyRungTests.RungVersion)
+        {
+            /* V161 (#5094) - the Query Store top daily summary tables; the first is the probe's sentinel. */
+            await using var dropTopDaily = new NpgsqlCommand(
+                "DROP TABLE IF EXISTS collect.query_store_top_daily, collect.query_store_top_daily_built", connection);
+            await dropTopDaily.ExecuteNonQueryAsync(ct);
+        }
+
+        if (simulatedVersion < CollectorRunTimeRungTests.RungVersion)
+        {
+            /* V160 (#4938) - the collector run time, in a table of its own; the table is the probe's sentinel. */
+            await using var dropRunAt = new NpgsqlCommand(
+                "DROP TABLE IF EXISTS config.config_collector_run_times", connection);
+            await dropRunAt.ExecuteNonQueryAsync(ct);
+        }
+
+        if (simulatedVersion < InstallIdTableOidRungTests.RungVersion)
+        {
+            /* V159 (#4961) - the install id table's own OID and the server's major version, which arrive in the one
+               statement; the OID's column is the probe's sentinel. IF EXISTS on the table, because a store simulated below
+               the install id's own rung has had the table dropped already. */
+            await using var dropTableOid = new NpgsqlCommand(
+                "ALTER TABLE IF EXISTS config.config_install_id DROP COLUMN IF EXISTS table_oid, DROP COLUMN IF EXISTS server_major", connection);
+            await dropTableOid.ExecuteNonQueryAsync(ct);
+        }
+
+        if (simulatedVersion < InstallIdRungTests.RungVersion)
+        {
+            /* V158 (#4961) - the install id's one-row table; the table is the probe's sentinel. */
+            await using var dropInstallId = new NpgsqlCommand(
+                "DROP TABLE IF EXISTS config.config_install_id", connection);
+            await dropInstallId.ExecuteNonQueryAsync(ct);
         }
 
         if (simulatedVersion < MuteRuleServerIdRungTests.RungVersion)

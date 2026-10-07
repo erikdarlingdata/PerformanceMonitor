@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
@@ -27,6 +28,8 @@ namespace PerformanceMonitorLite.Tests;
 /// </summary>
 public sealed class LiteAnomalousJobsFreshnessTests : IDisposable
 {
+    private readonly List<DuckDbInitializer> _initializers = [];
+
     private const int ServerId = 7;
     private readonly string _tempDir;
     private readonly string _dbPath;
@@ -40,6 +43,11 @@ public sealed class LiteAnomalousJobsFreshnessTests : IDisposable
 
     public void Dispose()
     {
+        foreach (var initializer in _initializers)
+        {
+            initializer.Dispose();
+        }
+
         try
         {
             if (Directory.Exists(_tempDir))
@@ -54,6 +62,7 @@ public sealed class LiteAnomalousJobsFreshnessTests : IDisposable
     private async Task<LocalDataService> SeedAsync(TimeSpan snapshotAge)
     {
         var initializer = new DuckDbInitializer(_dbPath);
+        _initializers.Add(initializer);
         await initializer.InitializeAsync();
 
         using (var connection = new DuckDBConnection($"Data Source={_dbPath}"))
@@ -141,7 +150,7 @@ VALUES (1, $1, $2, 'S1', 'Developer Edition', '16.0.4150.1', 'RTM', 3, -240)";
     [Fact]
     public async Task EmptyStore_IsNoEvidence()
     {
-        var initializer = new DuckDbInitializer(_dbPath);
+        using var initializer = new DuckDbInitializer(_dbPath);
         await initializer.InitializeAsync();
         await initializer.CreateArchiveViewsAsync();
         var adapter = new LiteAlertReadAdapter(new LocalDataService(initializer));

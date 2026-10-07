@@ -52,12 +52,20 @@ public static class QueryStorePerDatabaseState
     };
 
     /// <summary>
-    /// Key prefixes on the query_store state classes that are deliberately NOT pruned because they are not
-    /// keyed by database name. Empty today — every prefix either state class declares is per-database — and
-    /// it exists so that stays a recorded decision: the drift guard demands that every declared
+    /// Key prefixes the collectors declare that are deliberately NOT pruned, because a prune cannot rebuild their
+    /// keys as <c>&lt;prefix&gt;&lt;databaseName&gt;</c>. The drift guard demands that every declared
     /// <c>*KeyPrefix</c> appear in one list or the other, so a new server-scoped key is a deliberate entry
     /// here rather than a test failure whose obvious "fix" is to add it to <see cref="PrunableKeys"/> and
     /// have it deleted every cycle.
+    ///
+    /// <para>One member today: <see cref="LegacyLongQuerySession.StateKeyPrefix"/> (#4961), the record that the
+    /// long-query session older versions shared between installs was dropped once. The record for server scope is
+    /// the bare prefix, so a prune that rebuilds keys as prefix + database name would delete it every cycle, and the
+    /// one-time drop would run again each time. An Azure SQL Database's record is one row per database name, and is
+    /// kept.</para>
     /// </summary>
-    public static readonly IReadOnlyList<string> NotKeyedByDatabase = System.Array.Empty<string>();
+    public static readonly IReadOnlyList<string> NotKeyedByDatabase = new[]
+    {
+        LegacyLongQuerySession.StateKeyPrefix,
+    };
 }

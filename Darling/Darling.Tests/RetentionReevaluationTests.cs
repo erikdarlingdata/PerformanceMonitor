@@ -310,23 +310,26 @@ public sealed class RetentionReevaluationTests
         var guardAt = worker.IndexOf("if (StampIsDue(_nextCompressionCheckUtc, CompressionCheckSpan, DateTime.UtcNow))", StringComparison.Ordinal);
         var stampAt = worker.IndexOf("_nextCompressionCheckUtc = TimescaleSupport.NextCompressionCheckUtc(DateTime.UtcNow, s_compressionCheckInterval);", StringComparison.Ordinal);
         Assert.True(guardAt > 0 && stampAt > guardAt, "the tick's guard is the due time, stamped forward inside it");
-        var flagGateAt = worker.IndexOf("if (_timescaleAvailable)", stampAt, StringComparison.Ordinal);
-        var compressionAt = worker.IndexOf("await EvaluateCompressionJobHealthAsync(stoppingToken);", StringComparison.Ordinal);
-        var retentionAt = worker.IndexOf("await ReevaluateRetentionPoliciesAsync(stoppingToken);", StringComparison.Ordinal);
-        /* #3817 is the FOURTH tenant and sits after this pass, so the "next thing" that used to bound the
-           retention call's position is now the convergence call, and the store-metrics block bounds THAT.
-           Both bounds are kept: dropping the outer one would let a later edit hoist the whole gated group out
-           of the tick without this pin noticing. */
-        var convergenceAt = worker.IndexOf("await ConvergeStoreObjectsAsync(stoppingToken);", StringComparison.Ordinal);
+        /* #4970: the tenants run in RunStoreMaintenanceTickAsync, launched from the loop after the stamp.
+           Their order is read inside that method's body, so the flag gate is found from the body's start. */
+        var launchAt = worker.IndexOf("TryStartStoreMaintenanceTick(token => RunStoreMaintenanceTickAsync(token), stoppingToken);", stampAt, StringComparison.Ordinal);
+        Assert.True(launchAt > stampAt, "the loop launches the tick after stamping its due time");
         var nextBlockAt = worker.IndexOf("/* #2068: the store self-metrics sweep.", StringComparison.Ordinal);
-        Assert.True(flagGateAt > stampAt && compressionAt > flagGateAt && retentionAt > compressionAt
-            && convergenceAt > retentionAt && nextBlockAt > convergenceAt,
+        Assert.True(nextBlockAt > launchAt, "the launch stays ahead of the store self-metrics block");
+        var tickBody = MethodBody(worker, "private async Task RunStoreMaintenanceTickAsync(CancellationToken stoppingToken)");
+        Assert.False(string.IsNullOrEmpty(tickBody), "could not locate RunStoreMaintenanceTickAsync");
+        var flagGateAt = tickBody.IndexOf("if (_timescaleAvailable)", StringComparison.Ordinal);
+        var compressionAt = tickBody.IndexOf("await EvaluateCompressionJobHealthAsync(stoppingToken);", StringComparison.Ordinal);
+        var retentionAt = tickBody.IndexOf("await ReevaluateRetentionPoliciesAsync(stoppingToken);", StringComparison.Ordinal);
+        var convergenceAt = tickBody.IndexOf("await ConvergeStoreObjectsAsync(stoppingToken);", StringComparison.Ordinal);
+        Assert.True(flagGateAt >= 0 && compressionAt > flagGateAt && retentionAt > compressionAt
+            && convergenceAt > retentionAt,
             "the retention re-evaluation is awaited after the compression check inside the tick's _timescaleAvailable gate, "
           + "and the store-object convergence after it");
         Assert.Equal(1, CountOf(worker, "await ReevaluateRetentionPoliciesAsync(stoppingToken);"));
         Assert.Equal(1, CountOf(worker, "await ConvergeStoreObjectsAsync(stoppingToken);"));
 
-        var between = worker[compressionAt..retentionAt];
+        var between = tickBody[compressionAt..retentionAt];
         Assert.DoesNotContain("if (", between, StringComparison.Ordinal);
         Assert.DoesNotContain("return", between, StringComparison.Ordinal);
         Assert.DoesNotContain("}", between, StringComparison.Ordinal);

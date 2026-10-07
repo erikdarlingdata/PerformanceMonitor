@@ -20,9 +20,10 @@ namespace PerformanceMonitor.Ui;
 /// scope after the store read and dropping the paint when it had moved. That is only a drop, rather than a
 /// silent loss, where something else is certain to repaint — in the Darling viewer that is the coalescing
 /// replay in <c>RefreshVisibleAsync</c> / <c>RefreshActiveInnerTabAsync</c> / <c>RefreshActiveSubTabAsync</c>,
-/// which re-runs the load and re-reads the scope at the re-entered load's own entry. Lite has no replay
-/// anywhere (#2933): its guards are bail-only, so a scope re-verify there suppresses a paint that nothing
-/// will ever redo and leaves the tab showing the previous scope's data. A generation cannot do that. The
+/// which re-runs the load and re-reads the scope at the re-entered load's own entry. Lite had no replay
+/// anywhere (#2933): its guards were bail-only, so a scope re-verify there suppresses a paint that nothing
+/// will ever redo and leaves the tab showing the previous scope's data (the server tab's main-tab loads have
+/// had one since #5371, <see cref="RefreshCoordinator"/>; the other Lite guards are still bail-only). A generation cannot do that. The
 /// only condition under which it drops is that a newer load for the same surface has already started, so
 /// the surface always has a live writer, and the writer with the highest generation always paints.</para>
 ///

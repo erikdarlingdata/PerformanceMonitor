@@ -10,6 +10,7 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Data.SqlClient;
@@ -272,6 +273,19 @@ public partial class RemoteCollectorService
            it can bind the read's own lower bound, then the store's list is unioned with every database
            a hole key already names (state is loaded above, for free). */
         var databases = await GetBackfillCandidateDatabasesAsync(serverId, floorLimit, state, cancellationToken, server.DisplayName);
+
+        /* #5483, the twin of Darling's: a database the server no longer has is not a candidate. The list above is read
+           from the rows this store holds, so a dropped database stayed in it until its rows aged out of the horizon,
+           and every tick tried it and failed. Gated on the same AppliesTo that decides whether database_states is
+           collected at all: Azure SQL DB has no snapshot by design, so the read would be a guaranteed no-op. */
+        if (DatabaseStateCollector.Instance.AppliesTo(target))
+        {
+            /* The server's effective database_states interval (its own override or the default) sets how old a snapshot
+               may be before the check ignores it. */
+            var databaseStatesInterval = _scheduleManager.GetScheduleForServer(server.Id, DatabaseStateCollector.Instance.Name)?.FrequencyMinutes ?? 0;
+            databases = await DropGoneBackfillDatabasesAsync(
+                serverId, databases, floorLimit, cancellationToken, server.DisplayName, databaseStatesInterval);
+        }
 
         /* Databases whose slices keep failing: their slice is held back while any other database has work
            (see QueryStoreBackfillFailureLedger), then one of them is retried after the walk. */
@@ -614,6 +628,158 @@ public partial class RemoteCollectorService
         return QueryStoreBackfillState.MergeHoleDatabases(databases, state);
     }
 
+    /// <summary>#5483: databases already reported as gone, per (server, database), so the Information line below is
+    /// one per database per run of the app rather than one per tick. In memory on purpose, like the ledgers.
+    /// Trimmed each tick to the names still in the candidate list (see <see cref="DropGoneBackfillDatabasesAsync"/>),
+    /// so it never outgrows the candidates.</summary>
+    private readonly ConcurrentDictionary<(int ServerId, string Database), byte> _goneReported = new();
+
+    /// <summary>#5483: failed gone-database checks, one Warning per run of failures like the other backfill reads.
+    /// Its own instance, because the candidate read ends ITS run on every success and would otherwise end this
+    /// one too, warning every tick.</summary>
+    private readonly QueryStoreBackfillReadFailureRuns _goneCheckFailures = new();
+
+    /// <summary>How many databases the server's gone-report set holds. For the tests that pin the trim.</summary>
+    internal int GoneReportedCountForTests(int serverId) => _goneReported.Keys.Count(key => key.ServerId == serverId);
+
+    /// <summary>
+    /// #5483: removes from <paramref name="candidates"/> every database the server no longer has — the twin of
+    /// Darling's <c>QueryStoreBackfill.DropGoneDatabasesAsync</c>, the same rule on the same shared SQL text
+    /// (<see cref="QueryStoreBackfillState.NewestSnapshotSql"/>, <see cref="QueryStoreBackfillState.RowAtOrAfterSnapshotSql"/>).
+    ///
+    /// <para>The candidate list is read from the rows this store holds (<see cref="CandidateSql"/>), plus any database
+    /// a hole key names, so a database dropped from the server stayed in it until its last row aged past the
+    /// horizon, and every tick read its stored floor, opened a slice and failed with "database does not exist". The
+    /// <c>collector_state</c> keys were never the cause: a failed slice writes none, and the orphan prune retires a
+    /// dropped database's <c>done:</c> and <c>hole:</c> keys, but the candidate list does not read them.</para>
+    ///
+    /// <para>A candidate is gone when the newest <c>database_states</c> snapshot does not name it AND the store holds no
+    /// row for it at or after that snapshot (the prune's freshness guard: a snapshot cannot judge a database created
+    /// after it was taken). No snapshot, or one with no database names, drops nothing. A snapshot older than three
+    /// times <paramref name="databaseStatesIntervalMinutes"/> (floor one hour,
+    /// <see cref="QueryStoreBackfillState.IsSnapshotStale"/>) is unknown too: it still names a database dropped after
+    /// it, and each probe for a database it misses would scan every chunk since it, every tick. A failed read keeps
+    /// every candidate and logs one Warning for each run of failures, the rest at Debug. A database found gone
+    /// forgets its in-memory failure counts.</para>
+    /// </summary>
+    internal async Task<List<string>> DropGoneBackfillDatabasesAsync(
+        int serverId, List<string> candidates, DateTime floorLimit, CancellationToken cancellationToken, string? serverLabel = null,
+        int databaseStatesIntervalMinutes = 0)
+    {
+        /* Entries for databases that left the candidate list (their rows aged out) can never be reported again, so
+           they go now, before any early return below. */
+        var candidateSet = new HashSet<string>(candidates, StringComparer.Ordinal);
+        foreach (var key in _goneReported.Keys)
+        {
+            if (key.ServerId == serverId && !candidateSet.Contains(key.Database))
+            {
+                _goneReported.TryRemove(key, out _);
+            }
+        }
+
+        if (candidates.Count == 0)
+        {
+            return candidates;
+        }
+
+        try
+        {
+            /* The backfill runs outside the collection gate, so its reads take the read lock (see the slice's write). */
+            using var readLock = _duckDb.AcquireReadLock(cancellationToken);
+            using var conn = _duckDb.CreateConnection();
+            await conn.OpenAsync(cancellationToken);
+
+            var snapshotDatabases = new HashSet<string>(StringComparer.Ordinal);
+            DateTime? newest = null;
+            using (var snapshot = conn.CreateCommand())
+            {
+                snapshot.CommandText = QueryStoreBackfillState.NewestSnapshotSql;
+                snapshot.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = serverId });
+                snapshot.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = floorLimit });
+                using var reader = await snapshot.ExecuteReaderAsync(cancellationToken);
+                while (await reader.ReadAsync(cancellationToken))
+                {
+                    newest = reader.GetDateTime(1);
+                    if (!reader.IsDBNull(0))
+                    {
+                        snapshotDatabases.Add(reader.GetString(0));
+                    }
+                }
+            }
+
+            var result = candidates;
+            if (newest is DateTime snapshotTime
+                && snapshotDatabases.Count > 0
+                && !QueryStoreBackfillState.IsSnapshotStale(snapshotTime, DateTime.UtcNow, databaseStatesIntervalMinutes))
+            {
+                var absent = QueryStoreBackfillState.AbsentFromSnapshot(candidates, snapshotDatabases);
+                foreach (var candidate in candidates)
+                {
+                    if (snapshotDatabases.Contains(candidate))
+                    {
+                        _goneReported.TryRemove((serverId, candidate), out _);
+                    }
+                }
+
+                var gone = new HashSet<string>(StringComparer.Ordinal);
+                foreach (var database in absent)
+                {
+                    using var newer = conn.CreateCommand();
+                    newer.CommandText = QueryStoreBackfillState.RowAtOrAfterSnapshotSql;
+                    newer.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = serverId });
+                    newer.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = database });
+                    newer.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = snapshotTime });
+                    if (await newer.ExecuteScalarAsync(cancellationToken) is null)
+                    {
+                        gone.Add(database);
+                        if (_goneReported.TryAdd((serverId, database), 0))
+                        {
+                            _sliceFailures.RecordCompletion(serverId, database);
+                            _readFailures.RecordSuccess(serverId, database);
+                            /* "Not in the newest list", not "gone from the server": the snapshot is stamped at the
+                               start of its run, and a database created between the stamp and the read, whose first
+                               query_store rows carry an earlier stamp, is skipped for one snapshot cycle. It has no
+                               history to backfill yet, so nothing is lost. */
+                            _logger?.LogInformation(
+                                "query_store backfill on '{Server}' [{Database}]: not in the newest database_states snapshot and no stored row since; not backfilling it until a snapshot lists it.",
+                                serverLabel ?? serverId.ToString(CultureInfo.InvariantCulture), database);
+                        }
+                    }
+                    else
+                    {
+                        _goneReported.TryRemove((serverId, database), out _);
+                    }
+                }
+
+                if (gone.Count > 0)
+                {
+                    result = candidates.FindAll(database => !gone.Contains(database));
+                }
+            }
+
+            _goneCheckFailures.RecordSuccess(serverId);
+            return result;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            /* A failed check keeps every candidate, so a persistent failure brings the original bug back with nothing
+               saying so. One Warning at the first failure of a run; the repeats stay at Debug. */
+            if (_goneCheckFailures.RecordFailure(serverId))
+            {
+                _logger?.LogWarning(
+                    ex,
+                    "query_store backfill on '{Server}': checking which databases are gone failed, so every candidate is tried until a check succeeds. Further failures are logged at debug level.",
+                    serverLabel ?? serverId.ToString(CultureInfo.InvariantCulture));
+            }
+            else
+            {
+                _logger?.LogDebug(ex, "query_store backfill gone-database check failed; keeping every candidate this tick");
+            }
+
+            return candidates;
+        }
+    }
+
     /// <summary>The derived backfill ceiling for one database, the mirror of
     /// <see cref="GetLastCollectedTimeForDatabaseAsync"/>. Null skips this tick; failure never invents
     /// a boundary. #4197: the twin of Darling's exact bounded form — see
@@ -626,50 +792,55 @@ public partial class RemoteCollectorService
     {
         try
         {
-            /* The backfill runs outside the collection gate, so its reads take the read lock (see the slice's write). */
-            using var readLock = _duckDb.AcquireReadLock(cancellationToken);
-            using var conn = _duckDb.CreateConnection();
-            await conn.OpenAsync(cancellationToken);
-
+            /* The backfill runs outside the collection gate, so its reads take the read lock (see the slice's write).
+               #5377: each live read holds it in a scope that ends before the archive read, which takes the
+               limiter first and then its own lock, so a read that waits for the limiter holds no lock. */
             bool liveHit;
-            using (var exists = conn.CreateCommand())
+            DateTime? liveMin = null;
+            using (var readLock = _duckDb.AcquireReadLock(cancellationToken))
             {
+                using var conn = _duckDb.CreateConnection();
+                await conn.OpenAsync(cancellationToken);
+                using var exists = conn.CreateCommand();
                 exists.CommandText = $"SELECT 1 FROM {tableName} WHERE server_id = $1 AND {databaseColumnName} = $2 AND collection_time <= $3 LIMIT 1";
                 exists.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = serverId });
                 exists.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = databaseName });
                 exists.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = floorLimit });
                 liveHit = await exists.ExecuteScalarAsync(cancellationToken) is not null;
+
+                /* #5377 (review F1): the live MIN is read HERE, before the archive read, whether or not the archive
+                   turns out to need it. The two reads are no longer under one lock, and the combination is exact only
+                   in this order: a hot row that moves to Parquet after this scope bumps the archive generation before
+                   the archive read samples it, so the view is re-read and holds the row. Reading the live MIN after the
+                   archive read missed a row that moved in between (the floor came out too high). */
+                if (!liveHit)
+                {
+                    using var min = conn.CreateCommand();
+                    min.CommandText = $"SELECT MIN({columnName}) FROM {tableName} WHERE server_id = $1 AND {databaseColumnName} = $2 AND collection_time > $3";
+                    min.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = serverId });
+                    min.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = databaseName });
+                    min.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = floorLimit });
+                    if (await min.ExecuteScalarAsync(cancellationToken) is DateTime dt)
+                        liveMin = dt;
+                }
             }
 
-            /* The archive side, cached per archive generation under a key with no limit in it: the oldest
-               collection_time and the oldest value over the whole archived history for this database. A row
-               at or before the limit exists exactly when that oldest collection_time is <= the limit; and when
-               none does, every archived row is newer than the limit, so the unbounded oldest value IS the
-               bounded one. Live and archive combine as the lesser value / the OR of the two probes. */
-            var archivedRow = await ReadArchiveViewAsync(conn,
-                $"floor|{tableName}|{columnName}|{databaseColumnName}|{serverId}|{databaseName}",
-                $"SELECT MIN(collection_time), MIN({columnName}) FROM v_{tableName} WHERE server_id = $1 AND {databaseColumnName} = $2",
-                [serverId, databaseName], cancellationToken,
-                readRow: reader => (reader.IsDBNull(0) ? (DateTime?)null : reader.GetDateTime(0),
-                                    reader.IsDBNull(1) ? (DateTime?)null : reader.GetDateTime(1)));
-            var (archivedOldestCollection, archivedMin) =
-                archivedRow is ValueTuple<DateTime?, DateTime?> archivedPair ? archivedPair : (null, null);
+            /* The archive side (#5377 grouped): the oldest collection_time and the oldest value over the whole archived
+               history for this database come out of the SAME per-table grouped read the watermark map uses (same table,
+               value column and database column), so the backfill shares its cache and single flight and costs no
+               per-database scan. A database the archive does not hold is absent from the map: null, null, as the old
+               per-database read returned. A row at or before the limit exists exactly when the oldest collection_time
+               is <= the limit; when none does, every archived row is newer than the limit, so the unbounded oldest value
+               IS the bounded one. Live and archive combine as the lesser value / the OR of the two probes. */
+            var map = await ReadArchivedDatabaseMapAsync(tableName, columnName, databaseColumnName, cancellationToken);
+            map.TryGetValue((serverId, databaseName), out var archivedEntry);
+            var archivedOldestCollection = archivedEntry.OldestCollection;
+            var archivedMin = archivedEntry.OldestValue;
 
             if (liveHit || archivedOldestCollection <= floorLimit)
             {
                 _readFailures.RecordSuccess(serverId, databaseName);
                 return floorLimit;
-            }
-
-            DateTime? liveMin = null;
-            using (var min = conn.CreateCommand())
-            {
-                min.CommandText = $"SELECT MIN({columnName}) FROM {tableName} WHERE server_id = $1 AND {databaseColumnName} = $2 AND collection_time > $3";
-                min.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = serverId });
-                min.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = databaseName });
-                min.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = floorLimit });
-                if (await min.ExecuteScalarAsync(cancellationToken) is DateTime dt)
-                    liveMin = dt;
             }
 
             _readFailures.RecordSuccess(serverId, databaseName);

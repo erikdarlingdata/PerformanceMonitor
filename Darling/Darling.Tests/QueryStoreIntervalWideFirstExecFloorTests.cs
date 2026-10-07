@@ -17,12 +17,14 @@ using Xunit;
 namespace Darling.Tests;
 
 /// <summary>
-/// #4605: among the indexes of <c>collect.query_store_interval_wide</c> are the unique key (it leads with
-/// <c>server_id</c> and holds <c>first_execution_time</c> as a key column) and
-/// <c>idx_query_store_interval_wide_first_exec</c>. The three per-server reads of the table (the MCP Query Store top,
+/// #4605: among the btrees of <c>collect.query_store_interval_wide</c> are the unique key (it leads with
+/// <c>server_id</c> and holds <c>first_execution_time</c> as a key column),
+/// <c>idx_query_store_interval_wide_first_exec</c>, and, where the service has built it, the wide btree on
+/// <c>(server_id, first_execution_time)</c> (#4952), which the service builds in the background rather than a
+/// migration. The three per-server reads of the table (the MCP Query Store top,
 /// the Queries grid and the Trends chart, all <c>WHERE server_id = $1</c>) filter <c>collection_time</c> (the Trends
-/// interval arm <c>interval_start_time_utc</c>), which neither serves, so each walked all of the server's rows. Each
-/// now also carries
+/// interval arm <c>interval_start_time_utc</c>), which none of them serves, so each walked all of the server's rows.
+/// Each now also carries
 /// <c>first_execution_time &gt;= &lt;window start&gt; - </c><see cref="QueryStoreIntervalWide.PurgeEdgeMarginSql"/>.
 /// The Custom Views route, for all servers or some, carries no floor; its compose text is pinned in
 /// <c>DarlingComposeTests.Compile_QueryStoreWideEligible_CarriesNoFirstExecutionTimeFloor</c>. This class pins the

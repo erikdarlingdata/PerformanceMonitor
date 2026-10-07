@@ -69,11 +69,10 @@ public enum PerfmonCounterKind
 /// finding of the rung that stored the type, not something it fixes.</description></item>
 /// </list></para>
 ///
-/// <para><b>One vocabulary, two projects.</b> The COLLECTOR decides the write shape from the same gauge set
-/// (<c>PerfmonStatsCollector.GaugeCounterTypes</c>), but <c>PerformanceMonitor.Collectors</c> and this
-/// assembly reference neither each other nor a third that could hold the ids, so the collector spells its
-/// set itself and <c>Lite.Tests/PerfmonCounterTypeTests</c> asserts the two sets equal — the twin-constant
-/// idiom the repo uses wherever an assembly boundary forbids one declaration.</para>
+/// <para><b>One vocabulary, two projects.</b> The COLLECTOR decides the write shape from the same gauge set:
+/// <c>PerfmonStatsCollector.GaugeCounterTypes</c> and <c>IsGauge</c> read <see cref="GaugeTypes"/>, so the set
+/// is declared once, here. <c>PerformanceMonitor.Collectors</c> references this assembly and this assembly does
+/// not reference it back; <c>Lite.Tests/PerfmonCounterTypeTests</c> holds both facts.</para>
 /// </summary>
 public static class PerfmonCounterTypes
 {
@@ -107,8 +106,7 @@ public static class PerfmonCounterTypes
     public static readonly IReadOnlySet<int> RateTypes = new HashSet<int> { PerfCounterBulkCount, PerfCounterCounter };
 
     /// <summary>The ids that are gauges: the stored <c>cntr_value</c> is the reading and no delta is written for
-    /// them. The collector's <c>GaugeCounterTypes</c> is this set, spelled on its side of the assembly boundary
-    /// and pinned equal.</summary>
+    /// them. The collector's <c>GaugeCounterTypes</c> and <c>IsGauge</c> read this set.</summary>
     public static readonly IReadOnlySet<int> GaugeTypes = new HashSet<int> { PerfCounterLargeRawCount, PerfCounterRawCount };
 
     /// <summary>The three-way reading of a stored type. An id this vocabulary has never seen is

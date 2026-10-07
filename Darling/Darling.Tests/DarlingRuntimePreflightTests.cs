@@ -91,10 +91,12 @@ public class DarlingRuntimePreflightTests
 
         foreach (var (marker, what) in new[]
         {
+            ("Microsoft.NETCore.App", "the base shared framework BOTH exes need (#5407)"),
             ("Microsoft.AspNetCore.App", "the ASP.NET Core shared framework the SERVICE needs"),
             ("Microsoft.WindowsDesktop.App", "the Desktop shared framework the VIEWER needs"),
             ("$dotnetMajor = 10", "the required .NET major version"),
             ("https://dotnet.microsoft.com/download/dotnet/10.0", "where to download both runtimes"),
+            ("The .NET Runtime $dotnetMajor.0 is not installed", "the base-runtime refusal naming the missing runtime by its installer's name (#5407)"),
             ("ASP.NET Core Runtime $dotnetMajor.0 is not installed", "the refusal naming the missing runtime by its installer's name"),
             (".NET Desktop Runtime $dotnetMajor.0 is not installed", "the warning naming the missing runtime by its installer's name"),
         })
@@ -131,6 +133,92 @@ public class DarlingRuntimePreflightTests
     }
 
     /// <summary>
+    /// The base .NET Runtime is a refusal too, and it is checked before ASP.NET Core (#5407). The standalone
+    /// ASP.NET Core Runtime installer does not include <c>Microsoft.NETCore.App</c>, so a box with only that
+    /// installer passed the old gate and then died at service start with the host's "You must install .NET".
+    /// Checking it first lets an operator missing both read one message that names both.
+    /// </summary>
+    [Fact]
+    public void RuntimeGate_RefusesOnTheBaseRuntime_BeforeItChecksAspNetCore()
+    {
+        var script = InstallScript;
+
+        var netCoreHeader = "if (-not (Test-FrameworkMajorPresent $netCoreVersions $dotnetMajor)) {";
+        var netCore = ExtractBracedBlock(script, netCoreHeader);
+        Assert.Contains("Fail @\"", netCore, StringComparison.Ordinal);
+        Assert.Contains("Nothing was installed or changed.", netCore, StringComparison.Ordinal);
+        Assert.Contains("-SkipPreflight", netCore, StringComparison.Ordinal);
+        Assert.Contains("Hosting Bundle", netCore, StringComparison.Ordinal);
+
+        var netCoreAt = script.IndexOf(netCoreHeader, StringComparison.Ordinal);
+        var aspNetAt = script.IndexOf("if (-not (Test-FrameworkMajorPresent $aspNetVersions $dotnetMajor)) {", StringComparison.Ordinal);
+        Assert.True(netCoreAt < aspNetAt, "the base-runtime check must run before the ASP.NET Core check (#5407)");
+    }
+
+    /// <summary>
+    /// The gate, executed with the framework lookup stubbed. Missing base runtime with ASP.NET Core present is
+    /// refused with the base-runtime message; both present passes; base present with ASP.NET Core missing is
+    /// refused as before; missing both gives the one message that shows what was found for each.
+    /// </summary>
+    [Fact]
+    public void RuntimeGate_Executed_DecidesOnEachFramework()
+    {
+        const string present = "@('10.0.11')";
+        const string absent = "@()";
+
+        var baseMissing = RunGate(netCore: absent, aspNet: present, desktop: present);
+        Assert.Contains("FAILED", baseMissing, StringComparison.Ordinal);
+        Assert.Contains("The .NET Runtime 10.0 is not installed", baseMissing, StringComparison.Ordinal);
+        Assert.Contains("Hosting Bundle", baseMissing, StringComparison.Ordinal);
+        Assert.Contains("Nothing was installed or changed.", baseMissing, StringComparison.Ordinal);
+        Assert.Contains("Microsoft.NETCore.App):      nothing", baseMissing, StringComparison.Ordinal);
+        Assert.Contains("Microsoft.AspNetCore.App):   10.0.11", baseMissing, StringComparison.Ordinal);
+        Assert.DoesNotContain("Runtime check passed", baseMissing, StringComparison.Ordinal);
+
+        var bothPresent = RunGate(netCore: present, aspNet: present, desktop: present);
+        Assert.DoesNotContain("FAILED", bothPresent, StringComparison.Ordinal);
+        Assert.Contains("Runtime check passed", bothPresent, StringComparison.Ordinal);
+
+        var aspNetMissing = RunGate(netCore: present, aspNet: absent, desktop: present);
+        Assert.Contains("FAILED", aspNetMissing, StringComparison.Ordinal);
+        Assert.Contains("ASP.NET Core Runtime 10.0 is not installed", aspNetMissing, StringComparison.Ordinal);
+        Assert.DoesNotContain("The .NET Runtime 10.0 is not installed", aspNetMissing, StringComparison.Ordinal);
+        Assert.Contains("Microsoft.NETCore.App):      10.0.11", aspNetMissing, StringComparison.Ordinal);
+
+        var bothMissing = RunGate(netCore: "@('9.0.14')", aspNet: absent, desktop: present);
+        Assert.Contains("FAILED", bothMissing, StringComparison.Ordinal);
+        Assert.Contains("The .NET Runtime 10.0 is not installed", bothMissing, StringComparison.Ordinal);
+        Assert.Contains("Microsoft.NETCore.App):      9.0.14", bothMissing, StringComparison.Ordinal);
+        Assert.Contains("Microsoft.AspNetCore.App):   nothing", bothMissing, StringComparison.Ordinal);
+
+        /* Both runtimes present and only Desktop missing: a warning, and the install continues. */
+        var desktopMissing = RunGate(netCore: present, aspNet: present, desktop: absent);
+        Assert.DoesNotContain("FAILED", desktopMissing, StringComparison.Ordinal);
+        Assert.Contains("WARNING: the .NET Desktop Runtime 10.0 is not installed.", desktopMissing, StringComparison.Ordinal);
+    }
+
+    /// <summary>Runs the gate's body under Windows PowerShell 5.1 with the framework lookup stubbed and
+    /// <c>Fail</c> turned into a printed marker plus exit, and returns everything it printed.</summary>
+    private static string RunGate(string netCore, string aspNet, string desktop)
+    {
+        var script = InstallScript;
+        var gate = script.IndexOf("# -- 1c. Refuse an install the .NET runtimes on this box cannot run", StringComparison.Ordinal);
+        var guard = script.IndexOf("if (-not $SkipPreflight) {", gate, StringComparison.Ordinal);
+        var body = ExtractBracedBlockAt(script, script.IndexOf('{', guard), out _);
+
+        var probe = new StringBuilder();
+        probe.AppendLine("$dotnetMajor = 10");
+        probe.AppendLine("$dotnetDownloadUrl = 'https://dotnet.microsoft.com/download/dotnet/10.0'");
+        probe.AppendLine("function Fail([string]$message) { 'FAILED'; $message; exit 1 }");
+        probe.AppendLine($"function Get-InstalledFrameworkVersions([string]$name) {{ switch ($name) {{ 'Microsoft.NETCore.App' {{ {netCore} }} 'Microsoft.AspNetCore.App' {{ {aspNet} }} 'Microsoft.WindowsDesktop.App' {{ {desktop} }} }} }}");
+        probe.AppendLine(ExtractFunction(script, "Test-FrameworkMajorPresent"));
+        probe.AppendLine(ExtractFunction(script, "Format-FrameworkVersionList"));
+        probe.AppendLine(body);
+
+        return string.Join("\n", RunWindowsPowerShell(probe.ToString()));
+    }
+
+    /// <summary>
     /// The gate rides the existing <c>-SkipPreflight</c> switch rather than adding a second one. One
     /// documented escape hatch for "this script cannot see my box", not two — and the refusal message has
     /// to say which switch that is, or a false refusal is a dead end.
@@ -147,6 +235,7 @@ public class DarlingRuntimePreflightTests
         Assert.True(guard >= 0, "the .NET runtime gate is no longer governed by -SkipPreflight (#2479)");
 
         var body = ExtractBracedBlockAt(script, script.IndexOf('{', guard), out _);
+        Assert.Contains("Get-InstalledFrameworkVersions 'Microsoft.NETCore.App'", body, StringComparison.Ordinal);
         Assert.Contains("Get-InstalledFrameworkVersions 'Microsoft.AspNetCore.App'", body, StringComparison.Ordinal);
         Assert.Contains("Get-InstalledFrameworkVersions 'Microsoft.WindowsDesktop.App'", body, StringComparison.Ordinal);
 

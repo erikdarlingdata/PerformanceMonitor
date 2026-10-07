@@ -20,6 +20,7 @@ namespace Darling.Tests;
 /// <c>Lite.Tests</c> (which cannot run in-process on macOS; discovery dies on <c>WindowsBase</c>) because
 /// reading source text needs nothing Windows-only. This runs on macOS and in CI alike.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class RemoteCollectorServiceCancellationCensusTests
 {
     /// <summary>

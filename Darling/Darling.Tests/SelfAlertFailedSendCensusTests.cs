@@ -34,6 +34,7 @@ namespace Darling.Tests;
 /// <c>AfterSelfFire</c> arm pins the metric and the interval the arm passes, because the interval is the one
 /// argument a wrong copy would leave compiling: the back-dated stamp then opens the arm's gate at the wrong time.</para>
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class SelfAlertFailedSendCensusTests
 {
     private const string RestoreNotice =
@@ -56,10 +57,14 @@ public sealed class SelfAlertFailedSendCensusTests
             ["ApplyAgReplicaHealthAsync"] = (1, RestoreNotice),
             ["EvaluateStoreUpgradeAsync"] =
                 (2, "one notice per service start about the start's own upgrade: an event, never re-evaluated, so nothing to fire again"),
+            ["EvaluateCollectionGapAtStartAsync"] =
+                (1, "one notice per service start about the gap before the start: an event, never re-evaluated, so nothing to fire again"),
             ["EvaluateStoreTimescaleAsync"] =
                 (1, "one notice per service start about the start's own extension update: an event, never re-evaluated"),
             ["ApplyNotificationChannelsAsync"] =
                 (1, "the failing-channel notice is stated once when the policy decides it; the next decision is the channel's recovery"),
+            ["GiveUpOnHistoryAuditDayAsync"] =
+                (1, "the history audit gave up on a day at the next day's slot: the day is not audited again, so there is no later tick to send it on, and the stamp that matters is the new slot's own"),
             ["ApplyPolicyJobsStuckAsync"] =
                 (1, "the auto-re-armed notice is a state-machine edge: the next pass escalates or records the recovery, and neither is gated by a stamp"),
         };
@@ -74,6 +79,7 @@ public sealed class SelfAlertFailedSendCensusTests
         "ApplyCollectorCostDigestAsync",
         "ApplyFleetSweepRollupAsync",
         "ApplyAnalysisSinglesDigestAsync",
+        "ApplyCollectionHistoryAuditAsync",
     };
 
     /// <summary>The evaluator's source with comments and literal text blanked (offsets and newlines kept), read
@@ -422,7 +428,10 @@ public sealed class SelfAlertFailedSendCensusTests
     [InlineData("ApplyCustomRuleHealthAsync", 0, "CustomRuleHealthMetric", "SharedCooldown")]
     [InlineData("ApplyStaleMuteRulesAsync", 0, "StaleMuteMetric", "StaleMuteRefire")]
     [InlineData("ApplyStoreSettingsAsync", 0, "StoreSettingsMetric", "StoreSettingsRefire")]
-    [InlineData("ApplyWebTlsCertificateAsync", 0, "WebTlsCertExpiryMetric", "WebTlsCertRefire")]
+    /* #5288: the web and MCP certificate alerts are one body, ApplyListenerTlsCertificateAsync, which fires and
+       reports under its listener descriptor's metric (the band.Metric precedent below), so ONE row covers both
+       listeners. The interval is still the shared daily WebTlsCertRefire. */
+    [InlineData("ApplyListenerTlsCertificateAsync", 0, "tls.ExpiryMetric", "WebTlsCertRefire")]
     [InlineData("ApplyFleetGateAsync", 0, "FleetGateMetric", "SharedCooldown")]
     [InlineData("ApplyStoreJobCadenceAsync", 0, "JobCadenceMetric", "SharedCooldown")]
     [InlineData("ApplyRetentionHoldsAsync", 0, "RetentionHoldMetric", "SharedCooldown")]

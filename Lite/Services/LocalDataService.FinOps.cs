@@ -133,7 +133,13 @@ public class UtilizationEfficiencyRow
     // Health score (Increment 6)
     public decimal FreeSpacePct { get; set; }
     public int HealthScore { get; set; }
-    public string HealthScoreColor => FinOpsHealthCalculator.ScoreColor(HealthScore);
+
+    /// <summary>The badge color: the score's own, or gray when the window held no CPU sample and there is no score to color.</summary>
+    public string HealthScoreColor => HasCpuSample ? FinOpsHealthCalculator.ScoreColor(HealthScore) : FinOpsHealthCalculator.NoScoreColor;
+
+    /// <summary>The badge text: "Health: 87", or "Health: -" when the window held no CPU sample (<see cref="HasCpuSample"/> false). Memory and
+    /// storage alone can read a perfect 100 beside a "No Data" card, so with no CPU sample there is no score, not a partial one.</summary>
+    public string HealthScoreText => HasCpuSample ? $"Health: {HealthScore}" : "Health: -";
 
     /// <summary>
     /// The health score for these figures: CPU p95, the buffer pool's share of physical memory, and free storage. The memory
@@ -421,6 +427,12 @@ public class StorageGrowthRow
     public decimal? DailyGrowthRateMb { get; set; }
     public decimal? GrowthPct30d { get; set; }
 
+    /// <summary>The tooltip on a blank 7-day baseline cell (shown as n/a): no sample within a day of 7 days ago. Null when there is one.</summary>
+    public string? Size7dAgoNote => Size7dAgoMb == null ? "No sample from 7 days ago" : null;
+
+    /// <summary>The tooltip on a blank 30-day baseline cell (shown as n/a): no sample within a day of 30 days ago. Null when there is one.</summary>
+    public string? Size30dAgoNote => Size30dAgoMb == null ? "No sample from 30 days ago" : null;
+
     /// <summary>True when the database has the one row another database on an Azure SQL Database server gets: its
     /// size is data space only, and the log size is not reported. See <see cref="AzureSiblingDatabaseSize"/>.</summary>
     public bool HasSiblingRow { get; set; }
@@ -479,6 +491,12 @@ public class ExpensiveQueryRow
 
 public static class FinOpsHealthCalculator
 {
+    /// <summary>The badge color of a health score that does not exist (no CPU sample in the window).</summary>
+    public const string NoScoreColor = "#7F8C8D";
+
+    /// <summary>The tooltip on the dash shown in place of a health score when the last 24 hours hold no CPU sample.</summary>
+    public const string NoScoreNote = "No health score: the last 24 hours hold no CPU sample.";
+
     public static int CpuScore(decimal p95Pct)
     {
         if (p95Pct <= 70) return (int)(100 - p95Pct * 50 / 70);

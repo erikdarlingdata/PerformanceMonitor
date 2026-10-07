@@ -321,15 +321,15 @@ public sealed class QueryStoreClutterLivePostgresTests
         await using var postgres = NpgsqlDataSource.Create(connectionString);
         var start = anchor.AddHours(-24);
 
-        var readCost = await DarlingQueryStoreClutterReader.GetReadCostAsync(postgres, [PrimaryId, ReplicaId, EmptyId], start, anchor, ct);
+        var readCost = await DarlingQueryStoreClutterReader.GetReadCostAsync(postgres, [PrimaryId, ReplicaId, EmptyId], start, anchor, cancellationToken: ct);
         Assert.Equal(3, readCost.Count);
         Assert.All(readCost, r => Assert.Equal(PrimaryId, r.ServerId));
         Assert.Equal(40.0, QueryStoreClutter.DiscreteMedian(readCost.Select(r => r.SlowestSharePctP50)));
 
-        var churn = await DarlingQueryStoreClutterReader.GetPlanChurnAsync(postgres, [PrimaryId, ReplicaId, EmptyId], start, anchor, ct);
+        var churn = await DarlingQueryStoreClutterReader.GetPlanChurnAsync(postgres, [PrimaryId, ReplicaId, EmptyId], start, anchor, cancellationToken: ct);
         Assert.Equal(new[] { Alpha, Beta }, churn.Select(r => r.DatabaseName).ToArray());
 
-        var config = await DarlingQueryStoreClutterReader.GetConfigAsync(postgres, [PrimaryId, ReplicaId, EmptyId], start, anchor, ct);
+        var config = await DarlingQueryStoreClutterReader.GetConfigAsync(postgres, [PrimaryId, ReplicaId, EmptyId], start, anchor, cancellationToken: ct);
         Assert.Equal(5, config.Count);
         Assert.Single(config, c => c.IsSecondaryReplica);
         Assert.True(QueryStoreClutter.IsReplicaServer(config.Where(c => c.ServerId == ReplicaId)));

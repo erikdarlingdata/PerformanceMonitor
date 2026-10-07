@@ -73,7 +73,7 @@ public class DuckDbSentinelConnectionTests : IDisposable
     [Fact]
     public async Task ResetDatabaseAsync_WithLiveSentinel_NewConnectionSeesEmptyTable()
     {
-        var initializer = new DuckDbInitializer(_dbPath);
+        using var initializer = new DuckDbInitializer(_dbPath);
         await initializer.InitializeAsync();
 
         await SeedCollectionLogRowAsync(initializer, "TestCollector");
@@ -100,7 +100,7 @@ public class DuckDbSentinelConnectionTests : IDisposable
     [Fact]
     public async Task ArchiveAllAndResetAsync_WithLiveSentinel_ClearsHotTableThroughRealPath()
     {
-        var initializer = new DuckDbInitializer(_dbPath);
+        using var initializer = new DuckDbInitializer(_dbPath);
         await initializer.InitializeAsync();
 
         await SeedCollectionLogRowAsync(initializer, "ArchivedCollector");
@@ -142,7 +142,7 @@ public class DuckDbSentinelConnectionTests : IDisposable
             await ExecAsync(seed, "CREATE INDEX idx_server_properties_time ON server_properties(server_id, collection_time)");
         }
 
-        var initializer = new DuckDbInitializer(_dbPath);
+        using var initializer = new DuckDbInitializer(_dbPath);
         await initializer.InitializeAsync();
 
         using (var verify = new DuckDBConnection($"Data Source={_dbPath}"))
@@ -166,7 +166,7 @@ public class DuckDbSentinelConnectionTests : IDisposable
     [Fact]
     public async Task Dispose_ClosesSentinel_FileDeletableAfterward()
     {
-        var initializer = new DuckDbInitializer(_dbPath);
+        using var initializer = new DuckDbInitializer(_dbPath);
         await initializer.InitializeAsync();
 
         Assert.Throws<IOException>(() => File.Open(_dbPath, FileMode.Open, FileAccess.Read, FileShare.None).Dispose());
@@ -230,7 +230,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)";
     [Fact]
     public async Task ReadSentinelMemoryUsageBytes_RealConnection_ReturnsPositiveNumber()
     {
-        var initializer = new DuckDbInitializer(_dbPath);
+        using var initializer = new DuckDbInitializer(_dbPath);
         await initializer.InitializeAsync();
 
         using var connection = initializer.CreateConnection();
@@ -252,7 +252,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)";
     [Fact]
     public async Task RunMemoryTrimCycle_OverThreshold_RestoresConfiguredMemoryLimit()
     {
-        var initializer = new DuckDbInitializer(_dbPath);
+        using var initializer = new DuckDbInitializer(_dbPath);
         await initializer.InitializeAsync();
 
         var originalThreshold = DuckDbInitializer.TrimThresholdBytes;
@@ -290,7 +290,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)";
     [Fact]
     public async Task RunMemoryTrimCycle_ReadLockHeldByAnotherThread_SkipsWithoutWaiting()
     {
-        var initializer = new DuckDbInitializer(_dbPath);
+        using var initializer = new DuckDbInitializer(_dbPath);
         await initializer.InitializeAsync();
 
         var originalThreshold = DuckDbInitializer.TrimThresholdBytes;
@@ -334,7 +334,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)";
     [Fact]
     public async Task RunMemoryTrimCycle_OverThreshold_IncrementsCompletedCycleCount()
     {
-        var initializer = new DuckDbInitializer(_dbPath);
+        using var initializer = new DuckDbInitializer(_dbPath);
         await initializer.InitializeAsync();
 
         var originalThreshold = DuckDbInitializer.TrimThresholdBytes;
@@ -374,7 +374,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)";
     [Fact]
     public async Task RunMemoryTrimCycle_RacingReset_NeverThrowsAndResetStillCompletes()
     {
-        var initializer = new DuckDbInitializer(_dbPath);
+        using var initializer = new DuckDbInitializer(_dbPath);
         await initializer.InitializeAsync();
         await SeedCollectionLogRowAsync(initializer, "TestCollector");
 
@@ -427,7 +427,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)";
     [Fact]
     public async Task Dispose_ReadLockHeldOnAnotherThread_ReturnsWithoutHangingOrThrowing()
     {
-        var initializer = new DuckDbInitializer(_dbPath);
+        using var initializer = new DuckDbInitializer(_dbPath);
         await initializer.InitializeAsync();
 
         var readerReady = new ManualResetEventSlim();
@@ -495,7 +495,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)";
         }
         AppDomain.CurrentDomain.FirstChanceException += OnFirstChance;
 
-        var initializer = new DuckDbInitializer(_dbPath);
+        using var initializer = new DuckDbInitializer(_dbPath);
         try
         {
             Assert.True(DuckDbInitializer.TestTrimTickEntered.Wait(TimeSpan.FromSeconds(5)),
@@ -539,7 +539,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)";
     [Fact]
     public async Task CreateArchiveViewsAsync_WaitsForConcurrentWriteLock()
     {
-        var initializer = new DuckDbInitializer(_dbPath);
+        using var initializer = new DuckDbInitializer(_dbPath);
         await initializer.InitializeAsync();
 
         var writeLockAcquired = new ManualResetEventSlim();
@@ -574,7 +574,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)";
     [Fact]
     public async Task CreateArchiveViewsAsync_CalledWhileHoldingWriteLockOnSameThread_DoesNotThrow()
     {
-        var initializer = new DuckDbInitializer(_dbPath);
+        using var initializer = new DuckDbInitializer(_dbPath);
         await initializer.InitializeAsync();
 
         using (initializer.AcquireWriteLock())
@@ -615,7 +615,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)";
     [Fact]
     public async Task RunMemoryTrimCycle_AfterWideRead_ReducesProcessMemory()
     {
-        var initializer = new DuckDbInitializer(_dbPath);
+        using var initializer = new DuckDbInitializer(_dbPath);
         await initializer.InitializeAsync();
 
         using (var seed = initializer.CreateConnection())

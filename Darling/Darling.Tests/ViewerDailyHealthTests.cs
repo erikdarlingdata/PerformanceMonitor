@@ -163,7 +163,8 @@ public sealed class ViewerCollectionHealthSqlTests
         Assert.Contains("WHERE server_id = $1", sql, StringComparison.Ordinal);
         Assert.Contains("collection_time >= $2", sql, StringComparison.Ordinal);
         Assert.Contains("GROUP BY collector_name", sql, StringComparison.Ordinal);
-        Assert.Contains("ORDER BY collector_name", sql, StringComparison.Ordinal);
+        /* The final order is the aggregate's own collector_name, qualified because the keyed lookups (#4955) join it. */
+        Assert.Contains("ORDER BY h.collector_name", sql, StringComparison.Ordinal);
 
         /* Success / error / permission buckets feed the row's HealthStatus banding. The success bucket
            is NARROWED (#2926): an abandonment written before #2803 gave abandonment its own status is

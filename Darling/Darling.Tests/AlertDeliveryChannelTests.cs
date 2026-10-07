@@ -910,6 +910,382 @@ public sealed class AlertDeliveryChannelTests
         Assert.Equal(2, CountOccurrences(message, "before raising MAXDOP"));
     }
 
+    /* ────── the PagerDuty paired lifecycle, on the wire ────── */
+
+    /// <summary>
+    /// The review's paired lifecycle, on the wire rather than at the payload builder. PagerDuty's own send
+    /// is captured at the test-only override (below), and the same settings seam drives the whole Darling
+    /// path — <see cref="DarlingAlertDeliverer.DeliverAsync"/> through the shared send core, the fan-out
+    /// and the PagerDuty payload builder — so the flag the payload resolved with is the one the SEND read,
+    /// not one the test handed a builder directly. With the flag OFF the closing edge posts an
+    /// info-severity TRIGGER on its own state-named key (shipped behavior); with the flag ON it posts a
+    /// RESOLVE on the pair's shared incident, and a second firing afterward is NOT throttled by the first
+    /// incident's cooldown (the clear its resolve carried re-armed it).
+    /// </summary>
+    [Fact]
+    public async Task TheDeliverer_SendsThePagerDutyPairedLifecycle_OnTheWire_WithTheFlagOn()
+    {
+        var capture = new CapturingPagerDuty();
+
+        var config = new DarlingConfig();
+        config.Webhooks.PagerDutyRoutingKey = "rk-test";
+        config.Webhooks.PagerDutyAutoResolve = true;
+        config.Smtp.Host = "";
+        config.Smtp.To = "";
+
+        var settings = new DarlingAlertSettings(config);
+        var history = new DiscardingHistoryStore();
+        var webhooks = new WebhookAlertService(
+            settings, DarlingAlertDeliverer.Branding, NullLogger<WebhookAlertService>.Instance, history);
+        webhooks.PostPagerDutyAsyncOverride = (endpoint, payload) =>
+        {
+            Assert.Equal("https://events.pagerduty.com/v2/enqueue", endpoint);
+            capture.Bodies.Add(payload);
+            return Task.FromResult<string?>(null);
+        };
+        var deliverer = new DarlingAlertDeliverer(settings, history, webhooks, NullLogger.Instance);
+
+        var outcome = new AlertOutcome(
+            "13", "PROD01", "Server Unreachable", "Login timeout expired", "Online",
+            Context: null, DetailText: null, NumericCurrentValue: 0, NumericThresholdValue: 0,
+            Muted: false, Severity: AlertSeverityLevel.Critical);
+
+        await deliverer.DeliverAsync(outcome, TestContext.Current.CancellationToken);
+        await deliverer.DeliverAsync(
+            outcome with { MetricName = "Server Restored", Severity = null },
+            TestContext.Current.CancellationToken);
+        await deliverer.DeliverAsync(outcome, TestContext.Current.CancellationToken);
+
+        /* Unreachable, Restored, Unreachable again: three posts, the middle one a resolve of the first's
+           incident, the third unthrottled by the recovery that closed it (item 2's cooldown clear). */
+        Assert.Equal(3, capture.Bodies.Count);
+
+        var trigger = System.Text.Json.JsonDocument.Parse(capture.Bodies[0]).RootElement;
+        var resolve = System.Text.Json.JsonDocument.Parse(capture.Bodies[1]).RootElement;
+        var second = System.Text.Json.JsonDocument.Parse(capture.Bodies[2]).RootElement;
+
+        Assert.Equal("trigger", trigger.GetProperty("event_action").GetString());
+        Assert.Equal("resolve", resolve.GetProperty("event_action").GetString());
+        Assert.Equal(trigger.GetProperty("dedup_key").GetString(), resolve.GetProperty("dedup_key").GetString());
+        Assert.Equal("trigger", second.GetProperty("event_action").GetString());
+    }
+
+    /// <summary>
+    /// The OFF half of the same pin: the same wire, the same pair, the shipped behavior — an info-severity
+    /// trigger on the closing edge's OWN key. This is what the generic <c>{{dedup_key}}</c> token and the
+    /// triage link also did before the flag existed, and why the rename must stay gated on it (item 3).
+    /// </summary>
+    [Fact]
+    public async Task TheDeliverer_LeavesThePagerDutyPairedLifecycleAlone_OnTheWire_WithTheFlagOff()
+    {
+        var capture = new CapturingPagerDuty();
+
+        var config = new DarlingConfig();
+        config.Webhooks.PagerDutyRoutingKey = "rk-test";
+        config.Webhooks.PagerDutyAutoResolve = false;
+
+        var settings = new DarlingAlertSettings(config);
+        var history = new DiscardingHistoryStore();
+        var webhooks = new WebhookAlertService(
+            settings, DarlingAlertDeliverer.Branding, NullLogger<WebhookAlertService>.Instance, history);
+        webhooks.PostPagerDutyAsyncOverride = (endpoint, payload) =>
+        {
+            capture.Bodies.Add(payload);
+            return Task.FromResult<string?>(null);
+        };
+        var deliverer = new DarlingAlertDeliverer(settings, history, webhooks, NullLogger.Instance);
+
+        var restored = new AlertOutcome(
+            "13", "PROD01", "Server Restored", "Online", "Online",
+            Context: null, DetailText: null, NumericCurrentValue: 0, NumericThresholdValue: 0,
+            Muted: false, Severity: null);
+
+        await deliverer.DeliverAsync(restored, TestContext.Current.CancellationToken);
+
+        var body = System.Text.Json.JsonDocument.Parse(Assert.Single(capture.Bodies)).RootElement;
+        Assert.Equal("trigger", body.GetProperty("event_action").GetString());
+        Assert.Equal("info", body.GetProperty("payload").GetProperty("severity").GetString());
+        Assert.Equal("13:Server Restored", body.GetProperty("dedup_key").GetString());
+    }
+
+    /// <summary>
+    /// The flap through the Darling deliverer: down, up, down, up inside the cooldown, auto-resolve on, for
+    /// the server pair and for one AG replica. The first recovery stamps its own key and the delivered close
+    /// clears only the firing key, so the second recovery used to meet its own cooldown and never resolve
+    /// the second incident. All four posts must reach PagerDuty, the last a resolve.
+    /// </summary>
+    [Theory]
+    [InlineData("Server Unreachable", "Server Restored", false)]
+    [InlineData("AG Replica Disconnected", "AG Replica Reconnected", true)]
+    public async Task TheDeliverer_ResolvesTheSecondIncident_WhenTheRecoveryFlapsInsideTheCooldown_WithTheFlagOn(
+        string firing, string recovery, bool replica)
+    {
+        var capture = new CapturingPagerDuty();
+        var (deliverer, _) = DelivererFor(autoResolve: true, capture);
+
+        var context = replica ? AgAlertContexts.ForReplica("OrdersAG", "REPLICA-A") : null;
+        var down = new AlertOutcome(
+            "13", "PROD01", firing, "Login timeout expired", "Online",
+            Context: context, DetailText: null, NumericCurrentValue: 0, NumericThresholdValue: 0,
+            Muted: false, Severity: AlertSeverityLevel.Critical);
+        var up = down with { MetricName = recovery, Severity = null };
+
+        foreach (var outcome in new[] { down, up, down, up })
+        {
+            await deliverer.DeliverAsync(outcome, TestContext.Current.CancellationToken);
+        }
+
+        var actions = capture.Bodies
+            .Select(body => System.Text.Json.JsonDocument.Parse(body).RootElement.GetProperty("event_action").GetString())
+            .ToArray();
+        Assert.Equal(new[] { "trigger", "resolve", "trigger", "resolve" }, actions);
+    }
+
+    /// <summary>
+    /// The control: the same flap with auto-resolve OFF keeps the shipped throttling. The re-arm is gated on
+    /// the flag, so only the first down and the first up post (the up as an info-severity trigger).
+    /// </summary>
+    [Fact]
+    public async Task TheDeliverer_KeepsTheShippedThrottling_WhenTheRecoveryFlapsInsideTheCooldown_WithTheFlagOff()
+    {
+        var capture = new CapturingPagerDuty();
+        var (deliverer, _) = DelivererFor(autoResolve: false, capture);
+
+        var down = new AlertOutcome(
+            "13", "PROD01", "Server Unreachable", "Login timeout expired", "Online",
+            Context: null, DetailText: null, NumericCurrentValue: 0, NumericThresholdValue: 0,
+            Muted: false, Severity: AlertSeverityLevel.Critical);
+        var up = down with { MetricName = "Server Restored", Severity = null };
+
+        foreach (var outcome in new[] { down, up, down, up })
+        {
+            await deliverer.DeliverAsync(outcome, TestContext.Current.CancellationToken);
+        }
+
+        Assert.Equal(2, capture.Bodies.Count);
+        Assert.All(capture.Bodies, body =>
+            Assert.Equal("trigger", System.Text.Json.JsonDocument.Parse(body).RootElement.GetProperty("event_action").GetString()));
+    }
+
+    /// <summary>
+    /// #5469 part 2 through the Darling deliverer: two replicas of ONE availability group, all four edges
+    /// inside the cooldown, auto-resolve on. Each replica is its own PagerDuty incident, so both must post
+    /// and each resolve must carry ITS replica's dedup key. With a cooldown key per server + metric, A's
+    /// recovery stamp throttled B's resolve and B's incident stayed open.
+    /// </summary>
+    [Fact]
+    public async Task TheDeliverer_ResolvesBothReplicaIncidents_WhenTwoReplicasFlapInsideTheCooldown_WithTheFlagOn()
+    {
+        var capture = new CapturingPagerDuty();
+        var (deliverer, _) = DelivererFor(autoResolve: true, capture);
+
+        var steps = new[]
+        {
+            ("AG Replica Disconnected", "REPLICA-A"),
+            ("AG Replica Disconnected", "REPLICA-B"),
+            ("AG Replica Reconnected", "REPLICA-A"),
+            ("AG Replica Reconnected", "REPLICA-B"),
+        };
+
+        foreach (var (metric, replica) in steps)
+        {
+            var outcome = new AlertOutcome(
+                "13", "PROD01", metric, "Replica state change", "Online",
+                Context: AgAlertContexts.ForReplica("OrdersAG", replica), DetailText: null,
+                NumericCurrentValue: 0, NumericThresholdValue: 0, Muted: false,
+                Severity: metric == "AG Replica Disconnected" ? AlertSeverityLevel.Critical : null);
+            await deliverer.DeliverAsync(outcome, TestContext.Current.CancellationToken);
+        }
+
+        var bodies = capture.Bodies.Select(body => System.Text.Json.JsonDocument.Parse(body).RootElement).ToArray();
+        Assert.Equal(
+            new[] { "trigger", "trigger", "resolve", "resolve" },
+            bodies.Select(root => root.GetProperty("event_action").GetString()).ToArray());
+        Assert.Equal("13:AG Replica Disconnected:OrdersAG:REPLICA-A", bodies[2].GetProperty("dedup_key").GetString());
+        Assert.Equal("13:AG Replica Disconnected:OrdersAG:REPLICA-B", bodies[3].GetProperty("dedup_key").GetString());
+    }
+
+    /// <summary>
+    /// The control: the same two-replica sequence with auto-resolve OFF keeps what shipped. The cooldown
+    /// key stays per server + metric, so the second down and the second up meet the first one's stamp and
+    /// only the first down and the first up post.
+    /// </summary>
+    [Fact]
+    public async Task TheDeliverer_KeepsTheShippedThrottling_WhenTwoReplicasFlapInsideTheCooldown_WithTheFlagOff()
+    {
+        var capture = new CapturingPagerDuty();
+        var (deliverer, _) = DelivererFor(autoResolve: false, capture);
+
+        foreach (var (metric, replica) in new[]
+        {
+            ("AG Replica Disconnected", "REPLICA-A"),
+            ("AG Replica Disconnected", "REPLICA-B"),
+            ("AG Replica Reconnected", "REPLICA-A"),
+            ("AG Replica Reconnected", "REPLICA-B"),
+        })
+        {
+            var outcome = new AlertOutcome(
+                "13", "PROD01", metric, "Replica state change", "Online",
+                Context: AgAlertContexts.ForReplica("OrdersAG", replica), DetailText: null,
+                NumericCurrentValue: 0, NumericThresholdValue: 0, Muted: false,
+                Severity: metric == "AG Replica Disconnected" ? AlertSeverityLevel.Critical : null);
+            await deliverer.DeliverAsync(outcome, TestContext.Current.CancellationToken);
+        }
+
+        Assert.Equal(2, capture.Bodies.Count);
+        Assert.All(capture.Bodies, body =>
+            Assert.Equal("trigger", System.Text.Json.JsonDocument.Parse(body).RootElement.GetProperty("event_action").GetString()));
+    }
+
+    /// <summary>
+    /// #5469 scope rule: the per-replica cooldown applies only when auto-resolve is on AND PagerDuty is set up
+    /// and routed for the alert. Two replicas go down inside the cooldown, Teams is the only channel that can
+    /// post, and the flag is on: with no PagerDuty key, and with a PagerDuty key routed to some OTHER metric,
+    /// every key is dev's per-server key, so replica B's firing is throttled behind replica A's (one Teams
+    /// post). With PagerDuty routed for the alert, each replica holds its own window (two Teams posts).
+    /// </summary>
+    [Theory]
+    [InlineData("none", 1)]
+    [InlineData("other-metric-route", 1)]
+    [InlineData("routed", 2)]
+    public async Task TheDeliverer_ScopesTheReplicaCooldown_OnlyWhenPagerDutyIsRoutedForTheAlert(string pagerDuty, int teamsPosts)
+    {
+        using var teams = new CapturingWebhookEndpoint();
+        var capture = new CapturingPagerDuty();
+        var (deliverer, _) = pagerDuty switch
+        {
+            "none" => DelivererFor(autoResolve: true, capture, pagerDutyKey: "", teamsUrl: teams.Url),
+            "other-metric-route" => DelivererFor(
+                autoResolve: true, capture, pagerDutyKey: "", teamsUrl: teams.Url,
+                routes: new[] { new NotificationRoute(1, "High CPU", "", "", "", "rk-other", "", true) }),
+            _ => DelivererFor(autoResolve: true, capture, teamsUrl: teams.Url),
+        };
+
+        foreach (var replica in new[] { "REPLICA-A", "REPLICA-B" })
+        {
+            var outcome = new AlertOutcome(
+                "13", "PROD01", "AG Replica Disconnected", "Replica state change", "Online",
+                Context: AgAlertContexts.ForReplica("OrdersAG", replica), DetailText: null,
+                NumericCurrentValue: 0, NumericThresholdValue: 0, Muted: false,
+                Severity: AlertSeverityLevel.Critical);
+            await deliverer.DeliverAsync(outcome, TestContext.Current.CancellationToken);
+        }
+
+        Assert.Equal(teamsPosts, teams.Bodies.Count);
+    }
+
+    /// <summary>
+    /// #5469 restart case, Darling's pin: the pair-aware history seed (the other edge sent more recently, so
+    /// this edge's own row is not seeded) applies only when PagerDuty is routed for the alert, because only
+    /// then do the in-memory clears exist for it to stand in for. Down at t-3 and up at t-2 are already in the
+    /// history, then a NEW service starts (a restart) and the second outage arrives, auto-resolve on, Teams
+    /// the only chat channel. With PagerDuty not routed for the metric, nothing was ever cleared, so the
+    /// firing seeds from its own row and stays throttled (no Teams post, as on dev). With PagerDuty routed,
+    /// the recovery closed the first incident, so the second outage announces (one Teams post).
+    /// </summary>
+    [Theory]
+    [InlineData("none", 0)]
+    [InlineData("other-metric-route", 0)]
+    [InlineData("routed", 1)]
+    public async Task TheDeliverer_AfterARestart_SkipsTheSupersededSeed_OnlyWhenPagerDutyIsRoutedForTheAlert(string pagerDuty, int teamsPosts)
+    {
+        using var teams = new CapturingWebhookEndpoint();
+        var capture = new CapturingPagerDuty();
+        var now = DateTime.UtcNow;
+        var history = new SeededHistoryStore();
+        history.SentRow("Server Unreachable", "13", now.AddMinutes(-3));
+        history.SentRow("Server Restored", "13", now.AddMinutes(-2));
+
+        var (deliverer, _) = pagerDuty switch
+        {
+            "none" => DelivererFor(autoResolve: true, capture, pagerDutyKey: "", teamsUrl: teams.Url, history: history),
+            "other-metric-route" => DelivererFor(
+                autoResolve: true, capture, pagerDutyKey: "", teamsUrl: teams.Url, history: history,
+                routes: new[] { new NotificationRoute(1, "High CPU", "", "", "", "rk-other", "", true) }),
+            _ => DelivererFor(autoResolve: true, capture, teamsUrl: teams.Url, history: history),
+        };
+
+        var secondOutage = new AlertOutcome(
+            "13", "PROD01", "Server Unreachable", "Login timeout expired", "Online",
+            Context: null, DetailText: null, NumericCurrentValue: 0, NumericThresholdValue: 0,
+            Muted: false, Severity: AlertSeverityLevel.Critical);
+        await deliverer.DeliverAsync(secondOutage, TestContext.Current.CancellationToken);
+
+        Assert.Equal(teamsPosts, teams.Bodies.Count);
+    }
+
+    /// <summary>
+    /// The seeding history store for the restart pin above: the last WEBHOOK send time per (metric, server),
+    /// answered the way the real stores answer the cooldown's seed. Scoped by metric, so one edge's question
+    /// is never answered with the other edge's row. Everything else is the discarding store's no-op.
+    /// </summary>
+    private sealed class SeededHistoryStore : IAlertHistoryStore
+    {
+        private readonly List<(string Metric, string ServerId, DateTime AtUtc)> _rows = new();
+
+        public void SentRow(string metricName, string serverId, DateTime atUtc) => _rows.Add((metricName, serverId, atUtc));
+
+        public Task<DateTime?> GetLastWebhookSentUtcAsync(string serverId, string metricName, string? dedupKey = null)
+        {
+            DateTime? max = null;
+            foreach (var row in _rows)
+            {
+                if (row.Metric == metricName && row.ServerId == serverId && (max is null || row.AtUtc > max.Value))
+                    max = row.AtUtc;
+            }
+
+            return Task.FromResult(max);
+        }
+
+        public Task RecordAlertAsync(AlertHistoryRecord record) => Task.CompletedTask;
+        public Task<DateTime?> GetLastEmailSentUtcAsync(string serverId, string metricName, string? dedupKey = null) => Task.FromResult<DateTime?>(null);
+        public Task<DateTime?> GetLastAlertTimeAsync(string serverId, string metricName, string? dedupKey = null) => Task.FromResult<DateTime?>(null);
+        public Task<DateTime?> GetLastDeliveredPageUtcAsync(string serverId, string metricName) => Task.FromResult<DateTime?>(null);
+    }
+
+    private static (DarlingAlertDeliverer Deliverer, WebhookAlertService Webhooks) DelivererFor(
+        bool autoResolve, CapturingPagerDuty capture, string pagerDutyKey = "rk-test", string? teamsUrl = null,
+        IReadOnlyList<NotificationRoute>? routes = null, IAlertHistoryStore? history = null)
+    {
+        var config = new DarlingConfig();
+        config.Webhooks.PagerDutyRoutingKey = pagerDutyKey;
+        config.Webhooks.PagerDutyAutoResolve = autoResolve;
+        if (teamsUrl is not null)
+        {
+            config.Webhooks.TeamsUrl = teamsUrl;
+        }
+
+        if (routes is not null)
+        {
+            config.NotificationRoutes = routes;
+        }
+
+        config.Smtp.Host = "";
+        config.Smtp.To = "";
+
+        var settings = new DarlingAlertSettings(config);
+        history ??= new DiscardingHistoryStore();
+        var webhooks = new WebhookAlertService(
+            settings, DarlingAlertDeliverer.Branding, NullLogger<WebhookAlertService>.Instance, history);
+        webhooks.PostPagerDutyAsyncOverride = (endpoint, payload) =>
+        {
+            capture.Bodies.Add(payload);
+            return Task.FromResult<string?>(null);
+        };
+        return (new DarlingAlertDeliverer(settings, history, webhooks, NullLogger.Instance), webhooks);
+    }
+
+    /// <summary>
+    /// The payloads one test's PagerDuty sends captured, in send order. Plain list, no socket: the
+    /// service's test-only post override answers the send (see its own remarks) and hands the payload
+    /// here, so nothing leaves the process and the assertions read the exact JSON the wire would have
+    /// seen.
+    /// </summary>
+    private sealed class CapturingPagerDuty
+    {
+        public List<string> Bodies { get; } = new();
+    }
+
     /* ────── #3302 regression: a finding's Diagnosis facts, delivered once and stored in full ────── */
 
     /// <summary>

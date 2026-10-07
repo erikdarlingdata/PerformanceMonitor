@@ -36,6 +36,7 @@ namespace Lite.Tests;
 /// Text-scans SOURCE (XAML + .cs), located from this file's compile-time path — NO WPF / DuckDB / assembly
 /// load, exactly like the other parity pins.
 /// </summary>
+[Trait("Stage", "Guard")]
 public sealed class ServerTabCapabilityPinTests
 {
     /* ---------------- section facts ---------------- */

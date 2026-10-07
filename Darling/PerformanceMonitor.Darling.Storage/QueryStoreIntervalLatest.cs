@@ -466,6 +466,53 @@ WHERE t.server_id = $1;";
         }
     }
 
+    /// <summary>
+    /// The built days of the PLAN_REGRESSION window for one server (#5448), or none when the read fails. It runs
+    /// <see cref="PlanRegressionDaily.BuiltDaysSql"/> ($1 server_id, $2 the window floor); <paramref name="isExpectedAbandon"/> is
+    /// the pass's abandon filter, so a cancelled or shut-down pass is not swallowed here.
+    ///
+    /// <para><b>Why this is not a caveat.</b> A failure answers "none built", and the fact then runs the exact-bound read,
+    /// the shipped one, which finds everything the daily totals would have. The failure costs the speedup, not the
+    /// finding, so it is logged here, at Warning, and recorded nowhere else: a stored caveat would tell a user the
+    /// regression check is missing data when it is not. If the exact read also fails, that read's own catch records the
+    /// failure, once. It sits beside <see cref="ReadsTableAsync"/> for the same reason: the fact collectors' census
+    /// requires every swallowing catch there to record a failure, which is right for a read that leaves a fact empty and
+    /// wrong for one that falls back to a read that is whole.</para>
+    /// </summary>
+    public static async Task<List<DateOnly>> ReadBuiltDaysAsync(
+        NpgsqlConnection connection,
+        NpgsqlTransaction? transaction,
+        int serverId,
+        DateTime windowFloor,
+        int commandTimeoutSeconds,
+        ILogger? logger,
+        Func<Exception, bool> isExpectedAbandon,
+        CancellationToken cancellationToken)
+    {
+        var days = new List<DateOnly>();
+        try
+        {
+            await using var cmd = new NpgsqlCommand(PlanRegressionDaily.BuiltDaysSql, connection, transaction) { CommandTimeout = commandTimeoutSeconds };
+            cmd.Parameters.AddWithValue(serverId);
+            cmd.Parameters.AddWithValue(NpgsqlDbType.Timestamp, windowFloor);
+            await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                days.Add(reader.GetFieldValue<DateOnly>(0));
+            }
+
+            return days;
+        }
+        catch (Exception ex) when (!isExpectedAbandon(ex))
+        {
+            logger?.LogWarning(
+                ex,
+                "PLAN_REGRESSION built-days read failed for server {ServerId}; reading the interval table on its exact bounds",
+                serverId);
+            return new List<DateOnly>();
+        }
+    }
+
     private readonly ConcurrentDictionary<int, byte> _coverageEnsured = new();
     private readonly ConcurrentDictionary<int, DateTime> _gapCheckedAt = new();
     private readonly ILogger? _logger;

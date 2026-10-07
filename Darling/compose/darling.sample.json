@@ -28,6 +28,7 @@
     "enabled": false,
     "port": 5152,
     "network": {
+      "// tls": "Without this the bearer token above and every tool result cross the network in the clear, and allowFrom 0.0.0.0/0 bounds nothing. To enable: mount a PEM pair as the mcp_tls_cert / mcp_tls_key secrets (see docker-compose.yml) and add \"tls\": { \"certPath\": \"/run/secrets/mcp_tls_cert\", \"keyPath\": \"/run/secrets/mcp_tls_key\" } here, and \"hostName\": \"<the DNS name on the certificate>\" so clients can connect by that name. With a 0.0.0.0 listen the one listener then serves HTTPS, so local clients use https too. A bad or expired certificate keeps MCP loopback-only rather than falling back to HTTP, which in a container means unreachable — that is the intended failure.",
       "listen": "0.0.0.0",
       "allowFrom": "0.0.0.0/0",
       "token": "file:/run/secrets/mcp_token"
