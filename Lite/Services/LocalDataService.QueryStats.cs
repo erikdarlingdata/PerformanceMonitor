@@ -1376,8 +1376,45 @@ LEFT JOIN texts t ON t.sql_handle = j.text_handle;";
         MAX(collection_time) OVER () AS series_last,
         FIRST_VALUE(COALESCE(interval_seconds, 0)) OVER (ORDER BY collection_time) AS first_interval";
 
+    /// <summary>
+    /// #5449: the collector runs that stored no row (a minute in which no procedure did work), as zero-work collections, so the
+    /// chart plots a measured 0 for a quiet minute the way an old store, which kept the idle rows, does. The time axis is the
+    /// collector's own SUCCESS runs in <c>v_collection_log</c> inside the window; a run is idle when no stored collection
+    /// (<c>stored</c>, the per-collection CTE) falls in [its time, the next run's time), which holds whether the log stamps a
+    /// run at the same instant as its rows or a moment before them. An idle run's interval is the gap to the previous run (the
+    /// next run's gap for the first), the cadence an old store's idle row would have recorded, so its rate is 0 over real
+    /// seconds, never NULL. Old data never has an idle run (every run has a row), so its answer is unchanged.
+    /// </summary>
+    internal static string IdleRunCollectionsSql(bool withMatchedRows) => $@"
+    UNION ALL
+    SELECT
+        r.t AS collection_time,
+        CAST(0 AS DOUBLE PRECISION) AS total_elapsed_ms,
+        CAST(0 AS BIGINT) AS total_executions,
+        extract(epoch FROM COALESCE(r.t - r.prev_t, r.next_t - r.t)) AS interval_seconds{(withMatchedRows ? ",\n        CAST(0 AS BIGINT) AS matched_rows" : "")}
+    FROM
+    (
+        SELECT
+            collection_time AS t,
+            LAG(collection_time) OVER (ORDER BY collection_time) AS prev_t,
+            LEAD(collection_time) OVER (ORDER BY collection_time) AS next_t
+        FROM v_collection_log
+        WHERE server_id = $1
+        AND   collector_name = 'procedure_stats'
+        AND   status = 'SUCCESS'
+        AND   collection_time >= $2
+        AND   collection_time <= $3
+    ) AS r
+    WHERE NOT EXISTS
+    (
+        SELECT 1
+        FROM stored AS s
+        WHERE s.collection_time >= r.t
+        AND   (r.next_t IS NULL OR s.collection_time < r.next_t)
+    )";
+
     internal static string DurationTrendChartSql(string relation, string dbClause, int widthParamIndex, bool coverIdleSpan) => $@"
-WITH raw AS
+WITH stored AS
 (
     SELECT
         collection_time,
@@ -1394,6 +1431,10 @@ WITH raw AS
     AND   collection_time >= $2
     AND   collection_time <= $3
     GROUP BY collection_time
+),
+raw AS
+(
+    SELECT * FROM stored{(coverIdleSpan ? IdleRunCollectionsSql(dbClause.Length != 0) : "")}
 ),
 rated AS
 (

@@ -121,6 +121,40 @@ public sealed class ProcedureStatsIdleRowsReaderTests : IClassFixture<SharedDuck
         Assert.Equal(start, floor);
     }
 
+    [Fact]
+    public async Task ProcedureChartPoints_AQuietCollectionPlotsZero_OnBothStores()
+    {
+        var t0 = await SeedTwentyMinutesAsync();
+        /* The collector ran every minute on both servers; only the old one kept a row for the quiet minutes. */
+        await SeedRunsAsync(OldServer, "procedure_stats", t0.AddMinutes(1), t0.AddMinutes(20));
+        await SeedRunsAsync(NewServer, "procedure_stats", t0.AddMinutes(1), t0.AddMinutes(20));
+
+        var oldPoints = await _dataService.GetProcedureDurationTrendAsync(OldServer, 1, t0, t0.AddMinutes(25));
+        var newPoints = await _dataService.GetProcedureDurationTrendAsync(NewServer, 1, t0, t0.AddMinutes(25));
+
+        Assert.Equal(20, oldPoints.Count);
+        Assert.Equal(oldPoints.Select(p => p.CollectionTime), newPoints.Select(p => p.CollectionTime));
+        Assert.Equal(oldPoints.Select(p => p.Value), newPoints.Select(p => p.Value));
+        /* Minute 3 is quiet: a plotted 0, where the line used to be drawn straight from minute 2 to minute 15. */
+        Assert.Equal(0.0, newPoints.Single(p => p.CollectionTime == t0.AddMinutes(3)).Value!.Value, precision: 6);
+        Assert.Equal(10.0, newPoints.Single(p => p.CollectionTime == t0.AddMinutes(15)).Value!.Value, precision: 6);
+    }
+
+    [Fact]
+    public async Task ProcedureChartPoints_AFailedRunIsNotAQuietPoint()
+    {
+        var t0 = TenMinuteFloor(DateTime.UtcNow.AddMinutes(-40));
+        await SeedAsync(NewServer, t0.AddMinutes(1), "usp_Work", executions: 10, elapsedUs: 600_000, interval: 60);
+        await SeedAsync(NewServer, t0.AddMinutes(5), "usp_Work", executions: 10, elapsedUs: 600_000, interval: 240);
+        await SeedRunsAsync(NewServer, "procedure_stats", t0.AddMinutes(1), t0.AddMinutes(5));
+        await SetRunStatusAsync(NewServer, t0.AddMinutes(3), "ERROR");
+
+        var points = await _dataService.GetProcedureDurationTrendAsync(NewServer, 1, t0, t0.AddMinutes(25));
+
+        /* The runs at minutes 2 and 4 stored nothing and succeeded: zero points. Minute 3 failed: no point at all. */
+        Assert.Equal(new[] { 1, 2, 4, 5 }, points.Select(p => (int)(p.CollectionTime - t0).TotalMinutes).ToArray());
+    }
+
     private async Task<DuckDBConnection> SeedConnectionAsync()
     {
         if (_seedConn is null)
@@ -158,5 +192,14 @@ INSERT INTO collection_log (log_id, server_id, server_name, collector_name, coll
 SELECT {_nextId} - row_number() OVER (), {serverId}, 'idle-rows', '{collector}', g.t, 12, 'SUCCESS', 0
 FROM generate_series(TIMESTAMP '{firstUtc:yyyy-MM-dd HH:mm:ss}', TIMESTAMP '{lastUtc:yyyy-MM-dd HH:mm:ss}', INTERVAL 1 MINUTE) AS g(t)";
         _nextId -= await cmd.ExecuteNonQueryAsync() + 1;
+    }
+
+    private async Task SetRunStatusAsync(int serverId, DateTime at, string status)
+    {
+        using var readLock = _duckDb.AcquireReadLock();
+        var conn = await SeedConnectionAsync();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = $"UPDATE collection_log SET status = '{status}' WHERE server_id = {serverId} AND collection_time = TIMESTAMP '{at:yyyy-MM-dd HH:mm:ss}'";
+        await cmd.ExecuteNonQueryAsync();
     }
 }
