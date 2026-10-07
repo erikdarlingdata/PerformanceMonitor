@@ -405,4 +405,72 @@ public sealed class RollupFloorCacheTests
         Assert.Contains("materialization_hypertable_schema", sql, StringComparison.Ordinal);
         Assert.Contains("materialization_hypertable_name", sql, StringComparison.Ordinal);
     }
+
+    /* ─────────── #5329: a reused floor is still asked whether anything is earlier ─────────── */
+
+    [Fact]
+    public void RollupViewsToCheckForAnEarlierFloor_AReusedView_IsACandidate()
+    {
+        var view = TimescaleSupport.QueryStatsIoHourlyView;
+        var cached = new Dictionary<string, TimescaleSupport.RollupFloorCacheEntry>(StringComparer.Ordinal) { [view] = Entry("_hyper_1_1_chunk", SomeFloor) };
+        var oldestNow = new Dictionary<string, TimescaleSupport.RollupChunkIdentity>(StringComparer.Ordinal) { [view] = new("_hyper_1_1_chunk", SomeHypertable) };
+
+        var views = TimescaleSupport.RollupViewsToCheckForAnEarlierFloor(
+            cached, oldestNow, RollupAvailability.All, new HashSet<string>(StringComparer.Ordinal), deferred: null);
+
+        Assert.Equal(new[] { view }, views);
+    }
+
+    [Fact]
+    public void RollupViewsToCheckForAnEarlierFloor_AViewBeingMeasuredADeferredViewAnUncachedViewAndAChangedChunk_AreNotCandidates()
+    {
+        var measured = TimescaleSupport.QueryStatsIoHourlyView;
+        var deferred = TimescaleSupport.ProcedureStatsIoHourlyView;
+        var uncached = TimescaleSupport.QueryStoreStatsHourlyView;
+        var changed = TimescaleSupport.QueryStatsHourlyView;
+        var cached = new Dictionary<string, TimescaleSupport.RollupFloorCacheEntry>(StringComparer.Ordinal)
+        {
+            [measured] = Entry("_hyper_1_1_chunk", SomeFloor),
+            [deferred] = Entry("_hyper_1_1_chunk", SomeFloor),
+            [changed] = Entry("_hyper_1_1_chunk", SomeFloor),
+        };
+        var oldestNow = new Dictionary<string, TimescaleSupport.RollupChunkIdentity>(StringComparer.Ordinal)
+        {
+            [measured] = new("_hyper_1_1_chunk", SomeHypertable),
+            [deferred] = new("_hyper_1_1_chunk", SomeHypertable),
+            [uncached] = new("_hyper_1_1_chunk", SomeHypertable),
+            [changed] = new("_hyper_1_2_chunk", SomeHypertable),
+        };
+
+        var views = TimescaleSupport.RollupViewsToCheckForAnEarlierFloor(
+            cached, oldestNow, RollupAvailability.All,
+            new HashSet<string>(new[] { measured }, StringComparer.Ordinal),
+            new HashSet<string>(new[] { deferred }, StringComparer.Ordinal));
+
+        Assert.Empty(views);
+    }
+
+    [Fact]
+    public void RollupViewsToCheckForAnEarlierFloor_AViewTheStoreLacks_IsNotACandidate()
+    {
+        var view = TimescaleSupport.QueryStatsIoHourlyView;
+        var cached = new Dictionary<string, TimescaleSupport.RollupFloorCacheEntry>(StringComparer.Ordinal) { [view] = Entry("_hyper_1_1_chunk", SomeFloor) };
+        var oldestNow = new Dictionary<string, TimescaleSupport.RollupChunkIdentity>(StringComparer.Ordinal) { [view] = new("_hyper_1_1_chunk", SomeHypertable) };
+
+        var views = TimescaleSupport.RollupViewsToCheckForAnEarlierFloor(
+            cached, oldestNow, RollupAvailability.None, new HashSet<string>(StringComparer.Ordinal), deferred: null);
+
+        Assert.Empty(views);
+    }
+
+    [Fact]
+    public void RollupEarlierFloorProbeSql_IsABoundedReadPerView_AndNeverTheColdMinBucketStatement()
+    {
+        var sql = TimescaleSupport.RollupEarlierFloorProbeSql(new[] { TimescaleSupport.QueryStatsIoHourlyView, TimescaleSupport.ProcedureStatsIoHourlyView });
+
+        Assert.Contains($"FROM collect.{TimescaleSupport.QueryStatsIoHourlyView} AS m WHERE m.bucket < $1::timestamp", sql, StringComparison.Ordinal);
+        Assert.Contains($"FROM collect.{TimescaleSupport.ProcedureStatsIoHourlyView} AS m WHERE m.bucket < $2::timestamp", sql, StringComparison.Ordinal);
+        /* The floor-cache live tests count this text to prove the cold sort is not re-run; the bounded read must not match it. */
+        Assert.DoesNotContain("min(bucket) FROM collect.", sql, StringComparison.Ordinal);
+    }
 }

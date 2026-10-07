@@ -295,9 +295,10 @@ export function windowNoteText(data) {
   return sent;
 }
 
-/* The retention notice a Top Queries or Top Procedures answer carries for the Reads ranking (#5226), or null. Reads can only be ranked from
-   raw (the hourly rollups keep no logical reads), so over a window past what raw keeps the answer says so in `retention_notice`: the raw
-   route's partial-window sentence, with the store's measured raw reach. It says what the answer's `truncation_note` says (the older part of
+/* The retention notice a Top Queries or Top Procedures answer carries for the Reads ranking (#5226), or null. Reads are ranked from raw, or
+   (#5329) from the io hourly rollup when that reaches the window's start (the stitched hourly rollups keep no logical reads). When raw
+   answers, over a window past what raw keeps the answer says so in `retention_notice`: the raw
+   route's partial-window sentence, with the store's measured raw reach. The io route carries none; its partial window is `truncation_note`. It says what the answer's `truncation_note` says (the older part of
    the window was not read), and it carries the figures. */
 function retentionNoticeOf(data) {
   if (!data || typeof data !== "object" || Array.isArray(data)) return null;

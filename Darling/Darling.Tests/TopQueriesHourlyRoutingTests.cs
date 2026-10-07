@@ -142,7 +142,8 @@ public sealed class TopQueriesHourlyRoutingTests
         Assert.Contains("HourlyFirstBucketSingleRelationSql", body, StringComparison.Ordinal);
         Assert.Contains("\"UNION\"", body, StringComparison.Ordinal);
         Assert.Contains("GetHourlyFirstBucketAsync(postgres, coverage, TimescaleSupport.QueryStatsHourlyView,", source, StringComparison.Ordinal);
-        Assert.Contains("GetHourlyFirstBucketAsync(postgres, coverage, TimescaleSupport.ProcedureStatsHourlyView,", source, StringComparison.Ordinal);
+        /* #5329: the procedures arm picks its relation (io or the stitched legacy view) inside the call. */
+        Assert.Contains("postgres, coverage, io ? TimescaleSupport.ProcedureStatsIoHourlyView : TimescaleSupport.ProcedureStatsHourlyView,", source, StringComparison.Ordinal);
     }
 
     private static string FindReaderSourcePath()
