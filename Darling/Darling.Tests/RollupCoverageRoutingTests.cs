@@ -792,4 +792,54 @@ public sealed class RollupCoverageRoutingTests
 
         Assert.Equal(expected, DarlingDataReader.ChooseQueriesHourlyRoute(availability, coverage, ranking, DaysAgo(10)));
     }
+
+    /// <summary>
+    /// #5329 lane B2: the same table for the Top Procedures reader, over <c>procedure_stats_io_hourly</c> and
+    /// <c>procedure_stats</c>'s oldest row. Each case also plants the QUERIES io floor the other way round, so a procedures
+    /// route that read the queries relation's floor would answer differently and fail.
+    /// </summary>
+    [Theory]
+    [InlineData("absent", TopRanking.Reads, HourlyRoute.Raw)]
+    [InlineData("absent", TopRanking.Cpu, HourlyRoute.Stitched)]
+    [InlineData("empty", TopRanking.Reads, HourlyRoute.Raw)]
+    [InlineData("empty", TopRanking.Duration, HourlyRoute.Stitched)]
+    [InlineData("partial", TopRanking.Reads, HourlyRoute.Io)]      // io (6 days) reaches further back than raw (4 days)
+    [InlineData("partial", TopRanking.Executions, HourlyRoute.Stitched)]
+    [InlineData("partialShallow", TopRanking.Reads, HourlyRoute.Raw)]   // raw (4 days) reaches further back than io (2 days)
+    [InlineData("covering", TopRanking.Reads, HourlyRoute.Io)]
+    [InlineData("covering", TopRanking.Cpu, HourlyRoute.Io)]
+    [InlineData("covering", TopRanking.Duration, HourlyRoute.Io)]
+    [InlineData("covering", TopRanking.Executions, HourlyRoute.Io)]
+    public void TheProceduresReader_RoutesOnTheIoRollupsAvailabilityAndFloor(string io, TopRanking ranking, HourlyRoute expected)
+    {
+        var floors = new Dictionary<string, DateTime>(StringComparer.Ordinal)
+        {
+            [TimescaleSupport.ProcedureStatsHourlyView] = DaysAgo(30),
+            /* the queries io rollup says the opposite of every case below: covering, where procedures is not */
+            [TimescaleSupport.QueryStatsIoHourlyView] = DaysAgo(30),
+        };
+        switch (io)
+        {
+            case "absent":
+                floors[TimescaleSupport.ProcedureStatsIoHourlyView] = DaysAgo(30);   /* a stale floor under a name the store does not have */
+                break;
+            case "partial":
+                floors[TimescaleSupport.ProcedureStatsIoHourlyView] = DaysAgo(6);
+                break;
+            case "partialShallow":
+                floors[TimescaleSupport.ProcedureStatsIoHourlyView] = DaysAgo(2);
+                break;
+            case "covering":
+                floors[TimescaleSupport.ProcedureStatsIoHourlyView] = DaysAgo(30);
+                break;
+        }
+
+        var availability = io == "absent" ? RollupAvailability.WithoutIoHourlies : RollupAvailability.All;
+        var coverage = new RollupCoverage(
+            floors,
+            new Dictionary<string, DateTime>(StringComparer.Ordinal) { ["procedure_stats"] = DaysAgo(4), ["query_stats"] = DaysAgo(4) },
+            availability);
+
+        Assert.Equal(expected, DarlingDataReader.ChooseProceduresHourlyRoute(availability, coverage, ranking, DaysAgo(10)));
+    }
 }

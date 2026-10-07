@@ -1060,7 +1060,7 @@ public sealed class DarlingMcpDataTools
                            the hourly rollup (which cannot rank by reads) may — not that nothing was collected. */
                         ? McpHelpers.Status(
                             "empty",
-                            "raw procedure_stats holds nothing in this window; the hourly rollup, which covers this window, cannot rank by reads (it carries no per-procedure logical reads). Rank by cpu, duration or executions to read the rollup.",
+                            "raw procedure_stats holds nothing in this window; the hourly rollup, which covers this window, cannot rank by reads (the stitched rollups carry no per-procedure logical reads, and the io hourly rollup, procedure_stats_io_hourly, does not reach this window's start on this store). Rank by cpu, duration or executions to read the rollup.",
                             new { window_truncated = true })
                         : McpHelpers.Status(
                             "unavailable",
@@ -1079,12 +1079,19 @@ public sealed class DarlingMcpDataTools
             var windowTruncated = RawWindowFloor.IsTruncated(floor, requestedStart);
             if (routed.RawForced)
             {
-                precisionNote = "order_by=reads needs per-procedure logical reads, which only raw procedure_stats carries (the hourly rollup keeps CPU, elapsed time and execution counts); this read stayed on raw, which reaches back to effective_start (window_truncated says whether that cut the window). Rank by cpu, duration or executions to read the rollup.";
+                /* #5329: reads is answered from collect.procedure_stats_io_hourly when it reaches the window's start, and
+                   from raw otherwise: this read is the raw one, so the io rollup was absent, empty or reached no further
+                   back than raw does. The stitched rollups keep no logical reads. */
+                precisionNote = "order_by=reads needs per-procedure logical reads. Only raw procedure_stats and the io hourly rollup (procedure_stats_io_hourly) carry them, and that rollup was absent, empty or did not reach back further than raw on this store, so this read came from raw procedure_stats, which reaches back to effective_start (window_truncated says whether that cut the window). Rank by cpu, duration or executions to read the other hourly rollups.";
             }
 
             if (hourly)
             {
-                precisionNote = "hourly-rollup rows: object_type, sql_handle, plan_handle, reads/writes/physical reads/spills and min/max cpu/elapsed are null — "
+                /* #5329: on the io route (procedure_stats_io_hourly) the rows carry logical reads, physical reads and logical
+                   writes, so they are not in the null list; every other hourly read still has none of them. */
+                precisionNote = (routed.IoRoute
+                    ? "hourly-rollup rows from procedure_stats_io_hourly, the rollup that keeps logical reads: total_logical_reads, total_physical_reads and total_logical_writes are the rollup's sums. object_type, sql_handle, plan_handle, spills and min/max cpu/elapsed are null — "
+                    : "hourly-rollup rows: object_type, sql_handle, plan_handle, reads/writes/physical reads/spills and min/max cpu/elapsed are null — ")
                     + "the rollup does not carry them, and its min/max are per-collection sums, not per-execution extremes."
                     + " " + HourlyWindowEdges.Note(requestedStart, floor, now, routed.HourlyCeiling);
                 if (full)
@@ -1134,10 +1141,10 @@ public sealed class DarlingMcpDataTools
                 /* #2235: same lifetime-extremes flag as the queries tool. */
                 extremes_note = hourly ? null : QueryStatExtremes.LifetimeExtremeNote(
                     r.TotalCpuUs, r.MaxCpuUs, r.TotalElapsedUs, r.MaxElapsedUs),
-                avg_reads = hourly ? (double?)null : r.TotalExecutions > 0 ? (double)r.TotalLogicalReads / r.TotalExecutions : 0,
-                total_logical_reads = hourly ? (long?)null : r.TotalLogicalReads,
-                total_logical_writes = hourly ? (long?)null : r.TotalLogicalWrites,
-                total_physical_reads = hourly ? (long?)null : r.TotalPhysicalReads,
+                avg_reads = hourly && !routed.IoRoute ? (double?)null : r.TotalExecutions > 0 ? (double)r.TotalLogicalReads / r.TotalExecutions : 0,
+                total_logical_reads = hourly && !routed.IoRoute ? (long?)null : r.TotalLogicalReads,
+                total_logical_writes = hourly && !routed.IoRoute ? (long?)null : r.TotalLogicalWrites,
+                total_physical_reads = hourly && !routed.IoRoute ? (long?)null : r.TotalPhysicalReads,
                 total_spills = hourly ? (long?)null : r.TotalSpills
             }, r.Detail, r.TotalExecutions, r.TotalSpills, full));
 
