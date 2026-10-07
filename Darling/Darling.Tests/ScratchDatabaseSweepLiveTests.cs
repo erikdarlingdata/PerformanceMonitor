@@ -114,6 +114,8 @@ public sealed class ScratchDatabaseSweepLiveTests
             {
                 foreach (var name in planted)
                 {
+                    /* No TimescaleDB job worker is left in the database the FORCE drop below kills (#5480). */
+                    await ScratchPostgres.QuiesceTimescaleJobsAsync(baseConnectionString!, name);
                     await using var drop = new NpgsqlCommand($"DROP DATABASE IF EXISTS \"{name}\" WITH (FORCE)", cleanup);
                     await drop.ExecuteNonQueryAsync(cleanupCt);
                 }
@@ -209,6 +211,8 @@ public sealed class ScratchDatabaseSweepLiveTests
     private static Task DropIfStillThereAsync(string connectionString, string name, bool bodySucceeded) =>
         LiveStoreCleanup.RunAsync(connectionString, bodySucceeded, async (cleanup, cleanupCt) =>
         {
+            /* No TimescaleDB job worker is left in the database the FORCE drop below kills (#5480). */
+            await ScratchPostgres.QuiesceTimescaleJobsAsync(connectionString, name);
             await using var drop = new NpgsqlCommand($"DROP DATABASE IF EXISTS \"{name}\" WITH (FORCE)", cleanup);
             await drop.ExecuteNonQueryAsync(cleanupCt);
         });
