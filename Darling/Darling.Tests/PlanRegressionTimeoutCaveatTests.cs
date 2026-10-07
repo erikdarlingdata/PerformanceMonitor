@@ -44,10 +44,11 @@ public sealed class PlanRegressionTimeoutCaveatTests
 
         /* The fact's own read carries the deadline, and the built-days read is handed it (it builds its command in the
            storage helper, from the storage tenant's own SQL constant). */
-        Assert.Single(Regex.Matches(fact, @"new NpgsqlCommand\("));
-        Assert.Single(Regex.Matches(fact, @"CommandTimeout = FactCommandTimeoutSeconds"));
-        Assert.Contains("context.ServerId, windowFloor, FactCommandTimeoutSeconds", fact, StringComparison.Ordinal);
-        Assert.Contains("new NpgsqlCommand(PlanRegressionDaily.BuiltDaysSql, connection)", builtDays, StringComparison.Ordinal);
+        /* Two commands: the snapshot transaction's SET TRANSACTION READ ONLY, and the read. Both carry the deadline. */
+        Assert.Equal(2, Regex.Matches(fact, @"new NpgsqlCommand\(").Count);
+        Assert.Equal(2, Regex.Matches(fact, @"CommandTimeout = FactCommandTimeoutSeconds").Count);
+        Assert.Contains("snapshot, context.ServerId, windowFloor, FactCommandTimeoutSeconds", fact, StringComparison.Ordinal);
+        Assert.Contains("new NpgsqlCommand(PlanRegressionDaily.BuiltDaysSql, connection, transaction)", builtDays, StringComparison.Ordinal);
         Assert.Single(Regex.Matches(builtDays, @"new NpgsqlCommand\("));
         Assert.Single(Regex.Matches(builtDays, @"CommandTimeout = commandTimeoutSeconds"));
 

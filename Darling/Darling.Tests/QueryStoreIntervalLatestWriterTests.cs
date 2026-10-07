@@ -492,9 +492,9 @@ GROUP BY database_name, query_id, plan_id, replica_role, runtime_stats_interval_
         Assert.Equal(12, await ScalarLongAsync(connection,
             "SELECT execution_count FROM collect.query_store_interval_latest WHERE server_id = " + OtherServerId.ToString(System.Globalization.CultureInfo.InvariantCulture), ct));
 
-        /* Recreate the table the rung's way (idempotent DDL), then a later steady batch drains the pending row, and the
+        /* Recreate the table the rung's way (idempotent DDL, the V168 rung), then a later steady batch drains the pending row, and the
            replayed late row marks its day. */
-        await ExecAsync(connection, PgMigrations.Scripts.Single(m => m.Version == 167).Sql, ct);
+        await ExecAsync(connection, PgMigrations.Scripts.Single(m => m.Version == 168).Sql, ct);
         await WriteAsync(runner, now.AddSeconds(10), context, ct, Row("qsA", 1, 11, 100, now.AddHours(-1), now.AddMinutes(-1), 14, 510));
 
         Assert.Equal(0, await ScalarLongAsync(connection, "SELECT COUNT(*) FROM collect.query_store_interval_latest_pending", ct));

@@ -77,10 +77,9 @@ public sealed class PlanRegressionDailyReadShapeLiveTests
         var expectedReturned = openDays.Count * RowsPerServerDay;
         Assert.Equal(Servers.Length * 17L * RowsPerServerDay, totalRows);
 
-        var plan = await ExplainAsync(connection, today, floor, ct);
-        /* The built-days CTE joins the coverage table, whose name contains this one: it is not the interval table. */
-        var live = ScansOf(plan, "query_store_interval_latest").Where(s => !s.Relation.Contains("_coverage", StringComparison.Ordinal)).ToList();
-        var daily = ScansOf(plan, "plan_regression_daily").Where(s => !s.Relation.Contains("_built", StringComparison.Ordinal)).ToList();
+        var plan = await ExplainAsync(connection, today, floor, builtDays, ct);
+        var live = ScansOf(plan, "query_store_interval_latest").ToList();
+        var daily = ScansOf(plan, "plan_regression_daily").ToList();
         Assert.NotEmpty(live);
         Assert.NotEmpty(daily);
 
@@ -108,8 +107,7 @@ public sealed class PlanRegressionDailyReadShapeLiveTests
            (a third of it is this server's), which the report above records; what must hold is that the unique index
            serves the branch, so that on a store with many servers the read touches this server's built days only. With
            sequential scans off the plan has to use ux_plan_regression_daily and read no more than one server's share. */
-        var indexed = ScansOf(await ExplainAsync(connection, today, floor, ct, noSeqScan: true), "plan_regression_daily")
-            .Where(s => !s.Relation.Contains("_built", StringComparison.Ordinal)).ToList();
+        var indexed = ScansOf(await ExplainAsync(connection, today, floor, builtDays, ct, noSeqScan: true), "plan_regression_daily").ToList();
         Assert.NotEmpty(indexed);
         Assert.DoesNotContain(indexed, s => s.NodeType == "Seq Scan");
         Assert.All(indexed, s => Assert.Equal("ux_plan_regression_daily", s.IndexName));
@@ -131,7 +129,8 @@ public sealed class PlanRegressionDailyReadShapeLiveTests
         await using var connection = new NpgsqlConnection(scratch.ConnectionString);
         await connection.OpenAsync(ct);
         await PgMigrations.MigrateAsync(connection, ct);
-        Assert.SkipUnless(await TimescaleSupport.TryEnableAsync(connection, null, ct), "TimescaleDB is not available on this cluster.");
+        var timescaleEnabled = await LiveTimescaleProbe.TryEnableAsync(scratch.ConnectionString, ct);
+        Assert.SkipWhen(!timescaleEnabled, "TimescaleDB is not available on this cluster.");
         await ExecAsync(connection, "SELECT _timescaledb_functions.stop_background_workers()", ct);
 
         /* A one-day chunk, so the 17 seeded days are 17 chunks and the floor's reach is countable. */
@@ -147,10 +146,8 @@ public sealed class PlanRegressionDailyReadShapeLiveTests
             "SELECT count(*) FROM timescaledb_information.chunks WHERE hypertable_schema = 'collect' AND hypertable_name = 'query_store_interval_latest'", ct);
         Assert.True(chunks >= 17, $"the seed made {chunks} chunk(s); the test needs the 17 days in separate chunks");
 
-        var plan = await ExplainAsync(connection, today, floor, ct);
-        /* The floor is a sub-select of the statement now, so the chunks are excluded while it runs, not while it is planned:
-           an excluded chunk stays in the plan as a node that never ran (zero loops). Only the chunks that ran count. */
-        var live = ScansOf(plan, "_hyper_").Where(s => s.Loops > 0).ToList();
+        var plan = await ExplainAsync(connection, today, floor, builtDays, ct);
+        var live = ScansOf(plan, "_hyper_").ToList();
         Assert.NotEmpty(live);
         var livePlan = live.Select(s => s.Relation).Distinct().ToList();
 
@@ -242,19 +239,21 @@ CROSS JOIN generate_series(1, 2) AS p", connection) { CommandTimeout = 120 };
 
     /// <summary>The executed plan of the daily read, bound the way the collector binds it, parallelism off for the session.</summary>
     private static async Task<JsonElement> ExplainAsync(
-        NpgsqlConnection connection, DateTime today, DateTime floor, CancellationToken ct, bool noSeqScan = false)
+        NpgsqlConnection connection, DateTime today, DateTime floor, List<DateOnly> builtDays, CancellationToken ct, bool noSeqScan = false)
     {
         await ExecAsync(connection, "SET max_parallel_workers_per_gather = 0", ct);
         await ExecAsync(connection, noSeqScan ? "SET enable_seqscan = off" : "RESET enable_seqscan", ct);
         await using var command = new NpgsqlCommand("EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) " + PgFactCollector.PlanRegressionDailySql, connection);
         command.Parameters.AddWithValue(ServerA);
         command.Parameters.AddWithValue(NpgsqlDbType.Timestamp, floor);
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Date, Value = builtDays.ToArray() });
+        command.Parameters.AddWithValue(NpgsqlDbType.Timestamp, PgFactCollector.PlanRegressionLiveFloor(floor, builtDays));
         command.Parameters.AddWithValue(NpgsqlDbType.Timestamp, floor.AddDays(-1));
         var json = (string)(await command.ExecuteScalarAsync(ct))!;
         return JsonDocument.Parse(json).RootElement[0].GetProperty("Plan").Clone();
     }
 
-    private readonly record struct Scan(string Relation, string NodeType, string? IndexName, double RowsRead, double RowsReturned, double Blocks, double Loops = 1);
+    private readonly record struct Scan(string Relation, string NodeType, string? IndexName, double RowsRead, double RowsReturned, double Blocks);
 
     /// <summary>
     /// Every scan of a relation whose name contains <paramref name="relationPart"/>, from the executed plan: rows read are
@@ -275,7 +274,7 @@ CROSS JOIN generate_series(1, 2) AS p", connection) { CommandTimeout = 120 };
             var index = node.TryGetProperty("Index Name", out var i) ? i.GetString() : null;
             /* A bitmap heap scan names the index only on its child; a seq scan has none. */
             index ??= ChildIndexName(node);
-            yield return new Scan(relation.GetString()!, node.GetProperty("Node Type").GetString()!, index, returned + removed, returned, blocks, loops);
+            yield return new Scan(relation.GetString()!, node.GetProperty("Node Type").GetString()!, index, returned + removed, returned, blocks);
         }
 
         if (node.TryGetProperty("Plans", out var plans))

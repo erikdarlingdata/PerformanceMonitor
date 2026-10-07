@@ -481,6 +481,7 @@ WHERE t.server_id = $1;";
     /// </summary>
     public static async Task<List<DateOnly>> ReadBuiltDaysAsync(
         NpgsqlConnection connection,
+        NpgsqlTransaction? transaction,
         int serverId,
         DateTime windowFloor,
         int commandTimeoutSeconds,
@@ -491,7 +492,7 @@ WHERE t.server_id = $1;";
         var days = new List<DateOnly>();
         try
         {
-            await using var cmd = new NpgsqlCommand(PlanRegressionDaily.BuiltDaysSql, connection) { CommandTimeout = commandTimeoutSeconds };
+            await using var cmd = new NpgsqlCommand(PlanRegressionDaily.BuiltDaysSql, connection, transaction) { CommandTimeout = commandTimeoutSeconds };
             cmd.Parameters.AddWithValue(serverId);
             cmd.Parameters.AddWithValue(NpgsqlDbType.Timestamp, windowFloor);
             await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);

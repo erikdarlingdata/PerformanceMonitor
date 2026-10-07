@@ -81,6 +81,104 @@ public sealed class PlanRegressionBuiltDaysFallbackLiveTests
         Assert.DoesNotContain("plan_regression", CollectionCaveats.Describe(fallback.CollectionFailures, fallback.CollectionFamilyCount), StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// The built-days read and the daily read share one REPEATABLE READ transaction (#5448). Between them, from another
+    /// connection, the day totals are deleted and committed: the daily read must still see the totals that made those days
+    /// built, so the fact equals the undisturbed one. At READ COMMITTED the second read would see no totals for days the
+    /// first called built, and the regression's cheap plan would vanish from both halves.
+    /// </summary>
+    [Fact]
+    public async Task ADailyTotalsChange_BetweenTheBuiltDaysReadAndTheDailyRead_IsNotSeenByTheDailyRead()
+    {
+        var baseCs = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #5448 snapshot test.");
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        var (periodStart, periodEnd) = await SeedAndBuildAsync(connection, ct);
+        await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        var control = NewContext(periodStart, periodEnd);
+        var controlFact = (await new PgFactCollector(postgres).CollectFactsAsync(control)).Single(f => f.Key == "PLAN_REGRESSION");
+        Assert.NotNull(control.PlanRegressionWindowStart);
+
+        var seamRan = false;
+        PgFactCollector.TestOnlyAfterBuiltDaysRead.Value = async token =>
+        {
+            seamRan = true;
+            await using var other = new NpgsqlCommand("DELETE FROM collect.plan_regression_daily WHERE server_id = $1", connection);
+            other.Parameters.AddWithValue(ServerId);
+            await other.ExecuteNonQueryAsync(token);
+        };
+        try
+        {
+            var disturbed = NewContext(periodStart, periodEnd);
+            var disturbedFact = (await new PgFactCollector(postgres).CollectFactsAsync(disturbed)).Single(f => f.Key == "PLAN_REGRESSION");
+
+            Assert.True(seamRan);
+            Assert.NotNull(disturbed.PlanRegressionWindowStart);
+            Assert.Equal(controlFact.Value, disturbedFact.Value);
+            Assert.Equal(controlFact.Metadata["offender_count"], disturbedFact.Metadata["offender_count"]);
+        }
+        finally
+        {
+            PgFactCollector.TestOnlyAfterBuiltDaysRead.Value = null;
+        }
+    }
+
+    /// <summary>
+    /// A late row marks its day (#5448): T-14, the window's first day, is built; a real late insert (the trigger is on) with
+    /// a first execution in it takes that day and the next one out of the built days, so the fact reads them live, and it
+    /// still finds the regression.
+    /// </summary>
+    [Fact]
+    public async Task ADayMarkedByALateRow_DropsOutOfTheBuiltDays_AndIsReadLive()
+    {
+        var baseCs = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #5448 late-row test.");
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        var (periodStart, periodEnd) = await SeedAndBuildAsync(connection, ct);
+        await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        var windowFloor = PgFactCollector.PlanRegressionWindowFloor(periodStart.AddDays(-PgFactCollector.PlanRegressionWindowDays));
+        var markedDay = DateOnly.FromDateTime(windowFloor);
+        var before = await BuiltDaysAsync(connection, windowFloor, ct);
+        Assert.Contains(markedDay, before);
+        Assert.Contains(markedDay.AddDays(1), before);
+
+        await InsertIntervalAsync(connection, queryId: 3, planId: 31, "0xLATE", cpuUs: 5000, execs: 10, firstExec: windowFloor.AddHours(10), ct);
+
+        var after = await BuiltDaysAsync(connection, windowFloor, ct);
+        Assert.DoesNotContain(markedDay, after);
+        Assert.DoesNotContain(markedDay.AddDays(1), after);
+        Assert.Equal(before.Count - 2, after.Count);
+
+        var pass = NewContext(periodStart, periodEnd);
+        var fact = (await new PgFactCollector(postgres).CollectFactsAsync(pass)).Single(f => f.Key == "PLAN_REGRESSION");
+        Assert.NotNull(pass.PlanRegressionWindowStart);
+        Assert.Empty(PlanRegressionFailures(pass));
+        Assert.True(fact.Value > 1);
+    }
+
+    private static async Task<List<DateOnly>> BuiltDaysAsync(NpgsqlConnection connection, DateTime windowFloor, CancellationToken ct)
+    {
+        var days = new List<DateOnly>();
+        await using var cmd = new NpgsqlCommand(PlanRegressionDaily.BuiltDaysSql, connection);
+        cmd.Parameters.AddWithValue(ServerId);
+        cmd.Parameters.AddWithValue(NpgsqlDbType.Timestamp, windowFloor);
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct)) days.Add(reader.GetFieldValue<DateOnly>(0));
+        return days;
+    }
+
     [Fact]
     public async Task WhenBothReadsFail_TheExactReadsFailureIsTheOneRecorded_Once()
     {

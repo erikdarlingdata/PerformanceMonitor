@@ -220,6 +220,11 @@ public sealed class PlanRegressionDailyRungTests
         Assert.Contains("WHERE v.fresh", function, StringComparison.Ordinal);
         Assert.Matches(@"set_config\('darling\.plan_regression_marked',[^;]*, true\);", function);
         Assert.DoesNotContain(", false)", function, StringComparison.Ordinal);
+
+        /* First executions run T-17 through T-2, and the day after each is marked too: at most 17 pairs per server. The
+           function body (comment included) is stored in pg_proc.prosrc, so the number it states has to be the true one. */
+        Assert.Matches(@"keeps the list to at most\s+17 pairs per server", Rung.Sql);
+        Assert.DoesNotContain("19 pairs", Rung.Sql, StringComparison.Ordinal);
     }
 
     [Fact]

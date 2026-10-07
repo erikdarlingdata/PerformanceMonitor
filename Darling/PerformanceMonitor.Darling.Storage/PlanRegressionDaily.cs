@@ -160,13 +160,14 @@ AND   day = $2::date;";
 SELECT pg_try_advisory_xact_lock(hashtextextended('plan_regression_daily:' || $1::integer::text, 0));";
 
     /// <summary>
-    /// The built days of one server that the PLAN_REGRESSION read may take its totals from (#5448), as a bare
-    /// <c>SELECT</c> so the read's own statement embeds the very same text as a CTE. $1 server_id, $2 M (the window's
-    /// day-aligned start). A day is valid when its build saw every late row (<c>built_seq = late_seq</c>) and the interval
-    /// table's coverage claim reaches the whole day, which is <c>day &gt;= filled_since::date + 1</c>: the first day after
-    /// the one <c>filled_since</c> falls in, because that day may be only partly covered.
+    /// The built days of one server that the PLAN_REGRESSION read may take its totals from (#5448). $1 server_id, $2 M (the
+    /// window's day-aligned start). A day is valid when its build saw every late row (<c>built_seq = late_seq</c>) and the
+    /// interval table's coverage claim reaches the whole day, which is <c>day &gt;= filled_since::date + 1</c>: the first day
+    /// after the one <c>filled_since</c> falls in, because that day may be only partly covered. The fact runs this first, in
+    /// the same REPEATABLE READ transaction as the daily read, so both see one snapshot of the built days and of the totals;
+    /// an empty or failed answer sends the read to the exact-bound statement unchanged.
     /// </summary>
-    public const string BuiltDaysSelect = @"
+    public const string BuiltDaysSql = @"
 SELECT b.day
 FROM collect.plan_regression_daily_built AS b
 JOIN collect.query_store_interval_latest_coverage AS c
@@ -174,11 +175,7 @@ JOIN collect.query_store_interval_latest_coverage AS c
 WHERE b.server_id = $1::integer
 AND   b.day >= $2::date
 AND   b.built_seq = b.late_seq
-AND   b.day >= c.filled_since::date + 1";
-
-    /// <summary><see cref="BuiltDaysSelect"/>, ordered, for the read that chooses which statement the fact runs. A failed or
-    /// empty answer sends the read to the exact-bound statement unchanged.</summary>
-    public const string BuiltDaysSql = BuiltDaysSelect + @"
+AND   b.day >= c.filled_since::date + 1
 ORDER BY b.day;";
 
     /// <summary>

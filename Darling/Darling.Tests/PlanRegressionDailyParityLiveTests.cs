@@ -277,12 +277,15 @@ public sealed class PlanRegressionDailyParityLiveTests
         return days;
     }
 
-    private static async Task<List<string>> DailyRowsAsync(NpgsqlConnection connection, CancellationToken ct)
+    private static async Task<List<string>> DailyRowsAsync(NpgsqlConnection connection, CancellationToken ct, List<DateOnly>? days = null)
     {
+        days ??= await BuiltDaysAsync(connection, ct);
         var floor = PgFactCollector.PlanRegressionWindowFloor(WindowStart);
         await using var command = new NpgsqlCommand(PgFactCollector.PlanRegressionDailySql, connection);
         command.Parameters.AddWithValue(ServerId);
         command.Parameters.AddWithValue(NpgsqlDbType.Timestamp, floor);
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Date, Value = days.ToArray() });
+        command.Parameters.AddWithValue(NpgsqlDbType.Timestamp, PgFactCollector.PlanRegressionLiveFloor(floor, days));
         command.Parameters.AddWithValue(NpgsqlDbType.Timestamp, floor.AddDays(-1));
         return await RowsAsync(command, ct);
     }

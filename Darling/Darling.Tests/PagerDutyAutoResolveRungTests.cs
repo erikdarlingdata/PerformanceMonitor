@@ -141,7 +141,7 @@ public sealed class PagerDutyAutoResolveRungTests
         var v165 = viewer.IndexOf("if (hasPasswordKey)", StringComparison.Ordinal);
         Assert.True(v166 >= 0, "the viewer has no V166 sentinel arm — a fully-migrated store would map to 165");
         Assert.True(v165 >= 0, "the V165 arm is gone, so this pin is comparing against nothing");
-        Assert.True(v166 < v165, "the V166 arm sits above V165's, so a store that stopped at V166 maps one rung low");
+        Assert.True(v166 < v165, "the V166 arm sits below V165's, so a store that stopped at V166 maps one rung low");
         Assert.Contains(
             "return " + RungVersion.ToString(CultureInfo.InvariantCulture) + ";",
             viewer[v166..v165], StringComparison.Ordinal);

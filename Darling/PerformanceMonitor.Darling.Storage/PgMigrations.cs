@@ -782,8 +782,8 @@ AS $f$
    the builder reads late_seq before it aggregates, and the batch's rows commit together with the bump. The pairs
    already bumped are kept in a transaction-local setting (set_config(.., true)), which a rolled-back savepoint undoes
    together with the bump it recorded, and which the function's own SET search_path does not touch. Each key is
-   server_id:day-number between commas, so one lookup is a substring test; the 17-day clamp keeps the list to about
-   19 pairs per server. After a commit the setting reads back as an empty string, not NULL. */
+   server_id:day-number between commas, so one lookup is a substring test; the 17-day clamp keeps the list to at most
+   17 pairs per server. After a commit the setting reads back as an empty string, not NULL. */
 DECLARE
     d integer := NEW.first_execution_time::date - DATE '2000-01-01';
     marked text := coalesce(nullif(current_setting('darling.plan_regression_marked', true), ''), ',');
