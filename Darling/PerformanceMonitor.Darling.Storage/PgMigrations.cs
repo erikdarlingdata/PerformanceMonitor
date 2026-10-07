@@ -701,6 +701,121 @@ ALTER TABLE config.config_notification
     /// </summary>
     private const string V167Sql = LegacyPinCandidateTables.CreateSql + "\n\n" + LegacyPinCandidateTables.CaptureSql;
 
+    /// <summary>
+    /// V168 (#5448) — <c>collect.plan_regression_daily</c> and <c>collect.plan_regression_daily_built</c>: the per-day
+    /// per-plan totals PLAN_REGRESSION reads for CLOSED days instead of re-aggregating 14 days of
+    /// <c>collect.query_store_interval_latest</c> on every run, plus the trigger that marks a day stale when a late row
+    /// lands in it.
+    ///
+    /// <para><b>Totals, not averages.</b> A day's row holds the plan's execution count and the SUMS of
+    /// <c>avg_cpu_time_us * execution_count</c> and <c>avg_duration_us * execution_count</c>, which is what the read's
+    /// <c>plan_agg</c> step computes before it divides, so summing days and then dividing returns the same per-exec cost
+    /// as the single 14-day aggregate. Row day is the day of <c>last_execution_time</c> (naive UTC), the column the
+    /// read's window filters on. <c>query_plan_hash</c> is part of the unique key (the read's <c>any_value</c> picks one
+    /// hash per plan, and a day's rows keep each one), and the index is <c>NULLS NOT DISTINCT</c> because
+    /// <c>database_name</c>, <c>replica_role</c> and the others are NULL for some rows.</para>
+    ///
+    /// <para><b>The built table is the validity record.</b> <c>late_seq</c> counts the transactions that landed a late
+    /// row on a day (the trigger bumps a (server, day) once per transaction, not once per row, because a whole apply
+    /// is one transaction and tens of thousands of bumps of the same tuple inside it cost quadratic time), and
+    /// <c>built_seq</c> is the value the builder read BEFORE it aggregated: a day is valid only while the two
+    /// are equal, so a late row that lands after the build (even one that races it) leaves the day invalid and the
+    /// builder rebuilds it. The trigger marks the day of <c>first_execution_time</c> and the day after it, because
+    /// <c>last_execution_time</c> (the row's day) can cross midnight. It fires only for rows whose first execution is
+    /// at least a day old and no earlier than the start of the day 17 days back (a whole-day edge, so every day the
+    /// hourly cleanup still keeps can be marked): today and yesterday are always read live, and a row older than that
+    /// can never be read. The <c>WHEN</c> condition reads <c>NEW</c> only, because PostgreSQL does
+    /// not allow a subquery there.</para>
+    ///
+    /// <para><b>Plain tables, SECURITY INVOKER function, no GRANT</b>: the builder deletes and re-inserts whole days,
+    /// which a compressed hypertable chunk would not allow; the trigger function runs with the writer's own
+    /// privileges and pins <c>search_path</c> to <c>pg_catalog, pg_temp</c>, so it names every object schema-qualified;
+    /// and the <c>collect</c> schema's blanket <c>GRANT SELECT ON ALL TABLES</c> covers a table a migration introduces.
+    /// Every statement is idempotent, so a second run changes nothing. No index on
+    /// <c>query_store_interval_latest</c> is added here: V153's index on <c>first_execution_time</c> serves the per-day
+    /// builds, whose predicate bounds that column.</para>
+    /// </summary>
+    private const string V168Sql = @"
+/* V168 (#5448): per-day per-plan totals for PLAN_REGRESSION's closed days, and the trigger that marks a day stale when
+   a late row lands in it. Naive UTC throughout. The builder (the service) owns every write to the first table; the
+   function writes only plan_regression_daily_built, the rung's own bookkeeping table. */
+CREATE TABLE IF NOT EXISTS collect.plan_regression_daily
+(
+    server_id integer NOT NULL,
+    day date NOT NULL,
+    database_name text,
+    query_id bigint,
+    plan_id bigint,
+    replica_role text,
+    query_plan_hash text,
+    execs numeric,
+    cpu_us_sum numeric,
+    dur_us_sum numeric,
+    last_exec timestamp,
+    is_forced_plan boolean,
+    force_failure_count bigint
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS ux_plan_regression_daily
+ON collect.plan_regression_daily (server_id, day, database_name, query_id, plan_id, replica_role, query_plan_hash)
+NULLS NOT DISTINCT;
+
+CREATE TABLE IF NOT EXISTS collect.plan_regression_daily_built
+(
+    server_id integer NOT NULL,
+    day date NOT NULL,
+    late_seq bigint NOT NULL DEFAULT 0,
+    built_seq bigint,
+    built_at timestamp,
+    source_rows bigint,
+    CONSTRAINT pk_plan_regression_daily_built PRIMARY KEY (server_id, day)
+);
+
+CREATE OR REPLACE FUNCTION collect.plan_regression_daily_mark_late() RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog, pg_temp
+AS $f$
+/* A (server, day) is bumped at most once per transaction. The apply is one statement, so tens of
+   thousands of late rows would otherwise run ON CONFLICT DO UPDATE on the same one or two built rows, and each update
+   leaves another version of that tuple inside the one transaction: every conflict check after it walks the whole chain
+   (166 buffers at 30,000 versions against 4 on a fresh row), and the batch grows quadratically. One bump is enough:
+   the builder reads late_seq before it aggregates, and the batch's rows commit together with the bump. The pairs
+   already bumped are kept in a transaction-local setting (set_config(.., true)), which a rolled-back savepoint undoes
+   together with the bump it recorded, and which the function's own SET search_path does not touch. Each key is
+   server_id:day-number between commas, so one lookup is a substring test; the 17-day clamp keeps the list to at most
+   17 pairs per server. After a commit the setting reads back as an empty string, not NULL. */
+DECLARE
+    d integer := NEW.first_execution_time::date - DATE '2000-01-01';
+    marked text := coalesce(nullif(current_setting('darling.plan_regression_marked', true), ''), ',');
+    k0 text := ',' || NEW.server_id || ':' || d || ',';
+    k1 text := ',' || NEW.server_id || ':' || (d + 1) || ',';
+    new0 boolean := position(k0 in marked) = 0;
+    new1 boolean := position(k1 in marked) = 0;
+BEGIN
+    IF NOT (new0 OR new1) THEN
+        RETURN NULL;
+    END IF;
+
+    INSERT INTO collect.plan_regression_daily_built AS b (server_id, day, late_seq)
+    SELECT NEW.server_id, v.d, 1
+    FROM (VALUES (NEW.first_execution_time::date, new0), (NEW.first_execution_time::date + 1, new1)) AS v (d, fresh)
+    WHERE v.fresh
+    ON CONFLICT (server_id, day) DO UPDATE SET late_seq = b.late_seq + 1;
+
+    PERFORM set_config('darling.plan_regression_marked',
+        marked || CASE WHEN new0 THEN substr(k0, 2) ELSE '' END || CASE WHEN new1 THEN substr(k1, 2) ELSE '' END, true);
+    RETURN NULL;
+END
+$f$;
+
+DROP TRIGGER IF EXISTS trg_plan_regression_daily_late ON collect.query_store_interval_latest;
+CREATE TRIGGER trg_plan_regression_daily_late
+    AFTER INSERT OR UPDATE ON collect.query_store_interval_latest
+    FOR EACH ROW
+    WHEN (NEW.first_execution_time < date_trunc('day', now() AT TIME ZONE 'UTC') - interval '1 day'
+          AND NEW.first_execution_time >= date_trunc('day', now() AT TIME ZONE 'UTC') - interval '17 days')
+    EXECUTE FUNCTION collect.plan_regression_daily_mark_late();";
+
     public static IReadOnlyList<Migration> Scripts { get; } = new[]
     {
         new Migration(1, "collector-tables", PgSchemaGenerator.GenerateFullSchema()),
@@ -906,6 +1021,7 @@ ALTER TABLE config.config_notification
         new Migration(165, "password-key", V165Sql),
         new Migration(166, "pagerduty-auto-resolve", V166Sql),
         new Migration(167, "legacy-pin-candidates", V167Sql),
+        new Migration(168, "plan-regression-daily", V168Sql),
     };
 
     /// <summary>

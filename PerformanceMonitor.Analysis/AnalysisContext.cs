@@ -241,6 +241,14 @@ public class AnalysisContext
     public bool? PlanRegressionReadsIntervalTable { get; set; }
 
     /// <summary>
+    /// The window start the PLAN_REGRESSION fact actually read from (#5448), when it read per-day totals: the start of the
+    /// day the exact 14-day edge falls in, because the daily read moves the edge in whole days. Null when the fact read the
+    /// exact edge (raw, the interval table without day totals, or no fact), which is also what a drill-down without a fact
+    /// pass uses. The regressed-queries drill-down starts its window here when set, so its best plan is one the fact saw.
+    /// </summary>
+    public DateTime? PlanRegressionWindowStart { get; set; }
+
+    /// <summary>
     /// Records one failed read. <paramref name="family"/> is the family label the caveat counts by
     /// (<see cref="CollectionFailure.FamilyOf"/> from the collect method's name on the SQL Server collectors,
     /// <see cref="CollectionFailure.FamilyOfFile"/> from the partial file on the PostgreSQL-target one, whose
