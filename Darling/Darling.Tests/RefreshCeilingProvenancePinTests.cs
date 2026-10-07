@@ -561,11 +561,13 @@ public sealed class RefreshCeilingProvenancePinTests
            the grid, reducing LightHourlyRefreshCount to 12. The 3 successors that remain unmeasured are still
            argued by shape, but covered == total (12 == 12) so the scope sentence was deleted from the doc. The
            pin retires with the sentence: covered == total was the exit condition the comment named. */
-        /* RETIRED: yield return (
+        /* RE-ENABLED at #5329: the two io hourlies were registered after the census read, so the census covers
+           12 of the 14 light views and the scope sentence is back, with this pin. */
+        yield return (
             "the light views the census covers and the ones registered after it",
             LightCeilingDeclaration,
             @"it covers ([0-9]+) of the ([0-9]+) light views the constant now bounds; the ([0-9]+) registered after the read are unmeasured",
-            true); */
+            true);
 
         /* The exclusion CONTROL, which is what says the succeeded/finish filter is not selecting the
            population: both figures are the same number, and that number is the census count. A filter that
@@ -1924,10 +1926,21 @@ public sealed class RefreshCeilingProvenancePinTests
             + "the maximum, so one of the two is wrong");
         /* A6: census now covers the full grid (covered == LightHourlyRefreshCount), so the view count in
            the census sentence is directly pinned here instead of via the scope sentence. */
-        Require(lightCensus[3] == TimescaleSupport.LightHourlyRefreshCount,
-            $"the census sentence says it covers {lightCensus[3]} views against the "
-            + $"{TimescaleSupport.LightHourlyRefreshCount} non-heaviest hourly policies the product registers — "
-            + "the census covers the full grid; if a new view was added after the census re-read it");
+        /* #5329: the census was read over twelve light views and the product now registers fourteen. The scope
+           sentence accounts for the difference: covered is the census's own count, total is the product's, and
+           unmeasured is the remainder the shape argument in the prose is made for. A census re-read over the
+           full layout states covered == total and unmeasured == 0, and retires the sentence again. */
+        var scope = Read("the light views the census covers and the ones registered after it");
+        Require(scope[0] == lightCensus[3],
+            $"the scope sentence says it covers {scope[0]} light views but the census sentence read {lightCensus[3]}");
+        Require(scope[1] == TimescaleSupport.LightHourlyRefreshCount,
+            $"the scope sentence says the constant bounds {scope[1]} light views against the "
+            + $"{TimescaleSupport.LightHourlyRefreshCount} non-heaviest hourly policies the product registers");
+        Require(scope[2] == TimescaleSupport.LightHourlyRefreshCount - lightCensus[3],
+            $"the scope sentence says {scope[2]} views are unmeasured; the product registers "
+            + $"{TimescaleSupport.LightHourlyRefreshCount} against a census of {lightCensus[3]}");
+        Require(lightCensus[3] + scope[2] == TimescaleSupport.LightHourlyRefreshCount,
+            "covered plus unmeasured does not equal the product's light-policy count");
         /* #3653 (Q12): the census was read over twelve light views and the product registers fifteen. The
            scope sentence has to account for every one of the difference by name-of-count — covered plus
            unmeasured equals the light-policy count, the covered count is the census's own, and the

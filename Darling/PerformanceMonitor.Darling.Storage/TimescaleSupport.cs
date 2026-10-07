@@ -1624,6 +1624,16 @@ $do$";
         (CreateQueryStatsIntervalHourlySql,       QueryStatsIntervalHourlyView),
         (CreateProcedureStatsIntervalHourlySql,   ProcedureStatsIntervalHourlyView),
         (CreateQueryStatsDbIntervalHourlySql,     QueryStatsDbIntervalHourlyView),
+        /* The two hourly rollups that CARRY LOGICAL READS (#5329), appended after the interval pair they copy.
+           The query one groups by statement (query_hash, sql_handle), so it is an UNBOUNDED-cardinality refresh
+           like its sibling; the procedure one has no per-statement column and is deployment-bounded. The
+           phase grid RE-DERIVES from this list (LightHourlyRefreshCount 12 -> 14 and the rest, see
+           RefreshCeilingProvenancePinTests), and because the compression band is keyed on registry position,
+           APPENDING here moves the compression hour of every DAILY and BASELINE member after these by +2:
+           ConvergeCompressionScheduleAsync re-phases them on an existing store (the same proven path as every
+           earlier registration; TimescaleAggregateCompressionTests pins the re-phase). The band is 22 of 23. */
+        (CreateQueryStatsIoHourlySql,             QueryStatsIoHourlyView),
+        (CreateProcedureStatsIoHourlySql,         ProcedureStatsIoHourlyView),
     };
 
     /// <summary>
@@ -2041,6 +2051,16 @@ $do$";
     /// <see cref="QueryStatsDbHourlyView"/>, carrying the same I/O sums FinOps reads.</summary>
     public const string QueryStatsDbIntervalHourlyView = "query_stats_db_interval_hourly";
 
+    /// <summary>The per-query hourly rollup that CARRIES LOGICAL READS (#5329): <see cref="QueryStatsIntervalHourlyView"/>'s
+    /// text, every column, plus the three I/O sums the database-grain rollup carries. Named "io" for them.
+    /// HOURLY ONLY, on purpose: the daily tier is not read for a Top Queries ranking, and a daily would take the
+    /// compression band to 24 of 23 (see <see cref="AggregateCompressionBandFirstHour"/>); see
+    /// <see cref="CreateQueryStatsIoHourlySql"/>.</summary>
+    public const string QueryStatsIoHourlyView = "query_stats_io_hourly";
+
+    /// <summary><see cref="QueryStatsIoHourlyView"/>'s procedure_stats sibling (#5329).</summary>
+    public const string ProcedureStatsIoHourlyView = "procedure_stats_io_hourly";
+
     /// <summary>The INTERVAL-HONEST successor DAILY of <see cref="QueryStatsDailyView"/> (#3653, A6) —
     /// hierarchical from <see cref="QueryStatsIntervalHourlyView"/>, not from the legacy hourly its sibling
     /// reads. Named distinctly from <see cref="QueryStoreStatsIntervalDailyView"/> ("query_store_..." vs
@@ -2291,6 +2311,78 @@ SELECT
     max(delta_execution_count) AS execution_count_max,
     sum(sample_interval_seconds) AS sample_interval_seconds_sum,
     count(*) AS sample_count
+FROM collect.procedure_stats
+WHERE sample_interval_seconds IS DISTINCT FROM 0
+GROUP BY server_id, server_name, database_name, schema_name, object_name, bucket
+WITH NO DATA";
+
+    /// <summary>
+    /// The per-query hourly rollup that keeps LOGICAL READS (#5329): <see cref="CreateQueryStatsIntervalHourlySql"/>'s
+    /// text (same dimensions, same <c>WHERE sample_interval_seconds IS DISTINCT FROM 0</c>, every column) plus
+    /// <c>logical_reads_sum</c>, <c>physical_reads_sum</c> and <c>logical_writes_sum</c>, named as the database-grain
+    /// rollup names them (<see cref="CreateQueryStatsDbIntervalHourlySql"/>).
+    ///
+    /// <para><b>Why a new aggregate rather than a new column.</b> A continuous aggregate's query cannot take a
+    /// new column (#1661, see <see cref="CreateQueryStatsDbIntervalHourlySql"/>); a DROP + recreate would refill
+    /// from a few days of raw and destroy the 90-day hourly. So the interval pair stays exactly as it is and this
+    /// is a SIBLING, <c>WITH NO DATA</c>, created by the ensure sweep like the others (no PgMigrations rung:
+    /// existence is the gate). A reads ranking reads it once it reaches the window's start; before that, raw.
+    /// HOURLY ONLY (see <see cref="QueryStatsIoHourlyView"/>).</para>
+    /// </summary>
+    public const string CreateQueryStatsIoHourlySql = @"CREATE MATERIALIZED VIEW IF NOT EXISTS collect.query_stats_io_hourly
+WITH (timescaledb.continuous) AS
+SELECT
+    server_id,
+    server_name,
+    database_name,
+    query_hash,
+    sql_handle,
+    time_bucket('1 hour', collection_time) AS bucket,
+    sum(delta_worker_time) AS worker_time_sum,
+    min(delta_worker_time) AS worker_time_min,
+    max(delta_worker_time) AS worker_time_max,
+    sum(delta_elapsed_time) AS elapsed_time_sum,
+    min(delta_elapsed_time) AS elapsed_time_min,
+    max(delta_elapsed_time) AS elapsed_time_max,
+    sum(delta_execution_count) AS execution_count_sum,
+    min(delta_execution_count) AS execution_count_min,
+    max(delta_execution_count) AS execution_count_max,
+    sum(sample_interval_seconds) AS sample_interval_seconds_sum,
+    count(*) AS sample_count,
+    sum(delta_logical_reads) AS logical_reads_sum,
+    sum(delta_physical_reads) AS physical_reads_sum,
+    sum(delta_logical_writes) AS logical_writes_sum
+FROM collect.query_stats
+WHERE sample_interval_seconds IS DISTINCT FROM 0
+GROUP BY server_id, server_name, database_name, query_hash, sql_handle, bucket
+WITH NO DATA";
+
+    /// <summary><see cref="CreateQueryStatsIoHourlySql"/>'s procedure_stats sibling (#5329):
+    /// <see cref="CreateProcedureStatsIntervalHourlySql"/>'s text plus the three I/O sums. No per-statement
+    /// column, so it is deployment-bounded (the sub-3 s refresh class).</summary>
+    public const string CreateProcedureStatsIoHourlySql = @"CREATE MATERIALIZED VIEW IF NOT EXISTS collect.procedure_stats_io_hourly
+WITH (timescaledb.continuous) AS
+SELECT
+    server_id,
+    server_name,
+    database_name,
+    schema_name,
+    object_name,
+    time_bucket('1 hour', collection_time) AS bucket,
+    sum(delta_worker_time) AS worker_time_sum,
+    min(delta_worker_time) AS worker_time_min,
+    max(delta_worker_time) AS worker_time_max,
+    sum(delta_elapsed_time) AS elapsed_time_sum,
+    min(delta_elapsed_time) AS elapsed_time_min,
+    max(delta_elapsed_time) AS elapsed_time_max,
+    sum(delta_execution_count) AS execution_count_sum,
+    min(delta_execution_count) AS execution_count_min,
+    max(delta_execution_count) AS execution_count_max,
+    sum(sample_interval_seconds) AS sample_interval_seconds_sum,
+    count(*) AS sample_count,
+    sum(delta_logical_reads) AS logical_reads_sum,
+    sum(delta_physical_reads) AS physical_reads_sum,
+    sum(delta_logical_writes) AS logical_writes_sum
 FROM collect.procedure_stats
 WHERE sample_interval_seconds IS DISTINCT FROM 0
 GROUP BY server_id, server_name, database_name, schema_name, object_name, bucket
@@ -3989,9 +4081,10 @@ WITH NO DATA";
     ///
     /// <para><b>So: the small-residual reading is conditional on how long this job runs, and what
     /// invalidates it is that runtime approaching <see cref="RefreshPhaseSlotSeconds"/>.</b> At 896 s
-    /// against a 1260-second slot the margin is 364 seconds — the clearance the population above carries, a
-    /// property of that closed record rather than of current load (it was 184 s against #3653's 1,080 s slot;
-    /// the A6 freeze re-derived the window back to 21 minutes); the heaviest
+    /// against a 1140-second slot the margin is 244 seconds — the clearance the population above carries, a
+    /// property of that closed record rather than of current load (it was 364 s against the 1,260 s slot of
+    /// the A6 freeze, and 184 s against #3653's 1,080 s one; #5329's two io hourlies re-derived the window to
+    /// 19 minutes); the heaviest
     /// slot is excluded WHOLE rather than guarded on the guard band being shorter than the refresh rather
     /// than on the refresh filling the slot (see <see cref="CompressionPhaseMinutes"/>). A value at or past
     /// the slot width is asserted as a failure rather than accommodated: past that point the refresh runs
@@ -4000,10 +4093,10 @@ WITH NO DATA";
     /// <para><b>THE LIVE ENVELOPE, which the census has now COLLAPSED onto that clearance rather than
     /// leaving beside it (#3119, #3166).</b> Over <c>2026-09-07</c> — one closed day, its 24 runs read from
     /// <c>timescaledb_information.job_history</c> at one row per run — this job's maximum was
-    /// <b>896.1 s</b>. That leaves <b>363.9 s</b> of the slot, <b>28.8%</b> of it, and sits <b>153.9 s</b>
+    /// <b>896.1 s</b>. That leaves <b>243.9 s</b> of the slot, <b>21.3%</b> of it, and sits <b>53.9 s</b>
     /// BELOW <see cref="RefreshSlotWarningSeconds"/>, which <see cref="ClassifyRefreshSlotHeadroom"/> bands
-    /// <see cref="RefreshSlotHeadroom.InsideSlot"/> — by 153.9 s, at the A6 freeze's re-derived 1,260 s window
-    /// (183.9 s, 17.0% and 3.9 s against #3653's 1,080 s). #3119 had to state these figures apart from the
+    /// <see cref="RefreshSlotHeadroom.InsideSlot"/> — by 53.9 s, at #5329's re-derived 1,140 s window
+    /// (153.9 s and 28.8% at the A6 freeze's 1,260 s window; 3.9 s against #3653's 1,080 s). #3119 had to state these figures apart from the
     /// clearance because the constant was the maximum of a SAMPLE and the census exceeded it. They agree to
     /// the second — and that agreement is a COINCIDENCE ABOUT WHERE ONE RUN LANDED rather than an identity
     /// of populations (#3182). This day's runs are a SUBSET of the population above, not the whole of it:
@@ -4100,8 +4193,8 @@ WITH NO DATA";
 
     /// <summary>
     /// The line at which the heaviest hourly refresh's LIVE runtime is worth a warning — five sixths of
-    /// <see cref="RefreshPhaseSlotSeconds"/>, so 900 s against today's 1,080 s window (1,050 s against
-    /// #3174's 1,260 s, before #3653's three hourly successors re-derived it).
+    /// <see cref="RefreshPhaseSlotSeconds"/>, so 950 s against today's 1,140 s window (1,050 s against
+    /// the 1,260 s of #3174 and #3653's A6 freeze, before #5329's two io hourlies re-derived it).
     ///
     /// <para><b>Why this exists at all, which is the whole of #3044.</b> The assertion on
     /// <see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/> bounds a CONSTANT, and the thing it bounds is
@@ -4116,7 +4209,7 @@ WITH NO DATA";
     /// 293 s — 26.6% to 47.1% of the window — so a line at 83.3% leaves the peak of THAT set more than a
     /// third of the window below it, which is what keeps it off the load those five represent. And it must
     /// leave usable lead
-    /// time: the remaining sixth is 210 s here, while the walk that carries this job through the hour advances
+    /// time: the remaining sixth is 190 s here, while the walk that carries this job through the hour advances
     /// by its own runtime each cycle (see the finish-to-start note on
     /// <see cref="SetCompressionSchedulePhaseSql"/>), so the warning lands while the job still finishes inside
     /// its slot and the grid's stated precondition is still TRUE.</para>
@@ -4124,16 +4217,17 @@ WITH NO DATA";
     /// <para><b>The alternative, and the reason it is rejected — which #3174 had to RE-TAKE rather than
     /// restate, because the old reason stopped being true — and which #3653 re-took once more, because it
     /// came back.</b> The alternative that tempts here is the slot less one
-    /// <see cref="CompressionPhaseGuardMinutes"/> band, 1020 s, and it sits ABOVE
-    /// <see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/> at #3653's A6 freeze's 21-minute window, as it
-    /// did NOT under #3653's 18-minute window (840 s) and did at #3174's 21-minute window (1,020 s). Above the ceiling was
+    /// <see cref="CompressionPhaseGuardMinutes"/> band, 900 s, and it sits ABOVE
+    /// <see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/> at #5329's 19-minute window, as it did NOT
+    /// under #3653's 18-minute window (840 s) and did at the 21-minute window of #3174 and the A6 freeze
+    /// (1,020 s). Above the ceiling was
     /// whole of its original rejection, since a line under the recorded ceiling warns on the very run the
     /// compression grid is sized against; #3174's re-derivation took that argument away by shrinking the
     /// guard band from half a uniform slot to the light refreshes' own ceiling, leaving both lines clear of
     /// the ceiling and 30 s apart, so the ordering no longer discriminated and lead time argued mildly FOR
     /// the lower one. What rejected it then, and still rejects it whichever way the ordering falls, is
     /// COUPLING, a property the old geometry could not have exposed: the guard band
-    /// is a DECLARED width for the FIFTEEN OTHER refresh policies, so the alternative would make the
+    /// is a DECLARED width for the FOURTEEN OTHER refresh policies, so the alternative would make the
     /// heaviest refresh's watch line move whenever the light class's width was re-declared. While that width
     /// was <c>ceil(OtherHourlyRefreshObservedCeilingSeconds / 60)</c> the coupling was worse still — the
     /// line would have moved whenever a light refresh got slower — and #3188's inversion narrows the
@@ -4146,8 +4240,9 @@ WITH NO DATA";
     /// what makes a crossing mean something.</b> The census re-derivation (#3166) put that constant at
     /// <b>896 s</b>, which INVERTED the ordering against the 750 s line a 15-minute slot produced — and
     /// restoring it is one of the two things the re-derived grid is for. Against the window the hour can
-    /// spare, this line is 1,050 s and the ceiling is 154 s below it (#3653's 18-minute window had it at 900 s
-    /// and 4 s; #3653's A6 freeze restored #3174's 21-minute window), so a
+    /// spare, this line is 950 s and the ceiling is 54 s below it (#3653's 18-minute window had it at 900 s
+    /// and 4 s; #3653's A6 freeze restored #3174's 21-minute window, 1,050 s and 154 s; #5329's two io
+    /// hourlies took it to the 19-minute window), so a
     /// reading in this band is again past the whole of the record the compression grid is sized against: a
     /// different signal calling for a different response, rather than a restatement of the grid's own
     /// sizing. <b>The relationship is what is pinned, not the two numbers</b> — a ceiling that rose past
@@ -4157,9 +4252,9 @@ WITH NO DATA";
     /// that changes anything — and at four seconds of margin the next re-derivation has no geometry left to
     /// give and has to take a member OFF the grid or a minute off the compression band.</para>
     ///
-    /// <para><b>The alternative's ordering is ABOVE the ceiling at #3653's A6 freeze</b>: 1,260 - 240 = 1,020 s
-    /// sits 124 s above the 896 s constant, so coupling stands as the sole reason for the rejection — the
-    /// ordering argument is gone again, as it was at #3174's 21-minute window. TimescaleSupportTests pins both
+    /// <para><b>The alternative's ordering is ABOVE the ceiling at #5329</b>: 1,140 - 240 = 900 s
+    /// sits only 4 s above the 896 s constant (124 s at the 21-minute window), so coupling stands as the
+    /// reason for the rejection and the ordering argument is available again only by a hair. TimescaleSupportTests pins both
     /// reasons and says which one remains if a narrower window re-takes the ordering.</para>
     /// </summary>
     public static int RefreshSlotWarningSeconds =>
@@ -4580,7 +4675,17 @@ WITH NO DATA";
     /// <para><b>THE CENSUS.</b> Post-boundary, the maximum is <b>226.8</b> s over <b>874</b> runs of
     /// <b>12</b> views, with 95th percentile <b>42.2</b> s and median <b>0.8</b> s. Zero rows are removed by
     /// the succeeded/finish filter (<b>874</b> of <b>874</b>), so this is the whole of the span rather than a
-    /// status-selected part of it. <b>ONE STORE'S, on the same precondition
+    /// status-selected part of it. <b>TWELVE OF FOURTEEN, since #5329.</b> The read predates the two io
+    /// hourlies, so it covers 12 of the 14 light views the constant now bounds; the 2 registered after the
+    /// read are unmeasured, and are held under this bound by SHAPE rather than by a reading:
+    /// <see cref="QueryStatsIoHourlyView"/> reads the same raw rows under the same group key and the same
+    /// <c>WHERE</c> as <see cref="QueryStatsIntervalHourlyView"/> (that view's own maximum in this population
+    /// is 23.3 s) and adds three more sums to the same groups, and <see cref="ProcedureStatsIoHourlyView"/> is
+    /// its procedure sibling's shape with the same three (sub-3 s). Three extra <c>sum()</c> columns widen the
+    /// rows without adding a group, so the cost is argued to sit modestly above the sibling's and far below
+    /// this constant, not measured — and <see cref="LogRefreshCeilingStaleness"/> reports the first run of
+    /// either that falsifies it, exactly as it would for the twelve. The next census over the fourteen-view
+    /// layout replaces this sentence with a count. <b>ONE STORE'S, on the same precondition
     /// <see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/> states (#3175):</b> the read only sees
     /// executions where <c>timescaledb.enable_job_execution_logging</c> is ON, that GUC could not be healed
     /// onto a cluster predating the conf block that set it until #3175/#3177 gave it a marker of its own,
@@ -4949,12 +5054,12 @@ WITH NO DATA";
     /// this band cannot drift apart.</para>
     ///
     /// <para><b>Why the heaviest window is excluded whole rather than guarded.</b>
-    /// <see cref="HeaviestHourlyRefreshView"/> occupies 896 of the 1260 seconds in its window and the
+    /// <see cref="HeaviestHourlyRefreshView"/> occupies 896 of the 1140 seconds in its window and the
     /// <see cref="CompressionPhaseGuardMinutes"/> band is 4, so applying the ordinary band to this window
     /// would admit 11 minutes that sit INSIDE the refresh — the band is the wrong size for it, which is the
     /// arithmetic the exclusion rests on and the reason widening the band is not the alternative. The other
-    /// 6 minutes of the window are past the refresh and are left on the table deliberately (3 of #3653's
-    /// 1,080 s window; the A6 freeze re-added three): recovering them
+    /// 4 minutes of the window are past the refresh and are left on the table deliberately (3 of #3653's
+    /// 1,080 s window, 6 at the A6 freeze's 1,260 s one; #5329's io hourlies took two): recovering them
     /// means sizing a band for one window against a bound whose population is 57 readings and still moving
     /// (194 s to 896 s within the clean regime), which is #3035's exclude-versus-guard decision to reopen and
     /// not a renumbering. Stated in SECONDS against the window in seconds, because the occupancy is only
@@ -7104,6 +7209,15 @@ AND   j.hypertable_name = '{relation}'";
             (Relation: ProcedureStatsIntervalHourlyView, DropAfter: HourlyRetentionInterval, TimeColumn: "bucket", Coverage: new[] { RequireSuccessorDailyOf(ProcedureStatsIntervalHourlyView) }),
             (Relation: QueryStatsDbIntervalHourlyView,   DropAfter: HourlyRetentionInterval, TimeColumn: "bucket", Coverage: new[] { RequireSuccessorDailyOf(QueryStatsDbIntervalHourlyView) }),
 
+            /* #5329: the two io hourlies are LEAVES (#1757's rule): Coverage names the aggregate itself. The leaf
+               rule's one assumption is that NOTHING is built from io -- no daily, no hierarchical view -- so no
+               consumer's floor has to be waited on. The day a daily is built from either, that daily belongs
+               in Coverage here (as RequireSuccessorDailyOf does for the interval pair) or this purge could
+               drop buckets the new daily has not captured. They are not in RawTierCoverage on purpose (#1661:
+               a fresh rollup must not hold the raw purge). */
+            (Relation: QueryStatsIoHourlyView,           DropAfter: HourlyRetentionInterval, TimeColumn: "bucket", Coverage: new[] { QueryStatsIoHourlyView }),
+            (Relation: ProcedureStatsIoHourlyView,       DropAfter: HourlyRetentionInterval, TimeColumn: "bucket", Coverage: new[] { ProcedureStatsIoHourlyView }),
+
             /* The corrected Query Store tier (#1849, extended by #1869).
 
                L1 has THREE consumers. Two because the corrected daily is its SIBLING rather than the corrected
@@ -9228,7 +9342,12 @@ AND   ca.view_name IN ({views})";
            store, with no version gate. */
         $"to_regclass('collect.{QueryStatsIntervalDailyView}') IS NOT NULL, " +
         $"to_regclass('collect.{ProcedureStatsIntervalDailyView}') IS NOT NULL, " +
-        $"to_regclass('collect.{QueryStatsDbIntervalDailyView}') IS NOT NULL";
+        $"to_regclass('collect.{QueryStatsDbIntervalDailyView}') IS NOT NULL, " +
+        /* The two hourly rollups that carry logical reads (#5329) — existence-is-the-probe once more: a store
+           whose ensure sweep has not made them yet has none, and a reads ranking stays on raw for exactly that
+           store, with no version gate. */
+        $"to_regclass('collect.{QueryStatsIoHourlyView}') IS NOT NULL, " +
+        $"to_regclass('collect.{ProcedureStatsIoHourlyView}') IS NOT NULL";
 
     /// <summary>
     /// Detects which continuous-aggregate rollups exist in the store (<see cref="RollupProbeSql"/>). On a
@@ -9256,7 +9375,8 @@ AND   ca.view_name IN ({views})";
             reader.GetBoolean(8), reader.GetBoolean(9), reader.GetBoolean(10),
             reader.GetBoolean(11), reader.GetBoolean(12),
             reader.GetBoolean(13), reader.GetBoolean(14), reader.GetBoolean(15),
-            reader.GetBoolean(16), reader.GetBoolean(17), reader.GetBoolean(18));
+            reader.GetBoolean(16), reader.GetBoolean(17), reader.GetBoolean(18),
+            reader.GetBoolean(19), reader.GetBoolean(20));
     }
 
     /* ─────────────── rollup COVERAGE (the un-materialized-history guard, #1759) ─────────────── */
@@ -9333,6 +9453,13 @@ AND   ca.view_name IN ({views})";
         (QueryStatsIntervalHourlyView, "query_stats", "query_stats", "collection_time", HourlyBucket),
         (ProcedureStatsIntervalHourlyView, "procedure_stats", "procedure_stats", "collection_time", HourlyBucket),
         (QueryStatsDbIntervalHourlyView, "query_stats", "query_stats", "collection_time", HourlyBucket),
+
+        /* The two hourly rollups that carry logical reads (#5329): raw-sourced, depth 0 in the backfill order,
+           hourly-bucketed. Registering them HERE puts them on --backfill-rollups, in the coverage probe and in
+           MaterializationHoleTargets. They are NOT in RawTierCoverage (#1661: a fresh rollup must not hold the
+           raw purge) and NOT in SupersededHourlyRollups (nothing older is stitched to them). */
+        (QueryStatsIoHourlyView, "query_stats", "query_stats", "collection_time", HourlyBucket),
+        (ProcedureStatsIoHourlyView, "procedure_stats", "procedure_stats", "collection_time", HourlyBucket),
 
         /* The interval-honest successor DAILIES (#3653, A6): hierarchical from the interval-honest hourly
            successors just above, so RawTable is still the raw table two hops down and Source is the successor
@@ -13861,7 +13988,8 @@ public readonly record struct RollupAvailability(
     bool QueryStoreIntervalHourly = false, bool QueryStoreCorrectedHourly = false, bool QueryStoreCorrectedDaily = false,
     bool QueryStoreIntervalDaily = false, bool QueryStoreDayGrainDaily = false,
     bool QueryGrainIntervalHourly = false, bool ProcedureGrainIntervalHourly = false, bool DbGrainIntervalHourly = false,
-    bool QueryGrainIntervalDaily = false, bool ProcedureGrainIntervalDaily = false, bool DbGrainIntervalDaily = false)
+    bool QueryGrainIntervalDaily = false, bool ProcedureGrainIntervalDaily = false, bool DbGrainIntervalDaily = false,
+    bool QueryGrainIoHourly = false, bool ProcedureGrainIoHourly = false)
 {
     /// <summary>True when every rollup exists — the steady state on a TimescaleDB store, safe to cache
     /// permanently (a created continuous aggregate is never dropped outside the reshape sweep).</summary>
@@ -13871,13 +13999,19 @@ public readonly record struct RollupAvailability(
         && QueryStoreIntervalHourly && QueryStoreCorrectedHourly && QueryStoreCorrectedDaily
         && QueryStoreIntervalDaily && QueryStoreDayGrainDaily
         && QueryGrainIntervalHourly && ProcedureGrainIntervalHourly && DbGrainIntervalHourly
-        && QueryGrainIntervalDaily && ProcedureGrainIntervalDaily && DbGrainIntervalDaily;
+        && QueryGrainIntervalDaily && ProcedureGrainIntervalDaily && DbGrainIntervalDaily
+        && QueryGrainIoHourly && ProcedureGrainIoHourly;
 
     /// <summary>No rollups at all — the plain-PostgreSQL shape, and the safe fallback when a probe fails.</summary>
     public static RollupAvailability None => default;
 
     /// <summary>Every flag true — the fully-built TimescaleDB shape (and the test shorthand for it).</summary>
-    public static RollupAvailability All => new(true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true);
+    public static RollupAvailability All => new(true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true);
+
+    /// <summary>The pre-#5329 shape: every rollup up to and including the interval-honest dailies, none of the
+    /// two hourly rollups that carry logical reads — a store whose ensure sweep has not created them yet. A
+    /// reads ranking must stay on raw for exactly this shape (the test shorthand for that degrade).</summary>
+    public static RollupAvailability WithoutIoHourlies => new(true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true);
 
     /// <summary>The pre-#3653 shape: every rollup a #1869-era service created, none of the interval-honest hourly
     /// successors (Q12) — a store whose service predates this build. Its hourly-tier reads must keep routing to
@@ -13926,6 +14060,8 @@ public readonly record struct RollupAvailability(
         TimescaleSupport.QueryStatsIntervalDailyView => QueryGrainIntervalDaily,
         TimescaleSupport.ProcedureStatsIntervalDailyView => ProcedureGrainIntervalDaily,
         TimescaleSupport.QueryStatsDbIntervalDailyView => DbGrainIntervalDaily,
+        TimescaleSupport.QueryStatsIoHourlyView => QueryGrainIoHourly,
+        TimescaleSupport.ProcedureStatsIoHourlyView => ProcedureGrainIoHourly,
         _ => false,
     };
 }

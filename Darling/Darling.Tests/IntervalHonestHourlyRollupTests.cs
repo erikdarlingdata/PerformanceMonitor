@@ -66,7 +66,8 @@ public sealed class IntervalHonestHourlyRollupTests
         var frozen = TimescaleSupport.FrozenRollupAggregates.Select(a => a.View).ToHashSet(StringComparer.Ordinal);
 
         Assert.Equal(3, TimescaleSupport.SupersededHourlyRollups.Length);
-        Assert.Equal(6, hourly.Length);
+        /* 6 + the two io hourlies #5329 appended (query_stats_io_hourly, procedure_stats_io_hourly). */
+        Assert.Equal(8, hourly.Length);
         Assert.Equal(6, TimescaleSupport.FrozenRollupAggregates.Length);
 
         foreach (var (legacy, successor, dependentDaily) in TimescaleSupport.SupersededHourlyRollups)
@@ -169,7 +170,8 @@ public sealed class IntervalHonestHourlyRollupTests
         Assert.True(RollupAvailability.All.AllPresent);
         /* 16 through #3653 Q12, +3 for the A6 successor DAILIES this lane registers
            (query_stats_interval_daily, procedure_stats_interval_daily, query_stats_db_interval_daily). */
-        Assert.Equal(19, TimescaleSupport.RollupViews.Length);
+        /* 19 through the A6 dailies, +2 for #5329's io hourlies. */
+        Assert.Equal(21, TimescaleSupport.RollupViews.Length);
     }
 
     /// <summary>
@@ -188,6 +190,11 @@ public sealed class IntervalHonestHourlyRollupTests
             var expectedConsumers = TimescaleSupport.RollupViews
                 .Where(r => string.Equals(r.Source, row.Relation, StringComparison.Ordinal))
                 .Where(r => !TimescaleSupport.IsFrozenRollupAggregate(r.View))
+                /* #5329: the two io hourlies read raw directly and are deliberately NOT named in a raw purge
+                   gate (the #1661 rule: a fresh rollup must not hold the raw purge; the hole below an io
+                   floor is --backfill-rollups' job, and the repair walk fixes holes inside its span). The
+                   exemption is by name so a THIRD raw-direct consumer still has to be named or exempted. */
+                .Where(r => r.View != TimescaleSupport.QueryStatsIoHourlyView && r.View != TimescaleSupport.ProcedureStatsIoHourlyView)
                 .Select(r => r.View)
                 .OrderBy(v => v, StringComparer.Ordinal)
                 .ToArray();
