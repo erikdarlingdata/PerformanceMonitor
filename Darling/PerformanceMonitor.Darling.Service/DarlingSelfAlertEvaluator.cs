@@ -5339,15 +5339,31 @@ internal sealed class DarlingSelfAlertEvaluator
     internal static readonly TimeSpan CollectionGapAtStartThreshold = TimeSpan.FromMinutes(15);
 
     /// <summary>
-    /// The newest collection time that was in the store BEFORE this start's first collector wrote. The fleet
-    /// sentinel (server_id 0) is excluded: the daily purge writes its run record under it, and a purge row
-    /// would hide a gap in which nothing was collected. Bounded: ORDER BY collection_time DESC LIMIT 1 reads
-    /// the newest chunk's time index and stops at the first row.
+    /// The newest collection time that was in the store BEFORE this start's first collector wrote, over the
+    /// currently ENABLED servers only (#5450). A store whose servers are all disabled or removed reads NULL and
+    /// so fires nothing. The fleet sentinel (server_id 0: the daily purge's run record and the oversized-plan
+    /// sweep) is excluded naturally, because it is not a configured server. Bounded: one backward probe of
+    /// <c>idx_collection_log_time (server_id, collection_time)</c> per server, each stopping at its first row,
+    /// so it never scans or sorts the table, on a hypertable or on plain PostgreSQL.
     /// </summary>
-    internal const string NewestCollectionTimeSql =
-        "SELECT collection_time FROM collection_log WHERE server_id <> 0 ORDER BY collection_time DESC LIMIT 1";
+    internal const string NewestCollectionTimeSql = @"
+SELECT max(n.collection_time)
+FROM config.config_monitored_servers c
+CROSS JOIN LATERAL (
+    SELECT l.collection_time
+    FROM collect.collection_log l
+    WHERE l.server_id = c.server_id
+    ORDER BY l.collection_time DESC
+    LIMIT 1) n
+WHERE c.is_enabled";
 
-    /// <summary>Both times are UTC. Null at the call site (not a report) when the store had no rows.</summary>
+    /// <summary>
+    /// <paramref name="LastCollectionUtc"/> is read from a <c>timestamp</c> column that is written as UTC, so
+    /// Npgsql hands it back with Kind Unspecified; <paramref name="StartUtc"/> is the service process start,
+    /// in UTC. The gap is measured from the last collection to the PROCESS start, so a long migration or a
+    /// store runtime upgrade after the start is not counted as downtime. Null at the call site (not a report)
+    /// when no enabled server had rows.
+    /// </summary>
     internal sealed record CollectionGapReport(DateTime LastCollectionUtc, DateTime StartUtc);
 
     /// <summary>
@@ -5363,6 +5379,7 @@ internal sealed class DarlingSelfAlertEvaluator
             return;
         }
 
+        /* A negative gap (a clock step, or a row newer than the start) is under the threshold too. */
         var gap = report.StartUtc - report.LastCollectionUtc;
         if (gap < CollectionGapAtStartThreshold)
         {

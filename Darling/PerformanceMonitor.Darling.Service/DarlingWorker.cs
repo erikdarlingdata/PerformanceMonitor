@@ -1715,6 +1715,7 @@ LIMIT 1";
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        _executeStartedUtc = DateTime.UtcNow;
         /* #2185: an install directory the service account cannot read is diagnosed HERE — first, ahead of
            reading darling.json, and a long way ahead of the managed-Postgres bootstrap. Order is the whole
            point. Every message the reporter saw was downstream of this one: an unreadable tree takes out
@@ -2197,8 +2198,26 @@ LIMIT 1";
         }
     }
 
+    /* #5450: captured at the very top of ExecuteAsync, before any store work; the fallback when the process
+       start time cannot be read. */
+    private DateTime _executeStartedUtc = DateTime.UtcNow;
+
+    /// <summary>The service PROCESS start in UTC, so migrations and a runtime upgrade are not counted as downtime.</summary>
+    private DateTime ProcessStartUtc()
+    {
+        try
+        {
+            using var process = Process.GetCurrentProcess();
+            return process.StartTime.ToUniversalTime();
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return _executeStartedUtc;
+        }
+    }
+
     /// <summary>
-    /// Reads the newest pre-start collection time (#5450) and pairs it with now. Null for a store with no
+    /// Reads the newest pre-start collection time (#5450) and pairs it with the process start. Null for a store with no
     /// collection rows (a first install) or when the read fails.
     /// </summary>
     internal async Task<DarlingSelfAlertEvaluator.CollectionGapReport?> ReadCollectionGapAsync(
@@ -2210,7 +2229,8 @@ LIMIT 1";
             command.CommandTimeout = 30;
             var value = await command.ExecuteScalarAsync(cancellationToken);
             return value is DateTime last
-                ? new DarlingSelfAlertEvaluator.CollectionGapReport(last, DateTime.UtcNow)
+                ? new DarlingSelfAlertEvaluator.CollectionGapReport(
+                    DateTime.SpecifyKind(last, DateTimeKind.Utc), ProcessStartUtc())
                 : null;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
