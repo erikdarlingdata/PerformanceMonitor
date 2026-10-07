@@ -176,6 +176,19 @@ public sealed class TestCpuRunSummary : IDisposable
 {
     private static long s_chargedMs;
     private static int s_tests;
+    private static string? s_sidecarPath;
+
+    /// <summary>
+    /// Resolves the sidecar path when the run starts, while the process still has the directory the runner was started in: under
+    /// <c>dotnet run</c> the test process's working directory is later the build output folder, so a relative
+    /// <c>-xml</c> path resolved at the end of the run would point at a folder that does not exist.
+    /// </summary>
+    [System.Runtime.CompilerServices.ModuleInitializer]
+    internal static void CaptureSidecarPath()
+    {
+        string? path = SidecarPath(Environment.GetCommandLineArgs());
+        s_sidecarPath = path is null ? null : Path.GetFullPath(path);
+    }
 
     internal static void Record(long ms)
     {
@@ -215,12 +228,15 @@ public sealed class TestCpuRunSummary : IDisposable
         Console.Out.WriteLine(line);
         try
         {
-            string? path = SidecarPath(Environment.GetCommandLineArgs());
+            string? path = s_sidecarPath;
             if (path is not null)
             {
+                // The runner writes its own XML after this fixture is disposed, so the folder may not exist yet.
+                Directory.CreateDirectory(Path.GetDirectoryName(path)!);
                 File.WriteAllText(path, string.Create(CultureInfo.InvariantCulture,
                     $"{{\"cpu_ms\":{charged},\"process_cpu_ms\":{processMs:F0},\"tests\":{tests}}}"));
             }
+            Console.Out.WriteLine($"Lite test CPU coverage: sidecar {(path ?? "not requested (no -xml argument in: " + string.Join(" ", Environment.GetCommandLineArgs()) + ")")}");
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
