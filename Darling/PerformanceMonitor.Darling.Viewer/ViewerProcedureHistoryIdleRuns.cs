@@ -21,13 +21,21 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// </summary>
 internal static class ViewerProcedureHistoryIdleRuns
 {
+    /// <summary>One SUCCESS run of the collector: its log time (<c>collection_log.collection_time</c>) and its logged duration.</summary>
+    internal readonly record struct Run(DateTime Time, long DurationMs);
+
     /// <summary>
-    /// The collector runs that left no row for the procedure, between its first and last stored row. A run owns the rows in
-    /// [its time, the next run's time), so a run is idle when none falls there (this holds whether the log stamps a run at the
-    /// same instant as its rows or a moment before them). Runs before the first row or after the last are not returned: the
-    /// procedure was not in the cache yet, or had left it, and a 0 there would be invented. Both lists ascending.
+    /// The collector runs that left no row for the procedure, between its first and last stored row, as the time to plot each
+    /// 0 at. Darling stamps a run's rows when the run starts and writes its log row after the run, so a run's rows sit just
+    /// before its log time: run k owns the rows in (the previous run's log time, its own log time]. A run is a candidate when
+    /// the previous run's log time is at or after the first row and its own is before the last (the procedure was in the cache
+    /// for the whole of its span), and idle when no row of the procedure falls in what it owns. The 0 goes at the log time minus
+    /// the logged duration, so it never lands before the run's real start. The duration is only the placement: it covers
+    /// the run's query and store time, not its wall clock, so it never decides ownership. Runs before the first row or after
+    /// the last are not returned: the procedure was not in the cache yet, or had left it, and a 0 there would be invented.
+    /// Both lists ascending.
     /// </summary>
-    internal static List<DateTime> IdleRunTimes(IReadOnlyList<DateTime> rowTimes, IReadOnlyList<DateTime> runTimes)
+    internal static List<DateTime> IdleRunTimes(IReadOnlyList<DateTime> rowTimes, IReadOnlyList<Run> runs)
     {
         var idle = new List<DateTime>();
         if (rowTimes.Count == 0)
@@ -38,26 +46,26 @@ internal static class ViewerProcedureHistoryIdleRuns
         var first = rowTimes[0];
         var last = rowTimes[rowTimes.Count - 1];
         var r = 0;
-        for (var i = 0; i < runTimes.Count; i++)
+        for (var i = 1; i < runs.Count; i++)
         {
-            var t = runTimes[i];
-            if (t <= first || t >= last)
+            var previous = runs[i - 1].Time;
+            var logged = runs[i].Time;
+            if (previous < first || logged >= last)
             {
                 continue;
             }
 
-            var next = i + 1 < runTimes.Count ? runTimes[i + 1] : (DateTime?)null;
-            while (r < rowTimes.Count && rowTimes[r] < t)
+            while (r < rowTimes.Count && rowTimes[r] <= previous)
             {
                 r++;
             }
 
-            if (r < rowTimes.Count && (next is null || rowTimes[r] < next.Value))
+            if (r < rowTimes.Count && rowTimes[r] <= logged)
             {
                 continue;
             }
 
-            idle.Add(t);
+            idle.Add(logged.AddMilliseconds(-runs[i].DurationMs));
         }
 
         return idle;

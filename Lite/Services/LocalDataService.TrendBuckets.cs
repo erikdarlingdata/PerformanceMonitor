@@ -370,65 +370,7 @@ ORDER BY 1";
 
         var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc);
         var dbClause = BuildDbInClause(databaseNames, "database_name", 5, out var dbValues);
-        /* #5414 M1: the database filter is applied INSIDE the aggregates, not in the WHERE (see DbInPredicate). */
-        var matchedRows = dbClause.Length == 0
-            ? ""
-            : $",\n        COUNT(*) FILTER (WHERE {DbInPredicate(dbClause)}) AS matched_rows";
-        var matchedCarry = dbClause.Length == 0 ? "" : ",\n        matched_rows";
-        /* #5414 round 2: whether the chosen databases had any row is decided once for the whole window (the tool's
-           empty), never per bucket: a bucket they were quiet in is a measured 0, and dropping it made it read missing and
-           the window read truncated. */
-        var windowHasRows = dbClause.Length == 0 ? "" : "\nWHERE EXISTS (SELECT 1 FROM rated WHERE matched_rows > 0)";
-
-        /* #5449: v_procedure_stats stores no row for an idle cycle, so its bucket's seconds are the bucket's span, not just
-           the stored collections' intervals (see IdleSpanSecondsSql), and the collector's runs that stored nothing are zero-work
-           collections (IdleRunCollectionsSql), so a quiet bucket is a 0 point. The width is this statement's $4. */
-        var coverIdleSpan = relation == "v_procedure_stats";
-        var idleCols = coverIdleSpan ? IdleSpanColumnsSql("$4") : "";
-        var seconds = coverIdleSpan ? IdleSpanSecondsSql("$4") : "SUM(rated_seconds)";
-
-        command.CommandText = $@"
-WITH stored AS
-(
-    SELECT
-        collection_time,
-        {FilteredSum("delta_elapsed_time", dbClause)} / 1000.0 AS total_elapsed_ms,
-        {FilteredSum("delta_execution_count", dbClause)} AS total_executions,
-        CASE WHEN MAX(sample_interval_seconds) IS NULL
-             THEN extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time))))
-             ELSE NULLIF(MAX(sample_interval_seconds), 0)
-        END AS interval_seconds{matchedRows}
-    FROM {relation}
-    WHERE server_id = $1
-    AND   collection_time >= $2
-    AND   collection_time <= $3
-    GROUP BY collection_time
-),
-raw AS
-(
-    SELECT * FROM stored{(coverIdleSpan ? IdleRunCollectionsSql(dbClause.Length != 0) : "")}
-),
-rated AS
-(
-    SELECT
-        collection_time,
-        CASE WHEN interval_seconds > 0 THEN total_elapsed_ms END AS rated_elapsed_ms,
-        CASE WHEN interval_seconds > 0 THEN total_executions END AS rated_executions,
-        CASE WHEN interval_seconds > 0 THEN interval_seconds END AS rated_seconds,
-        CASE WHEN interval_seconds > 0 THEN total_elapsed_ms / interval_seconds END AS elapsed_ms_per_second,
-        CASE WHEN interval_seconds > 0 THEN CAST(total_executions AS DOUBLE PRECISION) / interval_seconds END AS executions_per_second{idleCols}{matchedCarry}
-    FROM raw
-)
-SELECT
-    GREATEST(time_bucket(to_minutes(CAST($4 AS INTEGER)), collection_time, {TrendBuckets.OriginSql}), $2) AS bucket_start,
-    SUM(rated_elapsed_ms) / {seconds} AS elapsed_ms_per_second,
-    CAST(SUM(rated_executions) AS DOUBLE PRECISION) / {seconds} AS executions_per_second,
-    MAX(elapsed_ms_per_second) AS peak_elapsed_ms_per_second,
-    MIN(collection_time) AS first_collection_time,
-    COUNT(*) - COUNT(rated_seconds) AS unrated_collections
-FROM rated{windowHasRows}
-GROUP BY 1
-ORDER BY 1";
+        command.CommandText = BucketedDurationTrendSql(relation, dbClause);
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = startTime });
@@ -457,6 +399,71 @@ ORDER BY 1";
         }
 
         return items;
+    }
+
+    /// <summary>
+    /// The statement behind <see cref="ReadBucketedDurationTrendAsync"/>, in its own member so a test can pin its text
+    /// (#5449). <c>$1</c> server, <c>$2</c> start, <c>$3</c> end, <c>$4</c> width in minutes, then the database filter's own
+    /// numbering from <c>$5</c>. <c>v_query_stats</c> keeps its per-collection read byte for byte; <c>v_procedure_stats</c>
+    /// reads its collections from <see cref="ProcedureCollectionsSql"/> (the run-based axis and denominator) and shares
+    /// everything after them.
+    /// </summary>
+    internal static string BucketedDurationTrendSql(string relation, string dbClause)
+    {
+        /* #5414 M1: the database filter is applied INSIDE the aggregates, not in the WHERE (see DbInPredicate). */
+        var matchedRows = dbClause.Length == 0
+            ? ""
+            : $",\n        COUNT(*) FILTER (WHERE {DbInPredicate(dbClause)}) AS matched_rows";
+        var matchedCarry = dbClause.Length == 0 ? "" : ",\n        matched_rows";
+        /* #5414 round 2: whether the chosen databases had any row is decided once for the whole window (the tool's
+           empty), never per bucket: a bucket they were quiet in is a measured 0, and dropping it made it read missing and
+           the window read truncated. */
+        var windowHasRows = dbClause.Length == 0 ? "" : "\nWHERE EXISTS (SELECT 1 FROM rated WHERE matched_rows > 0)";
+
+        /* #5449: v_procedure_stats stores no row for an idle cycle, so its collections come from ProcedureCollectionsSql
+           (the collector's runs are the axis, an idle run is a 0 point, a bucket's seconds are the rated gaps). */
+        var collections = relation == "v_procedure_stats"
+            ? ProcedureCollectionsSql(dbClause)
+            : $@"raw AS
+(
+    SELECT
+        collection_time,
+        {FilteredSum("delta_elapsed_time", dbClause)} / 1000.0 AS total_elapsed_ms,
+        {FilteredSum("delta_execution_count", dbClause)} AS total_executions,
+        CASE WHEN MAX(sample_interval_seconds) IS NULL
+             THEN extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time))))
+             ELSE NULLIF(MAX(sample_interval_seconds), 0)
+        END AS interval_seconds{matchedRows}
+    FROM {relation}
+    WHERE server_id = $1
+    AND   collection_time >= $2
+    AND   collection_time <= $3
+    GROUP BY collection_time
+),";
+
+        return $@"
+WITH {collections}
+rated AS
+(
+    SELECT
+        collection_time,
+        CASE WHEN interval_seconds > 0 THEN total_elapsed_ms END AS rated_elapsed_ms,
+        CASE WHEN interval_seconds > 0 THEN total_executions END AS rated_executions,
+        CASE WHEN interval_seconds > 0 THEN interval_seconds END AS rated_seconds,
+        CASE WHEN interval_seconds > 0 THEN total_elapsed_ms / interval_seconds END AS elapsed_ms_per_second,
+        CASE WHEN interval_seconds > 0 THEN CAST(total_executions AS DOUBLE PRECISION) / interval_seconds END AS executions_per_second{matchedCarry}
+    FROM raw
+)
+SELECT
+    GREATEST(time_bucket(to_minutes(CAST($4 AS INTEGER)), collection_time, {TrendBuckets.OriginSql}), $2) AS bucket_start,
+    SUM(rated_elapsed_ms) / SUM(rated_seconds) AS elapsed_ms_per_second,
+    CAST(SUM(rated_executions) AS DOUBLE PRECISION) / SUM(rated_seconds) AS executions_per_second,
+    MAX(elapsed_ms_per_second) AS peak_elapsed_ms_per_second,
+    MIN(collection_time) AS first_collection_time,
+    COUNT(*) - COUNT(rated_seconds) AS unrated_collections
+FROM rated{windowHasRows}
+GROUP BY 1
+ORDER BY 1";
     }
 
     /* ─────────────── the rest of the trend family (#3960): wait, CPU, tempdb, memory, perfmon ─────────────── */

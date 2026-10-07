@@ -64,12 +64,18 @@ public static class RawWindowFloor
     /// <summary>
     /// The probe SQL for <paramref name="table"/>, the table name the only thing that varies. $1 server_id,
     /// $2/$3 window (naive UTC). The window's start bounds only the existence check, never the floor.
+    /// #5449: <c>procedure_stats</c> has its own shape (<see cref="ProcedureFloorSql"/>); the two query views' text is unchanged.
     /// </summary>
-    public static string FloorSql(Table table) => $"""
+    public static string FloorSql(Table table) => table == Table.ProcedureStats ? ProcedureFloorSql() : $"""
         SELECT o.t
         FROM
         (
-            SELECT {OldestSql(table)} AS t
+            SELECT f.collection_time AS t
+            FROM {PgSchemaGenerator.CollectSchema}.{TableName(table)} AS f
+            WHERE f.server_id = $1
+            AND   f.collection_time <= $3
+            ORDER BY f.collection_time
+            LIMIT 1
         ) AS o
         WHERE EXISTS
         (
@@ -78,42 +84,72 @@ public static class RawWindowFloor
             WHERE w.server_id = $1
             AND   w.collection_time >= $2
             AND   w.collection_time <= $3
-        ){CoverageByRunsSql(table)}
+        )
         """;
 
     /// <summary>
-    /// The oldest instant the floor can start at. Every table but <c>procedure_stats</c>: its oldest <c>collection_time</c> at or
-    /// before the window's end. #5449: <c>procedure_stats</c> also counts the collector's own runs, so a store that holds runs and no
-    /// row yet (a new server whose procedures have all been idle) still has a floor, the first run, the way Lite's floor reads it;
-    /// where both exist the floor is the earlier of the oldest row and the oldest run.
+    /// #5449: the <c>procedure_stats</c> probe. The table stores a row only for a procedure that did work in a cycle (or a first
+    /// sighting or a counter reset), so a window the collector covered while every procedure sat idle holds no row, and a row-only
+    /// probe would answer null (nothing was read) where an older store, which kept the idle rows, answered the table's oldest row.
+    /// A SUCCESS run of the collector in <c>collection_log</c> inside the window proves the store covered it, so it satisfies the
+    /// existence check too (the <c>OR EXISTS</c>).
+    ///
+    /// <para>The floor is the earlier of the oldest row and the first run the retention cut left standing. The cut is found from the
+    /// log, because SQL cannot read the raw tier's policy (TimescaleDB 4 days, a plain store 30, or a custom one): G is the newest
+    /// SUCCESS run that stored rows (<c>rows_collected &gt; 0</c>) inside the window and before the oldest row. Those rows are gone,
+    /// so retention dropped them, and coverage starts after G. With no G, nothing stored was ever dropped, and the floor is
+    /// the oldest run. Idle runs (<c>rows_collected = 0</c>) are never a G: they stored nothing to lose, so they say nothing
+    /// about the cut and a window of them reads as covered back to the oldest run. $1 server_id, $2/$3 window (naive UTC).</para>
     /// </summary>
-    private static string OldestSql(Table table) => table != Table.ProcedureStats
-        ? $"""
-          (
-              SELECT f.collection_time
-              FROM {PgSchemaGenerator.CollectSchema}.{TableName(table)} AS f
-              WHERE f.server_id = $1
-              AND   f.collection_time <= $3
-              ORDER BY f.collection_time
-              LIMIT 1
-          )
-          """
-        : $"""
-          LEAST(
-              (SELECT MIN(f.collection_time) FROM {PgSchemaGenerator.CollectSchema}.{TableName(table)} AS f WHERE f.server_id = $1 AND f.collection_time <= $3),
-              (SELECT MIN(c.collection_time) FROM {PgSchemaGenerator.CollectSchema}.collection_log AS c
-               WHERE c.server_id = $1 AND c.collector_name = 'procedure_stats' AND c.status = 'SUCCESS' AND c.collection_time <= $3))
-          """;
-
-    /// <summary>
-    /// #5449: <c>procedure_stats</c> stores a row only for a procedure that did work in a cycle (or a first sighting or a counter
-    /// reset), so a window the collector covered while every procedure sat idle holds no row, and the probe would answer null
-    /// (nothing was read) where an older store, which kept the idle rows, answered the table's oldest row. A run of the collector
-    /// in <c>collection_log</c> inside the window proves the store covered it, so it satisfies the existence check too. The floor
-    /// itself is still the oldest row at or before the window's end. Every other table stores every cycle and keeps the row-only check.
-    /// </summary>
-    private static string CoverageByRunsSql(Table table) => table != Table.ProcedureStats ? "" : $"""
-
+    private static string ProcedureFloorSql() => $"""
+        SELECT o.t
+        FROM
+        (
+            SELECT LEAST(
+                (
+                    SELECT MIN(f.collection_time)
+                    FROM {PgSchemaGenerator.CollectSchema}.procedure_stats AS f
+                    WHERE f.server_id = $1
+                    AND   f.collection_time <= $3
+                ),
+                (
+                    SELECT MIN(c.collection_time)
+                    FROM {PgSchemaGenerator.CollectSchema}.collection_log AS c
+                    WHERE c.server_id = $1
+                    AND   c.collector_name = 'procedure_stats'
+                    AND   c.status = 'SUCCESS'
+                    AND   c.collection_time <= $3
+                    AND   c.collection_time >
+                    COALESCE(
+                    (
+                        SELECT g.collection_time
+                        FROM {PgSchemaGenerator.CollectSchema}.collection_log AS g
+                        WHERE g.server_id = $1
+                        AND   g.collector_name = 'procedure_stats'
+                        AND   g.status = 'SUCCESS'
+                        AND   g.rows_collected > 0
+                        AND   g.collection_time >= $2
+                        AND   g.collection_time <
+                        (
+                            SELECT MIN(f2.collection_time)
+                            FROM {PgSchemaGenerator.CollectSchema}.procedure_stats AS f2
+                            WHERE f2.server_id = $1
+                            AND   f2.collection_time <= $3
+                        )
+                        ORDER BY g.collection_time DESC
+                        LIMIT 1
+                    ), '-infinity'::timestamp)
+                )
+            ) AS t
+        ) AS o
+        WHERE EXISTS
+        (
+            SELECT 1
+            FROM {PgSchemaGenerator.CollectSchema}.procedure_stats AS w
+            WHERE w.server_id = $1
+            AND   w.collection_time >= $2
+            AND   w.collection_time <= $3
+        )
         OR EXISTS
         (
             SELECT 1
