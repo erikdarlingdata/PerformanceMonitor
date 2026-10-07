@@ -693,6 +693,14 @@ internal static class DiagnosticsBundle
         if (!string.IsNullOrEmpty(role))
         {
             aliaser.AddName(AliasKind.Role, role);
+            /* A partition-qualified account entry (aws-cn:123456789012): the account id alone is named too. */
+            var colon = role.LastIndexOf(':');
+            if (colon > 0 && role.Length - colon - 1 == 12 && role.AsSpan(colon + 1).IndexOfAnyExceptInRange('0', '9') < 0
+                && role.StartsWith("aws", StringComparison.Ordinal) && role.IndexOf(':') == colon)
+            {
+                aliaser.AddName(AliasKind.Role, role.Substring(colon + 1));
+            }
+
             try
             {
                 var match = s_awsRoleAccount.Match(role);

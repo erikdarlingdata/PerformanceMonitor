@@ -61,8 +61,52 @@ public sealed class AwsRoleAllowlistTests
 
         Assert.True(list.IsAllowed(Role));
         Assert.True(list.IsAllowed(PathRole));
-        Assert.True(list.IsAllowed("arn:aws-us-gov:iam::123456789012:role/darling-monitor"));
         Assert.False(list.IsAllowed(OtherAccountRole));
+    }
+
+    [Fact]
+    public void ABareAccountIdEntry_AllowsThatAccountInTheAwsPartitionOnly()
+    {
+        var list = AwsRoleAllowlist.From(new[] { "123456789012" });
+
+        Assert.True(list.IsAllowed(Role));
+        Assert.False(list.IsAllowed("arn:aws-cn:iam::123456789012:role/darling-monitor"));
+        Assert.False(list.IsAllowed("arn:aws-us-gov:iam::123456789012:role/darling-monitor"));
+    }
+
+    [Fact]
+    public void APartitionQualifiedAccountEntry_AllowsThatAccountInThatPartitionOnly()
+    {
+        var china = AwsRoleAllowlist.From(new[] { "aws-cn:123456789012" });
+        Assert.True(china.IsAllowed("arn:aws-cn:iam::123456789012:role/darling-monitor"));
+        Assert.True(china.IsAllowed("arn:aws-cn:iam::123456789012:role/team/darling-monitor"));
+        Assert.False(china.IsAllowed(Role));
+        Assert.False(china.IsAllowed("arn:aws-us-gov:iam::123456789012:role/darling-monitor"));
+        Assert.False(china.IsAllowed("arn:aws-cn:iam::210987654321:role/darling-monitor"));
+
+        var gov = AwsRoleAllowlist.From(new[] { "aws-us-gov:123456789012" });
+        Assert.True(gov.IsAllowed("arn:aws-us-gov:iam::123456789012:role/darling-monitor"));
+        Assert.False(gov.IsAllowed(Role));
+        Assert.False(gov.IsAllowed("arn:aws-cn:iam::123456789012:role/darling-monitor"));
+    }
+
+    [Fact]
+    public void TheAwsPartitionCanBeWrittenOut_AndMatchesTheBareForm()
+    {
+        var list = AwsRoleAllowlist.From(new[] { "aws:123456789012" });
+        Assert.True(list.IsAllowed(Role));
+        Assert.False(list.IsAllowed("arn:aws-cn:iam::123456789012:role/darling-monitor"));
+    }
+
+    [Fact]
+    public void SeveralPartitionEntries_EachAllowTheirOwnPartition()
+    {
+        var list = AwsRoleAllowlist.From(new[] { "123456789012", "aws-cn:123456789012", "aws-us-gov:210987654321" });
+        Assert.Equal(3, list.Count);
+        Assert.True(list.IsAllowed(Role));
+        Assert.True(list.IsAllowed("arn:aws-cn:iam::123456789012:role/darling-monitor"));
+        Assert.False(list.IsAllowed("arn:aws-us-gov:iam::123456789012:role/darling-monitor"));
+        Assert.True(list.IsAllowed("arn:aws-us-gov:iam::210987654321:role/darling-monitor"));
     }
 
     [Fact]
@@ -115,6 +159,14 @@ public sealed class AwsRoleAllowlistTests
     [InlineData(PathRole, true)]
     [InlineData("123456789012", true)]
     [InlineData("  123456789012  ", true)]
+    [InlineData("aws-cn:123456789012", true)]
+    [InlineData("aws-us-gov:123456789012", true)]
+    [InlineData("  aws-cn:123456789012  ", true)]
+    [InlineData("aws-cn:12345678901", false)]
+    [InlineData("aws-cn:", false)]
+    [InlineData(":123456789012", false)]
+    [InlineData("china:123456789012", false)]
+    [InlineData("aws-cn:aws-cn:123456789012", false)]
     [InlineData("12345678901", false)]
     [InlineData("1234567890123", false)]
     [InlineData("12345678901a", false)]
@@ -186,6 +238,7 @@ public sealed class AwsRoleAllowlistTests
         config.Servers.Add(new MonitoredServer { Name = "sql1", Host = "sql1.example", Auth = "integrated" });
         config.AllowedAwsRoles.Add(Role);
         config.AllowedAwsRoles.Add("123456789012");
+        config.AllowedAwsRoles.Add("aws-cn:123456789012");
         Assert.Empty(config.Validate());
 
         config.AllowedAwsRoles.Add("not-a-role");
@@ -193,9 +246,9 @@ public sealed class AwsRoleAllowlistTests
         var problems = config.Validate();
 
         Assert.Equal(2, problems.Count);
-        Assert.Contains(problems, p => p.StartsWith("allowedAwsRoles[2]: ", StringComparison.Ordinal)
+        Assert.Contains(problems, p => p.StartsWith("allowedAwsRoles[3]: ", StringComparison.Ordinal)
             && p.EndsWith(AwsRoleAllowlist.InvalidEntryMessage, StringComparison.Ordinal));
-        Assert.Contains(problems, p => p.StartsWith("allowedAwsRoles[3]: ", StringComparison.Ordinal));
+        Assert.Contains(problems, p => p.StartsWith("allowedAwsRoles[4]: ", StringComparison.Ordinal));
     }
 
     [Fact]

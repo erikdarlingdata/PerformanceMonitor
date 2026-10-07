@@ -156,7 +156,8 @@
   ],
 
   // Which AWS roles the web and MCP may set for an Amazon RDS or Aurora PostgreSQL target. An entry is an
-  // IAM role ARN (matched exactly) or a 12-digit AWS account id (every role in that account). The service
+  // IAM role ARN (matched exactly) or a 12-digit AWS account id (every role in that account, in the aws partition; write
+  // "aws-cn:123456789012" or "aws-us-gov:123456789012" for an account in the China or GovCloud partition). The service
   // assumes a saved role only if it is listed here, or a server in the "servers" list above names it in
   // "awsRoleArn". A role saved from the web, MCP, the desktop viewer or --add-server does not take effect
   // until then. Empty by default. Read at start, so an edit applies on restart.

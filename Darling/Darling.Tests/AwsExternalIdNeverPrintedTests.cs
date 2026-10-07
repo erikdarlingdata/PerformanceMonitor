@@ -46,6 +46,7 @@ public sealed class AwsExternalIdNeverPrintedTests
         AssertClean(ex.ToString());
         AssertClean(ex.SourceErrorCode ?? string.Empty);
         AssertClean(ex.SourceExceptionType ?? string.Empty);
+        AssertClean(ex.SourceDetail ?? string.Empty);
         AssertClean(ex.StackTrace ?? string.Empty);
         Assert.Null(ex.InnerException);
         Assert.Empty(ex.Data);
@@ -140,7 +141,9 @@ public sealed class AwsExternalIdNeverPrintedTests
 
         Assert.Equal(AwsRoleAssumeKind.Transient, ex.Kind);
         AssertClean(ex);
-        Assert.Contains("socket closed", ex.Message, StringComparison.Ordinal);
+        Assert.Contains("(SDK exception System.InvalidOperationException)", ex.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("socket closed", ex.Message, StringComparison.Ordinal);
+        Assert.Contains("socket closed", ex.SourceDetail, StringComparison.Ordinal);
     }
 
     [Fact]

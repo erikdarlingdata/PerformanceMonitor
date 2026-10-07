@@ -45,12 +45,15 @@ public enum AwsRoleAssumeKind
 /// travels further.
 ///
 /// <para><b>The external ID is never in it.</b> The message is either written here from the role ARN, the region and
-/// <c>ExternalId = set|none</c>, or it carries SDK text with the external ID scrubbed out first. The raw SDK exception
-/// is dropped (no <see cref="Exception.InnerException"/>); only its error code and type name are kept. A fresh instance
+/// <c>ExternalId = set|none</c>, with at most the SDK exception type name and the AWS error code added to it. The SDK's
+/// own text, with the external ID scrubbed out first, is kept in <see cref="SourceDetail"/> for the service log alone.
+/// The raw SDK exception is dropped (no <see cref="Exception.InnerException"/>); only its error code, type name and
+/// that scrubbed text are kept. A fresh instance
 /// is made for every throw, including one that serves a cached failure, so no two throws share a stack trace.
 /// <see cref="ToString"/> is written here and prints the kind, the message and the stack, nothing else.</para>
 ///
-/// <para><see cref="Exception.Message"/> is the text for the collection log and the warning log.
+/// <para><see cref="Exception.Message"/> is the text for the collection log and the warning log (the SDK's own text
+/// is added to the warning log by the credentials class, not to this message).
 /// <see cref="Find"/> walks the inner-exception chain, so an ingestor that wraps the failure still lets the worker see it.</para>
 /// </summary>
 public sealed class AwsRoleAssumeException : Exception
@@ -59,7 +62,7 @@ public sealed class AwsRoleAssumeException : Exception
 
     private AwsRoleAssumeException(
         AwsRoleAssumeKind kind, string roleArn, string region, bool externalIdSet, string message,
-        string? sourceErrorCode, string? sourceExceptionType)
+        string? sourceErrorCode, string? sourceExceptionType, string? sourceDetail = null)
         : base(message)
     {
         Kind = kind;
@@ -68,6 +71,7 @@ public sealed class AwsRoleAssumeException : Exception
         ExternalIdSet = externalIdSet;
         SourceErrorCode = sourceErrorCode;
         SourceExceptionType = sourceExceptionType;
+        SourceDetail = sourceDetail;
     }
 
     /// <summary>What went wrong.</summary>
@@ -87,6 +91,12 @@ public sealed class AwsRoleAssumeException : Exception
 
     /// <summary>The type name of the exception the SDK threw, with no message and no stack.</summary>
     public string? SourceExceptionType { get; }
+
+    /// <summary>
+    /// The SDK's own message with the external ID scrubbed out, for the service log. It is not part of
+    /// <see cref="Exception.Message"/>, so it never reaches the collection log or any answer.
+    /// </summary>
+    public string? SourceDetail { get; }
 
     /// <summary>
     /// True for a failure the operator fixes by changing configuration: the worker reports it as PERMISSIONS rather
@@ -151,7 +161,10 @@ public sealed class AwsRoleAssumeException : Exception
     /// <summary>The host has no AWS credentials to assume the role with.</summary>
     internal static AwsRoleAssumeException ForNoSourceIdentity(AwsRoleKey key, string region, Exception? raw) =>
         FromRaw(AwsRoleAssumeKind.NoSourceIdentity, key, region, raw,
-            scrubbed => $"The monitoring host has no AWS credentials to assume role {key.RoleArn} with: {scrubbed}");
+            (_, code, type) => $"The monitoring host has no AWS credentials to assume role {key.RoleArn} with. Nothing was read this cycle. "
+                + "Give the service an AWS identity to sign in with (an instance profile, a container task role, environment variables "
+                + "or a shared credentials profile it can read), then restart the service."
+                + SourceNote(code, type));
 
     /// <summary>The assume-role call failed. The raw exception is read for its code and type, then dropped.</summary>
     internal static AwsRoleAssumeException ForStsFailure(AwsRoleKey key, string region, Exception raw)
@@ -166,7 +179,7 @@ public sealed class AwsRoleAssumeException : Exception
                     ? AwsRoleAssumeKind.SourceCredentials
                     : AwsRoleAssumeKind.Transient;
 
-        return FromRaw(kind, key, region, raw, scrubbed => kind switch
+        return FromRaw(kind, key, region, raw, (_, code, type) => kind switch
         {
             AwsRoleAssumeKind.RegionDisabled =>
                 $"AWS STS is not active in region {region} for the monitoring host's AWS account, so role {key.RoleArn} could not be assumed. "
@@ -183,7 +196,9 @@ public sealed class AwsRoleAssumeException : Exception
                 + (string.IsNullOrEmpty(code) ? string.Empty : $" ({Scrub(code, key.ExternalId)})")
                 + ". The credentials the service runs with are expired or wrong, or the host's clock is off. Nothing was read this cycle. "
                 + "Fix the host's credentials or clock; a new attempt is made within a minute.",
-            _ => $"Assuming role {key.RoleArn}: {scrubbed}",
+            _ => $"Assuming role {key.RoleArn}: AWS STS could not be reached or answered with an error. Nothing was read this cycle. "
+                + "A new attempt is made within a minute."
+                + SourceNote(code, type),
         });
     }
 
@@ -200,8 +215,8 @@ public sealed class AwsRoleAssumeException : Exception
 
     /// <summary>A new exception from the facts of an earlier one, for a throw that serves a cached failure.</summary>
     internal static AwsRoleAssumeException Rebuild(
-        AwsRoleAssumeKind kind, AwsRoleKey key, string region, string message, string? code, string? type) =>
-        new(kind, key.RoleArn, region, key.HasExternalId, message, code, type);
+        AwsRoleAssumeKind kind, AwsRoleKey key, string region, string message, string? code, string? type, string? detail = null) =>
+        new(kind, key.RoleArn, region, key.HasExternalId, message, code, type, detail);
 
     /// <summary>
     /// Takes <paramref name="text"/> with every form of <paramref name="externalId"/> removed: as written, and as a URL
@@ -233,13 +248,31 @@ public sealed class AwsRoleAssumeException : Exception
     }
 
     private static AwsRoleAssumeException FromRaw(
-        AwsRoleAssumeKind kind, AwsRoleKey key, string region, Exception? raw, Func<string, string> message)
+        AwsRoleAssumeKind kind, AwsRoleKey key, string region, Exception? raw, Func<string, string?, string?, string> message)
     {
         var scrubbed = Scrub(raw?.Message, key.ExternalId);
         var code = (raw as AmazonServiceException)?.ErrorCode;
+        var safeCode = code is null ? null : Scrub(code, key.ExternalId);
+        var type = raw?.GetType().FullName;
         return new AwsRoleAssumeException(
-            kind, key.RoleArn, region, key.HasExternalId, message(scrubbed),
-            code is null ? null : Scrub(code, key.ExternalId), raw?.GetType().FullName);
+            kind, key.RoleArn, region, key.HasExternalId, message(scrubbed, safeCode, type),
+            safeCode, type, scrubbed.Length == 0 ? null : scrubbed);
+    }
+
+    /// <summary>
+    /// The tail of a message that names the SDK exception type and the AWS error code, and nothing the SDK wrote.
+    /// Empty when the SDK gave neither.
+    /// </summary>
+    private static string SourceNote(string? code, string? type)
+    {
+        if (string.IsNullOrEmpty(code) && string.IsNullOrEmpty(type))
+        {
+            return string.Empty;
+        }
+
+        return " (" + (string.IsNullOrEmpty(type) ? string.Empty : "SDK exception " + type)
+            + (string.IsNullOrEmpty(code) ? string.Empty : (string.IsNullOrEmpty(type) ? string.Empty : ", ") + "AWS error code " + code)
+            + ")";
     }
 
     private static bool StartsWithOrdinalIgnoreCase(string? value, string prefix) =>

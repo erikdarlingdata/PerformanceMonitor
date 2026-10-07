@@ -214,12 +214,18 @@ Each server can use its own AWS role instead, set on that server alone:
   "engine": "postgres",
   "host": "orders.cluster-abc123.us-east-1.rds.amazonaws.com",
   "awsRoleArn": "arn:aws:iam::123456789012:role/darling-monitor",
-  "awsExternalId": "orders-prod-7f3a"
+  "awsExternalId": "d3b7f1c2-9a4e-4c85-b0a6-5e1f7a2c8d94"
 }
 ```
 
 `awsRoleArn` is an IAM role ARN. `awsExternalId` is optional, needs the role, and is 2 to 1224 characters
-(letters, digits and `_ + = , . @ : / -`). Both apply to a PostgreSQL target only. Darling assumes the role
+(letters, digits and `_ + = , . @ : / -`). Use a random value that cannot be guessed, such as a UUID. The store keeps
+the external ID as plain text, unlike the passwords, which it seals. The web, MCP and the desktop viewer never show it
+back; they show only whether one is set. AWS does not treat the external ID as a secret either: it is not a
+credential, it can be seen by anyone with permission to view the role, and its job is to keep a role from being
+assumed on someone else's behalf (see
+[External IDs for third party access](https://docs.aws.amazon.com/IAM/latest/UserGuide/id_roles_common-scenarios_third-party.html)
+in the AWS IAM User Guide). Both apply to a PostgreSQL target only. Darling assumes the role
 through AWS STS and uses it for every AWS call it makes for that server. Those calls are the Describe calls
 that check the host, instance CPU and host memory (`pg_cpu_utilization`, through RDS and Performance Insights),
 and the log reads behind `pg_plan_capture`, `pg_deadlocks` and `pg_log_events`. A server with no `awsRoleArn` uses the
@@ -239,7 +245,7 @@ To set it up:
      "Effect": "Allow",
      "Principal": { "AWS": "arn:aws:iam::<host-account-id>:role/<darling-host-role>" },
      "Action": "sts:AssumeRole",
-     "Condition": { "StringEquals": { "sts:ExternalId": "orders-prod-7f3a" } }
+     "Condition": { "StringEquals": { "sts:ExternalId": "d3b7f1c2-9a4e-4c85-b0a6-5e1f7a2c8d94" } }
    }
    ```
 
@@ -256,7 +262,8 @@ A role is a server setting like `host`. You can put it in the
 dialog, and with `--add-server`. The service runs a role only if it is allowed:
 
 - `allowedAwsRoles` in `darling.json` is a list of role ARNs (matched exactly) and 12-digit account ids (every
-  role in that account):
+  role in that account). A bare account id is an account in the `aws` partition. For an account in the China or
+  GovCloud partition, write the partition first: `aws-cn:123456789012` or `aws-us-gov:123456789012`:
 
   ```json
   "allowedAwsRoles": [ "arn:aws:iam::123456789012:role/darling-monitor", "123456789012" ]
@@ -281,7 +288,8 @@ server that has an external ID stored needs the external ID in the same request 
 `Changing the AWS role needs the external ID with it: send the external ID again, or clear it.` The web and
 MCP never return the external ID. They show only whether one is set (`aws_external_id_set`). Omitting the external ID keeps
 the stored one. The desktop viewer's dialog is filled with the stored role, so
-emptying that box removes the role, and it holds the external ID in a masked box. A role-only change takes
+emptying that box removes the role. Its external ID box does not show the stored ID: it reads "set, leave blank to
+keep" when one is stored, typing in it replaces the ID, and the "Clear external ID" box removes it. A role-only change takes
 effect at the next sweep, with no restart: the server's connection is rebuilt with the new role.
 
 The service logs and records the role ARN and `ExternalId = set` or `ExternalId = none`. It never writes the
@@ -820,11 +828,12 @@ says which kind it is. A missing extension a collector declares gets its own `EX
 | `PERMISSIONS` | "NOT a missing grant", feature disabled | switched off in the parameter group | enable it, or accept the gap |
 | `PERMISSIONS` | `is not authorized to perform: rds:Describe...`/`rds:Download...`, names an IAM role ARN | the **monitoring host's IAM role** (or the server's own AWS role, once assumed) lacks the AWS-level grant plan capture/deadlocks need on Aurora/RDS | attach the IAM policy in step 1's IAM subsection to the role the message names. A DB-side grant cannot fix this, because it is a different identity entirely |
 | `PERMISSIONS` | `The AWS role <arn> on this server is not in allowedAwsRoles in darling.json, so it was not used. Nothing was read this cycle. Add the role or its account id to the list and restart the service, or clear the role on this server.` | the server names a role the list does not allow, so Darling never assumed it | list the role ARN or its account id in `allowedAwsRoles` and restart the service, or remove the role from the server |
-| `PERMISSIONS` | `Role <arn> is in AWS partition aws-cn, but this target's region <region> is in partition aws. A role can be assumed only inside its own partition. Nothing was read this cycle.` | the role and the target's region are in different AWS partitions | use a role from the region's partition |
-| `PERMISSIONS` | `AWS refused to let the monitoring host assume role <arn> (with the external ID set on this server)`, or `(without an external ID)`, then `One of these is wrong: the role does not exist, its trust policy does not trust the host's AWS identity, the external ID does not match the trust policy's sts:ExternalId condition, or the host's identity has no sts:AssumeRole permission on the role. AWS gives the same answer for all four.` | STS denied the assume-role call | check the four named things in step 1's cross-account subsection. The message never shows the external ID, only whether one is set |
-| `PERMISSIONS` | `AWS STS is not active in region <region> for the monitoring host's AWS account, so role <arn> could not be assumed. Activate STS for that region in the host account's IAM settings. Nothing was read this cycle.` | the host's account has STS switched off for that region | activate STS for the region |
-| `ERROR` | `AWS rejected the monitoring host's own credentials while it assumed role <arn>`, then `The credentials the service runs with are expired or wrong, or the host's clock is off. Nothing was read this cycle. Fix the host's credentials or clock; a new attempt is made within a minute.` | the host's own credentials, not the role, are the problem | fix the host's credentials or clock |
-| `ERROR` | `The monitoring host has no AWS credentials to assume role <arn> with: ...`, or `Assuming role <arn>: AWS STS did not answer within <n> seconds.` | the host has no AWS identity to assume the role from, or STS did not answer in time | give the service an AWS identity (step 1's IAM subsection). A timeout is retried on the next cycle |
+| `PERMISSIONS` | `Role <arn> is in AWS partition aws-cn, but this target's region <region> is in partition aws. A role can be assumed only inside its own partition. Nothing was read this cycle. Set a role from the target's partition on this server, or clear the role, or correct the server's host name if it names the wrong region.` | the role and the target's region are in different AWS partitions | set a role from the region's partition on the server, clear the role, or correct the host name if it names the wrong region |
+| `PERMISSIONS` | `AWS refused to let the monitoring host assume role <arn> (with the external ID set on this server). Nothing was read this cycle. One of these is wrong: the role does not exist, its trust policy does not trust the host's AWS identity, the external ID does not match the trust policy's sts:ExternalId condition, or the host's identity has no sts:AssumeRole permission on the role. AWS gives the same answer for all four.`, or the same with `(without an external ID)` | STS denied the assume-role call | check the four named things in step 1's cross-account subsection. The message never shows the external ID, only whether one is set |
+| `PERMISSIONS` | `AWS STS is not active in region <region> for the monitoring host's AWS account, so role <arn> could not be assumed. Nothing was read this cycle. Enable that region for the AWS account that owns the role and for the monitoring host's account (AWS account settings, Regions), or set a role in a region that is enabled, or correct the server's host name if it names the wrong region.` | STS is switched off for that region in the host's account or the role's account | enable the region for both accounts (AWS account settings, Regions), set a role in an enabled region, or correct the host name |
+| `ERROR` | `AWS rejected the monitoring host's own credentials while it assumed role <arn>`, then ` (<AWS error code>)` when AWS gave one, then `. The credentials the service runs with are expired or wrong, or the host's clock is off. Nothing was read this cycle. Fix the host's credentials or clock; a new attempt is made within a minute.` | the host's own credentials, not the role, are the problem | fix the host's credentials or clock |
+| `ERROR` | `The monitoring host has no AWS credentials to assume role <arn> with. Nothing was read this cycle. Give the service an AWS identity to sign in with (an instance profile, a container task role, environment variables or a shared credentials profile it can read), then restart the service.`, then `(SDK exception <type>, AWS error code <code>)` when the SDK gave them | the host has no AWS identity to assume the role from | give the service an AWS identity (step 1's IAM subsection). The message holds the SDK exception type and AWS error code only; the SDK's own text is in the service log |
+| `ERROR` | `Assuming role <arn>: AWS STS could not be reached or answered with an error. Nothing was read this cycle. A new attempt is made within a minute.`, then `(SDK exception <type>, AWS error code <code>)` when the SDK gave them; or `Assuming role <arn>: AWS STS did not answer within <n> seconds.` | STS, or the host's credential lookup, did not answer in time, or STS answered with a fault | a new attempt is made within a minute. The SDK's own text is in the service log |
 | `ERROR` | a statement timeout | the query was too slow **once** | usually transient; deliberately does *not* drop the connection, so a slow query cannot cause a reconnect storm |
 | `ERROR` | anything else | unclassified | read `error_message`; this is the bucket that wants a bug report |
 | `YIELDED` | lock contention | the collector stepped aside | none today — no PostgreSQL collector opts into the lock-timeout yield |

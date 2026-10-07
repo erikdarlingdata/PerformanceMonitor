@@ -534,7 +534,7 @@ Two mutually exclusive modes — setting `managed: true` together with `connecti
 
 | Key | Default | Notes |
 |---|---|---|
-| `allowedAwsRoles` | `[]` | The AWS roles the web, MCP, desktop viewer and `--add-server` may set on a server. Each entry is an IAM role ARN (matched exactly) or a 12-digit AWS account id (every role in that account). The service runs a role only if it is listed here or a `servers[]` entry in this file names it in `awsRoleArn`. With no list, the web and MCP cannot set a role. Read at start: restart the service after you change it. Example: `[ "arn:aws:iam::123456789012:role/darling-monitor", "123456789012" ]` |
+| `allowedAwsRoles` | `[]` | The AWS roles the web, MCP, desktop viewer and `--add-server` may set on a server. Each entry is an IAM role ARN (matched exactly) or a 12-digit AWS account id (every role in that account in the `aws` partition; write `aws-cn:123456789012` or `aws-us-gov:123456789012` for an account in the China or GovCloud partition). The service runs a role only if it is listed here or a `servers[]` entry in this file names it in `awsRoleArn`. With no list, the web and MCP cannot set a role. Read at start: restart the service after you change it. Example: `[ "arn:aws:iam::123456789012:role/darling-monitor", "123456789012" ]` |
 
 ### capturePlans (boolean, optional)
 
