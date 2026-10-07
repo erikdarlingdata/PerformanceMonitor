@@ -81,6 +81,47 @@ public sealed class GuardStageWorkflowTests
         Assert.DoesNotContain("upload-artifact", job, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// A skipped test exits 0, and the guard job has no PostgreSQL, so a tagged test that needs a store would skip
+    /// and the job would stay green (M1 of #5471's review). <c>-failSkips</c> turns that into a red job. The loop also
+    /// has to let both suites run when the first fails, which needs the native-command preference set outright (L1).
+    /// </summary>
+    [Fact]
+    public void TheGuardJobsRunStep_FailsOnASkip_AndLetsBothSuitesRunWhenOneFails()
+    {
+        var run = Step(JobBlock(Yaml(), "guard-tests"), "Run the Stage=Guard classes of both suites");
+
+        /* The one dotnet run of the tests (the class listing is a different command) carries the switch, once, in the loop. */
+        var runs = Regex.Matches(run, @"^\s*dotnet run --project \$suite\.Project -c Release --no-build -- -trait Stage=Guard.*$", RegexOptions.Multiline);
+        Assert.Single(runs);
+        Assert.Contains(" -failSkips", runs[0].Value, StringComparison.Ordinal);
+
+        var preference = run.IndexOf("$PSNativeCommandUseErrorActionPreference = $false", StringComparison.Ordinal);
+        Assert.True(preference >= 0, "the guard loop does not set $PSNativeCommandUseErrorActionPreference explicitly");
+        Assert.True(
+            preference > run.IndexOf("$ErrorActionPreference = 'Stop'", StringComparison.Ordinal)
+              && preference < run.IndexOf("foreach ($suite in $suites)", StringComparison.Ordinal),
+            "the native-command preference must be set after $ErrorActionPreference and before the loop");
+    }
+
+    /// <summary>
+    /// darling-tree-guards now skips on a pull request whose guards failed, so its header must not promise "always
+    /// reports a result" (L2 of #5471's review): a skip counts as passing, and the comment is what keeps the next
+    /// reader from making it a required check.
+    /// </summary>
+    [Fact]
+    public void TheTreeGuardsHeader_NoLongerPromisesAResultOnEveryEvent()
+    {
+        var yaml = Yaml();
+        var at = yaml.IndexOf("\n  darling-tree-guards:\n", StringComparison.Ordinal);
+        Assert.True(at >= 0);
+
+        var header = yaml[Math.Max(0, at - 700)..at];
+        Assert.DoesNotContain("always reports a result, so it can be a required check", header, StringComparison.Ordinal);
+        Assert.Contains("on a pull request whose Guard tests job did not", header, StringComparison.Ordinal);
+        Assert.Contains("is NOT a required check", header, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void TheGuardJobsFilter_IsACopyOfTheBuildJobsDocsAndAllEntries()
     {

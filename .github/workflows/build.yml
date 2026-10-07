@@ -315,6 +315,10 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
+          # Both suites must run even when the first fails, so a failing native command has to set $LASTEXITCODE
+          # and not throw (#5471 review L1). The default is already $false; the three loops below that need the
+          # same say it out loud, so this one does too.
+          $PSNativeCommandUseErrorActionPreference = $false
           $failed = @()
           $suites = @(
               @{ Name = 'Darling.Tests'; Project = 'Darling/Darling.Tests/Darling.Tests.csproj' },
@@ -331,7 +335,9 @@ jobs:
               if ($classes.Count -eq 0) { throw "$($suite.Name): no class carries Stage=Guard, so this job would run nothing" }
               Write-Host "$($suite.Name): $($classes.Count) Stage=Guard classes"
 
-              dotnet run --project $suite.Project -c Release --no-build -- -trait Stage=Guard
+              # -failSkips: this job has no PostgreSQL, so a tagged test that needs a store would SKIP, and a skip
+              # exits 0. Failing skips turns that into a red job (#5471 review M1). Both suites skip none today.
+              dotnet run --project $suite.Project -c Release --no-build -- -trait Stage=Guard -failSkips
               if ($LASTEXITCODE -ne 0) {
                   Write-Host "::error title=Guard tests failed::$($suite.Name) failed its Stage=Guard classes (exit $LASTEXITCODE). The shards were skipped on this pull request."
                   $failed += $suite.Name
@@ -1977,7 +1983,9 @@ jobs:
   # No PostgreSQL here, deliberately. The whole-tree guards need none, and standing up a throwaway
   # TimescaleDB cluster would make a documentation change depend on the flakiest part of CI
   # (#1862's compression flake failed twice in two unrecognizably different ways). Runs on every
-  # non-cancelled event and always reports a result, so it can be a required check.
+  # non-cancelled event, with one exception (#5459): on a pull request whose Guard tests job did not
+  # succeed it skips, because `build` is already red there. So it is NOT a required check, and must not
+  # be made one without reading that skip, which GitHub counts as passing.
   darling-tree-guards:
     name: Darling whole-tree guards
     # guard-tests too (#5459): when the Guard tests job failed on a pull request, `build` failed at once, and

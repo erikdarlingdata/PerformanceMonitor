@@ -10,8 +10,12 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Reflection;
 using System.Text;
 using System.Text.RegularExpressions;
+using System.Xml.Linq;
+using Xunit;
+using Xunit.v3;
 
 namespace Darling.Tests;
 
@@ -105,19 +109,32 @@ internal static class GuardStageScanner
         bool ReadsTestVariable,
         string OwnCode);
 
-    /// <summary>Every test class under <paramref name="testsRoot"/>, one row per class name.</summary>
-    internal static IReadOnlyList<Row> Scan(string testsRoot)
+    /// <summary>
+    /// Every test class under <paramref name="testsRoot"/>, one row per class name. When <paramref name="projectFile"/>
+    /// is given, the files the project compiles in through a <c>Link</c> are read too: they sit outside the folder
+    /// and xunit runs their classes all the same (M1 of #5471's review).
+    /// </summary>
+    internal static IReadOnlyList<Row> Scan(string testsRoot, string? projectFile = null)
     {
         var files = Directory.EnumerateFiles(testsRoot, "*.cs", SearchOption.AllDirectories)
             .Where(f => !IsBuildOutput(testsRoot, f))
             .OrderBy(f => f, StringComparer.Ordinal)
+            .Select(f => (Path: f, Relative: Path.GetRelativePath(testsRoot, f).Replace('\\', '/')))
             .ToList();
+
+        if (projectFile is not null)
+        {
+            var inFolder = new HashSet<string>(files.Select(f => Path.GetFullPath(f.Path)), StringComparer.OrdinalIgnoreCase);
+            files.AddRange(LinkedCompileFiles(projectFile)
+                .Where(l => inFolder.Add(Path.GetFullPath(l.Path)))
+                .Select(l => (l.Path, l.Link)));
+        }
 
         var decls = new List<Decl>();
         foreach (var file in files)
         {
-            var text = File.ReadAllText(file).Replace("\r\n", "\n", StringComparison.Ordinal);
-            decls.AddRange(Declarations(text, Path.GetRelativePath(testsRoot, file).Replace('\\', '/')));
+            var text = File.ReadAllText(file.Path).Replace("\r\n", "\n", StringComparison.Ordinal);
+            decls.AddRange(Declarations(text, file.Relative));
         }
 
         /* A type that is not a test class but names a DARLING_TEST_ variable is a store helper, and so is a type
@@ -370,6 +387,128 @@ internal static class GuardStageScanner
         }
 
         return new List<string>();
+    }
+
+    /// <summary>One class xunit would run in the guard job, as the loaded assembly says it is.</summary>
+    internal sealed record ReflectedClass(string Name, bool LiveCollection);
+
+    /// <summary>
+    /// The classes xunit selects for <c>-trait Stage=Guard</c>, read off the test assembly itself (M1 of #5471's
+    /// review): a public, concrete class with at least one test method, where the trait sits on the assembly, the
+    /// class (or a base class, which xunit inherits) or any of its test methods. This is xunit's own idea of
+    /// "tagged": it sees a method-level trait, a combined attribute list, a trait spelled with constants and a
+    /// linked file, which a source scan can miss, so a store-needing class cannot reach the guard job unseen.
+    /// </summary>
+    internal static IReadOnlyList<ReflectedClass> ReflectGuardClasses(Assembly assembly) =>
+        ReflectGuardClasses(
+            assembly.GetTypes().Where(t => t.IsPublic || t.IsNestedPublic),
+            HasGuardTrait(assembly.GetCustomAttributes()));
+
+    /// <summary>The same read over the given types, so a test can point it at probe classes xunit does not run.</summary>
+    internal static IReadOnlyList<ReflectedClass> ReflectGuardClasses(
+        IEnumerable<Type> types, bool assemblyTagged, Func<MethodInfo, bool>? isTest = null)
+    {
+        isTest ??= m => m.GetCustomAttributes(inherit: true).OfType<IFactAttribute>().Any();
+        var result = new List<ReflectedClass>();
+
+        foreach (var type in types.Where(t => t.IsClass && !t.IsAbstract))
+        {
+            var tests = type.GetMethods(BindingFlags.Public | BindingFlags.Instance)
+                .Where(isTest)
+                .ToList();
+            if (tests.Count == 0)
+            {
+                continue;
+            }
+
+            var tagged = assemblyTagged
+                || HasGuardTrait(type.GetCustomAttributes(inherit: true).Cast<Attribute>())
+                || tests.Any(m => HasGuardTrait(m.GetCustomAttributes(inherit: true).Cast<Attribute>()));
+            if (!tagged)
+            {
+                continue;
+            }
+
+            var live = type.GetCustomAttributes(inherit: true).OfType<CollectionAttribute>()
+                .Any(c => string.Equals(c.Name, "live-postgres", StringComparison.Ordinal));
+            result.Add(new ReflectedClass(type.Name, live));
+        }
+
+        return result;
+    }
+
+    private static bool HasGuardTrait(IEnumerable<Attribute> attributes) =>
+        attributes.OfType<ITraitAttribute>().Any(a => a.GetTraits().Any(
+            t => string.Equals(t.Key, "Stage", StringComparison.OrdinalIgnoreCase)
+              && string.Equals(t.Value, "Guard", StringComparison.OrdinalIgnoreCase)));
+
+    /// <summary>
+    /// Where the source scan and xunit disagree, and rule R3 over the reflected set (M1 of #5471's review). Both
+    /// directions fail: a class xunit tags that the scan does not (it could need a store unseen) and a class the
+    /// scan reads as tagged that xunit does not run in the guard job (the tag is not doing what the census thinks).
+    /// </summary>
+    internal static List<string> ReflectionProblems(IReadOnlyList<Row> rows, IReadOnlyList<ReflectedClass> reflected)
+    {
+        var problems = new List<string>();
+        var byName = rows.ToDictionary(r => r.Name, StringComparer.Ordinal);
+        var reflectedNames = new HashSet<string>(reflected.Select(r => r.Name), StringComparer.Ordinal);
+
+        foreach (var r in reflected.OrderBy(r => r.Name, StringComparer.Ordinal))
+        {
+            byName.TryGetValue(r.Name, out var row);
+
+            if (row is null)
+            {
+                problems.Add($"UNSCANNED {r.Name}: xunit runs it in the guard job but the source scan found no test class of that name "
+                  + "(a linked file the csproj does not list, or tests inherited from a base class)");
+            }
+            else if (!row.Tagged)
+            {
+                problems.Add($"UNTAGGED {row.File}: {r.Name} is selected by -trait Stage=Guard through a trait the source scan does not read "
+                  + "(a method-level trait, a combined attribute list, a constant, a base class); write it as the one attribute line above the class");
+            }
+
+            if (r.LiveCollection || (row is not null && row.NeedsAStore && !row.Tagged))
+            {
+                problems.Add($"STORE {r.Name} is selected by -trait Stage=Guard but needs a store ("
+                  + (r.LiveCollection ? "live-postgres collection" : row!.StoreReasons) + "); the guard job has no PostgreSQL");
+            }
+        }
+
+        foreach (var row in rows.Where(r => r.Tagged && !reflectedNames.Contains(r.Name)).OrderBy(r => r.Name, StringComparer.Ordinal))
+        {
+            problems.Add($"PHANTOM {row.File}: {row.Name} reads as tagged in source but xunit does not select it for -trait Stage=Guard "
+              + "(not public, abstract, or no test method)");
+        }
+
+        return problems;
+    }
+
+    /// <summary>
+    /// The files a project compiles in through an explicit <c>&lt;Compile Include=... Link=...&gt;</c> item, which a
+    /// scan of the project's own folder never sees (M1 of #5471's review). Wildcards are not links and are skipped.
+    /// </summary>
+    internal static IReadOnlyList<(string Path, string Link)> LinkedCompileFiles(string projectFile)
+    {
+        var projectDirectory = Path.GetDirectoryName(projectFile)
+            ?? throw new InvalidOperationException("The project file has no directory.");
+        var result = new List<(string, string)>();
+
+        foreach (var item in XDocument.Load(projectFile).Descendants().Where(e => e.Name.LocalName == "Compile"))
+        {
+            var include = (string?)item.Attribute("Include");
+            var link = (string?)item.Attribute("Link");
+            if (string.IsNullOrEmpty(include) || string.IsNullOrEmpty(link) || include.Contains('*', StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            result.Add((
+                System.IO.Path.GetFullPath(System.IO.Path.Combine(projectDirectory, include.Replace('\\', System.IO.Path.DirectorySeparatorChar))),
+                link.Replace('\\', '/')));
+        }
+
+        return result;
     }
 
     private static bool IsBuildOutput(string testsRoot, string file)
