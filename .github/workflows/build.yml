@@ -841,7 +841,9 @@ jobs:
         uses: actions/upload-artifact@v6
         with:
           name: lite-tests-timing-release
-          path: TestResults/lite-timing-*.xml
+          path: |
+            TestResults/lite-timing-*.xml
+            TestResults/lite-timing-*.xml.cpu.json
           retention-days: 7
           if-no-files-found: ignore
 
@@ -2531,6 +2533,11 @@ jobs:
         if: matrix.shard == 0
         run: python .github/scripts/lite-shard-pack.py --self-test
 
+      # #5208: the timing summary's own proof (per-class CPU column, the coverage line). No build needed.
+      - name: Lite timing summary self-test
+        if: matrix.shard == 0
+        run: python .github/scripts/lite-timing-top.py --self-test
+
       # The class list comes off the built assembly itself (-list classes/json), so the population is
       # whatever exists on THIS commit — no roster. An empty selection is a hard error, not a skip:
       # with zero -class arguments the runner executes the WHOLE suite, so "my shard is empty" and
@@ -2702,7 +2709,9 @@ jobs:
         uses: actions/upload-artifact@v6
         with:
           name: lite-tests-timing-${{ matrix.shard }}
-          path: TestResults/lite-timing-*.xml
+          path: |
+            TestResults/lite-timing-*.xml
+            TestResults/lite-timing-*.xml.cpu.json
           retention-days: 7
           if-no-files-found: ignore
 
