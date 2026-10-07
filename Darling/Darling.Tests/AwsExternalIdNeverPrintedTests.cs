@@ -197,4 +197,41 @@ public sealed class AwsExternalIdNeverPrintedTests
         AssertClean(AwsRoleAssumeException.Scrub(Echo("text"), Sentinel));
         AssertClean(AwsRoleAssumeException.Scrub("value " + System.Net.WebUtility.HtmlEncode(Sentinel) + " end", Sentinel));
     }
+
+    /* ---- the worker's own outputs --------------------------------------------------------------------------- */
+
+    private const string InstanceHost = "solo.abc123.us-east-1.rds.amazonaws.com";
+
+    [Theory]
+    [InlineData("AccessDenied")]
+    [InlineData("RegionDisabledException")]
+    [InlineData("ExpiredToken")]
+    [InlineData("Throttling")]
+    public async Task TheWorkersCollectionLogTextAndWarningLine_NeverCarryTheId(string code)
+    {
+        // An STS error that repeats the external ID in its message, driven through the real RDS reader and a real client.
+        var sts = new FakeSts((_, _) => throw FakeSts.Error(code, Echo("denied for role " + Role)));
+        var cacheLog = new CapturingAwsLogger();
+        var cache = new AwsRoleCredentialCache(AwsRoleAllowlist.From(new[] { Role }), null, sts.Factory, FakeSts.Source, new ManualTimeProvider(), null, cacheLog);
+        var ingestor = new RdsCpuIngestor(
+            Npgsql.NpgsqlDataSource.Create("Host=localhost;Port=1;Database=unused"),
+            verifier: RdsEndpointVerifier.ForTests(enforce: true, loginProbe: (_, _) => Task.FromResult<string?>(null)),
+            roles: cache);
+
+        var thrown = await Record.ExceptionAsync(
+            () => ingestor.IngestAsync(1, "s", InstanceHost, "Host=" + InstanceHost, new AwsRoleKey(Role, Sentinel), System.Threading.CancellationToken.None));
+
+        var fault = Assert.IsType<AwsRoleAssumeException>(thrown);
+        AssertClean(fault);
+
+        // What the worker writes for a refused role: the collection_log text and the warning line.
+        var workerLog = new CapturingAwsLogger();
+        var rowText = PerformanceMonitor.Darling.Service.DarlingWorker.AwsRoleFaultNote(workerLog, "alpha-pg-01", "pg_plan_capture", fault);
+        AssertClean(rowText);
+        AssertClean(workerLog.All);
+
+        // The ERROR arm writes the exception's message too; the credentials class logged one warning for the failed refresh.
+        AssertClean(fault.Message);
+        AssertClean(cacheLog.All);
+    }
 }

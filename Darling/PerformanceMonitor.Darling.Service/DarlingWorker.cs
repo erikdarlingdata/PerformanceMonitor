@@ -6484,6 +6484,25 @@ LIMIT 1";
     }
 
     /// <summary>
+    /// #5452: the AWS role exception behind <paramref name="ex"/> when it is one an operator can act on (the allow list does
+    /// not list the role, its partition is not the target's, STS refused it, the region is disabled), found through any
+    /// wrapper; otherwise null. The role arm of the collector run filters on this.
+    /// </summary>
+    internal static AwsRoleAssumeException? AwsRoleConfigurationFault(Exception ex)
+        => AwsRoleAssumeException.Find(ex) is { IsConfiguration: true } found ? found : null;
+
+    /// <summary>
+    /// #5452: writes the warning line for a server whose AWS role cannot be used and returns the text for its
+    /// <c>collection_log</c> row. Both are the exception's own message, which names the role ARN and whether an external ID is
+    /// set and never the ID. One method so the two outputs cannot differ, and so a test can read both.
+    /// </summary>
+    internal static string AwsRoleFaultNote(ILogger logger, string serverName, string collectorName, AwsRoleAssumeException fault)
+    {
+        logger.LogWarning("  [{Server}] {Collector} => PERMISSIONS: {Message}", serverName, collectorName, fault.Message);
+        return fault.Message;
+    }
+
+    /// <summary>
     /// Whether two server definitions are identical for the collection loop — the connection-relevant fields
     /// (host, port, engine, database, auth, credentials, intent), the server's own AWS role and external ID (#5452: a role-only edit
     /// reconnects, so the runtime reads under the new role and the host check starts over), plus the collection-affecting excluded databases. A difference triggers a reconnect on reconcile so the
@@ -14469,7 +14488,7 @@ LIMIT 1";
                 _postgres!, runtime, collectorName, "SESSION_MISSING", 0, runClock.ElapsedMilliseconds, 0, ex.Message, fanout: null, phases: null, drain: null, fetchPhases: null, sweepPeerMaxMs: peerMaxAtDispatchMs, _logger, cancellationToken);
             return 0;
         }
-        catch (Exception ex) when (AwsRoleAssumeException.Find(ex) is { IsConfiguration: true } assume)
+        catch (Exception ex) when (AwsRoleConfigurationFault(ex) is { } assume)
         {
             /* #5452: the AWS role on this server cannot be used: the allow list does not list it, its partition is not the
                target's, or STS refused to hand it out. FIRST of the RDS arms, and ahead of every arm that reads the text of an
@@ -14479,11 +14498,10 @@ LIMIT 1";
                ARN and whether an external ID is set and never the ID. Nothing was read this cycle. Written on every sweep so
                collection health keeps reading it. The other kinds (the host's credentials, no source identity, a transient
                STS failure) carry no operator-fixable setting and fall through to the general ERROR arm with the same message. */
-            _logger.LogWarning("  [{Server}] {Collector} => PERMISSIONS: {Message}",
-                server.Config.DisplayName, collectorName, assume.Message);
+            var roleNote = AwsRoleFaultNote(_logger, server.Config.DisplayName, collectorName, assume);
 
             await DarlingObservability.LogCollectionAsync(
-                _postgres!, runtime, collectorName, "PERMISSIONS", 0, 0, runClock.ElapsedMilliseconds, assume.Message,
+                _postgres!, runtime, collectorName, "PERMISSIONS", 0, 0, runClock.ElapsedMilliseconds, roleNote,
                 fanout: null, phases: null, drain: null, fetchPhases: null, sweepPeerMaxMs: peerMaxAtDispatchMs, _logger, cancellationToken);
             return 0;
         }
