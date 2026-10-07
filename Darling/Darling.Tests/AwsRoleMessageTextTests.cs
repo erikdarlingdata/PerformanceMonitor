@@ -183,3 +183,53 @@ public sealed class AwsRoleTestConnectionTests
         Assert.DoesNotContain("AwsExternalId", text[probe..end], StringComparison.Ordinal);
     }
 }
+
+/// <summary>The role messages in the runbook's failure table read exactly as the service writes them (#5452).</summary>
+public sealed class AwsRoleRunbookMessagesTests
+{
+    private const string Role = "arn:aws:iam::123456789012:role/darling-monitor";
+
+    private static string Runbook()
+    {
+        var dir = new DirectoryInfo(AppContext.BaseDirectory);
+        while (dir is not null && !File.Exists(Path.Combine(dir.FullName, "PerformanceMonitor.sln")))
+        {
+            dir = dir.Parent;
+        }
+
+        return File.ReadAllText(Path.Combine(
+            dir?.FullName ?? throw new InvalidOperationException("The repository root was not found."), "docs", "postgres-first-target-runbook.md"));
+    }
+
+    [Fact]
+    public void EachRoleMessage_IsQuotedInTheRunbookExactlyAsTheServiceWritesIt()
+    {
+        var runbook = Runbook();
+        var withId = new AwsRoleKey(Role, "ext-7Hq2mZ9vLx");
+        var messages = new[]
+        {
+            AwsRoleAssumeException.ForNotAllowed(withId, "us-east-1").Message,
+            AwsRoleAssumeException.ForPartitionMismatch(withId, "<region>", "aws-cn", "aws").Message,
+            AwsRoleAssumeException.ForStsFailure(withId, "<region>", FakeSts.Error("RegionDisabledException", "off")).Message,
+            AwsRoleAssumeException.ForStsFailure(withId, "us-east-1", FakeSts.Error("AccessDenied", "denied")).Message,
+            AwsRoleAssumeException.ForNoSourceIdentity(withId, "us-east-1", null).Message,
+            AwsRoleAssumeException.ForStsFailure(withId, "us-east-1", FakeSts.Error("Throttling", "slow")).Message,
+        };
+
+        foreach (var message in messages)
+        {
+            /* The table writes the role as <arn>, and the parts that vary (a code, the SDK note) as placeholders. */
+            var quoted = message.Replace(Role, "<arn>", StringComparison.Ordinal);
+            quoted = Regex.Replace(quoted, @" \((?:SDK exception [^)]*|AWS error code [^)]*)\)\z", string.Empty);
+            Assert.Contains(quoted, runbook, StringComparison.Ordinal);
+        }
+
+        /* The host-credentials message holds the AWS error code between its two quoted parts. */
+        var rejected = AwsRoleAssumeException.ForStsFailure(withId, "us-east-1", FakeSts.Error("ExpiredToken", "old")).Message
+            .Replace(Role, "<arn>", StringComparison.Ordinal);
+        var split = rejected.IndexOf(" (ExpiredToken)", StringComparison.Ordinal);
+        Assert.True(split > 0);
+        Assert.Contains(rejected[..split], runbook, StringComparison.Ordinal);
+        Assert.Contains(rejected[(split + " (ExpiredToken)".Length)..], runbook, StringComparison.Ordinal);
+    }
+}

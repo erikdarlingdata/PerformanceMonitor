@@ -58,7 +58,8 @@ public sealed class DarlingConfig
 
     /// <summary>
     /// Which AWS roles the web and MCP may set for an Amazon RDS or Aurora target (#5452): IAM role ARNs, or 12-digit
-    /// AWS account ids that allow every role in the account. The service assumes a saved role only if it is listed
+    /// AWS account ids that allow every role in the account (a bare id is an account in the <c>aws</c> partition;
+    /// <c>aws-cn:123456789012</c> and <c>aws-us-gov:123456789012</c> name the others). The service assumes a saved role only if it is listed
     /// here or a <c>servers[]</c> entry in this file names it in <c>awsRoleArn</c>. Read at start, so an edit applies
     /// on restart. Empty by default: only the roles the file's own servers name run.
     /// </summary>
