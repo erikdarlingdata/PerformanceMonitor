@@ -50,9 +50,11 @@ public sealed class QueryStoreTopDailyReadLiveTests
     /// <summary>SHA-256 of each statement, line endings normalized. They were taken from the pre-split text, before
     /// <c>QueryStoreTopSuffix</c> was divided into its ranked head and its tail, and re-taken once for #5313, which
     /// deliberately changed both statements: the over-fetch <c>LIMIT $4 + 5</c> became the round's candidate limit and
-    /// the tail gained the page / count-row wrapper. The split pin is the tail-sharing assert below.</summary>
-    private const string RawSqlHash = "82452A8DE4520B3A10759D096C3FF9040DF66B43B938687294F9A7FA28860D32";
-    private const string TableSqlHash = "FCA3351A98FD812C1FAFACCE9C74E5014EB3AF428845EAA33E81D0C371EAACC5";
+    /// the tail gained the page / count-row wrapper, and re-taken again for #5420, which deliberately bounded the tail's
+    /// inline-text fallback to the read's window (<c>collection_time &gt;= $2</c> and <c>&lt;= $3</c>). The split pin is the
+    /// tail-sharing assert below.</summary>
+    private const string RawSqlHash = "836D1C99489C7EC952E327EE1CE1C40D7B94DE3270EC67D9249D32D05634CC33";
+    private const string TableSqlHash = "00902FACCF96EB93F4AFC6817B221C70B7D6BB19674FF2AAD8FAA0506E97E425";
 
     private static string Hash(string sql) =>
         Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(sql.ReplaceLineEndings("\n"))));

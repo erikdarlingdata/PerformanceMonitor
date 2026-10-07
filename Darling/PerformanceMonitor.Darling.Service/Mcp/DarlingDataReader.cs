@@ -2635,6 +2635,13 @@ internal static class DarlingDataReader
                            WHERE s.server_id = $1
                            AND   s.query_id = r.query_id
                            AND   s.database_name = r.database_name
+                           /* #5420: bounded to the read's own window ($2 through $3, the same bound the fact rows
+                              above were read with). Without it a query with no inline text anywhere walked every
+                              retained chunk of query_store_stats on the time index looking for one. A query whose
+                              only inline text is older than the window now shows none, as a query with no text
+                              at all already did. Twins the other copy of this tail; keep them matching. */
+                           AND   s.collection_time >= $2
+                           AND   s.collection_time <= $3
                            AND   s.query_text IS NOT NULL
                            ORDER BY s.collection_time DESC, s.collection_id DESC
                            LIMIT 1
