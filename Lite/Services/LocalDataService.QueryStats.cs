@@ -913,7 +913,9 @@ OPTION(RECOMPILE);',
         command.CommandText = @"
 SELECT
     date_trunc('hour', collection_time) AS bucket,
-    COUNT(DISTINCT object_name) AS proc_count,
+    /* #5449: a procedure that did no work in a cycle has no stored row now (old data still has its zero-delta row), so
+       the count is of procedures WITH work: the same number on both. */
+    COUNT(DISTINCT object_name) FILTER (WHERE COALESCE(delta_execution_count, 0) > 0 OR COALESCE(delta_worker_time, 0) > 0 OR COALESCE(delta_elapsed_time, 0) > 0) AS proc_count,
     COALESCE(SUM(delta_worker_time), 0) / 1000.0 AS total_cpu_ms,
     COALESCE(SUM(delta_elapsed_time), 0) / 1000.0 AS total_elapsed_ms,
     COALESCE(SUM(delta_logical_reads), 0) AS total_reads,
@@ -1280,7 +1282,7 @@ LEFT JOIN texts t ON t.sql_handle = j.text_handle;";
         var widthParamIndex = 4 + dbValues.Count;
         var bucketMinutes = AutoChartBucketMinutes(startTime, endTime);
 
-        command.CommandText = DurationTrendChartSql(relation, dbClause, widthParamIndex);
+        command.CommandText = DurationTrendChartSql(relation, dbClause, widthParamIndex, coverIdleSpan: relation == "v_procedure_stats");
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = startTime });
@@ -1347,7 +1349,34 @@ LEFT JOIN texts t ON t.sql_handle = j.text_handle;";
     /// width is appended as its OWN trailing parameter at <paramref name="widthParamIndex"/> so that numbering
     /// never shifts, mirroring the wait/perfmon trend reads' own width parameter.
     /// </summary>
-    internal static string DurationTrendChartSql(string relation, string dbClause, int widthParamIndex) => $@"
+    internal static string DurationTrendChartSql(string relation, string dbClause, int widthParamIndex) =>
+        DurationTrendChartSql(relation, dbClause, widthParamIndex, coverIdleSpan: false);
+
+    /// <summary>
+    /// #5449: the denominator of a bucketed duration-trend rate for a relation whose collector stores no row for an idle
+    /// cycle (<c>v_procedure_stats</c>). A bucket's rate is its summed work over its summed seconds, and the seconds were
+    /// the stored collections' own intervals: with no row for a quiet minute the quiet minutes drop out of the denominator
+    /// and the rate rises, where old data (which stores the idle rows) reads the same bucket lower. The seconds are the
+    /// larger of the stored intervals' sum and the bucket's own span, clipped to where the series has collections (its
+    /// first collection less that collection's own interval, and its last collection), so a store younger than the window,
+    /// or a window that ends mid-bucket, is not read low. Old data, whose intervals already fill the span, keeps its answer.
+    /// NULL stays NULL: a bucket with no rated collection is the unrated point, never a fabricated rate.
+    /// <paramref name="widthExpr"/> is the bucket width in minutes, as the statement's own parameter.
+    /// </summary>
+    internal static string IdleSpanSecondsSql(string widthExpr) => $@"CASE WHEN SUM(rated_seconds) IS NULL THEN NULL ELSE GREATEST(
+        SUM(rated_seconds),
+        extract(epoch FROM (
+            LEAST(MIN(raw_bucket) + to_minutes(CAST({widthExpr} AS INTEGER)), MAX(series_last))
+          - GREATEST(GREATEST(MIN(raw_bucket), $2), MIN(series_first) - to_seconds(CAST(MIN(first_interval) AS BIGINT)))))) END";
+
+    /// <summary>The rated-CTE columns <see cref="IdleSpanSecondsSql"/> reads (#5449).</summary>
+    internal static string IdleSpanColumnsSql(string widthExpr) => $@",
+        time_bucket(to_minutes(CAST({widthExpr} AS INTEGER)), collection_time, {TrendBuckets.OriginSql}) AS raw_bucket,
+        MIN(collection_time) OVER () AS series_first,
+        MAX(collection_time) OVER () AS series_last,
+        FIRST_VALUE(COALESCE(interval_seconds, 0)) OVER (ORDER BY collection_time) AS first_interval";
+
+    internal static string DurationTrendChartSql(string relation, string dbClause, int widthParamIndex, bool coverIdleSpan) => $@"
 WITH raw AS
 (
     SELECT
@@ -1372,15 +1401,15 @@ rated AS
         collection_time,
         CASE WHEN interval_seconds > 0 THEN total_elapsed_ms END AS rated_elapsed_ms,
         CASE WHEN interval_seconds > 0 THEN total_executions END AS rated_executions,
-        CASE WHEN interval_seconds > 0 THEN interval_seconds END AS rated_seconds{(dbClause.Length == 0 ? "" : ",\n        matched_rows")}
+        CASE WHEN interval_seconds > 0 THEN interval_seconds END AS rated_seconds{(coverIdleSpan ? IdleSpanColumnsSql("$" + widthParamIndex) : "")}{(dbClause.Length == 0 ? "" : ",\n        matched_rows")}
     FROM raw
 )
 SELECT
     GREATEST(time_bucket(to_minutes(CAST(${widthParamIndex} AS INTEGER)), collection_time, {TrendBuckets.OriginSql}), $2) AS bucket_start,
     /* No ELSE, no HAVING: a bucket whose every collection is unrated sums to NULL over NULL and keeps its row
        — never a fabricated 0 (#3541 A12 at the bucket level). */
-    SUM(rated_elapsed_ms) / SUM(rated_seconds) AS elapsed_ms_per_second,
-    CAST(SUM(rated_executions) AS DOUBLE PRECISION) / SUM(rated_seconds) AS executions_per_second,
+    SUM(rated_elapsed_ms) / {(coverIdleSpan ? IdleSpanSecondsSql("$" + widthParamIndex) : "SUM(rated_seconds)")} AS elapsed_ms_per_second,
+    CAST(SUM(rated_executions) AS DOUBLE PRECISION) / {(coverIdleSpan ? IdleSpanSecondsSql("$" + widthParamIndex) : "SUM(rated_seconds)")} AS executions_per_second,
     MIN(collection_time) AS first_collection_time,
     COUNT(*) AS collection_count
 FROM rated{(dbClause.Length == 0 ? "" : "\nWHERE EXISTS (SELECT 1 FROM rated WHERE matched_rows > 0)")}
