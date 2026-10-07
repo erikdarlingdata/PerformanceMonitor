@@ -450,7 +450,10 @@ public sealed class DarlingMcpTrendToolsSurfaceAndSqlTests
     [InlineData(nameof(DarlingTrendReader.ProcedureDurationTrendHourlySql), TimescaleSupport.ProcedureStatsHourlyView, "procedure_stats")]
     public void DurationTrendHourlySql_ReadsTheRollup_BucketsByIt_ProjectsTheSharedShape(string sqlName, string view, string rawTable)
     {
-        var sql = SqlByName(sqlName);
+        /* Line endings normalized: the source files are checked out with CRLF (.gitattributes eol=crlf), so the builder's raw
+           string carries CRLF and a "\n" probe found nothing. (The query_stats branch's DoesNotContain below passed on that
+           mismatch alone; with LF it is a real guard.) */
+        var sql = Lf(SqlByName(sqlName));
 
         Assert.Contains("FROM " + view, sql, StringComparison.Ordinal);
         if (rawTable == "procedure_stats")
