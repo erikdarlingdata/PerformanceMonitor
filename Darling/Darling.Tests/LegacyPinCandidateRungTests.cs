@@ -125,7 +125,7 @@ public sealed class LegacyPinCandidateRungTests
         var probe = ViewerDataService.StoreSchemaProbeSql.Replace("\r\n", "\n", StringComparison.Ordinal);
         var arm = "to_regclass('config.legacy_secret_pin_candidate') IS NOT NULL";
         Assert.Contains(arm, probe, StringComparison.Ordinal);
-        Assert.Equal(1, System.Text.RegularExpressions.Regex.Matches(probe[probe.IndexOf(arm, StringComparison.Ordinal)..], "EXISTS").Count);
+        Assert.Single(System.Text.RegularExpressions.Regex.Matches(probe[probe.IndexOf(arm, StringComparison.Ordinal)..], "EXISTS"));
 
         var viewer = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.cs");
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal})", viewer, StringComparison.Ordinal);
