@@ -365,6 +365,7 @@ public sealed class SensitiveStatementsTests
     [Fact]
     public void AMegabyteOfOrdinarySqlWithATrailingNearMissIsCleanInsideTheTimeout()
     {
+        StatementFilterWarmUp.Ensure();
         SensitiveStatements.Judge("warm the regex up");
         var unit = "SELECT col_a, col_b FROM dbo.t WHERE c = 1 AND d <> 2 ";
         var text = string.Concat(Enumerable.Repeat(unit, 1_000_000 / unit.Length + 1)).Substring(0, 1_000_000)
@@ -713,6 +714,7 @@ public sealed class SensitiveStatementsTests
     [Fact]
     public void AMillionCharOrdinaryStatementIsCleanAndFast()
     {
+        StatementFilterWarmUp.Ensure();
         SensitiveStatements.Judge("warm the regex up");
         var unit = "SELECT col_a, col_b FROM dbo.t WHERE c = 1 AND d <> 2 ";
         var text = string.Concat(Enumerable.Repeat(unit, 1_000_000 / unit.Length + 1)).Substring(0, 1_000_000);
@@ -932,6 +934,7 @@ public sealed class SensitiveStatementsTests
     [Fact]
     public void TheEntryPointsEarnForADocumentOnce_AndAMemoHitEarnsNothing()
     {
+        StatementFilterWarmUp.Ensure();
         var calls = 0;
         var budget = new SensitiveStatements.JudgeBudget(TimeSpan.FromSeconds(1.5), _ =>
         {
@@ -978,6 +981,7 @@ public sealed class SensitiveStatementsTests
     [Fact]
     public void ACappedXmlCall_EarnsOnlyForTheTextItCanJudge()
     {
+        StatementFilterWarmUp.Ensure();
         var floor = TimeSpan.FromSeconds(1.5);
         var budget = new SensitiveStatements.JudgeBudget(floor, _ => SensitiveStatements.Verdict.Clean);
 
@@ -1014,6 +1018,7 @@ public sealed class SensitiveStatementsTests
     [Fact]
     public void AJsonResultEarnsOnceForItsWholeLength_AndTheValuesInsideEarnNothing()
     {
+        StatementFilterWarmUp.Ensure();
         var budget = new SensitiveStatements.JudgeBudget(TimeSpan.FromSeconds(1.5), _ => SensitiveStatements.Verdict.Clean);
         var json = "{\"plan\":\"" + new string('x', Megabyte) + "\",\"other\":\"" + new string('y', Megabyte) + "\"}";
 
@@ -1034,6 +1039,7 @@ public sealed class SensitiveStatementsTests
     [Fact]
     public void Measurements_AreRecordedAndWithinTheBounds()
     {
+        StatementFilterWarmUp.Ensure();
         SensitiveStatements.Judge("warm the regex up");
 
         // Throughput over 10,000 generated ordinary statements, 200-4,000 chars each.

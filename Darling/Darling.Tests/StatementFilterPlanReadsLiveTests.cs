@@ -353,6 +353,7 @@ public sealed class StatementFilterPlanReadsLiveTests
     [Fact]
     public async Task ATwentyMegabytePlan_ReadThroughGetPlanXml_StaysInsideTheCeiling_WithAndWithoutAHit()
     {
+        await StatementFilterWarmUp.EnsureAsync();
         var cs = ConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live plan-read filter test.");
         var ct = TestContext.Current.CancellationToken;

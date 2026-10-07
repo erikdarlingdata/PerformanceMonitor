@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Threading;
 using ModelContextProtocol;
 using ModelContextProtocol.Protocol;
 using ModelContextProtocol.Server;
@@ -84,6 +85,11 @@ public static class SensitiveStatementOutputFilter
 
         try
         {
+            /* #5478 / #5484: a large read in the first seconds of the process would walk cold code and be withheld, so
+               a result of 256 KB or more first waits for the start-up warm-up, up to 3 s after it started. The sweep
+               runs on a pool thread, so the blocking wait is fine. The result is sized only while a warm-up can still make
+               the call wait: sizing copies the structured content, and it must not recur for the life of the process. */
+            SensitiveStatements.WaitForWarmUp(() => SweptChars(result));
             var budget = new SensitiveStatements.JudgeBudget(SensitiveStatements.ReadBudget);
             bool changed = false;
 
@@ -132,6 +138,39 @@ public static class SensitiveStatementOutputFilter
         {
             return Refusal();
         }
+    }
+
+    /// <summary>How many times a result was sized. A test seam: it proves a sweep after the warm-up never sizes.</summary>
+    internal static long SizingCalls => Interlocked.Read(ref s_sizingCalls);
+
+    private static long s_sizingCalls;
+
+    /// <summary>The characters the sweep will judge in <paramref name="result"/>: the text of each text block and text
+    /// resource, and the structured content. The size gate of the warm-up wait; a block the sweep cannot read
+    /// counts for nothing here because it is refused, not walked.</summary>
+    private static long SweptChars(CallToolResult result)
+    {
+        Interlocked.Increment(ref s_sizingCalls);
+        long total = 0;
+        if (result.Content is { Count: > 0 } blocks)
+        {
+            foreach (ContentBlock block in blocks)
+            {
+                total += block switch
+                {
+                    TextContentBlock text => text.Text?.Length ?? 0,
+                    EmbeddedResourceBlock { Resource: TextResourceContents resource } => resource.Text?.Length ?? 0,
+                    _ => 0,
+                };
+            }
+        }
+
+        if (result.StructuredContent is { } structured)
+        {
+            total += structured.GetRawText().Length;
+        }
+
+        return total;
     }
 
     /// <summary>Sweeps one block. A block type this filter does not know (an image, audio, a blob resource, a

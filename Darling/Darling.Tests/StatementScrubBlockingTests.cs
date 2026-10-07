@@ -383,6 +383,7 @@ public sealed partial class StatementCollectionCensusTests
     [Fact]
     public async Task ABlockingRingBufferOfAboutFourMegabytes_IsJudgedWellUnderTheBudget()
     {
+        await StatementFilterWarmUp.EnsureAsync();
         var reports = new List<(string, string?, string?)>();
         var size = 0;
         for (var i = 0; size < 4_000_000; i++)

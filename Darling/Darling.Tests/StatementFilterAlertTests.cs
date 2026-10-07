@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Common;
@@ -29,7 +30,7 @@ public sealed class StatementFilterAlertTests
     private const string Marker = SensitiveStatements.PlaceholderText;
 
     /// <summary>A blocked-process report whose two input buffers hold the canary and the plain statement.</summary>
-    private static string ReportXml() =>
+    internal static string ReportXml() =>
         "<blocked-process-report monitorLoop=\"1\"><blocked-process><process id=\"p1\" spid=\"55\">"
         + "<inputbuf>" + StatementScrubCanary.CanaryStatement + "</inputbuf></process></blocked-process>"
         + "<blocking-process><process id=\"p2\" spid=\"155\"><inputbuf>" + StatementScrubCanary.PlainStatement
@@ -87,7 +88,7 @@ public sealed class StatementFilterAlertTests
         }
     }
 
-    private static void AssertNoSecret(string text)
+    internal static void AssertNoSecret(string text)
     {
         foreach (var needle in StatementScrubCanary.SecretNeedles)
         {
@@ -95,7 +96,7 @@ public sealed class StatementFilterAlertTests
         }
     }
 
-    private static AlertEngineTests.Harness BlockingHarness(out AlertEngineTests.Harness h)
+    internal static AlertEngineTests.Harness BlockingHarness(out AlertEngineTests.Harness h)
     {
         h = new AlertEngineTests.Harness();
         h.Settings.BlockingEnabled = true;
@@ -373,6 +374,7 @@ public sealed class StatementFilterAlertTests
     [Fact]
     public async Task Engine_AFourMegabyteReport_ReachesTheDelivererFilteredNotWithheldWhole()
     {
+        await StatementFilterWarmUp.EnsureAsync();
         var h = BlockingHarness(out _);
         /* One report with a 4 MB tail of harmless elements: the walk reads all of it, withholds only the
            canary statement, and does not run out of budget. */
@@ -393,6 +395,7 @@ public sealed class StatementFilterAlertTests
     [Fact]
     public void Apply_AFourMegabyteReport_FinishesInsideTheBudget()
     {
+        StatementFilterWarmUp.Ensure();
         var report = ReportXml().Replace(
             "</blocked-process-report>",
             string.Concat(Enumerable.Repeat("<note>" + new string('x', 400) + "</note>", 10_000)) + "</blocked-process-report>",
@@ -440,6 +443,7 @@ public sealed class StatementFilterAlertTests
     public async Task Engine_ThreeIncidentsWithDifferentFourMegabyteReports_EachReachesTheDelivererFilteredNotWithheldWhole()
     {
         // #5477: the budget grows with the distinct documents it judges, so the third report is not starved by the first two.
+        await StatementFilterWarmUp.EnsureAsync();
         var h = ThreeIncidentHarness();
 
         await h.Build().EvaluateServerAsync(AlertEngineTests.Harness.Snapshot());
@@ -461,6 +465,7 @@ public sealed class StatementFilterAlertTests
     public void ApplyCore_ThreeIncidentsWithOneBlockingAlertContext_JudgesEachDistinctReportOnce()
     {
         // The engine's own context: the alert's attachment is the first incident's report (the same string).
+        StatementFilterWarmUp.Ensure();
         var h = ThreeIncidentHarness();
         var context = AlertContextBuilders.BuildBlockingContext("SRV", h.Adapter.Blocking, Array.Empty<string>())!;
         Assert.Equal(3, context.Incidents!.Count);
@@ -474,12 +479,5 @@ public sealed class StatementFilterAlertTests
         Assert.Equal(3, budget.DocumentPasses);
         // And the budget earned 0.5 s per MB of each of them (a little under 2.0 s each, so about 7.4 s), not 1.5 s in all.
         Assert.InRange(budget.Limit, TimeSpan.FromSeconds(7.25), TimeSpan.FromSeconds(8.5));
-    }
-
-    [Fact]
-    public async Task TheAlertWarmUpSwallowsAThrownException_AndRunsTheDefaultProbe()
-    {
-        await AlertStatementFilter.WarmUpAsync(() => throw new InvalidOperationException("boom"));
-        await AlertStatementFilter.WarmUpAsync();
     }
 }
