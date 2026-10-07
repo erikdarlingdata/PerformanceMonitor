@@ -150,7 +150,7 @@ public sealed partial class ViewerDataService
     /// An hourly-routed page carries only what the rollup has: <c>object_type</c>/<c>sql_handle</c>/
     /// <c>plan_handle</c> are empty, and the reads/writes/physical-reads/spills columns the rollup keeps no copy of are
     /// NULL on the row (#5329), so the grid shows them blank instead of a false 0 — the same disclosure the MCP
-    /// payload's <c>tier_used</c>/<c>precision_note</c> make (null, never 0). An hourly-routed page
+    /// payload's <c>tier_used</c>/<c>precision_note</c> make (null, never 0). When the io hourly rollup (<see cref="IoHourlyCoversWindow"/>) reaches the window's start, the page reads it instead and fills logical reads, physical reads and logical writes from its sums (#5329). An hourly-routed page
     /// also stops BEFORE <paramref name="endUtc"/> (a bucket is stamped at its start, so an end on the hour
     /// does not add the hour that begins there). Use
     /// <see cref="GetTopProceduresByCpuTierAsync"/> to also learn which tier answered.</para>
@@ -178,7 +178,7 @@ public sealed partial class ViewerDataService
 
         if (routedTier == RetentionTier.Hourly)
         {
-            var hourlyRows = await GetTopProceduresByCpuHourlyAsync(coverage, serverId, startUtc, endUtc, top, databaseNames, cancellationToken);
+            var hourlyRows = await GetTopProceduresByCpuHourlyAsync(rollups, coverage, serverId, startUtc, endUtc, top, databaseNames, cancellationToken);
             return (hourlyRows, "hourly");
         }
 
@@ -191,12 +191,16 @@ public sealed partial class ViewerDataService
     /// <c>object_type</c>/<c>sql_handle</c>/<c>plan_handle</c>/reads/writes/spills at their defaults — the
     /// rollup has none of those columns.</summary>
     private async Task<List<ViewerProcedureStatsRow>> GetTopProceduresByCpuHourlyAsync(
-        RollupCoverage coverage, int serverId, DateTime startUtc, DateTime endUtc, int top,
+        RollupAvailability rollups, RollupCoverage coverage, int serverId, DateTime startUtc, DateTime endUtc, int top,
         IReadOnlyList<string>? databaseNames, CancellationToken cancellationToken)
     {
-        var fromClause = coverage.StitchedRelationSql(
-            TimescaleSupport.ProcedureStatsHourlyView, "f", startUtc, RollupCoverage.StitchTier.Hourly);
-        var sql = BuildTopProceduresHourlySql(fromClause);
+        /* #5329: the io hourly rollup, when it reaches the window's start, in place of the interval rollup (same
+           columns plus the three I/O sums); otherwise today's route and blank columns. See the queries arm. */
+        var useIo = IoHourlyCoversWindow(rollups, coverage, TimescaleSupport.ProcedureStatsIoHourlyView, startUtc);
+        var fromClause = useIo
+            ? coverage.StitchedRelationSql(TimescaleSupport.ProcedureStatsIoHourlyView, "f", startUtc, RollupCoverage.StitchTier.Hourly)
+            : coverage.StitchedRelationSql(TimescaleSupport.ProcedureStatsHourlyView, "f", startUtc, RollupCoverage.StitchTier.Hourly);
+        var sql = BuildTopProceduresHourlySql(fromClause, withIo: useIo);
 
         var rows = new List<ViewerProcedureStatsRow>();
         await using var command = _dataSource.CreateCommand(sql);
@@ -217,6 +221,10 @@ public sealed partial class ViewerDataService
                 TotalExecutions = reader.IsDBNull(3) ? 0 : reader.GetInt64(3),
                 TotalCpuUs = reader.IsDBNull(4) ? 0 : reader.GetInt64(4),
                 TotalElapsedUs = reader.IsDBNull(5) ? 0 : reader.GetInt64(5),
+                /* #5329: from the io rollup's sums when it covers the window, else null (blank, never 0). */
+                TotalLogicalReads = useIo && !reader.IsDBNull(6) ? reader.GetInt64(6) : null,
+                TotalPhysicalReads = useIo && !reader.IsDBNull(7) ? reader.GetInt64(7) : null,
+                TotalLogicalWrites = useIo && !reader.IsDBNull(8) ? reader.GetInt64(8) : null,
                 /* #5329: the four min/max time fields stay null here. */
             });
         }
@@ -229,14 +237,14 @@ public sealed partial class ViewerDataService
     /// hours up to 13:00-14:00 and does not add the 14:00-15:00 hour that only begins at the end. (The raw arm
     /// stamps a sample when it was taken, so it keeps <c>&lt;=</c> on <c>collection_time</c>.) Split out so a
     /// test can read the text.</summary>
-    internal static string BuildTopProceduresHourlySql(string fromClause) => $"""
+    internal static string BuildTopProceduresHourlySql(string fromClause, bool withIo = false) => $"""
         SELECT
             database_name,
             schema_name,
             object_name,
             CAST(SUM(execution_count_sum) AS bigint) AS total_executions,
             CAST(SUM(worker_time_sum) AS bigint) AS total_cpu_us,
-            CAST(SUM(elapsed_time_sum) AS bigint) AS total_elapsed_us
+            CAST(SUM(elapsed_time_sum) AS bigint) AS total_elapsed_us{(withIo ? IoSumsSelectSql : "")}
         FROM {fromClause}
         WHERE server_id = $1
         AND   bucket >= $2
