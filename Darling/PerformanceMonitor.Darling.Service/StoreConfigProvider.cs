@@ -62,6 +62,7 @@ public sealed class StoreConfigProvider
     /// once-per-call warning rather than to silence.</para>
     /// </summary>
     private int _viewReadFailureStreak;
+    private int _lastReenterCountLogged = -1;
 
     public StoreConfigProvider(NpgsqlDataSource postgres, ILogger? logger = null)
     {
@@ -331,16 +332,18 @@ public sealed class StoreConfigProvider
                 ? " Note --test-connection reads darling.json, so it probes the FILE's settings and can report "
                   + "PASS for a connection the service will never make."
                 : "";
+            var passwordNote = DescribePasswordNotUsed(live, MaxDriftedServersLogged);
 
             _logger?.LogWarning(
                 "darling.json disagrees with the registry about {Count} monitored server(s), and the registry is "
                 + "what the service uses: {Details}. The store is authoritative after the first seed, so editing a "
                 + "registered server's settings in the file changes nothing and a restart cannot change that — "
                 + "edit them in the Viewer's Manage Servers window (the MCP add_servers tool cannot: an "
-                + "already-registered server is skipped as a duplicate).{ConnectionCaveat}",
+                + "already-registered server is skipped as a duplicate).{ConnectionCaveat}{PasswordNote}",
                 live.Count,
                 FormatSettingDrift(live, MaxDriftedServersLogged),
-                connectionCaveat);
+                connectionCaveat,
+                passwordNote);
         }
 
         if (paused.Count > 0)
@@ -353,6 +356,29 @@ public sealed class StoreConfigProvider
                 paused.Count,
                 FormatSettingDrift(paused, MaxDriftedServersLogged));
         }
+    }
+
+    /// <summary>
+    /// The clause for the drift warning about a password: a server whose darling.json entry carries a password or a
+    /// reference gets the file's password only while the entry and the registry row agree on every connection setting
+    /// (<see cref="BackfillSecretFromFile"/>), so for a drifted connection setting the file's password is not used until
+    /// the two agree. Empty when no such server is listed. Pure, so the text is pinned by a test.
+    /// </summary>
+    internal static string DescribePasswordNotUsed(IReadOnlyList<ServerSettingDrift> drifted, int maxServers)
+    {
+        var names = drifted
+            .Where(d => d.FileEntryCarriesPassword && d.Fields.Any(f => f.AffectsConnection))
+            .Select(d => d.Server)
+            .ToList();
+        if (names.Count == 0)
+        {
+            return "";
+        }
+
+        var shown = maxServers > 0 && names.Count > maxServers ? maxServers : names.Count;
+        var listed = string.Join(", ", names.Take(shown)) + (shown < names.Count ? $" and {names.Count - shown} more" : "");
+        return $" For a drifted connection setting on an entry that carries a password or a reference ({listed}), "
+            + "its password from darling.json is not used until the two agree.";
     }
 
     /// <summary>
@@ -491,8 +517,11 @@ FROM config_monitored_servers", connection) { CommandTimeout = ServiceCommandDea
     /// </summary>
     internal sealed record RegisteredServer(MonitoredServer Config, bool IsEnabled);
 
-    /// <summary>One registered server and every field its darling.json entry disagrees with (#2552).</summary>
-    internal sealed record ServerSettingDrift(string Server, bool IsEnabled, IReadOnlyList<SettingDrift> Fields);
+    /// <summary>One registered server and every field its darling.json entry disagrees with (#2552).
+    /// <paramref name="FileEntryCarriesPassword"/> is whether the entry holds a password or a reference, which decides
+    /// whether the warning says that password is not used while a connection setting differs.</summary>
+    internal sealed record ServerSettingDrift(
+        string Server, bool IsEnabled, IReadOnlyList<SettingDrift> Fields, bool FileEntryCarriesPassword = false);
 
     /// <summary>
     /// Pairs each darling.json entry with its registry row and reports the fields they disagree on (#2552).
@@ -556,7 +585,9 @@ FROM config_monitored_servers", connection) { CommandTimeout = ServiceCommandDea
             var fields = CompareServerSettings(entry, match.Config);
             if (fields.Count > 0)
             {
-                drifted.Add(new ServerSettingDrift(match.Config.DisplayName, match.IsEnabled, fields));
+                drifted.Add(new ServerSettingDrift(
+                    match.Config.DisplayName, match.IsEnabled, fields,
+                    !string.IsNullOrWhiteSpace(entry.EncryptedPassword) || !string.IsNullOrWhiteSpace(entry.Password)));
             }
         }
 
@@ -1307,12 +1338,32 @@ ON CONFLICT (server_id) DO NOTHING", connection, transaction) { CommandTimeout =
                the skip parameter is gone with its last caller. */
             var (smtp, webhooks) = await ReadNotificationAsync(connection, cancellationToken);
 
+            /* #5366: the pins taken at upgrade for the old-format passwords, read once for the SMTP slot and every server. */
+            var pins = await ReadLegacyPinsAsync(connection, cancellationToken);
+            smtp.SecretPin = pins.GetValueOrDefault((0, "smtp"));
+            MarkSmtpTheFileDeclares(smtp, bootstrap);
+
             /* #3598 (V131): the routes layered over that row, read on the same privileged connection for the
                same reason — four of its five destination columns are the same bearer secrets. Zero rows is the
                ordinary state and resolves to the parent row exactly. */
             var routes = await ReadNotificationRoutesAsync(connection, cancellationToken);
 
-            var servers = await ReadMonitoredServersAsync(connection, bootstrap, cancellationToken);
+            var servers = await ReadMonitoredServersAsync(connection, bootstrap, cancellationToken, pins);
+
+            /* Once per change, not once per reload: the count is the same on every reload until someone enters a password. */
+            var enterAgain = CountPasswordsToEnterAgain(servers, smtp, LegacyDpapi.Current);
+            if (enterAgain == 1 && _lastReenterCountLogged != 1)
+            {
+                _logger?.LogWarning("1 saved password needs to be entered again. It is in the old format and cannot be opened here, or it no longer matches its server's connection settings");
+            }
+            else if (enterAgain > 1 && enterAgain != _lastReenterCountLogged)
+            {
+                _logger?.LogWarning(
+                    "{Count} saved passwords need to be entered again. They are in the old format and cannot be opened here, or they no longer match their server's connection settings",
+                    enterAgain);
+            }
+
+            _lastReenterCountLogged = enterAgain;
             var schedules = await ReadScheduleOverridesAsync(connection, _logger, cancellationToken);
 
             /* #4938: ResolveSchedule drops a run time that cannot apply, and it runs every sweep, so it stays pure and
@@ -1684,8 +1735,10 @@ FROM config_notification WHERE id = 1", connection) { CommandTimeout = ServiceCo
     /// directly with its own connection, rather than the file's darling.json list, so it tests the servers the
     /// store will actually collect from.</summary>
     internal static async Task<IReadOnlyList<MonitoredServer>> ReadMonitoredServersAsync(
-        NpgsqlConnection connection, DarlingConfig bootstrap, CancellationToken ct)
+        NpgsqlConnection connection, DarlingConfig bootstrap, CancellationToken ct,
+        IReadOnlyDictionary<(int ServerId, string Slot), LegacyPin>? pins = null)
     {
+        pins ??= await ReadLegacyPinsAsync(connection, ct);
         var servers = new List<MonitoredServer>();
         /* server_id is LAST rather than first (#2218): every ordinal in BuildServerFromRow is positional, so
            appending is the only addition that cannot silently re-map an existing column onto the wrong
@@ -1703,7 +1756,94 @@ ORDER BY name", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoo
             servers.Add(BuildServerFromRow(reader, bootstrap));
         }
 
+        /* #5366: the pins taken when this service was upgraded, matched to each server by id and slot. */
+        foreach (var server in servers)
+        {
+            server.SecretPin = pins.GetValueOrDefault((server.ServerId, "server"));
+            server.RemediationPin = pins.GetValueOrDefault((server.ServerId, "remediation"));
+        }
+
         return servers;
+    }
+
+    /// <summary>
+    /// The pins in <c>config.legacy_secret_pin</c>, read on the store owner's connection (row-level security hides every
+    /// row from any other role, so a different role finds none and an old-format value is then not opened). SMTP is
+    /// server id 0. A store that has no such table yet, or a role that may not read it, has none.
+    /// </summary>
+    internal static async Task<IReadOnlyDictionary<(int ServerId, string Slot), LegacyPin>> ReadLegacyPinsAsync(
+        NpgsqlConnection connection, CancellationToken ct)
+    {
+        var pins = new Dictionary<(int ServerId, string Slot), LegacyPin>();
+        try
+        {
+            using var command = new NpgsqlCommand(
+                "SELECT server_id, slot, value_sha256, binding_sha256 FROM config.legacy_secret_pin", connection)
+            { CommandTimeout = ServiceCommandDeadlines.SerialLoopSeconds };
+            using var reader = await command.ExecuteReaderAsync(ct);
+            while (await reader.ReadAsync(ct))
+            {
+                pins[(reader.GetInt32(0), reader.GetString(1))] = new LegacyPin((byte[])reader[2], (byte[])reader[3]);
+            }
+        }
+        catch (PostgresException ex) when (ex.SqlState is PostgresErrorCodes.UndefinedTable or PostgresErrorCodes.InsufficientPrivilege)
+        {
+            pins.Clear();
+        }
+
+        return pins;
+    }
+
+    /// <summary>
+    /// Marks the SMTP slot when darling.json declares the same text for the same SMTP connection (host, port, TLS and
+    /// username), the <see cref="MarkSlotsTheFileDeclares"/> rule for the one slot that has no server id (#5366).
+    /// </summary>
+    internal static void MarkSmtpTheFileDeclares(SmtpConfig smtp, DarlingConfig bootstrap)
+    {
+        var declared = bootstrap.Smtp;
+        if (declared is not null
+            && declared.EncryptedPasswordDeclaredByFile
+            && DarlingSecrets.DeclaresSecretText(smtp.EncryptedPassword)
+            && string.Equals(declared.EncryptedPassword, smtp.EncryptedPassword, StringComparison.Ordinal)
+            && string.Equals(declared.Host, smtp.Host, StringComparison.Ordinal)
+            && declared.Port == smtp.Port
+            && declared.UseSsl == smtp.UseSsl
+            && string.Equals(declared.Username ?? "", smtp.Username ?? "", StringComparison.Ordinal))
+        {
+            smtp.EncryptedPasswordDeclaredByFile = true;
+        }
+    }
+
+    /// <summary>
+    /// How many saved old-format passwords this service cannot open and the operator must enter again: a value in a
+    /// server slot, a remediation slot or the SMTP slot that is not a reference or a sealed value, on a machine that cannot
+    /// open it or with no declaration or matching pin (#5366).
+    /// </summary>
+    internal static int CountPasswordsToEnterAgain(IEnumerable<MonitoredServer> servers, SmtpConfig? smtp, LegacyDpapi dpapi)
+    {
+        var count = 0;
+        foreach (var server in servers)
+        {
+            if (server.RequiresResolvedSecret && DarlingSecrets.IsLegacyDpapi(server.EncryptedPassword)
+                && !DarlingSecrets.LegacyValueUsable(server.EncryptedPassword!, server.EncryptedPasswordDeclaredByFile, server.SecretPin, () => server.SecretBinding, dpapi))
+            {
+                count++;
+            }
+
+            if (server.HasRemediationCredential && DarlingSecrets.IsLegacyDpapi(server.RemediationEncryptedPassword)
+                && !DarlingSecrets.LegacyValueUsable(server.RemediationEncryptedPassword!, server.RemediationEncryptedPasswordDeclaredByFile, server.RemediationPin, () => server.RemediationBinding, dpapi))
+            {
+                count++;
+            }
+        }
+
+        if (smtp is not null && DarlingSecrets.IsLegacyDpapi(smtp.EncryptedPassword)
+            && !DarlingSecrets.LegacyValueUsable(smtp.EncryptedPassword!, smtp.EncryptedPasswordDeclaredByFile, smtp.SecretPin, () => smtp.SecretBinding, dpapi))
+        {
+            count++;
+        }
+
+        return count;
     }
 
     /// <summary>
@@ -1756,24 +1896,52 @@ ORDER BY name", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoo
             RemediationEncryptedPassword = reader.IsDBNull(18) ? null : reader.GetString(18),
         };
 
-        if (server.RequiresResolvedSecret && string.IsNullOrWhiteSpace(server.EncryptedPassword))
-        {
-            /* Service principal keeps its client secret in the same EncryptedPassword slot as a SQL password,
-               so the bootstrap backfill (store row minted without the secret) covers it identically. #3484. */
-            var matches = bootstrap.Servers.Where(s =>
-                s.RequiresResolvedSecret
-                && string.Equals(s.StorageName, server.StorageName, StringComparison.OrdinalIgnoreCase)
-                && string.Equals(s.Username, server.Username, StringComparison.Ordinal)).ToList();
+        /* #5366: the identity a sealed password is bound to is the row's own text, read through the one raw-row mapping
+           (a NULL column is not given the property's default here). */
+        server.StoredIdentity = ServerConnectionIdentity.FromStoredColumns(
+            reader.GetString(1), reader.IsDBNull(14) ? null : reader.GetInt32(14), reader.IsDBNull(13) ? null : reader.GetString(13),
+            reader.IsDBNull(2) ? null : reader.GetString(2), reader.GetBoolean(8), reader.GetString(3),
+            reader.IsDBNull(4) ? null : reader.GetString(4), reader.GetString(6), reader.GetBoolean(7), reader.GetBoolean(9));
 
-            if (matches.Count == 1)
-            {
-                server.EncryptedPassword = matches[0].EncryptedPassword;
-                server.Password = matches[0].Password;
-            }
-        }
-
+        BackfillSecretFromFile(server, bootstrap);
         MarkSlotsTheFileDeclares(server, bootstrap);
         return server;
+    }
+
+    /// <summary>The connection settings of a server definition, mapped the way a stored row is (<see cref="ServerConnectionIdentity.FromStoredColumns"/>).</summary>
+    internal static ServerConnectionIdentity ConnectionIdentityOf(MonitoredServer server) =>
+        ServerConnectionIdentity.FromStoredColumns(
+            server.Host, server.Port, server.Engine, server.Database, server.ReadOnlyIntent, server.Auth, server.Username,
+            server.EncryptMode, server.TrustServerCertificate, server.MultiSubnetFailover);
+
+    /// <summary>
+    /// Copies the darling.json secret into a server built from a store row that carries none, when exactly one file entry
+    /// holds the same connection: the storage name and username, and all ten connection settings plus engine
+    /// (<see cref="ServerConnectionIdentity.Differ"/>, authentication compared ignoring case). A row that differs in any
+    /// of them is left without the file's secret.
+    /// </summary>
+    internal static void BackfillSecretFromFile(MonitoredServer server, DarlingConfig bootstrap)
+    {
+        if (!server.RequiresResolvedSecret || !string.IsNullOrWhiteSpace(server.EncryptedPassword))
+        {
+            return;
+        }
+
+        /* Service principal keeps its client secret in the same EncryptedPassword slot as a SQL password,
+           so the bootstrap backfill (store row minted without the secret) covers it identically. #3484. */
+        var rowSettings = ConnectionIdentityOf(server);
+        var matches = bootstrap.Servers.Where(s =>
+            s is not null
+            && s.RequiresResolvedSecret
+            && string.Equals(s.StorageName, server.StorageName, StringComparison.OrdinalIgnoreCase)
+            && string.Equals(s.Username, server.Username, StringComparison.Ordinal)
+            && !ServerConnectionIdentity.Differ(ConnectionIdentityOf(s), rowSettings)).ToList();
+
+        if (matches.Count == 1)
+        {
+            server.EncryptedPassword = matches[0].EncryptedPassword;
+            server.Password = matches[0].Password;
+        }
     }
 
     /// <summary>
@@ -1781,9 +1949,9 @@ ORDER BY name", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoo
     /// reference, in that same slot, for the same server id, which is the one case where an owned reference may resolve
     /// (<see cref="DarlingSecrets.ResolvePassword"/>). Nothing in the row can set a mark: it takes a file entry (itself
     /// marked when the file was read) with this server's id and exactly this text. A store row for another server id, or a
-    /// row whose slot was changed to another reference, finds no such entry and is left unmarked. The row must also sit at
-    /// the entry's address (host and port, compared with the edit core's own rule), so a reference the file declares for one
-    /// address is never sent to another: an operator who moves a file server updates its darling.json entry too (the file
+    /// row whose slot was changed to another reference, finds no such entry and is left unmarked. The row must also agree with
+    /// the entry on all ten connection settings plus engine (the edit core's own rule, authentication compared ignoring case), so a
+    /// reference the file declares for one connection is never sent to another: an operator who moves a file server updates its darling.json entry too (the file
     /// then declares the reference for the new address), or uses a reference that is not owned.
     /// </summary>
     internal static void MarkSlotsTheFileDeclares(MonitoredServer server, DarlingConfig bootstrap)
@@ -1793,21 +1961,22 @@ ORDER BY name", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoo
             /* A null element is skipped, as DarlingConfig.Parse's own loop skips it (#5240). */
             if (declared is null
                 || declared.ServerId != server.ServerId
-                || !PerformanceMonitor.Darling.Service.Mcp.DarlingMcpServerAdminTools.SameAddress(
-                    declared.Host ?? "", declared.Port, server.Host ?? "", server.Port))
+                || ServerConnectionIdentity.Differ(ConnectionIdentityOf(declared), ConnectionIdentityOf(server)))
             {
                 continue;
             }
 
             if (declared.EncryptedPasswordDeclaredByFile
-                && DarlingSecretSource.IsReference(server.EncryptedPassword)
+                && DarlingSecrets.DeclaresSecretText(server.EncryptedPassword)
                 && string.Equals(declared.EncryptedPassword, server.EncryptedPassword, StringComparison.Ordinal))
             {
                 server.EncryptedPasswordDeclaredByFile = true;
             }
 
+            /* #5366: a remediation reference is declared for one remediation login, so the row must name that same login (null as empty). */
             if (declared.RemediationEncryptedPasswordDeclaredByFile
-                && DarlingSecretSource.IsReference(server.RemediationEncryptedPassword)
+                && string.Equals(declared.RemediationUsername ?? string.Empty, server.RemediationUsername ?? string.Empty, StringComparison.Ordinal)
+                && DarlingSecrets.DeclaresSecretText(server.RemediationEncryptedPassword)
                 && string.Equals(declared.RemediationEncryptedPassword, server.RemediationEncryptedPassword, StringComparison.Ordinal))
             {
                 server.RemediationEncryptedPasswordDeclaredByFile = true;

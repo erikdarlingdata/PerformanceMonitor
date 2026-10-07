@@ -370,13 +370,15 @@ internal static class DarlingSessionReader
     /// <summary>
     /// The recently-captured waiting tasks over the window — the base <c>waiting_tasks</c> table (there is no
     /// <c>v_waiting_tasks</c> view), newest first then longest wait. resource_description is stored but always
-    /// NULL (the collector no longer collects it). $1 server_id, $2/$3 window (naive UTC), $4 row cap.
+    /// NULL (the collector no longer collects it). $1 server_id, $2/$3 window (naive UTC), $4 row cap, $5 the databases as one
+    /// <c>text[]</c> (#5244, <see cref="DatabaseFilter.Clause"/>): SQL NULL is every database, otherwise only the named databases'
+    /// rows. The predicate sits in the WHERE, ahead of the cap, so the page is the newest N of the chosen databases.
     ///
     /// <para>The cap is a PARAMETER, not a literal (#3541 A3). It was <c>LIMIT 500</c> under a tool that
     /// advertised <c>limit</c>, applied it with <c>Take(limit)</c>, and then published a bare envelope with no
     /// window, no count and no bound — so a caller could not tell thirty tasks from thirty of five thousand.</para>
     /// </summary>
-    public const string WaitingTasksSql = """
+    public static readonly string WaitingTasksSql = $$"""
         SELECT
             collection_time,
             session_id,
@@ -390,20 +392,31 @@ internal static class DarlingSessionReader
         AND   collection_time >= $2
         AND   collection_time <= $3
         AND   wait_type IS NOT NULL
+        {{DatabaseFilter.All.Clause("database_name", 5)}}
         ORDER BY collection_time DESC, wait_duration_ms DESC
         LIMIT $4
         """;
 
     /// <summary>The newest <paramref name="cap"/> waiting tasks over the window. Callers detecting truncation
     /// pass <c>limit + 1</c> and read the extra row as the signal.</summary>
-    public static async Task<List<WaitingTaskRow>> GetWaitingTasksAsync(
-        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int cap, CancellationToken cancellationToken = default)
+    public static Task<List<WaitingTaskRow>> GetWaitingTasksAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int cap, CancellationToken cancellationToken = default) =>
+        GetWaitingTasksAsync(postgres, serverId, startUtc, endUtc, cap, DatabaseFilter.All, cancellationToken);
+
+    /// <summary>
+    /// The same read over a SET of databases (#5244): <paramref name="databases"/> empty (<see cref="DatabaseFilter.All"/>) is every
+    /// database, otherwise only the named databases' waiting tasks are the population, and the cap applies to them.
+    /// </summary>
+    internal static async Task<List<WaitingTaskRow>> GetWaitingTasksAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int cap, DatabaseFilter databases,
+        CancellationToken cancellationToken = default)
     {
         var rows = new List<WaitingTaskRow>();
         await using var command = postgres.CreateCommand(WaitingTasksSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddWindow(command, serverId, startUtc, endUtc);
         DarlingMcpReadParameters.AddInt(command, cap);
+        command.Parameters.Add(databases.Parameter());
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {

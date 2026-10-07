@@ -91,6 +91,22 @@ public sealed class ConfigDatabaseFilterLiveTests
             Assert.Equal([A, C], ChangeDatabases(Root(await Changes(postgres, Of(C, A)))));
             Assert.Equal([B], ChangeDatabases(Root(await Changes(postgres, DatabaseFilter.One(B)))));
 
+            // #5244 PR6: the web route hands the repeated keys to the read, and the answer echoes the choice (null for all).
+            var web = await WebReadProbe.ReadAsync(postgres, ServerName, "get_database_config_changes", "168", A, B);
+            Assert.Equal([A, B], ChangeDatabases(web));
+            Assert.Equal("the chosen databases", web.GetProperty("database_name").GetString());
+            var webOne = await WebReadProbe.ReadAsync(postgres, ServerName, "get_database_config_changes", "168", C);
+            Assert.Equal([C], ChangeDatabases(webOne));
+            Assert.Equal(C, webOne.GetProperty("database_name").GetString());
+            var webAll = await WebReadProbe.ReadAsync(postgres, ServerName, "get_database_config_changes", "168");
+            Assert.Equal([A, B, C], ChangeDatabases(webAll));
+            Assert.Equal(JsonValueKind.Null, webAll.GetProperty("database_name").ValueKind);
+            // The MCP tool takes the same name; whitespace-only is null in the echo, never the raw spaces.
+            var tool = Root(await DarlingMcpConfigHistoryTools.GetDatabaseConfigChanges(postgres, ServerName, 168, null, "   "));
+            Assert.Equal([A, B, C], ChangeDatabases(tool));
+            Assert.Equal(JsonValueKind.Null, tool.GetProperty("database_name").ValueKind);
+            Assert.Equal([B], ChangeDatabases(Root(await DarlingMcpConfigHistoryTools.GetDatabaseConfigChanges(postgres, ServerName, 168, null, B))));
+
             // M3: a blank or whitespace-only name is every database, never a literal name that matches nothing.
             Assert.Equal([A, B, C], ChangeDatabases(Root(await Changes(postgres, DatabaseFilter.One("   ")))));
             Assert.Equal([A, B, C], ChangeDatabases(Root(await Changes(postgres, Of("  ", "")))));
@@ -104,7 +120,7 @@ public sealed class ConfigDatabaseFilterLiveTests
             var one = Root(await Changes(postgres, DatabaseFilter.One(OneCapture)));
             Assert.Equal("empty", one.GetProperty("status").GetString());
             Assert.Equal(1, one.GetProperty("hints").GetProperty("snapshot_count").GetInt32());
-            Assert.Contains("for database " + OneCapture + " on this server", one.GetProperty("message").GetString()!, StringComparison.Ordinal);
+            Assert.Contains("for the database " + OneCapture + " on this server", one.GetProperty("message").GetString()!, StringComparison.Ordinal);
 
             // Two names that were never captured: the plural, and no claim about the server.
             var none = Root(await Changes(postgres, Of("CfgFilterMissingOne", "CfgFilterMissingTwo")));
@@ -118,7 +134,7 @@ public sealed class ConfigDatabaseFilterLiveTests
             Assert.Equal("empty", quiet.GetProperty("status").GetString());
             Assert.Contains("for the chosen databases.", quiet.GetProperty("message").GetString()!, StringComparison.Ordinal);
             var quietOne = Root(await Changes(postgres, DatabaseFilter.One(A), hoursBack: 1));
-            Assert.Contains("for database " + A + ".", quietOne.GetProperty("message").GetString()!, StringComparison.Ordinal);
+            Assert.Contains("for the database " + A + ".", quietOne.GetProperty("message").GetString()!, StringComparison.Ordinal);
 
             // Unfiltered, the same quiet window keeps the sentence it always had.
             var quietAll = Root(await Changes(postgres, DatabaseFilter.All, hoursBack: 1));
@@ -169,6 +185,14 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)",
                 DarlingMcpConfigHistoryTools.GetDatabaseScopedConfig(postgres, ServerName, f, CancellationToken.None);
             Task<string> Health(DatabaseFilter f) =>
                 DarlingMcpConfigHistoryTools.GetQueryStoreHealth(postgres, ServerName, f, CancellationToken.None);
+
+            // #5244 PR6: the web route hands the repeated keys to both reads.
+            foreach (var webRead in new[] { "get_database_scoped_config", "get_query_store_health" })
+            {
+                Assert.Equal([A, B], GroupDatabases(await WebReadProbe.ReadAsync(postgres, ServerName, webRead, "24", A, B)));
+                Assert.Equal([B], GroupDatabases(await WebReadProbe.ReadAsync(postgres, ServerName, webRead, "24", B)));
+                Assert.Equal([A, B, C], GroupDatabases(await WebReadProbe.ReadAsync(postgres, ServerName, webRead, "24")));
+            }
 
             foreach (var read in new Func<DatabaseFilter, Task<string>>[] { Scoped, Health })
             {

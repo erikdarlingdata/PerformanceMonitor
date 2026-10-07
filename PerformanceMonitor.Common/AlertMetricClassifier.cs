@@ -191,6 +191,11 @@ namespace PerformanceMonitor.Common
             "Poison Wait" => $"{value:F0} ms",
             "Long-Running Query" => $"{value:F0} m",
 
+            /* #5450: "Collection Gap At Start" carries the whole minutes the service was not collecting before
+               this start, and the 15 that gates it: a measurement, so a number with its unit rather than a
+               state-only dash. */
+            "Collection Gap At Start" => $"{value:F0} m",
+
             /* #1839 total blocked wait — seconds, whole (the numeric is already seconds, not ms). */
             "Blocking Wait Time" => $"{value:F0} s",
 

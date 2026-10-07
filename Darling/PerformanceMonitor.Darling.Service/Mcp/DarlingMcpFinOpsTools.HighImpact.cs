@@ -67,7 +67,8 @@ public sealed partial class DarlingMcpFinOpsTools
         executions_share_pct = r.ExecutionsShare,
         impact_score = r.ImpactScore,
         impact_band = HighImpactScorer.HighImpactBand(r.ImpactScore),
-        sample_query_text = r.SampleQueryText,
+        /* #5320: judged on the whole statement, then cut to the 200 characters the SQL sample carries. */
+        sample_query_text = McpHelpers.StatementPreview(r.FullQueryText, 200),
         has_plan = !string.IsNullOrEmpty(r.QueryPlanXml),
     };
 }

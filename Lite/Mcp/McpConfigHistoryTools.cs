@@ -118,9 +118,10 @@ public sealed class McpConfigHistoryTools
             var rows = await dataService.GetDatabaseConfigChangesAsync(
                 resolved.ServerId, hours_back, databaseNames: database is null ? null : new[] { database }, asOfUtc: windowEnd);
             if (rows.Count == 0)
-                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "database_config")
-                    ?? McpHelpers.Status("empty",
-                        $"No database configuration changes detected in the last {hours_back}h{(database is null ? "" : " for database " + database)}. Config is captured on connect, so at least two snapshots are needed to detect a change.",
+                return McpHelpers.WithDatabase(await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "database_config"), database)
+                    ?? McpHelpers.StatusForDatabase("empty",
+                        $"No database configuration changes detected in the last {hours_back}h{McpDatabaseSelection.ForChosen(database is null ? null : new[] { database })}. Config is captured on connect, so at least two snapshots are needed to detect a change.",
+                        database,
                         (await WindowNoticeAsync(dataService, QueryWindowRelation.DatabaseConfig, resolved.ServerId, hours_back, windowEnd, "database_config", emptyAnswer: true)).AsHints());
 
             var notice = await WindowNoticeAsync(dataService, QueryWindowRelation.DatabaseConfig, resolved.ServerId, hours_back, windowEnd, "database_config");
@@ -134,6 +135,7 @@ public sealed class McpConfigHistoryTools
                 effective_start = notice.EffectiveStart,
                 window_truncated = notice.WindowTruncated,
                 truncation_note = notice.TruncationNote,
+                database_name = database,
                 change_count = rows.Count,
                 changes = rows.Select(r => new
                 {

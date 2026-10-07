@@ -16,6 +16,19 @@ export const FILTERED = new Set([
   // Top queries, procedures, active queries, Query Store and the heatmap.
   "get_top_queries_by_cpu", "get_top_procedures_by_cpu", "get_active_queries", "get_query_store_top",
   "get_query_store_regressions", "get_query_heatmap",
+  // Object contention and index usage (#5231 PR2): the Locking page reads both. The Locking row's detail request
+  // (the `detail_*` selector) names its own database and ignores the injected filter.
+  "get_object_locking", "get_index_usage",
+  // Blocking and waits (#5244 PR3): the Blocking tab's blocking, trend, XML and stats reads and the Current Waits reads.
+  // get_blocking_stats limits only its blocking series (deadlock severity stays whole).
+  "get_blocking_trend", "get_waiting_tasks", "get_blocking", "get_current_waits_trend", "get_blocking_stats",
+  "get_blocked_process_xml",
+  // Duration trends, Query Store clutter, long queries and plan corrections (#5244 PR4).
+  "get_query_duration_trend", "get_procedure_duration_trend", "get_query_store_duration_trend",
+  "get_query_store_clutter", "get_long_query_completions", "get_plan_corrections",
+  // Configuration, Query Store health, configuration changes, severe errors and the default trace (#5244 PR6).
+  "get_database_config", "get_database_scoped_config", "get_query_store_health", "get_database_config_changes",
+  "get_health_parser_severe_errors", "get_default_trace_events",
 ]);
 
 /** Database-scoped reads that cannot take the filter yet, so they show every database and say so (the "All databases"
@@ -23,19 +36,8 @@ export const FILTERED = new Set([
  *  deadlock reads, which stay unfiltered on purpose (as on the desktop): a deadlock spans several databases, and they are
  *  inside each deadlock graph. The groups follow the page that moves each read into FILTERED. */
 export const UNFILTERED = new Set([
-  // Object contention and index usage.
-  "get_object_locking", "get_index_usage",
-  // Blocking.
-  "get_blocking_trend", "get_waiting_tasks", "get_blocking", "get_current_waits_trend", "get_blocking_stats",
-  "get_blocked_process_xml",
-  // Duration trends, Query Store clutter, long queries and plan corrections.
-  "get_query_duration_trend", "get_procedure_duration_trend", "get_query_store_duration_trend",
-  "get_query_store_clutter", "get_long_query_completions", "get_plan_corrections",
   // File I/O, sizes and the persistent version store.
   "get_file_io_trend", "get_file_io_stats", "get_database_sizes", "get_table_index_sizes", "get_pvs_stats",
-  // Configuration, Query Store health, configuration changes, severe errors and the default trace.
-  "get_database_config", "get_database_scoped_config", "get_query_store_health", "get_database_config_changes",
-  "get_health_parser_severe_errors", "get_default_trace_events",
   // The deadlock reads: they stay here.
   "get_deadlock_trend", "get_deadlocks", "get_deadlock_detail",
 ]);

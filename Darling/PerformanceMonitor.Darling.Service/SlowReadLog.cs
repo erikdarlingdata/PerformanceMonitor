@@ -19,6 +19,7 @@ using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using Npgsql;
 using NpgsqlTypes;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Darling.Service;
 
@@ -147,12 +148,31 @@ WHERE slow_read_id IN
                 return;
             }
 
-            TryEnqueue(Build(scope, surface, route, outcome, totalMs, arguments, errorClass, DateTime.UtcNow));
+            /* #4348: the arguments of a slow call can hold a statement or a plan the caller passed (the MCP, web and
+               compose surfaces all land here). They are judged before they are stored, so a named statement never
+               reaches the table; the sweep that follows on read covers rows written before this. */
+            var sweptArguments = arguments is null ? null : SensitiveStatements.Json(arguments.ToJsonString());
+            TryEnqueue(Build(scope, surface, route, outcome, totalMs, ArgumentsAfterSweep(arguments, sweptArguments), errorClass, DateTime.UtcNow));
         }
         catch (Exception ex)
         {
             logger?.LogDebug(ex, "Slow-read recording failed for {Route}.", route);
         }
+    }
+
+    /// <summary>The arguments to store after the statement sweep: the same instance when nothing was named, the swept
+    /// copy when something was, and one marker entry when the sweep refused the arguments (never the input).</summary>
+    internal static JsonObject? ArgumentsAfterSweep(JsonObject? arguments, string? swept)
+    {
+        if (arguments is null || swept is null) return arguments;
+        if (string.Equals(swept, SensitiveStatements.JsonRefusal, StringComparison.Ordinal))
+        {
+            return new JsonObject { ["arguments"] = SensitiveStatements.JsonRefusal };
+        }
+
+        return string.Equals(swept, arguments.ToJsonString(), StringComparison.Ordinal)
+            ? arguments
+            : JsonNode.Parse(swept) as JsonObject ?? new JsonObject { ["arguments"] = SensitiveStatements.JsonRefusal };
     }
 
     internal static SlowReadRecord Build(

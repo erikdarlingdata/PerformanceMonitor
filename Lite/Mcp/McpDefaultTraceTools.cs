@@ -65,9 +65,10 @@ public sealed class McpDefaultTraceTools
             var rows = await dataService.GetDefaultTraceEventsAsync(
                 resolved.ServerId, hours_back, databaseNames: database is null ? null : new[] { database }, asOfUtc: windowEnd, serverClock: serverClock);
             if (rows.Count == 0)
-                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "default_trace_events")
-                    ?? McpHelpers.Status("empty",
-                        "No significant default trace events found in the requested time range" + (database is null ? "." : " for database " + database + "."),
+                return McpHelpers.WithDatabase(await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "default_trace_events"), database)
+                    ?? McpHelpers.StatusForDatabase("empty",
+                        $"No significant default trace events found in the requested time range{McpDatabaseSelection.ForChosen(database is null ? null : new[] { database })}.",
+                        database,
                         (await WindowNoticeAsync(dataService, resolved.ServerId, hours_back, windowEnd, serverClock, emptyAnswer: true)).AsHints());
 
             var notice = await WindowNoticeAsync(dataService, resolved.ServerId, hours_back, windowEnd, serverClock);
@@ -81,6 +82,7 @@ public sealed class McpDefaultTraceTools
                 effective_start = notice.EffectiveStart,
                 window_truncated = notice.WindowTruncated,
                 truncation_note = notice.TruncationNote,
+                database_name = database,
                 total_events = rows.Count,
                 shown = Math.Min(rows.Count, limit),
                 events = rows.Take(limit).Select(r => new
@@ -98,7 +100,7 @@ public sealed class McpDefaultTraceTools
                     growth_mb = r.GrowthMb,
                     error_number = r.ErrorNumber,
                     severity = r.Severity,
-                    text_data = McpHelpers.Truncate(r.TextData, 2000)
+                    text_data = McpHelpers.TruncateStatement(r.TextData, 2000)
                 })
             }, McpHelpers.JsonOptions);
         }

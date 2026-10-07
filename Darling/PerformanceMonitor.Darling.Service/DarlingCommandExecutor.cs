@@ -15,6 +15,7 @@ using Microsoft.Extensions.Logging;
 using Npgsql;
 using NpgsqlTypes;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Service;
 
@@ -263,6 +264,14 @@ WHERE status = 'in_progress'
                 if (server is null)
                 {
                     return new CommandOutcome(false, "invalid args_json", ErrorJson("test_connect args_json did not deserialize to a server definition"));
+                }
+
+                /* The test resolves a reference only for the server that already stores it, with the settings it stores it
+                   for. Asked BEFORE the probe, so a refused test resolves nothing and connects to nothing. */
+                if (await TestConnectReferenceRefusalAsync(server, StoredSettingsOfReferenceAsync, cancellationToken) is { } refusal)
+                {
+                    _logger?.LogInformation("Command {Id} (test_connect '{Server}') => refused", command.CommandId, server.DisplayName);
+                    return new CommandOutcome(false, "refused", ErrorJson(refusal));
                 }
 
                 var probe = await DarlingServerConnector.ProbeAsync(server, _logger, cancellationToken);
@@ -683,6 +692,79 @@ WHERE status = 'in_progress'
             _logger?.LogWarning("Could not write result for command {Id}: {Message}", commandId, ex.Message);
         }
     }
+
+    /// <summary>What a <c>test_connect</c> answers when its password is a reference to a server that is not stored with
+    /// these connection settings: the plain ask for the password, with no value in it.</summary>
+    internal const string TestConnectPasswordNeededText =
+        "Enter the password again to test this server at a different address or with different connection settings: its stored password is only used for the server as it was saved.";
+
+    /// <summary>
+    /// PURE over the one store read it is given: null when a <c>test_connect</c> may go on to resolve its credential,
+    /// otherwise the sentence to answer with, before anything is resolved. A password typed as itself is not asked
+    /// about. A reference (<see cref="DarlingSecretSource.IsReference"/>, the resolver's own question) is let through only
+    /// when a stored server holds that exact text AND matches the test on every connection setting the edit core
+    /// compares (<see cref="ServerConnectionIdentity.Differ"/>:
+    /// host and instance, port, engine, database, read-only intent, auth, username, encrypt mode, certificate trust,
+    /// multi-subnet failover), so the stored password is never used anywhere else or with other trust settings. The plain
+    /// <c>password</c> slot never carries a reference from a command; no stored server has one.
+    /// </summary>
+    internal static async Task<string?> TestConnectReferenceRefusalAsync(
+        MonitoredServer server,
+        Func<string, CancellationToken, Task<IReadOnlyList<ServerConnectionIdentity>>> storedSettingsOfReference,
+        CancellationToken cancellationToken)
+    {
+        if (DarlingSecretSource.RequestReferenceRefusal(server.Password) is { } plainSlotRefusal)
+        {
+            return plainSlotRefusal;
+        }
+
+        var reference = server.EncryptedPassword;
+        if (!DarlingSecretSource.IsReference(reference))
+        {
+            return null;
+        }
+
+        /* The tested settings with the defaults a command's blank fields mean (SQL Server, integrated authentication,
+           mandatory encryption), read through the one mapping every stored row is read through. */
+        var tested = ServerConnectionIdentity.FromStoredColumns(
+            server.Host, server.Port, server.Engine ?? "sqlserver", server.Database, server.ReadOnlyIntent,
+            server.Auth ?? "integrated", server.Username, server.EncryptMode ?? "Mandatory", server.TrustServerCertificate,
+            server.MultiSubnetFailover);
+        foreach (var stored in await storedSettingsOfReference(reference!, cancellationToken))
+        {
+            if (!ServerConnectionIdentity.Differ(tested, stored))
+            {
+                return null;
+            }
+        }
+
+        return TestConnectPasswordNeededText;
+    }
+
+    /// <summary>The connection settings of every stored server that holds exactly this reference text.</summary>
+    private async Task<IReadOnlyList<ServerConnectionIdentity>> StoredSettingsOfReferenceAsync(string reference, CancellationToken cancellationToken)
+    {
+        var found = new List<ServerConnectionIdentity>();
+        await using var command = _postgres.CreateCommand(
+            "SELECT " + ServerConnectionIdentity.StoredColumns + " " +
+            "FROM config.config_monitored_servers WHERE encrypted_password = $1");
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = reference });
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            /* The one raw-row mapping; a NULL engine is SQL Server and a NULL authentication is integrated, as a test's
+               own blank fields are read above. */
+            found.Add(ServerConnectionIdentity.FromStoredColumns(
+                reader.GetString(0), reader.IsDBNull(1) ? null : reader.GetInt32(1),
+                reader.IsDBNull(2) ? "sqlserver" : reader.GetString(2), reader.IsDBNull(3) ? null : reader.GetString(3),
+                !reader.IsDBNull(4) && reader.GetBoolean(4), reader.IsDBNull(5) ? "integrated" : reader.GetString(5),
+                reader.IsDBNull(6) ? null : reader.GetString(6), reader.IsDBNull(7) ? "Mandatory" : reader.GetString(7),
+                !reader.IsDBNull(8) && reader.GetBoolean(8), !reader.IsDBNull(9) && reader.GetBoolean(9)));
+        }
+
+        return found;
+    }
+
 
     private static MonitoredServer? DeserializeServer(string argsJson)
     {

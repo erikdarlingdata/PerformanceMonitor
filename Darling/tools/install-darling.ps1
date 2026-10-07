@@ -24,10 +24,12 @@ C:\Program Files\PerformanceMonitorDarling). What it does, in order:
   1b2. Locks the install folder against ordinary users before anything runs from it (#4034): a folder made
      directly under C:\ otherwise lets any local user replace the service's binaries. Extract into a fresh
      folder and run this straight away; no lock can undo a file swapped before it.
-  1c. REFUSES an install when the ASP.NET Core Runtime 10 is missing, and WARNS when the .NET Desktop
-     Runtime 10 is (#2479). Both shipped binaries are framework-dependent; a stock Windows Server image
-     has neither runtime, and the failure is the .NET host's own "You must install .NET" error with
-     nothing of ours on it. Part of the pre-flight, so -SkipPreflight skips it.
+  1c. REFUSES an install when the base .NET Runtime 10 (Microsoft.NETCore.App) or the ASP.NET Core
+     Runtime 10 is missing, and WARNS when the .NET Desktop Runtime 10 is (#2479, #5407). Both shipped
+     binaries are framework-dependent; a stock Windows Server image has none of these runtimes, and the
+     failure is the .NET host's own "You must install .NET" error with nothing of ours on it. The
+     standalone ASP.NET Core Runtime installer does not include the base runtime; the Hosting Bundle
+     does. Part of the pre-flight, so -SkipPreflight skips it.
   2. Optional pre-flight: runs `--test-connection` and shows the per-server PASS/FAIL lines
      (continue-or-abort prompt on failure; -SkipPreflight to skip).
   3. Registers the Windows Event Log source 'PerformanceMonitor Darling' (requires elevation -
@@ -973,6 +975,9 @@ Invoke-InstallTreeLock $lockAccount -StopOnOpen
 #   PerformanceMonitor.Darling.Service.exe -> Microsoft.NETCore.App + Microsoft.AspNetCore.App
 #   viewer\PerformanceMonitor.Darling.Viewer.exe -> Microsoft.NETCore.App + Microsoft.WindowsDesktop.App
 #
+# Microsoft.NETCore.App is required by both and is NOT part of the standalone ASP.NET Core Runtime
+# installer (the Hosting Bundle and the .NET Runtime installer carry it), so it is checked on its own (#5407).
+#
 # ASP.NET Core is required UNCONDITIONALLY, which is the part nobody expects: the MCP tools reference
 # ModelContextProtocol.AspNetCore, which brings the Microsoft.AspNetCore.App framework reference in
 # transitively, so the framework is named in the runtimeconfig whether or not mcp.enabled and
@@ -988,15 +993,44 @@ Invoke-InstallTreeLock $lockAccount -StopOnOpen
 # question asked before anything is created, answered from the operator's machine, and worth bypassing
 # only when the operator knows something this script cannot see.
 if (-not $SkipPreflight) {
+    $netCoreVersions = @(Get-InstalledFrameworkVersions 'Microsoft.NETCore.App')
     $aspNetVersions = @(Get-InstalledFrameworkVersions 'Microsoft.AspNetCore.App')
     $desktopVersions = @(Get-InstalledFrameworkVersions 'Microsoft.WindowsDesktop.App')
+
+    # The base runtime is checked FIRST, and on its own it is a refusal for a reason that is easy to
+    # miss: the standalone ASP.NET Core Runtime installer does NOT include Microsoft.NETCore.App, so a box
+    # with only that installer passes the ASP.NET Core check below and then dies at service start with the
+    # host's own "You must install .NET" (#5407). Both shipped exes name Microsoft.NETCore.App. The message
+    # shows what was found for BOTH frameworks, so an operator missing both reads one message and fixes
+    # both in one pass (the Hosting Bundle installs both).
+    if (-not (Test-FrameworkMajorPresent $netCoreVersions $dotnetMajor)) {
+        Fail @"
+The .NET Runtime $dotnetMajor.0 is not installed, and the service cannot start without it.
+
+  Need:  The ASP.NET Core Hosting Bundle $dotnetMajor.0 (x64), which installs both runtimes below,
+         OR the .NET Runtime $dotnetMajor.0 (x64) together with the ASP.NET Core Runtime $dotnetMajor.0 (x64).
+  Found: .NET Runtime (Microsoft.NETCore.App):      $(Format-FrameworkVersionList $netCoreVersions)
+         ASP.NET Core (Microsoft.AspNetCore.App):   $(Format-FrameworkVersionList $aspNetVersions)
+  Get:   $dotnetDownloadUrl
+
+The standalone ASP.NET Core Runtime installer does NOT include the base .NET Runtime, so having only that
+one is not enough. The service also needs the ASP.NET Core Runtime whether or not you ever enable MCP or
+the web dashboard.
+
+Install it and run this script again. Nothing was installed or changed.
+
+If this machine DOES have it in a layout this check cannot see, re-run with -SkipPreflight, which skips
+this gate and the --test-connection probe together.
+"@
+    }
 
     if (-not (Test-FrameworkMajorPresent $aspNetVersions $dotnetMajor)) {
         Fail @"
 The ASP.NET Core Runtime $dotnetMajor.0 is not installed, and the service cannot start without it.
 
   Need:  ASP.NET Core Runtime $dotnetMajor.0 (x64). The Hosting Bundle contains it and also works.
-  Found: $(Format-FrameworkVersionList $aspNetVersions)
+  Found: .NET Runtime (Microsoft.NETCore.App):      $(Format-FrameworkVersionList $netCoreVersions)
+         ASP.NET Core (Microsoft.AspNetCore.App):   $(Format-FrameworkVersionList $aspNetVersions)
   Get:   $dotnetDownloadUrl
 
 This is required whether or not you ever enable MCP or the web dashboard - the MCP package brings the
@@ -1029,7 +1063,7 @@ this gate and the --test-connection probe together.
         Write-Host ''
     }
     else {
-        Write-Host "Runtime check passed (ASP.NET Core $dotnetMajor and .NET Desktop $dotnetMajor present)." -ForegroundColor Green
+        Write-Host "Runtime check passed (.NET Runtime $dotnetMajor, ASP.NET Core $dotnetMajor and .NET Desktop $dotnetMajor present)." -ForegroundColor Green
     }
 }
 

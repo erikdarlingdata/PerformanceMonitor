@@ -136,18 +136,20 @@ public sealed class DarlingMcpHealthParserTools
         [Description("Hours of history to retrieve. Default 24.")] int hours_back = 24,
         [Description("Maximum number of entries. Default 50.")] int limit = 50,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        [Description("Limit to one database. Omit for all databases.")] string? database_name = null,
         ILogger? logger = null,
         CancellationToken cancellationToken = default) =>
-        GetSevereErrors(postgres, server_name, hours_back, limit, DatabaseFilter.All, as_of, logger, cancellationToken);
+        GetSevereErrors(postgres, server_name, hours_back, limit, DatabaseFilter.One(database_name), as_of, logger, cancellationToken);
 
     /// <summary>
-    /// The same read over a SET of databases (#5245). The MCP tool passes <see cref="DatabaseFilter.All"/> (it takes no
-    /// database name) until a later lane wires the list. The store keeps no database name for these events, so the filter runs
-    /// in C#, on the name each error's <c>database_id</c> resolves to, compared ordinally, AFTER the severity gate and BEFORE
-    /// the counts and the page limit: <c>error_count</c> and the page are the chosen databases' errors. An error whose id
-    /// resolves to no name (no database context, or an id the map lacks) is in no chosen database while a filter is active, as on
-    /// the desktop. Known limit, desktop parity: an id is resolved through the LATEST id-to-name map, so an old error of a dropped
-    /// database whose id was reused is filed under the newer database's name (#5373).
+    /// The same read over a SET of databases (#5245). The MCP tool passes <c>DatabaseFilter.One(database_name)</c> (blank is every
+    /// database) and the web route the repeated keys (#5244). Every answer shape echoes <c>database_name</c> (the name for one
+    /// database, "the chosen databases" for two or more, null for all). The store keeps no database name for these events, so the filter runs
+    /// in C#, on the name each error's <c>database_id</c> carried AT THE ERROR'S TIME (<c>names.Resolve(id, eventTime)</c>, the name
+    /// the row shows, #5373), compared ordinally, AFTER the severity gate and BEFORE the counts and the page limit:
+    /// <c>error_count</c> and the page are the chosen databases' errors. An error whose id resolves to no name (no database
+    /// context, or an id the collected history never saw) is in no chosen database while a filter is active. A database id
+    /// reused by a second database therefore matches each error by the name it had then.
     /// </summary>
     internal static async Task<string> GetSevereErrors(
         NpgsqlDataSource postgres,
@@ -168,11 +170,8 @@ public sealed class DarlingMcpHealthParserTools
         try
         {
             var now = windowEnd;
-            /* database_id → name resolution needs the collected size-stats mapping (the shred left it null). */
-            var mapTask = DarlingSystemHealthReader.GetDatabaseNameMapAsync(postgres, resolved.ServerId, cancellationToken);
             var xmls = await DarlingSystemHealthReader.ReadEventXmlAsync(
                 postgres, resolved.ServerId, now.AddHours(-hours_back), now, SystemHealthParser.ErrorReportedEvent, cancellationToken);
-            var map = await mapTask;
             var lastCapturedAt = await DarlingSystemHealthReader.GetLastCaptureAsync(postgres, resolved.ServerId, cancellationToken);
 
             var rows = xmls
@@ -180,15 +179,24 @@ public sealed class DarlingMcpHealthParserTools
                 .Where(r => r != null && SystemHealthSignificance.IsSignificant(r))
                 .Select(r => r!)
                 .ToList();
-            /* #5245: the chosen databases, in C# on the resolved name (the store has none), before the counts and the page cap. */
+            /* database_id → name resolution needs the collected size-stats history (the shred left it null). #5373: each
+               error gets the name its id carried at the error's own time, not the server's latest name for the id.
+               #5244: the database filter matches on that same per-error name (the store has none), in C#, before the counts
+               and the page cap, so the history is read for every gated error under a filter and only for the errors shown
+               otherwise. */
+            var names = await DatabaseNameHistoryReader.ReadAsync(
+                postgres, resolved.ServerId,
+                (databases.IsAll ? rows.Take(limit) : rows).Select(r => (r.DatabaseId, r.EventTime)),
+                McpCommandDeadlines.ReadSeconds, cancellationToken);
             if (!databases.IsAll)
-                rows = rows.Where(r => IsInChosenDatabase(r.DatabaseId, map, databases)).ToList();
+                rows = rows.Where(r => names.IsIn(r.DatabaseId, r.EventTime, databases.Names)).ToList();
+            var shown = rows.Take(limit).ToList();
             if (rows.Count == 0)
-                return await EmptyAsync(
+                return McpHelpers.WithDatabase(await EmptyAsync(
                     postgres, new Collected<SevereErrorRecord>(null, resolved.ServerId, resolved.ServerName, rows, xmls.Count, lastCapturedAt, now),
                     hours_back, SystemHealthParser.ErrorReportedEvent,
                     $"none was a significant severe error (severity {SystemHealthSignificance.SevereErrorMinSeverity}+ and off the benign connection-reset list)"
-                        + (databases.IsAll ? "" : " in the chosen databases"), logger, cancellationToken);
+                        + DarlingMcpBlockingTools.ForChosenDatabases(databases), logger, cancellationToken), databases.Describe())!;
 
             var collected = new Collected<SevereErrorRecord>(null, resolved.ServerId, resolved.ServerName, rows, xmls.Count, lastCapturedAt, now);
             var notice = await NoticeAsync(postgres, collected, hours_back, EarliestOf(rows.Select(r => r.EventTime)), emptyAnswer: false, logger, cancellationToken);
@@ -202,28 +210,23 @@ public sealed class DarlingMcpHealthParserTools
                 truncation_note = notice.TruncationNote,
                 source_observed = true,
                 last_captured_at = Stamp(lastCapturedAt),
+                database_name = databases.Describe(),
                 error_count = rows.Count,
                 shown = Math.Min(rows.Count, limit),
-                errors = rows.Take(limit).Select(r => new
+                errors = shown.Select(r => new
                 {
                     event_time = r.EventTime?.ToString("o"),
                     error_number = r.ErrorNumber,
                     severity = r.Severity,
                     state = r.State,
                     database_id = r.DatabaseId,
-                    database_name = DarlingSystemHealthReader.ResolveDatabaseName(r.DatabaseId, map),
+                    database_name = names.Resolve(r.DatabaseId, r.EventTime),
                     message = r.Message
                 })
             }, McpHelpers.JsonOptions));
         }
         catch (Exception ex) when (ex is not OperationCanceledException) { return McpHelpers.FormatError("get_health_parser_severe_errors", ex); }
     }
-
-    /// <summary>True when the error's database id resolves, through <paramref name="map"/>, to a name in the chosen set (ordinal).
-    /// An id that resolves to nothing (0, null or not in the map) is in no chosen database.</summary>
-    private static bool IsInChosenDatabase(int? databaseId, Dictionary<int, string> map, DatabaseFilter databases) =>
-        databaseId is { } id && id != 0 && map.TryGetValue(id, out var name)
-        && databases.Names.Contains(name, StringComparer.Ordinal);
 
     [McpServerTool(Name = "get_health_parser_io_issues"), Description("Gets I/O issues from system_health (IO_SUBSYSTEM component results) over an event_time window ending at as_of, newest first. Gated: WARNING-state results only. An empty answer with status empty is a real result: nothing in this window passed the gate, and events_in_window counts what was captured and filtered out. status unavailable with source_observed false is no evidence either way. <<GUIDE>> Gets I/O-related issues from system_health (IO_SUBSYSTEM component): 15-second I/O warnings, long I/O request counts, and the longest pending request duration with its file path. " + McpToolGuideTopics.SystemHealthEmptyWindows)]
     public static async Task<string> GetIOIssues(

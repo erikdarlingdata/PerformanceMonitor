@@ -47,15 +47,18 @@ public sealed class DarlingMcpDefaultTraceTools
         [Description("Hours of history to retrieve. Default 24.")] int hours_back = 24,
         [Description("Maximum number of events to return. Default 100.")] int limit = 100,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        [Description("Limit to one database. Omit for all databases.")] string? database_name = null,
         ILogger? logger = null,
         CancellationToken cancellationToken = default) =>
-        GetDefaultTraceEvents(postgres, server_name, hours_back, limit, DatabaseFilter.All, as_of, logger, cancellationToken);
+        GetDefaultTraceEvents(postgres, server_name, hours_back, limit, DatabaseFilter.One(database_name), as_of, logger, cancellationToken);
 
     /// <summary>
-    /// The same read over a SET of databases (#5245). The MCP tool passes <see cref="DatabaseFilter.All"/> (it takes no
-    /// database name) until a later lane wires the list. The filter is applied in SQL, before the page limit, so the page and
-    /// <c>total_events</c> are the chosen databases' events. An empty answer under a filter says "for the chosen databases":
-    /// it is no verdict on a database the read did not look at, and the not_collected answer stays the server's own.
+    /// The same read over a SET of databases (#5245). The MCP tool passes <c>DatabaseFilter.One(database_name)</c> (blank is every
+    /// database) and the web route the repeated keys (#5244). The filter is applied in SQL, before the page limit, so the page and
+    /// <c>total_events</c> are the chosen databases' events. An empty answer under a filter says " for the database X" or " for the
+    /// chosen databases" (<see cref="DarlingMcpBlockingTools.ForChosenDatabases"/>, the sentence Lite's twin builds): it is no verdict
+    /// on a database the read did not look at, and the not_collected answer stays the server's own. Every answer shape echoes
+    /// <c>database_name</c> (the name for one database, "the chosen databases" for two or more, null for all).
     /// </summary>
     internal static async Task<string> GetDefaultTraceEvents(
         NpgsqlDataSource postgres,
@@ -93,7 +96,9 @@ public sealed class DarlingMcpDefaultTraceTools
                before any probe; an answer with rows over a window of 90 minutes or less starts none. */
             if (significant.Count == 0)
             {
-                var notCollected = await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "default_trace_events", cancellationToken);
+                var notCollected = McpHelpers.WithDatabase(
+                    await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "default_trace_events", cancellationToken),
+                    databases.Describe());
                 if (notCollected is not null)
                     return notCollected;
             }
@@ -110,11 +115,10 @@ public sealed class DarlingMcpDefaultTraceTools
                 windowStart, now, "default_trace_events", emptyAnswer: significant.Count == 0, logger: logger, cancellationToken: cancellationToken);
 
             if (significant.Count == 0)
-                return McpHelpers.Status(
+                return McpHelpers.StatusForDatabase(
                     "empty",
-                    databases.IsAll
-                        ? "No significant default trace events found in the requested time range."
-                        : "No significant default trace events found in the requested time range for the chosen databases.",
+                    $"No significant default trace events found in the requested time range{DarlingMcpBlockingTools.ForChosenDatabases(databases)}.",
+                    databases.Describe(),
                     notice.AsHints());
 
             var events = significant.Take(limit).Select(r =>
@@ -141,7 +145,7 @@ public sealed class DarlingMcpDefaultTraceTools
                         : (double?)null,
                     error_number = r.ErrorNumber,
                     severity = r.Severity,
-                    text_data = McpHelpers.Truncate(r.TextData, 2000)
+                    text_data = McpHelpers.TruncateStatement(r.TextData, 2000)
                 };
             }).ToList();
 
@@ -152,6 +156,7 @@ public sealed class DarlingMcpDefaultTraceTools
                 effective_start = notice.EffectiveStart,
                 window_truncated = notice.WindowTruncated,
                 truncation_note = notice.TruncationNote,
+                database_name = databases.Describe(),
                 total_events = significant.Count,
                 shown = events.Count,
                 events

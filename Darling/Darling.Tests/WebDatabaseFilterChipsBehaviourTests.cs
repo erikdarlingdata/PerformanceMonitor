@@ -95,21 +95,21 @@ public sealed class WebDatabaseFilterChipsBehaviourTests
         AssertChip(Heading(r, "queries", "Query Store Regressions"), "filtered", "2 databases", "SalesDb\nOrders");
         AssertChip(Heading(r, "queries", "Top Procedures by CPU"), "filtered", "2 databases", "SalesDb\nOrders");
 
-        /* The Query Store fanout: Clutter is database-scoped and says so; the overhead table and the memory clerk are instance-wide
+        /* The Query Store fanout: Clutter is database-scoped (#5244 PR4: its route takes the chosen databases); the overhead table and the memory clerk are instance-wide
            and override the shared read's class. */
-        AssertChip(Heading(r, "queries", "Query Store Clutter"), "unfiltered", "All databases");
+        AssertChip(Heading(r, "queries", "Query Store Clutter"), "filtered", "2 databases", "SalesDb\nOrders");
         AssertChip(Heading(r, "queries", "Query Store Overhead (per server)"), "server", "Server-wide", ServerTitle);
         AssertChip(Heading(r, "queries", "Query Store Memory Clerk"), "server", "Server-wide", ServerTitle);
 
         /* Blocking: the Waiting Tasks SERIES (get_current_waits_trend) is server-wide, the table of the same name is a
-           database-scoped read; Deadlock Severity and Deadlock Graphs are unfiltered, with the deadlock sentence on the graphs. */
+           database-scoped read; Deadlock Severity is unfiltered, and Deadlock Graphs keeps every graph whole while its process rows follow the filter (#5244). */
         var blocking = r.GetProperty("tabs").GetProperty("blocking").EnumerateArray().Where(h => h.GetProperty("title").GetString() == "Waiting Tasks").ToArray();
         AssertChip(Assert.Single(blocking), "server", "Server-wide", ServerTitle);
-        AssertChip(Heading(r, "waits", "Waiting Tasks"), "unfiltered", "All databases", UnfilteredTitle);
-        AssertChip(Heading(r, "blocking", "Blocked Sessions"), "unfiltered", "All databases");
-        AssertChip(Heading(r, "blocking", "Blocking Severity"), "unfiltered", "All databases");
+        AssertChip(Heading(r, "waits", "Waiting Tasks"), "filtered", "2 databases", "SalesDb\nOrders");
+        AssertChip(Heading(r, "blocking", "Blocked Sessions"), "filtered", "2 databases", "SalesDb\nOrders");
+        AssertChip(Heading(r, "blocking", "Blocking Severity"), "filtered", "2 databases", "SalesDb\nOrders");
         AssertChip(Heading(r, "blocking", "Deadlock Severity"), "unfiltered", "All databases", UnfilteredTitle);
-        AssertChip(Heading(r, "blocking", "Deadlock Graphs"), "unfiltered", "All databases", UnfilteredTitle + " The databases are inside each deadlock graph.");
+        AssertChip(Heading(r, "blocking", "Deadlock Graphs"), "process-rows", "Graphs: all; process rows: 2 databases", "Each graph is whole; process rows outside the chosen databases are hidden.");
         AssertChip(Heading(r, "blocking", "Lock Waits"), "server", "Server-wide");
 
         /* A composite built by panelShell passes its main read. */
@@ -117,7 +117,7 @@ public sealed class WebDatabaseFilterChipsBehaviourTests
         AssertChip(Heading(r, "io", "File I/O Latency"), "unfiltered", "All databases");
         AssertChip(Heading(r, "memory", "Memory Pressure Events"), "server", "Server-wide");
         AssertChip(Heading(r, "overview", "Daily Summary"), "server", "Server-wide");
-        AssertChip(Heading(r, "config", "Database Scoped Configuration"), "unfiltered", "All databases");
+        AssertChip(Heading(r, "config", "Database Scoped Configuration"), "filtered", "2 databases", "SalesDb\nOrders");
         AssertChip(Heading(r, "recommendations", "Recommendations"), "server", "Server-wide");
 
         /* No panel on any SQL Server tab is left without a chip, and none draws two. */

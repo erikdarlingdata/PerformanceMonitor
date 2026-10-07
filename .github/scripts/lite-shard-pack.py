@@ -3,6 +3,7 @@
 
   lite-shard-pack.py pack      --classes FILE --shards N --out DIR [--timings DIR ...] [--tests-dir DIR]
   lite-shard-pack.py reconcile --classes FILE --shards N --out DIR
+  lite-shard-pack.py backtest  --runs DIR [DIR ...] [--tests-dir DIR]
   lite-shard-pack.py --self-test
 
 `pack` reads the full discovered class list (one class per line) and writes DIR/shard-K.txt for K in
@@ -18,6 +19,11 @@ shard's load and no shard is left empty. A class with no timing history gets the
 classes. When the timings are missing, unreadable, empty, all zero, or cover less than MIN_COVERAGE of the
 discovered classes, the assignment falls back to the class-name hash (SHA-256 first byte modulo N), the cut
 the workflow used before this script existed.
+
+`backtest` replays the model: the DIRs are runs in time order, each holding one xUnit XML per shard. For every run after
+the first it weighs that run's shards by the PREVIOUS run's timings and prints modelled against ran, the way the real
+cut sees them, with each shard's error and the share of shards within 20 %. It writes nothing and the workflow never
+calls it (#5208).
 
 `reconcile` is the guard: it fails (exit 1) unless the shard files hold every discovered class exactly once
 and nothing else, and prints both differences. `pack` runs it before it exits, so a bad packer cannot
@@ -43,6 +49,11 @@ MIN_WEIGHT = 0.001
 # per-shard cost fits no better than this one constant, so the model keeps its shape. A blend of each class's seconds
 # with its test count was tried and dropped: replayed on 13 fresh timing artifacts it beat the plain cut in 78 of 156
 # ordered pairs, a coin flip.
+# Re-checked against 14 dev runs (`backtest`, #5208): from a shard's OWN seconds the model is 3 % off on average and every
+# shard is within 20 %; from the PREVIOUS run's seconds it is 25 % off and 46 % of shards are within 20 %. The gap is the
+# weights, not this constant: a class's seconds swing with what runs beside it (one test class took 0.2 s a test in one run
+# and 5.6 s a test in another), so no estimator over earlier runs got under about 19 % (median of the last 5, median of all
+# the other 13, minimum, trimmed mean, a power or a cap on each weight).
 PARALLEL_CONCURRENCY = 3.56
 DEFAULT_TESTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "Lite.Tests")
 
@@ -153,6 +164,35 @@ def predicted_walls(assignment, weights, serial):
     return [sum(class_weight(weights.get(c, default), c in serial) for c in shard) for shard in assignment]
 
 
+def shard_results(d):
+    """[(file name, set of classes, assembly wall seconds)] for every XML under d, one XML per shard. A file that does
+    not parse or has no assembly time is skipped."""
+    out = []
+    for p in sorted(glob.glob(os.path.join(d, "**", "*.xml"), recursive=True)):
+        try:
+            a = ET.parse(p).getroot().find("assembly")
+            wall = float(a.get("time"))
+        except (ET.ParseError, OSError, AttributeError, TypeError, ValueError):
+            continue
+        classes = {t.get("type") for t in a.iter("test") if t.get("type")}
+        if classes and math.isfinite(wall) and wall > 0:
+            out.append((os.path.basename(p), classes, wall))
+    return out
+
+
+def backtest(run_dirs, serial_names):
+    """Rows (run dir, shard file, modelled s, ran s) for each run after the first, modelled from the run before it
+    with the weights and serial classes `pack` would have used."""
+    rows = []
+    for prev, cur in zip(run_dirs, run_dirs[1:]):
+        weights = load_weights([prev])
+        serial = {c for c, col in load_collections([prev]).items() if col in serial_names}
+        shards = shard_results(cur)
+        walls = predicted_walls([sorted(cl) for _, cl, _ in shards], weights, serial)
+        rows += [(cur, name, pw, wall) for (name, _, wall), pw in zip(shards, walls)]
+    return rows
+
+
 def pack(classes, shards, weights, serial=frozenset()):
     """Returns (assignment: list of lists, method). Never drops or duplicates a class. `serial` is the set of
     classes that run one at a time; with none, every weight is scaled alike and the cut is the plain sum cut."""
@@ -228,14 +268,42 @@ def arg(args, name, default=None, many=False):
     return vals[-1] if vals else default
 
 
+def _positional(args):
+    """The values after --runs up to the next flag (a shell hands them over as separate arguments)."""
+    if "--runs" not in args:
+        return []
+    out = []
+    for a in args[args.index("--runs") + 1:]:
+        if a.startswith("--"):
+            break
+        out.append(a)
+    return out
+
+
+def run_backtest(run_dirs, tests_dir):
+    if len(run_dirs) < 2:
+        print("backtest needs at least two run directories, oldest first")
+        return 2
+    serial_names, _ = serial_collection_names(tests_dir)
+    rows = backtest(run_dirs, serial_names)
+    for d, name, pw, wall in rows:
+        print(f"{os.path.basename(os.path.normpath(d))}  {name}: modelled {pw:.0f} s, ran {wall:.0f} s, {(pw - wall) / wall:+.0%}")
+    within = sum(1 for _, _, pw, wall in rows if abs(pw - wall) / wall <= 0.2)
+    print(f"{len(rows)} shards, {within} within 20% ({within / len(rows):.0%}); mean absolute error "
+          f"{sum(abs(pw - wall) / wall for _, _, pw, wall in rows) / len(rows):.1%}" if rows else "no shards to compare")
+    return 0
+
+
 def main(argv):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     if "--self-test" in argv:
         return self_test()
-    if not argv or argv[0] not in ("pack", "reconcile"):
+    if not argv or argv[0] not in ("pack", "reconcile", "backtest"):
         print(__doc__)
         return 2
     cmd, rest = argv[0], argv[1:]
+    if cmd == "backtest":
+        return run_backtest(_positional(rest), arg(rest, "--tests-dir", DEFAULT_TESTS_DIR))
     classes = read_classes(arg(rest, "--classes"))
     shards = int(arg(rest, "--shards"))
     out = arg(rest, "--out")
@@ -374,6 +442,29 @@ def self_test():
         # The scan must find at least one serial collection; no collection name is hard-coded here, so renaming a
         # collection does not fail the shard-0 job (#5208).
         ok(len(cnames) > 0, "Lite.Tests declares at least one serial collection")
+
+    # Back-test (#5208): run 2's shards are modelled from run 1's seconds. Shard A holds one parallel class (356 s)
+    # and one serial class (10 s), so 356 / PARALLEL_CONCURRENCY + 10 against a 120 s wall.
+    with tempfile.TemporaryDirectory() as d:
+        def shard_xml(path, wall, tests):
+            body = "".join(f'<collection name="{col}"><test type="{c}" time="{t}"/></collection>' for c, col, t in tests)
+            with open(path, "w") as f:
+                f.write(f'<assemblies><assembly time="{wall}">{body}</assembly></assemblies>')
+        r1, r2 = os.path.join(d, "r1"), os.path.join(d, "r2")
+        os.makedirs(r1)
+        os.makedirs(r2)
+        shard_xml(os.path.join(r1, "s0.xml"), 99, [("A", "Par", 356.0), ("S", "Ser", 10.0)])
+        shard_xml(os.path.join(r1, "s1.xml"), 99, [("B", "Par", 178.0)])
+        shard_xml(os.path.join(r2, "s0.xml"), 120.0, [("A", "Par", 1.0), ("S", "Ser", 1.0)])
+        shard_xml(os.path.join(r2, "s1.xml"), 40.0, [("B", "Par", 1.0)])
+        with open(os.path.join(r2, "broken.xml"), "w") as f:
+            f.write("<assemblies><not closed")
+        rows = backtest([r1, r2], {"Ser"})
+        ok(len(rows) == 2, "back-test skips an unreadable shard file and models one row per shard")
+        ok(abs(rows[0][2] - (356.0 / PARALLEL_CONCURRENCY + 10.0)) < 1e-9 and rows[0][3] == 120.0, "back-test models a shard from the previous run's seconds")
+        ok(abs(rows[1][2] - 178.0 / PARALLEL_CONCURRENCY) < 1e-9 and rows[1][3] == 40.0, "back-test: the second shard uses its parallel seconds only")
+        ok(backtest([r1], {"Ser"}) == [], "back-test of a single run has nothing to compare")
+        ok(run_backtest([r1], DEFAULT_TESTS_DIR) == 2, "back-test with one directory is a usage error")
 
     # The guard must FAIL when a class is withheld, duplicated or invented. `names` is the 60-class list from the top
     # of the self-test; the checks below must run on it, not on collection names (#5208 review F1).

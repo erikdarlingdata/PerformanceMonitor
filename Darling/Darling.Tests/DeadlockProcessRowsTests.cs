@@ -172,7 +172,8 @@ public sealed class DeadlockProcessRowsTests
             js[js.IndexOf("const DEADLOCK_COLUMNS = [", StringComparison.Ordinal)..].Split("];")[0], @"\{ key: ").Count);
         Assert.Contains("const deadlockProcessesOpen = new Set();", js, StringComparison.Ordinal);
         Assert.Contains("server + \"\\u0001\" + (row.dedup_key", js, StringComparison.Ordinal);
-        Assert.Contains("deadlockXmlColumns(server)", js, StringComparison.Ordinal);
+        /* #5244: the panel passes its hidden-row scope to the columns, so the notice under it can count what the filter hid. */
+        Assert.Contains("deadlockXmlColumns(server, scope)", js, StringComparison.Ordinal);
         Assert.DoesNotContain("DOMParser", js, StringComparison.Ordinal);
         foreach (var key in new[] { "victim", "spid", "login_name", "host_name", "client_app", "database_name", "wait_resource", "lock_mode", "isolation_level", "transaction_name", "log_used", "sql_text" })
             Assert.Contains("{ key: \"" + key + "\"", js, StringComparison.Ordinal);
@@ -286,5 +287,88 @@ public sealed class DeadlockProcessRowsTests
         if (!TryRun("capped", out var r)) return;
 
         Assert.Contains("(+3 more in the graph)", r.GetProperty("summaries")[0].GetString(), StringComparison.Ordinal);
+    }
+
+    private static string[] Strings(JsonElement node) => node.EnumerateArray().Select(e => e.GetString()!).ToArray();
+
+    /// <summary>#5244: with A and B chosen, the C process row is hidden, a process with no database is hidden (the desktop's
+    /// rule), and the graphs, which are not filtered, still count every process; the notice line and the chip say so.</summary>
+    [Fact]
+    public void WithAFilter_TheProcessRowsOutsideTheChosenDatabasesAreHidden_AndTheGraphsStayWhole()
+    {
+        if (!TryRun("spread:A|B", out var r)) return;
+
+        Assert.Equal(new[] { "2 processes", "1 process" }, Strings(r.GetProperty("summaries")));
+        Assert.Equal(new[] { "A", "B" }, Strings(r.GetProperty("subDatabases")[0]));
+        Assert.Equal(new[] { "A" }, Strings(r.GetProperty("subDatabases")[1]));
+        Assert.Equal(new[] { "Graph (3 processes)", "Graph (1 process)", "Graph (1 process)" }, Strings(r.GetProperty("graphs")));
+        Assert.Equal(new[] { "1 process hidden by the database filter" }, Strings(r.GetProperty("cellTexts")));
+        Assert.Equal(
+            new[] { "The database filter hides 2 process rows outside the chosen databases. Each graph is whole." },
+            Strings(r.GetProperty("notes")));
+        var chip = Assert.Single(r.GetProperty("chips").EnumerateArray());
+        Assert.Equal("process-rows", chip.GetProperty("state").GetString());
+        Assert.Equal("Graphs: all; process rows: 2 databases", chip.GetProperty("text").GetString());
+        Assert.Equal("Each graph is whole; process rows outside the chosen databases are hidden.", chip.GetProperty("title").GetString());
+    }
+
+    [Fact]
+    public void WithNoFilter_EveryProcessRowShows_AndThereIsNoNoticeOrChip()
+    {
+        if (!TryRun("spread:none", out var r)) return;
+
+        Assert.Equal(new[] { "3 processes", "1 process", "1 process" }, Strings(r.GetProperty("summaries")));
+        Assert.Empty(r.GetProperty("cellTexts").EnumerateArray());
+        Assert.Equal(0, Strings(r.GetProperty("notes")).Count(n => n.Length > 0));
+        Assert.Empty(r.GetProperty("chips").EnumerateArray());
+    }
+
+    /// <summary>A filter naming A, B and C hides only the process that has no database, so the notice counts that one; the chip
+    /// pluralises by the number of chosen databases.</summary>
+    [Fact]
+    public void AProcessWithNoDatabase_IsHiddenWhileAFilterIsActive_AndTheChipCountsTheChosenDatabases()
+    {
+        if (!TryRun("spread:A|B|C", out var r)) return;
+
+        Assert.Equal(new[] { "3 processes", "1 process" }, Strings(r.GetProperty("summaries")));
+        Assert.Equal(
+            new[] { "The database filter hides 1 process row outside the chosen databases. Each graph is whole." },
+            Strings(r.GetProperty("notes")));
+        Assert.Equal("Graphs: all; process rows: 3 databases", r.GetProperty("chips")[0].GetProperty("text").GetString());
+
+        if (!TryRun("spread:A", out var one)) return;
+        Assert.Equal("Graphs: all; process rows: 1 database", one.GetProperty("chips")[0].GetProperty("text").GetString());
+    }
+
+    /// <summary>A filter that hides no process row draws no notice (the chip still says the rows follow the filter).</summary>
+    [Fact]
+    public void AFilterThatHidesNothing_DrawsNoNotice()
+    {
+        if (!TryRun("clean:A|B", out var r)) return;
+
+        Assert.Equal(new[] { "1 process", "2 processes" }, Strings(r.GetProperty("summaries")));
+        Assert.Equal(0, Strings(r.GetProperty("notes")).Count(n => n.Length > 0));
+        Assert.Equal("process-rows", Assert.Single(r.GetProperty("chips").EnumerateArray()).GetProperty("state").GetString());
+    }
+
+    /// <summary>#5244: the page row budget runs before the browser filter, so when every sent row is outside the chosen database the
+    /// cell still says how many rows were not sent (their database is unknown, so they are not counted as hidden).</summary>
+    [Fact]
+    public void WhenTheFilterHidesEverySentRow_TheCellStillCountsTheRowsNotSent()
+    {
+        if (!TryRun("cut:A", out var r)) return;
+
+        Assert.Equal(new[] { "1 process hidden by the database filter (+2 more in the graph)" }, Strings(r.GetProperty("cellTexts")));
+    }
+
+    [Fact]
+    public void TheProcessRowFilter_IsExactAboutDatabaseNames()
+    {
+        if (!TryRun("spread:a|b", out var r)) return;
+
+        /* No trim and no case folding: "a" and "b" name no database of the data, so every process row is hidden. */
+        Assert.Equal(
+            new[] { "3 processes hidden by the database filter", "1 process hidden by the database filter", "1 process hidden by the database filter" },
+            Strings(r.GetProperty("cellTexts")));
     }
 }

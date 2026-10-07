@@ -155,6 +155,9 @@ public sealed class RepoFileAdoptionTests
            CreateCommand-plus-CommandTimeout shape, and the statement's own WHERE/AND tail) — the same
            reasoning as the fleet twin above, which is the file this one was written beside. */
         "PerServerCollectionHealthMemoTests.cs",
+        /* #5366: its Linux-build-job pin slices the `darling-linux:` job out of the workflow starting at a line break
+           (`\n  darling-linux:`), so the text must be LF whatever the checkout's line endings. */
+        "PasswordKeySelfCheckTests.cs",
         "FleetPageAttentionFilterTests.cs",
         /* Its every-site pins match each `new AlertMuteContext { ... };` initializer across its line breaks in
            AlertEngine.cs and the Darling producers, and assert each one sets ServerId. */
@@ -217,6 +220,12 @@ public sealed class RepoFileAdoptionTests
            stores' sources and asserts them equal up to one token, and its wiring pin slices each pass method by
            call sites that sit on their own lines — anchors spanning line breaks on every arm. */
         "RecurrenceLabelStoreReadTests.cs",
+        /* #5320: its gate pins split build.yml into steps by line and anchor the gate step's PowerShell check (the
+           Tee-Object line through the Select-String line that reads the same log) across the lines between them. */
+        "ReleaseStatementGateWorkflowTests.cs",
+        /* #5374: its start pin slices the provisioning chain of DarlingWorker.cs, comments removed, and matches the rules call
+           inside each branch of it, across line breaks. */
+        "SelfManagedStoreRulesStartPinTests.cs",
         /* Its heading pin slices fillServerHead's body out of server.js, from its declaration to the closing brace
            on its own line, and asserts the display-name assignment sits inside it and ahead of the dot update. */
         "ServerPageTitlePinTests.cs",

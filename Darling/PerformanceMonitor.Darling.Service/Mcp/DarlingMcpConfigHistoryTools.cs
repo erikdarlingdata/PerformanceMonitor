@@ -120,13 +120,15 @@ public sealed class DarlingMcpConfigHistoryTools
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history to retrieve. Default 168 (7 days).")] int hours_back = 168,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        [Description("Limit to one database. Omit for all databases.")] string? database_name = null,
         ILogger? logger = null,
         CancellationToken cancellationToken = default)
-        => GetDatabaseConfigChanges(postgres, server_name, hours_back, DatabaseFilter.All, as_of, logger, cancellationToken);
+        => GetDatabaseConfigChanges(postgres, server_name, hours_back, DatabaseFilter.One(database_name), as_of, logger, cancellationToken);
 
     /// <summary>
-    /// #5245: the get_database_config_changes read over a LIST of databases. The MCP tool takes no database parameter yet and
-    /// passes <see cref="DatabaseFilter.All"/>; a later lane wires one. The snapshots are filtered in SQL, so the diff, the
+    /// #5245: the get_database_config_changes read over a LIST of databases. The MCP tool passes
+    /// <c>DatabaseFilter.One(database_name)</c> (blank is every database) and the web route the repeated keys (#5244); every answer
+    /// shape echoes <c>database_name</c> (the name for one database, "the chosen databases" for two or more, null for all). The snapshots are filtered in SQL, so the diff, the
     /// window notice and the not_collected check are unchanged, and the only one-name consumer is the empty answer, which
     /// says which databases it looked at (<see cref="DatabaseScopeText"/>) instead of claiming the SERVER has too few captures.
     /// </summary>
@@ -154,14 +156,18 @@ public sealed class DarlingMcpConfigHistoryTools
             if (changes.Count == 0)
             {
                 /* Decide not_collected first: it carries no notice, so probing before it would throw the probe away. */
-                var notCollected = await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "database_config", cancellationToken);
+                var notCollected = McpHelpers.WithDatabase(
+                    await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "database_config", cancellationToken),
+                    databases.Describe());
                 if (notCollected is not null)
                 {
                     return notCollected;
                 }
 
                 var emptyNotice = await ReadNoticeAsync(postgres, "database_config", resolved.ServerName, windowStart, windowEndNaive, emptyAnswer: true, logger, cancellationToken);
-                return NoChanges(resolved.ServerName, hours_back, DistinctCaptures(snapshots.Select(s => s.CaptureTime)), emptyNotice, DatabaseScopeText(databases));
+                return McpHelpers.WithDatabase(
+                    NoChanges(resolved.ServerName, hours_back, DistinctCaptures(snapshots.Select(s => s.CaptureTime)), emptyNotice, DatabaseScopeText(databases)),
+                    databases.Describe())!;
             }
 
             var notice = await ReadNoticeAsync(postgres, "database_config", resolved.ServerName, windowStart, windowEndNaive, emptyAnswer: false, logger, cancellationToken);
@@ -182,6 +188,7 @@ public sealed class DarlingMcpConfigHistoryTools
                 effective_start = notice.EffectiveStart,
                 window_truncated = notice.WindowTruncated,
                 truncation_note = notice.TruncationNote,
+                database_name = databases.Describe(),
                 change_count = changes.Count,
                 changes = result
             }, McpHelpers.JsonOptions);
@@ -273,7 +280,7 @@ public sealed class DarlingMcpConfigHistoryTools
 
     /// <summary>
     /// #5245: the GetDatabaseScopedConfig read over a LIST of databases. The MCP tool passes <see cref="DatabaseFilter.One"/> of its one
-    /// <c>database_name</c> (a blank or whitespace-only name is every database); a later lane wires the parameter to a list.
+    /// <c>database_name</c> (a blank or whitespace-only name is every database) and the web route passes the repeated keys (#5244).
     /// The read stays a latest-snapshot read of the whole server filtered in memory (so an empty store still answers
     /// unavailable / not_collected for the server, never "no such database"), and the in-memory match is list-aware
     /// (<see cref="MatchesDatabases"/>, case-insensitive as it always was). The payload names no database beyond each row's own.
@@ -337,7 +344,7 @@ public sealed class DarlingMcpConfigHistoryTools
 
     /// <summary>
     /// #5245: the GetQueryStoreHealth read over a LIST of databases. The MCP tool passes <see cref="DatabaseFilter.One"/> of its one
-    /// <c>database_name</c> (a blank or whitespace-only name is every database); a later lane wires the parameter to a list.
+    /// <c>database_name</c> (a blank or whitespace-only name is every database) and the web route passes the repeated keys (#5244).
     /// The read stays a latest-snapshot read of the whole server filtered in memory (so an empty store still answers
     /// unavailable / not_collected for the server, never "no such database"), and the in-memory match is list-aware
     /// (<see cref="MatchesDatabases"/>, case-insensitive as it always was). The payload names no database beyond each row's own.
@@ -433,12 +440,11 @@ public sealed class DarlingMcpConfigHistoryTools
         return rows.Where(r => names.Any(n => n.Equals(database(r), StringComparison.OrdinalIgnoreCase)));
     }
 
-    /// <summary>How a filtered empty answer names the databases it looked at: null for every database (the text is then
-    /// the one it always was), "database X" for one name, "the chosen databases" for two or more.</summary>
+    /// <summary>How a filtered empty answer names the databases it looked at, after "for ": null for every database (the text is
+    /// then the one it always was), "the database X" for one name, "the chosen databases" for two or more. The same words
+    /// <see cref="DarlingMcpBlockingTools.ForChosenDatabases"/> and Lite's <c>McpDatabaseSelection.ForChosen</c> build.</summary>
     internal static string? DatabaseScopeText(DatabaseFilter databases) =>
-        databases.IsAll ? null
-        : databases.Names.Count == 1 ? "database " + databases.Names[0]
-        : DatabaseFilter.ManyDatabasesDescription;
+        databases.IsAll ? null : DarlingMcpBlockingTools.ForChosenDatabases(databases)[" for ".Length..];
 
     /// <summary>
     /// The window-floor notice for one change tool, from the collector's own table. The rule matches the viewer's and the web's

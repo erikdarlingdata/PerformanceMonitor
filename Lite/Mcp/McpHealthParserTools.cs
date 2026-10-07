@@ -147,18 +147,17 @@ public sealed class McpHealthParserTools
             var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd) ?? McpHelpers.ValidateTop(limit);
             if (validation != null) return validation;
 
-            /* #5244: database_name appended LAST (H1). The store keeps no database name for these events, so the reader resolves each
-               database_id through the server's latest id-to-name map and filters in C# on that name, after the severity gate and before
-               the counts and the cap; a blank is "no filter". Known limit (#5373): SQL Server reuses a dropped database's id, so an old
-               error can resolve to a newer database's name. */
+            /* #5244: database_name appended LAST (H1). The store keeps no database name for these events, so the reader filters in C#,
+               after the severity gate and before the counts and the cap, on the name each error's database_id carried AT THE ERROR'S
+               TIME (#5373, the name the rows show); a blank is "no filter". */
             var database = string.IsNullOrWhiteSpace(database_name) ? null : database_name;
             var rows = await dataService.GetSevereErrorsAsync(
                 resolved.ServerId, hours_back, databaseNames: database is null ? null : new[] { database }, asOfUtc: windowEnd);
             var lastCapturedAt = await dataService.GetLastSystemHealthCaptureAsync(resolved.ServerId);
             if (rows.Count == 0)
-                return await EmptyAsync(dataService, resolved.ServerId, resolved.ServerName, hours_back, windowEnd, SystemHealthParser.ErrorReportedEvent,
+                return McpHelpers.WithDatabase(await EmptyAsync(dataService, resolved.ServerId, resolved.ServerName, hours_back, windowEnd, SystemHealthParser.ErrorReportedEvent,
                     $"none was a significant severe error (severity {SystemHealthSignificance.SevereErrorMinSeverity}+ and off the benign connection-reset list)"
-                        + (database is null ? "" : " in database " + database), capturedInWindow: null, lastCapturedAt);
+                        + McpDatabaseSelection.ForChosen(database is null ? null : new[] { database }), capturedInWindow: null, lastCapturedAt), database)!;
 
             var notice = await WindowNoticeAsync(dataService, resolved.ServerId, hours_back, windowEnd);
 
@@ -173,6 +172,7 @@ public sealed class McpHealthParserTools
                 truncation_note = notice.TruncationNote,
                 source_observed = true,
                 last_captured_at = Stamp(lastCapturedAt),
+                database_name = database,
                 error_count = rows.Count,
                 shown = Math.Min(rows.Count, limit),
                 errors = rows.Take(limit).Select(r => new

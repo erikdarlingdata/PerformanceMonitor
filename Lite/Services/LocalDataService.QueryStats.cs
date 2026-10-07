@@ -91,27 +91,11 @@ ORDER BY bucket";
     }
 
     /// <summary>
-    /// The top-N query-stats groups by CPU over the window. <paramref name="minMaxDop"/> is the lifetime
-    /// <c>max_dop</c> floor a group must reach to be RANKED at all (#3541 A13): 0 for no parallelism filter
-    /// (the grids' read, byte-identical to before), 2 for the MCP tool's <c>parallel_only</c>, the caller's
-    /// <c>min_dop</c> otherwise. It is a HAVING predicate on the grouped population, before the CPU ordering
-    /// and the cap, so the page is the top-N of the filtered population — the tool used to filter the
-    /// returned top-N page in C#, and a box whose hottest plans were all serial answered an empty page while
-    /// the window held parallel plans. Darling's <c>TopQueriesSql</c> carries the same floor as its $6.
+    /// The statement behind <see cref="GetTopQueriesByCpuAsync"/>, split out so a test can run it beside the pre-#5381
+    /// statement it replaced. <paramref name="dbClause"/> is the <see cref="BuildDbInClause"/> predicate (or empty);
+    /// <paramref name="candidates"/> is the ranking cut TopFill asked for.
     /// </summary>
-    public async Task<List<QueryStatsRow>> GetTopQueriesByCpuAsync(int serverId, int hoursBack = 24, int top = 50, DateTime? fromDate = null, DateTime? toDate = null, ServerClock? serverClock = null, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null, int minMaxDop = 0)
-    {
-        using var _q = TimeQuery("GetTopQueriesByCpuAsync", "v_query_stats top N by CPU");
-        using var connection = await OpenConnectionAsync();
-
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
-        var dbClause = BuildDbInClause(databaseNames, "database_name", 7, out var dbValues);
-
-        /* #5313: one round at a candidate limit; TopFill asks again with a larger one while WAITFOR shells left the page short. */
-        async Task<(List<QueryStatsRow> Rows, int CandidateCount)> RunRoundAsync(int candidates)
-        {
-        using var command = connection.CreateCommand();
-        command.CommandText = @"
+    internal static string TopQueriesByCpuSql(string dbClause, int candidates) => @"
 WITH ranked AS (
     SELECT
         database_name,
@@ -205,6 +189,46 @@ module AS (
     ) ranked_modules
     WHERE rn = 1
 ),
+texts AS (
+    /* #5381: the representative text is fetched AFTER the ranking, for the candidate groups only, and from the
+       read's own window. It used to be a LATERAL 'newest text per group' over the WHOLE archive with no time
+       filter, which DuckDB runs as a window over every archived row with query_text carried through it: the read's
+       memory grew with the archive (an out of memory at Lite's 1 GB limit from three daily files), not with the
+       window. This is one aggregate over the window's rows of the candidate groups: it keeps one text per group, and
+       the parquet files outside the window are pruned by collection_time.
+       The pick is the one the lateral made: the newest row of the group's OWN key (#2012 stage 2: the host
+       constraint, NOT DISTINCT FROM so ad-hoc NULL hosts still match ad-hoc rows) that carries a text, a tie on the
+       time broken on the row collected last (#5299 round 2 N3). The plan comes from that same row, even when it is NULL.
+       Difference from the lateral, on purpose: the text comes from the window, so a window that ends in the past
+       shows the window's newest statement rather than the newest one ever captured. */
+    SELECT
+        w_pick.database_name,
+        w_pick.query_hash,
+        w_pick.host_object_name,
+        w_pick.w.t AS query_text,
+        w_pick.w.p AS query_plan_xml
+    FROM
+    (
+        /* #5381 G1: text and plan are packed into ONE struct and picked together. Two separate arg_max calls
+           would each skip rows whose OWN argument is NULL, so a newest row with text but a NULL plan would
+           take the plan from an older row; the lateral this replaces read both from the one row. */
+        SELECT
+            q.database_name,
+            q.query_hash,
+            q.host_object_name,
+            arg_max(struct_pack(t := q.query_text, p := q.query_plan_xml), (q.collection_time, q.collection_id))
+                FILTER (WHERE q.query_text IS NOT NULL) AS w
+        FROM v_query_stats q
+        JOIN ranked r
+          ON  r.query_hash = q.query_hash
+          AND r.database_name = q.database_name
+          AND r.host_object_name IS NOT DISTINCT FROM q.host_object_name
+        WHERE q.server_id = $1
+        AND   q.collection_time >= $2
+        AND   q.collection_time <= $3
+        GROUP BY q.database_name, q.query_hash, q.host_object_name
+    ) w_pick
+),
 page AS (
 SELECT
     r.*,
@@ -215,22 +239,10 @@ SELECT
     m.database_name AS module_database_name,
     ROW_NUMBER() OVER (ORDER BY r.total_cpu_us DESC, r.database_name, r.query_hash, r.host_object_name) AS page_ord
 FROM ranked r
-LEFT JOIN LATERAL (
-    SELECT query_text, query_plan_xml
-    FROM v_query_stats
-    WHERE server_id = $1
-    AND   query_hash = r.query_hash
-    AND   database_name = r.database_name
-    /* #2012 stage 2: the representative text must come from THIS group's own rows - without the
-       host constraint a hash shared across host objects could label one caller's row with
-       another caller's text (NOT DISTINCT FROM so ad-hoc NULL hosts still match ad-hoc rows). */
-    AND   host_object_name IS NOT DISTINCT FROM r.host_object_name
-    AND   query_text IS NOT NULL
-    /* #5299 round 2 (N3): two rows of one key at one collection_time (two plans, one collection) must give the
-       same text on every read, so a tie on the time breaks on the row collected last. */
-    ORDER BY collection_time DESC, collection_id DESC
-    LIMIT 1
-) t ON TRUE
+LEFT JOIN texts t
+       ON  t.database_name = r.database_name
+       AND t.query_hash = r.query_hash
+       AND t.host_object_name IS NOT DISTINCT FROM r.host_object_name
 LEFT JOIN module m ON m.sql_handle = r.sql_handle
 WHERE t.query_text IS NULL OR t.query_text NOT LIKE 'WAITFOR%'
 ORDER BY r.total_cpu_us DESC, r.database_name, r.query_hash, r.host_object_name
@@ -241,6 +253,29 @@ SELECT p.*, c.candidate_count
 FROM (SELECT COUNT(*) AS candidate_count FROM ranked) c
 LEFT JOIN page p ON TRUE
 ORDER BY p.page_ord";
+
+    /// <summary>
+    /// The top-N query-stats groups by CPU over the window. <paramref name="minMaxDop"/> is the lifetime
+    /// <c>max_dop</c> floor a group must reach to be RANKED at all (#3541 A13): 0 for no parallelism filter
+    /// (the grids' read, byte-identical to before), 2 for the MCP tool's <c>parallel_only</c>, the caller's
+    /// <c>min_dop</c> otherwise. It is a HAVING predicate on the grouped population, before the CPU ordering
+    /// and the cap, so the page is the top-N of the filtered population — the tool used to filter the
+    /// returned top-N page in C#, and a box whose hottest plans were all serial answered an empty page while
+    /// the window held parallel plans. Darling's <c>TopQueriesSql</c> carries the same floor as its $6.
+    /// </summary>
+    public async Task<List<QueryStatsRow>> GetTopQueriesByCpuAsync(int serverId, int hoursBack = 24, int top = 50, DateTime? fromDate = null, DateTime? toDate = null, ServerClock? serverClock = null, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null, int minMaxDop = 0)
+    {
+        using var _q = TimeQuery("GetTopQueriesByCpuAsync", "v_query_stats top N by CPU");
+        using var connection = await OpenConnectionAsync();
+
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
+        var dbClause = BuildDbInClause(databaseNames, "database_name", 7, out var dbValues);
+
+        /* #5313: one round at a candidate limit; TopFill asks again with a larger one while WAITFOR shells left the page short. */
+        async Task<(List<QueryStatsRow> Rows, int CandidateCount)> RunRoundAsync(int candidates)
+        {
+        using var command = connection.CreateCommand();
+        command.CommandText = TopQueriesByCpuSql(dbClause, candidates);
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = startTime });
@@ -1020,20 +1055,10 @@ LIMIT $4";
     }
 
     /// <summary>
-    /// Gets procedure stats comparison between a current time range and a baseline range.
+    /// The statement behind <see cref="GetProcedureStatsComparisonAsync"/>, split out so a test can run it beside the
+    /// pre-#5381 statement it replaced. <paramref name="dbClause"/> is the <see cref="BuildDbInClause"/> predicate (or empty).
     /// </summary>
-    public async Task<List<ProcedureStatsComparisonItem>> GetProcedureStatsComparisonAsync(
-        int serverId,
-        DateTime currentStart, DateTime currentEnd,
-        DateTime baselineStart, DateTime baselineEnd,
-        IReadOnlyList<string>? databaseNames = null)
-    {
-        using var _q = TimeQuery("GetProcedureStatsComparisonAsync", "v_procedure_stats comparison");
-        using var connection = await OpenConnectionAsync();
-        using var command = connection.CreateCommand();
-        var dbClause = BuildDbInClause(databaseNames, "database_name", 6, out var dbValues);
-
-        command.CommandText = @"
+    internal static string ProcedureStatsComparisonSql(string dbClause) => @"
 WITH top_current AS (
     SELECT database_name, schema_name, object_name
     FROM v_procedure_stats
@@ -1095,35 +1120,71 @@ baseline_period AS (
     AND   ps.collection_time >= $4 AND ps.collection_time <= $5
     AND   ps.delta_execution_count > 0
     GROUP BY tp.database_name, tp.schema_name, tp.object_name
-)
-SELECT COALESCE(c.database_name, b.database_name) AS database_name,
-       COALESCE(c.schema_name, b.schema_name) AS schema_name,
-       COALESCE(c.object_name, b.object_name) AS object_name,
-       c.exec_count, c.avg_duration_ms, c.avg_cpu_ms, c.avg_reads,
-       b.exec_count AS baseline_exec_count,
-       b.avg_duration_ms AS baseline_avg_duration_ms,
-       b.avg_cpu_ms AS baseline_avg_cpu_ms,
-       b.avg_reads AS baseline_avg_reads,
-       t.query_text
-FROM current_period c
-FULL OUTER JOIN baseline_period b
-  ON  c.database_name IS NOT DISTINCT FROM b.database_name
-  AND c.schema_name IS NOT DISTINCT FROM b.schema_name
-  AND c.object_name IS NOT DISTINCT FROM b.object_name
-/* #1981: a REPRESENTATIVE statement of the procedure, resolved through the same normalized
-   sql_handle join the #1568 module attribution relies on (both stores persist the identical
-   CONVERT(varchar(130), ..., 1) text). procedure_stats captures no text of its own, so this is
-   the latest captured statement from inside the module - parity with the other two comparison
-   grids' text columns, labeled a statement rather than the definition. */
-LEFT JOIN LATERAL (
-    SELECT qs.query_text
+),
+joined AS (
+    SELECT COALESCE(c.database_name, b.database_name) AS database_name,
+           COALESCE(c.schema_name, b.schema_name) AS schema_name,
+           COALESCE(c.object_name, b.object_name) AS object_name,
+           c.exec_count, c.avg_duration_ms, c.avg_cpu_ms, c.avg_reads,
+           b.exec_count AS baseline_exec_count,
+           b.avg_duration_ms AS baseline_avg_duration_ms,
+           b.avg_cpu_ms AS baseline_avg_cpu_ms,
+           b.avg_reads AS baseline_avg_reads,
+           COALESCE(c.sql_handle, b.sql_handle) AS text_handle
+    FROM current_period c
+    FULL OUTER JOIN baseline_period b
+      ON  c.database_name IS NOT DISTINCT FROM b.database_name
+      AND c.schema_name IS NOT DISTINCT FROM b.schema_name
+      AND c.object_name IS NOT DISTINCT FROM b.object_name
+),
+texts AS (
+    /* #1981: a REPRESENTATIVE statement of the procedure, resolved through the same normalized
+       sql_handle join the #1568 module attribution relies on (both stores persist the identical
+       CONVERT(varchar(130), ..., 1) text). procedure_stats captures no text of its own, so this is
+       the latest captured statement from inside the module - parity with the other two comparison
+       grids' text columns, labeled a statement rather than the definition.
+       #5381: fetched AFTER the comparison is built, for the compared procedures' handles only, and from the
+       comparison's own two ranges, not the span between them (a baseline weeks before the current range would
+       otherwise read every file in the gap). It was a LATERAL over v_query_stats with no time
+       filter, which DuckDB runs as a window over every archived query_stats row with query_text carried through
+       it, so the read's memory grew with the archive (an out of memory at Lite's 1 GB limit from five daily
+       files). The pick is the same - the newest row of the handle that carries a text - with the row collected
+       last winning a tie on the time, as every other newest-text pick does (#5299 round 2 N3). Difference from
+       the lateral, on purpose: a handle with no captured statement inside the window now reads blank rather
+       than showing an older statement from outside it. */
+    SELECT qs.sql_handle,
+           arg_max(qs.query_text, (qs.collection_time, qs.collection_id)) AS query_text
     FROM v_query_stats qs
+    JOIN (SELECT DISTINCT text_handle FROM joined WHERE text_handle IS NOT NULL) h
+      ON h.text_handle = qs.sql_handle
     WHERE qs.server_id = $1
-    AND   qs.sql_handle = COALESCE(c.sql_handle, b.sql_handle)
     AND   qs.query_text IS NOT NULL
-    ORDER BY qs.collection_time DESC
-    LIMIT 1
-) t ON TRUE;";
+    AND   ((qs.collection_time >= $2 AND qs.collection_time <= $3)
+        OR (qs.collection_time >= $4 AND qs.collection_time <= $5))
+    GROUP BY qs.sql_handle
+)
+SELECT j.database_name, j.schema_name, j.object_name,
+       j.exec_count, j.avg_duration_ms, j.avg_cpu_ms, j.avg_reads,
+       j.baseline_exec_count, j.baseline_avg_duration_ms, j.baseline_avg_cpu_ms, j.baseline_avg_reads,
+       t.query_text
+FROM joined j
+LEFT JOIN texts t ON t.sql_handle = j.text_handle;";
+
+    /// <summary>
+    /// Gets procedure stats comparison between a current time range and a baseline range.
+    /// </summary>
+    public async Task<List<ProcedureStatsComparisonItem>> GetProcedureStatsComparisonAsync(
+        int serverId,
+        DateTime currentStart, DateTime currentEnd,
+        DateTime baselineStart, DateTime baselineEnd,
+        IReadOnlyList<string>? databaseNames = null)
+    {
+        using var _q = TimeQuery("GetProcedureStatsComparisonAsync", "v_procedure_stats comparison");
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+        var dbClause = BuildDbInClause(databaseNames, "database_name", 6, out var dbValues);
+
+        command.CommandText = ProcedureStatsComparisonSql(dbClause);
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = currentStart });
@@ -1173,8 +1234,8 @@ LEFT JOIN LATERAL (
     /// unknowable), <c>NULLIF(…, 0)</c> so the restart collection is UNRATED, and the LAG only for a
     /// pre-v61 collection (NULL) that never recorded one, so history renders exactly as it did.
     /// <c>COALESCE(NULLIF(sample_interval_seconds, 0), LAG)</c> would be the wrong spelling — it falls back
-    /// to a fabricated interval on precisely the restart row. Darling's twin is
-    /// <c>DurationTrendRouting.BuildRawTrendSql</c>.</para>
+    /// to a fabricated interval on precisely the restart row. Darling's twin is the per-collection CTE
+    /// <c>DurationTrendRouting.BuildBucketedRawTrendSql</c> builds.</para>
     /// <para><b>An unrated collection is a point with no rate, not a missing point (#3541 A12, #3540 A8).</b>
     /// The first collection of a pre-v61 stretch has a NULL LAG, a restart collection a NULL interval; either
     /// way the <c>CASE ... ELSE 0 END</c> this replaced published that unknowable as a measured 0.0, and every
@@ -1278,8 +1339,10 @@ LEFT JOIN LATERAL (
     /// an unrated collection's work/executions/seconds rather than its rate directly (so the bucket sums work and
     /// seconds separately and divides once — summed rates, never averaged ones), then one row per bucket.
     /// <c>bucket_start</c> is clamped to the window start (<c>GREATEST</c>) so an unaligned window's first,
-    /// partial bucket does not render before it. No <c>HAVING</c>: a bucket with no rated collection still gets a
-    /// row, its rate NULL — the per-collection contract above, applied per bucket. <paramref name="dbClause"/> is
+    /// partial bucket does not render before it. No <c>HAVING</c> on the rate: a bucket with no rated collection still gets a
+    /// row, its rate NULL — the per-collection contract above, applied per bucket. With a database filter the filter sits
+    /// INSIDE the aggregates (#5414 M1: a collection the chosen databases had no rows in still counts its seconds) and
+    /// whether the chosen databases had any row at all is one window-level <c>WHERE EXISTS</c> (the empty chart), never a per-bucket test, so a bucket they were quiet in reads 0 and is not missing (#5414 round 2). <paramref name="dbClause"/> is
     /// <see cref="LocalDataService.BuildDbInClause"/>'s own <c>$4..</c> numbering, unchanged by bucketing; the
     /// width is appended as its OWN trailing parameter at <paramref name="widthParamIndex"/> so that numbering
     /// never shifts, mirroring the wait/perfmon trend reads' own width parameter.
@@ -1289,18 +1352,18 @@ WITH raw AS
 (
     SELECT
         collection_time,
-        SUM(delta_elapsed_time) / 1000.0 AS total_elapsed_ms,
-        SUM(delta_execution_count) AS total_executions,
+        {FilteredSum("delta_elapsed_time", dbClause)} / 1000.0 AS total_elapsed_ms,
+        {FilteredSum("delta_execution_count", dbClause)} AS total_executions,
         /* The stored interval, three-state (#3653 A11): MAX 0 = every row unknowable (a restart) -> NULL, so
            the collection is unrated; NULL = pre-v61, the LAG stands in; n = measured. */
         CASE WHEN MAX(sample_interval_seconds) IS NULL
              THEN extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time))))
              ELSE NULLIF(MAX(sample_interval_seconds), 0)
-        END AS interval_seconds
+        END AS interval_seconds{(dbClause.Length == 0 ? "" : $",\n        COUNT(*) FILTER (WHERE {DbInPredicate(dbClause)}) AS matched_rows")}
     FROM {relation}
     WHERE server_id = $1
     AND   collection_time >= $2
-    AND   collection_time <= $3{dbClause}
+    AND   collection_time <= $3
     GROUP BY collection_time
 ),
 rated AS
@@ -1309,7 +1372,7 @@ rated AS
         collection_time,
         CASE WHEN interval_seconds > 0 THEN total_elapsed_ms END AS rated_elapsed_ms,
         CASE WHEN interval_seconds > 0 THEN total_executions END AS rated_executions,
-        CASE WHEN interval_seconds > 0 THEN interval_seconds END AS rated_seconds
+        CASE WHEN interval_seconds > 0 THEN interval_seconds END AS rated_seconds{(dbClause.Length == 0 ? "" : ",\n        matched_rows")}
     FROM raw
 )
 SELECT
@@ -1320,7 +1383,7 @@ SELECT
     CAST(SUM(rated_executions) AS DOUBLE PRECISION) / SUM(rated_seconds) AS executions_per_second,
     MIN(collection_time) AS first_collection_time,
     COUNT(*) AS collection_count
-FROM rated
+FROM rated{(dbClause.Length == 0 ? "" : "\nWHERE EXISTS (SELECT 1 FROM rated WHERE matched_rows > 0)")}
 GROUP BY 1
 ORDER BY 1";
 
@@ -1439,16 +1502,16 @@ WITH raw AS
 (
     SELECT
         collection_time,
-        SUM(delta_execution_count) AS total_executions,
+        {FilteredSum("delta_execution_count", dbClause)} AS total_executions,
         /* The stored interval, three-state (#3653 A11) — see GetQueryDurationTrendAsync. */
         CASE WHEN MAX(sample_interval_seconds) IS NULL
              THEN extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time))))
              ELSE NULLIF(MAX(sample_interval_seconds), 0)
-        END AS interval_seconds
+        END AS interval_seconds{(dbClause.Length == 0 ? "" : $",\n        COUNT(*) FILTER (WHERE {DbInPredicate(dbClause)}) AS matched_rows")}
     FROM v_query_stats
     WHERE server_id = $1
     AND   collection_time >= $2
-    AND   collection_time <= $3{dbClause}
+    AND   collection_time <= $3
     GROUP BY collection_time
 ),
 rated AS
@@ -1456,7 +1519,7 @@ rated AS
     SELECT
         collection_time,
         CASE WHEN interval_seconds > 0 THEN total_executions END AS rated_executions,
-        CASE WHEN interval_seconds > 0 THEN interval_seconds END AS rated_seconds
+        CASE WHEN interval_seconds > 0 THEN interval_seconds END AS rated_seconds{(dbClause.Length == 0 ? "" : ",\n        matched_rows")}
     FROM raw
 )
 SELECT
@@ -1466,7 +1529,7 @@ SELECT
     CAST(SUM(rated_executions) AS DOUBLE PRECISION) / SUM(rated_seconds) AS executions_per_second,
     MIN(collection_time) AS first_collection_time,
     COUNT(*) AS collection_count
-FROM rated
+FROM rated{(dbClause.Length == 0 ? "" : "\nWHERE EXISTS (SELECT 1 FROM rated WHERE matched_rows > 0)")}
 GROUP BY 1
 ORDER BY 1";
 

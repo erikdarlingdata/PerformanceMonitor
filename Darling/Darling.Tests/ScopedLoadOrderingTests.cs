@@ -27,7 +27,8 @@ namespace Darling.Tests;
 /// a drop rather than a silent loss only because something is certain to repaint — in the Darling viewer the
 /// coalescing replay in <c>RefreshVisibleAsync</c> / <c>RefreshActiveInnerTabAsync</c> /
 /// <c>RefreshActiveSubTabAsync</c>, which re-reads the scope at the re-entered load's own entry. <b>Lite has
-/// no replay anywhere</b>: <c>ServerTab._isRefreshing</c> and <c>RecommendationsTab._isBusy</c> are bail-only
+/// no replay at these sites</b> (the server tab's main-tab loads gained one in #5371, through
+/// <c>RefreshCoordinator</c>): <c>RecommendationsTab._isBusy</c> is bail-only
 /// and <c>FinOpsTab</c> has no load guard at all, so the same drop there suppresses a paint nothing will redo.
 /// A generation cannot do that: the only condition under which it drops is that a newer load for the same
 /// surface has already started, so the surface always has a live writer.</para>
@@ -54,12 +55,11 @@ namespace Darling.Tests;
 /// silent loss this mechanism exists to avoid, reached from the other direction.</para>
 ///
 /// <para><b>What is deliberately NOT in this table.</b> <c>ServerTab</c>'s twenty-one main-tab
-/// <c>Refresh*Async</c> loaders. Their races route through the bail-only <c>_isRefreshing</c>, where the
-/// user-visible half is the DROPPED trigger — a time-range change mid-pass leaves the charts on the old
-/// window while the combo shows the new one — and no drop-based mechanism can fix a load that never started.
-/// That wants the viewer's replay, which needs <c>_isRefreshing</c> separated from the event-suppression duty
-/// it also serves in <c>TimeDisplayMode_SelectionChanged</c>, <c>ServerTab.DrillDown.cs</c> and
-/// <c>ServerTab.Grids.cs</c>, and that is a load-architecture change rather than a guard.</para>
+/// <c>Refresh*Async</c> loaders. Their races used to route through the bail-only <c>_isRefreshing</c>, where the
+/// user-visible half was the DROPPED trigger — a time-range change mid-pass left the charts on the old
+/// window while the combo showed the new one — and no drop-based mechanism can fix a load that never started.
+/// #5371 gave them the viewer's replay (<c>RefreshCoordinator</c>), with the event-suppression duty split off
+/// into <c>_suppressRangeRefresh</c>, which was a load-architecture change rather than a guard.</para>
 /// </summary>
 public sealed class ScopedLoadOrderingTests
 {

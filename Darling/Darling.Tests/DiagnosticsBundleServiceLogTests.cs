@@ -55,6 +55,36 @@ public sealed class DiagnosticsBundleServiceLogTests
         Assert.Equal(DiagnosticsBundleServiceLog.MaxEntryChars, entries[0].Message.Length);
     }
 
+    /// <summary>
+    /// #5320: an entry is judged whole and then cut. A value sitting before the cut whose naming statement sits past it
+    /// (here past the alias-pass keep length too, and past a continuation line the old read stopped appending) is
+    /// withheld; an entry with no such statement is only cut.
+    /// </summary>
+    [Theory]
+    [InlineData(DiagnosticsBundleServiceLog.MaxEntryChars)]
+    [InlineData(DiagnosticsBundleServiceLog.AliasInputChars)]
+    public void Parse_JudgesTheWholeEntryBeforeTheCut_SoATriggerPastTheCutWithholdsAValueBeforeIt(int keep)
+    {
+        var t = new DateTime(2026, 1, 2, 3, 4, 5);
+        var padding = string.Concat(Enumerable.Repeat("word ", DiagnosticsBundleServiceLog.AliasInputChars / 5 + 100));
+        var first = $"login attempt with N'S3cret-canary-ssf' failed {padding}";
+        var log = string.Join("\n",
+            $"{Stamp(t)} [ERROR] [Cat] {first}",
+            "    " + padding,
+            "    " + StatementScrubCanary.CanaryStatement,
+            $"{Stamp(t)} [ERROR] [Cat] {first}",
+            $"{Stamp(t)} [ERROR] [Cat] an ordinary failure {padding}");
+
+        var entries = DiagnosticsBundleServiceLog.Parse(log, false, t.AddHours(-1), keep);
+
+        Assert.Equal(3, entries.Count);
+        Assert.Equal(PerformanceMonitor.Common.SensitiveStatements.PlaceholderText, entries[0].Message);
+        Assert.DoesNotContain("S3cret-canary-ssf", entries[0].Message, StringComparison.Ordinal);
+        Assert.Contains("S3cret-canary-ssf", entries[1].Message, StringComparison.Ordinal);
+        Assert.StartsWith("an ordinary failure", entries[2].Message, StringComparison.Ordinal);
+        Assert.True(entries[2].Message.Length <= keep);
+    }
+
     [Fact]
     public void Read_ReadsAFileAnotherHandleHoldsOpenForWrite_AndSkipsFilesOutsideTheWindow()
     {

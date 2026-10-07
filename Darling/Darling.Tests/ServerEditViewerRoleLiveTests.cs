@@ -317,7 +317,7 @@ public sealed class ServerEditViewerRoleLiveTests : IDisposable
 
             /* A rename needs no connection test, so the probe never runs; the write is the first thing that meets the missing function. */
             var answer = await DarlingMcpServerAdminTools.EditServerByNameAsync(
-                role, "echo", "{\"display_name\":\"Nope\"}", (_, _) => throw new InvalidOperationException("a rename must not be probed"), true, null, ct);
+                role, "echo", "{\"display_name\":\"Nope\"}", (_, _) => throw new InvalidOperationException("a rename must not be probed"), TestKeyRings.Healthy, null, ct);
 
             var envelope = JsonNode.Parse(answer)!;
             Assert.Equal("error", envelope["status"]!.GetValue<string>());

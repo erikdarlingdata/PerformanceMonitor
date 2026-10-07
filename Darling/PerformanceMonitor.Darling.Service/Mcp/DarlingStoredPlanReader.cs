@@ -12,6 +12,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 using NpgsqlTypes;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
@@ -49,6 +50,13 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// sweep on its own connection. So each stored-plan read here tries the collected content first and the
 /// backlog second, and a caller sees one answer either way. Without this half nothing a user can see changes
 /// — the recording half alone just moves the blind spot into a table.</para>
+///
+/// <para><b>The statement filter (#4348, Layer 1).</b> Every public read here returns its plan through
+/// <see cref="SensitiveStatements.Xml(string?, int)"/>, at this one seam, so a tool that reads a stored plan gets the filtered
+/// plan whatever it does next (return it, cut it, analyse it). Each public method has a private <c>...RawAsync</c> twin that
+/// holds the read itself; nothing outside this file reads a plan column (the source scan pins that). Each read takes an
+/// optional <c>maxOutputChars</c>: a caller that will cut the plan at that length (the <c>get_*_plan_xml</c> tools) says so,
+/// and the filter stops there instead of walking a 20 MB plan to its end.</para>
 /// </summary>
 internal static class DarlingStoredPlanReader
 {
@@ -338,7 +346,14 @@ internal static class DarlingStoredPlanReader
     /// </summary>
     public static async Task<string?> GetQueryStatsPlanXmlByHashAsync(
         NpgsqlDataSource postgres, int serverId, string queryHash, string? databaseName,
-        CancellationToken cancellationToken = default)
+        int maxOutputChars = int.MaxValue, CancellationToken cancellationToken = default) =>
+        SensitiveStatements.Xml(
+            await GetQueryStatsPlanXmlByHashRawAsync(postgres, serverId, queryHash, databaseName, cancellationToken),
+            maxOutputChars);
+
+    private static async Task<string?> GetQueryStatsPlanXmlByHashRawAsync(
+        NpgsqlDataSource postgres, int serverId, string queryHash, string? databaseName,
+        CancellationToken cancellationToken)
     {
         if (string.IsNullOrEmpty(queryHash))
         {
@@ -377,7 +392,14 @@ internal static class DarlingStoredPlanReader
     /// </summary>
     public static async Task<string?> GetProcedurePlanXmlBySqlHandleAsync(
         NpgsqlDataSource postgres, int serverId, string sqlHandle,
-        CancellationToken cancellationToken = default)
+        int maxOutputChars = int.MaxValue, CancellationToken cancellationToken = default) =>
+        SensitiveStatements.Xml(
+            await GetProcedurePlanXmlBySqlHandleRawAsync(postgres, serverId, sqlHandle, cancellationToken),
+            maxOutputChars);
+
+    private static async Task<string?> GetProcedurePlanXmlBySqlHandleRawAsync(
+        NpgsqlDataSource postgres, int serverId, string sqlHandle,
+        CancellationToken cancellationToken)
     {
         if (string.IsNullOrEmpty(sqlHandle))
         {
@@ -412,9 +434,9 @@ internal static class DarlingStoredPlanReader
     /// </summary>
     public static async Task<string?> GetQueryStorePlanTextAsync(
         NpgsqlDataSource postgres, int serverId, string databaseName, long queryId, long? planId,
-        DateTime? asOf = null, CancellationToken cancellationToken = default)
+        DateTime? asOf = null, int maxOutputChars = int.MaxValue, CancellationToken cancellationToken = default)
     {
-        var read = await ResolveQueryStorePlanAsync(postgres, serverId, databaseName, queryId, planId, asOf, cancellationToken);
+        var read = await ResolveQueryStorePlanAsync(postgres, serverId, databaseName, queryId, planId, asOf, maxOutputChars, cancellationToken);
         return read?.PlanXml;
     }
 
@@ -438,13 +460,21 @@ internal static class DarlingStoredPlanReader
     /// </summary>
     public static async Task<QueryStorePlanRead?> ResolveQueryStorePlanAsync(
         NpgsqlDataSource postgres, int serverId, string databaseName, long queryId, long? planId,
-        DateTime? asOf = null, CancellationToken cancellationToken = default)
+        DateTime? asOf = null, int maxOutputChars = int.MaxValue, CancellationToken cancellationToken = default)
+    {
+        var read = await ResolveQueryStorePlanRawAsync(postgres, serverId, databaseName, queryId, planId, asOf, cancellationToken);
+        return read is null ? null : read with { PlanXml = SensitiveStatements.Xml(read.PlanXml, maxOutputChars) ?? read.PlanXml };
+    }
+
+    private static async Task<QueryStorePlanRead?> ResolveQueryStorePlanRawAsync(
+        NpgsqlDataSource postgres, int serverId, string databaseName, long queryId, long? planId,
+        DateTime? asOf, CancellationToken cancellationToken)
     {
         databaseName ??= "";
 
         if (planId is long pinned)
         {
-            var plan = await ReadQueryStorePlanByIdAsync(postgres, serverId, databaseName, queryId, pinned, cancellationToken);
+            var plan = await ReadQueryStorePlanByIdRawAsync(postgres, serverId, databaseName, queryId, pinned, cancellationToken);
             return plan is null ? null : new QueryStorePlanRead(plan, pinned);
         }
 
@@ -453,7 +483,7 @@ internal static class DarlingStoredPlanReader
         foreach (var candidate in await ReadCandidatePlanIdsAsync(postgres, QueryStorePlanCandidatesSql, serverId, databaseName, queryId, since, cancellationToken))
         {
             tried.Add(candidate);
-            var plan = await ReadQueryStorePlanByIdAsync(postgres, serverId, databaseName, queryId, candidate, cancellationToken);
+            var plan = await ReadQueryStorePlanByIdRawAsync(postgres, serverId, databaseName, queryId, candidate, cancellationToken);
             if (plan is not null)
             {
                 return new QueryStorePlanRead(plan, candidate);
@@ -467,7 +497,7 @@ internal static class DarlingStoredPlanReader
                 continue;
             }
 
-            var plan = await ReadQueryStorePlanByIdAsync(postgres, serverId, databaseName, queryId, candidate, cancellationToken);
+            var plan = await ReadQueryStorePlanByIdRawAsync(postgres, serverId, databaseName, queryId, candidate, cancellationToken);
             if (plan is not null)
             {
                 return new QueryStorePlanRead(plan, candidate);
@@ -482,7 +512,14 @@ internal static class DarlingStoredPlanReader
     /// </summary>
     public static async Task<string?> ReadQueryStorePlanByIdAsync(
         NpgsqlDataSource postgres, int serverId, string databaseName, long queryId, long planId,
-        CancellationToken cancellationToken = default)
+        int maxOutputChars = int.MaxValue, CancellationToken cancellationToken = default) =>
+        SensitiveStatements.Xml(
+            await ReadQueryStorePlanByIdRawAsync(postgres, serverId, databaseName, queryId, planId, cancellationToken),
+            maxOutputChars);
+
+    private static async Task<string?> ReadQueryStorePlanByIdRawAsync(
+        NpgsqlDataSource postgres, int serverId, string databaseName, long queryId, long planId,
+        CancellationToken cancellationToken)
     {
         await using (var viaMap = postgres.CreateCommand(QueryStorePlanViaMapSql))
         {
@@ -543,7 +580,14 @@ internal static class DarlingStoredPlanReader
     /// </summary>
     public static async Task<string?> GetQuerySnapshotPlanXmlAsync(
         NpgsqlDataSource postgres, int serverId, DateTime collectionTimeUtc, int sessionId, int requestId, bool live,
-        CancellationToken cancellationToken = default)
+        int maxOutputChars = int.MaxValue, CancellationToken cancellationToken = default) =>
+        SensitiveStatements.Xml(
+            await GetQuerySnapshotPlanXmlRawAsync(postgres, serverId, collectionTimeUtc, sessionId, requestId, live, cancellationToken),
+            maxOutputChars);
+
+    private static async Task<string?> GetQuerySnapshotPlanXmlRawAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime collectionTimeUtc, int sessionId, int requestId, bool live,
+        CancellationToken cancellationToken)
     {
         await using var command = postgres.CreateCommand(live ? QuerySnapshotLivePlanSql : QuerySnapshotPlanSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
@@ -565,7 +609,16 @@ internal static class DarlingStoredPlanReader
     /// </summary>
     public static async Task<string?> GetBlockingPlanXmlAsync(
         NpgsqlDataSource postgres, int serverId, DateTime eventTimeUtc, int blockedSpid, int blockedEcid,
-        int blockingSpid, int blockingEcid, bool blockingSide, string? databaseName = null, CancellationToken cancellationToken = default)
+        int blockingSpid, int blockingEcid, bool blockingSide, string? databaseName = null, int maxOutputChars = int.MaxValue,
+        CancellationToken cancellationToken = default) =>
+        SensitiveStatements.Xml(
+            await GetBlockingPlanXmlRawAsync(
+                postgres, serverId, eventTimeUtc, blockedSpid, blockedEcid, blockingSpid, blockingEcid, blockingSide, databaseName, cancellationToken),
+            maxOutputChars);
+
+    private static async Task<string?> GetBlockingPlanXmlRawAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime eventTimeUtc, int blockedSpid, int blockedEcid,
+        int blockingSpid, int blockingEcid, bool blockingSide, string? databaseName, CancellationToken cancellationToken)
     {
         await using var command = postgres.CreateCommand(blockingSide ? BlockingPlanSql : BlockedPlanSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
@@ -590,7 +643,15 @@ internal static class DarlingStoredPlanReader
     /// </summary>
     public static async Task<DeadlockVictimPlanRead> GetDeadlockVictimPlanXmlAsync(
         NpgsqlDataSource postgres, int serverId, DateTime collectionTimeUtc, DateTime deadlockTimeUtc, string? victimProcessId,
-        string? databaseName = null, CancellationToken cancellationToken = default)
+        string? databaseName = null, int maxOutputChars = int.MaxValue, CancellationToken cancellationToken = default)
+    {
+        var read = await GetDeadlockVictimPlanXmlRawAsync(postgres, serverId, collectionTimeUtc, deadlockTimeUtc, victimProcessId, databaseName, cancellationToken);
+        return read with { PlanXml = SensitiveStatements.Xml(read.PlanXml, maxOutputChars) };
+    }
+
+    private static async Task<DeadlockVictimPlanRead> GetDeadlockVictimPlanXmlRawAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime collectionTimeUtc, DateTime deadlockTimeUtc, string? victimProcessId,
+        string? databaseName, CancellationToken cancellationToken)
     {
         await using var command = postgres.CreateCommand(DeadlockVictimPlanSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;

@@ -144,10 +144,20 @@ public sealed class McpToolsListBudgetTests
     // get_active_queries gains its wait_type parameter (#5235, a 190-character description, byte-identical with Darling's twin; the served head
     // is unchanged). Constant set to the value McpToolsListBudgetTests itself measured on this tree: 92,203 (the previous ceiling, 92,358, had
     // headroom even with the parameter in).
-    // get_database_config_changes, get_default_trace_events and get_health_parser_severe_errors gain database_name (#5244 PR6, appended last, the
-    // 46-character "Limit to one database. Omit for all databases." sentence the other Lite database_name parameters use; the served heads are
-    // unchanged), +97 bytes each. Constant set to the value McpToolsListBudgetTests itself measured on this tree: 92,494.
-    private const int TotalCeilingBytes = 92_494;
+    // get_object_locking gains database_name (#5231, appended last, the 46-character "Limit to one database. Omit for all databases."
+    // sentence get_query_heatmap and get_query_store_regressions already use; the served head is unchanged), +97 bytes: 92,300.
+    // #5244 PR3 lane L1: get_blocking_trend and get_blocked_process_xml gain database_name (46 characters each, the shared sentence) and
+    // get_blocking_stats gains its partial-scope form (66 characters); lane L2 adds database_name to get_blocked_process_reports and
+    // get_waiting_tasks (46 each); no served head changes. Constant set to the value McpToolsListBudgetTests itself measured on this tree.
+    // #5244 PR3 (r1 M1): get_blocking_trend and get_blocking_stats each gain the one sentence that says which collector answered (the source key
+    // and when the DMV snapshot is used), identical to Darling's twins: 92,805 -> 93,265 bytes (+460).
+    // #5244 PR4 lane L1: get_query_duration_trend, get_procedure_duration_trend and get_query_store_duration_trend gain database_name
+    // (46 characters each, the shared sentence); no served head changes. The ceiling is the measured total: 93,750 = dev 93,265 + 485 (lane L1 291, the three
+    // parameters with their JSON framing, + lane L2 194).
+    // #5244 PR6: get_database_config_changes, get_default_trace_events and get_health_parser_severe_errors gain database_name (appended last, the
+    // 46-character sentence the other Lite database_name parameters use; the served heads are unchanged), +97 bytes each (+291). The ceiling is the
+    // measured total on this tree, not a hand sum.
+    private const int TotalCeilingBytes = 94_041;
 
     private const int ConvertedHeadCap = 1_000;
     private const int ConvertedParameterCap = 200;

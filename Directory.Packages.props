@@ -10,6 +10,7 @@
   <ItemGroup>
     <PackageVersion Include="AWSSDK.PI" Version="4.0.100.15" />
     <PackageVersion Include="AWSSDK.RDS" Version="4.0.106.1" />
+    <PackageVersion Include="AWSSDK.SecurityToken" Version="4.0.101.1" />
     <PackageVersion Include="BlackwellSystems.Gcf" Version="1.1.0" />
     <PackageVersion Include="CredentialManagement" Version="1.0.2" />
     <PackageVersion Include="DuckDB.NET.Bindings.Full" Version="1.5.5" />

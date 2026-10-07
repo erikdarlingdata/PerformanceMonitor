@@ -340,7 +340,7 @@ public sealed class CrossAppMcpToolInventoryPinTests
 
         /* Darling MCP server-onboarding write tools — add/remove the monitored servers in the CENTRAL store the
            whole fleet shares (config.config_monitored_servers). add_servers bulk-onboards (validate + in-process
-           probe + case-folded dedupe + DPAPI-encrypt + INSERT); remove_server DELETEs by the shared resolver.
+           probe + case-folded dedupe + seal the password + INSERT); remove_server DELETEs by the shared resolver.
            Darling-ONLY by architecture, not "not ported yet": Lite is a single-instance WPF app that monitors
            servers from its own local config + DuckDB, with no central service-honored monitored-server store, so
            there is no Lite twin to port (same reasoning as the Custom Views + alert-tuning tools above). */

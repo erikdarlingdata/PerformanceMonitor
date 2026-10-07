@@ -108,8 +108,11 @@ public sealed class ViewerQueryTrendsSqlTests
     [Fact]
     public void DurationTrendSql_SumsElapsedMs_ExecutionTrendSql_OnlyExecutions()
     {
-        Assert.Contains("SUM(delta_elapsed_time) / 1000.0", ViewerDataService.QueryDurationTrendSql, StringComparison.Ordinal);
-        Assert.Contains("SUM(delta_elapsed_time) / 1000.0", ViewerDataService.ProcedureDurationTrendSql, StringComparison.Ordinal);
+        /* #5414 M1: the viewer's database filter sits inside the aggregate, so a collection the chosen database had no
+           rows in still counts its seconds. */
+        const string filteredElapsed = "COALESCE(SUM(delta_elapsed_time) FILTER (WHERE $4::text[] IS NULL OR database_name = ANY($4)), 0) / 1000.0";
+        Assert.Contains(filteredElapsed, ViewerDataService.QueryDurationTrendSql, StringComparison.Ordinal);
+        Assert.Contains(filteredElapsed, ViewerDataService.ProcedureDurationTrendSql, StringComparison.Ordinal);
         /* Query Store has no delta_elapsed_time: duration = execution_count * avg_duration_us. */
         Assert.Contains("SUM(execution_count * avg_duration_us / 1000.0)", ViewerDataService.QueryStoreDurationTrendSql, StringComparison.Ordinal);
         /* The execution-count trend projects only the executions/sec column (no elapsed). */

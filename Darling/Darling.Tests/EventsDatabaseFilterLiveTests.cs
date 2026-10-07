@@ -80,6 +80,11 @@ public sealed class EventsDatabaseFilterLiveTests
             Assert.Equal(2, ab.GetProperty("database_count").GetInt32());
             Assert.Equal(new[] { DbA, DbB }, ab.GetProperty("databases").EnumerateArray().Select(d => d.GetProperty("database_name").GetString()).Order().ToArray());
 
+            /* #5244 PR6: the web route hands the repeated keys to the read. */
+            var webAb = await WebReadProbe.ReadAsync(postgres, ServerName, "get_database_config", "24", DbA, DbB);
+            Assert.Equal(new[] { DbA, DbB }, webAb.GetProperty("databases").EnumerateArray().Select(d => d.GetProperty("database_name").GetString()).Order().ToArray());
+            Assert.Equal(3, (await WebReadProbe.ReadAsync(postgres, ServerName, "get_database_config", "24")).GetProperty("database_count").GetInt32());
+
             /* One name behaves as it did, ignoring case, and the public method that wraps it returns the same page. */
             var one = JsonDocument.Parse(await DarlingMcpConfigTools.GetDatabaseConfig(postgres, ServerName, DatabaseFilter.One(DbC.ToLowerInvariant()), ct)).RootElement;
             Assert.Equal(new[] { DbC }, one.GetProperty("databases").EnumerateArray().Select(d => d.GetProperty("database_name").GetString()).ToArray());
@@ -137,14 +142,24 @@ public sealed class EventsDatabaseFilterLiveTests
             var lower = JsonDocument.Parse(await DarlingMcpHealthParserTools.GetSevereErrors(postgres, ServerName, 24, 50, DatabaseFilter.One(DbC.ToLowerInvariant()), null, null, ct)).RootElement;
             Assert.Equal("empty", lower.GetProperty("status").GetString());
 
+            /* #5244 PR6: the web route hands the repeated keys to the read, and the answer echoes the choice. */
+            var webAb = await WebReadProbe.ReadAsync(postgres, ServerName, "get_health_parser_severe_errors", "24", DbA, DbB);
+            Assert.Equal(new[] { DbA, DbB }, webAb.GetProperty("errors").EnumerateArray().Select(e => e.GetProperty("database_name").GetString()).Order().ToArray());
+            Assert.Equal("the chosen databases", webAb.GetProperty("database_name").GetString());
+            var webAll = await WebReadProbe.ReadAsync(postgres, ServerName, "get_health_parser_severe_errors", "24");
+            Assert.Equal(4, webAll.GetProperty("error_count").GetInt32());
+
             /* [M4] Nothing in the chosen databases while errors WERE captured: the empty answer says so, and no database is named as a verdict. */
             var none = JsonDocument.Parse(await DarlingMcpHealthParserTools.GetSevereErrors(postgres, ServerName, 24, 50, DatabaseFilter.Of(["NoSuchDb", "NorThisOne"]), null, null, ct)).RootElement;
             Assert.Equal("empty", none.GetProperty("status").GetString());
             var message = none.GetProperty("message").GetString()!;
             Assert.Contains("none was a significant severe error", message, StringComparison.Ordinal);
-            Assert.Contains("in the chosen databases", message, StringComparison.Ordinal);
+            Assert.Contains("for the chosen databases", message, StringComparison.Ordinal);
             Assert.DoesNotContain("NoSuchDb", message, StringComparison.Ordinal);
             Assert.Equal(4, none.GetProperty("events_in_window").GetInt32());
+            Assert.Equal("the chosen databases", none.GetProperty("database_name").GetString());
+            Assert.Equal(JsonValueKind.Null, all.GetProperty("database_name").ValueKind);
+            Assert.Equal(DbA, JsonDocument.Parse(await DarlingMcpHealthParserTools.GetSevereErrors(postgres, ServerName, 24, 50, DatabaseFilter.One(DbA), null, null, ct)).RootElement.GetProperty("database_name").GetString());
 
             bodySucceeded = true;
         }
@@ -193,6 +208,19 @@ public sealed class EventsDatabaseFilterLiveTests
             Assert.Equal("No significant default trace events found in the requested time range for the chosen databases.", message);
             Assert.DoesNotContain("NoSuchDb", message, StringComparison.Ordinal);
 
+            var webTrace = await WebReadProbe.ReadAsync(postgres, ServerName, "get_default_trace_events", "24", DbA, DbB);
+            Assert.Equal(new[] { DbA, DbB }, webTrace.GetProperty("events").EnumerateArray().Select(e => e.GetProperty("database_name").GetString()).Order().ToArray());
+            Assert.Equal("the chosen databases", webTrace.GetProperty("database_name").GetString());
+
+            /* #5244 PR6 (W): the sentence form Lite's McpDatabaseSelection builds, and database_name echoed on every answer shape. */
+            Assert.Equal("the chosen databases", none.GetProperty("database_name").GetString());
+            Assert.Equal(JsonValueKind.Null, allTool.GetProperty("database_name").ValueKind);
+            var oneNone = JsonDocument.Parse(await DarlingMcpDefaultTraceTools.GetDefaultTraceEvents(postgres, ServerName, 24, 100, DatabaseFilter.One("NoSuchDb"), null, null, ct)).RootElement;
+            Assert.Equal("No significant default trace events found in the requested time range for the database NoSuchDb.", oneNone.GetProperty("message").GetString());
+            Assert.Equal("NoSuchDb", oneNone.GetProperty("database_name").GetString());
+            var wsTool = JsonDocument.Parse(await DarlingMcpDefaultTraceTools.GetDefaultTraceEvents(postgres, ServerName, 24, 100, DatabaseFilter.One("  "), null, null, ct)).RootElement;
+            Assert.Equal(JsonValueKind.Null, wsTool.GetProperty("database_name").ValueKind);
+
             bodySucceeded = true;
         }
         finally
@@ -201,8 +229,10 @@ public sealed class EventsDatabaseFilterLiveTests
         }
     }
 
-    private static string ErrorReportedXml(int errorNumber, int databaseId) =>
-        $"<event name=\"error_reported\" package=\"sqlserver\" timestamp=\"2026-09-01T00:00:00.000Z\">" +
+    /* The event timestamp is the seed time, not a fixed date: since #5373 a severe error is named by the id's name AT ITS OWN TIME,
+       and the history read only looks 14 days past the errors' range. */
+    private static string ErrorReportedXml(int errorNumber, int databaseId, DateTime at) =>
+        $"<event name=\"error_reported\" package=\"sqlserver\" timestamp=\"{at:yyyy-MM-ddTHH:mm:ss.fffZ}\">" +
         $"<data name=\"error_number\"><value>{errorNumber}</value></data>" +
         "<data name=\"severity\"><value>20</value></data>" +
         "<data name=\"state\"><value>1</value></data>" +
@@ -254,7 +284,7 @@ VALUES ($1,$2,$3,$4,$5,$6)", CollectionIdGenerator.Next(), t, ServerId, ServerNa
             await DarlingMcpTestData.ExecAsync(connection, ct,
                 @"INSERT INTO system_health_events (system_health_event_id, collection_time, server_id, server_name, event_time, event_type, event_xml)
 VALUES ($1,$2,$3,$4,$5,$6,$7)",
-                CollectionIdGenerator.Next(), t, ServerId, ServerName, t, SystemHealthParser.ErrorReportedEvent, ErrorReportedXml(number, id));
+                CollectionIdGenerator.Next(), t, ServerId, ServerName, t, SystemHealthParser.ErrorReportedEvent, ErrorReportedXml(number, id, t));
         }
 
         foreach (var db in new string?[] { DbA, DbB, DbC, null })

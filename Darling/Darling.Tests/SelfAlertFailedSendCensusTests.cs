@@ -56,6 +56,8 @@ public sealed class SelfAlertFailedSendCensusTests
             ["ApplyAgReplicaHealthAsync"] = (1, RestoreNotice),
             ["EvaluateStoreUpgradeAsync"] =
                 (2, "one notice per service start about the start's own upgrade: an event, never re-evaluated, so nothing to fire again"),
+            ["EvaluateCollectionGapAtStartAsync"] =
+                (1, "one notice per service start about the gap before the start: an event, never re-evaluated, so nothing to fire again"),
             ["EvaluateStoreTimescaleAsync"] =
                 (1, "one notice per service start about the start's own extension update: an event, never re-evaluated"),
             ["ApplyNotificationChannelsAsync"] =

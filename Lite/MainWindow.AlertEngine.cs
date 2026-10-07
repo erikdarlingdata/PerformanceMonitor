@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -245,15 +246,22 @@ public partial class MainWindow : Window
                be the one family on this store still costing one post per affected server. Read straight off
                the ServerConnection in hand rather than through ServerManager's scan, which exists for the
                callers that only have the hashed id. */
+            /* #5320 (part of #4348): this send bypasses LiteAlertDeliverer, so it runs the statement filter itself.
+               The mute check above matched the raw text; only what leaves the process is filtered. */
+            var filtered = AlertStatementFilter.Apply(new AlertOutcome(
+                serverId.ToString(CultureInfo.InvariantCulture), serverName, metricName, currentValue, "Online",
+                Context: null, DetailText: detailText, NumericCurrentValue: null, NumericThresholdValue: null,
+                Muted: isMuted, Severity: null, ShortMessage: currentValue));
+
             return _emailAlertService.TrySendAlertEmailAsync(
                 metricName,
                 serverName,
-                currentValue,
+                filtered.ShortMessage ?? currentValue,
                 "Online",
                 serverId,
                 context: null,
                 muted: isMuted,
-                detailText: detailText,
+                detailText: filtered.DetailText ?? detailText,
                 deliveryMode: AlertDeliveryModeResolver.Resolve(
                     server.AlertDeliveryModeOverride, App.AlertDeliveryMode));
         }
@@ -540,15 +548,22 @@ public partial class MainWindow : Window
                replicas on one availability group flap together, so this family fans out across servers the
                same way. Through ServerManager's scan because this path carries the hashed id, not the
                ServerConnection. */
+            /* #5320 (part of #4348): this send bypasses LiteAlertDeliverer too, so it runs the statement filter itself. */
+            var filtered = AlertStatementFilter.Apply(new AlertOutcome(
+                serverId.ToString(CultureInfo.InvariantCulture), serverName, alert.MetricName, alert.CurrentValue,
+                alert.ThresholdValue, Context: alert.Context, DetailText: alert.DetailText,
+                NumericCurrentValue: null, NumericThresholdValue: null, Muted: isMuted, Severity: null,
+                ShortMessage: alert.CurrentValue));
+
             return _emailAlertService.TrySendAlertEmailAsync(
                 alert.MetricName,
                 serverName,
-                alert.CurrentValue,
+                filtered.ShortMessage ?? alert.CurrentValue,
                 alert.ThresholdValue,
                 serverId,
-                context: alert.Context,
+                context: filtered.Context,
                 muted: isMuted,
-                detailText: alert.DetailText,
+                detailText: filtered.DetailText ?? alert.DetailText,
                 deliveryMode: AlertDeliveryModeResolver.Resolve(
                     _serverManager.ResolveAlertDeliveryModeOverride(serverId), App.AlertDeliveryMode));
         }

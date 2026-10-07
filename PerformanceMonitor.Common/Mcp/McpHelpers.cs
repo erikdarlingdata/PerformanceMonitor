@@ -75,6 +75,27 @@ internal static class McpHelpers
     }
 
     /// <summary>
+    /// <see cref="Truncate"/> for statement text (#5320): the WHOLE text is judged first
+    /// (<see cref="SensitiveStatements.Text"/>), then cut. A value can sit early in a batch with the text that
+    /// names it past the cut (a URI's <c>user:secret@</c> trigger is its closing at-sign), so a prefix can be
+    /// judged clean while it holds part of a secret. A statement judged named is the placeholder, so no cut text
+    /// can hold half of one.
+    /// </summary>
+    public static string? TruncateStatement(string? value, int maxLength) =>
+        Truncate(SensitiveStatements.Text(value), maxLength);
+
+    /// <summary>
+    /// The same filter-then-cut as <see cref="TruncateStatement"/> for a preview that carries no "... (truncated)"
+    /// marker because its row has its own truncated flag (the Query Heatmap cell, the FinOps query preview).
+    /// </summary>
+    public static string? StatementPreview(string? value, int maxLength)
+    {
+        var filtered = SensitiveStatements.Text(value);
+        if (filtered == null || filtered.Length <= maxLength) return filtered;
+        return filtered[..TextElementCutLength(filtered, maxLength)];
+    }
+
+    /// <summary>
     /// How many UTF-16 units of <paramref name="text"/> to keep so the cut lands on a text-element boundary (an
     /// extended grapheme cluster: an emoji with its modifiers, a letter with its combining accent, a CR LF pair) at
     /// or before <paramref name="limit"/>. The rule and the walk are the #3625 cut in
@@ -886,6 +907,46 @@ internal static class McpHelpers
         return hints is null
             ? JsonSerializer.Serialize(new { status, message }, JsonOptions)
             : JsonSerializer.Serialize(new { status, message, hints }, JsonOptions);
+    }
+
+    /// <summary>
+    /// <see cref="Status"/> for a read that takes <c>database_name</c> (#5244 review L2): the same <c>status</c>,
+    /// <c>message</c> and optional <c>hints</c>, with the database echo beside them, so an empty answer says which
+    /// databases it was limited to the way the answer with rows does. <paramref name="databaseName"/> is the name for one
+    /// database, "the chosen databases" for two or more and null for every database (Darling's
+    /// <c>DatabaseFilter.Describe()</c>, Lite's <c>McpDatabaseSelection.Describe</c>); the key is always written, null
+    /// included, so a client reads it without first checking whether it got data.
+    /// </summary>
+    public static string StatusForDatabase(string status, string message, string? databaseName, object? hints = null)
+    {
+        return hints is null
+            ? JsonSerializer.Serialize(new { status, message, database_name = databaseName }, JsonOptions)
+            : JsonSerializer.Serialize(new { status, message, database_name = databaseName, hints }, JsonOptions);
+    }
+
+    /// <summary>
+    /// <paramref name="statusJson"/> (a <c>not_collected</c> or <c>precondition</c> envelope another helper built) with
+    /// the <c>database_name</c> echo added, so every answer shape of a tool that takes <c>database_name</c> says which
+    /// databases the call was limited to (#5244 PR4 review round 2, L2). The echo is the name for one database, "the chosen
+    /// databases" for two or more and null for every database (Darling's <c>DatabaseFilter.Describe()</c>, Lite's single
+    /// name); the key is written even when null. Null in, null out, so it wraps a <c>??</c> ladder's rungs. An envelope that
+    /// already carries the key is returned unchanged.
+    /// </summary>
+    public static string? WithDatabase(string? statusJson, string? databaseName)
+    {
+        if (statusJson is null)
+        {
+            return null;
+        }
+
+        var node = System.Text.Json.Nodes.JsonNode.Parse(statusJson) as System.Text.Json.Nodes.JsonObject;
+        if (node is null || node.ContainsKey("database_name"))
+        {
+            return statusJson;
+        }
+
+        node["database_name"] = databaseName;
+        return node.ToJsonString(JsonOptions);
     }
 
     /// <summary>

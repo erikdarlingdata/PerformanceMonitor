@@ -19,7 +19,8 @@ namespace PerformanceMonitor.Darling.Viewer;
 
 /// <summary>One incident-count-per-minute bucket for the Blocking Trends charts (mirror of Lite's
 /// <c>TrendPoint</c>); shared by the blocking-incident and deadlock trend charts, which spike-plot it.</summary>
-public sealed record BlockingTrendPoint(DateTime Time, int Count);
+/// <remarks>#5244: <c>Source</c> is the arm that answered, "blocked-process-report" or "DMV snapshot" (the blocking trend only; the deadlock trend leaves it null).</remarks>
+public sealed record BlockingTrendPoint(DateTime Time, int Count, string? Source = null);
 
 /// <summary>One LCK% wait's per-second rate at a collection (mirror of Lite's <c>LockWaitTrendPoint</c>),
 /// grouped by wait type for the Blocking Trends lock-wait chart.
@@ -70,7 +71,7 @@ public sealed partial class ViewerDataService
     /// </summary>
     public const string BlockingTrendSql = """
         WITH bpr AS (
-            SELECT DATE_TRUNC('minute', event_time) AS bucket, COUNT(*) AS incident_count
+            SELECT DATE_TRUNC('minute', event_time) AS bucket, COUNT(*) AS incident_count, 'blocked-process-report' AS source
             FROM v_blocked_process_reports
             WHERE server_id = $1 AND event_time >= $2 AND event_time <= $3
             AND   collection_time >= $5
@@ -78,16 +79,16 @@ public sealed partial class ViewerDataService
             GROUP BY DATE_TRUNC('minute', event_time)
         ),
         dmv AS (
-            SELECT DATE_TRUNC('minute', event_time) AS bucket, COUNT(*) AS incident_count
+            SELECT DATE_TRUNC('minute', event_time) AS bucket, COUNT(*) AS incident_count, 'DMV snapshot' AS source
             FROM v_dmv_blocking_snapshots
             WHERE server_id = $1 AND event_time >= $2 AND event_time <= $3
             AND   collection_time >= $5
             AND   ($4::text[] IS NULL OR database_name = ANY($4))
             GROUP BY DATE_TRUNC('minute', event_time)
         )
-        SELECT bucket, incident_count FROM bpr
+        SELECT bucket, incident_count, source FROM bpr
         UNION ALL
-        SELECT bucket, incident_count FROM dmv WHERE NOT EXISTS (SELECT 1 FROM bpr)
+        SELECT bucket, incident_count, source FROM dmv WHERE NOT EXISTS (SELECT 1 FROM bpr)
         ORDER BY bucket
         """;
 
@@ -283,7 +284,8 @@ public sealed partial class ViewerDataService
         {
             items.Add(new BlockingTrendPoint(
                 reader.GetDateTime(0),
-                reader.IsDBNull(1) ? 0 : (int)reader.GetInt64(1)));
+                reader.IsDBNull(1) ? 0 : (int)reader.GetInt64(1),
+                reader.FieldCount > 2 && !reader.IsDBNull(2) ? reader.GetString(2) : null));
         }
 
         return items;

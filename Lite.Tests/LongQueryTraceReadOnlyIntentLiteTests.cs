@@ -482,7 +482,8 @@ public sealed class LongQueryTraceReadOnlyIntentLiteTests : IDisposable
     public async Task Azure_ARefusalThatIsNotReadOnly_StillRetriesOnEveryCycle()
     {
         var rig = await BuildRigAsync("beta", readOnlyIntent: false);
-        rig.Refusal = _ => SqlExceptionFactory.Create(262, errorClass: 14, message: "CREATE EVENT SESSION permission denied.");
+        /* Not a permission denial: 262 is one now (#5378), and a denial is no longer retried on every cycle. */
+        rig.Refusal = _ => SqlExceptionFactory.Create(1105, errorClass: 17, message: "Could not allocate space for the event session.");
 
         await rig.ReconcileAsync();
         await rig.ReconcileAsync();

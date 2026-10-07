@@ -377,6 +377,8 @@ OPTION(RECOMPILE);
     public override async ValueTask<List<Row>> ReadAsync(DbDataReader reader, CollectorContext context, CancellationToken cancellationToken)
     {
         var rows = new List<Row>();
+        /* #4348: the statement text goes through the statement filter where it first enters a row. */
+        var scrub = context.BeginStatementScrub();
 
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -399,7 +401,7 @@ OPTION(RECOMPILE);
                 Writes = reader.IsDBNull(6) ? null : reader.GetInt64(6),
                 RowCount = reader.IsDBNull(7) ? null : reader.GetInt64(7),
                 Result = reader.IsDBNull(8) ? null : reader.GetString(8),
-                StatementText = reader.IsDBNull(9) ? null : reader.GetString(9),
+                StatementText = reader.IsDBNull(9) ? null : scrub.Text(reader.GetString(9)),
                 ObjectName = reader.IsDBNull(10) ? null : reader.GetString(10),
                 ClientAppName = reader.IsDBNull(11) ? null : reader.GetString(11),
                 ClientPid = reader.IsDBNull(12) ? null : reader.GetInt32(12),

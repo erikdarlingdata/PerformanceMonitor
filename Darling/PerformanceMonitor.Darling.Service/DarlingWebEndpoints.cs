@@ -2296,6 +2296,11 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// </summary>
     internal static IResult MuteRuleToolResult(string result, string route, ILogger logger, long elapsedMs, int successStatus = StatusCodes.Status200OK)
     {
+        /* #4348: swept first, like ToHttpResult. A mute rule echoes the pattern it was given, which can be a statement. */
+        var swept = DarlingWebStatementSweep.Apply(result);
+        if (swept.Refused) return DarlingWebStatementSweep.Refusal(route, logger, elapsedMs);
+        result = swept.Text;
+
         var kind = ClassifyToolResponse(result);
         if (kind is ToolResponseKind.ServerError)
         {
@@ -4389,7 +4394,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             /* ── sessions (DarlingMcpSessionTools) ── */
             ["get_active_queries"] = R(CatSessions, "Currently-active queries, optionally blocking-only.", PServer(), PHours(1), PDatabases(), PBool("blocking_only", false), PText("wait_type"), PLimit(50), PAsOf()),
             ["get_session_stats"] = R(CatSessions, "Session-level summary counters for a server.", PServer()),
-            ["get_waiting_tasks"] = R(CatSessions, "Tasks currently waiting, with wait type and duration.", PServer(), PHours(1), PLimit(30), PAsOf()),
+            ["get_waiting_tasks"] = R(CatSessions, "Tasks currently waiting, with wait type and duration.", PServer(), PHours(1), PLimit(30), PDatabases(), PAsOf()),
 
             /* ── alerts / mute rules (DarlingMcpAlertTools) ── */
             ["get_alert_history"] = R(CatAlerts, "Recent fired-alert history for a server, newest first and bounded by limit. Excludes operator-dismissed alerts unless include_dismissed is true (dismissed_excluded_count says how many the default hid).", PServer(), PHours(24), PLimit(50), PAsOf(), PBool("include_dismissed", false)),
@@ -4404,32 +4409,32 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             ["get_notification_routes"] = R(CatAlerts, "The alert-family taxonomy (self-monitor / reports / agent-jobs / performance, with every metric each owns) and the notification routes layered over the parent channels — which channels each route sets, never the destination values."),
 
             /* ── blocking / deadlocks (DarlingMcpBlockingTools) ── */
-            ["get_blocked_process_xml"] = R(CatBlocking, "Blocked-process-report XML captures.", PServer(), PHours(24), PLimit(5), PAsOf()),
-            ["get_blocking"] = R(CatBlocking, "Blocking chains observed in the window.", PServer(), PHours(24), PLimit(30), PAsOf()),
-            ["get_blocking_trend"] = R(CatBlocking, "Blocking-event counts over time.", PServer(), PHours(24), PAsOf()),
+            ["get_blocked_process_xml"] = R(CatBlocking, "Blocked-process-report XML captures.", PServer(), PHours(24), PLimit(5), PDatabases(), PAsOf()),
+            ["get_blocking"] = R(CatBlocking, "Blocking chains observed in the window.", PServer(), PHours(24), PLimit(30), PDatabases(), PAsOf()),
+            ["get_blocking_trend"] = R(CatBlocking, "Blocking-event counts over time.", PServer(), PHours(24), PDatabases(), PAsOf()),
             ["get_deadlock_detail"] = R(CatBlocking, "Deadlock graph detail for recent deadlocks.", PServer(), PHours(24), PLimit(5), PBool("full_graph", true), PAsOf()),
             ["get_deadlock_trend"] = R(CatBlocking, "Deadlock counts over time.", PServer(), PHours(24), PAsOf()),
             ["get_deadlocks"] = R(CatBlocking, "Recent deadlocks with victim/resource summary.", PServer(), PHours(24), PLimit(20), PAsOf()),
             ["get_lock_wait_trend"] = R(CatBlocking, "The LCK% family's summed wait ms/sec over time - the aggregate lock-wait lane - with a legend of the types that waited.", PServer(), PHours(24), PAsOf(), PInt("bucket_minutes")),
 
             /* ── automatic plan correction (DarlingMcpPlanCorrectionTools, #2028) ── */
-            ["get_plan_corrections"] = R(CatAnalysis, "Automatic plan correction activity + per-database FORCE_LAST_GOOD_PLAN state.", PServer(), PHours(24), PLimit(50), PAsOf(), PBool("full_text", true)),
+            ["get_plan_corrections"] = R(CatAnalysis, "Automatic plan correction activity + per-database FORCE_LAST_GOOD_PLAN state.", PServer(), PHours(24), PLimit(50), PAsOf(), PBool("full_text", true), PDatabases()),
 
             /* ── config: current + history (DarlingMcpConfigTools / DarlingMcpConfigHistoryTools) ── */
-            ["get_database_config"] = R(CatConfig, "Database-level configuration for a server.", PServer(), PText("database_name")),
+            ["get_database_config"] = R(CatConfig, "Database-level configuration for a server.", PServer(), PDatabases()),
             ["get_server_config"] = R(CatConfig, "Server-level configuration (sp_configure) for a server.", PServer()),
             ["get_trace_flags"] = R(CatConfig, "Active trace flags for a server.", PServer()),
-            ["get_database_config_changes"] = R(CatConfig, "Database-configuration changes over time.", PServer(), PHours(168), PAsOf()),
-            ["get_database_scoped_config"] = R(CatConfig, "Database-scoped configuration for a database.", PServer(), PText("database_name")),
-            ["get_query_store_health"] = R(CatConfig, "Per-database Query Store health: actual vs desired state, readonly_reason, storage vs cap, and the two capture modes (query_capture_mode ALL / AUTO / CUSTOM / NONE, wait_stats_capture_mode ON / OFF; null on a pre-rung row or a pre-2017 engine).", PServer(), PText("database_name")),
+            ["get_database_config_changes"] = R(CatConfig, "Database-configuration changes over time.", PServer(), PHours(168), PAsOf(), PDatabases()),
+            ["get_database_scoped_config"] = R(CatConfig, "Database-scoped configuration for a database.", PServer(), PDatabases()),
+            ["get_query_store_health"] = R(CatConfig, "Per-database Query Store health: actual vs desired state, readonly_reason, storage vs cap, and the two capture modes (query_capture_mode ALL / AUTO / CUSTOM / NONE, wait_stats_capture_mode ON / OFF; null on a pre-rung row or a pre-2017 engine).", PServer(), PDatabases()),
             ["get_server_config_changes"] = R(CatConfig, "Server-configuration changes over time.", PServer(), PHours(168), PAsOf()),
             ["get_trace_flag_changes"] = R(CatConfig, "Trace-flag changes over time.", PServer(), PHours(168), PAsOf()),
 
             /* ── core data reads (DarlingMcpDataTools + long-query / fleet tools) ── */
             ["get_collection_health"] = R(CatData, "Per-collector collection health for a server.", PServer()),
             ["get_collection_log"] = R(CatData, "Raw per-run collector log for a server, newest first — or slowest first when min_duration_ms is supplied.", PServer(), PHours(24), PLimit(200), PAsOf(), PText("collector_name"), PDouble("min_duration_ms"), PText("status")),
-            ["get_current_waits_trend"] = R(CatData, "Waiting-task and blocked-session series over time.", PServer(), PHours(4), PText("database_name"), PAsOf()),
-            ["get_blocking_stats"] = R(CatData, "Blocking duration and deadlock severity per minute.", PServer(), PHours(24), PAsOf()),
+            ["get_current_waits_trend"] = R(CatData, "Waiting-task and blocked-session series over time.", PServer(), PHours(4), PDatabases(), PAsOf()),
+            ["get_blocking_stats"] = R(CatData, "Blocking duration and deadlock severity per minute.", PServer(), PHours(24), PDatabases(), PAsOf()),
             ["get_cpu_utilization"] = R(CatData, "CPU utilization over time.", PServer(), PHours(4), PAsOf(), PInt("bucket_minutes")),
             ["get_file_io_stats"] = R(CatData, "Per-file IO stall/throughput stats.", PServer()),
             ["get_memory_clerks"] = R(CatData, "Top memory clerks by allocation.", PServer()),
@@ -4437,10 +4442,10 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             ["get_perfmon_stats"] = R(CatData, "Perfmon counter values, filtered by counter/instance.", PServer(), PText("counter_name"), PText("instance_name")),
             ["get_query_heatmap"] = R(CatData, "Query counts per (time bin x log-magnitude bucket) - the viewer's Query Heatmap as a table.", PServer(), PHours(24), PText("metric"), PDatabases(), PInt("bucket_minutes", 5), PLimit(500), PAsOf()),
             ["get_query_store_regressions"] = R(CatData, "Queries whose Query Store performance got WORSE vs their baseline.", PServer(), PHours(24), PDatabases(), PLimit(50), PBool("full_text", true), PAsOf()),
-            ["get_query_store_clutter"] = R(CatData, "The Query Store CLUTTER view: per database the collector's read cost (how often and by how much it was the slowest fan-out item), plan churn (plans per query, arrivals per day, one-shot plans) and the options row, each with raw numbers and a decomposed verdict; ONE per-server overhead block (non-sleep QDS_* wait deltas with the excluded sleep waits named, and the Query Store memory clerk). Replicas excluded by architecture with the reason on the row; query_capture_mode (ALL / AUTO / CUSTOM / NONE) carried with capture_mode_known beside it, null meaning a capture older than the V137 rung rather than NONE. window_truncated says the raw tier did not hold the whole window. Composed from collected rows - no new query against the server.", PServer(), PHours(24), PLimit(DarlingMcpQueryStoreClutterTools.DefaultLimit), PBool("include_fleet_median", false), PAsOf()),
+            ["get_query_store_clutter"] = R(CatData, "The Query Store CLUTTER view: per database the collector's read cost (how often and by how much it was the slowest fan-out item), plan churn (plans per query, arrivals per day, one-shot plans) and the options row, each with raw numbers and a decomposed verdict; ONE per-server overhead block (non-sleep QDS_* wait deltas with the excluded sleep waits named, and the Query Store memory clerk). Replicas excluded by architecture with the reason on the row; query_capture_mode (ALL / AUTO / CUSTOM / NONE) carried with capture_mode_known beside it, null meaning a capture older than the V137 rung rather than NONE. window_truncated says the raw tier did not hold the whole window. Composed from collected rows - no new query against the server.", PServer(), PHours(24), PLimit(DarlingMcpQueryStoreClutterTools.DefaultLimit), PBool("include_fleet_median", false), PAsOf(), PDatabases()),
             ["get_query_store_query_history"] = R(CatData, "One Query Store query's executions, duration and CPU per plan over the window (requires database_name, query_id).", PReqText("database_name"), PReqInt("query_id"), PServer(), PHours(24), PAsOf()),
             ["get_query_store_top"] = R(CatData, "Top Query Store queries in the window, optionally filtered by execution outcome or to one exact module before ranking; window_truncated says the raw tier did not hold the whole window (effective_hours_back how far it reached).", PServer(), PHours(24), PTop(20), PDatabases(), PAsOf(), PText("execution_type"), PText("module_name"), PBool("full_text", false)),
-            ["get_long_query_completions"] = R(CatData, "Completed long-running queries captured by the XE trace.", PServer(), PHours(24), PLimit(30), PAsOf()),
+            ["get_long_query_completions"] = R(CatData, "Completed long-running queries captured by the XE trace.", PServer(), PHours(24), PLimit(30), PAsOf(), PDatabases()),
             ["get_server_properties"] = R(CatData, "Server properties/inventory for a server.", PServer()),
             ["get_tempdb_trend"] = R(CatData, "tempdb space usage over time.", PServer(), PHours(24), PAsOf(), PInt("bucket_minutes")),
             ["get_top_procedures_by_cpu"] = R(CatData, "Top stored procedures, ranked by CPU (the default), duration, reads or executions (order_by).", PServer(), PHours(24), PTop(20), PDatabases(), PTextDefault("order_by", "cpu"), PAsOf(), PTextDefault("detail", "summary")),
@@ -4492,9 +4497,9 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             ["get_perfmon_trend"] = R(CatTrends, "One perfmon counter over time (requires counter_name).", PReqText("counter_name"), PServer(), PHours(24), PAsOf(), PInt("bucket_minutes")),
             /* #3653 item 17: the four reads below disclose the WINDOW floor as window_truncated (beside
                effective_start / effective_hours_back) — not the page dialect's truncated, which they never had. */
-            ["get_procedure_duration_trend"] = R(CatTrends, "Stored-procedure elapsed ms/sec + executions/sec over time; window_truncated says the tier did not hold the whole window.", PServer(), PHours(24), PAsOf(), PInt("bucket_minutes")),
-            ["get_query_duration_trend"] = R(CatTrends, "Query elapsed ms/sec + executions/sec over time (per-interval rates, not percentiles); window_truncated says the tier did not hold the whole window.", PServer(), PHours(24), PAsOf(), PInt("bucket_minutes")),
-            ["get_query_store_duration_trend"] = R(CatTrends, "Query Store duration ms/sec + executions/sec over time; window_truncated says the tier did not hold the whole window.", PServer(), PHours(24), PAsOf()),
+            ["get_procedure_duration_trend"] = R(CatTrends, "Stored-procedure elapsed ms/sec + executions/sec over time; window_truncated says the tier did not hold the whole window.", PServer(), PHours(24), PAsOf(), PInt("bucket_minutes"), PDatabases()),
+            ["get_query_duration_trend"] = R(CatTrends, "Query elapsed ms/sec + executions/sec over time (per-interval rates, not percentiles); window_truncated says the tier did not hold the whole window.", PServer(), PHours(24), PAsOf(), PInt("bucket_minutes"), PDatabases()),
+            ["get_query_store_duration_trend"] = R(CatTrends, "Query Store duration ms/sec + executions/sec over time; window_truncated says the tier did not hold the whole window.", PServer(), PHours(24), PAsOf(), PDatabases()),
             ["get_query_trend"] = R(CatTrends, "One query's metrics over time (requires query_hash + database_name); window_truncated says the tier did not hold the whole window.", PReqText("query_hash"), PReqText("database_name"), PServer(), PHours(24), PAsOf()),
 
             /* ── health / overview (DarlingMcpHealthTools / DarlingMcpFleetTools) ── */
@@ -4527,8 +4532,8 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             /* ── object / index stats (DarlingMcpObjectStatsTools) ── */
             ["get_database_sizes"] = R(CatObjects, "Per-database size breakdown.", PServer()),
             ["get_pvs_stats"] = R(CatObjects, "ADR persistent version store state per database, with an optional top-5 size trend.", PServer(), PInt("trend_hours_back", 0)),
-            ["get_index_usage"] = R(CatObjects, "Index usage (seeks/scans/updates) per index. Unused-first, so pass database_name unless you want a server-wide sweep; the answer carries matching_index_count and truncated.", PServer(), PText("database_name"), PLimit(200)),
-            ["get_object_locking"] = R(CatObjects, "Per-object locking/contention stats.", PServer(), PLimit(200)),
+            ["get_index_usage"] = R(CatObjects, "Index usage (seeks/scans/updates) per index. Unused-first, so pass database_name unless you want a server-wide sweep; the answer carries matching_index_count and truncated.", PServer(), PDatabases(), PLimit(200)),
+            ["get_object_locking"] = R(CatObjects, "Per-object locking/contention stats.", PServer(), PLimit(200), PDatabases(), PText("detail_database"), PText("detail_schema"), PText("detail_table"), PText("detail_index")),
             ["get_table_index_sizes"] = R(CatObjects, "Per-table/index size breakdown.", PServer()),
 
             /* ── plan cache / scheduler (DarlingMcpPlanCacheSchedulerTools) ── */
@@ -4552,7 +4557,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             ["get_query_repro_script"] = R(CatPlans, "A T-SQL repro script built from a stored query's text and plan (requires kind and its key).", PReqText("kind"), PServer(), PText("database_name"), PText("query_hash"), PInt("query_id"), PInt("plan_id"), PText("collection_time"), PInt("session_id"), PInt("request_id", 0)),
 
             /* ── default trace (DarlingMcpDefaultTraceTools) ── */
-            ["get_default_trace_events"] = R(CatDefaultTrace, "Default-trace events (file growth, DDL, security).", PServer(), PHours(24), PLimit(100), PAsOf()),
+            ["get_default_trace_events"] = R(CatDefaultTrace, "Default-trace events (file growth, DDL, security).", PServer(), PHours(24), PLimit(100), PAsOf(), PDatabases()),
 
             /* ── system_health parse-on-read family (DarlingMcpHealthParserTools) ── */
             ["get_health_parser_cpu_tasks"] = R(CatSystemHealth, "system_health: CPU-bound task snapshots.", PServer(), PHours(24), PLimit(50), PAsOf()),
@@ -4561,7 +4566,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             ["get_health_parser_memory_conditions"] = R(CatSystemHealth, "system_health: resource-monitor memory conditions.", PServer(), PHours(24), PLimit(50), PAsOf()),
             ["get_health_parser_memory_node_oom"] = R(CatSystemHealth, "system_health: per-node out-of-memory events.", PServer(), PHours(24), PLimit(50), PAsOf()),
             ["get_health_parser_scheduler_issues"] = R(CatSystemHealth, "system_health: non-yielding scheduler issues.", PServer(), PHours(24), PLimit(50), PAsOf()),
-            ["get_health_parser_severe_errors"] = R(CatSystemHealth, "system_health: severe (sev >= 17) errors.", PServer(), PHours(24), PLimit(50), PAsOf()),
+            ["get_health_parser_severe_errors"] = R(CatSystemHealth, "system_health: severe (sev >= 17) errors.", PServer(), PHours(24), PLimit(50), PAsOf(), PDatabases()),
             ["get_health_parser_significant_waits"] = R(CatSystemHealth, "system_health: individual 500 ms+ waits with their statement.", PServer(), PHours(24), PLimit(50), PAsOf()),
             ["get_health_parser_system_health"] = R(CatSystemHealth, "system_health: the raw parsed session records.", PServer(), PHours(24), PLimit(50), PAsOf()),
             // FinOps web parity (#4843), set A: append new FinOps entries below this line only.
@@ -5257,7 +5262,9 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 ? DarlingMcpSessionTools.GetActiveQueries(pg, Server(c), Hours(c, 1), databases, QueryBool(c, "blocking_only", false), Str(c, "wait_type"), Rows(c, "limit", 50), 2000, AsOf(c), logger, c.RequestAborted)
                 : DatabaseNamesRefusal(c),
             ["get_session_stats"] = (c, pg, an) => DarlingMcpSessionTools.GetSessionStats(pg, Server(c), c.RequestAborted),
-            ["get_waiting_tasks"] = (c, pg, an) => DarlingMcpSessionTools.GetWaitingTasks(pg, Server(c), Hours(c, 1), Rows(c, "limit", 30), as_of: AsOf(c), logger: logger, cancellationToken: c.RequestAborted),
+            ["get_waiting_tasks"] = (c, pg, an) => DatabaseNames(c) is { } databases
+                ? DarlingMcpSessionTools.GetWaitingTasks(pg, Server(c), Hours(c, 1), Rows(c, "limit", 30), databases, AsOf(c), logger, c.RequestAborted)
+                : DatabaseNamesRefusal(c),
 
             /* ── alerts / mute rules ── */
             ["get_alert_history"] = (c, pg, an) => DarlingMcpAlertTools.GetAlertHistory(pg, Server(c), Hours(c, 24), Rows(c, "limit", 50), as_of: AsOf(c), include_dismissed: QueryBool(c, "include_dismissed", false), cancellationToken: c.RequestAborted),
@@ -5286,13 +5293,19 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             ["get_sweep_reports"] = (c, pg, an) => DarlingMcpFleetSweepTools.GetSweepReports(pg, logger, Hours(c, 1), AsOf(c), Str(c, "sweep_id"), Str(c, "watch_state"), c.RequestAborted),
 
             /* ── blocking / deadlocks ── */
-            ["get_blocked_process_xml"] = (c, pg, an) => DarlingMcpBlockingTools.GetBlockedProcessXml(pg, Server(c), Hours(c, 24), Rows(c, "limit", 5), as_of: AsOf(c), logger: logger, cancellationToken: c.RequestAborted),
+            ["get_blocked_process_xml"] = (c, pg, an) => DatabaseNames(c) is { } databases
+                ? DarlingMcpBlockingTools.GetBlockedProcessXml(pg, Server(c), Hours(c, 24), Rows(c, "limit", 5), AsOf(c), databases, logger, c.RequestAborted)
+                : DatabaseNamesRefusal(c),
             /* #4198: the internal overload, not the MCP tool wrapper — pins the OLD row limit (30) and the
                OLD 2000-char text cap (WebSqlTextPreviewLength) explicitly, so this page does not change even
                though the tool's own MCP defaults (limit 15, 150-char preview) did. Same shape #3897's trend
                tools use to pass TrendBudget.Chart here instead of their own MCP point budget. */
-            ["get_blocking"] = (c, pg, an) => DarlingMcpBlockingTools.GetBlocking(pg, Server(c), Hours(c, 24), Rows(c, "limit", 30), null, false, AsOf(c), DarlingMcpBlockingTools.WebSqlTextPreviewLength, registryState, logger, c.RequestAborted),
-            ["get_blocking_trend"] = (c, pg, an) => DarlingMcpBlockingTools.GetBlockingTrend(pg, Server(c), Hours(c, 24), as_of: AsOf(c), cancellationToken: c.RequestAborted),
+            ["get_blocking"] = (c, pg, an) => DatabaseNames(c) is { } databases
+                ? DarlingMcpBlockingTools.GetBlocking(pg, Server(c), Hours(c, 24), Rows(c, "limit", 30), null, false, AsOf(c), databases, DarlingMcpBlockingTools.WebSqlTextPreviewLength, registryState, logger, c.RequestAborted)
+                : DatabaseNamesRefusal(c),
+            ["get_blocking_trend"] = (c, pg, an) => DatabaseNames(c) is { } databases
+                ? DarlingMcpBlockingTools.GetBlockingTrend(pg, Server(c), Hours(c, 24), AsOf(c), databases, c.RequestAborted)
+                : DatabaseNamesRefusal(c),
             /* #4254: full_graph defaults false on the MCP signature (a preview keeps a busy production
                store's tools/list-driven call under the shared response budget), but the web viewer has
                always shown the whole graph. The row pins its OWN default to true so #4198's MCP-side
@@ -5310,15 +5323,25 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                keeps a busy production server's default call under the shared response budget), but the
                web viewer has always shown the whole query text. The row pins its OWN default to true so
                #4198's MCP-side budget cut does not silently truncate what the viewer renders. */
-            ["get_plan_corrections"] = (c, pg, an) => DarlingMcpPlanCorrectionTools.GetPlanCorrections(pg, Server(c), Hours(c, 24), Rows(c, "limit", 50), as_of: AsOf(c), full_text: QueryBool(c, "full_text", true), cancellationToken: c.RequestAborted),
+            ["get_plan_corrections"] = (c, pg, an) => DatabaseNames(c) is { } databases
+                ? DarlingMcpPlanCorrectionTools.GetPlanCorrections(pg, Server(c), Hours(c, 24), Rows(c, "limit", 50), AsOf(c), QueryBool(c, "full_text", true), databases, null, c.RequestAborted)
+                : DatabaseNamesRefusal(c),
 
             /* ── config (current + history) ── */
-            ["get_database_config"] = (c, pg, an) => DarlingMcpConfigTools.GetDatabaseConfig(pg, Server(c), Str(c, "database_name"), c.RequestAborted),
+            ["get_database_config"] = (c, pg, an) => DatabaseNames(c) is { } databases
+                ? DarlingMcpConfigTools.GetDatabaseConfig(pg, Server(c), databases, c.RequestAborted)
+                : DatabaseNamesRefusal(c),
             ["get_server_config"] = (c, pg, an) => DarlingMcpConfigTools.GetServerConfig(pg, Server(c), c.RequestAborted),
             ["get_trace_flags"] = (c, pg, an) => DarlingMcpConfigTools.GetTraceFlags(pg, Server(c), c.RequestAborted),
-            ["get_database_config_changes"] = (c, pg, an) => DarlingMcpConfigHistoryTools.GetDatabaseConfigChanges(pg, Server(c), Hours(c, 168), as_of: AsOf(c), cancellationToken: c.RequestAborted),
-            ["get_database_scoped_config"] = (c, pg, an) => DarlingMcpConfigHistoryTools.GetDatabaseScopedConfig(pg, Server(c), Str(c, "database_name"), cancellationToken: c.RequestAborted),
-            ["get_query_store_health"] = (c, pg, an) => DarlingMcpConfigHistoryTools.GetQueryStoreHealth(pg, Server(c), Str(c, "database_name"), c.RequestAborted),
+            ["get_database_config_changes"] = (c, pg, an) => DatabaseNames(c) is { } databases
+                ? DarlingMcpConfigHistoryTools.GetDatabaseConfigChanges(pg, Server(c), Hours(c, 168), databases, AsOf(c), null, c.RequestAborted)
+                : DatabaseNamesRefusal(c),
+            ["get_database_scoped_config"] = (c, pg, an) => DatabaseNames(c) is { } databases
+                ? DarlingMcpConfigHistoryTools.GetDatabaseScopedConfig(pg, Server(c), databases, c.RequestAborted)
+                : DatabaseNamesRefusal(c),
+            ["get_query_store_health"] = (c, pg, an) => DatabaseNames(c) is { } databases
+                ? DarlingMcpConfigHistoryTools.GetQueryStoreHealth(pg, Server(c), databases, c.RequestAborted)
+                : DatabaseNamesRefusal(c),
             ["get_server_config_changes"] = (c, pg, an) => DarlingMcpConfigHistoryTools.GetServerConfigChanges(pg, Server(c), Hours(c, 168), as_of: AsOf(c), cancellationToken: c.RequestAborted),
             ["get_trace_flag_changes"] = (c, pg, an) => DarlingMcpConfigHistoryTools.GetTraceFlagChanges(pg, Server(c), Hours(c, 168), as_of: AsOf(c), cancellationToken: c.RequestAborted),
 
@@ -5336,8 +5359,12 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             ["get_collection_log"] = (c, pg, an) => OptionalDouble(c, "min_duration_ms", out var minDurationMs)
                 ? DarlingMcpDataTools.GetCollectionLog(pg, Server(c), Hours(c, 24), Rows(c, "limit", 200), AsOf(c), Str(c, "collector_name"), minDurationMs, status: Str(c, "status"), full_text: true, cancellationToken: c.RequestAborted)
                 : UnparseableParam("min_duration_ms"),
-            ["get_current_waits_trend"] = (c, pg, an) => DarlingMcpDataTools.GetCurrentWaitsTrend(pg, Server(c), Hours(c, 4), Str(c, "database_name"), as_of: AsOf(c), cancellationToken: c.RequestAborted),
-            ["get_blocking_stats"] = (c, pg, an) => DarlingMcpDataTools.GetBlockingStats(pg, Server(c), Hours(c, 24), as_of: AsOf(c), cancellationToken: c.RequestAborted),
+            ["get_current_waits_trend"] = (c, pg, an) => DatabaseNames(c) is { } databases
+                ? DarlingMcpDataTools.GetCurrentWaitsTrend(pg, Server(c), Hours(c, 4), databases, AsOf(c), c.RequestAborted)
+                : DatabaseNamesRefusal(c),
+            ["get_blocking_stats"] = (c, pg, an) => DatabaseNames(c) is { } databases
+                ? DarlingMcpDataTools.GetBlockingStats(pg, Server(c), Hours(c, 24), databases, AsOf(c), logger, c.RequestAborted)
+                : DatabaseNamesRefusal(c),
             /* #3960: the core trends a page charts take the CHART budget and bind bucket_minutes, as the trends
                below do (#3897). */
             ["get_cpu_utilization"] = (c, pg, an) => OptionalInt(c, "bucket_minutes", out var bucketMinutes)
@@ -5357,7 +5384,9 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             ["get_query_store_regressions"] = (c, pg, an) => DatabaseNames(c) is { } databases
                 ? DarlingMcpQueryStoreRegressionTools.GetQueryStoreRegressions(pg, Server(c), Hours(c, 24), databases, Rows(c, "limit", 50), full_text: QueryBool(c, "full_text", true), as_of: AsOf(c), logger: logger, cancellationToken: c.RequestAborted)
                 : DatabaseNamesRefusal(c),
-            ["get_query_store_clutter"] = (c, pg, an) => DarlingMcpQueryStoreClutterTools.GetQueryStoreClutter(pg, Server(c), Hours(c, 24), Rows(c, "limit", DarlingMcpQueryStoreClutterTools.DefaultLimit), QueryBool(c, "include_fleet_median", false), AsOf(c), c.RequestAborted),
+            ["get_query_store_clutter"] = (c, pg, an) => DatabaseNames(c) is { } databases
+                ? DarlingMcpQueryStoreClutterTools.GetQueryStoreClutter(pg, Server(c), Hours(c, 24), Rows(c, "limit", DarlingMcpQueryStoreClutterTools.DefaultLimit), QueryBool(c, "include_fleet_median", false), AsOf(c), databases, c.RequestAborted)
+                : DatabaseNamesRefusal(c),
             /* #4198: query_text already had a 2000-character cap before this tool had a full_text opt-in at
                all, so the viewer keeps that exact number through the previewLength overload -- QueryBool
                still lets an operator ask for the whole statement via ?full_text=true, but the default (no
@@ -5372,7 +5401,9 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             ["get_query_store_top"] = (c, pg, an) => DatabaseNames(c) is { } databases
                 ? DarlingMcpDataTools.GetQueryStoreTop(pg, Server(c), Hours(c, 24), Rows(c, "top", 20), databases, as_of: AsOf(c), execution_type: Str(c, "execution_type"), module_name: Str(c, "module_name"), full_text: QueryBool(c, "full_text", false), previewLength: 2000, cancellationToken: c.RequestAborted)
                 : DatabaseNamesRefusal(c),
-            ["get_long_query_completions"] = (c, pg, an) => DarlingMcpLongQueryTools.GetLongQueryCompletions(pg, Server(c), Hours(c, 24), Rows(c, "limit", 30), as_of: AsOf(c), logger: logger, cancellationToken: c.RequestAborted),
+            ["get_long_query_completions"] = (c, pg, an) => DatabaseNames(c) is { } databases
+                ? DarlingMcpLongQueryTools.GetLongQueryCompletions(pg, Server(c), Hours(c, 24), Rows(c, "limit", 30), AsOf(c), databases, logger, c.RequestAborted)
+                : DatabaseNamesRefusal(c),
             ["get_server_properties"] = (c, pg, an) => DarlingMcpDataTools.GetServerProperties(pg, Server(c), c.RequestAborted),
             ["get_tempdb_trend"] = (c, pg, an) => OptionalInt(c, "bucket_minutes", out var bucketMinutes)
                 ? DarlingMcpDataTools.GetTempDbTrend(pg, Server(c), Hours(c, 24), AsOf(c), bucketMinutes, TrendBudget.Chart, cancellationToken: c.RequestAborted)
@@ -5459,12 +5490,18 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                     : UnparseableParam("bucket_minutes"))
                 : MissingParam("counter_name"),
             ["get_procedure_duration_trend"] = (c, pg, an) => OptionalInt(c, "bucket_minutes", out var bucketMinutes)
-                ? DarlingMcpTrendTools.GetProcedureDurationTrend(pg, Server(c), Hours(c, 24), AsOf(c), bucketMinutes, TrendBudget.Chart, cancellationToken: c.RequestAborted)
+                ? (DatabaseNames(c) is { } databases
+                    ? DarlingMcpTrendTools.GetProcedureDurationTrend(pg, Server(c), Hours(c, 24), AsOf(c), bucketMinutes, databases, TrendBudget.Chart, cancellationToken: c.RequestAborted)
+                    : DatabaseNamesRefusal(c))
                 : UnparseableParam("bucket_minutes"),
             ["get_query_duration_trend"] = (c, pg, an) => OptionalInt(c, "bucket_minutes", out var bucketMinutes)
-                ? DarlingMcpTrendTools.GetQueryDurationTrend(pg, Server(c), Hours(c, 24), AsOf(c), bucketMinutes, TrendBudget.Chart, cancellationToken: c.RequestAborted)
+                ? (DatabaseNames(c) is { } databases
+                    ? DarlingMcpTrendTools.GetQueryDurationTrend(pg, Server(c), Hours(c, 24), AsOf(c), bucketMinutes, databases, TrendBudget.Chart, cancellationToken: c.RequestAborted)
+                    : DatabaseNamesRefusal(c))
                 : UnparseableParam("bucket_minutes"),
-            ["get_query_store_duration_trend"] = (c, pg, an) => DarlingMcpTrendTools.GetQueryStoreDurationTrend(pg, Server(c), Hours(c, 24), as_of: AsOf(c), cancellationToken: c.RequestAborted),
+            ["get_query_store_duration_trend"] = (c, pg, an) => DatabaseNames(c) is { } databases
+                ? DarlingMcpTrendTools.GetQueryStoreDurationTrend(pg, Server(c), Hours(c, 24), AsOf(c), databases, c.RequestAborted)
+                : DatabaseNamesRefusal(c),
             ["get_query_trend"] = (c, pg, an) => RequireText(c, "query_hash", out var queryHash)
                 ? (RequireText(c, "database_name", out var db)
                     ? DarlingMcpTrendTools.GetQueryTrend(pg, queryHash, db, Server(c), Hours(c, 24), as_of: AsOf(c), cancellationToken: c.RequestAborted)
@@ -5505,7 +5542,9 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             /* ── object / index stats ── */
             ["get_database_sizes"] = (c, pg, an) => DarlingMcpObjectStatsTools.GetDatabaseSizes(pg, Server(c), cancellationToken: c.RequestAborted),
             ["get_pvs_stats"] = (c, pg, an) => DarlingMcpPvsTools.GetPvsStats(pg, Server(c), QueryInt(c, "trend_hours_back", null, 0), c.RequestAborted),
-            ["get_index_usage"] = (c, pg, an) => DarlingMcpObjectStatsTools.GetIndexUsage(pg, Server(c), Str(c, "database_name"), Rows(c, "limit", 200), cancellationToken: c.RequestAborted),
+            ["get_index_usage"] = (c, pg, an) => DatabaseNames(c) is { } databases
+                ? DarlingMcpObjectStatsTools.GetIndexUsage(pg, Server(c), databases, Rows(c, "limit", 200), c.RequestAborted)
+                : DatabaseNamesRefusal(c),
             /* #4258: limit defaults to 75 on the MCP signature now (was an uncapped-looking 200-row hard
                fetch with no parameter at all), sized under the shared response budget. The web viewer has
                always effectively received that old 200-row fetch (there was no smaller cap anywhere in the
@@ -5513,7 +5552,10 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                for the identical reason - rather than silently dropping to the new MCP default. 200 is well
                under both McpHelpers.MaxTop and MaxRowLimit (1000 each), so the value is never refused or
                reclamped by either validation layer. */
-            ["get_object_locking"] = (c, pg, an) => DarlingMcpObjectStatsTools.GetObjectLocking(pg, Server(c), Rows(c, "limit", 200), registryState, c.RequestAborted),
+            ["get_object_locking"] = (c, pg, an) => HasObjectLockingSelector(c) ? ObjectLockingDetail(c, pg)
+                : DatabaseNames(c) is { } databases
+                    ? DarlingMcpObjectStatsTools.GetObjectLockingWithHeatAsync(pg, Server(c), Rows(c, "limit", 200), registryState, databases, c.RequestAborted)
+                    : DatabaseNamesRefusal(c),
             ["get_table_index_sizes"] = (c, pg, an) => DarlingMcpObjectStatsTools.GetTableIndexSizes(pg, Server(c), cancellationToken: c.RequestAborted),
 
             /* ── plan cache / scheduler ── */
@@ -5591,7 +5633,9 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                     PlanIdentity(("collection_time", deadlockCollection), ("deadlock_time", deadlockTime), ("victim_process_id", Str(c, "victim_process_id")), ("database_name", Str(c, "database_name")))),
 
             /* ── default trace ── */
-            ["get_default_trace_events"] = (c, pg, an) => DarlingMcpDefaultTraceTools.GetDefaultTraceEvents(pg, Server(c), Hours(c, 24), Rows(c, "limit", 100), as_of: AsOf(c), cancellationToken: c.RequestAborted),
+            ["get_default_trace_events"] = (c, pg, an) => DatabaseNames(c) is { } databases
+                ? DarlingMcpDefaultTraceTools.GetDefaultTraceEvents(pg, Server(c), Hours(c, 24), Rows(c, "limit", 100), databases, AsOf(c), null, c.RequestAborted)
+                : DatabaseNamesRefusal(c),
 
             /* ── system_health parse-on-read family ── */
             ["get_health_parser_cpu_tasks"] = (c, pg, an) => DarlingMcpHealthParserTools.GetCPUTasks(pg, Server(c), Hours(c, 24), Rows(c, "limit", 50), as_of: AsOf(c), cancellationToken: c.RequestAborted),
@@ -5600,7 +5644,9 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             ["get_health_parser_memory_conditions"] = (c, pg, an) => DarlingMcpHealthParserTools.GetMemoryConditions(pg, Server(c), Hours(c, 24), Rows(c, "limit", 50), as_of: AsOf(c), cancellationToken: c.RequestAborted),
             ["get_health_parser_memory_node_oom"] = (c, pg, an) => DarlingMcpHealthParserTools.GetMemoryNodeOOM(pg, Server(c), Hours(c, 24), Rows(c, "limit", 50), as_of: AsOf(c), cancellationToken: c.RequestAborted),
             ["get_health_parser_scheduler_issues"] = (c, pg, an) => DarlingMcpHealthParserTools.GetSchedulerIssues(pg, Server(c), Hours(c, 24), Rows(c, "limit", 50), as_of: AsOf(c), cancellationToken: c.RequestAborted),
-            ["get_health_parser_severe_errors"] = (c, pg, an) => DarlingMcpHealthParserTools.GetSevereErrors(pg, Server(c), Hours(c, 24), Rows(c, "limit", 50), as_of: AsOf(c), cancellationToken: c.RequestAborted),
+            ["get_health_parser_severe_errors"] = (c, pg, an) => DatabaseNames(c) is { } databases
+                ? DarlingMcpHealthParserTools.GetSevereErrors(pg, Server(c), Hours(c, 24), Rows(c, "limit", 50), databases, AsOf(c), null, c.RequestAborted)
+                : DatabaseNamesRefusal(c),
             ["get_health_parser_significant_waits"] = (c, pg, an) => DarlingMcpHealthParserTools.GetSignificantWaits(pg, Server(c), Hours(c, 24), Rows(c, "limit", 50), as_of: AsOf(c), cancellationToken: c.RequestAborted),
             ["get_health_parser_system_health"] = (c, pg, an) => DarlingMcpHealthParserTools.GetSystemHealth(pg, Server(c), Hours(c, 24), Rows(c, "limit", 50), as_of: AsOf(c), cancellationToken: c.RequestAborted),
             // FinOps web parity (#4843), set A: append new FinOps entries below this line only.
@@ -5726,13 +5772,22 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// The bare <c>"Error during "</c> arm <see cref="ClassifyToolResponse"/> keeps for an un-migrated producer
     /// maps here too, for the same reason.</para>
     /// </summary>
-    internal static IResult ToHttpResult(string result, string route, ILogger logger, long elapsedMs) => ClassifyToolResponse(result) switch
+    internal static IResult ToHttpResult(string result, string route, ILogger logger, long elapsedMs)
     {
-        ToolResponseKind.JsonPassthrough => Results.Text(result, "application/json"),
-        ToolResponseKind.Refusal => Results.Text(result, "application/json", statusCode: StatusCodes.Status400BadRequest),
-        ToolResponseKind.ServerError => ServerErrorResult(McpHelpers.ErrorMessageOf(result), route, logger, elapsedMs),
-        _ => Results.Json(new { error = result }, statusCode: StatusCodes.Status400BadRequest),
-    };
+        /* #4348: the statement filter's web sweep. It runs BEFORE ClassifyToolResponse, so the error sentence
+           ServerErrorResult echoes is swept too, and a body it cannot read is never written. */
+        var swept = DarlingWebStatementSweep.Apply(result);
+        if (swept.Refused) return DarlingWebStatementSweep.Refusal(route, logger, elapsedMs);
+        result = swept.Text;
+
+        return ClassifyToolResponse(result) switch
+        {
+            ToolResponseKind.JsonPassthrough => Results.Text(result, "application/json"),
+            ToolResponseKind.Refusal => Results.Text(result, "application/json", statusCode: StatusCodes.Status400BadRequest),
+            ToolResponseKind.ServerError => ServerErrorResult(McpHelpers.ErrorMessageOf(result), route, logger, elapsedMs),
+            _ => Results.Json(new { error = result }, statusCode: StatusCodes.Status400BadRequest),
+        };
+    }
 
     /// <summary>The ServerError arm's body, factored out so both <see cref="ToHttpResult"/> and the
     /// <c>/api/read/*</c> loop's binding-layer catch (which holds the real <see cref="Exception"/>, not just
@@ -5748,6 +5803,45 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// <summary>The server name from <c>?server=</c> (or the tool's own <c>?server_name=</c>); null when absent,
     /// which lets a tool auto-select a sole configured server exactly as the MCP surface does.</summary>
     private static string? Server(HttpContext context) => First(context, "server") ?? First(context, "server_name");
+
+    /* ── the Locking page's index detail selector (#5311): web-only, never an MCP parameter ── */
+
+    private static readonly string[] ObjectLockingSelectorKeys = ["detail_database", "detail_schema", "detail_table", "detail_index"];
+
+    /// <summary>True when the request carries any <c>detail_*</c> selector key: the read then answers ONE index's four
+    /// counters (<see cref="ObjectLockingDetail"/>) instead of the list. Without one the list read is untouched.</summary>
+    private static bool HasObjectLockingSelector(HttpContext context) =>
+        ObjectLockingSelectorKeys.Any(key => context.Request.Query.ContainsKey(key));
+
+    /// <summary>
+    /// #5311: the detail read of <c>get_object_locking</c>. The index is named exactly by <c>detail_database</c>,
+    /// <c>detail_schema</c> and <c>detail_table</c> (each required) and <c>detail_index</c> (absent names a heap); each
+    /// goes to the store as a bound parameter. A missing or blank name, a name over a <c>sysname</c>'s 128 characters or
+    /// one holding NUL is refused with the usual <c>invalid</c> envelope before the store is touched; a blank database
+    /// would otherwise be the "every database" filter, and a selector never widens.
+    /// </summary>
+    private static Task<string> ObjectLockingDetail(HttpContext context, NpgsqlDataSource postgres)
+    {
+        foreach (var key in new[] { "detail_database", "detail_schema", "detail_table" })
+        {
+            var v = First(context, key);
+            if (v is null || string.IsNullOrWhiteSpace(v)) return MissingParam(key);
+        }
+
+        foreach (var key in ObjectLockingSelectorKeys)
+        {
+            var v = First(context, key);
+            if (v is null) continue;
+            if (v.Contains('\0'))
+                return Task.FromResult(McpHelpers.Refusal(key, $"A {key} value holds a character an object name cannot hold."));
+            if (v.Length > MaxDatabaseNameLength)
+                return Task.FromResult(McpHelpers.Refusal(key, $"A {key} value is {v.Length} characters long; an object name is at most {MaxDatabaseNameLength} characters."));
+        }
+
+        return DarlingMcpObjectStatsTools.GetObjectLockingDetailAsync(
+            postgres, Server(context), First(context, "detail_database")!, First(context, "detail_schema")!,
+            First(context, "detail_table")!, First(context, "detail_index"), context.RequestAborted);
+    }
 
     /// <summary>The hours-back window from <c>?hours=</c> (or the tool's own <c>?hours_back=</c>), else the tool's default.</summary>
     private static int Hours(HttpContext context, int def) => QueryInt(context, "hours", "hours_back", def);

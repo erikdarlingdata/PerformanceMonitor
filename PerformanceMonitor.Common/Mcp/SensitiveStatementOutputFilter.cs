@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using ModelContextProtocol;
 using ModelContextProtocol.Protocol;
 using ModelContextProtocol.Server;
 
@@ -33,7 +34,44 @@ public static class SensitiveStatementOutputFilter
 {
     /// <summary>The filter: run the tool, then sweep its result. A filter is <c>next =&gt; handler</c>.</summary>
     public static McpRequestFilter<CallToolRequestParams, CallToolResult> Instance =>
-        next => async (request, cancellationToken) => Sweep(await next(request, cancellationToken));
+        next => async (request, cancellationToken) =>
+        {
+            try
+            {
+                return Sweep(await next(request, cancellationToken));
+            }
+            catch (McpException ex)
+            {
+                // #4348: the SDK turns a thrown McpException into an error result of its own, from the exception's
+                // message, OUTSIDE this filter's result sweep. A tool's message can echo a statement, so the message
+                // is swept here and the exception rethrown with the same type, error code and inner exception.
+                throw WithSweptMessage(ex);
+            }
+        };
+
+    /// <summary>
+    /// A copy of <paramref name="ex"/> whose message is swept (the same object when nothing in it is named). A
+    /// message the sweep cannot read becomes <see cref="SensitiveStatements.JsonRefusal"/>, never the raw text.
+    /// </summary>
+    private static McpException WithSweptMessage(McpException ex)
+    {
+        string swept;
+        try
+        {
+            swept = Judge(ex.Message, new SensitiveStatements.JudgeBudget(SensitiveStatements.ReadBudget));
+        }
+#pragma warning disable CA1031 // fail closed: the sweep never lets the message through after a failure
+        catch (Exception)
+#pragma warning restore CA1031
+        {
+            swept = SensitiveStatements.JsonRefusal;
+        }
+
+        if (ReferenceEquals(swept, ex.Message)) return ex;
+        return ex is McpProtocolException protocol
+            ? new McpProtocolException(swept, ex.InnerException, protocol.ErrorCode)
+            : new McpException(swept, ex.InnerException);
+    }
 
     /// <summary>
     /// Returns <paramref name="result"/> itself when nothing in it is named, otherwise a copy with each named

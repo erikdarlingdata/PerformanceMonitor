@@ -79,11 +79,18 @@ public sealed class ViewerTrendRoutingPortTests
         };
 
         var viewerLines = Lf(viewer).Split('\n');
+        /* #5414 round 2: the filter sits INSIDE the three sums (elapsed, executions, matched rows), never as a WHERE term, so an
+           hour the chosen databases had no rollup row in is a measured 0 and not a missing point; the old WHERE line is gone. */
         var filterLines = viewerLines.Where(l => l.Contains("$4::text[]", StringComparison.Ordinal)).ToArray();
-        var filter = Assert.Single(filterLines);
-        Assert.Equal("AND   ($4::text[] IS NULL OR database_name = ANY($4))", filter.Trim());
+        Assert.Equal(3, filterLines.Length);
+        Assert.All(filterLines, l => Assert.Contains("FILTER (WHERE $4::text[] IS NULL OR database_name = ANY($4))", l, StringComparison.Ordinal));
+        Assert.DoesNotContain(viewerLines, l => l.Trim() == "AND   ($4::text[] IS NULL OR database_name = ANY($4))");
+        /* Empty is one window-level test, never a per-hour HAVING. */
+        Assert.Contains("WHERE EXISTS (SELECT 1 FROM hourly WHERE matched_rows > 0)", Lf(viewer), StringComparison.Ordinal);
+        Assert.DoesNotContain("HAVING", viewer, StringComparison.Ordinal);
 
-        /* The rollup read, FROM through GROUP BY bucket: the viewer's minus its filter line IS the MCP's hourly CTE. */
+        /* The rollup read, FROM through GROUP BY bucket: the viewer's IS the MCP's hourly CTE read, line for line (the filter
+           lives in the select list above it). */
         static string[] RollupRead(IEnumerable<string> lines) => lines
             .Select(l => l.Trim())
             .SkipWhile(l => !l.StartsWith("FROM ", StringComparison.Ordinal))
@@ -91,13 +98,10 @@ public sealed class ViewerTrendRoutingPortTests
             .Append("GROUP BY bucket")
             .ToArray();
         Assert.Equal(
-            RollupRead(viewerLines.Where(l => !l.Contains("$4::text[]", StringComparison.Ordinal))),
+            RollupRead(viewerLines),
             RollupRead(Lf(mcp).Split('\n')));
         Assert.Contains("GROUP BY bucket", Lf(mcp), StringComparison.Ordinal);
 
-        /* The filter sits inside the WHERE, before the GROUP BY — a filter after the aggregate would be a HAVING
-           on a column the rollup groups by, which parses and silently filters nothing. */
-        Assert.True(Array.IndexOf(viewerLines, filter) < Array.FindIndex(viewerLines, l => l.StartsWith("GROUP BY", StringComparison.Ordinal)));
         Assert.Contains("$4", viewer, StringComparison.Ordinal);
         Assert.DoesNotContain("$5", viewer, StringComparison.Ordinal);
     }
@@ -259,7 +263,7 @@ public sealed class ViewerTrendRoutingPortTests
         Assert.Contains("ReadTrendPointsAsync(QueryDurationTrendHourlySql, serverId, startUtc, endUtc, databaseNames, valueOrdinal: 2, executionsOrdinal: null", method, StringComparison.Ordinal);
 
         /* Ordinal 2 of the shared hourly text IS executions_per_second. */
-        var projection = Lf(ViewerDataService.QueryDurationTrendHourlySql).Split('\n').Where(l => l.Contains(" AS ", StringComparison.Ordinal)).Select(l => l.Trim()).ToArray();
+        var projection = Lf(ViewerDataService.QueryDurationTrendHourlySql).Split('\n').Where(l => l.Contains(" AS ", StringComparison.Ordinal)).Select(l => l.Trim()).TakeLast(3).ToArray();
         Assert.Equal(3, projection.Length);
         Assert.EndsWith("AS collection_time,", projection[0], StringComparison.Ordinal);
         Assert.EndsWith("AS elapsed_ms_per_second,", projection[1], StringComparison.Ordinal);

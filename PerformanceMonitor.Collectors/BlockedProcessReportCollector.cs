@@ -899,6 +899,9 @@ OUTER APPLY
         var eventsRead = 0;
         var emptyReports = 0;
         var unparsedReports = 0;
+        /* #4348: one statement-filter session for this read. Each string that carries a statement is judged where it
+           first enters the row; the identity of everything stored is then computed from the filtered value. */
+        var scrub = context.BeginStatementScrub();
 
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -921,7 +924,9 @@ OUTER APPLY
                 continue;
             }
 
-            /* Parse the blocked process report XML in C# (read phase, like the original) */
+            /* Parse the blocked process report XML in C# (read phase, like the original). The RAW report is parsed
+               first and each derived string is judged after (#4348): the inputbuf text with Text and the whole
+               report with Xml, the same judge on the same decoded text, so the verdicts agree. */
             var parsed = ParseReportXml(reportXml, eventTime);
             if (parsed == null)
             {
@@ -929,12 +934,14 @@ OUTER APPLY
                 continue;
             }
 
-            parsed.ReportXml = reportXml;
+            parsed.BlockedSqlText = scrub.Text(parsed.BlockedSqlText);
+            parsed.BlockingSqlText = scrub.Text(parsed.BlockingSqlText);
+            parsed.ReportXml = scrub.Xml(reportXml);
             parsed.ObjectId = objectId;
             parsed.DatabaseId = databaseId;
             parsed.ContentiousObject = contentiousObject;
-            parsed.BlockedQueryPlanXml = blockedQueryPlanXml;
-            parsed.BlockingQueryPlanXml = blockingQueryPlanXml;
+            parsed.BlockedQueryPlanXml = scrub.Xml(blockedQueryPlanXml);
+            parsed.BlockingQueryPlanXml = scrub.Xml(blockingQueryPlanXml);
             /* Per-database path (#1535): the capture database is authoritative for the
                per-database watermark key — a database-scoped session only captures its own
                database, and a report whose XML carries no currentdbname would otherwise never
@@ -1001,10 +1008,13 @@ OUTER APPLY
             return;
         }
 
+        /* #4348: the resolved name replaces a placeholder that was not statement text, but it is a new string
+           that enters the row here, so it goes through the filter again. */
+        var scrub = context.BeginStatementScrub();
         foreach (var row in rows)
         {
-            row.BlockedSqlText = ProcPlaceholder.Resolve(row.BlockedSqlText, resolved);
-            row.BlockingSqlText = ProcPlaceholder.Resolve(row.BlockingSqlText, resolved);
+            row.BlockedSqlText = scrub.Text(ProcPlaceholder.Resolve(row.BlockedSqlText, resolved));
+            row.BlockingSqlText = scrub.Text(ProcPlaceholder.Resolve(row.BlockingSqlText, resolved));
         }
     }
 

@@ -115,6 +115,23 @@ const bodies = {
   capped: { server: "SRV1", deadlocks: [DEADLOCK("k1", PROCESSES, 3)] },
 };
 
+/* #5244: one graph whose processes span databases A, B and C (and one with none), one with A only, one with an unknown database
+   only. `graph` is the already laid-out graph the service sends; the process rows are filtered, the graph is not. */
+const PROC = (spid, database) => ({ victim: spid === 1, spid, wait_time_ms: 10, deadlock_type: "Regular", ...(database === undefined ? {} : { database_name: database }) });
+const GRAPH = (n) => ({ process_count: n, processes: Array.from({ length: n }, (_, i) => ({ id: "p" + i, spid: i + 1, x: 0, y: 0 })), edges: [], cycles: [] });
+const WITH_GRAPH = (key, processes) => ({ ...DEADLOCK(key, processes), graph: GRAPH(processes.length) });
+bodies.spread = {
+  server: "SRV1",
+  deadlocks: [
+    WITH_GRAPH("s1", [PROC(1, "A"), PROC(2, "B"), PROC(3, "C")]),
+    WITH_GRAPH("s2", [PROC(4, "A")]),
+    WITH_GRAPH("s3", [PROC(5)]),
+  ],
+};
+
+/* #5244 L1: the page row budget cut two rows of this deadlock before the browser filter ran; the one row sent is in C. */
+bodies.cut = { server: "SRV1", deadlocks: [{ ...WITH_GRAPH("t1", [PROC(1, "C")]), processes_truncated: 2 }] };
+
 const all = (node, tag, found = []) => {
   if (!node || typeof node !== "object") return found;
   if (node.tag === tag) found.push(node);
@@ -185,6 +202,33 @@ if (scenario === "closed") {
 } else if (scenario === "capped") {
   const panel = await buildPanel(bodies.capped);
   Object.assign(out, state(panel));
+} else if (scenario.startsWith("spread:") || scenario.startsWith("clean:") || scenario.startsWith("cut:")) {
+  /* spread:<names split on |>, or spread:none for no filter; clean: is the same over the two deadlocks whose processes are all in A or B. */
+  const names = scenario.slice(scenario.indexOf(":") + 1);
+  if (names !== "none") {
+    globalThis.location = { hash: "#/server/SRV1/blocking" };
+    modules.util.setActiveDatabaseFilter({ server: "SRV1", databases: names.split("|") });
+  }
+  const panel = await buildPanel(scenario.startsWith("clean:") ? { server: "SRV1", deadlocks: [bodies.spread.deadlocks[1], WITH_GRAPH("c1", [PROC(1, "A"), PROC(2, "B")])] } : scenario.startsWith("cut:") ? bodies.cut : bodies.spread);
+  const procs = processDetails(panel).filter((d) => !/^Graph/.test(d.children[0].textContent));
+  const st = {
+    summaries: procs.map((d) => d.children[0].textContent),
+    subRows: procs.map((d) => all(d, "tr").map((tr) => all(tr, "td").map((td) => td.textContent)).filter((c) => c.length)),
+  };
+  const classOf = (n) => n.className || "";
+  const find = (node, pred, found = []) => {
+    if (!node || typeof node !== "object") return found;
+    if (pred(node)) found.push(node);
+    node.children.forEach((c) => find(c, pred, found));
+    return found;
+  };
+  out.summaries = st.summaries;
+  out.subDatabases = st.subRows.map((rows) => rows.map((cells) => cells[3]));
+  out.graphs = find(panel, (n) => n.tag === "details" && /^Graph/.test(n.children[0].textContent)).map((d) => d.children[0].textContent);
+  out.cellTexts = find(panel, (n) => n.tag === "td" && /hidden by the database filter/.test(n.textContent)).map((n) => n.textContent);
+  out.notes = find(panel, (n) => classOf(n) === "deadlock-rows-note").map((n) => n.textContent);
+  const chips = find(panel, (n) => n.dataset && n.dataset.dbScope);
+  out.chips = chips.map((c) => ({ state: c.dataset.dbScope, text: c.textContent, title: c.attrs.title }));
 } else {
   throw new Error("unknown scenario " + scenario);
 }

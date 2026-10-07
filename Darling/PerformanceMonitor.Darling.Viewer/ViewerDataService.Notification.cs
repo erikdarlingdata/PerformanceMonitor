@@ -26,11 +26,10 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// through <see cref="ExecuteWriteAsync"/> so a read-only seat degrades to <see cref="ViewerReadOnlyException"/>.
 /// The single global row is <c>id = 1</c>; <c>modified_at</c> is server-side naive-UTC.</para>
 ///
-/// <para><b>The SMTP secret.</b> <c>smtp_encrypted_password</c> is NEVER plaintext in Postgres — it is the
-/// DPAPI-LocalMachine blob <see cref="ViewerServerSecret.Protect"/> produces, the SAME format the service's
-/// <c>DarlingAlertSettings.GetSmtpPassword</c> reads back with <c>DarlingSecrets.Unprotect</c> (identical
-/// entropy + scope, pinned by a Darling.Tests round-trip). The managed single-box deploy (viewer + service on
-/// one host) shares the machine DPAPI key, so the service decrypts what the viewer sealed. The webhook URLs
+/// <para><b>The SMTP secret.</b> <c>smtp_encrypted_password</c> is NEVER plaintext in Postgres — the viewer seals
+/// it to the service's published key (<see cref="ViewerPasswordSealer.SealSmtp"/>) for the host, port, SSL flag and
+/// user name it is written with, and the service's <c>DarlingAlertSettings.GetSmtpPassword</c> opens it for those same
+/// four values (#5366). A value saved before passwords were sealed is kept as it is until a new password is typed. The webhook URLs
 /// carry as plain text in <c>teams_url</c>/<c>slack_url</c> exactly as darling.json holds them (the service
 /// treats a channel as enabled by a non-empty URL — so a disabled channel writes an EMPTY url, matching the
 /// service's <c>TeamsWebhookEnabled =&gt; !IsNullOrWhiteSpace(TeamsUrl)</c> derivation).</para>
@@ -204,7 +203,7 @@ ON CONFLICT (id) DO UPDATE SET
 /// the desired-state twin of the service's <c>SmtpConfig</c> + <c>WebhooksConfig</c>. There is no per-channel
 /// "enabled" column (the service derives enablement from non-empty fields: SMTP from host+from+to, a webhook
 /// from its URL); the Settings window maps its enable toggles onto that by clearing the channel's fields when
-/// unchecked. <see cref="SmtpEncryptedPassword"/> is a DPAPI-LocalMachine blob, never plaintext. Defaults
+/// unchecked. <see cref="SmtpEncryptedPassword"/> is a sealed value (or one saved before sealing), never plaintext. Defaults
 /// mirror the V17 DDL so <see cref="Defaults"/> equals a freshly-seeded row.
 /// </summary>
 public sealed class NotificationRow
@@ -214,7 +213,7 @@ public sealed class NotificationRow
     public bool SmtpUseSsl { get; set; } = true;
     public string? SmtpUsername { get; set; }
 
-    /// <summary>DPAPI-LocalMachine base64 blob (<see cref="ViewerServerSecret.Protect"/>), or null when unset.</summary>
+    /// <summary>The sealed SMTP password (<see cref="ViewerPasswordSealer.SealSmtp"/>), a value saved before sealing, or null when unset.</summary>
     public string? SmtpEncryptedPassword { get; set; }
 
     public string SmtpFromAddress { get; set; } = "";

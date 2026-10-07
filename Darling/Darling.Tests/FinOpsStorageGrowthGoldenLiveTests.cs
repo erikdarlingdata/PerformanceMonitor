@@ -63,7 +63,7 @@ public sealed class FinOpsStorageGrowthGoldenLiveTests
                 var heat = await viewer.GetObjectGrowthHeatmapDataAsync(id, HeatDb, 30, 4, ct);
                 map[key] = new Dictionary<string, object?>
                 {
-                    ["storageGrowth"] = await viewer.GetStorageGrowthAsync(id, ct),
+                    ["storageGrowth"] = await viewer.GetStorageGrowthAsync(id, cancellationToken: ct),
                     ["heatmapObjects"] = heat.Objects,
                     ["heatmapSamples"] = heat.Samples,
                     ["indexDetailOrders"] = await viewer.GetObjectIndexDetailAsync(id, HeatDb, "dbo", "Orders", ct),

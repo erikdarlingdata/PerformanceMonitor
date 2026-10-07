@@ -23,6 +23,11 @@ public sealed class FinOpsTabIndexAnalysisPageTests
         ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "finops", "index-analysis.js")
             .ReplaceLineEndings("\n");
 
+    // The Database box's draft, caret, focus and commit handling lives in the shared module (#5231).
+    private static string Box() =>
+        ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "finops", "database-box.js")
+            .ReplaceLineEndings("\n");
+
     private static string ToolSource() =>
         ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpFinOpsTools.IndexAnalysis.cs")
             .ReplaceLineEndings("\n");
@@ -108,12 +113,16 @@ public sealed class FinOpsTabIndexAnalysisPageTests
         var tab = Tab();
         Assert.Contains("if (choice.db) params.database_name = choice.db;", tab);
         Assert.DoesNotContain("database_name: choice", tab);
-        Assert.Contains("type: \"text\", list: listId", tab);
-        Assert.Contains("el(\"datalist\", { id: listId })", tab);
+        Assert.Contains("databaseBox(choice, { onCommit: () => reread() })", tab);
         Assert.Contains("choice.names = (data.databases || []).map((d) => d.database_name)", tab);
-        Assert.Contains("el(\"span\", { text: \"Database\" })", tab);
-        Assert.Contains("dbInput.addEventListener(\"change\"", tab);
-        Assert.Contains("choice.db = dbInput.value.trim();", tab);
+        var box = Box();
+        Assert.Contains("type: \"text\", list: listId", box);
+        Assert.Contains("el(\"datalist\", { id: listId })", box);
+        Assert.Contains("el(\"span\", { text: \"Database\" })", box);
+        Assert.Contains("input.addEventListener(\"change\"", box);
+        // One name, exactly as typed (no trim, #5244 M3), in the stored spelling when it matches a suggestion ignoring case (#5244 L8c).
+        Assert.Contains("choice.db = storedSpelling(input.value, known());", box);
+        Assert.DoesNotContain(".trim();", box.Replace("text.trim() === \"\"", "").Replace("String(typed).trim() === \"\"", ""));
     }
 
     [Fact]
@@ -238,21 +247,21 @@ public sealed class FinOpsTabIndexAnalysisPageTests
     [Fact]
     public void TheTypedDatabaseTextSurvivesAPoll()
     {
-        var tab = Tab();
-        Assert.Matches(@"addEventListener\(""input"", \(\) => \{\s*choice\.draft = dbInput\.value;", tab);
-        Assert.Contains("choice.caret = [dbInput.selectionStart, dbInput.selectionEnd];", tab);
-        Assert.Contains("dbInput.value = choice.draft ?? choice.db;", tab);
-        Assert.Matches(@"addEventListener\(""change"", \(\) => \{\s*choice\.db = dbInput\.value\.trim\(\);\s*choice\.draft = undefined;", tab);
+        var box = Box();
+        Assert.Matches(@"addEventListener\(""input"", \(\) => \{\s*choice\.draft = input\.value;", box);
+        Assert.Contains("choice.caret = [input.selectionStart, input.selectionEnd];", box);
+        Assert.Contains("input.value = choice.draft ?? choice.db;", box);
+        Assert.Matches(@"addEventListener\(""change"", \(\) => \{\s*choice\.db = storedSpelling\(input\.value, known\(\)\);\s*choice\.draft = undefined;", box);
     }
 
     [Fact]
     public void FocusSurvivesAPoll()
     {
-        var tab = Tab();
-        Assert.Matches(@"addEventListener\(""focus"", \(\) => \{\s*choice\.focused = true;", tab);
-        Assert.Matches(@"addEventListener\(""blur"", \(\) => \{\s*setTimeout\(\(\) => \{\s*if \(dbInput\.isConnected\) choice\.focused = false;\s*\}, 0\);", tab);
-        Assert.Matches(@"if \(choice\.focused\) \{\s*setTimeout\(\(\) => \{\s*if \(dbInput\.isConnected\) \{\s*dbInput\.focus\(\);\s*if \(choice\.caret\) dbInput\.setSelectionRange\(choice\.caret\[0\], choice\.caret\[1\]\);", tab);
-        Assert.DoesNotContain("requestAnimationFrame", tab);
+        var box = Box();
+        Assert.Matches(@"addEventListener\(""focus"", \(\) => \{\s*choice\.focused = true;", box);
+        Assert.Matches(@"addEventListener\(""blur"", \(\) => \{\s*setTimeout\(\(\) => \{\s*if \(input\.isConnected\) choice\.focused = false;\s*\}, 0\);", box);
+        Assert.Matches(@"if \(choice\.focused\) \{\s*setTimeout\(\(\) => \{\s*if \(input\.isConnected\) \{\s*input\.focus\(\);\s*if \(choice\.caret\) input\.setSelectionRange\(choice\.caret\[0\], choice\.caret\[1\]\);", box);
+        Assert.DoesNotContain("requestAnimationFrame", box);
     }
 
     [Fact]
@@ -349,7 +358,7 @@ public sealed class FinOpsTabIndexAnalysisPageTests
     {
         var imports = Regex.Matches(Tab(), "from \"([^\"]+)\";").Select(m => m.Groups[1].Value).ToList();
         Assert.NotEmpty(imports);
-        Assert.All(imports, i => Assert.Contains(i, new[] { "../../panels.js", "../../util.js" }));
+        Assert.All(imports, i => Assert.Contains(i, new[] { "./database-box.js", "../../panels.js", "../../util.js" }));
     }
 
     [Fact]

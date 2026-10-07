@@ -95,6 +95,13 @@ public class AlertContext
     /// other alert and on any row written before this member existed.
     /// </summary>
     public string? CollectorName { get; set; }
+
+    /// <summary>
+    /// A copy of this context that shares its member objects (#5320): the alert statement filter replaces the
+    /// members it rewrites and leaves the rest, so a member added to this class later is carried without the
+    /// filter being edited. A field-by-field copy would silently drop it.
+    /// </summary>
+    public AlertContext ShallowCopy() => (AlertContext)MemberwiseClone();
 }
 
 /// <summary>
@@ -285,6 +292,9 @@ public class AlertDetailItem
     /// which is the no-Apply-button case.
     /// </summary>
     public RemediationAction? Remediation { get; set; }
+
+    /// <summary>A copy that shares its member objects (#5320); see <see cref="AlertContext.ShallowCopy"/>.</summary>
+    public AlertDetailItem ShallowCopy() => (AlertDetailItem)MemberwiseClone();
 }
 
 /// <summary>

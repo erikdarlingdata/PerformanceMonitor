@@ -103,7 +103,7 @@ public sealed class McpDatabaseNameFilterToolTests : IClassFixture<SharedDuckDbF
         Assert.False(McpHelpers.IsErrorEnvelope(none), $"tool returned an error: {none}");
         using var noneDoc = JsonDocument.Parse(none);
         Assert.Equal("empty", noneDoc.RootElement.GetProperty("status").GetString());
-        Assert.Contains("for database NoSuchDb", none);
+        Assert.Contains("for the database NoSuchDb", none);
     }
 
     [Fact]
@@ -136,7 +136,7 @@ public sealed class McpDatabaseNameFilterToolTests : IClassFixture<SharedDuckDbF
         Assert.False(McpHelpers.IsErrorEnvelope(none), $"tool returned an error: {none}");
         using var noneDoc = JsonDocument.Parse(none);
         Assert.Equal("empty", noneDoc.RootElement.GetProperty("status").GetString());
-        Assert.Contains("for database NoSuchDb", none);
+        Assert.Contains("for the database NoSuchDb", none);
     }
 
     [Fact]
@@ -156,6 +156,7 @@ public sealed class McpDatabaseNameFilterToolTests : IClassFixture<SharedDuckDbF
             _dataService, _serverManager, ServerName, database_name: "ProdDB");
         using (var doc = JsonDocument.Parse(one))
         {
+            Assert.True(doc.RootElement.TryGetProperty("error_count", out _), one);
             Assert.Equal(2, doc.RootElement.GetProperty("error_count").GetInt32());
             var errors = doc.RootElement.GetProperty("errors").EnumerateArray().ToList();
             Assert.All(errors, e => Assert.Equal("ProdDB", e.GetProperty("database_name").GetString()));
@@ -195,7 +196,7 @@ public sealed class McpDatabaseNameFilterToolTests : IClassFixture<SharedDuckDbF
         Assert.False(McpHelpers.IsErrorEnvelope(none), $"tool returned an error: {none}");
         using var noneDoc = JsonDocument.Parse(none);
         Assert.Equal("empty", noneDoc.RootElement.GetProperty("status").GetString());
-        Assert.Contains("in database NoSuchDb", none);
+        Assert.Contains("for the database NoSuchDb", none);
     }
 
     // ── Seeding helpers (raw INSERT through one shared connection) ──
@@ -282,6 +283,9 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)";
         var fixture = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "Fixtures", "SystemHealth", "error_reported.xml"));
         Assert.Contains(DatabaseIdValue, fixture);
         var xml = fixture.Replace(DatabaseIdValue, DatabaseIdValue.Replace("<value>6</value>", $"<value>{databaseId}</value>"));
+        /* The error's own time is the XML timestamp, and since #5373 its database is the name the id carried then (the history read looks 14 days
+           around the errors), so the fixture's fixed July timestamp is replaced by the seeded event time. */
+        xml = xml.Replace("timestamp=\"2026-07-05T12:00:05.500Z\"", $"timestamp=\"{eventTime:yyyy-MM-ddTHH:mm:ss.fffZ}\"");
 
         using var readLock = _duckDb.AcquireReadLock();
         var connection = await SeedConnectionAsync();

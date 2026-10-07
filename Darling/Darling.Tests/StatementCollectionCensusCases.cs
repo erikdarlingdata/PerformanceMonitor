@@ -25,5 +25,29 @@ internal static class StatementCollectionCensusCases
         {
             // Filled by the lanes that hook a column, one line each, for example:
             // ["query_stats.query_text"] = "StatementCollectionCensusTests.QueryStats_QueryText_IsWithheld",
+            ["long_query_completions.statement_text"] = "StatementCollectionCensusTests.LongQueryCompletions_StatementText_IsWithheldAndThePlainStatementIsUntouched",
+            ["default_trace_events.text_data"] = "StatementCollectionCensusTests.DefaultTraceEvents_TextData_IsWithheldAndThePlainStatementIsUntouched",
+            ["system_health_events.event_xml"] = "StatementCollectionCensusTests.SystemHealthEvents_EventXml_WithholdsTheSqlTextActionAndKeepsTheRestOfTheEvent",
+            ["job_history.message"] = "StatementCollectionCensusTests.JobHistory_Message_IsWithheldWhenItEchoesAStatement_AndAPlainMessageIsUntouched",
+            ["query_store.query_text"] = "StatementCollectionCensusTests.QueryStore_QueryText_IsWithheld",
+            ["query_snapshots.query_text"] = "StatementCollectionCensusTests.QuerySnapshots_QueryText_IsWithheld",
+            ["query_snapshots.query_plan"] = "StatementCollectionCensusTests.QuerySnapshots_QueryPlan_IsFiltered",
+            ["query_snapshots.live_query_plan"] = "StatementCollectionCensusTests.QuerySnapshots_LiveQueryPlan_IsFiltered",
+            ["plan_correction.query_text"] = "StatementCollectionCensusTests.PlanCorrection_QueryText_IsWithheld",
+            ["plan_correction.implementation_script"] = "StatementCollectionCensusTests.PlanCorrection_ImplementationScript_IsWithheld",
+            ["query_stats.query_text"] = "StatementCollectionCensusTests.QueryStats_QueryText_IsWithheld",
+            ["query_stats.query_plan_xml"] = "StatementCollectionCensusTests.QueryStats_QueryPlanXml_InlinePlanIsFiltered",
+            ["procedure_stats.query_plan_xml"] = "StatementCollectionCensusTests.ProcedureStats_QueryPlanXml_InlinePlanIsFiltered",
+            // R4 (blocking and deadlocks), StatementScrubBlockingTests.cs:
+            ["blocked_process_report.blocked_sql_text"] = "StatementCollectionCensusTests.BlockedProcessReport_blocked_sql_text_blocking_sql_text_blocked_process_report_xml_and_both_plans_AreWithheld",
+            ["blocked_process_report.blocking_sql_text"] = "StatementCollectionCensusTests.BlockedProcessReport_blocked_sql_text_blocking_sql_text_blocked_process_report_xml_and_both_plans_AreWithheld",
+            ["blocked_process_report.blocked_process_report_xml"] = "StatementCollectionCensusTests.BlockedProcessReport_blocked_sql_text_blocking_sql_text_blocked_process_report_xml_and_both_plans_AreWithheld",
+            ["blocked_process_report.blocked_query_plan_xml"] = "StatementCollectionCensusTests.BlockedProcessReport_blocked_sql_text_blocking_sql_text_blocked_process_report_xml_and_both_plans_AreWithheld",
+            ["blocked_process_report.blocking_query_plan_xml"] = "StatementCollectionCensusTests.BlockedProcessReport_blocked_sql_text_blocking_sql_text_blocked_process_report_xml_and_both_plans_AreWithheld",
+            ["deadlocks.victim_sql_text"] = "StatementCollectionCensusTests.Deadlocks_victim_sql_text_deadlock_graph_xml_and_victim_query_plan_xml_AreWithheld",
+            ["deadlocks.deadlock_graph_xml"] = "StatementCollectionCensusTests.Deadlocks_victim_sql_text_deadlock_graph_xml_and_victim_query_plan_xml_AreWithheld",
+            ["deadlocks.victim_query_plan_xml"] = "StatementCollectionCensusTests.Deadlocks_victim_sql_text_deadlock_graph_xml_and_victim_query_plan_xml_AreWithheld",
+            ["dmv_blocking_snapshot.blocked_sql_text"] = "StatementCollectionCensusTests.DmvBlockingSnapshot_blocked_sql_text_and_blocking_sql_text_AreWithheld",
+            ["dmv_blocking_snapshot.blocking_sql_text"] = "StatementCollectionCensusTests.DmvBlockingSnapshot_blocked_sql_text_and_blocking_sql_text_AreWithheld",
         };
 }

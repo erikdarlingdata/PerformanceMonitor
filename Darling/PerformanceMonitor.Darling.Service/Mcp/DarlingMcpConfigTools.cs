@@ -85,7 +85,7 @@ public sealed class DarlingMcpConfigTools
 
     /// <summary>
     /// The same read over a SET of databases (#5245). The MCP tool passes <see cref="DatabaseFilter.One"/> of its one
-    /// <c>database_name</c> until a later lane wires the list. <b>A whitespace-only name now means every database</b>
+    /// <c>database_name</c> and the web route passes the repeated keys (#5244). <b>A whitespace-only name now means every database</b>
     /// (it used to filter to nothing); any other name is matched as before, ignoring case, and a list matches any name in it.
     /// "Nothing collected" is judged on the whole snapshot, before the filter.
     /// </summary>

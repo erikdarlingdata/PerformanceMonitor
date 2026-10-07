@@ -28,7 +28,8 @@ public sealed class FinOpsTabLockingPageTests
     {
         var js = Tab();
         Assert.Contains("read: \"get_object_locking\"", js);
-        Assert.Contains("params: { server, limit: 200 }", js);
+        Assert.Contains("const params = { server, limit: 200 };", js);
+        Assert.Contains("if (choice.db) params.database_name = choice.db;", js);
         Assert.Contains("rowsKey: \"objects\"", js);
     }
 
@@ -50,7 +51,7 @@ public sealed class FinOpsTabLockingPageTests
         var src = ToolSource();
         var start = src.IndexOf("internal static async Task<string> GetObjectLockingCoreAsync(", System.StringComparison.Ordinal);
         Assert.True(start >= 0, "GetObjectLockingCoreAsync not found");
-        var end = src.IndexOf("objects = result", start, System.StringComparison.Ordinal);
+        var end = src.IndexOf("objects = objectRows", start, System.StringComparison.Ordinal);
         Assert.True(end > start, "the end of the get_object_locking projection was not found");
         return src.Substring(start, end - start);
     }
@@ -73,7 +74,7 @@ public sealed class FinOpsTabLockingPageTests
     {
         var imports = Regex.Matches(Tab(), "from \"([^\"]+)\"").Select(m => m.Groups[1].Value).ToList();
         Assert.NotEmpty(imports);
-        Assert.All(imports, i => Assert.Contains(i, new[] { "../../panels.js", "../../charts.js", "../../util.js" }));
+        Assert.All(imports, i => Assert.Contains(i, new[] { "../../panels.js", "../../charts.js", "../../util.js", "./database-box.js" }));
     }
 
     [Fact]

@@ -450,7 +450,8 @@ public sealed class WebDataStartNoteTests
 
         Assert.Contains("ORDER BY collection_time DESC", PerformanceMonitor.Darling.Service.Mcp.DarlingSessionReader.WaitingTasksSql, StringComparison.Ordinal);
         var tools = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpSessionTools.cs");
-        var tool = tools.IndexOf("public static async Task<string> GetWaitingTasks(", StringComparison.Ordinal);
+        /* #5244: the public method forwards to the internal overload that takes a DatabaseFilter, and that one holds the body. */
+        var tool = tools.IndexOf("internal static async Task<string> GetWaitingTasks(", StringComparison.Ordinal);
         Assert.True(tool > 0);
         var body = tools[tool..];
         Assert.Contains("truncated,", body, StringComparison.Ordinal);
@@ -459,7 +460,7 @@ public sealed class WebDataStartNoteTests
 
         Assert.Contains("ORDER BY collection_time DESC", PerformanceMonitor.Darling.Service.Mcp.DarlingPlanCorrectionReader.PlanCorrectionsSql, StringComparison.Ordinal);
         var corrections = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpPlanCorrectionTools.cs");
-        var correctionsTool = corrections.IndexOf("public static async Task<string> GetPlanCorrections(", StringComparison.Ordinal);
+        var correctionsTool = corrections.IndexOf("internal static async Task<string> GetPlanCorrections(", StringComparison.Ordinal);
         Assert.True(correctionsTool > 0);
         var correctionsBody = corrections[correctionsTool..];
         Assert.Contains("var truncated = rows.Count > limit;", correctionsBody, StringComparison.Ordinal);
