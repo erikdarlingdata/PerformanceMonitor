@@ -540,8 +540,6 @@ CROSS JOIN generate_series(TIMESTAMP '2026-02-08 12:00:00', TIMESTAMP '2026-02-2
         await command.ExecuteNonQueryAsync(ct);
     }
 
-    /// <summary>Migrates a scratch store, converts the collector tables to hypertables BEFORE any row lands (so the
-    /// seed creates real 1-day chunks), runs the seeds and hands the body a connection.</summary>
     /// <summary>
     /// Six groups per twin, each pair a NULL key beside the empty-string key it must stay apart from, all heavy enough to make the
     /// top 100 in BOTH windows (one row each at 06:00 of the baseline day and of the current day; the counts are 100 to 600 in
@@ -582,6 +580,8 @@ FROM (VALUES (1, 'dbA'::text, 'dbo'::text, NULL::text, 100), (2, 'dbA', 'dbo', '
              (4, '', 'dbo', 'pX', 400), (5, 'dbA', NULL, 'pX', 500), (6, 'dbA', '', 'pX', 600)) AS v(n, db, sch, obj, cur_exec)
 CROSS JOIN (VALUES (TIMESTAMP '2026-02-20 06:00:00', true), (TIMESTAMP '2026-02-19 06:00:00', false)) AS g(t, cur);";
 
+    /// <summary>Migrates a scratch store, converts the collector tables to hypertables BEFORE any row lands (so the
+    /// seed creates real 1-day chunks), runs the seeds and hands the body a connection.</summary>
     private static async Task RunLiveAsync(string[] seeds, Func<NpgsqlConnection, CancellationToken, Task> body)
     {
         Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), SkipText);
