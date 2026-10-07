@@ -32,8 +32,9 @@ permissions:
 # superseded PUSH run is safe because no run's RESULT depends on another run's output: every
 # upload-artifact step in this workflow is gated to the release event (the SignPath signing
 # path) or to failure() (darling-pg diagnostics), except the per-run Lite timing uploads
-# (#5208), and exactly ONE thing reads a previous run's artifacts: the Lite shard packer
-# (#5208). The gate job picks, once per run, the newest successful push run on dev (of the 30
+# (#5208) and the Guard job's two test-build uploads (#5459), which only jobs of the SAME run
+# download (no run-id; a cancelled run's build is never read by another run), and exactly ONE
+# thing reads a previous run's artifacts: the Lite shard packer (#5208). The gate job picks, once per run, the newest successful push run on dev (of the 30
 # newest successful dev runs) whose lite-tests-timing artifacts ALL have more than two days of
 # retention left, and pins that run and its exact artifact set; every Lite shard downloads that
 # set and fails if it gets anything else. A cancelled run is not a successful run, so a
@@ -221,6 +222,18 @@ jobs:
   # say (dev pushes are the safety net and the source of the Lite timings), so the shards' `if:` below read
   # this job's result only on a pull request. Skipped on release, where `build` runs the suites whole.
   #
+  # The build is shared (#5459 change 2). Right after the Release build, and before any test runs (so a guard
+  # failure still leaves it), this job uploads the two test projects' bin/Release trees plus the few obj files
+  # `dotnet run --no-build` reads (project.assets.json, the nuget props/targets, the cache file), and a small
+  # origin file recording the producer's github.workspace and sha. The consumers (the six PostgreSQL shards, the
+  # four Lite shards, the whole-tree guards job) download it into the same relative paths and skip their own
+  # restore and build. The obj/Release intermediates and every other project's obj are not needed, and not
+  # uploaded: `dotnet run --no-build` was proven locally with exactly this set and an empty NuGet package folder.
+  # The workspace path is recorded because many tests find the repo root through [CallerFilePath], so a binary
+  # built in one workspace path reads its source from that path; a consumer whose workspace or sha differs fails
+  # loudly instead of testing the wrong tree. Only a consumer that USED the artifact leaves out Stage=Guard (this
+  # job ran those classes on the same binaries in this run); one that built for itself runs every class.
+  #
   # Docs-only changes: the filter below holds ONLY the build job's `docs` and `all` entries (a byte copy,
   # pinned by GuardStageWorkflowTests), and a change whose every file is on the documentation allowlist
   # reports a notice and succeeds without building anything, exactly as the build job's docs fast path does.
@@ -239,6 +252,13 @@ jobs:
     timeout-minutes: 20
     permissions:
       contents: read
+    # One artifact per suite, so a Darling consumer does not download the Lite tree and the other way round. Each
+    # output holds the artifact name, set only when its upload step succeeded (empty on a docs-only change, a failed
+    # build, or a failed upload). The consumers download only when it is set; a job output is still published when
+    # a later step of this job fails, which is the case that matters (the guards failed after the upload).
+    outputs:
+      darling_build_artifact: ${{ steps.upload-darling-build.outcome == 'success' && 'guard-test-build-darling' || '' }}
+      lite_build_artifact: ${{ steps.upload-lite-build.outcome == 'success' && 'guard-test-build-lite' || '' }}
 
     steps:
       - uses: actions/checkout@v7
@@ -309,6 +329,58 @@ jobs:
 
           dotnet build Darling/Darling.Tests/Darling.Tests.csproj -c Release --no-restore
           dotnet build Lite.Tests/Lite.Tests.csproj -c Release --no-restore
+
+      # Written by the producer for the consumers' check (see the header above): where this build was made and from
+      # what. Plain key=value lines, no dot-prefix (upload-artifact skips hidden files).
+      - name: Record where this build was made
+        if: steps.decide.outputs.run == 'true'
+        shell: pwsh
+        env:
+          PRODUCER_WORKSPACE: ${{ github.workspace }}
+          PRODUCER_SHA: ${{ github.sha }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Set-Content -Path guard-build-origin.txt -Value @("workspace=$env:PRODUCER_WORKSPACE", "sha=$env:PRODUCER_SHA") -Encoding utf8NoBOM
+
+      # Before the tests, so a guard failure still leaves the artifacts. One day of retention: they are read only by
+      # the jobs of this run. overwrite: a re-run of this job in a later attempt uploads the same names again.
+      - name: Upload the built Darling.Tests for the shards
+        id: upload-darling-build
+        if: steps.decide.outputs.run == 'true'
+        uses: actions/upload-artifact@v6
+        with:
+          name: guard-test-build-darling
+          path: |
+            guard-build-origin.txt
+            Darling/Darling.Tests/bin/Release
+            Darling/Darling.Tests/obj/project.assets.json
+            Darling/Darling.Tests/obj/project.nuget.cache
+            Darling/Darling.Tests/obj/*.nuget.g.props
+            Darling/Darling.Tests/obj/*.nuget.g.targets
+            Darling/Darling.Tests/obj/*.nuget.dgspec.json
+          retention-days: 1
+          compression-level: 1
+          overwrite: true
+          if-no-files-found: error
+
+      - name: Upload the built Lite.Tests for the shards
+        id: upload-lite-build
+        if: steps.decide.outputs.run == 'true'
+        uses: actions/upload-artifact@v6
+        with:
+          name: guard-test-build-lite
+          path: |
+            guard-build-origin.txt
+            Lite.Tests/bin/Release
+            Lite.Tests/obj/project.assets.json
+            Lite.Tests/obj/project.nuget.cache
+            Lite.Tests/obj/*.nuget.g.props
+            Lite.Tests/obj/*.nuget.g.targets
+            Lite.Tests/obj/*.nuget.dgspec.json
+          retention-days: 1
+          compression-level: 1
+          overwrite: true
+          if-no-files-found: error
 
       - name: Run the Stage=Guard classes of both suites
         if: steps.decide.outputs.run == 'true'
@@ -1313,12 +1385,60 @@ jobs:
             echo "Changed files, none of them in the gate: ${ALL_FILES:-[]}"
           fi
 
+      # Shared build (#5459 change 2): this run's Guard job already built this test project in Release and uploaded
+      # it before running its tests (see the header on that job). Fetch it instead of restoring and building again.
+      # continue-on-error: no artifact (a release, a docs-only change, a Guard build that failed) is the normal
+      # fallback, not a failure, and the check below turns it into a notice and the old restore and build.
+      - name: Fetch the Guard job's build of the test project
+        id: guard-build
+        if: steps.filter.outputs.darling == 'true' && needs.guard-tests.outputs.darling_build_artifact != ''
+        continue-on-error: true
+        uses: actions/download-artifact@v6
+        with:
+          name: ${{ needs.guard-tests.outputs.darling_build_artifact }}
+          path: .
+
+      # A fetched build that is not for THIS workspace and commit is an error, never a quiet fallback: the tests
+      # find the repo root through [CallerFilePath], so a binary built in another path would read another tree.
+      - name: Check the fetched build is for this workspace and commit
+        id: guard-build-check
+        if: steps.filter.outputs.darling == 'true'
+        shell: pwsh
+        env:
+          FETCH_OUTCOME: ${{ steps.guard-build.outcome }}
+          THIS_WORKSPACE: ${{ github.workspace }}
+          THIS_SHA: ${{ github.sha }}
+          REQUIRED_FILES: Darling/Darling.Tests/bin/Release/net10.0-windows/Darling.Tests.dll;Darling/Darling.Tests/obj/project.assets.json
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:FETCH_OUTCOME -ne 'success') {
+            Write-Host "::notice title=Building the test project here::No Guard job build was fetched for this run (fetch outcome '$env:FETCH_OUTCOME'; skipped means the Guard job published none), so this job restores and builds for itself and runs every class, Stage=Guard included."
+            'used=false' | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+            exit 0
+          }
+          $origin = @{}
+          if (Test-Path guard-build-origin.txt) {
+            foreach ($line in Get-Content guard-build-origin.txt) { if ($line -match '^(\w+)=(.*)$') { $origin[$Matches[1]] = $Matches[2] } }
+          }
+          if ($origin['workspace'] -ne $env:THIS_WORKSPACE -or $origin['sha'] -ne $env:THIS_SHA) {
+            Write-Host "::error title=Guard build is for another workspace or commit::The fetched build says workspace '$($origin['workspace'])' at '$($origin['sha'])'; this job is at '$env:THIS_WORKSPACE' at '$env:THIS_SHA'."
+            exit 1
+          }
+          foreach ($file in ($env:REQUIRED_FILES -split ';')) {
+            if (-not (Test-Path $file)) {
+              Write-Host "::error title=Guard build is incomplete::The fetched build has no $file."
+              exit 1
+            }
+          }
+          Write-Host "::notice title=Using the Guard job's build::The test project was built by the Guard job of this run at the same workspace and commit, so this job skips its restore and build and leaves out the Stage=Guard classes that job ran."
+          'used=true' | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
       - name: Setup .NET 10.0
         if: steps.filter.outputs.darling == 'true'
         uses: actions/setup-dotnet@v6
         with:
           global-json-file: global.json
-          cache: true
+          cache: ${{ steps.guard-build-check.outputs.used != 'true' }}
           cache-dependency-path: '**/packages.lock.json'
 
       # Same cache key the release job and nightly.yml use (the fetch script's own content hash), so
@@ -1369,11 +1489,11 @@ jobs:
         run: ./Darling/tools/new-upgraded-store-fixture.ps1 -SkipNew
 
       - name: Restore Darling.Tests
-        if: steps.filter.outputs.darling == 'true'
+        if: steps.filter.outputs.darling == 'true' && steps.guard-build-check.outputs.used != 'true'
         run: dotnet restore Darling/Darling.Tests/Darling.Tests.csproj --locked-mode
 
       - name: Build Darling.Tests
-        if: steps.filter.outputs.darling == 'true'
+        if: steps.filter.outputs.darling == 'true' && steps.guard-build-check.outputs.used != 'true'
         run: dotnet build Darling/Darling.Tests/Darling.Tests.csproj -c Release --no-restore
 
       # Throwaway cluster from the bundled runtime. initdb TRUST auth is acceptable ONLY here: an
@@ -1604,9 +1724,14 @@ jobs:
           DARLING_TEST_PG_LOGROTATE: "Host=127.0.0.1;Port=5546;Username=darling;Database=darling"
           DARLING_TEST_PG_LOGROTATE_CSV: "Host=127.0.0.1;Port=5547;Username=darling;Database=darling"
           DARLING_TEST_PG_LOGROTATE_JSON: "Host=127.0.0.1;Port=5548;Username=darling;Database=darling"
+          # 'true' only when this shard used the Guard job's build of this run, which proves that job ran the Stage=Guard classes.
+          GUARD_BUILD_USED: ${{ steps.guard-build-check.outputs.used }}
         run: |
           $ErrorActionPreference = 'Stop'
-          $lines = @(dotnet run --project Darling/Darling.Tests/Darling.Tests.csproj -c Release --no-build -- -list classes/json)
+          # The cut and the run must agree (#5459): the listing every shard cuts from leaves the Guard classes out exactly
+          # when the Guard job ran them, so each remaining class still lands in exactly one shard. No artifact: all classes.
+          $guardFilter = @(if ($env:GUARD_BUILD_USED -eq 'true') { '-trait-'; 'Stage=Guard' })
+          $lines = @(dotnet run --project Darling/Darling.Tests/Darling.Tests.csproj -c Release --no-build -- -list classes/json @guardFilter)
           if ($LASTEXITCODE -ne 0) { throw "class listing failed with exit code $LASTEXITCODE" }
           # Only the runner's one-line JSON array is parsed: the dotnet CLI can print its own notice on stdout,
           # and a line starting "W" after the array failed a shard's ConvertFrom-Json on 2026-09-23.
@@ -2078,20 +2203,68 @@ jobs:
             echo "::notice title=Whole-tree guards skipped::The build job's 'Run Darling tests' step reported '${DARLING_TESTS}', so the suite has already run on this commit."
           fi
 
+      # Shared build (#5459 change 2): this run's Guard job already built this test project in Release and uploaded
+      # it before running its tests (see the header on that job). Fetch it instead of restoring and building again.
+      # continue-on-error: no artifact (a release, a docs-only change, a Guard build that failed) is the normal
+      # fallback, not a failure, and the check below turns it into a notice and the old restore and build.
+      - name: Fetch the Guard job's build of the test project
+        id: guard-build
+        if: steps.gate.outputs.run == 'true' && needs.guard-tests.outputs.darling_build_artifact != ''
+        continue-on-error: true
+        uses: actions/download-artifact@v6
+        with:
+          name: ${{ needs.guard-tests.outputs.darling_build_artifact }}
+          path: .
+
+      # A fetched build that is not for THIS workspace and commit is an error, never a quiet fallback: the tests
+      # find the repo root through [CallerFilePath], so a binary built in another path would read another tree.
+      - name: Check the fetched build is for this workspace and commit
+        id: guard-build-check
+        if: steps.gate.outputs.run == 'true'
+        shell: pwsh
+        env:
+          FETCH_OUTCOME: ${{ steps.guard-build.outcome }}
+          THIS_WORKSPACE: ${{ github.workspace }}
+          THIS_SHA: ${{ github.sha }}
+          REQUIRED_FILES: Darling/Darling.Tests/bin/Release/net10.0-windows/Darling.Tests.dll;Darling/Darling.Tests/obj/project.assets.json
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:FETCH_OUTCOME -ne 'success') {
+            Write-Host "::notice title=Building the test project here::No Guard job build was fetched for this run (fetch outcome '$env:FETCH_OUTCOME'; skipped means the Guard job published none), so this job restores and builds for itself and runs every class, Stage=Guard included."
+            'used=false' | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+            exit 0
+          }
+          $origin = @{}
+          if (Test-Path guard-build-origin.txt) {
+            foreach ($line in Get-Content guard-build-origin.txt) { if ($line -match '^(\w+)=(.*)$') { $origin[$Matches[1]] = $Matches[2] } }
+          }
+          if ($origin['workspace'] -ne $env:THIS_WORKSPACE -or $origin['sha'] -ne $env:THIS_SHA) {
+            Write-Host "::error title=Guard build is for another workspace or commit::The fetched build says workspace '$($origin['workspace'])' at '$($origin['sha'])'; this job is at '$env:THIS_WORKSPACE' at '$env:THIS_SHA'."
+            exit 1
+          }
+          foreach ($file in ($env:REQUIRED_FILES -split ';')) {
+            if (-not (Test-Path $file)) {
+              Write-Host "::error title=Guard build is incomplete::The fetched build has no $file."
+              exit 1
+            }
+          }
+          Write-Host "::notice title=Using the Guard job's build::The test project was built by the Guard job of this run at the same workspace and commit, so this job skips its restore and build and leaves out the Stage=Guard classes that job ran."
+          'used=true' | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
       - name: Setup .NET 10.0
         if: steps.gate.outputs.run == 'true'
         uses: actions/setup-dotnet@v6
         with:
           global-json-file: global.json
-          cache: true
+          cache: ${{ steps.guard-build-check.outputs.used != 'true' }}
           cache-dependency-path: '**/packages.lock.json'
 
       - name: Restore Darling.Tests
-        if: steps.gate.outputs.run == 'true'
+        if: steps.gate.outputs.run == 'true' && steps.guard-build-check.outputs.used != 'true'
         run: dotnet restore Darling/Darling.Tests/Darling.Tests.csproj --locked-mode
 
       - name: Build Darling.Tests
-        if: steps.gate.outputs.run == 'true'
+        if: steps.gate.outputs.run == 'true' && steps.guard-build-check.outputs.used != 'true'
         run: dotnet build Darling/Darling.Tests/Darling.Tests.csproj -c Release --no-restore
 
       # The FULL suite, not a class filter naming the whole-tree guards. Such a filter would be one
@@ -2100,7 +2273,12 @@ jobs:
       # unset, so the gated-live classes skip here just as they do in the build job.
       - name: Run the whole-tree guards
         if: steps.gate.outputs.run == 'true'
-        run: dotnet run --project Darling/Darling.Tests/Darling.Tests.csproj -c Release --no-build
+        env:
+          # 'true' only when this job used the Guard job's build of this run, which proves that job ran the Stage=Guard classes.
+          GUARD_BUILD_USED: ${{ steps.guard-build-check.outputs.used }}
+        run: |
+          $guardFilter = @(if ($env:GUARD_BUILD_USED -eq 'true') { '-trait-'; 'Stage=Guard' })
+          dotnet run --project Darling/Darling.Tests/Darling.Tests.csproj -c Release --no-build -- @guardFilter
 
   # The Lite suite on pull requests and pushes: four shards cut over CLASS NAMES (#3887), balanced
   # by recorded duration since #5208. The build job's single "Run Lite tests" step had grown to
@@ -2279,20 +2457,68 @@ jobs:
           echo "run=${run}" >> "$GITHUB_OUTPUT"
           echo "::notice title=Lite scope::mode=${mode}, shard ${SHARD} runs=${run}"
 
+      # Shared build (#5459 change 2): this run's Guard job already built this test project in Release and uploaded
+      # it before running its tests (see the header on that job). Fetch it instead of restoring and building again.
+      # continue-on-error: no artifact (a release, a docs-only change, a Guard build that failed) is the normal
+      # fallback, not a failure, and the check below turns it into a notice and the old restore and build.
+      - name: Fetch the Guard job's build of the test project
+        id: guard-build
+        if: steps.scope.outputs.run == 'true' && needs.guard-tests.outputs.lite_build_artifact != ''
+        continue-on-error: true
+        uses: actions/download-artifact@v6
+        with:
+          name: ${{ needs.guard-tests.outputs.lite_build_artifact }}
+          path: .
+
+      # A fetched build that is not for THIS workspace and commit is an error, never a quiet fallback: the tests
+      # find the repo root through [CallerFilePath], so a binary built in another path would read another tree.
+      - name: Check the fetched build is for this workspace and commit
+        id: guard-build-check
+        if: steps.scope.outputs.run == 'true'
+        shell: pwsh
+        env:
+          FETCH_OUTCOME: ${{ steps.guard-build.outcome }}
+          THIS_WORKSPACE: ${{ github.workspace }}
+          THIS_SHA: ${{ github.sha }}
+          REQUIRED_FILES: Lite.Tests/bin/Release/net10.0-windows/Lite.Tests.dll;Lite.Tests/obj/project.assets.json
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:FETCH_OUTCOME -ne 'success') {
+            Write-Host "::notice title=Building the test project here::No Guard job build was fetched for this run (fetch outcome '$env:FETCH_OUTCOME'; skipped means the Guard job published none), so this job restores and builds for itself and runs every class, Stage=Guard included."
+            'used=false' | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+            exit 0
+          }
+          $origin = @{}
+          if (Test-Path guard-build-origin.txt) {
+            foreach ($line in Get-Content guard-build-origin.txt) { if ($line -match '^(\w+)=(.*)$') { $origin[$Matches[1]] = $Matches[2] } }
+          }
+          if ($origin['workspace'] -ne $env:THIS_WORKSPACE -or $origin['sha'] -ne $env:THIS_SHA) {
+            Write-Host "::error title=Guard build is for another workspace or commit::The fetched build says workspace '$($origin['workspace'])' at '$($origin['sha'])'; this job is at '$env:THIS_WORKSPACE' at '$env:THIS_SHA'."
+            exit 1
+          }
+          foreach ($file in ($env:REQUIRED_FILES -split ';')) {
+            if (-not (Test-Path $file)) {
+              Write-Host "::error title=Guard build is incomplete::The fetched build has no $file."
+              exit 1
+            }
+          }
+          Write-Host "::notice title=Using the Guard job's build::The test project was built by the Guard job of this run at the same workspace and commit, so this job skips its restore and build and leaves out the Stage=Guard classes that job ran."
+          'used=true' | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
       - name: Setup .NET 10.0
         if: steps.scope.outputs.run == 'true'
         uses: actions/setup-dotnet@v6
         with:
           global-json-file: global.json
-          cache: true
+          cache: ${{ steps.guard-build-check.outputs.used != 'true' }}
           cache-dependency-path: '**/packages.lock.json'
 
       - name: Restore Lite.Tests
-        if: steps.scope.outputs.run == 'true'
+        if: steps.scope.outputs.run == 'true' && steps.guard-build-check.outputs.used != 'true'
         run: dotnet restore Lite.Tests/Lite.Tests.csproj --locked-mode
 
       - name: Build Lite.Tests
-        if: steps.scope.outputs.run == 'true'
+        if: steps.scope.outputs.run == 'true' && steps.guard-build-check.outputs.used != 'true'
         run: dotnet build Lite.Tests/Lite.Tests.csproj -c Release --no-restore
 
       # #5208: the packer's own proof (totality, input-order determinism, the hash fallback, serial-aware weighting). No build needed.
@@ -2317,10 +2543,15 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           LITE_SCOPE_MODE: ${{ steps.scope.outputs.mode }}
+          # 'true' only when this shard used the Guard job's build of this run, which proves that job ran the Stage=Guard classes.
+          GUARD_BUILD_USED: ${{ steps.guard-build-check.outputs.used }}
         run: |
           $ErrorActionPreference = 'Stop'
+          # The cut and the run must agree (#5459): every listing below (the full one the shards cut from and the
+          # Darling-reads one) leaves the Guard classes out exactly when the Guard job ran them. No artifact: all classes.
+          $guardFilter = @(if ($env:GUARD_BUILD_USED -eq 'true') { '-trait-'; 'Stage=Guard' })
           function Get-LiteClasses([string[]] $filter) {
-              $lines = @(dotnet run --project Lite.Tests/Lite.Tests.csproj -c Release --no-build -- -list classes/json @filter)
+              $lines = @(dotnet run --project Lite.Tests/Lite.Tests.csproj -c Release --no-build -- -list classes/json @guardFilter @filter)
               if ($LASTEXITCODE -ne 0) { throw "class listing failed with exit code $LASTEXITCODE" }
               # Only the runner's one-line JSON array is parsed; see the Darling shard step (a CLI notice on stdout).
               $json = @($lines | Where-Object { $_ -match '^\s*\[' })

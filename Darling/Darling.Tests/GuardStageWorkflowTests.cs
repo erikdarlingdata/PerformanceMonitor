@@ -78,7 +78,8 @@ public sealed class GuardStageWorkflowTests
         Assert.DoesNotContain("DARLING_TEST_", job, StringComparison.Ordinal);
         Assert.DoesNotContain("pg-runtime", job, StringComparison.Ordinal);
         Assert.DoesNotContain("lite-tests-timing", job, StringComparison.Ordinal);
-        Assert.DoesNotContain("upload-artifact", job, StringComparison.Ordinal);
+        /* The only uploads are the two built test projects (#5459 change 2), pinned by TheGuardJobUploadsTheBuiltTestProjects_... below. */
+        Assert.Equal(2, Regex.Matches(job, "actions/upload-artifact@").Count);
     }
 
     /// <summary>
@@ -279,6 +280,126 @@ public sealed class GuardStageWorkflowTests
             StringComparison.Ordinal);
         Assert.Contains("::error title=Guard tests failed::The Guard tests job", steps[1], StringComparison.Ordinal);
         Assert.Contains("exit 1", steps[1], StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #5459 change 2: the Guard job uploads each built test project right after its build and BEFORE it runs a test (a
+    /// guard failure still leaves the artifacts), with the producer's workspace and sha beside them, and publishes the
+    /// artifact names as job outputs only when the upload succeeded. A reorder that put the tests first would lose the
+    /// artifacts exactly when a guard fails on a push, where the shards still run.
+    /// </summary>
+    [Fact]
+    public void TheGuardJobUploadsTheBuiltTestProjects_BeforeAnyTestRuns_WithTheWorkspaceAndShaBesideThem()
+    {
+        var job = JobBlock(Yaml(), "guard-tests");
+
+        var build = job.IndexOf("- name: Build both test projects\n", StringComparison.Ordinal);
+        var origin = job.IndexOf("- name: Record where this build was made\n", StringComparison.Ordinal);
+        var uploadDarling = job.IndexOf("- name: Upload the built Darling.Tests for the shards\n", StringComparison.Ordinal);
+        var uploadLite = job.IndexOf("- name: Upload the built Lite.Tests for the shards\n", StringComparison.Ordinal);
+        var run = job.IndexOf("- name: Run the Stage=Guard classes of both suites\n", StringComparison.Ordinal);
+        Assert.True(build > 0 && build < origin && origin < uploadDarling && uploadDarling < uploadLite && uploadLite < run,
+            "the Guard job must build, record the origin, upload both test projects, and only then run the guard classes");
+
+        var recorded = Step(job, "Record where this build was made");
+        Assert.Contains("workspace=$env:PRODUCER_WORKSPACE", recorded, StringComparison.Ordinal);
+        Assert.Contains("sha=$env:PRODUCER_SHA", recorded, StringComparison.Ordinal);
+        Assert.Contains("PRODUCER_WORKSPACE: ${{ github.workspace }}", recorded, StringComparison.Ordinal);
+        Assert.Contains("PRODUCER_SHA: ${{ github.sha }}", recorded, StringComparison.Ordinal);
+
+        foreach (var (stepName, name, project, output, id) in new[]
+        {
+            ("Upload the built Darling.Tests for the shards", "guard-test-build-darling", "Darling/Darling.Tests", "darling_build_artifact", "upload-darling-build"),
+            ("Upload the built Lite.Tests for the shards", "guard-test-build-lite", "Lite.Tests", "lite_build_artifact", "upload-lite-build"),
+        })
+        {
+            var upload = Step(job, stepName);
+            Assert.Contains("id: " + id, upload, StringComparison.Ordinal);
+            Assert.Contains("if: steps.decide.outputs.run == 'true'", upload, StringComparison.Ordinal);
+            Assert.Contains("uses: actions/upload-artifact@v6", upload, StringComparison.Ordinal);
+            Assert.Contains("name: " + name + "\n", upload, StringComparison.Ordinal);
+            Assert.Contains("guard-build-origin.txt", upload, StringComparison.Ordinal);
+            Assert.Contains(project + "/bin/Release", upload, StringComparison.Ordinal);
+            Assert.Contains(project + "/obj/project.assets.json", upload, StringComparison.Ordinal);
+            Assert.Contains("retention-days: 1\n", upload, StringComparison.Ordinal);
+            Assert.Contains("overwrite: true", upload, StringComparison.Ordinal);
+            Assert.Contains("if-no-files-found: error", upload, StringComparison.Ordinal);
+            Assert.Contains(
+                output + ": ${{ steps." + id + ".outcome == 'success' && '" + name + "' || '' }}",
+                job,
+                StringComparison.Ordinal);
+        }
+    }
+
+    /// <summary>
+    /// #5459 change 2, rulings 2 and 3, for the three jobs that build the same test projects the Guard job built. Each
+    /// fetches the artifact of THIS run (no run-id), fails with an error when its workspace or sha differs, skips its
+    /// restore and build and turns off the NuGet cache only when it used the artifact, and leaves Stage=Guard out of
+    /// the class listing it cuts from only then. Without the artifact it builds and runs every class, as before.
+    /// </summary>
+    [Theory]
+    [InlineData("darling-pg", "darling", "steps.filter.outputs.darling == 'true'", "Restore Darling.Tests", "Build Darling.Tests", "Run Darling PG tests")]
+    [InlineData("darling-tree-guards", "darling", "steps.gate.outputs.run == 'true'", "Restore Darling.Tests", "Build Darling.Tests", "Run the whole-tree guards")]
+    [InlineData("lite-tests", "lite", "steps.scope.outputs.run == 'true'", "Restore Lite.Tests", "Build Lite.Tests", "Run Lite tests (shard)")]
+    public void TheConsumers_UseTheGuardBuildOnlyForThisRunAndWorkspace_AndLeaveGuardOutOnlyThen(
+        string jobKey, string suite, string gate, string restoreStep, string buildStep, string runStep)
+    {
+        var job = JobBlock(Yaml(), jobKey);
+        Assert.Contains("needs: [gate, ", job.Split("\n    steps:\n")[0], StringComparison.Ordinal);
+        Assert.Contains("guard-tests", job.Split("\n    steps:\n")[0], StringComparison.Ordinal);
+
+        /* The fetch: this run's artifact, by the producer's output, nothing from another run; a miss is a notice. */
+        var fetch = Step(job, "Fetch the Guard job's build of the test project");
+        Assert.Contains("id: guard-build\n", fetch, StringComparison.Ordinal);
+        Assert.Contains($"if: {gate} && needs.guard-tests.outputs.{suite}_build_artifact != ''", fetch, StringComparison.Ordinal);
+        Assert.Contains("continue-on-error: true", fetch, StringComparison.Ordinal);
+        Assert.Contains("uses: actions/download-artifact@v6", fetch, StringComparison.Ordinal);
+        Assert.Contains($"name: ${{{{ needs.guard-tests.outputs.{suite}_build_artifact }}}}", fetch, StringComparison.Ordinal);
+        Assert.DoesNotContain("run-id", fetch, StringComparison.Ordinal);
+        Assert.DoesNotContain("github-token", fetch, StringComparison.Ordinal);
+
+        /* The check: a different workspace or sha is an error, no artifact is a notice and the old path. */
+        var check = Step(job, "Check the fetched build is for this workspace and commit");
+        Assert.Contains("id: guard-build-check\n", check, StringComparison.Ordinal);
+        Assert.Contains($"if: {gate}\n", check, StringComparison.Ordinal);
+        Assert.Contains("FETCH_OUTCOME: ${{ steps.guard-build.outcome }}", check, StringComparison.Ordinal);
+        Assert.Contains("THIS_WORKSPACE: ${{ github.workspace }}", check, StringComparison.Ordinal);
+        Assert.Contains("THIS_SHA: ${{ github.sha }}", check, StringComparison.Ordinal);
+        Assert.Contains("$origin['workspace'] -ne $env:THIS_WORKSPACE -or $origin['sha'] -ne $env:THIS_SHA", check, StringComparison.Ordinal);
+        Assert.Contains("::error title=Guard build is for another workspace or commit::", check, StringComparison.Ordinal);
+        Assert.Contains("::notice title=Building the test project here::", check, StringComparison.Ordinal);
+        Assert.Contains("'used=true'", check, StringComparison.Ordinal);
+        Assert.Contains("'used=false'", check, StringComparison.Ordinal);
+
+        /* Restore, build and the NuGet cache wait for the check and run only when the artifact was not used. */
+        const string notUsed = "steps.guard-build-check.outputs.used != 'true'";
+        Assert.Contains($"if: {gate} && {notUsed}\n", Step(job, restoreStep), StringComparison.Ordinal);
+        Assert.Contains($"if: {gate} && {notUsed}\n", Step(job, buildStep), StringComparison.Ordinal);
+        Assert.Contains($"cache: ${{{{ {notUsed} }}}}", Step(job, "Setup .NET 10.0"), StringComparison.Ordinal);
+        Assert.True(
+            job.IndexOf("- name: Check the fetched build", StringComparison.Ordinal) < job.IndexOf("- name: Setup .NET 10.0", StringComparison.Ordinal),
+            "the check has to come before setup-dotnet, whose cache input reads its output");
+
+        /* Guard is left out only through the one filter the check's output feeds; there is no literal exclusion. */
+        var run = Step(job, runStep);
+        Assert.Contains("GUARD_BUILD_USED: ${{ steps.guard-build-check.outputs.used }}", run, StringComparison.Ordinal);
+        Assert.Contains("$guardFilter = @(if ($env:GUARD_BUILD_USED -eq 'true') { '-trait-'; 'Stage=Guard' })", run, StringComparison.Ordinal);
+        Assert.Single(Regex.Matches(run, "'-trait-'"));
+        Assert.DoesNotContain("-trait- Stage=Guard", run, StringComparison.Ordinal);
+
+        if (jobKey == "darling-pg")
+        {
+            Assert.Contains("-- -list classes/json @guardFilter)", run, StringComparison.Ordinal);
+        }
+        else if (jobKey == "lite-tests")
+        {
+            /* Every listing, the Darling-reads one included, so the cut and the run agree. */
+            Assert.Contains("-- -list classes/json @guardFilter @filter)", run, StringComparison.Ordinal);
+        }
+        else
+        {
+            Assert.Contains("--no-build -- @guardFilter", run, StringComparison.Ordinal);
+        }
     }
 
     private static string Yaml() => RepoFile.ReadRepoFileLf(".github", "workflows", "build.yml");
