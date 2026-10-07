@@ -14,6 +14,7 @@ using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using Microsoft.Data.SqlClient;
 using PerformanceMonitor.Analysis.Baselines;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Ui;
 using PerformanceMonitor.Common;
 
@@ -716,6 +717,47 @@ ORDER BY collection_time";
     }
 
     /// <summary>
+    /// #5449: the rows the per-procedure history CHART plots: the history rows plus a zero row at each collector run that
+    /// stored nothing for this procedure between its first and last stored row (see <see cref="ProcedureHistoryIdleRuns"/>).
+    /// The collector keeps no row for a procedure that did no work in a cycle, where an older store kept one with deltas 0, so
+    /// without these the chart draws a line across the quiet minutes. Only SUCCESS runs count: a failed run says nothing about
+    /// the procedure. The grid keeps listing the stored rows.
+    /// </summary>
+    public async Task<List<ProcedureStatsHistoryRow>> GetProcedureStatsHistoryChartRowsAsync(int serverId, IReadOnlyList<ProcedureStatsHistoryRow> history)
+    {
+        if (history.Count == 0)
+        {
+            return new List<ProcedureStatsHistoryRow>();
+        }
+
+        var ordered = history.OrderBy(r => r.CollectionTime).ToList();
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+        command.CommandText = @"
+SELECT collection_time
+FROM v_collection_log
+WHERE server_id = $1
+AND   collector_name = 'procedure_stats'
+AND   status = 'SUCCESS'
+AND   collection_time >= $2
+AND   collection_time <= $3
+ORDER BY collection_time";
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        command.Parameters.Add(new DuckDBParameter { Value = ordered[0].CollectionTime });
+        command.Parameters.Add(new DuckDBParameter { Value = ordered[^1].CollectionTime });
+
+        var runs = new List<DateTime>();
+        using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            runs.Add(reader.GetDateTime(0));
+        }
+
+        var idle = ProcedureHistoryIdleRuns.IdleRunTimes(ordered.Select(r => r.CollectionTime).ToList(), runs);
+        return ProcedureHistoryIdleRuns.ChartRows(ordered, idle);
+    }
+
+    /// <summary>
     /// Looks up a cached query plan from DuckDB by server_id and query_hash.
     /// Returns the most recently collected plan XML, or null if not found.
     /// </summary>
@@ -913,7 +955,9 @@ OPTION(RECOMPILE);',
         command.CommandText = @"
 SELECT
     date_trunc('hour', collection_time) AS bucket,
-    COUNT(DISTINCT object_name) AS proc_count,
+    /* #5449: a procedure that did no work in a cycle has no stored row now (old data still has its zero-delta row), so
+       the count is of procedures WITH work: the same number on both. */
+    COUNT(DISTINCT object_name) FILTER (WHERE COALESCE(delta_execution_count, 0) > 0 OR COALESCE(delta_worker_time, 0) > 0 OR COALESCE(delta_elapsed_time, 0) > 0) AS proc_count,
     COALESCE(SUM(delta_worker_time), 0) / 1000.0 AS total_cpu_ms,
     COALESCE(SUM(delta_elapsed_time), 0) / 1000.0 AS total_elapsed_ms,
     COALESCE(SUM(delta_logical_reads), 0) AS total_reads,
@@ -1348,7 +1392,7 @@ LEFT JOIN texts t ON t.sql_handle = j.text_handle;";
     /// never shifts, mirroring the wait/perfmon trend reads' own width parameter.
     /// </summary>
     internal static string DurationTrendChartSql(string relation, string dbClause, int widthParamIndex) => $@"
-WITH raw AS
+WITH {(relation == "v_procedure_stats" ? ProcedureCollectionsSql(dbClause) : $@"raw AS
 (
     SELECT
         collection_time,
@@ -1365,7 +1409,7 @@ WITH raw AS
     AND   collection_time >= $2
     AND   collection_time <= $3
     GROUP BY collection_time
-),
+),")}
 rated AS
 (
     SELECT
@@ -1386,6 +1430,114 @@ SELECT
 FROM rated{(dbClause.Length == 0 ? "" : "\nWHERE EXISTS (SELECT 1 FROM rated WHERE matched_rows > 0)")}
 GROUP BY 1
 ORDER BY 1";
+
+    /// <summary>
+    /// #5449: the collections of the procedure grain, as the leading CTEs of both bucketed duration-trend reads, ending in
+    /// <c>raw</c> with the query grain's columns (<c>collection_time</c>, <c>total_elapsed_ms</c>, <c>total_executions</c>,
+    /// <c>interval_seconds</c>, and <c>matched_rows</c> under a database filter). The collector stores no row for a procedure
+    /// that did no work in a cycle, so the grain's time axis is the collector's SUCCESS runs: a run that stored rows is a point
+    /// at its stored collection_time, a run that stored none is an idle point (work 0) at its log time. The log stamps a run's
+    /// start and the rows follow it, so run k owns [t_k, t_k+1): it is idle when no stored collection falls there, and a slip
+    /// adds or drops a 0, never double-counts seconds. A point's seconds are its gap to the previous point, NULL (unrated) past
+    /// <see cref="CollectorDeltaCalculator.DefaultMaxGapSeconds"/> (the collector's own limit, so a point it measured is rated).
+    /// A restart collection (every stored interval 0) stays unrated whatever the gap (#3540), the store's first point keeps its
+    /// stored interval, and an idle point with no previous point is unrated. A collection that returns after a quiet stretch
+    /// carries its whole delta in the run that stored it, over that run's gap, never its own long interval: bucket totals are
+    /// exact. Both tables are read from an hour before <c>$2</c> so the first in-window point has its previous point, and the
+    /// points before <c>$2</c> are dropped after the LAG. With no log (an imported or old store) the axis is the stored
+    /// collections alone. The database filter stays inside the sums; an idle point has 0 matched rows.
+    ///
+    /// <para>Rows and runs are read to <c>$3</c> plus the gap policy and the points are cut at <c>$3</c> last: a window can end between
+    /// a run's log time and its rows (a few hundred ms later), and a run whose rows sit past <c>$3</c> would otherwise read as idle
+    /// and plot a false 0 at its log time. The next run's time (the LEAD) is read past <c>$3</c> for the same reason (#5449).</para>
+    /// </summary>
+    internal static string ProcedureCollectionsSql(string dbClause)
+    {
+        var withFilter = dbClause.Length != 0;
+        var storedMatched = withFilter ? $",\n        COUNT(*) FILTER (WHERE {DbInPredicate(dbClause)}) AS matched_rows" : "";
+        var axisMatched = withFilter ? ",\n        matched_rows" : "";
+        var idleMatched = withFilter ? ",\n        CAST(0 AS BIGINT) AS matched_rows" : "";
+        const int gap = CollectorDeltaCalculator.DefaultMaxGapSeconds;
+        return $@"stored AS
+(
+    SELECT
+        collection_time,
+        {FilteredSum("delta_elapsed_time", dbClause)} / 1000.0 AS total_elapsed_ms,
+        {FilteredSum("delta_execution_count", dbClause)} AS total_executions,
+        MAX(sample_interval_seconds) AS stored_interval,
+        TRUE AS is_stored{storedMatched}
+    FROM v_procedure_stats
+    WHERE server_id = $1
+    AND   collection_time >= $2 - to_seconds({gap})
+    AND   collection_time <= $3 + to_seconds({gap})
+    GROUP BY collection_time
+),
+axis AS
+(
+    SELECT
+        collection_time,
+        total_elapsed_ms,
+        total_executions,
+        stored_interval,
+        is_stored{axisMatched}
+    FROM stored
+    UNION ALL
+    SELECT
+        r.t AS collection_time,
+        CAST(0 AS DOUBLE PRECISION) AS total_elapsed_ms,
+        CAST(0 AS BIGINT) AS total_executions,
+        CAST(NULL AS BIGINT) AS stored_interval,
+        FALSE AS is_stored{idleMatched}
+    FROM
+    (
+        SELECT
+            collection_time AS t,
+            LEAD(collection_time) OVER (ORDER BY collection_time) AS next_t
+        FROM v_collection_log
+        WHERE server_id = $1
+        AND   collector_name = 'procedure_stats'
+        AND   status = 'SUCCESS'
+        AND   collection_time >= $2 - to_seconds({gap})
+        AND   collection_time <= $3 + to_seconds({gap})
+    ) AS r
+    WHERE NOT EXISTS
+    (
+        SELECT 1
+        FROM stored AS s
+        WHERE s.collection_time >= r.t
+        AND   (r.next_t IS NULL OR s.collection_time < r.next_t)
+    )
+),
+raw AS
+(
+    SELECT
+        collection_time,
+        total_elapsed_ms,
+        total_executions,
+        CASE
+            -- #5449: a stored collection whose rows ALL carry interval 0 reads as a restart and stays unrated, its seconds out of the
+            -- bucket. This is the chosen three-state rule. It also catches a collection of only 0/0 rows (a quiet server whose procedure
+            -- returns at or past the 3600 s gap policy): SQL cannot tell that from a collector restart, so the minute is unrated and
+            -- counted in unrated_collections rather than rated 0.
+            WHEN is_stored AND stored_interval = 0 THEN NULL
+            WHEN prev_t IS NOT NULL
+            THEN CASE
+                     WHEN extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', prev_t))) <= {gap}
+                     THEN extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', prev_t)))
+                 END
+            WHEN is_stored THEN NULLIF(stored_interval, 0)
+        END AS interval_seconds{axisMatched}
+    FROM
+    (
+        SELECT
+            *,
+            LAG(collection_time) OVER (ORDER BY collection_time) AS prev_t
+        FROM axis
+    ) AS a
+    WHERE collection_time >= $2
+    AND   collection_time <= $3
+),";
+    }
 
     /// <summary>
     /// Whether this server has EVER recorded a query-stats sample, ignoring any window.
