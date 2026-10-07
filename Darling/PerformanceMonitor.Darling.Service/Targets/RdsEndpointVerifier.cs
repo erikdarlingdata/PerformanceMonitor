@@ -272,7 +272,7 @@ public sealed class RdsEndpointVerifier
     {
         if (cache.Count >= MaxEntries && !cache.ContainsKey(key))
         {
-            /* A concurrent clear can empty the cache between the count and the enumeration: nothing to remove then. */
+            /* A concurrent clear can empty the cache between the count and this walk: nothing to remove then. */
             var oldest = cache.OrderBy(pair => atUtc(pair.Value)).Select(pair => (KeyValuePair<TKey, TValue>?)pair).FirstOrDefault();
 
             if (oldest is { } entry)
