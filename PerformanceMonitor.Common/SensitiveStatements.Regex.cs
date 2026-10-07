@@ -588,6 +588,17 @@ public static partial class SensitiveStatements
     /// Runs a judge under an elapsed-time budget. Once <see cref="Elapsed"/> reaches the limit
     /// (<see cref="Spent"/>), every later value is returned as named without running the judge and is counted
     /// unjudged.
+    /// <para><b>Growth (#5477).</b> The limit the constructor takes is the floor. Each distinct document that
+    /// enters the budget through <c>SensitiveStatements.Xml</c>, <c>Json</c> or <c>TextUnder</c> (<see cref="Earn"/>)
+    /// adds <see cref="EarnPerMegabyte"/> per 1,048,576 characters of its length, proportionally, up to
+    /// <see cref="MaxLimit"/> in all (a floor above the cap stays as it is). Values nested inside a document add
+    /// nothing, and neither does a document the budget has already judged. So a blocking alert whose incidents each
+    /// carry a large report is not starved by the first, and one alert or one web or MCP read still stalls for at
+    /// most the cap plus one value's match timeout.</para>
+    /// <para><b>Memo (#5477).</b> The same entry points judge a distinct document once per budget: a repeat of
+    /// the same text (the alert's attachment and its incident's are one string) returns exactly what the first
+    /// call returned, a withheld marker included, and charges nothing. The memo lives on the budget and dies with
+    /// it; nothing is cached across budgets.</para>
     /// </summary>
     internal sealed class JudgeBudget(
         TimeSpan limit,
@@ -599,8 +610,60 @@ public static partial class SensitiveStatements
         private readonly Lazy<Func<string, Verdict>> _shared = shared ?? s_judge;
         private readonly Func<TimeSpan> _now = clock ?? (static () => Stopwatch.GetElapsedTime(0));
         private TimeSpan _elapsed;
+        private TimeSpan _earned;
+        private Dictionary<(int Kind, string Text, int Cap), string?>? _memo;
 
-        public TimeSpan Limit { get; } = limit;
+        /// <summary>Added to the limit per 1,048,576 characters of each distinct document (#5477).</summary>
+        internal static readonly TimeSpan EarnPerMegabyte = TimeSpan.FromMilliseconds(500);
+
+        /// <summary>The most a budget can grow to (#5477). A floor above it stays as it is.</summary>
+        internal static readonly TimeSpan MaxLimit = TimeSpan.FromSeconds(10);
+
+        private readonly TimeSpan _floor = limit;
+
+        /// <summary>The floor plus what the documents earned, never above <see cref="MaxLimit"/>.</summary>
+        public TimeSpan Limit
+        {
+            get
+            {
+                var grown = _floor + _earned;
+                var cap = _floor > MaxLimit ? _floor : MaxLimit;
+                return grown > cap ? cap : grown;
+            }
+        }
+
+        /// <summary>XML and JSON documents the entry points judged, memo hits and plain text values not counted (#5477).</summary>
+        public int DocumentPasses { get; private set; }
+
+        /// <summary>Grows the limit for one distinct document of <paramref name="characters"/> characters
+        /// (#5477): 0.5 s per 1,048,576, proportional.</summary>
+        public void Earn(int characters)
+        {
+            if (characters > 0)
+            {
+                _earned += TimeSpan.FromTicks((long)(EarnPerMegabyte.Ticks * (characters / 1048576.0)));
+            }
+        }
+
+        /// <summary>The result an entry point returned for this exact text before, if any (#5477). A string is found
+        /// by reference first, then by ordinal equality.</summary>
+        internal bool TryRecall(int kind, string text, int cap, out string? result)
+        {
+            result = null;
+            return _memo is not null && _memo.TryGetValue((kind, text, cap), out result);
+        }
+
+        /// <summary>Remembers what an entry point returned for this text and counts the pass (#5477). The text kind is a
+        /// plain text value, which is not counted as a document.</summary>
+        internal void Remember(int kind, string text, int cap, string? result)
+        {
+            if (kind != MemoText)
+            {
+                DocumentPasses++;
+            }
+
+            (_memo ??= new())[(kind, text, cap)] = result;
+        }
 
         /// <summary>True when this budget runs the production judge, not a fake one a test handed it (#5477): only then may a
         /// whole-document pre-check stand in for judging every value.</summary>

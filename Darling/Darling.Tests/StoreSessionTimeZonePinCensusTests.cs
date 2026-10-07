@@ -67,6 +67,9 @@ public sealed class StoreSessionTimeZonePinCensusTests
            connection, not the store's. */
         "DarlingWorker.cs:ReadPgStatementTextAsync",
         "DarlingWorker.cs:RunTestHypotheticalIndexAsync",
+
+        /* The RDS endpoint check's fresh unpooled login to a MONITORED target (runtime.ConnectionString), never the store. */
+        "RdsEndpointVerifier.cs:ProbeLoginAsync",
     };
 
     [Fact]

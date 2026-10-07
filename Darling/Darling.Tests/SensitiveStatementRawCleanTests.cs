@@ -151,7 +151,8 @@ public class SensitiveStatementRawCleanTests
     [Fact]
     public void ASpentBudget_WithholdsTheDocument_AsBefore()
     {
-        var budget = new SensitiveStatements.JudgeBudget(TimeSpan.Zero);
+        var budget = new SensitiveStatements.JudgeBudget(SensitiveStatements.ReadBudget);
+        budget.AddElapsed(TimeSpan.FromSeconds(60));
 
         var result = SensitiveStatements.Xml("<r><n>" + Plain + "</n></r>", budget);
 

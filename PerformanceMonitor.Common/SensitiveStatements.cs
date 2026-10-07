@@ -110,9 +110,10 @@ public static partial class SensitiveStatements
     /// from withheld text, and never the input.</summary>
     public const string JsonRefusal = "Output withheld: the sensitive-statement filter could not read this result.";
 
-    /// <summary>One read-time call may spend this long judging and parsing (the outermost <see cref="Xml"/> or
-    /// <see cref="Json"/> call; every nested value shares it). One value may still overrun by its own match
-    /// timeout, so a call is bounded by about 1.75 s.</summary>
+    /// <summary>The floor of one read-time budget (the outermost <see cref="Xml"/> or <see cref="Json"/> call; every
+    /// nested value shares it). The budget grows by 0.5 s per 1,048,576 characters of each distinct document it judges,
+    /// up to <see cref="JudgeBudget.MaxLimit"/> (10 s), so a call is bounded by about 10 s plus one value's match
+    /// timeout (#5477).</summary>
     internal static readonly TimeSpan ReadBudget = TimeSpan.FromMilliseconds(1500);
 
     /// <summary>
@@ -133,9 +134,25 @@ public static partial class SensitiveStatements
     /// </summary>
     public static string Json(string output) => Json(output, new JudgeBudget(ReadBudget));
 
+    internal const int MemoXml = 0;
+    internal const int MemoJson = 1;
+    internal const int MemoText = 2;
+
     /// <summary><see cref="Xml(string?, int)"/> under a budget the caller owns, so one outermost call can share it
-    /// across every value it judges.</summary>
+    /// across every value it judges. A budget-taking entry point (#5477): the document earns the budget its time and
+    /// is judged once, so a repeat of the same text returns the first result.</summary>
     internal static string? Xml(string? xml, JudgeBudget budget, int maxOutputChars = int.MaxValue)
+    {
+        if (string.IsNullOrEmpty(xml)) return xml;
+        if (budget.TryRecall(MemoXml, xml, maxOutputChars, out var recalled)) return recalled;
+        budget.Earn(xml.Length);
+        var result = XmlWalk(xml, budget, maxOutputChars);
+        budget.Remember(MemoXml, xml, maxOutputChars, result);
+        return result;
+    }
+
+    /// <summary>The walk itself. Nested values inside a document come here, so they neither earn nor memo (#5477).</summary>
+    private static string? XmlWalk(string? xml, JudgeBudget budget, int maxOutputChars)
     {
         if (string.IsNullOrEmpty(xml)) return xml;
         if (RawTextHoldsNothingNamed(budget, xml)) return xml;
@@ -157,9 +174,20 @@ public static partial class SensitiveStatements
         }
     }
 
-    /// <summary><see cref="Json(string)"/> under a budget the caller owns.</summary>
-    internal static string Json(string output, JudgeBudget budget) =>
-        JsonCore(output, value => TextUnder(budget, value), value => Xml(value, budget), JsonRefusal);
+    /// <summary><see cref="Json(string)"/> under a budget the caller owns. A budget-taking entry point (#5477): the
+    /// whole result earns the budget its time once, and the values and XML documents inside it neither earn nor memo.</summary>
+    internal static string Json(string output, JudgeBudget budget)
+    {
+        if (string.IsNullOrEmpty(output)) return JsonWalk(output, budget);
+        if (budget.TryRecall(MemoJson, output, 0, out var recalled)) return recalled!;
+        budget.Earn(output.Length);
+        var result = JsonWalk(output, budget);
+        budget.Remember(MemoJson, output, 0, result);
+        return result;
+    }
+
+    private static string JsonWalk(string output, JudgeBudget budget) =>
+        JsonCore(output, value => TextWalk(budget, value), value => XmlWalk(value, budget, int.MaxValue), JsonRefusal);
 
     /// <summary>True when <paramref name="value"/>, or its HTML-decoded form, is named or not judged in time.</summary>
     private static bool IsNamedUnder(JudgeBudget budget, string value) =>
@@ -168,6 +196,17 @@ public static partial class SensitiveStatements
 
     /// <summary><see cref="Text(string?)"/> under a budget: a spent budget or a failed match gives the marker.</summary>
     internal static string? TextUnder(JudgeBudget budget, string? value)
+    {
+        if (string.IsNullOrEmpty(value)) return value;
+        if (budget.TryRecall(MemoText, value, 0, out var recalled)) return recalled;
+        budget.Earn(value.Length);
+        var result = TextWalk(budget, value);
+        budget.Remember(MemoText, value, 0, result);
+        return result;
+    }
+
+    /// <summary>The judge for one value inside a walk: no earning and no memo (#5477).</summary>
+    private static string? TextWalk(JudgeBudget budget, string? value)
     {
         if (string.IsNullOrEmpty(value)) return value;
         try

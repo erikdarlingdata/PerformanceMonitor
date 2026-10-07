@@ -39,7 +39,10 @@ public class PerformanceCalendarDataTests : IClassFixture<SharedDuckDbFixture>, 
        nobody changed. Two months back is always inside a three-month horizon and always a finished month,
        so the still-forming-day clamp never applies; the day-number comments below ("07-10") read as
        "day 10 of the fixture month". */
-    private static readonly DateTime MonthStart = new DateTime(DateTime.UtcNow.Year, DateTime.UtcNow.Month, 1, 0, 0, 0, DateTimeKind.Utc).AddMonths(-2);
+    private static readonly DateTime MonthStart = FirstOfMonth(DateTime.UtcNow).AddMonths(-2);
+
+    // Year and month from one clock read: two reads could straddle a month boundary.
+    private static DateTime FirstOfMonth(DateTime now) => new(now.Year, now.Month, 1, 0, 0, 0, DateTimeKind.Utc);
     private static readonly DateTime MonthEnd = MonthStart.AddMonths(1);
 
     public PerformanceCalendarDataTests(SharedDuckDbFixture fixture)

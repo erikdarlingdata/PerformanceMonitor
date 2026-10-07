@@ -890,6 +890,117 @@ public sealed class SensitiveStatementsTests
         Assert.Equal(SensitiveStatements.Verdict.Clean, budget.Judge("SELECT 1"));
     }
 
+    // ---- Budget growth and memo (#5477) ------------------------------------------------------------------
+
+    private const int Megabyte = 1_048_576;
+
+    /// <summary>An XML document of exactly <paramref name="length"/> characters that holds one plain statement.</summary>
+    private static string PaddedXml(int length, char pad = 'x') =>
+        "<a>" + new string(pad, length - "<a></a>".Length) + "</a>";
+
+    [Fact]
+    public void ABudgetGrowsHalfASecondPerMegabyteOfEachDistinctDocument_UpToTheCap()
+    {
+        var floor = TimeSpan.FromMilliseconds(1500);
+
+        var one = new SensitiveStatements.JudgeBudget(floor);
+        one.Earn(4 * Megabyte);
+        Assert.Equal(TimeSpan.FromSeconds(3.5), one.Limit);
+
+        var three = new SensitiveStatements.JudgeBudget(floor);
+        for (var i = 0; i < 3; i++)
+        {
+            three.Earn(4 * Megabyte);
+        }
+
+        Assert.Equal(TimeSpan.FromSeconds(7.5), three.Limit);
+
+        var half = new SensitiveStatements.JudgeBudget(floor);
+        half.Earn(Megabyte / 2);
+        Assert.Equal(TimeSpan.FromSeconds(1.75), half.Limit);
+
+        var huge = new SensitiveStatements.JudgeBudget(floor);
+        huge.Earn(40 * Megabyte);
+        Assert.Equal(TimeSpan.FromSeconds(10), huge.Limit);
+
+        // A floor above the cap (the 15 s session budget) is never cut down.
+        var session = new SensitiveStatements.JudgeBudget(TimeSpan.FromSeconds(15));
+        session.Earn(40 * Megabyte);
+        Assert.Equal(TimeSpan.FromSeconds(15), session.Limit);
+    }
+
+    [Fact]
+    public void TheEntryPointsEarnForADocumentOnce_AndAMemoHitEarnsNothing()
+    {
+        var calls = 0;
+        var budget = new SensitiveStatements.JudgeBudget(TimeSpan.FromSeconds(1.5), _ =>
+        {
+            calls++;
+            return SensitiveStatements.Verdict.Clean;
+        });
+        var doc = PaddedXml(Megabyte);
+
+        var first = SensitiveStatements.Xml(doc, budget);
+        var callsAfterFirst = calls;
+        Assert.Same(doc, first);
+        Assert.Equal(TimeSpan.FromSeconds(2), budget.Limit);
+        Assert.Equal(1, budget.DocumentPasses);
+
+        // The same instance, then an equal copy: both are hits that run no judge and earn nothing.
+        Assert.Same(doc, SensitiveStatements.Xml(doc, budget));
+        Assert.Same(doc, SensitiveStatements.Xml(PaddedXml(Megabyte), budget));
+        Assert.Equal(callsAfterFirst, calls);
+        Assert.Equal(TimeSpan.FromSeconds(2), budget.Limit);
+        Assert.Equal(1, budget.DocumentPasses);
+
+        // A different document of the same size earns again.
+        SensitiveStatements.Xml(PaddedXml(Megabyte, 'y'), budget);
+        Assert.Equal(TimeSpan.FromSeconds(2.5), budget.Limit);
+        Assert.Equal(2, budget.DocumentPasses);
+    }
+
+    [Fact]
+    public void AMemoHitReturnsTheWithheldMarkerTheFirstCallReturned()
+    {
+        var calls = 0;
+        var budget = new SensitiveStatements.JudgeBudget(TimeSpan.FromSeconds(1.5), _ =>
+        {
+            calls++;
+            return SensitiveStatements.Verdict.Named;
+        });
+        var doc = PaddedXml(1000);
+
+        var first = SensitiveStatements.Xml(doc, budget);
+        Assert.Contains(SensitiveStatements.PlaceholderText, first, StringComparison.Ordinal);
+        var callsAfterFirst = calls;
+        Assert.Same(first, SensitiveStatements.Xml(doc, budget));
+        Assert.Equal(callsAfterFirst, calls);
+
+        var text = new string('t', 500);
+        Assert.Equal(SensitiveStatements.PlaceholderText, SensitiveStatements.TextUnder(budget, text));
+        var callsAfterText = calls;
+        Assert.Equal(SensitiveStatements.PlaceholderText, SensitiveStatements.TextUnder(budget, text));
+        Assert.Equal(callsAfterText, calls);
+    }
+
+    [Fact]
+    public void AJsonResultEarnsOnceForItsWholeLength_AndTheValuesInsideEarnNothing()
+    {
+        var budget = new SensitiveStatements.JudgeBudget(TimeSpan.FromSeconds(1.5), _ => SensitiveStatements.Verdict.Clean);
+        var json = "{\"plan\":\"" + new string('x', Megabyte) + "\",\"other\":\"" + new string('y', Megabyte) + "\"}";
+
+        Assert.Same(json, SensitiveStatements.Json(json, budget));
+
+        var expected = new SensitiveStatements.JudgeBudget(TimeSpan.FromSeconds(1.5));
+        expected.Earn(json.Length);
+        Assert.Equal(expected.Limit, budget.Limit);
+        Assert.Equal(1, budget.DocumentPasses);
+
+        Assert.Same(json, SensitiveStatements.Json(json, budget));
+        Assert.Equal(expected.Limit, budget.Limit);
+        Assert.Equal(1, budget.DocumentPasses);
+    }
+
     // ---- Measurements (recorded in the test diagnostics on every run) -------------------------------------
 
     [Fact]

@@ -48,7 +48,7 @@ public sealed class AzureSiblingGrowthTests : IClassFixture<SharedDuckDbFixture>
     public void Dispose() => _seedConn?.Dispose();
 
     private static readonly DateTime Collected = DateTime.SpecifyKind(
-        new DateTime(DateTime.UtcNow.Ticks - (DateTime.UtcNow.Ticks % TimeSpan.TicksPerMinute)), DateTimeKind.Unspecified);
+        new DateTime(DateTime.UtcNow.Ticks / TimeSpan.TicksPerMinute * TimeSpan.TicksPerMinute), DateTimeKind.Unspecified);
 
     /// <summary>One stored size row. A sibling row has no database id, file id or physical name.</summary>
     private async Task SeedAsync(string database, int? fileId, string fileName, double? total, double? used, DateTime? at = null)

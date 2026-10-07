@@ -39,7 +39,10 @@ public sealed class EventListDatabaseFilterToolTests : IClassFixture<SharedDuckD
     private readonly LocalDataService _service;
     private DuckDBConnection? _seedConn;
     private long _nextId = 950000;
-    private readonly DateTime _planBase = new(DateTime.UtcNow.Year, DateTime.UtcNow.Month, DateTime.UtcNow.Day, DateTime.UtcNow.Hour, DateTime.UtcNow.Minute, 0, DateTimeKind.Utc);
+    private readonly DateTime _planBase = MinuteOf(DateTime.UtcNow);
+
+    // One clock read: five reads of UtcNow could straddle a minute (or hour) boundary.
+    private static DateTime MinuteOf(DateTime now) => new(now.Year, now.Month, now.Day, now.Hour, now.Minute, 0, DateTimeKind.Utc);
 
     public EventListDatabaseFilterToolTests(SharedDuckDbFixture fixture)
     {

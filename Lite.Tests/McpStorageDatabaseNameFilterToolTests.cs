@@ -335,11 +335,14 @@ public sealed class McpStorageDatabaseNameFilterToolTests : IClassFixture<Shared
     private static DateTime Truncate(DateTime t) =>
         new(t.Year, t.Month, t.Day, t.Hour, t.Minute, t.Second, DateTimeKind.Unspecified);
 
-    private static DateTime Minute(int minutesAgo)
-    {
-        var now = DateTime.UtcNow;
-        return new DateTime(now.Year, now.Month, now.Day, now.Hour, now.Minute, 0, DateTimeKind.Unspecified).AddMinutes(-minutesAgo);
-    }
+    // One clock read per test instance (cut to the minute). Reading the clock on every call split rows
+    // seeded together across two minutes whenever a minute boundary passed mid-seed.
+    private readonly DateTime _minuteAnchor = MinuteOf(DateTime.UtcNow);
+
+    private static DateTime MinuteOf(DateTime now) =>
+        new(now.Year, now.Month, now.Day, now.Hour, now.Minute, 0, DateTimeKind.Unspecified);
+
+    private DateTime Minute(int minutesAgo) => _minuteAnchor.AddMinutes(-minutesAgo);
 
     private async Task ExecAsync(string sql, params object[] values)
     {
