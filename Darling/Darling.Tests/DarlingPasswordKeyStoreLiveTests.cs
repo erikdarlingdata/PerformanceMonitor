@@ -344,6 +344,54 @@ public sealed class DarlingPasswordKeyStoreLiveTests
     }
 
     [Fact]
+    public async Task TheFirstConfigView_CarriesThePins_OnlyWhenThePinSnapshotRanBeforeIt()
+    {
+        string? Open(string stored) => stored.StartsWith("legacy-", StringComparison.Ordinal) ? "p@ss-not-real" : throw new CryptographicException("not a blob");
+        var windows = new LegacyDpapi(true, _ => "p@ss-not-real");
+        var ct = TestContext.Current.CancellationToken;
+
+        // The order the service runs (#5455): pins first, then the view. Every saved old-format password is pinned.
+        await using var pinnedFirst = await StoreFixture.CreateAsync();
+        var firstSucceeded = false;
+        try
+        {
+            await pinnedFirst.SeedServersAsync();
+            await pinnedFirst.StartAsync(isWindows: true, unprotect: Open);
+            var view = await new StoreConfigProvider(pinnedFirst.Source).LoadViewAsync(new DarlingConfig(), ct);
+            Assert.NotNull(view);
+            var server = Assert.Single(view.EnabledServers, s => s.Name == "alpha-example");
+            Assert.NotNull(server.SecretPin);
+            Assert.NotNull(server.RemediationPin);
+            Assert.NotNull(view.Smtp.SecretPin);
+            Assert.Equal(0, StoreConfigProvider.CountPasswordsToEnterAgain(view.EnabledServers, view.Smtp, windows));
+            firstSucceeded = true;
+        }
+        finally
+        {
+            await pinnedFirst.CleanupAsync(firstSucceeded);
+        }
+
+        // The old order: the view is read before the snapshot, so the same rows carry no pin and are counted.
+        await using var viewFirst = await StoreFixture.CreateAsync();
+        var secondSucceeded = false;
+        try
+        {
+            await viewFirst.SeedServersAsync();
+            var view = await new StoreConfigProvider(viewFirst.Source).LoadViewAsync(new DarlingConfig(), ct);
+            Assert.NotNull(view);
+            await viewFirst.StartAsync(isWindows: true, unprotect: Open);
+            var server = Assert.Single(view.EnabledServers, s => s.Name == "alpha-example");
+            Assert.Null(server.SecretPin);
+            Assert.Equal(3, StoreConfigProvider.CountPasswordsToEnterAgain(view.EnabledServers, view.Smtp, windows));
+            secondSucceeded = true;
+        }
+        finally
+        {
+            await viewFirst.CleanupAsync(secondSucceeded);
+        }
+    }
+
+    [Fact]
     public async Task OnLinux_ThePendingMarkerBecomesSkipped_AndNothingIsPinned()
     {
         await using var store = await StoreFixture.CreateAsync();
