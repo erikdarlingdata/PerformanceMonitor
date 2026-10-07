@@ -77,7 +77,7 @@ public sealed class DarlingMcpConfigHistoryToolsSurfaceAndSqlTests
 
     [Theory]
     [InlineData("get_server_config_changes", "server_name,hours_back,as_of")]
-    [InlineData("get_database_config_changes", "server_name,hours_back,as_of")]
+    [InlineData("get_database_config_changes", "server_name,hours_back,as_of,database_name")]
     [InlineData("get_trace_flag_changes", "server_name,hours_back,as_of")]
     [InlineData("get_database_scoped_config", "server_name,database_name")]
     [InlineData("get_query_store_health", "server_name,database_name")]
@@ -870,7 +870,12 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
 
             var names = root.EnumerateObject().Select(p => p.Name).ToList();
             var at = names.IndexOf("hours_back");
-            Assert.Equal(["effective_start", "window_truncated", "truncation_note", "change_count"], names.Skip(at + 1).Take(4));
+            /* #5244 PR6: get_database_config_changes echoes database_name (null for all) after the window notice. */
+            Assert.Equal(
+                tool == "get_database_config_changes"
+                    ? ["effective_start", "window_truncated", "truncation_note", "database_name", "change_count"]
+                    : ["effective_start", "window_truncated", "truncation_note", "change_count"],
+                names.Skip(at + 1).Take(tool == "get_database_config_changes" ? 5 : 4));
         });
     }
 

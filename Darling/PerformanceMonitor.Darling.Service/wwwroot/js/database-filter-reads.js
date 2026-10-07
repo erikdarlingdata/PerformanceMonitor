@@ -26,6 +26,9 @@ export const FILTERED = new Set([
   // Duration trends, Query Store clutter, long queries and plan corrections (#5244 PR4).
   "get_query_duration_trend", "get_procedure_duration_trend", "get_query_store_duration_trend",
   "get_query_store_clutter", "get_long_query_completions", "get_plan_corrections",
+  // Configuration, Query Store health, configuration changes, severe errors and the default trace (#5244 PR6).
+  "get_database_config", "get_database_scoped_config", "get_query_store_health", "get_database_config_changes",
+  "get_health_parser_severe_errors", "get_default_trace_events",
 ]);
 
 /** Database-scoped reads that cannot take the filter yet, so they show every database and say so (the "All databases"
@@ -35,9 +38,6 @@ export const FILTERED = new Set([
 export const UNFILTERED = new Set([
   // File I/O, sizes and the persistent version store.
   "get_file_io_trend", "get_file_io_stats", "get_database_sizes", "get_table_index_sizes", "get_pvs_stats",
-  // Configuration, Query Store health, configuration changes, severe errors and the default trace.
-  "get_database_config", "get_database_scoped_config", "get_query_store_health", "get_database_config_changes",
-  "get_health_parser_severe_errors", "get_default_trace_events",
   // The deadlock reads: they stay here.
   "get_deadlock_trend", "get_deadlocks", "get_deadlock_detail",
 ]);
