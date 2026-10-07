@@ -363,14 +363,42 @@ ANALYZE collect.plan_regression_daily_built;", ct);
                and it reads only that day's ten rows of the 90,010. */
             var due = await TotalsScansOfGcAsync(connection, 9, new DateOnly(2026, 3, 10), ct);
             Assert.NotEmpty(due);
+
+            /* Both leading columns are in the index condition: a day test the index cannot use (a cast, say) would leave the probe
+               on the server alone and read every day of it, which a small due day of a small server would hide. */
+            Assert.All(due, node => Assert.True(node.IndexCond is not null && node.IndexCond.Contains("server_id", StringComparison.Ordinal)
+                && node.IndexCond.Contains("day", StringComparison.Ordinal), $"index condition: {node.IndexCond ?? "none"}"));
             Assert.All(due, node => Assert.True(node.Index == "ux_plan_regression_daily", $"{node.NodeType} on {node.Index ?? "no index"}"));
             Assert.True(due.Sum(node => node.RowsRead) <= 10, $"the cleanup read {due.Sum(node => node.RowsRead)} totals rows for ten due ones");
 
             /* Nothing is read when nothing is due: the built-row delete returns no key, so no totals statement runs and the
                totals table is not touched. After the disabled server's day goes, a second pass removes nothing. */
+            /* The explain above runs the statement text on its own. What GcAsync really runs is counted through
+               pg_stat_statements (when this rig loads it; CI does): one due key is one keyed totals delete that touches a few
+               blocks, where a delete with a predicate of its own would read the whole 90,010-row table, and a pass with
+               nothing due runs no totals delete at all. */
+            var counted = await StartStatementCountAsync(connection, ct);
             Assert.Equal(1L, await PlanRegressionDaily.GcAsync(connection, Now, ct));
+            if (counted)
+            {
+                var (calls, blocks) = await TotalsDeleteStatementsAsync(connection, ct);
+                Assert.True(calls == 1, $"the cleanup ran {calls} totals deletes for one due key");
+                Assert.True(blocks <= 60, $"the cleanup's totals delete touched {blocks} blocks for ten due rows");
+            }
+
             Assert.Equal(90000L, await ScalarAsync(connection, "SELECT count(*) FROM collect.plan_regression_daily", ct));
+            if (counted)
+            {
+                await ExecAsync(connection, "SELECT pg_stat_statements_reset(0, (SELECT oid FROM pg_database WHERE datname = current_database()), 0)", ct);
+            }
+
             Assert.Equal(0L, await PlanRegressionDaily.GcAsync(connection, Now, ct));
+            if (counted)
+            {
+                var (calls, _) = await TotalsDeleteStatementsAsync(connection, ct);
+                Assert.True(calls == 0, $"the cleanup ran {calls} totals deletes when nothing had expired");
+            }
+
             Assert.Equal(90000L, await ScalarAsync(connection, "SELECT count(*) FROM collect.plan_regression_daily", ct));
 
             /* The live days stay, and an expired day of an enabled server goes with its totals. */
@@ -382,7 +410,35 @@ ANALYZE collect.plan_regression_daily_built;", ct);
         });
     }
 
-    private readonly record struct TotalsScan(string NodeType, string? Index, double RowsRead);
+    /// <summary>Turns on pg_stat_statements for this database and clears its counters. False when the rig does not preload it.</summary>
+    private static async Task<bool> StartStatementCountAsync(NpgsqlConnection connection, CancellationToken ct)
+    {
+        await using var preloadCommand = new NpgsqlCommand("SELECT current_setting('shared_preload_libraries')", connection);
+        var preload = (string)(await preloadCommand.ExecuteScalarAsync(ct))!;
+        if (!preload.Split(',').Select(name => name.Trim()).Contains("pg_stat_statements"))
+        {
+            return false;
+        }
+
+        await ExecAsync(connection, "CREATE EXTENSION IF NOT EXISTS pg_stat_statements", ct);
+        await ExecAsync(connection, "SELECT pg_stat_statements_reset(0, (SELECT oid FROM pg_database WHERE datname = current_database()), 0)", ct);
+        return true;
+    }
+
+    /// <summary>The calls and the blocks touched (hit plus read) of the statements that delete from the totals table, in this database.</summary>
+    private static async Task<(long Calls, long Blocks)> TotalsDeleteStatementsAsync(NpgsqlConnection connection, CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand(@"
+SELECT COALESCE(SUM(calls), 0)::bigint, COALESCE(SUM(shared_blks_hit + shared_blks_read), 0)::bigint
+FROM pg_stat_statements
+WHERE dbid = (SELECT oid FROM pg_database WHERE datname = current_database())
+AND   query ~ '^DELETE FROM collect\.plan_regression_daily(\s|$)';", connection);
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        await reader.ReadAsync(ct);
+        return (reader.GetInt64(0), reader.GetInt64(1));
+    }
+
+    private readonly record struct TotalsScan(string NodeType, string? Index, string? IndexCond, double RowsRead);
 
     /// <summary>Runs <see cref="PlanRegressionDaily.GcTotalsSql"/> for one key under EXPLAIN ANALYZE in a transaction that is
     /// rolled back, and returns every access to the totals table: its node type, index and rows read (rows returned,
@@ -408,7 +464,7 @@ ANALYZE collect.plan_regression_daily_built;", ct);
             {
                 var loops = node.GetProperty("Actual Loops").GetDouble();
                 var rows = node.GetProperty("Actual Rows").GetDouble() * loops;
-                found.Add(new TotalsScan(node.GetProperty("Node Type").GetString()!, node.TryGetProperty("Index Name", out var index) ? index.GetString() : null, rows));
+                found.Add(new TotalsScan(node.GetProperty("Node Type").GetString()!, node.TryGetProperty("Index Name", out var index) ? index.GetString() : null, node.TryGetProperty("Index Cond", out var cond) ? cond.GetString() : null, rows));
             }
 
             if (node.TryGetProperty("Plans", out var plans))
