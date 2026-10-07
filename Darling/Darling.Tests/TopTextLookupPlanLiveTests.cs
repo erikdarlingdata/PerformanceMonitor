@@ -99,6 +99,7 @@ public sealed class TopTextLookupPlanLiveTests
             "delta_elapsed_time AS elapsed_time_sum FROM collect.query_stats) AS f";
         var sql = TopRankings.Apply(DarlingDataReader.TopQueriesHourlySql, TopRanking.Cpu, hourly: true)
             .Replace("$FROM$", standIn, StringComparison.Ordinal)
+            .Replace("$IOSUMS$", TopRankings.HourlyNoIoSums, StringComparison.Ordinal)
             .Replace("$CEIL$", "", StringComparison.Ordinal);
         var plan = await ExplainAsync(connection, sql, ct, serverId, now.AddHours(-24), now.AddMinutes(5),
             P(NpgsqlDbType.Integer, Top), P(NpgsqlDbType.Array | NpgsqlDbType.Text, null), P(NpgsqlDbType.Integer, Candidates));
@@ -143,6 +144,7 @@ public sealed class TopTextLookupPlanLiveTests
             /* The stand-in keeps the window rows only, so the fallback's ten-day-old row is read by latest_any from raw, as in life. */
             var sql = TopRankings.Apply(DarlingDataReader.TopQueriesHourlySql, TopRanking.Cpu, hourly: true)
                 .Replace("$FROM$", standIn, StringComparison.Ordinal)
+                .Replace("$IOSUMS$", TopRankings.HourlyNoIoSums, StringComparison.Ordinal)
                 .Replace("$CEIL$", "", StringComparison.Ordinal);
             await using var command = new NpgsqlCommand(sql, connection);
             command.Parameters.Add(P(NpgsqlDbType.Integer, serverId));
@@ -156,7 +158,7 @@ public sealed class TopTextLookupPlanLiveTests
             {
                 while (await reader.ReadAsync(ct))
                 {
-                    if (!reader.IsDBNull(7))
+                    if (!reader.IsDBNull(10))
                     {
                         texts[(reader.IsDBNull(0) ? "(null)" : reader.GetString(0)) + "/" + (reader.IsDBNull(1) ? "(null)" : reader.GetString(1))] =
                             reader.IsDBNull(6) ? null : reader.GetString(6);
@@ -212,6 +214,7 @@ public sealed class TopTextLookupPlanLiveTests
                 now.AddDays(-2).ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture) + "') AS f";
             var sql = TopRankings.Apply(DarlingDataReader.TopQueriesHourlySql, TopRanking.Cpu, hourly: true)
                 .Replace("$FROM$", standIn, StringComparison.Ordinal)
+                .Replace("$IOSUMS$", TopRankings.HourlyNoIoSums, StringComparison.Ordinal)
                 .Replace("$CEIL$", "", StringComparison.Ordinal);
             var plan = await ExplainAsync(connection, sql, ct, serverId, now.AddHours(-24), now.AddMinutes(5),
                 P(NpgsqlDbType.Integer, Top), P(NpgsqlDbType.Array | NpgsqlDbType.Text, null), P(NpgsqlDbType.Integer, Candidates));

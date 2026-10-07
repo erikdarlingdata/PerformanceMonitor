@@ -122,6 +122,61 @@ public sealed class TopRankingTests
     }
 
     /// <summary>
+    /// #5329: <c>query_stats_io_hourly</c> carries the reads sums, so on the io shape EVERY ranking has a statement,
+    /// reads included; the three sums are projected there and as typed NULLs on the stitched shape.
+    /// </summary>
+    [Fact]
+    public void OnTheIoShape_ReadsHasAStatement_RankedByTheLogicalReadsSum()
+    {
+        foreach (var ranking in Enum.GetValues<TopRanking>())
+        {
+            Assert.True(TopRankings.HourlyCarries(ranking, io: true));
+        }
+
+        var sql = TopRankings.Apply(DarlingDataReader.TopQueriesHourlySql, TopRanking.Reads, hourly: true, io: true);
+        Assert.Contains("SUM(logical_reads_sum) AS rank_metric", sql, StringComparison.Ordinal);
+        Assert.Contains("SUM(worker_time_sum) AS rank_cpu", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain(TopRankings.RankAnchor, sql, StringComparison.Ordinal);
+        Assert.Throws<InvalidOperationException>(() => TopRankings.Apply(DarlingDataReader.TopQueriesHourlySql, TopRanking.Reads, hourly: true, io: false));
+        Assert.Contains("SUM(physical_reads_sum)", TopRankings.HourlyIoSums, StringComparison.Ordinal);
+        Assert.Contains("SUM(logical_writes_sum)", TopRankings.HourlyIoSums, StringComparison.Ordinal);
+        Assert.DoesNotContain("SUM(", TopRankings.HourlyNoIoSums, StringComparison.Ordinal);
+        Assert.Contains(DarlingDataReader.TopQueriesHourlyIoSumsPlaceholder, DarlingDataReader.TopQueriesHourlySql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #5329 route table over the io floor and raw's oldest row, window start 10 days back. io absent and io empty both
+    /// answer a null floor. Covering io (floor at or before the start) takes EVERY ranking. Otherwise a reads ranking
+    /// reads raw when raw reaches the start, else whichever reaches further back (a tie goes to raw), and any other
+    /// ranking keeps the stitched route.
+    /// </summary>
+    [Theory]
+    [InlineData(TopRanking.Reads, null, 4, HourlyRoute.Raw)]        // io absent or empty, raw does not reach: raw
+    [InlineData(TopRanking.Reads, null, null, HourlyRoute.Raw)]     // nothing anywhere
+    [InlineData(TopRanking.Reads, null, 12, HourlyRoute.Raw)]       // io absent, raw reaches the start
+    [InlineData(TopRanking.Reads, 20, 4, HourlyRoute.Io)]           // io covers (floor 20 days back)
+    [InlineData(TopRanking.Reads, 10, 4, HourlyRoute.Io)]           // io floor exactly at the start covers
+    [InlineData(TopRanking.Reads, 20, 12, HourlyRoute.Io)]          // io covers though raw does too
+    [InlineData(TopRanking.Reads, 6, 4, HourlyRoute.Io)]            // io partial but deeper than raw
+    [InlineData(TopRanking.Reads, 4, 6, HourlyRoute.Raw)]           // io partial, raw is deeper
+    [InlineData(TopRanking.Reads, 5, 5, HourlyRoute.Raw)]           // a tie goes to raw
+    [InlineData(TopRanking.Reads, 5, 12, HourlyRoute.Raw)]          // io partial, raw reaches the start
+    [InlineData(TopRanking.Reads, 5, null, HourlyRoute.Io)]         // io partial, raw empty
+    [InlineData(TopRanking.Cpu, null, 4, HourlyRoute.Stitched)]
+    [InlineData(TopRanking.Cpu, 5, 4, HourlyRoute.Stitched)]        // io partial: today's route
+    [InlineData(TopRanking.Cpu, 20, 4, HourlyRoute.Io)]
+    [InlineData(TopRanking.Duration, 20, 4, HourlyRoute.Io)]
+    [InlineData(TopRanking.Executions, 20, null, HourlyRoute.Io)]
+    [InlineData(TopRanking.Duration, 5, 12, HourlyRoute.Stitched)]
+    [InlineData(TopRanking.Executions, null, null, HourlyRoute.Stitched)]
+    public void ChooseHourlyRoute_FollowsTheIoFloorAndRawsReach(TopRanking ranking, int? ioDaysBack, int? rawDaysBack, HourlyRoute expected)
+    {
+        var now = new DateTime(2026, 6, 1, 0, 0, 0, DateTimeKind.Unspecified);
+        DateTime? Back(int? days) => days is null ? null : now.AddDays(-days.Value);
+        Assert.Equal(expected, TopRankings.ChooseHourlyRoute(ranking, now.AddDays(-10), Back(ioDaysBack), Back(rawDaysBack)));
+    }
+
+    /// <summary>
     /// The rollups keep worker time, elapsed time and execution counts and no logical reads, so a reads ranking has
     /// no hourly statement: the reader routes it to raw, and asking Apply for one is a programming error.
     /// </summary>

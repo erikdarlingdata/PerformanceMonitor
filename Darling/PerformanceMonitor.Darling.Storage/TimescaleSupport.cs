@@ -16,6 +16,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using Npgsql;
+using NpgsqlTypes;
 using PerformanceMonitor.Collectors;
 
 namespace PerformanceMonitor.Darling.Storage;
@@ -1624,6 +1625,16 @@ $do$";
         (CreateQueryStatsIntervalHourlySql,       QueryStatsIntervalHourlyView),
         (CreateProcedureStatsIntervalHourlySql,   ProcedureStatsIntervalHourlyView),
         (CreateQueryStatsDbIntervalHourlySql,     QueryStatsDbIntervalHourlyView),
+        /* The two hourly rollups that CARRY LOGICAL READS (#5329), appended after the interval pair they copy.
+           The query one groups by statement (query_hash, sql_handle), so it is an UNBOUNDED-cardinality refresh
+           like its sibling; the procedure one has no per-statement column and is deployment-bounded. The
+           phase grid RE-DERIVES from this list (LightHourlyRefreshCount 12 -> 14 and the rest, see
+           RefreshCeilingProvenancePinTests), and because the compression band is keyed on registry position,
+           APPENDING here moves the compression hour of every DAILY and BASELINE member after these by +2:
+           ConvergeCompressionScheduleAsync re-phases them on an existing store (the same proven path as every
+           earlier registration; TimescaleAggregateCompressionTests pins the re-phase). The band is 22 of 23. */
+        (CreateQueryStatsIoHourlySql,             QueryStatsIoHourlyView),
+        (CreateProcedureStatsIoHourlySql,         ProcedureStatsIoHourlyView),
     };
 
     /// <summary>
@@ -2004,6 +2015,35 @@ $do$";
         return FrozenRollupAggregates.Any(a => string.Equals(a.View, bare, StringComparison.Ordinal));
     }
 
+    /// <summary>
+    /// The rollups that read a raw table directly and must NOT hold its purge (#5329, the #1661 rule: a fresh
+    /// rollup must not hold the raw purge): the two io hourlies. Both raw-purge gates honor it: the coverage
+    /// verdict leaves them out of <see cref="RawTierCoverage"/>, and the service-triggered purge's hole gate
+    /// (<c>DarlingWorker.TriggerRawPurgeCoreAsync</c>) skips them through <see cref="HoldsRawPurge"/>.
+    ///
+    /// <para><b>Why the hole gate needs its own exemption.</b> The hole gate walks
+    /// <see cref="MaterializationHoleTargets"/>, which derives from every registered rollup, so registering an
+    /// io view put it under the gate without anyone naming it. An io view is created WITH NO DATA and its
+    /// refresh policy reaches back only <see cref="HourlyRefreshStartSpan"/> (a day), so a store that took this
+    /// build holds up to <see cref="RawRetentionSpan"/> of raw hours the io view never saw. The purge range
+    /// starts at the oldest raw chunk, so those hours sit in it until the chunk drops, and the repair walk
+    /// closes at most <see cref="MaterializationHoleRepairCapBuckets"/> (24) buckets per start. A purge gated on
+    /// them would hold query_stats and procedure_stats (the largest tables) for as many restarts as it takes,
+    /// which is the unbounded raw growth the #1661 rule exists to prevent. What the exemption costs is the
+    /// documented one: the io view is partial for that window (<c>--backfill-rollups</c> fills it), and every
+    /// reader already falls back to raw below the io floor.</para>
+    /// </summary>
+    public static readonly IReadOnlyList<string> RawPurgeUngatedRollups = new[]
+    {
+        QueryStatsIoHourlyView,
+        ProcedureStatsIoHourlyView,
+    };
+
+    /// <summary>Does <paramref name="view"/> hold the raw purge when it has a hole? False for
+    /// <see cref="RawPurgeUngatedRollups"/>; true for every other rollup that reads a raw table.</summary>
+    public static bool HoldsRawPurge(string view)
+        => !RawPurgeUngatedRollups.Contains(view, StringComparer.Ordinal);
+
     /// <summary>Detaches an EXISTING refresh policy from a frozen legacy rollup, if the store still carries one
     /// from before #3653's LC — <c>if_exists</c>, so a store that has never had one, or has already lost it,
     /// changes nothing. Issued once per <see cref="FrozenRollupAggregates"/> member, every start, by
@@ -2040,6 +2080,16 @@ $do$";
     /// <summary><see cref="QueryStatsIntervalHourlyView"/>'s database-grain sibling — the successor of
     /// <see cref="QueryStatsDbHourlyView"/>, carrying the same I/O sums FinOps reads.</summary>
     public const string QueryStatsDbIntervalHourlyView = "query_stats_db_interval_hourly";
+
+    /// <summary>The per-query hourly rollup that CARRIES LOGICAL READS (#5329): <see cref="QueryStatsIntervalHourlyView"/>'s
+    /// text, every column, plus the three I/O sums the database-grain rollup carries. Named "io" for them.
+    /// HOURLY ONLY, on purpose: the daily tier is not read for a Top Queries ranking, and a daily would take the
+    /// compression band to 24 of 23 (see <see cref="AggregateCompressionBandFirstHour"/>); see
+    /// <see cref="CreateQueryStatsIoHourlySql"/>.</summary>
+    public const string QueryStatsIoHourlyView = "query_stats_io_hourly";
+
+    /// <summary><see cref="QueryStatsIoHourlyView"/>'s procedure_stats sibling (#5329).</summary>
+    public const string ProcedureStatsIoHourlyView = "procedure_stats_io_hourly";
 
     /// <summary>The INTERVAL-HONEST successor DAILY of <see cref="QueryStatsDailyView"/> (#3653, A6) —
     /// hierarchical from <see cref="QueryStatsIntervalHourlyView"/>, not from the legacy hourly its sibling
@@ -2291,6 +2341,78 @@ SELECT
     max(delta_execution_count) AS execution_count_max,
     sum(sample_interval_seconds) AS sample_interval_seconds_sum,
     count(*) AS sample_count
+FROM collect.procedure_stats
+WHERE sample_interval_seconds IS DISTINCT FROM 0
+GROUP BY server_id, server_name, database_name, schema_name, object_name, bucket
+WITH NO DATA";
+
+    /// <summary>
+    /// The per-query hourly rollup that keeps LOGICAL READS (#5329): <see cref="CreateQueryStatsIntervalHourlySql"/>'s
+    /// text (same dimensions, same <c>WHERE sample_interval_seconds IS DISTINCT FROM 0</c>, every column) plus
+    /// <c>logical_reads_sum</c>, <c>physical_reads_sum</c> and <c>logical_writes_sum</c>, named as the database-grain
+    /// rollup names them (<see cref="CreateQueryStatsDbIntervalHourlySql"/>).
+    ///
+    /// <para><b>Why a new aggregate rather than a new column.</b> A continuous aggregate's query cannot take a
+    /// new column (#1661, see <see cref="CreateQueryStatsDbIntervalHourlySql"/>); a DROP + recreate would refill
+    /// from a few days of raw and destroy the 90-day hourly. So the interval pair stays exactly as it is and this
+    /// is a SIBLING, <c>WITH NO DATA</c>, created by the ensure sweep like the others (no PgMigrations rung:
+    /// existence is the gate). A reads ranking reads it once it reaches the window's start; before that, raw.
+    /// HOURLY ONLY (see <see cref="QueryStatsIoHourlyView"/>).</para>
+    /// </summary>
+    public const string CreateQueryStatsIoHourlySql = @"CREATE MATERIALIZED VIEW IF NOT EXISTS collect.query_stats_io_hourly
+WITH (timescaledb.continuous) AS
+SELECT
+    server_id,
+    server_name,
+    database_name,
+    query_hash,
+    sql_handle,
+    time_bucket('1 hour', collection_time) AS bucket,
+    sum(delta_worker_time) AS worker_time_sum,
+    min(delta_worker_time) AS worker_time_min,
+    max(delta_worker_time) AS worker_time_max,
+    sum(delta_elapsed_time) AS elapsed_time_sum,
+    min(delta_elapsed_time) AS elapsed_time_min,
+    max(delta_elapsed_time) AS elapsed_time_max,
+    sum(delta_execution_count) AS execution_count_sum,
+    min(delta_execution_count) AS execution_count_min,
+    max(delta_execution_count) AS execution_count_max,
+    sum(sample_interval_seconds) AS sample_interval_seconds_sum,
+    count(*) AS sample_count,
+    sum(delta_logical_reads) AS logical_reads_sum,
+    sum(delta_physical_reads) AS physical_reads_sum,
+    sum(delta_logical_writes) AS logical_writes_sum
+FROM collect.query_stats
+WHERE sample_interval_seconds IS DISTINCT FROM 0
+GROUP BY server_id, server_name, database_name, query_hash, sql_handle, bucket
+WITH NO DATA";
+
+    /// <summary><see cref="CreateQueryStatsIoHourlySql"/>'s procedure_stats sibling (#5329):
+    /// <see cref="CreateProcedureStatsIntervalHourlySql"/>'s text plus the three I/O sums. No per-statement
+    /// column, so it is deployment-bounded (the sub-3 s refresh class).</summary>
+    public const string CreateProcedureStatsIoHourlySql = @"CREATE MATERIALIZED VIEW IF NOT EXISTS collect.procedure_stats_io_hourly
+WITH (timescaledb.continuous) AS
+SELECT
+    server_id,
+    server_name,
+    database_name,
+    schema_name,
+    object_name,
+    time_bucket('1 hour', collection_time) AS bucket,
+    sum(delta_worker_time) AS worker_time_sum,
+    min(delta_worker_time) AS worker_time_min,
+    max(delta_worker_time) AS worker_time_max,
+    sum(delta_elapsed_time) AS elapsed_time_sum,
+    min(delta_elapsed_time) AS elapsed_time_min,
+    max(delta_elapsed_time) AS elapsed_time_max,
+    sum(delta_execution_count) AS execution_count_sum,
+    min(delta_execution_count) AS execution_count_min,
+    max(delta_execution_count) AS execution_count_max,
+    sum(sample_interval_seconds) AS sample_interval_seconds_sum,
+    count(*) AS sample_count,
+    sum(delta_logical_reads) AS logical_reads_sum,
+    sum(delta_physical_reads) AS physical_reads_sum,
+    sum(delta_logical_writes) AS logical_writes_sum
 FROM collect.procedure_stats
 WHERE sample_interval_seconds IS DISTINCT FROM 0
 GROUP BY server_id, server_name, database_name, schema_name, object_name, bucket
@@ -3989,9 +4111,10 @@ WITH NO DATA";
     ///
     /// <para><b>So: the small-residual reading is conditional on how long this job runs, and what
     /// invalidates it is that runtime approaching <see cref="RefreshPhaseSlotSeconds"/>.</b> At 896 s
-    /// against a 1260-second slot the margin is 364 seconds — the clearance the population above carries, a
-    /// property of that closed record rather than of current load (it was 184 s against #3653's 1,080 s slot;
-    /// the A6 freeze re-derived the window back to 21 minutes); the heaviest
+    /// against a 1140-second slot the margin is 244 seconds — the clearance the population above carries, a
+    /// property of that closed record rather than of current load (it was 364 s against the 1,260 s slot of
+    /// the A6 freeze, and 184 s against #3653's 1,080 s one; #5329's two io hourlies re-derived the window to
+    /// 19 minutes); the heaviest
     /// slot is excluded WHOLE rather than guarded on the guard band being shorter than the refresh rather
     /// than on the refresh filling the slot (see <see cref="CompressionPhaseMinutes"/>). A value at or past
     /// the slot width is asserted as a failure rather than accommodated: past that point the refresh runs
@@ -4000,10 +4123,10 @@ WITH NO DATA";
     /// <para><b>THE LIVE ENVELOPE, which the census has now COLLAPSED onto that clearance rather than
     /// leaving beside it (#3119, #3166).</b> Over <c>2026-09-07</c> — one closed day, its 24 runs read from
     /// <c>timescaledb_information.job_history</c> at one row per run — this job's maximum was
-    /// <b>896.1 s</b>. That leaves <b>363.9 s</b> of the slot, <b>28.8%</b> of it, and sits <b>153.9 s</b>
+    /// <b>896.1 s</b>. That leaves <b>243.9 s</b> of the slot, <b>21.3%</b> of it, and sits <b>53.9 s</b>
     /// BELOW <see cref="RefreshSlotWarningSeconds"/>, which <see cref="ClassifyRefreshSlotHeadroom"/> bands
-    /// <see cref="RefreshSlotHeadroom.InsideSlot"/> — by 153.9 s, at the A6 freeze's re-derived 1,260 s window
-    /// (183.9 s, 17.0% and 3.9 s against #3653's 1,080 s). #3119 had to state these figures apart from the
+    /// <see cref="RefreshSlotHeadroom.InsideSlot"/> — by 53.9 s, at #5329's re-derived 1,140 s window
+    /// (153.9 s and 28.8% at the A6 freeze's 1,260 s window; 3.9 s against #3653's 1,080 s). #3119 had to state these figures apart from the
     /// clearance because the constant was the maximum of a SAMPLE and the census exceeded it. They agree to
     /// the second — and that agreement is a COINCIDENCE ABOUT WHERE ONE RUN LANDED rather than an identity
     /// of populations (#3182). This day's runs are a SUBSET of the population above, not the whole of it:
@@ -4100,8 +4223,8 @@ WITH NO DATA";
 
     /// <summary>
     /// The line at which the heaviest hourly refresh's LIVE runtime is worth a warning — five sixths of
-    /// <see cref="RefreshPhaseSlotSeconds"/>, so 900 s against today's 1,080 s window (1,050 s against
-    /// #3174's 1,260 s, before #3653's three hourly successors re-derived it).
+    /// <see cref="RefreshPhaseSlotSeconds"/>, so 950 s against today's 1,140 s window (1,050 s against
+    /// the 1,260 s of #3174 and #3653's A6 freeze, before #5329's two io hourlies re-derived it).
     ///
     /// <para><b>Why this exists at all, which is the whole of #3044.</b> The assertion on
     /// <see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/> bounds a CONSTANT, and the thing it bounds is
@@ -4116,7 +4239,7 @@ WITH NO DATA";
     /// 293 s — 26.6% to 47.1% of the window — so a line at 83.3% leaves the peak of THAT set more than a
     /// third of the window below it, which is what keeps it off the load those five represent. And it must
     /// leave usable lead
-    /// time: the remaining sixth is 210 s here, while the walk that carries this job through the hour advances
+    /// time: the remaining sixth is 190 s here, while the walk that carries this job through the hour advances
     /// by its own runtime each cycle (see the finish-to-start note on
     /// <see cref="SetCompressionSchedulePhaseSql"/>), so the warning lands while the job still finishes inside
     /// its slot and the grid's stated precondition is still TRUE.</para>
@@ -4124,16 +4247,17 @@ WITH NO DATA";
     /// <para><b>The alternative, and the reason it is rejected — which #3174 had to RE-TAKE rather than
     /// restate, because the old reason stopped being true — and which #3653 re-took once more, because it
     /// came back.</b> The alternative that tempts here is the slot less one
-    /// <see cref="CompressionPhaseGuardMinutes"/> band, 1020 s, and it sits ABOVE
-    /// <see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/> at #3653's A6 freeze's 21-minute window, as it
-    /// did NOT under #3653's 18-minute window (840 s) and did at #3174's 21-minute window (1,020 s). Above the ceiling was
+    /// <see cref="CompressionPhaseGuardMinutes"/> band, 900 s, and it sits ABOVE
+    /// <see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/> at #5329's 19-minute window, as it did NOT
+    /// under #3653's 18-minute window (840 s) and did at the 21-minute window of #3174 and the A6 freeze
+    /// (1,020 s). Above the ceiling was
     /// whole of its original rejection, since a line under the recorded ceiling warns on the very run the
     /// compression grid is sized against; #3174's re-derivation took that argument away by shrinking the
     /// guard band from half a uniform slot to the light refreshes' own ceiling, leaving both lines clear of
     /// the ceiling and 30 s apart, so the ordering no longer discriminated and lead time argued mildly FOR
     /// the lower one. What rejected it then, and still rejects it whichever way the ordering falls, is
     /// COUPLING, a property the old geometry could not have exposed: the guard band
-    /// is a DECLARED width for the FIFTEEN OTHER refresh policies, so the alternative would make the
+    /// is a DECLARED width for the FOURTEEN OTHER refresh policies, so the alternative would make the
     /// heaviest refresh's watch line move whenever the light class's width was re-declared. While that width
     /// was <c>ceil(OtherHourlyRefreshObservedCeilingSeconds / 60)</c> the coupling was worse still — the
     /// line would have moved whenever a light refresh got slower — and #3188's inversion narrows the
@@ -4146,8 +4270,9 @@ WITH NO DATA";
     /// what makes a crossing mean something.</b> The census re-derivation (#3166) put that constant at
     /// <b>896 s</b>, which INVERTED the ordering against the 750 s line a 15-minute slot produced — and
     /// restoring it is one of the two things the re-derived grid is for. Against the window the hour can
-    /// spare, this line is 1,050 s and the ceiling is 154 s below it (#3653's 18-minute window had it at 900 s
-    /// and 4 s; #3653's A6 freeze restored #3174's 21-minute window), so a
+    /// spare, this line is 950 s and the ceiling is 54 s below it (#3653's 18-minute window had it at 900 s
+    /// and 4 s; #3653's A6 freeze restored #3174's 21-minute window, 1,050 s and 154 s; #5329's two io
+    /// hourlies took it to the 19-minute window), so a
     /// reading in this band is again past the whole of the record the compression grid is sized against: a
     /// different signal calling for a different response, rather than a restatement of the grid's own
     /// sizing. <b>The relationship is what is pinned, not the two numbers</b> — a ceiling that rose past
@@ -4157,9 +4282,9 @@ WITH NO DATA";
     /// that changes anything — and at four seconds of margin the next re-derivation has no geometry left to
     /// give and has to take a member OFF the grid or a minute off the compression band.</para>
     ///
-    /// <para><b>The alternative's ordering is ABOVE the ceiling at #3653's A6 freeze</b>: 1,260 - 240 = 1,020 s
-    /// sits 124 s above the 896 s constant, so coupling stands as the sole reason for the rejection — the
-    /// ordering argument is gone again, as it was at #3174's 21-minute window. TimescaleSupportTests pins both
+    /// <para><b>The alternative's ordering is ABOVE the ceiling at #5329</b>: 1,140 - 240 = 900 s
+    /// sits only 4 s above the 896 s constant (124 s at the 21-minute window), so coupling stands as the
+    /// reason for the rejection and the ordering argument is available again only by a hair. TimescaleSupportTests pins both
     /// reasons and says which one remains if a narrower window re-takes the ordering.</para>
     /// </summary>
     public static int RefreshSlotWarningSeconds =>
@@ -4580,7 +4705,17 @@ WITH NO DATA";
     /// <para><b>THE CENSUS.</b> Post-boundary, the maximum is <b>226.8</b> s over <b>874</b> runs of
     /// <b>12</b> views, with 95th percentile <b>42.2</b> s and median <b>0.8</b> s. Zero rows are removed by
     /// the succeeded/finish filter (<b>874</b> of <b>874</b>), so this is the whole of the span rather than a
-    /// status-selected part of it. <b>ONE STORE'S, on the same precondition
+    /// status-selected part of it. <b>TWELVE OF FOURTEEN, since #5329.</b> The read predates the two io
+    /// hourlies, so it covers 12 of the 14 light views the constant now bounds; the 2 registered after the
+    /// read are unmeasured, and are held under this bound by SHAPE rather than by a reading:
+    /// <see cref="QueryStatsIoHourlyView"/> reads the same raw rows under the same group key and the same
+    /// <c>WHERE</c> as <see cref="QueryStatsIntervalHourlyView"/> (that view's own maximum in this population
+    /// is 23.3 s) and adds three more sums to the same groups, and <see cref="ProcedureStatsIoHourlyView"/> is
+    /// its procedure sibling's shape with the same three (sub-3 s). Three extra <c>sum()</c> columns widen the
+    /// rows without adding a group, so the cost is argued to sit modestly above the sibling's and far below
+    /// this constant, not measured — and <see cref="LogRefreshCeilingStaleness"/> reports the first run of
+    /// either that falsifies it, exactly as it would for the twelve. The next census over the fourteen-view
+    /// layout replaces this sentence with a count. <b>ONE STORE'S, on the same precondition
     /// <see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/> states (#3175):</b> the read only sees
     /// executions where <c>timescaledb.enable_job_execution_logging</c> is ON, that GUC could not be healed
     /// onto a cluster predating the conf block that set it until #3175/#3177 gave it a marker of its own,
@@ -4949,12 +5084,12 @@ WITH NO DATA";
     /// this band cannot drift apart.</para>
     ///
     /// <para><b>Why the heaviest window is excluded whole rather than guarded.</b>
-    /// <see cref="HeaviestHourlyRefreshView"/> occupies 896 of the 1260 seconds in its window and the
+    /// <see cref="HeaviestHourlyRefreshView"/> occupies 896 of the 1140 seconds in its window and the
     /// <see cref="CompressionPhaseGuardMinutes"/> band is 4, so applying the ordinary band to this window
     /// would admit 11 minutes that sit INSIDE the refresh — the band is the wrong size for it, which is the
     /// arithmetic the exclusion rests on and the reason widening the band is not the alternative. The other
-    /// 6 minutes of the window are past the refresh and are left on the table deliberately (3 of #3653's
-    /// 1,080 s window; the A6 freeze re-added three): recovering them
+    /// 4 minutes of the window are past the refresh and are left on the table deliberately (3 of #3653's
+    /// 1,080 s window, 6 at the A6 freeze's 1,260 s one; #5329's io hourlies took two): recovering them
     /// means sizing a band for one window against a bound whose population is 57 readings and still moving
     /// (194 s to 896 s within the clean regime), which is #3035's exclude-versus-guard decision to reopen and
     /// not a renumbering. Stated in SECONDS against the window in seconds, because the occupancy is only
@@ -7104,6 +7239,15 @@ AND   j.hypertable_name = '{relation}'";
             (Relation: ProcedureStatsIntervalHourlyView, DropAfter: HourlyRetentionInterval, TimeColumn: "bucket", Coverage: new[] { RequireSuccessorDailyOf(ProcedureStatsIntervalHourlyView) }),
             (Relation: QueryStatsDbIntervalHourlyView,   DropAfter: HourlyRetentionInterval, TimeColumn: "bucket", Coverage: new[] { RequireSuccessorDailyOf(QueryStatsDbIntervalHourlyView) }),
 
+            /* #5329: the two io hourlies are LEAVES (#1757's rule): Coverage names the aggregate itself. The leaf
+               rule's one assumption is that NOTHING is built from io -- no daily, no hierarchical view -- so no
+               consumer's floor has to be waited on. The day a daily is built from either, that daily belongs
+               in Coverage here (as RequireSuccessorDailyOf does for the interval pair) or this purge could
+               drop buckets the new daily has not captured. They are not in RawTierCoverage on purpose (#1661:
+               a fresh rollup must not hold the raw purge). */
+            (Relation: QueryStatsIoHourlyView,           DropAfter: HourlyRetentionInterval, TimeColumn: "bucket", Coverage: new[] { QueryStatsIoHourlyView }),
+            (Relation: ProcedureStatsIoHourlyView,       DropAfter: HourlyRetentionInterval, TimeColumn: "bucket", Coverage: new[] { ProcedureStatsIoHourlyView }),
+
             /* The corrected Query Store tier (#1849, extended by #1869).
 
                L1 has THREE consumers. Two because the corrected daily is its SIBLING rather than the corrected
@@ -9228,7 +9372,12 @@ AND   ca.view_name IN ({views})";
            store, with no version gate. */
         $"to_regclass('collect.{QueryStatsIntervalDailyView}') IS NOT NULL, " +
         $"to_regclass('collect.{ProcedureStatsIntervalDailyView}') IS NOT NULL, " +
-        $"to_regclass('collect.{QueryStatsDbIntervalDailyView}') IS NOT NULL";
+        $"to_regclass('collect.{QueryStatsDbIntervalDailyView}') IS NOT NULL, " +
+        /* The two hourly rollups that carry logical reads (#5329) — existence-is-the-probe once more: a store
+           whose ensure sweep has not made them yet has none, and a reads ranking stays on raw for exactly that
+           store, with no version gate. */
+        $"to_regclass('collect.{QueryStatsIoHourlyView}') IS NOT NULL, " +
+        $"to_regclass('collect.{ProcedureStatsIoHourlyView}') IS NOT NULL";
 
     /// <summary>
     /// Detects which continuous-aggregate rollups exist in the store (<see cref="RollupProbeSql"/>). On a
@@ -9256,7 +9405,8 @@ AND   ca.view_name IN ({views})";
             reader.GetBoolean(8), reader.GetBoolean(9), reader.GetBoolean(10),
             reader.GetBoolean(11), reader.GetBoolean(12),
             reader.GetBoolean(13), reader.GetBoolean(14), reader.GetBoolean(15),
-            reader.GetBoolean(16), reader.GetBoolean(17), reader.GetBoolean(18));
+            reader.GetBoolean(16), reader.GetBoolean(17), reader.GetBoolean(18),
+            reader.GetBoolean(19), reader.GetBoolean(20));
     }
 
     /* ─────────────── rollup COVERAGE (the un-materialized-history guard, #1759) ─────────────── */
@@ -9334,6 +9484,13 @@ AND   ca.view_name IN ({views})";
         (ProcedureStatsIntervalHourlyView, "procedure_stats", "procedure_stats", "collection_time", HourlyBucket),
         (QueryStatsDbIntervalHourlyView, "query_stats", "query_stats", "collection_time", HourlyBucket),
 
+        /* The two hourly rollups that carry logical reads (#5329): raw-sourced, depth 0 in the backfill order,
+           hourly-bucketed. Registering them HERE puts them on --backfill-rollups, in the coverage probe and in
+           MaterializationHoleTargets. They are NOT in RawTierCoverage (#1661: a fresh rollup must not hold the
+           raw purge) and NOT in SupersededHourlyRollups (nothing older is stitched to them). */
+        (QueryStatsIoHourlyView, "query_stats", "query_stats", "collection_time", HourlyBucket),
+        (ProcedureStatsIoHourlyView, "procedure_stats", "procedure_stats", "collection_time", HourlyBucket),
+
         /* The interval-honest successor DAILIES (#3653, A6): hierarchical from the interval-honest hourly
            successors just above, so RawTable is still the raw table two hops down and Source is the successor
            HOURLY (not the legacy). Registering them here puts them on the --backfill-rollups plan
@@ -9388,13 +9545,23 @@ AND   ca.view_name IN ({views})";
     {
         var columns = RollupViews
             .Select(r => availability.Has(r.View) && (measure is null || measure.Contains(r.View))
-                ? $"(SELECT min(bucket) FROM collect.{r.View})"
+                ? $"(SELECT {ColdFloorMarker} min(bucket) FROM collect.{r.View})"
                 : "NULL::timestamp")
             /* The raw tables are migration-created and always exist, so they need no availability gate. */
             .Concat(RolledRawTables.Select(t => $"(SELECT min(collection_time) FROM collect.{t})"));
 
         return "SELECT " + string.Join(", ", columns);
     }
+
+    /// <summary>The fixed marker the cold coverage probe (<see cref="RollupCoverageProbeSql(RollupAvailability,IReadOnlySet{string}?)"/>)
+    /// carries inside every rollup column it measures (#5329): <c>(SELECT marker min(bucket) FROM collect.&lt;view&gt;)</c>. The
+    /// floor-cache tests count the statements that carry the marker beside one view, so the count is of THIS probe and does not
+    /// depend on how any other statement spells its <c>min(bucket)</c>.</summary>
+    internal const string ColdFloorMarker = "/* coverage-floor:cold */";
+
+    /// <summary>The fixed marker the bounded earlier-floor probe (<see cref="RollupEarlierFloorProbeSql"/>) carries (#5329); see
+    /// <see cref="ColdFloorMarker"/>.</summary>
+    internal const string EarlierFloorMarker = "/* coverage-floor:earlier */";
 
     /// <summary>
     /// #4539: for each rollup PRESENT in <paramref name="availability"/>, its materialization's OLDEST chunk —
@@ -9647,6 +9814,109 @@ WHERE ca.view_schema = 'collect'
     }
 
     /// <summary>
+    /// #5329: which views a coverage cycle should ask "is anything EARLIER than the floor I cached?" for. A view whose
+    /// cached identity matches its oldest chunk (so <see cref="PlanRollupFloorMeasurements"/> chose to trust the cached
+    /// floor) can still have a true floor EARLIER than the cached one: a refresh or a <c>--backfill-rollups</c> run
+    /// that fills earlier buckets usually lands them in the chunk the cache already knows, so neither the chunk name
+    /// nor the hypertable moves, and a cached floor would otherwise be served until the hour is up. That is exactly
+    /// what happens to a new rollup (the io hourly pair): the refresh policy fills recent hours first and the earlier
+    /// ones later. Candidates are the present views that have an entry whose identity matches and that this cycle is
+    /// not already measuring (<paramref name="measuring"/>) or deferring to the background pass
+    /// (<paramref name="deferred"/>, which re-measures them within the cycle anyway).
+    /// </summary>
+    internal static IReadOnlyList<string> RollupViewsToCheckForAnEarlierFloor(
+        IReadOnlyDictionary<string, RollupFloorCacheEntry> cached,
+        IReadOnlyDictionary<string, RollupChunkIdentity> oldestNow,
+        RollupAvailability availability,
+        IReadOnlySet<string> measuring,
+        IReadOnlySet<string>? deferred)
+    {
+        var views = new List<string>();
+        foreach (var (view, _, _, _, _) in RollupViews)
+        {
+            if (!availability.Has(view)
+                || measuring.Contains(view)
+                || (deferred is not null && deferred.Contains(view))
+                || !cached.TryGetValue(view, out var entry)
+                || !oldestNow.TryGetValue(view, out var identity)
+                || !string.Equals(entry.ChunkName, identity.ChunkName, StringComparison.Ordinal)
+                || !string.Equals(entry.MaterializationHypertable, identity.MaterializationHypertable, StringComparison.Ordinal)
+                || entry.DatabaseOid != identity.DatabaseOid)
+            {
+                continue;
+            }
+
+            views.Add(view);
+        }
+
+        return views;
+    }
+
+    /// <summary>
+    /// #5329: the bounded "anything earlier than the cached floor?" read for <paramref name="views"/>, one column each,
+    /// <c>$1</c>, <c>$2</c>... being each view's cached floor. <c>min(m.bucket) ... WHERE m.bucket &lt; floor</c> is
+    /// answered from the chunk constraints and, on a compressed chunk, the batch metadata: every batch whose smallest
+    /// bucket is at or after the cached floor is skipped without being decompressed, so a rollup with nothing earlier
+    /// costs a metadata read, not the cold sort of <see cref="RollupCoverageProbeSql(RollupAvailability,IReadOnlySet{string}?)"/>.
+    /// A non-NULL answer IS the new floor: everything at or after the cached floor is not smaller, so the smallest row
+    /// below it is the smallest row there is. NULL means the cached floor still stands. The statement carries
+    /// <see cref="EarlierFloorMarker"/> and the cold probe <see cref="ColdFloorMarker"/>, which is what the floor-cache tests
+    /// count to prove the cold probe is not re-run (the alias spelling is no longer what keeps them apart).
+    /// </summary>
+    internal static string RollupEarlierFloorProbeSql(IReadOnlyList<string> views)
+        => "SELECT " + string.Join(", ", views.Select((view, i) =>
+            string.Create(CultureInfo.InvariantCulture, $"(SELECT min(m.bucket) FROM collect.{view} AS m WHERE m.bucket < ${i + 1}::timestamp)")))
+           + " " + EarlierFloorMarker;
+
+    /// <summary>
+    /// #5329: runs <see cref="RollupEarlierFloorProbeSql"/> for <paramref name="views"/> against their cached floors and
+    /// returns the views whose true floor is EARLIER, with that floor. A failed read returns nothing: the cached floor
+    /// is kept, the conservative direction (a later floor never claims coverage a rollup lacks), and the hour's
+    /// re-measure still applies.
+    /// </summary>
+    private static async Task<Dictionary<string, DateTime>> ReadEarlierRollupFloorsAsync(
+        NpgsqlDataSource dataSource,
+        IReadOnlyList<string> views,
+        Dictionary<string, RollupFloorCacheEntry> cached,
+        CancellationToken cancellationToken)
+    {
+        var moved = new Dictionary<string, DateTime>(StringComparer.Ordinal);
+        if (views.Count == 0)
+        {
+            return moved;
+        }
+
+        try
+        {
+            await using var command = dataSource.CreateCommand(RollupEarlierFloorProbeSql(views));
+            command.CommandTimeout = JobCatalogReadTimeoutSeconds;
+            foreach (var view in views)
+            {
+                command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = DateTime.SpecifyKind(cached[view].Floor, DateTimeKind.Unspecified) });
+            }
+
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            if (await reader.ReadAsync(cancellationToken))
+            {
+                for (var i = 0; i < views.Count; i++)
+                {
+                    if (!await reader.IsDBNullAsync(i, cancellationToken))
+                    {
+                        moved[views[i]] = reader.GetDateTime(i);
+                    }
+                }
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            moved.Clear();
+            _ = ex;
+        }
+
+        return moved;
+    }
+
+    /// <summary>
     /// #4957: writes one coverage cycle's result into a store's cache, touching only what that cycle measured. A view
     /// measured this cycle gets its new entry, or none when it came back empty; a view whose rollup is gone is
     /// dropped; every other view is left as the cache holds it NOW. The cycle's <see cref="MergeRollupFloors"/> result
@@ -9817,7 +10087,12 @@ WHERE ca.view_schema = 'collect'
     /// (<see cref="RollupOldestChunkSql"/>) decides which rollups actually need that sort re-run; the rest
     /// reuse their last-measured floor. A reused floor can only be LATER than the true one (an older backfill
     /// landing in the same chunk moves the true floor earlier, never later), which is the conservative
-    /// direction for routing — it can never claim coverage a rollup does not actually have. A failed catalog
+    /// direction for routing — it can never claim coverage a rollup does not actually have. <b>#5329: it is also
+    /// not left that way.</b> Every probe asks each reused view one bounded question, "is any bucket earlier than the
+    /// floor I hold?" (<see cref="RollupEarlierFloorProbeSql"/>), because a fill of earlier buckets (the refresh
+    /// policy catching up on a new rollup, or <c>--backfill-rollups</c> in another process) usually lands in the
+    /// chunk the cache already knows and moves neither identity; the next probe after the fill reports the new floor
+    /// instead of the hour-old one. A failed catalog
     /// read (a plain-PostgreSQL store, or any other failure) falls back to measuring every present rollup, the
     /// same as before this cache existed.</para>
     /// </summary>
@@ -9912,6 +10187,17 @@ WHERE ca.view_schema = 'collect'
             }
         }
 
+        /* #5329: a view whose cached floor is trusted can still have an EARLIER true floor, because a fill of earlier
+           buckets usually lands in the chunk the cache already knows. One bounded read per view, answered from chunk
+           constraints and batch metadata, finds it; the answer is the new floor. */
+        var movedEarlier = measure is not null && oldestNow is not null
+            ? await ReadEarlierRollupFloorsAsync(
+                dataSource,
+                RollupViewsToCheckForAnEarlierFloor(cachedSnapshot, oldestNow, availability, measure, due),
+                cachedSnapshot,
+                cancellationToken)
+            : new Dictionary<string, DateTime>(StringComparer.Ordinal);
+
         await using var command = dataSource.CreateCommand(RollupCoverageProbeSql(availability, measure));
         command.CommandTimeout = JobCatalogReadTimeoutSeconds;
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -9952,6 +10238,12 @@ WHERE ca.view_schema = 'collect'
         for (var i = 0; i < RollupViews.Length; i++)
         {
             var view = RollupViews[i].View;
+            if (movedEarlier.TryGetValue(view, out var earlierFloor))
+            {
+                measuredThisCycle[view] = earlierFloor;
+                continue;
+            }
+
             if (!measure.Contains(view))
             {
                 continue;
@@ -13861,7 +14153,8 @@ public readonly record struct RollupAvailability(
     bool QueryStoreIntervalHourly = false, bool QueryStoreCorrectedHourly = false, bool QueryStoreCorrectedDaily = false,
     bool QueryStoreIntervalDaily = false, bool QueryStoreDayGrainDaily = false,
     bool QueryGrainIntervalHourly = false, bool ProcedureGrainIntervalHourly = false, bool DbGrainIntervalHourly = false,
-    bool QueryGrainIntervalDaily = false, bool ProcedureGrainIntervalDaily = false, bool DbGrainIntervalDaily = false)
+    bool QueryGrainIntervalDaily = false, bool ProcedureGrainIntervalDaily = false, bool DbGrainIntervalDaily = false,
+    bool QueryGrainIoHourly = false, bool ProcedureGrainIoHourly = false)
 {
     /// <summary>True when every rollup exists — the steady state on a TimescaleDB store, safe to cache
     /// permanently (a created continuous aggregate is never dropped outside the reshape sweep).</summary>
@@ -13871,13 +14164,19 @@ public readonly record struct RollupAvailability(
         && QueryStoreIntervalHourly && QueryStoreCorrectedHourly && QueryStoreCorrectedDaily
         && QueryStoreIntervalDaily && QueryStoreDayGrainDaily
         && QueryGrainIntervalHourly && ProcedureGrainIntervalHourly && DbGrainIntervalHourly
-        && QueryGrainIntervalDaily && ProcedureGrainIntervalDaily && DbGrainIntervalDaily;
+        && QueryGrainIntervalDaily && ProcedureGrainIntervalDaily && DbGrainIntervalDaily
+        && QueryGrainIoHourly && ProcedureGrainIoHourly;
 
     /// <summary>No rollups at all — the plain-PostgreSQL shape, and the safe fallback when a probe fails.</summary>
     public static RollupAvailability None => default;
 
     /// <summary>Every flag true — the fully-built TimescaleDB shape (and the test shorthand for it).</summary>
-    public static RollupAvailability All => new(true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true);
+    public static RollupAvailability All => new(true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true);
+
+    /// <summary>The pre-#5329 shape: every rollup up to and including the interval-honest dailies, none of the
+    /// two hourly rollups that carry logical reads — a store whose ensure sweep has not created them yet. A
+    /// reads ranking must stay on raw for exactly this shape (the test shorthand for that degrade).</summary>
+    public static RollupAvailability WithoutIoHourlies => new(true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true);
 
     /// <summary>The pre-#3653 shape: every rollup a #1869-era service created, none of the interval-honest hourly
     /// successors (Q12) — a store whose service predates this build. Its hourly-tier reads must keep routing to
@@ -13926,6 +14225,8 @@ public readonly record struct RollupAvailability(
         TimescaleSupport.QueryStatsIntervalDailyView => QueryGrainIntervalDaily,
         TimescaleSupport.ProcedureStatsIntervalDailyView => ProcedureGrainIntervalDaily,
         TimescaleSupport.QueryStatsDbIntervalDailyView => DbGrainIntervalDaily,
+        TimescaleSupport.QueryStatsIoHourlyView => QueryGrainIoHourly,
+        TimescaleSupport.ProcedureStatsIoHourlyView => ProcedureGrainIoHourly,
         _ => false,
     };
 }
@@ -14109,6 +14410,117 @@ public sealed class RollupCoverage
     /// <see cref="StitchedRelationSql"/> instead.</summary>
     public string HourlyRelationNameFor(string legacyHourly, DateTime windowStartUtc) =>
         HourlyRelationFor(legacyHourly, windowStartUtc);
+
+    /// <summary>
+    /// #5329: the materialization ceiling of the relation that serves the END of an hourly window over
+    /// <paramref name="legacyHourly"/>: the successor when the read is stitched (the successor serves everything from
+    /// the stitch floor on), otherwise the one relation <see cref="HourlyRelationNameFor"/> names. Null when that
+    /// relation has no measured ceiling (nothing materialized, or an unknown coverage), which means no bound. The one
+    /// rule every hourly reader shares: the service's MCP reads and the Viewer's grids bind a bucket below this value,
+    /// so a bucket the rollup has not finished is never read.
+    /// </summary>
+    public DateTime? HourlyEndCeiling(string legacyHourly, DateTime windowStartUtc)
+    {
+        var relation = StitchFloor(legacyHourly, StitchTier.Hourly, windowStartUtc) is not null
+            ? TimescaleSupport.SuccessorOf(legacyHourly)!
+            : HourlyRelationNameFor(legacyHourly, windowStartUtc);
+        return CeilingOf(relation);
+    }
+
+    /// <summary>
+    /// The hourly tier's per-server coverage probe when the read is stitched: the first bucket the ranked read's
+    /// window actually holds for this server. A stitched <c>UNION ALL</c> cannot give an ordered first row (the
+    /// planner cannot merge-append it in order, so <c>ORDER BY ... LIMIT 1</c> over it sorts every row the server
+    /// has), so the probe splits at the stitch floor F, the same F <see cref="StitchedRelationSql"/>
+    /// uses (<see cref="StitchFloor"/> is documented to agree with it exactly). The legacy relation
+    /// only holds rows below F, so the first bucket of the stitch is <c>least()</c> of the legacy relation's first
+    /// bucket below F and the successor's first bucket from F; <c>least()</c> ignores a null half. Each half is an
+    /// ordered <c>LIMIT 1</c> over one relation. $1 server_id, $2/$3 window (naive UTC), $4 F (naive UTC).
+    /// Null when the server has no bucket in the window. <c>$LEGACY$</c> and <c>$SUCCESSOR$</c> are relation names.
+    /// #5329: moved here from the service's reader so the Viewer's grids and the MCP tools run ONE copy of the probe
+    /// (the start edge is per server on both). The window end is EXCLUSIVE (<c>bucket &lt; $3</c>), as the grids' is: the first bucket
+    /// names the start of the rows the grid read, so a server whose only bucket is the one that begins AT the end has no start
+    /// (its grid is empty).
+    /// </summary>
+    public const string HourlyFirstBucketSql =
+        "SELECT least(" +
+        "(SELECT f.bucket FROM collect.$LEGACY$ AS f WHERE f.server_id = $1 AND f.bucket >= $2 AND f.bucket < $4 AND f.bucket < $3$CEIL$ ORDER BY f.bucket LIMIT 1), " +
+        "(SELECT f.bucket FROM collect.$SUCCESSOR$ AS f WHERE f.server_id = $1 AND f.bucket >= $4 AND f.bucket >= $2 AND f.bucket < $3$CEIL$ ORDER BY f.bucket LIMIT 1))";
+
+    /// <summary>
+    /// The coverage probe when <see cref="StitchFloor"/> answers null: the window is served by ONE
+    /// relation, and <c>$FROM$</c> is replaced with the exact single-relation splice
+    /// <see cref="StitchedRelationSql"/> returns. <c>ORDER BY ... LIMIT 1</c> stops at the first
+    /// bucket. Never used over a stitch (a <c>UNION ALL</c> cannot be read in order; see
+    /// <see cref="HourlyFirstBucketSql"/>). $1 server_id, $2/$3 window (naive UTC).
+    /// </summary>
+    public const string HourlyFirstBucketSingleRelationSql =
+        "SELECT f.bucket FROM $FROM$ WHERE f.server_id = $1 AND f.bucket >= $2 AND f.bucket < $3$CEIL$ ORDER BY f.bucket LIMIT 1";
+
+    /// <summary>The placeholder <see cref="HourlyFirstBucketSingleRelationSql"/> (and the service's hourly top-N
+    /// statements) carry where the FROM splice goes.</summary>
+    public const string HourlyFromPlaceholder = "$FROM$";
+
+    /// <summary>Where the hourly reads carry the materialization-ceiling bound. Replaced with
+    /// <see cref="HourlyCeilingClause"/> when the ceiling is known and with the empty string when it is not.</summary>
+    public const string HourlyCeilingPlaceholder = "$CEIL$";
+
+    /// <summary>The ceiling bound: a bucket at or after the relation's materialization ceiling is never read, so
+    /// "nothing after the ceiling was read" holds by construction. <paramref name="ordinal"/> is the bound
+    /// parameter's position; the value is bound, never computed in SQL.</summary>
+    public static string HourlyCeilingClause(int ordinal) => " AND f.bucket < $" + ordinal.ToString(CultureInfo.InvariantCulture);
+
+    /// <summary>Runs the coverage probe for <paramref name="legacy"/>'s hourly tier: two ordered first-row probes
+    /// split at the stitch floor when the read is stitched (<see cref="HourlyFirstBucketSql"/>), one probe when a
+    /// single relation serves the window (<see cref="HourlyFirstBucketSingleRelationSql"/>). It is per SERVER: the
+    /// first bucket THIS server holds in the window, which is what a window that starts before the server was added
+    /// needs (the store-wide floor belongs to the oldest server). Null when the server has no bucket in the window.
+    /// The single seam the service's MCP reads and the Viewer's grids share (#5329).</summary>
+    public async Task<DateTime?> GetHourlyFirstBucketAsync(
+        NpgsqlDataSource dataSource, string legacy, int serverId, DateTime startUtc, DateTime endUtc,
+        DateTime? ceiling, int commandTimeoutSeconds, CancellationToken cancellationToken)
+    {
+        var floor = StitchFloor(legacy, StitchTier.Hourly, startUtc);
+        string sql;
+        if (floor is null)
+        {
+            var splice = StitchedRelationSql(legacy, "f", startUtc, StitchTier.Hourly);
+            if (splice.Contains("UNION", StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidOperationException(
+                    "The hourly coverage probe found a stitched relation where StitchFloor answered a single one.");
+            }
+
+            sql = HourlyFirstBucketSingleRelationSql
+                .Replace(HourlyFromPlaceholder, splice, StringComparison.Ordinal)
+                .Replace(HourlyCeilingPlaceholder, ceiling is null ? "" : HourlyCeilingClause(4), StringComparison.Ordinal);
+        }
+        else
+        {
+            sql = HourlyFirstBucketSql
+                .Replace(HourlyCeilingPlaceholder, ceiling is null ? "" : HourlyCeilingClause(5), StringComparison.Ordinal)
+                .Replace("$LEGACY$", legacy, StringComparison.Ordinal)
+                .Replace("$SUCCESSOR$", TimescaleSupport.SuccessorOf(legacy)!, StringComparison.Ordinal);
+        }
+
+        await using var command = dataSource.CreateCommand(sql);
+        command.CommandTimeout = commandTimeoutSeconds;
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(startUtc, DateTimeKind.Unspecified) });
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(endUtc, DateTimeKind.Unspecified) });
+        if (floor is not null)
+        {
+            command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(floor.Value, DateTimeKind.Unspecified) });
+        }
+
+        if (ceiling is not null)
+        {
+            command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(ceiling.Value, DateTimeKind.Unspecified) });
+        }
+
+        var value = await command.ExecuteScalarAsync(cancellationToken);
+        return value is DateTime bucket ? bucket : null;
+    }
 
     /// <summary>Nothing measured — every lookup answers null, so the router keeps its pre-#1759 behaviour.
     /// The safe answer for a store with no rollups AND for a probe that failed.</summary>
