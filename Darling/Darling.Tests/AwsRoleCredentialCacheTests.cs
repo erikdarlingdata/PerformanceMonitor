@@ -24,7 +24,7 @@ public sealed class AwsRoleCredentialCacheTests
     private const string GovRole = "arn:aws-us-gov:iam::123456789012:role/darling-monitor";
 
     private static AwsRoleCredentialCache Cache(FakeSts sts, AwsRoleAllowlist? list = null, ManualTimeProvider? clock = null) =>
-        new(list ?? AwsRoleAllowlist.From(new[] { "123456789012" }), null, sts.Factory, FakeSts.Source, clock ?? new ManualTimeProvider());
+        new(list ?? AwsRoleAllowlist.From(new[] { "123456789012", "aws-cn:123456789012", "aws-us-gov:123456789012" }), null, sts.Factory, FakeSts.Source, clock ?? new ManualTimeProvider());
 
     /* ---- the allow list, at use ---------------------------------------------------------------------------- */
 

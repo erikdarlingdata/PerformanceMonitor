@@ -18,8 +18,9 @@ namespace PerformanceMonitor.Darling.Service.Targets;
 /// Which AWS roles the service may assume for an Amazon RDS or Aurora target (#5452). The list comes from darling.json:
 /// the top-level <c>allowedAwsRoles</c> setting plus the <c>awsRoleArn</c> of every <c>servers[]</c> entry. A role
 /// saved from the web, MCP, the desktop viewer or <c>--add-server</c> runs only if it is on the list. An entry is
-/// either a full role ARN, matched exactly (ordinal, case-sensitive), or a 12-digit AWS account id, which allows
-/// every role in that account. <see cref="Empty"/> allows none.
+/// either a full role ARN, matched exactly (ordinal, case-sensitive), or an AWS account id, which allows every role
+/// in that account. A bare 12-digit id is an account in the <c>aws</c> partition; an account in another partition is
+/// written with it, as <c>aws-cn:123456789012</c> or <c>aws-us-gov:123456789012</c>. <see cref="Empty"/> allows none.
 ///
 /// <para>darling.json is read once at start, so an edit to the list applies on the next restart.
 /// <see cref="Current"/> is set once, where the worker builds the collector runner, the same way as
@@ -29,13 +30,15 @@ public sealed class AwsRoleAllowlist
 {
     /// <summary>The error text for an <c>allowedAwsRoles</c> entry that is neither a role ARN nor a 12-digit account id.</summary>
     public const string InvalidEntryMessage =
-        "Each entry must be an IAM role ARN, such as arn:aws:iam::123456789012:role/darling-monitor, or a 12-digit AWS account id, such as 123456789012.";
+        "Each entry must be an IAM role ARN, such as arn:aws:iam::123456789012:role/darling-monitor, or a 12-digit AWS account id, such as 123456789012 (a China or GovCloud account is written with its partition, such as aws-cn:123456789012).";
 
+    /* A bare id is the aws partition; "aws-cn:<id>" and "aws-us-gov:<id>" name the others. */
     private static readonly Regex AccountIdPattern = new(
-        @"^[0-9]{12}\z", RegexOptions.CultureInvariant, TimeSpan.FromSeconds(1));
+        @"^(?:(?<partition>aws(?:-[a-z]+)*):)?(?<account>[0-9]{12})\z",
+        RegexOptions.CultureInvariant | RegexOptions.ExplicitCapture, TimeSpan.FromSeconds(1));
 
     private static readonly Regex RoleAccountPattern = new(
-        @"^arn:aws(?:-[a-z]+)*:iam::(?<account>[0-9]{12}):role/",
+        @"^arn:(?<partition>aws(?:-[a-z]+)*):iam::(?<account>[0-9]{12}):role/",
         RegexOptions.CultureInvariant | RegexOptions.ExplicitCapture, TimeSpan.FromSeconds(1));
 
     private readonly HashSet<string> _arns;
@@ -74,7 +77,7 @@ public sealed class AwsRoleAllowlist
             return InvalidEntryMessage;
         }
 
-        if (AccountIdPattern.IsMatch(value))
+        if (AccountKey(value) is not null)
         {
             return null;
         }
@@ -98,9 +101,10 @@ public sealed class AwsRoleAllowlist
                 continue;
             }
 
-            if (AccountIdPattern.IsMatch(value))
+            var accountKey = AccountKey(value);
+            if (accountKey is not null)
             {
-                accounts.Add(value);
+                accounts.Add(accountKey);
             }
             else
             {
@@ -133,8 +137,8 @@ public sealed class AwsRoleAllowlist
     }
 
     /// <summary>
-    /// True when <paramref name="roleArn"/> is on this list: an entry equals it exactly, or a 12-digit entry equals
-    /// the account id in it. A blank or null role is never allowed.
+    /// True when <paramref name="roleArn"/> is on this list: an entry equals it exactly, or an account entry equals
+    /// the partition and account id in it. A blank or null role is never allowed.
     /// </summary>
     public bool IsAllowed(string? roleArn)
     {
@@ -155,7 +159,23 @@ public sealed class AwsRoleAllowlist
         }
 
         var match = RoleAccountPattern.Match(role);
-        return match.Success && _accounts.Contains(match.Groups["account"].Value);
+        return match.Success && _accounts.Contains(match.Groups["partition"].Value + ":" + match.Groups["account"].Value);
+    }
+
+    /// <summary>
+    /// The partition and account of an account entry, as <c>aws:123456789012</c>, or null when the entry is not an
+    /// account entry. A bare 12-digit id is in the <c>aws</c> partition.
+    /// </summary>
+    private static string? AccountKey(string value)
+    {
+        var match = AccountIdPattern.Match(value);
+        if (!match.Success)
+        {
+            return null;
+        }
+
+        var partition = match.Groups["partition"].Success ? match.Groups["partition"].Value : "aws";
+        return partition + ":" + match.Groups["account"].Value;
     }
 
     /// <summary><see cref="IsAllowed(string?)"/> against the list in <paramref name="allowlist"/>, so a test names the list it means.</summary>

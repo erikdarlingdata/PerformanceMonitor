@@ -147,10 +147,11 @@ public sealed class AwsAssumedRoleCredentials : AWSCredentials
     }
 
     /// <summary>
-    /// The session name for an install id: <c>darling-</c> and the first 12 hex digits of the id, lowercase, hyphens
-    /// removed (20 characters, inside AWS's <c>[\w+=,.@-]{2,64}</c>). CloudTrail in the role's account then shows
-    /// which Darling installation assumed the role, without the host's machine name. An id with fewer than 12 hex
-    /// digits, or with anything else in it, gives <see cref="FallbackSessionName"/>.
+    /// The session name for an install id: <c>darling-</c> and the first 12 hex digits of the id (the whole id when it
+    /// has fewer, down to the store's 8), lowercase, hyphens removed (at most 20 characters, inside AWS's
+    /// <c>[\w+=,.@-]{2,64}</c>). CloudTrail in the role's account then shows which Darling installation assumed the
+    /// role, without the host's machine name. An id with fewer than 8 hex digits, or with anything else in it, gives
+    /// <see cref="FallbackSessionName"/>.
     /// </summary>
     public static string SessionNameFor(string? installId)
     {
@@ -160,7 +161,7 @@ public sealed class AwsAssumedRoleCredentials : AWSCredentials
         }
 
         var hex = installId.Trim().Replace("-", string.Empty, StringComparison.Ordinal).ToLowerInvariant();
-        if (hex.Length < 12)
+        if (hex.Length < 8)
         {
             return FallbackSessionName;
         }
@@ -173,7 +174,7 @@ public sealed class AwsAssumedRoleCredentials : AWSCredentials
             }
         }
 
-        return "darling-" + hex[..12];
+        return "darling-" + hex[..Math.Min(12, hex.Length)];
     }
 
     /// <summary>
@@ -214,7 +215,17 @@ public sealed class AwsAssumedRoleCredentials : AWSCredentials
         }
         else
         {
-            await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+            /* A caller with nothing valid waits for the refresh in progress, and no longer than that refresh may take. */
+            using var gateWait = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            gateWait.CancelAfter(_refreshDeadline);
+            try
+            {
+                await _gate.WaitAsync(gateWait.Token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+            {
+                throw AwsRoleAssumeException.ForTimeout(Key, stsRegion.SystemName, _refreshDeadline);
+            }
         }
 
         try
@@ -242,7 +253,8 @@ public sealed class AwsAssumedRoleCredentials : AWSCredentials
             {
                 var remembered = new Failure(_clock.GetUtcNow(), stsRegion.SystemName, failure);
                 _failure = remembered;
-                _logger?.LogWarning("{Message}", failure.Message);
+                _logger?.LogWarning("{Message}{Detail}", failure.Message,
+                    string.IsNullOrEmpty(failure.SourceDetail) ? string.Empty : " SDK detail (service log only): " + failure.SourceDetail);
                 return ServeOrThrowFirst(grant, failure, _clock.GetUtcNow());
             }
         }
@@ -288,24 +300,30 @@ public sealed class AwsAssumedRoleCredentials : AWSCredentials
     {
         var region = stsRegion.SystemName;
 
+        /* One deadline covers the credential lookup and the STS call: the default chain can wait on an instance or
+           container endpoint or a single sign-on cache, and it must not hold every collector for this role. */
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        deadline.CancelAfter(_refreshDeadline);
+
         ImmutableCredentials sourceCredentials;
         try
         {
-            var source = await _source(stsRegion).ConfigureAwait(false)
+            var source = await _source(stsRegion).WaitAsync(deadline.Token).ConfigureAwait(false)
                 ?? throw new AmazonClientException("The credential source returned no credentials.");
-            sourceCredentials = await source.GetCredentialsAsync().ConfigureAwait(false);
+            sourceCredentials = await source.GetCredentialsAsync().WaitAsync(deadline.Token).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             throw;
         }
+        catch (OperationCanceledException) when (deadline.IsCancellationRequested)
+        {
+            throw AwsRoleAssumeException.ForTimeout(Key, region, _refreshDeadline);
+        }
         catch (Exception ex)
         {
             throw AwsRoleAssumeException.ForNoSourceIdentity(Key, region, ex);
         }
-
-        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        deadline.CancelAfter(_refreshDeadline);
 
         var request = new AssumeRoleRequest
         {
@@ -385,6 +403,7 @@ public sealed class AwsAssumedRoleCredentials : AWSCredentials
         private readonly string _message;
         private readonly string? _code;
         private readonly string? _type;
+        private readonly string? _detail;
 
         public Failure(DateTimeOffset at, string region, AwsRoleAssumeException from)
         {
@@ -394,13 +413,14 @@ public sealed class AwsAssumedRoleCredentials : AWSCredentials
             _message = from.Message;
             _code = from.SourceErrorCode;
             _type = from.SourceExceptionType;
+            _detail = from.SourceDetail;
         }
 
         public DateTimeOffset At { get; }
 
         public string Region { get; }
 
-        public AwsRoleAssumeException ToException(AwsRoleKey key) => AwsRoleAssumeException.Rebuild(_kind, key, Region, _message, _code, _type);
+        public AwsRoleAssumeException ToException(AwsRoleKey key) => AwsRoleAssumeException.Rebuild(_kind, key, Region, _message, _code, _type, _detail);
     }
 
     private sealed class RegionHandle : AWSCredentials

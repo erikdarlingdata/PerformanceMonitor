@@ -81,6 +81,41 @@ public sealed class AwsRoleMessageTextTests
         Assert.Contains("(without an external ID)", without, StringComparison.Ordinal);
         Assert.DoesNotContain(Sentinel, with, StringComparison.OrdinalIgnoreCase);
     }
+
+    [Fact]
+    public void ANoSourceIdentityMessage_NamesTheRoleAndWhatToChange_AndHoldsNoneOfTheSdksOwnText()
+    {
+        var raw = new InvalidOperationException(@"Profile corp-sso not found in C:\Users\svc\.aws\credentials; IMDS at 169.254.169.254 refused");
+
+        var ex = AwsRoleAssumeException.ForNoSourceIdentity(new AwsRoleKey(Role, Sentinel), "us-east-1", raw);
+
+        Assert.Contains(Role, ex.Message, StringComparison.Ordinal);
+        Assert.Contains("Nothing was read this cycle", ex.Message, StringComparison.Ordinal);
+        Assert.Contains("restart the service", ex.Message, StringComparison.Ordinal);
+        Assert.Contains("SDK exception System.InvalidOperationException", ex.Message, StringComparison.Ordinal);
+        foreach (var text in new[] { "corp-sso", @"C:\Users", ".aws", "169.254", "IMDS" })
+        {
+            Assert.DoesNotContain(text, ex.Message, StringComparison.Ordinal);
+            Assert.DoesNotContain(text, ex.ToString(), StringComparison.Ordinal);
+        }
+
+        Assert.Contains("corp-sso", ex.SourceDetail, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ATransientMessage_NamesTheRole_AndHoldsNoneOfTheSdksOwnText()
+    {
+        var raw = FakeSts.Error("Throttling", @"Rate exceeded for C:\ProgramData\aws\config on host build-07");
+
+        var ex = AwsRoleAssumeException.ForStsFailure(new AwsRoleKey(Role, Sentinel), "us-east-1", raw);
+
+        Assert.Equal(AwsRoleAssumeKind.Transient, ex.Kind);
+        Assert.Contains(Role, ex.Message, StringComparison.Ordinal);
+        Assert.Contains("AWS error code Throttling", ex.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("ProgramData", ex.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("build-07", ex.Message, StringComparison.Ordinal);
+        Assert.Contains("build-07", ex.SourceDetail, StringComparison.Ordinal);
+    }
 }
 
 /// <summary>

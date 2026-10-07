@@ -208,11 +208,14 @@ public sealed class AwsAssumedRoleCredentialsTests
     [InlineData("0123abcd-4567-89ef-0123-456789abcdef", "darling-0123abcd4567")]
     [InlineData("0123ABCD456789EF0123456789ABCDEF", "darling-0123abcd4567")]
     [InlineData("  0123abcd-4567-89ef-0123-456789abcdef  ", "darling-0123abcd4567")]
+    [InlineData("0a1b2c3d", "darling-0a1b2c3d")]
+    [InlineData("0A1B2C3D", "darling-0a1b2c3d")]
     [InlineData(null, "darling-collector")]
     [InlineData("", "darling-collector")]
     [InlineData("abc", "darling-collector")]
+    [InlineData("0a1b2c3", "darling-collector")]
     [InlineData("not-a-hex-install-id-at-all", "darling-collector")]
-    public void SessionName_IsDarlingAndTwelveHexDigits_OrTheFallback(string? installId, string expected)
+    public void SessionName_IsDarlingAndTheInstallIdsHexDigits_OrTheFallback(string? installId, string expected)
     {
         var name = AwsAssumedRoleCredentials.SessionNameFor(installId);
 
@@ -386,7 +389,65 @@ public sealed class AwsAssumedRoleCredentialsTests
 
         Assert.Equal(AwsRoleAssumeKind.NoSourceIdentity, ex.Kind);
         Assert.False(ex.IsConfiguration);
-        Assert.Contains("The monitoring host has no AWS credentials to assume role " + Role + " with:", ex.Message, StringComparison.Ordinal);
+        Assert.Contains("The monitoring host has no AWS credentials to assume role " + Role + " with.", ex.Message, StringComparison.Ordinal);
+        Assert.Equal(0, sts.Calls);
+    }
+
+    [Fact]
+    public async Task ANoSourceIdentityMessage_IsAFixedSentence_WithTheSdkTypeAndCodeOnly_AndTheSdkTextGoesToTheServiceLog()
+    {
+        var logger = new CapturingAwsLogger();
+        var sts = new FakeSts();
+        var credentials = Make(sts, new ManualTimeProvider(), logger: logger, source: _ => throw new AmazonServiceException(
+            @"The profile 'corp-sso' could not be found in C:\Users\svc\.aws\credentials; SSO cache C:\Users\svc\.aws\sso\cache failed",
+            null, System.Net.HttpStatusCode.Forbidden)
+        { ErrorCode = "ProfileNotFound" });
+
+        var ex = await Assert.ThrowsAsync<AwsRoleAssumeException>(() => credentials.GetCredentialsAsync());
+
+        Assert.Equal(AwsRoleAssumeKind.NoSourceIdentity, ex.Kind);
+        Assert.Contains("(SDK exception Amazon.Runtime.AmazonServiceException, AWS error code ProfileNotFound)", ex.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("corp-sso", ex.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain(".aws", ex.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("svc", ex.Message, StringComparison.Ordinal);
+        Assert.Contains("corp-sso", ex.SourceDetail, StringComparison.Ordinal);
+        Assert.Contains("corp-sso", logger.All, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ATransientMessage_IsAFixedSentence_WithTheSdkTypeAndCodeOnly()
+    {
+        var sts = new FakeSts((_, _) => throw new AmazonServiceException(
+            @"Unable to reach http://169.254.170.2/v2/credentials/abc from C:\ProgramData\aws\config",
+            null, System.Net.HttpStatusCode.ServiceUnavailable)
+        { ErrorCode = "ServiceUnavailable" });
+        var credentials = Make(sts, new ManualTimeProvider());
+
+        var ex = await Assert.ThrowsAsync<AwsRoleAssumeException>(() => credentials.GetCredentialsAsync());
+
+        Assert.Equal(AwsRoleAssumeKind.Transient, ex.Kind);
+        Assert.Contains("(SDK exception Amazon.Runtime.AmazonServiceException, AWS error code ServiceUnavailable)", ex.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("169.254", ex.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("ProgramData", ex.Message, StringComparison.Ordinal);
+        Assert.Contains("169.254.170.2", ex.SourceDetail, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ACredentialSourceThatNeverCompletes_FailsWithinTheDeadline_AndASecondCallerFailsWithinTheSameBound()
+    {
+        var sts = new FakeSts();
+        var credentials = Make(sts, new ManualTimeProvider(), deadline: TimeSpan.FromMilliseconds(200),
+            source: _ => new TaskCompletionSource<AWSCredentials>().Task);
+
+        var first = Assert.ThrowsAsync<AwsRoleAssumeException>(() => credentials.GetCredentialsAsync());
+        var second = Assert.ThrowsAsync<AwsRoleAssumeException>(() => credentials.GetCredentialsAsync());
+
+        var firstFailure = await first.WaitAsync(TimeSpan.FromSeconds(10));
+        var secondFailure = await second.WaitAsync(TimeSpan.FromSeconds(10));
+
+        Assert.Equal(AwsRoleAssumeKind.Transient, firstFailure.Kind);
+        Assert.Contains("did not answer within", firstFailure.Message, StringComparison.Ordinal);
+        Assert.Equal(AwsRoleAssumeKind.Transient, secondFailure.Kind);
         Assert.Equal(0, sts.Calls);
     }
 
