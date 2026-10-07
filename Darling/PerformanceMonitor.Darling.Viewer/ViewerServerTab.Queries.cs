@@ -296,12 +296,30 @@ public partial class ViewerServerTab
                 var slicerSince = slicerTruncated
                     ? BannerTime(RawWindowFloor.EffectiveStart(floor, requestedStartUtc))
                     : null;
-                var text = wideTruncated
-                    ? $"Showing since {BannerTime(servedStart!.Value)}{startReason}"
-                        + (slicerSince is null ? string.Empty : $" · slicer since {slicerSince}")
-                    : slicerSince is null
+                /* #5329: "the grid shows the full window" is the wide plan's claim and is true only there. On the hourly
+                   route the edges note in the suffix says where the grid really starts and stops, so the claim would
+                   contradict it, and an empty grid (no bucket) has no start to name at all. */
+                string text;
+                if (wideTruncated)
+                {
+                    text = $"Showing since {BannerTime(servedStart!.Value)}{startReason}"
+                        + (slicerSince is null ? string.Empty : $" · slicer since {slicerSince}");
+                }
+                else if (hourlyServed && hourly!.Value.FirstBucket is null)
+                {
+                    text = slicerSince is null ? "No rollup bucket in the window" : $"Slicer since {slicerSince}";
+                }
+                else if (hourlyServed)
+                {
+                    text = $"Showing {BannerTime(requestedStartUtc)}"
+                        + (slicerSince is null ? string.Empty : $" · slicer since {slicerSince}");
+                }
+                else
+                {
+                    text = slicerSince is null
                         ? $"Showing {BannerTime(requestedStartUtc)}"
                         : $"Slicer since {slicerSince} (the grid shows the full window)";
+                }
 
                 banner.Text = text + tierSuffix;
                 banner.Visibility = Visibility.Visible;

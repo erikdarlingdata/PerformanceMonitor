@@ -470,7 +470,9 @@ public sealed class RollupFloorCacheTests
 
         Assert.Contains($"FROM collect.{TimescaleSupport.QueryStatsIoHourlyView} AS m WHERE m.bucket < $1::timestamp", sql, StringComparison.Ordinal);
         Assert.Contains($"FROM collect.{TimescaleSupport.ProcedureStatsIoHourlyView} AS m WHERE m.bucket < $2::timestamp", sql, StringComparison.Ordinal);
-        /* The floor-cache live tests count this text to prove the cold sort is not re-run; the bounded read must not match it. */
-        Assert.DoesNotContain("min(bucket) FROM collect.", sql, StringComparison.Ordinal);
+        /* The floor-cache live tests count the markers (ColdFloorMarker for the cold sort, EarlierFloorMarker for this bounded
+           read) to prove the cold sort is not re-run; the bounded read carries the earlier marker and never the cold one. */
+        Assert.DoesNotContain(TimescaleSupport.ColdFloorMarker, sql, StringComparison.Ordinal);
+        Assert.Contains(TimescaleSupport.EarlierFloorMarker, sql, StringComparison.Ordinal);
     }
 }

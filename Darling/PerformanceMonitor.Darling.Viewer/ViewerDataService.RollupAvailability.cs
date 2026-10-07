@@ -119,6 +119,15 @@ public sealed partial class ViewerDataService
         return string.IsNullOrEmpty(note) ? null : note;
     }
 
+    /// <summary>#5329: awaits a probe task whose answer is no longer wanted (the grid read beside it threw) so its fault is
+    /// observed here and never reaches <c>App.OnUnobservedTaskException</c> as a second error for one failure. The twin of
+    /// <c>DarlingDataReader.ObserveAsync</c>; the grid read's own exception is the one that propagates.</summary>
+    internal static async Task ObserveAsync(Task task)
+    {
+        try { await task; }
+        catch (Exception) { /* the grid read's own exception is the one that propagates. */ }
+    }
+
     /// <summary>
     /// #4957: measures each rollup's coverage floor in the background shortly after the Viewer opens its store, so
     /// the first routed read (Overview, Queries, FinOps and the rest all go through

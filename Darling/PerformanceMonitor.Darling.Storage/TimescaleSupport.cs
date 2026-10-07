@@ -14409,12 +14409,14 @@ public sealed class RollupCoverage
     /// ordered <c>LIMIT 1</c> over one relation. $1 server_id, $2/$3 window (naive UTC), $4 F (naive UTC).
     /// Null when the server has no bucket in the window. <c>$LEGACY$</c> and <c>$SUCCESSOR$</c> are relation names.
     /// #5329: moved here from the service's reader so the Viewer's grids and the MCP tools run ONE copy of the probe
-    /// (the start edge is per server on both).
+    /// (the start edge is per server on both). The window end is EXCLUSIVE (<c>bucket &lt; $3</c>), as the grids' is: the first bucket
+    /// names the start of the rows the grid read, so a server whose only bucket is the one that begins AT the end has no start
+    /// (its grid is empty).
     /// </summary>
     public const string HourlyFirstBucketSql =
         "SELECT least(" +
-        "(SELECT f.bucket FROM collect.$LEGACY$ AS f WHERE f.server_id = $1 AND f.bucket >= $2 AND f.bucket < $4 AND f.bucket <= $3$CEIL$ ORDER BY f.bucket LIMIT 1), " +
-        "(SELECT f.bucket FROM collect.$SUCCESSOR$ AS f WHERE f.server_id = $1 AND f.bucket >= $4 AND f.bucket >= $2 AND f.bucket <= $3$CEIL$ ORDER BY f.bucket LIMIT 1))";
+        "(SELECT f.bucket FROM collect.$LEGACY$ AS f WHERE f.server_id = $1 AND f.bucket >= $2 AND f.bucket < $4 AND f.bucket < $3$CEIL$ ORDER BY f.bucket LIMIT 1), " +
+        "(SELECT f.bucket FROM collect.$SUCCESSOR$ AS f WHERE f.server_id = $1 AND f.bucket >= $4 AND f.bucket >= $2 AND f.bucket < $3$CEIL$ ORDER BY f.bucket LIMIT 1))";
 
     /// <summary>
     /// The coverage probe when <see cref="StitchFloor"/> answers null: the window is served by ONE
@@ -14424,7 +14426,7 @@ public sealed class RollupCoverage
     /// <see cref="HourlyFirstBucketSql"/>). $1 server_id, $2/$3 window (naive UTC).
     /// </summary>
     public const string HourlyFirstBucketSingleRelationSql =
-        "SELECT f.bucket FROM $FROM$ WHERE f.server_id = $1 AND f.bucket >= $2 AND f.bucket <= $3$CEIL$ ORDER BY f.bucket LIMIT 1";
+        "SELECT f.bucket FROM $FROM$ WHERE f.server_id = $1 AND f.bucket >= $2 AND f.bucket < $3$CEIL$ ORDER BY f.bucket LIMIT 1";
 
     /// <summary>The placeholder <see cref="HourlyFirstBucketSingleRelationSql"/> (and the service's hourly top-N
     /// statements) carry where the FROM splice goes.</summary>

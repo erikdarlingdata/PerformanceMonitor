@@ -410,8 +410,7 @@ public sealed partial class ViewerDataService
 
         if (routedTier == RetentionTier.Hourly)
         {
-            var (hourlyRows, edgesNote, useIo, firstBucket) = await GetTopQueriesByCpuHourlyAsync(rollups, coverage, serverId, startUtc, endUtc, top, databaseNames, cancellationToken);
-            return new ViewerRoutedRead<ViewerQueryStatsRow>(hourlyRows, "hourly", edgesNote, useIo, firstBucket);
+            return await GetTopQueriesByCpuHourlyAsync(rollups, coverage, serverId, startUtc, endUtc, top, databaseNames, cancellationToken);
         }
 
         return new ViewerRoutedRead<ViewerQueryStatsRow>(await GetTopQueriesByCpuRawAsync(serverId, startUtc, endUtc, top, databaseNames, cancellationToken), "raw", null);
@@ -421,7 +420,7 @@ public sealed partial class ViewerDataService
     /// <see cref="RollupCoverage.StitchedRelationSql"/> (never a literal rollup name), groups by
     /// <c>(database_name, query_hash)</c> (the rollup has no host_object_name), and resolves each row's
     /// <c>query_text</c> with a follow-up lookup mirroring <see cref="DarlingDataReader"/>'s MCP twin.</summary>
-    private async Task<(List<ViewerQueryStatsRow> Rows, string? EdgesNote, bool UseIo, DateTime? FirstBucket)> GetTopQueriesByCpuHourlyAsync(
+    private async Task<ViewerRoutedRead<ViewerQueryStatsRow>> GetTopQueriesByCpuHourlyAsync(
         RollupAvailability rollups, RollupCoverage coverage, int serverId, DateTime startUtc, DateTime endUtc, int top,
         IReadOnlyList<string>? databaseNames, CancellationToken cancellationToken)
     {
@@ -443,66 +442,76 @@ public sealed partial class ViewerDataService
             _dataSource, answeringView, serverId, startUtc, endUtc, ceiling, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
 
         var ranked = new List<(string Database, string QueryHash, long TotalExecutions, long TotalCpuUs, long TotalElapsedUs, long? Reads, long? PhysicalReads, long? Writes)>();
-        await using (var command = _dataSource.CreateCommand(sql))
+        List<ViewerQueryStatsRow> rows;
+        try
         {
-            command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
-            AddServerWindowParameters(command, serverId, startUtc, endUtc);
-            command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = top });
-            command.Parameters.Add(DatabaseFilterParameter(databaseNames));
-            AddHourlyCeilingParameter(command, ceiling);
-            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-            while (await reader.ReadAsync(cancellationToken))
+            await using (var command = _dataSource.CreateCommand(sql))
             {
-                ranked.Add((
-                    reader.IsDBNull(0) ? "" : reader.GetString(0),
-                    reader.IsDBNull(1) ? "" : reader.GetString(1),
-                    reader.IsDBNull(2) ? 0 : reader.GetInt64(2),
-                    reader.IsDBNull(3) ? 0 : reader.GetInt64(3),
-                    reader.IsDBNull(4) ? 0 : reader.GetInt64(4),
-                    useIo && !reader.IsDBNull(5) ? reader.GetInt64(5) : null,
-                    useIo && !reader.IsDBNull(6) ? reader.GetInt64(6) : null,
-                    useIo && !reader.IsDBNull(7) ? reader.GetInt64(7) : null));
-            }
-        }
-
-        var rows = new List<ViewerQueryStatsRow>(ranked.Count);
-        foreach (var r in ranked)
-        {
-            var queryText = "";
-            await using (var textCommand = _dataSource.CreateCommand(
-                "SELECT query_text FROM v_query_stats WHERE server_id = $1 AND database_name = $2 AND query_hash = $3 AND query_text IS NOT NULL ORDER BY collection_time DESC LIMIT 1"))
-            {
-                textCommand.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
-                textCommand.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
-                textCommand.Parameters.Add(new NpgsqlParameter<string> { TypedValue = r.Database });
-                textCommand.Parameters.Add(new NpgsqlParameter<string> { TypedValue = r.QueryHash });
-                var textResult = await textCommand.ExecuteScalarAsync(cancellationToken);
-                if (textResult is string text)
+                command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
+                AddServerWindowParameters(command, serverId, startUtc, endUtc);
+                command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = top });
+                command.Parameters.Add(DatabaseFilterParameter(databaseNames));
+                AddHourlyCeilingParameter(command, ceiling);
+                await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+                while (await reader.ReadAsync(cancellationToken))
                 {
-                    queryText = text;
+                    ranked.Add((
+                        reader.IsDBNull(0) ? "" : reader.GetString(0),
+                        reader.IsDBNull(1) ? "" : reader.GetString(1),
+                        reader.IsDBNull(2) ? 0 : reader.GetInt64(2),
+                        reader.IsDBNull(3) ? 0 : reader.GetInt64(3),
+                        reader.IsDBNull(4) ? 0 : reader.GetInt64(4),
+                        useIo && !reader.IsDBNull(5) ? reader.GetInt64(5) : null,
+                        useIo && !reader.IsDBNull(6) ? reader.GetInt64(6) : null,
+                        useIo && !reader.IsDBNull(7) ? reader.GetInt64(7) : null));
                 }
             }
 
-            rows.Add(new ViewerQueryStatsRow
+            rows = new List<ViewerQueryStatsRow>(ranked.Count);
+            foreach (var r in ranked)
             {
-                DatabaseName = r.Database,
-                QueryHash = r.QueryHash,
-                TotalExecutions = r.TotalExecutions,
-                TotalCpuUs = r.TotalCpuUs,
-                TotalElapsedUs = r.TotalElapsedUs,
-                /* #5329: from the io rollup's sums when it covers the window, else null (blank, never 0). */
-                TotalLogicalReads = r.Reads,
-                TotalPhysicalReads = r.PhysicalReads,
-                TotalLogicalWrites = r.Writes,
-                /* #5329: MinCpuUs, MaxCpuUs, MinElapsedUs and MaxElapsedUs stay null here. */
-                QueryText = queryText,
-                /* #4231 stage 3: the rollup has no host_object_name column. */
-                HostObjectName = null,
-            });
+                var queryText = "";
+                await using (var textCommand = _dataSource.CreateCommand(
+                    "SELECT query_text FROM v_query_stats WHERE server_id = $1 AND database_name = $2 AND query_hash = $3 AND query_text IS NOT NULL ORDER BY collection_time DESC LIMIT 1"))
+                {
+                    textCommand.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
+                    textCommand.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
+                    textCommand.Parameters.Add(new NpgsqlParameter<string> { TypedValue = r.Database });
+                    textCommand.Parameters.Add(new NpgsqlParameter<string> { TypedValue = r.QueryHash });
+                    var textResult = await textCommand.ExecuteScalarAsync(cancellationToken);
+                    if (textResult is string text)
+                    {
+                        queryText = text;
+                    }
+                }
+
+                rows.Add(new ViewerQueryStatsRow
+                {
+                    DatabaseName = r.Database,
+                    QueryHash = r.QueryHash,
+                    TotalExecutions = r.TotalExecutions,
+                    TotalCpuUs = r.TotalCpuUs,
+                    TotalElapsedUs = r.TotalElapsedUs,
+                    /* #5329: from the io rollup's sums when it covers the window, else null (blank, never 0). */
+                    TotalLogicalReads = r.Reads,
+                    TotalPhysicalReads = r.PhysicalReads,
+                    TotalLogicalWrites = r.Writes,
+                    /* #5329: MinCpuUs, MaxCpuUs, MinElapsedUs and MaxElapsedUs stay null here. */
+                    QueryText = queryText,
+                    /* #4231 stage 3: the rollup has no host_object_name column. */
+                    HostObjectName = null,
+                });
+            }
+        }
+        catch
+        {
+            /* #5329: the probe is no longer wanted, so observe its fault (never throw it over this one): otherwise one failure logs twice. */
+            await ObserveAsync(firstBucketTask);
+            throw;
         }
 
         var firstBucket = await firstBucketTask;
-        return (rows, HourlyEdgesNote(startUtc, endUtc, firstBucket, ceiling), useIo, firstBucket);
+        return new ViewerRoutedRead<ViewerQueryStatsRow>(rows, "hourly", HourlyEdgesNote(startUtc, endUtc, firstBucket, ceiling), useIo, firstBucket);
     }
 
     /// <summary>#5329: the three columns the io hourly rollups add, appended to the hourly arm's select list

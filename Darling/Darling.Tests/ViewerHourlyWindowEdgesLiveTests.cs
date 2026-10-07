@@ -198,6 +198,18 @@ public sealed class ViewerHourlyWindowEdgesLiveTests
                 /* Server A, in the same store and the same viewer, still starts at its own first bucket. */
                 var first = await viewer.GetTopQueriesByCpuRoutedAsync(ServerId, WindowStart, end, cancellationToken: ct);
                 Assert.Equal(H0, first.HourlyFirstBucket);
+
+                /* The probe's window end is exclusive, as the grids' is: server B's ONLY bucket is H1, so a window that ENDS at H1
+                   reads nothing, and its note and banner must not name a start for that empty grid. */
+                var emptyEnd = await viewer.GetTopQueriesByCpuRoutedAsync(OtherServerId, WindowStart, H1, cancellationToken: ct);
+                Assert.Equal("hourly", emptyEnd.Tier);
+                Assert.Empty(emptyEnd.Rows);
+                Assert.Null(emptyEnd.HourlyFirstBucket);
+                Assert.DoesNotContain("served from", emptyEnd.HourlyEdgesNote ?? string.Empty, StringComparison.Ordinal);
+
+                var emptyEndProcedures = await viewer.GetTopProceduresByCpuRoutedAsync(OtherServerId, WindowStart, H1, cancellationToken: ct);
+                Assert.Empty(emptyEndProcedures.Rows);
+                Assert.Null(emptyEndProcedures.HourlyFirstBucket);
             }
 
             /* ── a bucket materializes AFTER the viewer measured its ceiling (the coverage snapshot is cached per viewer):

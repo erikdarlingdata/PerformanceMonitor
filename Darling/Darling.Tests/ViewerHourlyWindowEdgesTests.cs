@@ -9,6 +9,8 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Threading;
+using System.Threading.Tasks;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Darling.Viewer;
 using Xunit;
@@ -212,6 +214,47 @@ public sealed class ViewerHourlyWindowEdgesTests
         Assert.Contains("HourlyEdgesNote(startUtc, endUtc, firstBucket, ceiling)", body, StringComparison.Ordinal);
         Assert.DoesNotContain("HourlyServedFloor", body, StringComparison.Ordinal);
         Assert.Contains("coverage.StitchedRelationSql(answeringView", body, StringComparison.Ordinal);
+    }
+
+    /// <summary>#5329: when the grid read throws, the probe running beside it is awaited in a swallowing helper, so its own
+    /// fault is observed (never a second "Unobserved task exception" for one failure) and the grid's exception is the one
+    /// that propagates. Each arm returns <c>ViewerRoutedRead</c> directly (a tuple return hides it from the fan-out census).</summary>
+    [Theory]
+    [InlineData("ViewerDataService.QueryStats.cs", "GetTopQueriesByCpuHourlyAsync", "ViewerRoutedRead<ViewerQueryStatsRow>")]
+    [InlineData("ViewerDataService.ProcedureStats.cs", "GetTopProceduresByCpuHourlyAsync", "ViewerRoutedRead<ViewerProcedureStatsRow>")]
+    public void HourlyArm_ObservesTheProbe_WhenTheGridReadThrows_AndReturnsTheRoutedRead(string file, string method, string returnType)
+    {
+        var source = File.ReadAllText(FindSource("PerformanceMonitor.Darling.Viewer", file));
+        var start = source.IndexOf("private async Task<" + returnType + "> " + method + "(", StringComparison.Ordinal);
+        Assert.True(start >= 0, method + " must return " + returnType + " directly, not a tuple");
+        var end = source.IndexOf("internal static string BuildTop", start, StringComparison.Ordinal);
+        var body = source.Substring(start, end - start);
+
+        var probe = body.IndexOf("var firstBucketTask = ", StringComparison.Ordinal);
+        var tryAt = body.IndexOf("try", probe, StringComparison.Ordinal);
+        var catchAt = body.IndexOf("catch", tryAt, StringComparison.Ordinal);
+        var observe = body.IndexOf("await ObserveAsync(firstBucketTask);", catchAt, StringComparison.Ordinal);
+        var rethrow = body.IndexOf("throw;", observe, StringComparison.Ordinal);
+        var awaited = body.IndexOf("await firstBucketTask;", rethrow, StringComparison.Ordinal);
+        Assert.True(probe >= 0 && tryAt > probe && catchAt > tryAt && observe > catchAt && rethrow > observe && awaited > rethrow,
+            "the grid read must sit in a try whose catch observes the probe and rethrows, before the probe is awaited");
+        /* The command and the reader are opened inside the try. */
+        Assert.True(body.IndexOf("ExecuteReaderAsync(", StringComparison.Ordinal) > tryAt);
+        Assert.True(body.IndexOf("ExecuteReaderAsync(", StringComparison.Ordinal) < catchAt);
+        Assert.Contains("return new " + returnType + "(", body, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ObserveAsync_SwallowsTheProbesFault_SoOnlyTheGridReadsExceptionPropagates()
+    {
+        var faulted = Task.FromException(new TimeoutException("probe"));
+        await ViewerDataService.ObserveAsync(faulted);   // must not throw
+        Assert.True(faulted.IsFaulted);
+
+        var cancelled = Task.FromCanceled(new CancellationToken(canceled: true));
+        await ViewerDataService.ObserveAsync(cancelled);
+
+        await ViewerDataService.ObserveAsync(Task.CompletedTask);
     }
 
     [Fact]

@@ -186,6 +186,26 @@ public sealed class RawWindowFloorViewerPortTests
             ViewerServerTab.UpdateTruncationBanner(none, RequestedStart.AddDays(4), RequestedStart, Suffix,
                 hourly: new ViewerServerTab.HourlyServed(null));
             Assert.StartsWith("Slicer since ", none.Text, StringComparison.Ordinal);
+            Assert.DoesNotContain("full window", none.Text, StringComparison.Ordinal);
+
+            /* #5329: the usual hourly route (a cut raw floor, a first bucket inside the slack, and an edges note that says the
+               grid stops short) must not say "the grid shows the full window": that is the wide plan's claim. */
+            const string Edges = " - aggregated hourly. Window edges: the data from a to b is not included";
+            var usual = new TextBlock();
+            ViewerServerTab.UpdateTruncationBanner(usual, RequestedStart.AddDays(4), RequestedStart, Edges,
+                hourly: new ViewerServerTab.HourlyServed(RequestedStart.AddHours(1)));
+            Assert.DoesNotContain("full window", usual.Text, StringComparison.Ordinal);
+            Assert.StartsWith("Showing 2", usual.Text, StringComparison.Ordinal);
+            Assert.Contains(" · slicer since ", usual.Text, StringComparison.Ordinal);
+            Assert.EndsWith(Edges, usual.Text, StringComparison.Ordinal);
+
+            /* An empty grid (no bucket) names no start for it, and makes no full-window claim, with or without a cut raw floor. */
+            var emptyNoSlicer = new TextBlock();
+            ViewerServerTab.UpdateTruncationBanner(emptyNoSlicer, null, RequestedStart, Edges,
+                hourly: new ViewerServerTab.HourlyServed(null));
+            Assert.DoesNotContain("full window", emptyNoSlicer.Text, StringComparison.Ordinal);
+            Assert.DoesNotContain("Showing", emptyNoSlicer.Text, StringComparison.Ordinal);
+            Assert.StartsWith("No rollup bucket in the window", emptyNoSlicer.Text, StringComparison.Ordinal);
         });
     }
 
