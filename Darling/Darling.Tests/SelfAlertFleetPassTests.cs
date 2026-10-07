@@ -76,6 +76,25 @@ public sealed class SelfAlertFleetPassTests
         };
     }
 
+    /// <summary>
+    /// Waits for the worker's current self-alert pass to finish, failing the test with a message if it does not within
+    /// <see cref="Patience"/>. A test that counts evaluations must wait on this, not on the counter, before it starts the
+    /// next pass: the counter moves inside the pass, before the pass task completes.
+    /// </summary>
+    internal static async Task WaitForPassToEndAsync(DarlingWorker worker, int round)
+    {
+        var pass = worker.SelfAlertPassForTests;
+        Assert.NotNull(pass);
+        try
+        {
+            await pass.WaitAsync(Patience, TestContext.Current.CancellationToken);
+        }
+        catch (TimeoutException)
+        {
+            Assert.Fail($"the self-alert pass of round {round} did not end within {Patience}");
+        }
+    }
+
     internal static async Task<bool> BecomesTrueAsync(Func<bool> condition)
     {
         var deadline = DateTime.UtcNow + Patience;
@@ -176,10 +195,13 @@ public sealed class SelfAlertFleetPassTests
     {
         var worker = MakeWorker();
         var evaluations = 0;
-        worker.SelfAlertServerOverride = (_, _) =>
+        worker.SelfAlertServerOverride = async (_, _) =>
         {
             Interlocked.Increment(ref evaluations);
-            return Task.CompletedTask;
+
+            /* A slow tail: the counter is visible well before the pass ends, so a test that starts the next pass on the
+               counter alone gets a pass still running every time (the CI race). */
+            await Task.Delay(200);
         };
         var server = MakeServer("example-sql-01", connected: true);
         server.InFlightSweep = new TaskCompletionSource().Task;
@@ -190,6 +212,10 @@ public sealed class SelfAlertFleetPassTests
             var previous = worker.TryStartSelfAlertPass([server], TestContext.Current.CancellationToken);
             Assert.True(previous);
             Assert.True(await BecomesTrueAsync(() => Volatile.Read(ref evaluations) == round), $"round {round} was not evaluated");
+
+            /* The counter moves inside the pass, before the pass task ends: wait for the pass itself, or the next
+               TryStartSelfAlertPass sees a pass still running and returns false (the CI race). */
+            await WaitForPassToEndAsync(worker, round);
         }
 
         /* On its cadence: a tick inside the 30 second window evaluates nothing. */

@@ -11275,6 +11275,13 @@ AND   j.hypertable_name = '{relation}'", connection))
     internal Func<ServerLoopState, CancellationToken, Task>? SelfAlertServerOverride { get; set; }
 
     /// <summary>
+    /// Test seam (#5481): the fleet pass's task, so a test that starts a second pass waits for the first to finish rather than
+    /// for a counter the pass moves before it ends (a pass still running makes <see cref="TryStartSelfAlertPass"/> return false).
+    /// Null before the first pass. Production never reads it.
+    /// </summary>
+    internal Task? SelfAlertPassForTests => _selfAlertPass;
+
+    /// <summary>
     /// The per-server self-alert pass's launcher (#5479): Collection Stopped and the other store-polled self-alerts, and
     /// the custom-alert rules, for every server in this tick's snapshot. They ran at the top of each server's collection
     /// body, so a body the memory launch guard held off, or one that never finished, silenced them; a fleet that had
