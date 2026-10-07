@@ -432,6 +432,88 @@ public sealed class AwsPerServerRoleLiveTests
     /* ---- the trigger rule ------------------------------------------------------------------------------ */
 
     [Fact]
+    public async Task ALoginThatOnlyExecutes_GetsInvalidValueForAnEmptyRequiredField_OnBothSignatures_AndTheRowIsUnchanged()
+    {
+        var baseConnectionString = BaseConnectionString();
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), "Set DARLING_TEST_PG to run the live AWS role tests (each mints its own scratch database).");
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        string? login = null;
+        var bodySucceeded = false;
+        try
+        {
+            await using var owner = await OpenOwnerAsync(scratch, ct);
+            await ExecAsync(owner, DarlingManagedRoles.BuildEditMonitoredServerFunctionSql("config"), ct);
+            await ExecAsync(owner, DarlingManagedRoles.BuildEditMonitoredServerLegacyWrapperSql("config"), ct);
+            await InsertServerAsync(owner, 8701, Role, External, ct);
+
+            /* The edit-only login the web host uses: EXECUTE on both signatures, and no right on the table itself. */
+            login = await CreateLoginRoleAsync(owner, ct);
+            await ExecAsync(owner, $"GRANT EXECUTE ON FUNCTION config.edit_monitored_server({DarlingManagedRoles.EditMonitoredServerSignature}) TO {login}", ct);
+            await ExecAsync(owner, $"GRANT EXECUTE ON FUNCTION config.edit_monitored_server({DarlingManagedRoles.EditMonitoredServerLegacySignature}) TO {login}", ct);
+            await using var role = await OpenAsRoleAsync(scratch, login, ct);
+
+            var before = await StoredAsync(owner, 8701, ct);
+            var nameBefore = await TextAsync(owner, "SELECT name || '|' || host || '|' || modified_at::text FROM config.config_monitored_servers WHERE server_id = 8701", ct);
+
+            /* An empty name: the 17-argument function and the 15-argument wrapper answer with an outcome, and raise nothing. */
+            var token = await TokenAsync(owner, 8701, ct);
+            Assert.Equal("invalid_value", await TextAsync(role,
+                $"SELECT outcome FROM config.edit_monitored_server(8701, '{token}'::timestamp, ARRAY['name']::text[], "
+                + "NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL)", ct));
+            Assert.Equal("invalid_value", await TextAsync(role,
+                $"SELECT outcome FROM config.edit_monitored_server(8701, '{token}'::timestamp, ARRAY['name']::text[], "
+                + "NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL)", ct));
+
+            /* An empty host with a typed secret, on both. */
+            Assert.Equal("invalid_value", await TextAsync(role,
+                $"SELECT outcome FROM config.edit_monitored_server(8701, '{token}'::timestamp, ARRAY['host','encrypted_password']::text[], "
+                + "NULL, NULL, NULL, NULL, NULL, NULL, NULL, 'typed-secret', NULL, NULL, NULL, NULL, NULL, NULL)", ct));
+            Assert.Equal("invalid_value", await TextAsync(role,
+                $"SELECT outcome FROM config.edit_monitored_server(8701, '{token}'::timestamp, ARRAY['host','encrypted_password']::text[], "
+                + "NULL, NULL, NULL, NULL, NULL, NULL, NULL, 'typed-secret', NULL, NULL, NULL, NULL)", ct));
+
+            Assert.Equal(before, await StoredAsync(owner, 8701, ct));
+            Assert.Equal(nameBefore, await TextAsync(owner, "SELECT name || '|' || host || '|' || modified_at::text FROM config.config_monitored_servers WHERE server_id = 8701", ct));
+            bodySucceeded = true;
+        }
+        finally
+        {
+            var loginToDrop = login;
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, (cleanup, _) => DropLoginRoleAsync(cleanup, loginToDrop));
+        }
+    }
+
+    [Fact]
+    public async Task TheCheck_RefusesMarkupAndQuoteCharactersInARolePath()
+    {
+        var baseConnectionString = BaseConnectionString();
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), "Set DARLING_TEST_PG to run the live AWS role tests (each mints its own scratch database).");
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        var bodySucceeded = false;
+        try
+        {
+            await using var owner = await OpenOwnerAsync(scratch, ct);
+            var id = 8710;
+            foreach (var path in new[] { "<svg/onload=alert(1)>/x", "a<b>/x", "a>b/x", "a\"b/x", "a'b/x", "a&b/x", "a`b/x", "a b/x" })
+            {
+                var refused = await RefusalAsync(() => InsertServerAsync(owner, id++, $"arn:aws:iam::123456789012:role/{path}", null, ct));
+                Assert.Equal("23514", refused);
+            }
+
+            await InsertServerAsync(owner, id, "arn:aws:iam::123456789012:role/path_1+=,.@-/darling-monitor", null, ct);
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, (_, _) => Task.CompletedTask);
+        }
+    }
+
+    [Fact]
     public async Task ARoleThatIsNotTheOwner_CannotPutANewRoleOverAStoredId_Pw004()
     {
         var baseConnectionString = BaseConnectionString();

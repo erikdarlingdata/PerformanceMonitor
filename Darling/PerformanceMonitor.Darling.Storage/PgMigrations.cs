@@ -738,7 +738,7 @@ BEGIN
         ALTER TABLE config.config_monitored_servers
             ADD CONSTRAINT config_monitored_servers_aws_role_check CHECK (
                 (aws_external_id IS NULL OR aws_role_arn IS NOT NULL)
-                AND (aws_role_arn IS NULL OR (aws_role_arn ~ '^arn:aws(-[a-z]+)*:iam::[0-9]{12}:role/[!-~]+$'
+                AND (aws_role_arn IS NULL OR (aws_role_arn ~ '^arn:aws(-[a-z]+)*:iam::[0-9]{12}:role/[A-Za-z0-9_+=,.@/-]+$'
                                               AND char_length(aws_role_arn) <= 2048))
                 AND (aws_external_id IS NULL OR (aws_external_id ~ '^[A-Za-z0-9_+=,.@:/-]+$'
                                                  AND char_length(aws_external_id) BETWEEN 2 AND 1224)));

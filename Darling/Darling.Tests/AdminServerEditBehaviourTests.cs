@@ -495,6 +495,12 @@ public sealed class AdminServerEditBehaviourTests
         Assert.Equal(
             "The AWS role must be an IAM role ARN, such as arn:aws:iam::123456789012:role/darling-monitor.",
             Pure("validateEdit", original, PgEdited(true, """{"aws_role_arn":"nope"}"""), "", "").GetString());
+        foreach (var path in new[] { "<svg/onload=alert(1)>/x", "a<b>/x", "a&b/x", "a`b/x", "a'b/x" })
+        {
+            Assert.Equal(
+                "The AWS role must be an IAM role ARN, such as arn:aws:iam::123456789012:role/darling-monitor.",
+                Pure("validateEdit", original, PgEdited(true, "{\"aws_role_arn\":\"arn:aws:iam::123456789012:role/" + path + "\"}"), "", "").GetString());
+        }
         Assert.Equal(
             "The external ID must be 2 to 1224 characters: letters, digits and _ + = , . @ : / - with no spaces.",
             Pure("validateEdit", original, PgEdited(true, "{}"), "", "has space").GetString());

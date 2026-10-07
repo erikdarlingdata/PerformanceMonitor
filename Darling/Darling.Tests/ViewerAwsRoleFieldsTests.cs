@@ -19,9 +19,9 @@ namespace Darling.Tests;
 
 /// <summary>
 /// The desktop viewer's per-server AWS role fields (#5452). The writes name <c>aws_role_arn</c> and <c>aws_external_id</c> and
-/// never the generated <c>aws_external_id_set</c>; the by-id read an admin seat makes is the one read of the external ID,
-/// because the read-only roles are denied the column; and every read's column count agrees with the ordinals its reader
-/// uses, which a live test would only catch on a store with the V168 columns.
+/// never the generated <c>aws_external_id_set</c>; no read selects the external ID, only whether one is set, and an edit
+/// keeps the stored ID unless a new one is typed or the clear box is ticked; and every read's column count agrees with the
+/// ordinals its reader uses, which a live test would only catch on a store with the V168 columns.
 /// </summary>
 public sealed class ViewerAwsRoleFieldsTests
 {
@@ -60,22 +60,28 @@ public sealed class ViewerAwsRoleFieldsTests
             var values = sql[valuesStart..sql.IndexOf("ON CONFLICT", StringComparison.Ordinal)];
             Assert.Equal(columns, Regex.Matches(values, @"\$\d+|\(now\(\) AT TIME ZONE 'UTC'\)").Count);
             Assert.Contains("$20", sql, StringComparison.Ordinal);
-            Assert.DoesNotContain("$21", sql, StringComparison.Ordinal);
         }
 
+        Assert.DoesNotContain("$21", ViewerDataService.MonitoredServerInsertIfAbsentSql, StringComparison.Ordinal);
         Assert.Contains("aws_role_arn = EXCLUDED.aws_role_arn", ViewerDataService.MonitoredServerUpsertSql, StringComparison.Ordinal);
-        Assert.Contains("aws_external_id = EXCLUDED.aws_external_id", ViewerDataService.MonitoredServerUpsertSql, StringComparison.Ordinal);
     }
 
     [Fact]
-    public void OnlyTheByIdRead_SelectsTheExternalId_TheOthersCarryTheRoleAndTheFlag()
+    public void TheUpsert_KeepsTheStoredExternalId_UnlessOneWasTypedOrTheBoxWasCleared()
     {
-        Assert.Matches(ExternalIdColumn, ViewerDataService.MonitoredServerByIdSql);
-        Assert.Contains("aws_external_id_set", ViewerDataService.MonitoredServerByIdSql, StringComparison.Ordinal);
+        var sql = ViewerDataService.MonitoredServerUpsertSql;
+        Assert.DoesNotContain("aws_external_id = EXCLUDED.aws_external_id,", sql, StringComparison.Ordinal);
+        Assert.Contains("WHEN $21 THEN EXCLUDED.aws_external_id", sql, StringComparison.Ordinal);
+        Assert.Contains("ELSE config_monitored_servers.aws_external_id END", sql, StringComparison.Ordinal);
+        Assert.Contains("WHEN EXCLUDED.aws_role_arn IS NULL THEN NULL", sql, StringComparison.Ordinal);
+    }
 
-        /* A read-only seat is denied the aws_external_id column: any read it makes must not name it, or it fails with 42501. */
+    [Fact]
+    public void NoRead_SelectsTheExternalId_EachCarriesTheRoleAndTheFlag()
+    {
         foreach (var sql in new[]
         {
+            ViewerDataService.MonitoredServerByIdSql,
             ViewerDataService.MonitoredServersSelectSql,
             ViewerDataService.MonitoredServerByIdNoSecretSql,
             ViewerDataService.MonitoredServerByAddressSql,
@@ -106,6 +112,7 @@ public sealed class ViewerAwsRoleFieldsTests
         var row = new MonitoredServerRow();
         Assert.Null(row.AwsRoleArn);
         Assert.Null(row.AwsExternalId);
+        Assert.False(row.AwsExternalIdSent);
         Assert.False(row.AwsExternalIdSet);
     }
 
@@ -122,33 +129,61 @@ public sealed class ViewerAwsRoleFieldsTests
     [Fact]
     public void Resolve_BlankBoxes_AreNotSet_AndOnAnEditClearTheStoredRole()
     {
-        Assert.Equal((null, null, null), AddServerDialog.ResolveAwsRole("  ", "", null, null, false));
-        Assert.Equal((null, null, null), AddServerDialog.ResolveAwsRole("", "", Role, null, false));
+        Assert.Equal((null, null, false, null), AddServerDialog.ResolveAwsRole("  ", "", false, null, false));
+        Assert.Equal((null, null, false, null), AddServerDialog.ResolveAwsRole("", "", false, Role, false));
     }
 
     [Fact]
     public void Resolve_TheSharedChecksApply_WithTheirFixedSentences()
     {
-        Assert.Equal(AwsRoleSettings.InvalidRoleMessage, AddServerDialog.ResolveAwsRole("not-an-arn", "", null, null, false).Error);
-        Assert.Equal(AwsRoleSettings.InvalidExternalIdMessage, AddServerDialog.ResolveAwsRole(Role, "has space", null, null, false).Error);
-        Assert.Equal(AwsRoleSettings.ExternalIdNeedsRoleMessage, AddServerDialog.ResolveAwsRole("", "ext-1234", null, null, false).Error);
-        Assert.Equal((Role, "ext-1234", null), AddServerDialog.ResolveAwsRole($" {Role} ", " ext-1234 ", null, null, false));
+        Assert.Equal(AwsRoleSettings.InvalidRoleMessage, AddServerDialog.ResolveAwsRole("not-an-arn", "", false, null, false).Error);
+        Assert.Equal(AwsRoleSettings.InvalidExternalIdMessage, AddServerDialog.ResolveAwsRole(Role, "has space", false, null, false).Error);
+        Assert.Equal(AwsRoleSettings.ExternalIdNeedsRoleMessage, AddServerDialog.ResolveAwsRole("", "ext-1234", false, null, false).Error);
+        Assert.Equal((Role, "ext-1234", true, null), AddServerDialog.ResolveAwsRole($" {Role} ", " ext-1234 ", false, null, false));
+    }
+
+    [Fact]
+    public void Resolve_AnEditWithTheBoxUntouched_KeepsTheStoredExternalId()
+    {
+        /* Nothing typed and the clear box not ticked: nothing is sent, so the upsert keeps the stored ID. */
+        Assert.Equal((Role, null, false, null), AddServerDialog.ResolveAwsRole(Role, "", false, Role, true));
+        Assert.Equal((Role, null, false, null), AddServerDialog.ResolveAwsRole(Role, "   ", false, Role, true));
+    }
+
+    [Fact]
+    public void Resolve_ATypedExternalId_Replaces_AndTheClearBoxRemoves()
+    {
+        Assert.Equal((Role, "ext-5678", true, null), AddServerDialog.ResolveAwsRole(Role, "ext-5678", false, Role, true));
+        Assert.Equal((Role, null, true, null), AddServerDialog.ResolveAwsRole(Role, "", true, Role, true));
+        Assert.Equal(AddServerDialog.AwsExternalIdTypedAndClearedMessage, AddServerDialog.ResolveAwsRole(Role, "ext-5678", true, Role, true).Error);
     }
 
     [Fact]
     public void Resolve_ANewRole_NeedsTheStoredExternalIdChangedOrCleared()
     {
-        /* The box still holds the stored ID: the store's trigger would refuse it (PW004), so the dialog says so first. */
+        /* The box is untouched and one is stored: the store's trigger would refuse it (PW004), so the dialog says so first. */
         Assert.Equal(AwsRoleSettings.RoleChangeNeedsExternalIdMessage,
-            AddServerDialog.ResolveAwsRole(OtherRole, "ext-1234", Role, "ext-1234", true).Error);
+            AddServerDialog.ResolveAwsRole(OtherRole, "", false, Role, true).Error);
 
         /* A new ID, or a cleared one, goes through; an unchanged role never needs it. */
-        Assert.Null(AddServerDialog.ResolveAwsRole(OtherRole, "ext-5678", Role, "ext-1234", true).Error);
-        Assert.Null(AddServerDialog.ResolveAwsRole(OtherRole, "", Role, "ext-1234", true).Error);
-        Assert.Null(AddServerDialog.ResolveAwsRole(Role, "ext-1234", Role, "ext-1234", true).Error);
+        Assert.Null(AddServerDialog.ResolveAwsRole(OtherRole, "ext-5678", false, Role, true).Error);
+        Assert.Null(AddServerDialog.ResolveAwsRole(OtherRole, "", true, Role, true).Error);
+        Assert.Null(AddServerDialog.ResolveAwsRole(Role, "", false, Role, true).Error);
 
         /* A target with no stored ID takes a new role freely. */
-        Assert.Null(AddServerDialog.ResolveAwsRole(OtherRole, "", Role, null, false).Error);
+        Assert.Null(AddServerDialog.ResolveAwsRole(OtherRole, "", false, Role, false).Error);
+    }
+
+    [Fact]
+    public void TheDialog_ShowsWhetherAnExternalIdIsSet_AndOffersAClearBox_AndNeverFillsTheBox()
+    {
+        var xaml = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "AddServerDialog.xaml");
+        Assert.Contains("x:Name=\"AwsClearExternalIdBox\" Content=\"Clear external ID\"", xaml, StringComparison.Ordinal);
+
+        var code = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "AddServerDialog.xaml.cs");
+        Assert.Contains("AwsExternalIdState.Text = existing.AwsExternalIdSet ? AwsExternalIdSetNote : AwsExternalIdNoneNote;", code, StringComparison.Ordinal);
+        Assert.DoesNotContain("AwsExternalIdBox.Password =", code, StringComparison.Ordinal);
+        Assert.Contains("Leave the box blank to keep it", AddServerDialog.AwsExternalIdSetNote, StringComparison.Ordinal);
     }
 
     [Fact]

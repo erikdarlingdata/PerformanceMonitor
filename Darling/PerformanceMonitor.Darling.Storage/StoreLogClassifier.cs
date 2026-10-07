@@ -1327,7 +1327,7 @@ public static class StoreLogClassifier
                 var masked = field.Name switch
                 {
                     "STATEMENT" or "QUERY" => PgLogTextRedactor.RedactStoredStatement(text) ?? WithheldStatement,
-                    "DETAIL" => PgLogTextRedactor.RedactDetail(text, detailComplete) ?? string.Empty,
+                    "DETAIL" => MaskRowValues(PgLogTextRedactor.RedactDetail(text, detailComplete) ?? string.Empty),
                     _ => PgLogTextRedactor.RedactContext(text) ?? string.Empty,
                 };
 
@@ -1346,6 +1346,35 @@ public static class StoreLogClassifier
         }
 
         return result.ToString();
+    }
+
+    private static readonly Regex FailingRowPattern = new(
+        @"Failing row contains \(.*",
+        RegexOptions.CultureInvariant | RegexOptions.Singleline, TimeSpan.FromSeconds(1));
+
+    private static readonly Regex KeyValuePattern = new(
+        @"Key \(([^)]*)\)=\(.*\)(?= (?:already exists|is not present|is still referenced))",
+        RegexOptions.CultureInvariant | RegexOptions.Singleline, TimeSpan.FromSeconds(1));
+
+    private static readonly Regex KeyValueUnterminatedPattern = new(
+        @"Key \(([^)]*)\)=\((?!\.\.\.\))(.*)",
+        RegexOptions.CultureInvariant | RegexOptions.Singleline, TimeSpan.FromSeconds(1));
+
+    /// <summary>
+    /// A DETAIL's row values withheld (#5452): the tuple in <c>Failing row contains (...)</c> and the value in
+    /// <c>Key (columns)=(value)</c> are replaced by <c>...</c>, so the stored text names the constraint and the
+    /// columns and holds no stored value. Idempotent, like <see cref="MaskEntry"/>.
+    /// </summary>
+    internal static string MaskRowValues(string detail)
+    {
+        if (detail.Length == 0)
+        {
+            return detail;
+        }
+
+        detail = FailingRowPattern.Replace(detail, "Failing row contains (...).");
+        detail = KeyValuePattern.Replace(detail, "Key ($1)=(...)");
+        return KeyValueUnterminatedPattern.Replace(detail, "Key ($1)=(...)");
     }
 
     /// <summary>A field's text (<see cref="MaskEntry"/>): its first line from <paramref name="from"/>, and the

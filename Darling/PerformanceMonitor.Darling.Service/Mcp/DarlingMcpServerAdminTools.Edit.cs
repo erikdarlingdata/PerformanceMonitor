@@ -109,6 +109,9 @@ public sealed partial class DarlingMcpServerAdminTools
     /// password itself from the viewer, admin and MCP roles. The same words in the store's own trigger and edit function.</summary>
     internal const string EditReferenceRefusedText = ServerConnectionRule.ReferenceRefusedText;
 
+    /// <summary>The store's own answer when an edit sends an empty value for a required field, or one the store's field rules do not accept: nothing is saved.</summary>
+    internal const string EditInvalidValueText = "One of the values in this edit is empty or is not accepted for its field, so nothing was saved. Check the fields you changed and try again.";
+
     /// <summary>The answer when the store refuses a change to how a server is reached because the row holds a remediation
     /// login: that secret is set and changed on the service host. The same words in the store's own trigger.</summary>
     internal const string EditRemediationKeptText = ServerConnectionRule.RemediationKeptText;
@@ -398,6 +401,8 @@ public sealed partial class DarlingMcpServerAdminTools
                 return Outcome(EditStatus.Invalid, AwsRoleSettings.RoleChangeNeedsExternalIdMessage);
             case ServerEditWriteKind.ExternalIdNeedsRole:
                 return Outcome(EditStatus.Invalid, AwsRoleSettings.ExternalIdNeedsRoleMessage);
+            case ServerEditWriteKind.InvalidValue:
+                return Outcome(EditStatus.Invalid, EditInvalidValueText);
             case ServerEditWriteKind.Conflict:
                 /* Same shape as the pre-probe conflict: the current non-secret values, so the caller can retry. */
                 if (await store.ReadRowAsync(serverId, cancellationToken) is { } currentRow)
@@ -1051,7 +1056,7 @@ public sealed partial class DarlingMcpServerAdminTools
     /// <summary><c>Occupied</c>: another definition holds the address the edit moves to. <c>ActualOccupied</c>: another
     /// definition holds the storage key the probe's connected database gives (#5240), the refusal
     /// <see cref="ActualIdentityCollision"/> gives before the write. Neither commits.</summary>
-    internal enum ServerEditWriteKind { Written, NotFound, Conflict, Occupied, PasswordNeeded, ActualOccupied, ReferenceRefused, RemediationKept, ExternalIdNeeded, ExternalIdNeedsRole }
+    internal enum ServerEditWriteKind { Written, NotFound, Conflict, Occupied, PasswordNeeded, ActualOccupied, ReferenceRefused, RemediationKept, ExternalIdNeeded, ExternalIdNeedsRole, InvalidValue }
 
     internal sealed record ServerEditWrite(ServerEditWriteKind Kind, DateTime ModifiedAt);
 
@@ -1251,6 +1256,8 @@ FROM config_monitored_servers WHERE server_id = $1";
                     return new ServerEditWrite(ServerEditWriteKind.ExternalIdNeeded, expectedModifiedAt);
                 case "external_id_needs_role":
                     return new ServerEditWrite(ServerEditWriteKind.ExternalIdNeedsRole, expectedModifiedAt);
+                case "invalid_value":
+                    return new ServerEditWrite(ServerEditWriteKind.InvalidValue, expectedModifiedAt);
                 case "saved":
                     break;
                 default:

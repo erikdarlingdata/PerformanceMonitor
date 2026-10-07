@@ -70,7 +70,7 @@ public static class AwsRoleSettings
         RegexOptions.CultureInvariant, TimeSpan.FromSeconds(1));
 
     private static readonly Regex PathSegmentPattern = new(
-        @"^[\x21-\x2E\x30-\x7E]+\z",
+        @"^[A-Za-z0-9_+=,.@-]+\z",
         RegexOptions.CultureInvariant, TimeSpan.FromSeconds(1));
 
     private static readonly Regex ExternalIdPattern = new(

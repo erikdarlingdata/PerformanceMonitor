@@ -1126,7 +1126,13 @@ GRANT UPDATE (enabled, modified_at), DELETE ON {config}.config_notification_rout
 --    config_monitored_servers write fires trg_bump_monitored_servers -> config_bump_version (SECURITY INVOKER),
 --    which UPDATEs config_service.config_version AS mcp, and section 8 already granted mcp
 --    UPDATE (config_version, updated_at) ON config_service -- so no additional config_service grant is needed here.
-GRANT INSERT, UPDATE, DELETE ON {config}.config_monitored_servers TO {mcp};
+GRANT INSERT, DELETE ON {config}.config_monitored_servers TO {mcp};
+REVOKE UPDATE ON {config}.config_monitored_servers FROM {mcp};
+-- The role and external ID of a server are set only through the edit function (and an INSERT): mcp's UPDATE
+-- names every other column of the table and leaves out aws_role_arn, aws_external_id and the generated
+-- aws_external_id_set. A column added to the table later is added to this list.
+GRANT UPDATE ({McpMonitoredServerUpdateColumns})
+   ON {config}.config_monitored_servers TO {mcp};
 
 -- 10. Custom-alert resolve-on-delete privileged write (#3334). The recovery/resolution row a caller-initiated
 --     rule DELETE writes (CustomAlertEvaluator.WriteTeardownResolutionAsync) lands in config.config_alert_log,
@@ -1290,6 +1296,10 @@ AS $fn$
 $fn$;
 REVOKE ALL ON FUNCTION {config}.record_custom_alert_resolution(integer, text, text, text) FROM PUBLIC;";
 
+    /// <summary>The columns of <c>config.config_monitored_servers</c> the <c>mcp</c> login may UPDATE directly (#5452): every column except the AWS role, the external ID and the generated external-ID flag, which change only through <c>config.edit_monitored_server</c>. <c>tools/provision-roles.sql</c> carries the same list.</summary>
+    internal const string McpMonitoredServerUpdateColumns =
+        "server_id, name, host, database, auth, username, encrypted_password, encrypt_mode, trust_server_certificate, read_only_intent, multi_subnet_failover, excluded_databases, monthly_cost_usd, capture_plans, is_enabled, created_at, modified_at, alert_delivery_mode_override, engine, port, plan_force_bot_enabled, remediation_username, remediation_encrypted_password";
+
     /// <summary>The argument types of <c>config.edit_monitored_server</c> (#5240), in order. The one place the signature is
     /// spelled for the <c>GRANT EXECUTE</c>, so a changed parameter list cannot leave the grant naming another function.</summary>
     internal const string EditMonitoredServerSignature = "integer, timestamp, text[], text, text, integer, text, boolean, text, text, text, text, boolean, boolean, numeric, text, text";
@@ -1307,7 +1317,8 @@ REVOKE ALL ON FUNCTION {config}.record_custom_alert_resolution(integer, text, te
     /// itself from the stored row, answers <c>remediation_kept</c> instead of writing when the row holds a remediation login,
     /// and answers <c>password_needed</c> instead of writing when that change, or a switch
     /// of authentication mode, would keep the stored secret on a SQL or service-principal row. A row whose
-    /// authentication stores no secret never keeps one. Same builder for the managed batch, the script's text and the
+    /// authentication stores no secret never keeps one. A missing value for a required column, or a value the table's
+    /// checks refuse, answers <c>invalid_value</c> instead of writing. Same builder for the managed batch, the script's text and the
     /// live tests, so none drifts. Pinned <c>search_path</c>, fixed statements, no dynamic SQL.
     /// </summary>
     internal static string BuildEditMonitoredServerFunctionSql(string config) => $@"
@@ -1406,6 +1417,16 @@ BEGIN
    v_secret_auth := lower(v_auth) IN ('sql', 'serviceprincipal');
    v_new_secret := 'encrypted_password' = ANY (p_columns) AND COALESCE(p_secret, '') <> '';
 
+   -- A NULL for a column the table requires is refused with a plain outcome: the edit sends nothing the table would
+   -- have to turn away.
+   IF ('name' = ANY (p_columns) AND p_name IS NULL)
+      OR v_host IS NULL OR v_port IS NULL OR v_auth IS NULL OR v_encrypt_mode IS NULL
+      OR v_read_only_intent IS NULL OR v_trust_server_certificate IS NULL OR v_multi_subnet_failover IS NULL
+      OR ('monthly_cost_usd' = ANY (p_columns) AND p_monthly_cost_usd IS NULL) THEN
+      RETURN QUERY SELECT 'invalid_value'::text, NULL::timestamp;
+      RETURN;
+   END IF;
+
    -- The store takes the password itself from these roles: a secret that starts with env: or file: (a reference,
    -- compared as the service reads one, case-sensitive and at the start of the text) is refused. References are set
    -- in the configuration file.
@@ -1464,24 +1485,31 @@ BEGIN
       v_secret := NULL;
    END IF;
 
-   UPDATE {config}.config_monitored_servers AS s
-   SET name = CASE WHEN 'name' = ANY (p_columns) THEN p_name ELSE s.name END,
-       host = v_host,
-       port = v_port,
-       database = v_database,
-       read_only_intent = v_read_only_intent,
-       auth = v_auth,
-       username = v_username,
-       encrypted_password = CASE WHEN v_secret_set THEN v_secret ELSE s.encrypted_password END,
-       encrypt_mode = v_encrypt_mode,
-       trust_server_certificate = v_trust_server_certificate,
-       multi_subnet_failover = v_multi_subnet_failover,
-       monthly_cost_usd = CASE WHEN 'monthly_cost_usd' = ANY (p_columns) THEN p_monthly_cost_usd ELSE s.monthly_cost_usd END,
-       aws_role_arn = v_role,
-       aws_external_id = v_ext,
-       modified_at = (now() AT TIME ZONE 'UTC')
-   WHERE s.server_id = p_server_id
-   RETURNING s.modified_at INTO new_modified_at;
+   -- A value the table's own checks refuse (a required column, a format, a duplicate) answers invalid_value too:
+   -- the table's error text is not passed on.
+   BEGIN
+      UPDATE {config}.config_monitored_servers AS s
+      SET name = CASE WHEN 'name' = ANY (p_columns) THEN p_name ELSE s.name END,
+          host = v_host,
+          port = v_port,
+          database = v_database,
+          read_only_intent = v_read_only_intent,
+          auth = v_auth,
+          username = v_username,
+          encrypted_password = CASE WHEN v_secret_set THEN v_secret ELSE s.encrypted_password END,
+          encrypt_mode = v_encrypt_mode,
+          trust_server_certificate = v_trust_server_certificate,
+          multi_subnet_failover = v_multi_subnet_failover,
+          monthly_cost_usd = CASE WHEN 'monthly_cost_usd' = ANY (p_columns) THEN p_monthly_cost_usd ELSE s.monthly_cost_usd END,
+          aws_role_arn = v_role,
+          aws_external_id = v_ext,
+          modified_at = (now() AT TIME ZONE 'UTC')
+      WHERE s.server_id = p_server_id
+      RETURNING s.modified_at INTO new_modified_at;
+   EXCEPTION WHEN not_null_violation OR check_violation OR unique_violation THEN
+      RETURN QUERY SELECT 'invalid_value'::text, NULL::timestamp;
+      RETURN;
+   END;
 
    outcome := 'saved';
    RETURN NEXT;

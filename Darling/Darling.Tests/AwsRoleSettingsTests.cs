@@ -65,6 +65,14 @@ public sealed class AwsRoleSettingsTests
     [InlineData("arn:aws:iam::123456789012:role/darlingé")]
     [InlineData("ARN:aws:iam::123456789012:role/darling-monitor")]
     [InlineData("arn:aws:iam::123456789012:role/darling-monitor\nextra")]
+    [InlineData("arn:aws:iam::123456789012:role/<svg/onload=alert(1)>/x")]
+    [InlineData("arn:aws:iam::123456789012:role/path<b>/darling")]
+    [InlineData("arn:aws:iam::123456789012:role/path>/darling")]
+    [InlineData("arn:aws:iam::123456789012:role/pa\"th/darling")]
+    [InlineData("arn:aws:iam::123456789012:role/pa'th/darling")]
+    [InlineData("arn:aws:iam::123456789012:role/pa&th/darling")]
+    [InlineData("arn:aws:iam::123456789012:role/pa`th/darling")]
+    [InlineData("arn:aws:iam::123456789012:role/pa<th")]
     public void ValidateRole_RefusesAnythingElse_WithTheSharedSentence(string role)
     {
         Assert.Equal(AwsRoleSettings.InvalidRoleMessage, AwsRoleSettings.ValidateRole(role));

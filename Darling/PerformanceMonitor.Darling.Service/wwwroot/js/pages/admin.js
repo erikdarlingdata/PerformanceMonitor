@@ -230,7 +230,7 @@ export const AWS_ROLE_CHANGE_NEEDS_EXTERNAL_ID = "Changing the AWS role needs th
 
 const AWS_ROLE_PATTERN = /^arn:aws(?:-[a-z]+)*:iam::[0-9]{12}:role\/(.+)$/;
 const AWS_ROLE_NAME_PATTERN = /^[A-Za-z0-9_+=,.@-]{1,64}$/;
-const AWS_ROLE_PATH_SEGMENT_PATTERN = /^[\x21-\x2E\x30-\x7E]+$/;
+const AWS_ROLE_PATH_SEGMENT_PATTERN = /^[A-Za-z0-9_+=,.@-]+$/;
 const AWS_EXTERNAL_ID_PATTERN = /^[A-Za-z0-9_+=,.@:/-]{2,1224}$/;
 
 /* True when `role` (trimmed, not blank) is an IAM role ARN the service accepts. */

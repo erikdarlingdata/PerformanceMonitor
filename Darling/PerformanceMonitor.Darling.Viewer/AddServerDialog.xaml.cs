@@ -116,10 +116,10 @@ public partial class AddServerDialog : Window
             PostgresEngineRadio.IsChecked = true;
             PortBox.Text = existing.Port > 0 ? existing.Port.ToString(CultureInfo.InvariantCulture) : "";
 
-            /* #5452: the stored role, and the external ID when this seat read it (the by-id read an admin seat gets; a
-               read-only seat's row carries only the flag and cannot save anyway). */
+            /* #5452: the stored role. The external ID is not read back: the box stays empty and the line under it says
+               whether one is set. */
             AwsRoleBox.Text = existing.AwsRoleArn ?? "";
-            AwsExternalIdBox.Password = existing.AwsExternalId ?? "";
+            AwsExternalIdState.Text = existing.AwsExternalIdSet ? AwsExternalIdSetNote : AwsExternalIdNoneNote;
         }
         SqlServerEngineRadio.IsEnabled = false;
         PostgresEngineRadio.IsEnabled = false;
@@ -575,6 +575,15 @@ public partial class AddServerDialog : Window
         return false;
     }
 
+    /// <summary>What the dialog says under the external ID box when one is stored: the same wording as the web form.</summary>
+    internal const string AwsExternalIdSetNote = "An external ID is set. Leave the box blank to keep it, type a new one to replace it, or tick Clear external ID.";
+
+    /// <summary>What the dialog says under the external ID box when none is stored.</summary>
+    internal const string AwsExternalIdNoneNote = "No external ID is set.";
+
+    /// <summary>The sentence when the box holds a new external ID and Clear external ID is ticked.</summary>
+    internal const string AwsExternalIdTypedAndClearedMessage = "Type a new external ID or tick Clear external ID, not both.";
+
     /// <summary>What the dialog says about the AWS role, beside its boxes (#5452). The service runs a stored role only
     /// when it is allowed, so a save here is not the last step.</summary>
     internal const string AwsRoleSaveNote =
@@ -586,28 +595,34 @@ public partial class AddServerDialog : Window
     /// pair goes through the one shared check (<see cref="AwsRoleSettings.ValidatePair"/>). On an edit, a new role while an
     /// external ID is stored needs the ID changed or cleared with it (<see cref="AwsRoleSettings.RoleChangeNeedsExternalId"/>):
     /// the store's trigger refuses it for this seat, which does not own the table, so the dialog says so first. The ID
-    /// counts as sent when the box no longer holds the stored text, and clearing the box counts. A blank role on an edit
-    /// clears the stored role, because the box was filled with it.
+    /// is never read back, so it counts as sent only when a new one was typed or <paramref name="clearExternalId"/> is
+    /// ticked (the stored one stays otherwise), and typing one while ticking the clear box is a sentence for the status
+    /// line. A blank role on an edit clears the stored role, because the box was filled with it.
     /// </summary>
-    internal static (string? Role, string? ExternalId, string? Error) ResolveAwsRole(
-        string? roleText, string? externalIdText, string? storedRole, string? storedExternalId, bool storedExternalIdSet)
+    internal static (string? Role, string? ExternalId, bool ExternalIdSent, string? Error) ResolveAwsRole(
+        string? roleText, string? externalIdText, bool clearExternalId, string? storedRole, bool storedExternalIdSet)
     {
         var role = AwsRoleSettings.Normalize(roleText);
         var externalId = AwsRoleSettings.Normalize(externalIdText);
 
+        if (clearExternalId && externalId is not null)
+        {
+            return (null, null, false, AwsExternalIdTypedAndClearedMessage);
+        }
+
         var pairError = AwsRoleSettings.ValidatePair(role, externalId);
         if (pairError is not null)
         {
-            return (null, null, pairError);
+            return (null, null, false, pairError);
         }
 
-        var externalIdSent = !string.Equals(externalId, AwsRoleSettings.Normalize(storedExternalId), StringComparison.Ordinal);
+        var externalIdSent = clearExternalId || externalId is not null;
         if (AwsRoleSettings.RoleChangeNeedsExternalId(storedRole, role, storedExternalIdSet, externalIdSent))
         {
-            return (null, null, AwsRoleSettings.RoleChangeNeedsExternalIdMessage);
+            return (null, null, false, AwsRoleSettings.RoleChangeNeedsExternalIdMessage);
         }
 
-        return (role, externalId, null);
+        return (role, externalId, externalIdSent, null);
     }
 
     /// <summary>Reads the form into a fresh store row (server_id derived from identity), or a user-facing error.</summary>
@@ -665,11 +680,12 @@ public partial class AddServerDialog : Window
 
         /* #5452: the AWS role belongs to a PostgreSQL target; a SQL Server row keeps whatever it already holds. */
         var awsRole = _existing?.AwsRoleArn;
-        var awsExternalId = _existing?.AwsExternalId;
+        string? awsExternalId = null;
+        var awsExternalIdSent = false;
         if (isPostgres)
         {
-            var (role, externalId, awsError) = ResolveAwsRole(
-                AwsRoleBox.Text, AwsExternalIdBox.Password, _existing?.AwsRoleArn, _existing?.AwsExternalId, _existing?.AwsExternalIdSet == true);
+            var (role, externalId, externalIdSent, awsError) = ResolveAwsRole(
+                AwsRoleBox.Text, AwsExternalIdBox.Password, AwsClearExternalIdBox.IsChecked == true, _existing?.AwsRoleArn, _existing?.AwsExternalIdSet == true);
             if (awsError is not null)
             {
                 error = awsError;
@@ -678,6 +694,7 @@ public partial class AddServerDialog : Window
 
             awsRole = role;
             awsExternalId = externalId;
+            awsExternalIdSent = externalIdSent;
         }
 
         var displayName = DisplayNameBox.Text.Trim();
@@ -714,6 +731,7 @@ public partial class AddServerDialog : Window
             Port = port,
             AwsRoleArn = awsRole,
             AwsExternalId = awsExternalId,
+            AwsExternalIdSent = awsExternalIdSent,
             Auth = auth,
             Username = username,
             EncryptedPassword = encryptedPassword,

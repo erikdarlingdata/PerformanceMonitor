@@ -543,7 +543,11 @@ public sealed class DarlingManagedRolesTests
 
         /* The MCP server-onboarding write tools (add_servers / remove_server): full CRUD on the single
            config_monitored_servers table — an EXPLICIT single-table statement, its own 'TO mcp' line. */
-        Assert.Contains("GRANT INSERT, UPDATE, DELETE ON config.config_monitored_servers TO mcp;", sql, StringComparison.Ordinal);
+        Assert.Contains("GRANT INSERT, DELETE ON config.config_monitored_servers TO mcp;", sql, StringComparison.Ordinal);
+
+        /* The UPDATE is column by column (#5452): every column but the AWS role and external ID, which change through the edit function. */
+        Assert.Contains($"GRANT UPDATE ({DarlingManagedRoles.McpMonitoredServerUpdateColumns})", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("GRANT INSERT, UPDATE, DELETE ON config.config_monitored_servers", sql, StringComparison.Ordinal);
 
         /* Still NARROW: no schema-wide config write for mcp, and NO ALTER DEFAULT PRIVILEGES names mcp (either
            would broaden it to all of config). No NEW config_service grant — section 8's beacon column-grant

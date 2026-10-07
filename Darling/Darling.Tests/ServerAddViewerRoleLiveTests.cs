@@ -232,6 +232,8 @@ public sealed class ServerAddViewerRoleLiveTests : IDisposable
                 insert.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Timestamp, Value = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified) });
                 insert.Parameters.Add(new NpgsqlParameter<string> { TypedValue = "sqlserver" });
                 insert.Parameters.Add(new NpgsqlParameter<int> { TypedValue = 0 });
+                insert.Parameters.Add(new NpgsqlParameter { Value = DBNull.Value, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Text });
+                insert.Parameters.Add(new NpgsqlParameter { Value = DBNull.Value, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Text });
                 await insert.ExecuteNonQueryAsync(ct);
             });
             Assert.Equal("42501", denied.SqlState);

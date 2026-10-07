@@ -77,7 +77,7 @@ public sealed class AwsPerServerRoleRungTests
 
         /* No term of the check can be NULL, so an external ID with no role is false rather than unknown. */
         Assert.Contains("(aws_external_id IS NULL OR aws_role_arn IS NOT NULL)", rung, StringComparison.Ordinal);
-        Assert.Contains("aws_role_arn ~ '^arn:aws(-[a-z]+)*:iam::[0-9]{12}:role/[!-~]+$'", rung, StringComparison.Ordinal);
+        Assert.Contains("aws_role_arn ~ '^arn:aws(-[a-z]+)*:iam::[0-9]{12}:role/[A-Za-z0-9_+=,.@/-]+$'", rung, StringComparison.Ordinal);
         Assert.Contains("char_length(aws_role_arn) <= " + AwsRoleSettings.RoleArnMaxLength, rung, StringComparison.Ordinal);
         Assert.Contains("aws_external_id ~ '^[A-Za-z0-9_+=,.@:/-]+$'", rung, StringComparison.Ordinal);
         Assert.Contains(
@@ -214,6 +214,46 @@ public sealed class AwsPerServerRoleRungTests
         Assert.Contains("USING ERRCODE = 'PW004'", rules, StringComparison.Ordinal);
         Assert.Contains(AwsRoleSettings.RoleChangeNeedsExternalIdMessage, rules, StringComparison.Ordinal);
         Assert.Contains(NormalizeSql(rules), NormalizeSql(script), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TheMcpLogin_UpdatesEveryColumnButTheRoleAndExternalId_InTheManagedBatchAndTheScript()
+    {
+        var columns = DarlingManagedRoles.McpMonitoredServerUpdateColumns.Split(',', StringSplitOptions.TrimEntries);
+        Assert.DoesNotContain("aws_role_arn", columns);
+        Assert.DoesNotContain("aws_external_id", columns);
+        Assert.DoesNotContain("aws_external_id_set", columns);
+        Assert.Equal(columns.Length, columns.Distinct(StringComparer.Ordinal).Count());
+
+        var batch = NormalizeSql(DarlingManagedRoles.BuildProvisioningSql(
+            ProvisioningTestSecrets.Admin, ProvisioningTestSecrets.Viewer, ProvisioningTestSecrets.Mcp));
+        var script = NormalizeSql(RepoFile.ReadRepoFile("Darling", "tools", "provision-roles.sql"));
+
+        Assert.Contains($"GRANT UPDATE ({DarlingManagedRoles.McpMonitoredServerUpdateColumns}) ON config.config_monitored_servers TO mcp;", script, StringComparison.Ordinal);
+        Assert.Contains("REVOKE UPDATE ON config.config_monitored_servers FROM mcp;", script, StringComparison.Ordinal);
+        Assert.Contains("GRANT INSERT, DELETE ON config.config_monitored_servers TO mcp;", script, StringComparison.Ordinal);
+        Assert.DoesNotContain("GRANT INSERT, UPDATE, DELETE ON config.config_monitored_servers", script, StringComparison.Ordinal);
+
+        Assert.Contains($"GRANT UPDATE ({DarlingManagedRoles.McpMonitoredServerUpdateColumns}) ON", batch, StringComparison.Ordinal);
+        Assert.Contains("REVOKE UPDATE ON", batch, StringComparison.Ordinal);
+        Assert.Contains("GRANT INSERT, DELETE ON config.config_monitored_servers TO", batch, StringComparison.Ordinal);
+        Assert.DoesNotContain("GRANT INSERT, UPDATE, DELETE ON config.config_monitored_servers", batch, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TheEditFunction_AnswersInvalidValue_ForAnEmptyRequiredField_AndForAValueTheTableRefuses()
+    {
+        foreach (var body in new[]
+        {
+            NormalizeSql(DarlingManagedRoles.BuildEditMonitoredServerFunctionSql("config")),
+            NormalizeSql(RepoFile.ReadRepoFile("Darling", "tools", "provision-roles.sql")),
+        })
+        {
+            Assert.Contains("'name' = ANY (p_columns) AND p_name IS NULL", body, StringComparison.Ordinal);
+            Assert.Contains("OR v_host IS NULL OR v_port IS NULL OR v_auth IS NULL OR v_encrypt_mode IS NULL", body, StringComparison.Ordinal);
+            Assert.Contains("'invalid_value'::text", body, StringComparison.Ordinal);
+            Assert.Contains("EXCEPTION WHEN not_null_violation OR check_violation OR unique_violation THEN", body, StringComparison.Ordinal);
+        }
     }
 
     private static string NormalizeSql(string sql) =>

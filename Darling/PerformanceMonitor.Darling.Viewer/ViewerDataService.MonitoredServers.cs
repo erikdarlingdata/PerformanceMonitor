@@ -88,7 +88,12 @@ ON CONFLICT (server_id) DO UPDATE SET
     engine = EXCLUDED.engine,
     port = EXCLUDED.port,
     aws_role_arn = EXCLUDED.aws_role_arn,
-    aws_external_id = EXCLUDED.aws_external_id,
+    /* The stored external ID is never read back to this seat: it is replaced only when $21 says one was typed or the
+       box was cleared, and a cleared role takes it along (the table's check needs a role for an ID). */
+    aws_external_id = CASE
+        WHEN EXCLUDED.aws_role_arn IS NULL THEN NULL
+        WHEN $21 THEN EXCLUDED.aws_external_id
+        ELSE config_monitored_servers.aws_external_id END,
     modified_at = (now() AT TIME ZONE 'UTC')";
 
     /// <summary>Insert only when the <c>server_id</c> is absent — the Add save (#4789) and the one-time
@@ -144,12 +149,12 @@ ORDER BY name";
     /// <summary>One configured server by id (the Edit prefill, incl. the DPAPI blob for the password box). $1 server_id.
     /// An <c>admin</c>-role action — the read-only <c>viewer</c> role is column-denied <c>encrypted_password</c>
     /// (#1416), so a viewer seat uses <see cref="MonitoredServerByIdNoSecretSql"/> instead. It is the one read that
-    /// selects <c>aws_external_id</c> (#5452): that column is denied to the read-only roles the same way.</summary>
+    /// reads <c>aws_external_id_set</c> (#5452), never the external ID itself.</summary>
     public const string MonitoredServerByIdSql = @"
 SELECT server_id, name, host, database, auth, username, encrypted_password, encrypt_mode,
        trust_server_certificate, read_only_intent, multi_subnet_failover, excluded_databases,
        monthly_cost_usd, capture_plans, is_enabled, created_at, alert_delivery_mode_override, engine, port,
-       aws_role_arn, aws_external_id, aws_external_id_set
+       aws_role_arn, aws_external_id_set
 FROM config_monitored_servers
 WHERE server_id = $1";
 
@@ -467,6 +472,7 @@ ORDER BY COALESCE(s.display_name, c.name)";
         await using var command = new NpgsqlCommand(MonitoredServerUpsertSql, connection, transaction);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         BindMonitoredServer(command, row);
+        command.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = row.AwsExternalIdSent });       // $21
         try
         {
             await ExecuteWriteAsync(command, cancellationToken);
@@ -876,8 +882,7 @@ WHERE server_id = $1";
         Engine = reader.GetString(17),
         Port = reader.GetInt32(18),
         AwsRoleArn = reader.IsDBNull(19) ? null : reader.GetString(19),
-        AwsExternalId = reader.IsDBNull(20) ? null : reader.GetString(20),
-        AwsExternalIdSet = reader.GetBoolean(21),
+        AwsExternalIdSet = reader.GetBoolean(20),
     };
 
     /// <summary>
@@ -1008,13 +1013,17 @@ public sealed class MonitoredServerRow
     /// allowed (<c>allowedAwsRoles</c> or a darling.json server).</summary>
     public string? AwsRoleArn { get; set; }
 
-    /// <summary>The external ID sent when the role is assumed, or null. Read only by the full by-id read (the
-    /// <c>admin</c> seat); the list, secret-free and by-address reads leave it null and carry
-    /// <see cref="AwsExternalIdSet"/> instead, because the read-only roles cannot select the column.</summary>
+    /// <summary>The external ID to store with the role, or null. Write-only: no read fills it, and a stored ID
+    /// is never read back. An insert stores it as given; the upsert stores it only when
+    /// <see cref="AwsExternalIdSent"/> is set (typed, or null for "cleared") and keeps the stored one otherwise.</summary>
     public string? AwsExternalId { get; set; }
 
+    /// <summary>The edit typed a new external ID, or cleared it: the upsert then writes <see cref="AwsExternalId"/>
+    /// (null clears). Not set, the stored ID stays.</summary>
+    public bool AwsExternalIdSent { get; set; }
+
     /// <summary>Whether an external ID is stored (<c>aws_external_id_set</c>, which the store computes). It is not
-    /// written: the upsert and insert send <see cref="AwsExternalId"/> only.</summary>
+    /// written.</summary>
     public bool AwsExternalIdSet { get; set; }
 
     /// <summary>Server-set creation time (read-only, from the store's <c>created_at</c>); null when not read.</summary>

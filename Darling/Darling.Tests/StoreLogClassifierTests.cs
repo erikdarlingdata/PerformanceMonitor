@@ -266,7 +266,9 @@ public class StoreLogClassifierTests
         var duplicate = retained.Single(g => g.MessageText!.StartsWith("duplicate key", StringComparison.Ordinal));
         Assert.Equal("duplicate key value violates unique constraint \"?\"", duplicate.MessageText);
         Assert.Contains("ERROR:  duplicate key value violates unique constraint \"t_pkey\"", duplicate.SampleLine, StringComparison.Ordinal);
-        Assert.Contains("DETAIL:  Key (id)=(Kept3944c) already exists.", duplicate.SampleLine, StringComparison.Ordinal);
+        /* The key value is withheld from the stored text (#5452): the constraint and the column stay, the stored value does not. */
+        Assert.Contains("DETAIL:  Key (id)=(...) already exists.", duplicate.SampleLine, StringComparison.Ordinal);
+        Assert.DoesNotContain("Kept3944c", duplicate.SampleLine, StringComparison.Ordinal);
         Assert.Contains("STATEMENT:  INSERT INTO t VALUES ('?')", duplicate.SampleLine, StringComparison.Ordinal);
         Assert.Contains(
             "DETAIL:  Process 5360 waits for ShareLock on transaction 809; blocked by process 5361.",
@@ -1858,6 +1860,34 @@ public class StoreLogClassifierTests
         }
 
         return set;
+    }
+
+    [Fact]
+    public void MaskEntry_NamesTheConstraint_AndKeepsTheRowTupleOutOfTheStoredText()
+    {
+        var raw = DefaultPrefix + "ERROR:  null value in column \"name\" of relation \"config_monitored_servers\" violates not-null constraint\n"
+            + DefaultPrefix + "DETAIL:  Failing row contains (1, x, host-1, arn:aws:iam::123456789012:role/r, ext-secret-123, t).\n"
+            + DefaultPrefix + "STATEMENT:  SELECT 1";
+
+        var masked = StoreLogClassifier.MaskEntry(raw);
+
+        Assert.DoesNotContain("ext-secret-123", masked, StringComparison.Ordinal);
+        Assert.DoesNotContain("host-1", masked, StringComparison.Ordinal);
+        Assert.Contains("violates not-null constraint", masked, StringComparison.Ordinal);
+        Assert.Contains("DETAIL:  Failing row contains (...).", masked, StringComparison.Ordinal);
+        Assert.Equal(masked, StoreLogClassifier.MaskEntry(masked));
+    }
+
+    [Theory]
+    [InlineData("Key (name)=(alpha) already exists.", "Key (name)=(...) already exists.")]
+    [InlineData("Key (host, port)=(db-1.example.test, 5432) already exists.", "Key (host, port)=(...) already exists.")]
+    [InlineData("Key (server_id)=(5) is not present in table \"config_monitored_servers\".", "Key (server_id)=(...) is not present in table \"config_monitored_servers\".")]
+    [InlineData("Key (name)=(a) already exists. and more (b) already exists.", "Key (name)=(...) already exists.")]
+    [InlineData("Key (name)=(...) already exists.", "Key (name)=(...) already exists.")]
+    [InlineData("Process 12 waits for ShareLock on transaction 99; blocked by process 13.", "Process 12 waits for ShareLock on transaction 99; blocked by process 13.")]
+    public void MaskRowValues_ReplacesTheKeyValue_AndLeavesOtherProseAlone(string detail, string expected)
+    {
+        Assert.Equal(expected, StoreLogClassifier.MaskRowValues(detail));
     }
 
     private static string Render(string prefix, IEnumerable<string> messages)

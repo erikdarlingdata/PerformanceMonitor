@@ -96,8 +96,11 @@
             <StackPanel Orientation="Horizontal" Margin="0,0,0,4">
                 <TextBlock Text="External ID:" Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center" Width="110"/>
                 <PasswordBox x:Name="AwsExternalIdBox" Width="360"
-                             ToolTip="Optional. The external ID the role's trust policy asks for. Needs a role ARN. Clear it to remove it."/>
+                             ToolTip="Optional. The external ID the role's trust policy asks for. Needs a role ARN. When one is set, leave this blank to keep it."/>
+                <CheckBox x:Name="AwsClearExternalIdBox" Content="Clear external ID" Margin="10,0,0,0" VerticalAlignment="Center"
+                          ToolTip="Removes the stored external ID. Leave unchecked to keep it."/>
             </StackPanel>
+            <TextBlock x:Name="AwsExternalIdState" TextWrapping="Wrap" Foreground="{DynamicResource ForegroundMutedBrush}" FontSize="11" Margin="110,0,0,4"/>
             <TextBlock x:Name="AwsRoleNote" TextWrapping="Wrap" Foreground="{DynamicResource ForegroundMutedBrush}" FontSize="11"/>
         </StackPanel>
 
