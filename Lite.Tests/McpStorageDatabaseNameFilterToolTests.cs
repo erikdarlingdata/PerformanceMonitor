@@ -282,6 +282,35 @@ public sealed class McpStorageDatabaseNameFilterToolTests : IClassFixture<Shared
         Assert.Equal("empty", doc.RootElement.GetProperty("status").GetString());
     }
 
+    /// <summary>#5244 PR5: every answer shape of the storage tools says which database it was limited to (null for every database).</summary>
+    [Fact]
+    public async Task TheStorageAnswers_EchoDatabaseName_OnTheDataTheEmptyAndTheNoDataShapes()
+    {
+        static string? Echo(string json) =>
+            JsonDocument.Parse(json).RootElement.TryGetProperty("database_name", out var e) && e.ValueKind == JsonValueKind.String ? e.GetString() : "<absent>";
+        static bool HasKey(string json) => JsonDocument.Parse(json).RootElement.TryGetProperty("database_name", out _);
+
+        /* No data at all: the unavailable answers carry the key (null for every database, the name for one). */
+        Assert.True(HasKey(await McpServerInfoTools.GetDatabaseSizes(_dataService, _serverManager, ServerName)));
+        Assert.Equal("DbA", Echo(await McpServerInfoTools.GetDatabaseSizes(_dataService, _serverManager, ServerName, database_name: "DbA")));
+        Assert.True(HasKey(await McpObjectStatsTools.GetTableIndexSizes(_dataService, _serverManager, ServerName)));
+        Assert.Equal("DbA", Echo(await McpObjectStatsTools.GetTableIndexSizes(_dataService, _serverManager, ServerName, database_name: "DbA")));
+        Assert.True(HasKey(await McpPvsTools.GetPvsStats(_dataService, _serverManager, ServerName)));
+        Assert.Equal("DbA", Echo(await McpPvsTools.GetPvsStats(_dataService, _serverManager, ServerName, database_name: "DbA")));
+
+        /* Data: the answer carries the echo, and an empty filtered answer names the database. */
+        await SeedDatabaseSizeAsync("DbA", Truncate(DateTime.UtcNow.AddHours(-1)));
+        await SeedTableAsync("DbA", "ta", Truncate(DateTime.UtcNow.AddHours(-1)), 10m);
+        await SeedPvsAsync("DbA", 5, 10);
+        Assert.True(HasKey(await McpServerInfoTools.GetDatabaseSizes(_dataService, _serverManager, ServerName)));
+        Assert.Equal("DbA", Echo(await McpServerInfoTools.GetDatabaseSizes(_dataService, _serverManager, ServerName, database_name: "DbA")));
+        Assert.Equal("DbA", Echo(await McpObjectStatsTools.GetTableIndexSizes(_dataService, _serverManager, ServerName, database_name: "DbA")));
+        Assert.Equal("DbA", Echo(await McpPvsTools.GetPvsStats(_dataService, _serverManager, ServerName, database_name: "DbA")));
+        Assert.Equal("NoSuch", Echo(await McpServerInfoTools.GetDatabaseSizes(_dataService, _serverManager, ServerName, database_name: "NoSuch")));
+        Assert.Equal("NoSuch", Echo(await McpObjectStatsTools.GetTableIndexSizes(_dataService, _serverManager, ServerName, database_name: "NoSuch")));
+        Assert.Equal("NoSuch", Echo(await McpPvsTools.GetPvsStats(_dataService, _serverManager, ServerName, database_name: "NoSuch")));
+    }
+
     [Fact]
     public void TheFourStorageTools_TakeDatabaseNameLast_WithTheSharedSentence()
     {
