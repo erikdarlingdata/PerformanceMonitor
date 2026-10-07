@@ -195,7 +195,7 @@ public sealed class RdsLogSource
         ILogger? logger = null,
         RdsEndpointVerifier? verifier = null)
     {
-        _verifier = verifier ?? new RdsEndpointVerifier(clock);
+        _verifier = verifier ?? new RdsEndpointVerifier(clock, null);
         _clientFactory = clientFactory
             ?? (region => new AmazonRDSClient(RegionEndpoint.GetBySystemName(region)));
         _clock = clock ?? (() => DateTime.UtcNow);
@@ -436,9 +436,11 @@ public sealed class RdsLogSource
     /// <summary>
     /// The same read for the server <paramref name="serverId"/>, which keys the cached endpoint check
     /// (<see cref="RdsEndpointVerifier"/>) together with the host and the parsed id.
+    /// <paramref name="loginConnectionString"/> is the target's connection string, for the fresh login the check needs.
     /// </summary>
     public async Task<LogChunk?> ReadNewestAsync(
-        string host, LogFileKind kind, int serverId, CancellationToken cancellationToken)
+        string host, LogFileKind kind, int serverId, CancellationToken cancellationToken,
+        string? loginConnectionString = null)
     {
         var endpoint = RdsEndpoint.TryParse(host);
 
@@ -461,7 +463,7 @@ public sealed class RdsLogSource
         using var client = _clientFactory(parsed.Region);
 
         /* The host must be the endpoint AWS reports for the id parsed from it before any log call is made. */
-        await _verifier.EnsureAsync(client, parsed, host, serverId, cancellationToken);
+        await _verifier.EnsureAsync(client, parsed, host, serverId, cancellationToken, loginConnectionString);
 
         var instanceId = parsed.Kind == RdsEndpointKind.ClusterWriter
             ? await ResolveWriterAsync(client, parsed.Identifier, cancellationToken)

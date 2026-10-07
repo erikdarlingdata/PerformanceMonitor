@@ -250,6 +250,7 @@ public sealed class RdsCpuIngestor
         int serverId,
         string storageName,
         string host,
+        string? loginConnectionString = null,
         CancellationToken cancellationToken = default)
     {
         var endpoint = RdsEndpoint.TryParse(host);
@@ -285,7 +286,7 @@ public sealed class RdsCpuIngestor
 
             /* The host must be the endpoint AWS reports for the id parsed from it before any RDS or Performance
                Insights read is made. */
-            await _verifier.EnsureAsync(rds, parsed, host, serverId, cancellationToken);
+            await _verifier.EnsureAsync(rds, parsed, host, serverId, cancellationToken, loginConnectionString);
 
             var instanceId = parsed.Kind == RdsEndpointKind.ClusterWriter
                 ? await ResolveWriterAsync(rds, parsed.Identifier, cancellationToken)

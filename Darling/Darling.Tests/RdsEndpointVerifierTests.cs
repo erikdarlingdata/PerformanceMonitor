@@ -26,16 +26,20 @@ namespace Darling.Tests;
 /// or Performance Insights read runs. Every case here builds the verifier with <c>enforce: true</c>, because the test
 /// assembly's default verifier skips the check for the older fixtures that predate it.
 /// </summary>
-public class RdsEndpointVerifierTests
+public partial class RdsEndpointVerifierTests
 {
     private const string InstanceHost = "solo.abc123.us-east-1.rds.amazonaws.com";
     private const string WriterHost = "shared.cluster-abc123.us-east-1.rds.amazonaws.com";
     private const string ReaderHost = "shared.cluster-ro-abc123.us-east-1.rds.amazonaws.com";
     private const string CustomHost = "shared.cluster-custom-abc.us-east-1.rds.amazonaws.com";
-    private const string LookAlikeHost = "solo.abc123.us-east-1.rds.example.invalid";
+    private const string HostNotReportedByAws = "solo.abc123.us-east-1.rds.example.net";
     private const string ReportedElsewhere = "elsewhere.zzz999.us-east-1.rds.amazonaws.com";
 
-    private static RdsEndpointVerifier Enforcing(Func<DateTime>? clock = null) => new(clock, enforce: true);
+    private const string ConnectionString = "Host=solo.abc123.us-east-1.rds.amazonaws.com;Username=u;Database=d";
+
+    private static RdsEndpointVerifier Enforcing(
+        Func<DateTime>? clock = null, Func<string?, CancellationToken, Task<string?>>? loginProbe = null)
+        => new(clock, enforce: true, loginProbe ?? ((_, _) => Task.FromResult<string?>(null)));
 
     private static RdsEndpoint.Parsed Parse(string host) => RdsEndpoint.TryParse(host)!.Value;
 
@@ -52,6 +56,9 @@ public class RdsEndpointVerifierTests
         public List<string>? CustomEndpoints { get; init; } = [CustomHost];
         public Exception? DescribeFailure { get; init; }
 
+        /// <summary>Describe answers with an empty list.</summary>
+        public bool NoResults { get; init; }
+
         public int InstanceDescribes;
         public int ClusterDescribes;
         public int LogListings;
@@ -65,6 +72,11 @@ public class RdsEndpointVerifierTests
             if (DescribeFailure is not null)
             {
                 throw DescribeFailure;
+            }
+
+            if (NoResults)
+            {
+                return Task.FromResult(new DescribeDBInstancesResponse { DBInstances = [] });
             }
 
             return Task.FromResult(new DescribeDBInstancesResponse
@@ -81,6 +93,11 @@ public class RdsEndpointVerifierTests
             if (DescribeFailure is not null)
             {
                 throw DescribeFailure;
+            }
+
+            if (NoResults)
+            {
+                return Task.FromResult(new DescribeDBClustersResponse { DBClusters = [] });
             }
 
             return Task.FromResult(new DescribeDBClustersResponse
@@ -208,9 +225,9 @@ public class RdsEndpointVerifierTests
 
         Assert.Equal(2, rds.InstanceDescribes);
 
-        /* The host edited to a look-alike: a new key, so AWS is asked again, and now it does not match. */
+        /* The host edited to one AWS does not report: a new key, so AWS is asked again, and now it does not match. */
         await Assert.ThrowsAsync<RdsEndpointMismatchException>(
-            () => verifier.EnsureAsync(rds, Parse(LookAlikeHost), LookAlikeHost, 1, CancellationToken.None));
+            () => verifier.EnsureAsync(rds, Parse(HostNotReportedByAws), HostNotReportedByAws, 1, CancellationToken.None));
 
         Assert.Equal(3, rds.InstanceDescribes);
     }
@@ -274,13 +291,13 @@ public class RdsEndpointVerifierTests
     [Fact]
     public async Task HostThatIsNotTheReportedEndpoint_ReadsNothing()
     {
-        var rds = new FakeRds { InstanceAddress = ReportedElsewhere };
+        var rds = new FakeRds();
         var source = new RdsLogSource(_ => rds, verifier: Enforcing());
 
         var ex = await Assert.ThrowsAsync<RdsEndpointMismatchException>(
-            () => source.ReadNewestAsync(LookAlikeHost, RdsLogSource.LogFileKind.Stderr, 7, CancellationToken.None));
+            () => source.ReadNewestAsync(HostNotReportedByAws, RdsLogSource.LogFileKind.Stderr, 7, CancellationToken.None));
 
-        Assert.Contains(LookAlikeHost, ex.Message, StringComparison.Ordinal);
+        Assert.Contains(HostNotReportedByAws, ex.Message, StringComparison.Ordinal);
         Assert.Equal(0, rds.LogListings);
         Assert.Equal(0, rds.Downloads);
     }
@@ -288,15 +305,15 @@ public class RdsEndpointVerifierTests
     [Fact]
     public async Task HostThatIsNotTheReportedEndpoint_ReachesTheRunnerUnwrapped_ThroughEachLogIngestor()
     {
-        var rds = new FakeRds { InstanceAddress = ReportedElsewhere };
+        var rds = new FakeRds();
         var source = new RdsLogSource(_ => rds, verifier: Enforcing());
 
         await Assert.ThrowsAsync<RdsEndpointMismatchException>(
-            () => new RdsPlanIngestor(UnusedDataSource(), source).IngestAsync(7, "srv", LookAlikeHost));
+            () => new RdsPlanIngestor(UnusedDataSource(), source).IngestAsync(7, "srv", HostNotReportedByAws));
         await Assert.ThrowsAsync<RdsEndpointMismatchException>(
-            () => new RdsDeadlockIngestor(UnusedDataSource(), source).IngestAsync(7, "srv", LookAlikeHost));
+            () => new RdsDeadlockIngestor(UnusedDataSource(), source).IngestAsync(7, "srv", HostNotReportedByAws));
         await Assert.ThrowsAsync<RdsEndpointMismatchException>(
-            () => new RdsLogEventIngestor(UnusedDataSource(), TestLogHashKeys.Fixed, source).IngestAsync(7, "srv", LookAlikeHost));
+            () => new RdsLogEventIngestor(UnusedDataSource(), TestLogHashKeys.Fixed, source).IngestAsync(7, "srv", HostNotReportedByAws));
 
         Assert.Equal(0, rds.LogListings);
         Assert.Equal(0, rds.Downloads);
@@ -323,7 +340,7 @@ public class RdsEndpointVerifierTests
     [Fact]
     public async Task Cpu_HostThatIsNotTheReportedEndpoint_MakesNoPerformanceInsightsCall()
     {
-        var rds = new FakeRds { InstanceAddress = ReportedElsewhere };
+        var rds = new FakeRds();
         var piCalled = false;
         var ingestor = new RdsCpuIngestor(
             UnusedDataSource(),
@@ -332,9 +349,9 @@ public class RdsEndpointVerifierTests
             verifier: Enforcing());
 
         var ex = await Assert.ThrowsAsync<RdsEndpointMismatchException>(
-            () => ingestor.IngestAsync(7, "srv", LookAlikeHost));
+            () => ingestor.IngestAsync(7, "srv", HostNotReportedByAws));
 
-        Assert.Contains(LookAlikeHost, ex.Message, StringComparison.Ordinal);
+        Assert.Contains(HostNotReportedByAws, ex.Message, StringComparison.Ordinal);
         Assert.False(piCalled);
     }
 
@@ -357,37 +374,7 @@ public class RdsEndpointVerifierTests
         Assert.True(ex.IsAuthorizationFailure);
     }
 
-    /// <summary>
-    /// The skip switch the older fixtures rely on stays out of product code: it may be named in the verifier's own file
-    /// and nowhere else in the service.
-    /// </summary>
-    [Fact]
-    public void TheTestSkipSwitch_IsNamedInNoOtherServiceFile()
-    {
-        var service = Path.Combine(RepoRoot(), "Darling", "PerformanceMonitor.Darling.Service");
-
-        var offenders = Directory.EnumerateFiles(service, "*.cs", SearchOption.AllDirectories)
-            .Where(path => !path.Contains(Path.DirectorySeparatorChar + "obj" + Path.DirectorySeparatorChar, StringComparison.Ordinal)
-                && !path.Contains(Path.DirectorySeparatorChar + "bin" + Path.DirectorySeparatorChar, StringComparison.Ordinal)
-                && Path.GetFileName(path) != "RdsEndpointVerifier.cs"
-                && File.ReadAllText(path).Contains("TestOnlySkipCheck", StringComparison.Ordinal))
-            .ToList();
-
-        Assert.Empty(offenders);
-    }
-
-    /// <summary>The runner builds its sources and ingestors without a verifier, so each one enforces.</summary>
-    [Fact]
-    public void TheRunner_BuildsTheRdsReadersWithTheDefaultEnforcingVerifier()
-    {
-        var runner = File.ReadAllText(Path.Combine(
-            RepoRoot(), "Darling", "PerformanceMonitor.Darling.Service", "DarlingCollectorRunner.cs"));
-
-        Assert.DoesNotContain("RdsEndpointVerifier(", runner, StringComparison.Ordinal);
-        Assert.DoesNotContain("enforce:", runner, StringComparison.Ordinal);
-    }
-
-    private static string RepoRoot([CallerFilePath] string thisFile = "")
+    internal static string RepoRoot([CallerFilePath] string thisFile = "")
         => Path.GetFullPath(Path.Combine(Path.GetDirectoryName(thisFile)!, "..", ".."));
 }
 

@@ -66,11 +66,11 @@ public sealed class RdsLogEventIngestor
 
     /// <param name="logHashKey">The store's log-hash key (#4004), the same instance the <c>pg_read_file</c> route's
     /// runs carry, so the two transports store identical identities for identical text.</param>
-    public RdsLogEventIngestor(NpgsqlDataSource postgres, PgLogHashKey logHashKey, RdsLogSource? logs = null, ILogger? logger = null, RdsResumeStore? resume = null)
+    public RdsLogEventIngestor(NpgsqlDataSource postgres, PgLogHashKey logHashKey, RdsLogSource? logs = null, ILogger? logger = null, RdsResumeStore? resume = null, RdsEndpointVerifier? verifier = null)
     {
         _postgres = postgres ?? throw new ArgumentNullException(nameof(postgres));
         _classifier = new PgLogEventClassifier(logHashKey ?? throw new ArgumentNullException(nameof(logHashKey)));
-        _logs = logs ?? new RdsLogSource(logger: logger);
+        _logs = logs ?? new RdsLogSource(logger: logger, verifier: verifier);
         _logger = logger;
         _resume = resume;
     }
@@ -92,6 +92,7 @@ public sealed class RdsLogEventIngestor
         string host,
         bool logTimezoneIsUtc = false,
         bool pgLogUsesCsvlog = false,
+        string? loginConnectionString = null,
         CancellationToken cancellationToken = default)
     {
         /* #4708: what the last process saved for this server is loaded once, before its first read, so a
@@ -104,7 +105,7 @@ public sealed class RdsLogEventIngestor
         /* #4708: a rotated file is finished and the newest file opened in the SAME cycle (bounded), rather than
            the old file on one cycle and the new one on the next. */
         return await RdsLogSource.RunPassesAsync(
-            () => IngestPassAsync(serverId, storageName, host, logTimezoneIsUtc, pgLogUsesCsvlog, cancellationToken));
+            () => IngestPassAsync(serverId, storageName, host, logTimezoneIsUtc, pgLogUsesCsvlog, loginConnectionString, cancellationToken));
     }
 
     /// <summary>
@@ -118,6 +119,7 @@ public sealed class RdsLogEventIngestor
         string host,
         bool logTimezoneIsUtc,
         bool pgLogUsesCsvlog,
+        string? loginConnectionString,
         CancellationToken cancellationToken)
     {
         RdsLogSource.LogChunk? chunk;
@@ -126,7 +128,7 @@ public sealed class RdsLogEventIngestor
 
         try
         {
-            chunk = await _logs.ReadNewestAsync(host, kind, serverId, cancellationToken);
+            chunk = await _logs.ReadNewestAsync(host, kind, serverId, cancellationToken, loginConnectionString);
         }
         catch (RdsEndpointMismatchException)
         {

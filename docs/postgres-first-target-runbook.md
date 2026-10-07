@@ -197,7 +197,7 @@ read the log file itself. `DescribeDBInstances` looks up the instance's `DbiReso
 Performance Insights uses. `pi:GetResourceMetrics` reads the CPU and host-memory series from Performance
 Insights. Darling also uses the two `Describe` actions to check that the server's host is the endpoint AWS
 reports for that instance or cluster, before it reads any logs or Performance Insights data for it; a host
-that does not match is recorded as a PERMISSIONS outcome and nothing is read. Self-managed PostgreSQL doesn't need this at all — it reads `pg_read_file()` directly,
+that does not match, or a server that does not accept a fresh login, is recorded as a PERMISSIONS outcome and nothing is read. Self-managed PostgreSQL doesn't need this at all — it reads `pg_read_file()` directly,
 which is what the log-reader grants above are for. Skipping this on Aurora/RDS is not silent: both
 collectors log the missing action by name (see step 10).
 
