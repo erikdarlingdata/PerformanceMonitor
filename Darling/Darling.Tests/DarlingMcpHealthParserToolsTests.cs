@@ -83,7 +83,11 @@ public sealed class DarlingMcpHealthParserToolsSurfaceAndSqlTests
                 .Where(x => x.GetCustomAttribute<DescriptionAttribute>() is not null)
                 .Select(x => (x.Name!, x.HasDefaultValue))
                 .ToArray();
-            Assert.Equal(new[] { "server_name", "hours_back", "limit", "as_of" }, p.Select(x => x.Item1).ToArray());
+            /* #5244 PR6: get_health_parser_severe_errors takes database_name, appended last. */
+            var expected = tool == "get_health_parser_severe_errors"
+                ? new[] { "server_name", "hours_back", "limit", "as_of", "database_name" }
+                : new[] { "server_name", "hours_back", "limit", "as_of" };
+            Assert.Equal(expected, p.Select(x => x.Item1).ToArray());
             Assert.All(p, x => Assert.True(x.Item2, $"{tool}.{x.Item1} must be optional"));
         }
     }
