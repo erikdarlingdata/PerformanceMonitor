@@ -1007,6 +1007,21 @@ export function dbScopeState(read, override) {
   return scope === "identity" ? null : scope;
 }
 
+/* Reads whose "no row" text names a missing snapshot: a filter that matches no database leaves the snapshot in place with an
+   empty `databases` list, so that text would be false. database-filter-reads.js stays pure data, so the sentence lives here. */
+const FILTERED_NO_ROW_READS = new Set(["get_database_config", "get_database_scoped_config", "get_query_store_health"]);
+
+/**
+ * The text a table panel shows when its read answered with no rows (#5244). Normally the panel's own `emptyText`. While a database
+ * filter is active and the read takes it, a snapshot-state text (get_database_config, get_database_scoped_config and
+ * get_query_store_health) is replaced by one that says the chosen databases have no row, because the snapshot itself exists:
+ * a server with no snapshot answers through the read's empty envelope instead, which never reaches this text.
+ */
+export function dbFilteredEmptyText(read, emptyText, override) {
+  if (!FILTERED_NO_ROW_READS.has(read) || dbScopeState(read, override) !== "filtered") return emptyText;
+  return "No database in the chosen databases has a row in this snapshot.";
+}
+
 /**
  * The chip for dbScopeState(read, override), or null. It reuses the badge look (warning for "unfiltered", muted for "server")
  * and tags itself with `data-db-scope`. A database name is only ever text here: the label is `el(..., { text })` and the

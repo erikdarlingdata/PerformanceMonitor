@@ -4566,7 +4566,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             ["get_health_parser_memory_conditions"] = R(CatSystemHealth, "system_health: resource-monitor memory conditions.", PServer(), PHours(24), PLimit(50), PAsOf()),
             ["get_health_parser_memory_node_oom"] = R(CatSystemHealth, "system_health: per-node out-of-memory events.", PServer(), PHours(24), PLimit(50), PAsOf()),
             ["get_health_parser_scheduler_issues"] = R(CatSystemHealth, "system_health: non-yielding scheduler issues.", PServer(), PHours(24), PLimit(50), PAsOf()),
-            ["get_health_parser_severe_errors"] = R(CatSystemHealth, "system_health: severe (sev >= 17) errors.", PServer(), PHours(24), PLimit(50), PAsOf(), PDatabases()),
+            ["get_health_parser_severe_errors"] = R(CatSystemHealth, "system_health: severe (sev >= 19) errors.", PServer(), PHours(24), PLimit(50), PAsOf(), PDatabases()),
             ["get_health_parser_significant_waits"] = R(CatSystemHealth, "system_health: individual 500 ms+ waits with their statement.", PServer(), PHours(24), PLimit(50), PAsOf()),
             ["get_health_parser_system_health"] = R(CatSystemHealth, "system_health: the raw parsed session records.", PServer(), PHours(24), PLimit(50), PAsOf()),
             // FinOps web parity (#4843), set A: append new FinOps entries below this line only.

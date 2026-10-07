@@ -236,6 +236,52 @@ const scenarios = {
   },
 };
 
+/* The empty text of the three snapshot panels (#5244): the reads answer a snapshot with an empty `databases` list, as they do when the
+   filter matches no database. A text node is the strip's only child, so the strips' text is read back by class. */
+const emptyStrips = (root) => {
+  const found = [];
+  walk(root, (node) => {
+    if (node.attrs.class === "strip empty" || node.className === "strip empty") found.push(node.textContent);
+  });
+  return found;
+};
+scenarios.emptyText = async () => {
+  const SNAPSHOT_READS = ["get_database_config", "get_database_scoped_config", "get_query_store_health"];
+  let mode = "snapshot";
+  globalThis.fetch = async (url) => {
+    const tool = String(url).replace(/^\/api\/read\//, "").split("?")[0];
+    if (!SNAPSHOT_READS.includes(tool)) return { status: 200, ok: true, text: async () => "{}" };
+    const body = mode === "snapshot" ? { captured_at: "2026-01-01T00:00:00Z", database_count: 0, databases: [] } : { status: "not_collected", message: "Nothing collected for this server yet." };
+    return { status: 200, ok: true, text: async () => JSON.stringify(body) };
+  };
+  const panelTexts = async () => {
+    const texts = [];
+    for (const tab of tabs.SERVER_TABS) {
+      const holder = new FakeNode("div");
+      util.mount(holder, tab.build("SRV1", { hours: 24, label: "last 24 hours" }));
+      await settle();
+      texts.push(...emptyStrips(holder));
+    }
+    return texts;
+  };
+  const templateText = async () => {
+    const holder = new FakeNode("div");
+    util.mount(holder, panels.renderPanel({ title: "T", read: "get_database_config", params: { server: "SRV1" }, viz: "table", rowsKey: "databases", columns: [{ key: "database_name", label: "Database" }], emptyText: "No database configuration snapshot yet." }));
+    await settle();
+    return emptyStrips(holder);
+  };
+  globalThis.location.hash = "#/server/SRV1";
+  util.setActiveDatabaseFilter({ server: "SRV1", databases: ["NoSuchDb"] });
+  out.filtered = await panelTexts();
+  out.filteredTemplate = await templateText();
+  mode = "none";
+  out.filteredNoSnapshot = await panelTexts();
+  mode = "snapshot";
+  util.setActiveDatabaseFilter(null);
+  out.unfiltered = await panelTexts();
+  out.unfilteredTemplate = await templateText();
+};
+
 const chosen = scenarios[scenario];
 if (!chosen) throw new Error("unknown scenario " + scenario);
 await chosen();
