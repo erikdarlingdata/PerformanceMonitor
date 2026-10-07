@@ -12,6 +12,7 @@ using System.Diagnostics;
 using System.Globalization;
 using System.Text;
 using System.Text.Json;
+using System.Threading;
 using System.Runtime.CompilerServices;
 using System.Threading.Tasks;
 using PerformanceMonitor.Common;
@@ -84,6 +85,7 @@ public static class AlertStatementFilter
             return outcome;
         }
 
+        WaitForWarmUp();
         try
         {
             var budget = new SensitiveStatements.JudgeBudget(SensitiveStatements.ReadBudget);
@@ -164,6 +166,7 @@ public static class AlertStatementFilter
             return null;
         }
 
+        WaitForWarmUp();
         try
         {
             return ApplyCore(context, new SensitiveStatements.JudgeBudget(SensitiveStatements.ReadBudget));
@@ -183,6 +186,7 @@ public static class AlertStatementFilter
     public static FindingAlert Apply(FindingAlert alert)
     {
         ArgumentNullException.ThrowIfNull(alert);
+        WaitForWarmUp();
         return ApplyFinding(alert, new SensitiveStatements.JudgeBudget(SensitiveStatements.ReadBudget));
     }
 
@@ -191,6 +195,7 @@ public static class AlertStatementFilter
     {
         ArgumentNullException.ThrowIfNull(alerts);
 
+        WaitForWarmUp();
         var budget = new SensitiveStatements.JudgeBudget(SensitiveStatements.ReadBudget);
         List<FindingAlert>? result = null;
         for (var i = 0; i < alerts.Count; i++)
@@ -239,7 +244,54 @@ public static class AlertStatementFilter
     /// about 2 seconds, off the startup path. Never throws and logs nothing; the task it returns always completes normally.
     /// </summary>
     /// <param name="probe">What to run in place of the default; a test passes one that throws.</param>
-    public static Task WarmUpAsync(Action? probe = null) => Task.Run(async () =>
+    public static Task WarmUpAsync(Action? probe = null)
+    {
+        var warmUp = Task.Run(async () =>
+        {
+            /* The warm-up's own Apply and Json calls never wait on the warm-up they belong to. The flag is async-local,
+               so it follows the warm-up across its awaits and never reaches a caller's thread. */
+            s_insideWarmUp.Value = true;
+            await RunWarmUpAsync(probe).ConfigureAwait(false);
+        });
+        Volatile.Write(ref s_warmUp, warmUp);
+        return warmUp;
+    }
+
+    /// <summary>The longest an alert waits for a warm-up that is still running (#5478); then it is judged as it would be cold.</summary>
+    internal static readonly TimeSpan WarmUpWaitLimit = TimeSpan.FromSeconds(3);
+
+    private static Task? s_warmUp;
+    private static readonly AsyncLocal<bool> s_insideWarmUp = new();
+
+    /// <summary>
+    /// #5478: the warm-up starts at the same moment as the first stored alerts are read (Lite judges the stored fleet
+    /// as soon as its window is up), and the first walks of a large report in a cold process can cost more than the
+    /// judging budget, which would clear the report. So an alert that arrives while the warm-up is still running waits
+    /// for it, but never longer than <see cref="WarmUpWaitLimit"/>. A warm-up that finished, threw, was never started,
+    /// or is the caller itself costs nothing. Never throws.
+    /// </summary>
+    private static void WaitForWarmUp() => WaitForWarmUp(Volatile.Read(ref s_warmUp), WarmUpWaitLimit);
+
+    internal static bool WaitForWarmUp(Task? warmUp, TimeSpan limit)
+    {
+        if (warmUp is null || warmUp.IsCompleted || s_insideWarmUp.Value)
+        {
+            return true;
+        }
+
+        try
+        {
+            return warmUp.Wait(limit);
+        }
+#pragma warning disable CA1031 // a failed wait changes nothing: the alert is judged as it would be cold
+        catch (Exception)
+#pragma warning restore CA1031
+        {
+            return false;
+        }
+    }
+
+    private static async Task RunWarmUpAsync(Action? probe)
     {
         try
         {
@@ -257,7 +309,7 @@ public static class AlertStatementFilter
 #pragma warning restore CA1031
         {
         }
-    });
+    }
 
     private const int WarmUpRounds = 4;
     private const int WarmUpCallsPerRound = 12;

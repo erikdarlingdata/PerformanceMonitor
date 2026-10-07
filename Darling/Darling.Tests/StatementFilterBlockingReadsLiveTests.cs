@@ -382,6 +382,7 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)",
     [Fact]
     public async Task GetDeadlockDetail_OnAFourMegabyteGraph_StaysPreciseInsideTheCeiling()
     {
+        await StatementFilterWarmUp.EnsureAsync();
         var cs = ConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live blocking-read filter test.");
         var ct = TestContext.Current.CancellationToken;

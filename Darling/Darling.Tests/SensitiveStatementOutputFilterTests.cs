@@ -509,6 +509,7 @@ public sealed class SensitiveStatementOutputFilterTests
     [Fact]
     public async Task MeasureSweepOverheadOnAOneMegabyteResponseThatNamesNothing()
     {
+        await StatementFilterWarmUp.EnsureAsync();
         var rows = new JsonArray();
         string filler = string.Concat(Enumerable.Repeat("SELECT c FROM dbo.t WHERE id = @id; ", 140));
         for (int i = 0; i < 200; i++)
